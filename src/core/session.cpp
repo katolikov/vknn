@@ -95,7 +95,7 @@ void Session::plan() {
       VX_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2)
           << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by "
           << backendName(cfg_.backend) << " backend -> falling back to "
-          << backends_[chosen]->name() << " (CPU). Perf note: this op runs on CPU.";
+          << backends_[chosen]->name() << ". Perf note: this op does not run on the requested backend.";
     }
   }
 

@@ -117,6 +117,27 @@ rule CXX_EXECUTABLE_LINKER__vx_ion_zerocopy_Release
 #############################################
 # Rule for compiling CXX files.
 
+rule CXX_COMPILER__vx_backend_switch_unscanned_Release
+  depfile = $DEP_FILE
+  deps = gcc
+  command = ${LAUNCHER}${CODE_CHECK}/Users/artemkatolikov/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android33 --sysroot=/Users/artemkatolikov/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
+  description = Building CXX object $out
+
+
+#############################################
+# Rule for linking CXX executable.
+
+rule CXX_EXECUTABLE_LINKER__vx_backend_switch_Release
+  depfile = $DEP_FILE
+  deps = gcc
+  command = $PRE_LINK && /Users/artemkatolikov/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android33 --sysroot=/Users/artemkatolikov/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
+  description = Linking CXX executable $TARGET_FILE
+  restat = $RESTAT
+
+
+#############################################
+# Rule for compiling CXX files.
+
 rule CXX_COMPILER__vx_op_check_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc

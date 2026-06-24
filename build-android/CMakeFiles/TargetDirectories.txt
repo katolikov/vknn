@@ -3,6 +3,7 @@
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vx_classify.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vx_profile.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vx_ion_zerocopy.dir
+/Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vx_backend_switch.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vx_op_check.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/edit_cache.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/rebuild_cache.dir

@@ -99,3 +99,13 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - **On device: dma-heap alloc OK (fd 10); imported into Vulkan; GPU `add` reads the ION buffer
   directly (CPU-written via mmap) -> maxAbsErr=0.0 vs staged path, BOTH Mode A and Mode B PASS.**
   True zero-copy confirmed on Xclipse (the earlier over-constrained memory-type pick was the only fix).
+
+### M7 — Pluggable ENN/NPU backend (stub) DONE (verified on device)
+- EnnBackend subclasses Backend, registers via VX_REGISTER_BACKEND, selectable as config.backend=ENN
+  with zero core-dispatch changes. dlopen-probes the on-device ENN libs (found 4/5:
+  libenn_public_api_cpp/model/user_driver_gpu/unified), logs the gap, declines all ops -> graph
+  runs via the configured fallback (Vulkan/CPU).
+- compileSegment throws a clear "needs NNC model / no on-device compiler" (never reached since
+  supports()=false). Documented in ADR-0007 + LIMITATIONS.md.
+- **On device (vx_backend_switch): VULKAN -> 65 nodes Vulkan; CPU -> 65 nodes CPU;
+  ENN -> consulted first, falls back to Vulkan for all 65; all three give top-1 258.**
