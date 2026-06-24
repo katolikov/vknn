@@ -86,6 +86,21 @@ void inferShapes(Graph& g, int64_t batch) {
         SH(o) = {d0, d1};
         break;
       }
+      case OpType::kConcat: {
+        Shape s = SH(nd.inputs[0]);
+        if (!s.empty()) {
+          int64_t axis = nd.attr.geti("axis", 1);
+          if (axis < 0) axis += (int64_t)s.size();
+          int64_t sum = 0;
+          for (TensorId in : nd.inputs) {
+            const Shape& si = SH(in);
+            if (si.empty()) { sum = -1; break; }
+            sum += si[axis];
+          }
+          if (sum >= 0) { s[axis] = sum; SH(o) = s; }
+        }
+        break;
+      }
       case OpType::kReshape: {
         TensorId sid = nd.inputs[1];
         if (!g.isInitializer(sid)) break;  // shape becomes const after constFold; 2nd pass fills it
