@@ -143,6 +143,12 @@ class VulkanBackend : public Backend {
       }
       return true;
     }
+    if (nd.type == OpType::kFusedSE) {
+      // fixed LDS arrays: avg[1024], s1[256]
+      const Shape& f = g.desc(nd.inputs[0]).shape;
+      const Shape& w1 = g.desc(nd.inputs[1]).shape;
+      return f.size() == 4 && f[1] <= 1024 && !w1.empty() && w1[0] <= 256;
+    }
     if (nd.type == OpType::kGridSample) {
       // GPU path needs the grid as a raw constant buffer (it can't be NC4HW4-packed); runtime grids
       // and cubic mode fall back to the CPU op.

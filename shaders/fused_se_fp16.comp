@@ -1,0 +1,47 @@
+#version 450
+// Fused SE middle (one workgroup per image): reads the pooled avg [N,C,1,1], does FC1(relu) ->
+// FC2 -> hardsigmoid, writes the channel scale [N,C,1,1]. GlobalAvgPool + the broadcast Mul stay as
+// their own (parallel) ops; this only collapses the tiny [N,C,1,1] middle dispatches into one.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Avg { f16vec4 avgbuf[]; };
+layout(std430, binding = 1) readonly  buffer W1 { float16_t w1[]; };
+layout(std430, binding = 2) readonly  buffer B1 { float16_t b1[]; };
+layout(std430, binding = 3) readonly  buffer W2 { float16_t w2[]; };
+layout(std430, binding = 4) readonly  buffer B2 { float16_t b2[]; };
+layout(std430, binding = 5) writeonly buffer Scale { f16vec4 scale[]; };
+layout(push_constant) uniform PC { int N, C, Cr; float alpha, beta; } pc;
+shared float avg[1024];
+shared float s1[256];
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  int n = int(gl_WorkGroupID.x);
+  int tid = int(gl_LocalInvocationID.x);
+  for (int cb = tid; cb < Cb; cb += 256) {
+    vec4 a = vec4(avgbuf[n * Cb + cb]);
+    for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) avg[cb * 4 + l] = a[l];
+  }
+  barrier();
+  for (int j = tid; j < pc.Cr; j += 256) {
+    float acc = float(b1[j]);
+    int row = j * pc.C;
+    for (int c = 0; c < pc.C; ++c) acc += float(w1[row + c]) * avg[c];
+    s1[j] = max(acc, 0.0);
+  }
+  barrier();
+  for (int cb = tid; cb < Cb; cb += 256) {
+    vec4 o = vec4(0.0);
+    for (int l = 0; l < 4; ++l) {
+      int k = cb * 4 + l;
+      if (k >= pc.C) continue;
+      float acc = float(b2[k]);
+      int row = k * pc.Cr;
+      for (int j = 0; j < pc.Cr; ++j) acc += float(w2[row + j]) * s1[j];
+      o[l] = clamp(pc.alpha * acc + pc.beta, 0.0, 1.0);
+    }
+    scale[n * Cb + cb] = f16vec4(o);
+  }
+}

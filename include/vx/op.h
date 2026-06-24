@@ -46,6 +46,7 @@ enum class OpType {
   kReduce,      // ReduceMean/Sum/Max/Min/Prod, see ReduceType
   kCast,        // dtype cast (CPU)
   kSplit,       // split along an axis into N outputs (CPU)
+  kFusedSE,     // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
   // layout conversion nodes (inserted by the layout pass)
   kConvertLayout,
 };

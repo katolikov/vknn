@@ -1,0 +1,50 @@
+// Fused Squeeze-Excite scale on the GPU. One dispatch (one workgroup per image) replaces the
+// GAP->FC->relu->FC->hardsigmoid chain. Weights uploaded once (fp16). The following Mul is unchanged.
+#include "vk_op_common.h"
+#include "vx/op.h"
+
+namespace vx {
+namespace {
+struct SePC { int N, C, Cr; float alpha, beta; };
+struct FusedSeOp : VulkanOp {
+  std::unique_ptr<vk::ComputePipeline> pipe;
+  std::shared_ptr<vk::Buffer> w1, b1, w2, b2;
+  SePC pc{};
+  void prepare(const Node& node, VkOpEnv& env) override {
+    const Graph& g = *env.graph;
+    NCHW x = NCHW::from(g.desc(node.inputs[0]).shape);
+    int64_t C = x.c, Cr = g.desc(node.inputs[3]).shape[0];  // W2 is [C][Cr] -> rows=C; use W1 rows
+    Cr = g.desc(node.inputs[1]).shape[0];                    // W1 is [Cr][C] -> Cr = rows of W1
+    pc = {(int)x.n, (int)C, (int)Cr, node.actLo, node.actHi};
+    w1 = uploadCached(env, node.name + "#w1", [&] {
+      const auto& t = g.initializers.at(node.inputs[1]);
+      return std::vector<float>(t.f32(), t.f32() + t.bytes.size() / 4);
+    });
+    w2 = uploadCached(env, node.name + "#w2", [&] {
+      const auto& t = g.initializers.at(node.inputs[3]);
+      return std::vector<float>(t.f32(), t.f32() + t.bytes.size() / 4);
+    });
+    b1 = uploadCached(env, node.name + "#b1", [&] {
+      std::vector<float> v(Cr, 0.f);
+      if (node.inputs[2] != kNoTensor) { const auto& t = g.initializers.at(node.inputs[2]); for (int64_t i = 0; i < Cr && i < (int64_t)(t.bytes.size() / 4); ++i) v[i] = t.f32()[i]; }
+      return v;
+    });
+    b2 = uploadCached(env, node.name + "#b2", [&] {
+      std::vector<float> v(C, 0.f);
+      if (node.inputs[4] != kNoTensor) { const auto& t = g.initializers.at(node.inputs[4]); for (int64_t i = 0; i < C && i < (int64_t)(t.bytes.size() / 4); ++i) v[i] = t.f32()[i]; }
+      return v;
+    });
+    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("fused_se", env.useFp16), 6,
+                                                 sizeof(SePC), std::vector<uint32_t>{},
+                                                 env.cache->handle());
+  }
+  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
+    vk::Buffer* f = env.devBuf(node.inputs[0]);
+    vk::Buffer* s = env.devBuf(node.outputs[0]);
+    pipe->dispatch(cmd, {f->handle(), w1->handle(), b1->handle(), w2->handle(), b2->handle(),
+                         s->handle()}, &pc, sizeof(pc), (uint32_t)pc.N);
+  }
+};
+}  // namespace
+VX_REGISTER_VK_OP(OpType::kFusedSE, FusedSeOp);
+}  // namespace vx

@@ -65,6 +65,8 @@ const char* opTypeName(OpType t) {
       return "Cast";
     case OpType::kSplit:
       return "Split";
+    case OpType::kFusedSE:
+      return "FusedSE";
     case OpType::kConvertLayout:
       return "ConvertLayout";
     default:
