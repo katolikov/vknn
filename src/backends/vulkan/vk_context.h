@@ -25,8 +25,8 @@ struct VulkanCaps {
   uint32_t maxWorkGroupInvocations = 0;
   uint32_t maxWorkGroupSize[3] = {0, 0, 0};
   uint32_t maxSharedMemory = 0;
-  float    timestampPeriod = 0.f;
-  bool     timestampSupported = false;
+  float timestampPeriod = 0.f;
+  bool timestampSupported = false;
 
   // Feature flags we exploit
   bool shaderFloat16 = false;

@@ -8,9 +8,12 @@ namespace vx {
 
 const char* backendName(BackendKind k) {
   switch (k) {
-    case BackendKind::kVulkan: return "VULKAN";
-    case BackendKind::kCpu: return "CPU";
-    case BackendKind::kEnn: return "ENN";
+    case BackendKind::kVulkan:
+      return "VULKAN";
+    case BackendKind::kCpu:
+      return "CPU";
+    case BackendKind::kEnn:
+      return "ENN";
   }
   return "?";
 }
@@ -42,7 +45,10 @@ static const char* tuneStr(TuningLevel t) {
 
 Config Config::fromJsonFile(const std::string& path) {
   std::ifstream f(path);
-  if (!f) { VX_WARN << "config file not found: " << path << " (using defaults)"; return {}; }
+  if (!f) {
+    VX_WARN << "config file not found: " << path << " (using defaults)";
+    return {};
+  }
   std::stringstream ss;
   ss << f.rdbuf();
   return fromJsonString(ss.str());
@@ -52,9 +58,15 @@ Config Config::fromJsonString(const std::string& json) {
   Config c;
   JsonValue v = JsonParser::parse(json);
   if (!v.isObject()) return c;
-  auto S = [&](const char* k, std::string& dst) { if (auto* j = v.get(k)) dst = j->asStr(dst); };
-  auto B = [&](const char* k, bool& dst) { if (auto* j = v.get(k)) dst = j->asBool(dst); };
-  auto I = [&](const char* k, int& dst) { if (auto* j = v.get(k)) dst = (int)j->asNum(dst); };
+  auto S = [&](const char* k, std::string& dst) {
+    if (auto* j = v.get(k)) dst = j->asStr(dst);
+  };
+  auto B = [&](const char* k, bool& dst) {
+    if (auto* j = v.get(k)) dst = j->asBool(dst);
+  };
+  auto I = [&](const char* k, int& dst) {
+    if (auto* j = v.get(k)) dst = (int)j->asNum(dst);
+  };
 
   if (auto* j = v.get("backend")) c.backend = backendFromStr(j->asStr("VULKAN"));
   if (auto* j = v.get("fallback")) {
@@ -94,7 +106,11 @@ std::string Config::toJson() const {
   os << "],\n";
   os << "  \"allowCpuFallback\": " << (allowCpuFallback ? "true" : "false") << ",\n";
   os << "  \"precision\": \"" << precStr(precision) << "\",\n";
-  os << "  \"power\": \"" << (power == PowerHint::kHigh ? "high" : power == PowerHint::kLow ? "low" : "normal") << "\",\n";
+  os << "  \"power\": \""
+     << (power == PowerHint::kHigh  ? "high"
+         : power == PowerHint::kLow ? "low"
+                                    : "normal")
+     << "\",\n";
   os << "  \"cpuThreads\": " << cpuThreads << ",\n";
   os << "  \"inputLayout\": \"" << formatStr(inputLayout) << "\",\n";
   os << "  \"outputLayout\": \"" << formatStr(outputLayout) << "\",\n";
@@ -114,9 +130,15 @@ std::string Config::toJson() const {
 
 void Config::applyLogLevel() const {
   switch (verbosity) {
-    case 0: Log::setLevel(LogLevel::kWarn); break;
-    case 1: Log::setLevel(LogLevel::kInfo); break;
-    default: Log::setLevel(LogLevel::kDebug); break;
+    case 0:
+      Log::setLevel(LogLevel::kWarn);
+      break;
+    case 1:
+      Log::setLevel(LogLevel::kInfo);
+      break;
+    default:
+      Log::setLevel(LogLevel::kDebug);
+      break;
   }
 }
 

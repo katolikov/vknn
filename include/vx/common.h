@@ -20,13 +20,20 @@ enum class Status {
 
 inline const char* statusStr(Status s) {
   switch (s) {
-    case Status::kOk: return "Ok";
-    case Status::kInvalidArgument: return "InvalidArgument";
-    case Status::kUnsupported: return "Unsupported";
-    case Status::kNotFound: return "NotFound";
-    case Status::kRuntimeError: return "RuntimeError";
-    case Status::kDeviceLost: return "DeviceLost";
-    case Status::kIoError: return "IoError";
+    case Status::kOk:
+      return "Ok";
+    case Status::kInvalidArgument:
+      return "InvalidArgument";
+    case Status::kUnsupported:
+      return "Unsupported";
+    case Status::kNotFound:
+      return "NotFound";
+    case Status::kRuntimeError:
+      return "RuntimeError";
+    case Status::kDeviceLost:
+      return "DeviceLost";
+    case Status::kIoError:
+      return "IoError";
   }
   return "?";
 }
@@ -38,6 +45,7 @@ class Error : public std::runtime_error {
   Error(Status s, const std::string& msg)
       : std::runtime_error(std::string(statusStr(s)) + ": " + msg), status_(s) {}
   Status status() const { return status_; }
+
  private:
   Status status_;
 };

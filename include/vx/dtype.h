@@ -9,32 +9,44 @@ namespace vx {
 enum class DType : uint8_t {
   kFloat32 = 0,
   kFloat16 = 1,
-  kInt32   = 2,
-  kInt8    = 3,   // reserved for the int8 stretch goal
-  kUInt8   = 4,
-  kInt64   = 5,
+  kInt32 = 2,
+  kInt8 = 3,  // reserved for the int8 stretch goal
+  kUInt8 = 4,
+  kInt64 = 5,
 };
 
 inline size_t dtypeSize(DType d) {
   switch (d) {
-    case DType::kFloat32: return 4;
-    case DType::kFloat16: return 2;
-    case DType::kInt32:   return 4;
-    case DType::kInt8:    return 1;
-    case DType::kUInt8:   return 1;
-    case DType::kInt64:   return 8;
+    case DType::kFloat32:
+      return 4;
+    case DType::kFloat16:
+      return 2;
+    case DType::kInt32:
+      return 4;
+    case DType::kInt8:
+      return 1;
+    case DType::kUInt8:
+      return 1;
+    case DType::kInt64:
+      return 8;
   }
   return 0;
 }
 
 inline const char* dtypeStr(DType d) {
   switch (d) {
-    case DType::kFloat32: return "f32";
-    case DType::kFloat16: return "f16";
-    case DType::kInt32:   return "i32";
-    case DType::kInt8:    return "i8";
-    case DType::kUInt8:   return "u8";
-    case DType::kInt64:   return "i64";
+    case DType::kFloat32:
+      return "f32";
+    case DType::kFloat16:
+      return "f16";
+    case DType::kInt32:
+      return "i32";
+    case DType::kInt8:
+      return "i8";
+    case DType::kUInt8:
+      return "u8";
+    case DType::kInt64:
+      return "i64";
   }
   return "?";
 }
@@ -54,7 +66,10 @@ inline float halfToFloat(fp16_t h) {
     } else {
       // subnormal
       exp = 127 - 15 + 1;
-      while ((mant & 0x400) == 0) { mant <<= 1; --exp; }
+      while ((mant & 0x400) == 0) {
+        mant <<= 1;
+        --exp;
+      }
       mant &= 0x3FF;
       f = sign | (exp << 23) | (mant << 13);
     }

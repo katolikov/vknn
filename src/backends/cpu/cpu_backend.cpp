@@ -1,5 +1,7 @@
 #include "cpu_backend.h"
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include "vx/logging.h"
 #include "vx/profiler.h"
 
@@ -29,11 +31,33 @@ int64_t* allocOutI64(RtTensor& rt, const Shape& shape) {
 }
 void applyAct(float* p, int64_t n, ActType act, float lo, float hi) {
   switch (act) {
-    case ActType::kRelu: for (int64_t i = 0; i < n; ++i) p[i] = p[i] > 0 ? p[i] : 0; break;
-    case ActType::kRelu6: for (int64_t i = 0; i < n; ++i) { float v = p[i]; p[i] = v < 0 ? 0 : (v > 6 ? 6 : v); } break;
-    case ActType::kClip: for (int64_t i = 0; i < n; ++i) { float v = p[i]; p[i] = v < lo ? lo : (v > hi ? hi : v); } break;
-    default: break;
+    case ActType::kRelu:
+      for (int64_t i = 0; i < n; ++i) p[i] = p[i] > 0 ? p[i] : 0;
+      break;
+    case ActType::kRelu6:
+      for (int64_t i = 0; i < n; ++i) {
+        float v = p[i];
+        p[i] = v < 0 ? 0 : (v > 6 ? 6 : v);
+      }
+      break;
+    case ActType::kClip:
+      for (int64_t i = 0; i < n; ++i) {
+        float v = p[i];
+        p[i] = v < lo ? lo : (v > hi ? hi : v);
+      }
+      break;
+    default:
+      break;
   }
+}
+void copyAs(const RtTensor& X, RtTensor& Y, const Shape& shape) {
+  Y.shape = shape;
+  Y.dtype = X.dtype;
+  Y.host.resizeElems(numElements(shape), X.dtype);
+  Y.hostValid = true;
+  Y.deviceValid = false;
+  std::memcpy(Y.host.bytes.data(), X.host.bytes.data(),
+              std::min(Y.host.bytes.size(), X.host.bytes.size()));
 }
 }  // namespace cpu
 
@@ -52,7 +76,8 @@ class CpuSegment : public Segment {
       const Node& node = ctx.graph->nodes[nodeIdx[k]];
       CpuOp* op = ops_[k].get();
       if (!op)
-        throw Error(Status::kUnsupported, std::string("no CPU kernel for op ") + opTypeName(node.type) + " (" + node.name + ")");
+        throw Error(Status::kUnsupported, std::string("no CPU kernel for op ") +
+                                              opTypeName(node.type) + " (" + node.name + ")");
       auto t0 = std::chrono::high_resolution_clock::now();
       op->run(node, ctx);
       auto t1 = std::chrono::high_resolution_clock::now();
@@ -67,6 +92,7 @@ class CpuSegment : public Segment {
       }
     }
   }
+
  private:
   Graph& g_;
   std::vector<std::unique_ptr<CpuOp>> ops_;

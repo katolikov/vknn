@@ -28,14 +28,20 @@ static bool runAdd(vk::VulkanContext& ctx, vk::CommandRunner& runner, vk::Comput
 
 int main() {
   vk::VulkanContext ctx;
-  if (!ctx.initialized()) { fprintf(stderr, "no Vulkan\n"); return 1; }
+  if (!ctx.initialized()) {
+    fprintf(stderr, "no Vulkan\n");
+    return 1;
+  }
   vk::CommandRunner runner(ctx);
   vk::ComputePipeline add(ctx, "add", 3, sizeof(uint32_t));
 
   const uint32_t N = 1 << 16;
   const size_t bytes = (size_t)N * 4;
   std::vector<float> A(N), B(N);
-  for (uint32_t i = 0; i < N; ++i) { A[i] = (float)i * 0.01f; B[i] = (float)(N - i) * 0.02f; }
+  for (uint32_t i = 0; i < N; ++i) {
+    A[i] = (float)i * 0.01f;
+    B[i] = (float)(N - i) * 0.02f;
+  }
 
   // shared operand B + output, used by all paths
   vk::Buffer bBuf(ctx, bytes), cBuf(ctx, bytes, vk::MemPref::kReadback);
@@ -44,7 +50,8 @@ int main() {
   auto verify = [&](const char* tag) {
     cBuf.download(got.data(), bytes);
     double maxErr = 0;
-    for (uint32_t i = 0; i < N; ++i) maxErr = std::max(maxErr, (double)std::fabs(got[i] - (A[i] + B[i])));
+    for (uint32_t i = 0; i < N; ++i)
+      maxErr = std::max(maxErr, (double)std::fabs(got[i] - (A[i] + B[i])));
     bool ok = maxErr < 1e-3;
     printf("  [%s] maxAbsErr=%.3e => %s\n", tag, maxErr, ok ? "PASS" : "FAIL");
     return ok;
@@ -52,8 +59,12 @@ int main() {
 
   // ---------- Staged reference path ----------
   printf("== staged path (baseline) ==\n");
-  { vk::Buffer aStg(ctx, bytes); aStg.upload(A.data(), bytes);
-    runAdd(ctx, runner, add, aStg.handle(), bBuf.handle(), cBuf.handle(), N); verify("staged"); }
+  {
+    vk::Buffer aStg(ctx, bytes);
+    aStg.upload(A.data(), bytes);
+    runAdd(ctx, runner, add, aStg.handle(), bBuf.handle(), cBuf.handle(), N);
+    verify("staged");
+  }
 
   bool importedOk = false;
   int savedFd = -1;
@@ -62,7 +73,7 @@ int main() {
   printf("== Mode A: library-allocated ION (dma-heap) ==\n");
   auto ionA = IonBuffer::alloc(bytes);
   if (ionA && ionA->data()) {
-    memcpy(ionA->data(), A.data(), bytes);                // CPU fills the ION buffer
+    memcpy(ionA->data(), A.data(), bytes);  // CPU fills the ION buffer
     std::unique_ptr<vk::Buffer> imp(vk::Buffer::importDmaBufFd(ctx, ionA->fd(), bytes));
     if (imp) {
       importedOk = true;
@@ -71,7 +82,9 @@ int main() {
       printf("  imported dma-buf fd %d into Vulkan (zero-copy, no staging)\n", ionA->fd());
       verify("ion-mode-A");
     } else {
-      printf("  dma-buf import into Vulkan unsupported on this driver -> would fall back to staging\n");
+      printf(
+          "  dma-buf import into Vulkan unsupported on this driver -> would fall back to "
+          "staging\n");
     }
   } else {
     printf("  dma-heap allocation unavailable -> ION zero-copy not testable here\n");
@@ -80,7 +93,7 @@ int main() {
   // ---------- Mode B: user-supplied fd ----------
   printf("== Mode B: user-supplied fd (wrapFd) ==\n");
   if (importedOk && savedFd >= 0) {
-    int dupFd = ::dup(savedFd);                            // simulate an fd from elsewhere
+    int dupFd = ::dup(savedFd);  // simulate an fd from elsewhere
     auto ionB = IonBuffer::wrapFd(dupFd, bytes, /*takeOwnership=*/true);
     // data already present in the shared buffer; re-write to be explicit
     if (ionB->data()) memcpy(ionB->data(), A.data(), bytes);
@@ -93,9 +106,13 @@ int main() {
     printf("  (skipped: import path not available)\n");
   }
 
-  printf("== ION zero-copy demo %s ==\n", importedOk ? "OK" : "(import unsupported; see LIMITATIONS.md)");
+  printf("== ION zero-copy demo %s ==\n",
+         importedOk ? "OK" : "(import unsupported; see LIMITATIONS.md)");
   return 0;
 }
 #else
-int main() { printf("vx_ion_zerocopy: built without Vulkan (Android-only feature)\n"); return 0; }
+int main() {
+  printf("vx_ion_zerocopy: built without Vulkan (Android-only feature)\n");
+  return 0;
+}
 #endif

@@ -11,8 +11,8 @@ namespace vx {
 
 class Graph {
  public:
-  std::vector<TensorDesc> tensors;            // indexed by TensorId
-  std::vector<Node> nodes;                    // topologically ordered after import
+  std::vector<TensorDesc> tensors;  // indexed by TensorId
+  std::vector<Node> nodes;          // topologically ordered after import
   std::map<std::string, TensorId> tensorByName;
   std::vector<TensorId> inputs;
   std::vector<TensorId> outputs;

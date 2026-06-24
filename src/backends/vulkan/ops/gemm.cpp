@@ -1,0 +1,61 @@
+// Gemm / fully-connected classifier. The pooled input is NC4HW4 with H=W=1, so the packed
+// buffer is just the channel vector. Weights are stored row-major [Cout][Cin].
+#include "vk_op_common.h"
+
+namespace vx {
+namespace {
+
+struct GemmOp : VulkanOp {
+  std::unique_ptr<vk::ComputePipeline> pipe;
+  std::shared_ptr<vk::Buffer> wbuf, bbuf;
+  FcPC pc{};
+  int64_t Cout = 0;
+
+  void prepare(const Node& node, VkOpEnv& env) override {
+    const Graph& g = *env.graph;
+    const Shape& ws = g.desc(node.inputs[1]).shape;  // [Cout,Cin] when transB, else [Cin,Cout]
+    int64_t transB = node.attr.geti("transB", 0);
+    int64_t Cin, CoutL;
+    if (transB) {
+      CoutL = ws[0];
+      Cin = ws[1];
+    } else {
+      Cin = ws[0];
+      CoutL = ws[1];
+    }
+    Cout = CoutL;
+    const float* wsrc = g.initializers.at(node.inputs[1]).f32();
+    wbuf = uploadCached(env, node.name + "#w", [&] {
+      std::vector<float> wp((size_t)CoutL * Cin);
+      for (int64_t oc = 0; oc < CoutL; ++oc)
+        for (int64_t ic = 0; ic < Cin; ++ic)
+          wp[oc * Cin + ic] = transB ? wsrc[oc * Cin + ic] : wsrc[ic * CoutL + oc];
+      return wp;
+    });
+    bbuf = uploadCached(env, node.name + "#b", [&] {
+      std::vector<float> bias(CoutL, 0.f);
+      if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
+        const float* bsrc = g.initializers.at(node.inputs[2]).f32();
+        for (int64_t i = 0; i < CoutL; ++i) bias[i] = bsrc[i];
+      }
+      return bias;
+    });
+    pc = {(int)Cin, (int)CoutL, (int)node.fusedAct, node.actLo, node.actHi};
+    pipe =
+        std::make_unique<vk::ComputePipeline>(*env.ctx, shader("fc", env.useFp16), 4, sizeof(FcPC),
+                                              std::vector<uint32_t>{}, env.cache->handle());
+  }
+
+  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
+    vk::Buffer* src = env.devBuf(node.inputs[0]);
+    vk::Buffer* dst = env.devBuf(node.outputs[0]);
+    pipe->dispatch(cmd, {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()}, &pc,
+                   sizeof(pc), groups(Cout, 64));
+  }
+};
+
+}  // namespace
+
+VX_REGISTER_VK_OP(OpType::kGemm, GemmOp);
+
+}  // namespace vx

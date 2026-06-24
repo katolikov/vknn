@@ -11,7 +11,8 @@ void inferShapes(Graph& g, int64_t batch) {
   // Resolve dynamic dims on inputs to `batch`.
   for (TensorId in : g.inputs) {
     auto& s = g.desc(in).shape;
-    for (auto& d : s) if (d < 0) d = batch;
+    for (auto& d : s)
+      if (d < 0) d = batch;
   }
   auto SH = [&](TensorId id) -> Shape& { return g.desc(id).shape; };
   for (auto& nd : g.nodes) {
@@ -24,8 +25,11 @@ void inferShapes(Graph& g, int64_t batch) {
         if (w.size() < 4) break;
         int64_t outC = w[0], kh = w[2], kw = w[3];
         auto ints = [&](const char* k, std::vector<int64_t> d) {
-          const auto& v = nd.attr.getints(k); return v.empty() ? d : v; };
-        auto st = ints("strides", {1, 1}); auto pad = ints("pads", {0, 0, 0, 0});
+          const auto& v = nd.attr.getints(k);
+          return v.empty() ? d : v;
+        };
+        auto st = ints("strides", {1, 1});
+        auto pad = ints("pads", {0, 0, 0, 0});
         auto dil = ints("dilations", {1, 1});
         int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (kh - 1) + 1)) / st[0] + 1;
         int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (kw - 1) + 1)) / st[1] + 1;
@@ -39,7 +43,8 @@ void inferShapes(Graph& g, int64_t batch) {
         SH(o) = SH(nd.inputs[0]);
         break;
       case OpType::kAdd: {
-        const Shape& a = SH(nd.inputs[0]); const Shape& b = SH(nd.inputs[1]);
+        const Shape& a = SH(nd.inputs[0]);
+        const Shape& b = SH(nd.inputs[1]);
         SH(o) = (numElements(a) >= numElements(b)) ? a : b;
         break;
       }
@@ -49,7 +54,8 @@ void inferShapes(Graph& g, int64_t batch) {
         break;
       }
       case OpType::kGemm: {
-        const Shape& a = SH(nd.inputs[0]); const Shape& w = SH(nd.inputs[1]);
+        const Shape& a = SH(nd.inputs[0]);
+        const Shape& w = SH(nd.inputs[1]);
         int64_t transB = nd.attr.geti("transB", 0);
         int64_t M = a.empty() ? 1 : a[0];
         int64_t N = w.size() < 2 ? 0 : (transB ? w[0] : w[1]);
@@ -76,13 +82,17 @@ void inferShapes(Graph& g, int64_t batch) {
           int64_t d = hb.i64()[i];
           if (d == 0) d = (i < (int64_t)in.size()) ? in[i] : 1;
           out[i] = d;
-          if (d == -1) infer = i; else known *= d;
+          if (d == -1)
+            infer = i;
+          else
+            known *= d;
         }
         if (infer >= 0) out[infer] = numElements(in) / std::max<int64_t>(known, 1);
         SH(o) = out;
         break;
       }
-      default: break;  // shape-path ops resolved by constFold
+      default:
+        break;  // shape-path ops resolved by constFold
     }
   }
 }
@@ -95,7 +105,10 @@ void constFold(Graph& g) {
     pool[i].id = (TensorId)i;
     pool[i].shape = g.tensors[i].shape;
     pool[i].dtype = g.tensors[i].dtype;
-    if (g.isInitializer((TensorId)i)) { pool[i].host = g.initializers[i]; pool[i].hostValid = true; }
+    if (g.isInitializer((TensorId)i)) {
+      pool[i].host = g.initializers[i];
+      pool[i].hostValid = true;
+    }
   }
   ExecContext ctx;
   ctx.pool = &pool;
@@ -106,7 +119,8 @@ void constFold(Graph& g) {
   std::set<int> removeNodes;
   auto foldable = [&](const Node& nd) {
     switch (nd.type) {
-      case OpType::kConstant: return true;
+      case OpType::kConstant:
+        return true;
       case OpType::kShape:
         return !g.desc(nd.inputs[0]).shape.empty();  // shape known
       case OpType::kGather:
@@ -116,7 +130,8 @@ void constFold(Graph& g) {
           if (in != kNoTensor && !known.count(in)) return false;
         return true;
       }
-      default: return false;
+      default:
+        return false;
     }
   };
 
@@ -129,7 +144,9 @@ void constFold(Graph& g) {
     if (!op) continue;
     try {
       op->run(nd, ctx);
-    } catch (...) { continue; }
+    } catch (...) {
+      continue;
+    }
     for (TensorId o : nd.outputs) {
       if (o == kNoTensor) continue;
       g.initializers[o] = pool[o].host;
@@ -157,7 +174,8 @@ void foldBatchNorm(Graph& g) {
   // map tensor -> producing node index
   std::vector<int> producer(g.tensors.size(), -1);
   for (size_t i = 0; i < g.nodes.size(); ++i)
-    for (TensorId o : g.nodes[i].outputs) if (o != kNoTensor) producer[o] = (int)i;
+    for (TensorId o : g.nodes[i].outputs)
+      if (o != kNoTensor) producer[o] = (int)i;
 
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& bn = g.nodes[i];
@@ -168,7 +186,8 @@ void foldBatchNorm(Graph& g) {
     // only fold if conv output feeds only this BN
     int consumers = 0;
     for (auto& nn : g.nodes)
-      for (TensorId in : nn.inputs) if (in == conv.outputs[0]) consumers++;
+      for (TensorId in : nn.inputs)
+        if (in == conv.outputs[0]) consumers++;
     if (consumers != 1) continue;
 
     const auto& scale = g.initializers[bn.inputs[1]].f32();
@@ -180,9 +199,12 @@ void foldBatchNorm(Graph& g) {
     int64_t perOC = numElements(g.desc(conv.inputs[1]).shape) / outC;
     HostBuffer& W = g.initializers[conv.inputs[1]];
     // ensure bias exists
-    TensorId biasId = (conv.inputs.size() > 2 && conv.inputs[2] != kNoTensor) ? conv.inputs[2] : kNoTensor;
+    TensorId biasId =
+        (conv.inputs.size() > 2 && conv.inputs[2] != kNoTensor) ? conv.inputs[2] : kNoTensor;
     HostBuffer biasBuf;
-    if (biasId == kNoTensor) { biasBuf.resizeElems(outC, DType::kFloat32); }
+    if (biasId == kNoTensor) {
+      biasBuf.resizeElems(outC, DType::kFloat32);
+    }
     HostBuffer& Bb = (biasId == kNoTensor) ? biasBuf : g.initializers[biasId];
     for (int64_t oc = 0; oc < outC; ++oc) {
       float a = scale[oc] / std::sqrt(var[oc] + eps);
@@ -191,7 +213,10 @@ void foldBatchNorm(Graph& g) {
       Bb.f32()[oc] = (Bb.f32()[oc] - mean[oc]) * a + bias[oc];
     }
     if (biasId == kNoTensor) {
-      TensorDesc d; d.name = conv.name + "_bias"; d.shape = {outC}; d.isInitializer = true;
+      TensorDesc d;
+      d.name = conv.name + "_bias";
+      d.shape = {outC};
+      d.isInitializer = true;
       TensorId nb = g.addTensor(d);
       g.initializers[nb] = std::move(biasBuf);
       if (conv.inputs.size() < 3) conv.inputs.resize(3, kNoTensor);
@@ -200,14 +225,17 @@ void foldBatchNorm(Graph& g) {
     // rewire: BN consumers now read conv output
     TensorId bnOut = bn.outputs[0], convOut = conv.outputs[0];
     for (auto& nn : g.nodes)
-      for (TensorId& in : nn.inputs) if (in == bnOut) in = convOut;
-    for (TensorId& go : g.outputs) if (go == bnOut) go = convOut;
+      for (TensorId& in : nn.inputs)
+        if (in == bnOut) in = convOut;
+    for (TensorId& go : g.outputs)
+      if (go == bnOut) go = convOut;
     remove.insert((int)i);
     folded++;
   }
   if (folded) {
     std::vector<Node> kept;
-    for (size_t i = 0; i < g.nodes.size(); ++i) if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+    for (size_t i = 0; i < g.nodes.size(); ++i)
+      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "foldBatchNorm: folded " << folded << " BN node(s) into Conv";
   }
@@ -216,7 +244,8 @@ void foldBatchNorm(Graph& g) {
 void fuseActivations(Graph& g) {
   std::vector<int> producer(g.tensors.size(), -1);
   for (size_t i = 0; i < g.nodes.size(); ++i)
-    for (TensorId o : g.nodes[i].outputs) if (o != kNoTensor) producer[o] = (int)i;
+    for (TensorId o : g.nodes[i].outputs)
+      if (o != kNoTensor) producer[o] = (int)i;
   std::set<int> remove;
   int fused = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
@@ -230,12 +259,15 @@ void fuseActivations(Graph& g) {
     // producer output must feed only this activation
     int consumers = 0;
     for (auto& nn : g.nodes)
-      for (TensorId in : nn.inputs) if (in == prod.outputs[0]) consumers++;
-    for (TensorId go : g.outputs) if (go == prod.outputs[0]) consumers++;
+      for (TensorId in : nn.inputs)
+        if (in == prod.outputs[0]) consumers++;
+    for (TensorId go : g.outputs)
+      if (go == prod.outputs[0]) consumers++;
     if (consumers != 1) continue;
 
-    if (act.type == OpType::kRelu) { prod.fusedAct = ActType::kRelu; }
-    else {
+    if (act.type == OpType::kRelu) {
+      prod.fusedAct = ActType::kRelu;
+    } else {
       float lo = 0, hi = 6;  // default relu6
       if (act.inputs.size() > 1 && act.inputs[1] != kNoTensor && g.isInitializer(act.inputs[1]))
         lo = g.initializers[act.inputs[1]].f32()[0];
@@ -244,19 +276,23 @@ void fuseActivations(Graph& g) {
       if (act.attr.has("min")) lo = act.attr.getf("min", lo);
       if (act.attr.has("max")) hi = act.attr.getf("max", hi);
       prod.fusedAct = (lo == 0.f && hi == 6.f) ? ActType::kRelu6 : ActType::kClip;
-      prod.actLo = lo; prod.actHi = hi;
+      prod.actLo = lo;
+      prod.actHi = hi;
     }
     // rewire consumers of act output to producer output
     TensorId actOut = act.outputs[0], prodOut = prod.outputs[0];
     for (auto& nn : g.nodes)
-      for (TensorId& in : nn.inputs) if (in == actOut) in = prodOut;
-    for (TensorId& go : g.outputs) if (go == actOut) go = prodOut;
+      for (TensorId& in : nn.inputs)
+        if (in == actOut) in = prodOut;
+    for (TensorId& go : g.outputs)
+      if (go == actOut) go = prodOut;
     remove.insert((int)i);
     fused++;
   }
   if (fused) {
     std::vector<Node> kept;
-    for (size_t i = 0; i < g.nodes.size(); ++i) if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+    for (size_t i = 0; i < g.nodes.size(); ++i)
+      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "fuseActivations: fused " << fused << " activation(s) into Conv/Gemm";
   }
@@ -267,26 +303,38 @@ void eliminateDeadNodes(Graph& g) {
   bool changed = true;
   std::vector<int> producer(g.tensors.size(), -1);
   for (size_t i = 0; i < g.nodes.size(); ++i)
-    for (TensorId o : g.nodes[i].outputs) if (o != kNoTensor) producer[o] = (int)i;
+    for (TensorId o : g.nodes[i].outputs)
+      if (o != kNoTensor) producer[o] = (int)i;
   // propagate liveness backward
   while (changed) {
     changed = false;
     for (auto& nd : g.nodes) {
       bool nodeLive = false;
-      for (TensorId o : nd.outputs) if (o != kNoTensor && live.count(o)) nodeLive = true;
+      for (TensorId o : nd.outputs)
+        if (o != kNoTensor && live.count(o)) nodeLive = true;
       if (!nodeLive) continue;
       for (TensorId in : nd.inputs)
-        if (in != kNoTensor && !live.count(in)) { live.insert(in); changed = true; }
+        if (in != kNoTensor && !live.count(in)) {
+          live.insert(in);
+          changed = true;
+        }
     }
   }
   std::vector<Node> kept;
   int removed = 0;
   for (auto& nd : g.nodes) {
     bool nodeLive = false;
-    for (TensorId o : nd.outputs) if (o != kNoTensor && live.count(o)) nodeLive = true;
-    if (nodeLive) kept.push_back(nd); else removed++;
+    for (TensorId o : nd.outputs)
+      if (o != kNoTensor && live.count(o)) nodeLive = true;
+    if (nodeLive)
+      kept.push_back(nd);
+    else
+      removed++;
   }
-  if (removed) { g.nodes = std::move(kept); VX_INFO << "eliminateDeadNodes: removed " << removed << " node(s)"; }
+  if (removed) {
+    g.nodes = std::move(kept);
+    VX_INFO << "eliminateDeadNodes: removed " << removed << " node(s)";
+  }
 }
 
 void runStandardPasses(Graph& g, int64_t batch) {

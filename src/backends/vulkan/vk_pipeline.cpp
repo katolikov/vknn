@@ -43,8 +43,7 @@ PipelineCache::~PipelineCache() {
 // ----------------------------- ComputePipeline -----------------------------
 ComputePipeline::ComputePipeline(VulkanContext& ctx, const std::string& shaderName,
                                  uint32_t numBuffers, uint32_t pushConstBytes,
-                                 const std::vector<uint32_t>& specData,
-                                 VkPipelineCache cache)
+                                 const std::vector<uint32_t>& specData, VkPipelineCache cache)
     : ctx_(ctx), numBuffers_(numBuffers) {
   auto it = embeddedShaders().find(shaderName);
   if (it == embeddedShaders().end())
@@ -113,8 +112,8 @@ ComputePipeline::~ComputePipeline() {
 }
 
 void ComputePipeline::dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer>& buffers,
-                               const void* pushConst, uint32_t pcBytes, uint32_t gx,
-                               uint32_t gy, uint32_t gz) {
+                               const void* pushConst, uint32_t pcBytes, uint32_t gx, uint32_t gy,
+                               uint32_t gz) {
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
   std::vector<VkDescriptorBufferInfo> infos(buffers.size());
   std::vector<VkWriteDescriptorSet> writes(buffers.size());

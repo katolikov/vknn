@@ -4,9 +4,9 @@
 namespace vx {
 namespace vk {
 
-static const VkBufferUsageFlags kBaseUsage =
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+static const VkBufferUsageFlags kBaseUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
 uint32_t Buffer::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags want,
                                 VkMemoryPropertyFlags avoid) {
@@ -53,9 +53,8 @@ Buffer::Buffer(VulkanContext& ctx, size_t bytes, MemPref pref, VkBufferUsageFlag
     typeIdx = findMemoryType(req.memoryTypeBits, want, avoid);
   } catch (...) {
     // fall back to any host-visible (non-UMA case)
-    typeIdx = findMemoryType(req.memoryTypeBits,
-                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    typeIdx = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   }
 
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -97,8 +96,7 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
   b->bytes_ = bytes;
   b->imported_ = true;
   try {
-    VkExternalMemoryBufferCreateInfo ext{
-        VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+    VkExternalMemoryBufferCreateInfo ext{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
     ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bi.pNext = &ext;
@@ -116,8 +114,8 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
       // Dup the fd: the query and the import each consume a reference; the
       // driver takes ownership of the fd passed to vkAllocateMemory.
       int dupForQuery = ::dup(fd);
-      if (pfnGetFdProps(ctx.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-                        dupForQuery, &fdProps) == VK_SUCCESS)
+      if (pfnGetFdProps(ctx.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, dupForQuery,
+                        &fdProps) == VK_SUCCESS)
         typeBits = fdProps.memoryTypeBits;
       ::close(dupForQuery);
     }
@@ -135,7 +133,10 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
       const auto& mp = ctx.memProps();
       int pick = -1;
       for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
-        if (typeBits & (1u << i)) { pick = (int)i; break; }
+        if (typeBits & (1u << i)) {
+          pick = (int)i;
+          break;
+        }
       if (pick < 0) throw Error(Status::kUnsupported, "no compatible memory type for dma-buf");
       typeIdx = (uint32_t)pick;
     }
@@ -143,8 +144,7 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
     VkImportMemoryFdInfoKHR importInfo{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
     importInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
     importInfo.fd = ::dup(fd);  // driver takes ownership of this dup
-    VkMemoryDedicatedAllocateInfo dedicated{
-        VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+    VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
     dedicated.buffer = b->buf_;
     importInfo.pNext = &dedicated;
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -153,8 +153,7 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
     ai.memoryTypeIndex = typeIdx;
     VK_CHECK(vkAllocateMemory(ctx.device(), &ai, nullptr, &b->mem_));
     VK_CHECK(vkBindBufferMemory(ctx.device(), b->buf_, b->mem_, 0));
-    if (ctx.memProps().memoryTypes[typeIdx].propertyFlags &
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+    if (ctx.memProps().memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
       vkMapMemory(ctx.device(), b->mem_, 0, VK_WHOLE_SIZE, 0, &b->mapped_);
     }
     return b;

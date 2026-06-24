@@ -40,7 +40,7 @@ struct Config {
 
   // Profiling / debug.
   bool profile = false;
-  int  verbosity = 1;                  // maps to log level
+  int verbosity = 1;  // maps to log level
   bool layerDump = false;
   std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
 

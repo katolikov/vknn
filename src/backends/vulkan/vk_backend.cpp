@@ -9,6 +9,12 @@
 
 namespace vx {
 
+// True once the fp16 shader variants (conv_fp16, dwconv_fp16, ...) are compiled in. The ops
+// pick the _fp16 kernels and upload half weights when this and the device feature line up.
+bool vxVulkanFp16Available() {
+  return true;
+}
+
 // ============================ VkOpRegistry ============================
 VkOpRegistry& VkOpRegistry::instance() {
   static VkOpRegistry r;
@@ -16,7 +22,8 @@ VkOpRegistry& VkOpRegistry::instance() {
 }
 
 // ============================ WeightCache ============================
-// Binary format: [u32 nWeights]{[u32 klen][key][u32 nfloats][floats]} [u32 nTune]{[u32 klen][key][i32 val]}
+// Binary format: [u32 nWeights]{[u32 klen][key][u32 nfloats][floats]} [u32 nTune]{[u32
+// klen][key][i32 val]}
 void WeightCache::load(const std::string& path) {
   path_ = path;
   FILE* f = fopen(path.c_str(), "rb");
@@ -27,17 +34,21 @@ void WeightCache::load(const std::string& path) {
     for (uint32_t i = 0; i < nw; ++i) {
       uint32_t kl = 0, nf = 0;
       if (!rd32(kl)) break;
-      std::string k(kl, 0); fread(&k[0], 1, kl, f);
+      std::string k(kl, 0);
+      fread(&k[0], 1, kl, f);
       if (!rd32(nf)) break;
-      std::vector<float> d(nf); fread(d.data(), 4, nf, f);
+      std::vector<float> d(nf);
+      fread(d.data(), 4, nf, f);
       weights_[k] = std::move(d);
     }
     uint32_t nt = 0;
     if (rd32(nt))
       for (uint32_t i = 0; i < nt; ++i) {
-        uint32_t kl = 0; int32_t val = 0;
+        uint32_t kl = 0;
+        int32_t val = 0;
         if (!rd32(kl)) break;
-        std::string k(kl, 0); fread(&k[0], 1, kl, f);
+        std::string k(kl, 0);
+        fread(&k[0], 1, kl, f);
         fread(&val, 4, 1, f);
         tune_[k] = val;
       }
@@ -49,17 +60,24 @@ void WeightCache::load(const std::string& path) {
 void WeightCache::save() const {
   if (path_.empty() || !dirty_) return;
   FILE* f = fopen(path_.c_str(), "wb");
-  if (!f) { VX_WARN << "WeightCache: cannot write " << path_; return; }
+  if (!f) {
+    VX_WARN << "WeightCache: cannot write " << path_;
+    return;
+  }
   auto wr32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
   wr32((uint32_t)weights_.size());
   for (auto& kv : weights_) {
-    wr32((uint32_t)kv.first.size()); fwrite(kv.first.data(), 1, kv.first.size(), f);
-    wr32((uint32_t)kv.second.size()); fwrite(kv.second.data(), 4, kv.second.size(), f);
+    wr32((uint32_t)kv.first.size());
+    fwrite(kv.first.data(), 1, kv.first.size(), f);
+    wr32((uint32_t)kv.second.size());
+    fwrite(kv.second.data(), 4, kv.second.size(), f);
   }
   wr32((uint32_t)tune_.size());
   for (auto& kv : tune_) {
-    wr32((uint32_t)kv.first.size()); fwrite(kv.first.data(), 1, kv.first.size(), f);
-    int32_t v = kv.second; fwrite(&v, 4, 1, f);
+    wr32((uint32_t)kv.first.size());
+    fwrite(kv.first.data(), 1, kv.first.size(), f);
+    int32_t v = kv.second;
+    fwrite(&v, 4, 1, f);
   }
   fclose(f);
   dirty_ = false;
@@ -80,7 +98,10 @@ int WeightCache::tuned(const std::string& sig, int dflt) const {
   auto it = tune_.find(sig);
   return it == tune_.end() ? dflt : it->second;
 }
-void WeightCache::setTuned(const std::string& sig, int val) { tune_[sig] = val; dirty_ = true; }
+void WeightCache::setTuned(const std::string& sig, int val) {
+  tune_[sig] = val;
+  dirty_ = true;
+}
 
 // ============================ VulkanBackend ============================
 class VulkanBackend : public Backend {
@@ -115,16 +136,19 @@ class VulkanBackend : public Backend {
   WeightCache* weightCache(const Config& cfg) {
     if (!wcache_) {
       wcache_ = std::make_unique<WeightCache>();
-      if (cfg.cacheWeights) wcache_->load(cfg.cacheDir + "/weights.bin");
-      else wcache_->load("");  // disabled (no path)
+      if (cfg.cacheWeights)
+        wcache_->load(cfg.cacheDir + "/weights.bin");
+      else
+        wcache_->load("");  // disabled (no path)
     }
     return wcache_.get();
   }
-  void saveCaches() { if (cache_) cache_->save(); if (wcache_) wcache_->save(); }
+  void saveCaches() {
+    if (cache_) cache_->save();
+    if (wcache_) wcache_->save();
+  }
 
   bool useFp16(const Config& cfg) const {
-    // fp16 device path requires the fp16 shader variants (registered when present).
-    extern bool vxVulkanFp16Available();
     return vxVulkanFp16Available() && ctx_->caps().shaderFloat16 &&
            (cfg.precision == Precision::kFp16 || cfg.precision == Precision::kAuto);
   }
@@ -242,8 +266,9 @@ class VulkanSegment : public Segment {
     };
     for (int ni : idx) {
       auto op = VkOpRegistry::instance().create(g.nodes[ni].type);
-      if (!op) throw Error(Status::kUnsupported,
-          std::string("no Vulkan kernel for ") + opTypeName(g.nodes[ni].type));
+      if (!op)
+        throw Error(Status::kUnsupported,
+                    std::string("no Vulkan kernel for ") + opTypeName(g.nodes[ni].type));
       op->prepare(g.nodes[ni], env_);
       ops_.push_back(std::move(op));
     }
@@ -267,15 +292,15 @@ class VulkanSegment : public Segment {
   void record() {
     cmd_ = be_->runner().allocate();
     be_->runner().begin(cmd_);
-    if (queryPool_)
-      vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t)(nodeIdx.size() * 2));
+    if (queryPool_) vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t)(nodeIdx.size() * 2));
     for (size_t k = 0; k < nodeIdx.size(); ++k) {
       const Node& node = g_.nodes[nodeIdx[k]];
       if (queryPool_)
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t)(k * 2));
       ops_[k]->record(cmd_, node, env_);
       if (queryPool_)
-        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, (uint32_t)(k * 2 + 1));
+        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_,
+                            (uint32_t)(k * 2 + 1));
       vk::computeBarrier(cmd_);
     }
     be_->runner().end(cmd_);

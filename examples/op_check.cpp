@@ -18,7 +18,10 @@ int main(int argc, char** argv) {
   ::mkdir(cacheDir.c_str(), 0755);
 
   vk::VulkanContext ctx;
-  if (!ctx.initialized()) { fprintf(stderr, "no Vulkan\n"); return 1; }
+  if (!ctx.initialized()) {
+    fprintf(stderr, "no Vulkan\n");
+    return 1;
+  }
 
   vk::PipelineCache cache(ctx, cacheDir + "/pipeline.bin");
   vk::CommandRunner runner(ctx);
@@ -28,7 +31,10 @@ int main(int argc, char** argv) {
   const uint32_t N = 1u << 20;  // 1M elements
   vk::Buffer ba(ctx, N * 4), bb(ctx, N * 4), bc(ctx, N * 4, vk::MemPref::kReadback);
   std::vector<float> a(N), b(N);
-  for (uint32_t i = 0; i < N; ++i) { a[i] = (float)i * 0.5f; b[i] = (float)(N - i) * 0.25f; }
+  for (uint32_t i = 0; i < N; ++i) {
+    a[i] = (float)i * 0.5f;
+    b[i] = (float)(N - i) * 0.25f;
+  }
   ba.upload(a.data(), N * 4);
   bb.upload(b.data(), N * 4);
 

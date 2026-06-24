@@ -32,7 +32,9 @@ void CommandRunner::begin(VkCommandBuffer cmd) {
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
 }
-void CommandRunner::end(VkCommandBuffer cmd) { VK_CHECK(vkEndCommandBuffer(cmd)); }
+void CommandRunner::end(VkCommandBuffer cmd) {
+  VK_CHECK(vkEndCommandBuffer(cmd));
+}
 
 double CommandRunner::submitAndWait(VkCommandBuffer cmd) {
   VK_CHECK(vkResetFences(ctx_.device(), 1, &fence_));

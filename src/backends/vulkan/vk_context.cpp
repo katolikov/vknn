@@ -9,20 +9,18 @@ namespace vk {
 std::string VulkanCaps::summary() const {
   std::ostringstream os;
   os << deviceName << " | " << driverName << " (" << driverInfo << ")"
-     << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion)
-     << "." << VK_VERSION_PATCH(apiVersion)
-     << " | subgroup=" << subgroupSize
-     << " maxWG=" << maxWorkGroupInvocations
-     << " shared=" << (maxSharedMemory / 1024) << "KB"
+     << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "."
+     << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize
+     << " maxWG=" << maxWorkGroupInvocations << " shared=" << (maxSharedMemory / 1024) << "KB"
      << " tsPeriod=" << timestampPeriod << "ns\n"
-     << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8
-     << " storage16=" << storage16bit << " storage8=" << storage8bit
-     << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
+     << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " storage16=" << storage16bit
+     << " storage8=" << storage8bit << " int8dot=" << int8DotProduct
+     << " coopmat=" << cooperativeMatrix << "\n"
      << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor
      << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd
      << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb
-     << " memBudget=" << memoryBudget
-     << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle;
+     << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic
+     << " shuffle=" << subgroupShuffle;
   return os.str();
 }
 
@@ -85,7 +83,8 @@ void VulkanContext::queryCaps() {
   for (auto& e : exts) caps_.deviceExtensions.insert(e.extensionName);
 
   // --- properties (+ driver, subgroup) via pNext chain ---
-  VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+  VkPhysicalDeviceSubgroupProperties subgroup{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
   VkPhysicalDeviceDriverProperties driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
   driver.pNext = &subgroup;
   VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -102,7 +101,8 @@ void VulkanContext::queryCaps() {
   caps_.driverName = driver.driverName;
   caps_.driverInfo = driver.driverInfo;
   caps_.subgroupSize = subgroup.subgroupSize;
-  caps_.subgroupArithmetic = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
+  caps_.subgroupArithmetic =
+      (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
   caps_.subgroupShuffle = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
   caps_.maxWorkGroupInvocations = p.limits.maxComputeWorkGroupInvocations;
   caps_.maxWorkGroupSize[0] = p.limits.maxComputeWorkGroupSize[0];
@@ -118,8 +118,7 @@ void VulkanContext::queryCaps() {
   VkPhysicalDevice16BitStorageFeatures s16{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
   f16i8.pNext = &s16;
-  VkPhysicalDevice8BitStorageFeatures s8{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
+  VkPhysicalDevice8BitStorageFeatures s8{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
   s16.pNext = &s8;
   VkPhysicalDeviceShaderIntegerDotProductFeatures dot{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES};
@@ -161,7 +160,10 @@ void VulkanContext::createDevice() {
   for (uint32_t i = 0; i < qn; ++i) {
     if (qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
       if (fallback < 0) fallback = (int)i;
-      if (!(qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) { chosen = (int)i; break; }
+      if (!(qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+        chosen = (int)i;
+        break;
+      }
     }
   }
   if (chosen < 0) chosen = fallback;
@@ -217,8 +219,8 @@ void VulkanContext::createDevice() {
   vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
 
   if (caps_.pushDescriptor)
-    cmdPushDescriptorSet = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(
-        device_, "vkCmdPushDescriptorSetKHR");
+    cmdPushDescriptorSet =
+        (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(device_, "vkCmdPushDescriptorSetKHR");
   if (caps_.externalMemoryFd)
     getMemoryFd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(device_, "vkGetMemoryFdKHR");
 }

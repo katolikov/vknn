@@ -13,7 +13,7 @@ namespace vx {
 /// Compile-time description of a tensor in the graph.
 struct TensorDesc {
   std::string name;
-  Shape shape;                              // logical NCHW shape (may have dynamic dims as -1)
+  Shape shape;  // logical NCHW shape (may have dynamic dims as -1)
   DType dtype = DType::kFloat32;
   TensorFormat format = TensorFormat::kNCHW;
   bool isInput = false;
@@ -47,13 +47,16 @@ struct RtTensor {
   bool hostValid = false;
 
   // ---- device residency (managed by a backend) ----
-  std::shared_ptr<DeviceStorage> device;   // null until a backend allocates it
+  std::shared_ptr<DeviceStorage> device;  // null until a backend allocates it
   TensorFormat deviceFormat = TensorFormat::kUnknown;
   DType deviceDtype = DType::kFloat32;
   bool deviceValid = false;
 
   int64_t elems() const { return numElements(shape); }
-  void allocHost() { host.resizeElems(elems(), dtype); hostValid = true; }
+  void allocHost() {
+    host.resizeElems(elems(), dtype);
+    hostValid = true;
+  }
 };
 
 }  // namespace vx

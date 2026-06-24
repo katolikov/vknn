@@ -21,21 +21,21 @@ int main() {
   printf("apiVersion     : %u.%u.%u\n", VK_VERSION_MAJOR(c.apiVersion),
          VK_VERSION_MINOR(c.apiVersion), VK_VERSION_PATCH(c.apiVersion));
   printf("vendor/device  : 0x%x / 0x%x\n", c.vendorID, c.deviceID);
-  printf("subgroupSize   : %u (arith=%d shuffle=%d)\n", c.subgroupSize,
-         c.subgroupArithmetic, c.subgroupShuffle);
+  printf("subgroupSize   : %u (arith=%d shuffle=%d)\n", c.subgroupSize, c.subgroupArithmetic,
+         c.subgroupShuffle);
   printf("maxWGInvoc     : %u\n", c.maxWorkGroupInvocations);
   printf("maxWGSize      : [%u,%u,%u]\n", c.maxWorkGroupSize[0], c.maxWorkGroupSize[1],
          c.maxWorkGroupSize[2]);
   printf("sharedMemory   : %u KiB\n", c.maxSharedMemory / 1024);
   printf("timestampPeriod: %.4f ns (supported=%d)\n", c.timestampPeriod, c.timestampSupported);
   printf("---- features ----\n");
-  printf("  shaderFloat16=%d shaderInt8=%d storage16=%d storage8=%d\n",
-         c.shaderFloat16, c.shaderInt8, c.storage16bit, c.storage8bit);
+  printf("  shaderFloat16=%d shaderInt8=%d storage16=%d storage8=%d\n", c.shaderFloat16,
+         c.shaderInt8, c.storage16bit, c.storage8bit);
   printf("  int8DotProduct=%d cooperativeMatrix=%d\n", c.int8DotProduct, c.cooperativeMatrix);
-  printf("  timelineSemaphore=%d pushDescriptor=%d dedicatedAllocation=%d\n",
-         c.timelineSemaphore, c.pushDescriptor, c.dedicatedAllocation);
-  printf("  externalMemoryFd=%d dmaBuf=%d ahb=%d memoryBudget=%d\n",
-         c.externalMemoryFd, c.externalMemoryDmaBuf, c.externalMemoryAhb, c.memoryBudget);
+  printf("  timelineSemaphore=%d pushDescriptor=%d dedicatedAllocation=%d\n", c.timelineSemaphore,
+         c.pushDescriptor, c.dedicatedAllocation);
+  printf("  externalMemoryFd=%d dmaBuf=%d ahb=%d memoryBudget=%d\n", c.externalMemoryFd,
+         c.externalMemoryDmaBuf, c.externalMemoryAhb, c.memoryBudget);
   printf("---- memory types ----\n");
   const auto& mp = ctx.memProps();
   for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {

@@ -5,28 +5,50 @@ namespace vx {
 
 const char* opTypeName(OpType t) {
   switch (t) {
-    case OpType::kConv: return "Conv";
-    case OpType::kClip: return "Clip";
-    case OpType::kRelu: return "Relu";
-    case OpType::kAdd: return "Add";
-    case OpType::kGlobalAvgPool: return "GlobalAveragePool";
-    case OpType::kAvgPool: return "AveragePool";
-    case OpType::kMaxPool: return "MaxPool";
-    case OpType::kGemm: return "Gemm";
-    case OpType::kMatMul: return "MatMul";
-    case OpType::kReshape: return "Reshape";
-    case OpType::kFlatten: return "Flatten";
-    case OpType::kSoftmax: return "Softmax";
-    case OpType::kBatchNorm: return "BatchNormalization";
-    case OpType::kConcat: return "Concat";
-    case OpType::kPad: return "Pad";
-    case OpType::kIdentity: return "Identity";
-    case OpType::kConstant: return "Constant";
-    case OpType::kShape: return "Shape";
-    case OpType::kGather: return "Gather";
-    case OpType::kUnsqueeze: return "Unsqueeze";
-    case OpType::kConvertLayout: return "ConvertLayout";
-    default: return "Unknown";
+    case OpType::kConv:
+      return "Conv";
+    case OpType::kClip:
+      return "Clip";
+    case OpType::kRelu:
+      return "Relu";
+    case OpType::kAdd:
+      return "Add";
+    case OpType::kGlobalAvgPool:
+      return "GlobalAveragePool";
+    case OpType::kAvgPool:
+      return "AveragePool";
+    case OpType::kMaxPool:
+      return "MaxPool";
+    case OpType::kGemm:
+      return "Gemm";
+    case OpType::kMatMul:
+      return "MatMul";
+    case OpType::kReshape:
+      return "Reshape";
+    case OpType::kFlatten:
+      return "Flatten";
+    case OpType::kSoftmax:
+      return "Softmax";
+    case OpType::kBatchNorm:
+      return "BatchNormalization";
+    case OpType::kConcat:
+      return "Concat";
+    case OpType::kPad:
+      return "Pad";
+    case OpType::kIdentity:
+      return "Identity";
+    case OpType::kConstant:
+      return "Constant";
+    case OpType::kShape:
+      return "Shape";
+    case OpType::kGather:
+      return "Gather";
+    case OpType::kUnsqueeze:
+      return "Unsqueeze";
+    case OpType::kConvertLayout:
+      return "ConvertLayout";
+    default:
+      return "Unknown";
   }
 }
 

@@ -20,17 +20,20 @@ double Profiler::totalGpuMs() const {
 }
 
 void Profiler::printTable() const {
-  if (records_.empty()) { printf("(profiler: no records)\n"); return; }
+  if (records_.empty()) {
+    printf("(profiler: no records)\n");
+    return;
+  }
   // Aggregate per op type for the summary, but print per-node too.
-  printf("\n%-28s %-10s %-7s %10s %10s  %s\n", "op (node)", "backend", "type", "cpu(ms)",
-         "gpu(ms)", "dispatch");
+  printf("\n%-28s %-10s %-7s %10s %10s  %s\n", "op (node)", "backend", "type", "cpu(ms)", "gpu(ms)",
+         "dispatch");
   printf("%s\n", std::string(86, '-').c_str());
   double tcpu = 0, tgpu = 0;
   std::map<std::string, std::pair<double, double>> byType;
   for (const auto& r : records_) {
     char disp[48] = "-";
-    if (r.dispatch[0]) snprintf(disp, sizeof(disp), "%ux%ux%u", r.dispatch[0], r.dispatch[1],
-                                r.dispatch[2]);
+    if (r.dispatch[0])
+      snprintf(disp, sizeof(disp), "%ux%ux%u", r.dispatch[0], r.dispatch[1], r.dispatch[2]);
     char gpu[16] = "-";
     if (r.gpuMs >= 0) snprintf(gpu, sizeof(gpu), "%.3f", r.gpuMs);
     printf("%-28.28s %-10s %-7s %10.3f %10s  %s%s\n", r.name.c_str(), r.backend.c_str(),
@@ -45,8 +48,7 @@ void Profiler::printTable() const {
   printf("%-28s %-10s %-7s %10.3f %10.3f\n", "TOTAL", "", "", tcpu, tgpu);
   printf("\nPer op-type (cpu ms / gpu ms):\n");
   std::vector<std::pair<std::string, std::pair<double, double>>> v(byType.begin(), byType.end());
-  std::sort(v.begin(), v.end(),
-            [](auto& a, auto& b) { return a.second.second > b.second.second; });
+  std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.second > b.second.second; });
   for (auto& kv : v)
     printf("  %-22s %8.3f / %8.3f\n", kv.first.c_str(), kv.second.first, kv.second.second);
 }
@@ -56,11 +58,10 @@ std::string Profiler::toJson() const {
   os << "[";
   for (size_t i = 0; i < records_.size(); ++i) {
     const auto& r = records_[i];
-    os << "{\"name\":\"" << r.name << "\",\"type\":\"" << opTypeName(r.type)
-       << "\",\"backend\":\"" << r.backend << "\",\"cpuMs\":" << r.cpuMs
-       << ",\"gpuMs\":" << r.gpuMs << ",\"dispatch\":[" << r.dispatch[0] << ","
-       << r.dispatch[1] << "," << r.dispatch[2] << "],\"fellBack\":"
-       << (r.fellBack ? "true" : "false") << "}";
+    os << "{\"name\":\"" << r.name << "\",\"type\":\"" << opTypeName(r.type) << "\",\"backend\":\""
+       << r.backend << "\",\"cpuMs\":" << r.cpuMs << ",\"gpuMs\":" << r.gpuMs << ",\"dispatch\":["
+       << r.dispatch[0] << "," << r.dispatch[1] << "," << r.dispatch[2]
+       << "],\"fellBack\":" << (r.fellBack ? "true" : "false") << "}";
     if (i + 1 < records_.size()) os << ",";
   }
   os << "]";

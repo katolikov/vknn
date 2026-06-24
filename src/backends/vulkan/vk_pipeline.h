@@ -20,6 +20,7 @@ class PipelineCache {
   VkPipelineCache handle() const { return cache_; }
   void save();
   size_t diskBytes() const { return diskBytes_; }
+
  private:
   VulkanContext& ctx_;
   std::string path_;
@@ -41,9 +42,8 @@ class ComputePipeline {
   uint32_t numBuffers() const { return numBuffers_; }
 
   // Records bind + push-descriptors + push-constants + dispatch into `cmd`.
-  void dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer>& buffers,
-                const void* pushConst, uint32_t pcBytes,
-                uint32_t gx, uint32_t gy = 1, uint32_t gz = 1);
+  void dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer>& buffers, const void* pushConst,
+                uint32_t pcBytes, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1);
 
  private:
   VulkanContext& ctx_;

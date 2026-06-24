@@ -18,8 +18,11 @@ namespace vx {
 namespace {
 
 const char* kEnnLibs[] = {
-    "libenn_public_api_cpp.so", "libenn_engine.so", "libenn_model.so",
-    "libenn_user_driver_gpu.so", "libenn_user_driver_unified.so",
+    "libenn_public_api_cpp.so",
+    "libenn_engine.so",
+    "libenn_model.so",
+    "libenn_user_driver_gpu.so",
+    "libenn_user_driver_unified.so",
 };
 
 class EnnBackend : public Backend {
@@ -35,8 +38,7 @@ class EnnBackend : public Backend {
 
   bool supports(OpType, DType) const override { return false; }
 
-  std::unique_ptr<Segment> compileSegment(const std::vector<int>&, Graph&,
-                                          const Config&) override {
+  std::unique_ptr<Segment> compileSegment(const std::vector<int>&, Graph&, const Config&) override {
     throw Error(Status::kUnsupported,
                 "ENN backend requires an NNC-format model; no on-device NNC compiler / public "
                 "headers available on this device (see LIMITATIONS.md). Use VULKAN or CPU.");
@@ -48,14 +50,20 @@ class EnnBackend : public Backend {
     std::string present;
     for (const char* lib : kEnnLibs) {
       void* h = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
-      if (h) { ++found; present += std::string(lib) + " "; dlclose(h); }
+      if (h) {
+        ++found;
+        present += std::string(lib) + " ";
+        dlclose(h);
+      }
     }
     if (found)
-      VX_INFO << "ENN backend: probed " << found << "/" << (int)(sizeof(kEnnLibs) / sizeof(*kEnnLibs))
-              << " runtime libs present [" << present << "] — but NNC model + public headers are "
-              << "unavailable on-device, so ENN execution is stubbed (falls back). See LIMITATIONS.md";
+      VX_INFO
+          << "ENN backend: probed " << found << "/" << (int)(sizeof(kEnnLibs) / sizeof(*kEnnLibs))
+          << " runtime libs present [" << present << "] — but NNC model + public headers are "
+          << "unavailable on-device, so ENN execution is stubbed (falls back). See LIMITATIONS.md";
     else
-      VX_INFO << "ENN backend: no ENN runtime libs reachable via dlopen (vendor namespace). Stubbed.";
+      VX_INFO
+          << "ENN backend: no ENN runtime libs reachable via dlopen (vendor namespace). Stubbed.";
   }
 };
 

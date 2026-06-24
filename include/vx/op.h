@@ -16,10 +16,10 @@ enum class ActType : int32_t { kNone = 0, kRelu = 1, kRelu6 = 2, kClip = 3 };
 /// Operator types. Add a new value here + a name mapping + register kernels.
 enum class OpType {
   kUnknown = 0,
-  kConv,            // Conv2D (incl. depthwise via group, pointwise 1x1)
-  kClip,            // Clip / Relu6
+  kConv,  // Conv2D (incl. depthwise via group, pointwise 1x1)
+  kClip,  // Clip / Relu6
   kRelu,
-  kAdd,             // elementwise add (residual)
+  kAdd,  // elementwise add (residual)
   kGlobalAvgPool,
   kAvgPool,
   kMaxPool,
@@ -57,17 +57,21 @@ struct Attributes {
   std::map<std::string, Attr> map;
   bool has(const std::string& k) const { return map.count(k) > 0; }
   int64_t geti(const std::string& k, int64_t d = 0) const {
-    auto it = map.find(k); return it == map.end() ? d : it->second.i;
+    auto it = map.find(k);
+    return it == map.end() ? d : it->second.i;
   }
   float getf(const std::string& k, float d = 0) const {
-    auto it = map.find(k); return it == map.end() ? d : it->second.f;
+    auto it = map.find(k);
+    return it == map.end() ? d : it->second.f;
   }
   const std::vector<int64_t>& getints(const std::string& k) const {
-    static const std::vector<int64_t> e; auto it = map.find(k);
+    static const std::vector<int64_t> e;
+    auto it = map.find(k);
     return it == map.end() ? e : it->second.ints;
   }
   std::string gets(const std::string& k, const std::string& d = "") const {
-    auto it = map.find(k); return it == map.end() ? d : it->second.str;
+    auto it = map.find(k);
+    return it == map.end() ? d : it->second.str;
   }
 };
 

@@ -26,7 +26,7 @@ class IonBuffer {
 
   int fd() const { return fd_; }
   size_t size() const { return size_; }
-  void* data() const { return map_; }          // CPU-mapped pointer (may be null if mmap failed)
+  void* data() const { return map_; }  // CPU-mapped pointer (may be null if mmap failed)
   const std::string& heap() const { return heap_; }
 
  private:

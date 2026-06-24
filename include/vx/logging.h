@@ -31,7 +31,10 @@ struct LogStream {
       : lvl(l), key(std::move(k)), throttleAfter(t) {}
   ~LogStream() { Log::emit(lvl, ss.str(), key, throttleAfter); }
   template <typename T>
-  LogStream& operator<<(const T& v) { ss << v; return *this; }
+  LogStream& operator<<(const T& v) {
+    ss << v;
+    return *this;
+  }
 };
 }  // namespace detail
 
@@ -39,8 +42,8 @@ struct LogStream {
 
 #define VX_LOG(LVL) ::vx::detail::LogStream(::vx::LogLevel::LVL)
 #define VX_DEBUG VX_LOG(kDebug)
-#define VX_INFO  VX_LOG(kInfo)
-#define VX_WARN  VX_LOG(kWarn)
+#define VX_INFO VX_LOG(kInfo)
+#define VX_WARN VX_LOG(kWarn)
 #define VX_ERROR VX_LOG(kError)
 // Throttled warning: WARN that collapses after N repeats keyed by KEY.
 #define VX_WARN_THROTTLE(KEY, N) ::vx::detail::LogStream(::vx::LogLevel::kWarn, KEY, N)

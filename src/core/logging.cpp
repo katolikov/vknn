@@ -22,37 +22,63 @@ void ensureInit() {
   if (g_init) return;
   g_init = true;
   if (const char* e = std::getenv("VXRT_LOG_LEVEL")) {
-    if (!strcasecmp(e, "DEBUG")) g_level = LogLevel::kDebug;
-    else if (!strcasecmp(e, "INFO")) g_level = LogLevel::kInfo;
-    else if (!strcasecmp(e, "WARN")) g_level = LogLevel::kWarn;
-    else if (!strcasecmp(e, "ERROR")) g_level = LogLevel::kError;
-    else if (!strcasecmp(e, "NONE")) g_level = LogLevel::kNone;
+    if (!strcasecmp(e, "DEBUG"))
+      g_level = LogLevel::kDebug;
+    else if (!strcasecmp(e, "INFO"))
+      g_level = LogLevel::kInfo;
+    else if (!strcasecmp(e, "WARN"))
+      g_level = LogLevel::kWarn;
+    else if (!strcasecmp(e, "ERROR"))
+      g_level = LogLevel::kError;
+    else if (!strcasecmp(e, "NONE"))
+      g_level = LogLevel::kNone;
   }
 }
 
 const char* levelTag(LogLevel l) {
   switch (l) {
-    case LogLevel::kDebug: return "DEBUG";
-    case LogLevel::kInfo: return "INFO ";
-    case LogLevel::kWarn: return "WARN ";
-    case LogLevel::kError: return "ERROR";
-    default: return "?????";
+    case LogLevel::kDebug:
+      return "DEBUG";
+    case LogLevel::kInfo:
+      return "INFO ";
+    case LogLevel::kWarn:
+      return "WARN ";
+    case LogLevel::kError:
+      return "ERROR";
+    default:
+      return "?????";
   }
 }
 const char* levelColor(LogLevel l) {
   switch (l) {
-    case LogLevel::kDebug: return "\033[2;37m";   // dim grey
-    case LogLevel::kInfo: return "\033[36m";       // cyan
-    case LogLevel::kWarn: return "\033[33m";       // yellow
-    case LogLevel::kError: return "\033[1;31m";    // bold red
-    default: return "";
+    case LogLevel::kDebug:
+      return "\033[2;37m";  // dim grey
+    case LogLevel::kInfo:
+      return "\033[36m";  // cyan
+    case LogLevel::kWarn:
+      return "\033[33m";  // yellow
+    case LogLevel::kError:
+      return "\033[1;31m";  // bold red
+    default:
+      return "";
   }
 }
 }  // namespace
 
-void Log::setLevel(LogLevel l) { std::lock_guard<std::mutex> g(g_mu); g_init = true; g_level = l; }
-LogLevel Log::level() { std::lock_guard<std::mutex> g(g_mu); ensureInit(); return g_level; }
-void Log::setColor(bool on) { std::lock_guard<std::mutex> g(g_mu); g_color = on; }
+void Log::setLevel(LogLevel l) {
+  std::lock_guard<std::mutex> g(g_mu);
+  g_init = true;
+  g_level = l;
+}
+LogLevel Log::level() {
+  std::lock_guard<std::mutex> g(g_mu);
+  ensureInit();
+  return g_level;
+}
+void Log::setColor(bool on) {
+  std::lock_guard<std::mutex> g(g_mu);
+  g_color = on;
+}
 
 void Log::emit(LogLevel lvl, const std::string& msg, const std::string& key, int throttleAfter) {
   std::lock_guard<std::mutex> g(g_mu);
@@ -74,19 +100,28 @@ void Log::emit(LogLevel lvl, const std::string& msg, const std::string& key, int
 #if defined(VXRT_ANDROID)
   int prio = ANDROID_LOG_INFO;
   switch (lvl) {
-    case LogLevel::kDebug: prio = ANDROID_LOG_DEBUG; break;
-    case LogLevel::kInfo: prio = ANDROID_LOG_INFO; break;
-    case LogLevel::kWarn: prio = ANDROID_LOG_WARN; break;
-    case LogLevel::kError: prio = ANDROID_LOG_ERROR; break;
-    default: break;
+    case LogLevel::kDebug:
+      prio = ANDROID_LOG_DEBUG;
+      break;
+    case LogLevel::kInfo:
+      prio = ANDROID_LOG_INFO;
+      break;
+    case LogLevel::kWarn:
+      prio = ANDROID_LOG_WARN;
+      break;
+    case LogLevel::kError:
+      prio = ANDROID_LOG_ERROR;
+      break;
+    default:
+      break;
   }
   __android_log_print(prio, "vxrt", "%s%s", msg.c_str(), suffix.c_str());
 #endif
   // Always also print to stderr (so adb shell run captures it without logcat).
   FILE* out = stderr;
   if (g_color) {
-    fprintf(out, "%s[vxrt %s]\033[0m %s%s\n", levelColor(lvl), levelTag(lvl),
-            msg.c_str(), suffix.c_str());
+    fprintf(out, "%s[vxrt %s]\033[0m %s%s\n", levelColor(lvl), levelTag(lvl), msg.c_str(),
+            suffix.c_str());
   } else {
     fprintf(out, "[vxrt %s] %s%s\n", levelTag(lvl), msg.c_str(), suffix.c_str());
   }

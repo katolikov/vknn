@@ -21,7 +21,7 @@ class Profiler;
 
 /// Per-run execution context shared with operators.
 struct ExecContext {
-  std::vector<RtTensor>* pool = nullptr;   // indexed by TensorId
+  std::vector<RtTensor>* pool = nullptr;  // indexed by TensorId
   const Graph* graph = nullptr;
   const Config* config = nullptr;
   Profiler* profiler = nullptr;
@@ -47,8 +47,8 @@ class Backend {
   virtual void toDevice(RtTensor& rt, ExecContext& ctx) {}
 
   /// Compile a contiguous run of nodes (indices into graph.nodes) into a Segment.
-  virtual std::unique_ptr<Segment> compileSegment(const std::vector<int>& nodeIdx,
-                                                  Graph& g, const Config& cfg) = 0;
+  virtual std::unique_ptr<Segment> compileSegment(const std::vector<int>& nodeIdx, Graph& g,
+                                                  const Config& cfg) = 0;
 
   /// Called once after all segments are compiled (flush pipeline/weight/tuning caches to disk).
   virtual void finalize() {}
@@ -60,8 +60,8 @@ class Segment {
   virtual ~Segment() = default;
   virtual void run(ExecContext& ctx) = 0;
   Backend* backend = nullptr;
-  bool isFallback = false;   // true if this CPU segment exists because the primary backend
-                             // could not run these ops (drives the fallback warning + profiler tag)
+  bool isFallback = false;  // true if this CPU segment exists because the primary backend
+                            // could not run these ops (drives the fallback warning + profiler tag)
   std::vector<int> nodeIdx;
   // tensor ids this segment consumes from outside / produces for outside (boundary set)
   std::vector<TensorId> boundaryInputs;
@@ -76,6 +76,7 @@ class BackendRegistry {
   void registerBackend(BackendKind k, Factory f);
   bool has(BackendKind k) const;
   std::unique_ptr<Backend> create(BackendKind k) const;
+
  private:
   std::map<BackendKind, Factory> factories_;
 };
@@ -85,10 +86,10 @@ struct BackendRegistrar {
     BackendRegistry::instance().registerBackend(k, std::move(f));
   }
 };
-#define VX_REGISTER_BACKEND(KIND, TYPE)                                      \
-  static ::vx::BackendRegistrar _vx_backend_reg_##TYPE(                      \
-      KIND, []() -> std::unique_ptr<::vx::Backend> {                         \
-        return std::unique_ptr<::vx::Backend>(new TYPE());                   \
+#define VX_REGISTER_BACKEND(KIND, TYPE)                    \
+  static ::vx::BackendRegistrar _vx_backend_reg_##TYPE(    \
+      KIND, []() -> std::unique_ptr<::vx::Backend> {       \
+        return std::unique_ptr<::vx::Backend>(new TYPE()); \
       })
 
 }  // namespace vx

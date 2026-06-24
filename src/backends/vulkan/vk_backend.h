@@ -30,6 +30,7 @@ class WeightCache {
   // autotune table: op-signature -> chosen local_size_x
   int tuned(const std::string& sig, int dflt) const;
   void setTuned(const std::string& sig, int val);
+
  private:
   std::string path_;
   std::map<std::string, std::vector<float>> weights_;
@@ -48,8 +49,8 @@ struct VkOpEnv {
   const Config* config = nullptr;
   std::function<vk::Buffer*(TensorId)> devBuf;  // activation buffer for a tensor id
   bool useFp16 = false;
-  WeightCache* weights = nullptr;               // prepacked-weight + tuning cache (may be null)
-  vk::CommandRunner* runner = nullptr;          // for on-device autotuning benchmarks
+  WeightCache* weights = nullptr;       // prepacked-weight + tuning cache (may be null)
+  vk::CommandRunner* runner = nullptr;  // for on-device autotuning benchmarks
   TuningLevel tuning = TuningLevel::kFast;
 };
 
@@ -74,6 +75,7 @@ class VkOpRegistry {
     auto it = factories_.find(t);
     return it == factories_.end() ? nullptr : it->second();
   }
+
  private:
   std::map<OpType, VkOpFactory> factories_;
 };
@@ -81,10 +83,9 @@ class VkOpRegistry {
 struct VkOpRegistrar {
   VkOpRegistrar(OpType t, VkOpFactory f) { VkOpRegistry::instance().reg(t, std::move(f)); }
 };
-#define VX_REGISTER_VK_OP(OPTYPE, CLASS)                                        \
-  static ::vx::VkOpRegistrar _vx_vkop_reg_##CLASS(OPTYPE, []() {                \
-    return std::unique_ptr<::vx::VulkanOp>(new CLASS());                        \
-  })
+#define VX_REGISTER_VK_OP(OPTYPE, CLASS)           \
+  static ::vx::VkOpRegistrar _vx_vkop_reg_##CLASS( \
+      OPTYPE, []() { return std::unique_ptr<::vx::VulkanOp>(new CLASS()); })
 
 // NC4HW4 element count for a logical NCHW shape.
 inline int64_t packedElems(const Shape& shape) {

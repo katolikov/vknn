@@ -49,8 +49,8 @@ std::unique_ptr<IonBuffer> IonBuffer::alloc(size_t bytes, const std::string& hea
     VX_WARN << "ION: mmap failed (errno " << errno << ")";
     b->map_ = nullptr;
   }
-  VX_INFO << "ION: allocated " << bytes << " bytes from /dev/dma_heap/" << heap
-          << " -> fd " << b->fd_ << (b->map_ ? " (mapped)" : " (unmapped)");
+  VX_INFO << "ION: allocated " << bytes << " bytes from /dev/dma_heap/" << heap << " -> fd "
+          << b->fd_ << (b->map_ ? " (mapped)" : " (unmapped)");
   return b;
 }
 
@@ -61,9 +61,12 @@ std::unique_ptr<IonBuffer> IonBuffer::wrapFd(int fd, size_t bytes, bool takeOwne
   b->owns_ = takeOwnership;
   b->heap_ = "<wrapped>";
   b->map_ = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  if (b->map_ == MAP_FAILED) { b->map_ = nullptr; VX_WARN << "ION: wrapFd mmap failed"; }
-  VX_INFO << "ION: wrapped fd " << fd << " (" << bytes << " bytes, ownership="
-          << (takeOwnership ? "engine" : "caller") << ")";
+  if (b->map_ == MAP_FAILED) {
+    b->map_ = nullptr;
+    VX_WARN << "ION: wrapFd mmap failed";
+  }
+  VX_INFO << "ION: wrapped fd " << fd << " (" << bytes
+          << " bytes, ownership=" << (takeOwnership ? "engine" : "caller") << ")";
   return b;
 }
 

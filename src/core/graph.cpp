@@ -43,7 +43,10 @@ void Graph::topoSort() {
       auto it = producer.find(in);
       if (it != producer.end() && it->second != (int)i) preds.insert(it->second);
     }
-    for (int p : preds) { succ[p].push_back((int)i); indeg[i]++; }
+    for (int p : preds) {
+      succ[p].push_back((int)i);
+      indeg[i]++;
+    }
   }
   std::vector<int> q;
   for (size_t i = 0; i < n; ++i)
@@ -57,8 +60,7 @@ void Graph::topoSort() {
     for (int v : succ[u])
       if (--indeg[v] == 0) q.push_back(v);
   }
-  if (ordered.size() != n)
-    throw Error(Status::kInvalidArgument, "graph has a cycle");
+  if (ordered.size() != n) throw Error(Status::kInvalidArgument, "graph has a cycle");
   nodes = std::move(ordered);
 }
 
@@ -66,8 +68,10 @@ std::string Graph::dump() const {
   std::ostringstream os;
   os << "Graph: " << nodes.size() << " nodes, " << tensors.size() << " tensors, "
      << initializers.size() << " initializers\n";
-  for (TensorId i : inputs) os << "  input  " << tensors[i].name << " " << shapeStr(tensors[i].shape) << "\n";
-  for (TensorId o : outputs) os << "  output " << tensors[o].name << " " << shapeStr(tensors[o].shape) << "\n";
+  for (TensorId i : inputs)
+    os << "  input  " << tensors[i].name << " " << shapeStr(tensors[i].shape) << "\n";
+  for (TensorId o : outputs)
+    os << "  output " << tensors[o].name << " " << shapeStr(tensors[o].shape) << "\n";
   for (const auto& nd : nodes) {
     os << "  " << opTypeName(nd.type) << " '" << nd.name << "' (";
     for (size_t k = 0; k < nd.inputs.size(); ++k)

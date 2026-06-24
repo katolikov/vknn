@@ -41,7 +41,11 @@ class JsonParser {
   const std::string& s_;
   size_t i_ = 0;
 
-  void ws() { while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r' || s_[i_] == ',')) ++i_; }
+  void ws() {
+    while (i_ < s_.size() &&
+           (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r' || s_[i_] == ','))
+      ++i_;
+  }
   char peek() { return i_ < s_.size() ? s_[i_] : '\0'; }
 
   JsonValue value() {
@@ -49,13 +53,32 @@ class JsonParser {
     char c = peek();
     if (c == '{') return object();
     if (c == '[') return array();
-    if (c == '"') { JsonValue v; v.type = JsonValue::kString; v.str = str(); return v; }
-    if (c == 't' || c == 'f') { JsonValue v; v.type = JsonValue::kBool; v.b = boolean(); return v; }
-    if (c == 'n') { i_ += 4; JsonValue v; return v; }
-    JsonValue v; v.type = JsonValue::kNumber; v.num = number(); return v;
+    if (c == '"') {
+      JsonValue v;
+      v.type = JsonValue::kString;
+      v.str = str();
+      return v;
+    }
+    if (c == 't' || c == 'f') {
+      JsonValue v;
+      v.type = JsonValue::kBool;
+      v.b = boolean();
+      return v;
+    }
+    if (c == 'n') {
+      i_ += 4;
+      JsonValue v;
+      return v;
+    }
+    JsonValue v;
+    v.type = JsonValue::kNumber;
+    v.num = number();
+    return v;
   }
   JsonValue object() {
-    JsonValue v; v.type = JsonValue::kObject; ++i_;  // {
+    JsonValue v;
+    v.type = JsonValue::kObject;
+    ++i_;  // {
     ws();
     while (peek() != '}' && i_ < s_.size()) {
       ws();
@@ -69,7 +92,9 @@ class JsonParser {
     return v;
   }
   JsonValue array() {
-    JsonValue v; v.type = JsonValue::kArray; ++i_;  // [
+    JsonValue v;
+    v.type = JsonValue::kArray;
+    ++i_;  // [
     ws();
     while (peek() != ']' && i_ < s_.size()) {
       v.arr.push_back(value());
@@ -87,27 +112,45 @@ class JsonParser {
       if (c == '\\' && i_ < s_.size()) {
         char e = s_[i_++];
         switch (e) {
-          case 'n': out += '\n'; break;
-          case 't': out += '\t'; break;
-          case '"': out += '"'; break;
-          case '\\': out += '\\'; break;
-          case '/': out += '/'; break;
-          default: out += e;
+          case 'n':
+            out += '\n';
+            break;
+          case 't':
+            out += '\t';
+            break;
+          case '"':
+            out += '"';
+            break;
+          case '\\':
+            out += '\\';
+            break;
+          case '/':
+            out += '/';
+            break;
+          default:
+            out += e;
         }
-      } else out += c;
+      } else
+        out += c;
     }
     if (peek() == '"') ++i_;
     return out;
   }
   bool boolean() {
-    if (s_.compare(i_, 4, "true") == 0) { i_ += 4; return true; }
-    if (s_.compare(i_, 5, "false") == 0) { i_ += 5; return false; }
+    if (s_.compare(i_, 4, "true") == 0) {
+      i_ += 4;
+      return true;
+    }
+    if (s_.compare(i_, 5, "false") == 0) {
+      i_ += 5;
+      return false;
+    }
     return false;
   }
   double number() {
     size_t start = i_;
-    while (i_ < s_.size() && (isdigit(s_[i_]) || s_[i_] == '-' || s_[i_] == '+' ||
-                              s_[i_] == '.' || s_[i_] == 'e' || s_[i_] == 'E'))
+    while (i_ < s_.size() && (isdigit(s_[i_]) || s_[i_] == '-' || s_[i_] == '+' || s_[i_] == '.' ||
+                              s_[i_] == 'e' || s_[i_] == 'E'))
       ++i_;
     return std::stod(s_.substr(start, i_ - start));
   }

@@ -10,11 +10,13 @@
 using namespace vx;
 static std::vector<uint8_t> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
-  return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>())
+  return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                  std::istreambuf_iterator<char>())
            : std::vector<uint8_t>();
 }
 static const char* argval(int c, char** v, const char* k, const char* d) {
-  for (int i = 1; i < c - 1; ++i) if (!strcmp(v[i], k)) return v[i + 1];
+  for (int i = 1; i < c - 1; ++i)
+    if (!strcmp(v[i], k)) return v[i + 1];
   return d;
 }
 
@@ -25,11 +27,20 @@ static void runWith(const std::string& model, const std::vector<uint8_t>& inData
   cfg.precision = Precision::kFp16;
   printf("\n=== config.backend = %s ===\n", backendName(be));
   auto sess = Runtime::load(model, cfg);
-  if (!sess) { printf("  load failed\n"); return; }
-  IOTensor in; in.name = "input"; in.shape = {1, 3, 224, 224}; in.dtype = DType::kFloat32;
+  if (!sess) {
+    printf("  load failed\n");
+    return;
+  }
+  IOTensor in;
+  in.name = "input";
+  in.shape = {1, 3, 224, 224};
+  in.dtype = DType::kFloat32;
   in.data = inData;
   std::vector<IOTensor> outs;
-  if (sess->run({in}, outs) != Status::kOk) { printf("  run failed\n"); return; }
+  if (sess->run({in}, outs) != Status::kOk) {
+    printf("  run failed\n");
+    return;
+  }
   // backend usage histogram
   std::map<BackendKind, int> hist;
   for (BackendKind k : sess->nodeBackends()) hist[k]++;
@@ -38,7 +49,8 @@ static void runWith(const std::string& model, const std::vector<uint8_t>& inData
   printf("\n");
   const float* y = outs[0].f32();
   int64_t n = numElements(outs[0].shape), top = 0;
-  for (int64_t i = 1; i < n; ++i) if (y[i] > y[top]) top = i;
+  for (int64_t i = 1; i < n; ++i)
+    if (y[i] > y[top]) top = i;
   printf("  top-1 = class %lld (score %.4f)\n", (long long)top, y[top]);
 }
 

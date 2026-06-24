@@ -25,8 +25,8 @@ std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
   auto t0 = std::chrono::high_resolution_clock::now();
   s->plan();
   auto t1 = std::chrono::high_resolution_clock::now();
-  VX_INFO << "Session created in "
-          << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
+  VX_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count()
+          << " ms";
   return s;
 }
 
@@ -45,7 +45,10 @@ void Session::plan() {
   for (BackendKind k : order) {
     if (seen.count(k)) continue;
     seen.insert(k);
-    if (!reg.has(k)) { VX_DEBUG << "backend " << backendName(k) << " not registered"; continue; }
+    if (!reg.has(k)) {
+      VX_DEBUG << "backend " << backendName(k) << " not registered";
+      continue;
+    }
     auto b = reg.create(k);
     if (!b || !b->available()) {
       VX_WARN << "backend " << backendName(k) << " unavailable; skipping";
@@ -83,19 +86,23 @@ void Session::plan() {
     DType dt = DType::kFloat32;  // compute dtype at IR level
     int chosen = -1;
     for (size_t bi = 0; bi < backends_.size(); ++bi) {
-      if (backends_[bi]->supports(nd.type, dt)) { chosen = (int)bi; break; }
+      if (backends_[bi]->supports(nd.type, dt)) {
+        chosen = (int)bi;
+        break;
+      }
     }
-    if (chosen < 0) throw Error(Status::kUnsupported,
-        std::string("no backend supports op ") + opTypeName(nd.type) + " (" + nd.name + ")");
+    if (chosen < 0)
+      throw Error(Status::kUnsupported, std::string("no backend supports op ") +
+                                            opTypeName(nd.type) + " (" + nd.name + ")");
     nodeBackendIdx_[n] = chosen;
     // warn if the primary backend couldn't take it
-    if (backends_[chosen]->kind() != cfg_.backend &&
-        byKind_.count(cfg_.backend) &&
+    if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend) &&
         !byKind_[cfg_.backend]->supports(nd.type, dt)) {
       VX_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2)
           << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by "
           << backendName(cfg_.backend) << " backend -> falling back to "
-          << backends_[chosen]->name() << ". Perf note: this op does not run on the requested backend.";
+          << backends_[chosen]->name()
+          << ". Perf note: this op does not run on the requested backend.";
     }
   }
 
@@ -138,7 +145,10 @@ void Session::plan() {
           for (size_t q = 0; q < graph_.nodes.size() && !external; ++q)
             if (nodeToSeg[q] != (int)p)
               for (TensorId x : graph_.nodes[q].inputs)
-                if (x == o) { external = true; break; }
+                if (x == o) {
+                  external = true;
+                  break;
+                }
         if (external) outs.insert(o);
       }
     }
@@ -180,8 +190,12 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
     TensorId id = graph_.find(io.name);
     if (id == kNoTensor) {
       // fall back to the single graph input
-      if (graph_.inputs.size() == 1) id = graph_.inputs[0];
-      else { VX_ERROR << "input not found: " << io.name; return Status::kInvalidArgument; }
+      if (graph_.inputs.size() == 1)
+        id = graph_.inputs[0];
+      else {
+        VX_ERROR << "input not found: " << io.name;
+        return Status::kInvalidArgument;
+      }
     }
     RtTensor& rt = pool_[id];
     rt.shape = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
@@ -206,7 +220,8 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
       RtTensor& rt = pool_[i];
       if (!rt.hostValid || graph_.isInitializer((TensorId)i)) continue;
       std::string nm = graph_.tensors[i].name;
-      for (char& c : nm) if (c == '/' || c == ':') c = '_';
+      for (char& c : nm)
+        if (c == '/' || c == ':') c = '_';
       std::ofstream f(cfg_.layerDumpDir + "/" + nm + ".bin", std::ios::binary);
       if (f) f.write((const char*)rt.host.bytes.data(), rt.host.bytes.size());
     }

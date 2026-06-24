@@ -26,14 +26,17 @@ using namespace vx;
 static std::vector<uint8_t> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
   if (!f) return {};
-  return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
 }
 static const char* argval(int argc, char** argv, const char* key, const char* def) {
-  for (int i = 1; i < argc - 1; ++i) if (!strcmp(argv[i], key)) return argv[i + 1];
+  for (int i = 1; i < argc - 1; ++i)
+    if (!strcmp(argv[i], key)) return argv[i + 1];
   return def;
 }
 static bool hasflag(int argc, char** argv, const char* key) {
-  for (int i = 1; i < argc; ++i) if (!strcmp(argv[i], key)) return true;
+  for (int i = 1; i < argc; ++i)
+    if (!strcmp(argv[i], key)) return true;
   return false;
 }
 
@@ -52,18 +55,31 @@ int main(int argc, char** argv) {
   cfg.precision = (precision == "fp32") ? Precision::kFp32 : Precision::kFp16;
   cfg.cacheDir = argval(argc, argv, "--cache", cfg.cacheDir.c_str());
   if (hasflag(argc, argv, "--profile")) cfg.profile = true;
-  if (hasflag(argc, argv, "--layer-dump")) { cfg.layerDump = true; cfg.layerDumpDir = argval(argc, argv, "--layer-dump", cfg.layerDumpDir.c_str()); }
+  if (hasflag(argc, argv, "--layer-dump")) {
+    cfg.layerDump = true;
+    cfg.layerDumpDir = argval(argc, argv, "--layer-dump", cfg.layerDumpDir.c_str());
+  }
 
   Shape shape;
-  { std::string s = shapeStr; size_t pos; while ((pos = s.find(',')) != std::string::npos || !s.empty()) {
-      std::string tok = s.substr(0, pos); shape.push_back(std::stoll(tok));
-      if (pos == std::string::npos) break; s = s.substr(pos + 1); } }
+  {
+    std::string s = shapeStr;
+    size_t pos;
+    while ((pos = s.find(',')) != std::string::npos || !s.empty()) {
+      std::string tok = s.substr(0, pos);
+      shape.push_back(std::stoll(tok));
+      if (pos == std::string::npos) break;
+      s = s.substr(pos + 1);
+    }
+  }
 
   printf("model=%s backend=%s precision=%s input=%s shape=%s\n", model.c_str(),
          backendName(cfg.backend), precision.c_str(), inpath.c_str(), shapeStr.c_str());
 
   auto sess = Runtime::load(model, cfg);
-  if (!sess) { fprintf(stderr, "failed to load model\n"); return 1; }
+  if (!sess) {
+    fprintf(stderr, "failed to load model\n");
+    return 1;
+  }
   if (hasflag(argc, argv, "--show-graph")) {
     const Graph& gg = sess->graph();
     int i = 0;
@@ -89,7 +105,10 @@ int main(int argc, char** argv) {
 
   std::vector<IOTensor> outs;
   Status st = sess->run({in}, outs);
-  if (st != Status::kOk || outs.empty()) { fprintf(stderr, "run failed\n"); return 2; }
+  if (st != Status::kOk || outs.empty()) {
+    fprintf(stderr, "run failed\n");
+    return 2;
+  }
 
   const float* y = outs[0].f32();
   int64_t n = numElements(outs[0].shape);
@@ -108,11 +127,15 @@ int main(int argc, char** argv) {
     int64_t m = std::min(n, gn);
     double dot = 0, na = 0, nb = 0, maxErr = 0;
     for (int64_t i = 0; i < m; ++i) {
-      dot += (double)y[i] * g[i]; na += (double)y[i] * y[i]; nb += (double)g[i] * g[i];
+      dot += (double)y[i] * g[i];
+      na += (double)y[i] * y[i];
+      nb += (double)g[i] * g[i];
       maxErr = std::max(maxErr, (double)std::fabs(y[i] - g[i]));
     }
     double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
-    int goldTop = 0; for (int64_t i = 1; i < m; ++i) if (g[i] > g[goldTop]) goldTop = (int)i;
+    int goldTop = 0;
+    for (int64_t i = 1; i < m; ++i)
+      if (g[i] > g[goldTop]) goldTop = (int)i;
     printf("golden compare: cosine=%.6f maxAbsErr=%.4e  top1 vxrt=%d golden=%d  => %s\n", cos,
            maxErr, idx[0], goldTop, (idx[0] == goldTop && cos >= 0.99) ? "PASS" : "CHECK");
   }
@@ -131,7 +154,9 @@ int main(int argc, char** argv) {
       ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
     }
     std::sort(ms.begin(), ms.end());
-    double mean = 0; for (double v : ms) mean += v; mean /= ms.size();
+    double mean = 0;
+    for (double v : ms) mean += v;
+    mean /= ms.size();
     double med = ms[ms.size() / 2];
     double p90 = ms[(size_t)(ms.size() * 0.9)];
     printf("\nbench (%d runs): mean=%.2f ms  median=%.2f ms  p90=%.2f ms  => %.1f fps (median)\n",

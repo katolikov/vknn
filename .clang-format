@@ -1,0 +1,11 @@
+# vxrt house style. Run: clang-format -i (see scripts/format.sh)
+BasedOnStyle: Google
+ColumnLimit: 100
+IndentWidth: 2
+DerivePointerAlignment: false
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+SortIncludes: false
+SpacesBeforeTrailingComments: 2

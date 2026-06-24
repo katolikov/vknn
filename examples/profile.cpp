@@ -9,12 +9,14 @@
 
 using namespace vx;
 static const char* argval(int c, char** v, const char* k, const char* d) {
-  for (int i = 1; i < c - 1; ++i) if (!strcmp(v[i], k)) return v[i + 1];
+  for (int i = 1; i < c - 1; ++i)
+    if (!strcmp(v[i], k)) return v[i + 1];
   return d;
 }
 static std::vector<uint8_t> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
-  return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>())
+  return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                  std::istreambuf_iterator<char>())
            : std::vector<uint8_t>();
 }
 
@@ -31,7 +33,10 @@ int main(int argc, char** argv) {
   cfg.profile = true;
 
   auto sess = Runtime::load(model, cfg);
-  if (!sess) { fprintf(stderr, "load failed\n"); return 1; }
+  if (!sess) {
+    fprintf(stderr, "load failed\n");
+    return 1;
+  }
   IOTensor in;
   in.name = "input";
   in.shape = {1, 3, 224, 224};
