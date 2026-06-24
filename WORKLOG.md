@@ -48,3 +48,18 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - Golden: onnxruntime on cat/dog image -> top-1 class 258 (Samoyed), 105 per-layer dumps.
 - **MobileNetV2 CPU on device: cosine=1.000000, maxAbsErr=1.62e-05, top-1 258==258 PASS.**
   Host build identical. Session create ~12 ms on device.
+
+### M3 — Vulkan MobileNetV2 fp32 DONE (verified on device, GPU)
+- Graph passes wired into Session: inferShapes (incl. Conv/Gemm/Reshape), foldBatchNorm,
+  fuseActivations (35 Clip/Relu -> Conv/Gemm), constFold (5 shape nodes), DCE. 105 -> 65 nodes.
+- NC4HW4 packed layout. Shaders: pack/unpack, conv (general group=1), dwconv (depthwise),
+  avgpool (global), fc (gemm), add (reused). Weight prepacking on host.
+- VulkanBackend + VulkanSegment: per-tensor device buffers, ops prepare()+record(), ONE
+  pre-recorded command buffer for the whole static graph, timestamp query pool, CPU<->NC4HW4
+  pack/unpack at boundaries.
+- Bugs found & fixed on device: (1) Session member destruction order freed Vulkan buffers
+  after the VkDevice (teardown segfault) -> reordered. (2) Reshape output shape not inferred ->
+  undersized device buffer -> Gemm read OOB garbage -> added Reshape shape inference.
+- **RESULT on Xclipse 960 GPU: top-5 exact match, cosine=1.000000, maxAbsErr=1.3e-05,
+  top-1 258==258 PASS. Latency: median 24.35 ms = 41.1 fps (fp32). CPU ref: 672 ms = 1.5 fps.**
+- Debug tooling: per-layer dump (--layer-dump) + tools/compare_layers.py used to localize bugs.

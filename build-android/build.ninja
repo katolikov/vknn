@@ -47,7 +47,7 @@ cmake_ninja_workdir = /Users/artemkatolikov/DEV/LibTAS/build-android/
 #############################################
 # Order-only phony target for vxrt
 
-build cmake_object_order_depends_target_vxrt: phony || generated/add.spv generated/vx_embedded_shaders.cpp
+build cmake_object_order_depends_target_vxrt: phony || generated/add.spv generated/avgpool.spv generated/conv.spv generated/dwconv.spv generated/fc.spv generated/pack.spv generated/unpack.spv generated/vx_embedded_shaders.cpp
 
 build CMakeFiles/vxrt.dir/src/backends/cpu/cpu_backend.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/backends/cpu/cpu_backend.cpp || cmake_object_order_depends_target_vxrt
   CONFIG = Release
@@ -157,6 +157,15 @@ build CMakeFiles/vxrt.dir/src/import/onnx/onnx_parser.cpp.o: CXX_COMPILER__vxrt_
   OBJECT_DIR = CMakeFiles/vxrt.dir
   OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/src/import/onnx
 
+build CMakeFiles/vxrt.dir/src/import/passes.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/import/passes.cpp || cmake_object_order_depends_target_vxrt
+  CONFIG = Release
+  DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
+  DEP_FILE = CMakeFiles/vxrt.dir/src/import/passes.cpp.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG -std=gnu++17 -fPIC -pthread
+  INCLUDES = -I/Users/artemkatolikov/DEV/LibTAS/include -I/Users/artemkatolikov/DEV/LibTAS/src -I/Users/artemkatolikov/DEV/LibTAS/third_party
+  OBJECT_DIR = CMakeFiles/vxrt.dir
+  OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/src/import
+
 build CMakeFiles/vxrt.dir/generated/vx_embedded_shaders.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/build-android/generated/vx_embedded_shaders.cpp || cmake_object_order_depends_target_vxrt
   CONFIG = Release
   DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
@@ -165,6 +174,15 @@ build CMakeFiles/vxrt.dir/generated/vx_embedded_shaders.cpp.o: CXX_COMPILER__vxr
   INCLUDES = -I/Users/artemkatolikov/DEV/LibTAS/include -I/Users/artemkatolikov/DEV/LibTAS/src -I/Users/artemkatolikov/DEV/LibTAS/third_party
   OBJECT_DIR = CMakeFiles/vxrt.dir
   OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/generated
+
+build CMakeFiles/vxrt.dir/src/backends/vulkan/vk_backend.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/backends/vulkan/vk_backend.cpp || cmake_object_order_depends_target_vxrt
+  CONFIG = Release
+  DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
+  DEP_FILE = CMakeFiles/vxrt.dir/src/backends/vulkan/vk_backend.cpp.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG -std=gnu++17 -fPIC -pthread
+  INCLUDES = -I/Users/artemkatolikov/DEV/LibTAS/include -I/Users/artemkatolikov/DEV/LibTAS/src -I/Users/artemkatolikov/DEV/LibTAS/third_party
+  OBJECT_DIR = CMakeFiles/vxrt.dir
+  OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/src/backends/vulkan
 
 build CMakeFiles/vxrt.dir/src/backends/vulkan/vk_buffer.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/backends/vulkan/vk_buffer.cpp || cmake_object_order_depends_target_vxrt
   CONFIG = Release
@@ -193,6 +211,15 @@ build CMakeFiles/vxrt.dir/src/backends/vulkan/vk_context.cpp.o: CXX_COMPILER__vx
   OBJECT_DIR = CMakeFiles/vxrt.dir
   OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/src/backends/vulkan
 
+build CMakeFiles/vxrt.dir/src/backends/vulkan/vk_ops.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/backends/vulkan/vk_ops.cpp || cmake_object_order_depends_target_vxrt
+  CONFIG = Release
+  DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
+  DEP_FILE = CMakeFiles/vxrt.dir/src/backends/vulkan/vk_ops.cpp.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG -std=gnu++17 -fPIC -pthread
+  INCLUDES = -I/Users/artemkatolikov/DEV/LibTAS/include -I/Users/artemkatolikov/DEV/LibTAS/src -I/Users/artemkatolikov/DEV/LibTAS/third_party
+  OBJECT_DIR = CMakeFiles/vxrt.dir
+  OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/src/backends/vulkan
+
 build CMakeFiles/vxrt.dir/src/backends/vulkan/vk_pipeline.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/backends/vulkan/vk_pipeline.cpp || cmake_object_order_depends_target_vxrt
   CONFIG = Release
   DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
@@ -210,7 +237,7 @@ build CMakeFiles/vxrt.dir/src/backends/vulkan/vk_pipeline.cpp.o: CXX_COMPILER__v
 #############################################
 # Link the static library libvxrt.a
 
-build libvxrt.a: CXX_STATIC_LIBRARY_LINKER__vxrt_Release CMakeFiles/vxrt.dir/src/backends/cpu/cpu_backend.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_basic.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_conv.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_shape.cpp.o CMakeFiles/vxrt.dir/src/core/backend_registry.cpp.o CMakeFiles/vxrt.dir/src/core/config.cpp.o CMakeFiles/vxrt.dir/src/core/graph.cpp.o CMakeFiles/vxrt.dir/src/core/logging.cpp.o CMakeFiles/vxrt.dir/src/core/op.cpp.o CMakeFiles/vxrt.dir/src/core/profiler.cpp.o CMakeFiles/vxrt.dir/src/core/session.cpp.o CMakeFiles/vxrt.dir/src/import/onnx/onnx_parser.cpp.o CMakeFiles/vxrt.dir/generated/vx_embedded_shaders.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_buffer.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_command.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_context.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_pipeline.cpp.o
+build libvxrt.a: CXX_STATIC_LIBRARY_LINKER__vxrt_Release CMakeFiles/vxrt.dir/src/backends/cpu/cpu_backend.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_basic.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_conv.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_shape.cpp.o CMakeFiles/vxrt.dir/src/core/backend_registry.cpp.o CMakeFiles/vxrt.dir/src/core/config.cpp.o CMakeFiles/vxrt.dir/src/core/graph.cpp.o CMakeFiles/vxrt.dir/src/core/logging.cpp.o CMakeFiles/vxrt.dir/src/core/op.cpp.o CMakeFiles/vxrt.dir/src/core/profiler.cpp.o CMakeFiles/vxrt.dir/src/core/session.cpp.o CMakeFiles/vxrt.dir/src/import/onnx/onnx_parser.cpp.o CMakeFiles/vxrt.dir/src/import/passes.cpp.o CMakeFiles/vxrt.dir/generated/vx_embedded_shaders.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_backend.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_buffer.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_command.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_context.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_ops.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_pipeline.cpp.o
   CONFIG = Release
   LANGUAGE_COMPILE_FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG
   OBJECT_DIR = CMakeFiles/vxrt.dir
@@ -361,8 +388,8 @@ build rebuild_cache: phony CMakeFiles/rebuild_cache.util
 #############################################
 # Custom command for generated/vx_embedded_shaders.cpp
 
-build generated/vx_embedded_shaders.cpp | ${cmake_ninja_workdir}generated/vx_embedded_shaders.cpp: CUSTOM_COMMAND generated/add.spv /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py
-  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/cmake -E env python3 /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py /Users/artemkatolikov/DEV/LibTAS/build-android/generated/vx_embedded_shaders.cpp /Users/artemkatolikov/DEV/LibTAS/build-android/generated/add.spv
+build generated/vx_embedded_shaders.cpp | ${cmake_ninja_workdir}generated/vx_embedded_shaders.cpp: CUSTOM_COMMAND generated/add.spv generated/avgpool.spv generated/conv.spv generated/dwconv.spv generated/fc.spv generated/pack.spv generated/unpack.spv /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/cmake -E env python3 /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py /Users/artemkatolikov/DEV/LibTAS/build-android/generated/vx_embedded_shaders.cpp /Users/artemkatolikov/DEV/LibTAS/build-android/generated/add.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/avgpool.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/conv.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/dwconv.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/fc.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/pack.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/unpack.spv
   DESC = Embedding SPIR-V blobs -> vx_embedded_shaders.cpp
   restat = 1
 
@@ -373,6 +400,60 @@ build generated/vx_embedded_shaders.cpp | ${cmake_ninja_workdir}generated/vx_emb
 build generated/add.spv | ${cmake_ninja_workdir}generated/add.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/add.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
   COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/add.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/add.spv
   DESC = glslc add.comp -> add.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/avgpool.spv
+
+build generated/avgpool.spv | ${cmake_ninja_workdir}generated/avgpool.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/avgpool.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/avgpool.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/avgpool.spv
+  DESC = glslc avgpool.comp -> avgpool.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/conv.spv
+
+build generated/conv.spv | ${cmake_ninja_workdir}generated/conv.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/conv.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/conv.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/conv.spv
+  DESC = glslc conv.comp -> conv.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/dwconv.spv
+
+build generated/dwconv.spv | ${cmake_ninja_workdir}generated/dwconv.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/dwconv.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/dwconv.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/dwconv.spv
+  DESC = glslc dwconv.comp -> dwconv.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/fc.spv
+
+build generated/fc.spv | ${cmake_ninja_workdir}generated/fc.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/fc.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/fc.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/fc.spv
+  DESC = glslc fc.comp -> fc.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/pack.spv
+
+build generated/pack.spv | ${cmake_ninja_workdir}generated/pack.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/pack.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/pack.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/pack.spv
+  DESC = glslc pack.comp -> pack.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/unpack.spv
+
+build generated/unpack.spv | ${cmake_ninja_workdir}generated/unpack.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/unpack.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/unpack.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/unpack.spv
+  DESC = glslc unpack.comp -> unpack.spv
   restat = 1
 
 # =============================================================================

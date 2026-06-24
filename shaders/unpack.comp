@@ -1,0 +1,21 @@
+#version 450
+// NC4HW4 (float) -> NCHW (float). One thread per NCHW element.
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { float src[]; };  // NC4HW4
+layout(std430, binding = 1) writeonly buffer Dst { float dst[]; };  // NCHW
+layout(push_constant) uniform PC { int N, C, H, W; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  uint total = uint(pc.N * pc.C * pc.H * pc.W);
+  if (gid >= total) return;
+  int w = int(gid) % pc.W;
+  int h = (int(gid) / pc.W) % pc.H;
+  int c = (int(gid) / (pc.W * pc.H)) % pc.C;
+  int n = int(gid) / (pc.W * pc.H * pc.C);
+  int Cb = (pc.C + 3) / 4;
+  int cb = c / 4, l = c % 4;
+  int sidx = ((((n * Cb + cb) * pc.H + h) * pc.W + w) * 4) + l;
+  dst[gid] = src[sidx];
+}

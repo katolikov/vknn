@@ -5,6 +5,7 @@
 #include <set>
 #include <sys/stat.h>
 #include "vx/logging.h"
+#include "../import/passes.h"
 
 namespace vx {
 
@@ -30,6 +31,10 @@ std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
 }
 
 void Session::plan() {
+  // --- graph optimization passes (NCHW IR, static batch=1) ---
+  runStandardPasses(graph_, 1);
+  graph_.topoSort();
+
   // --- instantiate backends in priority order: primary, fallbacks..., CPU last ---
   std::vector<BackendKind> order;
   order.push_back(cfg_.backend);

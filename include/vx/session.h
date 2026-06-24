@@ -50,11 +50,14 @@ class Session {
   Graph graph_;
   Config cfg_;
   Profiler profiler_;
-  std::vector<RtTensor> pool_;
+  // Declaration order matters for teardown: backends_ (owns the VulkanContext) must be
+  // destroyed LAST, after segments_ and pool_ release their device buffers. Members are
+  // destroyed in reverse declaration order, so backends_ is declared first here.
   std::vector<std::unique_ptr<Backend>> backends_;     // active, in priority order
   std::map<BackendKind, Backend*> byKind_;
   std::vector<int> nodeBackendIdx_;                    // backend index per node
   std::vector<std::unique_ptr<Segment>> segments_;
+  std::vector<RtTensor> pool_;
   bool planned_ = false;
 };
 

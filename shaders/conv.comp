@@ -1,0 +1,52 @@
+#version 450
+// General Conv2D (group=1), NC4HW4. Handles 1x1 pointwise and KxK strided.
+// One thread computes one output channel-block (4 output channels) at one (oy,ox).
+// weight layout: [Cout][Cinb][KH][KW][4]  (lane = input channel within block)
+// bias layout:   [Coutb*4]
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { float src[]; };
+layout(std430, binding = 1) readonly  buffer Wt  { float wt[]; };
+layout(std430, binding = 2) readonly  buffer Bs  { float bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { float dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  uint total = uint(pc.N * Coutb * pc.OH * pc.OW);
+  if (gid >= total) return;
+  int ox = int(gid) % pc.OW;
+  int oy = (int(gid) / pc.OW) % pc.OH;
+  int ocb = (int(gid) / (pc.OW * pc.OH)) % Coutb;
+  int n = int(gid) / (pc.OW * pc.OH * Coutb);
+
+  vec4 acc = vec4(0.0);
+  for (int l = 0; l < 4; ++l) acc[l] = bias[ocb * 4 + l];
+
+  for (int icb = 0; icb < Cinb; ++icb) {
+    for (int ky = 0; ky < pc.KH; ++ky) {
+      int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+      if (iy < 0 || iy >= pc.H) continue;
+      for (int kx = 0; kx < pc.KW; ++kx) {
+        int ix = ox * pc.SW - pc.PL + kx * pc.DW;
+        if (ix < 0 || ix >= pc.W) continue;
+        int sidx = ((((n * Cinb + icb) * pc.H + iy) * pc.W + ix) * 4);
+        vec4 inv = vec4(src[sidx], src[sidx + 1], src[sidx + 2], src[sidx + 3]);
+        for (int l = 0; l < 4; ++l) {
+          int oc = ocb * 4 + l;
+          int widx = ((((oc * Cinb + icb) * pc.KH + ky) * pc.KW + kx) * 4);
+          vec4 wv = vec4(wt[widx], wt[widx + 1], wt[widx + 2], wt[widx + 3]);
+          acc[l] += dot(inv, wv);
+        }
+      }
+    }
+  }
+  int didx = ((((n * Coutb + ocb) * pc.OH + oy) * pc.OW + ox) * 4);
+  for (int l = 0; l < 4; ++l)
+    dst[didx + l] = vx_act(acc[l], pc.act, pc.actLo, pc.actHi);
+}

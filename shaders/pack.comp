@@ -1,0 +1,25 @@
+#version 450
+// NCHW (float) -> NC4HW4 (float, channels grouped in 4). One thread per packed slot.
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { float src[]; };  // NCHW
+layout(std430, binding = 1) writeonly buffer Dst { float dst[]; };  // NC4HW4
+layout(push_constant) uniform PC { int N, C, H, W; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  int Cb = (pc.C + 3) / 4;
+  uint total = uint(pc.N * Cb * pc.H * pc.W);
+  if (gid >= total) return;
+  int w = int(gid) % pc.W;
+  int h = (int(gid) / pc.W) % pc.H;
+  int cb = (int(gid) / (pc.W * pc.H)) % Cb;
+  int n = int(gid) / (pc.W * pc.H * Cb);
+  int base = ((((n * Cb + cb) * pc.H + h) * pc.W + w) * 4);
+  for (int l = 0; l < 4; ++l) {
+    int c = cb * 4 + l;
+    float v = 0.0;
+    if (c < pc.C) v = src[(((n * pc.C + c) * pc.H + h) * pc.W + w)];
+    dst[base + l] = v;
+  }
+}

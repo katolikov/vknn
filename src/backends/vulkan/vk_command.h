@@ -7,13 +7,16 @@
 namespace vx {
 namespace vk {
 
-/// Inserts a barrier so a following compute dispatch sees the previous dispatch's writes.
+/// Inserts a barrier so a following dispatch/copy sees the previous one's writes.
+/// Covers both COMPUTE and TRANSFER stages (Reshape uses vkCmdCopyBuffer).
 inline void computeBarrier(VkCommandBuffer cmd) {
   VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+  b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+  b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                    VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+  const VkPipelineStageFlags stages =
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+  vkCmdPipelineBarrier(cmd, stages, stages, 0, 1, &b, 0, nullptr, 0, nullptr);
 }
 
 class CommandRunner {

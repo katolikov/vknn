@@ -12,6 +12,7 @@
 //   --layer-dump DIR  dump every layer output to DIR
 //   --cache DIR       cache directory
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -63,6 +64,16 @@ int main(int argc, char** argv) {
 
   auto sess = Runtime::load(model, cfg);
   if (!sess) { fprintf(stderr, "failed to load model\n"); return 1; }
+  if (hasflag(argc, argv, "--show-graph")) {
+    const Graph& gg = sess->graph();
+    int i = 0;
+    for (const auto& nd : gg.nodes) {
+      TensorId o = nd.outputs.empty() ? kNoTensor : nd.outputs[0];
+      printf("  [%3d] %-18s out=%-8s %s act=%d\n", i++, opTypeName(nd.type),
+             o == kNoTensor ? "?" : gg.tensors[o].name.c_str(),
+             o == kNoTensor ? "" : ::vx::shapeStr(gg.tensors[o].shape).c_str(), (int)nd.fusedAct);
+    }
+  }
 
   IOTensor in;
   in.name = "input";
@@ -107,5 +118,24 @@ int main(int argc, char** argv) {
   }
 
   if (cfg.profile) sess->profiler().printTable();
+
+  // Optional latency benchmark: --bench N  (warmup 5, then N timed runs).
+  int benchN = atoi(argval(argc, argv, "--bench", "0"));
+  if (benchN > 0) {
+    for (int i = 0; i < 5; ++i) sess->run({in}, outs);  // warmup
+    std::vector<double> ms;
+    for (int i = 0; i < benchN; ++i) {
+      auto t0 = std::chrono::high_resolution_clock::now();
+      sess->run({in}, outs);
+      auto t1 = std::chrono::high_resolution_clock::now();
+      ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+    }
+    std::sort(ms.begin(), ms.end());
+    double mean = 0; for (double v : ms) mean += v; mean /= ms.size();
+    double med = ms[ms.size() / 2];
+    double p90 = ms[(size_t)(ms.size() * 0.9)];
+    printf("\nbench (%d runs): mean=%.2f ms  median=%.2f ms  p90=%.2f ms  => %.1f fps (median)\n",
+           benchN, mean, med, p90, 1000.0 / med);
+  }
   return 0;
 }
