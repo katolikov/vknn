@@ -302,6 +302,19 @@ class VulkanSegment : public Segment {
     env_.graph = &g;
     env_.config = &cfg;
     env_.useFp16 = useFp16_;
+    // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
+    // model, distinct across models) so a shared cacheDir can't return another model's weights.
+    {
+      uint64_t h = 1469598103934665603ull;
+      auto mix = [&](const std::string& s) {
+        for (char c : s) { h ^= (uint8_t)c; h *= 1099511628211ull; }
+      };
+      for (const auto& nd : g.nodes) { mix(nd.name); mix(opTypeName(nd.type)); }
+      mix(std::to_string(g.nodes.size()));
+      char buf[20];
+      snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
+      env_.modelTag = buf;
+    }
     env_.devBuf = [this](TensorId t) -> vk::Buffer* {
       auto it = buffers_.find(t);
       return it == buffers_.end() ? nullptr : it->second.get();

@@ -93,7 +93,8 @@ inline std::shared_ptr<vk::Buffer> upload(vk::VulkanContext& ctx, const std::vec
 // Same as upload(), but reuse the prepacked blob from the weight cache on warm starts.
 // `compute` only runs on a cache miss.
 template <typename Fn>
-inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string& key, Fn compute) {
+inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string& rawKey, Fn compute) {
+  std::string key = env.modelTag.empty() ? rawKey : env.modelTag + "/" + rawKey;
   std::vector<float> v;
   if (!(env.weights && env.weights->get(key, v))) {
     v = compute();

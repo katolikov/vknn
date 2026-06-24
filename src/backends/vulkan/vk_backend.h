@@ -52,6 +52,9 @@ struct VkOpEnv {
   WeightCache* weights = nullptr;       // prepacked-weight + tuning cache (may be null)
   vk::CommandRunner* runner = nullptr;  // for on-device autotuning benchmarks
   TuningLevel tuning = TuningLevel::kFast;
+  // Per-model namespace for the weight cache, so reusing one cacheDir across different models can't
+  // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
+  std::string modelTag;
 };
 
 /// One operator on the Vulkan backend. Adding an op: subclass + VX_REGISTER_VK_OP.
