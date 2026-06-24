@@ -28,6 +28,7 @@ struct AddCpu : CpuOp {
       for (; i + 4 <= n; i += 4) vst1q_f32(y + i, vaddq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
 #endif
       for (; i < n; ++i) y[i] = a[i] + b[i];
+      cpu::applyAct(y, n, node.fusedAct, node.actLo, node.actHi);  // fused Relu (e.g. ResNet)
       return;
     }
 

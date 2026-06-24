@@ -5,14 +5,21 @@
 namespace vx {
 namespace {
 
+struct AddPC {
+  uint32_t count;
+  int act;
+  float actLo, actHi;
+};
+
 struct AddOp : VulkanOp {
   std::unique_ptr<vk::ComputePipeline> pipe;
-  uint32_t count = 0;
+  AddPC pc{};
 
   void prepare(const Node& node, VkOpEnv& env) override {
-    count = (uint32_t)packedElems(env.graph->desc(node.outputs[0]).shape);
+    pc = {(uint32_t)packedElems(env.graph->desc(node.outputs[0]).shape), (int)node.fusedAct,
+          node.actLo, node.actHi};
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("add", env.useFp16), 3,
-                                                 sizeof(uint32_t), std::vector<uint32_t>{},
+                                                 sizeof(AddPC), std::vector<uint32_t>{},
                                                  env.cache->handle());
   }
 
@@ -20,8 +27,8 @@ struct AddOp : VulkanOp {
     vk::Buffer* a = env.devBuf(node.inputs[0]);
     vk::Buffer* b = env.devBuf(node.inputs[1]);
     vk::Buffer* y = env.devBuf(node.outputs[0]);
-    pipe->dispatch(cmd, {a->handle(), b->handle(), y->handle()}, &count, sizeof(count),
-                   groups(count, 256));
+    pipe->dispatch(cmd, {a->handle(), b->handle(), y->handle()}, &pc, sizeof(pc),
+                   groups(pc.count, 256));
   }
 };
 

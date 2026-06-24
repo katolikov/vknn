@@ -269,7 +269,8 @@ void fuseActivations(Graph& g) {
     int pi = producer[act.inputs[0]];
     if (pi < 0) continue;
     Node& prod = g.nodes[pi];
-    if (prod.type != OpType::kConv && prod.type != OpType::kGemm) continue;
+    if (prod.type != OpType::kConv && prod.type != OpType::kGemm && prod.type != OpType::kAdd)
+      continue;
     if (prod.fusedAct != ActType::kNone) continue;
     // producer output must feed only this activation
     int consumers = 0;
