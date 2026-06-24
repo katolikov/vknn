@@ -23,6 +23,15 @@ struct IOTensor {
   const float* f32() const { return reinterpret_cast<const float*>(data.data()); }
 };
 
+/// Describes a model input or output. Everything the caller would otherwise hand-specify, read
+/// straight from the model (concrete shapes resolved at load time, batch fixed to 1).
+struct IOInfo {
+  std::string name;
+  Shape shape;
+  DType dtype = DType::kFloat32;
+  int64_t elems = 0;  // product of shape = number of fp32 values expected/produced
+};
+
 /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.
 class Session {
  public:
@@ -33,6 +42,17 @@ class Session {
   static std::unique_ptr<Session> create(Graph&& g, const Config& cfg);
 
   Status run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& outputs);
+
+  // --- ergonomic API: names/shapes/dtypes come from the model; the caller passes only data ---
+  /// Model inputs/outputs (name, concrete shape, dtype, element count). Use these to size buffers.
+  std::vector<IOInfo> inputInfo() const;
+  std::vector<IOInfo> outputInfo() const;
+  /// Run with raw fp32 data, one buffer per model input in model order. Names/shapes/dtypes are
+  /// filled from the model and the element counts are validated. Outputs come back fully described.
+  Status run(const std::vector<std::vector<float>>& inputData, std::vector<IOTensor>& outputs);
+  /// Single-input / single-output convenience: feed the input values, get the output values back.
+  /// Returns empty on error. The shape is whatever the model declares (see inputInfo()).
+  std::vector<float> infer(const std::vector<float>& input);
 
   const Graph& graph() const { return graph_; }
   const Config& config() const { return cfg_; }

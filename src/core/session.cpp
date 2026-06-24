@@ -242,4 +242,60 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
   return Status::kOk;
 }
 
+// --- ergonomic API ------------------------------------------------------------------------------
+
+static IOInfo ioInfoOf(const Graph& g, TensorId id) {
+  IOInfo info;
+  info.name = g.tensors[id].name;
+  info.shape = g.tensors[id].shape;
+  info.dtype = g.tensors[id].dtype;
+  info.elems = numElements(info.shape);
+  return info;
+}
+
+std::vector<IOInfo> Session::inputInfo() const {
+  std::vector<IOInfo> v;
+  for (TensorId id : graph_.inputs) v.push_back(ioInfoOf(graph_, id));
+  return v;
+}
+
+std::vector<IOInfo> Session::outputInfo() const {
+  std::vector<IOInfo> v;
+  for (TensorId id : graph_.outputs) v.push_back(ioInfoOf(graph_, id));
+  return v;
+}
+
+Status Session::run(const std::vector<std::vector<float>>& inputData,
+                    std::vector<IOTensor>& outputs) {
+  if (inputData.size() != graph_.inputs.size()) {
+    VX_ERROR << "run: expected " << graph_.inputs.size() << " input(s), got " << inputData.size();
+    return Status::kInvalidArgument;
+  }
+  std::vector<IOTensor> ins(graph_.inputs.size());
+  for (size_t i = 0; i < graph_.inputs.size(); ++i) {
+    TensorId id = graph_.inputs[i];
+    const TensorDesc& d = graph_.tensors[id];
+    int64_t want = numElements(d.shape);
+    // Allow callers not to know the count (want<=0 for fully-dynamic shapes); otherwise validate.
+    if (want > 0 && (int64_t)inputData[i].size() != want) {
+      VX_ERROR << "run: input '" << d.name << "' expects " << want << " values, got "
+               << inputData[i].size();
+      return Status::kInvalidArgument;
+    }
+    ins[i].name = d.name;
+    ins[i].shape = d.shape;
+    ins[i].dtype = DType::kFloat32;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(inputData[i].data());
+    ins[i].data.assign(p, p + inputData[i].size() * sizeof(float));
+  }
+  return run(ins, outputs);
+}
+
+std::vector<float> Session::infer(const std::vector<float>& input) {
+  std::vector<IOTensor> outs;
+  if (run({input}, outs) != Status::kOk || outs.empty()) return {};
+  const float* o = outs[0].f32();
+  return std::vector<float>(o, o + numElements(outs[0].shape));
+}
+
 }  // namespace vx

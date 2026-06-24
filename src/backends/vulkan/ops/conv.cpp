@@ -15,6 +15,7 @@ struct ConvOp : VulkanOp {
   bool pointwise = false;
   bool winograd = false;
   bool splitk = false;
+  bool reg = false;    // register-tiled implicit-im2col general conv (WTILE pixels/thread)
   bool hasRes = false;  // residual Add fused into the epilogue (out = act(conv + residual))
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> wbuf, bbuf;
@@ -240,7 +241,17 @@ struct ConvOp : VulkanOp {
               *env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
               std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)}, env.cache->handle());
         }
+      } else if (std::getenv("VXRT_CONV_REG")) {
+        // register-tiled implicit-im2col (opt-in): regresses 3x3 on this GPU (small weight tensors
+        // already cache well; WTILE overhead + extra input loads dominate). Kept for experiments.
+        reg = true;
+        int64_t HW = y.h * y.w;
+        total = x.n * Coutb * ((HW + kTile - 1) / kTile);
+        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv_reg", env.useFp16), 4,
+                                                     sizeof(ConvPC), std::vector<uint32_t>{},
+                                                     env.cache->handle());
       } else {
+        // autotuned 1-pixel-per-thread direct kernel (fastest 3x3 path on Xclipse so far)
         total = x.n * Coutb * y.h * y.w;
         localSize = pickLocalSize(env, env.devBuf(node.inputs[0]), env.devBuf(node.outputs[0]));
         pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv", env.useFp16), 4,
@@ -282,7 +293,7 @@ struct ConvOp : VulkanOp {
       if (hasRes) bufs.push_back(res);
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
     } else
-      pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, localSize));
+      pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, reg ? 64 : localSize));
   }
 };
 

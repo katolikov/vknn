@@ -91,12 +91,19 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Name + shape come from the model (inputInfo); --shape only needed if you want to override.
   IOTensor in;
-  in.name = "input";
-  in.shape = shape;
+  auto inInfo = sess->inputInfo();
+  if (!inInfo.empty()) {
+    in.name = inInfo[0].name;
+    in.shape = shape.empty() ? inInfo[0].shape : shape;
+  } else {
+    in.name = "input";
+    in.shape = shape;
+  }
   in.dtype = DType::kFloat32;
   in.data = readFile(inpath);
-  int64_t need = numElements(shape) * 4;
+  int64_t need = numElements(in.shape) * 4;
   if ((int64_t)in.data.size() < need) {
     fprintf(stderr, "input file too small (%zu < %lld); using zeros\n", in.data.size(),
             (long long)need);

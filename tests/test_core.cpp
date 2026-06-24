@@ -129,6 +129,39 @@ TEST(CpuOps, Conv1x1ReluReference) {
   EXPECT_NEAR(o[1], 10.0f, 1e-5);
 }
 
+// Ergonomic API: infer()/inputInfo() — caller passes only data, metadata comes from the model.
+TEST(Api, AutoShapesFromModel) {
+  // input[1,2,1,1] -> Conv 1x1 (weight 2*I, bias {-3,0}) -> y
+  Graph g;
+  TensorDesc xi; xi.name = "x"; xi.shape = {1, 2, 1, 1}; xi.isInput = true;
+  TensorId x = g.addTensor(xi); g.inputs.push_back(x);
+  TensorDesc wi; wi.name = "w"; wi.shape = {2, 2, 1, 1}; wi.isInitializer = true;
+  TensorId w = g.addTensor(wi);
+  HostBuffer wb; wb.resizeElems(4, DType::kFloat32);
+  wb.f32()[0] = 2; wb.f32()[1] = 0; wb.f32()[2] = 0; wb.f32()[3] = 2; g.initializers[w] = wb;
+  TensorDesc bi; bi.name = "b"; bi.shape = {2}; bi.isInitializer = true;
+  TensorId b = g.addTensor(bi);
+  HostBuffer bb; bb.resizeElems(2, DType::kFloat32); bb.f32()[0] = -3; bb.f32()[1] = 0;
+  g.initializers[b] = bb;
+  TensorDesc yo; yo.name = "y"; yo.isOutput = true; TensorId y = g.addTensor(yo);
+  Node conv; conv.type = OpType::kConv; conv.name = "conv"; conv.inputs = {x, w, b};
+  conv.outputs = {y}; g.nodes.push_back(conv); g.outputs = {y};
+
+  Config cfg; cfg.backend = BackendKind::kCpu;
+  auto sess = Session::create(std::move(g), cfg);
+  // query metadata instead of hand-specifying it
+  auto in = sess->inputInfo();
+  ASSERT_EQ(in.size(), 1u);
+  EXPECT_EQ(in[0].name, "x");
+  EXPECT_EQ(in[0].elems, 2);
+  EXPECT_EQ(sess->outputInfo()[0].elems, 2);
+  // infer() with just data
+  std::vector<float> out = sess->infer({1.0f, 5.0f});  // -> {2*1-3, 2*5} = {-1, 10}
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_NEAR(out[0], -1.0f, 1e-5);
+  EXPECT_NEAR(out[1], 10.0f, 1e-5);
+}
+
 // Unary family: Sigmoid + HardSwish on CPU.
 TEST(CpuOps, UnarySigmoidHardSwish) {
   for (int sub : {(int)kUSigmoid, (int)kUHardSwish}) {

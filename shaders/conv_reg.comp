@@ -1,0 +1,76 @@
+#version 450
+// General group=1 conv, register-tiled like conv1x1: each thread computes one output channel-block
+// (4 oc) for WTILE output pixels, looping the KHxKW taps and gathering input from NC4HW4 (implicit
+// im2col, no patch buffer, no LDS). A weight vec4 is loaded once per (icb,ky,kx) and reused across
+// all WTILE pixels. Per-pixel output coords are hoisted OUT of the hot loop (no div/mod inside). fp16.
+#include "common.glsl"
+#define WTILE 4
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+} pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int HW = pc.OH * pc.OW;
+  int nTiles = (HW + WTILE - 1) / WTILE;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.N * Coutb * nTiles)) return;
+  int tile = int(gid) % nTiles;
+  int ocb = (int(gid) / nTiles) % Coutb;
+  int n = int(gid) / (nTiles * Coutb);
+  int p0 = tile * WTILE;
+
+  // Hoist per-pixel output coords once (the div/mod must NOT be in the icb/ky/kx hot loop).
+  int oyv[WTILE], oxv[WTILE];
+  for (int p = 0; p < WTILE; ++p) {
+    int pix = min(p0 + p, HW - 1);
+    oyv[p] = pix / pc.OW;
+    oxv[p] = pix - oyv[p] * pc.OW;
+  }
+
+  vec4 acc[WTILE];
+  vec4 b = vec4(bias[ocb]);
+  for (int p = 0; p < WTILE; ++p) acc[p] = b;
+
+  int ocStride = Cinb * pc.KH * pc.KW;
+  int wbase = ocb * 4 * ocStride;
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int sb = (n * Cinb + icb) * pc.H * pc.W;
+    for (int ky = 0; ky < pc.KH; ++ky) {
+      for (int kx = 0; kx < pc.KW; ++kx) {
+        int wtap = (icb * pc.KH + ky) * pc.KW + kx;
+        vec4 w0 = vec4(wt[wbase + 0 * ocStride + wtap]);
+        vec4 w1 = vec4(wt[wbase + 1 * ocStride + wtap]);
+        vec4 w2 = vec4(wt[wbase + 2 * ocStride + wtap]);
+        vec4 w3 = vec4(wt[wbase + 3 * ocStride + wtap]);
+        for (int p = 0; p < WTILE; ++p) {
+          int iy = oyv[p] * pc.SH - pc.PT + ky * pc.DH;
+          int ix = oxv[p] * pc.SW - pc.PL + kx * pc.DW;
+          if (uint(iy) < uint(pc.H) && uint(ix) < uint(pc.W)) {
+            vec4 inv = vec4(src[sb + iy * pc.W + ix]);
+            acc[p].x += dot(inv, w0);
+            acc[p].y += dot(inv, w1);
+            acc[p].z += dot(inv, w2);
+            acc[p].w += dot(inv, w3);
+          }
+        }
+      }
+    }
+  }
+  int dbase = (n * Coutb + ocb) * HW;
+  for (int p = 0; p < WTILE; ++p) {
+    int pix = p0 + p;
+    if (pix < HW)
+      dst[dbase + pix] = vec4(vx_act(acc[p].x, pc.act, pc.actLo, pc.actHi),
+                                 vx_act(acc[p].y, pc.act, pc.actLo, pc.actHi),
+                                 vx_act(acc[p].z, pc.act, pc.actLo, pc.actHi),
+                                 vx_act(acc[p].w, pc.act, pc.actLo, pc.actHi));
+  }
+}
