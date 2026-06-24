@@ -28,3 +28,11 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - **UMA finding:** memory types 0 & 1 are DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT (type 1 also
   HOST_CACHED). → engine maps device-local memory directly, NO staging copies for upload. Big win.
 - Compute queue family = 1 (dedicated compute), selected automatically.
+
+### M1 — DONE (verified on device)
+- Vulkan compute foundation: `vk::Buffer` (UMA direct-mapped, dma-buf import path),
+  `vk::ComputePipeline` (push descriptors, spec constants, push constants), `vk::PipelineCache`
+  (disk-serialized), `vk::CommandRunner` (one-shot + recordable, barriers).
+- `add.comp` (elementwise add) compiled by glslc, embedded, run on device:
+  **GPU add == CPU add, maxAbsErr = 0.0**, pipeline cache written (1012 B) and reused on run 2.
+- ADRs 0001-0005,0007 recorded.

@@ -1,4 +1,5 @@
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vxrt.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vx_probe.dir
+/Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/vx_op_check.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/edit_cache.dir
 /Users/artemkatolikov/DEV/LibTAS/build-android/CMakeFiles/rebuild_cache.dir
