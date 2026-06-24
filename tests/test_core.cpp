@@ -5,6 +5,7 @@
 #include "vx/config.h"
 #include "vx/dtype.h"
 #include "vx/graph.h"
+#include "vx/model.h"
 #include "vx/session.h"
 #include "vx/tensor_format.h"
 
@@ -127,6 +128,20 @@ TEST(CpuOps, Conv1x1ReluReference) {
   const float* o = outs[0].f32();
   EXPECT_NEAR(o[0], 0.0f, 1e-5);
   EXPECT_NEAR(o[1], 10.0f, 1e-5);
+}
+
+// Humane Tensor API: construct, shape/size accessors, argmax.
+TEST(Api, TensorHelpers) {
+  Tensor t({1.f, 5.f, 2.f, 9.f, 3.f, 0.f}, {1, 6});
+  EXPECT_EQ(t.rank(), 2);
+  EXPECT_EQ(t.size(), 6);
+  EXPECT_EQ(t.dim(1), 6);
+  EXPECT_EQ(t.shapeString(), "1x6");
+  EXPECT_EQ(t.argmax(), 3);
+  EXPECT_NEAR(t.max(), 9.f, 1e-6);
+  Tensor flat(std::vector<float>{1.f, 2.f, 3.f});
+  EXPECT_EQ(flat.rank(), 1);
+  EXPECT_EQ(flat.shapeString(), "3");
 }
 
 // Ergonomic API: infer()/inputInfo() — caller passes only data, metadata comes from the model.
