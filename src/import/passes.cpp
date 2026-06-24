@@ -74,6 +74,25 @@ void inferShapes(Graph& g, int64_t batch) {
         if (xs.size() == 4 && gs.size() == 4) SH(o) = {xs[0], xs[1], gs[1], gs[2]};
         break;
       }
+      case OpType::kCast: {
+        SH(o) = SH(nd.inputs[0]);
+        break;
+      }
+      case OpType::kSplit: {
+        const Shape& a = SH(nd.inputs[0]);
+        if (a.empty()) break;
+        int64_t rank = (int64_t)a.size();
+        int64_t axis = nd.attr.geti("axis", 0);
+        if (axis < 0) axis += rank;
+        std::vector<int64_t> sp = readI64Param(g, nd, "split", 1);
+        int64_t nout = (int64_t)nd.outputs.size();
+        if (sp.empty() && nout > 0) { int64_t each = a[axis] / nout; for (int64_t k = 0; k < nout; ++k) sp.push_back(each); }
+        for (int64_t k = 0; k < nout && k < (int64_t)sp.size(); ++k) {
+          if (nd.outputs[k] == kNoTensor) continue;
+          Shape os = a; os[axis] = sp[k]; SH(nd.outputs[k]) = os;
+        }
+        break;
+      }
       case OpType::kTranspose: {
         const Shape& a = SH(nd.inputs[0]);
         const auto& perm = nd.attr.getints("perm");

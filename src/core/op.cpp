@@ -61,6 +61,10 @@ const char* opTypeName(OpType t) {
       return "Slice";
     case OpType::kReduce:
       return "Reduce";
+    case OpType::kCast:
+      return "Cast";
+    case OpType::kSplit:
+      return "Split";
     case OpType::kConvertLayout:
       return "ConvertLayout";
     default:
@@ -125,6 +129,8 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"GridSample", OpType::kGridSample},
       {"Transpose", OpType::kTranspose},
       {"Slice", OpType::kSlice},
+      {"Cast", OpType::kCast},
+      {"Split", OpType::kSplit},
   };
   auto it = m.find(s);
   if (it != m.end()) return it->second;

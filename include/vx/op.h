@@ -44,6 +44,8 @@ enum class OpType {
   kTranspose,   // permute dims (CPU)
   kSlice,       // strided slice (CPU)
   kReduce,      // ReduceMean/Sum/Max/Min/Prod, see ReduceType
+  kCast,        // dtype cast (CPU)
+  kSplit,       // split along an axis into N outputs (CPU)
   // layout conversion nodes (inserted by the layout pass)
   kConvertLayout,
 };
