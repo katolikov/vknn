@@ -1,0 +1,9 @@
+# ninja log v7
+0	70	1782323266776607092	generated/vx_embedded_shaders.cpp	6b32a869b7cc380d
+0	70	1782323266776607092	/Users/artemkatolikov/DEV/LibTAS/build-android/generated/vx_embedded_shaders.cpp	6b32a869b7cc380d
+71	593	1782323266781049785	CMakeFiles/vxrt.dir/generated/vx_embedded_shaders.cpp.o	9a06f81a8aa78918
+71	632	1782323266781408870	CMakeFiles/vx_probe.dir/examples/probe.cpp.o	daa44537c4bbe54f
+71	705	1782323266780707741	CMakeFiles/vxrt.dir/src/core/logging.cpp.o	81e87f0df5fd0dd9
+71	877	1782323266781231077	CMakeFiles/vxrt.dir/src/backends/vulkan/vk_context.cpp.o	d80ce6961bd1c761
+877	965	1782323267587104626	libvxrt.a	963f26bc7a323ee1
+965	1029	1782323267675458097	vx_probe	ccb3286d8aff87ad
