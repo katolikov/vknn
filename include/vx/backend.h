@@ -57,6 +57,8 @@ class Segment {
   virtual ~Segment() = default;
   virtual void run(ExecContext& ctx) = 0;
   Backend* backend = nullptr;
+  bool isFallback = false;   // true if this CPU segment exists because the primary backend
+                             // could not run these ops (drives the fallback warning + profiler tag)
   std::vector<int> nodeIdx;
   // tensor ids this segment consumes from outside / produces for outside (boundary set)
   std::vector<TensorId> boundaryInputs;

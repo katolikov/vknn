@@ -2,6 +2,10 @@
 #include "cpu_backend.h"
 #include "vx/logging.h"
 #include <vector>
+#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define VX_HAS_NEON 1
+#endif
 
 namespace vx {
 namespace {
@@ -94,7 +98,19 @@ struct GemmCpuOp : CpuOp {
     for (int64_t m = 0; m < M; ++m)
       for (int64_t n = 0; n < N; ++n) {
         float acc = 0;
-        for (int64_t k = 0; k < K; ++k) {
+        int64_t k = 0;
+#if defined(VX_HAS_NEON)
+        // NEON 4-wide dot for the common transB=1, no-transA case (classifier Gemm).
+        if (transB && !transA) {
+          const float* arow = a + m * K;
+          const float* brow = b + n * K;
+          float32x4_t v = vdupq_n_f32(0.f);
+          for (; k + 4 <= K; k += 4)
+            v = vmlaq_f32(v, vld1q_f32(arow + k), vld1q_f32(brow + k));
+          acc = vaddvq_f32(v);
+        }
+#endif
+        for (; k < K; ++k) {
           float av = transA ? a[k * M + m] : a[m * K + k];
           float bv = transB ? b[n * K + k] : b[k * N + n];
           acc += av * bv;

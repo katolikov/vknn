@@ -79,3 +79,13 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - Per-layer dump (--layer-dump) + tools/compare_layers.py validated. Chrome trace = 65 events,
   loads in chrome://tracing. profile.json = 65 records.
 - Note: fused-activation conv outputs map to the golden post-Clip tensor name (documented).
+
+### M5 — NEON CPU fallback + warning DONE (verified on device)
+- Fallback is automatic via the segment model: ops the active backend can't run are assigned to
+  CPU; the Vulkan segment downloads/uploads (NC4HW4<->NCHW) at segment boundaries -> seamless handoff.
+- Throttled WARN per fallen-back op type (op name, reason, perf note). Profiler tags fallback ops.
+- NEON kernels: Add (4-wide, equal-shape fast path) and Gemm (transB dot, vmlaq/vaddvq) under
+  #if VXRT_ENABLE_NEON && __ARM_NEON. Scalar reference remains the oracle/fallback.
+- Debug hook VXRT_DISABLE_VK_OPS forces ops to fall back.
+- **On device: VXRT_DISABLE_VK_OPS="Add,GlobalAveragePool" -> 23 segments, warnings logged,
+  output cosine=1.000000, top-1 258==258 PASS.** Correctness preserved across the boundary.

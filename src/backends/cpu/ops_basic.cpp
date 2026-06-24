@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include "vx/logging.h"
+#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define VX_HAS_NEON 1
+#endif
 
 namespace vx {
 namespace {
@@ -43,6 +48,21 @@ struct AddCpuOp : CpuOp {
     const RtTensor& B = ctx.t(node.inputs[1]);
     RtTensor& Y = ctx.t(node.outputs[0]);
     const Shape& sa = A.shape, & sb = B.shape;
+    // Fast path: identical shapes (residual adds) -> NEON 4-wide.
+    if (sa == sb) {
+      int64_t n = A.elems();
+      float* y = cpu::allocOut(Y, sa);
+      const float* a = A.host.f32();
+      const float* b = B.host.f32();
+      int64_t i = 0;
+#if defined(VX_HAS_NEON)
+      VX_LOG(kDebug) << "NEON Add kernel (" << n << " elems)";
+      for (; i + 4 <= n; i += 4)
+        vst1q_f32(y + i, vaddq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
+#endif
+      for (; i < n; ++i) y[i] = a[i] + b[i];
+      return;
+    }
     // result shape = broadcast
     size_t rank = std::max(sa.size(), sb.size());
     Shape out(rank, 1);

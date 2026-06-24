@@ -144,6 +144,9 @@ void Session::plan() {
     }
     seg->boundaryInputs.assign(ins.begin(), ins.end());
     seg->boundaryOutputs.assign(outs.begin(), outs.end());
+    // tag a CPU segment as a fallback when the configured primary backend isn't CPU.
+    if (backends_[bi]->kind() == BackendKind::kCpu && cfg_.backend != BackendKind::kCpu)
+      seg->isFallback = true;
     segments_.push_back(std::move(seg));
   }
   planned_ = true;

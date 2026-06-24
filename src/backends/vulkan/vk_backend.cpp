@@ -1,5 +1,6 @@
 #include "vk_backend.h"
 #include <chrono>
+#include <cstdlib>
 #include <set>
 #include <sys/stat.h>
 #include "vx/dtype.h"
@@ -26,6 +27,12 @@ class VulkanBackend : public Backend {
   bool available() const override { return ctx_ && ctx_->initialized(); }
   bool supports(OpType t, DType dt) const override {
     if (!available()) return false;
+    // Debug/fallback hook: VXRT_DISABLE_VK_OPS="Add,Conv" forces those ops to fall back
+    // (used to demonstrate the NEON CPU fallback path, M5).
+    if (const char* dis = std::getenv("VXRT_DISABLE_VK_OPS")) {
+      std::string list = dis, name = opTypeName(t);
+      if (list.find(name) != std::string::npos) return false;
+    }
     return VkOpRegistry::instance().has(t);
   }
 

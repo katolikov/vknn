@@ -62,12 +62,11 @@ class CpuSegment : public Segment {
         r.type = node.type;
         r.backend = backend ? backend->name() : "CPU";
         r.cpuMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        r.fellBack = fellBack;
+        r.fellBack = isFallback;
         ctx.profiler->add(r);
       }
     }
   }
-  bool fellBack = false;
  private:
   Graph& g_;
   std::vector<std::unique_ptr<CpuOp>> ops_;
