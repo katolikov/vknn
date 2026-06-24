@@ -147,3 +147,19 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
   ~1.5x (equal-thermal) to ~2-3x (MNN best case) faster. vxrt is genuinely slower (naive kernels
   + ~11 ms CPU<->device pack/unpack). Documented in docs/BENCHMARK.md + scripts/bench_vs_mnn.sh.
   Note: device thermally throttles hard, so numbers are reported per thermal state.
+
+## 2026-06-24 (Vulkan performance pass)
+- Profiled the real cost: cool GPU span ~7.1ms, submit ~8.9ms, per-op sum dropped 12->7.4ms.
+  The sustained-bench 22ms was largely thermal throttling, not kernel time.
+- Optimizations:
+  * Vectorized all fp16 kernels to f16vec4 loads/stores (4x fewer memory transactions).
+  * fc/Gemm vectorized: 0.9ms -> 0.27ms (~3x).
+  * Register-tiled 1x1 pointwise kernel (conv1x1[_fp16], WTILE=4) - each thread does 4 output
+    pixels, reusing weights; predicated (no break) so acc stays in registers.
+  * Lighter compute-only barriers (transfer barrier only around the Reshape copy).
+  * Timestamps only recorded when profiling (off the hot path).
+  * NEON fp16 input pack (vcvt_f16_f32): 2.0ms -> 0.54ms.
+- Result: vxrt fp16 went from ~22ms to ~13-17ms (min ~13.3ms). vs MNN-Vulkan (~9.5-15.5ms):
+  now near-parity (was 1.5-3x behind). vxrt's GPU span (7.1ms) is competitive with MNN's full
+  run (7.7ms); remaining gap is submit/pack overhead + thermal. Correctness preserved
+  (fp32 cosine 1.0, fp16 0.999965). Honest numbers in docs/BENCHMARK.md.

@@ -3,6 +3,9 @@
 #include <cstdlib>
 #include <set>
 #include <sys/stat.h>
+#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include "vx/dtype.h"
 #include "vx/logging.h"
 #include "vx/profiler.h"
@@ -169,11 +172,17 @@ class VulkanBackend : public Backend {
           for (int64_t h = 0; h < x.h; ++h)
             for (int64_t w = 0; w < x.w; ++w) {
               int64_t base = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4;
+              float t[4] = {0, 0, 0, 0};
               for (int l = 0; l < 4; ++l) {
                 int64_t c = cb * 4 + l;
-                float v = (c < x.c) ? src[((n * x.c + c) * x.h + h) * x.w + w] : 0.f;
-                dst[base + l] = floatToHalf(v);
+                if (c < x.c) t[l] = src[((n * x.c + c) * x.h + h) * x.w + w];
               }
+#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+              // convert the 4 gathered channels to fp16 in one instruction
+              vst1_f16(reinterpret_cast<__fp16*>(dst + base), vcvt_f16_f32(vld1q_f32(t)));
+#else
+              for (int l = 0; l < 4; ++l) dst[base + l] = floatToHalf(t[l]);
+#endif
             }
     } else {
       float* dst = reinterpret_cast<float*>(buf->host());
@@ -273,8 +282,9 @@ class VulkanSegment : public Segment {
       ops_.push_back(std::move(op));
     }
 
-    // 3) timestamp query pool (2 per node).
-    if (be_->ctx().caps().timestampSupported) {
+    // 3) timestamp query pool (2 per node). Only when profiling - the extra writes + the implicit
+    //    barriers around them aren't free, and we don't want them on the hot path.
+    if (be_->ctx().caps().timestampSupported && cfg.profile) {
       VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
       qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
       qi.queryCount = (uint32_t)(idx.size() * 2);
@@ -301,13 +311,23 @@ class VulkanSegment : public Segment {
       if (queryPool_)
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_,
                             (uint32_t)(k * 2 + 1));
-      vk::computeBarrier(cmd_);
+      // Reshape uses a buffer copy (transfer); its producer/consumer edges need the wider
+      // barrier. Everything else is compute->compute.
+      bool nextIsReshape = (k + 1 < nodeIdx.size() &&
+                            g_.nodes[nodeIdx[k + 1]].type == OpType::kReshape);
+      if (node.type == OpType::kReshape || nextIsReshape)
+        vk::transferBarrier(cmd_);
+      else
+        vk::computeBarrier(cmd_);
     }
     be_->runner().end(cmd_);
     recorded_ = true;
   }
 
   void run(ExecContext& ctx) override {
+    const bool timing = std::getenv("VXRT_TIMING") != nullptr;
+    auto now = [] { return std::chrono::high_resolution_clock::now(); };
+    auto t0 = now();
     // attach boundary buffers to RtTensors (cross-segment residency) + upload inputs.
     for (TensorId tid : boundaryInputs) {
       RtTensor& rt = ctx.t(tid);
@@ -321,8 +341,10 @@ class VulkanSegment : public Segment {
         rt.deviceFormat = TensorFormat::kNC4HW4;
       }
     }
+    auto t1 = now();
 
     double wall = be_->runner().submitAndWait(cmd_);
+    auto t2 = now();
 
     // download boundary outputs to host.
     for (TensorId tid : boundaryOutputs) {
@@ -334,6 +356,14 @@ class VulkanSegment : public Segment {
       rt.deviceValid = true;
       rt.deviceFormat = TensorFormat::kNC4HW4;
       VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_);
+    }
+    if (timing) {
+      auto t3 = now();
+      auto ms = [&](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+      };
+      VX_INFO << "timing: pack=" << ms(t0, t1) << "ms submit+gpu=" << wall
+              << "ms unpack=" << ms(t2, t3) << "ms";
     }
 
     // layer-dump: bring every activation back to host for per-layer diffing.
@@ -362,7 +392,10 @@ class VulkanSegment : public Segment {
         r.cpuMs = 0;
         ctx.profiler->add(r);
       }
-      (void)wall;
+      // GPU span (first dispatch start -> last dispatch end) vs the CPU-side submit wall: the
+      // difference is barrier bubbles + submit/fence latency, not kernel work.
+      double span = (double)(ts.back() - ts.front()) * period / 1e6;
+      VX_INFO << "gpu span=" << span << "ms  submit-wall=" << wall << "ms  (gap = overhead)";
     }
   }
 

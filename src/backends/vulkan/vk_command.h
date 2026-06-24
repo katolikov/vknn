@@ -7,16 +7,25 @@
 namespace vx {
 namespace vk {
 
-/// Inserts a barrier so a following dispatch/copy sees the previous one's writes.
-/// Covers both COMPUTE and TRANSFER stages (Reshape uses vkCmdCopyBuffer).
+// The common case: dispatch N+1 reads what dispatch N wrote. Compute->compute only, which is
+// what the linear CNN graph almost always needs - cheaper than dragging the transfer stage in.
 inline void computeBarrier(VkCommandBuffer cmd) {
+  VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+}
+
+// Wider barrier for the boundary around a vkCmdCopyBuffer (Reshape): covers transfer too.
+inline void transferBarrier(VkCommandBuffer cmd) {
   VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
   b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
   b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
                     VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-  const VkPipelineStageFlags stages =
+  const VkPipelineStageFlags s =
       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
-  vkCmdPipelineBarrier(cmd, stages, stages, 0, 1, &b, 0, nullptr, 0, nullptr);
+  vkCmdPipelineBarrier(cmd, s, s, 0, 1, &b, 0, nullptr, 0, nullptr);
 }
 
 class CommandRunner {

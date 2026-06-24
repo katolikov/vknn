@@ -159,8 +159,11 @@ int main(int argc, char** argv) {
     mean /= ms.size();
     double med = ms[ms.size() / 2];
     double p90 = ms[(size_t)(ms.size() * 0.9)];
-    printf("\nbench (%d runs): mean=%.2f ms  median=%.2f ms  p90=%.2f ms  => %.1f fps (median)\n",
-           benchN, mean, med, p90, 1000.0 / med);
+    printf(
+        "\nbench (%d runs): min=%.2f ms  median=%.2f ms  p90=%.2f ms  => %.1f fps (min) / %.1f fps "
+        "(median)\n",
+        benchN, ms.front(), med, p90, 1000.0 / ms.front(), 1000.0 / med);
+    (void)mean;
   }
   return 0;
 }

@@ -1,17 +1,19 @@
 #version 450
-// General Conv2D (group=1), NC4HW4, fp16 storage + fp32 accumulation.
+// General Conv2D (group=1), NC4HW4, fp16. Vectorized: buffers are f16vec4 so each load pulls a
+// whole channel-block in one transaction. Accumulate in fp32 to keep accuracy.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common.glsl"
 layout(local_size_x_id = 0, local_size_x = 64) in;
-layout(std430, binding = 0) readonly  buffer Src { float16_t src[]; };
-layout(std430, binding = 1) readonly  buffer Wt  { float16_t wt[]; };
-layout(std430, binding = 2) readonly  buffer Bs  { float16_t bias[]; };
-layout(std430, binding = 3) writeonly buffer Dst { float16_t dst[]; };
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
 layout(push_constant) uniform PC {
   int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
   float actLo, actHi;
-} pc;
+}
+pc;
 
 void main() {
   uint gid = gl_GlobalInvocationID.x;
@@ -24,8 +26,7 @@ void main() {
   int ocb = (int(gid) / (pc.OW * pc.OH)) % Coutb;
   int n = int(gid) / (pc.OW * pc.OH * Coutb);
 
-  vec4 acc = vec4(0.0);
-  for (int l = 0; l < 4; ++l) acc[l] = float(bias[ocb * 4 + l]);
+  vec4 acc = vec4(bias[ocb]);
 
   for (int icb = 0; icb < Cinb; ++icb) {
     for (int ky = 0; ky < pc.KH; ++ky) {
@@ -34,18 +35,20 @@ void main() {
       for (int kx = 0; kx < pc.KW; ++kx) {
         int ix = ox * pc.SW - pc.PL + kx * pc.DW;
         if (ix < 0 || ix >= pc.W) continue;
-        int sidx = ((((n * Cinb + icb) * pc.H + iy) * pc.W + ix) * 4);
-        vec4 inv = vec4(float(src[sidx]), float(src[sidx+1]), float(src[sidx+2]), float(src[sidx+3]));
-        for (int l = 0; l < 4; ++l) {
-          int oc = ocb * 4 + l;
-          int widx = ((((oc * Cinb + icb) * pc.KH + ky) * pc.KW + kx) * 4);
-          vec4 wv = vec4(float(wt[widx]), float(wt[widx+1]), float(wt[widx+2]), float(wt[widx+3]));
-          acc[l] += dot(inv, wv);
-        }
+        int s = (((n * Cinb + icb) * pc.H + iy) * pc.W + ix);
+        vec4 inv = vec4(src[s]);
+        int wbase = (((ocb * 4 + 0) * Cinb + icb) * pc.KH + ky) * pc.KW + kx;
+        int wstride = Cinb * pc.KH * pc.KW;  // step between output channels
+        acc.x += dot(inv, vec4(wt[wbase]));
+        acc.y += dot(inv, vec4(wt[wbase + wstride]));
+        acc.z += dot(inv, vec4(wt[wbase + 2 * wstride]));
+        acc.w += dot(inv, vec4(wt[wbase + 3 * wstride]));
       }
     }
   }
-  int didx = ((((n * Coutb + ocb) * pc.OH + oy) * pc.OW + ox) * 4);
-  for (int l = 0; l < 4; ++l)
-    dst[didx + l] = float16_t(vx_act(acc[l], pc.act, pc.actLo, pc.actHi));
+  int d = ((n * Coutb + ocb) * pc.OH + oy) * pc.OW + ox;
+  dst[d] = f16vec4(vx_act(acc.x, pc.act, pc.actLo, pc.actHi),
+                   vx_act(acc.y, pc.act, pc.actLo, pc.actHi),
+                   vx_act(acc.z, pc.act, pc.actLo, pc.actHi),
+                   vx_act(acc.w, pc.act, pc.actLo, pc.actHi));
 }

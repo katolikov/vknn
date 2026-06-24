@@ -9,7 +9,9 @@ namespace vx {
 namespace {
 
 struct ConvOp : VulkanOp {
+  static constexpr int kTile = 4;  // output pixels per thread in the 1x1 kernel (matches shader)
   bool depthwise = false;
+  bool pointwise = false;
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> wbuf, bbuf;
   ConvPC pc{};
@@ -67,6 +69,8 @@ struct ConvOp : VulkanOp {
     auto dil = attrInts(node, "dilations", {1, 1});
     int64_t group = node.attr.geti("group", 1);
     depthwise = (group == x.c && group == Cout && inCg == 1);
+    pointwise = (!depthwise && group == 1 && KH == 1 && KW == 1 && st[0] == 1 && st[1] == 1 &&
+                 pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
 
     const float* wsrc = g.initializers.at(node.inputs[1]).f32();
     int64_t Coutb = cBlocks(Cout);
@@ -120,10 +124,21 @@ struct ConvOp : VulkanOp {
           }
         return wp;
       });
-      localSize = pickLocalSize(env, env.devBuf(node.inputs[0]), env.devBuf(node.outputs[0]));
-      pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv", env.useFp16), 4,
-                                                   sizeof(ConvPC), std::vector<uint32_t>{localSize},
-                                                   env.cache->handle());
+      if (pointwise) {
+        // register-tiled 1x1 kernel: one thread does kTile output pixels for an output block
+        int64_t nTiles = (y.h * y.w + kTile - 1) / kTile;
+        total = x.n * Coutb * nTiles;
+        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1", env.useFp16), 4,
+                                                     sizeof(ConvPC), std::vector<uint32_t>{},
+                                                     env.cache->handle());
+      } else {
+        total = x.n * Coutb * y.h * y.w;
+        localSize = pickLocalSize(env, env.devBuf(node.inputs[0]), env.devBuf(node.outputs[0]));
+        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv", env.useFp16), 4,
+                                                     sizeof(ConvPC),
+                                                     std::vector<uint32_t>{localSize},
+                                                     env.cache->handle());
+      }
     }
   }
 
@@ -133,6 +148,8 @@ struct ConvOp : VulkanOp {
     std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
     if (depthwise)
       pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, 64));
+    else if (pointwise)
+      pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
     else
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, localSize));
   }
