@@ -150,9 +150,12 @@ class VulkanBackend : public Backend {
       const Shape& a = g.desc(nd.inputs[0]).shape;
       const Shape& b = g.desc(nd.inputs[1]).shape;
       if (a == b) return true;
-      // channel-broadcast: b is [N,C,1,1] over a's [N,C,H,W]
-      return a.size() == 4 && b.size() == 4 && b[0] == a[0] && b[1] == a[1] && b[2] == 1 &&
-             b[3] == 1;
+      // channel-broadcast on either operand: one is [N,C,1,1], the other [N,C,H,W] (matching N,C)
+      auto bcastOver = [](const Shape& s, const Shape& full) {
+        return s.size() == 4 && full.size() == 4 && s[0] == full[0] && s[1] == full[1] &&
+               s[2] == 1 && s[3] == 1 && (full[2] > 1 || full[3] > 1);
+      };
+      return bcastOver(a, b) || bcastOver(b, a);
     }
     return true;
   }

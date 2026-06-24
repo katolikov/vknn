@@ -1,6 +1,7 @@
 #version 450
-// Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) over NC4HW4 (fp16). BCAST=1 means the second
-// operand is channel-wise [N,C,1,1] (broadcast across H,W) - the Squeeze-Excite pattern.
+// Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) over NC4HW4 (fp16). BCAST: 0 = same shape,
+// 1 = operand A is channel-wise [N,C,1,1], 2 = operand B is channel-wise [N,C,1,1]. The non-broadcast
+// operand and the output share the full [N,C,H,W] layout; operand order is preserved (Sub/Div care).
 #include "common.glsl"
 layout(constant_id = 0) const int BCAST = 0;
 layout(local_size_x = 256) in;
@@ -11,8 +12,10 @@ layout(push_constant) uniform PC { int count, HW, op; } pc;
 void main() {
   uint i = gl_GlobalInvocationID.x;
   if (i >= uint(pc.count)) return;
-  vec4 av = vec4(a[i]);
-  vec4 bv = vec4(BCAST != 0 ? b[int(i) / pc.HW] : b[i]);
+  int ai = (BCAST == 1) ? int(i) / pc.HW : int(i);
+  int bi = (BCAST == 2) ? int(i) / pc.HW : int(i);
+  vec4 av = vec4(a[ai]);
+  vec4 bv = vec4(b[bi]);
   c[i] = vec4(vx_binary(av.x, bv.x, pc.op), vx_binary(av.y, bv.y, pc.op),
                  vx_binary(av.z, bv.z, pc.op), vx_binary(av.w, bv.w, pc.op));
 }

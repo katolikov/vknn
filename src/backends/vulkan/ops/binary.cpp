@@ -16,13 +16,18 @@ struct BinaryOp : VulkanOp {
 
   void prepare(const Node& node, VkOpEnv& env) override {
     NCHW y = NCHW::from(env.graph->desc(node.outputs[0]).shape);
+    NCHW a = NCHW::from(env.graph->desc(node.inputs[0]).shape);
     NCHW b = NCHW::from(env.graph->desc(node.inputs[1]).shape);
     int HW = (int)(y.h * y.w);
-    bool bcast = (b.h * b.w == 1 && y.h * y.w != 1);
+    // 0 = same shape, 1 = A is the [N,C,1,1] broadcast operand, 2 = B is.
+    uint32_t bcast = 0;
+    if (y.h * y.w != 1) {
+      if (a.h * a.w == 1) bcast = 1;
+      else if (b.h * b.w == 1) bcast = 2;
+    }
     pc = {(int)((int64_t)y.n * cBlocks(y.c) * HW), HW, node.subOp};
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("binary", env.useFp16), 3,
-                                                 sizeof(BinaryPC),
-                                                 std::vector<uint32_t>{(uint32_t)(bcast ? 1 : 0)},
+                                                 sizeof(BinaryPC), std::vector<uint32_t>{bcast},
                                                  env.cache->handle());
   }
 
