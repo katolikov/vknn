@@ -1,0 +1,64 @@
+// Winograd F(2x2,3x3) output transform. For each output channel-block and tile, read the 16
+// M values and compute the 2x2 output Y = At * M * A, add bias, apply activation, scatter.
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer M { f16vec4 mbuf[]; };
+layout(std430, binding = 1) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 2) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cout, OH, OW, nTH, nTW, act, pad0;
+  float actLo, actHi;
+}
+pc;
+
+void main() {
+  int Coutb = (pc.Cout + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(Coutb * nT)) return;
+  int tile = int(gid) % nT;
+  int ocb = int(gid) / nT;
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+
+  vec4 m[4][4];
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c)
+      m[r][c] = vec4(mbuf[((r * 4 + c) * Coutb + ocb) * nT + tile]);
+
+  // tmp = At * M  (At rows: [1,1,1,0],[0,1,-1,-1])
+  vec4 t0[4], t1[4];
+  for (int c = 0; c < 4; ++c) {
+    t0[c] = m[0][c] + m[1][c] + m[2][c];
+    t1[c] = m[1][c] - m[2][c] - m[3][c];
+  }
+  // Y = tmp * A  (A cols: [1,1,1,0]^T, [0,1,-1,-1]^T) -> y[i][0]=t[0]+t[1]+t[2], y[i][1]=t[1]-t[2]-t[3]
+  vec4 b = vec4(bias[ocb]);
+  vec4 y00 = t0[0] + t0[1] + t0[2] + b;
+  vec4 y01 = t0[1] - t0[2] - t0[3] + b;
+  vec4 y10 = t1[0] + t1[1] + t1[2] + b;
+  vec4 y11 = t1[1] - t1[2] - t1[3] + b;
+
+  int oy = ty * 2, ox = tx * 2;
+  int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
+  if (oy < pc.OH && ox < pc.OW)
+    dst[obase + oy * pc.OW + ox] = f16vec4(
+        vx_act(y00.x, pc.act, pc.actLo, pc.actHi), vx_act(y00.y, pc.act, pc.actLo, pc.actHi),
+        vx_act(y00.z, pc.act, pc.actLo, pc.actHi), vx_act(y00.w, pc.act, pc.actLo, pc.actHi));
+  if (oy < pc.OH && ox + 1 < pc.OW)
+    dst[obase + oy * pc.OW + ox + 1] = f16vec4(
+        vx_act(y01.x, pc.act, pc.actLo, pc.actHi), vx_act(y01.y, pc.act, pc.actLo, pc.actHi),
+        vx_act(y01.z, pc.act, pc.actLo, pc.actHi), vx_act(y01.w, pc.act, pc.actLo, pc.actHi));
+  if (oy + 1 < pc.OH && ox < pc.OW)
+    dst[obase + (oy + 1) * pc.OW + ox] = f16vec4(
+        vx_act(y10.x, pc.act, pc.actLo, pc.actHi), vx_act(y10.y, pc.act, pc.actLo, pc.actHi),
+        vx_act(y10.z, pc.act, pc.actLo, pc.actHi), vx_act(y10.w, pc.act, pc.actLo, pc.actHi));
+  if (oy + 1 < pc.OH && ox + 1 < pc.OW)
+    dst[obase + (oy + 1) * pc.OW + ox + 1] = f16vec4(
+        vx_act(y11.x, pc.act, pc.actLo, pc.actHi), vx_act(y11.y, pc.act, pc.actLo, pc.actHi),
+        vx_act(y11.z, pc.act, pc.actLo, pc.actHi), vx_act(y11.w, pc.act, pc.actLo, pc.actHi));
+}

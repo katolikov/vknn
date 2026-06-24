@@ -1,5 +1,40 @@
 # vxrt vs MNN — Vulkan, on-device benchmark
 
+## Which models MNN benchmarks
+MNN's own benchmark suite (`benchmark/models/` in the MNN repo) ships: **MobileNetV1, MobileNetV2,
+SqueezeNet v1.0/v1.1, ResNet-v2-50, Inception-v3, MobileNetV3, NASNet**. We compare on the subset
+vxrt currently runs end-to-end:
+
+| Model (Vulkan, fp16, same device) | vxrt | MNN | correctness (vxrt vs ORT) |
+|---|---|---|---|
+| **MobileNetV2** | min 14.7 / median 17.9 ms | avg 14.0 / min 10.9 ms | cosine 0.999965, top-1 match |
+| **ResNet-50** | min 60.4 / median 61.1 ms | avg 45.9 / min 44.0 ms | cosine 1.000000, top-1 match |
+
+**Honest bottom line: MNN is still ~1.3–1.4× faster on both.** On MobileNetV2 *cold/best-case*
+vxrt's full run (~10 ms, of which ~7 ms is GPU) is close to MNN's best (~10.9 ms), but under
+sustained load vxrt throttles more. On ResNet-50 the gap is larger because ResNet is dominated by
+3×3 group=1 convolutions, which vxrt runs with a straightforward (untiled) kernel while MNN uses
+Winograd / tiled GEMM. SqueezeNet/Inception/MobileNetV3/NASNet need a few more ops (Concat on the
+GPU, hard-swish, branchy graphs) before vxrt can run them.
+
+What's been tried to beat MNN (and the result):
+- f16vec4 vectorized kernels — **helped**.
+- register-tiled 1×1 conv (reuse weights across output pixels) — **helped**.
+- NEON fp16 input pack — **helped** (2.0→0.54 ms).
+- shared-memory 1×1 GEMM — **hurt**: MobileNet's deep convs have tiny spatial (7×7), so one
+  workgroup per output-block means no cross-workgroup LDS reuse, only barrier overhead.
+- register-tiled 3×3 — **hurt**: register pressure dropped occupancy.
+- **Winograd F(2×2,3×3)** for the 3×3 group-1 convs (input transform → 16 batched matmuls →
+  output transform). **Implemented and numerically correct** (ResNet-50 cosine **0.999999**), but
+  the un-fused 3-pass version is **memory-bound and ~15% slower** than the direct kernel on this
+  GPU (71 ms vs 61 ms): writing/reading the transformed V (16/9× input) and M (16/4× output)
+  buffers to global memory costs more than the 2.25× multiply reduction saves. It's behind
+  `VXRT_WINOGRAD=1` (default off). To make Winograd win it must be **fused** — transforms kept in
+  registers/LDS so V and M never hit global memory (this is what MNN does). That, plus
+  texture-backed activations, is the concrete remaining path; it's a substantial effort.
+
+
+
 Honest head-to-head against [MNN](https://github.com/alibaba/MNN) (Alibaba's production inference
 engine) on the **same phone, same model, both at their fastest config**. No cherry-picking — the
 raw tool output is reproducible with `scripts/bench_vs_mnn.sh`.

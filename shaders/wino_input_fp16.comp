@@ -1,0 +1,55 @@
+#version 450
+// Winograd F(2x2,3x3) input transform. For each 4x4 input tile (stride 2, pad 1) and input
+// channel-block, compute V = Bt * d * B (16 values). NC4HW4, fp16 storage, fp32 math.
+// Vbuf layout: [pos(0..15)][icb][tile]  (vec4 = 4 input channels)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) writeonly buffer V { f16vec4 vbuf[]; };
+layout(push_constant) uniform PC { int N, C, H, W, OH, OW, nTH, nTW; } pc;
+
+void main() {
+  int Cinb = (pc.C + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(Cinb * nT)) return;
+  int tile = int(gid) % nT;
+  int icb = int(gid) / nT;
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+
+  vec4 d[4][4];
+  int base = (n * Cinb + icb) * pc.H * pc.W;
+  for (int r = 0; r < 4; ++r) {
+    int iy = ty * 2 - 1 + r;
+    for (int c = 0; c < 4; ++c) {
+      int ix = tx * 2 - 1 + c;
+      d[r][c] = (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W)
+                    ? vec4(src[base + iy * pc.W + ix])
+                    : vec4(0.0);
+    }
+  }
+  // tmp = Bt * d  (rows of Bt: [1,0,-1,0],[0,1,1,0],[0,-1,1,0],[0,1,0,-1])
+  vec4 t[4][4];
+  for (int c = 0; c < 4; ++c) {
+    t[0][c] = d[0][c] - d[2][c];
+    t[1][c] = d[1][c] + d[2][c];
+    t[2][c] = d[2][c] - d[1][c];
+    t[3][c] = d[1][c] - d[3][c];
+  }
+  // V = tmp * B  (cols of B from Bt^T): v0=t0-t2, v1=t1+t2, v2=t2-t1, v3=t1-t3
+  int tile_nT = tile;
+  for (int r = 0; r < 4; ++r) {
+    vec4 v0 = t[r][0] - t[r][2];
+    vec4 v1 = t[r][1] + t[r][2];
+    vec4 v2 = t[r][2] - t[r][1];
+    vec4 v3 = t[r][1] - t[r][3];
+    vbuf[((r * 4 + 0) * Cinb + icb) * nT + tile_nT] = f16vec4(v0);
+    vbuf[((r * 4 + 1) * Cinb + icb) * nT + tile_nT] = f16vec4(v1);
+    vbuf[((r * 4 + 2) * Cinb + icb) * nT + tile_nT] = f16vec4(v2);
+    vbuf[((r * 4 + 3) * Cinb + icb) * nT + tile_nT] = f16vec4(v3);
+  }
+}

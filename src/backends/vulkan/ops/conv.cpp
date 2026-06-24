@@ -2,6 +2,7 @@
 // covers 1x1 pointwise) and the depthwise case (the "dwconv" shader). Weights are repacked to
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
+#include <cstdlib>
 #include "vk_op_common.h"
 #include "vx/logging.h"
 
@@ -12,12 +13,73 @@ struct ConvOp : VulkanOp {
   static constexpr int kTile = 4;  // output pixels per thread in the 1x1 kernel (matches shader)
   bool depthwise = false;
   bool pointwise = false;
+  bool winograd = false;
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> wbuf, bbuf;
   ConvPC pc{};
   DwPC dpc{};
   int64_t total = 0;
   uint32_t localSize = 64;
+
+  // --- Winograd F(2x2,3x3) state (used for 3x3, stride 1, pad 1, group 1, fp16) ---
+  std::unique_ptr<vk::ComputePipeline> wInPipe, wMmPipe, wOutPipe;
+  std::shared_ptr<vk::Buffer> ubuf, vbuf, mbuf;
+  WinoInPC wInPC{};
+  WinoMmPC wMmPC{};
+  WinoOutPC wOutPC{};
+  int64_t wInGroups = 0, wMmGroups = 0, wOutGroups = 0;
+
+  void prepareWinograd(const Node& node, VkOpEnv& env, NCHW x, NCHW y, int64_t Cout,
+                       int64_t Coutb) {
+    const Graph& g = *env.graph;
+    int64_t Cin = x.c, Cinb = cBlocks(x.c);
+    int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
+    const float* wsrc = g.initializers.at(node.inputs[1]).f32();
+
+    // Host weight transform U = G g G^T, packed [pos][oc][icb] vec4(4 ic). Cached on disk.
+    ubuf = uploadCached(env, node.name + "#wino", [&] {
+      const float G[4][3] = {{1, 0, 0}, {0.5f, 0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0, 0, 1}};
+      std::vector<float> U((size_t)16 * Cout * Cinb * 4, 0.f);
+      for (int64_t oc = 0; oc < Cout; ++oc)
+        for (int64_t ic = 0; ic < Cin; ++ic) {
+          const float* gk = wsrc + (oc * Cin + ic) * 9;  // 3x3
+          float Gg[4][3];
+          for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 3; ++j)
+              Gg[i][j] = G[i][0] * gk[j] + G[i][1] * gk[3 + j] + G[i][2] * gk[6 + j];
+          int64_t icb = ic / 4, lane = ic % 4;
+          for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) {
+              float u = Gg[i][0] * G[j][0] + Gg[i][1] * G[j][1] + Gg[i][2] * G[j][2];
+              int pos = i * 4 + j;
+              U[(((pos * Cout + oc) * Cinb + icb) * 4) + lane] = u;
+            }
+        }
+      return U;
+    });
+
+    int el = 2;  // fp16
+    vbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * Cinb * nT * 4 * el,
+                                        vk::MemPref::kDeviceOnly);
+    mbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * Coutb * nT * 4 * el,
+                                        vk::MemPref::kDeviceOnly);
+
+    wInPC = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)nTH, (int)nTW};
+    wMmPC = {(int)Cin, (int)Cout, (int)nT};
+    wOutPC = {(int)x.n,  (int)Cout, (int)y.h, (int)y.w, (int)nTH,
+              (int)nTW,  (int)node.fusedAct, 0, node.actLo, node.actHi};
+    wInGroups = groups(Cinb * nT, 64);
+    wMmGroups = groups(16 * Coutb * nT, 64);  // one thread per (pos, ocb, tile)
+    wOutGroups = groups(Coutb * nT, 64);
+    wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC),
+                                                    std::vector<uint32_t>{}, env.cache->handle());
+    wMmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_matmul_fp16", 3,
+                                                    sizeof(WinoMmPC), std::vector<uint32_t>{},
+                                                    env.cache->handle());
+    wOutPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_output_fp16", 3,
+                                                     sizeof(WinoOutPC), std::vector<uint32_t>{},
+                                                     env.cache->handle());
+  }
 
   // Try a few workgroup sizes for this exact shape, keep the fastest, and remember it so the
   // next session (or run) skips the measurement. Only the group==1 conv shader is tunable.
@@ -71,6 +133,13 @@ struct ConvOp : VulkanOp {
     depthwise = (group == x.c && group == Cout && inCg == 1);
     pointwise = (!depthwise && group == 1 && KH == 1 && KW == 1 && st[0] == 1 && st[1] == 1 &&
                  pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
+    // Winograd F(2,3) for 3x3 stride-1 pad-1 group-1 convs (fp16). Correct (cosine 0.999999) but
+    // the un-fused 3-pass version is memory-bound and currently slower than the direct kernel on
+    // this GPU, so it's opt-in via VXRT_WINOGRAD=1 until the transforms are fused. See BENCHMARK.md.
+    bool winoEnabled = std::getenv("VXRT_WINOGRAD") != nullptr;
+    winograd = (winoEnabled && env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 &&
+                st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 &&
+                pad[3] == 1 && x.c >= 16);
 
     const float* wsrc = g.initializers.at(node.inputs[1]).f32();
     int64_t Coutb = cBlocks(Cout);
@@ -84,6 +153,11 @@ struct ConvOp : VulkanOp {
       }
       return bias;
     });
+
+    if (winograd) {
+      prepareWinograd(node, env, x, y, Cout, Coutb);
+      return;
+    }
 
     if (depthwise) {
       int64_t Cb = cBlocks(x.c);
@@ -145,6 +219,18 @@ struct ConvOp : VulkanOp {
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
     vk::Buffer* src = env.devBuf(node.inputs[0]);
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
+    if (winograd) {
+      // 3 stages: input transform -> 16 batched matmuls -> output transform, with barriers.
+      wInPipe->dispatch(cmd, {src->handle(), vbuf->handle()}, &wInPC, sizeof(wInPC),
+                        (uint32_t)wInGroups);
+      vk::computeBarrier(cmd);
+      wMmPipe->dispatch(cmd, {ubuf->handle(), vbuf->handle(), mbuf->handle()}, &wMmPC,
+                        sizeof(wMmPC), (uint32_t)wMmGroups);
+      vk::computeBarrier(cmd);
+      wOutPipe->dispatch(cmd, {mbuf->handle(), bbuf->handle(), dst->handle()}, &wOutPC,
+                         sizeof(wOutPC), (uint32_t)wOutGroups);
+      return;
+    }
     std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
     if (depthwise)
       pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, 64));

@@ -1,0 +1,34 @@
+#version 450
+// Winograd batched matmul: M[pos][oc][tile] = sum_ic U[pos][oc][ic] * V[pos][ic][tile].
+// One thread per (pos, output channel-block, tile) for high parallelism. fp32 accumulate.
+// U layout: [pos][oc][icb] vec4(4 ic).  V: [pos][icb][tile].  M: [pos][ocb][tile].
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer U { f16vec4 ubuf[]; };
+layout(std430, binding = 1) readonly buffer V { f16vec4 vbuf[]; };
+layout(std430, binding = 2) writeonly buffer M { f16vec4 mbuf[]; };
+layout(push_constant) uniform PC { int Cin, Cout, nT; } pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(16 * Coutb * pc.nT)) return;
+  int tile = int(gid) % pc.nT;
+  int ocb = (int(gid) / pc.nT) % Coutb;
+  int pos = int(gid) / (pc.nT * Coutb);
+
+  vec4 acc = vec4(0.0);  // 4 output channels
+  int ubase = (pos * pc.Cout + ocb * 4) * Cinb;
+  int vbase = (pos * Cinb) * pc.nT + tile;
+  for (int icb = 0; icb < Cinb; ++icb) {
+    vec4 vv = vec4(vbuf[vbase + icb * pc.nT]);
+    acc.x += dot(vv, vec4(ubuf[ubase + 0 * Cinb + icb]));
+    acc.y += dot(vv, vec4(ubuf[ubase + 1 * Cinb + icb]));
+    acc.z += dot(vv, vec4(ubuf[ubase + 2 * Cinb + icb]));
+    acc.w += dot(vv, vec4(ubuf[ubase + 3 * Cinb + icb]));
+  }
+  mbuf[(pos * Coutb + ocb) * pc.nT + tile] = f16vec4(acc);
+}
