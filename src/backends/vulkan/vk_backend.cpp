@@ -143,6 +143,15 @@ class VulkanBackend : public Backend {
       }
       return true;
     }
+    if (nd.type == OpType::kGridSample) {
+      // GPU path needs the grid as a raw constant buffer (it can't be NC4HW4-packed); runtime grids
+      // and cubic mode fall back to the CPU op.
+      if (nd.inputs.size() < 2 || !g.isInitializer(nd.inputs[1])) return false;
+      const Shape& in = g.desc(nd.inputs[0]).shape;
+      if (in.size() != 4) return false;
+      std::string m = nd.attr.gets("mode", "bilinear");
+      return m == "bilinear" || m == "linear" || m == "nearest";
+    }
     if (nd.type == OpType::kResize) {
       // GPU kernel resizes spatial dims only; channel/batch resize falls back to the CPU op.
       const Shape& in = g.desc(nd.inputs[0]).shape;

@@ -1,0 +1,60 @@
+#version 450
+// GridSample on the GPU (NC4HW4 data + flat fp32 grid). The data path samples whole channel-blocks
+// (a vec4 per output pixel for every channel), so the channel axis is never permuted. The grid is a
+// flat float buffer (2 coords per output pixel), uploaded raw by the op (works when the grid is a
+// constant). MODE: 0=bilinear 1=nearest. PADMODE: 0=zeros 1=border 2=reflection.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(constant_id = 0) const int MODE = 0;
+layout(constant_id = 1) const int PADMODE = 0;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly  buffer Grid { float grid[]; };
+layout(std430, binding = 2) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC { int N, C, Hin, Win, OH, OW, align; } pc;
+
+float reflectc(float x, float lo, float hi) {
+  if (hi <= lo) return lo;
+  float rng = hi - lo, t = mod(x - lo, 2.0 * rng);
+  if (t < 0.0) t += 2.0 * rng;
+  if (t > rng) t = 2.0 * rng - t;
+  return lo + t;
+}
+float handle(float c, int S) {
+  if (PADMODE == 2) return reflectc(c, pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(S - 1) : float(S) - 0.5);
+  return c;
+}
+// fetch a channel-block vec4 at (px,py) with padding behaviour; returns vec4(0) for zeros-OOB.
+vec4 fetchBlk(int sb, int px, int py, int Cb) {
+  if (PADMODE == 0) { if (px < 0 || px >= pc.Win || py < 0 || py >= pc.Hin) return vec4(0.0); }
+  else { px = clamp(px, 0, pc.Win - 1); py = clamp(py, 0, pc.Hin - 1); }
+  return vec4(src[sb + py * pc.Win + px]);
+}
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= uint(pc.N * Cb * pc.OH * pc.OW)) return;
+  int ox = int(i) % pc.OW;
+  int oy = (int(i) / pc.OW) % pc.OH;
+  int cb = (int(i) / (pc.OW * pc.OH)) % Cb;
+  int n = int(i) / (pc.OW * pc.OH * Cb);
+  int gi = 2 * (n * pc.OH * pc.OW + oy * pc.OW + ox);
+  int a = pc.align == 1 ? 1 : 0, b = 1 - a;
+  float ix = handle(((1.0 + grid[gi + 0]) * float(pc.Win - a) - float(b)) * 0.5, pc.Win);
+  float iy = handle(((1.0 + grid[gi + 1]) * float(pc.Hin - a) - float(b)) * 0.5, pc.Hin);
+  int sb = (n * Cb + cb) * pc.Hin * pc.Win;
+  vec4 v;
+  if (MODE == 1) {
+    int rx = int(floor(ix + 0.5)), ry = int(floor(iy + 0.5));
+    v = fetchBlk(sb, rx, ry, Cb);
+  } else {
+    int x0 = int(floor(ix)), y0 = int(floor(iy));
+    float wx = ix - float(x0), wy = iy - float(y0);
+    vec4 v00 = fetchBlk(sb, x0, y0, Cb), v01 = fetchBlk(sb, x0 + 1, y0, Cb);
+    vec4 v10 = fetchBlk(sb, x0, y0 + 1, Cb), v11 = fetchBlk(sb, x0 + 1, y0 + 1, Cb);
+    v = (1.0 - wy) * ((1.0 - wx) * v00 + wx * v01) + wy * ((1.0 - wx) * v10 + wx * v11);
+  }
+  dst[(n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox] = f16vec4(v);
+}
