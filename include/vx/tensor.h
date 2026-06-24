@@ -1,4 +1,5 @@
-// vxrt — tensor descriptor (IR) and runtime tensor (execution-time storage).
+// Two views of a tensor: TensorDesc is the static description in the graph, RtTensor is the
+// live thing during a run (host data, device data, or both, with validity flags).
 #pragma once
 #include <cstring>
 #include <memory>

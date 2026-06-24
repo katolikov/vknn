@@ -1,4 +1,4 @@
-// vxrt — tensor layout formats and helpers. Canonical IR layout is NCHW.
+// Tensor layouts. The IR is always NCHW; the Vulkan backend packs to NC4HW4 internally.
 #pragma once
 #include <cstdint>
 #include "vx/common.h"

@@ -1,4 +1,4 @@
-// vx_ion_zerocopy — demonstrate Exynos ION / DMA-BUF zero-copy import into Vulkan.
+// vx_ion_zerocopy - demonstrate Exynos ION / DMA-BUF zero-copy import into Vulkan.
 //
 // Mode A (library-allocated): IonBuffer::alloc -> CPU memcpy -> import fd into Vulkan ->
 //   GPU compute (add) reads the ION buffer directly (no staging) -> verify vs CPU.

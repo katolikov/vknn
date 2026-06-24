@@ -1,4 +1,4 @@
-// vxrt — data types. Designed as an enum so INT8 (stretch goal) slots in cleanly.
+// Tensor element types. Kept as an enum so int8 can be bolted on later without churn.
 #pragma once
 #include <cstdint>
 #include <cstring>

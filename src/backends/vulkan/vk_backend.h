@@ -1,4 +1,4 @@
-// vxrt — Vulkan backend: device tensors (NC4HW4), op registry, pre-recorded segments.
+// Vulkan backend: device tensors (NC4HW4), op registry, pre-recorded segments.
 #pragma once
 #include <functional>
 #include <map>

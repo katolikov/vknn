@@ -1,4 +1,4 @@
-// vxrt — CPU reference backend + scalar/NEON operator registry.
+// CPU reference backend + scalar/NEON operator registry.
 //
 // Adding a CPU op (see docs/ADDING_AN_OPERATOR.md):
 //   1. subclass CpuOp, implement run().

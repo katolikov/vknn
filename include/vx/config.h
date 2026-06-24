@@ -1,4 +1,5 @@
-// vxrt — MNN-inspired configuration. Struct + JSON file. Documented in docs/CONFIG.md.
+// Runtime config (the knobs MNN exposes were the starting point). Plain struct + a JSON loader.
+// Every field is documented in docs/CONFIG.md.
 #pragma once
 #include <string>
 #include <vector>

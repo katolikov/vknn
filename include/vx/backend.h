@@ -1,11 +1,12 @@
-// vxrt — Backend abstraction, segment execution model, and per-backend op registries.
+// Backend interface, the segment execution model, and the backend registry.
 //
-// Execution model: the Session partitions the topo-ordered node list into maximal
-// runs ("segments") of nodes assigned to the same backend. Each backend compiles a
-// segment into a Segment object (the Vulkan backend pre-records one command buffer per
-// segment; the CPU backend just lists ops). At run time, segments execute in order and
-// tensor residency is reconciled at segment boundaries (toHost/toDevice), giving
-// pre-recorded GPU command buffers + seamless CPU fallback with minimal host<->device sync.
+// How execution works: the Session walks the topo-sorted nodes and groups consecutive nodes
+// that landed on the same backend into a "segment". Each backend turns its segment into a
+// Segment object - the Vulkan backend records one command buffer for the whole thing, the CPU
+// backend just keeps a list of ops. Segments run in order; when a tensor crosses from one
+// backend to another we sync it at the boundary (toHost/toDevice). That's what gives us both a
+// single pre-recorded GPU submit for the common case and a working CPU fallback when the GPU
+// can't do an op, without much copying.
 #pragma once
 #include <functional>
 #include <map>

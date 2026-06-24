@@ -151,7 +151,7 @@ void VulkanContext::queryCaps() {
 
 void VulkanContext::createDevice() {
   // Pick a compute-capable queue family, preferring a dedicated compute queue
-  // (COMPUTE without GRAPHICS) — on Xclipse that is family 1.
+  // (COMPUTE without GRAPHICS) - on Xclipse that is family 1.
   uint32_t qn = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(phys_, &qn, nullptr);
   std::vector<VkQueueFamilyProperties> qfs(qn);

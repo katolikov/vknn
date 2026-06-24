@@ -1,4 +1,4 @@
-// vxrt — compute pipeline, shader-module cache, on-disk VkPipelineCache.
+// compute pipeline, shader-module cache, on-disk VkPipelineCache.
 #pragma once
 #include "vk_context.h"
 #include <map>

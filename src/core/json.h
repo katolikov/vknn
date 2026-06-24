@@ -1,4 +1,4 @@
-// vxrt — minimal dependency-free JSON parser (objects/arrays/strings/numbers/bool/null).
+// minimal dependency-free JSON parser (objects/arrays/strings/numbers/bool/null).
 #pragma once
 #include <map>
 #include <memory>

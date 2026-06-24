@@ -1,4 +1,4 @@
-// vxrt — backend-agnostic graph IR. Canonical tensor layout = NCHW.
+// The graph IR. Backend-agnostic; every tensor here is NCHW.
 #pragma once
 #include <map>
 #include <memory>

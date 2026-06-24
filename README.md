@@ -123,8 +123,9 @@ docs/                  ARCHITECTURE, ADDING_*, CONFIG, LIMITATIONS, DEVICE_REPOR
 - [docs/ADDING_A_BACKEND.md](docs/ADDING_A_BACKEND.md) — implement and register a new `Backend`.
 - [docs/CONFIG.md](docs/CONFIG.md) — every `vx::Config` field and its JSON form.
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md) — supported operators, known gaps, ENN stub status.
+- [docs/BENCHMARK.md](docs/BENCHMARK.md) — honest vxrt-Vulkan vs MNN-Vulkan numbers on-device.
 - [docs/DEVICE_REPORT.md](docs/DEVICE_REPORT.md) — full probed capabilities of the target device.
-- [docs/adr/](docs/adr/) — architecture decision records (0001 language/build, 0002 Vulkan loader + embedded SPIR-V, 0003 UMA memory, 0004 NC4HW4 layout, 0005 ION via DMA-BUF, 0006 segment execution + fallback, 0007 ENN stub).
+- [docs/adr/](docs/adr/) — architecture decision records (0001 language/build, 0002 Vulkan loader + embedded SPIR-V, 0003 UMA memory, 0004 NC4HW4 layout, 0005 ION via DMA-BUF, 0006 segment execution + fallback, 0007 ENN stub, 0008 caches + autotuning).
 
 ### Extending
 

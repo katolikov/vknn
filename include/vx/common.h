@@ -1,4 +1,4 @@
-// vxrt — common types, status, and utility macros.
+// Shared basics: Status codes, the Error exception, and small Shape helpers.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -38,7 +38,7 @@ inline const char* statusStr(Status s) {
   return "?";
 }
 
-/// Lightweight exception carrying a Status (used internally; the public façade
+/// Lightweight exception carrying a Status (used internally; the public facade
 /// also exposes status-returning variants).
 class Error : public std::runtime_error {
  public:

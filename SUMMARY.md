@@ -24,6 +24,24 @@ Full probe in [`docs/DEVICE_REPORT.md`](docs/DEVICE_REPORT.md).
 | Caches & autotuning | cold session **445 ms** (first run + full autotune) → **warm 68 ms** (**6.5×**); 106 weights + 20 tuning entries cached |
 | Host unit + integration tests | 7/7 pass (incl. full MobileNetV2 CPU vs golden, cosine ≥ 0.999) |
 
+## Versus MNN (honest, same device, both Vulkan + fp16)
+Benchmarked against Alibaba's **MNN** (production engine) on the same phone, both fastest config.
+Full methodology + raw output: [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
+
+| Engine (Vulkan, fp16) | Equal-thermal (30 loops) | Best case (cool) |
+|---|---|---|
+| MNN | ~15.3 ms avg | ~7.7 ms avg (min 6.8) |
+| **vxrt** | ~22.2 ms median | ~23 ms |
+
+**MNN is faster — ~1.5× at equal thermal, up to ~2–3× in its best case.** vxrt is genuinely
+slower: it's a from-scratch engine with straightforward NC4HW4 kernels, and ~11 ms of its ~22 ms
+is CPU↔device pack/unpack (only ~12 ms is GPU compute). vxrt's wins are correctness
+(cosine 0.999965), consistency (p90 within 1 ms of median), and a clean/extensible codebase — not
+peak speed yet. The two fixes that would close most of the gap are listed in next steps. (Also:
+MNN's *optimized CPU* backend runs this model in ~2.7 ms, beating its own Vulkan — at MobileNet
+scale, GPU dispatch/transfer overhead dominates. vxrt's CPU backend is a scalar oracle, not a
+fair CPU-vs-CPU contender.)
+
 ## Milestones (all green, committed)
 - **M0** project skeleton + Vulkan probe — capabilities read on-device match `vkjson`.
 - **M1** Vulkan compute foundation — GPU add == CPU, pipeline cache produced & reused.

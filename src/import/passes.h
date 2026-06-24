@@ -1,4 +1,4 @@
-// vxrt — graph optimization passes (backend-agnostic, operate on NCHW IR).
+// graph optimization passes (backend-agnostic, operate on NCHW IR).
 #pragma once
 #include "vx/graph.h"
 

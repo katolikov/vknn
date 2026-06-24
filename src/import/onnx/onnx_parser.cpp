@@ -1,4 +1,4 @@
-// vxrt — minimal, dependency-free ONNX (protobuf) importer.
+// minimal, dependency-free ONNX (protobuf) importer.
 //
 // Parses the protobuf wire format directly (varint / length-delimited / fixed32/64),
 // reading only the fields vxrt needs: GraphProto nodes, initializers (TensorProto),

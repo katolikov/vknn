@@ -1,4 +1,4 @@
-// vxrt — Vulkan buffer + memory. Exploits UMA (device-local + host-visible) on Xclipse
+// Vulkan buffer + memory. Exploits UMA (device-local + host-visible) on Xclipse
 // so uploads/downloads are direct memcpy with no staging copy.
 #pragma once
 #include "vk_context.h"

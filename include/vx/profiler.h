@@ -1,4 +1,5 @@
-// vxrt — per-operator profiler (CPU wall + GPU timestamp), table/JSON/Chrome-trace export.
+// Per-op timing: CPU wall clock plus GPU timestamp queries. Prints a table, dumps JSON, and
+// writes a chrome://tracing file.
 #pragma once
 #include <array>
 #include <cstdint>

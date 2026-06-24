@@ -1,4 +1,5 @@
-// vxrt — structured, leveled, throttled, color-coded logging.
+// Small leveled logger. Reads VXRT_LOG_LEVEL, colorizes by level, and can throttle a repeated
+// line so spammy warnings (e.g. per-op fallbacks) collapse to one.
 #pragma once
 #include <string>
 #include <sstream>

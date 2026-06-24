@@ -132,3 +132,18 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
   5.9MB HTML API docs via gen_docs.sh. SUMMARY.md written.
 - Clean from-scratch Android build reproduces all 7 binaries. bench.sh (stable): Vulkan fp16
   22.1ms/45fps, fp32 24.2ms/41fps, CPU 672ms.
+
+## 2026-06-24 (follow-up: style, structure, MNN comparison)
+- **One operator per file**: CPU ops -> src/backends/cpu/ops/*.cpp (16 files), Vulkan ops ->
+  src/backends/vulkan/ops/*.cpp (5) + vk_op_common.h. Old combined files removed. Builds + tests
+  + on-device GPU correctness (cosine 0.999965) all still pass.
+- **clang-format**: added .clang-format (Google base, 100 col, 2-space) + scripts/format.sh;
+  formatted all sources.
+- **Human comments**: stripped the "// vxrt -" branding prefix and em-dashes from every file,
+  rewrote the public-header top comments in a plainer engineer voice.
+- **MNN comparison (honest, on-device, both Vulkan + fp16)**: built MNN from source for arm64
+  (MNN_VULKAN=ON), converted MobileNetV2 to fp16 .mnn, ran MNNV2Basic (forwardType=7, precision
+  Low) vs vx_classify. Result: **MNN ~15 ms avg / ~7-11 ms best vs vxrt ~22 ms** -> MNN is
+  ~1.5x (equal-thermal) to ~2-3x (MNN best case) faster. vxrt is genuinely slower (naive kernels
+  + ~11 ms CPU<->device pack/unpack). Documented in docs/BENCHMARK.md + scripts/bench_vs_mnn.sh.
+  Note: device thermally throttles hard, so numbers are reported per thermal state.

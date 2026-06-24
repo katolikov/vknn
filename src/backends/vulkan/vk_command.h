@@ -1,4 +1,4 @@
-// vxrt — command pool, one-shot + recordable command buffers, barriers, timestamps.
+// command pool, one-shot + recordable command buffers, barriers, timestamps.
 #pragma once
 #include "vk_context.h"
 #include <functional>

@@ -1,4 +1,5 @@
-// vxrt — Session (planned graph + backends + caches) and Runtime façade.
+// Session holds the planned graph, the chosen backends and the caches. Runtime is the thin
+// entry point callers actually use.
 #pragma once
 #include <map>
 #include <memory>
@@ -61,7 +62,7 @@ class Session {
   bool planned_ = false;
 };
 
-/// Top-level façade users call.
+/// Top-level facade users call.
 class Runtime {
  public:
   static std::unique_ptr<Session> load(const std::string& onnxPath, const Config& cfg = {}) {

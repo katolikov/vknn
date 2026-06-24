@@ -1,4 +1,4 @@
-// vxrt — Vulkan instance/device context and capability discovery.
+// Vulkan instance/device context and capability discovery.
 #pragma once
 #include "vk_common.h"
 #include <set>

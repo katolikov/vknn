@@ -1,4 +1,4 @@
-// vxrt — ENN / NPU backend (Samsung Exynos Neural Network).
+// ENN / NPU backend (Samsung Exynos Neural Network).
 //
 // Status: documented STUB (see docs/adr/0007 + LIMITATIONS.md). The ENN runtime libraries
 // are present on-device, but (1) no public ENN C++ headers are available to us and (2) there is
@@ -59,7 +59,7 @@ class EnnBackend : public Backend {
     if (found)
       VX_INFO
           << "ENN backend: probed " << found << "/" << (int)(sizeof(kEnnLibs) / sizeof(*kEnnLibs))
-          << " runtime libs present [" << present << "] — but NNC model + public headers are "
+          << " runtime libs present [" << present << "] - but NNC model + public headers are "
           << "unavailable on-device, so ENN execution is stubbed (falls back). See LIMITATIONS.md";
     else
       VX_INFO

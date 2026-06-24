@@ -1,8 +1,8 @@
-// vxrt — Exynos ION / DMA-BUF heap allocation (zero-copy). See docs/adr/0005.
+// Exynos ION / DMA-BUF allocation for zero-copy GPU input. See docs/adr/0005.
 //
-// On this device classic /dev/ion is gone; the "exynos_ion" mechanism is DMA-BUF heaps
-// (/dev/dma_heap/system). An IonBuffer wraps a dma-buf fd + CPU mmap; the fd is imported
-// into Vulkan via VK_EXT_external_memory_dma_buf for true zero-copy GPU access.
+// Classic /dev/ion is gone on this build, so "exynos_ion" here really means DMA-BUF heaps
+// (/dev/dma_heap/system). An IonBuffer is just a dma-buf fd plus a CPU mmap; the same fd gets
+// imported into Vulkan (VK_EXT_external_memory_dma_buf) so the GPU reads it directly, no copy.
 #pragma once
 #include <cstddef>
 #include <memory>
@@ -16,11 +16,11 @@ class IonBuffer {
   IonBuffer(const IonBuffer&) = delete;
   IonBuffer& operator=(const IonBuffer&) = delete;
 
-  // Mode A — library-allocated: allocate `bytes` from a dma-heap (default "system"),
+  // Mode A - library-allocated: allocate `bytes` from a dma-heap (default "system"),
   // mmap for CPU access. Returns null if the heap/ioctl is unavailable.
   static std::unique_ptr<IonBuffer> alloc(size_t bytes, const std::string& heap = "system");
 
-  // Mode B — user-supplied fd: wrap an existing dma-buf fd. By default does NOT take
+  // Mode B - user-supplied fd: wrap an existing dma-buf fd. By default does NOT take
   // ownership (caller keeps/closes the fd). mmap for CPU access.
   static std::unique_ptr<IonBuffer> wrapFd(int fd, size_t bytes, bool takeOwnership = false);
 

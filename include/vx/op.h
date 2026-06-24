@@ -1,4 +1,4 @@
-// vxrt — operator types, fused-activation codes, attributes, and IR node.
+// Op types, the fused-activation codes, the attribute bag, and the IR node struct.
 #pragma once
 #include <map>
 #include <string>

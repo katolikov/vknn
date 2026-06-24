@@ -1,4 +1,4 @@
-// vxrt — Vulkan common includes, error checking, function-pointer loading.
+// Vulkan common includes, error checking, function-pointer loading.
 #pragma once
 #include <vulkan/vulkan.h>
 #include <string>

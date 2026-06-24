@@ -1,4 +1,4 @@
-// vx_backend_switch — select the backend via config (VULKAN | CPU | ENN) with no other change.
+// vx_backend_switch - select the backend via config (VULKAN | CPU | ENN) with no other change.
 // Demonstrates the pluggable-backend path: ENN is consulted first then falls back (stub).
 #include <algorithm>
 #include <cstdio>
