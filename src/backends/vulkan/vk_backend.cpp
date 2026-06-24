@@ -349,26 +349,47 @@ class VulkanSegment : public Segment {
     cmd_ = be_->runner().allocate();
     be_->runner().begin(cmd_);
     if (queryPool_) vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t)(nodeIdx.size() * 2));
+    auto isCopy = [&](int idx) {
+      OpType t = g_.nodes[idx].type;
+      return t == OpType::kReshape || t == OpType::kFlatten;
+    };
+    // Precise barriers: each activation tensor has a single writer, so only a read-after-write needs
+    // a barrier. Emit one before an op only when it reads a tensor written since the last barrier,
+    // letting independent ops (e.g. the parallel branches of an Inception module, or a residual
+    // block's downsample and conv1) run without draining the GPU between them. When profiling, keep
+    // a barrier after every op so the per-op timestamps aren't polluted by overlap.
+    const bool perOpBarrier = (queryPool_ != VK_NULL_HANDLE);
+    std::set<TensorId> writtenSinceBarrier;
+    bool copySinceBarrier = false;
     for (size_t k = 0; k < nodeIdx.size(); ++k) {
       const Node& node = g_.nodes[nodeIdx[k]];
+      bool needBarrier = perOpBarrier;
+      if (!needBarrier)
+        for (TensorId in : node.inputs)
+          if (in != kNoTensor && writtenSinceBarrier.count(in)) { needBarrier = true; break; }
+      if (needBarrier) {
+        if (copySinceBarrier || isCopy(nodeIdx[k]))
+          vk::transferBarrier(cmd_);
+        else
+          vk::computeBarrier(cmd_);
+        writtenSinceBarrier.clear();
+        copySinceBarrier = false;
+      }
       if (queryPool_)
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t)(k * 2));
       ops_[k]->record(cmd_, node, env_);
       if (queryPool_)
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_,
                             (uint32_t)(k * 2 + 1));
-      // Reshape/Flatten use a buffer copy (transfer); those edges need the wider barrier.
-      // Everything else is compute->compute.
-      auto isCopy = [&](int idx) {
-        OpType t = g_.nodes[idx].type;
-        return t == OpType::kReshape || t == OpType::kFlatten;
-      };
-      bool nextIsCopy = (k + 1 < nodeIdx.size()) && isCopy(nodeIdx[k + 1]);
-      if (isCopy(nodeIdx[k]) || nextIsCopy)
-        vk::transferBarrier(cmd_);
-      else
-        vk::computeBarrier(cmd_);
+      for (TensorId o : node.outputs)
+        if (o != kNoTensor) writtenSinceBarrier.insert(o);
+      if (isCopy(nodeIdx[k])) copySinceBarrier = true;
     }
+    // Final barrier so the segment outputs are complete + visible before the host reads them.
+    if (copySinceBarrier)
+      vk::transferBarrier(cmd_);
+    else
+      vk::computeBarrier(cmd_);
     be_->runner().end(cmd_);
     recorded_ = true;
   }
