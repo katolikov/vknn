@@ -45,11 +45,33 @@ const char* opTypeName(OpType t) {
       return "Gather";
     case OpType::kUnsqueeze:
       return "Unsqueeze";
+    case OpType::kUnary:
+      return "Unary";
+    case OpType::kBinary:
+      return "Binary";
     case OpType::kConvertLayout:
       return "ConvertLayout";
     default:
       return "Unknown";
   }
+}
+
+int unaryFromOnnx(const std::string& s) {
+  static const std::unordered_map<std::string, int> m = {
+      {"Sigmoid", kUSigmoid},     {"Tanh", kUTanh},   {"HardSwish", kUHardSwish},
+      {"HardSigmoid", kUHardSigmoid}, {"LeakyRelu", kULeakyRelu}, {"Elu", kUElu},
+      {"Abs", kUAbs},             {"Neg", kUNeg},     {"Exp", kUExp},
+      {"Log", kULog},             {"Sqrt", kUSqrt},   {"Floor", kUFloor},
+      {"Ceil", kUCeil}};
+  auto it = m.find(s);
+  return it == m.end() ? -1 : it->second;
+}
+int binaryFromOnnx(const std::string& s) {
+  static const std::unordered_map<std::string, int> m = {{"Mul", kBMul}, {"Sub", kBSub},
+                                                         {"Div", kBDiv}, {"Max", kBMax},
+                                                         {"Min", kBMin}, {"Pow", kBPow}};
+  auto it = m.find(s);
+  return it == m.end() ? -1 : it->second;
 }
 
 OpType opTypeFromOnnx(const std::string& s) {
@@ -79,7 +101,10 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"Unsqueeze", OpType::kUnsqueeze},
   };
   auto it = m.find(s);
-  return it == m.end() ? OpType::kUnknown : it->second;
+  if (it != m.end()) return it->second;
+  if (unaryFromOnnx(s) >= 0) return OpType::kUnary;
+  if (binaryFromOnnx(s) >= 0) return OpType::kBinary;
+  return OpType::kUnknown;
 }
 
 }  // namespace vx

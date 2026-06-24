@@ -40,8 +40,10 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kRelu:
       case OpType::kBatchNorm:
       case OpType::kIdentity:
+      case OpType::kUnary:
         SH(o) = SH(nd.inputs[0]);
         break;
+      case OpType::kBinary:
       case OpType::kAdd: {
         const Shape& a = SH(nd.inputs[0]);
         const Shape& b = SH(nd.inputs[1]);

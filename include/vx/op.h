@@ -36,12 +36,24 @@ enum class OpType {
   kShape,
   kGather,
   kUnsqueeze,
+  kUnary,   // elementwise unary family (Sigmoid/Tanh/HardSwish/...), see UnaryType
+  kBinary,  // elementwise binary family (Mul/Sub/Div/Max/Min/Pow), see BinaryType
   // layout conversion nodes (inserted by the layout pass)
   kConvertLayout,
 };
 
+// Sub-codes for the kUnary/kBinary families (kept in sync with shaders/common.glsl).
+enum UnaryType {
+  kUSigmoid = 0, kUTanh = 1, kUHardSwish = 2, kUHardSigmoid = 3, kULeakyRelu = 4, kUElu = 5,
+  kUAbs = 6, kUNeg = 7, kUExp = 8, kULog = 9, kUSqrt = 10, kUFloor = 11, kUCeil = 12, kURelu = 13
+};
+enum BinaryType { kBMul = 0, kBSub = 1, kBDiv = 2, kBMax = 3, kBMin = 4, kBPow = 5, kBAdd = 6 };
+
 const char* opTypeName(OpType t);
 OpType opTypeFromOnnx(const std::string& s);
+// Returns the UnaryType/BinaryType code for an ONNX op name, or -1 if not in that family.
+int unaryFromOnnx(const std::string& s);
+int binaryFromOnnx(const std::string& s);
 
 /// A single attribute value (subset needed for CNNs).
 struct Attr {
@@ -85,6 +97,9 @@ struct Node {
   // Fusion metadata filled by graph passes:
   ActType fusedAct = ActType::kNone;
   float actLo = 0, actHi = 0;
+  // For kUnary/kBinary: the UnaryType/BinaryType code. For unary ops with params (LeakyRelu/Elu
+  // alpha, HardSigmoid alpha/beta) the params live in actLo/actHi.
+  int32_t subOp = 0;
 };
 
 }  // namespace vx
