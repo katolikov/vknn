@@ -70,3 +70,12 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - **fp16 on Xclipse 960: cosine=0.999965, maxAbsErr=0.08, top-1 258==258 PASS,
   median 23.05 ms = 43.4 fps.** (fp32 was 24.35 ms; naive kernels are memory-bound so fp16's
   arithmetic win is modest — tiling/vectorized fp16 loads are future work, logged.)
+
+### M4 — Profiler & debug DONE (verified on device)
+- Per-op GPU time via VkQueryPool timestamps (timestampPeriod 39.0625ns), per-op CPU wall time,
+  op->backend map (shows fallbacks). Sorted table + per-op-type summary + JSON + Chrome trace.
+- vx_profile on device (fp16): GPU compute total 12.085 ms (Conv 10.7, Gemm 0.9, Add 0.26,
+  Pool 0.09, Reshape 0.11). Wall 23ms => ~11ms is CPU pack/unpack+submit (optimization target).
+- Per-layer dump (--layer-dump) + tools/compare_layers.py validated. Chrome trace = 65 events,
+  loads in chrome://tracing. profile.json = 65 records.
+- Note: fused-activation conv outputs map to the golden post-Clip tensor name (documented).

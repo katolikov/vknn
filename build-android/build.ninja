@@ -323,6 +323,44 @@ build vx_classify: CXX_EXECUTABLE_LINKER__vx_classify_Release CMakeFiles/vx_clas
   TARGET_PDB = vx_classify.dbg
 
 # =============================================================================
+# Object build statements for EXECUTABLE target vx_profile
+
+
+#############################################
+# Order-only phony target for vx_profile
+
+build cmake_object_order_depends_target_vx_profile: phony || cmake_object_order_depends_target_vxrt
+
+build CMakeFiles/vx_profile.dir/examples/profile.cpp.o: CXX_COMPILER__vx_profile_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/examples/profile.cpp || cmake_object_order_depends_target_vx_profile
+  CONFIG = Release
+  DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
+  DEP_FILE = CMakeFiles/vx_profile.dir/examples/profile.cpp.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG -std=gnu++17 -fPIE -pthread
+  INCLUDES = -I/Users/artemkatolikov/DEV/LibTAS/include -I/Users/artemkatolikov/DEV/LibTAS/src -I/Users/artemkatolikov/DEV/LibTAS/third_party
+  OBJECT_DIR = CMakeFiles/vx_profile.dir
+  OBJECT_FILE_DIR = CMakeFiles/vx_profile.dir/examples
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target vx_profile
+
+
+#############################################
+# Link the executable vx_profile
+
+build vx_profile: CXX_EXECUTABLE_LINKER__vx_profile_Release CMakeFiles/vx_profile.dir/examples/profile.cpp.o | libvxrt.a || libvxrt.a
+  CONFIG = Release
+  DEP_FILE = CMakeFiles/vx_profile.dir/link.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG
+  LINK_FLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments   -Wl,--gc-sections  -Xlinker --dependency-file=CMakeFiles/vx_profile.dir/link.d
+  LINK_LIBRARIES = -Xlinker --push-state -Xlinker --whole-archive  libvxrt.a  -Xlinker --pop-state  -lvulkan  -landroid  -llog  -pthread  -latomic -lm
+  OBJECT_DIR = CMakeFiles/vx_profile.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = vx_profile
+  TARGET_PDB = vx_profile.dbg
+
+# =============================================================================
 # Object build statements for EXECUTABLE target vx_op_check
 
 
@@ -514,7 +552,7 @@ build vxrt: phony libvxrt.a
 #############################################
 # Folder: /Users/artemkatolikov/DEV/LibTAS/build-android
 
-build all: phony libvxrt.a vx_probe vx_classify vx_op_check
+build all: phony libvxrt.a vx_probe vx_classify vx_profile vx_op_check
 
 # =============================================================================
 # Built-in targets
