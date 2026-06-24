@@ -24,14 +24,20 @@ What's been tried to beat MNN (and the result):
 - shared-memory 1×1 GEMM — **hurt**: MobileNet's deep convs have tiny spatial (7×7), so one
   workgroup per output-block means no cross-workgroup LDS reuse, only barrier overhead.
 - register-tiled 3×3 — **hurt**: register pressure dropped occupancy.
-- **Winograd F(2×2,3×3)** for the 3×3 group-1 convs (input transform → 16 batched matmuls →
-  output transform). **Implemented and numerically correct** (ResNet-50 cosine **0.999999**), but
-  the un-fused 3-pass version is **memory-bound and ~15% slower** than the direct kernel on this
-  GPU (71 ms vs 61 ms): writing/reading the transformed V (16/9× input) and M (16/4× output)
-  buffers to global memory costs more than the 2.25× multiply reduction saves. It's behind
-  `VXRT_WINOGRAD=1` (default off). To make Winograd win it must be **fused** — transforms kept in
-  registers/LDS so V and M never hit global memory (this is what MNN does). That, plus
-  texture-backed activations, is the concrete remaining path; it's a substantial effort.
+- **Winograd F(2×2,3×3)** for the 3×3 group-1 convs. **Implemented two ways, both numerically
+  correct** (ResNet-50 cosine 0.999999–1.000000), both **slower than the direct kernel** here, so
+  it stays behind `VXRT_WINOGRAD=1` (default off):
+  - *3-pass* (input transform → 16 batched matmuls → output transform): **~71 ms**, memory-bound —
+    the V (16/9× input) and M (16/4× output) intermediates round-trip through global memory, which
+    costs more than the 2.25× multiply cut saves.
+  - *2-pass fused* (matmul + output transform in one kernel, the 16 accumulators in registers so M
+    never hits global memory): **~142 ms**, occupancy-bound — 16 vec4 of register accumulator per
+    thread collapses occupancy, starving the GPU.
+  This is the classic Winograd bind: un-fused is memory-bound, naively-fused is register-bound.
+  Winning needs the production recipe — **multi-tile-per-workgroup Winograd with the transforms in
+  LDS and a register-blocked matmul** so you get the multiply savings *without* either the global
+  round-trip or the occupancy cliff. That's what MNN does, and it's a substantial, carefully-tuned
+  kernel (not an incremental change). The direct conv (61 ms) remains vxrt's fastest 3×3 path.
 
 
 

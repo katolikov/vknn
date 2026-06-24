@@ -22,12 +22,13 @@ struct ConvOp : VulkanOp {
   uint32_t localSize = 64;
 
   // --- Winograd F(2x2,3x3) state (used for 3x3, stride 1, pad 1, group 1, fp16) ---
-  std::unique_ptr<vk::ComputePipeline> wInPipe, wMmPipe, wOutPipe;
-  std::shared_ptr<vk::Buffer> ubuf, vbuf, mbuf;
+  // Two passes: input transform -> V (global), then a FUSED matmul+output-transform kernel that
+  // keeps the 16 transform-domain accumulators in registers (no M global buffer).
+  std::unique_ptr<vk::ComputePipeline> wInPipe, wFusedPipe;
+  std::shared_ptr<vk::Buffer> ubuf, vbuf;
   WinoInPC wInPC{};
-  WinoMmPC wMmPC{};
-  WinoOutPC wOutPC{};
-  int64_t wInGroups = 0, wMmGroups = 0, wOutGroups = 0;
+  WinoFusedPC wFusedPC{};
+  int64_t wInGroups = 0, wFusedGroups = 0;
 
   void prepareWinograd(const Node& node, VkOpEnv& env, NCHW x, NCHW y, int64_t Cout,
                        int64_t Coutb) {
@@ -61,24 +62,17 @@ struct ConvOp : VulkanOp {
     int el = 2;  // fp16
     vbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * Cinb * nT * 4 * el,
                                         vk::MemPref::kDeviceOnly);
-    mbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * Coutb * nT * 4 * el,
-                                        vk::MemPref::kDeviceOnly);
 
     wInPC = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)nTH, (int)nTW};
-    wMmPC = {(int)Cin, (int)Cout, (int)nT};
-    wOutPC = {(int)x.n,  (int)Cout, (int)y.h, (int)y.w, (int)nTH,
-              (int)nTW,  (int)node.fusedAct, 0, node.actLo, node.actHi};
+    wFusedPC = {(int)x.n,  (int)Cin, (int)Cout, (int)y.h,           (int)y.w,
+                (int)nTH,  (int)nTW, (int)node.fusedAct, node.actLo, node.actHi};
     wInGroups = groups(Cinb * nT, 64);
-    wMmGroups = groups(16 * Coutb * nT, 64);  // one thread per (pos, ocb, tile)
-    wOutGroups = groups(Coutb * nT, 64);
+    wFusedGroups = groups(Coutb * nT, 64);
     wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC),
                                                     std::vector<uint32_t>{}, env.cache->handle());
-    wMmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_matmul_fp16", 3,
-                                                    sizeof(WinoMmPC), std::vector<uint32_t>{},
-                                                    env.cache->handle());
-    wOutPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_output_fp16", 3,
-                                                     sizeof(WinoOutPC), std::vector<uint32_t>{},
-                                                     env.cache->handle());
+    wFusedPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_fused_fp16", 4,
+                                                       sizeof(WinoFusedPC), std::vector<uint32_t>{},
+                                                       env.cache->handle());
   }
 
   // Try a few workgroup sizes for this exact shape, keep the fastest, and remember it so the
@@ -220,15 +214,12 @@ struct ConvOp : VulkanOp {
     vk::Buffer* src = env.devBuf(node.inputs[0]);
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
     if (winograd) {
-      // 3 stages: input transform -> 16 batched matmuls -> output transform, with barriers.
+      // 2 stages: input transform -> V, then fused matmul + output transform -> dst.
       wInPipe->dispatch(cmd, {src->handle(), vbuf->handle()}, &wInPC, sizeof(wInPC),
                         (uint32_t)wInGroups);
       vk::computeBarrier(cmd);
-      wMmPipe->dispatch(cmd, {ubuf->handle(), vbuf->handle(), mbuf->handle()}, &wMmPC,
-                        sizeof(wMmPC), (uint32_t)wMmGroups);
-      vk::computeBarrier(cmd);
-      wOutPipe->dispatch(cmd, {mbuf->handle(), bbuf->handle(), dst->handle()}, &wOutPC,
-                         sizeof(wOutPC), (uint32_t)wOutGroups);
+      wFusedPipe->dispatch(cmd, {ubuf->handle(), vbuf->handle(), bbuf->handle(), dst->handle()},
+                           &wFusedPC, sizeof(wFusedPC), (uint32_t)wFusedGroups);
       return;
     }
     std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
