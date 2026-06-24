@@ -28,19 +28,23 @@ Full probe in [`docs/DEVICE_REPORT.md`](docs/DEVICE_REPORT.md).
 Benchmarked against Alibaba's **MNN** (production engine) on the same phone, both fastest config.
 Full methodology + raw output: [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
 
-| Engine (Vulkan, fp16) | Equal-thermal (30 loops) | Best case (cool) |
-|---|---|---|
-| MNN | ~15.3 ms avg | ~7.7 ms avg (min 6.8) |
-| **vxrt** | ~22.2 ms median | ~23 ms |
+After a Vulkan optimization pass (f16vec4 vectorized kernels, register-tiled 1×1 conv, NEON fp16
+pack, lighter barriers), vxrt went from ~22 ms to **near-parity** with MNN:
 
-**MNN is faster — ~1.5× at equal thermal, up to ~2–3× in its best case.** vxrt is genuinely
-slower: it's a from-scratch engine with straightforward NC4HW4 kernels, and ~11 ms of its ~22 ms
-is CPU↔device pack/unpack (only ~12 ms is GPU compute). vxrt's wins are correctness
-(cosine 0.999965), consistency (p90 within 1 ms of median), and a clean/extensible codebase — not
-peak speed yet. The two fixes that would close most of the gap are listed in next steps. (Also:
-MNN's *optimized CPU* backend runs this model in ~2.7 ms, beating its own Vulkan — at MobileNet
-scale, GPU dispatch/transfer overhead dominates. vxrt's CPU backend is a scalar oracle, not a
-fair CPU-vs-CPU contender.)
+| Metric (Vulkan, fp16) | vxrt | MNN |
+|---|---|---|
+| GPU kernel span (cool, stable) | **~7.0 ms** | — |
+| Cold single inference (full, incl. I/O) | **~10 ms** | ~9.5 ms |
+| Sustained / throttled bench | ~17–20 ms | ~14 ms |
+
+**Honest:** the gap closed from ~1.5–3× to ~1.0–1.3×. vxrt's *kernels* (7 ms) are now competitive
+with MNN's full run, and cold single-shot is near-tied. **MNN still edges ahead under sustained
+load** — its kernels move less memory, so the SoC throttles less. We did not definitively beat it;
+the path to pulling ahead (shared-memory/subgroup GEMM on the big 1×1 convs, depthwise+pointwise
+fusion, texture-backed activations) is in [`docs/BENCHMARK.md`](docs/BENCHMARK.md). Correctness was
+preserved throughout (fp16 cosine 0.999965). (MNN's *optimized CPU* backend does this model in
+~2.7 ms — at MobileNet scale GPU dispatch overhead dominates; vxrt's CPU backend is a scalar oracle,
+not a fair CPU-vs-CPU contender.)
 
 ## Milestones (all green, committed)
 - **M0** project skeleton + Vulkan probe — capabilities read on-device match `vkjson`.

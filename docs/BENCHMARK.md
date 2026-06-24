@@ -16,6 +16,27 @@ raw tool output is reproducible with `scripts/bench_vs_mnn.sh`.
 - **vxrt runner:** `vx_classify --backend vulkan --precision fp16 --bench 30` (5 warmup runs, then
   30 timed `run()` calls including the host↔device pack/unpack).
 
+## Status after the optimization pass (2026-06-24)
+After a round of Vulkan tuning (f16vec4 vectorized kernels, register-tiled 1x1 conv, NEON fp16
+input pack, compute-only barriers, profiling-only timestamps), vxrt went from ~22 ms to roughly
+**parity** with MNN-Vulkan:
+
+| Metric (MobileNetV2, fp16, Vulkan) | vxrt | MNN |
+|---|---|---|
+| GPU kernel time (timestamp span, cool, stable) | **~7.0 ms** | n/a (MNN doesn't expose it) |
+| Cold single inference (full run incl. I/O copy) | **~10 ms** | ~9.5 ms |
+| Sustained / throttled (15-loop bench, hot device) | ~17–20 ms | ~14 ms |
+
+Honest reading: **vxrt's kernels are now competitive** — its 7 ms of pure GPU work is in the same
+range as MNN's ~7–9 ms full run, and cold single-shot is near-tied (~10 vs ~9.5 ms). **MNN still
+wins under sustained load** (~14 vs ~18 ms): its kernels move less memory per inference, so the
+SoC throttles less. So we did **not** definitively beat MNN; we closed a 1.5–3x gap down to ~1.0–1.3x
+and matched it on best-case latency. To pull ahead, the remaining work is (a) shared-memory /
+subgroup-cooperative GEMM for the large-channel 1x1 convs (the 0.5 ms hotspots), (b) depthwise+pointwise
+fusion to cut dispatch count, and (c) image/texture-backed activations (better mobile-GPU cache).
+
+The detailed pre-optimization numbers below are kept for the record.
+
 ## A note on thermal throttling (read before the numbers)
 This phone throttles fast. A short burst (20 loops, cool) and a longer burst (30–100 loops, hot)
 give very different numbers for the *same* binary. MNN is affected a lot; vxrt almost not at all
