@@ -1,0 +1,25 @@
+#version 450
+// Split-K reduce pass: sum the KPARTS partials for each (output channel-block, pixel), add bias,
+// apply activation, write the final output. fp16 storage, fp32 accumulate.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Part { f16vec4 part[]; };
+layout(std430, binding = 1) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 2) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC { int Cout, HW, KPARTS, act; float actLo, actHi; } pc;
+
+void main() {
+  int Coutb = (pc.Cout + 3) / 4;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(Coutb * pc.HW)) return;
+  int pix = int(gid) % pc.HW;
+  int ocb = int(gid) / pc.HW;
+  vec4 acc = vec4(bias[ocb]);
+  for (int k = 0; k < pc.KPARTS; ++k) acc += vec4(part[(k * Coutb + ocb) * pc.HW + pix]);
+  dst[ocb * pc.HW + pix] = f16vec4(vx_act(acc.x, pc.act, pc.actLo, pc.actHi),
+                                   vx_act(acc.y, pc.act, pc.actLo, pc.actHi),
+                                   vx_act(acc.z, pc.act, pc.actLo, pc.actHi),
+                                   vx_act(acc.w, pc.act, pc.actLo, pc.actHi));
+}

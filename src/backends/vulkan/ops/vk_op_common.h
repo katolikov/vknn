@@ -30,6 +30,14 @@ struct FcPC {
   int Cin, Cout, act;
   float actLo, actHi;
 };
+// Split-K 1x1 conv (for deep, small-spatial convs that otherwise have too few threads).
+struct SplitKPC {
+  int Cin, Cout, HW, KPARTS, chunk;
+};
+struct ReducePC {
+  int Cout, HW, KPARTS, act;
+  float actLo, actHi;
+};
 // Winograd F(2x2,3x3) push constants.
 struct WinoInPC {
   int N, C, H, W, OH, OW, nTH, nTW;

@@ -1,0 +1,37 @@
+#version 450
+// Split-K partial pass for 1x1 conv (group=1, stride1, pad0), NC4HW4, fp16, N=1.
+// The deep convs (e.g. 960->160 @7x7) have tiny spatial -> too few threads to fill the GPU. We
+// split the Cin reduction across KPARTS thread-groups so total threads = KPARTS x Coutb x HW.
+// Each thread sums its Cin slice into a partial; the reduce pass adds the partials (+bias+act).
+// partial layout: [KPARTS][Coutb][HW] vec4(4 oc).  weight: [Cout][Cinb][4ic] (same as conv1x1).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) writeonly buffer Part { f16vec4 part[]; };
+layout(push_constant) uniform PC { int Cin, Cout, HW, KPARTS, chunk; } pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.KPARTS * Coutb * pc.HW)) return;
+  int pix = int(gid) % pc.HW;
+  int ocb = (int(gid) / pc.HW) % Coutb;
+  int kpart = int(gid) / (pc.HW * Coutb);
+
+  int istart = kpart * pc.chunk;
+  int iend = min(istart + pc.chunk, Cinb);
+  int wrow = ocb * 4 * Cinb;
+  vec4 acc = vec4(0.0);
+  for (int icb = istart; icb < iend; ++icb) {
+    vec4 inv = vec4(src[icb * pc.HW + pix]);
+    acc.x += dot(inv, vec4(wt[wrow + 0 * Cinb + icb]));
+    acc.y += dot(inv, vec4(wt[wrow + 1 * Cinb + icb]));
+    acc.z += dot(inv, vec4(wt[wrow + 2 * Cinb + icb]));
+    acc.w += dot(inv, vec4(wt[wrow + 3 * Cinb + icb]));
+  }
+  part[(kpart * Coutb + ocb) * pc.HW + pix] = f16vec4(acc);
+}

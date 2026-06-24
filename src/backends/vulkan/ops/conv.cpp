@@ -14,12 +14,40 @@ struct ConvOp : VulkanOp {
   bool depthwise = false;
   bool pointwise = false;
   bool winograd = false;
+  bool splitk = false;
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> wbuf, bbuf;
   ConvPC pc{};
   DwPC dpc{};
   int64_t total = 0;
   uint32_t localSize = 64;
+
+  // --- split-K 1x1 (deep, low-parallelism convs): partial pass + reduce pass ---
+  std::unique_ptr<vk::ComputePipeline> skPipe, skRed;
+  std::shared_ptr<vk::Buffer> partBuf;
+  SplitKPC skPC{};
+  ReducePC skRedPC{};
+  int64_t skGroups = 0, skRedGroups = 0;
+
+  void prepareSplitK(const Node& node, VkOpEnv& env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
+    int64_t Cinb = cBlocks(x.c), HW = y.h * y.w;
+    // pick KPARTS so the partial pass has enough threads to fill the GPU (~8192), capped by Cinb.
+    int64_t kparts = (8192 + Coutb * HW - 1) / (Coutb * HW);
+    kparts = std::max<int64_t>(2, std::min<int64_t>({kparts, Cinb, 16}));
+    int64_t chunk = (Cinb + kparts - 1) / kparts;
+    skPC = {(int)x.c, (int)Cout, (int)HW, (int)kparts, (int)chunk};
+    skRedPC = {(int)Cout, (int)HW, (int)kparts, (int)node.fusedAct, node.actLo, node.actHi};
+    partBuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)kparts * Coutb * HW * 4 * 2,
+                                           vk::MemPref::kDeviceOnly);
+    skGroups = groups(kparts * Coutb * HW, 64);
+    skRedGroups = groups(Coutb * HW, 64);
+    skPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_splitk_fp16", 3,
+                                                   sizeof(SplitKPC), std::vector<uint32_t>{},
+                                                   env.cache->handle());
+    skRed = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_reduce_fp16", 3,
+                                                  sizeof(ReducePC), std::vector<uint32_t>{},
+                                                  env.cache->handle());
+  }
 
   // --- Winograd F(2x2,3x3) state (used for 3x3, stride 1, pad 1, group 1, fp16) ---
   // Two passes: input transform -> V (global), then a FUSED matmul+output-transform kernel that
@@ -193,12 +221,20 @@ struct ConvOp : VulkanOp {
         return wp;
       });
       if (pointwise) {
-        // register-tiled 1x1 kernel: one thread does kTile output pixels for an output block
-        int64_t nTiles = (y.h * y.w + kTile - 1) / kTile;
-        total = x.n * Coutb * nTiles;
-        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1", env.useFp16), 4,
-                                                     sizeof(ConvPC), std::vector<uint32_t>{},
-                                                     env.cache->handle());
+        // Deep, small-spatial 1x1 convs have too few threads for the register-tiled kernel; use
+        // split-K there (parallelize the channel reduction). Threshold = standard thread count.
+        int64_t HW = y.h * y.w;
+        int64_t stdThreads = Coutb * ((HW + kTile - 1) / kTile);
+        splitk = (env.useFp16 && x.n == 1 && x.c >= 32 && stdThreads < 2048);
+        if (splitk) {
+          prepareSplitK(node, env, x, y, Cout, Coutb);
+        } else {
+          int64_t nTiles = (HW + kTile - 1) / kTile;
+          total = x.n * Coutb * nTiles;
+          pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1", env.useFp16), 4,
+                                                       sizeof(ConvPC), std::vector<uint32_t>{},
+                                                       env.cache->handle());
+        }
       } else {
         total = x.n * Coutb * y.h * y.w;
         localSize = pickLocalSize(env, env.devBuf(node.inputs[0]), env.devBuf(node.outputs[0]));
@@ -220,6 +256,15 @@ struct ConvOp : VulkanOp {
       vk::computeBarrier(cmd);
       wFusedPipe->dispatch(cmd, {ubuf->handle(), vbuf->handle(), bbuf->handle(), dst->handle()},
                            &wFusedPC, sizeof(wFusedPC), (uint32_t)wFusedGroups);
+      return;
+    }
+    if (splitk) {
+      // partial pass (K-parallel) -> reduce pass (+bias+act).
+      skPipe->dispatch(cmd, {src->handle(), wbuf->handle(), partBuf->handle()}, &skPC, sizeof(skPC),
+                       (uint32_t)skGroups);
+      vk::computeBarrier(cmd);
+      skRed->dispatch(cmd, {partBuf->handle(), bbuf->handle(), dst->handle()}, &skRedPC,
+                      sizeof(skRedPC), (uint32_t)skRedGroups);
       return;
     }
     std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
