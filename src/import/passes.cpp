@@ -7,6 +7,30 @@
 
 namespace vx {
 
+// Read an int64 list parameter from either a node attribute (older opsets) or an initializer input
+// (opset 10+/13+ moved Slice/Pad/Reduce params to inputs). Returns empty if neither is present.
+static std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* attrName,
+                                         int inputIdx) {
+  const auto& av = nd.attr.getints(attrName);
+  if (!av.empty()) return av;
+  if (inputIdx >= 0 && inputIdx < (int)nd.inputs.size() && nd.inputs[inputIdx] != kNoTensor) {
+    auto it = g.initializers.find(nd.inputs[inputIdx]);
+    if (it != g.initializers.end()) {
+      const HostBuffer& hb = it->second;
+      if (g.tensors[nd.inputs[inputIdx]].dtype == DType::kInt64) {
+        int64_t n = (int64_t)hb.bytes.size() / 8;
+        return std::vector<int64_t>(hb.i64(), hb.i64() + n);
+      }
+      int64_t n = (int64_t)hb.bytes.size() / 4;
+      std::vector<int64_t> out;
+      const float* f = hb.f32();
+      for (int64_t i = 0; i < n; ++i) out.push_back((int64_t)f[i]);
+      return out;
+    }
+  }
+  return {};
+}
+
 void inferShapes(Graph& g, int64_t batch) {
   // Resolve dynamic dims on inputs to `batch`.
   for (TensorId in : g.inputs) {
@@ -48,6 +72,67 @@ void inferShapes(Graph& g, int64_t batch) {
         const Shape& xs = SH(nd.inputs[0]);
         const Shape& gs = SH(nd.inputs[1]);
         if (xs.size() == 4 && gs.size() == 4) SH(o) = {xs[0], xs[1], gs[1], gs[2]};
+        break;
+      }
+      case OpType::kTranspose: {
+        const Shape& a = SH(nd.inputs[0]);
+        const auto& perm = nd.attr.getints("perm");
+        Shape out(a.size());
+        for (size_t i = 0; i < a.size(); ++i)
+          out[i] = perm.empty() ? a[a.size() - 1 - i] : a[perm[i]];
+        SH(o) = out;
+        break;
+      }
+      case OpType::kReduce: {
+        const Shape& a = SH(nd.inputs[0]);
+        int64_t rank = (int64_t)a.size();
+        std::vector<int64_t> axes = readI64Param(g, nd, "axes", 1);
+        if (axes.empty())
+          for (int64_t i = 0; i < rank; ++i) axes.push_back(i);  // reduce all
+        std::set<int64_t> ax;
+        for (int64_t v : axes) ax.insert(v < 0 ? v + rank : v);
+        bool keep = nd.attr.geti("keepdims", 1) != 0;
+        Shape out;
+        for (int64_t i = 0; i < rank; ++i) {
+          if (ax.count(i)) { if (keep) out.push_back(1); }
+          else out.push_back(a[i]);
+        }
+        if (out.empty()) out.push_back(1);
+        SH(o) = out;
+        break;
+      }
+      case OpType::kPad: {
+        const Shape& a = SH(nd.inputs[0]);
+        int64_t rank = (int64_t)a.size();
+        std::vector<int64_t> pads = readI64Param(g, nd, "pads", 1);
+        Shape out = a;
+        if ((int64_t)pads.size() >= 2 * rank)
+          for (int64_t i = 0; i < rank; ++i) out[i] = a[i] + pads[i] + pads[i + rank];
+        SH(o) = out;
+        break;
+      }
+      case OpType::kSlice: {
+        const Shape& a = SH(nd.inputs[0]);
+        int64_t rank = (int64_t)a.size();
+        std::vector<int64_t> starts = readI64Param(g, nd, "starts", 1);
+        std::vector<int64_t> ends = readI64Param(g, nd, "ends", 2);
+        std::vector<int64_t> axes = readI64Param(g, nd, "axes", 3);
+        std::vector<int64_t> steps = readI64Param(g, nd, "steps", 4);
+        Shape out = a;
+        for (size_t k = 0; k < starts.size(); ++k) {
+          int64_t ax = axes.empty() ? (int64_t)k : axes[k];
+          if (ax < 0) ax += rank;
+          if (ax < 0 || ax >= rank) continue;
+          int64_t step = (k < steps.size()) ? steps[k] : 1;
+          int64_t dim = a[ax];
+          int64_t st = starts[k] < 0 ? starts[k] + dim : starts[k];
+          int64_t en = ends[k] < 0 ? ends[k] + dim : ends[k];
+          st = std::max<int64_t>(0, std::min(st, dim));
+          en = std::max<int64_t>(0, std::min(en, dim));
+          int64_t n = step > 0 ? (en - st + step - 1) / step : 0;
+          out[ax] = std::max<int64_t>(0, n);
+        }
+        SH(o) = out;
         break;
       }
       case OpType::kResize: {

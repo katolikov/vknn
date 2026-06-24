@@ -41,6 +41,9 @@ enum class OpType {
   kPRelu,   // y = x>0 ? x : slope*x, slope per-channel
   kResize,  // Resize/Upsample (nearest/linear), spatial
   kGridSample,  // sample input at grid coords (CPU)
+  kTranspose,   // permute dims (CPU)
+  kSlice,       // strided slice (CPU)
+  kReduce,      // ReduceMean/Sum/Max/Min/Prod, see ReduceType
   // layout conversion nodes (inserted by the layout pass)
   kConvertLayout,
 };
@@ -51,12 +54,14 @@ enum UnaryType {
   kUAbs = 6, kUNeg = 7, kUExp = 8, kULog = 9, kUSqrt = 10, kUFloor = 11, kUCeil = 12, kURelu = 13
 };
 enum BinaryType { kBMul = 0, kBSub = 1, kBDiv = 2, kBMax = 3, kBMin = 4, kBPow = 5, kBAdd = 6 };
+enum ReduceType { kRMean = 0, kRSum = 1, kRMax = 2, kRMin = 3, kRProd = 4 };
 
 const char* opTypeName(OpType t);
 OpType opTypeFromOnnx(const std::string& s);
 // Returns the UnaryType/BinaryType code for an ONNX op name, or -1 if not in that family.
 int unaryFromOnnx(const std::string& s);
 int binaryFromOnnx(const std::string& s);
+int reduceFromOnnx(const std::string& s);
 
 /// A single attribute value (subset needed for CNNs).
 struct Attr {

@@ -55,6 +55,12 @@ const char* opTypeName(OpType t) {
       return "Resize";
     case OpType::kGridSample:
       return "GridSample";
+    case OpType::kTranspose:
+      return "Transpose";
+    case OpType::kSlice:
+      return "Slice";
+    case OpType::kReduce:
+      return "Reduce";
     case OpType::kConvertLayout:
       return "ConvertLayout";
     default:
@@ -71,6 +77,14 @@ int unaryFromOnnx(const std::string& s) {
       {"Ceil", kUCeil}};
   auto it = m.find(s);
   return it == m.end() ? -1 : it->second;
+}
+int reduceFromOnnx(const std::string& s) {
+  if (s == "ReduceMean") return kRMean;
+  if (s == "ReduceSum") return kRSum;
+  if (s == "ReduceMax") return kRMax;
+  if (s == "ReduceMin") return kRMin;
+  if (s == "ReduceProd") return kRProd;
+  return -1;
 }
 int binaryFromOnnx(const std::string& s) {
   static const std::unordered_map<std::string, int> m = {{"Mul", kBMul}, {"Sub", kBSub},
@@ -109,9 +123,13 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"Resize", OpType::kResize},
       {"Upsample", OpType::kResize},
       {"GridSample", OpType::kGridSample},
+      {"Transpose", OpType::kTranspose},
+      {"Slice", OpType::kSlice},
   };
   auto it = m.find(s);
   if (it != m.end()) return it->second;
+  if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd")
+    return OpType::kReduce;
   if (unaryFromOnnx(s) >= 0) return OpType::kUnary;
   if (binaryFromOnnx(s) >= 0) return OpType::kBinary;
   return OpType::kUnknown;

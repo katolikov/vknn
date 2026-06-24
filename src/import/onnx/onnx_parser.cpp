@@ -374,6 +374,8 @@ static void parseNode(Reader r, Graph& g, Node& node) {
     }
   } else if (node.type == OpType::kBinary) {
     node.subOp = binaryFromOnnx(opType);
+  } else if (node.type == OpType::kReduce) {
+    node.subOp = reduceFromOnnx(opType);
   }
   if (node.type == OpType::kUnknown)
     VX_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
