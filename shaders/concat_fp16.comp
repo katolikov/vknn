@@ -1,0 +1,18 @@
+#version 450
+// Channel-axis Concat over NC4HW4 (fp16). One dispatch per input copies its [N][Cib][HW] blocks
+// into the output at channel-block offset cbOff. Requires each input's channel count % 4 == 0.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC { int N, Cib, Cob, cbOff, HW; } pc;
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.N * pc.Cib * pc.HW)) return;
+  int hw = int(gid) % pc.HW;
+  int cb = (int(gid) / pc.HW) % pc.Cib;
+  int n = int(gid) / (pc.HW * pc.Cib);
+  dst[((n * pc.Cob) + pc.cbOff + cb) * pc.HW + hw] = src[((n * pc.Cib) + cb) * pc.HW + hw];
+}

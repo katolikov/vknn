@@ -41,6 +41,11 @@ class Backend {
   virtual bool available() const = 0;
   /// Capability query used for per-op backend assignment / fallback decisions.
   virtual bool supports(OpType t, DType dt) const = 0;
+  /// Shape-aware capability query. Defaults to the type-only check; backends override this when
+  /// support depends on the node's attributes/shapes (e.g. Concat axis, broadcast layout).
+  virtual bool supportsNode(const Graph& g, const Node& nd, DType dt) const {
+    return supports(nd.type, dt);
+  }
 
   /// Ensure tensor `rt` has valid host data (NCHW canonical). Default: assume host already valid.
   virtual void toHost(RtTensor& rt, ExecContext& ctx) {}

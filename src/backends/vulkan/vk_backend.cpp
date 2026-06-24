@@ -127,6 +127,36 @@ class VulkanBackend : public Backend {
     return VkOpRegistry::instance().has(t);
   }
 
+  // Shape-aware gate: Concat and Binary only run on the GPU for the NC4HW4-friendly cases; other
+  // layouts fall back to the (always-correct) CPU op.
+  bool supportsNode(const Graph& g, const Node& nd, DType dt) const override {
+    if (!supports(nd.type, dt)) return false;
+    if (nd.type == OpType::kConcat) {
+      const Shape& out = g.desc(nd.outputs[0]).shape;
+      int rank = (int)out.size();
+      int64_t axis = nd.attr.geti("axis", 1);
+      if (axis < 0) axis += rank;
+      if (rank != 4 || axis != 1) return false;  // channel concat only
+      for (TensorId in : nd.inputs) {
+        const Shape& s = g.desc(in).shape;
+        if (s.size() != 4 || s[1] % 4 != 0) return false;  // need 4-aligned channel blocks
+      }
+      return true;
+    }
+    if (nd.type == OpType::kBinary) {
+      if (nd.inputs.size() != 2) return false;
+      // constant operands aren't uploaded as device buffers; let the CPU op handle those
+      if (g.isInitializer(nd.inputs[0]) || g.isInitializer(nd.inputs[1])) return false;
+      const Shape& a = g.desc(nd.inputs[0]).shape;
+      const Shape& b = g.desc(nd.inputs[1]).shape;
+      if (a == b) return true;
+      // channel-broadcast: b is [N,C,1,1] over a's [N,C,H,W]
+      return a.size() == 4 && b.size() == 4 && b[0] == a[0] && b[1] == a[1] && b[2] == 1 &&
+             b[3] == 1;
+    }
+    return true;
+  }
+
   vk::VulkanContext& ctx() { return *ctx_; }
   vk::CommandRunner& runner() { return *runner_; }
   vk::PipelineCache* pipelineCache(const Config& cfg) {

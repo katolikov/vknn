@@ -86,7 +86,7 @@ void Session::plan() {
     DType dt = DType::kFloat32;  // compute dtype at IR level
     int chosen = -1;
     for (size_t bi = 0; bi < backends_.size(); ++bi) {
-      if (backends_[bi]->supports(nd.type, dt)) {
+      if (backends_[bi]->supportsNode(graph_, nd, dt)) {
         chosen = (int)bi;
         break;
       }
@@ -97,7 +97,7 @@ void Session::plan() {
     nodeBackendIdx_[n] = chosen;
     // warn if the primary backend couldn't take it
     if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend) &&
-        !byKind_[cfg_.backend]->supports(nd.type, dt)) {
+        !byKind_[cfg_.backend]->supportsNode(graph_, nd, dt)) {
       VX_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2)
           << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by "
           << backendName(cfg_.backend) << " backend -> falling back to "
