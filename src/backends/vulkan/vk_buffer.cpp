@@ -124,9 +124,21 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(ctx.device(), b->buf_, &req);
     typeBits &= req.memoryTypeBits;
+    if (typeBits == 0) typeBits = req.memoryTypeBits;  // tolerate driver returning 0 from the query
 
-    uint32_t typeIdx = b->findMemoryType(
-        typeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    // For an imported dma-buf the allowed memory types are dictated by the fd; do not
+    // over-constrain. Prefer host-visible (so we can also CPU-map it), else any allowed type.
+    uint32_t typeIdx;
+    try {
+      typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    } catch (...) {
+      const auto& mp = ctx.memProps();
+      int pick = -1;
+      for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if (typeBits & (1u << i)) { pick = (int)i; break; }
+      if (pick < 0) throw Error(Status::kUnsupported, "no compatible memory type for dma-buf");
+      typeIdx = (uint32_t)pick;
+    }
 
     VkImportMemoryFdInfoKHR importInfo{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
     importInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;

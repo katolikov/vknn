@@ -112,6 +112,15 @@ build CMakeFiles/vxrt.dir/src/core/graph.cpp.o: CXX_COMPILER__vxrt_unscanned_Rel
   OBJECT_DIR = CMakeFiles/vxrt.dir
   OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/src/core
 
+build CMakeFiles/vxrt.dir/src/core/ion.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/core/ion.cpp || cmake_object_order_depends_target_vxrt
+  CONFIG = Release
+  DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
+  DEP_FILE = CMakeFiles/vxrt.dir/src/core/ion.cpp.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG -std=gnu++17 -fPIC -pthread
+  INCLUDES = -I/Users/artemkatolikov/DEV/LibTAS/include -I/Users/artemkatolikov/DEV/LibTAS/src -I/Users/artemkatolikov/DEV/LibTAS/third_party
+  OBJECT_DIR = CMakeFiles/vxrt.dir
+  OBJECT_FILE_DIR = CMakeFiles/vxrt.dir/src/core
+
 build CMakeFiles/vxrt.dir/src/core/logging.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/core/logging.cpp || cmake_object_order_depends_target_vxrt
   CONFIG = Release
   DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
@@ -237,7 +246,7 @@ build CMakeFiles/vxrt.dir/src/backends/vulkan/vk_pipeline.cpp.o: CXX_COMPILER__v
 #############################################
 # Link the static library libvxrt.a
 
-build libvxrt.a: CXX_STATIC_LIBRARY_LINKER__vxrt_Release CMakeFiles/vxrt.dir/src/backends/cpu/cpu_backend.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_basic.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_conv.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_shape.cpp.o CMakeFiles/vxrt.dir/src/core/backend_registry.cpp.o CMakeFiles/vxrt.dir/src/core/config.cpp.o CMakeFiles/vxrt.dir/src/core/graph.cpp.o CMakeFiles/vxrt.dir/src/core/logging.cpp.o CMakeFiles/vxrt.dir/src/core/op.cpp.o CMakeFiles/vxrt.dir/src/core/profiler.cpp.o CMakeFiles/vxrt.dir/src/core/session.cpp.o CMakeFiles/vxrt.dir/src/import/onnx/onnx_parser.cpp.o CMakeFiles/vxrt.dir/src/import/passes.cpp.o CMakeFiles/vxrt.dir/generated/vx_embedded_shaders.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_backend.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_buffer.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_command.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_context.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_ops.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_pipeline.cpp.o
+build libvxrt.a: CXX_STATIC_LIBRARY_LINKER__vxrt_Release CMakeFiles/vxrt.dir/src/backends/cpu/cpu_backend.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_basic.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_conv.cpp.o CMakeFiles/vxrt.dir/src/backends/cpu/ops_shape.cpp.o CMakeFiles/vxrt.dir/src/core/backend_registry.cpp.o CMakeFiles/vxrt.dir/src/core/config.cpp.o CMakeFiles/vxrt.dir/src/core/graph.cpp.o CMakeFiles/vxrt.dir/src/core/ion.cpp.o CMakeFiles/vxrt.dir/src/core/logging.cpp.o CMakeFiles/vxrt.dir/src/core/op.cpp.o CMakeFiles/vxrt.dir/src/core/profiler.cpp.o CMakeFiles/vxrt.dir/src/core/session.cpp.o CMakeFiles/vxrt.dir/src/import/onnx/onnx_parser.cpp.o CMakeFiles/vxrt.dir/src/import/passes.cpp.o CMakeFiles/vxrt.dir/generated/vx_embedded_shaders.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_backend.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_buffer.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_command.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_context.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_ops.cpp.o CMakeFiles/vxrt.dir/src/backends/vulkan/vk_pipeline.cpp.o
   CONFIG = Release
   LANGUAGE_COMPILE_FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG
   OBJECT_DIR = CMakeFiles/vxrt.dir
@@ -359,6 +368,44 @@ build vx_profile: CXX_EXECUTABLE_LINKER__vx_profile_Release CMakeFiles/vx_profil
   PRE_LINK = :
   TARGET_FILE = vx_profile
   TARGET_PDB = vx_profile.dbg
+
+# =============================================================================
+# Object build statements for EXECUTABLE target vx_ion_zerocopy
+
+
+#############################################
+# Order-only phony target for vx_ion_zerocopy
+
+build cmake_object_order_depends_target_vx_ion_zerocopy: phony || cmake_object_order_depends_target_vxrt
+
+build CMakeFiles/vx_ion_zerocopy.dir/examples/ion_zerocopy.cpp.o: CXX_COMPILER__vx_ion_zerocopy_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/examples/ion_zerocopy.cpp || cmake_object_order_depends_target_vx_ion_zerocopy
+  CONFIG = Release
+  DEFINES = -DVXRT_ANDROID=1 -DVXRT_ENABLE_NEON=1 -DVXRT_ENABLE_VULKAN=1
+  DEP_FILE = CMakeFiles/vx_ion_zerocopy.dir/examples/ion_zerocopy.cpp.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG -std=gnu++17 -fPIE -pthread
+  INCLUDES = -I/Users/artemkatolikov/DEV/LibTAS/include -I/Users/artemkatolikov/DEV/LibTAS/src -I/Users/artemkatolikov/DEV/LibTAS/third_party
+  OBJECT_DIR = CMakeFiles/vx_ion_zerocopy.dir
+  OBJECT_FILE_DIR = CMakeFiles/vx_ion_zerocopy.dir/examples
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target vx_ion_zerocopy
+
+
+#############################################
+# Link the executable vx_ion_zerocopy
+
+build vx_ion_zerocopy: CXX_EXECUTABLE_LINKER__vx_ion_zerocopy_Release CMakeFiles/vx_ion_zerocopy.dir/examples/ion_zerocopy.cpp.o | libvxrt.a || libvxrt.a
+  CONFIG = Release
+  DEP_FILE = CMakeFiles/vx_ion_zerocopy.dir/link.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG
+  LINK_FLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments   -Wl,--gc-sections  -Xlinker --dependency-file=CMakeFiles/vx_ion_zerocopy.dir/link.d
+  LINK_LIBRARIES = -Xlinker --push-state -Xlinker --whole-archive  libvxrt.a  -Xlinker --pop-state  -lvulkan  -landroid  -llog  -pthread  -latomic -lm
+  OBJECT_DIR = CMakeFiles/vx_ion_zerocopy.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = vx_ion_zerocopy
+  TARGET_PDB = vx_ion_zerocopy.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target vx_op_check
@@ -552,7 +599,7 @@ build vxrt: phony libvxrt.a
 #############################################
 # Folder: /Users/artemkatolikov/DEV/LibTAS/build-android
 
-build all: phony libvxrt.a vx_probe vx_classify vx_profile vx_op_check
+build all: phony libvxrt.a vx_probe vx_classify vx_profile vx_ion_zerocopy vx_op_check
 
 # =============================================================================
 # Built-in targets

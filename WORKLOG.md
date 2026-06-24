@@ -89,3 +89,13 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - Debug hook VXRT_DISABLE_VK_OPS forces ops to fall back.
 - **On device: VXRT_DISABLE_VK_OPS="Add,GlobalAveragePool" -> 23 segments, warnings logged,
   output cosine=1.000000, top-1 258==258 PASS.** Correctness preserved across the boundary.
+
+### M6 — ION zero-copy DONE (verified on device)
+- `vx::IonBuffer`: allocates from /dev/dma_heap/system via DMA_HEAP_IOCTL_ALLOC (local uAPI defn),
+  mmaps for CPU access. Mode A (alloc) + Mode B (wrapFd, ownership configurable).
+- `vk::Buffer::importDmaBufFd`: imports the dma-buf fd via VkImportMemoryFdInfoKHR
+  (DMA_BUF_BIT_EXT) + vkGetMemoryFdPropertiesKHR; relaxed memory-type selection (import dictates
+  types). Falls back to staging + logged limitation if import fails.
+- **On device: dma-heap alloc OK (fd 10); imported into Vulkan; GPU `add` reads the ION buffer
+  directly (CPU-written via mmap) -> maxAbsErr=0.0 vs staged path, BOTH Mode A and Mode B PASS.**
+  True zero-copy confirmed on Xclipse (the earlier over-constrained memory-type pick was the only fix).
