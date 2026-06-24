@@ -110,7 +110,10 @@ struct ConvOp : VulkanOp {
 
   // Try a few workgroup sizes for this exact shape, keep the fastest, and remember it so the
   // next session (or run) skips the measurement. Only the group==1 conv shader is tunable.
-  uint32_t pickLocalSize(VkOpEnv& env, vk::Buffer* src, vk::Buffer* dst) {
+  // The timing dispatches run on dedicated SCRATCH buffers, never the real activation buffers -
+  // tuning must not write into the data path (doing so raced the first real run and corrupted it).
+  uint32_t pickLocalSize(VkOpEnv& env) {
+    if (std::getenv("VXRT_NO_TUNE")) return 64;
     char buf[96];
     snprintf(buf, sizeof(buf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH,
              pc.OW, pc.KH, pc.SH);
@@ -121,6 +124,13 @@ struct ConvOp : VulkanOp {
     }
     uint32_t best = 64;
     if (env.tuning != TuningLevel::kOff && env.runner) {
+      int es = env.useFp16 ? 2 : 4;
+      size_t srcBytes = (size_t)pc.N * cBlocks(pc.Cin) * pc.H * pc.W * 4 * es;
+      size_t dstBytes = (size_t)pc.N * cBlocks(pc.Cout) * pc.OH * pc.OW * 4 * es;
+      auto sSrc = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16),
+                                               vk::MemPref::kDeviceOnly);
+      auto sDst = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16),
+                                               vk::MemPref::kDeviceOnly);
       std::vector<uint32_t> cands = (env.tuning == TuningLevel::kThorough)
                                         ? std::vector<uint32_t>{32, 64, 128, 256}
                                         : std::vector<uint32_t>{64, 128, 256};
@@ -131,7 +141,7 @@ struct ConvOp : VulkanOp {
         VkCommandBuffer cmd = env.runner->allocate();
         env.runner->begin(cmd);
         for (int rep = 0; rep < 8; ++rep)
-          p.dispatch(cmd, {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()}, &pc,
+          p.dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc,
                      sizeof(pc), groups(total, ls));
         env.runner->end(cmd);
         double ms = env.runner->submitAndWait(cmd);
@@ -265,7 +275,7 @@ struct ConvOp : VulkanOp {
       } else {
         // autotuned 1-pixel-per-thread direct kernel (fastest 3x3 path on Xclipse so far)
         total = x.n * Coutb * y.h * y.w;
-        localSize = pickLocalSize(env, env.devBuf(node.inputs[0]), env.devBuf(node.outputs[0]));
+        localSize = pickLocalSize(env);
         pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv", env.useFp16), 4,
                                                      sizeof(ConvPC),
                                                      std::vector<uint32_t>{localSize},
