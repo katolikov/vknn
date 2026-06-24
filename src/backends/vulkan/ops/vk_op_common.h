@@ -23,6 +23,9 @@ struct DwPC {
 struct PoolPC {
   int N, C, H, W;
 };
+struct MaxPC {
+  int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL;
+};
 struct FcPC {
   int Cin, Cout, act;
   float actLo, actHi;

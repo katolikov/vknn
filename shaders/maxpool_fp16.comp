@@ -1,0 +1,30 @@
+#version 450
+// MaxPool2D over NC4HW4 (fp16).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC { int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL; } pc;
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.N * Cb * pc.OH * pc.OW)) return;
+  int ox = int(gid) % pc.OW;
+  int oy = (int(gid) / pc.OW) % pc.OH;
+  int cb = (int(gid) / (pc.OW * pc.OH)) % Cb;
+  int n = int(gid) / (pc.OW * pc.OH * Cb);
+  vec4 m = vec4(-65504.0);
+  for (int ky = 0; ky < pc.KH; ++ky) {
+    int iy = oy * pc.SH - pc.PT + ky;
+    if (iy < 0 || iy >= pc.H) continue;
+    for (int kx = 0; kx < pc.KW; ++kx) {
+      int ix = ox * pc.SW - pc.PL + kx;
+      if (ix < 0 || ix >= pc.W) continue;
+      m = max(m, vec4(src[((n * Cb + cb) * pc.H + iy) * pc.W + ix]));
+    }
+  }
+  dst[((n * Cb + cb) * pc.OH + oy) * pc.OW + ox] = f16vec4(m);
+}

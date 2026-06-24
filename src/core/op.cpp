@@ -59,6 +59,9 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"Relu", OpType::kRelu},
       {"Add", OpType::kAdd},
       {"GlobalAveragePool", OpType::kGlobalAvgPool},
+      // ReduceMean over the spatial dims (keepdims) is exactly a global average pool; that's how
+      // it shows up in ResNet exports, so we route it to the same kernel.
+      {"ReduceMean", OpType::kGlobalAvgPool},
       {"AveragePool", OpType::kAvgPool},
       {"MaxPool", OpType::kMaxPool},
       {"Gemm", OpType::kGemm},

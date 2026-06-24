@@ -13,6 +13,8 @@ void constFold(Graph& g);
 void foldBatchNorm(Graph& g);
 // Fuse Clip(relu6)/Relu following Conv/Gemm into the producer's fused activation.
 void fuseActivations(Graph& g);
+// Remove Identity nodes, rewiring consumers to the input.
+void eliminateIdentity(Graph& g);
 // Remove nodes whose outputs are unused (keeps graph outputs alive).
 void eliminateDeadNodes(Graph& g);
 // Run the standard pipeline used before backend planning.

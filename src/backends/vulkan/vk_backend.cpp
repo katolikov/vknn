@@ -311,11 +311,14 @@ class VulkanSegment : public Segment {
       if (queryPool_)
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_,
                             (uint32_t)(k * 2 + 1));
-      // Reshape uses a buffer copy (transfer); its producer/consumer edges need the wider
-      // barrier. Everything else is compute->compute.
-      bool nextIsReshape = (k + 1 < nodeIdx.size() &&
-                            g_.nodes[nodeIdx[k + 1]].type == OpType::kReshape);
-      if (node.type == OpType::kReshape || nextIsReshape)
+      // Reshape/Flatten use a buffer copy (transfer); those edges need the wider barrier.
+      // Everything else is compute->compute.
+      auto isCopy = [&](int idx) {
+        OpType t = g_.nodes[idx].type;
+        return t == OpType::kReshape || t == OpType::kFlatten;
+      };
+      bool nextIsCopy = (k + 1 < nodeIdx.size()) && isCopy(nodeIdx[k + 1]);
+      if (isCopy(nodeIdx[k]) || nextIsCopy)
         vk::transferBarrier(cmd_);
       else
         vk::computeBarrier(cmd_);

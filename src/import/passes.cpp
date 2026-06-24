@@ -53,6 +53,21 @@ void inferShapes(Graph& g, int64_t batch) {
         SH(o) = {x.n, x.c, 1, 1};
         break;
       }
+      case OpType::kMaxPool:
+      case OpType::kAvgPool: {
+        NCHW x = NCHW::from(SH(nd.inputs[0]));
+        auto ints = [&](const char* k, std::vector<int64_t> d) {
+          const auto& v = nd.attr.getints(k);
+          return v.empty() ? d : v;
+        };
+        auto ks = ints("kernel_shape", {1, 1});
+        auto st = ints("strides", {1, 1});
+        auto pad = ints("pads", {0, 0, 0, 0});
+        int64_t oh = (x.h + pad[0] + pad[2] - ks[0]) / st[0] + 1;
+        int64_t ow = (x.w + pad[1] + pad[3] - ks[1]) / st[1] + 1;
+        SH(o) = {x.n, x.c, oh, ow};
+        break;
+      }
       case OpType::kGemm: {
         const Shape& a = SH(nd.inputs[0]);
         const Shape& w = SH(nd.inputs[1]);
@@ -298,6 +313,32 @@ void fuseActivations(Graph& g) {
   }
 }
 
+void eliminateIdentity(Graph& g) {
+  // Drop Identity nodes by pointing their consumers (and any graph output) straight at the input.
+  std::set<int> remove;
+  int n = 0;
+  for (size_t i = 0; i < g.nodes.size(); ++i) {
+    Node& id = g.nodes[i];
+    if (id.type != OpType::kIdentity) continue;
+    if (id.inputs.empty() || id.outputs.empty()) continue;
+    TensorId in = id.inputs[0], out = id.outputs[0];
+    for (auto& nn : g.nodes)
+      for (TensorId& x : nn.inputs)
+        if (x == out) x = in;
+    for (TensorId& go : g.outputs)
+      if (go == out) go = in;
+    remove.insert((int)i);
+    ++n;
+  }
+  if (n) {
+    std::vector<Node> kept;
+    for (size_t i = 0; i < g.nodes.size(); ++i)
+      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+    g.nodes = std::move(kept);
+    VX_INFO << "eliminateIdentity: removed " << n << " Identity node(s)";
+  }
+}
+
 void eliminateDeadNodes(Graph& g) {
   std::set<TensorId> live(g.outputs.begin(), g.outputs.end());
   bool changed = true;
@@ -339,6 +380,7 @@ void eliminateDeadNodes(Graph& g) {
 
 void runStandardPasses(Graph& g, int64_t batch) {
   inferShapes(g, batch);
+  eliminateIdentity(g);
   foldBatchNorm(g);
   fuseActivations(g);
   constFold(g);
