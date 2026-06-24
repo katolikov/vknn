@@ -26,6 +26,9 @@ struct PoolPC {
 struct MaxPC {
   int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL;
 };
+struct AvgPC {
+  int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, countIncludePad;
+};
 struct FcPC {
   int Cin, Cout, act;
   float actLo, actHi;
