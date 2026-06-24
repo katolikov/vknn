@@ -1,12 +1,17 @@
 build/
+build-android/
 build-host/
 *.o
 *.spv
 .DS_Store
-assets/*.onnx
-assets/*.npy
 device_out/
 __pycache__/
 .venv/
-third_party/googletest/
 docs/api/
+third_party/googletest/
+# generated/large assets (reproducible via scripts/get_golden.py)
+assets/*.onnx
+assets/*.npy
+assets/*.bin
+assets/*.jpg
+assets/layers/
