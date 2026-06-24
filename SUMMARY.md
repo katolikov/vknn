@@ -33,13 +33,20 @@ After studying MNN's backend and a focused conv-kernel effort, both Vulkan fp16,
 | Model | vxrt | MNN |
 |---|---|---|
 | **MobileNetV2** | min **10.1 ms**, median **15.4 ms** | min 10.3–12.8, avg 15.6–16.1 ms |
-| ResNet-50 | min 56 ms | min ~45 ms |
+| **SqueezeNet 1.1** | min **7.7 ms**, median **12–13.6 ms** | min 10.3–11.4, avg 12.5–13.1 ms |
+| ResNet-50 | min **52.4 ms** | min ~45 ms |
 
-**vxrt now matches/edges MNN on MobileNetV2** (median 15.4 vs MNN avg ~16). The wins, all measured:
+**vxrt now matches/edges MNN on MobileNetV2 *and* SqueezeNet**; ResNet-50 is the lone laggard,
+bottlenecked on its 3×3 convs. The wins, all measured:
 - **Split-K for deep 1×1 convs** — deep pointwise convs (960→160 @7×7) were running at ~1–2% of
   GPU peak from too few threads; splitting the channel reduction filled the GPU. MobileNetV2 best
   case 14.7→10.1 ms.
-- **Fuse post-residual Relu into Add** (ResNet: 58→55.8 ms).
+- **Fuse residual Add + post-residual Relu into the 1×1 conv epilogue** (ResNet: 58→52.4 ms; the
+  Add(4.5ms)+Relu(2.9ms) ops disappear entirely).
+- **Broader op coverage** (toward MNN's set): generic Unary (Sigmoid/Tanh/HardSwish/HardSigmoid/
+  LeakyRelu/Elu/Abs/Exp/Sqrt/…) and Binary (Mul/Sub/Div/Max/Min/Pow incl. Squeeze-Excite broadcast)
+  families, windowed AveragePool, and NC4HW4 channel Concat on the GPU — SqueezeNet now runs fully
+  on Vulkan with no CPU fallback.
 - f16vec4 vectorized kernels, register-tiled 1×1, NEON fp16 pack.
 
 A key analysis finding (`docs/MNN_ANALYSIS.md`): MNN defaults to a **VkImage** backend, but a

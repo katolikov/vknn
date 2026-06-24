@@ -6,7 +6,16 @@ Same device, both Vulkan fp16, alternating runs:
 | Model | vxrt | MNN | verdict |
 |---|---|---|---|
 | **MobileNetV2** | min **10.1 ms**, median **15.4 ms** | min 10.3–12.8, avg 15.6–16.1 ms | **vxrt ≈ / slightly beats MNN** |
-| ResNet-50 | min 56.0 ms | min ~45–47 ms | MNN ~1.2× faster (3×3-bound) |
+| **SqueezeNet 1.1** | min **7.7 ms**, median **12–13.6 ms** | min 10.3–11.4, avg 12.5–13.1 ms | **vxrt ≈ / slightly beats MNN** |
+| ResNet-50 | min **52.4 ms** | min ~45–47 ms | MNN ~1.15× faster (3×3-bound) |
+
+vxrt now matches or beats MNN-Vulkan on **MobileNetV2 and SqueezeNet**; ResNet-50 is the lone
+laggard, bottlenecked entirely on its 3×3 convs (see the Winograd note below). The residual Add and
+the post-residual Relu are now fused into the conv epilogue (ResNet 58→52.4 ms), and SqueezeNet runs
+fully on the GPU thanks to NC4HW4 channel-Concat. Op coverage was broadened toward MNN's set: a
+generic Unary family (Sigmoid/Tanh/HardSwish/HardSigmoid/LeakyRelu/Elu/…) and Binary family
+(Mul/Sub/Div/Max/Min/Pow, incl. the Squeeze-Excite channel-broadcast Mul), plus windowed AveragePool
+and channel Concat on the GPU.
 
 What got us there (all measured, kept only if they helped):
 - **Split-K for deep 1×1 convs** — the big one. The deep pointwise convs (e.g. 960→160 @7×7) had
