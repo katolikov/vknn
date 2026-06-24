@@ -53,6 +53,8 @@ const char* opTypeName(OpType t) {
       return "PRelu";
     case OpType::kResize:
       return "Resize";
+    case OpType::kGridSample:
+      return "GridSample";
     case OpType::kConvertLayout:
       return "ConvertLayout";
     default:
@@ -106,6 +108,7 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"PRelu", OpType::kPRelu},
       {"Resize", OpType::kResize},
       {"Upsample", OpType::kResize},
+      {"GridSample", OpType::kGridSample},
   };
   auto it = m.find(s);
   if (it != m.end()) return it->second;

@@ -44,6 +44,12 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kPRelu:
         SH(o) = SH(nd.inputs[0]);
         break;
+      case OpType::kGridSample: {
+        const Shape& xs = SH(nd.inputs[0]);
+        const Shape& gs = SH(nd.inputs[1]);
+        if (xs.size() == 4 && gs.size() == 4) SH(o) = {xs[0], xs[1], gs[1], gs[2]};
+        break;
+      }
       case OpType::kResize: {
         // output = round(input * scales) or explicit sizes; scales/sizes are initializer inputs.
         Shape s = SH(nd.inputs[0]);
