@@ -8,11 +8,13 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common.glsl"
 #define WTILE 4
+layout(constant_id = 0) const int HAS_RES = 0;  // fused residual add (out = act(conv + res))
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
 layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(std430, binding = 4) readonly buffer Res { f16vec4 res[]; };
 layout(push_constant) uniform PC {
   int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
   float actLo, actHi;
@@ -54,10 +56,13 @@ void main() {
   int dbase = (n * Coutb + ocb) * HW;
   for (int p = 0; p < WTILE; ++p) {
     int pix = p0 + p;
-    if (pix < HW)
-      dst[dbase + pix] = f16vec4(vx_act(acc[p].x, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].y, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].z, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].w, pc.act, pc.actLo, pc.actHi));
+    if (pix < HW) {
+      vec4 v = acc[p];
+      if (HAS_RES != 0) v += vec4(res[dbase + pix]);
+      dst[dbase + pix] = f16vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi),
+                                 vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+                                 vx_act(v.z, pc.act, pc.actLo, pc.actHi),
+                                 vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+    }
   }
 }

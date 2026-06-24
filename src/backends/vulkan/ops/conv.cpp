@@ -15,6 +15,7 @@ struct ConvOp : VulkanOp {
   bool pointwise = false;
   bool winograd = false;
   bool splitk = false;
+  bool hasRes = false;  // residual Add fused into the epilogue (out = act(conv + residual))
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> wbuf, bbuf;
   ConvPC pc{};
@@ -44,8 +45,9 @@ struct ConvOp : VulkanOp {
     skPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_splitk_fp16", 3,
                                                    sizeof(SplitKPC), std::vector<uint32_t>{},
                                                    env.cache->handle());
-    skRed = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_reduce_fp16", 3,
-                                                  sizeof(ReducePC), std::vector<uint32_t>{},
+    skRed = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_reduce_fp16", hasRes ? 4 : 3,
+                                                  sizeof(ReducePC),
+                                                  std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)},
                                                   env.cache->handle());
   }
 
@@ -152,6 +154,7 @@ struct ConvOp : VulkanOp {
     auto pad = attrInts(node, "pads", {0, 0, 0, 0});
     auto dil = attrInts(node, "dilations", {1, 1});
     int64_t group = node.attr.geti("group", 1);
+    hasRes = (node.fusedResidual != kNoTensor);  // set by the residual-Add fusion pass (1x1 only)
     depthwise = (group == x.c && group == Cout && inCg == 1);
     pointwise = (!depthwise && group == 1 && KH == 1 && KW == 1 && st[0] == 1 && st[1] == 1 &&
                  pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
@@ -169,7 +172,9 @@ struct ConvOp : VulkanOp {
     // bias, padded out to a multiple of 4 so the kernel can read whole vec4s
     bbuf = uploadCached(env, node.name + "#b", [&] {
       std::vector<float> bias(Coutb * 4, 0.f);
-      if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
+      // inputs[2] is bias unless it's the appended residual (no-bias + fused-residual case)
+      if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor &&
+          node.inputs[2] != node.fusedResidual) {
         const float* bsrc = g.initializers.at(node.inputs[2]).f32();
         for (int64_t i = 0; i < Cout; ++i) bias[i] = bsrc[i];
       }
@@ -231,9 +236,9 @@ struct ConvOp : VulkanOp {
         } else {
           int64_t nTiles = (HW + kTile - 1) / kTile;
           total = x.n * Coutb * nTiles;
-          pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1", env.useFp16), 4,
-                                                       sizeof(ConvPC), std::vector<uint32_t>{},
-                                                       env.cache->handle());
+          pipe = std::make_unique<vk::ComputePipeline>(
+              *env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
+              std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)}, env.cache->handle());
         }
       } else {
         total = x.n * Coutb * y.h * y.w;
@@ -258,21 +263,25 @@ struct ConvOp : VulkanOp {
                            &wFusedPC, sizeof(wFusedPC), (uint32_t)wFusedGroups);
       return;
     }
+    // fused residual (1x1 path only); bias is a harmless dummy when not fused (shader won't read it)
+    VkBuffer res = (hasRes ? env.devBuf(node.fusedResidual) : bbuf.get())->handle();
     if (splitk) {
-      // partial pass (K-parallel) -> reduce pass (+bias+act).
+      // partial pass (K-parallel) -> reduce pass (+bias [+residual] +act).
       skPipe->dispatch(cmd, {src->handle(), wbuf->handle(), partBuf->handle()}, &skPC, sizeof(skPC),
                        (uint32_t)skGroups);
       vk::computeBarrier(cmd);
-      skRed->dispatch(cmd, {partBuf->handle(), bbuf->handle(), dst->handle()}, &skRedPC,
-                      sizeof(skRedPC), (uint32_t)skRedGroups);
+      std::vector<VkBuffer> rb = {partBuf->handle(), bbuf->handle(), dst->handle()};
+      if (hasRes) rb.push_back(res);
+      skRed->dispatch(cmd, rb, &skRedPC, sizeof(skRedPC), (uint32_t)skRedGroups);
       return;
     }
     std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
     if (depthwise)
       pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, 64));
-    else if (pointwise)
+    else if (pointwise) {
+      if (hasRes) bufs.push_back(res);
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
-    else
+    } else
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, localSize));
   }
 };

@@ -100,6 +100,9 @@ struct Node {
   // For kUnary/kBinary: the UnaryType/BinaryType code. For unary ops with params (LeakyRelu/Elu
   // alpha, HardSigmoid alpha/beta) the params live in actLo/actHi.
   int32_t subOp = 0;
+  // Conv only: a residual tensor fused into the epilogue (out = act(conv + residual)); set by the
+  // residual-Add fusion pass. kNoTensor when not fused.
+  TensorId fusedResidual = kNoTensor;
 };
 
 }  // namespace vx

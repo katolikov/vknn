@@ -10,7 +10,8 @@ struct ConvCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
     const RtTensor& X = ctx.t(node.inputs[0]);
     const RtTensor& W = ctx.t(node.inputs[1]);
-    const bool hasBias = node.inputs.size() > 2 && node.inputs[2] != kNoTensor;
+    const bool hasBias = node.inputs.size() > 2 && node.inputs[2] != kNoTensor &&
+                         node.inputs[2] != node.fusedResidual;
     const RtTensor* B = hasBias ? &ctx.t(node.inputs[2]) : nullptr;
     RtTensor& Y = ctx.t(node.outputs[0]);
 
@@ -63,6 +64,11 @@ struct ConvCpu : CpuOp {
             y[((n * outC + oc) * outH + oy) * outW + ox] = acc;
           }
       }
+    if (node.fusedResidual != kNoTensor) {  // fused residual add: out = act(conv + residual)
+      const float* rd = ctx.t(node.fusedResidual).host.f32();
+      int64_t n = Y.elems();
+      for (int64_t i = 0; i < n; ++i) y[i] += rd[i];
+    }
     cpu::applyAct(y, Y.elems(), node.fusedAct, node.actLo, node.actHi);
   }
 };

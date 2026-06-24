@@ -13,6 +13,8 @@ void constFold(Graph& g);
 void foldBatchNorm(Graph& g);
 // Fuse Clip(relu6)/Relu following Conv/Gemm into the producer's fused activation.
 void fuseActivations(Graph& g);
+// Fuse a residual Add(conv, x) into the (1x1) conv's epilogue: out = act(conv + x).
+void fuseResidualAdd(Graph& g);
 // Remove Identity nodes, rewiring consumers to the input.
 void eliminateIdentity(Graph& g);
 // Remove nodes whose outputs are unused (keeps graph outputs alive).
