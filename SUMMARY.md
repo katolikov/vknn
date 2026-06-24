@@ -30,23 +30,39 @@ Full methodology + raw output: [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
 
 After studying MNN's backend and a focused conv-kernel effort, both Vulkan fp16, same device:
 
-| Model (Vulkan fp16) | vxrt (median) | MNN (avg) |
-|---|---|---|
-| **MobileNetV2** | 15.4 ms | 15.6–16.1 ms |
-| **MobileNetV3-Large** | 17.9–18.2 ms | 16.3–18.5 ms |
-| **SqueezeNet 1.1** | 12–13.6 ms | 12.5–13.1 ms |
-| **Inception-v3** | 66–72 ms | 65–67 ms |
-| ResNet-50 | 52.4 ms | ~45 ms |
+| Model (Vulkan fp16) | vxrt median | MNN avg / min | standing |
+|---|---|---|---|
+| **Inception-v3** | **51–55 ms** | 64–72 / 62–70 ms | **vxrt wins ~20%** |
+| MobileNetV2 | 15.4 ms | 15.4 / 10.3 ms | ≈ MNN avg (MNN's best-case faster) |
+| SqueezeNet 1.1 | 11.4 ms | 11.1 / 9.5 ms | ≈ MNN avg (MNN's best-case faster) |
+| MobileNetV3-Large | 22.5 ms | 21.6 / 19.6 ms | MNN ~1.15× |
+| ResNet-50 | 52.8 ms | 46.4 / 43.5 ms | MNN ~1.15× |
 
-**vxrt runs five of MNN's benchmark models end-to-end on the GPU and matches/beats MNN-Vulkan on
-four** (MobileNetV2/V3, SqueezeNet tied-or-ahead; Inception tied within ~3%). ResNet-50 is the lone
-laggard, bottlenecked on its symmetric 3×3 convs. All five verified vs onnxruntime (cosine ≥ 0.9990).
-The wins, all measured:
+**vxrt runs five of MNN's benchmark models end-to-end on the GPU** and **clearly beats MNN-Vulkan on
+Inception-v3** (~20%, via parallel-branch overlap from precise barriers). It is **on par with MNN on
+MobileNetV2 and SqueezeNet** at equal thermal (vxrt's latency is very consistent; MNN's avg is close
+but its cold-loop variance makes its *min* lower). It remains **~15% behind on MobileNetV3 and
+ResNet-50**, both bottlenecked on conv kernels where MNN's years-tuned Winograd/GEMM still wins.
+Honest finding: on this Xclipse/SPAL driver, eight hand-written kernel strategies (register-tiling,
+LDS-halo, fp16-packed-math, Winograd ×2, WTILE=8, implicit-im2col, split-K-3×3) were tried; only
+**split-K for deep 1×1** and **precise data-dependency barriers** beat the straightforward direct
+kernels — the rest regress (the driver punishes occupancy/LDS/register pressure). Closing the last
+~15% needs a production fused-cooperative Winograd, a large effort with low success odds here.
+All five verified vs onnxruntime (cosine ≥ 0.9990). The improvements, all measured:
+- **Precise data-dependency barriers** — only barrier on a real read-after-write, so independent ops
+  overlap instead of draining the GPU between every dispatch. Inception-v3 ~66→~54 ms (its parallel
+  branches now overlap) → overtakes MNN; SqueezeNet also gains from its parallel expand branches.
 - **Split-K for deep 1×1 convs** — deep pointwise convs (960→160 @7×7) were running at ~1–2% of
   GPU peak from too few threads; splitting the channel reduction filled the GPU. MobileNetV2 best
   case 14.7→10.1 ms.
 - **Fuse residual Add + post-residual Relu into the 1×1 conv epilogue** (ResNet: 58→52.4 ms; the
   Add(4.5ms)+Relu(2.9ms) ops disappear entirely).
+- **Two correctness fixes** found while optimizing: the workgroup autotune was dispatching onto the
+  live activation buffers and intermittently corrupting cold runs (most visible on Inception); and
+  the prepacked-weight cache wasn't namespaced per model, so reusing one cacheDir across models
+  returned the wrong weights. Both fixed + verified.
+- **Ergonomic API**: `infer(data)` / `run(vector<vector<float>>)` + `inputInfo()`/`outputInfo()` —
+  tensor names/shapes/dtypes come from the model; only precision stays in the config.
 - **Broader op coverage** (toward MNN's set): generic Unary (Sigmoid/Tanh/HardSwish/HardSigmoid/
   LeakyRelu/Elu/Abs/Exp/Sqrt/…) and Binary (Mul/Sub/Div/Max/Min/Pow incl. Squeeze-Excite broadcast)
   families, windowed AveragePool, and NC4HW4 channel Concat on the GPU — SqueezeNet now runs fully
