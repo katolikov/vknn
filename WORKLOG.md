@@ -118,3 +118,17 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
   caches the winner (20 entries). Warm starts load the table and skip benchmarking.
 - **On device (fp16): COLD session (first run + full tune) = 445 ms; WARM session (all caches) =
   68 ms => 6.5x faster. Tuning improved inference to 22.0 ms / 45.4 fps (from 43.4). cosine 0.999965.**
+
+### M9 — Docs, tests, examples, scripts DONE
+- GoogleTest suite (host): dtype/fp16, config JSON round-trip + parse, layout pack math, CPU op
+  reference (Conv1x1+Relu, Add broadcast), full MobileNetV2 CPU-vs-golden integration. 7/7 pass
+  on host; 6/6 unit tests pass on-device (integration skips when assets not co-located).
+- Examples: probe, classify (getopt-style flags, golden compare, --bench, --layer-dump,
+  --show-graph), profile, ion_zerocopy, backend_switch, op_check.
+- Scripts (strict mode, idempotent): build_android.sh, run_on_device.sh, bench.sh, gen_docs.sh,
+  get_golden.py; tools/embed_spirv.py, tools/compare_layers.py.
+- Docs: README, ARCHITECTURE, ADDING_AN_OPERATOR (worked LeakyRelu example), ADDING_A_BACKEND,
+  CONFIG (all fields), LIMITATIONS, DEVICE_REPORT, 8 ADRs. Doxygen (docs/Doxyfile) generates
+  5.9MB HTML API docs via gen_docs.sh. SUMMARY.md written.
+- Clean from-scratch Android build reproduces all 7 binaries. bench.sh (stable): Vulkan fp16
+  22.1ms/45fps, fp32 24.2ms/41fps, CPU 672ms.

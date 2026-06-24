@@ -8,3 +8,5 @@ assets/*.npy
 device_out/
 __pycache__/
 .venv/
+third_party/googletest/
+docs/api/

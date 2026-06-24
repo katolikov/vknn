@@ -4,8 +4,9 @@
 //   GPU compute (add) reads the ION buffer directly (no staging) -> verify vs CPU.
 // Mode B (user-supplied fd): wrap an existing dma-buf fd -> import -> verify.
 // Both are validated against the staged (regular VkBuffer + upload) path.
-#include <cmath>
 #include <cstdio>
+#if defined(VXRT_ENABLE_VULKAN)
+#include <cmath>
 #include <unistd.h>
 #include <vector>
 #include "vx/ion.h"
@@ -95,3 +96,6 @@ int main() {
   printf("== ION zero-copy demo %s ==\n", importedOk ? "OK" : "(import unsupported; see LIMITATIONS.md)");
   return 0;
 }
+#else
+int main() { printf("vx_ion_zerocopy: built without Vulkan (Android-only feature)\n"); return 0; }
+#endif
