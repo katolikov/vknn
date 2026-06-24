@@ -36,3 +36,15 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - `add.comp` (elementwise add) compiled by glslc, embedded, run on device:
   **GPU add == CPU add, maxAbsErr = 0.0**, pipeline cache written (1012 B) and reused on run 2.
 - ADRs 0001-0005,0007 recorded.
+
+### M2 — DONE (verified on device)
+- Core IR (Tensor/TensorDesc/RtTensor, Graph, Node, Attributes), Config (+JSON parser),
+  Profiler, Backend abstraction + registry, CPU op registry. Segment-based execution model
+  (maximal same-backend runs; boundary residency reconciliation) designed for Vulkan + fallback.
+- **Dependency-free ONNX importer** (hand-rolled protobuf wire parser) — no protobuf lib.
+- CPU reference ops: Conv (general/depthwise/pointwise), Gemm, Clip, Relu, Add(broadcast),
+  GlobalAveragePool, Softmax, BatchNorm, Identity, Reshape, Flatten, Shape, Constant, Gather,
+  Unsqueeze, Concat. MobileNetV2 classifier preamble runs directly (no const-fold needed on CPU).
+- Golden: onnxruntime on cat/dog image -> top-1 class 258 (Samoyed), 105 per-layer dumps.
+- **MobileNetV2 CPU on device: cosine=1.000000, maxAbsErr=1.62e-05, top-1 258==258 PASS.**
+  Host build identical. Session create ~12 ms on device.

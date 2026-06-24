@@ -121,7 +121,9 @@ if(VXRT_BUILD_EXAMPLES)
   foreach(ex probe classify profile ion_zerocopy backend_switch op_check)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vx_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
-      target_link_libraries(vx_${ex} PRIVATE vxrt)
+      # whole-archive so self-registering backends/operators (static initializers in the
+      # static lib) are retained even though no symbol references them directly.
+      target_link_libraries(vx_${ex} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vxrt>")
     endif()
   endforeach()
 endif()
@@ -133,5 +135,5 @@ if(VXRT_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletes
   add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
   file(GLOB VXRT_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
   add_executable(vx_tests ${VXRT_TEST_SRC})
-  target_link_libraries(vx_tests PRIVATE vxrt gtest gtest_main)
+  target_link_libraries(vx_tests PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vxrt>" gtest gtest_main)
 endif()
