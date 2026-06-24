@@ -109,3 +109,12 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
   supports()=false). Documented in ADR-0007 + LIMITATIONS.md.
 - **On device (vx_backend_switch): VULKAN -> 65 nodes Vulkan; CPU -> 65 nodes CPU;
   ENN -> consulted first, falls back to Vulkan for all 65; all three give top-1 258.**
+
+### M8 — Caches & tuning DONE (verified on device)
+- Pipeline cache (VkPipelineCache, disk) saved in Backend::finalize(); prepacked-weights cache
+  (106 entries, content-keyed) skips repack on warm; planned graph reused within process.
+- Real MNN-style autotuner: conv shaders use spec-constant local_size_x; ConvVulkanOp benchmarks
+  candidate workgroup sizes {64,128,256} (or {32,64,128,256} thorough) per op-signature on-device,
+  caches the winner (20 entries). Warm starts load the table and skip benchmarking.
+- **On device (fp16): COLD session (first run + full tune) = 445 ms; WARM session (all caches) =
+  68 ms => 6.5x faster. Tuning improved inference to 22.0 ms / 45.4 fps (from 43.4). cosine 0.999965.**

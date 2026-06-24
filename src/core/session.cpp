@@ -149,6 +149,7 @@ void Session::plan() {
       seg->isFallback = true;
     segments_.push_back(std::move(seg));
   }
+  for (auto& b : backends_) b->finalize();  // flush pipeline/weight/tuning caches
   planned_ = true;
   VX_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size()
           << " nodes";

@@ -15,6 +15,73 @@ VkOpRegistry& VkOpRegistry::instance() {
   return r;
 }
 
+// ============================ WeightCache ============================
+// Binary format: [u32 nWeights]{[u32 klen][key][u32 nfloats][floats]} [u32 nTune]{[u32 klen][key][i32 val]}
+void WeightCache::load(const std::string& path) {
+  path_ = path;
+  FILE* f = fopen(path.c_str(), "rb");
+  if (!f) return;
+  auto rd32 = [&](uint32_t& v) { return fread(&v, 4, 1, f) == 1; };
+  uint32_t nw = 0;
+  if (rd32(nw)) {
+    for (uint32_t i = 0; i < nw; ++i) {
+      uint32_t kl = 0, nf = 0;
+      if (!rd32(kl)) break;
+      std::string k(kl, 0); fread(&k[0], 1, kl, f);
+      if (!rd32(nf)) break;
+      std::vector<float> d(nf); fread(d.data(), 4, nf, f);
+      weights_[k] = std::move(d);
+    }
+    uint32_t nt = 0;
+    if (rd32(nt))
+      for (uint32_t i = 0; i < nt; ++i) {
+        uint32_t kl = 0; int32_t val = 0;
+        if (!rd32(kl)) break;
+        std::string k(kl, 0); fread(&k[0], 1, kl, f);
+        fread(&val, 4, 1, f);
+        tune_[k] = val;
+      }
+  }
+  fclose(f);
+  VX_INFO << "WeightCache: loaded " << weights_.size() << " prepacked weights, " << tune_.size()
+          << " tuning entries from " << path;
+}
+void WeightCache::save() const {
+  if (path_.empty() || !dirty_) return;
+  FILE* f = fopen(path_.c_str(), "wb");
+  if (!f) { VX_WARN << "WeightCache: cannot write " << path_; return; }
+  auto wr32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
+  wr32((uint32_t)weights_.size());
+  for (auto& kv : weights_) {
+    wr32((uint32_t)kv.first.size()); fwrite(kv.first.data(), 1, kv.first.size(), f);
+    wr32((uint32_t)kv.second.size()); fwrite(kv.second.data(), 4, kv.second.size(), f);
+  }
+  wr32((uint32_t)tune_.size());
+  for (auto& kv : tune_) {
+    wr32((uint32_t)kv.first.size()); fwrite(kv.first.data(), 1, kv.first.size(), f);
+    int32_t v = kv.second; fwrite(&v, 4, 1, f);
+  }
+  fclose(f);
+  dirty_ = false;
+  VX_INFO << "WeightCache: saved " << weights_.size() << " weights + " << tune_.size()
+          << " tuning entries -> " << path_;
+}
+bool WeightCache::get(const std::string& key, std::vector<float>& out) const {
+  auto it = weights_.find(key);
+  if (it == weights_.end()) return false;
+  out = it->second;
+  return true;
+}
+void WeightCache::put(const std::string& key, const std::vector<float>& data) {
+  weights_[key] = data;
+  dirty_ = true;
+}
+int WeightCache::tuned(const std::string& sig, int dflt) const {
+  auto it = tune_.find(sig);
+  return it == tune_.end() ? dflt : it->second;
+}
+void WeightCache::setTuned(const std::string& sig, int val) { tune_[sig] = val; dirty_ = true; }
+
 // ============================ VulkanBackend ============================
 class VulkanBackend : public Backend {
  public:
@@ -45,7 +112,15 @@ class VulkanBackend : public Backend {
     }
     return cache_.get();
   }
-  void saveCaches() { if (cache_) cache_->save(); }
+  WeightCache* weightCache(const Config& cfg) {
+    if (!wcache_) {
+      wcache_ = std::make_unique<WeightCache>();
+      if (cfg.cacheWeights) wcache_->load(cfg.cacheDir + "/weights.bin");
+      else wcache_->load("");  // disabled (no path)
+    }
+    return wcache_.get();
+  }
+  void saveCaches() { if (cache_) cache_->save(); if (wcache_) wcache_->save(); }
 
   bool useFp16(const Config& cfg) const {
     // fp16 device path requires the fp16 shader variants (registered when present).
@@ -56,6 +131,7 @@ class VulkanBackend : public Backend {
 
   std::unique_ptr<Segment> compileSegment(const std::vector<int>& idx, Graph& g,
                                           const Config& cfg) override;
+  void finalize() override { saveCaches(); }
 
   // ---- host NCHW fp32  <->  device NC4HW4 (fp32 path; fp16 device buffers handled here) ----
   static void packToBuffer(vk::Buffer* buf, const RtTensor& rt, bool fp16) {
@@ -123,6 +199,7 @@ class VulkanBackend : public Backend {
   std::unique_ptr<vk::VulkanContext> ctx_;
   std::unique_ptr<vk::CommandRunner> runner_;
   std::unique_ptr<vk::PipelineCache> cache_;
+  std::unique_ptr<WeightCache> wcache_;
 };
 
 // ============================ VulkanSegment ============================
@@ -153,6 +230,9 @@ class VulkanSegment : public Segment {
     env_.backend = be_;
     env_.ctx = &be_->ctx();
     env_.cache = be_->pipelineCache(cfg);
+    env_.weights = be_->weightCache(cfg);
+    env_.runner = &be_->runner();
+    env_.tuning = cfg.tuning;
     env_.graph = &g;
     env_.config = &cfg;
     env_.useFp16 = useFp16_;

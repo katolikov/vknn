@@ -17,6 +17,26 @@ struct DeviceStorage {
   std::shared_ptr<vk::Buffer> buffer;
 };
 
+/// Disk cache of prepacked weights (keyed by op+role+shape) and autotuned workgroup sizes.
+/// Skips the host repacking work on warm session creation. Format is a simple length-prefixed
+/// blob written/read atomically.
+class WeightCache {
+ public:
+  void load(const std::string& path);
+  void save() const;
+  bool enabled() const { return !path_.empty(); }
+  bool get(const std::string& key, std::vector<float>& out) const;
+  void put(const std::string& key, const std::vector<float>& data);
+  // autotune table: op-signature -> chosen local_size_x
+  int tuned(const std::string& sig, int dflt) const;
+  void setTuned(const std::string& sig, int val);
+ private:
+  std::string path_;
+  std::map<std::string, std::vector<float>> weights_;
+  std::map<std::string, int> tune_;
+  mutable bool dirty_ = false;
+};
+
 class VulkanBackend;
 
 /// Environment passed to Vulkan operators during prepare/record.
@@ -28,6 +48,9 @@ struct VkOpEnv {
   const Config* config = nullptr;
   std::function<vk::Buffer*(TensorId)> devBuf;  // activation buffer for a tensor id
   bool useFp16 = false;
+  WeightCache* weights = nullptr;               // prepacked-weight + tuning cache (may be null)
+  vk::CommandRunner* runner = nullptr;          // for on-device autotuning benchmarks
+  TuningLevel tuning = TuningLevel::kFast;
 };
 
 /// One operator on the Vulkan backend. Adding an op: subclass + VX_REGISTER_VK_OP.

@@ -50,6 +50,18 @@ static std::string sv(const char* base, bool fp16) {
   return fp16 ? std::string(base) + "_fp16" : std::string(base);
 }
 
+// Upload prepacked weights, using the on-disk weight cache to skip the repack on warm starts.
+// `compute` is only invoked on a cache miss.
+template <typename F>
+static std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string& key, F compute) {
+  std::vector<float> v;
+  if (!(env.weights && env.weights->get(key, v))) {
+    v = compute();
+    if (env.weights) env.weights->put(key, v);
+  }
+  return uploadWeights(*env.ctx, v, env.useFp16);
+}
+
 // ============================ Conv (general + depthwise) ============================
 struct ConvVulkanOp : VulkanOp {
   bool depthwise = false;
@@ -58,6 +70,44 @@ struct ConvVulkanOp : VulkanOp {
   ConvPC pc{};
   DwPC dpc{};
   int64_t total = 0;
+  uint32_t localSize = 64;
+
+  // Autotune the general-conv workgroup size for this op's signature: benchmark a few
+  // candidates on-device once, cache the winner (MNN-style). Cached on warm starts.
+  uint32_t tuneLocalSize(const Node& node, VkOpEnv& env, vk::Buffer* src, vk::Buffer* dst) {
+    char sigbuf[96];
+    snprintf(sigbuf, sizeof(sigbuf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W,
+             pc.Cout, pc.OH, pc.OW, pc.KH, pc.SH);
+    std::string sig = sigbuf;
+    if (env.weights) {
+      int cached = env.weights->tuned(sig, 0);
+      if (cached > 0) return (uint32_t)cached;
+    }
+    uint32_t best = 64;
+    if (env.tuning != TuningLevel::kOff && env.runner) {
+      const std::vector<uint32_t> cands =
+          (env.tuning == TuningLevel::kThorough) ? std::vector<uint32_t>{32, 64, 128, 256}
+                                                 : std::vector<uint32_t>{64, 128, 256};
+      double bestMs = 1e30;
+      for (uint32_t ls : cands) {
+        vk::ComputePipeline p(*env.ctx, sv("conv", env.useFp16), 4, sizeof(ConvPC),
+                              {ls}, env.cache->handle());
+        uint32_t groups = (uint32_t)((total + ls - 1) / ls);
+        VkCommandBuffer cmd = env.runner->allocate();
+        env.runner->begin(cmd);
+        for (int rep = 0; rep < 8; ++rep)
+          p.dispatch(cmd, {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()}, &pc,
+                     sizeof(pc), groups);
+        env.runner->end(cmd);
+        double ms = env.runner->submitAndWait(cmd);
+        vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
+        if (ms < bestMs) { bestMs = ms; best = ls; }
+      }
+      VX_DEBUG << "autotune " << sig << " -> local_size_x=" << best;
+    }
+    if (env.weights) env.weights->setTuned(sig, (int)best);
+    return best;
+  }
 
   void prepare(const Node& node, VkOpEnv& env) override {
     const Graph& g = *env.graph;
@@ -75,24 +125,28 @@ struct ConvVulkanOp : VulkanOp {
     const float* wsrc = g.initializers.at(wid).f32();
     // bias (optional) -> padded to multiple of 4
     int64_t Coutb = cBlocks(Cout);
-    std::vector<float> bias(Coutb * 4, 0.f);
-    if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
-      const float* bsrc = g.initializers.at(node.inputs[2]).f32();
-      for (int64_t i = 0; i < Cout; ++i) bias[i] = bsrc[i];
-    }
-    bbuf = uploadWeights(*env.ctx, bias, env.useFp16);
+    bbuf = uploadCached(env, node.name + "#b", [&] {
+      std::vector<float> bias(Coutb * 4, 0.f);
+      if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
+        const float* bsrc = g.initializers.at(node.inputs[2]).f32();
+        for (int64_t i = 0; i < Cout; ++i) bias[i] = bsrc[i];
+      }
+      return bias;
+    });
 
     if (depthwise) {
       // weight [C,1,KH,KW] -> [Cb][KH][KW][4]
       int64_t Cb = cBlocks(x.c);
-      std::vector<float> wp(Cb * KH * KW * 4, 0.f);
-      for (int64_t c = 0; c < x.c; ++c) {
-        int64_t cb = c / 4, l = c % 4;
-        for (int64_t ky = 0; ky < KH; ++ky)
-          for (int64_t kx = 0; kx < KW; ++kx)
-            wp[(((cb * KH + ky) * KW + kx) * 4) + l] = wsrc[((c * KH + ky) * KW + kx)];
-      }
-      wbuf = uploadWeights(*env.ctx, wp, env.useFp16);
+      wbuf = uploadCached(env, node.name + "#w", [&] {
+        std::vector<float> wp(Cb * KH * KW * 4, 0.f);
+        for (int64_t c = 0; c < x.c; ++c) {
+          int64_t cb = c / 4, l = c % 4;
+          for (int64_t ky = 0; ky < KH; ++ky)
+            for (int64_t kx = 0; kx < KW; ++kx)
+              wp[(((cb * KH + ky) * KW + kx) * 4) + l] = wsrc[((c * KH + ky) * KW + kx)];
+        }
+        return wp;
+      });
       dpc = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)KH, (int)KW,
              (int)st[0], (int)st[1], (int)pad[0], (int)pad[1], (int)dil[0], (int)dil[1],
              (int)node.fusedAct, 0, node.actLo, node.actHi};
@@ -102,22 +156,26 @@ struct ConvVulkanOp : VulkanOp {
     } else {
       // general group=1: weight [Cout,Cin,KH,KW] -> [Cout][Cinb][KH][KW][4]
       int64_t Cinb = cBlocks(x.c);
-      std::vector<float> wp((size_t)Cout * Cinb * KH * KW * 4, 0.f);
-      for (int64_t oc = 0; oc < Cout; ++oc)
-        for (int64_t ic = 0; ic < x.c; ++ic) {
-          int64_t icb = ic / 4, l = ic % 4;
-          for (int64_t ky = 0; ky < KH; ++ky)
-            for (int64_t kx = 0; kx < KW; ++kx)
-              wp[(((((oc * Cinb + icb) * KH + ky) * KW + kx) * 4) + l)] =
-                  wsrc[(((oc * x.c + ic) * KH + ky) * KW + kx)];
-        }
-      wbuf = uploadWeights(*env.ctx, wp, env.useFp16);
       pc = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)Cout, (int)y.h, (int)y.w, (int)KH,
             (int)KW, (int)st[0], (int)st[1], (int)pad[0], (int)pad[1], (int)dil[0], (int)dil[1],
             (int)node.fusedAct, node.actLo, node.actHi};
       total = x.n * Coutb * y.h * y.w;
-      pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("conv", env.useFp16).c_str(), 4, sizeof(ConvPC),
-                                                   std::vector<uint32_t>{}, env.cache->handle());
+      wbuf = uploadCached(env, node.name + "#w", [&] {
+        std::vector<float> wp((size_t)Cout * Cinb * KH * KW * 4, 0.f);
+        for (int64_t oc = 0; oc < Cout; ++oc)
+          for (int64_t ic = 0; ic < x.c; ++ic) {
+            int64_t icb = ic / 4, l = ic % 4;
+            for (int64_t ky = 0; ky < KH; ++ky)
+              for (int64_t kx = 0; kx < KW; ++kx)
+                wp[(((((oc * Cinb + icb) * KH + ky) * KW + kx) * 4) + l)] =
+                    wsrc[(((oc * x.c + ic) * KH + ky) * KW + kx)];
+          }
+        return wp;
+      });
+      localSize = tuneLocalSize(node, env, env.devBuf(node.inputs[0]), env.devBuf(node.outputs[0]));
+      pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("conv", env.useFp16), 4,
+                                                   sizeof(ConvPC), std::vector<uint32_t>{localSize},
+                                                   env.cache->handle());
     }
   }
 
@@ -128,7 +186,7 @@ struct ConvVulkanOp : VulkanOp {
     if (depthwise)
       pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups64(total));
     else
-      pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups64(total));
+      pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t)((total + localSize - 1) / localSize));
   }
 };
 
@@ -184,17 +242,21 @@ struct GemmVulkanOp : VulkanOp {
     if (transB) { CoutL = ws[0]; Cin = ws[1]; } else { Cin = ws[0]; CoutL = ws[1]; }
     Cout = CoutL;
     const float* wsrc = g.initializers.at(node.inputs[1]).f32();
-    std::vector<float> wp((size_t)CoutL * Cin);
-    for (int64_t oc = 0; oc < CoutL; ++oc)
-      for (int64_t ic = 0; ic < Cin; ++ic)
-        wp[oc * Cin + ic] = transB ? wsrc[oc * Cin + ic] : wsrc[ic * CoutL + oc];
-    wbuf = uploadWeights(*env.ctx, wp, env.useFp16);
-    std::vector<float> bias(CoutL, 0.f);
-    if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
-      const float* bsrc = g.initializers.at(node.inputs[2]).f32();
-      for (int64_t i = 0; i < CoutL; ++i) bias[i] = bsrc[i];
-    }
-    bbuf = uploadWeights(*env.ctx, bias, env.useFp16);
+    wbuf = uploadCached(env, node.name + "#w", [&] {
+      std::vector<float> wp((size_t)CoutL * Cin);
+      for (int64_t oc = 0; oc < CoutL; ++oc)
+        for (int64_t ic = 0; ic < Cin; ++ic)
+          wp[oc * Cin + ic] = transB ? wsrc[oc * Cin + ic] : wsrc[ic * CoutL + oc];
+      return wp;
+    });
+    bbuf = uploadCached(env, node.name + "#b", [&] {
+      std::vector<float> bias(CoutL, 0.f);
+      if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
+        const float* bsrc = g.initializers.at(node.inputs[2]).f32();
+        for (int64_t i = 0; i < CoutL; ++i) bias[i] = bsrc[i];
+      }
+      return bias;
+    });
     pc = {(int)Cin, (int)CoutL, (int)node.fusedAct, node.actLo, node.actHi};
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("fc", env.useFp16).c_str(), 4, sizeof(FcPC),
                                                  std::vector<uint32_t>{}, env.cache->handle());

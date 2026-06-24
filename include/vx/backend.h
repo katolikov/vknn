@@ -49,6 +49,9 @@ class Backend {
   /// Compile a contiguous run of nodes (indices into graph.nodes) into a Segment.
   virtual std::unique_ptr<Segment> compileSegment(const std::vector<int>& nodeIdx,
                                                   Graph& g, const Config& cfg) = 0;
+
+  /// Called once after all segments are compiled (flush pipeline/weight/tuning caches to disk).
+  virtual void finalize() {}
 };
 
 /// An executable run of nodes belonging to one backend.

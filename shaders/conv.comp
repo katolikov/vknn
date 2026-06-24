@@ -4,7 +4,7 @@
 // weight layout: [Cout][Cinb][KH][KW][4]  (lane = input channel within block)
 // bias layout:   [Coutb*4]
 #include "common.glsl"
-layout(local_size_x = 64) in;
+layout(local_size_x_id = 0, local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { float src[]; };
 layout(std430, binding = 1) readonly  buffer Wt  { float wt[]; };
 layout(std430, binding = 2) readonly  buffer Bs  { float bias[]; };
