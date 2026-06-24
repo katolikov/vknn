@@ -47,7 +47,7 @@ cmake_ninja_workdir = /Users/artemkatolikov/DEV/LibTAS/build-android/
 #############################################
 # Order-only phony target for vxrt
 
-build cmake_object_order_depends_target_vxrt: phony || generated/add.spv generated/avgpool.spv generated/conv.spv generated/dwconv.spv generated/fc.spv generated/pack.spv generated/unpack.spv generated/vx_embedded_shaders.cpp
+build cmake_object_order_depends_target_vxrt: phony || generated/add.spv generated/add_fp16.spv generated/avgpool.spv generated/avgpool_fp16.spv generated/conv.spv generated/conv_fp16.spv generated/dwconv.spv generated/dwconv_fp16.spv generated/fc.spv generated/fc_fp16.spv generated/pack.spv generated/unpack.spv generated/vx_embedded_shaders.cpp
 
 build CMakeFiles/vxrt.dir/src/backends/cpu/cpu_backend.cpp.o: CXX_COMPILER__vxrt_unscanned_Release /Users/artemkatolikov/DEV/LibTAS/src/backends/cpu/cpu_backend.cpp || cmake_object_order_depends_target_vxrt
   CONFIG = Release
@@ -388,8 +388,8 @@ build rebuild_cache: phony CMakeFiles/rebuild_cache.util
 #############################################
 # Custom command for generated/vx_embedded_shaders.cpp
 
-build generated/vx_embedded_shaders.cpp | ${cmake_ninja_workdir}generated/vx_embedded_shaders.cpp: CUSTOM_COMMAND generated/add.spv generated/avgpool.spv generated/conv.spv generated/dwconv.spv generated/fc.spv generated/pack.spv generated/unpack.spv /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py
-  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/cmake -E env python3 /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py /Users/artemkatolikov/DEV/LibTAS/build-android/generated/vx_embedded_shaders.cpp /Users/artemkatolikov/DEV/LibTAS/build-android/generated/add.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/avgpool.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/conv.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/dwconv.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/fc.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/pack.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/unpack.spv
+build generated/vx_embedded_shaders.cpp | ${cmake_ninja_workdir}generated/vx_embedded_shaders.cpp: CUSTOM_COMMAND generated/add.spv generated/add_fp16.spv generated/avgpool.spv generated/avgpool_fp16.spv generated/conv.spv generated/conv_fp16.spv generated/dwconv.spv generated/dwconv_fp16.spv generated/fc.spv generated/fc_fp16.spv generated/pack.spv generated/unpack.spv /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/cmake -E env python3 /Users/artemkatolikov/DEV/LibTAS/tools/embed_spirv.py /Users/artemkatolikov/DEV/LibTAS/build-android/generated/vx_embedded_shaders.cpp /Users/artemkatolikov/DEV/LibTAS/build-android/generated/add.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/add_fp16.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/avgpool.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/avgpool_fp16.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/conv.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/conv_fp16.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/dwconv.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/dwconv_fp16.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/fc.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/fc_fp16.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/pack.spv /Users/artemkatolikov/DEV/LibTAS/build-android/generated/unpack.spv
   DESC = Embedding SPIR-V blobs -> vx_embedded_shaders.cpp
   restat = 1
 
@@ -404,11 +404,29 @@ build generated/add.spv | ${cmake_ninja_workdir}generated/add.spv: CUSTOM_COMMAN
 
 
 #############################################
+# Custom command for generated/add_fp16.spv
+
+build generated/add_fp16.spv | ${cmake_ninja_workdir}generated/add_fp16.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/add_fp16.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/add_fp16.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/add_fp16.spv
+  DESC = glslc add_fp16.comp -> add_fp16.spv
+  restat = 1
+
+
+#############################################
 # Custom command for generated/avgpool.spv
 
 build generated/avgpool.spv | ${cmake_ninja_workdir}generated/avgpool.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/avgpool.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
   COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/avgpool.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/avgpool.spv
   DESC = glslc avgpool.comp -> avgpool.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/avgpool_fp16.spv
+
+build generated/avgpool_fp16.spv | ${cmake_ninja_workdir}generated/avgpool_fp16.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/avgpool_fp16.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/avgpool_fp16.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/avgpool_fp16.spv
+  DESC = glslc avgpool_fp16.comp -> avgpool_fp16.spv
   restat = 1
 
 
@@ -422,6 +440,15 @@ build generated/conv.spv | ${cmake_ninja_workdir}generated/conv.spv: CUSTOM_COMM
 
 
 #############################################
+# Custom command for generated/conv_fp16.spv
+
+build generated/conv_fp16.spv | ${cmake_ninja_workdir}generated/conv_fp16.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/conv_fp16.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/conv_fp16.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/conv_fp16.spv
+  DESC = glslc conv_fp16.comp -> conv_fp16.spv
+  restat = 1
+
+
+#############################################
 # Custom command for generated/dwconv.spv
 
 build generated/dwconv.spv | ${cmake_ninja_workdir}generated/dwconv.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/dwconv.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
@@ -431,11 +458,29 @@ build generated/dwconv.spv | ${cmake_ninja_workdir}generated/dwconv.spv: CUSTOM_
 
 
 #############################################
+# Custom command for generated/dwconv_fp16.spv
+
+build generated/dwconv_fp16.spv | ${cmake_ninja_workdir}generated/dwconv_fp16.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/dwconv_fp16.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/dwconv_fp16.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/dwconv_fp16.spv
+  DESC = glslc dwconv_fp16.comp -> dwconv_fp16.spv
+  restat = 1
+
+
+#############################################
 # Custom command for generated/fc.spv
 
 build generated/fc.spv | ${cmake_ninja_workdir}generated/fc.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/fc.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
   COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/fc.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/fc.spv
   DESC = glslc fc.comp -> fc.spv
+  restat = 1
+
+
+#############################################
+# Custom command for generated/fc_fp16.spv
+
+build generated/fc_fp16.spv | ${cmake_ninja_workdir}generated/fc_fp16.spv: CUSTOM_COMMAND /Users/artemkatolikov/DEV/LibTAS/shaders/fc_fp16.comp /Users/artemkatolikov/DEV/LibTAS/shaders/common.glsl
+  COMMAND = cd /Users/artemkatolikov/DEV/LibTAS/build-android && /opt/homebrew/bin/glslc -O --target-env=vulkan1.3 -fshader-stage=compute /Users/artemkatolikov/DEV/LibTAS/shaders/fc_fp16.comp -o /Users/artemkatolikov/DEV/LibTAS/build-android/generated/fc_fp16.spv
+  DESC = glslc fc_fp16.comp -> fc_fp16.spv
   restat = 1
 
 

@@ -3,12 +3,13 @@
 #include <cstring>
 #include <vector>
 #include "vk_backend.h"
+#include "vx/dtype.h"
 #include "vx/logging.h"
 
 namespace vx {
 
-// fp16 shader variants are added separately; off until registered.
-bool vxVulkanFp16Available() { return false; }
+// fp16 shader variants (conv_fp16/dwconv_fp16/avgpool_fp16/fc_fp16/add_fp16) are present.
+bool vxVulkanFp16Available() { return true; }
 
 namespace {
 
@@ -29,13 +30,24 @@ static std::vector<int64_t> ints(const Node& n, const char* k, std::vector<int64
 }
 static uint32_t groups64(int64_t total) { return (uint32_t)((total + 63) / 64); }
 
-// upload a host float vector into a new device buffer
-static std::shared_ptr<vk::Buffer> uploadFloats(vk::VulkanContext& ctx,
-                                                 const std::vector<float>& data) {
+// upload a host float vector into a new device buffer (fp32 or fp16 storage).
+static std::shared_ptr<vk::Buffer> uploadWeights(vk::VulkanContext& ctx,
+                                                 const std::vector<float>& data, bool fp16) {
+  if (fp16) {
+    std::vector<uint16_t> h(data.size());
+    for (size_t i = 0; i < data.size(); ++i) h[i] = floatToHalf(data[i]);
+    auto b = std::make_shared<vk::Buffer>(ctx, std::max<size_t>(h.size(), 4) * 2,
+                                          vk::MemPref::kAuto);
+    b->upload(h.data(), h.size() * 2);
+    return b;
+  }
   auto b = std::make_shared<vk::Buffer>(ctx, std::max<size_t>(data.size(), 4) * 4,
                                         vk::MemPref::kAuto);
   b->upload(data.data(), data.size() * 4);
   return b;
+}
+static std::string sv(const char* base, bool fp16) {
+  return fp16 ? std::string(base) + "_fp16" : std::string(base);
 }
 
 // ============================ Conv (general + depthwise) ============================
@@ -68,7 +80,7 @@ struct ConvVulkanOp : VulkanOp {
       const float* bsrc = g.initializers.at(node.inputs[2]).f32();
       for (int64_t i = 0; i < Cout; ++i) bias[i] = bsrc[i];
     }
-    bbuf = uploadFloats(*env.ctx, bias);
+    bbuf = uploadWeights(*env.ctx, bias, env.useFp16);
 
     if (depthwise) {
       // weight [C,1,KH,KW] -> [Cb][KH][KW][4]
@@ -80,12 +92,12 @@ struct ConvVulkanOp : VulkanOp {
           for (int64_t kx = 0; kx < KW; ++kx)
             wp[(((cb * KH + ky) * KW + kx) * 4) + l] = wsrc[((c * KH + ky) * KW + kx)];
       }
-      wbuf = uploadFloats(*env.ctx, wp);
+      wbuf = uploadWeights(*env.ctx, wp, env.useFp16);
       dpc = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)KH, (int)KW,
              (int)st[0], (int)st[1], (int)pad[0], (int)pad[1], (int)dil[0], (int)dil[1],
              (int)node.fusedAct, 0, node.actLo, node.actHi};
       total = x.n * Cb * y.h * y.w;
-      pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "dwconv", 4, sizeof(DwPC),
+      pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("dwconv", env.useFp16).c_str(), 4, sizeof(DwPC),
                                                    std::vector<uint32_t>{}, env.cache->handle());
     } else {
       // general group=1: weight [Cout,Cin,KH,KW] -> [Cout][Cinb][KH][KW][4]
@@ -99,12 +111,12 @@ struct ConvVulkanOp : VulkanOp {
               wp[(((((oc * Cinb + icb) * KH + ky) * KW + kx) * 4) + l)] =
                   wsrc[(((oc * x.c + ic) * KH + ky) * KW + kx)];
         }
-      wbuf = uploadFloats(*env.ctx, wp);
+      wbuf = uploadWeights(*env.ctx, wp, env.useFp16);
       pc = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)Cout, (int)y.h, (int)y.w, (int)KH,
             (int)KW, (int)st[0], (int)st[1], (int)pad[0], (int)pad[1], (int)dil[0], (int)dil[1],
             (int)node.fusedAct, node.actLo, node.actHi};
       total = x.n * Coutb * y.h * y.w;
-      pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv", 4, sizeof(ConvPC),
+      pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("conv", env.useFp16).c_str(), 4, sizeof(ConvPC),
                                                    std::vector<uint32_t>{}, env.cache->handle());
     }
   }
@@ -126,7 +138,7 @@ struct AddVulkanOp : VulkanOp {
   uint32_t count = 0;
   void prepare(const Node& node, VkOpEnv& env) override {
     count = (uint32_t)packedElems(env.graph->desc(node.outputs[0]).shape);
-    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "add", 3, sizeof(uint32_t),
+    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("add", env.useFp16).c_str(), 3, sizeof(uint32_t),
                                                  std::vector<uint32_t>{}, env.cache->handle());
   }
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
@@ -148,7 +160,7 @@ struct AvgPoolVulkanOp : VulkanOp {
     NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
     pc = {(int)x.n, (int)x.c, (int)x.h, (int)x.w};
     total = x.n * cBlocks(x.c);
-    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "avgpool", 2, sizeof(PoolPC),
+    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("avgpool", env.useFp16).c_str(), 2, sizeof(PoolPC),
                                                  std::vector<uint32_t>{}, env.cache->handle());
   }
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
@@ -176,15 +188,15 @@ struct GemmVulkanOp : VulkanOp {
     for (int64_t oc = 0; oc < CoutL; ++oc)
       for (int64_t ic = 0; ic < Cin; ++ic)
         wp[oc * Cin + ic] = transB ? wsrc[oc * Cin + ic] : wsrc[ic * CoutL + oc];
-    wbuf = uploadFloats(*env.ctx, wp);
+    wbuf = uploadWeights(*env.ctx, wp, env.useFp16);
     std::vector<float> bias(CoutL, 0.f);
     if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
       const float* bsrc = g.initializers.at(node.inputs[2]).f32();
       for (int64_t i = 0; i < CoutL; ++i) bias[i] = bsrc[i];
     }
-    bbuf = uploadFloats(*env.ctx, bias);
+    bbuf = uploadWeights(*env.ctx, bias, env.useFp16);
     pc = {(int)Cin, (int)CoutL, (int)node.fusedAct, node.actLo, node.actHi};
-    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "fc", 4, sizeof(FcPC),
+    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, sv("fc", env.useFp16).c_str(), 4, sizeof(FcPC),
                                                  std::vector<uint32_t>{}, env.cache->handle());
   }
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {

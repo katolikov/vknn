@@ -63,3 +63,10 @@ Timestamped running log of work, device findings, decisions, blockers, workaroun
 - **RESULT on Xclipse 960 GPU: top-5 exact match, cosine=1.000000, maxAbsErr=1.3e-05,
   top-1 258==258 PASS. Latency: median 24.35 ms = 41.1 fps (fp32). CPU ref: 672 ms = 1.5 fps.**
 - Debug tooling: per-layer dump (--layer-dump) + tools/compare_layers.py used to localize bugs.
+
+### M3 — fp16 fast path DONE (verified on device)
+- fp16 shader variants (conv/dwconv/avgpool/fc/add _fp16): fp16 storage + fp32 accumulation,
+  fp16 prepacked weights. Device buffers fp16 (2 bytes/elem). Selected via precision=fp16.
+- **fp16 on Xclipse 960: cosine=0.999965, maxAbsErr=0.08, top-1 258==258 PASS,
+  median 23.05 ms = 43.4 fps.** (fp32 was 24.35 ms; naive kernels are memory-bound so fp16's
+  arithmetic win is modest — tiling/vectorized fp16 loads are future work, logged.)

@@ -1,0 +1,43 @@
+#version 450
+// Depthwise Conv2D (group==channels), NC4HW4, fp16 storage + fp32 accumulation.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { float16_t src[]; };
+layout(std430, binding = 1) readonly  buffer Wt  { float16_t wt[]; };
+layout(std430, binding = 2) readonly  buffer Bs  { float16_t bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { float16_t dst[]; };
+layout(push_constant) uniform PC {
+  int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act, pad0;
+  float actLo, actHi;
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  int Cb = (pc.C + 3) / 4;
+  uint total = uint(pc.N * Cb * pc.OH * pc.OW);
+  if (gid >= total) return;
+  int ox = int(gid) % pc.OW;
+  int oy = (int(gid) / pc.OW) % pc.OH;
+  int cb = (int(gid) / (pc.OW * pc.OH)) % Cb;
+  int n = int(gid) / (pc.OW * pc.OH * Cb);
+
+  vec4 acc = vec4(float(bias[cb*4]), float(bias[cb*4+1]), float(bias[cb*4+2]), float(bias[cb*4+3]));
+  for (int ky = 0; ky < pc.KH; ++ky) {
+    int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+    if (iy < 0 || iy >= pc.H) continue;
+    for (int kx = 0; kx < pc.KW; ++kx) {
+      int ix = ox * pc.SW - pc.PL + kx * pc.DW;
+      if (ix < 0 || ix >= pc.W) continue;
+      int sidx = ((((n * Cb + cb) * pc.H + iy) * pc.W + ix) * 4);
+      vec4 inv = vec4(float(src[sidx]), float(src[sidx+1]), float(src[sidx+2]), float(src[sidx+3]));
+      int widx = (((cb * pc.KH + ky) * pc.KW + kx) * 4);
+      vec4 wv = vec4(float(wt[widx]), float(wt[widx+1]), float(wt[widx+2]), float(wt[widx+3]));
+      acc += inv * wv;
+    }
+  }
+  int didx = ((((n * Cb + cb) * pc.OH + oy) * pc.OW + ox) * 4);
+  for (int l = 0; l < 4; ++l)
+    dst[didx + l] = float16_t(vx_act(acc[l], pc.act, pc.actLo, pc.actHi));
+}
