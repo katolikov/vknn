@@ -30,14 +30,18 @@ Full methodology + raw output: [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
 
 After studying MNN's backend and a focused conv-kernel effort, both Vulkan fp16, same device:
 
-| Model | vxrt | MNN |
+| Model (Vulkan fp16) | vxrt (median) | MNN (avg) |
 |---|---|---|
-| **MobileNetV2** | min **10.1 ms**, median **15.4 ms** | min 10.3–12.8, avg 15.6–16.1 ms |
-| **SqueezeNet 1.1** | min **7.7 ms**, median **12–13.6 ms** | min 10.3–11.4, avg 12.5–13.1 ms |
-| ResNet-50 | min **52.4 ms** | min ~45 ms |
+| **MobileNetV2** | 15.4 ms | 15.6–16.1 ms |
+| **MobileNetV3-Large** | 17.9–18.2 ms | 16.3–18.5 ms |
+| **SqueezeNet 1.1** | 12–13.6 ms | 12.5–13.1 ms |
+| **Inception-v3** | 66–72 ms | 65–67 ms |
+| ResNet-50 | 52.4 ms | ~45 ms |
 
-**vxrt now matches/edges MNN on MobileNetV2 *and* SqueezeNet**; ResNet-50 is the lone laggard,
-bottlenecked on its 3×3 convs. The wins, all measured:
+**vxrt runs five of MNN's benchmark models end-to-end on the GPU and matches/beats MNN-Vulkan on
+four** (MobileNetV2/V3, SqueezeNet tied-or-ahead; Inception tied within ~3%). ResNet-50 is the lone
+laggard, bottlenecked on its symmetric 3×3 convs. All five verified vs onnxruntime (cosine ≥ 0.9990).
+The wins, all measured:
 - **Split-K for deep 1×1 convs** — deep pointwise convs (960→160 @7×7) were running at ~1–2% of
   GPU peak from too few threads; splitting the channel reduction filled the GPU. MobileNetV2 best
   case 14.7→10.1 ms.

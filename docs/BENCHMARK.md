@@ -3,11 +3,21 @@
 ## Latest results (after the conv-kernel work)
 Same device, both Vulkan fp16, alternating runs:
 
-| Model | vxrt | MNN | verdict |
+| Model | vxrt (median) | MNN (avg) | verdict |
 |---|---|---|---|
-| **MobileNetV2** | min **10.1 ms**, median **15.4 ms** | min 10.3–12.8, avg 15.6–16.1 ms | **vxrt ≈ / slightly beats MNN** |
-| **SqueezeNet 1.1** | min **7.7 ms**, median **12–13.6 ms** | min 10.3–11.4, avg 12.5–13.1 ms | **vxrt ≈ / slightly beats MNN** |
-| ResNet-50 | min **52.4 ms** | min ~45–47 ms | MNN ~1.15× faster (3×3-bound) |
+| **MobileNetV2** | 15.4 ms (min 10.1) | 15.6–16.1 ms | **vxrt ≈ / slightly beats** |
+| **MobileNetV3-Large** | 17.9–18.2 ms | 16.3–18.5 ms | **tied** |
+| **SqueezeNet 1.1** | 12–13.6 ms (min 7.7) | 12.5–13.1 ms | **vxrt ≈ / slightly beats** |
+| **Inception-v3** | 66–72 ms | 65–67 ms | tied (~3% behind) |
+| ResNet-50 | 52.4 ms | ~45–47 ms | MNN ~1.15× (3×3-bound) |
+
+vxrt now runs **five** of MNN's benchmark models end-to-end on the GPU and is **competitive with or
+beats MNN-Vulkan on four of them**; ResNet-50 is the lone laggard, bottlenecked entirely on its
+symmetric 3×3 convs (Inception is also conv-heavy but stays tied because its many 1×1/asymmetric
+convs hit the split-K + register-tiled paths). All five verified vs onnxruntime (cosine ≥ 0.9990,
+top-1 match). MobileNetV3 + Inception-v3 became runnable once the op set was broadened (Unary/Binary
+families incl. either-operand channel-broadcast Mul for Squeeze-Excite, windowed AvgPool, NC4HW4
+channel Concat).
 
 vxrt now matches or beats MNN-Vulkan on **MobileNetV2 and SqueezeNet**; ResNet-50 is the lone
 laggard, bottlenecked entirely on its 3×3 convs (see the Winograd note below). The residual Add and
