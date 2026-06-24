@@ -28,23 +28,26 @@ Full probe in [`docs/DEVICE_REPORT.md`](docs/DEVICE_REPORT.md).
 Benchmarked against Alibaba's **MNN** (production engine) on the same phone, both fastest config.
 Full methodology + raw output: [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
 
-After a Vulkan optimization pass (f16vec4 vectorized kernels, register-tiled 1×1 conv, NEON fp16
-pack, lighter barriers), vxrt went from ~22 ms to **near-parity** with MNN:
+After studying MNN's backend and a focused conv-kernel effort, both Vulkan fp16, same device:
 
-| Metric (Vulkan, fp16) | vxrt | MNN |
+| Model | vxrt | MNN |
 |---|---|---|
-| GPU kernel span (cool, stable) | **~7.0 ms** | — |
-| Cold single inference (full, incl. I/O) | **~10 ms** | ~9.5 ms |
-| Sustained / throttled bench | ~17–20 ms | ~14 ms |
+| **MobileNetV2** | min **10.1 ms**, median **15.4 ms** | min 10.3–12.8, avg 15.6–16.1 ms |
+| ResNet-50 | min 56 ms | min ~45 ms |
 
-**Honest:** the gap closed from ~1.5–3× to ~1.0–1.3×. vxrt's *kernels* (7 ms) are now competitive
-with MNN's full run, and cold single-shot is near-tied. **MNN still edges ahead under sustained
-load** — its kernels move less memory, so the SoC throttles less. We did not definitively beat it;
-the path to pulling ahead (shared-memory/subgroup GEMM on the big 1×1 convs, depthwise+pointwise
-fusion, texture-backed activations) is in [`docs/BENCHMARK.md`](docs/BENCHMARK.md). Correctness was
-preserved throughout (fp16 cosine 0.999965). (MNN's *optimized CPU* backend does this model in
-~2.7 ms — at MobileNet scale GPU dispatch overhead dominates; vxrt's CPU backend is a scalar oracle,
-not a fair CPU-vs-CPU contender.)
+**vxrt now matches/edges MNN on MobileNetV2** (median 15.4 vs MNN avg ~16). The wins, all measured:
+- **Split-K for deep 1×1 convs** — deep pointwise convs (960→160 @7×7) were running at ~1–2% of
+  GPU peak from too few threads; splitting the channel reduction filled the GPU. MobileNetV2 best
+  case 14.7→10.1 ms.
+- **Fuse post-residual Relu into Add** (ResNet: 58→55.8 ms).
+- f16vec4 vectorized kernels, register-tiled 1×1, NEON fp16 pack.
+
+A key analysis finding (`docs/MNN_ANALYSIS.md`): MNN defaults to a **VkImage** backend, but a
+microbenchmark proved **images are ~2× *slower* than SSBO on this Xclipse/SPAL driver** — so an
+image backend would hurt, not help. MNN's edge is kernel quality, not storage type. ResNet's
+remaining gap is its 3×3 convs (bandwidth-bound; Winograd is implemented + correct but not yet
+faster — the production fused-LDS version is the open work). Correctness preserved throughout
+(MobileNetV2 cosine 0.999958, ResNet 1.000000).
 
 ## Milestones (all green, committed)
 - **M0** project skeleton + Vulkan probe — capabilities read on-device match `vkjson`.

@@ -1,5 +1,25 @@
 # vxrt vs MNN — Vulkan, on-device benchmark
 
+## Latest results (after the conv-kernel work)
+Same device, both Vulkan fp16, alternating runs:
+
+| Model | vxrt | MNN | verdict |
+|---|---|---|---|
+| **MobileNetV2** | min **10.1 ms**, median **15.4 ms** | min 10.3–12.8, avg 15.6–16.1 ms | **vxrt ≈ / slightly beats MNN** |
+| ResNet-50 | min 56.0 ms | min ~45–47 ms | MNN ~1.2× faster (3×3-bound) |
+
+What got us there (all measured, kept only if they helped):
+- **Split-K for deep 1×1 convs** — the big one. The deep pointwise convs (e.g. 960→160 @7×7) had
+  only ~520 threads (1–2% of GPU peak); splitting the channel reduction across KPARTS thread-groups
+  (partial pass + reduce pass) filled the GPU. MobileNetV2 min **14.7→10.1 ms** → now at/above MNN.
+- **Fuse post-residual Relu into Add** — ResNet has 16 residual+relu pairs over large tensors
+  (Relu was 2.9 ms); folding it into the Add saved ~2.5 ms (58→55.8 ms).
+- f16vec4 vectorization, register-tiled 1×1, NEON pack (earlier).
+
+ResNet's remaining gap is its **3×3 convs** (43 ms of 52 ms): they're well-parallelized (so
+split-K doesn't help) but bandwidth-heavy, and our register-tiling regresses there. That's the
+Winograd/​im2col-GEMM case — implemented Winograd is correct but not yet faster (see below).
+
 ## Which models MNN benchmarks
 MNN's own benchmark suite (`benchmark/models/` in the MNN repo) ships: **MobileNetV1, MobileNetV2,
 SqueezeNet v1.0/v1.1, ResNet-v2-50, Inception-v3, MobileNetV3, NASNet**. We compare on the subset
