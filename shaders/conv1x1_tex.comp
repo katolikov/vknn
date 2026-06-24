@@ -1,0 +1,65 @@
+#version 450
+// Same c8w4 1x1 conv, but inputs are SAMPLED images read via texelFetch(sampler2D) - the path
+// that actually uses the GPU texture cache (unlike imageLoad on a storage image). This is what
+// MNN does. Output is a storage image. Lets us measure the true texture-cache effect.
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D uInput;          // [W*Cinb, H]  texel(w+icb*W, h)
+layout(binding = 1) uniform sampler2D uKernel;         // [Cin, Coutb] texel(ic, ocb)
+layout(binding = 2, rgba16f) uniform writeonly image2D uOutput;
+layout(push_constant) uniform PC { int W, H, Cin, Cout; } pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int W4 = (pc.W + 3) / 4;
+  int C8 = (Coutb + 1) / 2;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(C8 * W4 * pc.H)) return;
+  int w4 = int(gid) % W4;
+  int oh = (int(gid) / W4) % pc.H;
+  int c8 = int(gid) / (W4 * pc.H);
+  int ow0 = w4 * 4, oc0 = c8 * 2, oc1 = oc0 + 1;
+  bool hasC1 = oc1 < Coutb;
+
+  vec4 r0c0 = vec4(0), r1c0 = vec4(0), r2c0 = vec4(0), r3c0 = vec4(0);
+  vec4 r0c1 = vec4(0), r1c1 = vec4(0), r2c1 = vec4(0), r3c1 = vec4(0);
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int xb = icb * pc.W;
+    vec4 i0 = texelFetch(uInput, ivec2(ow0 + xb, oh), 0);
+    vec4 i1 = (ow0 + 1 < pc.W) ? texelFetch(uInput, ivec2(ow0 + 1 + xb, oh), 0) : vec4(0);
+    vec4 i2 = (ow0 + 2 < pc.W) ? texelFetch(uInput, ivec2(ow0 + 2 + xb, oh), 0) : vec4(0);
+    vec4 i3 = (ow0 + 3 < pc.W) ? texelFetch(uInput, ivec2(ow0 + 3 + xb, oh), 0) : vec4(0);
+    int kx = icb * 4;
+    vec4 w0c0 = texelFetch(uKernel, ivec2(kx + 0, oc0), 0);
+    vec4 w1c0 = texelFetch(uKernel, ivec2(kx + 1, oc0), 0);
+    vec4 w2c0 = texelFetch(uKernel, ivec2(kx + 2, oc0), 0);
+    vec4 w3c0 = texelFetch(uKernel, ivec2(kx + 3, oc0), 0);
+    r0c0 += i0.x * w0c0 + i0.y * w1c0 + i0.z * w2c0 + i0.w * w3c0;
+    r1c0 += i1.x * w0c0 + i1.y * w1c0 + i1.z * w2c0 + i1.w * w3c0;
+    r2c0 += i2.x * w0c0 + i2.y * w1c0 + i2.z * w2c0 + i2.w * w3c0;
+    r3c0 += i3.x * w0c0 + i3.y * w1c0 + i3.z * w2c0 + i3.w * w3c0;
+    if (hasC1) {
+      vec4 w0c1 = texelFetch(uKernel, ivec2(kx + 0, oc1), 0);
+      vec4 w1c1 = texelFetch(uKernel, ivec2(kx + 1, oc1), 0);
+      vec4 w2c1 = texelFetch(uKernel, ivec2(kx + 2, oc1), 0);
+      vec4 w3c1 = texelFetch(uKernel, ivec2(kx + 3, oc1), 0);
+      r0c1 += i0.x * w0c1 + i0.y * w1c1 + i0.z * w2c1 + i0.w * w3c1;
+      r1c1 += i1.x * w0c1 + i1.y * w1c1 + i1.z * w2c1 + i1.w * w3c1;
+      r2c1 += i2.x * w0c1 + i2.y * w1c1 + i2.z * w2c1 + i2.w * w3c1;
+      r3c1 += i3.x * w0c1 + i3.y * w1c1 + i3.z * w2c1 + i3.w * w3c1;
+    }
+  }
+  int xo0 = oc0 * pc.W;
+  imageStore(uOutput, ivec2(ow0 + xo0, oh), r0c0);
+  if (ow0 + 1 < pc.W) imageStore(uOutput, ivec2(ow0 + 1 + xo0, oh), r1c0);
+  if (ow0 + 2 < pc.W) imageStore(uOutput, ivec2(ow0 + 2 + xo0, oh), r2c0);
+  if (ow0 + 3 < pc.W) imageStore(uOutput, ivec2(ow0 + 3 + xo0, oh), r3c0);
+  if (hasC1) {
+    int xo1 = oc1 * pc.W;
+    imageStore(uOutput, ivec2(ow0 + xo1, oh), r0c1);
+    if (ow0 + 1 < pc.W) imageStore(uOutput, ivec2(ow0 + 1 + xo1, oh), r1c1);
+    if (ow0 + 2 < pc.W) imageStore(uOutput, ivec2(ow0 + 2 + xo1, oh), r2c1);
+    if (ow0 + 3 < pc.W) imageStore(uOutput, ivec2(ow0 + 3 + xo1, oh), r3c1);
+  }
+}
