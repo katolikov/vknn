@@ -16,6 +16,8 @@ struct ConvOp : VulkanOp {
   bool winograd = false;
   bool splitk = false;
   bool reg = false;    // register-tiled implicit-im2col general conv (WTILE pixels/thread)
+  bool lds = false;    // LDS input-halo 3x3 (8x8 tile/workgroup)
+  int64_t ldsGroups = 0;
   bool hasRes = false;  // residual Add fused into the epilogue (out = act(conv + residual))
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> wbuf, bbuf;
@@ -241,6 +243,16 @@ struct ConvOp : VulkanOp {
               *env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
               std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)}, env.cache->handle());
         }
+      } else if (std::getenv("VXRT_LDS") && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 &&
+                 st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 &&
+                 dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14) {
+        // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
+        // layer4 stays on the direct kernel (tile barely fills, halo overhead dominates).
+        lds = true;
+        int64_t nTX = (y.w + 7) / 8, nTY = (y.h + 7) / 8;
+        ldsGroups = x.n * Coutb * nTY * nTX;
+        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC),
+                                                     std::vector<uint32_t>{}, env.cache->handle());
       } else if (std::getenv("VXRT_CONV_REG")) {
         // register-tiled implicit-im2col (opt-in): regresses 3x3 on this GPU (small weight tensors
         // already cache well; WTILE overhead + extra input loads dominate). Kept for experiments.
@@ -292,7 +304,9 @@ struct ConvOp : VulkanOp {
     else if (pointwise) {
       if (hasRes) bufs.push_back(res);
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
-    } else
+    } else if (lds)
+      pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t)ldsGroups);
+    else
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, reg ? 64 : localSize));
   }
 };

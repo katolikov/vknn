@@ -1,0 +1,70 @@
+#version 450
+// 3x3 stride1 pad1 group1 conv with LDS input-halo reuse (NC4HW4, fp16). One 64-thread workgroup
+// (== one 64-wide subgroup on Xclipse, so barrier() is ~free) owns an 8x8 output tile for one
+// output channel-block. Per input channel-block it stages the 10x10 input halo into LDS once, then
+// every thread reads its 3x3 window from LDS instead of re-reading global -> input is fetched 1x
+// from L2 instead of ~9x. fp32 accumulation. Uses the existing [Cout][Cinb][3][3][4] weight pack.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+#define TS 8
+#define HS 10  // TS + 2 (halo)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+} pc;
+shared f16vec4 halo[HS * HS];
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int nTX = (pc.OW + TS - 1) / TS;
+  int nTY = (pc.OH + TS - 1) / TS;
+  uint wg = gl_WorkGroupID.x;
+  int tx = int(wg) % nTX;
+  int ty = (int(wg) / nTX) % nTY;
+  int ocb = (int(wg) / (nTX * nTY)) % Coutb;
+  int n = int(wg) / (nTX * nTY * Coutb);
+  int tid = int(gl_LocalInvocationID.x);
+  int lx = tid & 7, ly = tid >> 3;
+  int ox = tx * TS + lx, oy = ty * TS + ly;
+  int ix0 = tx * TS - 1, iy0 = ty * TS - 1;  // halo top-left in input coords (pad 1)
+
+  vec4 acc = vec4(bias[ocb]);
+  int ocStride = Cinb * 9;
+  int wbase = ocb * 4 * ocStride;
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int sb = (n * Cinb + icb) * pc.H * pc.W;
+    for (int k = tid; k < HS * HS; k += 64) {
+      int hy = k / HS, hx = k - hy * HS;
+      int iy = iy0 + hy, ix = ix0 + hx;
+      halo[k] = (uint(iy) < uint(pc.H) && uint(ix) < uint(pc.W)) ? src[sb + iy * pc.W + ix]
+                                                                 : f16vec4(0.0);
+    }
+    barrier();
+    int wtap0 = wbase + icb * 9;
+    for (int ky = 0; ky < 3; ++ky) {
+      for (int kx = 0; kx < 3; ++kx) {
+        f16vec4 inv = halo[(ly + ky) * HS + (lx + kx)];
+        int w0 = wtap0 + ky * 3 + kx;
+        acc.x += float(dot(inv, wt[w0]));
+        acc.y += float(dot(inv, wt[w0 + ocStride]));
+        acc.z += float(dot(inv, wt[w0 + 2 * ocStride]));
+        acc.w += float(dot(inv, wt[w0 + 3 * ocStride]));
+      }
+    }
+    barrier();
+  }
+  if (ox < pc.OW && oy < pc.OH) {
+    int d = (n * Coutb + ocb) * pc.OH * pc.OW + oy * pc.OW + ox;
+    dst[d] = f16vec4(vx_act(acc.x, pc.act, pc.actLo, pc.actHi),
+                     vx_act(acc.y, pc.act, pc.actLo, pc.actHi),
+                     vx_act(acc.z, pc.act, pc.actLo, pc.actHi),
+                     vx_act(acc.w, pc.act, pc.actLo, pc.actHi));
+  }
+}
