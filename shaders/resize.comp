@@ -1,0 +1,45 @@
+#version 450
+// Resize (spatial) over NC4HW4 (fp16). nearest + bilinear; coord modes match the CPU oracle.
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
+layout(push_constant) uniform PC { int N, C, IH, IW, OH, OW, mode, cm; } pc;
+
+float coord(int d, int outS, int inS, int cm) {
+  float scale = float(outS) / float(inS);
+  if (cm == 1) return outS > 1 ? float(d) * float(inS - 1) / float(outS - 1) : 0.0;
+  if (cm == 2) return float(d) / scale;
+  if (cm == 3) return outS > 1 ? (float(d) + 0.5) / scale - 0.5 : 0.0;
+  return (float(d) + 0.5) / scale - 0.5;
+}
+int clampi(int v, int lo, int hi) { return clamp(v, lo, hi); }
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= uint(pc.N * Cb * pc.OH * pc.OW)) return;
+  int ox = int(i) % pc.OW;
+  int oy = (int(i) / pc.OW) % pc.OH;
+  int cb = (int(i) / (pc.OW * pc.OH)) % Cb;
+  int n = int(i) / (pc.OW * pc.OH * Cb);
+  int sb = (n * Cb + cb) * pc.IH * pc.IW;
+  float fy = coord(oy, pc.OH, pc.IH, pc.cm);
+  float fx = coord(ox, pc.OW, pc.IW, pc.cm);
+  vec4 v;
+  if (pc.mode == 0) {
+    int iy = int(floor(fy)); if (fy - float(iy) > 0.5) iy++;
+    int ix = int(floor(fx)); if (fx - float(ix) > 0.5) ix++;
+    iy = clampi(iy, 0, pc.IH - 1); ix = clampi(ix, 0, pc.IW - 1);
+    v = vec4(src[sb + iy * pc.IW + ix]);
+  } else {
+    int iy0 = int(floor(fy)), ix0 = int(floor(fx));
+    float wy = fy - float(iy0), wx = fx - float(ix0);
+    int cy0 = clampi(iy0, 0, pc.IH - 1), cx0 = clampi(ix0, 0, pc.IW - 1);
+    int iy1 = clampi(iy0 + 1, 0, pc.IH - 1), ix1 = clampi(ix0 + 1, 0, pc.IW - 1);
+    vec4 a = vec4(src[sb + cy0 * pc.IW + cx0]), b = vec4(src[sb + cy0 * pc.IW + ix1]);
+    vec4 c = vec4(src[sb + iy1 * pc.IW + cx0]), d = vec4(src[sb + iy1 * pc.IW + ix1]);
+    v = a * (1.0 - wy) * (1.0 - wx) + b * (1.0 - wy) * wx + c * wy * (1.0 - wx) + d * wy * wx;
+  }
+  dst[(n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox] = vec4(v);
+}

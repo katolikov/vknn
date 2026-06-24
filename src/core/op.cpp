@@ -49,6 +49,10 @@ const char* opTypeName(OpType t) {
       return "Unary";
     case OpType::kBinary:
       return "Binary";
+    case OpType::kPRelu:
+      return "PRelu";
+    case OpType::kResize:
+      return "Resize";
     case OpType::kConvertLayout:
       return "ConvertLayout";
     default:
@@ -99,6 +103,9 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"Shape", OpType::kShape},
       {"Gather", OpType::kGather},
       {"Unsqueeze", OpType::kUnsqueeze},
+      {"PRelu", OpType::kPRelu},
+      {"Resize", OpType::kResize},
+      {"Upsample", OpType::kResize},
   };
   auto it = m.find(s);
   if (it != m.end()) return it->second;

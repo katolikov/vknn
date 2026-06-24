@@ -143,6 +143,12 @@ class VulkanBackend : public Backend {
       }
       return true;
     }
+    if (nd.type == OpType::kResize) {
+      // GPU kernel resizes spatial dims only; channel/batch resize falls back to the CPU op.
+      const Shape& in = g.desc(nd.inputs[0]).shape;
+      const Shape& out = g.desc(nd.outputs[0]).shape;
+      return in.size() == 4 && out.size() == 4 && in[0] == out[0] && in[1] == out[1];
+    }
     if (nd.type == OpType::kBinary) {
       if (nd.inputs.size() != 2) return false;
       // constant operands aren't uploaded as device buffers; let the CPU op handle those

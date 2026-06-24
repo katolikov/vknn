@@ -38,6 +38,8 @@ enum class OpType {
   kUnsqueeze,
   kUnary,   // elementwise unary family (Sigmoid/Tanh/HardSwish/...), see UnaryType
   kBinary,  // elementwise binary family (Mul/Sub/Div/Max/Min/Pow), see BinaryType
+  kPRelu,   // y = x>0 ? x : slope*x, slope per-channel
+  kResize,  // Resize/Upsample (nearest/linear), spatial
   // layout conversion nodes (inserted by the layout pass)
   kConvertLayout,
 };

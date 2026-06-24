@@ -41,8 +41,40 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kBatchNorm:
       case OpType::kIdentity:
       case OpType::kUnary:
+      case OpType::kPRelu:
         SH(o) = SH(nd.inputs[0]);
         break;
+      case OpType::kResize: {
+        // output = round(input * scales) or explicit sizes; scales/sizes are initializer inputs.
+        Shape s = SH(nd.inputs[0]);
+        if (s.size() == 4) {
+          // ONNX Resize inputs: X, roi, scales, sizes (some optional/empty). Prefer sizes if given.
+          auto getInit = [&](int idx, std::vector<float>& f, std::vector<int64_t>& i64) {
+            if (idx >= (int)nd.inputs.size() || nd.inputs[idx] == kNoTensor) return false;
+            auto it = g.initializers.find(nd.inputs[idx]);
+            if (it == g.initializers.end()) return false;
+            int64_t n = (int64_t)it->second.bytes.size() /
+                        (g.tensors[nd.inputs[idx]].dtype == DType::kInt64 ? 8 : 4);
+            if (g.tensors[nd.inputs[idx]].dtype == DType::kInt64) {
+              const int64_t* p = it->second.i64();
+              for (int64_t k = 0; k < n; ++k) i64.push_back(p[k]);
+            } else {
+              const float* p = it->second.f32();
+              for (int64_t k = 0; k < n; ++k) f.push_back(p[k]);
+            }
+            return true;
+          };
+          std::vector<float> sizesF, scalesF;
+          std::vector<int64_t> sizesI, scalesI;
+          if (nd.inputs.size() >= 4 && getInit(3, sizesF, sizesI) && (sizesI.size() == 4 || sizesF.size() == 4)) {
+            for (int k = 0; k < 4; ++k) s[k] = sizesI.size() == 4 ? sizesI[k] : (int64_t)sizesF[k];
+          } else if (getInit(2, scalesF, scalesI) && scalesF.size() == 4) {
+            for (int k = 0; k < 4; ++k) s[k] = (int64_t)(SH(nd.inputs[0])[k] * scalesF[k]);
+          }
+        }
+        SH(o) = s;
+        break;
+      }
       case OpType::kBinary:
       case OpType::kAdd: {
         const Shape& a = SH(nd.inputs[0]);
