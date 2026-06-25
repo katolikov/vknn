@@ -6,9 +6,9 @@ namespace vx {
 
 // Resolve dynamic batch to `batch` and infer concrete shapes for all tensors possible.
 void inferShapes(Graph& g, int64_t batch = 1);
-// Constant-fold shape-computation ops (Shape/Constant/Gather/Unsqueeze/Concat) into
-// initializers (requires inferShapes first). Leaves data-path ops intact.
-void constFold(Graph& g);
+// Constant-fold ops whose inputs are all known constants (shape arithmetic, scalar Binary, etc.)
+// into initializers (requires inferShapes first). Returns the number of nodes folded.
+int constFold(Graph& g);
 // Fold BatchNormalization that follows a Conv into the conv weights/bias.
 void foldBatchNorm(Graph& g);
 // Fuse Clip(relu6)/Relu following Conv/Gemm into the producer's fused activation.

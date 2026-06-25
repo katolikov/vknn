@@ -308,7 +308,7 @@ void inferShapes(Graph& g, int64_t batch) {
   }
 }
 
-void constFold(Graph& g) {
+int constFold(Graph& g) {
   std::set<TensorId> known;
   for (auto& kv : g.initializers) known.insert(kv.first);
   std::vector<RtTensor> pool(g.tensors.size());
@@ -334,9 +334,21 @@ void constFold(Graph& g) {
         return true;
       case OpType::kShape:
         return !g.desc(nd.inputs[0]).shape.empty();  // shape known
+      // Any op whose every input is a known constant can be evaluated now. This collapses the
+      // shape-arithmetic that detection heads (YOLO) build at runtime — Shape/Gather feeding scalar
+      // Binary/Add to derive per-level strides — into plain constants, so those ops never need a
+      // backend at all (neither CPU nor GPU).
       case OpType::kGather:
       case OpType::kUnsqueeze:
-      case OpType::kConcat: {
+      case OpType::kConcat:
+      case OpType::kBinary:
+      case OpType::kAdd:
+      case OpType::kReshape:
+      case OpType::kSlice:
+      case OpType::kTranspose:
+      case OpType::kCast:
+      case OpType::kReduce: {
+        if (nd.inputs.empty()) return false;
         for (TensorId in : nd.inputs)
           if (in != kNoTensor && !known.count(in)) return false;
         return true;
@@ -375,6 +387,7 @@ void constFold(Graph& g) {
     g.nodes = std::move(kept);
     VX_INFO << "constFold: folded " << removeNodes.size() << " shape-path node(s)";
   }
+  return (int)removeNodes.size();
 }
 
 void foldBatchNorm(Graph& g) {
@@ -817,7 +830,14 @@ void runStandardPasses(Graph& g, int64_t batch) {
   if (!std::getenv("VXRT_NO_FUSE_SWISH")) fuseSwish(g);  // HardSwish/SiLU into conv epilogue (default on)
   if (std::getenv("VXRT_FUSE_SE")) fuseSqueezeExcite(g);
   if (std::getenv("VXRT_FUSE_DWPW")) fuseDwPw(g);
-  constFold(g);
+  // Iterate fold+infer: folding a Shape/Gather/Concat chain turns a dynamic Reshape's shape input
+  // into a constant, which lets the next inferShapes resolve that Reshape statically, which in turn
+  // exposes more foldable shape ops downstream (YOLO's DFL/box-decode head). Converges in a couple
+  // rounds; the loop just runs until constFold stops removing nodes.
+  for (int iter = 0; iter < 8; ++iter) {
+    if (constFold(g) == 0) break;
+    inferShapes(g, batch);
+  }
   eliminateDeadNodes(g);
   inferShapes(g, batch);  // refresh shapes after fusion/folding
 }
