@@ -143,6 +143,17 @@ class VulkanBackend : public Backend {
       }
       return true;
     }
+    if (nd.type == OpType::kSoftmax) {
+      // GPU softmax handles the channel-axis logits case ([N,C] / [N,C,1,1]); other axes -> CPU.
+      const Shape& s = g.desc(nd.inputs[0]).shape;
+      if (s.size() < 2) return false;
+      int64_t rank = (int64_t)s.size(), axis = nd.attr.geti("axis", -1);
+      if (axis < 0) axis += rank;
+      int64_t inner = 1;
+      for (int64_t i = axis; i < rank; ++i) inner *= s[i];
+      NCHW x = NCHW::from(s);
+      return x.h * x.w == 1 && inner == x.c;  // softmax purely over channels
+    }
     if (nd.type == OpType::kFusedSE) {
       // fixed LDS arrays: avg[1024], s1[256]
       const Shape& f = g.desc(nd.inputs[0]).shape;
