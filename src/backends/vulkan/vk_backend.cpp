@@ -183,6 +183,20 @@ class VulkanBackend : public Backend {
       const Shape& out = g.desc(nd.outputs[0]).shape;
       return in.size() == 4 && out.size() == 4 && in[0] == out[0] && in[1] == out[1];
     }
+    if (nd.type == OpType::kSplit) {
+      // GPU split is a channel-block range copy: channel axis only, every output 4-aligned.
+      const Shape& in = g.desc(nd.inputs[0]).shape;
+      if (in.size() != 4) return false;
+      int64_t axis = nd.attr.geti("axis", 0);
+      if (axis < 0) axis += 4;
+      if (axis != 1) return false;
+      for (TensorId o : nd.outputs) {
+        if (o == kNoTensor) continue;
+        const Shape& os = g.desc(o).shape;
+        if (os.size() != 4 || os[1] % 4 != 0) return false;
+      }
+      return true;
+    }
     if (nd.type == OpType::kAdd) {
       // The GPU residual-add kernel is a flat elementwise add over two identically-packed NC4HW4
       // buffers. Only take 4D same-shape, non-constant inputs (real residuals); anything else (a
@@ -335,10 +349,27 @@ class VulkanSegment : public Segment {
       for (TensorId o : g.nodes[ni].outputs)
         if (o != kNoTensor) acts.insert(o);
     }
+    // Tensors this segment produces that are read OUTSIDE it (by another segment or as a graph
+    // output) get downloaded to host via unpackFromBuffer. The default kAuto memory is write-combined
+    // (fast to upload, but CPU READS are uncached and brutally slow -> 150ms on a YOLO head boundary).
+    // Allocate those readback buffers as HOST_CACHED so the download is fast; keep the rest as kAuto.
+    std::set<int> idxSet(idx.begin(), idx.end());
+    std::set<TensorId> readBack(g.outputs.begin(), g.outputs.end());
+    {
+      std::set<TensorId> produced;
+      for (int ni : idx)
+        for (TensorId o : g.nodes[ni].outputs)
+          if (o != kNoTensor) produced.insert(o);
+      for (size_t q = 0; q < g.nodes.size(); ++q) {
+        if (idxSet.count((int)q)) continue;
+        for (TensorId in : g.nodes[q].inputs)
+          if (in != kNoTensor && produced.count(in)) readBack.insert(in);
+      }
+    }
     for (TensorId tid : acts) {
       size_t bytes = (size_t)packedElems(g.tensors[tid].shape) * elemSize_;
       if (bytes == 0) bytes = elemSize_ * 4;
-      auto pref = vk::MemPref::kAuto;
+      auto pref = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
       buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), bytes, pref);
     }
 
@@ -401,7 +432,7 @@ class VulkanSegment : public Segment {
     if (queryPool_) vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t)(nodeIdx.size() * 2));
     auto isCopy = [&](int idx) {
       OpType t = g_.nodes[idx].type;
-      return t == OpType::kReshape || t == OpType::kFlatten;
+      return t == OpType::kReshape || t == OpType::kFlatten || t == OpType::kSplit;
     };
     // Precise barriers: each activation tensor has a single writer, so only a read-after-write needs
     // a barrier. Emit one before an op only when it reads a tensor written since the last barrier,
