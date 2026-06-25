@@ -47,6 +47,7 @@ enum class OpType {
   kCast,        // dtype cast (CPU)
   kSplit,       // split along an axis into N outputs (CPU)
   kFusedSE,     // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
+  kFusedDwPw,   // fused depthwise-3x3 + 1x1-project (expanded intermediate stays on-chip)
   // layout conversion nodes (inserted by the layout pass)
   kConvertLayout,
 };

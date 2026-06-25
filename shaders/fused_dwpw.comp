@@ -1,0 +1,71 @@
+#version 450
+// Fused depthwise-3x3 + 1x1-project (NC4HW4, fp16). ONE workgroup per output pixel: phase A computes
+// the depthwise output for ALL expanded channel-blocks of this pixel into LDS (computed once, no
+// recompute), phase B does the 1x1 project reading from LDS. The expanded intermediate never touches
+// global memory and one dispatch+barrier per block is removed. Parallelism = N*OH*OW workgroups.
+#include "common.glsl"
+layout(constant_id = 0) const int HAS_RES = 0;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Exp { vec4 expb[]; };
+layout(std430, binding = 1) readonly  buffer DwW { vec4 dww[]; };
+layout(std430, binding = 2) readonly  buffer DwB { vec4 dwb[]; };
+layout(std430, binding = 3) readonly  buffer PwW { vec4 pww[]; };
+layout(std430, binding = 4) readonly  buffer PwB { vec4 pwb[]; };
+layout(std430, binding = 5) writeonly buffer Dst { vec4 dst[]; };
+layout(std430, binding = 6) readonly  buffer Res { vec4 res[]; };
+layout(push_constant) uniform PC {
+  int N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_, dwAct, pwAct;
+  float pwLo, pwHi;
+} pc;
+shared float comm[1024];  // depthwise output for this pixel (E channels), scalar SoA
+
+void main() {
+  int Eb = (pc.E + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int OHW = pc.OH * pc.OW;
+  uint wg = gl_WorkGroupID.x;
+  if (wg >= uint(pc.N * OHW)) return;
+  int pix = int(wg) % OHW;
+  int n = int(wg) / OHW;
+  int oy = pix / pc.OW, ox = pix % pc.OW;
+  int tid = int(gl_LocalInvocationID.x);
+
+  // Phase A: depthwise 3x3 for every channel-block at this output pixel -> LDS.
+  for (int eb = tid; eb < Eb; eb += 64) {
+    vec4 acc = vec4(dwb[eb]);
+    int sb = (n * Eb + eb) * pc.H * pc.W;
+    for (int ky = 0; ky < pc.KH; ++ky) {
+      int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+      if (iy < 0 || iy >= pc.H) continue;
+      for (int kx = 0; kx < pc.KW; ++kx) {
+        int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+        if (ix < 0 || ix >= pc.W) continue;
+        acc += vec4(expb[sb + iy * pc.W + ix]) * vec4(dww[(eb * pc.KH + ky) * pc.KW + kx]);
+      }
+    }
+    comm[eb * 4 + 0] = vx_act(acc.x, pc.dwAct, 0.0, 6.0);
+    comm[eb * 4 + 1] = vx_act(acc.y, pc.dwAct, 0.0, 6.0);
+    comm[eb * 4 + 2] = vx_act(acc.z, pc.dwAct, 0.0, 6.0);
+    comm[eb * 4 + 3] = vx_act(acc.w, pc.dwAct, 0.0, 6.0);
+  }
+  barrier();
+
+  // Phase B: 1x1 project for every output channel-block at this pixel.
+  for (int ocb = tid; ocb < Coutb; ocb += 64) {
+    vec4 acc = vec4(pwb[ocb]);
+    int wbase = ocb * 4 * Eb;
+    for (int eb = 0; eb < Eb; ++eb) {
+      vec4 d = vec4(comm[eb * 4], comm[eb * 4 + 1], comm[eb * 4 + 2], comm[eb * 4 + 3]);
+      acc.x += dot(d, vec4(pww[wbase + 0 * Eb + eb]));
+      acc.y += dot(d, vec4(pww[wbase + 1 * Eb + eb]));
+      acc.z += dot(d, vec4(pww[wbase + 2 * Eb + eb]));
+      acc.w += dot(d, vec4(pww[wbase + 3 * Eb + eb]));
+    }
+    int dbase = (n * Coutb + ocb) * OHW + pix;
+    if (HAS_RES != 0) acc += vec4(res[dbase]);
+    dst[dbase] = vec4(vx_act(acc.x, pc.pwAct, pc.pwLo, pc.pwHi),
+                         vx_act(acc.y, pc.pwAct, pc.pwLo, pc.pwHi),
+                         vx_act(acc.z, pc.pwAct, pc.pwLo, pc.pwHi),
+                         vx_act(acc.w, pc.pwAct, pc.pwLo, pc.pwHi));
+  }
+}

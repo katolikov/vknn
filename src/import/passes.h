@@ -17,6 +17,8 @@ void fuseActivations(Graph& g);
 void fuseResidualAdd(Graph& g);
 // Fuse a Squeeze-Excite scale chain (GAP->FC->relu->FC->hardsigmoid) into one kFusedSE node.
 void fuseSqueezeExcite(Graph& g);
+// Fuse a depthwise-3x3 conv followed by a 1x1 project conv into one kFusedDwPw kernel.
+void fuseDwPw(Graph& g);
 // Remove Identity nodes, rewiring consumers to the input.
 void eliminateIdentity(Graph& g);
 // Remove nodes whose outputs are unused (keeps graph outputs alive).

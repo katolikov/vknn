@@ -154,6 +154,14 @@ class VulkanBackend : public Backend {
       NCHW x = NCHW::from(s);
       return x.h * x.w == 1 && inner == x.c;  // softmax purely over channels
     }
+    if (nd.type == OpType::kFusedDwPw) {
+      // LDS holds E depthwise outputs (cap 1024). Run ALL eligible fused nodes on the GPU: a partial
+      // gate (some fused nodes on CPU) creates a GPU/CPU boundary that mis-handles the fused residual.
+      const Shape& in = g.desc(nd.inputs[0]).shape;     // expanded [N,E,H,W]
+      const Shape& out = g.desc(nd.outputs[0]).shape;   // [N,Cout,OH,OW]
+      if (in.size() != 4 || out.size() != 4) return false;
+      return in[1] <= 1024;
+    }
     if (nd.type == OpType::kFusedSE) {
       // fixed LDS arrays: avg[1024], s1[256]
       const Shape& f = g.desc(nd.inputs[0]).shape;

@@ -67,6 +67,8 @@ const char* opTypeName(OpType t) {
       return "Split";
     case OpType::kFusedSE:
       return "FusedSE";
+    case OpType::kFusedDwPw:
+      return "FusedDwPw";
     case OpType::kConvertLayout:
       return "ConvertLayout";
     default:
