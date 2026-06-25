@@ -11,6 +11,7 @@ docs/api/
 third_party/googletest/
 # generated/large assets (reproducible via scripts/get_golden.py)
 assets/*.onnx
+assets/*.onnx.data
 assets/*.npy
 assets/*.bin
 assets/*.jpg
