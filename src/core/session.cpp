@@ -52,6 +52,77 @@ std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
   return s;
 }
 
+void Session::foldTinyGpuIslands() {
+  int cpuIdx = -1;
+  for (size_t i = 0; i < backends_.size(); ++i)
+    if (backends_[i]->kind() == BackendKind::kCpu) cpuIdx = (int)i;
+  if (cpuIdx < 0) return;  // no CPU backend to fall back to
+  auto isCpu = [&](int ni) { return backends_[nodeBackendIdx_[ni]]->kind() == BackendKind::kCpu; };
+  // Approximate per-node work: a conv/gemm output costs Cin*KH*KW per element, everything else ~1.
+  auto nodeCost = [&](int ni) -> int64_t {
+    const Node& nd = graph_.nodes[ni];
+    int64_t outElems = nd.outputs.empty() || nd.outputs[0] == kNoTensor
+                           ? 0 : numElements(graph_.desc(nd.outputs[0]).shape);
+    if ((nd.type == OpType::kConv || nd.type == OpType::kGemm) && nd.inputs.size() > 1) {
+      const Shape& w = graph_.desc(nd.inputs[1]).shape;
+      int64_t k = 1;
+      for (size_t i = 1; i < w.size(); ++i) k *= w[i];  // Cin*KH*KW (Gemm: K)
+      return outElems * std::max<int64_t>(k, 1);
+    }
+    return outElems;
+  };
+  const int64_t kKeepOnGpu = 2'000'000;  // work below this isn't worth a CPU<->GPU round trip
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    // contiguous same-backend runs over the (topo-sorted) node order
+    std::vector<int> runOf(graph_.nodes.size(), -1);
+    int nRuns = 0;
+    for (size_t n = 0; n < graph_.nodes.size(); ++n) {
+      if (n == 0 || nodeBackendIdx_[n] != nodeBackendIdx_[n - 1]) nRuns++;
+      runOf[n] = nRuns - 1;
+    }
+    std::vector<int> producerRun(graph_.tensors.size(), -1);
+    std::vector<std::vector<int>> runNodes(nRuns);
+    for (size_t n = 0; n < graph_.nodes.size(); ++n) {
+      runNodes[runOf[n]].push_back((int)n);
+      for (TensorId o : graph_.nodes[n].outputs)
+        if (o != kNoTensor) producerRun[o] = runOf[n];
+    }
+    for (int r = 0; r < nRuns && !changed; ++r) {
+      if (isCpu(runNodes[r].front())) continue;  // already CPU
+      std::set<TensorId> internal;
+      for (int ni : runNodes[r])
+        for (TensorId o : graph_.nodes[ni].outputs)
+          if (o != kNoTensor) internal.insert(o);
+      bool touchesGpu = false;
+      int64_t work = 0;
+      for (int ni : runNodes[r]) {
+        work += nodeCost(ni);
+        for (TensorId in : graph_.nodes[ni].inputs)  // fed by another GPU run?
+          if (in != kNoTensor && !internal.count(in) && producerRun[in] >= 0 &&
+              !isCpu(runNodes[producerRun[in]].front()))
+            touchesGpu = true;
+      }
+      for (size_t q = 0; q < graph_.nodes.size() && !touchesGpu; ++q) {  // consumed by a GPU run?
+        if (runOf[q] == r || isCpu((int)q)) continue;
+        for (TensorId x : graph_.nodes[q].inputs)
+          if (x != kNoTensor && internal.count(x)) { touchesGpu = true; break; }
+      }
+      if (touchesGpu || work >= kKeepOnGpu) continue;  // connected to GPU work, or heavy -> keep
+      bool cpuOk = true;
+      for (int ni : runNodes[r])
+        if (!backends_[cpuIdx]->supportsNode(graph_, graph_.nodes[ni], DType::kFloat32)) {
+          cpuOk = false;
+          break;
+        }
+      if (!cpuOk) continue;
+      for (int ni : runNodes[r]) nodeBackendIdx_[ni] = cpuIdx;
+      changed = true;  // restart: the fold may have merged neighbours into a new island
+    }
+  }
+}
+
 void Session::plan() {
   // --- graph optimization passes (NCHW IR, static batch=1) ---
   // Skipped when the graph came from a .vxm (passes already applied at save time).
@@ -128,6 +199,14 @@ void Session::plan() {
           << ". Perf note: this op does not run on the requested backend.";
     }
   }
+
+  // --- fold tiny GPU "islands" back to CPU ---
+  // A maximal run of GPU nodes that is fed only by CPU output and consumed only by CPU (a true island
+  // in the dataflow) costs a CPU->GPU->CPU round trip. When that island does little work (a detection
+  // head's DFL conv / sigmoid on tiny tensors) the pack/unpack dwarfs the compute and, worse, stresses
+  // the boundary path. Run it on the CPU instead. The heavy backbone/head convs are kept on the GPU —
+  // they exceed the work threshold, so this never drags real compute off the accelerator.
+  foldTinyGpuIslands();
 
   // --- partition into maximal same-backend segments ---
   std::vector<std::vector<int>> parts;

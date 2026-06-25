@@ -70,6 +70,7 @@ class Session {
  private:
   Session() = default;
   void plan();  // assign backends, partition into segments, compile
+  void foldTinyGpuIslands();  // reassign small CPU-bounded GPU runs to CPU (avoid round trips)
   void reconcileInputs(Segment& seg);
 
   Graph graph_;

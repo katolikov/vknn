@@ -449,13 +449,19 @@ class VulkanSegment : public Segment {
     auto now = [] { return std::chrono::high_resolution_clock::now(); };
     auto t0 = now();
     // attach boundary buffers to RtTensors (cross-segment residency) + upload inputs.
+    // Each segment owns a SEPARATE buffer per tensor, so a boundary input must be (re)packed into
+    // THIS segment's buffer unless that exact buffer already holds the data. The old `!deviceValid`
+    // guard checked only "some buffer has it" — when a tensor was produced by an earlier GPU segment
+    // (deviceValid set, but pointing at that segment's buffer) a later GPU consumer skipped the pack
+    // and read its own never-written buffer (zeros). Seen as YOLO's P3/P4 class logits collapsing.
     for (TensorId tid : boundaryInputs) {
       RtTensor& rt = ctx.t(tid);
       auto bit = buffers_.find(tid);
       if (bit == buffers_.end()) continue;
+      bool alreadyHere = rt.deviceValid && rt.device && rt.device->buffer == bit->second;
       if (!rt.device) rt.device = std::make_shared<DeviceStorage>();
       rt.device->buffer = bit->second;
-      if (rt.hostValid && !rt.deviceValid) {
+      if (rt.hostValid && !alreadyHere) {
         VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_);
         rt.deviceValid = true;
         rt.deviceFormat = TensorFormat::kNC4HW4;
