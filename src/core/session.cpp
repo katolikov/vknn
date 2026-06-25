@@ -158,6 +158,14 @@ void Session::plan() {
     return s;
   }();
 
+  // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
+  //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
+  //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).
+  if (byKind_.count(BackendKind::kVulkan) && !std::getenv("VXRT_NO_FLAT_OPS")) {
+    insertLayoutConverts(graph_);
+    graph_.topoSort();
+  }
+
   // --- init tensor pool, load initializers ---
   pool_.resize(graph_.tensors.size());
   for (size_t i = 0; i < pool_.size(); ++i) {

@@ -131,29 +131,12 @@ class VulkanBackend : public Backend {
   // layouts fall back to the (always-correct) CPU op.
   bool supportsNode(const Graph& g, const Node& nd, DType dt) const override {
     if (!supports(nd.type, dt)) return false;
-    if (nd.type == OpType::kConcat) {
-      const Shape& out = g.desc(nd.outputs[0]).shape;
-      int rank = (int)out.size();
-      int64_t axis = nd.attr.geti("axis", 1);
-      if (axis < 0) axis += rank;
-      if (rank != 4 || axis != 1) return false;  // channel concat only
-      for (TensorId in : nd.inputs) {
-        const Shape& s = g.desc(in).shape;
-        if (s.size() != 4 || s[1] % 4 != 0) return false;  // need 4-aligned channel blocks
-      }
+    // Generic N-D ops the GPU runs flat (Transpose/Slice always; Concat/Softmax/Binary/Add either
+    // NC4HW4 or flat per the layout pass). The flat row-major kernels handle rank <= 6.
+    if (nd.type == OpType::kTranspose || nd.type == OpType::kSlice ||
+        nd.type == OpType::kConvertLayout || nd.type == OpType::kConcat ||
+        nd.type == OpType::kSoftmax)
       return true;
-    }
-    if (nd.type == OpType::kSoftmax) {
-      // GPU softmax handles the channel-axis logits case ([N,C] / [N,C,1,1]); other axes -> CPU.
-      const Shape& s = g.desc(nd.inputs[0]).shape;
-      if (s.size() < 2) return false;
-      int64_t rank = (int64_t)s.size(), axis = nd.attr.geti("axis", -1);
-      if (axis < 0) axis += rank;
-      int64_t inner = 1;
-      for (int64_t i = axis; i < rank; ++i) inner *= s[i];
-      NCHW x = NCHW::from(s);
-      return x.h * x.w == 1 && inner == x.c;  // softmax purely over channels
-    }
     if (nd.type == OpType::kFusedDwPw) {
       // LDS holds E depthwise outputs (cap 1024). Run ALL eligible fused nodes on the GPU: a partial
       // gate (some fused nodes on CPU) creates a GPU/CPU boundary that mis-handles the fused residual.
@@ -197,30 +180,9 @@ class VulkanBackend : public Backend {
       }
       return true;
     }
-    if (nd.type == OpType::kAdd) {
-      // The GPU residual-add kernel is a flat elementwise add over two identically-packed NC4HW4
-      // buffers. Only take 4D same-shape, non-constant inputs (real residuals); anything else (a
-      // head Add on a 3D/odd tensor, or a constant operand) goes to the CPU op.
-      if (nd.inputs.size() != 2) return false;
-      if (g.isInitializer(nd.inputs[0]) || g.isInitializer(nd.inputs[1])) return false;
-      const Shape& a = g.desc(nd.inputs[0]).shape;
-      const Shape& b = g.desc(nd.inputs[1]).shape;
-      return a.size() == 4 && b.size() == 4 && a == b;
-    }
-    if (nd.type == OpType::kBinary) {
-      if (nd.inputs.size() != 2) return false;
-      // constant operands aren't uploaded as device buffers; let the CPU op handle those
-      if (g.isInitializer(nd.inputs[0]) || g.isInitializer(nd.inputs[1])) return false;
-      const Shape& a = g.desc(nd.inputs[0]).shape;
-      const Shape& b = g.desc(nd.inputs[1]).shape;
-      if (a == b) return true;
-      // channel-broadcast on either operand: one is [N,C,1,1], the other [N,C,H,W] (matching N,C)
-      auto bcastOver = [](const Shape& s, const Shape& full) {
-        return s.size() == 4 && full.size() == 4 && s[0] == full[0] && s[1] == full[1] &&
-               s[2] == 1 && s[3] == 1 && (full[2] > 1 || full[3] > 1);
-      };
-      return bcastOver(a, b) || bcastOver(b, a);
-    }
+    // Add/Binary: 2 inputs required. The NC4HW4 kernel does same-shape + channel-broadcast; the
+    // flat kernel (chosen by the layout pass) does everything else incl. constant operands.
+    if (nd.type == OpType::kAdd || nd.type == OpType::kBinary) return nd.inputs.size() == 2;
     return true;
   }
 
@@ -258,7 +220,18 @@ class VulkanBackend : public Backend {
   void finalize() override { saveCaches(); }
 
   // ---- host NCHW fp32  <->  device NC4HW4 (fp32 path; fp16 device buffers handled here) ----
-  static void packToBuffer(vk::Buffer* buf, const RtTensor& rt, bool fp16) {
+  static void packToBuffer(vk::Buffer* buf, const RtTensor& rt, bool fp16, bool flat = false) {
+    if (flat) {  // host NCHW row-major == the flat device buffer; straight copy (+ fp16 convert)
+      int64_t n = numElements(rt.shape);
+      const float* src = rt.host.f32();
+      if (fp16) {
+        fp16_t* dst = reinterpret_cast<fp16_t*>(buf->host());
+        for (int64_t i = 0; i < n; ++i) dst[i] = floatToHalf(src[i]);
+      } else {
+        std::memcpy(buf->host(), src, (size_t)n * 4);
+      }
+      return;
+    }
     NCHW x = NCHW::from(rt.shape);
     int64_t Cb = cBlocks(x.c);
     const float* src = rt.host.f32();
@@ -295,7 +268,21 @@ class VulkanBackend : public Backend {
             }
     }
   }
-  static void unpackFromBuffer(vk::Buffer* buf, RtTensor& rt, bool fp16) {
+  static void unpackFromBuffer(vk::Buffer* buf, RtTensor& rt, bool fp16, bool flat = false) {
+    if (flat) {  // flat device buffer == host NCHW row-major; straight copy (+ fp16 convert)
+      int64_t n = numElements(rt.shape);
+      rt.host.resizeElems(n, DType::kFloat32);
+      rt.dtype = DType::kFloat32;
+      float* dst = rt.host.f32();
+      if (fp16) {
+        const fp16_t* src = reinterpret_cast<const fp16_t*>(buf->host());
+        for (int64_t i = 0; i < n; ++i) dst[i] = halfToFloat(src[i]);
+      } else {
+        std::memcpy(dst, buf->host(), (size_t)n * 4);
+      }
+      rt.hostValid = true;
+      return;
+    }
     NCHW x = NCHW::from(rt.shape);
     int64_t Cb = cBlocks(x.c);
     rt.host.resizeElems(x.elems(), DType::kFloat32);
@@ -367,7 +354,9 @@ class VulkanSegment : public Segment {
       }
     }
     for (TensorId tid : acts) {
-      size_t bytes = (size_t)packedElems(g.tensors[tid].shape) * elemSize_;
+      int64_t elems = g.tensors[tid].gpuFlat ? numElements(g.tensors[tid].shape)
+                                             : packedElems(g.tensors[tid].shape);
+      size_t bytes = (size_t)elems * elemSize_;
       if (bytes == 0) bytes = elemSize_ * 4;
       auto pref = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
       buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), bytes, pref);
@@ -490,12 +479,13 @@ class VulkanSegment : public Segment {
       auto bit = buffers_.find(tid);
       if (bit == buffers_.end()) continue;
       bool alreadyHere = rt.deviceValid && rt.device && rt.device->buffer == bit->second;
+      bool flat = g_.desc(tid).gpuFlat;
       if (!rt.device) rt.device = std::make_shared<DeviceStorage>();
       rt.device->buffer = bit->second;
       if (rt.hostValid && !alreadyHere) {
-        VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_);
+        VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_, flat);
         rt.deviceValid = true;
-        rt.deviceFormat = TensorFormat::kNC4HW4;
+        rt.deviceFormat = flat ? TensorFormat::kNCHW : TensorFormat::kNC4HW4;
       }
     }
     auto t1 = now();
@@ -508,11 +498,12 @@ class VulkanSegment : public Segment {
       auto bit = buffers_.find(tid);
       if (bit == buffers_.end()) continue;
       RtTensor& rt = ctx.t(tid);
+      bool flat = g_.desc(tid).gpuFlat;
       if (!rt.device) rt.device = std::make_shared<DeviceStorage>();
       rt.device->buffer = bit->second;
       rt.deviceValid = true;
-      rt.deviceFormat = TensorFormat::kNC4HW4;
-      VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_);
+      rt.deviceFormat = flat ? TensorFormat::kNCHW : TensorFormat::kNC4HW4;
+      VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_, flat);
     }
     if (timing) {
       auto t3 = now();
@@ -528,7 +519,7 @@ class VulkanSegment : public Segment {
       for (auto& kv : buffers_) {
         RtTensor& rt = ctx.t(kv.first);
         if (g_.isInitializer(kv.first)) continue;
-        VulkanBackend::unpackFromBuffer(kv.second.get(), rt, useFp16_);
+        VulkanBackend::unpackFromBuffer(kv.second.get(), rt, useFp16_, g_.desc(kv.first).gpuFlat);
       }
     }
 

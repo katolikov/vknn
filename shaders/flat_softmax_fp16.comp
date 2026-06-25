@@ -1,0 +1,22 @@
+#version 450
+// Flat softmax over one axis, fp16 storage + fp32 arithmetic (see flat_softmax.comp).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { float16_t s[]; };
+layout(std430, binding = 1) writeonly buffer D { float16_t d[]; };
+layout(push_constant) uniform PC { int outer, axis, inner; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.outer * pc.inner)) return;
+  int o = int(gid) / pc.inner, i = int(gid) % pc.inner;
+  int base = o * pc.axis * pc.inner + i;
+  float m = -3.4e38;
+  for (int a = 0; a < pc.axis; ++a) m = max(m, float(s[base + a * pc.inner]));
+  float sum = 0.0;
+  for (int a = 0; a < pc.axis; ++a) sum += exp(float(s[base + a * pc.inner]) - m);
+  for (int a = 0; a < pc.axis; ++a)
+    d[base + a * pc.inner] = float16_t(exp(float(s[base + a * pc.inner]) - m) / sum);
+}

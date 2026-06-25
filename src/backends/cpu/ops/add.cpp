@@ -18,6 +18,42 @@ struct AddCpu : CpuOp {
     RtTensor& Y = ctx.t(node.outputs[0]);
     const Shape &sa = A.shape, &sb = B.shape;
 
+    // int64 path: shape arithmetic (Shape/Gather + Add) const-folded for slice/reshape bounds.
+    if (A.dtype == DType::kInt64 || B.dtype == DType::kInt64) {
+      size_t rank = std::max(sa.size(), sb.size());
+      Shape out(rank, 1);
+      auto dimOf = [&](const Shape& s, size_t i) -> int64_t {
+        size_t off = rank - s.size();
+        return i < off ? 1 : s[i - off];
+      };
+      for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
+      int64_t n = numElements(out);
+      int64_t* y = cpu::allocOutI64(Y, out);
+      auto val = [](const RtTensor& T, int64_t i) {
+        return T.dtype == DType::kInt64 ? T.host.i64()[i] : (int64_t)T.host.f32()[i];
+      };
+      std::vector<int64_t> oa(rank), ob(rank);
+      int64_t sA = 1, sB = 1;
+      for (int i = (int)rank - 1; i >= 0; --i) {
+        oa[i] = (dimOf(sa, i) == 1) ? 0 : sA;
+        ob[i] = (dimOf(sb, i) == 1) ? 0 : sB;
+        sA *= dimOf(sa, i);
+        sB *= dimOf(sb, i);
+      }
+      for (int64_t lin = 0; lin < n; ++lin) {
+        int64_t ia = 0, ib = 0;
+        for (size_t d = 0; d < rank; ++d) {
+          int64_t stride = 1;
+          for (size_t e = d + 1; e < rank; ++e) stride *= out[e];
+          int64_t id = (lin / stride) % out[d];
+          ia += id * oa[d];
+          ib += id * ob[d];
+        }
+        y[lin] = val(A, ia) + val(B, ib);
+      }
+      return;
+    }
+
     if (sa == sb) {  // residual add: same shape, vectorizable
       int64_t n = A.elems();
       float* y = cpu::allocOut(Y, sa);

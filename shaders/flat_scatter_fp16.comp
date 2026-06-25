@@ -1,0 +1,22 @@
+#version 450
+// Flat row-major scatter: out[base + sum_k inCoord_k * outStride_k] = in[i]. Drives Concat — each
+// input is scattered into the output at its axis offset (base = offset * outStride[axis]).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { float16_t s[]; };
+layout(std430, binding = 1) writeonly buffer D { float16_t d[]; };
+layout(push_constant) uniform PC { int rank, total, base; int inDim[6]; int outStride[6]; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), outIdx = pc.base;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % pc.inDim[k];
+    rem /= pc.inDim[k];
+    outIdx += c * pc.outStride[k];
+  }
+  d[outIdx] = s[gid];
+}

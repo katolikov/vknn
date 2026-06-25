@@ -10,8 +10,8 @@ namespace vx {
 
 // Read an int64 list parameter from either a node attribute (older opsets) or an initializer input
 // (opset 10+/13+ moved Slice/Pad/Reduce params to inputs). Returns empty if neither is present.
-static std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* attrName,
-                                         int inputIdx) {
+std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* attrName,
+                                  int inputIdx) {
   const auto& av = nd.attr.getints(attrName);
   if (!av.empty()) return av;
   if (inputIdx >= 0 && inputIdx < (int)nd.inputs.size() && nd.inputs[inputIdx] != kNoTensor) {
@@ -81,6 +81,7 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kBatchNorm:
       case OpType::kIdentity:
       case OpType::kUnary:
+      case OpType::kSoftmax:
       case OpType::kPRelu:
         SH(o) = SH(nd.inputs[0]);
         break;
@@ -90,7 +91,8 @@ void inferShapes(Graph& g, int64_t batch) {
         if (xs.size() == 4 && gs.size() == 4) SH(o) = {xs[0], xs[1], gs[1], gs[2]};
         break;
       }
-      case OpType::kCast: {
+      case OpType::kCast:
+      case OpType::kConvertLayout: {
         SH(o) = SH(nd.inputs[0]);
         break;
       }
@@ -818,6 +820,118 @@ void eliminateDeadNodes(Graph& g) {
   if (removed) {
     g.nodes = std::move(kept);
     VX_INFO << "eliminateDeadNodes: removed " << removed << " node(s)";
+  }
+}
+
+// Does this op run as a FLAT (row-major) GPU op rather than the NC4HW4 path? Mirrors the cases the
+// Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
+// Concat that isn't 4D channel-axis 4-aligned; Binary/Add with a constant operand or a broadcast/
+// rank that the packed kernel doesn't handle.
+static bool gpuFlatNode(const Graph& g, const Node& n) {
+  auto sh = [&](TensorId t) -> const Shape& { return g.desc(t).shape; };
+  switch (n.type) {
+    case OpType::kTranspose:
+    case OpType::kSlice:
+      return true;
+    case OpType::kSoftmax: {
+      if (n.inputs.empty()) return false;
+      const Shape& s = sh(n.inputs[0]);
+      if (s.size() < 2) return true;
+      int rank = (int)s.size();
+      int64_t axis = n.attr.geti("axis", -1);
+      if (axis < 0) axis += rank;
+      NCHW x = NCHW::from(s);
+      int64_t inner = 1;
+      for (int k = (int)axis; k < rank; ++k) inner *= s[k];
+      return !(x.h * x.w == 1 && inner == x.c);  // channel softmax stays NC4HW4
+    }
+    case OpType::kConcat: {
+      const Shape& o = sh(n.outputs[0]);
+      int rank = (int)o.size();
+      int64_t axis = n.attr.geti("axis", 1);
+      if (axis < 0) axis += rank;
+      if (rank != 4 || axis != 1) return true;
+      for (TensorId in : n.inputs)
+        if (sh(in).size() != 4 || sh(in)[1] % 4 != 0) return true;
+      return false;
+    }
+    case OpType::kBinary:
+    case OpType::kAdd: {
+      if (n.inputs.size() != 2) return false;
+      if (g.isInitializer(n.inputs[0]) || g.isInitializer(n.inputs[1])) return true;
+      const Shape& a = sh(n.inputs[0]);
+      const Shape& b = sh(n.inputs[1]);
+      if (a.size() == 4 && b.size() == 4 && a == b) return false;  // NC4HW4 same-shape
+      if (n.type == OpType::kBinary) {
+        auto bc = [](const Shape& s, const Shape& f) {
+          return s.size() == 4 && f.size() == 4 && s[0] == f[0] && s[1] == f[1] && s[2] == 1 &&
+                 s[3] == 1 && (f[2] > 1 || f[3] > 1);
+        };
+        if (bc(a, b) || bc(b, a)) return false;  // NC4HW4 channel-broadcast
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+void insertLayoutConverts(Graph& g) {
+  // Mark each tensor's GPU format from its producer (flat if produced by a flat op), then for every
+  // node input whose format differs from what the consumer needs, splice in a ConvertLayout node.
+  auto agnostic = [](const Node& n) {
+    return n.type == OpType::kReshape || n.type == OpType::kFlatten;
+  };
+  // Mark each tensor's GPU format in topo order. Reshape/Flatten are layout-agnostic: a flat reshape
+  // is a plain row-major copy (valid for ANY shape), while the NC4HW4 byte-copy is only valid when
+  // the channel count is unchanged (else the vec4 interleave shifts). So a reshape is flat if its
+  // input is flat OR it changes the channel count; otherwise it stays NC4HW4.
+  for (auto& nd : g.nodes) {
+    bool f;
+    if (agnostic(nd) && !nd.inputs.empty() && nd.inputs[0] != kNoTensor) {
+      bool inFlat = g.desc(nd.inputs[0]).gpuFlat;
+      int64_t cin = NCHW::from(g.desc(nd.inputs[0]).shape).c;
+      int64_t cout = NCHW::from(g.desc(nd.outputs[0]).shape).c;
+      f = inFlat || cin != cout;
+    } else {
+      f = gpuFlatNode(g, nd);
+    }
+    for (TensorId o : nd.outputs)
+      if (o != kNoTensor) g.desc(o).gpuFlat = f;
+  }
+  std::map<std::pair<TensorId, bool>, TensorId> cache;  // (tensor, needFlat) -> converted tensor
+  std::vector<Node> converts;
+  int n = 0;
+  for (auto& nd : g.nodes) {
+    if (nd.outputs.empty() || nd.outputs[0] == kNoTensor) continue;
+    bool needFlat = g.desc(nd.outputs[0]).gpuFlat;  // the format this node operates in
+    for (TensorId& in : nd.inputs) {
+      if (in == kNoTensor || g.isInitializer(in)) continue;  // constants handled inside flat ops
+      if (g.desc(in).gpuFlat == needFlat) continue;
+      auto key = std::make_pair(in, needFlat);
+      auto it = cache.find(key);
+      if (it == cache.end()) {
+        TensorDesc d = g.desc(in);
+        d.name = g.desc(in).name + (needFlat ? "#flat" : "#nc4") + std::to_string(n);
+        d.isInitializer = d.isInput = d.isOutput = false;
+        d.gpuFlat = needFlat;
+        TensorId t2 = g.addTensor(d);
+        Node cv;
+        cv.type = OpType::kConvertLayout;
+        cv.name = "convert" + std::to_string(n++);
+        cv.subOp = needFlat ? 0 : 1;  // 0: NC4HW4->flat, 1: flat->NC4HW4
+        cv.inputs = {in};
+        cv.outputs = {t2};
+        converts.push_back(cv);
+        it = cache.emplace(key, t2).first;
+      }
+      in = it->second;
+    }
+  }
+  if (!converts.empty()) {
+    for (auto& c : converts) g.nodes.push_back(std::move(c));
+    g.topoSort();
+    VX_INFO << "insertLayoutConverts: inserted " << converts.size() << " layout convert(s)";
   }
 }
 

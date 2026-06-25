@@ -1,6 +1,7 @@
 // Channel-axis Concat on the GPU (NC4HW4). Each input is copied into the output at its channel-
 // block offset. Only valid when every input's channel count is a multiple of 4 (block alignment);
 // the backend's supportsNode() enforces that, otherwise it falls back to the CPU concat.
+#include "flat_ops.h"
 #include "vk_op_common.h"
 
 namespace vx {
@@ -14,8 +15,11 @@ struct ConcatOp : VulkanOp {
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::vector<ConcatPC> parts;  // one per input
   std::vector<int64_t> partGroups;
+  flat::Concat flatImpl;
+  bool flat = false;
 
   void prepare(const Node& node, VkOpEnv& env) override {
+    if (opIsFlat(node, env)) { flat = true; flatImpl.prepare(node, env); return; }
     NCHW y = NCHW::from(env.graph->desc(node.outputs[0]).shape);
     int Cob = (int)cBlocks(y.c), HW = (int)(y.h * y.w);
     int cbOff = 0;
@@ -32,6 +36,7 @@ struct ConcatOp : VulkanOp {
   }
 
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
+    if (flat) { flatImpl.record(cmd, node, env); return; }
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
     // Each input writes a disjoint channel-block range of the output, so no barriers between them.
     for (size_t i = 0; i < node.inputs.size(); ++i) {

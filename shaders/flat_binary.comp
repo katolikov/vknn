@@ -1,0 +1,22 @@
+#version 450
+// Flat row-major elementwise binary with N-D broadcasting: out[i] = op(a[ai], b[bi]) where ai/bi
+// are computed from out coords using per-operand strides (stride 0 on a broadcast dim).
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { float a[]; };
+layout(std430, binding = 1) readonly  buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { int rank, total, op; int outDim[6]; int aStride[6]; int bStride[6]; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), ai = 0, bi = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % pc.outDim[k];
+    rem /= pc.outDim[k];
+    ai += c * pc.aStride[k];
+    bi += c * pc.bStride[k];
+  }
+  d[gid] = vx_binary(a[ai], b[bi], pc.op);
+}

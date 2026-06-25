@@ -20,6 +20,9 @@ struct TensorDesc {
   bool isInput = false;
   bool isOutput = false;
   bool isInitializer = false;
+  // Vulkan only: store this tensor as a flat row-major buffer (set by the layout-convert pass for
+  // the generic head ops) instead of the default NC4HW4 packing. Ignored by the CPU backend.
+  bool gpuFlat = false;
 };
 
 /// Host-side raw bytes (initializers, I/O, CPU compute results). Logical layout = NCHW.

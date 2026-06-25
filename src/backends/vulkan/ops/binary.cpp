@@ -1,6 +1,7 @@
 // Elementwise binary family on the GPU (Mul/Sub/Div/Max/Min/Pow). Handles same-shape inputs and
 // the channel-broadcast case (second operand [N,C,1,1], the Squeeze-Excite scale). Other broadcast
 // patterns fall back to the CPU binary op (gated in the backend's supportsNode()).
+#include "flat_ops.h"
 #include "vk_op_common.h"
 
 namespace vx {
@@ -13,8 +14,11 @@ struct BinaryPC {
 struct BinaryOp : VulkanOp {
   std::unique_ptr<vk::ComputePipeline> pipe;
   BinaryPC pc{};
+  flat::Binary flatImpl;
+  bool flat = false;
 
   void prepare(const Node& node, VkOpEnv& env) override {
+    if (opIsFlat(node, env)) { flat = true; flatImpl.prepare(node, env); return; }
     NCHW y = NCHW::from(env.graph->desc(node.outputs[0]).shape);
     NCHW a = NCHW::from(env.graph->desc(node.inputs[0]).shape);
     NCHW b = NCHW::from(env.graph->desc(node.inputs[1]).shape);
@@ -32,6 +36,7 @@ struct BinaryOp : VulkanOp {
   }
 
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
+    if (flat) { flatImpl.record(cmd, node, env); return; }
     vk::Buffer* a = env.devBuf(node.inputs[0]);
     vk::Buffer* b = env.devBuf(node.inputs[1]);
     vk::Buffer* c = env.devBuf(node.outputs[0]);
