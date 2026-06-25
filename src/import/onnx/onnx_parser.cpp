@@ -5,8 +5,10 @@
 // inputs/outputs (ValueInfoProto), and NodeProto attributes. Sufficient for MobileNetV2
 // and CNNs in general. No protobuf library / no generated code required.
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 #include "vx/graph.h"
@@ -102,7 +104,10 @@ class Reader {
 
 // ----------------------------- TensorProto -----------------------------
 // fields: 1=dims(int64 repeated/packed), 2=data_type(int32), 4=float_data(packed),
-// 7=int64_data(packed), 8=name(string), 9=raw_data(bytes)
+// 7=int64_data(packed), 8=name(string), 9=raw_data(bytes), 13=external_data
+// (repeated StringStringEntryProto{1=key,2=value}), 14=data_location(0=DEFAULT,1=EXTERNAL).
+// Large models (incl. anything torch's newer exporter emits) keep weights in a sibling .onnx.data
+// file and reference them via external_data; resolved against the model dir at materialize time.
 struct TensorProto {
   std::vector<int64_t> dims;
   int32_t dataType = 1;  // 1=FLOAT, 7=INT64
@@ -110,6 +115,10 @@ struct TensorProto {
   std::vector<uint8_t> raw;
   std::vector<float> floatData;
   std::vector<int64_t> int64Data;
+  int32_t dataLocation = 0;  // 1 = EXTERNAL
+  std::string extLoc;        // external file (relative to the model dir)
+  int64_t extOffset = 0;
+  int64_t extLength = -1;
 };
 
 static TensorProto parseTensor(Reader r) {
@@ -156,12 +165,57 @@ static TensorProto parseTensor(Reader r) {
       case 9:
         t.raw = r.bytes();
         break;
+      case 13: {  // external_data: StringStringEntryProto { 1=key, 2=value }
+        Reader s = r.sub();
+        std::string key, val;
+        uint32_t ef, ew;
+        while (s.tag(ef, ew)) {
+          if (ef == 1 && ew == 2) key = s.str();
+          else if (ef == 2 && ew == 2) val = s.str();
+          else s.skip(ew);
+        }
+        if (key == "location") t.extLoc = val;
+        else if (key == "offset") t.extOffset = std::strtoll(val.c_str(), nullptr, 10);
+        else if (key == "length") t.extLength = std::strtoll(val.c_str(), nullptr, 10);
+        break;
+      }
+      case 14:  // data_location
+        t.dataLocation = (int32_t)r.varint();
+        break;
       default:
         r.skip(w);
         break;
     }
   }
   return t;
+}
+
+// Resolve an EXTERNAL tensor (data_location==1) by reading its byte range from the sibling data
+// file into t.raw, so the normal raw_data paths below handle it. The data file is read once and
+// cached (one .onnx.data backs every weight). No-op if the tensor isn't external or already inline.
+static void resolveExternal(const std::string& baseDir, TensorProto& t,
+                            std::map<std::string, std::vector<uint8_t>>& cache) {
+  if (t.dataLocation != 1 || t.extLoc.empty() || !t.raw.empty()) return;
+  std::string path = baseDir.empty() ? t.extLoc : baseDir + "/" + t.extLoc;
+  auto it = cache.find(path);
+  if (it == cache.end()) {
+    std::ifstream f(path, std::ios::binary);
+    std::vector<uint8_t> buf;
+    if (f)
+      buf.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    else
+      VX_ERROR << "external data file not found: " << path << " (for tensor '" << t.name << "')";
+    it = cache.emplace(path, std::move(buf)).first;
+  }
+  const std::vector<uint8_t>& file = it->second;
+  int64_t off = t.extOffset;
+  int64_t len = t.extLength >= 0 ? t.extLength : (int64_t)file.size() - off;
+  if (off < 0 || len < 0 || off + len > (int64_t)file.size()) {
+    VX_ERROR << "external data range [" << off << "," << off + len << ") out of bounds for '"
+             << t.name << "' (file " << file.size() << " bytes)";
+    return;
+  }
+  t.raw.assign(file.begin() + off, file.begin() + off + len);
 }
 
 // Materialize a TensorProto into a float32 HostBuffer (raw_data or typed data).
@@ -386,13 +440,14 @@ static void parseNode(Reader r, Graph& g, Node& node) {
 
 // ----------------------------- GraphProto -----------------------------
 // fields: 1=node, 2=name, 5=initializer, 11=input, 12=output, 13=value_info
-static void parseGraph(Reader r, Graph& g) {
+static void parseGraph(Reader r, Graph& g, const std::string& baseDir) {
   uint32_t f, w;
   struct PendingInit {
     std::string name;
     TensorProto tp;
   };
   std::vector<PendingInit> inits;
+  std::map<std::string, std::vector<uint8_t>> extCache;  // external .data files, read once each
   std::vector<Node> nodes;
   while (r.tag(f, w)) {
     switch (f) {
@@ -457,6 +512,7 @@ static void parseGraph(Reader r, Graph& g) {
     int64_t n = 1;
     for (auto x : pi.tp.dims) n *= x;
     if (pi.tp.dims.empty()) n = 1;
+    resolveExternal(baseDir, pi.tp, extCache);  // pull EXTERNAL weights from the sibling data file
     HostBuffer hb;
     if (pi.tp.dataType == 7) {
       d.dtype = DType::kInt64;
@@ -481,6 +537,9 @@ Graph importOnnx(const std::string& path) {
   std::ifstream f(path, std::ios::binary);
   if (!f) throw Error(Status::kIoError, "cannot open ONNX file: " + path);
   std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  // Directory the model lives in — external_data locations are relative to it.
+  size_t slash = path.find_last_of("/\\");
+  std::string baseDir = slash == std::string::npos ? std::string() : path.substr(0, slash);
   Graph g;
   // ModelProto: field 7 = graph (GraphProto). Skip everything else.
   onnx::Reader r(buf.data(), buf.size());
@@ -488,7 +547,7 @@ Graph importOnnx(const std::string& path) {
   bool foundGraph = false;
   while (r.tag(fld, wire)) {
     if (fld == 7 && wire == 2) {
-      onnx::parseGraph(r.sub(), g);
+      onnx::parseGraph(r.sub(), g, baseDir);
       foundGraph = true;
     } else
       r.skip(wire);
