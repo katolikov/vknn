@@ -32,6 +32,21 @@ static std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const c
   return {};
 }
 
+// Redirect every reference to tensor `from` so it points at `to`: node inputs, the fused-residual
+// edge (NOT in the inputs list on every op), and graph outputs. Fusion passes that delete a node and
+// fold its output into a producer MUST use this — rewiring only node.inputs leaves a stale
+// fusedResidual edge dangling at a dead tensor (the cause of a hard crash in conv residual reads).
+static void rewireTensor(Graph& g, TensorId from, TensorId to) {
+  if (from == to || from == kNoTensor) return;
+  for (auto& nn : g.nodes) {
+    for (TensorId& in : nn.inputs)
+      if (in == from) in = to;
+    if (nn.fusedResidual == from) nn.fusedResidual = to;
+  }
+  for (TensorId& go : g.outputs)
+    if (go == from) go = to;
+}
+
 void inferShapes(Graph& g, int64_t batch) {
   // Resolve dynamic dims on inputs to `batch`.
   for (TensorId in : g.inputs) {
@@ -668,9 +683,10 @@ void fuseSwish(Graph& g) {
                     g.nodes[px].fusedAct == ActType::kNone && consumers[x] == 2;
     if (fuseConv) {
       g.nodes[px].fusedAct = act;
-      TensorId mo = M.outputs[0];
-      for (auto& nn : g.nodes) for (TensorId& in : nn.inputs) if (in == mo) in = x;
-      for (TensorId& go : g.outputs) if (go == mo) go = x;
+      // Fold the Mul output onto the conv output. Must also patch any fusedResidual edge that
+      // pointed at the Mul output (a residual already folded into a later conv by fuseResidualAdd),
+      // else that conv reads a dead tensor -> crash.
+      rewireTensor(g, M.outputs[0], x);
       remove.insert((int)i);
       remove.insert(sigIdx);
       fusedC++;
@@ -795,7 +811,7 @@ void runStandardPasses(Graph& g, int64_t batch) {
   foldBatchNorm(g);
   fuseActivations(g);
   fuseResidualAdd(g);
-  if (std::getenv("VXRT_FUSE_SWISH")) fuseSwish(g);
+  if (!std::getenv("VXRT_NO_FUSE_SWISH")) fuseSwish(g);  // HardSwish/SiLU into conv epilogue (default on)
   if (std::getenv("VXRT_FUSE_SE")) fuseSqueezeExcite(g);
   if (std::getenv("VXRT_FUSE_DWPW")) fuseDwPw(g);
   constFold(g);
