@@ -34,6 +34,11 @@ class Tensor {
   Tensor(std::vector<float> data, std::vector<int64_t> shape, std::string name = "");
   /// Wrap raw values with a 1-D shape (handy for quick inputs).
   explicit Tensor(std::vector<float> data);
+  /// Zero-copy input from a DMA-BUF fd (e.g. a camera/ION buffer). vxrt imports the fd instead of
+  /// copying a host buffer. `name` selects which model input this feeds (optional for single-input).
+  /// The fd's memory is read as row-major fp32 in the given shape.
+  static Tensor fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "");
+  int dmaBufFd() const { return fd_; }
 
   const std::string& name() const { return name_; }
   const std::vector<int64_t>& shape() const { return shape_; }
@@ -57,6 +62,7 @@ class Tensor {
   std::string name_;
   std::vector<int64_t> shape_;
   std::vector<float> data_;
+  int fd_ = -1;  // DMA-BUF fd for zero-copy input (-1 = host data in data_)
 };
 
 /// A loaded, ready-to-run model. Copyable handle (shares the underlying engine).
@@ -88,5 +94,8 @@ class Model {
  private:
   std::shared_ptr<Session> sess_;
 };
+
+/// Find a tensor by name in a run() result (for multi-output models). Returns nullptr if absent.
+const Tensor* findTensor(const std::vector<Tensor>& tensors, const std::string& name);
 
 }  // namespace vx

@@ -1,6 +1,7 @@
 // Implementation of the friendly Model/Tensor facade on top of Session.
 #include "vx/model.h"
 #include <algorithm>
+#include "vx/ion.h"
 #include "vx/session.h"
 
 namespace vx {
@@ -19,6 +20,20 @@ Tensor::Tensor(std::vector<float> data, std::vector<int64_t> shape, std::string 
 
 Tensor::Tensor(std::vector<float> data)
     : shape_{(int64_t)data.size()}, data_(std::move(data)) {}
+
+Tensor Tensor::fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name) {
+  Tensor t;
+  t.shape_ = std::move(shape);
+  t.name_ = std::move(name);
+  t.fd_ = fd;
+  return t;
+}
+
+const Tensor* findTensor(const std::vector<Tensor>& tensors, const std::string& name) {
+  for (const auto& t : tensors)
+    if (t.name() == name) return &t;
+  return nullptr;
+}
 
 std::string Tensor::shapeString() const { return shapeJoin(shape_); }
 
@@ -70,13 +85,25 @@ std::vector<Tensor> Model::run(const std::vector<Tensor>& inputs) {
   // Build IOTensors, filling name/shape from the model where the caller left them blank.
   auto info = sess_->inputInfo();
   std::vector<IOTensor> ins(inputs.size());
+  std::vector<std::unique_ptr<IonBuffer>> dmabufs;  // keep mappings alive for the run
   for (size_t i = 0; i < inputs.size(); ++i) {
     const Tensor& t = inputs[i];
     ins[i].name = !t.name().empty() ? t.name() : (i < info.size() ? info[i].name : "");
     ins[i].shape = !t.shape().empty() ? t.shape() : (i < info.size() ? info[i].shape : Shape{});
     ins[i].dtype = DType::kFloat32;
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(t.data());
-    ins[i].data.assign(p, p + t.size() * sizeof(float));
+    if (t.dmaBufFd() >= 0) {
+      // zero-copy: read the input straight from the DMA-BUF (no caller-side host buffer).
+      int64_t n = numElements(ins[i].shape);
+      auto ion = IonBuffer::wrapFd(t.dmaBufFd(), (size_t)n * sizeof(float));
+      if (ion && ion->data()) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(ion->data());
+        ins[i].data.assign(p, p + n * sizeof(float));
+        dmabufs.push_back(std::move(ion));
+      }
+    } else {
+      const uint8_t* p = reinterpret_cast<const uint8_t*>(t.data());
+      ins[i].data.assign(p, p + t.size() * sizeof(float));
+    }
   }
   std::vector<IOTensor> outs;
   if (sess_->run(ins, outs) != Status::kOk) return {};
