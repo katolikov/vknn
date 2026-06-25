@@ -1,4 +1,5 @@
-// GlobalAveragePool: average each channel over H*W. One thread per (n, channel-block).
+// GlobalAveragePool: average each channel over H*W. One workgroup per (n, channel-block); its
+// threads cooperatively reduce the spatial dimension (see shaders/avgpool.comp).
 #include "vk_op_common.h"
 
 namespace vx {
@@ -21,7 +22,8 @@ struct GlobalAvgPoolOp : VulkanOp {
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
     vk::Buffer* src = env.devBuf(node.inputs[0]);
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
-    pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), groups(total, 64));
+    // one workgroup per (n, channel-block); the workgroup's 256 threads reduce H*W together
+    pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), (uint32_t)total);
   }
 };
 

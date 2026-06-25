@@ -1,27 +1,39 @@
 #version 450
-// GlobalAveragePool, NC4HW4, fp16 storage + fp32 accumulation.
+// GlobalAveragePool, NC4HW4, fp16 storage + fp32 accumulation. ONE workgroup per (n, channel-block);
+// its 256 threads cooperatively reduce H*W then tree-reduce in shared memory (see avgpool.comp).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common.glsl"
-layout(local_size_x = 64) in;
+layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Src { float16_t src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { float16_t dst[]; };
 layout(push_constant) uniform PC { int N, C, H, W; } pc;
 
+shared vec4 partial[256];
+
 void main() {
-  uint gid = gl_GlobalInvocationID.x;
   int Cb = (pc.C + 3) / 4;
-  if (gid >= uint(pc.N * Cb)) return;
-  int cb = int(gid) % Cb;
-  int n = int(gid) / Cb;
-  vec4 acc = vec4(0.0);
+  uint wg = gl_WorkGroupID.x;
+  if (wg >= uint(pc.N * Cb)) return;
+  int cb = int(wg) % Cb;
+  int n = int(wg) / Cb;
   int hw = pc.H * pc.W;
   int base = (((n * Cb + cb) * pc.H) * pc.W) * 4;
-  for (int i = 0; i < hw; ++i) {
+  uint t = gl_LocalInvocationID.x;
+  vec4 acc = vec4(0.0);
+  for (int i = int(t); i < hw; i += 256) {
     int idx = base + i * 4;
-    acc += vec4(float(src[idx]), float(src[idx+1]), float(src[idx+2]), float(src[idx+3]));
+    acc += vec4(float(src[idx]), float(src[idx + 1]), float(src[idx + 2]), float(src[idx + 3]));
   }
-  acc /= float(hw);
-  int didx = (n * Cb + cb) * 4;
-  for (int l = 0; l < 4; ++l) dst[didx + l] = float16_t(acc[l]);
+  partial[t] = acc;
+  barrier();
+  for (uint s = 128u; s > 0u; s >>= 1) {
+    if (t < s) partial[t] += partial[t + s];
+    barrier();
+  }
+  if (t == 0u) {
+    vec4 r = partial[0] / float(hw);
+    int didx = (n * Cb + cb) * 4;
+    for (int l = 0; l < 4; ++l) dst[didx + l] = float16_t(r[l]);
+  }
 }
