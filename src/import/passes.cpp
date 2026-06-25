@@ -634,6 +634,63 @@ void fuseSqueezeExcite(Graph& g) {
   }
 }
 
+void fuseSwish(Graph& g) {
+  // Fuse the elementwise self-gating activation Mul(x, HardSigmoid(x)) = HardSwish and
+  // Mul(x, Sigmoid(x)) = SiLU/Swish. If x is produced by a Conv/Gemm (consumed only by the gate +
+  // the Mul), fold it into that op's epilogue activation (removes 2 dispatches + the intermediate);
+  // otherwise collapse the [gate, Mul] pair into a single unary op. MobileNetV3 has ~21 of these.
+  std::vector<int> producer(g.tensors.size(), -1);
+  std::vector<int> consumers(g.tensors.size(), 0);
+  for (size_t i = 0; i < g.nodes.size(); ++i) {
+    for (TensorId o : g.nodes[i].outputs) if (o != kNoTensor) producer[o] = (int)i;
+    for (TensorId in : g.nodes[i].inputs) if (in != kNoTensor) consumers[in]++;
+  }
+  std::set<int> remove;
+  int fusedC = 0, fusedU = 0;
+  for (size_t i = 0; i < g.nodes.size(); ++i) {
+    Node& M = g.nodes[i];
+    if (M.type != OpType::kBinary || M.subOp != kBMul || M.inputs.size() != 2) continue;
+    int sigIdx = -1;
+    TensorId x = kNoTensor;
+    for (int e = 0; e < 2; ++e) {
+      int pc = producer[M.inputs[e]];
+      if (pc < 0 || g.nodes[pc].type != OpType::kUnary) continue;
+      int su = g.nodes[pc].subOp;
+      if ((su == kUHardSigmoid || su == kUSigmoid) && g.nodes[pc].inputs[0] == M.inputs[1 - e]) {
+        sigIdx = pc; x = M.inputs[1 - e]; break;
+      }
+    }
+    if (sigIdx < 0) continue;
+    if (consumers[g.nodes[sigIdx].outputs[0]] != 1) continue;  // gate feeds only this Mul
+    ActType act = g.nodes[sigIdx].subOp == kUHardSigmoid ? ActType::kHardSwish : ActType::kSiLU;
+    int px = producer[x];
+    bool fuseConv = px >= 0 && (g.nodes[px].type == OpType::kConv || g.nodes[px].type == OpType::kGemm) &&
+                    g.nodes[px].fusedAct == ActType::kNone && consumers[x] == 2;
+    if (fuseConv) {
+      g.nodes[px].fusedAct = act;
+      TensorId mo = M.outputs[0];
+      for (auto& nn : g.nodes) for (TensorId& in : nn.inputs) if (in == mo) in = x;
+      for (TensorId& go : g.outputs) if (go == mo) go = x;
+      remove.insert((int)i);
+      remove.insert(sigIdx);
+      fusedC++;
+    } else {
+      // collapse [gate, Mul] -> one unary
+      M.type = OpType::kUnary;
+      M.subOp = (act == ActType::kHardSwish) ? kUHardSwish : kUSiLU;
+      M.inputs = {x};
+      remove.insert(sigIdx);
+      fusedU++;
+    }
+  }
+  if (!remove.empty()) {
+    std::vector<Node> kept;
+    for (size_t i = 0; i < g.nodes.size(); ++i) if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+    g.nodes = std::move(kept);
+    VX_INFO << "fuseSwish: fused " << fusedC << " into conv, collapsed " << fusedU << " to unary";
+  }
+}
+
 void fuseDwPw(Graph& g) {
   // Fuse depthwise-3x3 conv (D) -> 1x1 project conv (P) into one kFusedDwPw node, so the expanded
   // intermediate (D's output, the block's largest activation) never hits global memory and a
@@ -738,6 +795,7 @@ void runStandardPasses(Graph& g, int64_t batch) {
   foldBatchNorm(g);
   fuseActivations(g);
   fuseResidualAdd(g);
+  if (std::getenv("VXRT_FUSE_SWISH")) fuseSwish(g);
   if (std::getenv("VXRT_FUSE_SE")) fuseSqueezeExcite(g);
   if (std::getenv("VXRT_FUSE_DWPW")) fuseDwPw(g);
   constFold(g);

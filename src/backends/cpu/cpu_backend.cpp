@@ -1,3 +1,4 @@
+#include <cmath>
 #include "cpu_backend.h"
 #include <algorithm>
 #include <chrono>
@@ -45,6 +46,12 @@ void applyAct(float* p, int64_t n, ActType act, float lo, float hi) {
         float v = p[i];
         p[i] = v < lo ? lo : (v > hi ? hi : v);
       }
+      break;
+    case ActType::kHardSwish:
+      for (int64_t i = 0; i < n; ++i) { float v = p[i]; p[i] = v * std::min(std::max(v + 3.f, 0.f), 6.f) / 6.f; }
+      break;
+    case ActType::kSiLU:
+      for (int64_t i = 0; i < n; ++i) p[i] = p[i] / (1.f + std::exp(-p[i]));
       break;
     default:
       break;

@@ -19,6 +19,8 @@ void fuseResidualAdd(Graph& g);
 void fuseSqueezeExcite(Graph& g);
 // Fuse a depthwise-3x3 conv followed by a 1x1 project conv into one kFusedDwPw kernel.
 void fuseDwPw(Graph& g);
+// Fuse Mul(x,HardSigmoid(x))=HardSwish / Mul(x,Sigmoid(x))=SiLU into the conv epilogue or one unary.
+void fuseSwish(Graph& g);
 // Remove Identity nodes, rewiring consumers to the input.
 void eliminateIdentity(Graph& g);
 // Remove nodes whose outputs are unused (keeps graph outputs alive).

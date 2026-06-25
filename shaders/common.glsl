@@ -15,6 +15,8 @@ float vx_act(float x, int act, float lo, float hi) {
   if (act == ACT_RELU)  return max(x, 0.0);
   if (act == ACT_RELU6) return clamp(x, 0.0, 6.0);
   if (act == ACT_CLIP)  return clamp(x, lo, hi);
+  if (act == 4)         return x * clamp(x + 3.0, 0.0, 6.0) / 6.0;  // HardSwish
+  if (act == 5)         return x / (1.0 + exp(-x));                 // SiLU / Swish
   return x;
 }
 
@@ -34,6 +36,7 @@ float vx_unary(float x, int op, float a, float b) {
   if (op == 11) return floor(x);
   if (op == 12) return ceil(x);
   if (op == 13) return max(x, 0.0);                    // relu
+  if (op == 14) return x / (1.0 + exp(-x));            // silu
   return x;
 }
 

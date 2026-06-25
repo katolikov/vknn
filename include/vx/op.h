@@ -11,7 +11,7 @@ using TensorId = int32_t;
 constexpr TensorId kNoTensor = -1;
 
 /// Fused activation applied after an op (kept in sync with shaders/common.glsl).
-enum class ActType : int32_t { kNone = 0, kRelu = 1, kRelu6 = 2, kClip = 3 };
+enum class ActType : int32_t { kNone = 0, kRelu = 1, kRelu6 = 2, kClip = 3, kHardSwish = 4, kSiLU = 5 };
 
 /// Operator types. Add a new value here + a name mapping + register kernels.
 enum class OpType {
@@ -55,7 +55,7 @@ enum class OpType {
 // Sub-codes for the kUnary/kBinary families (kept in sync with shaders/common.glsl).
 enum UnaryType {
   kUSigmoid = 0, kUTanh = 1, kUHardSwish = 2, kUHardSigmoid = 3, kULeakyRelu = 4, kUElu = 5,
-  kUAbs = 6, kUNeg = 7, kUExp = 8, kULog = 9, kUSqrt = 10, kUFloor = 11, kUCeil = 12, kURelu = 13
+  kUAbs = 6, kUNeg = 7, kUExp = 8, kULog = 9, kUSqrt = 10, kUFloor = 11, kUCeil = 12, kURelu = 13, kUSiLU = 14
 };
 enum BinaryType { kBMul = 0, kBSub = 1, kBDiv = 2, kBMax = 3, kBMin = 4, kBPow = 5, kBAdd = 6 };
 enum ReduceType { kRMean = 0, kRSum = 1, kRMax = 2, kRMin = 3, kRProd = 4 };
