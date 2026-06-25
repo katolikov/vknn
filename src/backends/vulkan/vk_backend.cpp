@@ -166,6 +166,13 @@ class VulkanBackend : public Backend {
       const Shape& out = g.desc(nd.outputs[0]).shape;
       return in.size() == 4 && out.size() == 4 && in[0] == out[0] && in[1] == out[1];
     }
+    if (nd.type == OpType::kBatchNorm) {
+      // per-channel affine; needs 4D input and the 4 params (gamma/beta/mean/var) as constants.
+      if (nd.inputs.size() < 5 || g.desc(nd.inputs[0]).shape.size() != 4) return false;
+      for (int i = 1; i <= 4; ++i)
+        if (!g.isInitializer(nd.inputs[i])) return false;
+      return true;
+    }
     if (nd.type == OpType::kSplit) {
       // GPU split is a channel-block range copy: channel axis only, every output 4-aligned.
       const Shape& in = g.desc(nd.inputs[0]).shape;
