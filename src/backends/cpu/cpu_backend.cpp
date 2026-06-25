@@ -81,6 +81,18 @@ class CpuSegment : public Segment {
   void run(ExecContext& ctx) override {
     for (size_t k = 0; k < nodeIdx.size(); ++k) {
       const Node& node = ctx.graph->nodes[nodeIdx[k]];
+      if (std::getenv("VXRT_DEBUG_SEG")) {
+        std::string sh;
+        for (auto t : node.inputs) {
+          sh += std::to_string(t) + ":[";
+          if (t >= 0) {
+            const RtTensor& rt = ctx.t(t);
+            for (auto d : rt.shape) sh += std::to_string(d) + ",";
+            sh += rt.hostValid ? "]h " : "]NOHOST ";
+          } else sh += "?] ";
+        }
+        VX_INFO << "  cpuop " << opTypeName(node.type) << " '" << node.name << "' ins=" << sh;
+      }
       CpuOp* op = ops_[k].get();
       if (!op)
         throw Error(Status::kUnsupported, std::string("no CPU kernel for op ") +

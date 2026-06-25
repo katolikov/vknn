@@ -35,6 +35,13 @@ struct NCHW {
       r.c = s[1];
       r.h = s[2];
       r.w = s[3];
+    } else if (s.size() == 3) {
+      // e.g. a reshaped detection map [N,C,L]; treat the trailing dim as spatial so the NC4HW4
+      // element count (cBlocks(C)*4*H*W) matches and 3D tensors pack/unpack across GPU<->CPU.
+      r.n = s[0];
+      r.c = s[1];
+      r.h = s[2];
+      r.w = 1;
     } else if (s.size() == 2) {
       r.n = s[0];
       r.c = s[1];
