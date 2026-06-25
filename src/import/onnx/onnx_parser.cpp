@@ -311,6 +311,7 @@ static void parseAttr(Reader r, Node& node) {
   if (hasTp) {
     // store as a float-ints attribute when it's a small shape/scalar constant
     a.kind = Attr::kFloats;
+    a.shape = tp.dims;  // keep dims so a Constant node emits its true shape (e.g. anchor grids)
     int64_t n = 1;
     for (auto d : tp.dims) n *= d;
     if (tp.dims.empty())

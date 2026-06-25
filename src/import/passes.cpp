@@ -172,8 +172,11 @@ void inferShapes(Graph& g, int64_t batch) {
         std::vector<int64_t> axes = readI64Param(g, nd, "axes", 3);
         std::vector<int64_t> steps = readI64Param(g, nd, "steps", 4);
         Shape out = a;
-        for (size_t k = 0; k < starts.size(); ++k) {
-          int64_t ax = axes.empty() ? (int64_t)k : axes[k];
+        // starts/ends/axes/steps come from initializer inputs that may be only partially
+        // const-foldable (the YOLO DFL head leaves some runtime); only bound a dim when BOTH
+        // its start and end are known, and never index a param vector past its length.
+        for (size_t k = 0; k < starts.size() && k < ends.size(); ++k) {
+          int64_t ax = axes.empty() ? (int64_t)k : (k < axes.size() ? axes[k] : (int64_t)k);
           if (ax < 0) ax += rank;
           if (ax < 0 || ax >= rank) continue;
           int64_t step = (k < steps.size()) ? steps[k] : 1;

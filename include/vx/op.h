@@ -75,6 +75,9 @@ struct Attr {
   std::vector<int64_t> ints;
   std::vector<float> floats;
   std::string str;
+  // For tensor-valued attributes (a Constant node's `value`): the tensor's dims, so the op can
+  // emit the right shape instead of a flat 1-D vector (multi-dim constants like anchor grids).
+  std::vector<int64_t> shape;
 };
 
 struct Attributes {
