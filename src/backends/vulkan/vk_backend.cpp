@@ -183,6 +183,16 @@ class VulkanBackend : public Backend {
       const Shape& out = g.desc(nd.outputs[0]).shape;
       return in.size() == 4 && out.size() == 4 && in[0] == out[0] && in[1] == out[1];
     }
+    if (nd.type == OpType::kAdd) {
+      // The GPU residual-add kernel is a flat elementwise add over two identically-packed NC4HW4
+      // buffers. Only take 4D same-shape, non-constant inputs (real residuals); anything else (a
+      // head Add on a 3D/odd tensor, or a constant operand) goes to the CPU op.
+      if (nd.inputs.size() != 2) return false;
+      if (g.isInitializer(nd.inputs[0]) || g.isInitializer(nd.inputs[1])) return false;
+      const Shape& a = g.desc(nd.inputs[0]).shape;
+      const Shape& b = g.desc(nd.inputs[1]).shape;
+      return a.size() == 4 && b.size() == 4 && a == b;
+    }
     if (nd.type == OpType::kBinary) {
       if (nd.inputs.size() != 2) return false;
       // constant operands aren't uploaded as device buffers; let the CPU op handle those

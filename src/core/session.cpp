@@ -230,7 +230,12 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
 
   // --- run segments in order ---
   try {
-    for (auto& seg : segments_) seg->run(ctx);
+    bool dbg = std::getenv("VXRT_DEBUG_SEG") != nullptr;
+    for (size_t si = 0; si < segments_.size(); ++si) {
+      if (dbg) VX_INFO << "RUN segment " << si << "/" << segments_.size()
+                       << " backend=" << segments_[si]->backend->name();
+      segments_[si]->run(ctx);
+    }
   } catch (const std::exception& e) {
     VX_ERROR << "run failed: " << e.what();
     return Status::kRuntimeError;
