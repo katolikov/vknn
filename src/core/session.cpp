@@ -16,6 +16,28 @@ std::unique_ptr<Session> Session::createFromOnnx(const std::string& path, const 
   return create(std::move(g), cfg);
 }
 
+std::unique_ptr<Session> Session::createFromVxm(const std::string& path, const Config& cfg) {
+  Graph g;
+  if (!loadGraphBin(g, path)) {
+    VX_ERROR << "failed to load .vxm: " << path;
+    return nullptr;
+  }
+  auto s = std::unique_ptr<Session>(new Session());
+  s->graphOptimized_ = true;  // passes already baked in
+  s->graph_ = std::move(g);
+  s->cfg_ = cfg;
+  cfg.applyLogLevel();
+  s->profiler_.setEnabled(cfg.profile);
+  auto t0 = std::chrono::high_resolution_clock::now();
+  s->plan();
+  auto t1 = std::chrono::high_resolution_clock::now();
+  VX_INFO << "Session created from .vxm in "
+          << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
+  return s;
+}
+
+bool Session::saveOptimized(const std::string& path) const { return saveGraphBin(graph_, path); }
+
 std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
   auto s = std::unique_ptr<Session>(new Session());
   s->graph_ = std::move(g);
@@ -32,7 +54,8 @@ std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
 
 void Session::plan() {
   // --- graph optimization passes (NCHW IR, static batch=1) ---
-  runStandardPasses(graph_, 1);
+  // Skipped when the graph came from a .vxm (passes already applied at save time).
+  if (!graphOptimized_) runStandardPasses(graph_, 1);
   graph_.topoSort();
 
   // --- instantiate backends in priority order: primary, fallbacks..., CPU last ---

@@ -38,8 +38,12 @@ class Session {
   ~Session();
   /// Build a session from an ONNX model file.
   static std::unique_ptr<Session> createFromOnnx(const std::string& path, const Config& cfg);
+  /// Build from a pre-optimized ".vxm" file (skips ONNX parsing + graph passes).
+  static std::unique_ptr<Session> createFromVxm(const std::string& path, const Config& cfg);
   /// Build from an already-imported graph (testing / surgery).
   static std::unique_ptr<Session> create(Graph&& g, const Config& cfg);
+  /// Serialize the optimized graph to a ".vxm" file for fast reloads.
+  bool saveOptimized(const std::string& path) const;
 
   Status run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& outputs);
 
@@ -80,6 +84,7 @@ class Session {
   std::vector<std::unique_ptr<Segment>> segments_;
   std::vector<RtTensor> pool_;
   bool planned_ = false;
+  bool graphOptimized_ = false;  // graph came from .vxm (passes already applied)
 };
 
 /// Top-level facade users call.

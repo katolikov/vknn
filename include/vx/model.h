@@ -73,6 +73,9 @@ class Model {
   static Model load(const std::string& onnxPath, Precision precision = Precision::kAuto);
   /// Advanced: full control via Config.
   static Model load(const std::string& onnxPath, const Config& cfg);
+  /// Save the optimized model to a ".vxm" file. A later Model::load() on that path skips ONNX
+  /// parsing + graph passes (faster load). Returns false on error.
+  bool save(const std::string& vxmPath) const;
 
   bool ok() const { return sess_ != nullptr; }
   explicit operator bool() const { return ok(); }

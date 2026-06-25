@@ -35,4 +35,9 @@ class Graph {
 /// Import an ONNX model file into the backend-agnostic IR (canonical NCHW).
 Graph importOnnx(const std::string& path);
 
+/// Save/load the optimized graph (post-passes) as a compact self-contained ".vxm" binary, so a
+/// reload skips ONNX parsing + all graph passes.
+bool saveGraphBin(const Graph& g, const std::string& path);
+bool loadGraphBin(Graph& g, const std::string& path);
+
 }  // namespace vx

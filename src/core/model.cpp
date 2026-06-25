@@ -53,11 +53,21 @@ Model Model::load(const std::string& onnxPath, Precision precision) {
   return load(onnxPath, cfg);
 }
 
-Model Model::load(const std::string& onnxPath, const Config& cfg) {
+static bool endsWith(const std::string& s, const std::string& suf) {
+  return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+}
+
+Model Model::load(const std::string& path, const Config& cfg) {
   Model m;
-  auto s = Session::createFromOnnx(onnxPath, cfg);
+  // .vxm = pre-optimized binary (skip ONNX parse + passes); anything else = ONNX.
+  auto s = endsWith(path, ".vxm") ? Session::createFromVxm(path, cfg)
+                                  : Session::createFromOnnx(path, cfg);
   m.sess_ = std::shared_ptr<Session>(s.release());
   return m;
+}
+
+bool Model::save(const std::string& vxmPath) const {
+  return sess_ && sess_->saveOptimized(vxmPath);
 }
 
 static std::vector<TensorInfo> toInfos(const std::vector<IOInfo>& v) {

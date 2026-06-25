@@ -34,5 +34,9 @@ int main(int argc, char** argv) {
   vx::Tensor out = net.run(input);  // one line to run
   printf("result: shape=%s  top1=%lld  max=%.4f\n", out.shapeString().c_str(),
          (long long)out.argmax(), out.max());
+
+  if (argc >= 4) {  // optional: save the optimized model for fast reloads
+    if (net.save(argv[3])) printf("saved optimized model -> %s\n", argv[3]);
+  }
   return 0;
 }
