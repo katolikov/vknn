@@ -17,3 +17,5 @@ assets/*.bin
 assets/*.jpg
 assets/layers/
 build-asan/
+assets/*.vxm
+*.vxm
