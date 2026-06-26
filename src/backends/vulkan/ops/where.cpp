@@ -5,7 +5,7 @@
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct WhereVk : VulkanOp {
@@ -58,5 +58,5 @@ struct WhereVk : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kWhere, WhereVk);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kWhere, WhereVk);
+}  // namespace vknn

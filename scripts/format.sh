@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Format all vxrt C/C++ sources with clang-format (.clang-format at repo root).
+# Format all VKNN C/C++ sources with clang-format (.clang-format at repo root).
 # Skips third_party and generated code.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -2,7 +2,7 @@
 // over flat::Broadcast (each dim repeated `repeats` times).
 #include "flat_ops.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct TileOp : VulkanOp {
@@ -14,5 +14,5 @@ struct TileOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kTile, TileOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kTile, TileOp);
+}  // namespace vknn

@@ -4,9 +4,9 @@
 #include <limits>
 
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ClipOp : VulkanOp {
@@ -51,5 +51,5 @@ struct ClipOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kClip, ClipOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kClip, ClipOp);
+}  // namespace vknn

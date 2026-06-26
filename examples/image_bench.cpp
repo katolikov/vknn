@@ -7,15 +7,15 @@
 #include <cstring>
 #include <vector>
 
-#include "vx/dtype.h"
-#include "vx/logging.h"
-#if defined(VXRT_ENABLE_VULKAN)
+#include "vknn/dtype.h"
+#include "vknn/logging.h"
+#if defined(VKNN_ENABLE_VULKAN)
 #include "backends/vulkan/vk_buffer.h"
 #include "backends/vulkan/vk_command.h"
 #include "backends/vulkan/vk_image.h"
 #include "backends/vulkan/vk_pipeline.h"
 
-using namespace vx;
+using namespace vknn;
 
 int main(int argc, char** argv) {
   int Cin = argc > 4 ? atoi(argv[1]) : 256;

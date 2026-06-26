@@ -1,13 +1,13 @@
-// vxrt integration test: full MobileNetV2 on the CPU backend vs the onnxruntime golden.
+// vknn integration test: full MobileNetV2 on the CPU backend vs the onnxruntime golden.
 // Skips gracefully if assets are not present (run scripts/get_golden.py first).
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <fstream>
 
-#include "vx/session.h"
+#include "vknn/session.h"
 
-using namespace vx;
+using namespace vknn;
 
 static std::vector<uint8_t> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);

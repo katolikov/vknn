@@ -1,4 +1,4 @@
-#include "vx/ion.h"
+#include "vknn/ion.h"
 
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -8,9 +8,9 @@
 #include <cstdint>
 #include <cstring>
 
-#include "vx/logging.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 
 // DMA-BUF heap uAPI (linux/dma-heap.h). Defined locally to avoid header-availability
 // issues across NDK API levels; matches the stable kernel ABI.
@@ -30,7 +30,7 @@ std::unique_ptr<IonBuffer> IonBuffer::alloc(size_t bytes, const std::string& hea
   std::string path = "/dev/dma_heap/" + heap;
   int hfd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (hfd < 0) {
-    VX_WARN << "ION: cannot open dma-heap " << path << " (errno " << errno << ")";
+    VKNN_WARN << "ION: cannot open dma-heap " << path << " (errno " << errno << ")";
     return nullptr;
   }
   dma_heap_allocation_data data{};
@@ -39,7 +39,7 @@ std::unique_ptr<IonBuffer> IonBuffer::alloc(size_t bytes, const std::string& hea
   int rc = ::ioctl(hfd, kDmaHeapIoctlAlloc, &data);
   ::close(hfd);
   if (rc < 0) {
-    VX_WARN << "ION: DMA_HEAP_IOCTL_ALLOC failed (errno " << errno << ")";
+    VKNN_WARN << "ION: DMA_HEAP_IOCTL_ALLOC failed (errno " << errno << ")";
     return nullptr;
   }
   auto b = std::unique_ptr<IonBuffer>(new IonBuffer());
@@ -49,10 +49,10 @@ std::unique_ptr<IonBuffer> IonBuffer::alloc(size_t bytes, const std::string& hea
   b->heap_ = heap;
   b->map_ = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd_, 0);
   if (b->map_ == MAP_FAILED) {
-    VX_WARN << "ION: mmap failed (errno " << errno << ")";
+    VKNN_WARN << "ION: mmap failed (errno " << errno << ")";
     b->map_ = nullptr;
   }
-  VX_INFO << "ION: allocated " << bytes << " bytes from /dev/dma_heap/" << heap << " -> fd "
+  VKNN_INFO << "ION: allocated " << bytes << " bytes from /dev/dma_heap/" << heap << " -> fd "
           << b->fd_ << (b->map_ ? " (mapped)" : " (unmapped)");
   return b;
 }
@@ -66,9 +66,9 @@ std::unique_ptr<IonBuffer> IonBuffer::wrapFd(int fd, size_t bytes, bool takeOwne
   b->map_ = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (b->map_ == MAP_FAILED) {
     b->map_ = nullptr;
-    VX_WARN << "ION: wrapFd mmap failed";
+    VKNN_WARN << "ION: wrapFd mmap failed";
   }
-  VX_INFO << "ION: wrapped fd " << fd << " (" << bytes
+  VKNN_INFO << "ION: wrapped fd " << fd << " (" << bytes
           << " bytes, ownership=" << (takeOwnership ? "engine" : "caller") << ")";
   return b;
 }
@@ -80,4 +80,4 @@ IonBuffer::~IonBuffer() {
     ::close(fd_);
 }
 
-}  // namespace vx
+}  // namespace vknn

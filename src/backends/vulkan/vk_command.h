@@ -5,7 +5,7 @@
 
 #include "vk_context.h"
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 // The common case: dispatch N+1 reads what dispatch N wrote. Compute->compute only, which is
@@ -53,4 +53,4 @@ private:
 };
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

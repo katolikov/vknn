@@ -4,9 +4,9 @@
 //     DCR: in channel = (bh*b + bw) * C2 + c
 //     CRD: in channel = c * (b*b) + (bh*b + bw)
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct DepthToSpaceCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -41,5 +41,5 @@ struct DepthToSpaceCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kDepthToSpace, DepthToSpaceCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kDepthToSpace, DepthToSpaceCpu);
+}  // namespace vknn

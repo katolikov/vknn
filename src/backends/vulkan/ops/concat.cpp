@@ -4,7 +4,7 @@
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ConcatPC {
@@ -55,5 +55,5 @@ struct ConcatOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kConcat, ConcatOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kConcat, ConcatOp);
+}  // namespace vknn

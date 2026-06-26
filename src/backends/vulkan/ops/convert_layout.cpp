@@ -3,7 +3,7 @@
 // (0: NC4HW4 -> flat, 1: flat -> NC4HW4). Logical NCHW shape is identical on both sides.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ConvertPC {
@@ -35,6 +35,6 @@ struct ConvertLayoutOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kConvertLayout, ConvertLayoutOp);
+VKNN_REGISTER_VK_OP(OpType::kConvertLayout, ConvertLayoutOp);
 
-}  // namespace vx
+}  // namespace vknn

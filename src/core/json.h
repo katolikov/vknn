@@ -5,9 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "vx/common.h"
+#include "vknn/common.h"
 
-namespace vx {
+namespace vknn {
 
 struct JsonValue {
   enum Type { kNull, kBool, kNumber, kString, kArray, kObject } type = kNull;
@@ -165,4 +165,4 @@ private:
   }
 };
 
-}  // namespace vx
+}  // namespace vknn

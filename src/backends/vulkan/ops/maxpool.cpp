@@ -1,7 +1,7 @@
 // MaxPool2D on the GPU (NC4HW4).
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct MaxPoolOp : VulkanOp {
@@ -35,5 +35,5 @@ struct MaxPoolOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kMaxPool, MaxPoolOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kMaxPool, MaxPoolOp);
+}  // namespace vknn

@@ -64,7 +64,7 @@ _orig_inverse = torch.Tensor.inverse
 
 def _inverse_patch(self, *a, **k):
     """Only a single batched 3x3 inverse (intrinsics, projection.py:84) fires on
-    the encoder forward path. ONNX/vxrt have no Inverse op; use the exact analytic
+    the encoder forward path. ONNX/VKNN have no Inverse op; use the exact analytic
     3x3 closed form (elementwise + stack). Fall back to original for other sizes."""
     if self.shape[-2:] == (3, 3):
         A = self
@@ -91,7 +91,7 @@ def _diag_embed_patch(self, *a, **k):
 
 
 def patch_svd_orthogonalize():
-    """CameraHead.svd_orthogonalize uses torch.svd (aten::svd, not ONNX/vxrt).
+    """CameraHead.svd_orthogonalize uses torch.svd (aten::svd, not ONNX/VKNN).
     It returns r = (orthogonal polar factor of normalize(m))^T. The polar factor
     is computed by Newton-Schulz iteration (matmuls only) -> exportable and
     GPU-friendly. For a trained pose head det(R)=+1, so this matches the SVD
@@ -135,7 +135,7 @@ def patch_position_getter():
 def bake_pos_embed(enc):
     """DINOv2 interpolates its pretrained pos-embed (37x37 -> 16x16) with
     antialiased bicubic every forward (aten::_upsample_bicubic2d_aa, not ONNX-
-    exportable and not a vxrt GPU op). Input size is fixed (224), so the result
+    exportable and not a VKNN GPU op). Input size is fixed (224), so the result
     is a constant: compute it once eagerly at full fidelity, then return the
     cached tensor so the traced graph sees a Constant."""
     vit = enc.backbone.encoder
@@ -207,7 +207,7 @@ def main():
     for nm, t in zip(names, outs):
         print(f"      {nm:12} {tuple(t.shape)}  {t.dtype}")
 
-    # save real reference I/O (golden) for ORT + later vxrt validation
+    # save real reference I/O (golden) for ORT + later VKNN validation
     import numpy as np
     os.makedirs("/tmp/YoNoSplat/ref", exist_ok=True)
     np.save("/tmp/YoNoSplat/ref/image.npy", image.numpy())

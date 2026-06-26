@@ -4,7 +4,7 @@
 
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct UnsqueezeCpu : CpuOp {
@@ -30,5 +30,5 @@ struct UnsqueezeCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kUnsqueeze, UnsqueezeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kUnsqueeze, UnsqueezeCpu);
+}  // namespace vknn

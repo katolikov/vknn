@@ -13,11 +13,11 @@
 #include <memory>
 #include <vector>
 
-#include "vx/config.h"
-#include "vx/graph.h"
-#include "vx/tensor.h"
+#include "vknn/config.h"
+#include "vknn/graph.h"
+#include "vknn/tensor.h"
 
-namespace vx {
+namespace vknn {
 
 class Profiler;
 
@@ -93,10 +93,10 @@ struct BackendRegistrar {
     BackendRegistry::instance().registerBackend(k, std::move(f));
   }
 };
-#define VX_REGISTER_BACKEND(KIND, TYPE)                    \
-  static ::vx::BackendRegistrar _vx_backend_reg_##TYPE(    \
-      KIND, []() -> std::unique_ptr<::vx::Backend> {       \
-        return std::unique_ptr<::vx::Backend>(new TYPE()); \
+#define VKNN_REGISTER_BACKEND(KIND, TYPE)                    \
+  static ::vknn::BackendRegistrar _vx_backend_reg_##TYPE(    \
+      KIND, []() -> std::unique_ptr<::vknn::Backend> {       \
+        return std::unique_ptr<::vknn::Backend>(new TYPE()); \
       })
 
-}  // namespace vx
+}  // namespace vknn

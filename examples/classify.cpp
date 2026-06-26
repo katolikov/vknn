@@ -20,9 +20,9 @@
 #include <string>
 #include <vector>
 
-#include "vx/session.h"
+#include "vknn/session.h"
 
-using namespace vx;
+using namespace vknn;
 
 static std::vector<uint8_t> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
       TensorId o = nd.outputs.empty() ? kNoTensor : nd.outputs[0];
       printf("  [%3d] %-18s out=%-8s %s act=%d\n", i++, opTypeName(nd.type),
              o == kNoTensor ? "?" : gg.tensors[o].name.c_str(),
-             o == kNoTensor ? "" : ::vx::shapeStr(gg.tensors[o].shape).c_str(), (int)nd.fusedAct);
+             o == kNoTensor ? "" : ::vknn::shapeStr(gg.tensors[o].shape).c_str(), (int)nd.fusedAct);
     }
   }
 
@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
     for (int64_t i = 1; i < m; ++i)
       if (g[i] > g[goldTop])
         goldTop = (int)i;
-    printf("golden compare: cosine=%.6f maxAbsErr=%.4e  top1 vxrt=%d golden=%d  => %s\n", cos,
+    printf("golden compare: cosine=%.6f maxAbsErr=%.4e  top1 vknn=%d golden=%d  => %s\n", cos,
            maxErr, idx[0], goldTop, (idx[0] == goldTop && cos >= 0.99) ? "PASS" : "CHECK");
   }
 

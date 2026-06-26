@@ -1,7 +1,7 @@
 // vx_yonosplat - the full YoNoSplat 3D Gaussian-Splatting pipeline in one program, all on the GPU:
-//   image + intrinsics --> encoder (vxrt Vulkan) --> Gaussians --> Vulkan rasterizer --> rendered
+//   image + intrinsics --> encoder (vknn Vulkan) --> Gaussians --> Vulkan rasterizer --> rendered
 //   view.
-// The encoder runs as a normal vxrt Session; its 6 Gaussian outputs feed the from-scratch Vulkan
+// The encoder runs as a normal vknn Session; its 6 Gaussian outputs feed the from-scratch Vulkan
 // compute rasterizer (preprocess -> GPU tile-bin -> bitonic sort -> per-tile alpha compositing).
 // The rendered view is written as a PPM. See scripts/yonosplat/ for how the encoder .vxm + inputs
 // are made.
@@ -9,7 +9,7 @@
 //   vx_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr extr.bin] [--view N]
 // image.bin = fp32 [1,V,3,224,224], intrinsics.bin = fp32 [1,V,3,3] (normalized). extr.bin
 // (optional) = fp32 [V,4,4] camera-to-world (the encoder's predicted pose, dumpable via
-// VXRT_DUMP_NAMES); identity if omitted. Renders view N.
+// VKNN_DUMP_NAMES); identity if omitted. Renders view N.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -18,14 +18,14 @@
 #include <fstream>
 #include <vector>
 
-#include "vx/session.h"
-#if defined(VXRT_ENABLE_VULKAN)
+#include "vknn/session.h"
+#if defined(VKNN_ENABLE_VULKAN)
 #include "backends/vulkan/vk_buffer.h"
 #include "backends/vulkan/vk_command.h"
 #include "backends/vulkan/vk_pipeline.h"
 #endif
 
-using namespace vx;
+using namespace vknn;
 static const float C0 = 0.28209479177387814f;
 
 static std::vector<uint8_t> readFile(const std::string& p) {
@@ -46,7 +46,7 @@ static const char* opt(int c, char** v, const char* k, const char* d) {
 }
 
 int main(int argc, char** argv) {
-#if !defined(VXRT_ENABLE_VULKAN)
+#if !defined(VKNN_ENABLE_VULKAN)
   fprintf(stderr, "vx_yonosplat needs Vulkan\n");
   return 1;
 #else
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
   const int H = 224, W = 224;
   const float NEAR = 0.2f;
 
-  // ---------- 1. encoder: image + intrinsics -> 6 Gaussian outputs (vxrt Vulkan) ----------
+  // ---------- 1. encoder: image + intrinsics -> 6 Gaussian outputs (vknn Vulkan) ----------
   Config cfg;
   cfg.backend = BackendKind::kVulkan;
   cfg.precision = Precision::kFp16;

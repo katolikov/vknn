@@ -1,8 +1,8 @@
 // PRelu: y = x>0 ? x : slope*x, slope per-channel (or scalar). slope is initializer input[1].
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct PReluCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -23,5 +23,5 @@ struct PReluCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kPRelu, PReluCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kPRelu, PReluCpu);
+}  // namespace vknn

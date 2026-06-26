@@ -3,9 +3,9 @@
 #include <algorithm>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct PadCpu : CpuOp {
   static std::vector<int64_t> readI64(const Node& n, ExecContext& ctx, const char* attr, int idx) {
@@ -68,5 +68,5 @@ struct PadCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kPad, PadCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kPad, PadCpu);
+}  // namespace vknn

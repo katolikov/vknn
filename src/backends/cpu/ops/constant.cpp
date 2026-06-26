@@ -1,7 +1,7 @@
 // Constant: emit the node's stored value (int64 or float vector).
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ConstantCpu : CpuOp {
@@ -34,5 +34,5 @@ struct ConstantCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kConstant, ConstantCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kConstant, ConstantCpu);
+}  // namespace vknn

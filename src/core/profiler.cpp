@@ -1,4 +1,4 @@
-#include "vx/profiler.h"
+#include "vknn/profiler.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -6,7 +6,7 @@
 #include <map>
 #include <sstream>
 
-namespace vx {
+namespace vknn {
 
 double Profiler::totalCpuMs() const {
   double s = 0;
@@ -96,4 +96,4 @@ void Profiler::writeChromeTrace(const std::string& path) const {
   f << "],\"displayTimeUnit\":\"ms\"}";
 }
 
-}  // namespace vx
+}  // namespace vknn

@@ -4,10 +4,10 @@
 
 #include <string>
 
-#include "vx/common.h"
-#include "vx/logging.h"
+#include "vknn/common.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 inline const char* vkResultStr(VkResult r) {
@@ -43,10 +43,10 @@ inline const char* vkResultStr(VkResult r) {
   do {                                                                                             \
     VkResult _vr = (expr);                                                                         \
     if (_vr != VK_SUCCESS) {                                                                       \
-      throw ::vx::Error(::vx::Status::kRuntimeError, std::string("Vulkan call failed: ") + #expr + \
-                                                         " -> " + ::vx::vk::vkResultStr(_vr));     \
+      throw ::vknn::Error(::vknn::Status::kRuntimeError, std::string("Vulkan call failed: ") + #expr + \
+                                                         " -> " + ::vknn::vk::vkResultStr(_vr));     \
     }                                                                                              \
   } while (0)
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

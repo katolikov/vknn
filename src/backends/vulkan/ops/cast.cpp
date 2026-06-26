@@ -4,7 +4,7 @@
 // (an int-target Cast — none here — would fall back to the CPU op).
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct CastOp : VulkanOp {
@@ -19,5 +19,5 @@ struct CastOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kCast, CastOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kCast, CastOp);
+}  // namespace vknn

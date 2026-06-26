@@ -1,7 +1,7 @@
 // Shape: emit the input's dims as an int64 vector.
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ShapeCpu : CpuOp {
@@ -16,5 +16,5 @@ struct ShapeCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kShape, ShapeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kShape, ShapeCpu);
+}  // namespace vknn

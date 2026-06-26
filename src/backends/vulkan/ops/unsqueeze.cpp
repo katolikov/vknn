@@ -3,7 +3,7 @@
 // pass marks Unsqueeze layout-agnostic, so input and output share the flat row-major layout.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct UnsqueezeOp : VulkanOp {
@@ -18,5 +18,5 @@ struct UnsqueezeOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kUnsqueeze, UnsqueezeOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kUnsqueeze, UnsqueezeOp);
+}  // namespace vknn

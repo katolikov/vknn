@@ -1,9 +1,9 @@
 // Transpose / Permute (generic N-D, dtype-agnostic). CPU-only; channel-permuting layouts make a
 // packed NC4HW4 kernel a scatter, so this runs in canonical NCHW with boundary converts.
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct TransposeCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -49,5 +49,5 @@ struct TransposeCpu : CpuOp {
   bool supportsDType(DType) const override { return true; }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kTranspose, TransposeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kTranspose, TransposeCpu);
+}  // namespace vknn

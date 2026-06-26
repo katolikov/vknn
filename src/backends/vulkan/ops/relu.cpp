@@ -2,7 +2,7 @@
 // fused into a Conv/Gemm (e.g. the ReLU after a residual Add in ResNet).
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ReluOp : VulkanOp {
@@ -24,5 +24,5 @@ struct ReluOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kRelu, ReluOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kRelu, ReluOp);
+}  // namespace vknn

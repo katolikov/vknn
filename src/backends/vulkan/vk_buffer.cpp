@@ -2,7 +2,7 @@
 
 #include <unistd.h>
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 static const VkBufferUsageFlags kBaseUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -171,11 +171,11 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
     }
     return b;
   } catch (const std::exception& e) {
-    VX_WARN << "dma-buf import failed: " << e.what();
+    VKNN_WARN << "dma-buf import failed: " << e.what();
     delete b;
     return nullptr;
   }
 }
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

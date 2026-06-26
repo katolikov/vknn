@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build vxrt for Android arm64-v8a using the NDK CMake toolchain.
+# Build VKNN for Android arm64-v8a using the NDK CMake toolchain.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

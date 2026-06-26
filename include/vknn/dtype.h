@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace vx {
+namespace vknn {
 
 enum class DType : uint8_t {
   kFloat32 = 0,
@@ -111,4 +111,4 @@ inline fp16_t floatToHalf(float v) {
   return out;
 }
 
-}  // namespace vx
+}  // namespace vknn

@@ -3,7 +3,7 @@
 
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct AvgPoolCpu : CpuOp {
@@ -52,5 +52,5 @@ struct AvgPoolCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kAvgPool, AvgPoolCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kAvgPool, AvgPoolCpu);
+}  // namespace vknn

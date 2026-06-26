@@ -1,7 +1,7 @@
-#include "vx/backend.h"
-#include "vx/logging.h"
+#include "vknn/backend.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 
 BackendRegistry& BackendRegistry::instance() {
   static BackendRegistry r;
@@ -20,4 +20,4 @@ std::unique_ptr<Backend> BackendRegistry::create(BackendKind k) const {
   return it->second();
 }
 
-}  // namespace vx
+}  // namespace vknn

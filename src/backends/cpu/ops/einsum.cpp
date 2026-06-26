@@ -6,9 +6,9 @@
 #include <string>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 static std::string stripw(const std::string& s) {
@@ -86,5 +86,5 @@ struct EinsumCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kEinsum, EinsumCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kEinsum, EinsumCpu);
+}  // namespace vknn

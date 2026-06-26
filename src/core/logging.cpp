@@ -1,4 +1,4 @@
-#include "vx/logging.h"
+#include "vknn/logging.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -7,11 +7,11 @@
 #include <mutex>
 #include <unordered_map>
 
-#if defined(VXRT_ANDROID)
+#if defined(VKNN_ANDROID)
 #include <android/log.h>
 #endif
 
-namespace vx {
+namespace vknn {
 namespace {
 std::mutex g_mu;
 LogLevel g_level = LogLevel::kInfo;
@@ -23,7 +23,7 @@ void ensureInit() {
   if (g_init)
     return;
   g_init = true;
-  if (const char* e = std::getenv("VXRT_LOG_LEVEL")) {
+  if (const char* e = std::getenv("VKNN_LOG_LEVEL")) {
     if (!strcasecmp(e, "DEBUG"))
       g_level = LogLevel::kDebug;
     else if (!strcasecmp(e, "INFO"))
@@ -100,7 +100,7 @@ void Log::emit(LogLevel lvl, const std::string& msg, const std::string& key, int
   if (throttleAfter > 0 && !key.empty() && g_counts[key] == throttleAfter + 1)
     suffix = " (further '" + key + "' messages suppressed)";
 
-#if defined(VXRT_ANDROID)
+#if defined(VKNN_ANDROID)
   int prio = ANDROID_LOG_INFO;
   switch (lvl) {
     case LogLevel::kDebug:
@@ -118,17 +118,17 @@ void Log::emit(LogLevel lvl, const std::string& msg, const std::string& key, int
     default:
       break;
   }
-  __android_log_print(prio, "vxrt", "%s%s", msg.c_str(), suffix.c_str());
+  __android_log_print(prio, "vknn", "%s%s", msg.c_str(), suffix.c_str());
 #endif
   // Always also print to stderr (so adb shell run captures it without logcat).
   FILE* out = stderr;
   if (g_color) {
-    fprintf(out, "%s[vxrt %s]\033[0m %s%s\n", levelColor(lvl), levelTag(lvl), msg.c_str(),
+    fprintf(out, "%s[vknn %s]\033[0m %s%s\n", levelColor(lvl), levelTag(lvl), msg.c_str(),
             suffix.c_str());
   } else {
-    fprintf(out, "[vxrt %s] %s%s\n", levelTag(lvl), msg.c_str(), suffix.c_str());
+    fprintf(out, "[vknn %s] %s%s\n", levelTag(lvl), msg.c_str(), suffix.c_str());
   }
   fflush(out);
 }
 
-}  // namespace vx
+}  // namespace vknn

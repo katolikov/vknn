@@ -2,16 +2,16 @@
 //
 // Adding a CPU op (see docs/ADDING_AN_OPERATOR.md):
 //   1. subclass CpuOp, implement run().
-//   2. VX_REGISTER_CPU_OP(OpType::kFoo, FooCpuOp);
+//   2. VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpuOp);
 // No edits to core dispatch are required.
 #pragma once
 #include <functional>
 #include <map>
 #include <memory>
 
-#include "vx/backend.h"
+#include "vknn/backend.h"
 
-namespace vx {
+namespace vknn {
 
 /// One operator implementation for the CPU backend. `run` reads inputs and writes outputs
 /// (host buffers, NCHW canonical). Shape inference is the op's responsibility.
@@ -44,9 +44,9 @@ private:
 struct CpuOpRegistrar {
   CpuOpRegistrar(OpType t, CpuOpFactory f) { CpuOpRegistry::instance().reg(t, std::move(f)); }
 };
-#define VX_REGISTER_CPU_OP(OPTYPE, CLASS)            \
-  static ::vx::CpuOpRegistrar _vx_cpuop_reg_##CLASS( \
-      OPTYPE, []() { return std::unique_ptr<::vx::CpuOp>(new CLASS()); })
+#define VKNN_REGISTER_CPU_OP(OPTYPE, CLASS)            \
+  static ::vknn::CpuOpRegistrar _vx_cpuop_reg_##CLASS( \
+      OPTYPE, []() { return std::unique_ptr<::vknn::CpuOp>(new CLASS()); })
 
 // ---- helpers shared by CPU ops ----
 namespace cpu {
@@ -59,4 +59,4 @@ void applyAct(float* p, int64_t n, ActType act, float lo, float hi);
 void copyAs(const RtTensor& X, RtTensor& Y, const Shape& shape);
 }  // namespace cpu
 
-}  // namespace vx
+}  // namespace vknn

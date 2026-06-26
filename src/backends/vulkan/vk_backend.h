@@ -9,9 +9,9 @@
 #include "vk_command.h"
 #include "vk_context.h"
 #include "vk_pipeline.h"
-#include "vx/backend.h"
+#include "vknn/backend.h"
 
-namespace vx {
+namespace vknn {
 
 /// Opaque (to core) device storage = a Vulkan buffer holding an NC4HW4 tensor.
 struct DeviceStorage {
@@ -58,7 +58,7 @@ struct VkOpEnv {
   std::string modelTag;
 };
 
-/// One operator on the Vulkan backend. Adding an op: subclass + VX_REGISTER_VK_OP.
+/// One operator on the Vulkan backend. Adding an op: subclass + VKNN_REGISTER_VK_OP.
 class VulkanOp {
 public:
   virtual ~VulkanOp() = default;
@@ -87,9 +87,9 @@ private:
 struct VkOpRegistrar {
   VkOpRegistrar(OpType t, VkOpFactory f) { VkOpRegistry::instance().reg(t, std::move(f)); }
 };
-#define VX_REGISTER_VK_OP(OPTYPE, CLASS)           \
-  static ::vx::VkOpRegistrar _vx_vkop_reg_##CLASS( \
-      OPTYPE, []() { return std::unique_ptr<::vx::VulkanOp>(new CLASS()); })
+#define VKNN_REGISTER_VK_OP(OPTYPE, CLASS)           \
+  static ::vknn::VkOpRegistrar _vx_vkop_reg_##CLASS( \
+      OPTYPE, []() { return std::unique_ptr<::vknn::VulkanOp>(new CLASS()); })
 
 // NC4HW4 element count for a logical NCHW shape.
 inline int64_t packedElems(const Shape& shape) {
@@ -97,4 +97,4 @@ inline int64_t packedElems(const Shape& shape) {
   return x.n * cBlocks(x.c) * 4 * x.h * x.w;
 }
 
-}  // namespace vx
+}  // namespace vknn

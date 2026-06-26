@@ -1,10 +1,10 @@
-"""Per-op correctness: build a tiny ONNX for each new vxrt op (realistic transformer shapes),
-run onnxruntime (reference) and vxrt CPU, compare. Confirms the kernels independently."""
+"""Per-op correctness: build a tiny ONNX for each new VKNN op (realistic transformer shapes),
+run onnxruntime (reference) and VKNN CPU, compare. Confirms the kernels independently."""
 import numpy as np, onnx, subprocess, os, tempfile
 from onnx import helper as H, TensorProto as T, numpy_helper as NH
 import onnxruntime as ort
 
-VX = "/Users/artemkatolikov/DEV/LibTAS/build-host/vx_run_io"
+VX = "/Users/artemkatolikov/DEV/LibTAS/build-host/vknn_run_io"
 np.random.seed(0)
 D = "/tmp/opval"; os.makedirs(D, exist_ok=True)
 
@@ -21,7 +21,7 @@ def run(name, nodes, inputs, outputs, inits=None, feeds=None):
         ref = ort.InferenceSession(p, providers=["CPUExecutionProvider"]).run(outputs, feeds)
     except Exception as e:
         print(f"  {name:14} ORT-ERR {str(e).splitlines()[-1][:70]}"); return False
-    # vxrt
+    # VKNN
     od = f"{D}/{name}_out"; os.makedirs(od, exist_ok=True)
     for f in os.listdir(od): os.remove(f"{od}/{f}")
     args = [VX, p, od]
@@ -47,7 +47,7 @@ def run(name, nodes, inputs, outputs, inits=None, feeds=None):
 def ci(name, arr):  # const initializer
     return NH.from_array(arr, name)
 
-print("=== per-op validation: vxrt CPU vs onnxruntime ===")
+print("=== per-op validation: VKNN CPU vs onnxruntime ===")
 # LayerNorm [1,256,1024]
 run("layernorm", [H.make_node("LayerNormalization", ["x","g","b"], ["y"], axis=-1, epsilon=1e-6)],
     [("x",[1,256,1024])], ["y"],

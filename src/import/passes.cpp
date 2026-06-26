@@ -6,9 +6,9 @@
 #include <set>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/logging.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 
 // Read an int64 list parameter from either a node attribute (older opsets) or an initializer input
 // (opset 10+/13+ moved Slice/Pad/Reduce params to inputs). Returns empty if neither is present.
@@ -760,7 +760,7 @@ void lowerEinsum(Graph& g) {
       kept.push_back(std::move(a));
     g.nodes = std::move(kept);
     g.topoSort();
-    VX_INFO << "lowerEinsum: lowered " << remove.size() << " batched einsum(s) to MatMul";
+    VKNN_INFO << "lowerEinsum: lowered " << remove.size() << " batched einsum(s) to MatMul";
   }
 }
 
@@ -923,7 +923,7 @@ int constFold(Graph& g) {
       if (!removeNodes.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "constFold: folded " << removeNodes.size() << " shape-path node(s)";
+    VKNN_INFO << "constFold: folded " << removeNodes.size() << " shape-path node(s)";
   }
   return (int)removeNodes.size();
 }
@@ -1009,7 +1009,7 @@ void foldBatchNorm(Graph& g) {
       if (!remove.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "foldBatchNorm: folded " << folded << " BN node(s) into Conv";
+    VKNN_INFO << "foldBatchNorm: folded " << folded << " BN node(s) into Conv";
   }
 }
 
@@ -1079,7 +1079,7 @@ void fuseActivations(Graph& g) {
       if (!remove.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "fuseActivations: fused " << fused << " activation(s) into Conv/Gemm";
+    VKNN_INFO << "fuseActivations: fused " << fused << " activation(s) into Conv/Gemm";
   }
 }
 
@@ -1110,7 +1110,7 @@ void eliminateIdentity(Graph& g) {
       if (!remove.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "eliminateIdentity: removed " << n << " Identity node(s)";
+    VKNN_INFO << "eliminateIdentity: removed " << n << " Identity node(s)";
   }
 }
 
@@ -1189,7 +1189,7 @@ void fuseResidualAdd(Graph& g) {
       if (!remove.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "fuseResidualAdd: fused " << fused << " residual Add(s) into Conv";
+    VKNN_INFO << "fuseResidualAdd: fused " << fused << " residual Add(s) into Conv";
   }
 }
 
@@ -1252,7 +1252,7 @@ void fuseSqueezeExcite(Graph& g) {
       if (!remove.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "fuseSqueezeExcite: fused " << fused << " SE chain(s)";
+    VKNN_INFO << "fuseSqueezeExcite: fused " << fused << " SE chain(s)";
   }
 }
 
@@ -1326,7 +1326,7 @@ void fuseSwish(Graph& g) {
       if (!remove.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "fuseSwish: fused " << fusedC << " into conv, collapsed " << fusedU << " to unary";
+    VKNN_INFO << "fuseSwish: fused " << fusedC << " into conv, collapsed " << fusedU << " to unary";
   }
 }
 
@@ -1403,7 +1403,7 @@ void fuseDwPw(Graph& g) {
       if (!remove.count((int)i))
         kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
-    VX_INFO << "fuseDwPw: fused " << fused << " depthwise+project pair(s)";
+    VKNN_INFO << "fuseDwPw: fused " << fused << " depthwise+project pair(s)";
   }
 }
 
@@ -1446,7 +1446,7 @@ void eliminateDeadNodes(Graph& g) {
   }
   if (removed) {
     g.nodes = std::move(kept);
-    VX_INFO << "eliminateDeadNodes: removed " << removed << " node(s)";
+    VKNN_INFO << "eliminateDeadNodes: removed " << removed << " node(s)";
   }
 }
 
@@ -1624,7 +1624,7 @@ void insertLayoutConverts(Graph& g) {
     for (auto& c : converts)
       g.nodes.push_back(std::move(c));
     g.topoSort();
-    VX_INFO << "insertLayoutConverts: inserted " << converts.size() << " layout convert(s)";
+    VKNN_INFO << "insertLayoutConverts: inserted " << converts.size() << " layout convert(s)";
   }
 }
 
@@ -1634,11 +1634,11 @@ void runStandardPasses(Graph& g, int64_t batch) {
   foldBatchNorm(g);
   fuseActivations(g);
   fuseResidualAdd(g);
-  if (!std::getenv("VXRT_NO_FUSE_SWISH"))
+  if (!std::getenv("VKNN_NO_FUSE_SWISH"))
     fuseSwish(g);  // HardSwish/SiLU into conv epilogue (default on)
-  if (std::getenv("VXRT_FUSE_SE"))
+  if (std::getenv("VKNN_FUSE_SE"))
     fuseSqueezeExcite(g);
-  if (std::getenv("VXRT_FUSE_DWPW"))
+  if (std::getenv("VKNN_FUSE_DWPW"))
     fuseDwPw(g);
   // Iterate fold+infer: folding a Shape/Gather/Concat chain turns a dynamic Reshape's shape input
   // into a constant, which lets the next inferShapes resolve that Reshape statically, which in turn
@@ -1653,7 +1653,7 @@ void runStandardPasses(Graph& g, int64_t batch) {
   inferShapes(g, batch);  // refresh shapes after fusion/folding
   lowerEinsum(g);         // batched einsums -> MatMul (needs the operand shapes resolved above)
   inferShapes(g, batch);  // resolve the inserted Unsqueeze/MatMul/Squeeze
-  if (std::getenv("VXRT_DUMP_BIG")) {
+  if (std::getenv("VKNN_DUMP_BIG")) {
     for (const Node& n : g.nodes)
       for (TensorId o : n.outputs) {
         if (o == kNoTensor)
@@ -1663,11 +1663,11 @@ void runStandardPasses(Graph& g, int64_t batch) {
           std::string sh;
           for (int64_t d : g.desc(o).shape)
             sh += std::to_string(d) + ",";
-          VX_WARN << "BIG tensor " << ne << " elems from " << opTypeName(n.type) << " " << n.name
+          VKNN_WARN << "BIG tensor " << ne << " elems from " << opTypeName(n.type) << " " << n.name
                   << " shape=[" << sh << "]";
         }
       }
   }
 }
 
-}  // namespace vx
+}  // namespace vknn

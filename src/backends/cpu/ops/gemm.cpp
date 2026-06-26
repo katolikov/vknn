@@ -1,12 +1,12 @@
 // Gemm: Y = alpha*op(A)*op(B) + beta*C. The inner contraction gets a NEON path for the common
 // classifier shape (transB=1, A not transposed); everything else uses the scalar fallback.
 #include "backends/cpu/cpu_backend.h"
-#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
 #include <arm_neon.h>
-#define VX_HAS_NEON 1
+#define VKNN_HAS_NEON 1
 #endif
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct GemmCpu : CpuOp {
@@ -36,7 +36,7 @@ struct GemmCpu : CpuOp {
       for (int64_t n = 0; n < N; ++n) {
         float acc = 0;
         int64_t k = 0;
-#if defined(VX_HAS_NEON)
+#if defined(VKNN_HAS_NEON)
         if (transB && !transA) {
           const float* arow = a + m * K;
           const float* brow = b + n * K;
@@ -62,6 +62,6 @@ struct GemmCpu : CpuOp {
 
 }  // namespace
 
-VX_REGISTER_CPU_OP(OpType::kGemm, GemmCpu);
+VKNN_REGISTER_CPU_OP(OpType::kGemm, GemmCpu);
 
-}  // namespace vx
+}  // namespace vknn

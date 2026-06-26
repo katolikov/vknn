@@ -2,7 +2,7 @@
 // [1,1280]) leaves the packed bytes identical, so we just copy the buffer.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ReshapeOp : VulkanOp {
@@ -25,6 +25,6 @@ struct ReshapeOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kReshape, ReshapeOp);
+VKNN_REGISTER_VK_OP(OpType::kReshape, ReshapeOp);
 
-}  // namespace vx
+}  // namespace vknn

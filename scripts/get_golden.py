@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Produce onnxruntime golden outputs for vxrt validation.
+"""Produce onnxruntime golden outputs for VKNN validation.
 
 Outputs (under assets/):
   input.bin        fixed preprocessed input, raw float32 NCHW [1,3,224,224]

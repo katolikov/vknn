@@ -5,10 +5,10 @@
 #include <string>
 #include <vector>
 
-#include "vx/op.h"
-#include "vx/tensor.h"
+#include "vknn/op.h"
+#include "vknn/tensor.h"
 
-namespace vx {
+namespace vknn {
 
 class Graph {
 public:
@@ -41,4 +41,4 @@ Graph importOnnx(const std::string& path);
 bool saveGraphBin(const Graph& g, const std::string& path);
 bool loadGraphBin(Graph& g, const std::string& path);
 
-}  // namespace vx
+}  // namespace vknn

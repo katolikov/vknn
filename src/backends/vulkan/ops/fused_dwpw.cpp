@@ -2,9 +2,9 @@
 // staged in LDS (computed once), then projected. Gated by supportsNode to large-spatial fp16
 // blocks.
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct DwPwPC {
   int N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DWd, dwAct, pwAct;
@@ -94,5 +94,5 @@ struct FusedDwPwOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kFusedDwPw, FusedDwPwOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kFusedDwPw, FusedDwPwOp);
+}  // namespace vknn

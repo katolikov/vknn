@@ -4,7 +4,7 @@
 
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ReshapeCpu : CpuOp {
@@ -34,5 +34,5 @@ struct ReshapeCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kReshape, ReshapeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kReshape, ReshapeCpu);
+}  // namespace vknn

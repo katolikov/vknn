@@ -6,9 +6,9 @@
 #include <string>
 #include <vector>
 
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 
 struct OpRecord {
   std::string name;
@@ -43,4 +43,4 @@ private:
   std::vector<OpRecord> records_;
 };
 
-}  // namespace vx
+}  // namespace vknn

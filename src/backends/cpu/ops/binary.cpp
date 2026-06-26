@@ -3,9 +3,9 @@
 #include <cmath>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 static float binary(float a, float b, BinaryType op) {
@@ -128,5 +128,5 @@ struct BinaryCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kBinary, BinaryCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kBinary, BinaryCpu);
+}  // namespace vknn

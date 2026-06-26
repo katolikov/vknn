@@ -5,7 +5,7 @@
 // Mode B (user-supplied fd): wrap an existing dma-buf fd -> import -> verify.
 // Both are validated against the staged (regular VkBuffer + upload) path.
 #include <cstdio>
-#if defined(VXRT_ENABLE_VULKAN)
+#if defined(VKNN_ENABLE_VULKAN)
 #include <unistd.h>
 
 #include <cmath>
@@ -14,10 +14,10 @@
 #include "backends/vulkan/vk_buffer.h"
 #include "backends/vulkan/vk_command.h"
 #include "backends/vulkan/vk_pipeline.h"
-#include "vx/ion.h"
-#include "vx/logging.h"
+#include "vknn/ion.h"
+#include "vknn/logging.h"
 
-using namespace vx;
+using namespace vknn;
 
 static bool runAdd(vk::VulkanContext& ctx, vk::CommandRunner& runner, vk::ComputePipeline& add,
                    VkBuffer a, VkBuffer b, VkBuffer c, uint32_t n) {

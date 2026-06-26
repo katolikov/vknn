@@ -1,8 +1,8 @@
-#include "vx/op.h"
+#include "vknn/op.h"
 
 #include <unordered_map>
 
-namespace vx {
+namespace vknn {
 
 const char* opTypeName(OpType t) {
   switch (t) {
@@ -205,4 +205,4 @@ OpType opTypeFromOnnx(const std::string& s) {
   return OpType::kUnknown;
 }
 
-}  // namespace vx
+}  // namespace vknn

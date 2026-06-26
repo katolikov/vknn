@@ -5,9 +5,9 @@
 #include <set>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct ReduceCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -78,5 +78,5 @@ struct ReduceCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kReduce, ReduceCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kReduce, ReduceCpu);
+}  // namespace vknn

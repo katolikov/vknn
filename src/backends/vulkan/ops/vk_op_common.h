@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "backends/vulkan/vk_backend.h"
-#include "vx/dtype.h"
+#include "vknn/dtype.h"
 
-namespace vx {
+namespace vknn {
 
 // Push-constant layouts. If you touch one of these, change the matching shader too.
 struct ConvPC {
@@ -149,4 +149,4 @@ inline vk::Buffer* operandBuf(VkOpEnv& env, TensorId t, std::shared_ptr<vk::Buff
   return env.devBuf(t);
 }
 
-}  // namespace vx
+}  // namespace vknn

@@ -1,7 +1,7 @@
 // ReLU.
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ReluCpu : CpuOp {
@@ -17,5 +17,5 @@ struct ReluCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kRelu, ReluCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kRelu, ReluCpu);
+}  // namespace vknn

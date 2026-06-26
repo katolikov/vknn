@@ -3,7 +3,7 @@
 
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ConcatCpu : CpuOp {
@@ -55,5 +55,5 @@ struct ConcatCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kConcat, ConcatCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kConcat, ConcatCpu);
+}  // namespace vknn

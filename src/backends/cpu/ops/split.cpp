@@ -1,8 +1,8 @@
 // Split a tensor along an axis into N outputs (generic N-D, dtype-agnostic).
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct SplitCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -48,5 +48,5 @@ struct SplitCpu : CpuOp {
   bool supportsDType(DType) const override { return true; }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kSplit, SplitCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kSplit, SplitCpu);
+}  // namespace vknn

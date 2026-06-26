@@ -2,7 +2,7 @@
 // kernel/stride/pad form used by Inception/SqueezeNet.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct AvgPoolOp : VulkanOp {
@@ -47,5 +47,5 @@ struct AvgPoolOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kAvgPool, AvgPoolOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kAvgPool, AvgPoolOp);
+}  // namespace vknn

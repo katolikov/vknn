@@ -4,14 +4,14 @@
 #include <fstream>
 #include <vector>
 
-#include "vx/model.h"
+#include "vknn/model.h"
 
 int main(int argc, char** argv) {
   if (argc < 2) {
     printf("usage: %s model.onnx [input.bin]\n", argv[0]);
     return 1;
   }
-  vx::Model net = vx::Model::load(argv[1]);  // precision auto, Vulkan if available
+  vknn::Model net = vknn::Model::load(argv[1]);  // precision auto, Vulkan if available
   if (!net) {
     printf("failed to load %s\n", argv[1]);
     return 1;
@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
       f.read(reinterpret_cast<char*>(input.data()), need * sizeof(float));
   }
 
-  vx::Tensor out = net.run(input);  // one line to run
+  vknn::Tensor out = net.run(input);  // one line to run
   printf("result: shape=%s  top1=%lld  max=%.4f\n", out.shapeString().c_str(),
          (long long)out.argmax(), out.max());
 

@@ -5,9 +5,9 @@
 #include <cstring>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ScatterNDCpu : CpuOp {
@@ -72,5 +72,5 @@ struct ScatterNDCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kScatterND, ScatterNDCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kScatterND, ScatterNDCpu);
+}  // namespace vknn

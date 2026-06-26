@@ -2,7 +2,7 @@
 // buffer is just the channel vector. Weights are stored row-major [Cout][Cin].
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct GemmOp : VulkanOp {
@@ -71,6 +71,6 @@ struct GemmOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kGemm, GemmOp);
+VKNN_REGISTER_VK_OP(OpType::kGemm, GemmOp);
 
-}  // namespace vx
+}  // namespace vknn

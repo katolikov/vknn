@@ -4,7 +4,7 @@
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct BinaryPC {
@@ -55,5 +55,5 @@ struct BinaryOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kBinary, BinaryOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kBinary, BinaryOp);
+}  // namespace vknn

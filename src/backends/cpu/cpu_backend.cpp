@@ -5,10 +5,10 @@
 #include <cmath>
 #include <cstring>
 
-#include "vx/logging.h"
-#include "vx/profiler.h"
+#include "vknn/logging.h"
+#include "vknn/profiler.h"
 
-namespace vx {
+namespace vknn {
 
 CpuOpRegistry& CpuOpRegistry::instance() {
   static CpuOpRegistry r;
@@ -88,7 +88,7 @@ public:
   void run(ExecContext& ctx) override {
     for (size_t k = 0; k < nodeIdx.size(); ++k) {
       const Node& node = ctx.graph->nodes[nodeIdx[k]];
-      if (std::getenv("VXRT_DEBUG_SEG")) {
+      if (std::getenv("VKNN_DEBUG_SEG")) {
         std::string sh;
         for (auto t : node.inputs) {
           sh += std::to_string(t) + ":[";
@@ -100,7 +100,7 @@ public:
           } else
             sh += "?] ";
         }
-        VX_INFO << "  cpuop " << opTypeName(node.type) << " '" << node.name << "' ins=" << sh;
+        VKNN_INFO << "  cpuop " << opTypeName(node.type) << " '" << node.name << "' ins=" << sh;
       }
       CpuOp* op = ops_[k].get();
       if (!op)
@@ -146,6 +146,6 @@ public:
   }
 };
 
-VX_REGISTER_BACKEND(BackendKind::kCpu, CpuBackend);
+VKNN_REGISTER_BACKEND(BackendKind::kCpu, CpuBackend);
 
-}  // namespace vx
+}  // namespace vknn

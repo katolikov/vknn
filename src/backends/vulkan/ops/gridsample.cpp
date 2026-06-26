@@ -2,9 +2,9 @@
 // (the grid's [N,H,W,2] layout can't go through NC4HW4 input packing; a constant is uploaded raw
 // here, like conv weights). Runtime grids fall back to the CPU op.
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct GsPC {
   int N, C, Hin, Win, OH, OW, align;
@@ -43,5 +43,5 @@ struct GridSampleOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kGridSample, GridSampleOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kGridSample, GridSampleOp);
+}  // namespace vknn

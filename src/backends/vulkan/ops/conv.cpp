@@ -5,9 +5,9 @@
 #include <cstdlib>
 
 #include "vk_op_common.h"
-#include "vx/logging.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ConvOp : VulkanOp {
@@ -115,7 +115,7 @@ struct ConvOp : VulkanOp {
   // The timing dispatches run on dedicated SCRATCH buffers, never the real activation buffers -
   // tuning must not write into the data path (doing so raced the first real run and corrupted it).
   uint32_t pickLocalSize(VkOpEnv& env) {
-    if (std::getenv("VXRT_NO_TUNE"))
+    if (std::getenv("VKNN_NO_TUNE"))
       return 64;
     char buf[96];
     snprintf(buf, sizeof(buf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH,
@@ -155,7 +155,7 @@ struct ConvOp : VulkanOp {
           best = ls;
         }
       }
-      VX_DEBUG << "autotune " << sig << " -> local_size_x=" << best;
+      VKNN_DEBUG << "autotune " << sig << " -> local_size_x=" << best;
     }
     if (env.weights)
       env.weights->setTuned(sig, (int)best);
@@ -178,9 +178,9 @@ struct ConvOp : VulkanOp {
                  pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
     // Winograd F(2,3) for 3x3 stride-1 pad-1 group-1 convs (fp16). Correct (cosine 0.999999) but
     // the un-fused 3-pass version is memory-bound and currently slower than the direct kernel on
-    // this GPU, so it's opt-in via VXRT_WINOGRAD=1 until the transforms are fused. See
+    // this GPU, so it's opt-in via VKNN_WINOGRAD=1 until the transforms are fused. See
     // BENCHMARK.md.
-    bool winoEnabled = std::getenv("VXRT_WINOGRAD") != nullptr;
+    bool winoEnabled = std::getenv("VKNN_WINOGRAD") != nullptr;
     winograd = (winoEnabled && env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 &&
                 st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 &&
                 pad[3] == 1 && x.c >= 16);
@@ -262,7 +262,7 @@ struct ConvOp : VulkanOp {
               *env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
               std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)}, env.cache->handle());
         }
-      } else if (std::getenv("VXRT_LDS") && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 &&
+      } else if (std::getenv("VKNN_LDS") && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 &&
                  st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 &&
                  dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14) {
         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
@@ -273,7 +273,7 @@ struct ConvOp : VulkanOp {
         pipe =
             std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC),
                                                   std::vector<uint32_t>{}, env.cache->handle());
-      } else if (std::getenv("VXRT_CONV_REG")) {
+      } else if (std::getenv("VKNN_CONV_REG")) {
         // register-tiled implicit-im2col (opt-in): regresses 3x3 on this GPU (small weight tensors
         // already cache well; WTILE overhead + extra input loads dominate). Kept for experiments.
         reg = true;
@@ -335,6 +335,6 @@ struct ConvOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kConv, ConvOp);
+VKNN_REGISTER_VK_OP(OpType::kConv, ConvOp);
 
-}  // namespace vx
+}  // namespace vknn

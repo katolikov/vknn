@@ -1,7 +1,7 @@
 // PRelu on the GPU (NC4HW4). Per-channel slope packed to [Cb][4] and uploaded once.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct PReluPC {
   int count, HW, Cb;
@@ -37,5 +37,5 @@ struct PReluOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kPRelu, PReluOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kPRelu, PReluOp);
+}  // namespace vknn

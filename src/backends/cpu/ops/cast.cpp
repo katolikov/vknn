@@ -1,9 +1,9 @@
-// Cast: change dtype. vxrt computes in fp32 and carries int64 for shape paths, so we support
+// Cast: change dtype. vknn computes in fp32 and carries int64 for shape paths, so we support
 // float<->int64 conversions (other integer widths map onto these). Shape unchanged.
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct CastCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -40,5 +40,5 @@ struct CastCpu : CpuOp {
   bool supportsDType(DType) const override { return true; }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kCast, CastCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kCast, CastCpu);
+}  // namespace vknn

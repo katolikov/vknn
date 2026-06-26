@@ -6,7 +6,7 @@
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct SplitOp : VulkanOp {
@@ -104,6 +104,6 @@ struct SplitOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kSplit, SplitOp);
+VKNN_REGISTER_VK_OP(OpType::kSplit, SplitOp);
 
-}  // namespace vx
+}  // namespace vknn

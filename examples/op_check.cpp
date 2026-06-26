@@ -6,16 +6,16 @@
 #include <cstdlib>
 #include <vector>
 
-#include "vx/logging.h"
-#if defined(VXRT_ENABLE_VULKAN)
+#include "vknn/logging.h"
+#if defined(VKNN_ENABLE_VULKAN)
 #include "backends/vulkan/vk_buffer.h"
 #include "backends/vulkan/vk_command.h"
 #include "backends/vulkan/vk_pipeline.h"
 #endif
 
 int main(int argc, char** argv) {
-#if defined(VXRT_ENABLE_VULKAN)
-  using namespace vx;
+#if defined(VKNN_ENABLE_VULKAN)
+  using namespace vknn;
   const std::string cacheDir = (argc > 1) ? argv[1] : "/data/local/tmp/vxrt/cache";
   ::mkdir(cacheDir.c_str(), 0755);
 

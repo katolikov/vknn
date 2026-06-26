@@ -1,21 +1,21 @@
 // vx_probe - enumerate the device's Vulkan compute capabilities (M0 hello-vulkan).
 #include <cstdio>
 
-#include "vx/logging.h"
-#if defined(VXRT_ENABLE_VULKAN)
+#include "vknn/logging.h"
+#if defined(VKNN_ENABLE_VULKAN)
 #include "backends/vulkan/vk_context.h"
 #endif
 
 int main() {
-#if defined(VXRT_ENABLE_VULKAN)
-  using namespace vx;
+#if defined(VKNN_ENABLE_VULKAN)
+  using namespace vknn;
   vk::VulkanContext ctx;
   if (!ctx.initialized()) {
     fprintf(stderr, "Vulkan context failed to initialize\n");
     return 1;
   }
   const auto& c = ctx.caps();
-  printf("==== vxrt Vulkan probe ====\n");
+  printf("==== vknn Vulkan probe ====\n");
   printf("device         : %s\n", c.deviceName.c_str());
   printf("driver         : %s | %s\n", c.driverName.c_str(), c.driverInfo.c_str());
   printf("driverID       : %u\n", c.driverID);

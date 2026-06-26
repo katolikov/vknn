@@ -6,13 +6,13 @@
 #include <string>
 #include <vector>
 
-#include "vx/backend.h"
-#include "vx/config.h"
-#include "vx/graph.h"
-#include "vx/profiler.h"
-#include "vx/tensor.h"
+#include "vknn/backend.h"
+#include "vknn/config.h"
+#include "vknn/graph.h"
+#include "vknn/profiler.h"
+#include "vknn/tensor.h"
 
-namespace vx {
+namespace vknn {
 
 /// A named tensor handed in/out of the engine (host side, NCHW canonical, fp32).
 struct IOTensor {
@@ -100,4 +100,4 @@ public:
   }
 };
 
-}  // namespace vx
+}  // namespace vknn

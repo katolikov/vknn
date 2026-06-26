@@ -4,9 +4,9 @@
 #include <vector>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct FusedDwPwCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -69,5 +69,5 @@ struct FusedDwPwCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kFusedDwPw, FusedDwPwCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kFusedDwPw, FusedDwPwCpu);
+}  // namespace vknn

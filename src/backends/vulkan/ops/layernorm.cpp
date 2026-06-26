@@ -6,9 +6,9 @@
 // scale/bias-as-initializers.
 #include "flat_ops.h"
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct LnPC {
@@ -66,5 +66,5 @@ struct LayerNormOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kLayerNorm, LayerNormOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kLayerNorm, LayerNormOp);
+}  // namespace vknn

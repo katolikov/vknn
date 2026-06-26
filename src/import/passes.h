@@ -1,8 +1,8 @@
 // graph optimization passes (backend-agnostic, operate on NCHW IR).
 #pragma once
-#include "vx/graph.h"
+#include "vknn/graph.h"
 
-namespace vx {
+namespace vknn {
 
 // Resolve dynamic batch to `batch` and infer concrete shapes for all tensors possible.
 void inferShapes(Graph& g, int64_t batch = 1);
@@ -36,4 +36,4 @@ std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* at
 // without such ops. Run after backend-agnostic passes, before backend planning.
 void insertLayoutConverts(Graph& g);
 
-}  // namespace vx
+}  // namespace vknn

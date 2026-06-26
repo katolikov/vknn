@@ -1,4 +1,4 @@
-#include "vx/session.h"
+#include "vknn/session.h"
 
 #include <sys/stat.h>
 
@@ -8,9 +8,9 @@
 #include <set>
 
 #include "../import/passes.h"
-#include "vx/logging.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 
 Session::~Session() = default;
 
@@ -22,7 +22,7 @@ std::unique_ptr<Session> Session::createFromOnnx(const std::string& path, const 
 std::unique_ptr<Session> Session::createFromVxm(const std::string& path, const Config& cfg) {
   Graph g;
   if (!loadGraphBin(g, path)) {
-    VX_ERROR << "failed to load .vxm: " << path;
+    VKNN_ERROR << "failed to load .vxm: " << path;
     return nullptr;
   }
   auto s = std::unique_ptr<Session>(new Session());
@@ -34,7 +34,7 @@ std::unique_ptr<Session> Session::createFromVxm(const std::string& path, const C
   auto t0 = std::chrono::high_resolution_clock::now();
   s->plan();
   auto t1 = std::chrono::high_resolution_clock::now();
-  VX_INFO << "Session created from .vxm in "
+  VKNN_INFO << "Session created from .vxm in "
           << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
   return s;
 }
@@ -52,7 +52,7 @@ std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
   auto t0 = std::chrono::high_resolution_clock::now();
   s->plan();
   auto t1 = std::chrono::high_resolution_clock::now();
-  VX_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count()
+  VKNN_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count()
           << " ms";
   return s;
 }
@@ -164,12 +164,12 @@ void Session::plan() {
       continue;
     seen.insert(k);
     if (!reg.has(k)) {
-      VX_DEBUG << "backend " << backendName(k) << " not registered";
+      VKNN_DEBUG << "backend " << backendName(k) << " not registered";
       continue;
     }
     auto b = reg.create(k);
     if (!b || !b->available()) {
-      VX_WARN << "backend " << backendName(k) << " unavailable; skipping";
+      VKNN_WARN << "backend " << backendName(k) << " unavailable; skipping";
       continue;
     }
     byKind_[k] = b.get();
@@ -177,7 +177,7 @@ void Session::plan() {
   }
   if (backends_.empty())
     throw Error(Status::kRuntimeError, "no usable backend");
-  VX_INFO << "Active backends (priority): " << [&] {
+  VKNN_INFO << "Active backends (priority): " << [&] {
     std::string s;
     for (auto& b : backends_)
       s += std::string(b->name()) + " ";
@@ -223,7 +223,7 @@ void Session::plan() {
     // warn if the primary backend couldn't take it
     if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend) &&
         !byKind_[cfg_.backend]->supportsNode(graph_, nd, dt)) {
-      VX_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2)
+      VKNN_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2)
           << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by "
           << backendName(cfg_.backend) << " backend -> falling back to "
           << backends_[chosen]->name()
@@ -352,11 +352,11 @@ void Session::plan() {
     for (auto& kv : graph_.initializers)
       freed += kv.second.bytes.size();
     graph_.initializers.clear();
-    VX_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
+    VKNN_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
   }
 
   planned_ = true;
-  VX_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size()
+  VKNN_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size()
           << " nodes";
 }
 
@@ -390,7 +390,7 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
       if (graph_.inputs.size() == 1)
         id = graph_.inputs[0];
       else {
-        VX_ERROR << "input not found: " << io.name;
+        VKNN_ERROR << "input not found: " << io.name;
         return Status::kInvalidArgument;
       }
     }
@@ -404,15 +404,15 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
 
   // --- run segments in order ---
   try {
-    bool dbg = std::getenv("VXRT_DEBUG_SEG") != nullptr;
+    bool dbg = std::getenv("VKNN_DEBUG_SEG") != nullptr;
     for (size_t si = 0; si < segments_.size(); ++si) {
       if (dbg)
-        VX_INFO << "RUN segment " << si << "/" << segments_.size()
+        VKNN_INFO << "RUN segment " << si << "/" << segments_.size()
                 << " backend=" << segments_[si]->backend->name();
       segments_[si]->run(ctx);
     }
   } catch (const std::exception& e) {
-    VX_ERROR << "run failed: " << e.what();
+    VKNN_ERROR << "run failed: " << e.what();
     return Status::kRuntimeError;
   }
 
@@ -431,7 +431,7 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
       if (f)
         f.write((const char*)rt.host.bytes.data(), rt.host.bytes.size());
     }
-    VX_INFO << "layer dump written to " << cfg_.layerDumpDir;
+    VKNN_INFO << "layer dump written to " << cfg_.layerDumpDir;
   }
 
   // --- collect outputs ---
@@ -476,7 +476,7 @@ std::vector<IOInfo> Session::outputInfo() const {
 Status Session::run(const std::vector<std::vector<float>>& inputData,
                     std::vector<IOTensor>& outputs) {
   if (inputData.size() != graph_.inputs.size()) {
-    VX_ERROR << "run: expected " << graph_.inputs.size() << " input(s), got " << inputData.size();
+    VKNN_ERROR << "run: expected " << graph_.inputs.size() << " input(s), got " << inputData.size();
     return Status::kInvalidArgument;
   }
   std::vector<IOTensor> ins(graph_.inputs.size());
@@ -486,7 +486,7 @@ Status Session::run(const std::vector<std::vector<float>>& inputData,
     int64_t want = numElements(d.shape);
     // Allow callers not to know the count (want<=0 for fully-dynamic shapes); otherwise validate.
     if (want > 0 && (int64_t)inputData[i].size() != want) {
-      VX_ERROR << "run: input '" << d.name << "' expects " << want << " values, got "
+      VKNN_ERROR << "run: input '" << d.name << "' expects " << want << " values, got "
                << inputData[i].size();
       return Status::kInvalidArgument;
     }
@@ -507,4 +507,4 @@ std::vector<float> Session::infer(const std::vector<float>& input) {
   return std::vector<float>(o, o + numElements(outs[0].shape));
 }
 
-}  // namespace vx
+}  // namespace vknn

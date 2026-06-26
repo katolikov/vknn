@@ -4,7 +4,7 @@
 
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct SoftmaxCpu : CpuOp {
@@ -39,5 +39,5 @@ struct SoftmaxCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kSoftmax, SoftmaxCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kSoftmax, SoftmaxCpu);
+}  // namespace vknn

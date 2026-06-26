@@ -7,7 +7,7 @@
 
 #include "vk_context.h"
 
-namespace vx {
+namespace vknn {
 // Provided by the build-time-generated translation unit (tools/embed_spirv.py).
 const std::map<std::string, std::vector<uint32_t>>& embeddedShaders();
 
@@ -56,4 +56,4 @@ private:
 };
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

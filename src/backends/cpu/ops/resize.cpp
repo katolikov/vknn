@@ -5,9 +5,9 @@
 #include <cmath>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 
 // mode codes shared with the shader
 int vxResizeMode(const std::string& s) {
@@ -81,5 +81,5 @@ struct ResizeCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kResize, ResizeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kResize, ResizeCpu);
+}  // namespace vknn

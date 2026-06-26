@@ -2,9 +2,9 @@
 // (logits [N,C] / [N,C,1,1]); other axes fall back to the CPU softmax.
 #include "flat_ops.h"
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct SmPC {
   int N, C;
@@ -37,5 +37,5 @@ struct SoftmaxOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kSoftmax, SoftmaxOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kSoftmax, SoftmaxOp);
+}  // namespace vknn

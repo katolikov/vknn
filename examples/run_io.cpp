@@ -15,9 +15,9 @@
 #include <string>
 #include <vector>
 
-#include "vx/session.h"
+#include "vknn/session.h"
 
-using namespace vx;
+using namespace vknn;
 
 static bool flag(int c, char** v, const char* k) {
   for (int i = 3; i < c; ++i)

@@ -1,7 +1,7 @@
 // Identity: pass the tensor through unchanged.
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct IdentityCpu : CpuOp {
@@ -17,5 +17,5 @@ struct IdentityCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kIdentity, IdentityCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kIdentity, IdentityCpu);
+}  // namespace vknn

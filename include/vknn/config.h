@@ -4,10 +4,10 @@
 #include <string>
 #include <vector>
 
-#include "vx/common.h"
-#include "vx/tensor_format.h"
+#include "vknn/common.h"
+#include "vknn/tensor_format.h"
 
-namespace vx {
+namespace vknn {
 
 enum class BackendKind { kVulkan = 0, kCpu = 1, kEnn = 2 };
 enum class Precision { kFp32 = 0, kFp16 = 1, kAuto = 2 };
@@ -45,10 +45,10 @@ struct Config {
   // the full weight blob — needed to fit large (e.g. 965M-param fp16) models on-device.
   bool freeWeightsAfterUpload = true;
 
-  // Optimization / debug (replace the old VXRT_* env vars; set from binary flags).
+  // Optimization / debug (replace the old VKNN_* env vars; set from binary flags).
   int optLevel = 3;        // graph optimization level 0..3 (fusions). 0 = none.
-  bool noFlatOps = false;  // disable the flat-layout GPU pass (was VXRT_NO_FLAT_OPS)
-  bool timing = false;     // print pack/submit/unpack timing (was VXRT_TIMING)
+  bool noFlatOps = false;  // disable the flat-layout GPU pass (was VKNN_NO_FLAT_OPS)
+  bool timing = false;     // print pack/submit/unpack timing (was VKNN_TIMING)
 
   // Profiling / debug.
   bool profile = false;
@@ -65,4 +65,4 @@ struct Config {
   void applyLogLevel() const;
 };
 
-}  // namespace vx
+}  // namespace vknn

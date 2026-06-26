@@ -3,7 +3,7 @@
 // marks Squeeze layout-agnostic, so input and output share the flat row-major layout.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct SqueezeOp : VulkanOp {
@@ -25,6 +25,6 @@ struct SqueezeOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kSqueeze, SqueezeOp);
+VKNN_REGISTER_VK_OP(OpType::kSqueeze, SqueezeOp);
 
-}  // namespace vx
+}  // namespace vknn

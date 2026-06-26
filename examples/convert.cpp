@@ -12,10 +12,10 @@
 #include <vector>
 
 #include "import/passes.h"
-#include "vx/dtype.h"
-#include "vx/graph.h"
+#include "vknn/dtype.h"
+#include "vknn/graph.h"
 
-using namespace vx;
+using namespace vknn;
 
 int main(int argc, char** argv) {
   if (argc < 3) {

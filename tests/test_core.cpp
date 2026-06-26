@@ -1,17 +1,17 @@
-// vxrt unit tests (host): dtype/fp16, config JSON, ONNX import, graph passes, CPU ops vs
+// vknn unit tests (host): dtype/fp16, config JSON, ONNX import, graph passes, CPU ops vs
 // reference, layout packing math. Vulkan correctness is validated on-device (see scripts).
 #include <gtest/gtest.h>
 
 #include <cmath>
 
-#include "vx/config.h"
-#include "vx/dtype.h"
-#include "vx/graph.h"
-#include "vx/model.h"
-#include "vx/session.h"
-#include "vx/tensor_format.h"
+#include "vknn/config.h"
+#include "vknn/dtype.h"
+#include "vknn/graph.h"
+#include "vknn/model.h"
+#include "vknn/session.h"
+#include "vknn/tensor_format.h"
 
-using namespace vx;
+using namespace vknn;
 
 TEST(DType, HalfRoundTrip) {
   for (float v : {0.f, 1.f, -1.f, 0.5f, 6.f, 3.14159f, -2.71828f, 65504.f}) {

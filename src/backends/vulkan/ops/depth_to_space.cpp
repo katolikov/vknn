@@ -3,9 +3,9 @@
 // flat (channel count changes) and inserts ConvertLayout at the NC4HW4 boundary.
 #include "flat_ops.h"
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct D2sPC {
   int total, N, C, H, W, C2, OH, OW, b, mode;
@@ -41,5 +41,5 @@ struct DepthToSpaceOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kDepthToSpace, DepthToSpaceOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kDepthToSpace, DepthToSpaceOp);
+}  // namespace vknn

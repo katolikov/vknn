@@ -3,7 +3,7 @@
 # YoNoSplat's evaluation index, extracts its 2 context views + (normalized) intrinsics, and writes
 # re10k_image.bin [1,2,3,224,224] + re10k_intr.bin [1,2,3,3] (+ preview PNGs). Then:
 #   adb push re10k_image.bin re10k_intr.bin /data/local/tmp/vxrt/yono/
-#   adb shell ".../vx_yonosplat encoder_fp16.vxm re10k_image.bin re10k_intr.bin out.ppm --extr CAM"
+#   adb shell ".../vknn_yonosplat encoder_fp16.vxm re10k_image.bin re10k_intr.bin out.ppm --extr CAM"
 import io, json, os, urllib.request
 import numpy as np
 import torch

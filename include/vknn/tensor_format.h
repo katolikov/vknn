@@ -2,9 +2,9 @@
 #pragma once
 #include <cstdint>
 
-#include "vx/common.h"
+#include "vknn/common.h"
 
-namespace vx {
+namespace vknn {
 
 enum class TensorFormat : uint8_t {
   kNCHW = 0,    // canonical (ONNX/Caffe). N, C, H, W.
@@ -61,4 +61,4 @@ inline int64_t cBlocks(int64_t c) {
   return (c + 3) / 4;
 }
 
-}  // namespace vx
+}  // namespace vknn

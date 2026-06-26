@@ -1,7 +1,7 @@
 // GlobalAveragePool: collapse each channel's HxW plane to its mean.
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct GlobalAvgPoolCpu : CpuOp {
@@ -24,5 +24,5 @@ struct GlobalAvgPoolCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kGlobalAvgPool, GlobalAvgPoolCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kGlobalAvgPool, GlobalAvgPoolCpu);
+}  // namespace vknn

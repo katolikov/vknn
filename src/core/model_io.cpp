@@ -1,15 +1,15 @@
-// Save/load the optimized vxrt graph (post-import, post-passes) as a compact binary ".vxm" so a
+// Save/load the optimized vknn graph (post-import, post-passes) as a compact binary ".vxm" so a
 // reload skips both ONNX protobuf parsing and all graph passes. Self-contained (embeds weights).
 // Pairs with the existing weight/pipeline/tuning caches for fast warm starts.
 #include <cstdint>
 #include <cstdio>
 #include <string>
 
-#include "vx/graph.h"
-#include "vx/logging.h"
-#include "vx/op.h"
+#include "vknn/graph.h"
+#include "vknn/logging.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 
 namespace {
 constexpr uint32_t kMagic = 0x314d5856;  // "VXM1"
@@ -87,7 +87,7 @@ Attr readAttr(Reader& r) {
 bool saveGraphBin(const Graph& g, const std::string& path) {
   FILE* f = fopen(path.c_str(), "wb");
   if (!f) {
-    VX_WARN << "saveGraph: cannot write " << path;
+    VKNN_WARN << "saveGraph: cannot write " << path;
     return false;
   }
   Writer w{f};
@@ -128,7 +128,7 @@ bool saveGraphBin(const Graph& g, const std::string& path) {
     w.vec(kv.second.bytes);
   }
   fclose(f);
-  VX_INFO << "saved optimized model -> " << path << " (" << g.nodes.size() << " nodes, "
+  VKNN_INFO << "saved optimized model -> " << path << " (" << g.nodes.size() << " nodes, "
           << g.initializers.size() << " weights)";
   return true;
 }
@@ -140,7 +140,7 @@ bool loadGraphBin(Graph& g, const std::string& path) {
   Reader r{f};
   if (r.u32() != kMagic) {
     fclose(f);
-    VX_WARN << "loadGraph: bad magic in " << path;
+    VKNN_WARN << "loadGraph: bad magic in " << path;
     return false;
   }
   g = Graph{};
@@ -189,10 +189,10 @@ bool loadGraphBin(Graph& g, const std::string& path) {
   }
   fclose(f);
   if (!r.ok) {
-    VX_WARN << "loadGraph: truncated " << path;
+    VKNN_WARN << "loadGraph: truncated " << path;
     return false;
   }
   return true;
 }
 
-}  // namespace vx
+}  // namespace vknn

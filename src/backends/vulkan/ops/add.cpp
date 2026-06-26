@@ -3,7 +3,7 @@
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct AddPC {
@@ -46,6 +46,6 @@ struct AddOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kAdd, AddOp);
+VKNN_REGISTER_VK_OP(OpType::kAdd, AddOp);
 
-}  // namespace vx
+}  // namespace vknn

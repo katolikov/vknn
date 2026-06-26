@@ -12,10 +12,10 @@
 // Replacing the body with a real implementation requires only this file.
 #include <dlfcn.h>
 
-#include "vx/backend.h"
-#include "vx/logging.h"
+#include "vknn/backend.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 const char* kEnnLibs[] = {
@@ -58,17 +58,17 @@ private:
       }
     }
     if (found)
-      VX_INFO
+      VKNN_INFO
           << "ENN backend: probed " << found << "/" << (int)(sizeof(kEnnLibs) / sizeof(*kEnnLibs))
           << " runtime libs present [" << present << "] - but NNC model + public headers are "
           << "unavailable on-device, so ENN execution is stubbed (falls back). See LIMITATIONS.md";
     else
-      VX_INFO
+      VKNN_INFO
           << "ENN backend: no ENN runtime libs reachable via dlopen (vendor namespace). Stubbed.";
   }
 };
 
-VX_REGISTER_BACKEND(BackendKind::kEnn, EnnBackend);
+VKNN_REGISTER_BACKEND(BackendKind::kEnn, EnnBackend);
 
 }  // namespace
-}  // namespace vx
+}  // namespace vknn

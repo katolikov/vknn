@@ -3,9 +3,9 @@
 // accepts it and so a runtime shape input still works. Emits float (the canonical compute dtype);
 // integer `value` attrs are emitted as int64.
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ConstantOfShapeCpu : CpuOp {
@@ -47,5 +47,5 @@ struct ConstantOfShapeCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kConstantOfShape, ConstantOfShapeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kConstantOfShape, ConstantOfShapeCpu);
+}  // namespace vknn

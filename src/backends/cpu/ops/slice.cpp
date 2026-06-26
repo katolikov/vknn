@@ -3,9 +3,9 @@
 #include <algorithm>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct SliceCpu : CpuOp {
   static std::vector<int64_t> rd(const Node& n, ExecContext& ctx, const char* attr, int idx) {
@@ -68,5 +68,5 @@ struct SliceCpu : CpuOp {
   bool supportsDType(DType) const override { return true; }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kSlice, SliceCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kSlice, SliceCpu);
+}  // namespace vknn

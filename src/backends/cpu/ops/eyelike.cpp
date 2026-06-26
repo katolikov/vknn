@@ -1,9 +1,9 @@
 // EyeLike: output has the same 2-D shape as the input, with ones on a diagonal (offset by attr `k`)
 // and zeros elsewhere. The input values are ignored — only its shape matters. Usually const-folded.
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct EyeLikeCpu : CpuOp {
@@ -32,5 +32,5 @@ struct EyeLikeCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kEyeLike, EyeLikeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kEyeLike, EyeLikeCpu);
+}  // namespace vknn

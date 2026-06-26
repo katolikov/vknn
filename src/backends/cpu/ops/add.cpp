@@ -3,13 +3,13 @@
 #include <algorithm>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/logging.h"
-#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+#include "vknn/logging.h"
+#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
 #include <arm_neon.h>
-#define VX_HAS_NEON 1
+#define VKNN_HAS_NEON 1
 #endif
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct AddCpu : CpuOp {
@@ -63,7 +63,7 @@ struct AddCpu : CpuOp {
       const float* a = A.host.f32();
       const float* b = B.host.f32();
       int64_t i = 0;
-#if defined(VX_HAS_NEON)
+#if defined(VKNN_HAS_NEON)
       for (; i + 4 <= n; i += 4)
         vst1q_f32(y + i, vaddq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
 #endif
@@ -109,5 +109,5 @@ struct AddCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kAdd, AddCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kAdd, AddCpu);
+}  // namespace vknn

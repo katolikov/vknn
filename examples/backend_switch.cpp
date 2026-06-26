@@ -6,9 +6,9 @@
 #include <fstream>
 #include <map>
 
-#include "vx/session.h"
+#include "vknn/session.h"
 
-using namespace vx;
+using namespace vknn;
 static std::vector<uint8_t> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
   return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),

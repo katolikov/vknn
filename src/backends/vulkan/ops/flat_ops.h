@@ -7,7 +7,7 @@
 #include "import/passes.h"  // readI64Param
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 
 // A node runs the flat path iff the layout pass marked its (first) output as a flat GPU tensor.
 inline bool opIsFlat(const Node& node, VkOpEnv& env) {
@@ -254,4 +254,4 @@ struct Softmax {
 };
 
 }  // namespace flat
-}  // namespace vx
+}  // namespace vknn

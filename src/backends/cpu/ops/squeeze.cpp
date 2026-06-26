@@ -4,9 +4,9 @@
 #include <algorithm>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct SqueezeCpu : CpuOp {
@@ -43,5 +43,5 @@ struct SqueezeCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kSqueeze, SqueezeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kSqueeze, SqueezeCpu);
+}  // namespace vknn

@@ -4,7 +4,7 @@
 
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct BatchNormCpu : CpuOp {
@@ -33,5 +33,5 @@ struct BatchNormCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kBatchNorm, BatchNormCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kBatchNorm, BatchNormCpu);
+}  // namespace vknn

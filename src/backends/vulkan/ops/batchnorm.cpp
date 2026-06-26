@@ -5,7 +5,7 @@
 
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct BnPC {
@@ -59,6 +59,6 @@ struct BatchNormOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kBatchNorm, BatchNormOp);
+VKNN_REGISTER_VK_OP(OpType::kBatchNorm, BatchNormOp);
 
-}  // namespace vx
+}  // namespace vknn

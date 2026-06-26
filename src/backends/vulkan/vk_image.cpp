@@ -2,7 +2,7 @@
 
 #include "vk_buffer.h"
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 static const VkFormat kFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -104,4 +104,4 @@ void Image::download(CommandRunner& runner, uint16_t* rgba) {
 }
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

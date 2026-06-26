@@ -4,7 +4,7 @@
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct EqualVk : VulkanOp {
@@ -53,5 +53,5 @@ struct EqualVk : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kEqual, EqualVk);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kEqual, EqualVk);
+}  // namespace vknn

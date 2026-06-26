@@ -6,9 +6,9 @@
 #include <vector>
 
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct GatherOp : VulkanOp {
@@ -73,5 +73,5 @@ struct GatherOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kGather, GatherOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kGather, GatherOp);
+}  // namespace vknn

@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 CommandRunner::CommandRunner(VulkanContext& ctx) : ctx_(ctx) {
@@ -63,4 +63,4 @@ void CommandRunner::oneShot(const std::function<void(VkCommandBuffer)>& fn) {
 }
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

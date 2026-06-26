@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace vx {
+namespace vknn {
 
 /// Status codes returned across the public API.
 enum class Status {
@@ -69,4 +69,4 @@ inline std::string shapeStr(const Shape& s) {
   return out + "]";
 }
 
-}  // namespace vx
+}  // namespace vknn

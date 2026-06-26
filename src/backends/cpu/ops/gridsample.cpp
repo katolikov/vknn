@@ -4,9 +4,9 @@
 #include <cmath>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 static double reflectCoord(double x, double lo, double hi) {
@@ -78,5 +78,5 @@ struct GridSampleCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kGridSample, GridSampleCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kGridSample, GridSampleCpu);
+}  // namespace vknn

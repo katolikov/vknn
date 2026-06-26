@@ -1,15 +1,15 @@
-// Small leveled logger. Reads VXRT_LOG_LEVEL, colorizes by level, and can throttle a repeated
+// Small leveled logger. Reads VKNN_LOG_LEVEL, colorizes by level, and can throttle a repeated
 // line so spammy warnings (e.g. per-op fallbacks) collapse to one.
 #pragma once
 #include <cstdint>
 #include <sstream>
 #include <string>
 
-namespace vx {
+namespace vknn {
 
 enum class LogLevel { kDebug = 0, kInfo = 1, kWarn = 2, kError = 3, kNone = 4 };
 
-/// Global logger. Thread-safe. Honors VXRT_LOG_LEVEL env (DEBUG/INFO/WARN/ERROR).
+/// Global logger. Thread-safe. Honors VKNN_LOG_LEVEL env (DEBUG/INFO/WARN/ERROR).
 class Log {
 public:
   static void setLevel(LogLevel l);
@@ -39,12 +39,12 @@ struct LogStream {
 };
 }  // namespace detail
 
-}  // namespace vx
+}  // namespace vknn
 
-#define VX_LOG(LVL) ::vx::detail::LogStream(::vx::LogLevel::LVL)
-#define VX_DEBUG VX_LOG(kDebug)
-#define VX_INFO VX_LOG(kInfo)
-#define VX_WARN VX_LOG(kWarn)
-#define VX_ERROR VX_LOG(kError)
+#define VKNN_LOG(LVL) ::vknn::detail::LogStream(::vknn::LogLevel::LVL)
+#define VKNN_DEBUG VKNN_LOG(kDebug)
+#define VKNN_INFO VKNN_LOG(kInfo)
+#define VKNN_WARN VKNN_LOG(kWarn)
+#define VKNN_ERROR VKNN_LOG(kError)
 // Throttled warning: WARN that collapses after N repeats keyed by KEY.
-#define VX_WARN_THROTTLE(KEY, N) ::vx::detail::LogStream(::vx::LogLevel::kWarn, KEY, N)
+#define VKNN_WARN_THROTTLE(KEY, N) ::vknn::detail::LogStream(::vknn::LogLevel::kWarn, KEY, N)

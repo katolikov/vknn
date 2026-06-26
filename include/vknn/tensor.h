@@ -5,12 +5,12 @@
 #include <memory>
 #include <vector>
 
-#include "vx/common.h"
-#include "vx/dtype.h"
-#include "vx/op.h"
-#include "vx/tensor_format.h"
+#include "vknn/common.h"
+#include "vknn/dtype.h"
+#include "vknn/op.h"
+#include "vknn/tensor_format.h"
 
-namespace vx {
+namespace vknn {
 
 /// Compile-time description of a tensor in the graph.
 struct TensorDesc {
@@ -64,4 +64,4 @@ struct RtTensor {
   }
 };
 
-}  // namespace vx
+}  // namespace vknn

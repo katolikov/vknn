@@ -2,7 +2,7 @@
 // over flat::Broadcast (size-1 dims broadcast to the target shape).
 #include "flat_ops.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ExpandOp : VulkanOp {
@@ -14,5 +14,5 @@ struct ExpandOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kExpand, ExpandOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kExpand, ExpandOp);
+}  // namespace vknn

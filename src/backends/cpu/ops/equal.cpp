@@ -5,9 +5,9 @@
 #include <algorithm>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct EqualCpu : CpuOp {
@@ -58,5 +58,5 @@ struct EqualCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kEqual, EqualCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kEqual, EqualCpu);
+}  // namespace vknn

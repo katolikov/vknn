@@ -3,9 +3,9 @@
 #include <algorithm>
 
 #include "backends/cpu/cpu_backend.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct FusedSeCpu : CpuOp {
   void run(const Node& node, ExecContext& ctx) override {
@@ -40,5 +40,5 @@ struct FusedSeCpu : CpuOp {
   }
 };
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kFusedSE, FusedSeCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kFusedSE, FusedSeCpu);
+}  // namespace vknn

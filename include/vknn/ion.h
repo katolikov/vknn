@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 
-namespace vx {
+namespace vknn {
 
 class IonBuffer {
 public:
@@ -38,4 +38,4 @@ private:
   std::string heap_;
 };
 
-}  // namespace vx
+}  // namespace vknn

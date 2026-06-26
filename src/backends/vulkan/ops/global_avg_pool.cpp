@@ -2,7 +2,7 @@
 // threads cooperatively reduce the spatial dimension (see shaders/avgpool.comp).
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct GlobalAvgPoolOp : VulkanOp {
@@ -29,6 +29,6 @@ struct GlobalAvgPoolOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kGlobalAvgPool, GlobalAvgPoolOp);
+VKNN_REGISTER_VK_OP(OpType::kGlobalAvgPool, GlobalAvgPoolOp);
 
-}  // namespace vx
+}  // namespace vknn

@@ -2,7 +2,7 @@
 // Operates on the packed buffer, so it's correct for any layout.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct UnaryPC {
@@ -32,5 +32,5 @@ struct UnaryOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kUnary, UnaryOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kUnary, UnaryOp);
+}  // namespace vknn

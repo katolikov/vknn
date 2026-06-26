@@ -1,5 +1,5 @@
 # Build a small ONNX test model for a new GPU op, generate an ORT golden, save input+golden bins.
-# Usage: op_test.py <op>   ; then run on device: vx_run_io <op>.onnx out --backend vulkan <op>_in*.bin
+# Usage: op_test.py <op>   ; then run on device: vknn_run_io <op>.onnx out --backend vulkan <op>_in*.bin
 import sys, numpy as np, onnx, onnxruntime as ort
 from onnx import helper, TensorProto as TP
 op = sys.argv[1]
@@ -38,7 +38,7 @@ if op=="rope_gather":  # data[17,32] gathered by a runtime float index [4,5] alo
     n1=helper.make_node("Gather",["T","I"],["Y"],axis=0)
     g=helper.make_graph([n1],"g",[helper.make_tensor_value_info("T",TP.FLOAT,T.shape),helper.make_tensor_value_info("I",TP.INT64,[4,5])],
         [helper.make_tensor_value_info("Y",TP.FLOAT,[4,5,32])])
-    # ORT needs int64 index; vxrt reads it as float at runtime. Save idx as float for vxrt, int64 for ORT golden.
+    # ORT needs int64 index; VKNN reads it as float at runtime. Save idx as float for VKNN, int64 for ORT golden.
     onnx.save(helper.make_model(g,opset_imports=[helper.make_opsetid("",17)]),"/tmp/optest_rope_gather.onnx")
     so=ort.SessionOptions(); so.graph_optimization_level=ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     sess=ort.InferenceSession("/tmp/optest_rope_gather.onnx",so,providers=["CPUExecutionProvider"])

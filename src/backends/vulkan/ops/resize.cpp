@@ -1,8 +1,8 @@
 // Resize (spatial) on the GPU (NC4HW4): nearest + bilinear, per output channel-block.
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 int vxResizeMode(const std::string&);
 int vxResizeCoord(const std::string&);
 namespace {
@@ -36,5 +36,5 @@ struct ResizeOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kResize, ResizeOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kResize, ResizeOp);
+}  // namespace vknn

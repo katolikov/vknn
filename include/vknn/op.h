@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "vx/common.h"
+#include "vknn/common.h"
 
-namespace vx {
+namespace vknn {
 
 using TensorId = int32_t;
 constexpr TensorId kNoTensor = -1;
@@ -177,4 +177,4 @@ struct Node {
   TensorId fusedResidual = kNoTensor;
 };
 
-}  // namespace vx
+}  // namespace vknn

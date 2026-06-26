@@ -3,9 +3,9 @@
 // layout pass routes Reduce to the flat path; axes come from the `axes` attr or input[1].
 #include "flat_ops.h"
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct ReducePCFlat {
   int rank, total, op;
@@ -50,5 +50,5 @@ struct ReduceOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kReduce, ReduceOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kReduce, ReduceOp);
+}  // namespace vknn

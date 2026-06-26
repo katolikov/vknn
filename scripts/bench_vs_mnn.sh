@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Head-to-head: vxrt-Vulkan vs MNN-Vulkan on the connected device, both at their fastest
+# Head-to-head: VKNN-Vulkan vs MNN-Vulkan on the connected device, both at their fastest
 # (Vulkan backend, fp16). Honest, reproducible. Expects MNN already built+converted (see the
-# "SETUP" notes below); if the MNN bits are missing it just runs vxrt and says so.
+# "SETUP" notes below); if the MNN bits are missing it just runs VKNN and says so.
 #
 # SETUP (one time, on the host):
 #   git clone --depth 1 https://github.com/alibaba/MNN /tmp/MNN
@@ -25,13 +25,13 @@ MNN_MODEL=/tmp/mobilenetv2_fp16.mnn
 LOOPS="${1:-30}"
 log() { printf '\033[36m>> %s\033[0m\n' "$*"; }
 
-[[ -f build-android/vx_classify ]] || ./scripts/build_android.sh
+[[ -f build-android/vknn_classify ]] || ./scripts/build_android.sh
 adb shell "mkdir -p $DEV $DEV/mnn"
-adb push build-android/vx_classify assets/mobilenetv2.onnx assets/input.bin assets/golden.bin "$DEV/" >/dev/null
-adb shell "chmod +x $DEV/vx_classify"
+adb push build-android/vknn_classify assets/mobilenetv2.onnx assets/input.bin assets/golden.bin "$DEV/" >/dev/null
+adb shell "chmod +x $DEV/vknn_classify"
 
-log "vxrt — Vulkan fp16 (warm, autotuned)"
-adb shell "cd $DEV && ./vx_classify --model mobilenetv2.onnx --input input.bin --golden golden.bin \
+log "VKNN — Vulkan fp16 (warm, autotuned)"
+adb shell "cd $DEV && ./vknn_classify --model mobilenetv2.onnx --input input.bin --golden golden.bin \
   --backend vulkan --precision fp16 --bench $LOOPS 2>/dev/null | grep -iE 'golden compare|bench'"
 
 if [[ -f "$MNN_OUT" && -f "$MNN_LIB" && -f "$MNN_MODEL" ]]; then

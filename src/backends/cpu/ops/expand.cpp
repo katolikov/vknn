@@ -6,9 +6,9 @@
 
 #include "backends/cpu/cpu_backend.h"
 #include "import/passes.h"  // readI64Param
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ExpandCpu : CpuOp {
@@ -62,5 +62,5 @@ struct ExpandCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kExpand, ExpandCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kExpand, ExpandCpu);
+}  // namespace vknn

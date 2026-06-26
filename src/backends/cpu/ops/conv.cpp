@@ -3,7 +3,7 @@
 // against, so it stays simple and readable rather than fast.
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ConvCpu : CpuOp {
@@ -78,6 +78,6 @@ struct ConvCpu : CpuOp {
 
 }  // namespace
 
-VX_REGISTER_CPU_OP(OpType::kConv, ConvCpu);
+VKNN_REGISTER_CPU_OP(OpType::kConv, ConvCpu);
 
-}  // namespace vx
+}  // namespace vknn

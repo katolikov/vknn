@@ -2,9 +2,9 @@
 // GAP->FC->relu->FC->hardsigmoid chain. Weights uploaded once (fp16). The following Mul is
 // unchanged.
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 struct SePC {
   int N, C, Cr;
@@ -53,5 +53,5 @@ struct FusedSeOp : VulkanOp {
   }
 };
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kFusedSE, FusedSeOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kFusedSE, FusedSeOp);
+}  // namespace vknn

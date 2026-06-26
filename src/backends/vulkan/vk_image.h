@@ -5,7 +5,7 @@
 #include "vk_command.h"
 #include "vk_context.h"
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 class Image {
@@ -37,4 +37,4 @@ private:
 };
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

@@ -7,9 +7,9 @@
 
 #include "flat_ops.h"
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct EinsumPC {
@@ -49,5 +49,5 @@ struct EinsumOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kEinsum, EinsumOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kEinsum, EinsumOp);
+}  // namespace vknn

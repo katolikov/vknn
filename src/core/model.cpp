@@ -1,12 +1,12 @@
 // Implementation of the friendly Model/Tensor facade on top of Session.
-#include "vx/model.h"
+#include "vknn/model.h"
 
 #include <algorithm>
 
-#include "vx/ion.h"
-#include "vx/session.h"
+#include "vknn/ion.h"
+#include "vknn/session.h"
 
-namespace vx {
+namespace vknn {
 
 static std::string shapeJoin(const std::vector<int64_t>& s) {
   std::string r;
@@ -151,4 +151,4 @@ Tensor Model::run(const std::vector<float>& input) {
   return outs.empty() ? Tensor{} : outs[0];
 }
 
-}  // namespace vx
+}  // namespace vknn

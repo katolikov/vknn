@@ -5,9 +5,9 @@
 
 #include "flat_ops.h"
 #include "vk_op_common.h"
-#include "vx/op.h"
+#include "vknn/op.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 constexpr int kMaxR = 8;  // must match dataDim[8]/stride[8] in shaders/scatternd*.comp
@@ -108,5 +108,5 @@ struct ScatterNDOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kScatterND, ScatterNDOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kScatterND, ScatterNDOp);
+}  // namespace vknn

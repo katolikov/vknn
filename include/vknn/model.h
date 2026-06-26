@@ -2,8 +2,8 @@
 // wire up by hand; everything is read from the model. This is the API most users should reach for.
 // (The lower-level Session/IOTensor in session.h stay available for advanced control.)
 //
-//   vx::Model net = vx::Model::load("mobilenet.onnx");        // precision auto, Vulkan if
-//   available vx::Tensor out = net.run(pixels);                          // pixels =
+//   vknn::Model net = vknn::Model::load("mobilenet.onnx");        // precision auto, Vulkan if
+//   available vknn::Tensor out = net.run(pixels);                          // pixels =
 //   std::vector<float>, NCHW int cls = out.argmax();                                    // done
 //
 //   for (auto& in : net.inputs()) printf("%s %s\n", in.name.c_str(), in.shapeString().c_str());
@@ -12,10 +12,10 @@
 #include <string>
 #include <vector>
 
-#include "vx/config.h"
-#include "vx/dtype.h"
+#include "vknn/config.h"
+#include "vknn/dtype.h"
 
-namespace vx {
+namespace vknn {
 
 class Session;
 
@@ -36,7 +36,7 @@ public:
   Tensor(std::vector<float> data, std::vector<int64_t> shape, std::string name = "");
   /// Wrap raw values with a 1-D shape (handy for quick inputs).
   explicit Tensor(std::vector<float> data);
-  /// Zero-copy input from a DMA-BUF fd (e.g. a camera/ION buffer). vxrt imports the fd instead of
+  /// Zero-copy input from a DMA-BUF fd (e.g. a camera/ION buffer). vknn imports the fd instead of
   /// copying a host buffer. `name` selects which model input this feeds (optional for
   /// single-input). The fd's memory is read as row-major fp32 in the given shape.
   static Tensor fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "");
@@ -103,4 +103,4 @@ private:
 /// Find a tensor by name in a run() result (for multi-output models). Returns nullptr if absent.
 const Tensor* findTensor(const std::vector<Tensor>& tensors, const std::string& name);
 
-}  // namespace vx
+}  // namespace vknn

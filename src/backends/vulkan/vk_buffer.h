@@ -5,7 +5,7 @@
 
 #include "vk_context.h"
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 enum class MemPref {
@@ -50,4 +50,4 @@ private:
 };
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

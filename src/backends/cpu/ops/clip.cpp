@@ -4,7 +4,7 @@
 
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct ClipCpu : CpuOp {
@@ -32,5 +32,5 @@ struct ClipCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kClip, ClipCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kClip, ClipCpu);
+}  // namespace vknn

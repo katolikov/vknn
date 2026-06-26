@@ -1,7 +1,7 @@
 // Flatten to 2D: dims [0,axis) collapse to rows, [axis,end) to columns.
 #include "backends/cpu/cpu_backend.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct FlattenCpu : CpuOp {
@@ -21,5 +21,5 @@ struct FlattenCpu : CpuOp {
 };
 
 }  // namespace
-VX_REGISTER_CPU_OP(OpType::kFlatten, FlattenCpu);
-}  // namespace vx
+VKNN_REGISTER_CPU_OP(OpType::kFlatten, FlattenCpu);
+}  // namespace vknn

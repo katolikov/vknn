@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <fstream>
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 // ----------------------------- PipelineCache -----------------------------
@@ -14,7 +14,7 @@ PipelineCache::PipelineCache(VulkanContext& ctx, std::string path)
   if (f) {
     initial.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     diskBytes_ = initial.size();
-    VX_INFO << "Loaded pipeline cache (" << diskBytes_ << " bytes) from " << path_;
+    VKNN_INFO << "Loaded pipeline cache (" << diskBytes_ << " bytes) from " << path_;
   }
   VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
   ci.initialDataSize = initial.size();
@@ -31,9 +31,9 @@ void PipelineCache::save() {
   if (f) {
     f.write(data.data(), sz);
     diskBytes_ = sz;
-    VX_INFO << "Saved pipeline cache (" << sz << " bytes) -> " << path_;
+    VKNN_INFO << "Saved pipeline cache (" << sz << " bytes) -> " << path_;
   } else {
-    VX_WARN << "could not write pipeline cache to " << path_;
+    VKNN_WARN << "could not write pipeline cache to " << path_;
   }
 }
 
@@ -141,4 +141,4 @@ void ComputePipeline::dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer>&
 }
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

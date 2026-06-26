@@ -1,7 +1,7 @@
 // minimal, dependency-free ONNX (protobuf) importer.
 //
 // Parses the protobuf wire format directly (varint / length-delimited / fixed32/64),
-// reading only the fields vxrt needs: GraphProto nodes, initializers (TensorProto),
+// reading only the fields vknn needs: GraphProto nodes, initializers (TensorProto),
 // inputs/outputs (ValueInfoProto), and NodeProto attributes. Sufficient for MobileNetV2
 // and CNNs in general. No protobuf library / no generated code required.
 #include <cstdint>
@@ -12,10 +12,10 @@
 #include <string>
 #include <vector>
 
-#include "vx/graph.h"
-#include "vx/logging.h"
+#include "vknn/graph.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 namespace onnx {
 
 // ----------------------------- wire reader -----------------------------
@@ -216,14 +216,14 @@ static void resolveExternal(const std::string& baseDir, TensorProto& t,
     if (f)
       buf.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     else
-      VX_ERROR << "external data file not found: " << path << " (for tensor '" << t.name << "')";
+      VKNN_ERROR << "external data file not found: " << path << " (for tensor '" << t.name << "')";
     it = cache.emplace(path, std::move(buf)).first;
   }
   const std::vector<uint8_t>& file = it->second;
   int64_t off = t.extOffset;
   int64_t len = t.extLength >= 0 ? t.extLength : (int64_t)file.size() - off;
   if (off < 0 || len < 0 || off + len > (int64_t)file.size()) {
-    VX_ERROR << "external data range [" << off << "," << off + len << ") out of bounds for '"
+    VKNN_ERROR << "external data range [" << off << "," << off + len << ") out of bounds for '"
              << t.name << "' (file " << file.size() << " bytes)";
     return;
   }
@@ -455,7 +455,7 @@ static void parseNode(Reader r, Graph& g, Node& node) {
     node.subOp = (int32_t)reduceFromOnnx(opType);
   }
   if (node.type == OpType::kUnknown)
-    VX_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
+    VKNN_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
   for (auto& s : ins)
     node.inputs.push_back(s.empty() ? kNoTensor : g.findOrAdd(s));
   for (auto& s : outs)
@@ -586,9 +586,9 @@ Graph importOnnx(const std::string& path) {
   if (!foundGraph)
     throw Error(Status::kInvalidArgument, "no GraphProto in ONNX model");
   g.topoSort();
-  VX_INFO << "Imported ONNX: " << g.nodes.size() << " nodes, " << g.initializers.size()
+  VKNN_INFO << "Imported ONNX: " << g.nodes.size() << " nodes, " << g.initializers.size()
           << " initializers, " << g.inputs.size() << " inputs, " << g.outputs.size() << " outputs";
   return g;
 }
 
-}  // namespace vx
+}  // namespace vknn

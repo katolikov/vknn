@@ -5,14 +5,14 @@
 #include <chrono>
 #include <cstdlib>
 #include <set>
-#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
-#include "vx/dtype.h"
-#include "vx/logging.h"
-#include "vx/profiler.h"
+#include "vknn/dtype.h"
+#include "vknn/logging.h"
+#include "vknn/profiler.h"
 
-namespace vx {
+namespace vknn {
 
 // True once the fp16 shader variants (conv_fp16, dwconv_fp16, ...) are compiled in. The ops
 // pick the _fp16 kernels and upload half weights when this and the device feature line up.
@@ -63,7 +63,7 @@ void WeightCache::load(const std::string& path) {
       }
   }
   fclose(f);
-  VX_INFO << "WeightCache: loaded " << weights_.size() << " prepacked weights, " << tune_.size()
+  VKNN_INFO << "WeightCache: loaded " << weights_.size() << " prepacked weights, " << tune_.size()
           << " tuning entries from " << path;
 }
 void WeightCache::save() const {
@@ -71,7 +71,7 @@ void WeightCache::save() const {
     return;
   FILE* f = fopen(path_.c_str(), "wb");
   if (!f) {
-    VX_WARN << "WeightCache: cannot write " << path_;
+    VKNN_WARN << "WeightCache: cannot write " << path_;
     return;
   }
   auto wr32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
@@ -91,7 +91,7 @@ void WeightCache::save() const {
   }
   fclose(f);
   dirty_ = false;
-  VX_INFO << "WeightCache: saved " << weights_.size() << " weights + " << tune_.size()
+  VKNN_INFO << "WeightCache: saved " << weights_.size() << " weights + " << tune_.size()
           << " tuning entries -> " << path_;
 }
 bool WeightCache::get(const std::string& key, std::vector<float>& out) const {
@@ -128,9 +128,9 @@ public:
   bool supports(OpType t, DType dt) const override {
     if (!available())
       return false;
-    // Debug/fallback hook: VXRT_DISABLE_VK_OPS="Add,Conv" forces those ops to fall back
+    // Debug/fallback hook: VKNN_DISABLE_VK_OPS="Add,Conv" forces those ops to fall back
     // (used to demonstrate the NEON CPU fallback path, M5).
-    if (const char* dis = std::getenv("VXRT_DISABLE_VK_OPS")) {
+    if (const char* dis = std::getenv("VKNN_DISABLE_VK_OPS")) {
       std::string list = dis, name = opTypeName(t);
       if (list.find(name) != std::string::npos)
         return false;
@@ -350,7 +350,7 @@ public:
                 if (c < x.c)
                   t[l] = src[((n * x.c + c) * x.h + h) * x.w + w];
               }
-#if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
+#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
               // convert the 4 gathered channels to fp16 in one instruction
               vst1_f16(reinterpret_cast<__fp16*>(dst + base), vcvt_f16_f32(vld1q_f32(t)));
 #else
@@ -469,10 +469,10 @@ public:
             readBack.insert(in);
       }
     }
-    // Debug: VXRT_DUMP_NAMES="substr1,substr2" forces matching tensors to dedicated (un-aliased)
+    // Debug: VKNN_DUMP_NAMES="substr1,substr2" forces matching tensors to dedicated (un-aliased)
     // readback buffers and dumps them to /data/local/tmp/vxrt/dump after the run — so intermediate
     // activations can be diffed despite the liveness planner reusing buffers. A few tensors only.
-    if (const char* dn = std::getenv("VXRT_DUMP_NAMES")) {
+    if (const char* dn = std::getenv("VKNN_DUMP_NAMES")) {
       std::string list = dn;
       for (TensorId tid : acts) {
         const std::string& nm = g.tensors[tid].name;
@@ -725,7 +725,7 @@ public:
   }
 
   void run(ExecContext& ctx) override {
-    const bool timing = std::getenv("VXRT_TIMING") != nullptr;
+    const bool timing = std::getenv("VKNN_TIMING") != nullptr;
     auto now = [] { return std::chrono::high_resolution_clock::now(); };
     auto t0 = now();
     // attach boundary buffers to RtTensors (cross-segment residency) + upload inputs.
@@ -775,11 +775,11 @@ public:
       auto ms = [&](auto a, auto b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
       };
-      VX_INFO << "timing: pack=" << ms(t0, t1) << "ms submit+gpu=" << wall
+      VKNN_INFO << "timing: pack=" << ms(t0, t1) << "ms submit+gpu=" << wall
               << "ms unpack=" << ms(t2, t3) << "ms";
     }
 
-    // VXRT_DUMP_NAMES targeted dump: write the named tensors (dedicated buffers) to disk for
+    // VKNN_DUMP_NAMES targeted dump: write the named tensors (dedicated buffers) to disk for
     // diffing.
     if (!dumpTids_.empty()) {
       ::mkdir("/data/local/tmp/vxrt/dump", 0755);
@@ -830,7 +830,7 @@ public:
       // GPU span (first dispatch start -> last dispatch end) vs the CPU-side submit wall: the
       // difference is barrier bubbles + submit/fence latency, not kernel work.
       double span = (double)(ts.back() - ts.front()) * period / 1e6;
-      VX_INFO << "gpu span=" << span << "ms  submit-wall=" << wall << "ms  (gap = overhead)";
+      VKNN_INFO << "gpu span=" << span << "ms  submit-wall=" << wall << "ms  (gap = overhead)";
     }
   }
 
@@ -846,7 +846,7 @@ private:
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkQueryPool queryPool_ = VK_NULL_HANDLE;
   bool recorded_ = false;
-  std::vector<TensorId> dumpTids_;  // VXRT_DUMP_NAMES debug: tensors to dump after the run
+  std::vector<TensorId> dumpTids_;  // VKNN_DUMP_NAMES debug: tensors to dump after the run
 };
 
 std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int>& idx, Graph& g,
@@ -856,6 +856,6 @@ std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int>& i
   return s;
 }
 
-VX_REGISTER_BACKEND(BackendKind::kVulkan, VulkanBackend);
+VKNN_REGISTER_BACKEND(BackendKind::kVulkan, VulkanBackend);
 
-}  // namespace vx
+}  // namespace vknn

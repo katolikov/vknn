@@ -6,7 +6,7 @@
 
 #include "vk_common.h"
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 /// Performance-relevant capabilities probed from the physical device. Mirrors the
@@ -91,4 +91,4 @@ private:
 };
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

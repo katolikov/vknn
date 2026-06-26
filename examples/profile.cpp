@@ -6,9 +6,9 @@
 #include <fstream>
 #include <string>
 
-#include "vx/session.h"
+#include "vknn/session.h"
 
-using namespace vx;
+using namespace vknn;
 static const char* argval(int c, char** v, const char* k, const char* d) {
   for (int i = 1; i < c - 1; ++i)
     if (!strcmp(v[i], k))

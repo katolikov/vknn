@@ -1,11 +1,11 @@
-#include "vx/graph.h"
+#include "vknn/graph.h"
 
 #include <algorithm>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
-namespace vx {
+namespace vknn {
 
 TensorId Graph::find(const std::string& name) const {
   auto it = tensorByName.find(name);
@@ -96,4 +96,4 @@ std::string Graph::dump() const {
   return os.str();
 }
 
-}  // namespace vx
+}  // namespace vknn

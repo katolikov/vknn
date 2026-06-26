@@ -2,7 +2,7 @@
 // bytes unchanged, so it's just a buffer copy.
 #include "vk_op_common.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct FlattenOp : VulkanOp {
@@ -19,5 +19,5 @@ struct FlattenOp : VulkanOp {
 };
 
 }  // namespace
-VX_REGISTER_VK_OP(OpType::kFlatten, FlattenOp);
-}  // namespace vx
+VKNN_REGISTER_VK_OP(OpType::kFlatten, FlattenOp);
+}  // namespace vknn

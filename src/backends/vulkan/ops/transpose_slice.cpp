@@ -1,7 +1,7 @@
 // Transpose and Slice on the GPU — flat row-major only (the layout pass guarantees flat I/O).
 #include "flat_ops.h"
 
-namespace vx {
+namespace vknn {
 namespace {
 
 struct TransposeOp : VulkanOp {
@@ -21,7 +21,7 @@ struct SliceOp : VulkanOp {
 
 }  // namespace
 
-VX_REGISTER_VK_OP(OpType::kTranspose, TransposeOp);
-VX_REGISTER_VK_OP(OpType::kSlice, SliceOp);
+VKNN_REGISTER_VK_OP(OpType::kTranspose, TransposeOp);
+VKNN_REGISTER_VK_OP(OpType::kSlice, SliceOp);
 
-}  // namespace vx
+}  // namespace vknn

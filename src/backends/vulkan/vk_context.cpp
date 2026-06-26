@@ -4,7 +4,7 @@
 #include <sstream>
 #include <vector>
 
-namespace vx {
+namespace vknn {
 namespace vk {
 
 std::string VulkanCaps::summary() const {
@@ -31,9 +31,9 @@ VulkanContext::VulkanContext() {
     selectPhysicalDevice();
     queryCaps();
     createDevice();
-    VX_INFO << "Vulkan ready: " << caps_.summary();
+    VKNN_INFO << "Vulkan ready: " << caps_.summary();
   } catch (const std::exception& e) {
-    VX_ERROR << "VulkanContext init failed: " << e.what();
+    VKNN_ERROR << "VulkanContext init failed: " << e.what();
     // Leave device_ == null; callers check initialized().
   }
 }
@@ -47,9 +47,9 @@ VulkanContext::~VulkanContext() {
 
 void VulkanContext::createInstance() {
   VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-  app.pApplicationName = "vxrt";
+  app.pApplicationName = "vknn";
   app.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
-  app.pEngineName = "vxrt";
+  app.pEngineName = "vknn";
   app.apiVersion = VK_API_VERSION_1_3;
 
   VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
@@ -177,7 +177,7 @@ void VulkanContext::createDevice() {
   if (chosen < 0)
     throw Error(Status::kNotFound, "no compute queue family");
   queueFamily_ = (uint32_t)chosen;
-  VX_INFO << "Compute queue family = " << queueFamily_
+  VKNN_INFO << "Compute queue family = " << queueFamily_
           << (qfs[chosen].queueFlags & VK_QUEUE_GRAPHICS_BIT ? " (shared w/ graphics)"
                                                              : " (dedicated compute)");
 
@@ -235,4 +235,4 @@ void VulkanContext::createDevice() {
 }
 
 }  // namespace vk
-}  // namespace vx
+}  // namespace vknn

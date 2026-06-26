@@ -1,12 +1,12 @@
-#include "vx/config.h"
+#include "vknn/config.h"
 
 #include <fstream>
 #include <sstream>
 
 #include "json.h"
-#include "vx/logging.h"
+#include "vknn/logging.h"
 
-namespace vx {
+namespace vknn {
 
 const char* backendName(BackendKind k) {
   switch (k) {
@@ -55,7 +55,7 @@ static const char* tuneStr(TuningLevel t) {
 Config Config::fromJsonFile(const std::string& path) {
   std::ifstream f(path);
   if (!f) {
-    VX_WARN << "config file not found: " << path << " (using defaults)";
+    VKNN_WARN << "config file not found: " << path << " (using defaults)";
     return {};
   }
   std::stringstream ss;
@@ -161,4 +161,4 @@ void Config::applyLogLevel() const {
   }
 }
 
-}  // namespace vx
+}  // namespace vknn
