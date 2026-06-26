@@ -7,13 +7,16 @@ layout(std430, binding = 0) readonly  buffer Src { float src[]; };
 layout(std430, binding = 1) readonly  buffer Wt  { float wt[]; };
 layout(std430, binding = 2) readonly  buffer Bs  { float bias[]; };
 layout(std430, binding = 3) writeonly buffer Dst { float dst[]; };
-layout(push_constant) uniform PC { int Cin, Cout, act; float actLo, actHi; } pc;
+layout(push_constant) uniform PC { int Cin, Cout, M, srcStride, dstStride, act; float actLo, actHi; } pc;
 
 void main() {
-  uint oc = gl_GlobalInvocationID.x;
-  if (oc >= uint(pc.Cout)) return;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.M) * uint(pc.Cout)) return;
+  uint m = gid / uint(pc.Cout);
+  uint oc = gid % uint(pc.Cout);
   float acc = bias[oc];
   uint wbase = oc * uint(pc.Cin);
-  for (int ic = 0; ic < pc.Cin; ++ic) acc += wt[wbase + uint(ic)] * src[ic];
-  dst[oc] = vx_act(acc, pc.act, pc.actLo, pc.actHi);
+  uint sbase = m * uint(pc.srcStride);
+  for (int ic = 0; ic < pc.Cin; ++ic) acc += wt[wbase + uint(ic)] * src[sbase + uint(ic)];
+  dst[m * uint(pc.dstStride) + oc] = vx_act(acc, pc.act, pc.actLo, pc.actHi);
 }

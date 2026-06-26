@@ -30,7 +30,9 @@ struct AvgPC {
   int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, countIncludePad;
 };
 struct FcPC {
-  int Cin, Cout, act;
+  // M = batch rows (>1 for the YoNoSplat 2-view camera head; 1 for classifiers). srcStride/dstStride
+  // = per-row element stride: padded channels for NC4HW4 (H=W=1), or exact C for a gpuFlat operand.
+  int Cin, Cout, M, srcStride, dstStride, act;
   float actLo, actHi;
 };
 // Split-K 1x1 conv (for deep, small-spatial convs that otherwise have too few threads).

@@ -10,18 +10,21 @@ layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) readonly buffer Bs { float16_t bias[]; };
 layout(std430, binding = 3) writeonly buffer Dst { float16_t dst[]; };
 layout(push_constant) uniform PC {
-  int Cin, Cout, act;
+  int Cin, Cout, M, srcStride, dstStride, act;
   float actLo, actHi;
 }
 pc;
 
 void main() {
-  uint oc = gl_GlobalInvocationID.x;
-  if (oc >= uint(pc.Cout)) return;
-  int cb = (pc.Cin + 3) / 4;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.M) * uint(pc.Cout)) return;
+  uint m = gid / uint(pc.Cout);
+  uint oc = gid % uint(pc.Cout);
+  int cb = (pc.Cin + 3) / 4;                  // contraction length in f16vec4 units
   uint wrow = oc * uint(cb);
+  uint srow = m * uint(pc.srcStride) / 4u;    // srcStride is in float elems; src is f16vec4
   vec4 acc = vec4(0.0);
-  for (int j = 0; j < cb; ++j) acc += vec4(src[j]) * vec4(wt[wrow + uint(j)]);
+  for (int j = 0; j < cb; ++j) acc += vec4(src[srow + uint(j)]) * vec4(wt[wrow + uint(j)]);
   float r = acc.x + acc.y + acc.z + acc.w + float(bias[oc]);
-  dst[oc] = float16_t(vx_act(r, pc.act, pc.actLo, pc.actHi));
+  dst[m * uint(pc.dstStride) + oc] = float16_t(vx_act(r, pc.act, pc.actLo, pc.actHi));
 }
