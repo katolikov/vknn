@@ -1,0 +1,26 @@
+#version 450
+// Flat row-major DepthToSpace: [N,C,H,W] -> [N,C2,OH,OW] with C2=C/(b*b), OH=H*b, OW=W*b.
+// One thread per output element; reconstruct (n,c,h,w) from gid, map to the source channel/spatial.
+//   ih=h/b, bh=h%b, iw=w/b, bw=w%b, blk=bh*b+bw
+//   DCR (mode==0): inC = blk*C2 + c ;  CRD (mode==1): inC = c*(b*b) + blk
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { float s[]; };
+layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { int total, N, C, H, W, C2, OH, OW, b, mode; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid);
+  int w = rem % pc.OW; rem /= pc.OW;
+  int h = rem % pc.OH; rem /= pc.OH;
+  int c = rem % pc.C2; rem /= pc.C2;
+  int n = rem;
+  int ih = h / pc.b, bh = h % pc.b;
+  int iw = w / pc.b, bw = w % pc.b;
+  int blk = bh * pc.b + bw;
+  int inC = (pc.mode == 1) ? (c * (pc.b * pc.b) + blk) : (blk * pc.C2 + c);
+  int inIdx = ((n * pc.C + inC) * pc.H + ih) * pc.W + iw;
+  d[gid] = s[inIdx];
+}

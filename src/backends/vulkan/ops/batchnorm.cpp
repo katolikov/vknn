@@ -21,11 +21,14 @@ struct BatchNormOp : VulkanOp {
     NCHW x = NCHW::from(g.desc(node.inputs[0]).shape);
     int64_t Cb = cBlocks(x.c), padded = Cb * 4;
     float eps = node.attr.getf("epsilon", 1e-5f);
-    auto host = [&](TensorId t) { return g.initializers.at(t).f32(); };
-    const float* gamma = host(node.inputs[1]);
-    const float* beta = host(node.inputs[2]);
-    const float* mean = host(node.inputs[3]);
-    const float* var = host(node.inputs[4]);
+    std::vector<float> gammaV = initFloats(g, node.inputs[1]);
+    std::vector<float> betaV = initFloats(g, node.inputs[2]);
+    std::vector<float> meanV = initFloats(g, node.inputs[3]);
+    std::vector<float> varV = initFloats(g, node.inputs[4]);
+    const float* gamma = gammaV.data();
+    const float* beta = betaV.data();
+    const float* mean = meanV.data();
+    const float* var = varV.data();
     std::string tag = node.name;
     scaleBuf = uploadCached(env, tag + "#bn_scale", [&] {
       std::vector<float> a(padded, 0.f);

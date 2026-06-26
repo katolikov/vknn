@@ -43,7 +43,10 @@ static bool hasflag(int argc, char** argv, const char* key) {
 int main(int argc, char** argv) {
   std::string model = argval(argc, argv, "--model", "assets/mobilenetv2.onnx");
   std::string inpath = argval(argc, argv, "--input", "assets/input.bin");
-  std::string shapeStr = argval(argc, argv, "--shape", "1,3,224,224");
+  // Empty by default: the input shape comes from the model (inputInfo); --shape only OVERRIDES it.
+  // (A non-empty default like "1,3,224,224" silently forces every model to 224x224 -> wrong input
+  // crop for 299x299 Inception, 640x640 YOLO, and any non-image model.)
+  std::string shapeStr = argval(argc, argv, "--shape", "");
   std::string backend = argval(argc, argv, "--backend", "vulkan");
   std::string precision = argval(argc, argv, "--precision", "fp16");
   std::string goldpath = argval(argc, argv, "--golden", "");

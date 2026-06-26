@@ -17,21 +17,19 @@ struct FusedSeOp : VulkanOp {
     Cr = g.desc(node.inputs[1]).shape[0];                    // W1 is [Cr][C] -> Cr = rows of W1
     pc = {(int)x.n, (int)C, (int)Cr, node.actLo, node.actHi};
     w1 = uploadCached(env, node.name + "#w1", [&] {
-      const auto& t = g.initializers.at(node.inputs[1]);
-      return std::vector<float>(t.f32(), t.f32() + t.bytes.size() / 4);
+      return initFloats(g, node.inputs[1]);
     });
     w2 = uploadCached(env, node.name + "#w2", [&] {
-      const auto& t = g.initializers.at(node.inputs[3]);
-      return std::vector<float>(t.f32(), t.f32() + t.bytes.size() / 4);
+      return initFloats(g, node.inputs[3]);
     });
     b1 = uploadCached(env, node.name + "#b1", [&] {
       std::vector<float> v(Cr, 0.f);
-      if (node.inputs[2] != kNoTensor) { const auto& t = g.initializers.at(node.inputs[2]); for (int64_t i = 0; i < Cr && i < (int64_t)(t.bytes.size() / 4); ++i) v[i] = t.f32()[i]; }
+      if (node.inputs[2] != kNoTensor) { std::vector<float> t = initFloats(g, node.inputs[2]); for (int64_t i = 0; i < Cr && i < (int64_t)t.size(); ++i) v[i] = t[i]; }
       return v;
     });
     b2 = uploadCached(env, node.name + "#b2", [&] {
       std::vector<float> v(C, 0.f);
-      if (node.inputs[4] != kNoTensor) { const auto& t = g.initializers.at(node.inputs[4]); for (int64_t i = 0; i < C && i < (int64_t)(t.bytes.size() / 4); ++i) v[i] = t.f32()[i]; }
+      if (node.inputs[4] != kNoTensor) { std::vector<float> t = initFloats(g, node.inputs[4]); for (int64_t i = 0; i < C && i < (int64_t)t.size(); ++i) v[i] = t[i]; }
       return v;
     });
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("fused_se", env.useFp16), 6,

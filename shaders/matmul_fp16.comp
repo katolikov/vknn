@@ -1,0 +1,29 @@
+#version 450
+// Flat batched MatMul, fp16 storage + fp32 accumulation (see matmul.comp).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly  buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly buffer D { float16_t d[]; };
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK;
+  int outDim[8]; int aStride[8]; int bStride[8];
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), aBase = 0, bBase = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % pc.outDim[k];
+    rem /= pc.outDim[k];
+    aBase += c * pc.aStride[k];
+    bBase += c * pc.bStride[k];
+  }
+  float acc = 0.0;
+  for (int k = 0; k < pc.K; ++k)
+    acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
+  d[gid] = float16_t(acc);
+}

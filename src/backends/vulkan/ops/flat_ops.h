@@ -17,7 +17,7 @@ inline bool opIsFlat(const Node& node, VkOpEnv& env) {
 
 namespace flat {
 
-constexpr int kMaxRank = 6;
+constexpr int kMaxRank = 8;  // up to rank-7 geometry tensors ([1,2,50176,1,1,3,3]) run on the flat path
 inline std::vector<int64_t> rowStrides(const Shape& s) {
   std::vector<int64_t> st(s.size(), 1);
   for (int k = (int)s.size() - 2; k >= 0; --k) st[k] = st[k + 1] * s[k + 1];
@@ -28,6 +28,7 @@ inline std::vector<int64_t> rowStrides(const Shape& s) {
 struct Gather {
   struct PC { int rank, total, base, outDim[kMaxRank], inStride[kMaxRank]; } pc{};
   std::unique_ptr<vk::ComputePipeline> pipe;
+  std::shared_ptr<vk::Buffer> hold0;  // when input[0] is a constant initializer
   void prepare(const Node& node, VkOpEnv& env) {
     const Graph& g = *env.graph;
     Shape in = g.desc(node.inputs[0]).shape, out = g.desc(node.outputs[0]).shape;
@@ -66,7 +67,47 @@ struct Gather {
                                                  env.cache->handle());
   }
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) {
-    pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()},
+    pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(),
+                         env.devBuf(node.outputs[0])->handle()},
+                   &pc, sizeof(pc), groups(pc.total, 256));
+  }
+};
+
+// ---- Expand / Tile: out[i] = in[ sum_k (outCoord_k % inDim_k) * inStride_k ] ----
+// One shader (flat_broadcast) for both: the modulo gives broadcast (inDim==1 => index 0) for Expand
+// and wraparound for Tile. Input dims/strides are right-aligned into the output rank.
+struct Broadcast {
+  struct PC { int rank, total, mode; int outDim[kMaxRank]; int inDim[kMaxRank]; int inStride[kMaxRank]; } pc{};
+  std::unique_ptr<vk::ComputePipeline> pipe;
+  std::shared_ptr<vk::Buffer> constBuf;  // when the data operand is a constant initializer
+  void prepare(const Node& node, VkOpEnv& env) {
+    const Graph& g = *env.graph;
+    Shape in = g.desc(node.inputs[0]).shape, out = g.desc(node.outputs[0]).shape;
+    int rank = (int)out.size();
+    auto inStrideFull = rowStrides(in);            // strides in input's own rank
+    int pad = rank - (int)in.size();               // right-align input into output rank
+    pc.rank = rank;
+    pc.total = (int)numElements(out);
+    pc.mode = (node.type == OpType::kTile) ? 1 : 0;
+    for (int k = 0; k < rank; ++k) {
+      pc.outDim[k] = (int)out[k];
+      int j = k - pad;                             // matching input dim, or -1 if padded (size 1)
+      pc.inDim[k] = (j >= 0) ? (int)in[j] : 1;
+      pc.inStride[k] = (j >= 0) ? (int)inStrideFull[j] : 0;
+    }
+    // Expand/Tile of a constant operand (no activation buffer): upload it flat (decodes fp16).
+    if (g.isInitializer(node.inputs[0])) {
+      std::vector<float> v = initFloats(g, node.inputs[0]);
+      v.resize(numElements(in));
+      constBuf = upload(*env.ctx, v, env.useFp16);
+    }
+    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_broadcast", env.useFp16), 2,
+                                                 sizeof(PC), std::vector<uint32_t>{},
+                                                 env.cache->handle());
+  }
+  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) {
+    vk::Buffer* src = constBuf ? constBuf.get() : env.devBuf(node.inputs[0]);
+    pipe->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[0])->handle()},
                    &pc, sizeof(pc), groups(pc.total, 256));
   }
 };
@@ -77,6 +118,7 @@ struct Concat {
   std::vector<std::unique_ptr<vk::ComputePipeline>> pipes;
   std::vector<PC> pcs;
   std::vector<int> inIdx;
+  std::vector<std::shared_ptr<vk::Buffer>> holds;  // per-input, set when that input is a constant
   void prepare(const Node& node, VkOpEnv& env) {
     const Graph& g = *env.graph;
     Shape out = g.desc(node.outputs[0]).shape;
@@ -106,15 +148,21 @@ struct Concat {
   }
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) {
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
+    if (holds.size() < pcs.size()) holds.resize(pcs.size());
     for (size_t i = 0; i < pcs.size(); ++i)
-      pipes[i]->dispatch(cmd, {env.devBuf(node.inputs[inIdx[i]])->handle(), dst->handle()}, &pcs[i],
-                         sizeof(PC), groups(pcs[i].total, 256));
+      pipes[i]->dispatch(cmd, {operandBuf(env, node.inputs[inIdx[i]], holds[i])->handle(),
+                               dst->handle()},
+                         &pcs[i], sizeof(PC), groups(pcs[i].total, 256));
   }
 };
 
 // ---- broadcasting Binary / Add (handles a constant operand by uploading it flat) ----
 struct Binary {
-  struct PC { int rank, total, op, outDim[kMaxRank], aStride[kMaxRank], bStride[kMaxRank]; } pc{};
+  struct PC {
+    int rank, total, op, outDim[kMaxRank], aStride[kMaxRank], bStride[kMaxRank];
+    int act;
+    float actLo, actHi;
+  } pc{};
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> constBuf[2];
   void prepare(const Node& node, VkOpEnv& env) {
@@ -124,6 +172,11 @@ struct Binary {
     pc.rank = rank;
     pc.total = (int)numElements(out);
     pc.op = node.type == OpType::kAdd ? kBAdd : node.subOp;
+    // A fused activation (e.g. a Linear+Relu fused into the Add epilogue, as in the camera_head
+    // res_conv) must be applied here too — the NC4HW4 add does it; the flat path used to drop it.
+    pc.act = (int)node.fusedAct;
+    pc.actLo = node.actLo;
+    pc.actHi = node.actHi;
     for (int k = 0; k < rank; ++k) pc.outDim[k] = (int)out[k];
     auto setup = [&](TensorId t, int which) {
       Shape s = g.desc(t).shape;
@@ -135,9 +188,9 @@ struct Binary {
         (which == 0 ? pc.aStride : pc.bStride)[k] = stride;
       }
       if (g.isInitializer(t)) {
-        const HostBuffer& hb = g.initializers.at(t);
-        constBuf[which] = upload(*env.ctx, std::vector<float>(hb.f32(), hb.f32() + numElements(s)),
-                                 env.useFp16);
+        auto wv = initFloats(g, t);
+        wv.resize(numElements(s));
+        constBuf[which] = upload(*env.ctx, wv, env.useFp16);
       }
     };
     setup(node.inputs[0], 0);

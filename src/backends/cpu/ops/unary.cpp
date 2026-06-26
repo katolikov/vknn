@@ -23,6 +23,12 @@ static float unary(float x, int op, float a, float b) {
     case kUFloor: return std::floor(x);
     case kUCeil: return std::ceil(x);
     case kURelu: return x > 0 ? x : 0;
+    case kUSiLU: return x / (1.f + std::exp(-x));
+    case kUErf: return std::erf(x);
+    case kUCos: return std::cos(x);
+    case kUSin: return std::sin(x);
+    case kUReciprocal: return 1.f / x;
+    case kUSoftplus: return std::max(x, 0.f) + std::log1p(std::exp(-std::fabs(x)));
   }
   return x;
 }

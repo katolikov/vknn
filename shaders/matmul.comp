@@ -1,0 +1,30 @@
+#version 450
+// Flat row-major batched MatMul: out[...,m,n] = sum_k A[...,m,k] * B[...,k,n], with NumPy
+// broadcasting on the batch dims. One thread per output element (b,m,n); it decodes its output
+// coords, forms the A/B base offsets via per-output-dim strides (0 on a broadcast/contraction axis),
+// then walks K accumulating in float. Layout = row-major. push-constant: rank/total/M/N/K, the
+// contraction strides aK,bK, and per-out-dim strides for A and B.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { float a[]; };
+layout(std430, binding = 1) readonly  buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK;
+  int outDim[8]; int aStride[8]; int bStride[8];
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), aBase = 0, bBase = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % pc.outDim[k];
+    rem /= pc.outDim[k];
+    aBase += c * pc.aStride[k];
+    bBase += c * pc.bStride[k];
+  }
+  float acc = 0.0;
+  for (int k = 0; k < pc.K; ++k) acc += a[aBase + k * pc.aK] * b[bBase + k * pc.bK];
+  d[gid] = acc;
+}

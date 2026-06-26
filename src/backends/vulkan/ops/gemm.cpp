@@ -24,7 +24,8 @@ struct GemmOp : VulkanOp {
       CoutL = ws[1];
     }
     Cout = CoutL;
-    const float* wsrc = g.initializers.at(node.inputs[1]).f32();
+    std::vector<float> wv = initFloats(g, node.inputs[1]);
+    const float* wsrc = wv.data();
     wbuf = uploadCached(env, node.name + "#w", [&] {
       std::vector<float> wp((size_t)CoutL * Cin);
       for (int64_t oc = 0; oc < CoutL; ++oc)
@@ -32,10 +33,12 @@ struct GemmOp : VulkanOp {
           wp[oc * Cin + ic] = transB ? wsrc[oc * Cin + ic] : wsrc[ic * CoutL + oc];
       return wp;
     });
+    std::vector<float> bv;
+    if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) bv = initFloats(g, node.inputs[2]);
+    const float* bsrc = bv.data();
     bbuf = uploadCached(env, node.name + "#b", [&] {
       std::vector<float> bias(CoutL, 0.f);
       if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
-        const float* bsrc = g.initializers.at(node.inputs[2]).f32();
         for (int64_t i = 0; i < CoutL; ++i) bias[i] = bsrc[i];
       }
       return bias;

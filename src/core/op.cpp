@@ -23,12 +23,22 @@ const char* opTypeName(OpType t) {
       return "Gemm";
     case OpType::kMatMul:
       return "MatMul";
+    case OpType::kEinsum:
+      return "Einsum";
     case OpType::kReshape:
       return "Reshape";
+    case OpType::kExpand:
+      return "Expand";
+    case OpType::kTile:
+      return "Tile";
+    case OpType::kSqueeze:
+      return "Squeeze";
     case OpType::kFlatten:
       return "Flatten";
     case OpType::kSoftmax:
       return "Softmax";
+    case OpType::kLayerNorm:
+      return "LayerNormalization";
     case OpType::kBatchNorm:
       return "BatchNormalization";
     case OpType::kConcat:
@@ -61,10 +71,22 @@ const char* opTypeName(OpType t) {
       return "Slice";
     case OpType::kReduce:
       return "Reduce";
+    case OpType::kDepthToSpace:
+      return "DepthToSpace";
     case OpType::kCast:
       return "Cast";
     case OpType::kSplit:
       return "Split";
+    case OpType::kWhere:
+      return "Where";
+    case OpType::kEqual:
+      return "Equal";
+    case OpType::kConstantOfShape:
+      return "ConstantOfShape";
+    case OpType::kEyeLike:
+      return "EyeLike";
+    case OpType::kScatterND:
+      return "ScatterND";
     case OpType::kFusedSE:
       return "FusedSE";
     case OpType::kFusedDwPw:
@@ -82,7 +104,9 @@ int unaryFromOnnx(const std::string& s) {
       {"HardSigmoid", kUHardSigmoid}, {"LeakyRelu", kULeakyRelu}, {"Elu", kUElu},
       {"Abs", kUAbs},             {"Neg", kUNeg},     {"Exp", kUExp},
       {"Log", kULog},             {"Sqrt", kUSqrt},   {"Floor", kUFloor},
-      {"Ceil", kUCeil}};
+      {"Ceil", kUCeil},
+      {"Erf", kUErf},             {"Cos", kUCos},     {"Sin", kUSin},
+      {"Reciprocal", kUReciprocal}, {"Softplus", kUSoftplus}};
   auto it = m.find(s);
   return it == m.end() ? -1 : it->second;
 }
@@ -92,6 +116,7 @@ int reduceFromOnnx(const std::string& s) {
   if (s == "ReduceMax") return kRMax;
   if (s == "ReduceMin") return kRMin;
   if (s == "ReduceProd") return kRProd;
+  if (s == "ReduceL2") return kRL2;
   return -1;
 }
 int binaryFromOnnx(const std::string& s) {
@@ -116,9 +141,14 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"MaxPool", OpType::kMaxPool},
       {"Gemm", OpType::kGemm},
       {"MatMul", OpType::kMatMul},
+      {"Einsum", OpType::kEinsum},
       {"Reshape", OpType::kReshape},
+      {"Expand", OpType::kExpand},
+      {"Tile", OpType::kTile},
+      {"Squeeze", OpType::kSqueeze},
       {"Flatten", OpType::kFlatten},
       {"Softmax", OpType::kSoftmax},
+      {"LayerNormalization", OpType::kLayerNorm},
       {"BatchNormalization", OpType::kBatchNorm},
       {"Concat", OpType::kConcat},
       {"Pad", OpType::kPad},
@@ -133,12 +163,19 @@ OpType opTypeFromOnnx(const std::string& s) {
       {"GridSample", OpType::kGridSample},
       {"Transpose", OpType::kTranspose},
       {"Slice", OpType::kSlice},
+      {"DepthToSpace", OpType::kDepthToSpace},
       {"Cast", OpType::kCast},
       {"Split", OpType::kSplit},
+      {"Where", OpType::kWhere},
+      {"Equal", OpType::kEqual},
+      {"ConstantOfShape", OpType::kConstantOfShape},
+      {"EyeLike", OpType::kEyeLike},
+      {"ScatterND", OpType::kScatterND},
   };
   auto it = m.find(s);
   if (it != m.end()) return it->second;
-  if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd")
+  if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd" ||
+      s == "ReduceL2")
     return OpType::kReduce;
   if (unaryFromOnnx(s) >= 0) return OpType::kUnary;
   if (binaryFromOnnx(s) >= 0) return OpType::kBinary;

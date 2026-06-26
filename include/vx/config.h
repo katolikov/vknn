@@ -39,6 +39,16 @@ struct Config {
   bool cacheWeights = true;
   bool cacheTuning = true;
 
+  // Free host weight buffers after they are uploaded to the device / decoded into the pool. run()
+  // never reads graph initializers (it uses GPU buffers + the pool), so this is safe and reclaims
+  // the full weight blob — needed to fit large (e.g. 965M-param fp16) models on-device.
+  bool freeWeightsAfterUpload = true;
+
+  // Optimization / debug (replace the old VXRT_* env vars; set from binary flags).
+  int optLevel = 3;        // graph optimization level 0..3 (fusions). 0 = none.
+  bool noFlatOps = false;  // disable the flat-layout GPU pass (was VXRT_NO_FLAT_OPS)
+  bool timing = false;     // print pack/submit/unpack timing (was VXRT_TIMING)
+
   // Profiling / debug.
   bool profile = false;
   int verbosity = 1;  // maps to log level

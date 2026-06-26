@@ -98,9 +98,47 @@ inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string&
   std::vector<float> v;
   if (!(env.weights && env.weights->get(key, v))) {
     v = compute();
-    if (env.weights) env.weights->put(key, v);
+    // Only retain the prepacked blob when the cache is persistent (a disk path). Without a path the
+    // cache would still balloon RAM with every weight (a 965M model: ~3.85GB of prepacked fp32) for
+    // no warm-start benefit — so a one-shot run (cacheWeights=false) computes + uploads + frees.
+    if (env.weights && env.weights->enabled()) env.weights->put(key, v);
   }
   return upload(*env.ctx, v, env.useFp16);
+}
+
+// Read an initializer as fp32, decoding from fp16 if it was stored fp16 (an fp16 .vxm from
+// vx_convert). Ops prepack/transpose weights in fp32, then upload() re-encodes to fp16 for the GPU
+// (fp16->fp32->fp16 is exact). Use this instead of `g.initializers.at(id).f32()` so a model loaded
+// from an fp16 .vxm works unchanged; for an fp32 source it's a plain copy.
+inline std::vector<float> initFloats(const Graph& g, TensorId id) {
+  const HostBuffer& hb = g.initializers.at(id);
+  int64_t n = numElements(g.desc(id).shape);
+  std::vector<float> out((size_t)std::max<int64_t>(n, 0));
+  if (g.desc(id).dtype == DType::kFloat16) {
+    const fp16_t* h = reinterpret_cast<const fp16_t*>(hb.bytes.data());
+    for (int64_t i = 0; i < n; ++i) out[i] = halfToFloat(h[i]);
+  } else {
+    const float* f = hb.f32();
+    for (int64_t i = 0; i < n; ++i) out[i] = f[i];
+  }
+  return out;
+}
+
+// Resolve an op's DATA operand to a GPU buffer. An activation has a device buffer (env.devBuf); a
+// constant initializer has none, so upload it flat (decoding fp16) into `hold` on first use. Lets any
+// elementwise/data-movement op accept a constant operand (e.g. the RoPE freq tables computed from
+// constants, or a concatenated constant token) without a null-buffer crash.
+inline vk::Buffer* operandBuf(VkOpEnv& env, TensorId t, std::shared_ptr<vk::Buffer>& hold) {
+  const Graph& g = *env.graph;
+  if (g.isInitializer(t)) {
+    if (!hold) {
+      std::vector<float> v = initFloats(g, t);
+      v.resize(numElements(g.desc(t).shape));
+      hold = upload(*env.ctx, v, env.useFp16);
+    }
+    return hold.get();
+  }
+  return env.devBuf(t);
 }
 
 }  // namespace vx

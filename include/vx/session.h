@@ -91,8 +91,10 @@ class Session {
 /// Top-level facade users call.
 class Runtime {
  public:
-  static std::unique_ptr<Session> load(const std::string& onnxPath, const Config& cfg = {}) {
-    return Session::createFromOnnx(onnxPath, cfg);
+  static std::unique_ptr<Session> load(const std::string& path, const Config& cfg = {}) {
+    // Dispatch on extension: a pre-optimized ".vxm" skips ONNX parsing + passes; anything else is ONNX.
+    bool isVxm = path.size() >= 4 && path.compare(path.size() - 4, 4, ".vxm") == 0;
+    return isVxm ? Session::createFromVxm(path, cfg) : Session::createFromOnnx(path, cfg);
   }
 };
 

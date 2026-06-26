@@ -23,10 +23,10 @@ struct GridSampleOp : VulkanOp {
     std::string pad = node.attr.gets("padding_mode", "zeros");
     uint32_t PAD = pad == "border" ? 1u : (pad == "reflection" ? 2u : 0u);
     // upload the constant grid as a raw fp32 buffer (2 floats per output pixel)
-    const HostBuffer& gi = g.initializers.at(node.inputs[1]);
-    int64_t nf = (int64_t)gi.bytes.size() / 4;
+    std::vector<float> gv = initFloats(g, node.inputs[1]);
+    int64_t nf = (int64_t)gv.size();
     gridBuf = std::make_shared<vk::Buffer>(*env.ctx, std::max<int64_t>(nf * 4, 16), vk::MemPref::kAuto);
-    gridBuf->upload(gi.f32(), nf * 4);
+    gridBuf->upload(gv.data(), nf * 4);
     total = (int64_t)x.n * cBlocks(x.c) * OH * OW;
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("gridsample", env.useFp16), 3,
                                                  sizeof(GsPC), std::vector<uint32_t>{MODE, PAD},

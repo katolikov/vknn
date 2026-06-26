@@ -6,15 +6,14 @@ namespace vx {
 namespace {
 
 struct FlattenOp : VulkanOp {
-  size_t bytes = 0;
-  void prepare(const Node& node, VkOpEnv& env) override {
-    int elem = env.useFp16 ? 2 : 4;
-    bytes = (size_t)packedElems(env.graph->desc(node.outputs[0]).shape) * elem;
-  }
+  std::shared_ptr<vk::Buffer> hold0;  // when input is a constant initializer
+  void prepare(const Node&, VkOpEnv&) override {}
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
-    vk::Buffer* src = env.devBuf(node.inputs[0]);
+    vk::Buffer* src = operandBuf(env, node.inputs[0], hold0);
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
-    VkBufferCopy c{0, 0, std::min({bytes, src->bytes(), dst->bytes()})};
+    // Flatten preserves the element count; copy the whole buffer (not packedElems, which collapses
+    // rank>4 to 4 and would truncate a flat reshape).
+    VkBufferCopy c{0, 0, std::min(src->bytes(), dst->bytes())};
     vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
   }
 };

@@ -135,8 +135,27 @@ class VulkanBackend : public Backend {
     // NC4HW4 or flat per the layout pass). The flat row-major kernels handle rank <= 6.
     if (nd.type == OpType::kTranspose || nd.type == OpType::kSlice ||
         nd.type == OpType::kConvertLayout || nd.type == OpType::kConcat ||
-        nd.type == OpType::kSoftmax)
+        nd.type == OpType::kSoftmax || nd.type == OpType::kSqueeze)
       return true;
+    if (nd.type == OpType::kExpand || nd.type == OpType::kTile)
+      // flat broadcast/tile gather decodes up to kMaxRank=6 output dims.
+      return g.desc(nd.outputs[0]).shape.size() <= 8;
+    if (nd.type == OpType::kMatMul) {
+      // Batched N-D matmul on the flat row-major path; the kernel decodes up to kMaxRank=6 out dims.
+      if (nd.inputs.size() != 2) return false;
+      return g.desc(nd.outputs[0]).shape.size() <= 8;
+    }
+    if (nd.type == OpType::kDepthToSpace) {
+      // [N,C,H,W] -> [N,C/b^2,H*b,W*b]; flat index-remap kernel. Need 4D and C divisible by b^2.
+      const Shape& in = g.desc(nd.inputs[0]).shape;
+      int64_t b = nd.attr.geti("blocksize", 1);
+      return in.size() == 4 && b >= 1 && in[1] % (b * b) == 0;
+    }
+    if (nd.type == OpType::kReduce) {
+      // flat reduce kernel: one thread per output element, loops the reduced axes. rank <= 6.
+      const Shape& in = g.desc(nd.inputs[0]).shape;
+      return !in.empty() && in.size() <= 8;
+    }
     if (nd.type == OpType::kFusedDwPw) {
       // LDS holds E depthwise outputs (cap 1024). Run ALL eligible fused nodes on the GPU: a partial
       // gate (some fused nodes on CPU) creates a GPU/CPU boundary that mis-handles the fused residual.
@@ -166,6 +185,35 @@ class VulkanBackend : public Backend {
       const Shape& out = g.desc(nd.outputs[0]).shape;
       return in.size() == 4 && out.size() == 4 && in[0] == out[0] && in[1] == out[1];
     }
+    if (nd.type == OpType::kLayerNorm) {
+      // Flat reduction over the trailing axes; scale (and bias, if present) must be const initializers.
+      if (nd.inputs.size() < 2 || !g.isInitializer(nd.inputs[1])) return false;
+      if (nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
+        return false;
+      return true;
+    }
+    if (nd.type == OpType::kWhere || nd.type == OpType::kEqual)
+      // flat broadcasting kernels (fixed PC arrays) decode up to kMaxRank=6 output dims.
+      return g.desc(nd.outputs[0]).shape.size() <= 8;
+    if (nd.type == OpType::kUnsqueeze) return true;  // metadata copy on the flat path
+    if (nd.type == OpType::kCast) {
+      // float->float casts are a no-op copy on the unified-precision buffer; int targets stay CPU.
+      DType o = g.desc(nd.outputs[0]).dtype;
+      return o == DType::kFloat32 || o == DType::kFloat16;
+    }
+    if (nd.type == OpType::kGather)
+      // flat axis-aware gather; index may be a constant (uploaded) or a runtime float activation (RoPE).
+      return nd.inputs.size() >= 2;
+    if (nd.type == OpType::kScatterND)
+      // flat scatter; index may be a constant or a runtime float activation. Data rank within kMaxRank.
+      return nd.inputs.size() >= 3 && g.desc(nd.inputs[0]).shape.size() <= 8;
+    if (nd.type == OpType::kEinsum) {
+      // Only "i,j->ij" (outer product) has a GPU kernel; other equations use the CPU op.
+      std::string eq;
+      for (char c : nd.attr.gets("equation", ""))
+        if (c != ' ' && c != '\t') eq += c;
+      return eq == "i,j->ij";
+    }
     if (nd.type == OpType::kBatchNorm) {
       // per-channel affine; needs 4D input and the 4 params (gamma/beta/mean/var) as constants.
       if (nd.inputs.size() < 5 || g.desc(nd.inputs[0]).shape.size() != 4) return false;
@@ -174,17 +222,28 @@ class VulkanBackend : public Backend {
       return true;
     }
     if (nd.type == OpType::kSplit) {
-      // GPU split is a channel-block range copy: channel axis only, every output 4-aligned.
+      // NC4HW4 channel split (4D, axis 1, 4-aligned outputs) is a block copy; any other split runs
+      // on the flat row-major path (a Slice per output) for rank <= kMaxRank.
       const Shape& in = g.desc(nd.inputs[0]).shape;
-      if (in.size() != 4) return false;
+      if (in.empty()) return false;
+      int rank = (int)in.size();
       int64_t axis = nd.attr.geti("axis", 0);
-      if (axis < 0) axis += 4;
-      if (axis != 1) return false;
-      for (TensorId o : nd.outputs) {
-        if (o == kNoTensor) continue;
-        const Shape& os = g.desc(o).shape;
-        if (os.size() != 4 || os[1] % 4 != 0) return false;
+      if (axis < 0) axis += rank;
+      if (rank == 4 && axis == 1) {
+        bool aligned = true;
+        for (TensorId o : nd.outputs) {
+          if (o == kNoTensor) continue;
+          const Shape& os = g.desc(o).shape;
+          if (os.size() != 4 || os[1] % 4 != 0) aligned = false;
+        }
+        if (aligned) return true;
       }
+      return rank <= 8;
+    }
+    if (nd.type == OpType::kClip) {
+      // const-or-absent scalar bounds (baked into the PC in prepare); runtime bounds fall back.
+      for (int i = 1; i < 3 && i < (int)nd.inputs.size(); ++i)
+        if (nd.inputs[i] != kNoTensor && !g.isInitializer(nd.inputs[i])) return false;
       return true;
     }
     // Add/Binary: 2 inputs required. The NC4HW4 kernel does same-shape + channel-broadcast; the
@@ -340,6 +399,10 @@ class VulkanSegment : public Segment {
     for (int ni : idx) {
       for (TensorId in : g.nodes[ni].inputs)
         if (in != kNoTensor && !g.isInitializer(in)) acts.insert(in);
+      // A fused residual (out = act(conv + residual)) is read by record() but isn't in node.inputs,
+      // so it needs a buffer too — and may be produced by another segment (boundary input).
+      TensorId res = g.nodes[ni].fusedResidual;
+      if (res != kNoTensor && !g.isInitializer(res)) acts.insert(res);
       for (TensorId o : g.nodes[ni].outputs)
         if (o != kNoTensor) acts.insert(o);
     }
@@ -360,13 +423,81 @@ class VulkanSegment : public Segment {
           if (in != kNoTensor && produced.count(in)) readBack.insert(in);
       }
     }
-    for (TensorId tid : acts) {
+    // Debug: VXRT_DUMP_NAMES="substr1,substr2" forces matching tensors to dedicated (un-aliased)
+    // readback buffers and dumps them to /data/local/tmp/vxrt/dump after the run — so intermediate
+    // activations can be diffed despite the liveness planner reusing buffers. A few tensors only.
+    if (const char* dn = std::getenv("VXRT_DUMP_NAMES")) {
+      std::string list = dn;
+      for (TensorId tid : acts) {
+        const std::string& nm = g.tensors[tid].name;
+        if (nm.empty()) continue;
+        size_t pos = 0, comma;
+        do {
+          comma = list.find(',', pos);
+          std::string sub = list.substr(pos, comma == std::string::npos ? comma : comma - pos);
+          if (!sub.empty() && nm.find(sub) != std::string::npos) { readBack.insert(tid); dumpTids_.push_back(tid); break; }
+          pos = comma + 1;
+        } while (comma != std::string::npos);
+      }
+    }
+    auto actBytes = [&](TensorId tid) -> size_t {
       int64_t elems = g.tensors[tid].gpuFlat ? numElements(g.tensors[tid].shape)
                                              : packedElems(g.tensors[tid].shape);
-      size_t bytes = (size_t)elems * elemSize_;
-      if (bytes == 0) bytes = elemSize_ * 4;
+      size_t b = (size_t)elems * elemSize_;
+      return b == 0 ? (size_t)elemSize_ * 4 : b;
+    };
+    // Liveness buffer planner. One buffer per tensor keeps ALL activations live at once (~11.5GB on
+    // the YoNoSplat encoder); the simultaneously-live peak is ~0.17GB. Boundary-in (produced by
+    // another segment) and readback (read by host / another segment) tensors get dedicated buffers;
+    // internal (produced-and-consumed only here) tensors are pooled by a greedy scan over execution
+    // order, reusing a buffer once its previous occupant's last use has passed. The buffer-level
+    // barriers in record() make the write-after-read at each reuse point safe.
+    std::set<TensorId> producedHere;
+    for (int ni : idx)
+      for (TensorId o : g.nodes[ni].outputs)
+        if (o != kNoTensor) producedHere.insert(o);
+    for (TensorId tid : acts) {
+      bool internal = producedHere.count(tid) && !readBack.count(tid);
+      if (internal) continue;  // pooled below
       auto pref = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
-      buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), bytes, pref);
+      buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref);
+    }
+    // [firstPos,lastPos] of each internal tensor within this segment's execution order
+    std::map<TensorId, int> firstPos, lastPos;
+    auto touch = [&](TensorId t, int k) {
+      if (t == kNoTensor || !producedHere.count(t) || readBack.count(t)) return;
+      if (!firstPos.count(t)) firstPos[t] = k;
+      lastPos[t] = k;
+    };
+    for (int k = 0; k < (int)idx.size(); ++k) {
+      const Node& nd = g.nodes[idx[k]];
+      for (TensorId in : nd.inputs) touch(in, k);
+      touch(nd.fusedResidual, k);
+      for (TensorId o : nd.outputs) touch(o, k);
+    }
+    std::vector<TensorId> order;
+    order.reserve(firstPos.size());
+    for (auto& kv : firstPos) order.push_back(kv.first);
+    std::sort(order.begin(), order.end(),
+              [&](TensorId a, TensorId b) { return firstPos[a] < firstPos[b]; });
+    struct Slot { std::shared_ptr<vk::Buffer> buf; size_t cap; int deadAt; };
+    std::vector<Slot> busy, freeSlots;
+    for (TensorId tid : order) {
+      int p = firstPos[tid];
+      for (size_t i = 0; i < busy.size();) {
+        if (busy[i].deadAt < p) { freeSlots.push_back(busy[i]); busy[i] = busy.back(); busy.pop_back(); }
+        else ++i;
+      }
+      size_t need = actBytes(tid);
+      int best = -1;
+      for (size_t i = 0; i < freeSlots.size(); ++i)
+        if (freeSlots[i].cap >= need && (best < 0 || freeSlots[i].cap < freeSlots[best].cap)) best = (int)i;
+      Slot s;
+      if (best >= 0) { s = freeSlots[best]; freeSlots[best] = freeSlots.back(); freeSlots.pop_back(); }
+      else { s.buf = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kAuto); s.cap = need; }
+      s.deadAt = lastPos[tid];
+      buffers_[tid] = s.buf;
+      busy.push_back(s);
     }
 
     // 2) build env + ops; prepare uploads weights.
@@ -427,8 +558,15 @@ class VulkanSegment : public Segment {
     be_->runner().begin(cmd_);
     if (queryPool_) vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t)(nodeIdx.size() * 2));
     auto isCopy = [&](int idx) {
-      OpType t = g_.nodes[idx].type;
-      return t == OpType::kReshape || t == OpType::kFlatten || t == OpType::kSplit;
+      const Node& nn = g_.nodes[idx];
+      OpType t = nn.type;
+      // A flat split is a compute dispatch (flat_gather); the NC4HW4 split is a buffer copy.
+      if (t == OpType::kSplit)
+        return nn.outputs.empty() || nn.outputs[0] == kNoTensor ||
+               !g_.desc(nn.outputs[0]).gpuFlat;
+      // Reshape/Flatten/Squeeze/Unsqueeze/Cast are vkCmdCopyBuffer (transfer-stage writes).
+      return t == OpType::kReshape || t == OpType::kFlatten || t == OpType::kSqueeze ||
+             t == OpType::kUnsqueeze || t == OpType::kCast;
     };
     // Precise barriers: each activation tensor has a single writer, so only a read-after-write needs
     // a barrier. Emit one before an op only when it reads a tensor written since the last barrier,
@@ -436,20 +574,38 @@ class VulkanSegment : public Segment {
     // block's downsample and conv1) run without draining the GPU between them. When profiling, keep
     // a barrier after every op so the per-op timestamps aren't polluted by overlap.
     const bool perOpBarrier = (queryPool_ != VK_NULL_HANDLE);
-    std::set<TensorId> writtenSinceBarrier;
+    // Hazard tracking is at the BUFFER level, not the tensor level: the liveness planner aliases
+    // multiple tensors onto one buffer, so a node that writes a reused buffer has a write-after-read
+    // hazard against the previous occupant that a tensor-level check would miss. For non-aliased
+    // buffers this is identical to the old per-tensor read-after-write (single writer per buffer), so
+    // the independent-op overlap (Inception/YOLO) is preserved.
+    std::set<vk::Buffer*> writtenBufs, readBufs;
+    auto bufOf = [&](TensorId t) -> vk::Buffer* {
+      if (t == kNoTensor) return nullptr;
+      auto it = buffers_.find(t);
+      return it == buffers_.end() ? nullptr : it->second.get();
+    };
     bool copySinceBarrier = false;
     for (size_t k = 0; k < nodeIdx.size(); ++k) {
       const Node& node = g_.nodes[nodeIdx[k]];
       bool needBarrier = perOpBarrier;
-      if (!needBarrier)
-        for (TensorId in : node.inputs)
-          if (in != kNoTensor && writtenSinceBarrier.count(in)) { needBarrier = true; break; }
+      if (!needBarrier) {
+        for (TensorId in : node.inputs)  // read-after-write
+          if (vk::Buffer* b = bufOf(in)) if (writtenBufs.count(b)) { needBarrier = true; break; }
+        if (!needBarrier)
+          if (vk::Buffer* b = bufOf(node.fusedResidual)) if (writtenBufs.count(b)) needBarrier = true;
+        if (!needBarrier)
+          for (TensorId o : node.outputs)  // write-after-write / write-after-read (reused buffer)
+            if (vk::Buffer* b = bufOf(o))
+              if (writtenBufs.count(b) || readBufs.count(b)) { needBarrier = true; break; }
+      }
       if (needBarrier) {
         if (copySinceBarrier || isCopy(nodeIdx[k]))
           vk::transferBarrier(cmd_);
         else
           vk::computeBarrier(cmd_);
-        writtenSinceBarrier.clear();
+        writtenBufs.clear();
+        readBufs.clear();
         copySinceBarrier = false;
       }
       if (queryPool_)
@@ -458,8 +614,11 @@ class VulkanSegment : public Segment {
       if (queryPool_)
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_,
                             (uint32_t)(k * 2 + 1));
+      for (TensorId in : node.inputs)
+        if (vk::Buffer* b = bufOf(in)) readBufs.insert(b);
+      if (vk::Buffer* b = bufOf(node.fusedResidual)) readBufs.insert(b);
       for (TensorId o : node.outputs)
-        if (o != kNoTensor) writtenSinceBarrier.insert(o);
+        if (vk::Buffer* b = bufOf(o)) writtenBufs.insert(b);
       if (isCopy(nodeIdx[k])) copySinceBarrier = true;
     }
     // Final barrier so the segment outputs are complete + visible before the host reads them.
@@ -521,6 +680,20 @@ class VulkanSegment : public Segment {
               << "ms unpack=" << ms(t2, t3) << "ms";
     }
 
+    // VXRT_DUMP_NAMES targeted dump: write the named tensors (dedicated buffers) to disk for diffing.
+    if (!dumpTids_.empty()) {
+      ::mkdir("/data/local/tmp/vxrt/dump", 0755);
+      for (TensorId tid : dumpTids_) {
+        auto bit = buffers_.find(tid);
+        if (bit == buffers_.end()) continue;
+        RtTensor& rt = ctx.t(tid);
+        VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_, g_.desc(tid).gpuFlat);
+        std::string nm = g_.tensors[tid].name;
+        for (char& c : nm) if (c == '/' || c == ':') c = '_';
+        FILE* f = fopen(("/data/local/tmp/vxrt/dump/" + nm + ".bin").c_str(), "wb");
+        if (f) { fwrite(rt.host.bytes.data(), 1, rt.host.bytes.size(), f); fclose(f); }
+      }
+    }
     // layer-dump: bring every activation back to host for per-layer diffing.
     if (ctx.config && ctx.config->layerDump) {
       for (auto& kv : buffers_) {
@@ -566,6 +739,7 @@ class VulkanSegment : public Segment {
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkQueryPool queryPool_ = VK_NULL_HANDLE;
   bool recorded_ = false;
+  std::vector<TensorId> dumpTids_;  // VXRT_DUMP_NAMES debug: tensors to dump after the run
 };
 
 std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int>& idx, Graph& g,

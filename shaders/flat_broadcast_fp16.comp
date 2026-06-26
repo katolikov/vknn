@@ -1,0 +1,22 @@
+#version 450
+// fp16 variant of flat_broadcast: out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ].
+// Half-precision storage, read/written via float. See flat_broadcast.comp for the index math.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { float16_t s[]; };
+layout(std430, binding = 1) writeonly buffer D { float16_t d[]; };
+layout(push_constant) uniform PC { int rank, total, mode; int outDim[8]; int inDim[8]; int inStride[8]; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), inIdx = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % pc.outDim[k];
+    rem /= pc.outDim[k];
+    inIdx += (c % pc.inDim[k]) * pc.inStride[k];
+  }
+  d[gid] = float16_t(float(s[inIdx]));
+}

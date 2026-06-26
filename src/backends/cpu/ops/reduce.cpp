@@ -44,12 +44,17 @@ struct ReduceCpu : CpuOp {
       if (op == kRMax) acc[oi] = std::max(acc[oi], v);
       else if (op == kRMin) acc[oi] = std::min(acc[oi], v);
       else if (op == kRProd) acc[oi] *= v;
+      else if (op == kRL2) acc[oi] += v * v;  // sum of squares; sqrt below
       else acc[oi] += v;
       cnt[oi]++;
       (void)rem;
     }
     float* y = cpu::allocOut(Y, out);
-    for (int64_t i = 0; i < outElems; ++i) y[i] = (op == kRMean && cnt[i]) ? acc[i] / cnt[i] : acc[i];
+    for (int64_t i = 0; i < outElems; ++i) {
+      if (op == kRMean && cnt[i]) y[i] = acc[i] / cnt[i];
+      else if (op == kRL2) y[i] = std::sqrt(acc[i]);
+      else y[i] = acc[i];
+    }
   }
 };
 }  // namespace

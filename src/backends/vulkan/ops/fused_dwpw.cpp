@@ -33,8 +33,10 @@ struct FusedDwPwOp : VulkanOp {
           (int)st[0], (int)st[1], (int)pad[0], (int)pad[1], (int)dil[0], (int)dil[1],
           (int)node.subOp, (int)node.fusedAct, node.actLo, node.actHi};
     groups_ = (int64_t)x.n * y.h * y.w;
-    const float* dwsrc = g.initializers.at(node.inputs[1]).f32();
-    const float* pwsrc = g.initializers.at(node.inputs[3]).f32();
+    std::vector<float> dwsrcv = initFloats(g, node.inputs[1]);
+    std::vector<float> pwsrcv = initFloats(g, node.inputs[3]);
+    const float* dwsrc = dwsrcv.data();
+    const float* pwsrc = pwsrcv.data();
     dww = uploadCached(env, node.name + "#dww", [&] {  // [Eb][KH][KW][4]
       std::vector<float> wp(Eb * KH * KW * 4, 0.f);
       for (int64_t c = 0; c < E; ++c) { int64_t cb = c / 4, l = c % 4;
@@ -50,13 +52,13 @@ struct FusedDwPwOp : VulkanOp {
     });
     dwb = uploadCached(env, node.name + "#dwb", [&] {
       std::vector<float> b(Eb * 4, 0.f);
-      if (node.inputs[2] != kNoTensor) { const float* s = g.initializers.at(node.inputs[2]).f32();
+      if (node.inputs[2] != kNoTensor) { std::vector<float> sv = initFloats(g, node.inputs[2]); const float* s = sv.data();
         for (int64_t i = 0; i < E; ++i) b[i] = s[i]; }
       return b;
     });
     pwb = uploadCached(env, node.name + "#pwb", [&] {
       std::vector<float> b(Coutb * 4, 0.f);
-      if (node.inputs[4] != kNoTensor) { const float* s = g.initializers.at(node.inputs[4]).f32();
+      if (node.inputs[4] != kNoTensor) { std::vector<float> sv = initFloats(g, node.inputs[4]); const float* s = sv.data();
         for (int64_t i = 0; i < Cout; ++i) b[i] = s[i]; }
       return b;
     });

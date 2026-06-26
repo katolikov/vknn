@@ -68,7 +68,8 @@ struct ConvOp : VulkanOp {
     const Graph& g = *env.graph;
     int64_t Cin = x.c, Cinb = cBlocks(x.c);
     int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
-    const float* wsrc = g.initializers.at(node.inputs[1]).f32();
+    std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
+    const float* wsrc = wsrcv.data();
 
     // Host weight transform U = G g G^T, packed [pos][oc][icb] vec4(4 ic). Cached on disk.
     ubuf = uploadCached(env, node.name + "#wino", [&] {
@@ -179,7 +180,8 @@ struct ConvOp : VulkanOp {
                 st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 &&
                 pad[3] == 1 && x.c >= 16);
 
-    const float* wsrc = g.initializers.at(node.inputs[1]).f32();
+    std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
+    const float* wsrc = wsrcv.data();
     int64_t Coutb = cBlocks(Cout);
 
     // bias, padded out to a multiple of 4 so the kernel can read whole vec4s
@@ -188,7 +190,8 @@ struct ConvOp : VulkanOp {
       // inputs[2] is bias unless it's the appended residual (no-bias + fused-residual case)
       if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor &&
           node.inputs[2] != node.fusedResidual) {
-        const float* bsrc = g.initializers.at(node.inputs[2]).f32();
+        std::vector<float> bsrcv = initFloats(g, node.inputs[2]);
+        const float* bsrc = bsrcv.data();
         for (int64_t i = 0; i < Cout; ++i) bias[i] = bsrc[i];
       }
       return bias;

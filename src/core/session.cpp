@@ -161,7 +161,7 @@ void Session::plan() {
   // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
   //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
   //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).
-  if (byKind_.count(BackendKind::kVulkan) && !std::getenv("VXRT_NO_FLAT_OPS")) {
+  if (byKind_.count(BackendKind::kVulkan) && !cfg_.noFlatOps) {
     insertLayoutConverts(graph_);
     graph_.topoSort();
   }
@@ -173,13 +173,10 @@ void Session::plan() {
     pool_[i].shape = graph_.tensors[i].shape;
     pool_[i].dtype = graph_.tensors[i].dtype;
   }
-  for (auto& kv : graph_.initializers) {
-    RtTensor& rt = pool_[kv.first];
-    rt.host = kv.second;
-    rt.hostValid = true;
-    rt.shape = graph_.tensors[kv.first].shape;
-    rt.dtype = graph_.tensors[kv.first].dtype;
-  }
+  // Initializers are loaded into the pool LATER (after backend assignment), and only the ones a CPU
+  // op consumes — GPU ops upload their weights directly from graph_.initializers (the boundary pack
+  // skips initializers). This avoids re-materializing every weight in the pool, and lets us free the
+  // graph weights after upload — essential for fitting a 965M-param fp16 model on-device.
 
   // --- per-node backend assignment (highest-priority backend that supports it) ---
   nodeBackendIdx_.assign(graph_.nodes.size(), -1);
@@ -216,6 +213,38 @@ void Session::plan() {
   // they exceed the work threshold, so this never drags real compute off the accelerator.
   foldTinyGpuIslands();
 
+  // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---
+  // Only weights a CPU-assigned node reads need a host copy; GPU ops upload from graph_.initializers.
+  {
+    std::set<TensorId> cpuNeeded;
+    for (size_t n = 0; n < graph_.nodes.size(); ++n) {
+      bool isCpu = nodeBackendIdx_[n] >= 0 &&
+                   backends_[nodeBackendIdx_[n]]->kind() == BackendKind::kCpu;
+      if (!isCpu) continue;
+      for (TensorId in : graph_.nodes[n].inputs)
+        if (in != kNoTensor && graph_.isInitializer(in)) cpuNeeded.insert(in);
+    }
+    for (TensorId id : graph_.outputs)
+      if (id != kNoTensor && graph_.isInitializer(id)) cpuNeeded.insert(id);
+    for (TensorId id : cpuNeeded) {
+      RtTensor& rt = pool_[id];
+      const HostBuffer& src = graph_.initializers[id];
+      rt.shape = graph_.tensors[id].shape;
+      if (graph_.tensors[id].dtype == DType::kFloat16) {
+        int64_t nel = numElements(rt.shape);
+        const fp16_t* h = reinterpret_cast<const fp16_t*>(src.bytes.data());
+        rt.host.bytes.resize((size_t)nel * 4);
+        float* f = rt.host.f32();
+        for (int64_t i = 0; i < nel; ++i) f[i] = halfToFloat(h[i]);
+        rt.dtype = DType::kFloat32;
+      } else {
+        rt.host = src;
+        rt.dtype = graph_.tensors[id].dtype;
+      }
+      rt.hostValid = true;
+    }
+  }
+
   // --- partition into maximal same-backend segments ---
   std::vector<std::vector<int>> parts;
   for (size_t n = 0; n < graph_.nodes.size(); ++n) {
@@ -247,6 +276,9 @@ void Session::plan() {
         if (in == kNoTensor) continue;
         if (!internalOut.count(in)) ins.insert(in);  // produced outside (init/input/other seg)
       }
+      // a fused residual read by this op but produced by ANOTHER segment is also a boundary input.
+      TensorId res = graph_.nodes[ni].fusedResidual;
+      if (res != kNoTensor && !graph_.isInitializer(res) && !internalOut.count(res)) ins.insert(res);
       for (TensorId o : graph_.nodes[ni].outputs) {
         if (o == kNoTensor) continue;
         // consumed outside this segment?
@@ -270,6 +302,18 @@ void Session::plan() {
     segments_.push_back(std::move(seg));
   }
   for (auto& b : backends_) b->finalize();  // flush pipeline/weight/tuning caches
+
+  // --- free the host weights: GPU ops have uploaded them to the device, CPU-consumed ones were
+  //     decoded into the pool above. Reclaims the full weight blob (a 965M fp16 model: ~1.9GB) so
+  //     only the GPU buffers + activations remain resident. (Kept under a config flag so a future
+  //     re-plan / weight-introspection path can opt out.)
+  if (cfg_.freeWeightsAfterUpload) {
+    size_t freed = 0;
+    for (auto& kv : graph_.initializers) freed += kv.second.bytes.size();
+    graph_.initializers.clear();
+    VX_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
+  }
+
   planned_ = true;
   VX_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size()
           << " nodes";

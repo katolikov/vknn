@@ -1,0 +1,25 @@
+#version 450
+// Flat row-major Gather along an axis: out[outer, idxPart, inner] = data[outer, idx[idxPart], inner].
+// The index is read as float (so the SAME kernel serves const indices — uploaded as float — and the
+// runtime float index activations of RoPE), truncated to int, with negative wrap. nIdx = number of
+// index elements (1 for a scalar index, which drops the gathered axis).
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { float s[]; };
+layout(std430, binding = 1) readonly  buffer I { float idx[]; };
+layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { int total, outer, axisSize, inner, nIdx; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.total)) return;
+  int lin = int(gid);
+  int innerC = lin % pc.inner;
+  int t = lin / pc.inner;
+  int idxPart = t % pc.nIdx;
+  int outerC = t / pc.nIdx;
+  int ix = int(idx[idxPart]);
+  if (ix < 0) ix += pc.axisSize;
+  int src = (outerC * pc.axisSize + ix) * pc.inner + innerC;
+  d[gid] = s[src];
+}

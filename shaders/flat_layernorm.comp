@@ -1,0 +1,30 @@
+#version 450
+// Flat row-major LayerNormalization over the trailing axes. One thread per OUTER row; it walks its
+// normalized block (size = product of dims from `axis` to the end) computing mean then variance, then
+// writes y = (x-mean)/sqrt(var+eps)*gamma + beta. gamma/beta are 1-D [norm] constant buffers.
+// Layout = [outer][norm] row-major (norm contiguous). Mirrors flat_softmax.comp's outer/inner walk.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { float s[]; };
+layout(std430, binding = 1) readonly  buffer G { float gamma[]; };
+layout(std430, binding = 2) readonly  buffer B { float beta[]; };
+layout(std430, binding = 3) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { int outer, norm, hasBeta; float eps; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(pc.outer)) return;
+  int base = int(gid) * pc.norm;
+  float mean = 0.0;
+  for (int j = 0; j < pc.norm; ++j) mean += s[base + j];
+  mean /= float(pc.norm);
+  float var = 0.0;
+  for (int j = 0; j < pc.norm; ++j) { float c = s[base + j] - mean; var += c * c; }
+  var /= float(pc.norm);
+  float inv = 1.0 / sqrt(var + pc.eps);
+  for (int j = 0; j < pc.norm; ++j) {
+    float y = (s[base + j] - mean) * inv * gamma[j];
+    if (pc.hasBeta != 0) y += beta[j];
+    d[base + j] = y;
+  }
+}

@@ -1,0 +1,14 @@
+#version 450
+// Flat elementwise Clip: d[i] = clamp(s[i], lo, hi). Bounds are constant scalars baked into the PC
+// (absent bound -> -/+inf). Layout-oblivious (one element per thread), dispatched over the flat count.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { float s[]; };
+layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { int total; float lo, hi; } pc;
+
+void main() {
+  uint g = gl_GlobalInvocationID.x;
+  if (g >= uint(pc.total)) return;
+  d[g] = clamp(s[g], pc.lo, pc.hi);
+}

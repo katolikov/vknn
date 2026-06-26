@@ -41,7 +41,7 @@ file(MAKE_DIRECTORY ${VXRT_SHADER_GEN_DIR})
 set(EMBEDDED_SHADERS_CPP ${VXRT_SHADER_GEN_DIR}/vx_embedded_shaders.cpp)
 set(_spv_files "")
 if(VXRT_ENABLE_VULKAN AND GLSLC)
-  file(GLOB VXRT_COMP_SHADERS ${VXRT_SHADER_DIR}/*.comp)
+  file(GLOB VXRT_COMP_SHADERS CONFIGURE_DEPENDS ${VXRT_SHADER_DIR}/*.comp)
   foreach(_comp ${VXRT_COMP_SHADERS})
     get_filename_component(_name ${_comp} NAME_WE)
     set(_spv ${VXRT_SHADER_GEN_DIR}/${_name}.spv)
@@ -73,7 +73,7 @@ endif()
 # ---------------------------------------------------------------------------
 # Core library sources (host + android)
 # ---------------------------------------------------------------------------
-file(GLOB_RECURSE VXRT_CORE_SRC
+file(GLOB_RECURSE VXRT_CORE_SRC CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/import/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/layout/*.cpp
@@ -83,7 +83,7 @@ file(GLOB_RECURSE VXRT_CORE_SRC
 set(VXRT_SRC ${VXRT_CORE_SRC} ${EMBEDDED_SHADERS_CPP})
 
 if(VXRT_ENABLE_VULKAN)
-  file(GLOB_RECURSE VXRT_VK_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/vulkan/*.cpp)
+  file(GLOB_RECURSE VXRT_VK_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/vulkan/*.cpp)
   list(APPEND VXRT_SRC ${VXRT_VK_SRC})
 endif()
 
@@ -118,7 +118,7 @@ target_link_libraries(vxrt PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VXRT_BUILD_EXAMPLES)
-  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict)
+  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io convert)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vx_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       # whole-archive so self-registering backends/operators (static initializers in the
@@ -133,7 +133,7 @@ endif()
 # ---------------------------------------------------------------------------
 if(VXRT_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletest/CMakeLists.txt)
   add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
-  file(GLOB VXRT_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+  file(GLOB VXRT_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
   add_executable(vx_tests ${VXRT_TEST_SRC})
   target_link_libraries(vx_tests PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vxrt>" gtest gtest_main)
 endif()

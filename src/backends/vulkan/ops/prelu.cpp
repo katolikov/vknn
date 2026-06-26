@@ -13,11 +13,11 @@ struct PReluOp : VulkanOp {
     NCHW x = NCHW::from(g.desc(node.outputs[0]).shape);
     int64_t Cb = cBlocks(x.c);
     pc = {(int)((int64_t)x.n * Cb * x.h * x.w), (int)(x.h * x.w), (int)Cb};
-    const auto& si = g.initializers.at(node.inputs[1]);
-    int64_t ns = (int64_t)si.bytes.size() / 4;
+    std::vector<float> sv = initFloats(g, node.inputs[1]);
+    int64_t ns = numElements(g.desc(node.inputs[1]).shape);  // element count (dtype-agnostic; was bytes/4)
     slope = uploadCached(env, node.name + "#slope", [&] {
       std::vector<float> sp(Cb * 4, 0.f);
-      const float* s = si.f32();
+      const float* s = sv.data();
       for (int64_t c = 0; c < x.c; ++c) sp[c] = ns == 1 ? s[0] : s[c];
       return sp;
     });

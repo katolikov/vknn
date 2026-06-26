@@ -37,6 +37,17 @@ float vx_unary(float x, int op, float a, float b) {
   if (op == 12) return ceil(x);
   if (op == 13) return max(x, 0.0);                    // relu
   if (op == 14) return x / (1.0 + exp(-x));            // silu
+  if (op == 16) return cos(x);
+  if (op == 17) return sin(x);
+  if (op == 18) return 1.0 / x;                        // reciprocal
+  if (op == 19) return max(x, 0.0) + log(1.0 + exp(-abs(x)));  // softplus
+  if (op == 15) {                                      // erf (Abramowitz-Stegun 7.1.26, err<1.5e-7)
+    float s = sign(x); float ax = abs(x);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+                      - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
+    return s * y;
+  }
   return x;
 }
 
@@ -47,7 +58,17 @@ float vx_binary(float a, float b, int op) {
   if (op == 2) return a / b;
   if (op == 3) return max(a, b);
   if (op == 4) return min(a, b);
-  if (op == 5) return pow(a, b);
+  if (op == 5) {
+    // GLSL pow(x,y) is undefined (-> NaN) for x < 0, but ONNX/powf computes a negative base with an
+    // INTEGER exponent (e.g. (-0.5)^2 = 0.25, used on the normalized ray directions of the camera
+    // ray-map). Handle a negative base with an integer exponent by sign-correcting; a non-integer
+    // exponent of a negative base is genuinely NaN (matches powf), so fall through to pow().
+    if (a < 0.0 && b == round(b)) {
+      float r = pow(-a, b);
+      return (mod(round(b), 2.0) != 0.0) ? -r : r;
+    }
+    return pow(a, b);
+  }
   return a + b;
 }
 

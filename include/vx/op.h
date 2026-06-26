@@ -25,9 +25,14 @@ enum class OpType {
   kMaxPool,
   kGemm,
   kMatMul,
+  kEinsum,    // einsum: outer-product (RoPE) + batched mat-vec/matmul (geometry tail)
   kReshape,
+  kExpand,    // broadcast X to a target shape (numpy broadcasting), flat gather
+  kTile,      // repeat X along each dim by `repeats`, flat gather
+  kSqueeze,   // remove size-1 dims (metadata reshape / flat copy)
   kFlatten,
   kSoftmax,
+  kLayerNorm,  // LayerNormalization: normalize over axes [axis..end], y=(x-mean)/sqrt(var+eps)*g+b
   kBatchNorm,
   kConcat,
   kPad,
@@ -43,9 +48,15 @@ enum class OpType {
   kGridSample,  // sample input at grid coords (CPU)
   kTranspose,   // permute dims (CPU)
   kSlice,       // strided slice (CPU)
-  kReduce,      // ReduceMean/Sum/Max/Min/Prod, see ReduceType
+  kReduce,      // ReduceMean/Sum/Max/Min/Prod/L2, see ReduceType
+  kDepthToSpace,  // [N,C,H,W] -> [N,C/b^2,H*b,W*b], DCR|CRD (flat index remap)
   kCast,        // dtype cast (CPU)
   kSplit,       // split along an axis into N outputs (CPU)
+  kWhere,       // cond ? X : Y, elementwise with full broadcasting (flat path)
+  kEqual,       // A == B -> 1.0/0.0, elementwise with broadcasting (flat path)
+  kConstantOfShape,  // emit a tensor of the given shape filled with a scalar value
+  kEyeLike,          // identity-like matrix (ones on a diagonal) matching the input shape
+  kScatterND,        // copy data, then scatter update slices at N-D index rows
   kFusedSE,     // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
   kFusedDwPw,   // fused depthwise-3x3 + 1x1-project (expanded intermediate stays on-chip)
   // layout conversion nodes (inserted by the layout pass)
@@ -55,10 +66,11 @@ enum class OpType {
 // Sub-codes for the kUnary/kBinary families (kept in sync with shaders/common.glsl).
 enum UnaryType {
   kUSigmoid = 0, kUTanh = 1, kUHardSwish = 2, kUHardSigmoid = 3, kULeakyRelu = 4, kUElu = 5,
-  kUAbs = 6, kUNeg = 7, kUExp = 8, kULog = 9, kUSqrt = 10, kUFloor = 11, kUCeil = 12, kURelu = 13, kUSiLU = 14
+  kUAbs = 6, kUNeg = 7, kUExp = 8, kULog = 9, kUSqrt = 10, kUFloor = 11, kUCeil = 12, kURelu = 13, kUSiLU = 14,
+  kUErf = 15, kUCos = 16, kUSin = 17, kUReciprocal = 18, kUSoftplus = 19  // transformer: GELU, RoPE, ...
 };
 enum BinaryType { kBMul = 0, kBSub = 1, kBDiv = 2, kBMax = 3, kBMin = 4, kBPow = 5, kBAdd = 6 };
-enum ReduceType { kRMean = 0, kRSum = 1, kRMax = 2, kRMin = 3, kRProd = 4 };
+enum ReduceType { kRMean = 0, kRSum = 1, kRMax = 2, kRMin = 3, kRProd = 4, kRL2 = 5 };
 
 const char* opTypeName(OpType t);
 OpType opTypeFromOnnx(const std::string& s);
