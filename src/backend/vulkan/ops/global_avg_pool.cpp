@@ -3,31 +3,29 @@
 #include "vk_op_common.h"
 
 namespace vknn {
-namespace {
+    namespace {
 
-struct GlobalAvgPoolOp : VulkanOp {
-  std::unique_ptr<vk::ComputePipeline> pipe;
-  PoolPC pc{};
-  int64_t total = 0;
+        struct GlobalAvgPoolOp: VulkanOp {
+            std::unique_ptr<vk::ComputePipeline> pipe;
+            PoolPC                               pc {};
+            int64_t                              total = 0;
 
-  void prepare(const Node& node, VkOpEnv& env) override {
-    NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
-    pc = {(int)x.n, (int)x.c, (int)x.h, (int)x.w};
-    total = x.n * cBlocks(x.c);
-    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("avgpool", env.useFp16), 2,
-                                                 sizeof(PoolPC), std::vector<uint32_t>{},
-                                                 env.cache->handle());
-  }
+            void prepare(const Node &node, VkOpEnv &env) override {
+                NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
+                pc     = {(int) x.n, (int) x.c, (int) x.h, (int) x.w};
+                total  = x.n * cBlocks(x.c);
+                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("avgpool", env.useFp16), 2, sizeof(PoolPC), std::vector<uint32_t> {}, env.cache->handle());
+            }
 
-  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
-    vk::Buffer* src = env.devBuf(node.inputs[0]);
-    vk::Buffer* dst = env.devBuf(node.outputs[0]);
-    pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), (uint32_t)total);
-  }
-};
+            void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                vk::Buffer *src = env.devBuf(node.inputs[0]);
+                vk::Buffer *dst = env.devBuf(node.outputs[0]);
+                pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), (uint32_t) total);
+            }
+        };
 
-}  // namespace
+    } // namespace
 
-VKNN_REGISTER_VK_OP(OpType::kGlobalAvgPool, GlobalAvgPoolOp);
+    VKNN_REGISTER_VK_OP(OpType::kGlobalAvgPool, GlobalAvgPoolOp);
 
-}  // namespace vknn
+} // namespace vknn

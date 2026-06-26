@@ -4,27 +4,28 @@
 #include "vk_op_common.h"
 
 namespace vknn {
-namespace {
+    namespace {
 
-struct SqueezeOp : VulkanOp {
-  std::shared_ptr<vk::Buffer> hold0;  // when input is a constant initializer
+        struct SqueezeOp: VulkanOp {
+            std::shared_ptr<vk::Buffer> hold0; // when input is a constant initializer
 
-  void prepare(const Node&, VkOpEnv&) override {}
+            void prepare(const Node &, VkOpEnv &) override {
+            }
 
-  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
-    vk::Buffer* src = operandBuf(env, node.inputs[0], hold0);
-    vk::Buffer* dst = env.devBuf(node.outputs[0]);
-    // A squeeze preserves the element count + layout, so src/dst are equal-sized — copy the whole
-    // buffer. Do NOT cap by packedElems(output): NCHW::from collapses rank>4 to (1,1,1,1) -> 4,
-    // which would truncate a rank-5 flat squeeze (e.g. the quaternion [1,2,N,1,1,1]->[1,2,N,1,1])
-    // to 4 elems.
-    VkBufferCopy c{0, 0, std::min(src->bytes(), dst->bytes())};
-    vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
-  }
-};
+            void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                vk::Buffer *src = operandBuf(env, node.inputs[0], hold0);
+                vk::Buffer *dst = env.devBuf(node.outputs[0]);
+                // A squeeze preserves the element count + layout, so src/dst are equal-sized — copy the whole
+                // buffer. Do NOT cap by packedElems(output): NCHW::from collapses rank>4 to (1,1,1,1) -> 4,
+                // which would truncate a rank-5 flat squeeze (e.g. the quaternion [1,2,N,1,1,1]->[1,2,N,1,1])
+                // to 4 elems.
+                VkBufferCopy c {0, 0, std::min(src->bytes(), dst->bytes())};
+                vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
+            }
+        };
 
-}  // namespace
+    } // namespace
 
-VKNN_REGISTER_VK_OP(OpType::kSqueeze, SqueezeOp);
+    VKNN_REGISTER_VK_OP(OpType::kSqueeze, SqueezeOp);
 
-}  // namespace vknn
+} // namespace vknn

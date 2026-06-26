@@ -2,26 +2,30 @@
 #include "flat_ops.h"
 
 namespace vknn {
-namespace {
+    namespace {
 
-struct TransposeOp : VulkanOp {
-  flat::Gather impl;
-  void prepare(const Node& node, VkOpEnv& env) override { impl.prepare(node, env); }
-  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
-    impl.record(cmd, node, env);
-  }
-};
-struct SliceOp : VulkanOp {
-  flat::Gather impl;
-  void prepare(const Node& node, VkOpEnv& env) override { impl.prepare(node, env); }
-  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
-    impl.record(cmd, node, env);
-  }
-};
+        struct TransposeOp: VulkanOp {
+            flat::Gather impl;
+            void         prepare(const Node &node, VkOpEnv &env) override {
+                impl.prepare(node, env);
+            }
+            void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                impl.record(cmd, node, env);
+            }
+        };
+        struct SliceOp: VulkanOp {
+            flat::Gather impl;
+            void         prepare(const Node &node, VkOpEnv &env) override {
+                impl.prepare(node, env);
+            }
+            void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                impl.record(cmd, node, env);
+            }
+        };
 
-}  // namespace
+    } // namespace
 
-VKNN_REGISTER_VK_OP(OpType::kTranspose, TransposeOp);
-VKNN_REGISTER_VK_OP(OpType::kSlice, SliceOp);
+    VKNN_REGISTER_VK_OP(OpType::kTranspose, TransposeOp);
+    VKNN_REGISTER_VK_OP(OpType::kSlice, SliceOp);
 
-}  // namespace vknn
+} // namespace vknn

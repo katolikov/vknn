@@ -3,16 +3,18 @@
 #include "flat_ops.h"
 
 namespace vknn {
-namespace {
+    namespace {
 
-struct ExpandOp : VulkanOp {
-  flat::Broadcast impl;
-  void prepare(const Node& node, VkOpEnv& env) override { impl.prepare(node, env); }
-  void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
-    impl.record(cmd, node, env);
-  }
-};
+        struct ExpandOp: VulkanOp {
+            flat::Broadcast impl;
+            void            prepare(const Node &node, VkOpEnv &env) override {
+                impl.prepare(node, env);
+            }
+            void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                impl.record(cmd, node, env);
+            }
+        };
 
-}  // namespace
-VKNN_REGISTER_VK_OP(OpType::kExpand, ExpandOp);
-}  // namespace vknn
+    } // namespace
+    VKNN_REGISTER_VK_OP(OpType::kExpand, ExpandOp);
+} // namespace vknn

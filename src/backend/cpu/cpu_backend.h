@@ -5,58 +5,64 @@
 //   2. VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpuOp);
 // No edits to core dispatch are required.
 #pragma once
+#include "vknn/backend.h"
 #include <functional>
 #include <map>
 #include <memory>
 
-#include "vknn/backend.h"
-
 namespace vknn {
 
-/// One operator implementation for the CPU backend. `run` reads inputs and writes outputs
-/// (host buffers, NCHW canonical). Shape inference is the op's responsibility.
-class CpuOp {
-public:
-  virtual ~CpuOp() = default;
-  virtual void run(const Node& node, ExecContext& ctx) = 0;
-  // Which dtypes this op supports (for capability/fallback). Default: fp32.
-  virtual bool supportsDType(DType dt) const {
-    return dt == DType::kFloat32 || dt == DType::kInt64;
-  }
-};
+    /// One operator implementation for the CPU backend. `run` reads inputs and writes outputs
+    /// (host buffers, NCHW canonical). Shape inference is the op's responsibility.
+    class CpuOp {
+      public:
+        virtual ~CpuOp()                                     = default;
+        virtual void run(const Node &node, ExecContext &ctx) = 0;
+        // Which dtypes this op supports (for capability/fallback). Default: fp32.
+        virtual bool supportsDType(DType dt) const {
+            return dt == DType::kFloat32 || dt == DType::kInt64;
+        }
+    };
 
-using CpuOpFactory = std::function<std::unique_ptr<CpuOp>()>;
+    using CpuOpFactory = std::function<std::unique_ptr<CpuOp>()>;
 
-class CpuOpRegistry {
-public:
-  static CpuOpRegistry& instance();
-  void reg(OpType t, CpuOpFactory f) { factories_[t] = std::move(f); }
-  bool has(OpType t) const { return factories_.count(t) > 0; }
-  std::unique_ptr<CpuOp> create(OpType t) const {
-    auto it = factories_.find(t);
-    return it == factories_.end() ? nullptr : it->second();
-  }
+    class CpuOpRegistry {
+      public:
+        static CpuOpRegistry &instance();
+        void                  reg(OpType t, CpuOpFactory f) {
+            factories_[t] = std::move(f);
+        }
+        bool has(OpType t) const {
+            return factories_.count(t) > 0;
+        }
+        std::unique_ptr<CpuOp> create(OpType t) const {
+            auto it = factories_.find(t);
+            return it == factories_.end() ? nullptr : it->second();
+        }
 
-private:
-  std::map<OpType, CpuOpFactory> factories_;
-};
+      private:
+        std::map<OpType, CpuOpFactory> factories_;
+    };
 
-struct CpuOpRegistrar {
-  CpuOpRegistrar(OpType t, CpuOpFactory f) { CpuOpRegistry::instance().reg(t, std::move(f)); }
-};
-#define VKNN_REGISTER_CPU_OP(OPTYPE, CLASS)            \
-  static ::vknn::CpuOpRegistrar _vx_cpuop_reg_##CLASS( \
-      OPTYPE, []() { return std::unique_ptr<::vknn::CpuOp>(new CLASS()); })
+    struct CpuOpRegistrar {
+        CpuOpRegistrar(OpType t, CpuOpFactory f) {
+            CpuOpRegistry::instance().reg(t, std::move(f));
+        }
+    };
+#define VKNN_REGISTER_CPU_OP(OPTYPE, CLASS)                            \
+    static ::vknn::CpuOpRegistrar _vx_cpuop_reg_##CLASS(OPTYPE, []() { \
+        return std::unique_ptr<::vknn::CpuOp>(new CLASS());            \
+    })
 
-// ---- helpers shared by CPU ops ----
-namespace cpu {
-// Allocate rt's host buffer for `shape` and return a typed pointer (marks host valid).
-float* allocOut(RtTensor& rt, const Shape& shape);
-int64_t* allocOutI64(RtTensor& rt, const Shape& shape);
-// Apply a fused activation in place.
-void applyAct(float* p, int64_t n, ActType act, float lo, float hi);
-// Copy X's raw bytes into Y with a new shape, keeping the dtype (for reshape/flatten/etc).
-void copyAs(const RtTensor& X, RtTensor& Y, const Shape& shape);
-}  // namespace cpu
+    // ---- helpers shared by CPU ops ----
+    namespace cpu {
+        // Allocate rt's host buffer for `shape` and return a typed pointer (marks host valid).
+        float   *allocOut(RtTensor &rt, const Shape &shape);
+        int64_t *allocOutI64(RtTensor &rt, const Shape &shape);
+        // Apply a fused activation in place.
+        void applyAct(float *p, int64_t n, ActType act, float lo, float hi);
+        // Copy X's raw bytes into Y with a new shape, keeping the dtype (for reshape/flatten/etc).
+        void copyAs(const RtTensor &X, RtTensor &Y, const Shape &shape);
+    } // namespace cpu
 
-}  // namespace vknn
+} // namespace vknn

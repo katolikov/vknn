@@ -5,36 +5,40 @@
 #include "vk_command.h"
 #include "vk_context.h"
 
-namespace vknn {
-namespace vk {
+namespace vknn { namespace vk {
 
-class Image {
-public:
-  Image(VulkanContext& ctx, int width, int height);
-  ~Image();
-  Image(const Image&) = delete;
-  Image& operator=(const Image&) = delete;
+    class Image {
+      public:
+        Image(VulkanContext &ctx, int width, int height);
+        ~Image();
+        Image(const Image &)            = delete;
+        Image &operator=(const Image &) = delete;
 
-  VkImageView view() const { return view_; }
-  int width() const { return w_; }
-  int height() const { return h_; }
+        VkImageView view() const {
+            return view_;
+        }
+        int width() const {
+            return w_;
+        }
+        int height() const {
+            return h_;
+        }
 
-  // Transition UNDEFINED -> GENERAL (run once before use).
-  void toGeneral(CommandRunner& runner);
-  // host fp16 RGBA texels (w*h*4 uint16) -> image, and back.
-  void upload(CommandRunner& runner, const uint16_t* rgba);
-  void download(CommandRunner& runner, uint16_t* rgba);
+        // Transition UNDEFINED -> GENERAL (run once before use).
+        void toGeneral(CommandRunner &runner);
+        // host fp16 RGBA texels (w*h*4 uint16) -> image, and back.
+        void upload(CommandRunner &runner, const uint16_t *rgba);
+        void download(CommandRunner &runner, uint16_t *rgba);
 
-  // Whether the device supports RGBA16F storage images at all.
-  static bool supported(VulkanContext& ctx);
+        // Whether the device supports RGBA16F storage images at all.
+        static bool supported(VulkanContext &ctx);
 
-private:
-  VulkanContext& ctx_;
-  int w_, h_;
-  VkImage img_ = VK_NULL_HANDLE;
-  VkDeviceMemory mem_ = VK_NULL_HANDLE;
-  VkImageView view_ = VK_NULL_HANDLE;
-};
+      private:
+        VulkanContext &ctx_;
+        int            w_, h_;
+        VkImage        img_  = VK_NULL_HANDLE;
+        VkDeviceMemory mem_  = VK_NULL_HANDLE;
+        VkImageView    view_ = VK_NULL_HANDLE;
+    };
 
-}  // namespace vk
-}  // namespace vknn
+}} // namespace vknn::vk
