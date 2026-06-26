@@ -32,39 +32,21 @@ Concretely:
 
 ---
 
-## 2. ENN / NPU backend is a documented stub
+## 2. No ENN / NPU backend (Vulkan + CPU only)
 
-`EnnBackend` (`src/backends/enn/enn_backend.cpp`, ADR-0007) is **not** a working NPU
-path. It exists to prove the pluggable-backend architecture end-to-end, and to record
-the gap honestly.
+The backends are **Vulkan** (the on-device compute path) and **CPU** (host oracle +
+fallback). There is no Samsung ENN / NPU backend, because a genuine one is not
+buildable for us:
 
-What it actually does:
+1. **No public ENN C++ headers** are available.
+2. **No on-device NNC compiler.** ENN consumes `.nnc` models produced by an **offline**
+   Samsung SDK tool we do not have — the flow would be ONNX → Samsung NNC compiler →
+   `.nnc` → ENN runtime.
 
-- Subclasses `vx::Backend`, registers via `VX_REGISTER_BACKEND(BackendKind::kEnn, …)`,
-  and is selectable through `config.backend = BackendKind::kEnn` with **no edits to
-  core dispatch**.
-- On construction it `dlopen`-probes the on-device ENN runtime libraries
-  (`libenn_public_api_cpp.so`, `libenn_engine.so`, `libenn_model.so`,
-  `libenn_user_driver_gpu.so`, `libenn_user_driver_unified.so`). On the target
-  device **4 of the 5** resolve (`libenn_engine.so` is not reachable via `dlopen`
-  from the app namespace; the vendor namespace hides it).
-- `available()` returns `true`, but `supports(OpType, DType)` returns **`false` for
-  every op**, so the configured fallback list (Vulkan → CPU) executes the entire
-  graph.
-- `compileSegment()` throws `Status::kUnsupported` with an explicit message pointing
-  here.
-
-Why it is not real, and what a real path needs:
-
-1. **No public ENN C++ headers** are available to us.
-2. **No on-device NNC compiler.** ENN consumes `.nnc` models, which are produced by
-   an **offline** Samsung SDK tool we do not have.
-
-A genuine ENN backend therefore requires the offline flow
-**source ONNX → Samsung NNC compiler → `.nnc` → ENN runtime**, plus the headers.
-If both become available, **only `EnnBackend`'s body changes** — registration,
-selection, and fallback are already wired. See ADR-0007 and
-`docs/ADDING_A_BACKEND.md`.
+The pluggable-backend architecture stays open for it: adding one is purely a new
+`Backend` subclass + `VKNN_REGISTER_BACKEND`, with no edits to core dispatch — see
+`docs/ADDING_A_BACKEND.md`. (An earlier stub that only `dlopen`-probed the on-device ENN
+libs was removed; the device's ENN/NPU findings are recorded in `docs/DEVICE_REPORT.md`.)
 
 ---
 
