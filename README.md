@@ -65,18 +65,18 @@ fp16, thermal-controlled medians. VKNN beats MNN's Vulkan backend across the boa
 | MobileNetV3-Large | 2.8 ms | 17.0 ms | cosine 0.99954 |
 | SqueezeNet 1.1 | 1.7 ms | 10.9 ms | cosine 0.99998 |
 | EfficientNet-B0 | 4.3 ms | 19.9 ms | cosine 0.99983 |
-| ResNet-50 | 12.6 ms | 18.3 ms | cosine 1.000000 |
-| Inception-v3 | 16.0 ms | 25.6 ms | cosine 0.99998 |
-| YOLOv8n (640×640) | 20.6 ms | ~73 ms | cosine 1.000000 |
+| ResNet-50 | 12.1 ms | 18.3 ms | cosine 1.000000 |
+| Inception-v3 | 15.5 ms | 25.6 ms | cosine 0.99998 |
+| YOLOv8n (640×640) | 20.0 ms | ~73 ms | cosine 1.000000 |
 | YoNoSplat encoder (965M params) | ~13.5 s | cannot convert | 6 outputs, cosine 0.999+ |
 
 Against MNN's *absolute* best (the min over OpenCL HEAVY-tuned, CPU-4-thread, and Vulkan), VKNN is
 faster on **8 of 9** models — even though the VKNN number is the full `run()` wall including host I/O
-while MNN's is inference-only. The lone exception is **ResNet-50** (12.6 vs 10.3 ms): it is almost
-entirely 3×3-conv-bound and MNN's years-tuned OpenCL Winograd kernel wins there; on this driver
-Winograd regresses (it punishes the register/LDS pressure the transforms need), so VKNN's direct 3×3
-kernel trails by ~8% on raw GPU compute. The 965M-param YoNoSplat transformer encoder runs end-to-end
-on the GPU, and MNN's converter can't handle it at all.
+while MNN's is inference-only. The conv-heavy nets (ResNet, Inception, DenseNet, YOLO) run a tiled-GEMM
+**Winograd F(2,3)** kernel, autotuned per shape against the direct kernel. The lone holdout is
+**ResNet-50** (12.1 vs 10.3 ms): the two tie on a cool device, but MNN's kernels throttle less under a
+sustained loop, so it keeps a ~14% edge there. The 965M-param YoNoSplat transformer encoder runs
+end-to-end on the GPU, and MNN's converter can't handle it at all.
 
 **End-to-end, per stage** (ResNet-50, Vulkan fp16, warm). A first result is more than the GPU run —
 open the model, build the session, copy in, run, copy out:

@@ -77,29 +77,39 @@ the timed loop. Even so, VKNN is faster on **8 of 9** models:
 | MobileNetV3-Large | 2.84 ms | 3.78 ms (CPU-4t) | **VKNN −25%** |
 | MnasNet 1.0 | 2.68 ms | 3.68 ms (CPU-4t) | **VKNN −27%** |
 | EfficientNet-B0 | 4.34 ms | 9.29 ms (OpenCL) | **VKNN −53%** |
-| Inception-v3 | 16.03 ms | 19.43 ms (CPU-4t) | **VKNN −18%** |
-| DenseNet-121 | 15.64 ms | 15.58 ms (CPU-4t) | tie (VKNN min 15.09 < 15.58) |
-| YOLOv8n (640²) | 20.61 ms | 24.45 ms (OpenCL) | **VKNN −16%** |
-| ResNet-50 | 12.62 ms | 10.31 ms (OpenCL) | **MNN −18%** |
+| Inception-v3 | 15.46 ms | 19.35 ms (CPU-4t) | **VKNN −20%** |
+| DenseNet-121 | 13.90 ms | 15.37 ms (CPU-4t) | **VKNN −10%** |
+| YOLOv8n (640²) | 20.00 ms | 24.71 ms (OpenCL) | **VKNN −19%** |
+| ResNet-50 | 12.07 ms | 10.34 ms (OpenCL) | **MNN −14%** |
 
-**ResNet-50 is the one model where MNN still wins.** It is ~entirely 3×3-conv-bound, and MNN's
-years-tuned OpenCL Winograd kernel beats VKNN's direct 3×3. On the strict GPU-compute basis the gap is
-smaller (VKNN `submit+gpu` ~11.2 ms vs MNN `Avg` 10.31 ms, +8.6%), but it is real.
+The conv-heavy nets (Inception, DenseNet, YOLO, ResNet) run a **tiled-GEMM Winograd** kernel — see below.
 
-The lever for ResNet is Winograd, and it does **not** pay off on this driver. Three structural variants
-were implemented and verified correct (cosine 1.0), and all regressed vs the direct kernel:
+**ResNet-50 is the one model where MNN still wins**, and the gap is now small (+14%, down from +43% in
+earlier builds). On a *cool* device the two tie (~10.5 ms each); MNN keeps its edge under sustained 20-run
+load because its kernels throttle less — partly real (its kernels draw less power) and partly a
+benchmark-structure artifact (MNN's `MNNV2Basic` does host work between runs, spacing out GPU load, while
+VKNN's loop is tight and self-heats the GPU).
 
-- **2-pass** (transform → V in global, then fused matmul): ~15 ms. Memory-bound — V is ~4× the input
-  for F(2,3) and round-trips to DRAM. Splitting the 16 accumulators across 4 cooperating threads to
-  raise occupancy did not help, which confirms it is bandwidth- not occupancy-limited.
-- **fully-fused** (V staged in LDS, no global round-trip — the "production" design): ~88 ms. The 16 KB
-  static LDS array collapses occupancy on this GPU.
-- earlier: register-tiled 3×3, LDS input-halo, c8w4 — all regressed.
+### Winograd: a tiled-GEMM kernel, autotuned per shape
 
-The driver punishes register/LDS/occupancy pressure hard enough to erase Winograd's 2.25× FLOP saving;
-cooperative-matrix is absent. **split-K for deep 1×1** and **precise data-dependency barriers** remain
-the only conv wins. int8 weight-only on the deep 1×1 has a bandwidth ceiling (~0.2 ms here; RDNA-pre-4
-gives int8 == fp16 compute) well below the gap, so it cannot close ResNet alone.
+MNN's OpenCL backend here is actually **ANGLE translating OpenCL → Vulkan**, so its winning kernels are
+Vulkan compute too — reachable natively. MNN wins the 3×3-conv nets with **F(2,3) Winograd + a
+CLBlast-style tiled batched GEMM** (`XgemmBatched`) for the transform-domain multiply. VKNN now does the
+same: `wino_input` → V, **`wino_gemm`** (an LDS-staged, register-blocked batched GEMM) → M, `wino_out` →
+output. Earlier Winograd attempts here lost only because their matmul was naive (1-thread-per-output,
+memory-bound) — the algorithm was never the problem; the GEMM quality was.
+
+Winograd helps deep / square 3×3 (ResNet, DenseNet) but loses on small-channel or spatially-large 3×3,
+so `tuneWino` measures the tiled-GEMM Winograd against the direct kernel **per shape** on scratch buffers
+and caches the winner (like the local-size tune; default `fast` tuning, `VKNN_WINOGRAD` / `VKNN_NO_WINOGRAD`
+force it). Net effect vs the previous direct-only builds: DenseNet 15.5→13.9 (flips a tie to a win),
+Inception 16.0→15.5, YOLOv8n 25.8→20.0, ResNet-50 12.6→12.1 (and ~10.5 cool). cosine ≥ 0.9995 throughout.
+
+Three earlier *non*-GEMM Winograd variants regressed and are kept env-gated as a documented negative
+result: 2-pass with a naive matmul (~15 ms, memory-bound on the global V round-trip), the same split 4
+ways (no help → bandwidth- not occupancy-bound), and a fully-fused single kernel with V in LDS (~88 ms,
+the static LDS array collapses occupancy). int8 weight-only on the deep 1×1 has a bandwidth ceiling
+(~0.2 ms; RDNA-pre-4 gives int8 == fp16 compute), so it cannot close ResNet alone.
 
 ## YoNoSplat encoder (965M-param transformer)
 
