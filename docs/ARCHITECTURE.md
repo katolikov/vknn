@@ -325,7 +325,7 @@ Because the `host` side of every `RtTensor` is canonical NCHW fp32, it is the
 universal handoff format. The CPU backend operates directly on `host`
 (`cpu::allocOut` sets `hostValid = true`, `deviceValid = false`), so its
 `toHost`/`toDevice` are the default no-ops. The Vulkan `VulkanSegment::run`
-(`src/backends/vulkan/vk_backend.cpp`) does the reconciliation explicitly:
+(`src/backend/vulkan/vk_backend.cpp`) does the reconciliation explicitly:
 
 ```cpp
 void run(ExecContext& ctx) override {
@@ -405,7 +405,7 @@ Kernels are GLSL compute shaders in `shaders/`: `pack`, `unpack`, `conv`, `dwcon
 `avgpool`, `fc`, `add`, each with an `_fp16` variant, plus shared `common.glsl`.
 `glslc` compiles them at build time, and `tools/embed_spirv.py` embeds them into the
 static lib as SPIR-V, reachable through
-`vknn::embeddedShaders()` (`src/backends/vulkan/vk_pipeline.h`), so the runtime ships
+`vknn::embeddedShaders()` (`src/backend/vulkan/vk_pipeline.h`), so the runtime ships
 no loose shader files.
 
 Conv uses two strategies: a general `group == 1` kernel (covering both 1×1 pointwise
@@ -482,7 +482,7 @@ on the whole-archive link of the static lib:
 | Graph passes | `src/import/passes.{h,cpp}` |
 | Session / planning | `src/core/session.cpp` |
 | Core support | `src/core/` (`graph.cpp`, `op.cpp`, `config.cpp`, `profiler.cpp`, `backend_registry.cpp`, `ion.cpp`, `json.h`, `logging.cpp`) |
-| Vulkan backend | `src/backends/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `vk_ops.cpp`) |
-| CPU backend | `src/backends/cpu/` (`cpu_backend.cpp`, `ops_basic.cpp`, `ops_conv.cpp`, `ops_shape.cpp`) |
+| Vulkan backend | `src/backend/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `vk_ops.cpp`) |
+| CPU backend | `src/backend/cpu/` (`cpu_backend.cpp`, `ops_basic.cpp`, `ops_conv.cpp`, `ops_shape.cpp`) |
 | Shaders | `shaders/` (compiled by `glslc`, embedded via `tools/embed_spirv.py`) |
 | Examples | `examples/` (`probe`, `classify`, `profile`, `ion_zerocopy`, `backend_switch`, `op_check`) |

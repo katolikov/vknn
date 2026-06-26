@@ -93,7 +93,7 @@ also the fallback target for every op the primary backend declines, so writing
 the CPU kernel first gives you a correct baseline to diff against.
 
 A CPU op is a subclass of `vknn::CpuOp` (declared in
-`src/backends/cpu/cpu_backend.h`):
+`src/backend/cpu/cpu_backend.h`):
 
 ```cpp
 class CpuOp {
@@ -126,7 +126,7 @@ data pointer and `RtTensor::elems()` for the element count. The
 and returns a `float*` (there is also `cpu::allocOutI64` for integer outputs, and
 `cpu::applyAct` to apply a fused activation in place).
 
-Add the implementation to `src/backends/cpu/ops_basic.cpp` (inside the existing
+Add the implementation to `src/backend/cpu/ops_basic.cpp` (inside the existing
 anonymous `namespace`, next to `ReluCpuOp`):
 
 ```cpp
@@ -221,7 +221,7 @@ out; the CPU kernel is what runs.)
 
 ### 3b. The op: subclass `vknn::VulkanOp`
 
-A Vulkan op (declared in `src/backends/vulkan/vk_backend.h`) has two phases:
+A Vulkan op (declared in `src/backend/vulkan/vk_backend.h`) has two phases:
 
 ```cpp
 class VulkanOp {
@@ -268,7 +268,7 @@ Key APIs used below:
 - `pipe->dispatch(cmd, {bufHandles...}, &pc, sizeof(pc), groupsX)` — records bind
   + push-descriptors + push-constants + dispatch.
 
-Add this to `src/backends/vulkan/vk_ops.cpp` (inside the anonymous `namespace`,
+Add this to `src/backend/vulkan/vk_ops.cpp` (inside the anonymous `namespace`,
 next to `AddVulkanOp`). The push-constant struct must byte-match the shader's
 `PC` block:
 
@@ -342,8 +342,8 @@ target_link_libraries(vknn_tests  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>" g
 
 This pulls in every object file (and therefore every registrar) whether or not
 the symbol is directly referenced. As long as your new op lives in a
-source file already globbed into the `vknn` target — `src/backends/cpu/*.cpp` and
-`src/backends/vulkan/*.cpp` both are — registration "just works" with no further
+source file already globbed into the `vknn` target — `src/backend/cpu/*.cpp` and
+`src/backend/vulkan/*.cpp` both are — registration "just works" with no further
 build wiring.
 
 ---
@@ -360,7 +360,7 @@ Each backend answers whether it can run a given op at a given compute dtype
 (`include/vknn/backend.h`). The implementations are thin wrappers over the op
 registries:
 
-- **Vulkan** (`src/backends/vulkan/vk_backend.cpp`):
+- **Vulkan** (`src/backend/vulkan/vk_backend.cpp`):
 
   ```cpp
   bool supports(OpType t, DType dt) const override {
@@ -374,7 +374,7 @@ registries:
   }
   ```
 
-- **CPU** (`src/backends/cpu/cpu_backend.cpp`):
+- **CPU** (`src/backend/cpu/cpu_backend.cpp`):
 
   ```cpp
   bool supports(OpType t, DType dt) const override {
@@ -438,8 +438,8 @@ Vulkan/CPU segments while keeping the output bit-comparable).
 
 - [ ] `include/vknn/op.h`: add `OpType::kLeakyRelu`.
 - [ ] `src/core/op.cpp`: add to `opTypeName()` and `opTypeFromOnnx()`.
-- [ ] `src/backends/cpu/ops_basic.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP`.
+- [ ] `src/backend/cpu/ops_basic.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP`.
 - [ ] `shaders/leakyrelu.comp` (+ optional `leakyrelu_fp16.comp`).
-- [ ] `src/backends/vulkan/vk_ops.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP`.
+- [ ] `src/backend/vulkan/vk_ops.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP`.
 - [ ] Build and run; diff Vulkan output against the CPU reference (and against
       `scripts/get_golden.py` if you want an external check).

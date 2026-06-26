@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <set>
 
-#include "backends/cpu/cpu_backend.h"
+#include "backend/cpu/cpu_backend.h"
 #include "vknn/logging.h"
 
 namespace vknn {

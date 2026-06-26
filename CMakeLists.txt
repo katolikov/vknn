@@ -92,12 +92,12 @@ file(GLOB_RECURSE VKNN_CORE_SRC CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/import/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/layout/*.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cpu/*.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/cpu/*.cpp)
 
 set(VKNN_SRC ${VKNN_CORE_SRC} ${EMBEDDED_SHADERS_CPP})
 
 if(VKNN_ENABLE_VULKAN)
-  file(GLOB_RECURSE VKNN_VK_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/vulkan/*.cpp)
+  file(GLOB_RECURSE VKNN_VK_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/vulkan/*.cpp)
   list(APPEND VKNN_SRC ${VKNN_VK_SRC})
 endif()
 
@@ -135,7 +135,7 @@ if(VKNN_BUILD_EXAMPLES)
   foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io yonosplat)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vknn_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
-      # whole-archive so self-registering backends/operators (static initializers in the
+      # whole-archive so self-registering backend/operators (static initializers in the
       # static lib) are retained even though no symbol references them directly.
       target_link_libraries(vknn_${ex} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
     endif()

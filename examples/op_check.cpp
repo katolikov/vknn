@@ -8,9 +8,9 @@
 
 #include "vknn/logging.h"
 #if defined(VKNN_ENABLE_VULKAN)
-#include "backends/vulkan/vk_buffer.h"
-#include "backends/vulkan/vk_command.h"
-#include "backends/vulkan/vk_pipeline.h"
+#include "backend/vulkan/vk_buffer.h"
+#include "backend/vulkan/vk_command.h"
+#include "backend/vulkan/vk_pipeline.h"
 #endif
 
 int main(int argc, char** argv) {

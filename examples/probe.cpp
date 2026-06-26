@@ -3,7 +3,7 @@
 
 #include "vknn/logging.h"
 #if defined(VKNN_ENABLE_VULKAN)
-#include "backends/vulkan/vk_context.h"
+#include "backend/vulkan/vk_context.h"
 #endif
 
 int main() {

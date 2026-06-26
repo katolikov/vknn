@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark VKNN on-device across backends/precisions; report latency/fps + cold/warm session.
+# Benchmark VKNN on-device across backend/precisions; report latency/fps + cold/warm session.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

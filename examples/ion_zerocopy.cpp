@@ -11,9 +11,9 @@
 #include <cmath>
 #include <vector>
 
-#include "backends/vulkan/vk_buffer.h"
-#include "backends/vulkan/vk_command.h"
-#include "backends/vulkan/vk_pipeline.h"
+#include "backend/vulkan/vk_buffer.h"
+#include "backend/vulkan/vk_command.h"
+#include "backend/vulkan/vk_pipeline.h"
 #include "vknn/ion.h"
 #include "vknn/logging.h"
 

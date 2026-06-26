@@ -7,7 +7,7 @@ geometry) ride a **flat row-major GPU path** (rank up to 8), and the layout pass
 converts in at the boundaries. Everything below is checked against onnxruntime (cosine ≥ 0.999 on the
 GPU fp16 path, 1.0 on the CPU fp32 path).
 
-Every operator lives in its own file under `src/backends/{cpu,vulkan}/ops/` (one op per file).
+Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one op per file).
 
 ## Convolution & pooling
 
@@ -71,6 +71,6 @@ Applied by the graph passes (and `vknn_compile`):
 ## Adding an operator
 
 It's mechanical: enum in `include/vknn/op.h`, ONNX name in `src/core/op.cpp`, a shape rule in
-`src/import/passes.cpp` `inferShapes`, a CPU oracle in `src/backends/cpu/ops/`, and (when the layout
+`src/import/passes.cpp` `inferShapes`, a CPU oracle in `src/backend/cpu/ops/`, and (when the layout
 allows) a Vulkan op + GLSL shader gated by `Backend::supportsNode()`. See
 [ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md) and [../skills/add-an-operator.md](../skills/add-an-operator.md).

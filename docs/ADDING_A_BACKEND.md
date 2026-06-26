@@ -7,9 +7,9 @@ or runtime that can run inference) to **VKNN**. The contract is small: subclass
 core dispatch, the importer, or the graph passes are needed — self-registration
 plus whole-archive linking wires everything together at startup.
 
-Two backends in the tree work as references: `src/backends/cpu/`
+Two backends in the tree work as references: `src/backend/cpu/`
 (`CpuBackend` — the NCHW-native reference path and automatic fallback) and
-`src/backends/vulkan/` (`VulkanBackend` — a full GPU backend with packing, pipelines,
+`src/backend/vulkan/` (`VulkanBackend` — a full GPU backend with packing, pipelines,
 and a pre-recorded command buffer). The CPU backend is the smaller of the two and the
 best one to read first.
 
@@ -397,5 +397,5 @@ new backend — JIT or offline-compiled — drops in as a single `.cpp`.
 - [ ] Add the `.cpp` to the `vknn` CMake target (whole-archive linking does the rest).
 - [ ] Select via `config.backend` / `config.fallback`; verify `available()` and `supports()` partition the graph as expected.
 
-See also: `include/vknn/backend.h` (the contract), `src/backends/cpu/` (a small NCHW
-backend), and `src/backends/vulkan/` (a full GPU backend).
+See also: `include/vknn/backend.h` (the contract), `src/backend/cpu/` (a small NCHW
+backend), and `src/backend/vulkan/` (a full GPU backend).

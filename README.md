@@ -240,8 +240,8 @@ include/vknn/          public headers (model, session, config, backend, op, tens
 src/core/              session, graph, passes glue, config/JSON, profiler, ion (dma-buf), logging
 src/import/onnx/       dependency-free ONNX protobuf parser
 src/import/passes.*    graph passes (inferShapes, foldBatchNorm, fuseActivations, constFold, ...)
-src/backends/vulkan/   VulkanBackend: context, buffers, command/pipeline, NC4HW4 + flat ops, autotune
-src/backends/cpu/      CpuBackend: scalar reference + NEON; one op per file under ops/
+src/backend/vulkan/   VulkanBackend: context, buffers, command/pipeline, NC4HW4 + flat ops, autotune
+src/backend/cpu/      CpuBackend: scalar reference + NEON; one op per file under ops/
 shaders/               GLSL compute (.comp) + common.glsl/precision.glsl; compiled by glslc, embedded
 convert/               vknn_compile — the ONNX -> .vxm model compiler
 examples/              example/tool binaries (built as vknn_*)
@@ -293,7 +293,7 @@ Key reference docs:
 
 Self-registration works because the static lib is linked whole-archive
 (`$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>`); no edits to core dispatch are needed. Note the
-**one operator per file** convention under `src/backends/{cpu,vulkan}/ops/`.
+**one operator per file** convention under `src/backend/{cpu,vulkan}/ops/`.
 
 - **CPU op:** subclass `vknn::CpuOp` and `VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpuOp)`.
 - **Vulkan op:** subclass `vknn::VulkanOp` (implement `prepare()` / `record()`), add a GLSL

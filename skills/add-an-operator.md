@@ -12,17 +12,17 @@ on the GPU. The rule that matters: **one operator per file**. Full writeup:
 3. **`src/import/passes.cpp`** — add a shape rule for `kFoo` in `inferShapes` so the planner can size
    buffers. (`readI64Param` reads a param from an attribute *or* an initializer.) The Vulkan path
    needs concrete shapes at plan time.
-4. **`src/backends/cpu/ops/foo.cpp`** — the CPU oracle (always required; it is the correctness ground
+4. **`src/backend/cpu/ops/foo.cpp`** — the CPU oracle (always required; it is the correctness ground
    truth and the fallback).
-5. **`src/backends/vulkan/ops/foo.cpp`** + **`shaders/foo.comp`** — optional GPU kernel, gated by
+5. **`src/backend/vulkan/ops/foo.cpp`** + **`shaders/foo.comp`** — optional GPU kernel, gated by
    `supportsNode`.
 
 ## CPU op pattern
 
-`src/backends/cpu/ops/foo.cpp` — one struct, one registration:
+`src/backend/cpu/ops/foo.cpp` — one struct, one registration:
 
 ```cpp
-#include "backends/cpu/cpu_backend.h"
+#include "backend/cpu/cpu_backend.h"
 
 namespace vknn {
 namespace {
@@ -42,7 +42,7 @@ VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpu);
 
 ## Vulkan op pattern
 
-`src/backends/vulkan/ops/foo.cpp` — split `prepare()` (one-time: build the pipeline, read shapes) from
+`src/backend/vulkan/ops/foo.cpp` — split `prepare()` (one-time: build the pipeline, read shapes) from
 `record()` (hot path: bind buffers, dispatch). `shader("foo", env.useFp16)` resolves to `foo.spv` /
 `foo_fp16.spv`.
 

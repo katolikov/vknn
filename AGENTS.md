@@ -38,8 +38,8 @@ include/vknn/          public headers (model, session, config, backend, op, tens
 src/core/              session, graph, passes glue, config/JSON, profiler, ion (dma-buf), logging
 src/import/onnx/       dependency-free ONNX protobuf parser
 src/import/passes.*    graph passes (inferShapes, foldBatchNorm, fuseActivations, constFold, ...)
-src/backends/cpu/ops/  CPU operators — ONE OP PER FILE
-src/backends/vulkan/   Vulkan backend: context/buffers/command/pipeline + ops/ (ONE OP PER FILE)
+src/backend/cpu/ops/  CPU operators — ONE OP PER FILE
+src/backend/vulkan/   Vulkan backend: context/buffers/command/pipeline + ops/ (ONE OP PER FILE)
 shaders/               GLSL compute (.comp) + common.glsl / precision.glsl; compiled by glslc, embedded
 convert/compile.cpp    vknn_compile — the ONNX -> .vxm model compiler
 examples/              tool/example binaries (built as vknn_*)
@@ -52,14 +52,14 @@ docs/ , skills/        reference docs + focused how-to guides
 ## The operator framework (and the one rule)
 
 > **One operator per file.** Every backend op lives in its own source file under
-> `src/backends/cpu/ops/<op>.cpp` and `src/backends/vulkan/ops/<op>.cpp`, with exactly one
+> `src/backend/cpu/ops/<op>.cpp` and `src/backend/vulkan/ops/<op>.cpp`, with exactly one
 > `VKNN_REGISTER_CPU_OP` / `VKNN_REGISTER_VK_OP` per file. Never put two ops in one file; split
 > combined files if you find them. Shared helpers (e.g. `flat::Broadcast` in `flat_ops.h`) may be
 > shared across the per-op files.
 
 Adding an op touches: the `OpType` enum (`include/vknn/op.h`), the ONNX-name map
 (`src/core/op.cpp`), a shape rule in `inferShapes` (`src/import/passes.cpp`), a CPU oracle
-(`src/backends/cpu/ops/<op>.cpp`), and optionally a Vulkan op + GLSL shader gated by
+(`src/backend/cpu/ops/<op>.cpp`), and optionally a Vulkan op + GLSL shader gated by
 `supportsNode`. The CMake globs use `CONFIGURE_DEPENDS`, so a new file is picked up on the next
 configure (which `./build.sh` always runs). Full recipe: [skills/add-an-operator.md](skills/add-an-operator.md)
 and [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md). Backends:
