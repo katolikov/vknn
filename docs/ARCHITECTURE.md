@@ -1,16 +1,16 @@
-# vxrt Architecture
+# VKNN Architecture
 
-`vxrt` (Vulkan-eXynos RunTime, namespace `vx`) is a small C++17 inference runtime
+`VKNN` (Vulkan Neural Network, namespace `vknn`) is a small C++17 inference runtime
 that loads an ONNX CNN, lowers it to a backend-agnostic NCHW IR, optimizes it with
 graph passes, partitions it into backend-specific *segments*, and executes those
-segments — primarily on a Vulkan compute backend tuned for the Samsung Xclipse 960
-(AMD RDNA) GPU in the Exynos 2600, with a CPU backend as a seamless reference and
+segments — primarily on a Vulkan compute backend tuned for an AMD RDNA-class mobile
+GPU, with a CPU backend as a seamless reference and
 fallback.
 
 This document describes the end-to-end pipeline, the core abstractions, the internal
 `NC4HW4` tensor layout, the segment execution model (which gives both pre-recorded
 Vulkan command buffers *and* transparent CPU fallback), and the cache subsystem. It
-references real source under `include/vx/` and `src/`.
+references real source under `include/vknn/` and `src/`.
 
 ---
 
@@ -25,7 +25,7 @@ references real source under `include/vx/` and `src/`.
  │   src/import/onnx/onnx_parser.cpp  — hand-rolled, dependency-free       │
  │   protobuf parser                                                       │
  │   importOnnx(path)  →  Graph  (backend-agnostic NCHW IR)                │
- │   (include/vx/graph.h)                                                  │
+ │   (include/vknn/graph.h)                                                │
  └───────────────────────────────────────────────────────────────────────┘
        │   Graph { tensors[], nodes[], inputs, outputs, initializers }
        ▼
@@ -60,8 +60,8 @@ references real source under `include/vx/` and `src/`.
  │  NC4HW4 packed layout    │      │  scalar + NEON kernels     │
  │  1 pre-recorded VkCmdBuf  │ ...  │  (Add, Gemm)               │
  │  per static segment       │      │                            │
- │  push descriptors,        │      │ EnnBackend (stub: declines │
- │  timestamp queries        │      │  all ops, falls back)      │
+ │  push descriptors,        │      │                            │
+ │  timestamp queries        │      │                            │
  └──────────────────────────┘      └──────────────────────────┘
        │
        ▼
@@ -78,7 +78,7 @@ re-packs into `NC4HW4` internally; the rest of the engine never sees it.
 
 ## 2. Core abstractions
 
-### 2.1 Tensors: `TensorDesc`, `HostBuffer`, `RtTensor` (`include/vx/tensor.h`)
+### 2.1 Tensors: `TensorDesc`, `HostBuffer`, `RtTensor` (`include/vknn/tensor.h`)
 
 There are two tensor representations, split by lifetime:
 
@@ -116,7 +116,7 @@ There are two tensor representations, split by lifetime:
   flags are what the residency-reconciliation logic (§4.3) reads and writes so a
   tensor is only ever packed/unpacked/copied when actually needed.
 
-### 2.2 Graph IR: `Graph`, `Node`, `Attributes` (`include/vx/graph.h`, `include/vx/op.h`)
+### 2.2 Graph IR: `Graph`, `Node`, `Attributes` (`include/vknn/graph.h`, `include/vknn/op.h`)
 
 `Graph` is the whole model:
 
@@ -154,7 +154,7 @@ path). `ActType` (`kNone`/`kRelu`/`kRelu6`/`kClip`) is kept in sync with
 `shaders/common.glsl`. `Attributes` is a typed `name → Attr` map with `geti` /
 `getf` / `getints` / `gets` accessors used by kernels to read pads, strides, etc.
 
-### 2.3 Backend + Segment execution model (`include/vx/backend.h`)
+### 2.3 Backend + Segment execution model (`include/vknn/backend.h`)
 
 A `Backend` is the per-device abstraction:
 
@@ -193,17 +193,17 @@ class Segment {
 `ExecContext` is the per-run bundle handed to every op: a pointer to the `RtTensor`
 pool (with `RtTensor& t(TensorId)`), the `Graph`, the `Config`, and the `Profiler`.
 
-Backends self-register via `VX_REGISTER_BACKEND(KIND, TYPE)` into the
+Backends self-register via `VKNN_REGISTER_BACKEND(KIND, TYPE)` into the
 `BackendRegistry` singleton; `Session::plan()` calls `BackendRegistry::create(kind)`.
 This works only because the static lib is linked whole-archive
-(`$<LINK_LIBRARY:WHOLE_ARCHIVE,vxrt>`), so the registrar globals are not stripped.
+(`$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>`), so the registrar globals are not stripped.
 
-### 2.4 Config (`include/vx/config.h`)
+### 2.4 Config (`include/vknn/config.h`)
 
-`vx::Config` is an MNN-inspired struct, loadable from JSON
+`vknn::Config` is an MNN-inspired struct, loadable from JSON
 (`Config::fromJsonFile` / `fromJsonString` / `toJson`). Key fields:
 
-- `backend` (`kVulkan`/`kCpu`/`kEnn`), ordered `fallback` list, `allowCpuFallback`
+- `backend` (`kVulkan`/`kCpu`), ordered `fallback` list, `allowCpuFallback`
   (CPU is the implicit final fallback).
 - `precision` (`kFp32`/`kFp16`/`kAuto`; default `kFp16`), `power`, `cpuThreads`.
 - `inputLayout` / `outputLayout` (`kNCHW`/`kNHWC`) — what the *user* supplies and
@@ -213,7 +213,7 @@ This works only because the static lib is linked whole-archive
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
 - `tuning` (`kOff`/`kFast`/`kThorough`) — autotuning level.
 
-### 2.5 Session / Runtime (`include/vx/session.h`, `src/core/session.cpp`)
+### 2.5 Session / Runtime (`include/vknn/session.h`, `src/core/session.cpp`)
 
 `Session` owns the planned graph, the active backends, the segments, the caches
 (via the backends), and the `RtTensor` pool. `Runtime` is a thin façade
@@ -233,21 +233,21 @@ order, optionally dumps layers, and copies graph outputs back out (host, NCHW,
 fp32). `Session::tensor(name)` and `nodeBackends()` exist for debugging and
 fallback reporting.
 
-### 2.6 Profiler (`include/vx/profiler.h`)
+### 2.6 Profiler (`include/vknn/profiler.h`)
 
 `Profiler` collects one `OpRecord` per executed op when `Config::profile` is set:
 op `name`/`type`, `backend` string, `cpuMs` (CPU wall) and `gpuMs` (GPU timestamp;
 `< 0` means not measured), `dispatch` dims, `bytesIO`, and `fellBack`. It can emit a
 sorted table (`printTable`), JSON (`toJson`), or a Chrome trace
 (`writeChromeTrace`). The Vulkan backend fills `gpuMs` from per-node timestamp
-queries scaled by `timestampPeriod` (39.0625 ns on this device); the CPU backend
+queries scaled by `timestampPeriod` (39.0625 ns on the target device); the CPU backend
 fills `cpuMs` and sets `fellBack = isFallback`.
 
 ---
 
 ## 3. The `NC4HW4` layout and why
 
-`TensorFormat::kNC4HW4` (`include/vx/tensor_format.h`) is the Vulkan backend's
+`TensorFormat::kNC4HW4` (`include/vknn/tensor_format.h`) is the Vulkan backend's
 internal layout: channels are packed into `vec4` blocks. A logical NCHW tensor with
 `C` channels becomes `ceil(C/4)` channel-blocks of 4, i.e. its packed element count is
 
@@ -261,7 +261,7 @@ inline int64_t packedElems(const Shape& shape) {
 
 Why pack this way:
 
-- **vec4 = the GPU's natural width.** RDNA / Xclipse compute lanes load and ALU
+- **vec4 = the GPU's natural width.** RDNA-class compute lanes load and ALU
   `vec4`s efficiently; packing 4 channels per element keeps memory accesses
   coalesced and lets every kernel work in `vec4` granularity. This matters
   especially because the device exposes **no `VK_KHR_cooperative_matrix`**, so GEMM
@@ -290,7 +290,7 @@ for any op the GPU can't run — with no special-casing in the core dispatch loo
 
 Each node is assigned to the **highest-priority backend whose `supports(op, dt)`
 returns true**. If the primary backend declines an op (e.g. the GPU lacks a kernel,
-or `VXRT_DISABLE_VK_OPS` is set), a throttled fallback warning is logged and the
+or `VKNN_DISABLE_VK_OPS` is set), a throttled fallback warning is logged and the
 node falls through to the next backend (ultimately CPU). If *no* backend supports an
 op, planning throws `Status::kUnsupported`.
 
@@ -307,7 +307,7 @@ for (size_t n = 0; n < graph_.nodes.size(); ++n) {
 ```
 
 So an all-Vulkan model is one big segment; forcing two ops to CPU
-(`VXRT_DISABLE_VK_OPS="Add,GlobalAveragePool"`) fragments MobileNetV2 into 23
+(`VKNN_DISABLE_VK_OPS="Add,GlobalAveragePool"`) fragments MobileNetV2 into 23
 Vulkan/CPU segments — yet the output is still cosine `1.000000`, because boundaries
 reconcile residency.
 
@@ -406,7 +406,7 @@ Kernels are GLSL compute shaders in `shaders/`: `pack`, `unpack`, `conv`, `dwcon
 `avgpool`, `fc`, `add`, each with an `_fp16` variant, plus shared `common.glsl`.
 They are compiled by `glslc` at build time and embedded into the static lib as
 SPIR-V by `tools/embed_spirv.py`, reachable through
-`vx::embeddedShaders()` (`src/backends/vulkan/vk_pipeline.h`), so the runtime ships
+`vknn::embeddedShaders()` (`src/backends/vulkan/vk_pipeline.h`), so the runtime ships
 no loose shader files.
 
 Conv uses two strategies: a general `group == 1` kernel (covering both 1×1 pointwise
@@ -416,12 +416,12 @@ workgroup size per conv signature.
 
 ---
 
-## 6. ION / DMA-BUF zero-copy (`include/vx/ion.h`, `src/core/ion.cpp`)
+## 6. ION / DMA-BUF zero-copy (`include/vknn/ion.h`, `src/core/ion.cpp`)
 
-On this device `/dev/ion` no longer exists, so zero-copy uses **DMA-BUF heaps**
+On the target device `/dev/ion` no longer exists, so zero-copy uses **DMA-BUF heaps**
 (`/dev/dma_heap/system`) via `DMA_HEAP_IOCTL_ALLOC`, importing the resulting dma-buf
 fd into Vulkan with `VkImportMemoryFdInfoKHR` (handle type `DMA_BUF_BIT_EXT`). Two
-modes are exposed by `vx::IonBuffer`: **Mode A** allocates a heap buffer, **Mode B**
+modes are exposed by `vknn::IonBuffer`: **Mode A** allocates a heap buffer, **Mode B**
 (`wrapFd`) wraps an externally provided fd; the import itself is
 `vk::Buffer::importDmaBufFd`. Because the platform is UMA (all memory types are
 `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) there are no staging copies. Verified
@@ -459,7 +459,6 @@ end of `Session::plan()`.
 | --- | --- | --- |
 | **VulkanBackend** | primary | `NC4HW4` layout, one pre-recorded command buffer per static segment, push descriptors, timestamp queries, fp16 storage / fp32 accumulate, on-device autotuning. |
 | **CpuBackend** | reference + fallback | scalar reference kernels for all ops, NEON kernels for `Add` and `Gemm`; operates directly on host NCHW. Cosine `1.000000` vs onnxruntime. |
-| **EnnBackend** | documented stub | `dlopen`-probes Samsung ENN libs (found 4/5); no on-device NNC compiler and no public headers, so it `supports()` nothing and every op falls back. |
 
 ---
 
@@ -468,10 +467,10 @@ end of `Session::plan()`.
 All three plugin points use self-registration (no edits to core dispatch), relying
 on the whole-archive link of the static lib:
 
-- **Add a CPU op:** subclass `vx::CpuOp` (implement `run`) + `VX_REGISTER_CPU_OP(OpType, Class)`.
-- **Add a Vulkan op:** subclass `vx::VulkanOp` (implement `prepare()` / `record()`)
-  + `VX_REGISTER_VK_OP(OpType, Class)` + a `.comp` shader in `shaders/`.
-- **Add a backend:** subclass `vx::Backend` + `VX_REGISTER_BACKEND(BackendKind, Class)`.
+- **Add a CPU op:** subclass `vknn::CpuOp` (implement `run`) + `VKNN_REGISTER_CPU_OP(OpType, Class)`.
+- **Add a Vulkan op:** subclass `vknn::VulkanOp` (implement `prepare()` / `record()`)
+  + `VKNN_REGISTER_VK_OP(OpType, Class)` + a `.comp` shader in `shaders/`.
+- **Add a backend:** subclass `vknn::Backend` + `VKNN_REGISTER_BACKEND(BackendKind, Class)`.
 
 ---
 
@@ -479,13 +478,12 @@ on the whole-archive link of the static lib:
 
 | Area | Path |
 | --- | --- |
-| Public headers | `include/vx/` (`backend.h`, `session.h`, `tensor.h`, `graph.h`, `op.h`, `config.h`, `profiler.h`, `tensor_format.h`, `ion.h`, …) |
+| Public headers | `include/vknn/` (`backend.h`, `session.h`, `tensor.h`, `graph.h`, `op.h`, `config.h`, `profiler.h`, `tensor_format.h`, `ion.h`, …) |
 | ONNX import | `src/import/onnx/onnx_parser.cpp` |
 | Graph passes | `src/import/passes.{h,cpp}` |
 | Session / planning | `src/core/session.cpp` |
 | Core support | `src/core/` (`graph.cpp`, `op.cpp`, `config.cpp`, `profiler.cpp`, `backend_registry.cpp`, `ion.cpp`, `json.h`, `logging.cpp`) |
 | Vulkan backend | `src/backends/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `vk_ops.cpp`) |
 | CPU backend | `src/backends/cpu/` (`cpu_backend.cpp`, `ops_basic.cpp`, `ops_conv.cpp`, `ops_shape.cpp`) |
-| ENN stub | `src/backends/enn/enn_backend.cpp` |
 | Shaders | `shaders/` (compiled by `glslc`, embedded via `tools/embed_spirv.py`) |
 | Examples | `examples/` (`probe`, `classify`, `profile`, `ion_zerocopy`, `backend_switch`, `op_check`) |

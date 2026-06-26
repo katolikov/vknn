@@ -1,4 +1,4 @@
-// Residual add over NC4HW4 buffers. Both inputs have the same packed layout, so it's just a
+// Residual add over NC4HW4 buffers. Both inputs have the same packed layout, so it's a
 // flat elementwise add over the buffer.
 #include "flat_ops.h"
 #include "vk_op_common.h"

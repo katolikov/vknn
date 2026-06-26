@@ -32,7 +32,7 @@ def run(name, nodes, inputs, outputs, inits=None, feeds=None):
     for o, rr in zip(outputs, ref):
         vf = f"{od}/{o}.bin"
         if not os.path.exists(vf):
-            print(f"  {name:14} {o:10} VXRT-NO-OUTPUT  (stderr: {r.stderr.strip().splitlines()[-1][:80] if r.stderr.strip() else r.stdout.strip()[-80:]})")
+            print(f"  {name:14} {o:10} VKNN-NO-OUTPUT  (stderr: {r.stderr.strip().splitlines()[-1][:80] if r.stderr.strip() else r.stdout.strip()[-80:]})")
             ok_all = False; continue
         v = np.fromfile(vf, dtype=np.float32).astype(np.float64)
         b = rr.reshape(-1).astype(np.float64)

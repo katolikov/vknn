@@ -1,6 +1,6 @@
 #version 450
 // 3x3 stride1 pad1 group1 conv with LDS input-halo reuse (NC4HW4, fp16). One 64-thread workgroup
-// (== one 64-wide subgroup on Xclipse, so barrier() is ~free) owns an 8x8 output tile for one
+// (== one 64-wide subgroup on the target GPU, so barrier() is ~free) owns an 8x8 output tile for one
 // output channel-block. Per input channel-block it stages the 10x10 input halo into LDS once, then
 // every thread reads its 3x3 window from LDS instead of re-reading global -> input is fetched 1x
 // from L2 instead of ~9x. fp32 accumulation. Uses the existing [Cout][Cinb][3][3][4] weight pack.

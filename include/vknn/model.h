@@ -1,12 +1,10 @@
 // The friendly, high-level API. Load a model and run it — no tensor names, shapes, or dtypes to
-// wire up by hand; everything is read from the model. This is the API most users should reach for.
-// (The lower-level Session/IOTensor in session.h stay available for advanced control.)
+// wire up by hand; everything is read from the model. Most users want this; the lower-level
+// Session / IOTensor in session.h stay available for advanced control.
 //
-//   vknn::Model net = vknn::Model::load("mobilenet.onnx");        // precision auto, Vulkan if
-//   available vknn::Tensor out = net.run(pixels);                          // pixels =
-//   std::vector<float>, NCHW int cls = out.argmax();                                    // done
-//
-//   for (auto& in : net.inputs()) printf("%s %s\n", in.name.c_str(), in.shapeString().c_str());
+//   vknn::Model net = vknn::Model::load("mobilenet.onnx");
+//   vknn::Tensor out = net.run(pixels);   // pixels: std::vector<float>, NCHW
+//   int cls = out.argmax();
 #pragma once
 #include <memory>
 #include <string>

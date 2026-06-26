@@ -1,4 +1,4 @@
-// Implementation of the friendly Model/Tensor facade on top of Session.
+// Implementation of the Model/Tensor facade on top of Session.
 #include "vknn/model.h"
 
 #include <algorithm>

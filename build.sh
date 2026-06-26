@@ -5,7 +5,7 @@
 #   ./build.sh --android        Android arm64-v8a build (Vulkan backend, NDK toolchain)
 #   ./build.sh --clear          wipe the build directory first (clean build)
 #   ./build.sh --convert        build only the model compiler (vknn_compile) for the chosen target
-#   ./build.sh --docs           generate the themed HTML API docs into docs/api/html (needs doxygen)
+#   ./build.sh --docs           build the static documentation site (open docs/site/index.html)
 #
 # Flags combine, e.g.  ./build.sh --android --clear   or   ./build.sh --clear --convert
 # Override the NDK with ANDROID_NDK=..., the API level with ANDROID_API=...
@@ -25,12 +25,18 @@ for a in "$@"; do
   esac
 done
 
-# --docs: generate the themed HTML API site into docs/api/html (needs doxygen) and exit.
+# --docs: build the static documentation site into docs/site (entry point: docs/site/index.html).
+# Doxygen is optional/secondary — if installed, also emit the C++ API reference, linked from the site.
 if [[ $docs -eq 1 ]]; then
-  command -v doxygen >/dev/null || { echo "ERROR: doxygen not installed" >&2; exit 1; }
-  echo ">> generating API docs -> docs/api/html"
-  doxygen docs/Doxyfile
-  echo ">> open docs/api/html/index.html"
+  if command -v doxygen >/dev/null; then
+    echo ">> generating API reference -> docs/api/html (doxygen)"
+    doxygen docs/Doxyfile >/dev/null
+  else
+    echo ">> doxygen not found; skipping the optional API reference"
+  fi
+  echo ">> building documentation site -> docs/site"
+  python3 "$ROOT/scripts/gen_site.py"
+  echo ">> open docs/site/index.html"
   exit 0
 fi
 

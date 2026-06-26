@@ -1,6 +1,6 @@
 // Generic multi-input / multi-output runner. Loads a model (.onnx or .vxm), feeds raw fp32 .bin
 // files (in model input order), runs, dumps each output to <outdir>/<name>.bin.
-//   vx_run_io model outdir [flags] in0.bin in1.bin ...
+//   vknn_run_io model outdir [flags] in0.bin in1.bin ...
 // Flags (no env vars — everything is a flag):
 //   --backend cpu|vulkan   (default vulkan)   --precision fp16|fp32 (default fp16)
 //   --no-weight-cache      don't cache prepacked weights in RAM (saves memory for big models)

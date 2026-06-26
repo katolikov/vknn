@@ -22,7 +22,6 @@ struct GlobalAvgPoolOp : VulkanOp {
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
     vk::Buffer* src = env.devBuf(node.inputs[0]);
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
-    // one workgroup per (n, channel-block); the workgroup's 256 threads reduce H*W together
     pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), (uint32_t)total);
   }
 };

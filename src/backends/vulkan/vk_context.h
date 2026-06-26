@@ -9,9 +9,8 @@
 namespace vknn {
 namespace vk {
 
-/// Performance-relevant capabilities probed from the physical device. Mirrors the
-/// facts in docs/DEVICE_REPORT.md but is filled at runtime so the engine adapts to
-/// whatever GPU it actually runs on.
+/// Performance-relevant capabilities probed from the physical device at runtime, so the
+/// engine adapts to whatever GPU it actually runs on.
 struct VulkanCaps {
   std::string deviceName;
   std::string driverName;

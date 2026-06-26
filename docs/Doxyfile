@@ -19,10 +19,7 @@ USE_MDFILE_AS_MAINPAGE = README.md
 INPUT                 += README.md docs/ARCHITECTURE.md docs/ADDING_AN_OPERATOR.md \
                          docs/ADDING_A_BACKEND.md docs/CONFIG.md docs/LIMITATIONS.md
 
-# --- doxygen-awesome-css theme (vendored in docs/theme; a stylesheet, no toolchain dependency) ---
+# Stock Doxygen theme. The hand-built site (docs/site, via ./build.sh --docs) is the primary docs;
+# this C++ API reference is secondary and linked from it.
 GENERATE_TREEVIEW      = YES
-DISABLE_INDEX          = NO
-FULL_SIDEBAR           = NO
 HTML_COLORSTYLE        = LIGHT
-HTML_EXTRA_STYLESHEET  = docs/theme/doxygen-awesome.css \
-                         docs/theme/doxygen-awesome-sidebar-only.css

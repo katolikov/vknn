@@ -1,36 +1,76 @@
-# vxrt operator coverage vs MNN's Vulkan backend
+# VKNN operator coverage
 
-Reference: MNN's Vulkan **buffer** (SSBO) backend op set, enumerated from
-`source/backend/vulkan/buffer/execution/`. vxrt's device layout is NC4HW4; ops whose semantics move
-the channel axis (Transpose, channel Slice/Split, general Reduce) are awkward to pack, so they run on
-the CPU in canonical NCHW with automatic NC4HW4<->NCHW converts at the segment boundary (always
-correct, GPU-accelerated neighbours unaffected). All ops below are verified against onnxruntime
-(cosine ≥ 0.999 on synthetic + real models).
+VKNN imports ONNX and lowers it to its IR; each operator has a **CPU oracle** (the bit-exact
+reference and automatic fallback) and, for most, a **Vulkan kernel**. The default GPU layout is
+NC4HW4 (channels packed in vec4 blocks) for CNN-shaped tensors; a **flat row-major GPU path** (rank up
+to 8) carries the transformer-shaped tensors (attention, RoPE, geometry), with NC4HW4&harr;flat
+converts spliced in at the boundaries by the layout pass. Everything below is verified against
+onnxruntime (cosine ≥ 0.999 on the GPU fp16 path, 1.0 on the CPU fp32 path).
 
-| Operator | vxrt | backend | notes |
+Every operator lives in its own file under `src/backends/{cpu,vulkan}/ops/` (one op per file).
+
+## Convolution & pooling
+
+| Operator | GPU | CPU | Notes |
 |---|---|---|---|
-| Conv / ConvDepthwise | ✅ | GPU+CPU | NC4HW4, split-K, residual+act fusion |
-| Pooling (Max/Avg/Global) | ✅ | GPU+CPU | windowed + global |
-| BinaryOp (Mul/Sub/Div/Max/Min/Pow/Add) | ✅ | GPU+CPU | same-shape + channel-broadcast (SE) |
-| UnaryOp (Sigmoid/Tanh/HardSwish/HardSigmoid/Elu/Abs/Exp/Log/Sqrt/Floor/Ceil/…) | ✅ | GPU+CPU | type-coded family |
-| ReLU/ReLU6/Clip | ✅ | GPU+CPU | also fused into conv |
-| PRelu | ✅ | GPU+CPU | per-channel slope |
-| Concat | ✅ | GPU+CPU | channel-axis NC4HW4 (4-aligned) on GPU, else CPU |
-| Interp / Resize / Upsample | ✅ | GPU+CPU | nearest+bilinear, 4 coord modes, spatial |
-| GridSample | ✅ | CPU | bilinear/nearest, zeros/border/reflection (grid can't be NC4HW4-packed) |
-| Softmax | ✅ | CPU | |
-| MatMul / Gemm | ✅ | GPU(Gemm)+CPU | |
-| Transpose / Permute | ✅ | CPU | generic N-D |
-| Slice | ✅ | CPU | starts/ends/axes/steps |
-| Split | ✅ | CPU | |
-| Pad | ✅ | CPU | constant/edge/reflect |
-| Reduce (Sum/Max/Min/Prod/Mean) | ✅ | CPU | (Mean spatial → GlobalAvgPool on GPU) |
-| Cast | ✅ | CPU | float<->int64 |
-| BatchNorm / Scale | ✅ | folded | folded into conv |
-| Reshape / Flatten / Gather / Unsqueeze / Shape / Constant | ✅ | GPU/CPU/const-fold | |
-| **Not yet implemented** (specced, ready): Where/Select, ArgMax/ArgMin, LayerNorm, ConvTranspose/Deconvolution, ROIPooling, OneHot, Range, Loop/While | ⬜ | — | designs in the op-parity workflow output |
+| Conv (group=1, depthwise, 1×1 pointwise) | ✅ | ✅ | NC4HW4; direct 3×3, split-K deep 1×1, fused activation + residual-Add + Relu in the epilogue |
+| GlobalAveragePool | ✅ | ✅ | one workgroup / channel-block, LDS tree-reduce |
+| AvgPool / MaxPool | ✅ | ✅ | windowed |
+| BatchNorm | ✅ | ✅ | per-channel affine; usually folded into Conv |
 
-Adding any of the remaining ops is mechanical: enum in `include/vx/op.h`, ONNX name in
-`src/core/op.cpp`, shape rule in `src/import/passes.cpp` inferShapes, a CPU oracle in
-`src/backends/cpu/ops/`, and (when NC4HW4-clean) a Vulkan op + shader gated via
-`Backend::supportsNode()`. See `docs/ADDING_AN_OPERATOR.md`.
+## Elementwise
+
+| Operator | GPU | CPU | Notes |
+|---|---|---|---|
+| Unary family | ✅ | ✅ | Sigmoid, Tanh, HardSwish, HardSigmoid, LeakyRelu, Elu, Abs, Neg, Exp, Log, Sqrt, Floor, Ceil, Relu, SiLU, Erf, Cos, Sin, Reciprocal, Softplus |
+| Binary family | ✅ | ✅ | Mul, Sub, Div, Max, Min, Pow, Add — same-shape, channel-broadcast (SE), and general NumPy broadcast on the flat path |
+| Relu / Relu6 / Clip | ✅ | ✅ | standalone, and fused into the producing Conv/Gemm |
+| PRelu | ✅ | ✅ | per-channel slope |
+| Where / Equal | ✅ | ✅ | flat broadcast (fp32 + int64) |
+
+## Transformer / attention
+
+| Operator | GPU | CPU | Notes |
+|---|---|---|---|
+| MatMul | ✅ | ✅ | general batched N-D + broadcast (QKᵀ, AV, MLP) |
+| Gemm / FC | ✅ | ✅ | M rows (per-row strides for the multi-view camera head) |
+| Softmax | ✅ | ✅ | channel-axis (NC4HW4) and arbitrary last-axis (flat) |
+| LayerNorm | ✅ | ✅ | reduction over the last axes, affine |
+| Einsum | ✅ | ✅ | outer-product (RoPE) on GPU; batched mat-vec / matmul lowered to MatMul |
+| Gather | ✅ | ✅ | axis-aware (attention Q/K/V split on axis 2), const or runtime index |
+
+## Shape / data movement
+
+| Operator | GPU | CPU | Notes |
+|---|---|---|---|
+| Reshape / Flatten / Squeeze / Unsqueeze | ✅ | ✅ | metadata + flat copy (rank-5 channel-shuffle handled) |
+| Transpose / Slice | ✅ | ✅ | flat gather (generic N-D) |
+| Concat | ✅ | ✅ | NC4HW4 channel-axis (4-aligned) and flat scatter |
+| Split | ✅ | ✅ | 4-aligned channel split (block copy) + flat non-channel split |
+| Expand / Tile | ✅ | ✅ | broadcast / repeat, flat gather |
+| DepthToSpace | ✅ | ✅ | DCR / CRD (pixel-shuffle) |
+| ScatterND | ✅ | ✅ | copy + scatter (runtime float index) |
+| Resize / Upsample | ✅ | ✅ | nearest + bilinear, 4 coord modes |
+| GridSample | ✅* | ✅ | GPU for a constant grid; runtime grid on CPU |
+| Reduce (Mean/Sum/Max/Min/Prod/L2) | ✅ | ✅ | arbitrary axes |
+| Cast | ✅ | ✅ | float ↔ int32/int64 |
+| Pad | — | ✅ | constant / edge / reflect |
+| Shape / Constant / ConstantOfShape / EyeLike | const-fold | ✅ | resolved at compile time |
+| Identity | — | ✅ | |
+
+## Fusions
+
+Applied by the graph passes (and `vknn_compile`):
+
+- **Activation + residual-Add + Relu** folded into the Conv/Gemm epilogue (default on).
+- **Swish / SiLU** (`x · sigmoid(x)`) folded into the producing Conv (default on; opt out with `--no-fuse-swish`).
+- **Squeeze-Excite** chain → one kernel (`--fuse-se`, experimental).
+- **Depthwise-3×3 + 1×1-project** → one kernel, expanded intermediate stays on-chip (`--fuse-dwpw`, experimental).
+- **Einsum lowering** to MatMul/Transpose/Unsqueeze.
+
+## Adding an operator
+
+Mechanical: enum in `include/vknn/op.h`, ONNX name in `src/core/op.cpp`, a shape rule in
+`src/import/passes.cpp` `inferShapes`, a CPU oracle in `src/backends/cpu/ops/`, and (when the layout
+allows) a Vulkan op + GLSL shader gated by `Backend::supportsNode()`. See
+[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md) and [../skills/add-an-operator.md](../skills/add-an-operator.md).

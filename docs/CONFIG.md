@@ -1,13 +1,13 @@
-# Configuration (`vx::Config`)
+# Configuration (`vknn::Config`)
 
-`vx::Config` is the single struct that controls backend selection, precision,
-caching, zero-copy, profiling, and autotuning for a `vx::Session`. It is defined
-in [`include/vx/config.h`](../include/vx/config.h) and parsed/serialized in
+`vknn::Config` is the single struct that controls backend selection, precision,
+caching, zero-copy, profiling, and autotuning for a `vknn::Session`. It is defined
+in [`include/vknn/config.h`](../include/vknn/config.h) and parsed/serialized in
 [`src/core/config.cpp`](../src/core/config.cpp).
 
 A `Config` can be built three ways:
 
-- Default-constructed in C++ (`vx::Config cfg;`) and field-assigned.
+- Default-constructed in C++ (`vknn::Config cfg;`) and field-assigned.
 - Loaded from a JSON file: `Config::fromJsonFile(path)`.
 - Loaded from a JSON string: `Config::fromJsonString(json)`.
 
@@ -24,7 +24,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 
 | Field | JSON type | Accepted values | Default | Meaning |
 |---|---|---|---|---|
-| `backend` | string | `"VULKAN"`, `"CPU"`, `"ENN"` (case-insensitive: `vulkan`/`cpu`/`enn` also accepted) | `"VULKAN"` | Primary backend the planner prefers for each node. Unrecognized strings fall back to `CPU`. |
+| `backend` | string | `"VULKAN"`, `"CPU"` (case-insensitive: `vulkan`/`cpu` also accepted) | `"VULKAN"` | Primary backend the planner prefers for each node. Unrecognized strings fall back to `CPU`. |
 | `fallback` | array of string | same tokens as `backend` | `["CPU"]` | Ordered list of backends to try when the primary declines a node. CPU is always an implicit final fallback regardless of this list. Providing the key replaces the whole list. |
 | `allowCpuFallback` | bool | `true` / `false` | `true` | If `false`, nodes that no listed backend accepts are an error instead of silently running on CPU. |
 | `precision` | string | `"fp32"`, `"fp16"`, `"auto"` (also `"FP16"`, `"low"` → fp16) | `"fp16"` | Compute precision for the Vulkan backend. `fp16` = fp16 storage + fp32 accumulation. `fp32` = full precision. `auto` lets the backend choose. |
@@ -48,7 +48,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 
 ```cpp
-enum class BackendKind { kVulkan, kCpu, kEnn };
+enum class BackendKind { kVulkan, kCpu };
 enum class Precision   { kFp32, kFp16, kAuto };
 enum class PowerHint   { kNormal, kHigh, kLow };
 enum class TuningLevel { kOff, kFast, kThorough };
@@ -97,9 +97,9 @@ serialize a configured `Config`, edit the JSON, and reload it.
 ## Loading a config
 
 ```cpp
-#include "vx/config.h"
-#include "vx/session.h"
-using namespace vx;
+#include "vknn/config.h"
+#include "vknn/session.h"
+using namespace vknn;
 
 // From a file (returns defaults + a warning if the path is missing):
 Config cfg = Config::fromJsonFile("config.json");
@@ -127,7 +127,7 @@ auto session = Runtime::load("assets/mobilenetv2.onnx", cfg);
 
 ## How the `classify` example exposes config flags
 
-[`examples/classify.cpp`](../examples/classify.cpp) (`vx_classify`) shows the
+[`examples/classify.cpp`](../examples/classify.cpp) (`vknn_classify`) shows the
 intended layering of file config + CLI overrides. It first loads `--config`
 (if given), then lets individual flags override specific fields:
 
@@ -150,7 +150,7 @@ The CLI flags and the config fields they touch:
 | Flag | Config field set | Default |
 |---|---|---|
 | `--config PATH` | loads the whole `Config` via `fromJsonFile` | (none) |
-| `--backend NAME` | `backend` (`vulkan`/`cpu`/`enn`) | `vulkan` |
+| `--backend NAME` | `backend` (`vulkan`/`cpu`) | `vulkan` |
 | `--precision P` | `precision` (`fp32`/`fp16`) | `fp16` |
 | `--cache DIR` | `cacheDir` | struct default |
 | `--profile` | `profile = true` | off |
@@ -171,11 +171,11 @@ Example invocations:
 
 ```bash
 # Pure flags, no file:
-vx_classify --backend vulkan --precision fp16 --profile
+vknn_classify --backend vulkan --precision fp16 --profile
 
 # File config plus a cache override:
-vx_classify --config config.json --cache /data/local/tmp/vxrt/cache
+vknn_classify --config config.json --cache /data/local/tmp/vxrt/cache
 
 # CPU reference run with a golden comparison:
-vx_classify --backend cpu --precision fp32 --golden assets/golden.bin
+vknn_classify --backend cpu --precision fp32 --golden assets/golden.bin
 ```

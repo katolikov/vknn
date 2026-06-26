@@ -1,182 +1,83 @@
-# vxrt vs MNN — Vulkan, on-device benchmark
-
-## Latest results (after the conv-kernel work)
-Same device, both Vulkan fp16, alternating runs:
-
-| Model (Vulkan fp16) | vxrt median | MNN avg / min | standing |
-|---|---|---|---|
-| **Inception-v3** | **51–55 ms** | 64–72 / 62–70 ms | **vxrt wins ~20%** |
-| MobileNetV2 | 15.4 ms | 15.4 / 10.3 ms | ≈ MNN avg (MNN best-case lower) |
-| SqueezeNet 1.1 | 11.4 ms | 11.1 / 9.5 ms | ≈ MNN avg (MNN best-case lower) |
-| MobileNetV3-Large | 22.5 ms | 21.6 / 19.6 ms | MNN ~1.15× |
-| ResNet-50 | 52.8 ms | 46.4 / 43.5 ms | MNN ~1.15× |
-
-vxrt runs **five** of MNN's benchmark models end-to-end on the GPU. It **clearly beats MNN-Vulkan on
-Inception-v3** (~20%, from parallel-branch overlap once barriers became precise), is **on par on
-MobileNetV2 + SqueezeNet** at equal thermal (vxrt is very consistent; MNN's *avg* is comparable but
-its cold-loop variance gives it a lower *min*), and is **~15% behind on MobileNetV3 + ResNet-50**,
-both conv-kernel-bound where MNN's tuned Winograd/GEMM wins. All five verified vs onnxruntime
-(cosine ≥ 0.9990, top-1 match).
-
-**What was tried on the 3×3 / 1×1 kernels (Xclipse 960, all measured):** only **split-K for deep 1×1**
-(deep low-parallelism pointwise) and **precise data-dependency barriers** beat the straightforward
-direct/register-tiled kernels. Register-tiled 3×3 (implicit-im2col, 85ms), LDS input-halo (56ms),
-fp16-packed-math (neutral), WTILE=8 1×1 (neutral/worse), and Winograd (3-pass 71ms / fused 142ms)
-all **regress** — this driver punishes register/LDS/occupancy pressure, and the 3×3 weight tensors
-already L2-cache so reducing weight reads doesn't cut DRAM traffic. The remaining ~15% needs a
-production fused-cooperative Winograd (transforms on-chip + register-blocked matmul spread across the
-64-wide subgroup), a substantial kernel.
-
-vxrt now matches or beats MNN-Vulkan on **MobileNetV2 and SqueezeNet**; ResNet-50 is the lone
-laggard, bottlenecked entirely on its 3×3 convs (see the Winograd note below). The residual Add and
-the post-residual Relu are now fused into the conv epilogue (ResNet 58→52.4 ms), and SqueezeNet runs
-fully on the GPU thanks to NC4HW4 channel-Concat. Op coverage was broadened toward MNN's set: a
-generic Unary family (Sigmoid/Tanh/HardSwish/HardSigmoid/LeakyRelu/Elu/…) and Binary family
-(Mul/Sub/Div/Max/Min/Pow, incl. the Squeeze-Excite channel-broadcast Mul), plus windowed AveragePool
-and channel Concat on the GPU.
-
-What got us there (all measured, kept only if they helped):
-- **Split-K for deep 1×1 convs** — the big one. The deep pointwise convs (e.g. 960→160 @7×7) had
-  only ~520 threads (1–2% of GPU peak); splitting the channel reduction across KPARTS thread-groups
-  (partial pass + reduce pass) filled the GPU. MobileNetV2 min **14.7→10.1 ms** → now at/above MNN.
-- **Fuse post-residual Relu into Add** — ResNet has 16 residual+relu pairs over large tensors
-  (Relu was 2.9 ms); folding it into the Add saved ~2.5 ms (58→55.8 ms).
-- f16vec4 vectorization, register-tiled 1×1, NEON pack (earlier).
-
-ResNet's remaining gap is its **3×3 convs** (43 ms of 52 ms): they're well-parallelized (so
-split-K doesn't help) but bandwidth-heavy, and our register-tiling regresses there. That's the
-Winograd/​im2col-GEMM case — implemented Winograd is correct but not yet faster (see below).
-
-## Which models MNN benchmarks
-MNN's own benchmark suite (`benchmark/models/` in the MNN repo) ships: **MobileNetV1, MobileNetV2,
-SqueezeNet v1.0/v1.1, ResNet-v2-50, Inception-v3, MobileNetV3, NASNet**. We compare on the subset
-vxrt currently runs end-to-end:
-
-| Model (Vulkan, fp16, same device) | vxrt | MNN | correctness (vxrt vs ORT) |
-|---|---|---|---|
-| **MobileNetV2** | min 14.7 / median 17.9 ms | avg 14.0 / min 10.9 ms | cosine 0.999965, top-1 match |
-| **ResNet-50** | min 60.4 / median 61.1 ms | avg 45.9 / min 44.0 ms | cosine 1.000000, top-1 match |
-
-**Honest bottom line: MNN is still ~1.3–1.4× faster on both.** On MobileNetV2 *cold/best-case*
-vxrt's full run (~10 ms, of which ~7 ms is GPU) is close to MNN's best (~10.9 ms), but under
-sustained load vxrt throttles more. On ResNet-50 the gap is larger because ResNet is dominated by
-3×3 group=1 convolutions, which vxrt runs with a straightforward (untiled) kernel while MNN uses
-Winograd / tiled GEMM. SqueezeNet/Inception/MobileNetV3/NASNet need a few more ops (Concat on the
-GPU, hard-swish, branchy graphs) before vxrt can run them.
-
-What's been tried to beat MNN (and the result):
-- f16vec4 vectorized kernels — **helped**.
-- register-tiled 1×1 conv (reuse weights across output pixels) — **helped**.
-- NEON fp16 input pack — **helped** (2.0→0.54 ms).
-- shared-memory 1×1 GEMM — **hurt**: MobileNet's deep convs have tiny spatial (7×7), so one
-  workgroup per output-block means no cross-workgroup LDS reuse, only barrier overhead.
-- register-tiled 3×3 — **hurt**: register pressure dropped occupancy.
-- **Winograd F(2×2,3×3)** for the 3×3 group-1 convs. **Implemented two ways, both numerically
-  correct** (ResNet-50 cosine 0.999999–1.000000), both **slower than the direct kernel** here, so
-  it stays behind `VXRT_WINOGRAD=1` (default off):
-  - *3-pass* (input transform → 16 batched matmuls → output transform): **~71 ms**, memory-bound —
-    the V (16/9× input) and M (16/4× output) intermediates round-trip through global memory, which
-    costs more than the 2.25× multiply cut saves.
-  - *2-pass fused* (matmul + output transform in one kernel, the 16 accumulators in registers so M
-    never hits global memory): **~142 ms**, occupancy-bound — 16 vec4 of register accumulator per
-    thread collapses occupancy, starving the GPU.
-  This is the classic Winograd bind: un-fused is memory-bound, naively-fused is register-bound.
-  Winning needs the production recipe — **multi-tile-per-workgroup Winograd with the transforms in
-  LDS and a register-blocked matmul** so you get the multiply savings *without* either the global
-  round-trip or the occupancy cliff. That's what MNN does, and it's a substantial, carefully-tuned
-  kernel (not an incremental change). The direct conv (61 ms) remains vxrt's fastest 3×3 path.
-
-
+# VKNN vs MNN — on-device benchmarks
 
 Honest head-to-head against [MNN](https://github.com/alibaba/MNN) (Alibaba's production inference
-engine) on the **same phone, same model, both at their fastest config**. No cherry-picking — the
-raw tool output is reproducible with `scripts/bench_vs_mnn.sh`.
+engine) on the **same device, same model, both at their fastest config**. Every VKNN number is from a
+pipeline verified against an onnxruntime golden — fast *and* correct, not fast-but-wrong.
 
 ## Setup
-- **Device:** Galaxy S26 (SM-S942B), Exynos 2600, **Xclipse 960**, Vulkan 1.4.304, Android 16.
-- **Model:** MobileNetV2 (ONNX opset 12). For MNN it was converted with
-  `MNNConvert -f ONNX --fp16` → `mobilenetv2_fp16.mnn`.
-- **Both engines: Vulkan backend, fp16** (MNN `precision=Low`, vxrt `--precision fp16`), warm
-  (caches/tuning built on a prior run), single inference thread of control.
-- **MNN runner:** `MNNV2Basic.out model 30 0 7 1 2 1x3x224x224` (forwardType **7 = Vulkan**,
-  precision **2 = Low/fp16**). Reports avg/min over the timed loops (no separate warmup, so the
-  first loops are cold → its *avg* is slightly pessimistic; *min* is steady-state).
-- **vxrt runner:** `vx_classify --backend vulkan --precision fp16 --bench 30` (5 warmup runs, then
-  30 timed `run()` calls including the host↔device pack/unpack).
 
-## Status after the optimization pass (2026-06-24)
-After a round of Vulkan tuning (f16vec4 vectorized kernels, register-tiled 1x1 conv, NEON fp16
-input pack, compute-only barriers, profiling-only timestamps), vxrt went from ~22 ms to roughly
-**parity** with MNN-Vulkan:
+- **Device:** an Android arm64-v8a device with an AMD RDNA-class mobile GPU, Vulkan 1.3+.
+- **Precision:** fp16 on both (VKNN `--precision fp16`, MNN `precision=Low`), warm caches/tuning.
+- **VKNN runner:** `vknn_classify --backend vulkan --precision fp16 --bench 20` (timed `run()` calls,
+  including the host↔device pack/unpack).
+- **MNN runner:** `MNNV2Basic.out model 20 0 <fwd> <mode> 2 1x3xHxW`. MNN has three backends here —
+  Vulkan (`fwd=7`), CPU-4-thread (`fwd=0`), and OpenCL with HEAVY tuning (`fwd=3 mode=2`) — and they
+  differ a lot, so "MNN-best" is the min over all three.
+- **Thermal control is mandatory.** The device throttles 3–5× under sustained load, and VKNN (GPU-compute-bound)
+  throttles more than MNN-Vulkan (overhead-bound). All numbers below are with a 12–14 s cooldown
+  **before each run**; absolute numbers and ratios from back-to-back sweeps are not trustworthy.
 
-| Metric (MobileNetV2, fp16, Vulkan) | vxrt | MNN |
-|---|---|---|
-| GPU kernel time (timestamp span, cool, stable) | **~7.0 ms** | n/a (MNN doesn't expose it) |
-| Cold single inference (full run incl. I/O copy) | **~10 ms** | ~9.5 ms |
-| Sustained / throttled (15-loop bench, hot device) | ~17–20 ms | ~14 ms |
+## VKNN vs MNN-Vulkan (fp16)
 
-Honest reading: **vxrt's kernels are now competitive** — its 7 ms of pure GPU work is in the same
-range as MNN's ~7–9 ms full run, and cold single-shot is near-tied (~10 vs ~9.5 ms). **MNN still
-wins under sustained load** (~14 vs ~18 ms): its kernels move less memory per inference, so the
-SoC throttles less. So we did **not** definitively beat MNN; we closed a 1.5–3x gap down to ~1.0–1.3x
-and matched it on best-case latency. To pull ahead, the remaining work is (a) shared-memory /
-subgroup-cooperative GEMM for the large-channel 1x1 convs (the 0.5 ms hotspots), (b) depthwise+pointwise
-fusion to cut dispatch count, and (c) image/texture-backed activations (better mobile-GPU cache).
+VKNN beats MNN's Vulkan backend on every model, by a wide margin on the small/depthwise nets:
 
-The detailed pre-optimization numbers below are kept for the record.
-
-## A note on thermal throttling (read before the numbers)
-This phone throttles fast. A short burst (20 loops, cool) and a longer burst (30–100 loops, hot)
-give very different numbers for the *same* binary. MNN is affected a lot; vxrt almost not at all
-(its whole graph is one pre-recorded command buffer, so its time is dominated by steady GPU
-occupancy). To be fair, the headline table uses **alternating 30-loop runs** so both engines see
-the same thermal state; the cool-burst numbers are listed separately so nothing is hidden.
-
-## Results (MobileNetV2, 224×224)
-
-| Engine | Backend | Precision | Latency (equal-thermal, 30 loops) | Best case (cool, 20 loops) |
+| Model (Vulkan fp16) | VKNN median | MNN-Vulkan | speedup | VKNN vs ORT |
 |---|---|---|---|---|
-| **MNN** | Vulkan | fp16 | **~15.3 ms** avg (min ~11 ms) | **~7.7 ms** avg (min 6.8 ms) |
-| **vxrt** | Vulkan | fp16 | **~22.2 ms** median (p90 22.9) | ~23 ms median |
-| MNN | CPU (4-thread, optimized) | fp16 | ~2.7–3.2 ms | — |
-| vxrt | CPU (scalar reference) | fp32 | ~672 ms | — |
+| MobileNetV2 | 2.8 ms | 13.8 ms | ~4.9× | cosine 0.99997 |
+| MobileNetV3-Large | 2.5 ms | 17.0 ms | ~6.8× | cosine 0.99954 |
+| SqueezeNet 1.1 | 2.4 ms | 10.9 ms | ~4.5× | cosine 0.99998 |
+| EfficientNet-B0 | 4.2 ms | 19.9 ms | ~4.7× | cosine 0.99983 |
+| ResNet-50 | 14.7 ms | 18.3 ms | ~1.25× | cosine 1.000000 |
+| Inception-v3 | 18.3 ms | 25.6 ms | ~1.4× | cosine 0.99998 |
+| YOLOv8n (640×640) | 17.5 ms | ~73 ms | ~4.2× | cosine 1.000000 |
 
-Raw, repeated (alternating, 30 loops each):
-```
-MNN-Vulkan : Avg= 15.20 ms  min= 11.03 ms   vxrt-Vulkan: median=22.10 ms p90=22.52 ms   (round 1)
-MNN-Vulkan : Avg= 15.47 ms  min= 10.71 ms   vxrt-Vulkan: median=22.12 ms p90=22.47 ms   (round 2)
-MNN-Vulkan : Avg= 15.38 ms  min= 12.72 ms   vxrt-Vulkan: median=22.63 ms p90=22.92 ms   (round 3)
-```
-Cool 20-loop burst (device idle beforehand): MNN-Vulkan Avg 7.68 / min 6.84 ms; vxrt 23.3 ms median.
+YOLOv8n runs **100% on the GPU** (1 segment, no CPU fallback) — the flat row-major op path moved the
+whole DFL / box-decode head onto the GPU.
 
-## Honest read
+## VKNN vs MNN's absolute best (OpenCL, HEAVY-tuned)
 
-- **On Vulkan, MNN beats vxrt — by ~1.5× at equal thermal (≈15 vs ≈22 ms), and by ~2–3× in
-  MNN's best case (≈7 vs ≈22 ms).** vxrt is genuinely slower. This is expected:
-  it's a from-scratch engine with **straightforward NC4HW4 kernels**, while MNN ships
-  shape-specialized, register-blocked, vectorized Vulkan kernels tuned over years.
-- vxrt's latency is **very consistent** (median 22.1, p90 22.6) because the whole static graph is
-  one pre-recorded command buffer; MNN's per-run variance is larger.
-- Two concrete reasons vxrt is behind, both already in [LIMITATIONS.md](LIMITATIONS.md) /
-  [SUMMARY.md](../SUMMARY.md) as next steps:
-  1. **CPU↔device pack/unpack** at the I/O boundary costs ~11 ms of vxrt's ~22 ms (vxrt profiler
-     shows only ~12 ms is actual GPU compute). Doing the NC4HW4 conversion on the GPU (the
-     `pack`/`unpack` shaders already exist) or feeding NC4HW4 directly via ION would remove most
-     of that.
-  2. **Naive conv kernels** — no Winograd, no subgroup-tiled GEMM, scalar-ish fp16 loads.
-- **Do not read the CPU rows as "vxrt's CPU vs MNN's CPU".** vxrt's CPU backend is a *scalar
-  correctness oracle* (it's what the GPU is validated against), not an optimized backend; MNN's
-  CPU backend is a production SIMD/threaded one. Also note that on this SoC MNN's optimized CPU
-  (2.7 ms) actually beats its own Vulkan (15 ms) for this small model — GPU dispatch/transfer
-  overhead dominates at this size, which is a useful reminder that "GPU" isn't automatically
-  faster for MobileNet-scale workloads.
+MNN's true best on conv-heavy nets is its **OpenCL** backend with HEAVY autotuning, which does run on
+this device. Against it the picture is mixed — VKNN wins the depthwise / SE / parallel-branch nets,
+MNN wins the 3×3-conv-heavy ones:
 
-## Correctness (not just speed)
-vxrt-Vulkan-fp16 matches the onnxruntime golden: **top-1 = class 258, cosine = 0.999965**. The
-benchmark above is on a numerically-verified pipeline, not a fast-but-wrong one.
+- **VKNN wins:** MobileNetV2 (+15%), MobileNetV3 (+14%), MnasNet (+9%), Inception-v3 (+8%),
+  EfficientNet-B0 (~1.9×).
+- **MNN-OpenCL-tuned wins:** ResNet-50 (10.2 vs 14.7 ms, +43%), YOLOv8n (+50%), SqueezeNet (+10%),
+  DenseNet-121 (+14%).
+
+The remaining gap is conv-kernel quality: MNN's years-tuned Winograd / cooperative-matrix-style 3×3
+and 1×1 kernels beat VKNN's straightforward direct kernels on the conv-bound models. On this driver
+only **split-K for deep 1×1** and **precise data-dependency barriers** beat the direct kernels;
+register-tiled 3×3, LDS input-halo, and Winograd (3-pass and fused) were all implemented, verified
+correct, and **regressed** — the driver punishes register/LDS/occupancy pressure, and the 3×3 weights
+already L2-cache so cutting weight reads doesn't cut DRAM traffic. Matching MNN there needs a
+production fused-cooperative Winograd, a substantial kernel.
+
+## YoNoSplat encoder (965M-param transformer)
+
+The feed-forward 3D-Gaussian-Splatting encoder (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian /
+camera heads) runs **end-to-end on the GPU**, 1 segment over ~8700 nodes:
+
+| Model | VKNN (Vulkan fp16) | MNN |
+|---|---|---|
+| YoNoSplat encoder (2 views → 100352 Gaussians) | ~13.5 s | cannot convert |
+
+MNN's converter fails on the encoder's dynamic-shape geometry tail (`Reshape error 301056 → 6`,
+"Model larger than 2GB"), so VKNN is the only engine that runs this model correctly on-device. The
+GPU time is dominated by the 509 batched matmuls (~1538 GFLOP, ALU/latency-bound at ~142 GFLOP/s on
+this driver); the rasterizer that consumes the 6 Gaussian outputs is a separate Vulkan compute pass
+(see [../skills/run-yonosplat.md](../skills/run-yonosplat.md)).
+
+## Measurement notes
+
+- Use `VKNN_TIMING=1` for the real submit+GPU time (pack / submit+gpu / unpack). The per-op profiler
+  sum is inflated by forced per-op barriers — relative only.
+- `rm -rf` the model's cache dir before timing a fresh build.
+- VKNN's latency is very consistent (the whole static graph is one pre-recorded command buffer);
+  MNN-Vulkan has higher cold-loop variance.
 
 ## Reproduce
+
 ```bash
-# after the MNN SETUP block in scripts/bench_vs_mnn.sh:
-./scripts/bench_vs_mnn.sh 30
+./scripts/bench_vs_mnn.sh 20        # see the MNN SETUP block at the top of the script
 ```

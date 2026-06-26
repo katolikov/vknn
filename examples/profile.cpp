@@ -1,4 +1,4 @@
-// vx_profile - run a model with profiling: per-op timing table + JSON + Chrome trace.
+// vknn_profile - run a model with profiling: per-op timing table + JSON + Chrome trace.
 //
 // Flags: --model PATH --input PATH --backend NAME --precision P --trace PATH --json PATH
 #include <cstdio>

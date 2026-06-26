@@ -1,11 +1,11 @@
-// vxrt — shared GLSL definitions for compute shaders.
+// VKNN — shared GLSL definitions for compute shaders.
 // Included by all *.comp. Compiled with: glslc --target-env=vulkan1.3
 #ifndef VX_COMMON_GLSL
 #define VX_COMMON_GLSL
 
 #extension GL_GOOGLE_include_directive : require
 
-// Activation fusion codes (kept in sync with vx::ActType in include/vx/op.h).
+// Activation fusion codes (kept in sync with vknn::ActType in include/vknn/op.h).
 #define ACT_NONE  0
 #define ACT_RELU  1
 #define ACT_RELU6 2
@@ -20,7 +20,7 @@ float vx_act(float x, int act, float lo, float hi) {
   return x;
 }
 
-// Unary family (codes must match vx::UnaryType in include/vx/op.h). a,b are op params.
+// Unary family (codes must match vknn::UnaryType in include/vknn/op.h). a,b are op params.
 float vx_unary(float x, int op, float a, float b) {
   if (op == 0)  return 1.0 / (1.0 + exp(-x));          // sigmoid
   if (op == 1)  return tanh(x);                        // tanh
@@ -51,7 +51,7 @@ float vx_unary(float x, int op, float a, float b) {
   return x;
 }
 
-// Binary family (codes must match vx::BinaryType).
+// Binary family (codes must match vknn::BinaryType).
 float vx_binary(float a, float b, int op) {
   if (op == 0) return a * b;
   if (op == 1) return a - b;

@@ -1,4 +1,4 @@
-// vx_ion_zerocopy - demonstrate Exynos ION / DMA-BUF zero-copy import into Vulkan.
+// vknn_ion_zerocopy - demonstrate ION / DMA-BUF zero-copy import into Vulkan.
 //
 // Mode A (library-allocated): IonBuffer::alloc -> CPU memcpy -> import fd into Vulkan ->
 //   GPU compute (add) reads the ION buffer directly (no staging) -> verify vs CPU.
@@ -115,7 +115,7 @@ int main() {
 }
 #else
 int main() {
-  printf("vx_ion_zerocopy: built without Vulkan (Android-only feature)\n");
+  printf("vknn_ion_zerocopy: built without Vulkan (Android-only feature)\n");
   return 0;
 }
 #endif

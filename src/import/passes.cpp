@@ -1644,7 +1644,7 @@ void runStandardPasses(Graph& g, const PassOptions& opt) {
   // Iterate fold+infer: folding a Shape/Gather/Concat chain turns a dynamic Reshape's shape input
   // into a constant, which lets the next inferShapes resolve that Reshape statically, which in turn
   // exposes more foldable shape ops downstream (YOLO's DFL/box-decode head). Converges in a couple
-  // rounds; the loop just runs until constFold stops removing nodes.
+  // rounds; the loop runs until constFold stops removing nodes.
   for (int iter = 0; iter < 8; ++iter) {
     if (constFold(g) == 0)
       break;
@@ -1665,7 +1665,7 @@ void runStandardPasses(Graph& g, const PassOptions& opt) {
           for (int64_t d : g.desc(o).shape)
             sh += std::to_string(d) + ",";
           VKNN_WARN << "BIG tensor " << ne << " elems from " << opTypeName(n.type) << " " << n.name
-                  << " shape=[" << sh << "]";
+                    << " shape=[" << sh << "]";
         }
       }
   }

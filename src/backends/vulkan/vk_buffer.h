@@ -1,4 +1,4 @@
-// Vulkan buffer + memory. Exploits UMA (device-local + host-visible) on Xclipse
+// Vulkan buffer + memory. Exploits UMA (device-local + host-visible) on the target GPU
 // so uploads/downloads are direct memcpy with no staging copy.
 #pragma once
 #include <cstring>

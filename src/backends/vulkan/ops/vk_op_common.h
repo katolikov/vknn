@@ -113,9 +113,9 @@ inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string&
 }
 
 // Read an initializer as fp32, decoding from fp16 if it was stored fp16 (an fp16 .vxm from
-// vx_convert). Ops prepack/transpose weights in fp32, then upload() re-encodes to fp16 for the GPU
-// (fp16->fp32->fp16 is exact). Use this instead of `g.initializers.at(id).f32()` so a model loaded
-// from an fp16 .vxm works unchanged; for an fp32 source it's a plain copy.
+// vknn_compile). Ops prepack/transpose weights in fp32, then upload() re-encodes to fp16 for the
+// GPU (fp16->fp32->fp16 is exact). Use this instead of `g.initializers.at(id).f32()` so a model
+// loaded from an fp16 .vxm works unchanged; for an fp32 source it's a plain copy.
 inline std::vector<float> initFloats(const Graph& g, TensorId id) {
   const HostBuffer& hb = g.initializers.at(id);
   int64_t n = numElements(g.desc(id).shape);

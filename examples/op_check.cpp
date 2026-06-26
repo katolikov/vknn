@@ -1,4 +1,4 @@
-// vx_op_check - M1 foundation test: GPU elementwise add vs CPU, + pipeline cache.
+// vknn_op_check - M1 foundation test: GPU elementwise add vs CPU, + pipeline cache.
 #include <sys/stat.h>
 
 #include <cmath>

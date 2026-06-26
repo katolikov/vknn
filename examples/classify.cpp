@@ -1,4 +1,4 @@
-// vx_classify - load ONNX, run an input, print top-5; optional golden compare.
+// vknn_classify - load ONNX, run an input, print top-5; optional golden compare.
 //
 // Flags:
 //   --model PATH      ONNX model (default assets/mobilenetv2.onnx)

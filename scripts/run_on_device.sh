@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 DEV_DIR="/data/local/tmp/vxrt"
 BUILD_DIR="${BUILD_DIR:-build-android}"
-BACKEND="${1:-vulkan}"        # vulkan | cpu | enn
+BACKEND="${1:-vulkan}"        # vulkan | cpu
 PRECISION="${2:-fp16}"        # fp16 | fp32
 
 log() { printf '\033[36m>> %s\033[0m\n' "$*"; }
@@ -27,7 +27,7 @@ adb shell "mkdir -p $DEV_DIR"
 adb push "$BUILD_DIR/vknn_classify" "$BUILD_DIR/vknn_probe" "$BUILD_DIR/vknn_profile" \
          "$BUILD_DIR/vknn_backend_switch" "$BUILD_DIR/vknn_ion_zerocopy" "$DEV_DIR/" >/dev/null
 adb push assets/mobilenetv2.onnx assets/input.bin assets/golden.bin "$DEV_DIR/" >/dev/null
-adb shell "chmod +x $DEV_DIR/vx_*"
+adb shell "chmod +x $DEV_DIR/vknn_*"
 
 log "running classify ($BACKEND, $PRECISION)"
 adb shell "cd $DEV_DIR && ./vknn_classify --model mobilenetv2.onnx --input input.bin \

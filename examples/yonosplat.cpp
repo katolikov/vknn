@@ -1,4 +1,5 @@
-// vx_yonosplat - the full YoNoSplat 3D Gaussian-Splatting pipeline in one program, all on the GPU:
+// vknn_yonosplat - the full YoNoSplat 3D Gaussian-Splatting pipeline in one program, all on the
+// GPU:
 //   image + intrinsics --> encoder (vknn Vulkan) --> Gaussians --> Vulkan rasterizer --> rendered
 //   view.
 // The encoder runs as a normal vknn Session; its 6 Gaussian outputs feed the from-scratch Vulkan
@@ -6,7 +7,8 @@
 // The rendered view is written as a PPM. See scripts/yonosplat/ for how the encoder .vxm + inputs
 // are made.
 //
-//   vx_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr extr.bin] [--view N]
+//   vknn_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr extr.bin] [--view
+//   N]
 // image.bin = fp32 [1,V,3,224,224], intrinsics.bin = fp32 [1,V,3,3] (normalized). extr.bin
 // (optional) = fp32 [V,4,4] camera-to-world (the encoder's predicted pose, dumpable via
 // VKNN_DUMP_NAMES); identity if omitted. Renders view N.
@@ -47,12 +49,12 @@ static const char* opt(int c, char** v, const char* k, const char* d) {
 
 int main(int argc, char** argv) {
 #if !defined(VKNN_ENABLE_VULKAN)
-  fprintf(stderr, "vx_yonosplat needs Vulkan\n");
+  fprintf(stderr, "vknn_yonosplat needs Vulkan\n");
   return 1;
 #else
   if (argc < 5) {
     printf(
-        "usage: vx_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr "
+        "usage: vknn_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr "
         "extr.bin] [--view N]\n");
     return 1;
   }

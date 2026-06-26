@@ -2,7 +2,7 @@
 """Embed compiled SPIR-V (.spv) blobs into a single C++ translation unit.
 
 Usage: embed_spirv.py <out.cpp> <a.spv> <b.spv> ...
-Generates vx::embeddedShaders() -> map<name, vector<uint32_t>>.
+Generates vknn::embeddedShaders() -> map<name, vector<uint32_t>>.
 """
 import sys, os, struct
 

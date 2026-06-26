@@ -1,23 +1,23 @@
-# Adding an operator to vxrt
+# Adding an operator to VKNN
 
-This is a copy-pasteable walkthrough for adding a new ONNX operator to vxrt
-(Vulkan-eXynos RunTime). The worked example is **LeakyRelu**
+This is a copy-pasteable walkthrough for adding a new ONNX operator to VKNN
+(Vulkan Neural Network). The worked example is **LeakyRelu**
 (`y = x` for `x >= 0`, `y = alpha * x` otherwise), an elementwise unary op with
 one float attribute. The same pattern applies to any pointwise op (`Mul`,
 `Sigmoid`, `Tanh`, ...).
 
 There are four pieces. You can stop after any of them and still have a working
-build — vxrt's capability/fallback model means a CPU-only op simply runs on the
+build — VKNN's capability/fallback model means a CPU-only op simply runs on the
 CPU backend, and the Vulkan path falls back to it automatically.
 
 1. Declare the op: `OpType` enum value + name mappings.
-2. CPU reference: subclass `vx::CpuOp`, implement `run()`, register it.
-3. Vulkan kernel: a GLSL `.comp` shader + subclass `vx::VulkanOp` (`prepare()` /
+2. CPU reference: subclass `vknn::CpuOp`, implement `run()`, register it.
+3. Vulkan kernel: a GLSL `.comp` shader + subclass `vknn::VulkanOp` (`prepare()` /
    `record()`), register it.
 4. (Build) Nothing to wire up — self-registration relies on whole-archive
    linking; see [the last section](#self-registration-and-whole-archive-linking).
 
-Throughout, "register" means dropping a static `VX_REGISTER_*` line at file
+Throughout, "register" means dropping a static `VKNN_REGISTER_*` line at file
 scope. No edits to any core dispatch code are required.
 
 ---
@@ -27,7 +27,7 @@ scope. No edits to any core dispatch code are required.
 `OpType` is the backend-agnostic operator tag carried by every IR `Node`. Add a
 value, then keep the two switch/map tables in `src/core/op.cpp` in sync.
 
-### `include/vx/op.h`
+### `include/vknn/op.h`
 
 Add an enum value to `OpType` (placement is not significant — it is never
 serialized as an integer):
@@ -92,7 +92,7 @@ The CPU backend is the scalar reference (plus NEON kernels for `Add`/`Gemm`). It
 is also the fallback target for every op the primary backend declines, so adding
 the CPU kernel first gives you a correct baseline you can diff against.
 
-A CPU op is a subclass of `vx::CpuOp` (declared in
+A CPU op is a subclass of `vknn::CpuOp` (declared in
 `src/backends/cpu/cpu_backend.h`):
 
 ```cpp
@@ -144,13 +144,13 @@ struct LeakyReluCpuOp : CpuOp {
 ```
 
 Register it at namespace scope (bottom of the file, alongside the other
-`VX_REGISTER_CPU_OP` lines):
+`VKNN_REGISTER_CPU_OP` lines):
 
 ```cpp
-VX_REGISTER_CPU_OP(OpType::kLeakyRelu, LeakyReluCpuOp);
+VKNN_REGISTER_CPU_OP(OpType::kLeakyRelu, LeakyReluCpuOp);
 ```
 
-`VX_REGISTER_CPU_OP(OPTYPE, CLASS)` expands to a static `CpuOpRegistrar` whose
+`VKNN_REGISTER_CPU_OP(OPTYPE, CLASS)` expands to a static `CpuOpRegistrar` whose
 constructor calls `CpuOpRegistry::instance().reg(...)`. After this, the CPU
 backend's `supports()` returns `true` for `kLeakyRelu` (fp32/int64/int32) and the
 session can place the node on CPU.
@@ -163,9 +163,9 @@ and the op runs on the CPU backend, or as a Vulkan-segment fallback.
 ## 3. Vulkan compute kernel
 
 To run the op on the GPU you need two things: a GLSL compute shader, and a
-`vx::VulkanOp` subclass that builds the pipeline and records the dispatch.
+`vknn::VulkanOp` subclass that builds the pipeline and records the dispatch.
 
-vxrt's internal device layout is **NC4HW4** — channels packed in `vec4` blocks.
+VKNN's internal device layout is **NC4HW4** — channels packed in `vec4` blocks.
 For a pure elementwise op the packing is transparent: every packed element is
 processed independently, exactly like the existing `add.comp`. So `LeakyRelu` can
 operate on the flat packed buffer and never has to reason about the layout.
@@ -174,7 +174,7 @@ operate on the flat packed buffer and never has to reason about the layout.
 
 Shaders are GLSL compute, compiled at build time by `glslc`
 (`--target-env=vulkan1.3 -O`) and embedded into the static lib by
-`tools/embed_spirv.py` (exposed as `vx::embeddedShaders()`). The shader's base
+`tools/embed_spirv.py` (exposed as `vknn::embeddedShaders()`). The shader's base
 name (here `leakyrelu`) is the key you look up when creating the pipeline.
 
 The push-constant block and binding count must match the C++ side exactly. Model
@@ -201,10 +201,10 @@ void main() {
 ```
 
 `common.glsl` holds the shared fused-activation helper `vx_act()` and the
-`ACT_*` codes (kept in sync with `vx::ActType`). LeakyRelu does not use them
+`ACT_*` codes (kept in sync with `vknn::ActType`). LeakyRelu does not use them
 here, but include the header for consistency.
 
-**fp16 variant.** vxrt's fp16 device path uses fp16 *storage* with fp32
+**fp16 variant.** VKNN's fp16 device path uses fp16 *storage* with fp32
 *accumulation*, and selects a `_fp16`-suffixed shader at runtime via the `sv()`
 helper (`sv("conv", true)` → `"conv_fp16"`). If you want LeakyRelu to run in the
 fp16 pipeline, add `shaders/leakyrelu_fp16.comp` with `float16_t` storage buffers
@@ -219,7 +219,7 @@ under `shaders/` is picked up automatically by the `file(GLOB ...)` in
 without `glslc`, `embeddedShaders()` is a stub and the Vulkan path is compiled
 out; the CPU kernel is what runs.)
 
-### 3b. The op: subclass `vx::VulkanOp`
+### 3b. The op: subclass `vknn::VulkanOp`
 
 A Vulkan op (declared in `src/backends/vulkan/vk_backend.h`) has two phases:
 
@@ -311,10 +311,10 @@ Notes:
   not needed.
 
 Register it at namespace scope (bottom of the file, with the other
-`VX_REGISTER_VK_OP` lines):
+`VKNN_REGISTER_VK_OP` lines):
 
 ```cpp
-VX_REGISTER_VK_OP(OpType::kLeakyRelu, LeakyReluVulkanOp);
+VKNN_REGISTER_VK_OP(OpType::kLeakyRelu, LeakyReluVulkanOp);
 ```
 
 After this, the Vulkan backend's `supports()` returns `true` for `kLeakyRelu`
@@ -325,24 +325,24 @@ will place LeakyRelu nodes in Vulkan segments.
 
 ## 4. Self-registration and whole-archive linking
 
-There is no central table of operators to edit. Every `VX_REGISTER_CPU_OP`,
-`VX_REGISTER_VK_OP`, and `VX_REGISTER_BACKEND` declares a file-scope static whose
+There is no central table of operators to edit. Every `VKNN_REGISTER_CPU_OP`,
+`VKNN_REGISTER_VK_OP`, and `VKNN_REGISTER_BACKEND` declares a file-scope static whose
 constructor inserts the factory into the relevant registry
 (`CpuOpRegistry` / `VkOpRegistry` / `BackendRegistry`) before `main()` runs.
 
 The catch: a static-library object file that nothing references is dropped by the
-linker, taking its self-registration with it. vxrt avoids this by linking the
+linker, taking its self-registration with it. VKNN avoids this by linking the
 static lib **whole-archive** everywhere it is consumed
 (`CMakeLists.txt`):
 
 ```cmake
-target_link_libraries(vx_${ex}  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vxrt>")
-target_link_libraries(vx_tests  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vxrt>" gtest gtest_main)
+target_link_libraries(vknn_${ex}  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
+target_link_libraries(vknn_tests  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>" gtest gtest_main)
 ```
 
 This pulls in every object file (and therefore every registrar) regardless of
 whether the symbol is directly referenced. As long as your new op lives in a
-source file already globbed into the `vxrt` target — `src/backends/cpu/*.cpp` and
+source file already globbed into the `vknn` target — `src/backends/cpu/*.cpp` and
 `src/backends/vulkan/*.cpp` both are — registration "just works" with no further
 build wiring.
 
@@ -350,14 +350,14 @@ build wiring.
 
 ## The capability / fallback model
 
-vxrt assigns each node to a backend at session-creation time, then partitions the
+VKNN assigns each node to a backend at session-creation time, then partitions the
 topo-ordered node list into maximal same-backend **segments**. Two capability
 hooks drive this.
 
 ### `Backend::supports(OpType, DType)`
 
 Each backend answers whether it can run a given op at a given compute dtype
-(`include/vx/backend.h`). The implementations are thin wrappers over the op
+(`include/vknn/backend.h`). The implementations are thin wrappers over the op
 registries:
 
 - **Vulkan** (`src/backends/vulkan/vk_backend.cpp`):
@@ -365,8 +365,8 @@ registries:
   ```cpp
   bool supports(OpType t, DType dt) const override {
     if (!available()) return false;
-    // Debug hook: VXRT_DISABLE_VK_OPS="Add,Conv" forces those ops to fall back.
-    if (const char* dis = std::getenv("VXRT_DISABLE_VK_OPS")) {
+    // Debug hook: VKNN_DISABLE_VK_OPS="Add,Conv" forces those ops to fall back.
+    if (const char* dis = std::getenv("VKNN_DISABLE_VK_OPS")) {
       std::string list = dis, name = opTypeName(t);
       if (list.find(name) != std::string::npos) return false;
     }
@@ -425,21 +425,21 @@ You can exercise the fallback path without touching code by forcing the op back
 to CPU at runtime:
 
 ```sh
-VXRT_DISABLE_VK_OPS="LeakyRelu" ./vx_classify ...
+VKNN_DISABLE_VK_OPS="LeakyRelu" ./vknn_classify ...
 ```
 
 This is the same mechanism used to validate the NEON fallback path
-(`VXRT_DISABLE_VK_OPS="Add,GlobalAveragePool"` re-partitions the graph into
+(`VKNN_DISABLE_VK_OPS="Add,GlobalAveragePool"` re-partitions the graph into
 Vulkan/CPU segments while keeping the output bit-comparable).
 
 ---
 
 ## Checklist
 
-- [ ] `include/vx/op.h`: add `OpType::kLeakyRelu`.
+- [ ] `include/vknn/op.h`: add `OpType::kLeakyRelu`.
 - [ ] `src/core/op.cpp`: add to `opTypeName()` and `opTypeFromOnnx()`.
-- [ ] `src/backends/cpu/ops_basic.cpp`: `LeakyReluCpuOp` + `VX_REGISTER_CPU_OP`.
+- [ ] `src/backends/cpu/ops_basic.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP`.
 - [ ] `shaders/leakyrelu.comp` (+ optional `leakyrelu_fp16.comp`).
-- [ ] `src/backends/vulkan/vk_ops.cpp`: `LeakyReluVulkanOp` + `VX_REGISTER_VK_OP`.
+- [ ] `src/backends/vulkan/vk_ops.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP`.
 - [ ] Build and run; diff Vulkan output against the CPU reference (and against
       `scripts/get_golden.py` if you want an external check).

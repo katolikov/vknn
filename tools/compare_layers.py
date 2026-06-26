@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare vxrt per-layer dumps (.bin, float32, NCHW) against onnxruntime goldens (.npy).
+"""Compare VKNN per-layer dumps (.bin, float32, NCHW) against onnxruntime goldens (.npy).
 
 Usage: compare_layers.py <dump_dir> <golden_layers_dir>
 Prints per-layer cosine + max abs err, sorted worst-first, to locate first divergence.
@@ -28,7 +28,7 @@ def main():
         maxerr = float(np.max(np.abs(v[:min(len(v),g.size)] - g.ravel()[:min(len(v),g.size)]))) if g.size else 0
         rows.append((c, maxerr, name, g.shape, v.size))
     rows.sort(key=lambda r: r[0])
-    print(f"{'cosine':>9} {'maxErr':>11}  {'layer':<14} golden_shape / vxrt_elems")
+    print(f"{'cosine':>9} {'maxErr':>11}  {'layer':<14} golden_shape / vknn_elems")
     for c, e, name, gs, ve in rows[:25]:
         print(f"{c:9.5f} {e:11.4e}  {name:<14} {gs} / {ve}")
     print(f"... {len(rows)} layers compared; worst {min(r[0] for r in rows):.5f}" if rows else "no matches")

@@ -4,7 +4,7 @@
 Accepted (2026-06-24)
 
 ## Context
-The Xclipse 960 is a unified-memory (UMA) GPU. `vx_probe` confirmed memory types that are
+The target GPU is a unified-memory (UMA) GPU. `vknn_probe` confirmed memory types that are
 simultaneously `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` (type 0; type 1 adds HOST_CACHED).
 On discrete GPUs you must stage host→device through a separate transfer buffer; on UMA you do
 not.

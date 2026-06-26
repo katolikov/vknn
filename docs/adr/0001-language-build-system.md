@@ -11,9 +11,9 @@ and host-buildable for unit tests. The Vulkan/NEON code is inherently C/C++.
 - **C++17** (broad NDK r27 support, `if constexpr`, structured bindings; avoids C++20 module churn).
 - **CMake + Ninja** with the NDK's `android.toolchain.cmake`. A single `CMakeLists.txt` builds
   both host (CPU backend + IR + import + tests, no Vulkan needed) and Android (full engine).
-- **Static library** `libvxrt.a` linked into examples/tests. Avoids `LD_LIBRARY_PATH` juggling on
+- **Static library** `libvknn.a` linked into examples/tests. Avoids `LD_LIBRARY_PATH` juggling on
   device and keeps each pushed binary self-contained (shaders embedded, see ADR-0002).
-- `minSdk = 33` (Android 13). Device is API 36; 33 keeps headroom and dma-heap (API 30+) works.
+- `minSdk = 33` (Android 13). The target device runs a recent Android (API 33+); 33 keeps headroom and dma-heap (API 30+) works.
 
 ## Consequences
 - Easy `adb push <binary>` deployment, no shared-lib dependency chasing.

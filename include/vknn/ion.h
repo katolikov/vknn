@@ -1,6 +1,6 @@
-// Exynos ION / DMA-BUF allocation for zero-copy GPU input. See docs/adr/0005.
+// ION / DMA-BUF allocation for zero-copy GPU input. See docs/adr/0005.
 //
-// Classic /dev/ion is gone on this build, so "exynos_ion" here really means DMA-BUF heaps
+// Classic /dev/ion is gone on this build, so ION here really means DMA-BUF heaps
 // (/dev/dma_heap/system). An IonBuffer is just a dma-buf fd plus a CPU mmap; the same fd gets
 // imported into Vulkan (VK_EXT_external_memory_dma_buf) so the GPU reads it directly, no copy.
 #pragma once

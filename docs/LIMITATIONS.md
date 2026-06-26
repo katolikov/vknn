@@ -1,13 +1,15 @@
-# vxrt — Limitations & Known Gaps
+# VKNN — Limitations & Known Gaps
 
-This document is an honest account of what vxrt (`vx::`) does **not** do, what is
+This document is an honest account of what VKNN (`vknn::`) does **not** do, what is
 stubbed, and where the verified numbers fall short of state of the art. Everything
 below was measured on **one** device (see [Test coverage](#test-coverage-one-device))
 unless stated otherwise. No numbers here are aspirational — they are the figures
-produced by the on-device runs recorded in `docs/DEVICE_REPORT.md` and `WORKLOG.md`.
+produced by on-device runs against onnxruntime goldens.
 
-The reference workload throughout is **MobileNetV2**, fixed input image, top-1 class
-258 (Samoyed), compared against an onnxruntime golden.
+VKNN runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
+YOLOv8n detection, and the 965M-param YoNoSplat transformer encoder. Per-model latencies and the
+VKNN-vs-MNN comparison are in [BENCHMARK.md](BENCHMARK.md); this document is about what the engine
+does **not** do.
 
 ---
 
@@ -17,7 +19,7 @@ The engine plans a graph for a **fixed, fully-static shape**. `Session::plan()`
 runs `inferShapes` once at construction; every segment, every Vulkan command buffer,
 and every prepacked weight is specialized to those shapes. The Vulkan backend
 literally **pre-records one `VkCommandBuffer` per segment** (`Segment` in
-`include/vx/backend.h`), so there is no mechanism to vary `N`, `H`, or `W` at run
+`include/vknn/backend.h`), so there is no mechanism to vary `N`, `H`, or `W` at run
 time.
 
 Concretely:
@@ -32,89 +34,68 @@ Concretely:
 
 ---
 
-## 2. No ENN / NPU backend (Vulkan + CPU only)
+## 2. No NPU / accelerator backend (Vulkan + CPU only)
 
 The backends are **Vulkan** (the on-device compute path) and **CPU** (host oracle +
-fallback). There is no Samsung ENN / NPU backend, because a genuine one is not
-buildable for us:
+fallback). There is no NPU / vendor-accelerator backend. Such accelerators typically
+consume a model artifact produced by an **offline**, host-side toolchain rather than
+JIT-compiling from ONNX on device, and that toolchain (and matching public headers)
+was not available for the target hardware.
 
-1. **No public ENN C++ headers** are available.
-2. **No on-device NNC compiler.** ENN consumes `.nnc` models produced by an **offline**
-   Samsung SDK tool we do not have — the flow would be ONNX → Samsung NNC compiler →
-   `.nnc` → ENN runtime.
-
-The pluggable-backend architecture stays open for it: adding one is purely a new
+The pluggable-backend architecture stays open for one: adding a backend is purely a new
 `Backend` subclass + `VKNN_REGISTER_BACKEND`, with no edits to core dispatch — see
-`docs/ADDING_A_BACKEND.md`. (An earlier stub that only `dlopen`-probed the on-device ENN
-libs was removed; the device's ENN/NPU findings are recorded in `docs/DEVICE_REPORT.md`.)
+`docs/ADDING_A_BACKEND.md`, which documents the offline-compiled-accelerator pattern.
 
 ---
 
-## 3. fp16 trades accuracy for ~10% speed
+## 3. fp16 trades accuracy for speed
 
-The fp16 path uses **fp16 storage with fp32 accumulation**. It is faster but not
-bit-accurate against the fp32 / CPU reference:
+The default GPU path uses **fp16 storage with fp32 accumulation**. It is faster but not
+bit-accurate against the fp32 / CPU reference — cosine vs onnxruntime lands in the
+**0.9995–1.0** range across the benchmarked models (e.g. MobileNetV3 0.99954, ResNet-50 and
+YOLOv8n 1.000000), with small absolute error on intermediate activations. The Vulkan fp32 path is
+bit-close (cosine 1.0, maxAbsErr ~1e-5), and the CPU backend is the bit-exact reference.
 
-| Path          | cosine vs onnxruntime | maxAbsErr | latency       |
-|---------------|-----------------------|-----------|---------------|
-| CPU reference | 1.000000              | —         | 672 ms / 1.5 fps |
-| Vulkan fp32   | 1.000000              | 1.3e-5    | 24.35 ms / 41 fps |
-| Vulkan fp16   | **0.999965**          | **0.08**  | 22.0 ms / 45.4 fps |
-
-So fp16 (`precision = Precision::kFp16`, the default in `vx::Config`) costs roughly a
-**0.000035 cosine drop and up to 0.08 absolute error** on intermediate activations,
-in exchange for ~2.4 ms / ~4 fps over fp32. For accuracy-sensitive callers, set
-`precision = Precision::kFp32` (still real-time at 41 fps) or fall back to CPU for a
-bit-exact reference.
+For accuracy-sensitive callers, set `precision = Precision::kFp32` or fall back to CPU. fp16 is the
+default in `vknn::Config` because the accuracy cost is tiny and the bandwidth saving is real.
 
 ---
 
-## 4. Kernels are naive and memory-bound — 22 ms is not SOTA
+## 4. Conv kernels trail a years-tuned engine on the 3×3-heavy nets
 
-vxrt's compute kernels are straightforward and **deliberately unsophisticated**. The
-22 ms fp16 wall time is a competent baseline, not a tuned ceiling.
+VKNN beats MNN's Vulkan backend on every benchmarked model (often ~4×), but against MNN's
+**OpenCL HEAVY-tuned** best it trails on the 3×3-convolution-heavy nets — ResNet-50 (~+43% for MNN)
+and YOLOv8n (~+50%). The gap is conv-kernel quality. The Conv/GEMM kernels are deliberately
+straightforward:
 
-Specifically, the Conv/GEMM kernels:
+- **No Winograd** for 3×3 convolutions (implemented and verified correct, but slower here — see
+  below — so it stays behind `VKNN_WINOGRAD=1`).
+- **No cooperative-matrix / matrix-core path.** `VK_KHR_cooperative_matrix` is **absent on the
+  target driver**, so that avenue is closed regardless.
+- **No register-blocked tiled GEMM** for the large 3×3 convs.
 
-- Use **no Winograd** transform for 3×3 convolutions.
-- Use **no cooperative-matrix / matrix-core path**. `VK_KHR_cooperative_matrix` is
-  **absent on this driver** (Samsung SPAL 25.2.39), so that avenue is closed here
-  regardless.
-- Have **no subgroup-tiled GEMM yet** — the GEMM/FC and pointwise paths are plain
-  subgroup/vec4 (`NC4HW4`) loops, not register-blocked tiled microkernels.
-
-Conv strategies that *do* exist: a general `group = 1` kernel (handling 1×1 pointwise
-and 3×3 strided) and a specialized depthwise kernel. They are correct and packed
-(`NC4HW4`, channels in vec4 blocks, ADR-0004), but they are bandwidth-bound, not
-compute-optimal. The conv kernel does autotune `local_size_x` via a spec constant
-(20 cached entries), which helps occupancy but does not change the algorithmic class.
-
-GPU compute time alone (from timestamp queries, `timestampPeriod` 39.0625 ns):
-
-```
-total 12.1 ms   Conv 10.7   Gemm 0.9   Add 0.26   Pool 0.09   Reshape 0.11
-```
-
-Conv dominates (10.7 of 12.1 ms), which is exactly where Winograd / a tiled GEMM
-microkernel would pay off. Those are unimplemented.
+The proven kernels here are a direct 3×3, a register-tiled (WTILE=4) 1×1, an untiled depthwise, and
+**split-K** for deep low-parallelism 1×1 convs. Everything that adds register/LDS/occupancy pressure
+(register-tiled 3×3, LDS input-halo, Winograd 3-pass and fused, packed-math) was measured and
+**regressed** on this driver — it punishes occupancy pressure, and the 3×3 weights already L2-cache so
+cutting weight reads doesn't cut DRAM traffic. Matching MNN on ResNet/YOLO needs a production
+fused-cooperative Winograd, a substantial kernel. See [BENCHMARK.md](BENCHMARK.md).
 
 ---
 
-## 5. CPU↔device pack/unpack is ~half the wall time
+## 5. CPU↔device pack/unpack at the I/O boundary
 
-Of the 22 ms fp16 wall, only **12.1 ms is GPU compute**. The remaining **~11 ms** is
-host-side: converting the caller's NCHW fp32 input into the internal `NC4HW4` packed
-layout (and the reverse on output), plus the `toHost`/`toDevice` residency
-reconciliation at segment boundaries (`Backend::toHost` / `Backend::toDevice` in
-`include/vx/backend.h`).
+Converting the caller's NCHW fp32 input into the internal `NC4HW4` packed layout (and the reverse on
+output), plus the `toHost`/`toDevice` residency reconciliation at segment boundaries
+(`Backend::toHost` / `Backend::toDevice` in `include/vknn/backend.h`), is real host-side overhead. On
+small CNNs where GPU compute is only a few milliseconds, this boundary work can be a large fraction of
+the wall time.
 
-The device is UMA (memory types are `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`, so
-there are **no staging copies**), yet the pack/unpack itself is CPU work done with the
-`pack` / `unpack` compute shaders and host glue. This is the single largest, most
-addressable inefficiency in the pipeline today — it is larger than the entire Gemm +
-Add + Pool + Reshape GPU cost combined. It has not been optimized.
+The device is UMA (memory types are `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`, so there are **no
+staging copies**), yet the pack/unpack itself is CPU work. Feeding NC4HW4 directly, or doing the
+conversion on the GPU, would remove most of it; it has not been optimized.
 
-> Zero-copy I/O (`enableZeroCopy`, `vx::IonBuffer` over DMA-BUF heaps) removes the
+> Zero-copy I/O (`enableZeroCopy`, `vknn::IonBuffer` over DMA-BUF heaps) removes the
 > *input/output buffer copy*, and was verified bit-identical to the staged path
 > (maxAbsErr 0, both `Mode A` alloc and `Mode B` `wrapFd`). It does **not** remove the
 > layout pack/unpack, which is the dominant host cost above.
@@ -147,25 +128,21 @@ pre-activation one. This is correct behavior but can be confusing during debuggi
 
 ---
 
-## 8. ONNX coverage is limited to the CNN ops MobileNetV2 needs
+## 8. ONNX coverage is a fixed op table (broad, but not the whole opset)
 
-The importer (hand-rolled, dependency-free protobuf parser in
-`src/import/onnx/onnx_parser.cpp`) maps a **fixed, small** op set
-(`opTypeFromOnnx` in `src/core/op.cpp`). Anything not in that table imports as
-`OpType::kUnknown`. There is **no** support for transformers/attention, RNNs,
-dynamic control flow, training ops, or most of the broader ONNX opset.
+The importer (hand-rolled, dependency-free protobuf parser in `src/import/onnx/onnx_parser.cpp`) maps
+a **fixed** op set (`opTypeFromOnnx` in `src/core/op.cpp`). Anything not in that table imports as
+`OpType::kUnknown` and will not plan.
 
-Implemented compute ops: `Conv` (general / depthwise / pointwise), `Gemm`/FC,
-`Clip`(relu6) / `Relu` (fused into the producer), `Add` (residual; broadcast handled
-on CPU only), `GlobalAveragePool`, `Reshape`, `Flatten`, `Softmax`, `BatchNorm`
-(CPU reference only), `Identity`.
+The supported set is broad — it covers CNNs, detection, **and** transformer/attention models:
+convolution/pooling, the full elementwise unary/binary families, MatMul (batched N-D), Gemm,
+LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, and the shape/data-movement
+ops. The full table with per-op GPU/CPU coverage is in [OP_COVERAGE.md](OP_COVERAGE.md).
 
-Shape-path ops `Shape`, `Constant`, `Gather`, `Unsqueeze`, `Concat` exist but run on
-**CPU**, and for the Vulkan path they are expected to be **const-folded away**
-(`constFold` removed 5 shape-path nodes; the full pass pipeline reduces MobileNetV2
-from 105 → 65 nodes). `AvgPool`, `MaxPool`, `MatMul`, and `Pad` have op-type entries
-but are not part of the verified Vulkan path. Treat the supported set as "what
-MobileNetV2-class CNNs need," not as general ONNX coverage.
+**Not** supported: RNN/LSTM/GRU, dynamic control flow (`Loop` / `If` / `Scan`), training ops, sparse
+tensors, and the long tail of the ONNX opset. Adding an op is mechanical (see
+[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md)), but until it is in the table the model will not
+import.
 
 ---
 
@@ -173,10 +150,8 @@ MobileNetV2-class CNNs need," not as general ONNX coverage.
 
 Every on-device number in this repo comes from a **single** unit:
 
-- **Samsung Galaxy S26 (SM-S942B)**, Exynos 2600 (s5e9965)
-- GPU **Samsung Xclipse 960** (AMD RDNA), Samsung Proprietary **SPAL driver 25.2.39**
-- **Vulkan 1.4.304**, Android 16 / API 36, arm64-v8a
-- adb serial `R3CY905E04M`
+- An **Android arm64-v8a** device with an **AMD RDNA-class mobile GPU**
+- The GPU's **proprietary Vulkan driver**, **Vulkan 1.3+**
 
 There is no cross-device, cross-driver, or cross-vendor validation. Key behaviors are
 **driver-specific**: the absence of `VK_KHR_cooperative_matrix`, `subgroupSize = 64`,
@@ -194,11 +169,11 @@ the zero-copy / capability assumptions do not transfer** and have not been retes
 | Area | Status |
 |------|--------|
 | Batch / shapes | Static `batch = 1`, resolved at plan time; reshape ⇒ new Session |
-| ENN / NPU | Documented stub; 4/5 libs probed; no NNC compiler, no public headers; always falls back |
-| fp16 | cosine 0.999965 (vs 1.0), maxAbsErr 0.08; fp16 storage + fp32 accum |
-| Kernels | Memory-bound; no Winograd, no cooperative matrix (absent on driver), no tiled GEMM |
-| Host overhead | ~11 ms of the 22 ms wall is CPU↔device pack/unpack |
+| NPU / accelerator | None; Vulkan + CPU only (pluggable — see ADDING_A_BACKEND.md) |
+| fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
+| Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet/YOLO (3×3 convs); no Winograd/coopmat/tiled GEMM |
+| Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs) |
 | int8 | Not implemented (stretch goal) |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |
-| ONNX ops | Only the CNN ops MobileNetV2 needs |
-| Devices tested | One (Galaxy S26 / Xclipse 960 / SPAL 25.2.39) |
+| ONNX ops | See OP_COVERAGE.md |
+| Devices tested | One (Android arm64-v8a, AMD RDNA-class mobile GPU) |

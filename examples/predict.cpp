@@ -1,5 +1,5 @@
 // The friendly API in action: load a model, run it, read the result — no tensor wiring.
-//   vx_predict model.onnx input.bin
+//   vknn_predict model.onnx input.bin
 #include <cstdio>
 #include <fstream>
 #include <vector>

@@ -4,13 +4,12 @@
 Accepted (2026-06-24)
 
 ## Context
-The task calls for Exynos ION zero-copy. On-device probing found `/dev/ion` **absent** (classic
-ION removed on Android 12+), but `/dev/dma_heap/` present with a `system` heap, and
-`libion.so`/`libion_exynos.so`/`libdmabufheap.so` present. The Vulkan driver exposes
-`VK_EXT_external_memory_dma_buf` + `VK_KHR_external_memory_fd` + AHB.
+The task calls for ION zero-copy. On-device probing found `/dev/ion` **absent** (classic
+ION removed on Android 12+), but `/dev/dma_heap/` present with a `system` heap. The Vulkan
+driver exposes `VK_EXT_external_memory_dma_buf` + `VK_KHR_external_memory_fd` + AHB.
 
 ## Decision
-The "exynos_ion" mechanism on this build is **DMA-BUF heaps**. `vx::IonAllocator`:
+The ION mechanism on this build is **DMA-BUF heaps**. `vknn::IonAllocator`:
 - Allocates from `/dev/dma_heap/system` via the kernel `DMA_HEAP_IOCTL_ALLOC` ioctl
   (`linux/dma-heap.h` — no vendor lib link needed, robust across builds).
 - Returns a dma-buf **fd**, `mmap`s it for CPU access.

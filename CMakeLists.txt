@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(vknn LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
-# vknn — Vulkan-eXynos RunTime. On-device CNN inference engine.
+# vknn — Vulkan Neural Network. On-device inference engine (CNNs, transformers, 3D Gaussian Splatting).
 #   Host build  : CPU backend + IR + ONNX import + tests (no Vulkan needed).
 #   Android build: full engine incl. Vulkan backend (NDK toolchain, arm64-v8a).
 # ---------------------------------------------------------------------------

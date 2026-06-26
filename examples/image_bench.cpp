@@ -1,7 +1,7 @@
-// vx_image_bench - settle the "does VkImage beat SSBO on this GPU?" question with a real number.
+// vknn_image_bench - settle the "does VkImage beat SSBO on this GPU?" question with a real number.
 // Runs the SAME 1x1 conv two ways on representative shapes: (a) our SSBO c-tiled kernel,
 // (b) an image-backed c8w4 kernel reading via imageLoad (texture cache). Verifies both against a
-// CPU reference and reports timing. Usage: vx_image_bench [Cin Cout H W] [iters]
+// CPU reference and reports timing. Usage: vknn_image_bench [Cin Cout H W] [iters]
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

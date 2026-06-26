@@ -28,6 +28,6 @@ A throttled WARNING is emitted per fallen-back op type, and the profiler tags fa
 
 ## Consequences
 - A fully-Vulkan graph is one segment → one command buffer → minimal host↔device sync.
-- Disabling any Vulkan op (`VXRT_DISABLE_VK_OPS`) transparently splits the graph and falls back to
+- Disabling any Vulkan op (`VKNN_DISABLE_VK_OPS`) transparently splits the graph and falls back to
   CPU with correct output (verified on device: 23 segments, cosine still 1.000000).
 - Adding a backend never touches core dispatch (ADR-0002 registry + this model).

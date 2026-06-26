@@ -283,7 +283,7 @@ struct ConvOp : VulkanOp {
                                                      sizeof(ConvPC), std::vector<uint32_t>{},
                                                      env.cache->handle());
       } else {
-        // autotuned 1-pixel-per-thread direct kernel (fastest 3x3 path on Xclipse so far)
+        // autotuned 1-pixel-per-thread direct kernel (fastest 3x3 path on the target GPU so far)
         total = x.n * Coutb * y.h * y.w;
         localSize = pickLocalSize(env);
         pipe = std::make_unique<vk::ComputePipeline>(

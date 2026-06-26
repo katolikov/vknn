@@ -1,41 +1,74 @@
-# vxrt
+<h1 align="center">VKNN</h1>
 
-**vxrt** (Vulkan-eXynos RunTime, namespace `vx`) is a small, dependency-free C++17 inference
-runtime for CNNs on Samsung Exynos / Xclipse mobile GPUs. It imports an ONNX model with a
-hand-rolled protobuf parser, lowers it to a backend-agnostic NCHW IR, runs graph passes
-(shape inference, BatchNorm folding, activation fusion, constant folding, dead-node
-elimination), partitions the result into maximal same-backend segments, and executes each
-segment on a pluggable backend. The primary backend is Vulkan compute (NC4HW4 packed layout,
-one pre-recorded command buffer per static segment, push descriptors, fp16 storage with fp32
-accumulation, and true DMA-BUF zero-copy import); a scalar+NEON CPU backend provides the
-reference path and automatic fallback. Everything is verified end-to-end on a Galaxy S26
-against onnxruntime goldens.
+<p align="center">
+  <b>Vulkan Neural Network</b> — a small, dependency-free C++17 inference engine for neural networks on Android GPUs.
+</p>
 
-## Verified results
+<p align="center">
+  <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
+  <img alt="Vulkan compute" src="https://img.shields.io/badge/Vulkan-compute-A41E22?logo=vulkan&logoColor=white">
+  <img alt="Android arm64-v8a" src="https://img.shields.io/badge/Android-arm64--v8a-3DDC84?logo=android&logoColor=white">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue">
+  <img alt="no runtime deps" src="https://img.shields.io/badge/deps-none-success">
+</p>
 
-MobileNetV2, fixed input image (top-1 class 258 = Samoyed), Galaxy S26 / Exynos 2600 /
-Xclipse 960. Inference timings are wall-clock for one `Session::run`; cosine and max-abs-err
-are versus the onnxruntime CPU golden.
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#benchmarks">Benchmarks</a> ·
+  <a href="#compile-and-run-a-model">Compile &amp; run</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="AGENTS.md">Contributing</a>
+</p>
 
-| Backend | Latency | FPS | Cosine vs ORT | maxAbsErr |
-|---|---|---|---|---|
-| CPU (scalar + NEON) | 672 ms | 1.5 | 1.000000 | — |
-| Vulkan fp32 | 24.35 ms | 41.0 | 1.000000 | 1.3e-5 |
-| Vulkan fp16 | 22.0 ms | 45.4 | 0.999965 | 0.08 |
+**VKNN** (namespace `vknn`) is a small, dependency-free C++17 inference engine for running neural
+networks on Android arm64 GPUs through Vulkan compute. It imports an ONNX model with a hand-rolled
+protobuf parser, lowers it to a backend-agnostic NCHW IR, runs graph passes (shape inference,
+BatchNorm folding, activation/residual fusion, constant folding, dead-node elimination), partitions
+the result into maximal same-backend segments, and executes each segment on a pluggable backend.
 
-GPU compute time alone (timestamp queries, Vulkan fp16) is **12.1 ms**: Conv 10.7, Gemm 0.9,
-Add 0.26, GlobalAveragePool 0.09, Reshape 0.11. The remaining wall time is host&harr;device
-pack/unpack.
+The primary backend is **Vulkan compute** (NC4HW4 packed layout, one pre-recorded command
+buffer per static segment, push descriptors, fp16 storage with fp32 accumulation, DMA-BUF
+zero-copy import). A scalar + NEON **CPU backend** provides the reference path and an automatic
+fallback for ops the GPU declines. Everything is verified end-to-end against onnxruntime
+goldens on an Android arm64-v8a device with an AMD RDNA-class mobile GPU.
 
-**Session creation** (Vulkan fp16), showing the effect of the on-disk caches:
+VKNN runs more than classifiers: image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet,
+Inception, DenseNet, ShuffleNet), detection (YOLOv8n), and a 965M-parameter transformer
+encoder (the YoNoSplat feed-forward 3D Gaussian Splatting model), plus a from-scratch Vulkan
+3DGS rasterizer — all on the GPU.
 
-| Session | Time | Notes |
-|---|---|---|
-| Cold (first run + autotune) | 445 ms | empty cache, `tuning=fast` |
-| Cold (no tuning) | ~152 ms | empty cache, `tuning=off` |
-| Warm (all caches hit) | 68 ms | pipeline + prepacked-weights + autotune caches |
+## Highlights
 
-Warm session creation is up to **6.5x** faster than a cold tuned build.
+- **No third-party runtime dependencies.** ONNX import is a hand-rolled protobuf parser; the
+  only link-time deps are Vulkan + the C++ standard library (+ GoogleTest for the test target).
+- **One build entry point** — `./build.sh` (host) / `./build.sh --android` (NDK arm64-v8a).
+- **Pluggable backends and operators** via self-registration; adding an op or a backend is a
+  new file, no edits to core dispatch.
+- **Static, pre-recorded execution.** A model is planned once for a fixed input shape; the
+  Vulkan backend records one command buffer per segment and reuses it every run.
+- **Honest, reproducible numbers.** Every reported figure comes from on-device runs compared
+  against an onnxruntime golden — see [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+## Benchmarks
+
+VKNN vs [MNN](https://github.com/alibaba/MNN) (Alibaba's production engine), same model, both Vulkan
+fp16, thermal-controlled medians. VKNN beats MNN's Vulkan backend across the board:
+
+| Model (Vulkan, fp16) | VKNN | MNN-Vulkan | VKNN vs ORT |
+|---|---|---|---|
+| MobileNetV2 | 2.8 ms | 13.8 ms | cosine 0.99997 |
+| MobileNetV3-Large | 2.5 ms | 17.0 ms | cosine 0.99954 |
+| SqueezeNet 1.1 | 2.4 ms | 10.9 ms | cosine 0.99998 |
+| EfficientNet-B0 | 4.2 ms | 19.9 ms | cosine 0.99983 |
+| ResNet-50 | 14.7 ms | 18.3 ms | cosine 1.000000 |
+| Inception-v3 | 18.3 ms | 25.6 ms | cosine 0.99998 |
+| YOLOv8n (640×640) | 17.5 ms | ~73 ms | cosine 1.000000 |
+| YoNoSplat encoder (965M params) | ~13.5 s | cannot convert | 6 outputs, cosine 0.999+ |
+
+Against MNN's *absolute* best (OpenCL HEAVY-tuned) it's mixed — VKNN wins the depthwise / SE / branchy
+nets; MNN's years-tuned 3×3 kernels win ResNet-50 and YOLOv8n. The 965M-param YoNoSplat transformer
+encoder runs end-to-end on the GPU, and MNN's converter can't handle it at all. Full methodology and
+the OpenCL-tuned comparison: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Quickstart
 
@@ -43,115 +76,175 @@ Warm session creation is up to **6.5x** faster than a cold tuned build.
 
 - Android NDK **r27** (`27.0.12077973`); set `ANDROID_NDK` if it lives elsewhere.
 - `glslc` (shaderc) on `PATH` — compiles the GLSL compute shaders at build time.
-- `ninja` and CMake (&ge; 3.21).
-- Python 3 with `onnxruntime`, `numpy`, `onnx`, `pillow` — for the golden generator.
+- `ninja` and CMake (&ge; 3.22).
+- Python 3 with `onnxruntime`, `numpy`, `onnx`, `pillow` — for the golden generators.
 - `adb` with a connected arm64-v8a device for the on-device scripts.
 
 ```sh
-# 1. Generate the onnxruntime golden (and per-layer goldens with --layers).
-#    Drop your model at assets/mobilenetv2.onnx first.
-python3 scripts/get_golden.py --image assets/cat.jpg --layers
+# Host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan needed).
+./build.sh
 
-# 2. Build the static lib + examples + tests for Android arm64-v8a.
-scripts/build_android.sh                  # honors ANDROID_NDK / ANDROID_API / BUILD_DIR
+# Android build: full engine incl. the Vulkan backend (NDK arm64-v8a).
+./build.sh --android
 
-# 3. Push to device and run vx_classify (backend + precision are positional args).
-scripts/run_on_device.sh vulkan fp16      # also: cpu fp32, enn fp16, ...
+# Other flags: --clear (wipe build dir first), --convert (model compiler only), --docs (site).
+./build.sh --android --clear
 ```
 
-`scripts/bench.sh [N]` runs the full latency sweep (Vulkan fp16/fp32, CPU) plus the
-cold-vs-warm session-creation comparison.
+Run a model with the friendly one-liner tool:
 
-## Example binaries
+```sh
+adb push build-android/vknn_predict /data/local/tmp/vknn/
+adb shell /data/local/tmp/vknn/vknn_predict model.onnx input.bin
+```
 
-All build under `build-android/` (and on the host where Vulkan is unavailable). Each links the
-static lib whole-archive so self-registering backends and operators survive.
+`vknn_classify` adds top-5, golden cosine/top-1 checks, `--bench`, `--profile`, and
+`--layer-dump`; `vknn_run_io` is the generic multi-input/multi-output runner. See
+[skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md).
 
-| Binary | Source | What it does |
-|---|---|---|
-| `vx_probe` | `examples/probe.cpp` | Enumerates the device's Vulkan compute caps (driver, fp16/int8, subgroup size, queues, extensions). |
-| `vx_classify` | `examples/classify.cpp` | Loads ONNX, runs an input, prints top-5; optional golden cosine/top-1 check, `--bench`, `--profile`, `--layer-dump`. |
-| `vx_profile` | `examples/profile.cpp` | Runs with the profiler on: per-op timing table, JSON, and a Chrome trace. |
-| `vx_ion_zerocopy` | `examples/ion_zerocopy.cpp` | DMA-BUF zero-copy import into Vulkan — Mode A (`IonBuffer::alloc`) and Mode B (`wrapFd`), both verified against the staged path. |
-| `vx_backend_switch` | `examples/backend_switch.cpp` | Selects the backend via `Config` (VULKAN / CPU / ENN) with no other change; shows ENN consulted first then falling back. |
-| `vx_op_check` | `examples/op_check.cpp` | Foundation check: GPU elementwise add vs CPU, plus pipeline-cache round-trip. |
-
-Minimal use of the public API:
+## Minimal API
 
 ```cpp
-#include "vx/session.h"
-using namespace vx;
+#include "vknn/model.h"
 
-Config cfg;
-cfg.backend   = BackendKind::kVulkan;   // fallback {kCpu} is implicit
-cfg.precision = Precision::kFp16;
-
-auto session = Runtime::load("mobilenetv2.onnx", cfg);
-
-std::vector<IOTensor> in(1), out;
-in[0].name  = "input";
-in[0].shape = {1, 3, 224, 224};
-in[0].data.resize(1 * 3 * 224 * 224 * sizeof(float));
-// ... fill in[0].f32() with NCHW fp32 ...
-
-session->run(in, out);   // out[0].f32() holds the NCHW result
+vknn::Model net = vknn::Model::load("mobilenetv2.onnx");  // precision auto, Vulkan if available
+vknn::Tensor out = net.run(pixels);                       // pixels = std::vector<float>, NCHW
+int cls = out.argmax();
 ```
+
+`Model::load` reads names, shapes, and dtypes from the model — you never wire tensors by hand.
+For full control (backend, precision, caching, zero-copy) use `vknn::Config` with
+`Model::load(path, cfg)` or the lower-level `vknn::Session` / `Runtime::load`. See
+[docs/CONFIG.md](docs/CONFIG.md).
+
+## Compile and run a model
+
+**1. Compile ONNX → optimized `.vxm`.** `vknn_compile` runs the ONNX import + graph passes once and
+writes an optimized, backend-agnostic `.vxm` (weights optionally fp16). Loading a `.vxm` later skips
+ONNX parsing and the passes — handy for large models.
+
+```sh
+./build.sh --convert        # builds vknn_compile only
+
+#   vknn_compile <model.onnx> <out.vxm> [flags]
+./build-host/vknn_compile model.onnx model.vxm --fp16
+```
+
+Convert-time flags (separate from the runtime `Config` you pick when you load the `.vxm`):
+
+| Flag | Effect |
+|---|---|
+| `--fp16` | store weights as fp16 (≈half the file; the GPU path is fp16 anyway) |
+| `--no-fuse-swish` | disable folding `x · sigmoid(x)` into the producing Conv (default: on) |
+| `--fuse-se` | fuse the Squeeze-Excite chain (experimental) |
+| `--fuse-dwpw` | fuse depthwise-3×3 + 1×1-project (experimental) |
+| `--dump-big` | log tensors > 50M elements after shape inference (debug) |
+
+You can skip this step and load the `.onnx` directly — the loader auto-detects `.onnx` vs `.vxm`.
+
+**2. Run the compiled `.vxm` on the GPU.** `vknn_run_io` handles **any** number of inputs and
+outputs: pass one `.bin` per input (in model order); it writes one `.bin` per output (named by the
+output tensor) into the output dir, printing each input/output name + shape as it runs. Vulkan, fp16,
+all optimizations (`--opt-level 3` is the default):
+
+```sh
+adb push build-android/vknn_run_io model.vxm /data/local/tmp/vknn/
+adb shell mkdir -p /data/local/tmp/vknn/out
+
+# a model with TWO inputs -> TWO outputs:
+adb shell /data/local/tmp/vknn/vknn_run_io \
+    /data/local/tmp/vknn/model.vxm  /data/local/tmp/vknn/out  in0.bin in1.bin \
+    --backend vulkan --precision fp16
+#   input  'a'  1x3x224x224
+#   input  'b'  1x64
+#   output 'logits'  1x1000  -> /data/local/tmp/vknn/out/logits.bin
+#   output 'embed'   1x512   -> /data/local/tmp/vknn/out/embed.bin
+```
+
+Add `--timing` for the pack / submit+gpu / unpack breakdown, `--no-weight-cache` to skip the on-disk
+weight cache. The same flow runs the YoNoSplat encoder (2 inputs → 6 Gaussian outputs); see
+[skills/run-yonosplat.md](skills/run-yonosplat.md) and
+[skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md).
 
 ## Repo layout
 
 ```
-include/vx/            public headers (session, config, backend, op, tensor, ion, graph, profiler, ...)
+include/vknn/          public headers (model, session, config, backend, op, tensor, graph, ...)
 src/core/              session, graph, passes glue, config/JSON, profiler, ion (dma-buf), logging
 src/import/onnx/       dependency-free ONNX protobuf parser
-src/import/passes.*    graph passes (inferShapes, foldBatchNorm, fuseActivations, constFold, eliminateDeadNodes)
-src/backends/vulkan/   VulkanBackend: context, buffers, command/pipeline, NC4HW4 ops, autotune
-src/backends/cpu/      CpuBackend: scalar reference + NEON Add/Gemm; basic/conv/shape ops
-src/backends/enn/      EnnBackend: documented ENN-probing stub (declines ops -> fallback)
-src/layout/            layout-conversion helpers (NCHW <-> NC4HW4 / NHWC)
-shaders/               GLSL compute (.comp) + common.glsl; compiled by glslc, embedded into the lib
-examples/              the six example binaries above
-tests/                 GoogleTest: test_core.cpp, test_integration.cpp -> vx_tests
-scripts/               build_android, run_on_device, bench, gen_docs, get_golden
-tools/                 embed_spirv.py (SPIR-V -> vx::embeddedShaders()), compare_layers.py
-docs/                  ARCHITECTURE, ADDING_*, CONFIG, LIMITATIONS, DEVICE_REPORT, adr/
+src/import/passes.*    graph passes (inferShapes, foldBatchNorm, fuseActivations, constFold, ...)
+src/backends/vulkan/   VulkanBackend: context, buffers, command/pipeline, NC4HW4 + flat ops, autotune
+src/backends/cpu/      CpuBackend: scalar reference + NEON; one op per file under ops/
+shaders/               GLSL compute (.comp) + common.glsl/precision.glsl; compiled by glslc, embedded
+convert/               vknn_compile — the ONNX -> .vxm model compiler
+examples/              example/tool binaries (built as vknn_*)
+tests/                 GoogleTest core + integration -> vknn_tests
+scripts/               build_android shim, run_on_device, bench, gen_docs, get_golden, yonosplat/
+tools/                 embed_spirv.py (SPIR-V -> vknn::embeddedShaders()), compare_layers.py
+docs/                  ARCHITECTURE, ADDING_*, CONFIG, LIMITATIONS, BENCHMARK, OP_COVERAGE, adr/
 ```
 
+## Binaries
+
+All build as `vknn_*` under `build-android/` (and on the host where Vulkan is unavailable). Each
+links the static lib whole-archive so self-registering backends and operators survive.
+
+| Binary | Source | What it does |
+|---|---|---|
+| `vknn_probe` | `examples/probe.cpp` | Enumerates the device's Vulkan compute caps (driver, fp16/int8, subgroup size, queues, extensions). |
+| `vknn_classify` | `examples/classify.cpp` | Loads ONNX, runs an input, prints top-5; optional golden cosine/top-1, `--bench`, `--profile`, `--layer-dump`. |
+| `vknn_predict` | `examples/predict.cpp` | The friendly `Model` API in action: load, run, read the result. |
+| `vknn_run_io` | `examples/run_io.cpp` | Generic runner: any model, named inputs in / outputs dumped to a dir. |
+| `vknn_compile` | `convert/compile.cpp` | ONNX -> optimized `.vxm` model compiler (fp16, fusions). |
+| `vknn_profile` | `examples/profile.cpp` | Runs with the profiler on: per-op timing table, JSON, Chrome trace. |
+| `vknn_ion_zerocopy` | `examples/ion_zerocopy.cpp` | DMA-BUF zero-copy import into Vulkan, verified against the staged path. |
+| `vknn_backend_switch` | `examples/backend_switch.cpp` | Selects the backend via `Config` (Vulkan / CPU) and shows per-node routing. |
+| `vknn_yonosplat` | `examples/yonosplat.cpp` | The full YoNoSplat 3DGS pipeline: encoder -> Gaussians -> Vulkan rasterizer -> image. |
+| `vknn_tests` | `tests/*.cpp` | GoogleTest core IR/passes + import-to-run pipeline (host or device). |
+
 ## Documentation
+
+Build the static documentation site (one self-contained page set) with:
+
+```sh
+./build.sh --docs        # -> docs/site/index.html
+```
+
+Key reference docs:
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — import &rarr; IR &rarr; passes &rarr; segments &rarr; backends, and the NC4HW4 compute path.
 - [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md) — add a CPU or Vulkan op via the self-registration macros.
 - [docs/ADDING_A_BACKEND.md](docs/ADDING_A_BACKEND.md) — implement and register a new `Backend`.
-- [docs/CONFIG.md](docs/CONFIG.md) — every `vx::Config` field and its JSON form.
-- [docs/LIMITATIONS.md](docs/LIMITATIONS.md) — supported operators, known gaps, ENN stub status.
-- [docs/BENCHMARK.md](docs/BENCHMARK.md) — honest vxrt-Vulkan vs MNN-Vulkan numbers on-device.
-- [docs/DEVICE_REPORT.md](docs/DEVICE_REPORT.md) — full probed capabilities of the target device.
-- [docs/adr/](docs/adr/) — architecture decision records (0001 language/build, 0002 Vulkan loader + embedded SPIR-V, 0003 UMA memory, 0004 NC4HW4 layout, 0005 ION via DMA-BUF, 0006 segment execution + fallback, 0007 ENN stub, 0008 caches + autotuning).
+- [docs/CONFIG.md](docs/CONFIG.md) — every `vknn::Config` field and its JSON form.
+- [docs/OP_COVERAGE.md](docs/OP_COVERAGE.md) — the operator set and its backend coverage.
+- [docs/LIMITATIONS.md](docs/LIMITATIONS.md) — supported operators, known gaps, single-device caveat.
+- [docs/BENCHMARK.md](docs/BENCHMARK.md) — on-device VKNN vs MNN numbers and methodology.
+- [docs/adr/](docs/adr/) — architecture decision records.
+- [AGENTS.md](AGENTS.md) + [skills/](skills/) — orientation and focused how-to guides for contributors (and AI agents).
 
-### Extending
+## Extending
 
 Self-registration works because the static lib is linked whole-archive
-(`$<LINK_LIBRARY:WHOLE_ARCHIVE,vxrt>`); no edits to core dispatch are needed.
+(`$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>`); no edits to core dispatch are needed. Note the
+**one operator per file** convention under `src/backends/{cpu,vulkan}/ops/`.
 
-- **CPU op:** subclass `vx::CpuOp` and `VX_REGISTER_CPU_OP(OpType::kFoo, FooCpuOp)`.
-- **Vulkan op:** subclass `vx::VulkanOp` (implement `prepare()` / `record()`), add a GLSL `.comp` under `shaders/`, and `VX_REGISTER_VK_OP(OpType::kFoo, FooVulkanOp)`.
-- **Backend:** subclass `vx::Backend` and `VX_REGISTER_BACKEND(BackendKind::kFoo, FooBackend)`.
+- **CPU op:** subclass `vknn::CpuOp` and `VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpuOp)`.
+- **Vulkan op:** subclass `vknn::VulkanOp` (implement `prepare()` / `record()`), add a GLSL
+  `.comp` under `shaders/`, and `VKNN_REGISTER_VK_OP(OpType::kFoo, FooVulkanOp)`.
+- **Backend:** subclass `vknn::Backend` and `VKNN_REGISTER_BACKEND(BackendKind::kFoo, FooBackend)`.
 
-## Tests and API docs
+## Tests
 
 The unit/integration tests build and run **on the host** (no Vulkan / NEON required):
 
 ```sh
-cmake -S . -B build-host -G Ninja \
-  -DVXRT_ENABLE_VULKAN=OFF -DVXRT_ENABLE_NEON=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build-host --target vx_tests
-./build-host/vx_tests
+./build.sh                 # configures + builds build-host, including vknn_tests
+./build-host/vknn_tests
 ```
 
-`vx_tests` covers the core IR/passes (`tests/test_core.cpp`) and the import-to-run pipeline on
+`vknn_tests` covers the core IR/passes (`tests/test_core.cpp`) and the import-to-run pipeline on
 the CPU backend (`tests/test_integration.cpp`). The same binary also builds for the device.
 
-Generate the Doxygen API reference:
+## License
 
-```sh
-scripts/gen_docs.sh        # -> docs/api/html/index.html (uses docs/Doxyfile)
-```
+See [LICENSE](LICENSE).

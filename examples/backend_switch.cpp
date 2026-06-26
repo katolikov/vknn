@@ -1,4 +1,4 @@
-// vx_backend_switch - select the backend via config (VULKAN | CPU) with no other change.
+// vknn_backend_switch - select the backend via config (VULKAN | CPU) with no other change.
 #include <algorithm>
 #include <cstdio>
 #include <cstring>

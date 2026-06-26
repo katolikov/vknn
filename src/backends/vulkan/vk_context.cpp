@@ -156,7 +156,7 @@ void VulkanContext::queryCaps() {
 
 void VulkanContext::createDevice() {
   // Pick a compute-capable queue family, preferring a dedicated compute queue
-  // (COMPUTE without GRAPHICS) - on Xclipse that is family 1.
+  // (COMPUTE without GRAPHICS) - on the target GPU that is family 1.
   uint32_t qn = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(phys_, &qn, nullptr);
   std::vector<VkQueueFamilyProperties> qfs(qn);
@@ -178,8 +178,8 @@ void VulkanContext::createDevice() {
     throw Error(Status::kNotFound, "no compute queue family");
   queueFamily_ = (uint32_t)chosen;
   VKNN_INFO << "Compute queue family = " << queueFamily_
-          << (qfs[chosen].queueFlags & VK_QUEUE_GRAPHICS_BIT ? " (shared w/ graphics)"
-                                                             : " (dedicated compute)");
+            << (qfs[chosen].queueFlags & VK_QUEUE_GRAPHICS_BIT ? " (shared w/ graphics)"
+                                                               : " (dedicated compute)");
 
   float prio = 1.0f;
   VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
