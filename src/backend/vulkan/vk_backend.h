@@ -53,6 +53,7 @@ struct VkOpEnv {
   WeightCache* weights = nullptr;       // prepacked-weight + tuning cache (may be null)
   vk::CommandRunner* runner = nullptr;  // for on-device autotuning benchmarks
   TuningLevel tuning = TuningLevel::kFast;
+  WinogradMode winograd = WinogradMode::kAuto;
   // Per-model namespace for the weight cache, so reusing one cacheDir across different models can't
   // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
   std::string modelTag;

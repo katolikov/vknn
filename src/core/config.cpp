@@ -47,6 +47,16 @@ static TuningLevel tuneFromStr(const std::string& s) {
 static const char* tuneStr(TuningLevel t) {
   return t == TuningLevel::kOff ? "off" : t == TuningLevel::kThorough ? "thorough" : "fast";
 }
+static WinogradMode winoFromStr(const std::string& s) {
+  if (s == "on")
+    return WinogradMode::kOn;
+  if (s == "off")
+    return WinogradMode::kOff;
+  return WinogradMode::kAuto;
+}
+static const char* winoStr(WinogradMode w) {
+  return w == WinogradMode::kOn ? "on" : w == WinogradMode::kOff ? "off" : "auto";
+}
 
 Config Config::fromJsonFile(const std::string& path) {
   std::ifstream f(path);
@@ -104,6 +114,8 @@ Config Config::fromJsonString(const std::string& json) {
   S("layerDumpDir", c.layerDumpDir);
   if (auto* j = v.get("tuning"))
     c.tuning = tuneFromStr(j->asStr("fast"));
+  if (auto* j = v.get("winograd"))
+    c.winograd = winoFromStr(j->asStr("auto"));
   if (auto* j = v.get("power")) {
     std::string p = j->asStr("normal");
     c.power = p == "high" ? PowerHint::kHigh : p == "low" ? PowerHint::kLow : PowerHint::kNormal;
@@ -138,7 +150,8 @@ std::string Config::toJson() const {
   os << "  \"verbosity\": " << verbosity << ",\n";
   os << "  \"layerDump\": " << (layerDump ? "true" : "false") << ",\n";
   os << "  \"layerDumpDir\": \"" << layerDumpDir << "\",\n";
-  os << "  \"tuning\": \"" << tuneStr(tuning) << "\"\n";
+  os << "  \"tuning\": \"" << tuneStr(tuning) << "\",\n";
+  os << "  \"winograd\": \"" << winoStr(winograd) << "\"\n";
   os << "}\n";
   return os.str();
 }

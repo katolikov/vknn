@@ -170,7 +170,7 @@ struct ConvOp : VulkanOp {
   // The timing dispatches run on dedicated SCRATCH buffers, never the real activation buffers -
   // tuning must not write into the data path (doing so raced the first real run and corrupted it).
   uint32_t pickLocalSize(VkOpEnv& env) {
-    if (std::getenv("VKNN_NO_TUNE"))
+    if (env.tuning == TuningLevel::kOff)
       return 64;
     char buf[96];
     snprintf(buf, sizeof(buf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH,
@@ -222,9 +222,9 @@ struct ConvOp : VulkanOp {
   // transform passes aren't amortized there), so the choice is per-shape, measured on scratch
   // buffers and cached like the local-size tune. VKNN_WINOGRAD / VKNN_NO_WINOGRAD force it on/off.
   bool tuneWino(VkOpEnv& env, NCHW x, NCHW y, int64_t Cin, int64_t Cout, int act) {
-    if (std::getenv("VKNN_WINOGRAD"))
+    if (env.winograd == WinogradMode::kOn)
       return true;
-    if (std::getenv("VKNN_NO_WINOGRAD") || env.tuning == TuningLevel::kOff || !env.runner)
+    if (env.winograd == WinogradMode::kOff || env.tuning == TuningLevel::kOff || !env.runner)
       return false;
     int64_t Cinb = cBlocks(Cin), Coutb = cBlocks(Cout);
     int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
@@ -314,6 +314,7 @@ struct ConvOp : VulkanOp {
     // Winograd F(2,3) via a tiled GEMM (the structure MNN's OpenCL backend uses). It beats the
     // direct kernel on deep, square 3x3 (ResNet-50: 12.6 -> 10.5 ms, matching MNN's tuned OpenCL)
     // but loses on small-channel / spatially-large 3x3, so tuneWino picks per-shape and caches.
+    // Controlled by Config::winograd (kAuto default); NOT an env var.
     bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 &&
                       st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 &&
                       x.c >= 32 && Cout >= 32);

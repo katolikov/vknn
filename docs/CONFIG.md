@@ -42,16 +42,18 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `layerDump` | bool | `true` / `false` | `false` | Dump every layer's output tensor to disk for debugging. |
 | `layerDumpDir` | string | filesystem path | `"/data/local/tmp/vxrt/dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
 | `tuning` | string | `"off"`, `"fast"`, `"thorough"` | `"fast"` | Autotuning level for conv workgroup-size search. `off` uses defaults, `fast` does a quick search, `thorough` searches more candidates. |
+| `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection. `auto` (best+fast) measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. `auto` needs `tuning` != `off`. |
 
 ### Enum reference
 
 The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 
 ```cpp
-enum class BackendKind { kVulkan, kCpu };
-enum class Precision   { kFp32, kFp16, kAuto };
-enum class PowerHint   { kNormal, kHigh, kLow };
-enum class TuningLevel { kOff, kFast, kThorough };
+enum class BackendKind  { kVulkan, kCpu };
+enum class Precision    { kFp32, kFp16, kAuto };
+enum class PowerHint    { kNormal, kHigh, kLow };
+enum class TuningLevel  { kOff, kFast, kThorough };
+enum class WinogradMode { kAuto, kOn, kOff };   // kAuto = per-shape autotune (recommended default)
 enum class TensorFormat : uint8_t { kNCHW, kNHWC, kNC4HW4, kUnknown };
 ```
 

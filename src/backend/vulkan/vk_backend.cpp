@@ -578,6 +578,7 @@ public:
     env_.weights = be_->weightCache(cfg);
     env_.runner = &be_->runner();
     env_.tuning = cfg.tuning;
+    env_.winograd = cfg.winograd;
     env_.graph = &g;
     env_.config = &cfg;
     env_.useFp16 = useFp16_;

@@ -13,6 +13,10 @@ enum class BackendKind { kVulkan = 0, kCpu = 1 };
 enum class Precision { kFp32 = 0, kFp16 = 1, kAuto = 2 };
 enum class PowerHint { kNormal = 0, kHigh = 1, kLow = 2 };
 enum class TuningLevel { kOff = 0, kFast = 1, kThorough = 2 };
+// How the 3x3-conv Winograd F(2,3) kernel is selected. kAuto (the recommended, best+fast default)
+// measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; kOn
+// forces Winograd on every eligible 3x3; kOff always uses the direct kernel.
+enum class WinogradMode { kAuto = 0, kOn = 1, kOff = 2 };
 
 const char* backendName(BackendKind k);
 BackendKind backendFromStr(const std::string& s);
@@ -56,8 +60,11 @@ struct Config {
   bool layerDump = false;
   std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
 
-  // Tuning.
+  // Tuning. kFast (default) measures a few candidates per shape and caches the winner.
   TuningLevel tuning = TuningLevel::kFast;
+  // 3x3 Winograd selection. kAuto picks the faster of tiled-GEMM Winograd vs the direct kernel per
+  // shape (best+fast). Needs tuning != kOff to measure; with tuning off it stays on the direct kernel.
+  WinogradMode winograd = WinogradMode::kAuto;
 
   static Config fromJsonFile(const std::string& path);
   static Config fromJsonString(const std::string& json);

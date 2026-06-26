@@ -6,6 +6,8 @@
 //   --shape N,C,H,W   input shape (default 1,3,224,224)
 //   --backend NAME    vulkan|cpu (default vulkan)
 //   --precision P     fp32|fp16 (default fp16)
+//   --winograd MODE   auto|on|off  3x3 Winograd selection (default auto = best+fast per-shape pick)
+//   --tuning LEVEL    off|fast|thorough  kernel autotuning (default fast)
 //   --config PATH     JSON config (overrides flags it sets)
 //   --golden PATH     raw float32 golden output for cosine/top-1 check
 //   --profile         enable per-op profiler + print table
@@ -62,6 +64,19 @@ int main(int argc, char** argv) {
   cfg.backend = backendFromStr(backend);
   cfg.precision = (precision == "fp32") ? Precision::kFp32 : Precision::kFp16;
   cfg.cacheDir = argval(argc, argv, "--cache", cfg.cacheDir.c_str());
+  {
+    std::string w = argval(argc, argv, "--winograd", "auto");  // auto|on|off
+    cfg.winograd = (w == "on")    ? WinogradMode::kOn
+                   : (w == "off") ? WinogradMode::kOff
+                                  : WinogradMode::kAuto;
+    std::string t = argval(argc, argv, "--tuning", "");  // off|fast|thorough
+    if (t == "off")
+      cfg.tuning = TuningLevel::kOff;
+    else if (t == "thorough")
+      cfg.tuning = TuningLevel::kThorough;
+    else if (t == "fast")
+      cfg.tuning = TuningLevel::kFast;
+  }
   if (hasflag(argc, argv, "--profile"))
     cfg.profile = true;
   if (hasflag(argc, argv, "--layer-dump")) {
