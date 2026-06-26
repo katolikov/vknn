@@ -71,13 +71,14 @@ autotuning** (MNN's strongest path here, ANGLE-translated to Vulkan) — VKNN wi
 | YOLOv8n (640×640) | 20.0 ms | ~73 ms | 24.5 ms | cosine 1.000000 |
 | YoNoSplat encoder (965M params) | ~13.5 s | cannot convert | cannot convert | 6 outputs, cosine 0.999+ |
 
-The VKNN number is the full `run()` wall (it *includes* the host↔device pack/unpack); MNN's is
-inference-only — so the comparison is generous to MNN. Against MNN's *absolute* best (the min over
-OpenCL-HEAVY, CPU-4-thread, and Vulkan), VKNN is faster on **8 of 9** models and at **parity on the 9th
-(ResNet-50)**. The conv-heavy nets (ResNet, Inception, DenseNet, YOLO) run a tiled-GEMM **Winograd F(2,3)**
-kernel, autotuned per shape against the direct kernel — ResNet-50 (was MNN +43%) now matches MNN-OpenCL
-from a cool device, MNN keeping a slim edge only when the device is already warm. The 965M-param YoNoSplat
-transformer encoder runs end-to-end on the GPU, and MNN's converter can't handle it at all.
+The VKNN figure is the full `run()` wall — it *includes* the host↔device copies — while MNN's is
+inference-only, so the table is generous to MNN. Even so, measured against MNN's *absolute* best (the
+min over OpenCL-HEAVY, CPU-4-thread, and Vulkan), VKNN is faster on **8 of 9** models and at **parity on
+ResNet-50**. The conv-heavy nets (ResNet, Inception, DenseNet, YOLO) run a tiled-GEMM **Winograd F(2,3)**
+kernel, picked per shape against the direct kernel by an on-device autotuner — that took ResNet-50 from
+MNN +43% to a dead heat (it matches MNN-OpenCL on a cool device; MNN holds a slim edge only once the
+device is warm). YoNoSplat — a 965M-parameter transformer encoder — runs end-to-end on the GPU, a model
+MNN's converter can't handle at all.
 
 **End-to-end, per stage** (ResNet-50, Vulkan fp16, warm). A first result is more than the GPU run —
 open the model, build the session, copy in, run, copy out:
