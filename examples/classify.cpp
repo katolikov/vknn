@@ -4,7 +4,7 @@
 //   --model PATH      ONNX model (default assets/mobilenetv2.onnx)
 //   --input PATH      raw float32 NCHW input (default input.bin)
 //   --shape N,C,H,W   input shape (default 1,3,224,224)
-//   --backend NAME    vulkan|cpu|enn (default vulkan)
+//   --backend NAME    vulkan|cpu (default vulkan)
 //   --precision P     fp32|fp16 (default fp16)
 //   --config PATH     JSON config (overrides flags it sets)
 //   --golden PATH     raw float32 golden output for cosine/top-1 check

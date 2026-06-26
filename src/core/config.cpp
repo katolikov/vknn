@@ -14,16 +14,12 @@ const char* backendName(BackendKind k) {
       return "VULKAN";
     case BackendKind::kCpu:
       return "CPU";
-    case BackendKind::kEnn:
-      return "ENN";
   }
   return "?";
 }
 BackendKind backendFromStr(const std::string& s) {
   if (s == "VULKAN" || s == "vulkan")
     return BackendKind::kVulkan;
-  if (s == "ENN" || s == "enn")
-    return BackendKind::kEnn;
   return BackendKind::kCpu;
 }
 static Precision precFromStr(const std::string& s) {

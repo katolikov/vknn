@@ -1,5 +1,4 @@
-// vx_backend_switch - select the backend via config (VULKAN | CPU | ENN) with no other change.
-// Demonstrates the pluggable-backend path: ENN is consulted first then falls back (stub).
+// vx_backend_switch - select the backend via config (VULKAN | CPU) with no other change.
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -25,7 +24,7 @@ static const char* argval(int c, char** v, const char* k, const char* d) {
 static void runWith(const std::string& model, const std::vector<uint8_t>& inData, BackendKind be) {
   Config cfg;
   cfg.backend = be;
-  cfg.fallback = {BackendKind::kVulkan, BackendKind::kCpu};  // ENN/others fall back through these
+  cfg.fallback = {BackendKind::kVulkan, BackendKind::kCpu};  // others fall back through these
   cfg.precision = Precision::kFp16;
   printf("\n=== config.backend = %s ===\n", backendName(be));
   auto sess = Runtime::load(model, cfg);
@@ -64,7 +63,7 @@ int main(int argc, char** argv) {
   auto in = readFile(argval(argc, argv, "--input", "assets/input.bin"));
   if (in.empty())
     in.assign(1 * 3 * 224 * 224 * 4, 0);
-  for (BackendKind be : {BackendKind::kVulkan, BackendKind::kCpu, BackendKind::kEnn})
+  for (BackendKind be : {BackendKind::kVulkan, BackendKind::kCpu})
     runWith(model, in, be);
   return 0;
 }

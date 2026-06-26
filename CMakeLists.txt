@@ -77,8 +77,7 @@ file(GLOB_RECURSE VKNN_CORE_SRC CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/import/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/layout/*.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cpu/*.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/enn/*.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cpu/*.cpp)
 
 set(VKNN_SRC ${VKNN_CORE_SRC} ${EMBEDDED_SHADERS_CPP})
 
@@ -118,7 +117,7 @@ target_link_libraries(vknn PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io compile yonosplat)
+  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io yonosplat)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vknn_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       # whole-archive so self-registering backends/operators (static initializers in the
@@ -126,6 +125,14 @@ if(VKNN_BUILD_EXAMPLES)
       target_link_libraries(vknn_${ex} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
     endif()
   endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# Model compiler (ONNX -> optimized .vxm). Its own top-level dir, not an example.
+# ---------------------------------------------------------------------------
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/convert/compile.cpp)
+  add_executable(vknn_compile ${CMAKE_CURRENT_SOURCE_DIR}/convert/compile.cpp)
+  target_link_libraries(vknn_compile PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
 endif()
 
 # ---------------------------------------------------------------------------

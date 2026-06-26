@@ -9,7 +9,7 @@
 
 namespace vknn {
 
-enum class BackendKind { kVulkan = 0, kCpu = 1, kEnn = 2 };
+enum class BackendKind { kVulkan = 0, kCpu = 1 };
 enum class Precision { kFp32 = 0, kFp16 = 1, kAuto = 2 };
 enum class PowerHint { kNormal = 0, kHigh = 1, kLow = 2 };
 enum class TuningLevel { kOff = 0, kFast = 1, kThorough = 2 };
