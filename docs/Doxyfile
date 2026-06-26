@@ -15,9 +15,10 @@ JAVADOC_AUTOBRIEF      = YES
 QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = NO
 SOURCE_BROWSER         = YES
-USE_MDFILE_AS_MAINPAGE = README.md
-INPUT                 += README.md docs/ARCHITECTURE.md docs/ADDING_AN_OPERATOR.md \
-                         docs/ADDING_A_BACKEND.md docs/CONFIG.md docs/LIMITATIONS.md
+
+# Doxygen documents only the C++/GLSL sources — the Markdown docs are rendered by the static site
+# (scripts/gen_site.py), so feeding them here only produced spurious \ref warnings for their links.
+WARN_IF_DOC_ERROR      = NO
 
 # Stock Doxygen theme. The hand-built site (docs/site, via ./build.sh --docs) is the primary docs;
 # this C++ API reference is secondary and linked from it.
