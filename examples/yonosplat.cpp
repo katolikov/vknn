@@ -11,7 +11,7 @@
 //   N]
 // image.bin = fp32 [1,V,3,224,224], intrinsics.bin = fp32 [1,V,3,3] (normalized). extr.bin
 // (optional) = fp32 [V,4,4] camera-to-world (the encoder's predicted pose, dumpable via
-// VKNN_DUMP_NAMES); identity if omitted. Renders view N.
+// Config::dumpTensors); identity if omitted. Renders view N.
 #include "vknn/session.h"
 #include <algorithm>
 #include <cmath>

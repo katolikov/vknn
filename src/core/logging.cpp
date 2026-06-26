@@ -18,7 +18,7 @@ namespace vknn {
         std::unordered_map<std::string, int> g_counts;
         bool                                 g_init = false;
 
-        // The log level is set from Config::verbosity (applyLogLevel) — there are no environment variables.
+        // Log level comes from Config::verbosity via applyLogLevel().
         void ensureInit() {
             g_init = true;
         }

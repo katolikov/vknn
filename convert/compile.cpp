@@ -5,10 +5,6 @@
 // OOM. The Vulkan layout pass (NC4HW4<->flat) is applied per-target at load, so a .vxm is
 // backend-agnostic: compile once on the host, run anywhere.
 //
-// Everything is a flag — no environment variables. Conversion behaviour is explicit and
-// reproducible. Runtime behaviour (backend, precision, caching, …) is chosen separately when you
-// LOAD and run the .vxm (see vknn::Config), not here.
-//
 //   vknn_compile <model.onnx> <out.vxm> [flags]
 //     --fp16            store weights as fp16 (default: fp32)
 //     --no-fuse-swish   disable HardSwish/SiLU -> conv-epilogue fusion (default: on)

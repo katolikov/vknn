@@ -1062,7 +1062,7 @@ namespace vknn {
                 VKNN_INFO << "timing: pack=" << ms(t0, t1) << "ms submit+gpu=" << wall << "ms unpack=" << ms(t2, t3) << "ms";
             }
 
-            // VKNN_DUMP_NAMES targeted dump: write the named tensors (dedicated buffers) to disk for
+            // Config::dumpTensors targeted dump: write the named tensors (dedicated buffers) to disk for
             // diffing.
             if (!dumpTids_.empty())
             {
@@ -1142,7 +1142,7 @@ namespace vknn {
         VkCommandBuffer                                 cmd_       = VK_NULL_HANDLE;
         VkQueryPool                                     queryPool_ = VK_NULL_HANDLE;
         bool                                            recorded_  = false;
-        std::vector<TensorId>                           dumpTids_; // VKNN_DUMP_NAMES debug: tensors to dump after the run
+        std::vector<TensorId>                           dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
     };
 
     std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) {

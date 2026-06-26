@@ -19,7 +19,7 @@ namespace vknn {
 
     // Advanced kernel-selection hints (MNN-style Config::setHint). The defaults (value 0) are the
     // best/fast production kernels; non-zero values select experimental or research variants and are
-    // not needed for normal use. There are no environment variables — this is the only way to reach them.
+    // not needed for normal use.
     enum class Hint {
         // Winograd matmul variant: 0 = tiled-GEMM (default/best), 1 = fused, 2 = fused-split, 3 = fully-fused.
         kWinogradVariant = 0,
@@ -61,14 +61,13 @@ namespace vknn {
         // the full weight blob — needed to fit large (e.g. 965M-param fp16) models on-device.
         bool freeWeightsAfterUpload = true;
 
-        // Optimization / debug. These replace the old VKNN_* env vars entirely — there are NO environment
-        // variables in the engine; everything is configured here (or via setHint above).
+        // Optimization / debug.
         int         optLevel      = 3;     // graph optimization level 0..3 (fusions). 0 = none.
-        bool        noFlatOps     = false; // disable the flat-layout GPU pass (was VKNN_NO_FLAT_OPS)
-        bool        timing        = false; // print pack/submit/unpack + per-stage timing (was VKNN_TIMING)
-        bool        debugSegments = false; // trace per-segment + per-CPU-op execution (was VKNN_DEBUG_SEG)
-        std::string disableVkOps;          // comma list of op types to force onto CPU (was VKNN_DISABLE_VK_OPS)
-        std::string dumpTensors;           // comma list of tensor names to dump to disk (was VKNN_DUMP_NAMES)
+        bool        noFlatOps     = false; // disable the flat-layout GPU pass
+        bool        timing        = false; // print pack/submit/unpack + per-stage timing
+        bool        debugSegments = false; // trace per-segment + per-CPU-op execution
+        std::string disableVkOps;          // comma list of op types to force onto CPU
+        std::string dumpTensors;           // comma list of tensor names to dump to disk
 
         // Profiling / debug.
         bool        profile      = false;
@@ -83,7 +82,7 @@ namespace vknn {
         WinogradMode winograd = WinogradMode::kAuto;
 
         // Advanced research/experimental kernel hints (MNN-style). Default = best production kernels.
-        // e.g. cfg.setHint(Hint::kWinogradUnit, 4) to force F(4,3). Replaces the old VKNN_* env vars.
+        // e.g. cfg.setHint(Hint::kWinogradUnit, 4) to force F(4,3).
         std::vector<int> hints; // indexed by (int)Hint; 0 = default. Use setHint()/hint().
         void             setHint(Hint h, int value) {
             if ((int) h >= (int) hints.size())

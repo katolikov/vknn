@@ -10,7 +10,7 @@
 namespace vknn {
     namespace {
 
-        // Read an advanced kernel hint from the session Config (no env vars; see include/vknn/config.h).
+        // Read an advanced kernel hint from the session Config (see include/vknn/config.h).
         inline int cfgHint(const VkOpEnv &env, Hint h) {
             return env.config ? env.config->hint(h) : 0;
         }
@@ -56,19 +56,14 @@ namespace vknn {
             }
 
             // --- Winograd F(2x2,3x3) state (3x3, stride 1, pad 1, group 1, fp16) ---
-            // Three structural variants were implemented and verified (cosine 1.0 on ResNet-50) but ALL
-            // regress vs the direct 3x3 kernel (~11.2 ms GPU) on this driver — Winograd's 2.25x FLOP saving
-            // can't overcome the driver's punishment of memory/register/LDS pressure. DO NOT RE-TRY:
-            //   - 2-pass (VKNN_WINOGRAD): input transform -> V in GLOBAL, then fused matmul+output transform
-            //     with 16 register accumulators/thread. ~15 ms. MEMORY-bound: V is ~4x the input for F(2,3)
-            //     and round-trips to DRAM. Splitting the 16 accumulators across 4 cooperating threads
-            //     (VKNN_WINO2, wino_fused2) does NOT help -> confirms it's bandwidth, not occupancy.
-            //   - fully-fused (VKNN_WINOFULL, wino_full): one kernel, V staged in LDS (no global round-trip).
-            //     ~88 ms. OCCUPANCY collapse: the 16 KB static sV LDS array caps workgroups/SM to ~2-3 and
-            //     starves the GPU. This is the "production fused-LDS Winograd" approach; it dies here.
-            // The variants are kept behind env flags (default OFF) as a documented negative result.
-            // Two passes: input transform -> V (global), then a FUSED matmul+output-transform kernel that
-            // keeps the 16 transform-domain accumulators in registers (no M global buffer).
+            // The default Winograd kernel is the 3-pass tiled GEMM (wino_input -> wino_gemm -> wino_out);
+            // it beats the direct 3x3 on deep/square convs (ResNet-50 12.6 -> 10.5 ms) and tuneWino picks
+            // it per shape. The earlier non-GEMM matmul variants all regressed and are kept only behind
+            // Hint::kWinogradVariant as documented negative results: a 2-pass with a naive 16-accumulator
+            // matmul (~15 ms, memory-bound on the global V round-trip), the same split 4 ways (wino_fused2,
+            // no help -> bandwidth not occupancy), a fully-fused kernel with V in LDS (wino_full, ~88 ms,
+            // the 16 KB static LDS array collapses occupancy), and a subgroup-shuffle GEMM (wino_gemm_sg,
+            // +47% — shuffle costs more than LDS here).
             std::unique_ptr<vk::ComputePipeline> wInPipe, wFusedPipe, wFullPipe;
             std::shared_ptr<vk::Buffer>          ubuf, vbuf;
             WinoInPC                             wInPC {};
@@ -79,7 +74,7 @@ namespace vknn {
             // 3-pass with a TILED batched GEMM for the transform-domain multiply (MNN's structure).
             bool                                 winogemm     = false;
             bool                                 gemmSubgroup = false; // subgroup-shuffle GEMM (no LDS); U is [pos][icb][oc]
-            int                                  winoUnit     = 2; // output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic)
+            int                                  winoUnit     = 2;     // output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic)
             std::unique_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
             std::shared_ptr<vk::Buffer>          mbuf;
             WinoGemmPC                           wGemmPC {};
@@ -94,7 +89,7 @@ namespace vknn {
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
 
-                int wvar = cfgHint(env, Hint::kWinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
+                int wvar     = cfgHint(env, Hint::kWinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
                 gemmSubgroup = (wvar == 4);
 
                 // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3).
@@ -125,11 +120,10 @@ namespace vknn {
                             {
                                 for (int j = 0; j < A_; ++j)
                                 {
-                                    const float *Gj  = (U_ == 2) ? G2[j] : G4[j];
-                                    float        u   = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
-                                    int          pos = i * A_ + j;
-                                    int64_t      uidx =
-                                        gemmSubgroup ? ((pos * Cinb + icb) * Cout + oc) : ((pos * Cout + oc) * Cinb + icb);
+                                    const float *Gj    = (U_ == 2) ? G2[j] : G4[j];
+                                    float        u     = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
+                                    int          pos   = i * A_ + j;
+                                    int64_t      uidx  = gemmSubgroup ? ((pos * Cinb + icb) * Cout + oc) : ((pos * Cout + oc) * Cinb + icb);
                                     U[uidx * 4 + lane] = u;
                                 }
                             }
@@ -168,8 +162,8 @@ namespace vknn {
                     wGemmGZ = nPos;                     // one GEMM per transform position (16 or 36)
                     wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {},
                                                                     env.cache->handle());
-                    wGemmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC),
-                                                                      std::vector<uint32_t> {}, env.cache->handle());
+                    wGemmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {},
+                                                                      env.cache->handle());
                     wOutPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC), std::vector<uint32_t> {},
                                                                      env.cache->handle());
                     return;
@@ -343,7 +337,6 @@ namespace vknn {
                 // Winograd F(2,3) via a tiled GEMM (the structure MNN's OpenCL backend uses). It beats the
                 // direct kernel on deep, square 3x3 (ResNet-50: 12.6 -> 10.5 ms, matching MNN's tuned OpenCL)
                 // but loses on small-channel / spatially-large 3x3, so tuneWino picks per-shape and caches.
-                // Controlled by Config::winograd (kAuto default); NOT an env var.
                 bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && x.c >= 32 && Cout >= 32);
                 int wchoice = winoShape ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
                 winograd    = (wchoice > 0);

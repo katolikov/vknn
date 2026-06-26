@@ -10,8 +10,8 @@
 //   --tuning LEVEL    off|fast|thorough  kernel autotuning (default fast)
 //   --wino-unit N     0=auto (default), 4=force F(4,3) Winograd (research)
 //   --wino-variant N  0=tiled-GEMM (default), 1/2/3 = experimental fused variants
-//   --timing          print pack/submit/unpack + per-stage timing (was VKNN_TIMING env)
-//   --debug-seg       trace per-segment execution (was VKNN_DEBUG_SEG env)
+//   --timing          print pack/submit/unpack + per-stage timing
+//   --debug-seg       trace per-segment execution
 //   --config PATH     JSON config (overrides flags it sets)
 //   --golden PATH     raw float32 golden output for cosine/top-1 check
 //   --profile         enable per-op profiler + print table
@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
             cfg.tuning = TuningLevel::kThorough;
         } else if (t == "fast")
         { cfg.tuning = TuningLevel::kFast; }
-        // Advanced hints (replace the old env vars): force Winograd unit / variant for research.
+        // Advanced hints: force Winograd unit / variant for research.
         int wu = atoi(argval(argc, argv, "--wino-unit", "0")); // 0=auto, 4=force F(4,3)
         if (wu)
         {

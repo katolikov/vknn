@@ -26,8 +26,7 @@ namespace vknn {
     void eliminateIdentity(Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
     void eliminateDeadNodes(Graph &g);
-    // Options for the standard pass pipeline (compile time). The model compiler exposes these as flags
-    // so conversion behaviour is explicit and reproducible — no environment variables involved.
+    // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch             = 1;
         bool    fuseSwish         = true;  // fold HardSwish/SiLU self-gating into the conv epilogue
