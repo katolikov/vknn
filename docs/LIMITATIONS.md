@@ -1,10 +1,9 @@
 # VKNN — Limitations & Known Gaps
 
-This document is an honest account of what VKNN (`vknn::`) does **not** do, what is
-stubbed, and where the verified numbers fall short of state of the art. Everything
-below was measured on **one** device (see [Test coverage](#test-coverage-one-device))
-unless stated otherwise. No numbers here are aspirational — they are the figures
-produced by on-device runs against onnxruntime goldens.
+This is what VKNN (`vknn::`) does **not** do, what is stubbed, and where the verified
+numbers fall short of state of the art. Everything below was measured on **one** device
+(see [Test coverage](#test-coverage-one-device)) unless stated otherwise. No numbers here
+are aspirational — they come from on-device runs against onnxruntime goldens.
 
 VKNN runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
 YOLOv8n detection, and the 965M-param YoNoSplat transformer encoder. Per-model latencies and the
@@ -18,7 +17,7 @@ does **not** do.
 The engine plans a graph for a **fixed, fully-static shape**. `Session::plan()`
 runs `inferShapes` once at construction; every segment, every Vulkan command buffer,
 and every prepacked weight is specialized to those shapes. The Vulkan backend
-literally **pre-records one `VkCommandBuffer` per segment** (`Segment` in
+**pre-records one `VkCommandBuffer` per segment** (`Segment` in
 `include/vknn/backend.h`), so there is no mechanism to vary `N`, `H`, or `W` at run
 time.
 
@@ -29,20 +28,20 @@ Concretely:
 - Changing input size means **building a new `Session`** (and paying cold-start cost,
   see below).
 - This is a deliberate trade: static planning is what makes the pre-recorded
-  command buffer + push-descriptor + prepacked-weight design possible. It is not a
-  bug, but it is a hard constraint callers must design around.
+  command buffer + push-descriptor + prepacked-weight design possible. It's not a
+  bug, but it is a hard constraint callers have to design around.
 
 ---
 
 ## 2. No NPU / accelerator backend (Vulkan + CPU only)
 
 The backends are **Vulkan** (the on-device compute path) and **CPU** (host oracle +
-fallback). There is no NPU / vendor-accelerator backend. Such accelerators typically
-consume a model artifact produced by an **offline**, host-side toolchain rather than
-JIT-compiling from ONNX on device, and that toolchain (and matching public headers)
-was not available for the target hardware.
+fallback). There is no NPU / vendor-accelerator backend. Such accelerators usually
+consume a model artifact built by an **offline**, host-side toolchain rather than
+JIT-compiling from ONNX on device, and that toolchain (plus matching public headers)
+wasn't available for the target hardware.
 
-The pluggable-backend architecture stays open for one: adding a backend is purely a new
+The pluggable-backend architecture stays open for one: adding a backend is just a new
 `Backend` subclass + `VKNN_REGISTER_BACKEND`, with no edits to core dispatch — see
 `docs/ADDING_A_BACKEND.md`, which documents the offline-compiled-accelerator pattern.
 
@@ -77,9 +76,9 @@ straightforward:
 The proven kernels here are a direct 3×3, a register-tiled (WTILE=4) 1×1, an untiled depthwise, and
 **split-K** for deep low-parallelism 1×1 convs. Everything that adds register/LDS/occupancy pressure
 (register-tiled 3×3, LDS input-halo, Winograd 3-pass and fused, packed-math) was measured and
-**regressed** on this driver — it punishes occupancy pressure, and the 3×3 weights already L2-cache so
+**regressed** on this driver — it punishes occupancy pressure, and the 3×3 weights already L2-cache, so
 cutting weight reads doesn't cut DRAM traffic. Matching MNN on ResNet/YOLO needs a production
-fused-cooperative Winograd, a substantial kernel. See [BENCHMARK.md](BENCHMARK.md).
+fused-cooperative Winograd, a big kernel. See [BENCHMARK.md](BENCHMARK.md).
 
 ---
 
@@ -93,7 +92,7 @@ the wall time.
 
 The device is UMA (memory types are `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`, so there are **no
 staging copies**), yet the pack/unpack itself is CPU work. Feeding NC4HW4 directly, or doing the
-conversion on the GPU, would remove most of it; it has not been optimized.
+conversion on the GPU, would remove most of it. It hasn't been optimized.
 
 > Zero-copy I/O (`enableZeroCopy`, `vknn::IonBuffer` over DMA-BUF heaps) removes the
 > *input/output buffer copy*, and was verified bit-identical to the staged path
@@ -120,11 +119,11 @@ per live, non-initializer pool tensor, named after the **IR tensor name**
 into the preceding Conv/Gemm**, the activation's own output tensor is consumed and the
 fused producer writes the post-activation result directly.
 
-The practical consequence: a dumped Conv-with-fused-Clip6 tensor corresponds to the
+In practice: a dumped Conv-with-fused-Clip6 tensor corresponds to the
 golden's **post-Clip** name, not a separate pre-activation Conv output. `tools/compare_layers.py`
-matches dumps to goldens by name, so when locating a first divergence, expect the
+matches dumps to goldens by name, so when you're hunting a first divergence, expect the
 fused layers to line up against the activation-output golden, not an (absent)
-pre-activation one. This is correct behavior but can be confusing during debugging.
+pre-activation one. This is correct behavior, but it can trip you up while debugging.
 
 ---
 
@@ -141,7 +140,7 @@ ops. The full table with per-op GPU/CPU coverage is in [OP_COVERAGE.md](OP_COVER
 
 **Not** supported: RNN/LSTM/GRU, dynamic control flow (`Loop` / `If` / `Scan`), training ops, sparse
 tensors, and the long tail of the ONNX opset. Adding an op is mechanical (see
-[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md)), but until it is in the table the model will not
+[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md)), but until it's in the table the model won't
 import.
 
 ---

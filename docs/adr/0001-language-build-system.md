@@ -4,8 +4,8 @@
 Accepted (2026-06-24)
 
 ## Context
-We need a high-performance native engine for Android arm64-v8a, cross-compiled with the NDK,
-and host-buildable for unit tests. The Vulkan/NEON code is inherently C/C++.
+We need a fast native engine for Android arm64-v8a, cross-compiled with the NDK,
+and host-buildable for unit tests. The Vulkan/NEON code has to be C/C++.
 
 ## Decision
 - **C++17** (broad NDK r27 support, `if constexpr`, structured bindings; avoids C++20 module churn).

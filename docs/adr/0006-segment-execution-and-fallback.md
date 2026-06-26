@@ -4,8 +4,8 @@
 Accepted (2026-06-24)
 
 ## Context
-We need (a) pre-recorded Vulkan command buffers for the static graph (perf), and (b) seamless
-per-op fallback to CPU when the active backend can't run an op (correctness + the M5 requirement),
+We need (a) pre-recorded Vulkan command buffers for the static graph (perf), and (b) per-op
+fallback to CPU when the active backend can't run an op (correctness + the M5 requirement),
 without the core engine special-casing any backend.
 
 ## Decision
@@ -21,7 +21,7 @@ its segments into a `Segment` object:
 
 **Tensor residency** is reconciled at segment boundaries: a Vulkan segment uploads (packs
 NCHW→NC4HW4) its boundary inputs that are only host-valid, and downloads (unpacks NC4HW4→NCHW)
-its boundary outputs so the next CPU segment / final output sees them. This is the entire
+its boundary outputs so the next CPU segment / final output sees them. That's the whole
 cross-backend hand-off — no op needs to know about other backends.
 
 A throttled WARNING is emitted per fallen-back op type, and the profiler tags fallback ops.

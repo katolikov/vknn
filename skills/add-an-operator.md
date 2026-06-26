@@ -1,7 +1,7 @@
 # How to add an operator
 
 Goal: import a new ONNX op, run it correctly on the CPU (the reference), and optionally accelerate it
-on the GPU. The golden rule: **one operator per file**. Deep dive:
+on the GPU. The rule that matters: **one operator per file**. Full writeup:
 [../docs/ADDING_AN_OPERATOR.md](../docs/ADDING_AN_OPERATOR.md).
 
 ## The five touch points
@@ -10,7 +10,7 @@ on the GPU. The golden rule: **one operator per file**. Deep dive:
 2. **`src/core/op.cpp`** — map the ONNX op name to `OpType::kFoo` in `opTypeFromOnnx` (and back, if you
    serialize). Read list/scalar attributes via the helpers there.
 3. **`src/import/passes.cpp`** — add a shape rule for `kFoo` in `inferShapes` so the planner can size
-   buffers. (Use `readI64Param` to read a param from an attribute *or* an initializer.) The Vulkan path
+   buffers. (`readI64Param` reads a param from an attribute *or* an initializer.) The Vulkan path
    needs concrete shapes at plan time.
 4. **`src/backends/cpu/ops/foo.cpp`** — the CPU oracle (always required; it is the correctness ground
    truth and the fallback).
@@ -71,8 +71,8 @@ VKNN_REGISTER_VK_OP(OpType::kFoo, FooOp);
 }  // namespace vknn
 ```
 
-Then declare which shapes/dtypes the GPU kernel actually accepts by overriding `supportsNode` in the
-Vulkan backend; anything you decline falls back to the CPU oracle at a segment boundary.
+Override `supportsNode` in the Vulkan backend to declare which shapes/dtypes the GPU kernel actually
+accepts; anything you decline falls back to the CPU oracle at a segment boundary.
 
 ### Layout notes
 
@@ -86,8 +86,8 @@ Vulkan backend; anything you decline falls back to the CPU oracle at a segment b
 
 ## Validate
 
-Build host (CPU oracle) and Android (GPU), then check cosine against an onnxruntime golden — for a small
-synthetic op, build a tiny ONNX + golden with `scripts/yonosplat/op_test.py` and run with `vknn_run_io
+Build host (CPU oracle) and Android (GPU), then check cosine against an onnxruntime golden. For a small
+synthetic op, build a tiny ONNX + golden with `scripts/yonosplat/op_test.py` and run `vknn_run_io
 --backend vulkan` vs `--backend cpu`. A logic bug shows up in **fp32** where fp16 noise would mask it.
 
 ```sh

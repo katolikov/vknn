@@ -5,13 +5,13 @@ Accepted (2026-06-24)
 
 ## Context
 Canonical IR layout is NCHW (ONNX convention). The GPU backend needs a layout that maps well
-to the target GPU (an AMD RDNA-class mobile GPU, wavefront 64, strong vec4 ALU, fp16). `vknn_probe` confirmed
-`VK_KHR_cooperative_matrix` is **absent**, so we cannot use matrix-core tiles for GEMM/conv.
+to the target GPU (an AMD RDNA-class mobile GPU, wavefront 64, fast vec4 ALU, fp16). `vknn_probe` confirmed
+`VK_KHR_cooperative_matrix` is **absent**, so matrix-core tiles for GEMM/conv are off the table.
 
 ## Decision
 - **Internal Vulkan tensor layout = NC4HW4**: channels are grouped in blocks of 4 and stored as
-  `vec4` (so a `[N,C,H,W]` tensor becomes `[N, ceil(C/4), H, W, 4]`). This is the MNN/ncnn-proven
-  mobile-GPU layout: every load/store is a 16-byte `vec4`, matching the GPU's vector path and
+  `vec4` (so a `[N,C,H,W]` tensor becomes `[N, ceil(C/4), H, W, 4]`). This is the mobile-GPU layout
+  MNN and ncnn already use: every load/store is a 16-byte `vec4`, matching the GPU's vector path and
   keeping fp16 packing natural (a `vec4` of fp16 = 8 bytes).
 - **Conv strategies** (no coop-matrix):
   - 1×1 pointwise → treated as GEMM over the channel blocks, vec4 accumulation, with an
@@ -19,8 +19,8 @@ to the target GPU (an AMD RDNA-class mobile GPU, wavefront 64, strong vec4 ALU, 
   - depthwise k×k → specialized per-channel-block kernel (no im2col).
   - general k×k → implicit-GEMM (gather on the fly) with vec4 accumulation; Winograd 3×3 is a
     future optimization (logged, not required for the MobileNet slice).
-- Layout conversions (NCHW↔NC4HW4, NHWC I/O) are explicit kernels inserted automatically at
-  backend boundaries by the layout pass.
+- Layout conversions (NCHW↔NC4HW4, NHWC I/O) are explicit kernels, which the layout pass inserts
+  automatically at backend boundaries.
 
 ## Consequences
 - All Vulkan conv/pointwise kernels assume NC4HW4 inputs/outputs and `vec4` access.

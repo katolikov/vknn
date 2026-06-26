@@ -7,7 +7,7 @@ Goal: take an ONNX model, compile it to an optimized `.vxm`, and run it on the d
 ## 1. (Optional) Compile ONNX -> .vxm
 
 `vknn_compile` runs the ONNX import + graph passes once and writes a backend-agnostic `.vxm` (weights
-optionally fp16). Loading a `.vxm` later skips ONNX parsing and the passes — useful for large models.
+optionally fp16). Loading a `.vxm` later skips ONNX parsing and the passes, which pays off on large models.
 
 ```sh
 ./build.sh --convert                                   # builds vknn_compile only
@@ -24,7 +24,7 @@ Convert-time flags (these are **separate** from the runtime `Config`):
 | `--fuse-dwpw` | fuse depthwise + pointwise (experimental; off by default) |
 | `--dump-big` | log tensors larger than 50M elements after shape inference (diagnostic) |
 
-You can also skip this step and load the `.onnx` directly — `Model::load` / `Runtime::load`
+Or skip this step and load the `.onnx` directly — `Model::load` / `Runtime::load`
 auto-detects `.onnx` vs `.vxm`.
 
 ## 2. Run on the device
@@ -99,14 +99,14 @@ int main() {
 }
 ```
 
-Link the static lib **whole-archive** (so the self-registering operators survive) — drop the `.cpp`
-into `examples/` and add its name to the `examples` list in `CMakeLists.txt`, which already does this.
-The lower-level `vknn::Session` / `IOTensor` API (`include/vknn/session.h`) takes the same `Config` for
-finer control (per-tensor residency, DMA-BUF zero-copy).
+Link the static lib **whole-archive** so the self-registering operators survive: drop the `.cpp`
+into `examples/` and add its name to the `examples` list in `CMakeLists.txt`, which already handles this.
+For finer control, the lower-level `vknn::Session` / `IOTensor` API (`include/vknn/session.h`) takes the
+same `Config` and exposes per-tensor residency and DMA-BUF zero-copy.
 
 ## 4. Validate
 
 Always compare against an **onnxruntime golden** (cosine ≥ 0.999 for fp16, 1.0 for fp32/CPU). Generate
-goldens with `scripts/get_golden.py` (CNNs) or `scripts/yonosplat/gen_golden.py` (YoNoSplat). For any
-perf-sensitive change, also record runtime (`--bench` / `VKNN_TIMING=1`) — keeping cosine but slowing
-the GPU is a regression. Methodology + cooldown protocol: [../docs/BENCHMARK.md](../docs/BENCHMARK.md).
+goldens with `scripts/get_golden.py` (CNNs) or `scripts/yonosplat/gen_golden.py` (YoNoSplat). On any
+perf-sensitive change, record runtime too (`--bench` / `VKNN_TIMING=1`) — holding cosine but slowing
+the GPU is still a regression. Methodology and cooldown protocol: [../docs/BENCHMARK.md](../docs/BENCHMARK.md).

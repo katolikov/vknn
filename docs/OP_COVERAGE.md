@@ -1,11 +1,11 @@
 # VKNN operator coverage
 
-VKNN imports ONNX and lowers it to its IR; each operator has a **CPU oracle** (the bit-exact
-reference and automatic fallback) and, for most, a **Vulkan kernel**. The default GPU layout is
-NC4HW4 (channels packed in vec4 blocks) for CNN-shaped tensors; a **flat row-major GPU path** (rank up
-to 8) carries the transformer-shaped tensors (attention, RoPE, geometry), with NC4HW4&harr;flat
-converts spliced in at the boundaries by the layout pass. Everything below is verified against
-onnxruntime (cosine ≥ 0.999 on the GPU fp16 path, 1.0 on the CPU fp32 path).
+VKNN imports ONNX and lowers it to its IR. Each operator has a **CPU oracle** (the bit-exact
+reference and automatic fallback) and, for most, a **Vulkan kernel**. CNN-shaped tensors default to
+the NC4HW4 GPU layout (channels packed in vec4 blocks); transformer-shaped tensors (attention, RoPE,
+geometry) ride a **flat row-major GPU path** (rank up to 8), and the layout pass splices NC4HW4&harr;flat
+converts in at the boundaries. Everything below is checked against onnxruntime (cosine ≥ 0.999 on the
+GPU fp16 path, 1.0 on the CPU fp32 path).
 
 Every operator lives in its own file under `src/backends/{cpu,vulkan}/ops/` (one op per file).
 
@@ -70,7 +70,7 @@ Applied by the graph passes (and `vknn_compile`):
 
 ## Adding an operator
 
-Mechanical: enum in `include/vknn/op.h`, ONNX name in `src/core/op.cpp`, a shape rule in
+It's mechanical: enum in `include/vknn/op.h`, ONNX name in `src/core/op.cpp`, a shape rule in
 `src/import/passes.cpp` `inferShapes`, a CPU oracle in `src/backends/cpu/ops/`, and (when the layout
 allows) a Vulkan op + GLSL shader gated by `Backend::supportsNode()`. See
 [ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md) and [../skills/add-an-operator.md](../skills/add-an-operator.md).

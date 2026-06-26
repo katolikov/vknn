@@ -1,13 +1,13 @@
 # Adding an operator to VKNN
 
-This is a copy-pasteable walkthrough for adding a new ONNX operator to VKNN
+A copy-pasteable walkthrough for adding a new ONNX operator to VKNN
 (Vulkan Neural Network). The worked example is **LeakyRelu**
 (`y = x` for `x >= 0`, `y = alpha * x` otherwise), an elementwise unary op with
-one float attribute. The same pattern applies to any pointwise op (`Mul`,
+one float attribute. The same pattern fits any pointwise op (`Mul`,
 `Sigmoid`, `Tanh`, ...).
 
 There are four pieces. You can stop after any of them and still have a working
-build — VKNN's capability/fallback model means a CPU-only op simply runs on the
+build: under VKNN's capability/fallback model a CPU-only op runs on the
 CPU backend, and the Vulkan path falls back to it automatically.
 
 1. Declare the op: `OpType` enum value + name mappings.
@@ -76,21 +76,21 @@ OpType opTypeFromOnnx(const std::string& s) {
 }
 ```
 
-Anything not present in this map imports as `OpType::kUnknown`, and the ONNX
-attributes are still attached to the `Node` (`LeakyRelu` carries a float `alpha`,
+Anything missing from this map imports as `OpType::kUnknown`, and the ONNX
+attributes still attach to the `Node` (`LeakyRelu` carries a float `alpha`,
 default `0.01`), retrievable via `node.attr.getf("alpha", 0.01f)`.
 
-That is the entire core-side change. The op now flows through the import →
-IR → graph-pass → partition pipeline; the only thing missing is a kernel on at
+That's the entire core-side change. The op now flows through the import →
+IR → graph-pass → partition pipeline; all that's missing is a kernel on at
 least one backend.
 
 ---
 
 ## 2. CPU reference kernel
 
-The CPU backend is the scalar reference (plus NEON kernels for `Add`/`Gemm`). It
-is also the fallback target for every op the primary backend declines, so adding
-the CPU kernel first gives you a correct baseline you can diff against.
+The CPU backend is the scalar reference (plus NEON kernels for `Add`/`Gemm`). It's
+also the fallback target for every op the primary backend declines, so writing
+the CPU kernel first gives you a correct baseline to diff against.
 
 A CPU op is a subclass of `vknn::CpuOp` (declared in
 `src/backends/cpu/cpu_backend.h`):
@@ -155,7 +155,7 @@ constructor calls `CpuOpRegistry::instance().reg(...)`. After this, the CPU
 backend's `supports()` returns `true` for `kLeakyRelu` (fp32/int64/int32) and the
 session can place the node on CPU.
 
-That is enough for a complete, correct (if slow) operator. Build the host target
+That's a complete, correct (if slow) operator. Build the host target
 and the op runs on the CPU backend, or as a Vulkan-segment fallback.
 
 ---
@@ -167,7 +167,7 @@ To run the op on the GPU you need two things: a GLSL compute shader, and a
 
 VKNN's internal device layout is **NC4HW4** — channels packed in `vec4` blocks.
 For a pure elementwise op the packing is transparent: every packed element is
-processed independently, exactly like the existing `add.comp`. So `LeakyRelu` can
+processed independently, like the existing `add.comp`. So `LeakyRelu` can
 operate on the flat packed buffer and never has to reason about the layout.
 
 ### 3a. The shader: `shaders/leakyrelu.comp`
@@ -201,7 +201,7 @@ void main() {
 ```
 
 `common.glsl` holds the shared fused-activation helper `vx_act()` and the
-`ACT_*` codes (kept in sync with `vknn::ActType`). LeakyRelu does not use them
+`ACT_*` codes (kept in sync with `vknn::ActType`). LeakyRelu doesn't use them
 here, but include the header for consistency.
 
 **fp16 variant.** VKNN's fp16 device path uses fp16 *storage* with fp32
@@ -236,9 +236,9 @@ class VulkanOp {
 
 `prepare()` runs once at session-creation time (build the pipeline, prepack and
 upload any weights, read static shapes). `record()` runs once per static segment,
-emitting the dispatch into the segment's pre-recorded command buffer. Because the
-command buffer is recorded once and replayed every inference, `record()` must
-only reference buffers that are stable across runs — activation buffers are
+emitting the dispatch into the segment's pre-recorded command buffer. The
+command buffer is recorded once and replayed every inference, so `record()` must
+only reference buffers that stay stable across runs — activation buffers are
 fetched fresh through `env.devBuf(id)`.
 
 `prepare()`/`record()` receive a `VkOpEnv`:
@@ -303,7 +303,7 @@ Notes:
 - The workgroup size in the dispatch (`/256`) must match `local_size_x` in the
   shader. The general `conv` shader instead uses a spec-constant `local_size_x`
   (the `specData` argument) so its workgroup size can be autotuned on-device via
-  `env.runner` and cached; a simple elementwise op does not need that.
+  `env.runner` and cached; an elementwise op doesn't need that.
 - Ops with weights (see `ConvVulkanOp` / `GemmVulkanOp`) prepack the initializer
   into NC4HW4 / transposed layout in `prepare()` and upload it via
   `uploadCached(env, key, computeFn)`, which consults the content-keyed weight
@@ -330,9 +330,9 @@ There is no central table of operators to edit. Every `VKNN_REGISTER_CPU_OP`,
 constructor inserts the factory into the relevant registry
 (`CpuOpRegistry` / `VkOpRegistry` / `BackendRegistry`) before `main()` runs.
 
-The catch: a static-library object file that nothing references is dropped by the
+The catch: a static-library object file that nothing references gets dropped by the
 linker, taking its self-registration with it. VKNN avoids this by linking the
-static lib **whole-archive** everywhere it is consumed
+static lib **whole-archive** everywhere it's consumed
 (`CMakeLists.txt`):
 
 ```cmake
@@ -340,8 +340,8 @@ target_link_libraries(vknn_${ex}  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
 target_link_libraries(vknn_tests  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>" gtest gtest_main)
 ```
 
-This pulls in every object file (and therefore every registrar) regardless of
-whether the symbol is directly referenced. As long as your new op lives in a
+This pulls in every object file (and therefore every registrar) whether or not
+the symbol is directly referenced. As long as your new op lives in a
 source file already globbed into the `vknn` target — `src/backends/cpu/*.cpp` and
 `src/backends/vulkan/*.cpp` both are — registration "just works" with no further
 build wiring.
@@ -384,7 +384,7 @@ registries:
   }
   ```
 
-So registering your op (step 2 / step 3) is exactly what makes
+So registering your op (step 2 / step 3) is what makes
 `supports()` return true — there is no separate capability list to maintain. The
 per-op `CpuOp::supportsDType()` hook lets a CPU op narrow the dtypes it accepts
 (e.g. the shape ops accept all dtypes by returning `true`); the default is
@@ -404,13 +404,13 @@ for (size_t bi = 0; bi < backends_.size(); ++bi) {
 if (chosen < 0) throw Error(Status::kUnsupported, "no backend supports op ...");
 ```
 
-If the chosen backend is not the configured primary (because the primary's
+If the chosen backend isn't the configured primary (because the primary's
 `supports()` said no), the session emits a throttled fallback warning. Contiguous
 nodes assigned to the same backend are then merged into one segment; tensor
 residency is reconciled at segment boundaries via `toHost()` / `toDevice()`, so a
-CPU fallback segment in the middle of a Vulkan graph just triggers an
-unpack/repack around it. A CPU segment created because the primary backend could
-not run its ops is tagged `Segment::isFallback = true` (drives the warning and
+CPU fallback segment in the middle of a Vulkan graph triggers an
+unpack/repack around it. A CPU segment created because the primary backend couldn't
+run its ops is tagged `Segment::isFallback = true` (drives the warning and
 the profiler tag).
 
 This is why each step is independently shippable:

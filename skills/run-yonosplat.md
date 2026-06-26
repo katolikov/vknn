@@ -11,7 +11,8 @@ export recipe live in [`../scripts/yonosplat/`](../scripts/yonosplat/) (see its
   normal VKNN `Session` — it runs 100% on the GPU and produces 6 Gaussian outputs
   (means, covariances, harmonics, opacities, rotations, scales).
 - The **rasterizer** is a from-scratch Vulkan compute pipeline (preprocess -> tile-bin -> bitonic sort
-  -> per-tile alpha compositing), all in one GPU command buffer. `examples/yonosplat.cpp` glues the two.
+  -> per-tile alpha compositing), all in one GPU command buffer. `examples/yonosplat.cpp` wires the two
+  together.
 
 ## One-shot demo
 
@@ -48,12 +49,12 @@ python3 scripts/yonosplat/gen_golden.py
 ## Validate
 
 - Encoder: compare the 6 outputs against the ORT golden (target: bit-identical on the CPU fp32 path;
-  fp16 GPU within fp16 noise). To inspect intermediates, set `VKNN_DUMP_NAMES="t1,t2"` (forces those
-  tensors to dedicated buffers and dumps them, since the liveness planner aliases buffers) and compare
-  cosine per tensor.
+  fp16 GPU within fp16 noise). To inspect intermediates, set `VKNN_DUMP_NAMES="t1,t2"` — the liveness
+  planner aliases buffers, so this forces those tensors into dedicated buffers and dumps them — then
+  compare cosine per tensor.
 - Rasterizer: `scripts/yonosplat/ref_rasterizer.py` is the CPU reference (the gsplat "classic" math);
   validated cos=1.0 on synthetic and real encoder outputs.
 
-Re-push `build-android/vknn_yonosplat` after every Android rebuild. See the project memory / docs for
-the full debugging history of the transformer kernels (LayerNorm, batched MatMul, attention Softmax,
-RoPE, Einsum lowering).
+Re-push `build-android/vknn_yonosplat` after every Android rebuild. The project memory / docs cover the
+debugging history of the transformer kernels (LayerNorm, batched MatMul, attention Softmax, RoPE,
+Einsum lowering).

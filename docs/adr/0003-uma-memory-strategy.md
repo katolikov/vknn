@@ -4,9 +4,9 @@
 Accepted (2026-06-24)
 
 ## Context
-The target GPU is a unified-memory (UMA) GPU. `vknn_probe` confirmed memory types that are
+The target GPU uses unified memory (UMA). `vknn_probe` confirmed memory types that are
 simultaneously `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` (type 0; type 1 adds HOST_CACHED).
-On discrete GPUs you must stage host→device through a separate transfer buffer; on UMA you do
+A discrete GPU forces you to stage host→device through a separate transfer buffer. UMA does
 not.
 
 ## Decision

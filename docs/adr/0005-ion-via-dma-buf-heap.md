@@ -5,8 +5,8 @@ Accepted (2026-06-24)
 
 ## Context
 The task calls for ION zero-copy. On-device probing found `/dev/ion` **absent** (classic
-ION removed on Android 12+), but `/dev/dma_heap/` present with a `system` heap. The Vulkan
-driver exposes `VK_EXT_external_memory_dma_buf` + `VK_KHR_external_memory_fd` + AHB.
+ION was removed on Android 12+), but `/dev/dma_heap/` is present with a `system` heap. The
+Vulkan driver exposes `VK_EXT_external_memory_dma_buf` + `VK_KHR_external_memory_fd` + AHB.
 
 ## Decision
 The ION mechanism on this build is **DMA-BUF heaps**. `vknn::IonAllocator`:
@@ -15,13 +15,13 @@ The ION mechanism on this build is **DMA-BUF heaps**. `vknn::IonAllocator`:
 - Returns a dma-buf **fd**, `mmap`s it for CPU access.
 - Imports the **same fd** into Vulkan via `VkImportMemoryFdInfoKHR` (handle type
   `DMA_BUF_BIT_EXT`), querying allowed types with `vkGetMemoryFdPropertiesKHR`. This is true
-  zero-copy: GPU reads the ION buffer directly, no staging copy.
+  zero-copy: the GPU reads the ION buffer directly, with no staging copy.
 
 Two API modes (Section 6.7): **A — library-allocated** (`Tensor::createIon`) and
 **B — user-supplied fd** (`Tensor::wrapIonFd`, ownership configurable).
 
-Fallback chain if dma-buf import fails on some build: AHB route, then a staged copy with a
-logged `LIMITATIONS.md` entry.
+If dma-buf import fails on some build, the fallback chain is: the AHB route, then a staged
+copy with a logged `LIMITATIONS.md` entry.
 
 ## Consequences
 - No dependency on Samsung's libion headers; uses stable kernel uAPI.

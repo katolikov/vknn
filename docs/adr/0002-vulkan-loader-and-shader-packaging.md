@@ -4,19 +4,19 @@
 Accepted (2026-06-24)
 
 ## Context
-Options for the Vulkan loader: vendor `volk`, dlopen `libvulkan.so`, or link the NDK's
-`libvulkan`. Options for shaders: ship `.spv` files alongside binaries, or embed them.
+Three ways to get the Vulkan loader: vendor `volk`, dlopen `libvulkan.so`, or link the NDK's
+`libvulkan`. For shaders: ship `.spv` files next to the binaries, or embed them.
 
 ## Decision
 - **Link the NDK `libvulkan`** directly and resolve the few extension entrypoints we use
   (`vkCmdPushDescriptorSetKHR`, `vkGetMemoryFdKHR`, `vkGetMemoryFdPropertiesKHR`) via
-  `vkGetDeviceProcAddr`. The device is Vulkan 1.3+ so all promoted core functions (timeline
-  semaphore, properties2, etc.) are available without an extension loader. No third-party
+  `vkGetDeviceProcAddr`. The device is Vulkan 1.3+, so every promoted core function (timeline
+  semaphore, properties2, and the rest) is there without an extension loader. No third-party
   loader dependency.
 - **Embed SPIR-V** into the library: `glslc` compiles `shaders/*.comp` → `.spv` at build time,
-  `tools/embed_spirv.py` packs them into one generated `.cpp` exposing
-  `vknn::embeddedShaders()`. The binary is self-contained; no per-shader file pushes; the shader
-  set is versioned with the code.
+  `tools/embed_spirv.py` packs them into one generated `.cpp` that exposes
+  `vknn::embeddedShaders()`. The binary stands alone, there are no per-shader file pushes, and the
+  shader set is versioned with the code.
 
 ## Consequences
 - Zero runtime file dependencies for shaders.

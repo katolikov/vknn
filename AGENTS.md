@@ -1,7 +1,7 @@
 # AGENTS.md — orientation for contributors (human or AI)
 
-Read this first. It is the short map of the repo, the conventions that are easy to get wrong,
-and where to go for depth. The deeper guides live in [`docs/`](docs/) and [`skills/`](skills/).
+Read this first. It maps the repo, the conventions that are easy to get wrong, and where to go for
+depth. The deeper guides live in [`docs/`](docs/) and [`skills/`](skills/).
 
 ## What VKNN is
 
@@ -79,7 +79,7 @@ adb shell /data/local/tmp/vxrt/vknn_classify --model M.onnx --input in.bin \
 adb shell /data/local/tmp/vxrt/vknn_run_io M.vxm /data/local/tmp/vxrt/out in0.bin in1.bin
 ```
 
-Validate correctness with **cosine vs an onnxruntime golden** and, for any perf-sensitive change,
+Check correctness with **cosine vs an onnxruntime golden**, and for any perf-sensitive change,
 **measure runtime too** — beating MNN is a standing goal, so a change that keeps cosine but slows the
 GPU is a regression. See [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md) and
 [docs/BENCHMARK.md](docs/BENCHMARK.md).
@@ -108,8 +108,8 @@ committing.
 - **Re-push the `vknn_*` binaries** to the device after **every** Android rebuild — a stale binary on
   the device silently invalidates a "fix".
 - **Thermal throttling is real and fast.** Before each benchmark run, `adb shell sleep 12-14` to cool
-  the GPU; never A/B two builds back-to-back. Use `VKNN_TIMING=1` for real submit+GPU time (the
-  profiler's per-op sum is inflated by forced per-op barriers). `rm -rf` the model's cache dir before
+  the GPU; never A/B two builds back-to-back. Use `VKNN_TIMING=1` for real submit+GPU time — the
+  profiler's per-op sum is inflated by forced per-op barriers. `rm -rf` the model's cache dir before
   timing it.
 - **Validate non-classifier / non-image models with `vknn_run_io`**, not `vknn_classify` (the latter
   assumes an image-classifier I/O shape).

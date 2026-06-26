@@ -28,8 +28,8 @@ the result into maximal same-backend segments, and executes each segment on a pl
 
 The primary backend is **Vulkan compute** (NC4HW4 packed layout, one pre-recorded command
 buffer per static segment, push descriptors, fp16 storage with fp32 accumulation, DMA-BUF
-zero-copy import). A scalar + NEON **CPU backend** provides the reference path and an automatic
-fallback for ops the GPU declines. Everything is verified end-to-end against onnxruntime
+zero-copy import). A scalar + NEON **CPU backend** is the reference path and the automatic
+fallback for ops the GPU declines. Everything is checked end-to-end against onnxruntime
 goldens on an Android arm64-v8a device with an AMD RDNA-class mobile GPU.
 
 VKNN runs more than classifiers: image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet,
@@ -45,8 +45,8 @@ encoder (the YoNoSplat feed-forward 3D Gaussian Splatting model), plus a from-sc
 - **Pluggable backends and operators** via self-registration; adding an op or a backend is a
   new file, no edits to core dispatch.
 - **Static, pre-recorded execution.** A model is planned once for a fixed input shape; the
-  Vulkan backend records one command buffer per segment and reuses it every run.
-- **Honest, reproducible numbers.** Every reported figure comes from on-device runs compared
+  Vulkan backend records one command buffer per segment and replays it every run.
+- **Honest, reproducible numbers.** Every figure comes from on-device runs compared
   against an onnxruntime golden — see [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Benchmarks
@@ -65,10 +65,24 @@ fp16, thermal-controlled medians. VKNN beats MNN's Vulkan backend across the boa
 | YOLOv8n (640×640) | 17.5 ms | ~73 ms | cosine 1.000000 |
 | YoNoSplat encoder (965M params) | ~13.5 s | cannot convert | 6 outputs, cosine 0.999+ |
 
-Against MNN's *absolute* best (OpenCL HEAVY-tuned) it's mixed — VKNN wins the depthwise / SE / branchy
-nets; MNN's years-tuned 3×3 kernels win ResNet-50 and YOLOv8n. The 965M-param YoNoSplat transformer
-encoder runs end-to-end on the GPU, and MNN's converter can't handle it at all. Full methodology and
-the OpenCL-tuned comparison: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+Against MNN's *absolute* best (OpenCL HEAVY-tuned) it's mixed — VKNN takes the depthwise / SE / branchy
+nets; MNN's years-tuned 3×3 kernels take ResNet-50 and YOLOv8n. The 965M-param YoNoSplat transformer
+encoder runs end-to-end on the GPU, and MNN's converter can't handle it at all.
+
+**End-to-end, per stage** (ResNet-50, Vulkan fp16, warm). A first result is more than the GPU run —
+open the model, build the session, copy in, run, copy out:
+
+| Stage | VKNN | MNN-Vulkan |
+|---|---|---|
+| open model + create session | ~305 ms | ~960 ms |
+| copy in (host→device) | 0.10 ms | not exposed |
+| run (inference) | 10.5 ms | 24.2 ms |
+| copy out (device→host) | 0.03 ms | not exposed |
+| **end-to-end (load + 1 run)** | **~316 ms** | **~985 ms** |
+
+VKNN is ready in ~3× less wall time — MNN-Vulkan spends ~0.9 s compiling pipelines at session
+creation, and on this UMA device VKNN's host↔device copies are sub-millisecond. Full methodology, the
+per-stage MobileNetV3 numbers, and the OpenCL-tuned comparison: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Quickstart
 
@@ -91,7 +105,7 @@ the OpenCL-tuned comparison: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 ./build.sh --android --clear
 ```
 
-Run a model with the friendly one-liner tool:
+Run a model with the one-liner tool:
 
 ```sh
 adb push build-android/vknn_predict /data/local/tmp/vknn/
@@ -121,7 +135,7 @@ For full control (backend, precision, caching, zero-copy) use `vknn::Config` wit
 
 **1. Compile ONNX → optimized `.vxm`.** `vknn_compile` runs the ONNX import + graph passes once and
 writes an optimized, backend-agnostic `.vxm` (weights optionally fp16). Loading a `.vxm` later skips
-ONNX parsing and the passes — handy for large models.
+ONNX parsing and the passes, which pays off for large models.
 
 ```sh
 ./build.sh --convert        # builds vknn_compile only
@@ -214,7 +228,7 @@ int main() {
 }
 ```
 
-Link the static lib **whole-archive** so the self-registering operators/backends survive — the easy
+Link the static lib **whole-archive** so the self-registering operators/backends survive — the simplest
 path is to drop the `.cpp` in `examples/` and add its name to the `examples` list in `CMakeLists.txt`
 (it already links whole-archive). For finer control, the lower-level `vknn::Session` / `IOTensor` API
 in [`include/vknn/session.h`](include/vknn/session.h) takes the same `Config`.
@@ -257,7 +271,7 @@ links the static lib whole-archive so self-registering backends and operators su
 
 ## Documentation
 
-Build the static documentation site (one self-contained page set) with:
+Build the static documentation site (one self-contained page set):
 
 ```sh
 ./build.sh --docs        # -> docs/site/index.html

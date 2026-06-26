@@ -11,10 +11,10 @@ A `Config` can be built three ways:
 - Loaded from a JSON file: `Config::fromJsonFile(path)`.
 - Loaded from a JSON string: `Config::fromJsonString(json)`.
 
-JSON parsing is lenient: every field is optional, and any field absent from the
+JSON parsing is lenient. Every field is optional, and any field absent from the
 JSON keeps its struct default. An unparseable or non-object document yields a
 fully default `Config`. A missing file path logs a warning and returns defaults
-(it does not throw).
+rather than throwing.
 
 ---
 
@@ -63,8 +63,8 @@ accepted as I/O layouts.
 
 ## JSON example
 
-A complete config file (`config.json`). Every key shown here is optional; this
-example simply lists all of them with non-default values where useful:
+A complete config file (`config.json`). Every key here is optional; the example
+lists all of them, with non-default values where useful:
 
 ```json
 {
@@ -89,8 +89,8 @@ example simply lists all of them with non-default values where useful:
 }
 ```
 
-This is exactly the shape produced by `Config::toJson()`, so you can round-trip:
-serialize a configured `Config`, edit the JSON, and reload it.
+This is the exact shape `Config::toJson()` produces, so it round-trips:
+serialize a configured `Config`, edit the JSON, reload it.
 
 ---
 
@@ -127,9 +127,9 @@ auto session = Runtime::load("assets/mobilenetv2.onnx", cfg);
 
 ## How the `classify` example exposes config flags
 
-[`examples/classify.cpp`](../examples/classify.cpp) (`vknn_classify`) shows the
-intended layering of file config + CLI overrides. It first loads `--config`
-(if given), then lets individual flags override specific fields:
+[`examples/classify.cpp`](../examples/classify.cpp) (`vknn_classify`) shows how
+file config and CLI overrides layer. It loads `--config` first (if given), then
+lets individual flags override specific fields:
 
 ```cpp
 Config cfg;
@@ -160,12 +160,12 @@ Flags that are not config fields (model/input handling and benchmarking):
 `--model PATH`, `--input PATH`, `--shape N,C,H,W`, `--golden PATH`,
 `--show-graph`, `--bench N`.
 
-Note the precedence: `--config` is loaded first, then the explicit flags
-overwrite whatever the JSON set. Because `--backend` and `--precision` always
-assign `cfg.backend`/`cfg.precision` (they have CLI defaults), a `backend` or
-`precision` value in the JSON file is effectively superseded by the flag
-defaults unless you pass the matching flag — keep that in mind when mixing
-`--config` with these two flags.
+Watch the precedence: `--config` loads first, then the explicit flags overwrite
+whatever the JSON set. `--backend` and `--precision` always assign
+`cfg.backend`/`cfg.precision` (they carry CLI defaults), so a `backend` or
+`precision` value in the JSON file gets overridden by the flag defaults unless
+you pass the matching flag. Watch for this when mixing `--config` with these two
+flags.
 
 Example invocations:
 

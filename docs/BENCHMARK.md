@@ -1,7 +1,7 @@
 # VKNN vs MNN — on-device benchmarks
 
-Honest head-to-head against [MNN](https://github.com/alibaba/MNN) (Alibaba's production inference
-engine) on the **same device, same model, both at their fastest config**. Every VKNN number is from a
+Head-to-head against [MNN](https://github.com/alibaba/MNN) (Alibaba's production inference
+engine) on the **same device, same model, both at their fastest config**. Every VKNN number comes from a
 pipeline verified against an onnxruntime golden — fast *and* correct, not fast-but-wrong.
 
 ## Setup
@@ -14,7 +14,7 @@ pipeline verified against an onnxruntime golden — fast *and* correct, not fast
   Vulkan (`fwd=7`), CPU-4-thread (`fwd=0`), and OpenCL with HEAVY tuning (`fwd=3 mode=2`) — and they
   differ a lot, so "MNN-best" is the min over all three.
 - **Thermal control is mandatory.** The device throttles 3–5× under sustained load, and VKNN (GPU-compute-bound)
-  throttles more than MNN-Vulkan (overhead-bound). All numbers below are with a 12–14 s cooldown
+  throttles more than MNN-Vulkan (overhead-bound). All numbers below use a 12–14 s cooldown
   **before each run**; absolute numbers and ratios from back-to-back sweeps are not trustworthy.
 
 ## VKNN vs MNN-Vulkan (fp16)
@@ -34,10 +34,39 @@ VKNN beats MNN's Vulkan backend on every model, by a wide margin on the small/de
 YOLOv8n runs **100% on the GPU** (1 segment, no CPU fallback) — the flat row-major op path moved the
 whole DFL / box-decode head onto the GPU.
 
+## End-to-end, per stage
+
+A real inference is more than the GPU run: you open the model, build the session, copy the input over,
+run, and copy the result back. Each stage below is on the same device, both Vulkan fp16, warm (caches
+and tuning already built):
+
+| Stage | VKNN ResNet-50 | MNN ResNet-50 | VKNN MobileNetV3 | MNN MobileNetV3 |
+|---|---|---|---|---|
+| open model | 37 ms | —¹ | 6 ms | —¹ |
+| create session | 268 ms | 960 ms | 211 ms | 904 ms |
+| copy in (host→device) | 0.10 ms | —² | 0.10 ms | —² |
+| run (inference) | 10.5 ms | 24.2 ms | 1.95 ms | 19.5 ms |
+| copy out (device→host) | 0.03 ms | —² | 0.01 ms | —² |
+| **end-to-end (load + 1 run)** | **~316 ms** | **~985 ms** | **~219 ms** | **~924 ms** |
+
+¹ `MNNV2Basic` prints "Open Model" with no time; MNN's `createFromFile` is a few milliseconds.
+² `MNNV2Basic` does not time the host↔device copies (the input is set once, outside the timed loop).
+VKNN's are sub-millisecond because the device is UMA — there is no staging copy.
+
+VKNN reaches a first result in roughly **3× less wall time**, almost entirely because MNN-Vulkan spends
+~0.9 s compiling its pipelines at session creation, while VKNN builds the session in ~0.2–0.3 s from
+its cached pipelines/weights and one pre-recorded command buffer. Steady-state inference is 2–10×
+faster too, and the pack/unpack at the I/O boundary costs almost nothing.
+
+Methodology: VKNN stages come from a small timer using the public API (`loadGraphBin` = open model,
+`Runtime::load` = open + create session, `VKNN_TIMING` = pack / submit+gpu / unpack). MNN stages come
+from `MNNV2Basic.out` (the `Resize` cost = create session, `Run Avg` = inference). Both warm, 12+ runs,
+GPU cooled between measurements.
+
 ## VKNN vs MNN's absolute best (OpenCL, HEAVY-tuned)
 
 MNN's true best on conv-heavy nets is its **OpenCL** backend with HEAVY autotuning, which does run on
-this device. Against it the picture is mixed — VKNN wins the depthwise / SE / parallel-branch nets,
+this device. Against it the picture is mixed — VKNN wins the depthwise / SE / parallel-branch nets, and
 MNN wins the 3×3-conv-heavy ones:
 
 - **VKNN wins:** MobileNetV2 (+15%), MobileNetV3 (+14%), MnasNet (+9%), Inception-v3 (+8%),
@@ -46,11 +75,11 @@ MNN wins the 3×3-conv-heavy ones:
   DenseNet-121 (+14%).
 
 The remaining gap is conv-kernel quality: MNN's years-tuned Winograd / cooperative-matrix-style 3×3
-and 1×1 kernels beat VKNN's straightforward direct kernels on the conv-bound models. On this driver
-only **split-K for deep 1×1** and **precise data-dependency barriers** beat the direct kernels;
-register-tiled 3×3, LDS input-halo, and Winograd (3-pass and fused) were all implemented, verified
+and 1×1 kernels beat VKNN's direct kernels on the conv-bound models. On this driver
+only **split-K for deep 1×1** and **precise data-dependency barriers** beat the direct kernels.
+Register-tiled 3×3, LDS input-halo, and Winograd (3-pass and fused) were all implemented, verified
 correct, and **regressed** — the driver punishes register/LDS/occupancy pressure, and the 3×3 weights
-already L2-cache so cutting weight reads doesn't cut DRAM traffic. Matching MNN there needs a
+already L2-cache, so cutting weight reads doesn't cut DRAM traffic. Matching MNN there needs a
 production fused-cooperative Winograd, a substantial kernel.
 
 ## YoNoSplat encoder (965M-param transformer)
