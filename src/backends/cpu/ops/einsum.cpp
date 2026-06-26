@@ -4,6 +4,7 @@
 //   "bij,bnjk->bnik"     batched matmul w/ broadcast on n (SE3 pose transform)      [1x]
 // A general N-operand einsum isn't needed; these three cover the model.
 #include <string>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
@@ -13,7 +14,8 @@ namespace {
 static std::string stripw(const std::string& s) {
   std::string r;
   for (char c : s)
-    if (c != ' ' && c != '\t') r += c;
+    if (c != ' ' && c != '\t')
+      r += c;
   return r;
 }
 
@@ -30,7 +32,8 @@ struct EinsumCpu : CpuOp {
       int64_t I = A.elems(), J = B.elems();
       float* y = cpu::allocOut(Y, {I, J});
       for (int64_t i = 0; i < I; ++i)
-        for (int64_t j = 0; j < J; ++j) y[i * J + j] = a[i] * b[j];
+        for (int64_t j = 0; j < J; ++j)
+          y[i * J + j] = a[i] * b[j];
       return;
     }
     if (eq == "...ab,...b->...a") {
@@ -38,9 +41,11 @@ struct EinsumCpu : CpuOp {
       int ar = (int)as.size();
       int64_t aN = as[ar - 2], bN = as[ar - 1];
       int64_t batch = 1;
-      for (int k = 0; k < ar - 2; ++k) batch *= as[k];
+      for (int k = 0; k < ar - 2; ++k)
+        batch *= as[k];
       int64_t bBatch = 1;
-      for (int k = 0; k + 1 < (int)B.shape.size(); ++k) bBatch *= B.shape[k];
+      for (int k = 0; k + 1 < (int)B.shape.size(); ++k)
+        bBatch *= B.shape[k];
       Shape out(as.begin(), as.end() - 1);  // [..., a]
       float* y = cpu::allocOut(Y, out);
       for (int64_t bi = 0; bi < batch; ++bi) {
@@ -49,7 +54,8 @@ struct EinsumCpu : CpuOp {
         float* Yp = y + bi * aN;
         for (int64_t ii = 0; ii < aN; ++ii) {
           float s = 0;
-          for (int64_t jj = 0; jj < bN; ++jj) s += Ap[ii * bN + jj] * Bp[jj];
+          for (int64_t jj = 0; jj < bN; ++jj)
+            s += Ap[ii * bN + jj] * Bp[jj];
           Yp[ii] = s;
         }
       }
@@ -74,7 +80,8 @@ struct EinsumCpu : CpuOp {
     // Unhandled equation: pass input through (keeps the graph runnable; not hit by this model).
     int64_t n = A.elems();
     float* y = cpu::allocOut(Y, A.shape);
-    for (int64_t i = 0; i < n; ++i) y[i] = a[i];
+    for (int64_t i = 0; i < n; ++i)
+      y[i] = a[i];
   }
 };
 

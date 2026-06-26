@@ -1,7 +1,9 @@
 // Vulkan common includes, error checking, function-pointer loading.
 #pragma once
 #include <vulkan/vulkan.h>
+
 #include <string>
+
 #include "vx/common.h"
 #include "vx/logging.h"
 

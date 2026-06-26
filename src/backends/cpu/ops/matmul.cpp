@@ -5,6 +5,7 @@
 // canonical NCHW fp32, so this is the oracle the host tests validate against.
 #include <algorithm>
 #include <vector>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
@@ -21,8 +22,10 @@ struct MatMulCpu : CpuOp {
     // dim so it can be stripped from the output (NumPy matmul semantics).
     Shape sa = A.shape, sb = B.shape;
     bool aWas1D = sa.size() == 1, bWas1D = sb.size() == 1;
-    if (aWas1D) sa = {1, sa[0]};
-    if (bWas1D) sb = {sb[0], 1};
+    if (aWas1D)
+      sa = {1, sa[0]};
+    if (bWas1D)
+      sb = {sb[0], 1};
 
     int64_t M = sa[sa.size() - 2], K = sa[sa.size() - 1];
     int64_t Kb = sb[sb.size() - 2], N = sb[sb.size() - 1];
@@ -58,10 +61,13 @@ struct MatMulCpu : CpuOp {
 
     // Output shape = batch ++ [M,N], with the promoted dims stripped back out.
     Shape out = batch;
-    if (!aWas1D) out.push_back(M);
+    if (!aWas1D)
+      out.push_back(M);
     out.push_back(N);
-    if (bWas1D) out.pop_back();
-    if (out.empty()) out.push_back(1);  // scalar dot product -> [1]
+    if (bWas1D)
+      out.pop_back();
+    if (out.empty())
+      out.push_back(1);  // scalar dot product -> [1]
 
     float* y = cpu::allocOut(Y, out);
     const float* a = A.host.f32();
@@ -82,7 +88,8 @@ struct MatMulCpu : CpuOp {
       for (int64_t m = 0; m < M; ++m) {
         for (int64_t n = 0; n < N; ++n) {
           float acc = 0.f;
-          for (int64_t k = 0; k < K; ++k) acc += am[m * K + k] * bm[k * N + n];
+          for (int64_t k = 0; k < K; ++k)
+            acc += am[m * K + k] * bm[k * N + n];
           ym[m * N + n] = acc;
         }
       }

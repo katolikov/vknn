@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+
 #include "vx/backend.h"
 
 namespace vx {
@@ -15,7 +16,7 @@ namespace vx {
 /// One operator implementation for the CPU backend. `run` reads inputs and writes outputs
 /// (host buffers, NCHW canonical). Shape inference is the op's responsibility.
 class CpuOp {
- public:
+public:
   virtual ~CpuOp() = default;
   virtual void run(const Node& node, ExecContext& ctx) = 0;
   // Which dtypes this op supports (for capability/fallback). Default: fp32.
@@ -27,7 +28,7 @@ class CpuOp {
 using CpuOpFactory = std::function<std::unique_ptr<CpuOp>()>;
 
 class CpuOpRegistry {
- public:
+public:
   static CpuOpRegistry& instance();
   void reg(OpType t, CpuOpFactory f) { factories_[t] = std::move(f); }
   bool has(OpType t) const { return factories_.count(t) > 0; }
@@ -36,7 +37,7 @@ class CpuOpRegistry {
     return it == factories_.end() ? nullptr : it->second();
   }
 
- private:
+private:
   std::map<OpType, CpuOpFactory> factories_;
 };
 

@@ -2,6 +2,7 @@
 // reshape - data is untouched, so it's a byte copy with a new shape. axes from the attribute
 // (opset<13) or the int64 input[1] (opset>=13). dtype-agnostic.
 #include <algorithm>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
@@ -20,13 +21,22 @@ struct SqueezeCpu : CpuOp {
     }
     std::vector<bool> drop(rank, false);
     if (axes.empty()) {
-      for (int k = 0; k < rank; ++k) drop[k] = (X.shape[k] == 1);  // remove every size-1 dim
+      for (int k = 0; k < rank; ++k)
+        drop[k] = (X.shape[k] == 1);  // remove every size-1 dim
     } else {
-      for (int64_t ax : axes) { if (ax < 0) ax += rank; if (ax >= 0 && ax < rank) drop[ax] = true; }
+      for (int64_t ax : axes) {
+        if (ax < 0)
+          ax += rank;
+        if (ax >= 0 && ax < rank)
+          drop[ax] = true;
+      }
     }
     Shape out;
-    for (int k = 0; k < rank; ++k) if (!drop[k]) out.push_back(X.shape[k]);
-    if (out.empty()) out.push_back(1);  // scalar -> [1]
+    for (int k = 0; k < rank; ++k)
+      if (!drop[k])
+        out.push_back(X.shape[k]);
+    if (out.empty())
+      out.push_back(1);  // scalar -> [1]
     cpu::copyAs(X, Y, out);
   }
   bool supportsDType(DType) const override { return true; }

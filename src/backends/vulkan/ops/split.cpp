@@ -12,13 +12,20 @@ namespace {
 struct SplitOp : VulkanOp {
   bool flat_ = false;
   // ---- NC4HW4 channel path ----
-  struct Part { int outIdx; int64_t blockOff, cbk; };
+  struct Part {
+    int outIdx;
+    int64_t blockOff, cbk;
+  };
   std::vector<Part> parts_;
   NCHW x_{};
   int elem_ = 4;
   int64_t cbTotal_ = 0, hw_ = 0;
   // ---- flat path ----
-  struct FPC { int rank, total, base; int outDim[flat::kMaxRank]; int inStride[flat::kMaxRank]; };
+  struct FPC {
+    int rank, total, base;
+    int outDim[flat::kMaxRank];
+    int inStride[flat::kMaxRank];
+  };
   std::vector<FPC> fpcs_;
   std::vector<int> foutIdx_;
   std::vector<std::unique_ptr<vk::ComputePipeline>> fpipes_;
@@ -26,22 +33,28 @@ struct SplitOp : VulkanOp {
 
   void prepare(const Node& node, VkOpEnv& env) override {
     const Graph& g = *env.graph;
-    flat_ = !node.outputs.empty() && node.outputs[0] != kNoTensor && g.desc(node.outputs[0]).gpuFlat;
+    flat_ =
+        !node.outputs.empty() && node.outputs[0] != kNoTensor && g.desc(node.outputs[0]).gpuFlat;
     if (flat_) {
       Shape in = g.desc(node.inputs[0]).shape;
       int rank = (int)in.size();
       int axis = (int)node.attr.geti("axis", 0);
-      if (axis < 0) axis += rank;
+      if (axis < 0)
+        axis += rank;
       auto inStride = flat::rowStrides(in);
       int64_t offset = 0;
       for (size_t k = 0; k < node.outputs.size(); ++k) {
-        if (node.outputs[k] == kNoTensor) continue;
+        if (node.outputs[k] == kNoTensor)
+          continue;
         Shape out = g.desc(node.outputs[k]).shape;
         FPC pc{};
         pc.rank = rank;
         pc.total = (int)numElements(out);
         pc.base = (int)(offset * inStride[axis]);
-        for (int d = 0; d < rank; ++d) { pc.outDim[d] = (int)out[d]; pc.inStride[d] = (int)inStride[d]; }
+        for (int d = 0; d < rank; ++d) {
+          pc.outDim[d] = (int)out[d];
+          pc.inStride[d] = (int)inStride[d];
+        }
         fpcs_.push_back(pc);
         foutIdx_.push_back((int)k);
         offset += out[axis];
@@ -58,7 +71,8 @@ struct SplitOp : VulkanOp {
     hw_ = x_.h * x_.w;
     int64_t blk = 0;
     for (size_t k = 0; k < node.outputs.size(); ++k) {
-      if (node.outputs[k] == kNoTensor) continue;
+      if (node.outputs[k] == kNoTensor)
+        continue;
       int64_t ck = NCHW::from(g.desc(node.outputs[k]).shape).c;
       int64_t cbk = cBlocks(ck);
       parts_.push_back({(int)k, blk, cbk});

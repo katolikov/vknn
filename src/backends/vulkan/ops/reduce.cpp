@@ -22,7 +22,8 @@ struct ReduceOp : VulkanOp {
     int rank = (int)in.size();
     std::vector<int64_t> axes = readI64Param(g, node, "axes", 1);
     if (axes.empty())
-      for (int k = 0; k < rank; ++k) axes.push_back(k);  // reduce all
+      for (int k = 0; k < rank; ++k)
+        axes.push_back(k);  // reduce all
     auto inStride = flat::rowStrides(in);
     pc = {};
     pc.rank = rank;
@@ -34,7 +35,8 @@ struct ReduceOp : VulkanOp {
     }
     for (int64_t a : axes) {
       int ax = (int)(a < 0 ? a + rank : a);
-      if (ax >= 0 && ax < rank) pc.reduce[ax] = 1;
+      if (ax >= 0 && ax < rank)
+        pc.reduce[ax] = 1;
     }
     pc.total = (int)numElements(g.desc(node.outputs[0]).shape);
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_reduce", env.useFp16), 2,

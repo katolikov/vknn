@@ -34,25 +34,28 @@ struct GemmOp : VulkanOp {
       return wp;
     });
     std::vector<float> bv;
-    if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) bv = initFloats(g, node.inputs[2]);
+    if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor)
+      bv = initFloats(g, node.inputs[2]);
     const float* bsrc = bv.data();
     bbuf = uploadCached(env, node.name + "#b", [&] {
       std::vector<float> bias(CoutL, 0.f);
       if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor) {
-        for (int64_t i = 0; i < CoutL; ++i) bias[i] = bsrc[i];
+        for (int64_t i = 0; i < CoutL; ++i)
+          bias[i] = bsrc[i];
       }
       return bias;
     });
     // M = batch rows: classifiers have M=1; the YoNoSplat camera head is M=2 (two views) — without
-    // this the fc kernel computed only row 0. Per-row stride differs by layout: NC4HW4 pads channels
-    // to a multiple of 4 (H=W=1), a gpuFlat operand is exactly C.
+    // this the fc kernel computed only row 0. Per-row stride differs by layout: NC4HW4 pads
+    // channels to a multiple of 4 (H=W=1), a gpuFlat operand is exactly C.
     int64_t M = Cin > 0 ? numElements(g.desc(node.inputs[0]).shape) / Cin : 1;
-    if (M < 1) M = 1;
+    if (M < 1)
+      M = 1;
     auto pad4 = [](int64_t c) { return ((c + 3) / 4) * 4; };
     int srcStride = (int)(g.desc(node.inputs[0]).gpuFlat ? Cin : pad4(Cin));
     int dstStride = (int)(g.desc(node.outputs[0]).gpuFlat ? CoutL : pad4(CoutL));
-    pc = {(int)Cin,  (int)CoutL,         (int)M, srcStride, dstStride,
-          (int)node.fusedAct, node.actLo, node.actHi};
+    pc = {(int)Cin,  (int)CoutL,         (int)M,     srcStride,
+          dstStride, (int)node.fusedAct, node.actLo, node.actHi};
     pipe =
         std::make_unique<vk::ComputePipeline>(*env.ctx, shader("fc", env.useFp16), 4, sizeof(FcPC),
                                               std::vector<uint32_t>{}, env.cache->handle());

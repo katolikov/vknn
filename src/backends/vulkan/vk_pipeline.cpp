@@ -1,4 +1,5 @@
 #include "vk_pipeline.h"
+
 #include <cstdio>
 #include <fstream>
 
@@ -37,7 +38,8 @@ void PipelineCache::save() {
 }
 
 PipelineCache::~PipelineCache() {
-  if (cache_) vkDestroyPipelineCache(ctx_.device(), cache_, nullptr);
+  if (cache_)
+    vkDestroyPipelineCache(ctx_.device(), cache_, nullptr);
 }
 
 // ----------------------------- ComputePipeline -----------------------------
@@ -66,7 +68,8 @@ ComputePipeline::ComputePipeline(VulkanContext& ctx, const std::string& shaderNa
   slci.bindingCount = numBuffers;
   slci.pBindings = binds.data();
   bool usePush = ctx_.caps().pushDescriptor && ctx_.cmdPushDescriptorSet;
-  if (usePush) slci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+  if (usePush)
+    slci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
   VK_CHECK(vkCreateDescriptorSetLayout(ctx_.device(), &slci, nullptr, &setLayout_));
 
   VkPushConstantRange pcr{};
@@ -96,7 +99,8 @@ ComputePipeline::ComputePipeline(VulkanContext& ctx, const std::string& shaderNa
   stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
   stage.module = module_;
   stage.pName = "main";
-  if (!specData.empty()) stage.pSpecializationInfo = &specInfo;
+  if (!specData.empty())
+    stage.pSpecializationInfo = &specInfo;
 
   VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
   cpci.stage = stage;
@@ -105,10 +109,14 @@ ComputePipeline::ComputePipeline(VulkanContext& ctx, const std::string& shaderNa
 }
 
 ComputePipeline::~ComputePipeline() {
-  if (pipeline_) vkDestroyPipeline(ctx_.device(), pipeline_, nullptr);
-  if (layout_) vkDestroyPipelineLayout(ctx_.device(), layout_, nullptr);
-  if (setLayout_) vkDestroyDescriptorSetLayout(ctx_.device(), setLayout_, nullptr);
-  if (module_) vkDestroyShaderModule(ctx_.device(), module_, nullptr);
+  if (pipeline_)
+    vkDestroyPipeline(ctx_.device(), pipeline_, nullptr);
+  if (layout_)
+    vkDestroyPipelineLayout(ctx_.device(), layout_, nullptr);
+  if (setLayout_)
+    vkDestroyDescriptorSetLayout(ctx_.device(), setLayout_, nullptr);
+  if (module_)
+    vkDestroyShaderModule(ctx_.device(), module_, nullptr);
 }
 
 void ComputePipeline::dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer>& buffers,

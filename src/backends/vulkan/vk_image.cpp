@@ -53,9 +53,12 @@ Image::Image(VulkanContext& ctx, int width, int height) : ctx_(ctx), w_(width), 
 }
 
 Image::~Image() {
-  if (view_) vkDestroyImageView(ctx_.device(), view_, nullptr);
-  if (img_) vkDestroyImage(ctx_.device(), img_, nullptr);
-  if (mem_) vkFreeMemory(ctx_.device(), mem_, nullptr);
+  if (view_)
+    vkDestroyImageView(ctx_.device(), view_, nullptr);
+  if (img_)
+    vkDestroyImage(ctx_.device(), img_, nullptr);
+  if (mem_)
+    vkFreeMemory(ctx_.device(), mem_, nullptr);
 }
 
 void Image::toGeneral(CommandRunner& runner) {

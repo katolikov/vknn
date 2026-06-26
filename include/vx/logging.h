@@ -1,9 +1,9 @@
 // Small leveled logger. Reads VXRT_LOG_LEVEL, colorizes by level, and can throttle a repeated
 // line so spammy warnings (e.g. per-op fallbacks) collapse to one.
 #pragma once
-#include <string>
-#include <sstream>
 #include <cstdint>
+#include <sstream>
+#include <string>
 
 namespace vx {
 
@@ -11,7 +11,7 @@ enum class LogLevel { kDebug = 0, kInfo = 1, kWarn = 2, kError = 3, kNone = 4 };
 
 /// Global logger. Thread-safe. Honors VXRT_LOG_LEVEL env (DEBUG/INFO/WARN/ERROR).
 class Log {
- public:
+public:
   static void setLevel(LogLevel l);
   static LogLevel level();
   static void setColor(bool on);

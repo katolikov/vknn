@@ -1,6 +1,7 @@
 // Concat along an axis (same-rank inputs).
-#include "backends/cpu/cpu_backend.h"
 #include <cstring>
+
+#include "backends/cpu/cpu_backend.h"
 
 namespace vx {
 namespace {
@@ -11,18 +12,22 @@ struct ConcatCpu : CpuOp {
     int64_t axis = node.attr.geti("axis", 0);
     const RtTensor& first = ctx.t(node.inputs[0]);
     int64_t rank = (int64_t)first.shape.size();
-    if (axis < 0) axis += rank;
+    if (axis < 0)
+      axis += rank;
     Shape out = first.shape;
     int64_t total = 0;
-    for (TensorId in : node.inputs) total += ctx.t(in).shape[axis];
+    for (TensorId in : node.inputs)
+      total += ctx.t(in).shape[axis];
     out[axis] = total;
     auto blockElems = [&](const Shape& s) {
       int64_t b = 1;
-      for (int64_t i = axis; i < (int64_t)s.size(); ++i) b *= s[i];
+      for (int64_t i = axis; i < (int64_t)s.size(); ++i)
+        b *= s[i];
       return b;
     };
     int64_t outer = 1;
-    for (int64_t i = 0; i < axis; ++i) outer *= first.shape[i];
+    for (int64_t i = 0; i < axis; ++i)
+      outer *= first.shape[i];
     bool isI64 = first.dtype == DType::kInt64;
     if (isI64) {
       int64_t* y = cpu::allocOutI64(Y, out);

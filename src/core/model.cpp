@@ -1,6 +1,8 @@
 // Implementation of the friendly Model/Tensor facade on top of Session.
 #include "vx/model.h"
+
 #include <algorithm>
+
 #include "vx/ion.h"
 #include "vx/session.h"
 
@@ -8,18 +10,20 @@ namespace vx {
 
 static std::string shapeJoin(const std::vector<int64_t>& s) {
   std::string r;
-  for (size_t i = 0; i < s.size(); ++i) r += (i ? "x" : "") + std::to_string(s[i]);
+  for (size_t i = 0; i < s.size(); ++i)
+    r += (i ? "x" : "") + std::to_string(s[i]);
   return r.empty() ? "scalar" : r;
 }
 
-std::string TensorInfo::shapeString() const { return shapeJoin(shape); }
+std::string TensorInfo::shapeString() const {
+  return shapeJoin(shape);
+}
 
 // ----------------------------- Tensor -----------------------------
 Tensor::Tensor(std::vector<float> data, std::vector<int64_t> shape, std::string name)
     : name_(std::move(name)), shape_(std::move(shape)), data_(std::move(data)) {}
 
-Tensor::Tensor(std::vector<float> data)
-    : shape_{(int64_t)data.size()}, data_(std::move(data)) {}
+Tensor::Tensor(std::vector<float> data) : shape_{(int64_t)data.size()}, data_(std::move(data)) {}
 
 Tensor Tensor::fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name) {
   Tensor t;
@@ -31,14 +35,18 @@ Tensor Tensor::fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name) 
 
 const Tensor* findTensor(const std::vector<Tensor>& tensors, const std::string& name) {
   for (const auto& t : tensors)
-    if (t.name() == name) return &t;
+    if (t.name() == name)
+      return &t;
   return nullptr;
 }
 
-std::string Tensor::shapeString() const { return shapeJoin(shape_); }
+std::string Tensor::shapeString() const {
+  return shapeJoin(shape_);
+}
 
 int64_t Tensor::argmax() const {
-  if (data_.empty()) return -1;
+  if (data_.empty())
+    return -1;
   return (int64_t)(std::max_element(data_.begin(), data_.end()) - data_.begin());
 }
 
@@ -91,7 +99,8 @@ std::vector<TensorInfo> Model::outputs() const {
 }
 
 std::vector<Tensor> Model::run(const std::vector<Tensor>& inputs) {
-  if (!sess_) return {};
+  if (!sess_)
+    return {};
   // Build IOTensors, filling name/shape from the model where the caller left them blank.
   auto info = sess_->inputInfo();
   std::vector<IOTensor> ins(inputs.size());
@@ -116,12 +125,15 @@ std::vector<Tensor> Model::run(const std::vector<Tensor>& inputs) {
     }
   }
   std::vector<IOTensor> outs;
-  if (sess_->run(ins, outs) != Status::kOk) return {};
+  if (sess_->run(ins, outs) != Status::kOk)
+    return {};
   std::vector<Tensor> result;
   for (auto& o : outs) {
     int64_t n = 1;
-    for (int64_t d : o.shape) n *= d;
-    if (o.shape.empty()) n = (int64_t)(o.data.size() / sizeof(float));
+    for (int64_t d : o.shape)
+      n *= d;
+    if (o.shape.empty())
+      n = (int64_t)(o.data.size() / sizeof(float));
     const float* f = o.f32();
     result.emplace_back(std::vector<float>(f, f + n), o.shape, o.name);
   }

@@ -3,6 +3,7 @@
 #include <map>
 #include <string>
 #include <vector>
+
 #include "vx/common.h"
 
 namespace vx {
@@ -11,7 +12,14 @@ using TensorId = int32_t;
 constexpr TensorId kNoTensor = -1;
 
 /// Fused activation applied after an op (kept in sync with shaders/common.glsl).
-enum class ActType : int32_t { kNone = 0, kRelu = 1, kRelu6 = 2, kClip = 3, kHardSwish = 4, kSiLU = 5 };
+enum class ActType : int32_t {
+  kNone = 0,
+  kRelu = 1,
+  kRelu6 = 2,
+  kClip = 3,
+  kHardSwish = 4,
+  kSiLU = 5
+};
 
 /// Operator types. Add a new value here + a name mapping + register kernels.
 enum class OpType {
@@ -25,11 +33,11 @@ enum class OpType {
   kMaxPool,
   kGemm,
   kMatMul,
-  kEinsum,    // einsum: outer-product (RoPE) + batched mat-vec/matmul (geometry tail)
+  kEinsum,  // einsum: outer-product (RoPE) + batched mat-vec/matmul (geometry tail)
   kReshape,
-  kExpand,    // broadcast X to a target shape (numpy broadcasting), flat gather
-  kTile,      // repeat X along each dim by `repeats`, flat gather
-  kSqueeze,   // remove size-1 dims (metadata reshape / flat copy)
+  kExpand,   // broadcast X to a target shape (numpy broadcasting), flat gather
+  kTile,     // repeat X along each dim by `repeats`, flat gather
+  kSqueeze,  // remove size-1 dims (metadata reshape / flat copy)
   kFlatten,
   kSoftmax,
   kLayerNorm,  // LayerNormalization: normalize over axes [axis..end], y=(x-mean)/sqrt(var+eps)*g+b
@@ -41,42 +49,72 @@ enum class OpType {
   kShape,
   kGather,
   kUnsqueeze,
-  kUnary,   // elementwise unary family (Sigmoid/Tanh/HardSwish/...), see UnaryType
-  kBinary,  // elementwise binary family (Mul/Sub/Div/Max/Min/Pow), see BinaryType
-  kPRelu,   // y = x>0 ? x : slope*x, slope per-channel
-  kResize,  // Resize/Upsample (nearest/linear), spatial
-  kGridSample,  // sample input at grid coords (CPU)
-  kTranspose,   // permute dims (CPU)
-  kSlice,       // strided slice (CPU)
-  kReduce,      // ReduceMean/Sum/Max/Min/Prod/L2, see ReduceType
-  kDepthToSpace,  // [N,C,H,W] -> [N,C/b^2,H*b,W*b], DCR|CRD (flat index remap)
-  kCast,        // dtype cast (CPU)
-  kSplit,       // split along an axis into N outputs (CPU)
-  kWhere,       // cond ? X : Y, elementwise with full broadcasting (flat path)
-  kEqual,       // A == B -> 1.0/0.0, elementwise with broadcasting (flat path)
+  kUnary,            // elementwise unary family (Sigmoid/Tanh/HardSwish/...), see UnaryType
+  kBinary,           // elementwise binary family (Mul/Sub/Div/Max/Min/Pow), see BinaryType
+  kPRelu,            // y = x>0 ? x : slope*x, slope per-channel
+  kResize,           // Resize/Upsample (nearest/linear), spatial
+  kGridSample,       // sample input at grid coords (CPU)
+  kTranspose,        // permute dims (CPU)
+  kSlice,            // strided slice (CPU)
+  kReduce,           // ReduceMean/Sum/Max/Min/Prod/L2, see ReduceType
+  kDepthToSpace,     // [N,C,H,W] -> [N,C/b^2,H*b,W*b], DCR|CRD (flat index remap)
+  kCast,             // dtype cast (CPU)
+  kSplit,            // split along an axis into N outputs (CPU)
+  kWhere,            // cond ? X : Y, elementwise with full broadcasting (flat path)
+  kEqual,            // A == B -> 1.0/0.0, elementwise with broadcasting (flat path)
   kConstantOfShape,  // emit a tensor of the given shape filled with a scalar value
   kEyeLike,          // identity-like matrix (ones on a diagonal) matching the input shape
   kScatterND,        // copy data, then scatter update slices at N-D index rows
-  kFusedSE,     // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
-  kFusedDwPw,   // fused depthwise-3x3 + 1x1-project (expanded intermediate stays on-chip)
+  kFusedSE,          // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
+  kFusedDwPw,        // fused depthwise-3x3 + 1x1-project (expanded intermediate stays on-chip)
   // layout conversion nodes (inserted by the layout pass)
   kConvertLayout,
 };
 
 // Sub-codes for the kUnary/kBinary/kReduce families, stored in Node::subOp. The integer values are
-// kept in sync with the switch in shaders/common.glsl, so they are fixed and explicit. kInvalid (-1)
-// marks "this ONNX op is not in the family".
+// kept in sync with the switch in shaders/common.glsl, so they are fixed and explicit. kInvalid
+// (-1) marks "this ONNX op is not in the family".
 enum class UnaryType : int32_t {
   kInvalid = -1,
-  kSigmoid = 0, kTanh = 1, kHardSwish = 2, kHardSigmoid = 3, kLeakyRelu = 4, kElu = 5,
-  kAbs = 6, kNeg = 7, kExp = 8, kLog = 9, kSqrt = 10, kFloor = 11, kCeil = 12, kRelu = 13, kSiLU = 14,
-  kErf = 15, kCos = 16, kSin = 17, kReciprocal = 18, kSoftplus = 19  // transformer: GELU, RoPE, ...
+  kSigmoid = 0,
+  kTanh = 1,
+  kHardSwish = 2,
+  kHardSigmoid = 3,
+  kLeakyRelu = 4,
+  kElu = 5,
+  kAbs = 6,
+  kNeg = 7,
+  kExp = 8,
+  kLog = 9,
+  kSqrt = 10,
+  kFloor = 11,
+  kCeil = 12,
+  kRelu = 13,
+  kSiLU = 14,
+  kErf = 15,
+  kCos = 16,
+  kSin = 17,
+  kReciprocal = 18,
+  kSoftplus = 19  // transformer: GELU, RoPE, ...
 };
 enum class BinaryType : int32_t {
-  kInvalid = -1, kMul = 0, kSub = 1, kDiv = 2, kMax = 3, kMin = 4, kPow = 5, kAdd = 6
+  kInvalid = -1,
+  kMul = 0,
+  kSub = 1,
+  kDiv = 2,
+  kMax = 3,
+  kMin = 4,
+  kPow = 5,
+  kAdd = 6
 };
 enum class ReduceType : int32_t {
-  kInvalid = -1, kMean = 0, kSum = 1, kMax = 2, kMin = 3, kProd = 4, kL2 = 5
+  kInvalid = -1,
+  kMean = 0,
+  kSum = 1,
+  kMax = 2,
+  kMin = 3,
+  kProd = 4,
+  kL2 = 5
 };
 
 const char* opTypeName(OpType t);

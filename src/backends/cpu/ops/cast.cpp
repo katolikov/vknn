@@ -15,12 +15,26 @@ struct CastCpu : CpuOp {
     bool outI64 = (to == 7 || to == 6 || to == 5 || to == 3);  // integer targets -> carry as int64
     if (outI64) {
       int64_t* y = cpu::allocOutI64(Y, X.shape);
-      if (inI64) { const int64_t* x = X.host.i64(); for (int64_t i = 0; i < n; ++i) y[i] = x[i]; }
-      else { const float* x = X.host.f32(); for (int64_t i = 0; i < n; ++i) y[i] = (int64_t)x[i]; }
+      if (inI64) {
+        const int64_t* x = X.host.i64();
+        for (int64_t i = 0; i < n; ++i)
+          y[i] = x[i];
+      } else {
+        const float* x = X.host.f32();
+        for (int64_t i = 0; i < n; ++i)
+          y[i] = (int64_t)x[i];
+      }
     } else {
       float* y = cpu::allocOut(Y, X.shape);
-      if (inI64) { const int64_t* x = X.host.i64(); for (int64_t i = 0; i < n; ++i) y[i] = (float)x[i]; }
-      else { const float* x = X.host.f32(); for (int64_t i = 0; i < n; ++i) y[i] = x[i]; }
+      if (inI64) {
+        const int64_t* x = X.host.i64();
+        for (int64_t i = 0; i < n; ++i)
+          y[i] = (float)x[i];
+      } else {
+        const float* x = X.host.f32();
+        for (int64_t i = 0; i < n; ++i)
+          y[i] = x[i];
+      }
     }
   }
   bool supportsDType(DType) const override { return true; }

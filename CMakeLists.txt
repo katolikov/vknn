@@ -118,7 +118,7 @@ target_link_libraries(vxrt PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VXRT_BUILD_EXAMPLES)
-  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io convert raster yonosplat)
+  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io convert yonosplat)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vx_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       # whole-archive so self-registering backends/operators (static initializers in the

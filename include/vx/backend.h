@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <vector>
+
 #include "vx/config.h"
 #include "vx/graph.h"
 #include "vx/tensor.h"
@@ -33,7 +34,7 @@ class Segment;
 
 /// Abstract backend. Subclass + register to add a backend (see docs/ADDING_A_BACKEND.md).
 class Backend {
- public:
+public:
   virtual ~Backend() = default;
   virtual BackendKind kind() const = 0;
   virtual const char* name() const = 0;
@@ -62,7 +63,7 @@ class Backend {
 
 /// An executable run of nodes belonging to one backend.
 class Segment {
- public:
+public:
   virtual ~Segment() = default;
   virtual void run(ExecContext& ctx) = 0;
   Backend* backend = nullptr;
@@ -76,14 +77,14 @@ class Segment {
 
 // --------------------------- Backend registry ---------------------------
 class BackendRegistry {
- public:
+public:
   using Factory = std::function<std::unique_ptr<Backend>()>;
   static BackendRegistry& instance();
   void registerBackend(BackendKind k, Factory f);
   bool has(BackendKind k) const;
   std::unique_ptr<Backend> create(BackendKind k) const;
 
- private:
+private:
   std::map<BackendKind, Factory> factories_;
 };
 

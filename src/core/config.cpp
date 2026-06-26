@@ -1,8 +1,10 @@
 #include "vx/config.h"
+
 #include <fstream>
 #include <sstream>
-#include "vx/logging.h"
+
 #include "json.h"
+#include "vx/logging.h"
 
 namespace vx {
 
@@ -18,25 +20,32 @@ const char* backendName(BackendKind k) {
   return "?";
 }
 BackendKind backendFromStr(const std::string& s) {
-  if (s == "VULKAN" || s == "vulkan") return BackendKind::kVulkan;
-  if (s == "ENN" || s == "enn") return BackendKind::kEnn;
+  if (s == "VULKAN" || s == "vulkan")
+    return BackendKind::kVulkan;
+  if (s == "ENN" || s == "enn")
+    return BackendKind::kEnn;
   return BackendKind::kCpu;
 }
 static Precision precFromStr(const std::string& s) {
-  if (s == "fp16" || s == "FP16" || s == "low") return Precision::kFp16;
-  if (s == "auto") return Precision::kAuto;
+  if (s == "fp16" || s == "FP16" || s == "low")
+    return Precision::kFp16;
+  if (s == "auto")
+    return Precision::kAuto;
   return Precision::kFp32;
 }
 static const char* precStr(Precision p) {
   return p == Precision::kFp16 ? "fp16" : p == Precision::kAuto ? "auto" : "fp32";
 }
 static TensorFormat fmtFromStr(const std::string& s) {
-  if (s == "NHWC") return TensorFormat::kNHWC;
+  if (s == "NHWC")
+    return TensorFormat::kNHWC;
   return TensorFormat::kNCHW;
 }
 static TuningLevel tuneFromStr(const std::string& s) {
-  if (s == "off") return TuningLevel::kOff;
-  if (s == "thorough") return TuningLevel::kThorough;
+  if (s == "off")
+    return TuningLevel::kOff;
+  if (s == "thorough")
+    return TuningLevel::kThorough;
   return TuningLevel::kFast;
 }
 static const char* tuneStr(TuningLevel t) {
@@ -57,27 +66,36 @@ Config Config::fromJsonFile(const std::string& path) {
 Config Config::fromJsonString(const std::string& json) {
   Config c;
   JsonValue v = JsonParser::parse(json);
-  if (!v.isObject()) return c;
+  if (!v.isObject())
+    return c;
   auto S = [&](const char* k, std::string& dst) {
-    if (auto* j = v.get(k)) dst = j->asStr(dst);
+    if (auto* j = v.get(k))
+      dst = j->asStr(dst);
   };
   auto B = [&](const char* k, bool& dst) {
-    if (auto* j = v.get(k)) dst = j->asBool(dst);
+    if (auto* j = v.get(k))
+      dst = j->asBool(dst);
   };
   auto I = [&](const char* k, int& dst) {
-    if (auto* j = v.get(k)) dst = (int)j->asNum(dst);
+    if (auto* j = v.get(k))
+      dst = (int)j->asNum(dst);
   };
 
-  if (auto* j = v.get("backend")) c.backend = backendFromStr(j->asStr("VULKAN"));
+  if (auto* j = v.get("backend"))
+    c.backend = backendFromStr(j->asStr("VULKAN"));
   if (auto* j = v.get("fallback")) {
     c.fallback.clear();
     if (j->type == JsonValue::kArray)
-      for (auto& e : j->arr) c.fallback.push_back(backendFromStr(e.asStr()));
+      for (auto& e : j->arr)
+        c.fallback.push_back(backendFromStr(e.asStr()));
   }
   B("allowCpuFallback", c.allowCpuFallback);
-  if (auto* j = v.get("precision")) c.precision = precFromStr(j->asStr("fp16"));
-  if (auto* j = v.get("inputLayout")) c.inputLayout = fmtFromStr(j->asStr("NCHW"));
-  if (auto* j = v.get("outputLayout")) c.outputLayout = fmtFromStr(j->asStr("NCHW"));
+  if (auto* j = v.get("precision"))
+    c.precision = precFromStr(j->asStr("fp16"));
+  if (auto* j = v.get("inputLayout"))
+    c.inputLayout = fmtFromStr(j->asStr("NCHW"));
+  if (auto* j = v.get("outputLayout"))
+    c.outputLayout = fmtFromStr(j->asStr("NCHW"));
   I("cpuThreads", c.cpuThreads);
   B("enableZeroCopy", c.enableZeroCopy);
   S("cacheDir", c.cacheDir);
@@ -88,7 +106,8 @@ Config Config::fromJsonString(const std::string& json) {
   I("verbosity", c.verbosity);
   B("layerDump", c.layerDump);
   S("layerDumpDir", c.layerDumpDir);
-  if (auto* j = v.get("tuning")) c.tuning = tuneFromStr(j->asStr("fast"));
+  if (auto* j = v.get("tuning"))
+    c.tuning = tuneFromStr(j->asStr("fast"));
   if (auto* j = v.get("power")) {
     std::string p = j->asStr("normal");
     c.power = p == "high" ? PowerHint::kHigh : p == "low" ? PowerHint::kLow : PowerHint::kNormal;

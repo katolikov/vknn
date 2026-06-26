@@ -6,7 +6,9 @@
 
 namespace vx {
 namespace {
-struct GsPC { int N, C, Hin, Win, OH, OW, align; };
+struct GsPC {
+  int N, C, Hin, Win, OH, OW, align;
+};
 struct GridSampleOp : VulkanOp {
   std::unique_ptr<vk::ComputePipeline> pipe;
   std::shared_ptr<vk::Buffer> gridBuf;
@@ -25,7 +27,8 @@ struct GridSampleOp : VulkanOp {
     // upload the constant grid as a raw fp32 buffer (2 floats per output pixel)
     std::vector<float> gv = initFloats(g, node.inputs[1]);
     int64_t nf = (int64_t)gv.size();
-    gridBuf = std::make_shared<vk::Buffer>(*env.ctx, std::max<int64_t>(nf * 4, 16), vk::MemPref::kAuto);
+    gridBuf =
+        std::make_shared<vk::Buffer>(*env.ctx, std::max<int64_t>(nf * 4, 16), vk::MemPref::kAuto);
     gridBuf->upload(gv.data(), nf * 4);
     total = (int64_t)x.n * cBlocks(x.c) * OH * OW;
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("gridsample", env.useFp16), 3,

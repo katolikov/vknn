@@ -53,10 +53,12 @@ struct ConvCpu : CpuOp {
               const float* wch = wd + ((oc * inCg + ic) * kh) * kw;
               for (int64_t ky = 0; ky < kh; ++ky) {
                 int64_t iy = iy0 + ky * dh;
-                if (iy < 0 || iy >= x.h) continue;
+                if (iy < 0 || iy >= x.h)
+                  continue;
                 for (int64_t kx = 0; kx < kw; ++kx) {
                   int64_t ix = ix0 + kx * dw;
-                  if (ix < 0 || ix >= x.w) continue;
+                  if (ix < 0 || ix >= x.w)
+                    continue;
                   acc += xch[iy * x.w + ix] * wch[ky * kw + kx];
                 }
               }
@@ -67,7 +69,8 @@ struct ConvCpu : CpuOp {
     if (node.fusedResidual != kNoTensor) {  // fused residual add: out = act(conv + residual)
       const float* rd = ctx.t(node.fusedResidual).host.f32();
       int64_t n = Y.elems();
-      for (int64_t i = 0; i < n; ++i) y[i] += rd[i];
+      for (int64_t i = 0; i < n; ++i)
+        y[i] += rd[i];
     }
     cpu::applyAct(y, Y.elems(), node.fusedAct, node.actLo, node.actHi);
   }

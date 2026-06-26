@@ -1,8 +1,9 @@
 // command pool, one-shot + recordable command buffers, barriers, timestamps.
 #pragma once
-#include "vk_context.h"
 #include <functional>
 #include <vector>
+
+#include "vk_context.h"
 
 namespace vx {
 namespace vk {
@@ -29,7 +30,7 @@ inline void transferBarrier(VkCommandBuffer cmd) {
 }
 
 class CommandRunner {
- public:
+public:
   explicit CommandRunner(VulkanContext& ctx);
   ~CommandRunner();
 
@@ -45,7 +46,7 @@ class CommandRunner {
 
   VkCommandPool pool() const { return pool_; }
 
- private:
+private:
   VulkanContext& ctx_;
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;

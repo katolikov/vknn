@@ -1,11 +1,14 @@
 #include "vx/session.h"
+
+#include <sys/stat.h>
+
 #include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <set>
-#include <sys/stat.h>
-#include "vx/logging.h"
+
 #include "../import/passes.h"
+#include "vx/logging.h"
 
 namespace vx {
 
@@ -36,7 +39,9 @@ std::unique_ptr<Session> Session::createFromVxm(const std::string& path, const C
   return s;
 }
 
-bool Session::saveOptimized(const std::string& path) const { return saveGraphBin(graph_, path); }
+bool Session::saveOptimized(const std::string& path) const {
+  return saveGraphBin(graph_, path);
+}
 
 std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
   auto s = std::unique_ptr<Session>(new Session());
@@ -55,18 +60,22 @@ std::unique_ptr<Session> Session::create(Graph&& g, const Config& cfg) {
 void Session::foldTinyGpuIslands() {
   int cpuIdx = -1;
   for (size_t i = 0; i < backends_.size(); ++i)
-    if (backends_[i]->kind() == BackendKind::kCpu) cpuIdx = (int)i;
-  if (cpuIdx < 0) return;  // no CPU backend to fall back to
+    if (backends_[i]->kind() == BackendKind::kCpu)
+      cpuIdx = (int)i;
+  if (cpuIdx < 0)
+    return;  // no CPU backend to fall back to
   auto isCpu = [&](int ni) { return backends_[nodeBackendIdx_[ni]]->kind() == BackendKind::kCpu; };
   // Approximate per-node work: a conv/gemm output costs Cin*KH*KW per element, everything else ~1.
   auto nodeCost = [&](int ni) -> int64_t {
     const Node& nd = graph_.nodes[ni];
     int64_t outElems = nd.outputs.empty() || nd.outputs[0] == kNoTensor
-                           ? 0 : numElements(graph_.desc(nd.outputs[0]).shape);
+                           ? 0
+                           : numElements(graph_.desc(nd.outputs[0]).shape);
     if ((nd.type == OpType::kConv || nd.type == OpType::kGemm) && nd.inputs.size() > 1) {
       const Shape& w = graph_.desc(nd.inputs[1]).shape;
       int64_t k = 1;
-      for (size_t i = 1; i < w.size(); ++i) k *= w[i];  // Cin*KH*KW (Gemm: K)
+      for (size_t i = 1; i < w.size(); ++i)
+        k *= w[i];  // Cin*KH*KW (Gemm: K)
       return outElems * std::max<int64_t>(k, 1);
     }
     return outElems;
@@ -79,7 +88,8 @@ void Session::foldTinyGpuIslands() {
     std::vector<int> runOf(graph_.nodes.size(), -1);
     int nRuns = 0;
     for (size_t n = 0; n < graph_.nodes.size(); ++n) {
-      if (n == 0 || nodeBackendIdx_[n] != nodeBackendIdx_[n - 1]) nRuns++;
+      if (n == 0 || nodeBackendIdx_[n] != nodeBackendIdx_[n - 1])
+        nRuns++;
       runOf[n] = nRuns - 1;
     }
     std::vector<int> producerRun(graph_.tensors.size(), -1);
@@ -87,14 +97,17 @@ void Session::foldTinyGpuIslands() {
     for (size_t n = 0; n < graph_.nodes.size(); ++n) {
       runNodes[runOf[n]].push_back((int)n);
       for (TensorId o : graph_.nodes[n].outputs)
-        if (o != kNoTensor) producerRun[o] = runOf[n];
+        if (o != kNoTensor)
+          producerRun[o] = runOf[n];
     }
     for (int r = 0; r < nRuns && !changed; ++r) {
-      if (isCpu(runNodes[r].front())) continue;  // already CPU
+      if (isCpu(runNodes[r].front()))
+        continue;  // already CPU
       std::set<TensorId> internal;
       for (int ni : runNodes[r])
         for (TensorId o : graph_.nodes[ni].outputs)
-          if (o != kNoTensor) internal.insert(o);
+          if (o != kNoTensor)
+            internal.insert(o);
       bool touchesGpu = false;
       int64_t work = 0;
       for (int ni : runNodes[r]) {
@@ -105,19 +118,26 @@ void Session::foldTinyGpuIslands() {
             touchesGpu = true;
       }
       for (size_t q = 0; q < graph_.nodes.size() && !touchesGpu; ++q) {  // consumed by a GPU run?
-        if (runOf[q] == r || isCpu((int)q)) continue;
+        if (runOf[q] == r || isCpu((int)q))
+          continue;
         for (TensorId x : graph_.nodes[q].inputs)
-          if (x != kNoTensor && internal.count(x)) { touchesGpu = true; break; }
+          if (x != kNoTensor && internal.count(x)) {
+            touchesGpu = true;
+            break;
+          }
       }
-      if (touchesGpu || work >= kKeepOnGpu) continue;  // connected to GPU work, or heavy -> keep
+      if (touchesGpu || work >= kKeepOnGpu)
+        continue;  // connected to GPU work, or heavy -> keep
       bool cpuOk = true;
       for (int ni : runNodes[r])
         if (!backends_[cpuIdx]->supportsNode(graph_, graph_.nodes[ni], DType::kFloat32)) {
           cpuOk = false;
           break;
         }
-      if (!cpuOk) continue;
-      for (int ni : runNodes[r]) nodeBackendIdx_[ni] = cpuIdx;
+      if (!cpuOk)
+        continue;
+      for (int ni : runNodes[r])
+        nodeBackendIdx_[ni] = cpuIdx;
       changed = true;  // restart: the fold may have merged neighbours into a new island
     }
   }
@@ -126,18 +146,22 @@ void Session::foldTinyGpuIslands() {
 void Session::plan() {
   // --- graph optimization passes (NCHW IR, static batch=1) ---
   // Skipped when the graph came from a .vxm (passes already applied at save time).
-  if (!graphOptimized_) runStandardPasses(graph_, 1);
+  if (!graphOptimized_)
+    runStandardPasses(graph_, 1);
   graph_.topoSort();
 
   // --- instantiate backends in priority order: primary, fallbacks..., CPU last ---
   std::vector<BackendKind> order;
   order.push_back(cfg_.backend);
-  for (auto k : cfg_.fallback) order.push_back(k);
-  if (cfg_.allowCpuFallback) order.push_back(BackendKind::kCpu);
+  for (auto k : cfg_.fallback)
+    order.push_back(k);
+  if (cfg_.allowCpuFallback)
+    order.push_back(BackendKind::kCpu);
   std::set<BackendKind> seen;
   auto& reg = BackendRegistry::instance();
   for (BackendKind k : order) {
-    if (seen.count(k)) continue;
+    if (seen.count(k))
+      continue;
     seen.insert(k);
     if (!reg.has(k)) {
       VX_DEBUG << "backend " << backendName(k) << " not registered";
@@ -151,10 +175,12 @@ void Session::plan() {
     byKind_[k] = b.get();
     backends_.push_back(std::move(b));
   }
-  if (backends_.empty()) throw Error(Status::kRuntimeError, "no usable backend");
+  if (backends_.empty())
+    throw Error(Status::kRuntimeError, "no usable backend");
   VX_INFO << "Active backends (priority): " << [&] {
     std::string s;
-    for (auto& b : backends_) s += std::string(b->name()) + " ";
+    for (auto& b : backends_)
+      s += std::string(b->name()) + " ";
     return s;
   }();
 
@@ -175,8 +201,8 @@ void Session::plan() {
   }
   // Initializers are loaded into the pool LATER (after backend assignment), and only the ones a CPU
   // op consumes — GPU ops upload their weights directly from graph_.initializers (the boundary pack
-  // skips initializers). This avoids re-materializing every weight in the pool, and lets us free the
-  // graph weights after upload — essential for fitting a 965M-param fp16 model on-device.
+  // skips initializers). This avoids re-materializing every weight in the pool, and lets us free
+  // the graph weights after upload — essential for fitting a 965M-param fp16 model on-device.
 
   // --- per-node backend assignment (highest-priority backend that supports it) ---
   nodeBackendIdx_.assign(graph_.nodes.size(), -1);
@@ -206,26 +232,31 @@ void Session::plan() {
   }
 
   // --- fold tiny GPU "islands" back to CPU ---
-  // A maximal run of GPU nodes that is fed only by CPU output and consumed only by CPU (a true island
-  // in the dataflow) costs a CPU->GPU->CPU round trip. When that island does little work (a detection
-  // head's DFL conv / sigmoid on tiny tensors) the pack/unpack dwarfs the compute and, worse, stresses
-  // the boundary path. Run it on the CPU instead. The heavy backbone/head convs are kept on the GPU —
-  // they exceed the work threshold, so this never drags real compute off the accelerator.
+  // A maximal run of GPU nodes that is fed only by CPU output and consumed only by CPU (a true
+  // island in the dataflow) costs a CPU->GPU->CPU round trip. When that island does little work (a
+  // detection head's DFL conv / sigmoid on tiny tensors) the pack/unpack dwarfs the compute and,
+  // worse, stresses the boundary path. Run it on the CPU instead. The heavy backbone/head convs are
+  // kept on the GPU — they exceed the work threshold, so this never drags real compute off the
+  // accelerator.
   foldTinyGpuIslands();
 
   // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---
-  // Only weights a CPU-assigned node reads need a host copy; GPU ops upload from graph_.initializers.
+  // Only weights a CPU-assigned node reads need a host copy; GPU ops upload from
+  // graph_.initializers.
   {
     std::set<TensorId> cpuNeeded;
     for (size_t n = 0; n < graph_.nodes.size(); ++n) {
-      bool isCpu = nodeBackendIdx_[n] >= 0 &&
-                   backends_[nodeBackendIdx_[n]]->kind() == BackendKind::kCpu;
-      if (!isCpu) continue;
+      bool isCpu =
+          nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::kCpu;
+      if (!isCpu)
+        continue;
       for (TensorId in : graph_.nodes[n].inputs)
-        if (in != kNoTensor && graph_.isInitializer(in)) cpuNeeded.insert(in);
+        if (in != kNoTensor && graph_.isInitializer(in))
+          cpuNeeded.insert(in);
     }
     for (TensorId id : graph_.outputs)
-      if (id != kNoTensor && graph_.isInitializer(id)) cpuNeeded.insert(id);
+      if (id != kNoTensor && graph_.isInitializer(id))
+        cpuNeeded.insert(id);
     for (TensorId id : cpuNeeded) {
       RtTensor& rt = pool_[id];
       const HostBuffer& src = graph_.initializers[id];
@@ -235,7 +266,8 @@ void Session::plan() {
         const fp16_t* h = reinterpret_cast<const fp16_t*>(src.bytes.data());
         rt.host.bytes.resize((size_t)nel * 4);
         float* f = rt.host.f32();
-        for (int64_t i = 0; i < nel; ++i) f[i] = halfToFloat(h[i]);
+        for (int64_t i = 0; i < nel; ++i)
+          f[i] = halfToFloat(h[i]);
         rt.dtype = DType::kFloat32;
       } else {
         rt.host = src;
@@ -260,7 +292,8 @@ void Session::plan() {
     for (int ni : parts[p]) {
       nodeToSeg[ni] = (int)p;
       for (TensorId o : graph_.nodes[ni].outputs)
-        if (o != kNoTensor) producerSeg[o] = (int)p;
+        if (o != kNoTensor)
+          producerSeg[o] = (int)p;
     }
   std::set<TensorId> graphOutputs(graph_.outputs.begin(), graph_.outputs.end());
 
@@ -270,17 +303,22 @@ void Session::plan() {
     std::set<TensorId> ins, outs;
     std::set<TensorId> internalOut;
     for (int ni : parts[p])
-      for (TensorId o : graph_.nodes[ni].outputs) internalOut.insert(o);
+      for (TensorId o : graph_.nodes[ni].outputs)
+        internalOut.insert(o);
     for (int ni : parts[p]) {
       for (TensorId in : graph_.nodes[ni].inputs) {
-        if (in == kNoTensor) continue;
-        if (!internalOut.count(in)) ins.insert(in);  // produced outside (init/input/other seg)
+        if (in == kNoTensor)
+          continue;
+        if (!internalOut.count(in))
+          ins.insert(in);  // produced outside (init/input/other seg)
       }
       // a fused residual read by this op but produced by ANOTHER segment is also a boundary input.
       TensorId res = graph_.nodes[ni].fusedResidual;
-      if (res != kNoTensor && !graph_.isInitializer(res) && !internalOut.count(res)) ins.insert(res);
+      if (res != kNoTensor && !graph_.isInitializer(res) && !internalOut.count(res))
+        ins.insert(res);
       for (TensorId o : graph_.nodes[ni].outputs) {
-        if (o == kNoTensor) continue;
+        if (o == kNoTensor)
+          continue;
         // consumed outside this segment?
         bool external = graphOutputs.count(o) > 0;
         if (!external)
@@ -291,7 +329,8 @@ void Session::plan() {
                   external = true;
                   break;
                 }
-        if (external) outs.insert(o);
+        if (external)
+          outs.insert(o);
       }
     }
     seg->boundaryInputs.assign(ins.begin(), ins.end());
@@ -301,7 +340,8 @@ void Session::plan() {
       seg->isFallback = true;
     segments_.push_back(std::move(seg));
   }
-  for (auto& b : backends_) b->finalize();  // flush pipeline/weight/tuning caches
+  for (auto& b : backends_)
+    b->finalize();  // flush pipeline/weight/tuning caches
 
   // --- free the host weights: GPU ops have uploaded them to the device, CPU-consumed ones were
   //     decoded into the pool above. Reclaims the full weight blob (a 965M fp16 model: ~1.9GB) so
@@ -309,7 +349,8 @@ void Session::plan() {
   //     re-plan / weight-introspection path can opt out.)
   if (cfg_.freeWeightsAfterUpload) {
     size_t freed = 0;
-    for (auto& kv : graph_.initializers) freed += kv.second.bytes.size();
+    for (auto& kv : graph_.initializers)
+      freed += kv.second.bytes.size();
     graph_.initializers.clear();
     VX_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
   }
@@ -321,13 +362,15 @@ void Session::plan() {
 
 std::vector<BackendKind> Session::nodeBackends() const {
   std::vector<BackendKind> v;
-  for (int bi : nodeBackendIdx_) v.push_back(bi >= 0 ? backends_[bi]->kind() : BackendKind::kCpu);
+  for (int bi : nodeBackendIdx_)
+    v.push_back(bi >= 0 ? backends_[bi]->kind() : BackendKind::kCpu);
   return v;
 }
 
 const RtTensor* Session::tensor(const std::string& name) const {
   TensorId id = graph_.find(name);
-  if (id == kNoTensor) return nullptr;
+  if (id == kNoTensor)
+    return nullptr;
   return &pool_[id];
 }
 
@@ -363,8 +406,9 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
   try {
     bool dbg = std::getenv("VXRT_DEBUG_SEG") != nullptr;
     for (size_t si = 0; si < segments_.size(); ++si) {
-      if (dbg) VX_INFO << "RUN segment " << si << "/" << segments_.size()
-                       << " backend=" << segments_[si]->backend->name();
+      if (dbg)
+        VX_INFO << "RUN segment " << si << "/" << segments_.size()
+                << " backend=" << segments_[si]->backend->name();
       segments_[si]->run(ctx);
     }
   } catch (const std::exception& e) {
@@ -377,12 +421,15 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
     ::mkdir(cfg_.layerDumpDir.c_str(), 0755);
     for (size_t i = 0; i < pool_.size(); ++i) {
       RtTensor& rt = pool_[i];
-      if (!rt.hostValid || graph_.isInitializer((TensorId)i)) continue;
+      if (!rt.hostValid || graph_.isInitializer((TensorId)i))
+        continue;
       std::string nm = graph_.tensors[i].name;
       for (char& c : nm)
-        if (c == '/' || c == ':') c = '_';
+        if (c == '/' || c == ':')
+          c = '_';
       std::ofstream f(cfg_.layerDumpDir + "/" + nm + ".bin", std::ios::binary);
-      if (f) f.write((const char*)rt.host.bytes.data(), rt.host.bytes.size());
+      if (f)
+        f.write((const char*)rt.host.bytes.data(), rt.host.bytes.size());
     }
     VX_INFO << "layer dump written to " << cfg_.layerDumpDir;
   }
@@ -414,13 +461,15 @@ static IOInfo ioInfoOf(const Graph& g, TensorId id) {
 
 std::vector<IOInfo> Session::inputInfo() const {
   std::vector<IOInfo> v;
-  for (TensorId id : graph_.inputs) v.push_back(ioInfoOf(graph_, id));
+  for (TensorId id : graph_.inputs)
+    v.push_back(ioInfoOf(graph_, id));
   return v;
 }
 
 std::vector<IOInfo> Session::outputInfo() const {
   std::vector<IOInfo> v;
-  for (TensorId id : graph_.outputs) v.push_back(ioInfoOf(graph_, id));
+  for (TensorId id : graph_.outputs)
+    v.push_back(ioInfoOf(graph_, id));
   return v;
 }
 
@@ -452,7 +501,8 @@ Status Session::run(const std::vector<std::vector<float>>& inputData,
 
 std::vector<float> Session::infer(const std::vector<float>& input) {
   std::vector<IOTensor> outs;
-  if (run({input}, outs) != Status::kOk || outs.empty()) return {};
+  if (run({input}, outs) != Status::kOk || outs.empty())
+    return {};
   const float* o = outs[0].f32();
   return std::vector<float>(o, o + numElements(outs[0].shape));
 }

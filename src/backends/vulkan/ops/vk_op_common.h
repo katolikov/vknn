@@ -30,8 +30,9 @@ struct AvgPC {
   int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, countIncludePad;
 };
 struct FcPC {
-  // M = batch rows (>1 for the YoNoSplat 2-view camera head; 1 for classifiers). srcStride/dstStride
-  // = per-row element stride: padded channels for NC4HW4 (H=W=1), or exact C for a gpuFlat operand.
+  // M = batch rows (>1 for the YoNoSplat 2-view camera head; 1 for classifiers).
+  // srcStride/dstStride = per-row element stride: padded channels for NC4HW4 (H=W=1), or exact C
+  // for a gpuFlat operand.
   int Cin, Cout, M, srcStride, dstStride, act;
   float actLo, actHi;
 };
@@ -80,7 +81,8 @@ inline std::shared_ptr<vk::Buffer> upload(vk::VulkanContext& ctx, const std::vec
                                           bool fp16) {
   if (fp16) {
     std::vector<uint16_t> h(data.size());
-    for (size_t i = 0; i < data.size(); ++i) h[i] = floatToHalf(data[i]);
+    for (size_t i = 0; i < data.size(); ++i)
+      h[i] = floatToHalf(data[i]);
     auto b =
         std::make_shared<vk::Buffer>(ctx, std::max<size_t>(h.size(), 4) * 2, vk::MemPref::kAuto);
     b->upload(h.data(), h.size() * 2);
@@ -95,7 +97,8 @@ inline std::shared_ptr<vk::Buffer> upload(vk::VulkanContext& ctx, const std::vec
 // Same as upload(), but reuse the prepacked blob from the weight cache on warm starts.
 // `compute` only runs on a cache miss.
 template <typename Fn>
-inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string& rawKey, Fn compute) {
+inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string& rawKey,
+                                                Fn compute) {
   std::string key = env.modelTag.empty() ? rawKey : env.modelTag + "/" + rawKey;
   std::vector<float> v;
   if (!(env.weights && env.weights->get(key, v))) {
@@ -103,7 +106,8 @@ inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv& env, const std::string&
     // Only retain the prepacked blob when the cache is persistent (a disk path). Without a path the
     // cache would still balloon RAM with every weight (a 965M model: ~3.85GB of prepacked fp32) for
     // no warm-start benefit — so a one-shot run (cacheWeights=false) computes + uploads + frees.
-    if (env.weights && env.weights->enabled()) env.weights->put(key, v);
+    if (env.weights && env.weights->enabled())
+      env.weights->put(key, v);
   }
   return upload(*env.ctx, v, env.useFp16);
 }
@@ -118,18 +122,20 @@ inline std::vector<float> initFloats(const Graph& g, TensorId id) {
   std::vector<float> out((size_t)std::max<int64_t>(n, 0));
   if (g.desc(id).dtype == DType::kFloat16) {
     const fp16_t* h = reinterpret_cast<const fp16_t*>(hb.bytes.data());
-    for (int64_t i = 0; i < n; ++i) out[i] = halfToFloat(h[i]);
+    for (int64_t i = 0; i < n; ++i)
+      out[i] = halfToFloat(h[i]);
   } else {
     const float* f = hb.f32();
-    for (int64_t i = 0; i < n; ++i) out[i] = f[i];
+    for (int64_t i = 0; i < n; ++i)
+      out[i] = f[i];
   }
   return out;
 }
 
 // Resolve an op's DATA operand to a GPU buffer. An activation has a device buffer (env.devBuf); a
-// constant initializer has none, so upload it flat (decoding fp16) into `hold` on first use. Lets any
-// elementwise/data-movement op accept a constant operand (e.g. the RoPE freq tables computed from
-// constants, or a concatenated constant token) without a null-buffer crash.
+// constant initializer has none, so upload it flat (decoding fp16) into `hold` on first use. Lets
+// any elementwise/data-movement op accept a constant operand (e.g. the RoPE freq tables computed
+// from constants, or a concatenated constant token) without a null-buffer crash.
 inline vk::Buffer* operandBuf(VkOpEnv& env, TensorId t, std::shared_ptr<vk::Buffer>& hold) {
   const Graph& g = *env.graph;
   if (g.isInitializer(t)) {

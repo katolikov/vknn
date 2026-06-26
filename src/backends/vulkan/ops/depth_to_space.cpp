@@ -16,11 +16,20 @@ struct DepthToSpaceOp : VulkanOp {
   void prepare(const Node& node, VkOpEnv& env) override {
     NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
     int b = (int)node.attr.geti("blocksize", 1);
-    if (b < 1) b = 1;
+    if (b < 1)
+      b = 1;
     int C2 = (int)x.c / (b * b), OH = (int)x.h * b, OW = (int)x.w * b;
     int mode = node.attr.gets("mode", "DCR") == "CRD" ? 1 : 0;
-    pc = {(int)((int64_t)x.n * C2 * OH * OW), (int)x.n, (int)x.c, (int)x.h, (int)x.w,
-          C2, OH, OW, b, mode};
+    pc = {(int)((int64_t)x.n * C2 * OH * OW),
+          (int)x.n,
+          (int)x.c,
+          (int)x.h,
+          (int)x.w,
+          C2,
+          OH,
+          OW,
+          b,
+          mode};
     pipe = std::make_unique<vk::ComputePipeline>(
         *env.ctx, shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC),
         std::vector<uint32_t>{}, env.cache->handle());

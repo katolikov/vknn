@@ -2,15 +2,16 @@
 // wire up by hand; everything is read from the model. This is the API most users should reach for.
 // (The lower-level Session/IOTensor in session.h stay available for advanced control.)
 //
-//   vx::Model net = vx::Model::load("mobilenet.onnx");        // precision auto, Vulkan if available
-//   vx::Tensor out = net.run(pixels);                          // pixels = std::vector<float>, NCHW
-//   int cls = out.argmax();                                    // done
+//   vx::Model net = vx::Model::load("mobilenet.onnx");        // precision auto, Vulkan if
+//   available vx::Tensor out = net.run(pixels);                          // pixels =
+//   std::vector<float>, NCHW int cls = out.argmax();                                    // done
 //
 //   for (auto& in : net.inputs()) printf("%s %s\n", in.name.c_str(), in.shapeString().c_str());
 #pragma once
 #include <memory>
 #include <string>
 #include <vector>
+
 #include "vx/config.h"
 #include "vx/dtype.h"
 
@@ -22,22 +23,22 @@ class Session;
 struct TensorInfo {
   std::string name;
   std::vector<int64_t> shape;
-  DType dtype = DType::kFloat32;     // the tensor's element type (values cross the API as fp32)
-  int64_t count = 0;                 // number of elements
-  std::string shapeString() const;   // e.g. "1x3x224x224"
+  DType dtype = DType::kFloat32;    // the tensor's element type (values cross the API as fp32)
+  int64_t count = 0;                // number of elements
+  std::string shapeString() const;  // e.g. "1x3x224x224"
 };
 
 /// A tensor going in or out of a model. Carries its own shape + data; all the accessors you'd want
 /// are here so you never poke at raw buffers or recompute strides. Data is row-major fp32 (NCHW).
 class Tensor {
- public:
+public:
   Tensor() = default;
   Tensor(std::vector<float> data, std::vector<int64_t> shape, std::string name = "");
   /// Wrap raw values with a 1-D shape (handy for quick inputs).
   explicit Tensor(std::vector<float> data);
   /// Zero-copy input from a DMA-BUF fd (e.g. a camera/ION buffer). vxrt imports the fd instead of
-  /// copying a host buffer. `name` selects which model input this feeds (optional for single-input).
-  /// The fd's memory is read as row-major fp32 in the given shape.
+  /// copying a host buffer. `name` selects which model input this feeds (optional for
+  /// single-input). The fd's memory is read as row-major fp32 in the given shape.
   static Tensor fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "");
   int dmaBufFd() const { return fd_; }
 
@@ -59,7 +60,7 @@ class Tensor {
   /// Largest value.
   float max() const;
 
- private:
+private:
   std::string name_;
   std::vector<int64_t> shape_;
   std::vector<float> data_;
@@ -68,7 +69,7 @@ class Tensor {
 
 /// A loaded, ready-to-run model. Copyable handle (shares the underlying engine).
 class Model {
- public:
+public:
   /// Load an ONNX model. Picks the Vulkan backend if available (CPU fallback), and the given
   /// precision (Auto = fp16 on GPU). This is all the configuration most users need.
   static Model load(const std::string& onnxPath, Precision precision = Precision::kAuto);
@@ -95,7 +96,7 @@ class Model {
   /// Escape hatch to the low-level engine.
   Session* session() const { return sess_.get(); }
 
- private:
+private:
   std::shared_ptr<Session> sess_;
 };
 

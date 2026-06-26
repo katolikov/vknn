@@ -41,7 +41,8 @@ struct GemmCpu : CpuOp {
           const float* arow = a + m * K;
           const float* brow = b + n * K;
           float32x4_t v = vdupq_n_f32(0.f);
-          for (; k + 4 <= K; k += 4) v = vmlaq_f32(v, vld1q_f32(arow + k), vld1q_f32(brow + k));
+          for (; k + 4 <= K; k += 4)
+            v = vmlaq_f32(v, vld1q_f32(arow + k), vld1q_f32(brow + k));
           acc = vaddvq_f32(v);
         }
 #endif
@@ -51,7 +52,8 @@ struct GemmCpu : CpuOp {
           acc += av * bv;
         }
         acc *= alpha;
-        if (c) acc += beta * (cN == N ? c[n] : c[(m * N + n) % cN]);
+        if (c)
+          acc += beta * (cN == N ? c[n] : c[(m * N + n) % cN]);
         y[m * N + n] = acc;
       }
     cpu::applyAct(y, Y.elems(), node.fusedAct, node.actLo, node.actHi);

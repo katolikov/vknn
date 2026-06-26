@@ -5,12 +5,14 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+
 #include "vx/session.h"
 
 using namespace vx;
 static const char* argval(int c, char** v, const char* k, const char* d) {
   for (int i = 1; i < c - 1; ++i)
-    if (!strcmp(v[i], k)) return v[i + 1];
+    if (!strcmp(v[i], k))
+      return v[i + 1];
   return d;
 }
 static std::vector<uint8_t> readFile(const std::string& p) {
@@ -42,7 +44,8 @@ int main(int argc, char** argv) {
   in.shape = {1, 3, 224, 224};
   in.dtype = DType::kFloat32;
   in.data = readFile(inpath);
-  if (in.data.size() < numElements(in.shape) * 4) in.data.assign(numElements(in.shape) * 4, 0);
+  if (in.data.size() < numElements(in.shape) * 4)
+    in.data.assign(numElements(in.shape) * 4, 0);
 
   std::vector<IOTensor> outs;
   sess->run({in}, outs);  // warmup (fills caches)

@@ -3,6 +3,7 @@
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
 #include <cstdlib>
+
 #include "vk_op_common.h"
 #include "vx/logging.h"
 
@@ -15,8 +16,8 @@ struct ConvOp : VulkanOp {
   bool pointwise = false;
   bool winograd = false;
   bool splitk = false;
-  bool reg = false;    // register-tiled implicit-im2col general conv (WTILE pixels/thread)
-  bool lds = false;    // LDS input-halo 3x3 (8x8 tile/workgroup)
+  bool reg = false;  // register-tiled implicit-im2col general conv (WTILE pixels/thread)
+  bool lds = false;  // LDS input-halo 3x3 (8x8 tile/workgroup)
   int64_t ldsGroups = 0;
   bool hasRes = false;  // residual Add fused into the epilogue (out = act(conv + residual))
   std::unique_ptr<vk::ComputePipeline> pipe;
@@ -45,13 +46,12 @@ struct ConvOp : VulkanOp {
                                            vk::MemPref::kDeviceOnly);
     skGroups = groups(kparts * Coutb * HW, 64);
     skRedGroups = groups(Coutb * HW, 64);
-    skPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_splitk_fp16", 3,
-                                                   sizeof(SplitKPC), std::vector<uint32_t>{},
-                                                   env.cache->handle());
-    skRed = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_reduce_fp16", hasRes ? 4 : 3,
-                                                  sizeof(ReducePC),
-                                                  std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)},
-                                                  env.cache->handle());
+    skPipe =
+        std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_splitk_fp16", 3, sizeof(SplitKPC),
+                                              std::vector<uint32_t>{}, env.cache->handle());
+    skRed = std::make_unique<vk::ComputePipeline>(
+        *env.ctx, "conv1x1_reduce_fp16", hasRes ? 4 : 3, sizeof(ReducePC),
+        std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)}, env.cache->handle());
   }
 
   // --- Winograd F(2x2,3x3) state (used for 3x3, stride 1, pad 1, group 1, fp16) ---
@@ -98,15 +98,16 @@ struct ConvOp : VulkanOp {
                                         vk::MemPref::kDeviceOnly);
 
     wInPC = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)nTH, (int)nTW};
-    wFusedPC = {(int)x.n,  (int)Cin, (int)Cout, (int)y.h,           (int)y.w,
-                (int)nTH,  (int)nTW, (int)node.fusedAct, node.actLo, node.actHi};
+    wFusedPC = {(int)x.n, (int)Cin, (int)Cout,          (int)y.h,   (int)y.w,
+                (int)nTH, (int)nTW, (int)node.fusedAct, node.actLo, node.actHi};
     wInGroups = groups(Cinb * nT, 64);
     wFusedGroups = groups(Coutb * nT, 64);
-    wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC),
-                                                    std::vector<uint32_t>{}, env.cache->handle());
-    wFusedPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_fused_fp16", 4,
-                                                       sizeof(WinoFusedPC), std::vector<uint32_t>{},
-                                                       env.cache->handle());
+    wInPipe =
+        std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC),
+                                              std::vector<uint32_t>{}, env.cache->handle());
+    wFusedPipe =
+        std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_fused_fp16", 4, sizeof(WinoFusedPC),
+                                              std::vector<uint32_t>{}, env.cache->handle());
   }
 
   // Try a few workgroup sizes for this exact shape, keep the fastest, and remember it so the
@@ -114,14 +115,16 @@ struct ConvOp : VulkanOp {
   // The timing dispatches run on dedicated SCRATCH buffers, never the real activation buffers -
   // tuning must not write into the data path (doing so raced the first real run and corrupted it).
   uint32_t pickLocalSize(VkOpEnv& env) {
-    if (std::getenv("VXRT_NO_TUNE")) return 64;
+    if (std::getenv("VXRT_NO_TUNE"))
+      return 64;
     char buf[96];
     snprintf(buf, sizeof(buf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH,
              pc.OW, pc.KH, pc.SH);
     std::string sig = buf;
     if (env.weights) {
       int cached = env.weights->tuned(sig, 0);
-      if (cached > 0) return (uint32_t)cached;
+      if (cached > 0)
+        return (uint32_t)cached;
     }
     uint32_t best = 64;
     if (env.tuning != TuningLevel::kOff && env.runner) {
@@ -154,7 +157,8 @@ struct ConvOp : VulkanOp {
       }
       VX_DEBUG << "autotune " << sig << " -> local_size_x=" << best;
     }
-    if (env.weights) env.weights->setTuned(sig, (int)best);
+    if (env.weights)
+      env.weights->setTuned(sig, (int)best);
     return best;
   }
 
@@ -174,7 +178,8 @@ struct ConvOp : VulkanOp {
                  pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
     // Winograd F(2,3) for 3x3 stride-1 pad-1 group-1 convs (fp16). Correct (cosine 0.999999) but
     // the un-fused 3-pass version is memory-bound and currently slower than the direct kernel on
-    // this GPU, so it's opt-in via VXRT_WINOGRAD=1 until the transforms are fused. See BENCHMARK.md.
+    // this GPU, so it's opt-in via VXRT_WINOGRAD=1 until the transforms are fused. See
+    // BENCHMARK.md.
     bool winoEnabled = std::getenv("VXRT_WINOGRAD") != nullptr;
     winograd = (winoEnabled && env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 &&
                 st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 &&
@@ -192,7 +197,8 @@ struct ConvOp : VulkanOp {
           node.inputs[2] != node.fusedResidual) {
         std::vector<float> bsrcv = initFloats(g, node.inputs[2]);
         const float* bsrc = bsrcv.data();
-        for (int64_t i = 0; i < Cout; ++i) bias[i] = bsrc[i];
+        for (int64_t i = 0; i < Cout; ++i)
+          bias[i] = bsrc[i];
       }
       return bias;
     });
@@ -264,8 +270,9 @@ struct ConvOp : VulkanOp {
         lds = true;
         int64_t nTX = (y.w + 7) / 8, nTY = (y.h + 7) / 8;
         ldsGroups = x.n * Coutb * nTY * nTX;
-        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC),
-                                                     std::vector<uint32_t>{}, env.cache->handle());
+        pipe =
+            std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC),
+                                                  std::vector<uint32_t>{}, env.cache->handle());
       } else if (std::getenv("VXRT_CONV_REG")) {
         // register-tiled implicit-im2col (opt-in): regresses 3x3 on this GPU (small weight tensors
         // already cache well; WTILE overhead + extra input loads dominate). Kept for experiments.
@@ -279,10 +286,9 @@ struct ConvOp : VulkanOp {
         // autotuned 1-pixel-per-thread direct kernel (fastest 3x3 path on Xclipse so far)
         total = x.n * Coutb * y.h * y.w;
         localSize = pickLocalSize(env);
-        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv", env.useFp16), 4,
-                                                     sizeof(ConvPC),
-                                                     std::vector<uint32_t>{localSize},
-                                                     env.cache->handle());
+        pipe = std::make_unique<vk::ComputePipeline>(
+            *env.ctx, shader("conv", env.useFp16), 4, sizeof(ConvPC),
+            std::vector<uint32_t>{localSize}, env.cache->handle());
       }
     }
   }
@@ -299,7 +305,8 @@ struct ConvOp : VulkanOp {
                            &wFusedPC, sizeof(wFusedPC), (uint32_t)wFusedGroups);
       return;
     }
-    // fused residual (1x1 path only); bias is a harmless dummy when not fused (shader won't read it)
+    // fused residual (1x1 path only); bias is a harmless dummy when not fused (shader won't read
+    // it)
     VkBuffer res = (hasRes ? env.devBuf(node.fusedResidual) : bbuf.get())->handle();
     if (splitk) {
       // partial pass (K-parallel) -> reduce pass (+bias [+residual] +act).
@@ -307,7 +314,8 @@ struct ConvOp : VulkanOp {
                        (uint32_t)skGroups);
       vk::computeBarrier(cmd);
       std::vector<VkBuffer> rb = {partBuf->handle(), bbuf->handle(), dst->handle()};
-      if (hasRes) rb.push_back(res);
+      if (hasRes)
+        rb.push_back(res);
       skRed->dispatch(cmd, rb, &skRedPC, sizeof(skRedPC), (uint32_t)skRedGroups);
       return;
     }
@@ -315,7 +323,8 @@ struct ConvOp : VulkanOp {
     if (depthwise)
       pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, 64));
     else if (pointwise) {
-      if (hasRes) bufs.push_back(res);
+      if (hasRes)
+        bufs.push_back(res);
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
     } else if (lds)
       pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t)ldsGroups);

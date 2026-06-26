@@ -16,7 +16,8 @@ struct GlobalAvgPoolCpu : CpuOp {
       for (int64_t c = 0; c < x.c; ++c) {
         const float* p = xd + (n * x.c + c) * hw;
         double s = 0;
-        for (int64_t i = 0; i < hw; ++i) s += p[i];
+        for (int64_t i = 0; i < hw; ++i)
+          s += p[i];
         y[n * x.c + c] = (float)(s / hw);
       }
   }

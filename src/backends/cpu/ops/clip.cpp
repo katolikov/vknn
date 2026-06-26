@@ -1,7 +1,8 @@
 // Clip(x, min, max). MobileNetV2 uses this as ReLU6 (min=0, max=6). Opset 11/12 pass min/max
 // as inputs; older models pass them as attributes - handle both.
-#include "backends/cpu/cpu_backend.h"
 #include <limits>
+
+#include "backends/cpu/cpu_backend.h"
 
 namespace vx {
 namespace {
@@ -16,8 +17,10 @@ struct ClipCpu : CpuOp {
       lo = ctx.t(node.inputs[1]).host.f32()[0];
     if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor)
       hi = ctx.t(node.inputs[2]).host.f32()[0];
-    if (node.attr.has("min")) lo = node.attr.getf("min", lo);
-    if (node.attr.has("max")) hi = node.attr.getf("max", hi);
+    if (node.attr.has("min"))
+      lo = node.attr.getf("min", lo);
+    if (node.attr.has("max"))
+      hi = node.attr.getf("max", hi);
     int64_t n = X.elems();
     float* y = cpu::allocOut(Y, X.shape);
     const float* x = X.host.f32();

@@ -1,8 +1,8 @@
 // Tensor element types. Kept as an enum so int8 can be bolted on later without churn.
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <cstddef>
 
 namespace vx {
 
@@ -92,18 +92,22 @@ inline fp16_t floatToHalf(float v) {
   if (((f >> 23) & 0xFF) == 0xFF) {  // inf/nan
     return (fp16_t)(sign | 0x7C00 | (mant ? 0x200 : 0));
   }
-  if (exp >= 0x1F) return (fp16_t)(sign | 0x7C00);  // overflow -> inf
+  if (exp >= 0x1F)
+    return (fp16_t)(sign | 0x7C00);  // overflow -> inf
   if (exp <= 0) {
-    if (exp < -10) return (fp16_t)sign;  // underflow -> 0
+    if (exp < -10)
+      return (fp16_t)sign;  // underflow -> 0
     mant |= 0x800000;
     uint32_t shift = (uint32_t)(14 - exp);
     uint32_t half = (mant >> shift);
     // round to nearest even
-    if ((mant >> (shift - 1)) & 1) half += 1;
+    if ((mant >> (shift - 1)) & 1)
+      half += 1;
     return (fp16_t)(sign | half);
   }
   fp16_t out = (fp16_t)(sign | (exp << 10) | (mant >> 13));
-  if (mant & 0x1000) out += 1;  // round
+  if (mant & 0x1000)
+    out += 1;  // round
   return out;
 }
 

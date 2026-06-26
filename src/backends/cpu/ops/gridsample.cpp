@@ -2,6 +2,7 @@
 // bilinear/nearest; padding zeros/border/reflection; align_corners. NCHW fp32 reference oracle.
 #include <algorithm>
 #include <cmath>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
@@ -9,10 +10,13 @@ namespace vx {
 namespace {
 
 static double reflectCoord(double x, double lo, double hi) {
-  if (hi <= lo) return lo;
+  if (hi <= lo)
+    return lo;
   double rng = hi - lo, t = std::fmod(x - lo, 2 * rng);
-  if (t < 0) t += 2 * rng;
-  if (t > rng) t = 2 * rng - t;
+  if (t < 0)
+    t += 2 * rng;
+  if (t > rng)
+    t = 2 * rng - t;
   return lo + t;
 }
 
@@ -34,7 +38,8 @@ struct GridSampleCpu : CpuOp {
     const float* gd = G.host.f32();
     auto unnorm = [&](double g, int S) { return ((1.0 + g) * (S - a) - b) * 0.5; };
     auto handle = [&](double c, int S) {  // map continuous coord per padding mode
-      if (pad == "reflection") return reflectCoord(c, align ? 0.0 : -0.5, align ? (S - 1.0) : (S - 0.5));
+      if (pad == "reflection")
+        return reflectCoord(c, align ? 0.0 : -0.5, align ? (S - 1.0) : (S - 0.5));
       return c;  // zeros/border handled at fetch
     };
     auto fetch = [&](int n, int ch, int px, int py) -> float {
@@ -62,9 +67,11 @@ struct GridSampleCpu : CpuOp {
             double wx = ix - x0, wy = iy - y0;
             for (int64_t c = 0; c < x.c; ++c) {
               float v00 = fetch((int)n, (int)c, x0, y0), v01 = fetch((int)n, (int)c, x0 + 1, y0);
-              float v10 = fetch((int)n, (int)c, x0, y0 + 1), v11 = fetch((int)n, (int)c, x0 + 1, y0 + 1);
+              float v10 = fetch((int)n, (int)c, x0, y0 + 1),
+                    v11 = fetch((int)n, (int)c, x0 + 1, y0 + 1);
               y[((n * x.c + c) * Hout + oy) * Wout + ox] =
-                  (float)((1 - wy) * ((1 - wx) * v00 + wx * v01) + wy * ((1 - wx) * v10 + wx * v11));
+                  (float)((1 - wy) * ((1 - wx) * v00 + wx * v01) +
+                          wy * ((1 - wx) * v10 + wx * v11));
             }
           }
         }

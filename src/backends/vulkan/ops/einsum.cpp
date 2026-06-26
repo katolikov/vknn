@@ -4,6 +4,7 @@
 // or an activation.
 #include <string>
 #include <vector>
+
 #include "flat_ops.h"
 #include "vk_op_common.h"
 #include "vx/op.h"

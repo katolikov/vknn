@@ -2,6 +2,7 @@
 // pw_w[Cout,E,1,1], pw_b[Cout], (residual). subOp = dw ActType; fusedAct = project act.
 #include <algorithm>
 #include <vector>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
@@ -18,7 +19,8 @@ struct FusedDwPwCpu : CpuOp {
     NCHW x = NCHW::from(X.shape);
     int64_t E = x.c, Cout = PW.shape[0], KH = DW.shape[2], KW = DW.shape[3];
     auto a = [&](const char* k, std::vector<int64_t> d) {
-      const auto& v = node.attr.getints(k); return v.empty() ? d : v;
+      const auto& v = node.attr.getints(k);
+      return v.empty() ? d : v;
     };
     auto st = a("strides", {1, 1}), pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
     int64_t OH = (x.h + pad[0] + pad[2] - (dil[0] * (KH - 1) + 1)) / st[0] + 1;
@@ -28,7 +30,8 @@ struct FusedDwPwCpu : CpuOp {
     const float* pw = PW.host.f32();
     Shape os = {x.n, Cout, OH, OW};
     float* y = cpu::allocOut(Y, os);
-    const float* res = node.fusedResidual != kNoTensor ? ctx.t(node.fusedResidual).host.f32() : nullptr;
+    const float* res =
+        node.fusedResidual != kNoTensor ? ctx.t(node.fusedResidual).host.f32() : nullptr;
     std::vector<float> dwOut(E * OH * OW);
     for (int64_t n = 0; n < x.n; ++n) {
       // depthwise
@@ -38,10 +41,12 @@ struct FusedDwPwCpu : CpuOp {
             float acc = db ? db[e] : 0.f;
             for (int64_t ky = 0; ky < KH; ++ky) {
               int64_t iy = oy * st[0] - pad[0] + ky * dil[0];
-              if (iy < 0 || iy >= x.h) continue;
+              if (iy < 0 || iy >= x.h)
+                continue;
               for (int64_t kx = 0; kx < KW; ++kx) {
                 int64_t ix = ox * st[1] - pad[1] + kx * dil[1];
-                if (ix < 0 || ix >= x.w) continue;
+                if (ix < 0 || ix >= x.w)
+                  continue;
                 acc += xd[((n * E + e) * x.h + iy) * x.w + ix] * dw[(e * KH + ky) * KW + kx];
               }
             }
@@ -52,9 +57,11 @@ struct FusedDwPwCpu : CpuOp {
       for (int64_t c = 0; c < Cout; ++c)
         for (int64_t p = 0; p < OH * OW; ++p) {
           float acc = pb ? pb[c] : 0.f;
-          for (int64_t e = 0; e < E; ++e) acc += pw[c * E + e] * dwOut[e * OH * OW + p];
+          for (int64_t e = 0; e < E; ++e)
+            acc += pw[c * E + e] * dwOut[e * OH * OW + p];
           int64_t oi = (n * Cout + c) * OH * OW + p;
-          if (res) acc += res[oi];
+          if (res)
+            acc += res[oi];
           y[oi] = acc;
         }
     }

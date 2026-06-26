@@ -1,5 +1,6 @@
 // vx_probe - enumerate the device's Vulkan compute capabilities (M0 hello-vulkan).
 #include <cstdio>
+
 #include "vx/logging.h"
 #if defined(VXRT_ENABLE_VULKAN)
 #include "backends/vulkan/vk_context.h"

@@ -1,5 +1,6 @@
 // MaxPool2D (scalar reference). Used by ResNet/SqueezeNet-style nets.
 #include <limits>
+
 #include "backends/cpu/cpu_backend.h"
 
 namespace vx {
@@ -31,10 +32,12 @@ struct MaxPoolCpu : CpuOp {
             float m = -std::numeric_limits<float>::infinity();
             for (int64_t ky = 0; ky < kh; ++ky) {
               int64_t iy = oy * sh - pt + ky;
-              if (iy < 0 || iy >= x.h) continue;
+              if (iy < 0 || iy >= x.h)
+                continue;
               for (int64_t kx = 0; kx < kw; ++kx) {
                 int64_t ix = ox * sw - pl + kx;
-                if (ix < 0 || ix >= x.w) continue;
+                if (ix < 0 || ix >= x.w)
+                  continue;
                 m = std::max(m, xc[iy * x.w + ix]);
               }
             }

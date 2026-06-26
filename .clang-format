@@ -1,11 +1,40 @@
-# vxrt house style. Run: clang-format -i (see scripts/format.sh)
+# Establish Google as the baseline rule set
 BasedOnStyle: Google
+
+# Target language (can also be Java, JavaScript, Proto)
+Language: Cpp
+
+# 1. Spacing and Columns
+# Google default is 80, but 100 or 120 is common on modern wide monitors
 ColumnLimit: 100
 IndentWidth: 2
-DerivePointerAlignment: false
+TabWidth: 2
+UseTab: Never
+
+# 2. Pointer/Reference Alignment
+# Google default is Left: "int* p" instead of "int *p"
 PointerAlignment: Left
+DerivePointerAlignment: false
+
+# 3. Code Compactness
+# Controls whether short, one-liner elements stay on one line
+AllowShortBlocksOnASingleLine: Never
 AllowShortFunctionsOnASingleLine: Inline
-AllowShortIfStatementsOnASingleLine: WithoutElse
-AllowShortLoopsOnASingleLine: true
-SortIncludes: false
-SpacesBeforeTrailingComments: 2
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# 4. Braces and Indentation
+# Google style keeps braces attached to the control statement
+BreakBeforeBraces: Attach
+
+# Indent case labels inside a switch statement
+IndentCaseLabels: true
+
+# Indent public/private keywords relative to the class body
+# -2 places them flush with the class keyword
+AccessModifierOffset: -2
+
+# 5. Includes Organization
+# Automatically sorts #include directives alphabetically
+SortIncludes: true
+IncludeBlocks: Regroup

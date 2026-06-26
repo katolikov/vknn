@@ -20,9 +20,19 @@ struct AvgPoolOp : VulkanOp {
     auto ks = ints("kernel_shape", {1, 1});
     auto st = ints("strides", {1, 1});
     auto pad = ints("pads", {0, 0, 0, 0});
-    pc = {(int)x.n,   (int)x.c,   (int)x.h,    (int)x.w,    (int)y.h,
-          (int)y.w,   (int)ks[0], (int)ks[1],  (int)st[0],  (int)st[1],
-          (int)pad[0], (int)pad[1], (int)node.attr.geti("count_include_pad", 0)};
+    pc = {(int)x.n,
+          (int)x.c,
+          (int)x.h,
+          (int)x.w,
+          (int)y.h,
+          (int)y.w,
+          (int)ks[0],
+          (int)ks[1],
+          (int)st[0],
+          (int)st[1],
+          (int)pad[0],
+          (int)pad[1],
+          (int)node.attr.geti("count_include_pad", 0)};
     total = x.n * cBlocks(x.c) * y.h * y.w;
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("avgpool2d", env.useFp16), 2,
                                                  sizeof(AvgPC), std::vector<uint32_t>{},

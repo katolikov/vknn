@@ -1,10 +1,13 @@
 #include "vx/ion.h"
-#include <cstdint>
-#include <cstring>
+
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include <cstdint>
+#include <cstring>
+
 #include "vx/logging.h"
 
 namespace vx {
@@ -71,8 +74,10 @@ std::unique_ptr<IonBuffer> IonBuffer::wrapFd(int fd, size_t bytes, bool takeOwne
 }
 
 IonBuffer::~IonBuffer() {
-  if (map_) ::munmap(map_, size_);
-  if (owns_ && fd_ >= 0) ::close(fd_);
+  if (map_)
+    ::munmap(map_, size_);
+  if (owns_ && fd_ >= 0)
+    ::close(fd_);
 }
 
 }  // namespace vx

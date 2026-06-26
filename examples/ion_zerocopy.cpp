@@ -6,14 +6,16 @@
 // Both are validated against the staged (regular VkBuffer + upload) path.
 #include <cstdio>
 #if defined(VXRT_ENABLE_VULKAN)
-#include <cmath>
 #include <unistd.h>
+
+#include <cmath>
 #include <vector>
-#include "vx/ion.h"
-#include "vx/logging.h"
+
 #include "backends/vulkan/vk_buffer.h"
 #include "backends/vulkan/vk_command.h"
 #include "backends/vulkan/vk_pipeline.h"
+#include "vx/ion.h"
+#include "vx/logging.h"
 
 using namespace vx;
 
@@ -96,7 +98,8 @@ int main() {
     int dupFd = ::dup(savedFd);  // simulate an fd from elsewhere
     auto ionB = IonBuffer::wrapFd(dupFd, bytes, /*takeOwnership=*/true);
     // data already present in the shared buffer; re-write to be explicit
-    if (ionB->data()) memcpy(ionB->data(), A.data(), bytes);
+    if (ionB->data())
+      memcpy(ionB->data(), A.data(), bytes);
     std::unique_ptr<vk::Buffer> impB(vk::Buffer::importDmaBufFd(ctx, dupFd, bytes));
     if (impB) {
       runAdd(ctx, runner, add, impB->handle(), bBuf.handle(), cBuf.handle(), N);

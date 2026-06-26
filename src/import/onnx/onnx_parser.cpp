@@ -11,6 +11,7 @@
 #include <map>
 #include <string>
 #include <vector>
+
 #include "vx/graph.h"
 #include "vx/logging.h"
 
@@ -19,7 +20,7 @@ namespace onnx {
 
 // ----------------------------- wire reader -----------------------------
 class Reader {
- public:
+public:
   Reader(const uint8_t* p, size_t n) : p_(p), end_(p + n) {}
   bool eof() const { return p_ >= end_; }
 
@@ -29,7 +30,8 @@ class Reader {
     while (p_ < end_) {
       uint8_t b = *p_++;
       v |= (uint64_t)(b & 0x7F) << shift;
-      if (!(b & 0x80)) break;
+      if (!(b & 0x80))
+        break;
       shift += 7;
     }
     return v;
@@ -48,7 +50,8 @@ class Reader {
   }
   // returns (field number, wire type)
   bool tag(uint32_t& field, uint32_t& wire) {
-    if (eof()) return false;
+    if (eof())
+      return false;
     uint64_t t = varint();
     field = (uint32_t)(t >> 3);
     wire = (uint32_t)(t & 7);
@@ -97,7 +100,7 @@ class Reader {
   const uint8_t* cur() const { return p_; }
   const uint8_t* end() const { return end_; }
 
- private:
+private:
   const uint8_t* p_;
   const uint8_t* end_;
 };
@@ -129,7 +132,8 @@ static TensorProto parseTensor(Reader r) {
       case 1:  // dims
         if (w == 2) {
           Reader s = r.sub();
-          while (!s.eof()) t.dims.push_back((int64_t)s.varint());
+          while (!s.eof())
+            t.dims.push_back((int64_t)s.varint());
         } else
           t.dims.push_back((int64_t)r.varint());
         break;
@@ -155,7 +159,8 @@ static TensorProto parseTensor(Reader r) {
       case 7:  // int64_data
         if (w == 2) {
           Reader s = r.sub();
-          while (!s.eof()) t.int64Data.push_back((int64_t)s.varint());
+          while (!s.eof())
+            t.int64Data.push_back((int64_t)s.varint());
         } else
           t.int64Data.push_back((int64_t)r.varint());
         break;
@@ -170,13 +175,19 @@ static TensorProto parseTensor(Reader r) {
         std::string key, val;
         uint32_t ef, ew;
         while (s.tag(ef, ew)) {
-          if (ef == 1 && ew == 2) key = s.str();
-          else if (ef == 2 && ew == 2) val = s.str();
-          else s.skip(ew);
+          if (ef == 1 && ew == 2)
+            key = s.str();
+          else if (ef == 2 && ew == 2)
+            val = s.str();
+          else
+            s.skip(ew);
         }
-        if (key == "location") t.extLoc = val;
-        else if (key == "offset") t.extOffset = std::strtoll(val.c_str(), nullptr, 10);
-        else if (key == "length") t.extLength = std::strtoll(val.c_str(), nullptr, 10);
+        if (key == "location")
+          t.extLoc = val;
+        else if (key == "offset")
+          t.extOffset = std::strtoll(val.c_str(), nullptr, 10);
+        else if (key == "length")
+          t.extLength = std::strtoll(val.c_str(), nullptr, 10);
         break;
       }
       case 14:  // data_location
@@ -195,7 +206,8 @@ static TensorProto parseTensor(Reader r) {
 // cached (one .onnx.data backs every weight). No-op if the tensor isn't external or already inline.
 static void resolveExternal(const std::string& baseDir, TensorProto& t,
                             std::map<std::string, std::vector<uint8_t>>& cache) {
-  if (t.dataLocation != 1 || t.extLoc.empty() || !t.raw.empty()) return;
+  if (t.dataLocation != 1 || t.extLoc.empty() || !t.raw.empty())
+    return;
   std::string path = baseDir.empty() ? t.extLoc : baseDir + "/" + t.extLoc;
   auto it = cache.find(path);
   if (it == cache.end()) {
@@ -227,10 +239,12 @@ static void fillHostFloat(const TensorProto& t, HostBuffer& hb, int64_t elems) {
       std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t)elems * 4));
     } else if (t.dataType == 7) {  // INT64 raw
       const int64_t* s = reinterpret_cast<const int64_t*>(t.raw.data());
-      for (int64_t i = 0; i < elems; ++i) dst[i] = (float)s[i];
+      for (int64_t i = 0; i < elems; ++i)
+        dst[i] = (float)s[i];
     }
   } else if (!t.floatData.empty()) {
-    for (int64_t i = 0; i < elems && i < (int64_t)t.floatData.size(); ++i) dst[i] = t.floatData[i];
+    for (int64_t i = 0; i < elems && i < (int64_t)t.floatData.size(); ++i)
+      dst[i] = t.floatData[i];
   } else if (!t.int64Data.empty()) {
     for (int64_t i = 0; i < elems && i < (int64_t)t.int64Data.size(); ++i)
       dst[i] = (float)t.int64Data[i];
@@ -244,7 +258,8 @@ static void fillHostI64(const TensorProto& t, HostBuffer& hb, int64_t elems) {
   if (!t.raw.empty() && t.dataType == 7) {
     std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t)elems * 8));
   } else if (!t.int64Data.empty()) {
-    for (int64_t i = 0; i < elems && i < (int64_t)t.int64Data.size(); ++i) dst[i] = t.int64Data[i];
+    for (int64_t i = 0; i < elems && i < (int64_t)t.int64Data.size(); ++i)
+      dst[i] = t.int64Data[i];
   }
 }
 
@@ -292,7 +307,8 @@ static void parseAttr(Reader r, Node& node) {
       case 8: {
         if (w == 2) {
           Reader s = r.sub();
-          while (!s.eof()) a.ints.push_back((int64_t)s.varint());
+          while (!s.eof())
+            a.ints.push_back((int64_t)s.varint());
         } else
           a.ints.push_back((int64_t)r.varint());
         a.kind = Attr::kInts;
@@ -313,7 +329,8 @@ static void parseAttr(Reader r, Node& node) {
     a.kind = Attr::kFloats;
     a.shape = tp.dims;  // keep dims so a Constant node emits its true shape (e.g. anchor grids)
     int64_t n = 1;
-    for (auto d : tp.dims) n *= d;
+    for (auto d : tp.dims)
+      n *= d;
     if (tp.dims.empty())
       n = std::max<int64_t>(1, (int64_t)std::max(tp.floatData.size(), tp.int64Data.size()));
     if (!tp.int64Data.empty() || tp.dataType == 7) {
@@ -322,14 +339,16 @@ static void parseAttr(Reader r, Node& node) {
         a.ints = tp.int64Data;
       else if (!tp.raw.empty()) {
         const int64_t* s = (const int64_t*)tp.raw.data();
-        for (int64_t i = 0; i < n; ++i) a.ints.push_back(s[i]);
+        for (int64_t i = 0; i < n; ++i)
+          a.ints.push_back(s[i]);
       }
     } else {
       if (!tp.floatData.empty())
         a.floats = tp.floatData;
       else if (!tp.raw.empty()) {
         const float* s = (const float*)tp.raw.data();
-        for (int64_t i = 0; i < n; ++i) a.floats.push_back(s[i]);
+        for (int64_t i = 0; i < n; ++i)
+          a.floats.push_back(s[i]);
       }
     }
   }
@@ -422,8 +441,10 @@ static void parseNode(Reader r, Graph& g, Node& node) {
     UnaryType u = unaryFromOnnx(opType);
     node.subOp = (int32_t)u;
     // params (defaults per ONNX): LeakyRelu alpha=0.01, Elu alpha=1.0, HardSigmoid alpha,beta
-    if (u == UnaryType::kLeakyRelu) node.actLo = node.attr.getf("alpha", 0.01f);
-    else if (u == UnaryType::kElu) node.actLo = node.attr.getf("alpha", 1.0f);
+    if (u == UnaryType::kLeakyRelu)
+      node.actLo = node.attr.getf("alpha", 0.01f);
+    else if (u == UnaryType::kElu)
+      node.actLo = node.attr.getf("alpha", 1.0f);
     else if (u == UnaryType::kHardSigmoid) {
       node.actLo = node.attr.getf("alpha", 0.2f);
       node.actHi = node.attr.getf("beta", 0.5f);
@@ -435,9 +456,12 @@ static void parseNode(Reader r, Graph& g, Node& node) {
   }
   if (node.type == OpType::kUnknown)
     VX_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
-  for (auto& s : ins) node.inputs.push_back(s.empty() ? kNoTensor : g.findOrAdd(s));
-  for (auto& s : outs) node.outputs.push_back(g.findOrAdd(s));
-  if (node.name.empty()) node.name = opType + "_" + std::to_string(g.nodes.size());
+  for (auto& s : ins)
+    node.inputs.push_back(s.empty() ? kNoTensor : g.findOrAdd(s));
+  for (auto& s : outs)
+    node.outputs.push_back(g.findOrAdd(s));
+  if (node.name.empty())
+    node.name = opType + "_" + std::to_string(g.nodes.size());
 }
 
 // ----------------------------- GraphProto -----------------------------
@@ -494,7 +518,8 @@ static void parseGraph(Reader r, Graph& g, const std::string& baseDir) {
         parseValueInfo(r.sub(), nm, sh, el);
         if (!nm.empty()) {
           TensorId id = g.findOrAdd(nm);
-          if (g.desc(id).shape.empty()) g.desc(id).shape = sh;
+          if (g.desc(id).shape.empty())
+            g.desc(id).shape = sh;
         }
         break;
       }
@@ -512,8 +537,10 @@ static void parseGraph(Reader r, Graph& g, const std::string& baseDir) {
     d.isInitializer = true;
     d.shape = pi.tp.dims;
     int64_t n = 1;
-    for (auto x : pi.tp.dims) n *= x;
-    if (pi.tp.dims.empty()) n = 1;
+    for (auto x : pi.tp.dims)
+      n *= x;
+    if (pi.tp.dims.empty())
+      n = 1;
     resolveExternal(baseDir, pi.tp, extCache);  // pull EXTERNAL weights from the sibling data file
     HostBuffer hb;
     if (pi.tp.dataType == 7) {
@@ -528,7 +555,8 @@ static void parseGraph(Reader r, Graph& g, const std::string& baseDir) {
   // Remove initializer ids from the graph input list (ONNX lists them in both).
   std::vector<TensorId> realInputs;
   for (TensorId id : g.inputs)
-    if (!g.isInitializer(id)) realInputs.push_back(id);
+    if (!g.isInitializer(id))
+      realInputs.push_back(id);
   g.inputs = realInputs;
 }
 
@@ -537,7 +565,8 @@ static void parseGraph(Reader r, Graph& g, const std::string& baseDir) {
 // Public entry point.
 Graph importOnnx(const std::string& path) {
   std::ifstream f(path, std::ios::binary);
-  if (!f) throw Error(Status::kIoError, "cannot open ONNX file: " + path);
+  if (!f)
+    throw Error(Status::kIoError, "cannot open ONNX file: " + path);
   std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   // Directory the model lives in — external_data locations are relative to it.
   size_t slash = path.find_last_of("/\\");
@@ -554,7 +583,8 @@ Graph importOnnx(const std::string& path) {
     } else
       r.skip(wire);
   }
-  if (!foundGraph) throw Error(Status::kInvalidArgument, "no GraphProto in ONNX model");
+  if (!foundGraph)
+    throw Error(Status::kInvalidArgument, "no GraphProto in ONNX model");
   g.topoSort();
   VX_INFO << "Imported ONNX: " << g.nodes.size() << " nodes, " << g.initializers.size()
           << " initializers, " << g.inputs.size() << " inputs, " << g.outputs.size() << " outputs";

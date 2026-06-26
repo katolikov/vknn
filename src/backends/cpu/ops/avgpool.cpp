@@ -1,5 +1,6 @@
 // Windowed AveragePool2D (scalar reference). ONNX count_include_pad selects the divisor.
 #include <algorithm>
+
 #include "backends/cpu/cpu_backend.h"
 
 namespace vx {
@@ -33,10 +34,12 @@ struct AvgPoolCpu : CpuOp {
             int64_t cnt = 0;
             for (int64_t ky = 0; ky < kh; ++ky) {
               int64_t iy = oy * sh - pt + ky;
-              if (iy < 0 || iy >= x.h) continue;
+              if (iy < 0 || iy >= x.h)
+                continue;
               for (int64_t kx = 0; kx < kw; ++kx) {
                 int64_t ix = ox * sw - pl + kx;
-                if (ix < 0 || ix >= x.w) continue;
+                if (ix < 0 || ix >= x.w)
+                  continue;
                 acc += xc[iy * x.w + ix];
                 ++cnt;
               }

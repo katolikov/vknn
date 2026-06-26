@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <fstream>
 #include <vector>
+
 #include "vx/model.h"
 
 int main(int argc, char** argv) {
@@ -28,7 +29,8 @@ int main(int argc, char** argv) {
   std::vector<float> input(need, 0.f);
   if (argc >= 3) {
     std::ifstream f(argv[2], std::ios::binary);
-    if (f) f.read(reinterpret_cast<char*>(input.data()), need * sizeof(float));
+    if (f)
+      f.read(reinterpret_cast<char*>(input.data()), need * sizeof(float));
   }
 
   vx::Tensor out = net.run(input);  // one line to run
@@ -36,7 +38,8 @@ int main(int argc, char** argv) {
          (long long)out.argmax(), out.max());
 
   if (argc >= 4) {  // optional: save the optimized model for fast reloads
-    if (net.save(argv[3])) printf("saved optimized model -> %s\n", argv[3]);
+    if (net.save(argv[3]))
+      printf("saved optimized model -> %s\n", argv[3]);
   }
   return 0;
 }

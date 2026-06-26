@@ -1,8 +1,10 @@
 #include "passes.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <set>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/logging.h"
 
@@ -13,7 +15,8 @@ namespace vx {
 std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* attrName,
                                   int inputIdx) {
   const auto& av = nd.attr.getints(attrName);
-  if (!av.empty()) return av;
+  if (!av.empty())
+    return av;
   if (inputIdx >= 0 && inputIdx < (int)nd.inputs.size() && nd.inputs[inputIdx] != kNoTensor) {
     auto it = g.initializers.find(nd.inputs[inputIdx]);
     if (it != g.initializers.end()) {
@@ -25,7 +28,8 @@ std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* at
       int64_t n = (int64_t)hb.bytes.size() / 4;
       std::vector<int64_t> out;
       const float* f = hb.f32();
-      for (int64_t i = 0; i < n; ++i) out.push_back((int64_t)f[i]);
+      for (int64_t i = 0; i < n; ++i)
+        out.push_back((int64_t)f[i]);
       return out;
     }
   }
@@ -33,18 +37,22 @@ std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* at
 }
 
 // Redirect every reference to tensor `from` so it points at `to`: node inputs, the fused-residual
-// edge (NOT in the inputs list on every op), and graph outputs. Fusion passes that delete a node and
-// fold its output into a producer MUST use this — rewiring only node.inputs leaves a stale
+// edge (NOT in the inputs list on every op), and graph outputs. Fusion passes that delete a node
+// and fold its output into a producer MUST use this — rewiring only node.inputs leaves a stale
 // fusedResidual edge dangling at a dead tensor (the cause of a hard crash in conv residual reads).
 static void rewireTensor(Graph& g, TensorId from, TensorId to) {
-  if (from == to || from == kNoTensor) return;
+  if (from == to || from == kNoTensor)
+    return;
   for (auto& nn : g.nodes) {
     for (TensorId& in : nn.inputs)
-      if (in == from) in = to;
-    if (nn.fusedResidual == from) nn.fusedResidual = to;
+      if (in == from)
+        in = to;
+    if (nn.fusedResidual == from)
+      nn.fusedResidual = to;
   }
   for (TensorId& go : g.outputs)
-    if (go == from) go = to;
+    if (go == from)
+      go = to;
 }
 
 void inferShapes(Graph& g, int64_t batch) {
@@ -52,20 +60,24 @@ void inferShapes(Graph& g, int64_t batch) {
   for (TensorId in : g.inputs) {
     auto& s = g.desc(in).shape;
     for (auto& d : s)
-      if (d < 0) d = batch;
+      if (d < 0)
+        d = batch;
   }
   auto SH = [&](TensorId id) -> Shape& { return g.desc(id).shape; };
   for (auto& nd : g.nodes) {
-    if (nd.outputs.empty()) continue;
+    if (nd.outputs.empty())
+      continue;
     TensorId o = nd.outputs[0];
     switch (nd.type) {
       case OpType::kConv: {
-        if (SH(nd.inputs[0]).empty()) break;  // input unresolved: leave output empty (don't
-                                               // fabricate [1,C,1,1] from NCHW::from({}), which would
-                                               // let constFold freeze a stale Shape() of this output)
+        if (SH(nd.inputs[0]).empty())
+          break;  // input unresolved: leave output empty (don't
+                  // fabricate [1,C,1,1] from NCHW::from({}), which would
+                  // let constFold freeze a stale Shape() of this output)
         NCHW x = NCHW::from(SH(nd.inputs[0]));
         const Shape& w = SH(nd.inputs[1]);
-        if (w.size() < 4) break;
+        if (w.size() < 4)
+          break;
         int64_t outC = w[0], kh = w[2], kw = w[3];
         auto ints = [&](const char* k, std::vector<int64_t> d) {
           const auto& v = nd.attr.getints(k);
@@ -87,29 +99,35 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kSoftmax:
       case OpType::kLayerNorm:
       case OpType::kPRelu:
-      case OpType::kEyeLike:     // identity-like, same shape as input
-      case OpType::kScatterND:   // same shape as data (input[0])
+      case OpType::kEyeLike:    // identity-like, same shape as input
+      case OpType::kScatterND:  // same shape as data (input[0])
         SH(o) = SH(nd.inputs[0]);
         break;
       case OpType::kEqual: {
         const Shape& a = SH(nd.inputs[0]);
         const Shape& b = SH(nd.inputs[1]);
-        if (a.empty() && b.empty()) break;
-        if (a.empty() || b.empty()) { SH(o) = a.empty() ? b : a; break; }
+        if (a.empty() && b.empty())
+          break;
+        if (a.empty() || b.empty()) {
+          SH(o) = a.empty() ? b : a;
+          break;
+        }
         size_t rank = std::max(a.size(), b.size());
         Shape out(rank, 1);
         auto dimOf = [&](const Shape& s, size_t i) -> int64_t {
           size_t off = rank - s.size();
           return i < off ? 1 : s[i - off];
         };
-        for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(a, i), dimOf(b, i));
+        for (size_t i = 0; i < rank; ++i)
+          out[i] = std::max(dimOf(a, i), dimOf(b, i));
         SH(o) = out;
         break;
       }
       case OpType::kEinsum: {
         std::string eq;
         for (char c : nd.attr.gets("equation", ""))
-          if (c != ' ' && c != '\t') eq += c;
+          if (c != ' ' && c != '\t')
+            eq += c;
         const Shape& a = SH(nd.inputs[0]);
         const Shape& b = SH(nd.inputs[1]);
         if (eq == "i,j->ij" && !a.empty() && !b.empty())
@@ -125,7 +143,8 @@ void inferShapes(Graph& g, int64_t batch) {
             size_t off = rank - s.size();
             return i < off ? 1 : s[i - off];
           };
-          for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(ab, i), dimOf(bb, i));
+          for (size_t i = 0; i < rank; ++i)
+            out[i] = std::max(dimOf(ab, i), dimOf(bb, i));
           out.push_back(a[a.size() - 2]);  // the free dim A
           SH(o) = out;
         } else if (eq == "bij,bnjk->bnik" && a.size() >= 3 && b.size() >= 4)
@@ -136,13 +155,16 @@ void inferShapes(Graph& g, int64_t batch) {
         // Broadcast cond (in[0]), X (in[1]), Y (in[2]); output dims = elementwise-max.
         size_t rank = 0;
         for (TensorId t : nd.inputs)
-          if (t != kNoTensor) rank = std::max(rank, SH(t).size());
+          if (t != kNoTensor)
+            rank = std::max(rank, SH(t).size());
         Shape out(rank, 1);
         for (TensorId t : nd.inputs) {
-          if (t == kNoTensor) continue;
+          if (t == kNoTensor)
+            continue;
           const Shape& s = SH(t);
           size_t off = rank - s.size();
-          for (size_t i = 0; i < s.size(); ++i) out[off + i] = std::max(out[off + i], s[i]);
+          for (size_t i = 0; i < s.size(); ++i)
+            out[off + i] = std::max(out[off + i], s[i]);
         }
         SH(o) = out;
         break;
@@ -153,13 +175,17 @@ void inferShapes(Graph& g, int64_t batch) {
         if (g.isInitializer(sid)) {
           const HostBuffer& hb = g.initializers[sid];
           int64_t r = numElements(g.desc(sid).shape);
-          if (r <= 0) r = (int64_t)(hb.bytes.size() / 8);
-          if (r < 0 || r > 16) break;  // a shape vector has at most a handful of dims
+          if (r <= 0)
+            r = (int64_t)(hb.bytes.size() / 8);
+          if (r < 0 || r > 16)
+            break;  // a shape vector has at most a handful of dims
           Shape out(r);
           if (g.tensors[sid].dtype == DType::kInt64)
-            for (int64_t i = 0; i < r; ++i) out[i] = hb.i64()[i];
+            for (int64_t i = 0; i < r; ++i)
+              out[i] = hb.i64()[i];
           else
-            for (int64_t i = 0; i < r; ++i) out[i] = (int64_t)hb.f32()[i];
+            for (int64_t i = 0; i < r; ++i)
+              out[i] = (int64_t)hb.f32()[i];
           SH(o) = out;
         }
         break;
@@ -167,7 +193,8 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kGridSample: {
         const Shape& xs = SH(nd.inputs[0]);
         const Shape& gs = SH(nd.inputs[1]);
-        if (xs.size() == 4 && gs.size() == 4) SH(o) = {xs[0], xs[1], gs[1], gs[2]};
+        if (xs.size() == 4 && gs.size() == 4)
+          SH(o) = {xs[0], xs[1], gs[1], gs[2]};
         break;
       }
       case OpType::kCast:
@@ -176,17 +203,20 @@ void inferShapes(Graph& g, int64_t batch) {
         break;
       }
       case OpType::kFusedSE: {
-        if (SH(nd.inputs[0]).empty()) break;
+        if (SH(nd.inputs[0]).empty())
+          break;
         NCHW x = NCHW::from(SH(nd.inputs[0]));
         SH(o) = {x.n, x.c, 1, 1};  // channel scale
         break;
       }
       case OpType::kFusedDwPw: {
-        if (SH(nd.inputs[0]).empty()) break;
+        if (SH(nd.inputs[0]).empty())
+          break;
         NCHW x = NCHW::from(SH(nd.inputs[0]));  // expanded input [N,E,H,W]
         const Shape& pw = SH(nd.inputs[3]);     // project weights [Cout,E,1,1]
         auto a = [&](const char* k, std::vector<int64_t> d) {
-          const auto& v = nd.attr.getints(k); return v.empty() ? d : v;
+          const auto& v = nd.attr.getints(k);
+          return v.empty() ? d : v;
         };
         auto k = a("kernel_shape", {3, 3}), st = a("strides", {1, 1});
         auto pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
@@ -197,16 +227,25 @@ void inferShapes(Graph& g, int64_t batch) {
       }
       case OpType::kSplit: {
         const Shape& a = SH(nd.inputs[0]);
-        if (a.empty()) break;
+        if (a.empty())
+          break;
         int64_t rank = (int64_t)a.size();
         int64_t axis = nd.attr.geti("axis", 0);
-        if (axis < 0) axis += rank;
+        if (axis < 0)
+          axis += rank;
         std::vector<int64_t> sp = readI64Param(g, nd, "split", 1);
         int64_t nout = (int64_t)nd.outputs.size();
-        if (sp.empty() && nout > 0) { int64_t each = a[axis] / nout; for (int64_t k = 0; k < nout; ++k) sp.push_back(each); }
+        if (sp.empty() && nout > 0) {
+          int64_t each = a[axis] / nout;
+          for (int64_t k = 0; k < nout; ++k)
+            sp.push_back(each);
+        }
         for (int64_t k = 0; k < nout && k < (int64_t)sp.size(); ++k) {
-          if (nd.outputs[k] == kNoTensor) continue;
-          Shape os = a; os[axis] = sp[k]; SH(nd.outputs[k]) = os;
+          if (nd.outputs[k] == kNoTensor)
+            continue;
+          Shape os = a;
+          os[axis] = sp[k];
+          SH(nd.outputs[k]) = os;
         }
         break;
       }
@@ -221,29 +260,38 @@ void inferShapes(Graph& g, int64_t batch) {
       }
       case OpType::kReduce: {
         const Shape& a = SH(nd.inputs[0]);
-        if (a.empty()) break;
+        if (a.empty())
+          break;
         int64_t rank = (int64_t)a.size();
         std::vector<int64_t> axes = readI64Param(g, nd, "axes", 1);
         if (axes.empty())
-          for (int64_t i = 0; i < rank; ++i) axes.push_back(i);  // reduce all
+          for (int64_t i = 0; i < rank; ++i)
+            axes.push_back(i);  // reduce all
         std::set<int64_t> ax;
-        for (int64_t v : axes) ax.insert(v < 0 ? v + rank : v);
+        for (int64_t v : axes)
+          ax.insert(v < 0 ? v + rank : v);
         bool keep = nd.attr.geti("keepdims", 1) != 0;
         Shape out;
         for (int64_t i = 0; i < rank; ++i) {
-          if (ax.count(i)) { if (keep) out.push_back(1); }
-          else out.push_back(a[i]);
+          if (ax.count(i)) {
+            if (keep)
+              out.push_back(1);
+          } else
+            out.push_back(a[i]);
         }
-        if (out.empty()) out.push_back(1);
+        if (out.empty())
+          out.push_back(1);
         SH(o) = out;
         break;
       }
       case OpType::kDepthToSpace: {
         // [N,C,H,W] -> [N, C/(b*b), H*b, W*b]
-        if (SH(nd.inputs[0]).empty()) break;
+        if (SH(nd.inputs[0]).empty())
+          break;
         NCHW x = NCHW::from(SH(nd.inputs[0]));
         int64_t b = nd.attr.geti("blocksize", 1);
-        if (b < 1) b = 1;
+        if (b < 1)
+          b = 1;
         SH(o) = {x.n, x.c / (b * b), x.h * b, x.w * b};
         break;
       }
@@ -253,27 +301,31 @@ void inferShapes(Graph& g, int64_t batch) {
         std::vector<int64_t> pads = readI64Param(g, nd, "pads", 1);
         Shape out = a;
         if ((int64_t)pads.size() >= 2 * rank)
-          for (int64_t i = 0; i < rank; ++i) out[i] = a[i] + pads[i] + pads[i + rank];
+          for (int64_t i = 0; i < rank; ++i)
+            out[i] = a[i] + pads[i] + pads[i + rank];
         SH(o) = out;
         break;
       }
       case OpType::kSlice: {
         const Shape& a = SH(nd.inputs[0]);
-        if (a.empty()) break;
+        if (a.empty())
+          break;
         int64_t rank = (int64_t)a.size();
         std::vector<int64_t> starts = readI64Param(g, nd, "starts", 1);
         std::vector<int64_t> ends = readI64Param(g, nd, "ends", 2);
         std::vector<int64_t> axes = readI64Param(g, nd, "axes", 3);
         std::vector<int64_t> steps = readI64Param(g, nd, "steps", 4);
         // The number of axes this Slice bounds = length of the starts/ends params (known from the
-        // param tensor's shape even while its VALUES are still runtime). If a bound can't be read as
-        // a constant yet — e.g. a head_dim/2 derived from Shape() arithmetic that const-folds only on
-        // a later pass — DON'T fabricate the sliced axis at its full input size. That wrong dim can be
-        // frozen by a downstream Shape() fold (this masked the RoPE attention: Shape(rotated_q)[-1]
-        // froze at 4*head_dim, so the 1/sqrt(d) scale came out half). Defer (leave the output
-        // unresolved); inferShapes re-runs and resolves it once the bounds const-fold.
+        // param tensor's shape even while its VALUES are still runtime). If a bound can't be read
+        // as a constant yet — e.g. a head_dim/2 derived from Shape() arithmetic that const-folds
+        // only on a later pass — DON'T fabricate the sliced axis at its full input size. That wrong
+        // dim can be frozen by a downstream Shape() fold (this masked the RoPE attention:
+        // Shape(rotated_q)[-1] froze at 4*head_dim, so the 1/sqrt(d) scale came out half). Defer
+        // (leave the output unresolved); inferShapes re-runs and resolves it once the bounds
+        // const-fold.
         auto declLen = [&](int idx) -> int64_t {
-          if (idx >= (int)nd.inputs.size() || nd.inputs[idx] == kNoTensor) return 0;
+          if (idx >= (int)nd.inputs.size() || nd.inputs[idx] == kNoTensor)
+            return 0;
           const Shape& ps = g.desc(nd.inputs[idx]).shape;
           return ps.empty() ? -1 : numElements(ps);
         };
@@ -281,11 +333,14 @@ void inferShapes(Graph& g, int64_t batch) {
         if (want > 0 && ((int64_t)starts.size() < want || (int64_t)ends.size() < want))
           break;  // a slice bound is still runtime -> defer rather than fabricate a wrong dim
         Shape out = a;
-        // Bound a dim only when BOTH its start and end are known; never index a param past its length.
+        // Bound a dim only when BOTH its start and end are known; never index a param past its
+        // length.
         for (size_t k = 0; k < starts.size() && k < ends.size(); ++k) {
           int64_t ax = axes.empty() ? (int64_t)k : (k < axes.size() ? axes[k] : (int64_t)k);
-          if (ax < 0) ax += rank;
-          if (ax < 0 || ax >= rank) continue;
+          if (ax < 0)
+            ax += rank;
+          if (ax < 0 || ax >= rank)
+            continue;
           int64_t step = (k < steps.size()) ? steps[k] : 1;
           int64_t dim = a[ax];
           int64_t st = starts[k] < 0 ? starts[k] + dim : starts[k];
@@ -304,26 +359,33 @@ void inferShapes(Graph& g, int64_t batch) {
         if (s.size() == 4) {
           // ONNX Resize inputs: X, roi, scales, sizes (some optional/empty). Prefer sizes if given.
           auto getInit = [&](int idx, std::vector<float>& f, std::vector<int64_t>& i64) {
-            if (idx >= (int)nd.inputs.size() || nd.inputs[idx] == kNoTensor) return false;
+            if (idx >= (int)nd.inputs.size() || nd.inputs[idx] == kNoTensor)
+              return false;
             auto it = g.initializers.find(nd.inputs[idx]);
-            if (it == g.initializers.end()) return false;
+            if (it == g.initializers.end())
+              return false;
             int64_t n = (int64_t)it->second.bytes.size() /
                         (g.tensors[nd.inputs[idx]].dtype == DType::kInt64 ? 8 : 4);
             if (g.tensors[nd.inputs[idx]].dtype == DType::kInt64) {
               const int64_t* p = it->second.i64();
-              for (int64_t k = 0; k < n; ++k) i64.push_back(p[k]);
+              for (int64_t k = 0; k < n; ++k)
+                i64.push_back(p[k]);
             } else {
               const float* p = it->second.f32();
-              for (int64_t k = 0; k < n; ++k) f.push_back(p[k]);
+              for (int64_t k = 0; k < n; ++k)
+                f.push_back(p[k]);
             }
             return true;
           };
           std::vector<float> sizesF, scalesF;
           std::vector<int64_t> sizesI, scalesI;
-          if (nd.inputs.size() >= 4 && getInit(3, sizesF, sizesI) && (sizesI.size() == 4 || sizesF.size() == 4)) {
-            for (int k = 0; k < 4; ++k) s[k] = sizesI.size() == 4 ? sizesI[k] : (int64_t)sizesF[k];
+          if (nd.inputs.size() >= 4 && getInit(3, sizesF, sizesI) &&
+              (sizesI.size() == 4 || sizesF.size() == 4)) {
+            for (int k = 0; k < 4; ++k)
+              s[k] = sizesI.size() == 4 ? sizesI[k] : (int64_t)sizesF[k];
           } else if (getInit(2, scalesF, scalesI) && scalesF.size() == 4) {
-            for (int k = 0; k < 4; ++k) s[k] = (int64_t)(SH(nd.inputs[0])[k] * scalesF[k]);
+            for (int k = 0; k < 4; ++k)
+              s[k] = (int64_t)(SH(nd.inputs[0])[k] * scalesF[k]);
           }
         }
         SH(o) = s;
@@ -332,11 +394,13 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kBinary:
       case OpType::kAdd: {
         // True NumPy broadcasting (per-dim max over right-aligned shapes). The old "bigger element
-        // count wins" heuristic is wrong for outer-product style ops (e.g. [..,3,1]*[..,1,3]->[..,3,3]
-        // in the per-pixel ray math) and for a trailing broadcast ([2,224,224,1]*[3]->[2,224,224,3]).
+        // count wins" heuristic is wrong for outer-product style ops (e.g.
+        // [..,3,1]*[..,1,3]->[..,3,3] in the per-pixel ray math) and for a trailing broadcast
+        // ([2,224,224,1]*[3]->[2,224,224,3]).
         const Shape& a = SH(nd.inputs[0]);
         const Shape& b = SH(nd.inputs[1]);
-        if (a.empty() && b.empty()) break;
+        if (a.empty() && b.empty())
+          break;
         if (a.empty() || b.empty()) {  // one is a rank-0 scalar (or unresolved): use the other
           SH(o) = a.empty() ? b : a;
           break;
@@ -347,19 +411,22 @@ void inferShapes(Graph& g, int64_t batch) {
           size_t off = rank - s.size();
           return i < off ? 1 : s[i - off];
         };
-        for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(a, i), dimOf(b, i));
+        for (size_t i = 0; i < rank; ++i)
+          out[i] = std::max(dimOf(a, i), dimOf(b, i));
         SH(o) = out;
         break;
       }
       case OpType::kGlobalAvgPool: {
-        if (SH(nd.inputs[0]).empty()) break;
+        if (SH(nd.inputs[0]).empty())
+          break;
         NCHW x = NCHW::from(SH(nd.inputs[0]));
         SH(o) = {x.n, x.c, 1, 1};
         break;
       }
       case OpType::kMaxPool:
       case OpType::kAvgPool: {
-        if (SH(nd.inputs[0]).empty()) break;
+        if (SH(nd.inputs[0]).empty())
+          break;
         NCHW x = NCHW::from(SH(nd.inputs[0]));
         auto ints = [&](const char* k, std::vector<int64_t> d) {
           const auto& v = nd.attr.getints(k);
@@ -375,7 +442,8 @@ void inferShapes(Graph& g, int64_t batch) {
       }
       case OpType::kGemm: {
         const Shape& a = SH(nd.inputs[0]);
-        if (a.empty()) break;
+        if (a.empty())
+          break;
         const Shape& w = SH(nd.inputs[1]);
         int64_t transB = nd.attr.geti("transB", 0);
         int64_t M = a.empty() ? 1 : a[0];
@@ -386,11 +454,14 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kMatMul: {
         Shape a = SH(nd.inputs[0]);
         Shape b = SH(nd.inputs[1]);
-        if (a.empty() || b.empty()) break;
+        if (a.empty() || b.empty())
+          break;
         // 1-D promotion: A[K]->[1,K], B[K]->[K,1]; the prepended/appended dim is stripped from out.
         bool aWas1D = a.size() == 1, bWas1D = b.size() == 1;
-        if (aWas1D) a = {1, a[0]};
-        if (bWas1D) b = {b[0], 1};
+        if (aWas1D)
+          a = {1, a[0]};
+        if (bWas1D)
+          b = {b[0], 1};
         int64_t M = a[a.size() - 2], N = b[b.size() - 1];
         int64_t aBatch = (int64_t)a.size() - 2, bBatch = (int64_t)b.size() - 2;
         int64_t batchRank = std::max(aBatch, bBatch);
@@ -401,18 +472,23 @@ void inferShapes(Graph& g, int64_t batch) {
         Shape out;
         for (int64_t i = 0; i < batchRank; ++i)
           out.push_back(std::max(dimOf(a, aBatch, i), dimOf(b, bBatch, i)));
-        if (!aWas1D) out.push_back(M);
+        if (!aWas1D)
+          out.push_back(M);
         out.push_back(N);
-        if (bWas1D) out.pop_back();
-        if (out.empty()) out.push_back(1);  // scalar dot product -> [1]
+        if (bWas1D)
+          out.pop_back();
+        if (out.empty())
+          out.push_back(1);  // scalar dot product -> [1]
         SH(o) = out;
         break;
       }
       case OpType::kFlatten: {
         const Shape& a = SH(nd.inputs[0]);
-        if (a.empty()) break;
+        if (a.empty())
+          break;
         int64_t axis = nd.attr.geti("axis", 1), d0 = 1, d1 = 1;
-        for (int64_t i = 0; i < (int64_t)a.size(); ++i) (i < axis ? d0 : d1) *= a[i];
+        for (int64_t i = 0; i < (int64_t)a.size(); ++i)
+          (i < axis ? d0 : d1) *= a[i];
         SH(o) = {d0, d1};
         break;
       }
@@ -420,36 +496,47 @@ void inferShapes(Graph& g, int64_t batch) {
         Shape s = SH(nd.inputs[0]);
         if (!s.empty()) {
           int64_t axis = nd.attr.geti("axis", 1);
-          if (axis < 0) axis += (int64_t)s.size();
+          if (axis < 0)
+            axis += (int64_t)s.size();
           int64_t sum = 0;
           for (TensorId in : nd.inputs) {
             const Shape& si = SH(in);
-            if (si.empty()) { sum = -1; break; }
+            if (si.empty()) {
+              sum = -1;
+              break;
+            }
             sum += si[axis];
           }
-          if (sum >= 0) { s[axis] = sum; SH(o) = s; }
+          if (sum >= 0) {
+            s[axis] = sum;
+            SH(o) = s;
+          }
         }
         break;
       }
       case OpType::kReshape: {
         TensorId sid = nd.inputs[1];
-        if (!g.isInitializer(sid)) break;  // shape becomes const after constFold; 2nd pass fills it
+        if (!g.isInitializer(sid))
+          break;  // shape becomes const after constFold; 2nd pass fills it
         const HostBuffer& hb = g.initializers[sid];
         const Shape& in = SH(nd.inputs[0]);
         int64_t rank = numElements(g.desc(sid).shape);
-        if (rank <= 0) rank = (int64_t)(hb.bytes.size() / 8);
+        if (rank <= 0)
+          rank = (int64_t)(hb.bytes.size() / 8);
         Shape out(rank);
         int64_t known = 1, infer = -1;
         for (int64_t i = 0; i < rank; ++i) {
           int64_t d = hb.i64()[i];
-          if (d == 0) d = (i < (int64_t)in.size()) ? in[i] : 1;
+          if (d == 0)
+            d = (i < (int64_t)in.size()) ? in[i] : 1;
           out[i] = d;
           if (d == -1)
             infer = i;
           else
             known *= d;
         }
-        if (infer >= 0) out[infer] = numElements(in) / std::max<int64_t>(known, 1);
+        if (infer >= 0)
+          out[infer] = numElements(in) / std::max<int64_t>(known, 1);
         SH(o) = out;
         break;
       }
@@ -457,13 +544,15 @@ void inferShapes(Graph& g, int64_t batch) {
         // out = numpy-broadcast(in.shape, target). target is the int64 input[1].
         const Shape& in = SH(nd.inputs[0]);
         std::vector<int64_t> tgt = readI64Param(g, nd, "shape", 1);
-        if (tgt.empty()) break;  // target const after constFold; resolved on a later pass
+        if (tgt.empty())
+          break;  // target const after constFold; resolved on a later pass
         int rank = (int)std::max(in.size(), tgt.size());
         Shape out(rank, 1);
         for (int k = 0; k < rank; ++k) {
           int64_t a = (k >= rank - (int)in.size()) ? in[k - (rank - (int)in.size())] : 1;
           int64_t b = (k >= rank - (int)tgt.size()) ? tgt[k - (rank - (int)tgt.size())] : 1;
-          if (b < 0) b = 1;
+          if (b < 0)
+            b = 1;
           out[k] = std::max<int64_t>(a, b);
         }
         SH(o) = out;
@@ -473,7 +562,8 @@ void inferShapes(Graph& g, int64_t batch) {
         // out.shape[k] = in.shape[k] * repeats[k]. repeats is the int64 input[1].
         const Shape& in = SH(nd.inputs[0]);
         std::vector<int64_t> reps = readI64Param(g, nd, "repeats", 1);
-        if (reps.empty()) break;  // repeats const after constFold; resolved on a later pass
+        if (reps.empty())
+          break;  // repeats const after constFold; resolved on a later pass
         Shape out = in;
         for (int k = 0; k < (int)in.size(); ++k)
           out[k] = in[k] * std::max<int64_t>((k < (int)reps.size()) ? reps[k] : 1, 1);
@@ -483,17 +573,27 @@ void inferShapes(Graph& g, int64_t batch) {
       case OpType::kSqueeze: {
         // remove the listed size-1 axes, or every size-1 dim when axes is absent.
         const Shape& in = SH(nd.inputs[0]);
-        if (in.empty()) break;
+        if (in.empty())
+          break;
         int rank = (int)in.size();
         std::vector<int64_t> axes = readI64Param(g, nd, "axes", 1);
         std::vector<bool> drop(rank, false);
         if (axes.empty())
-          for (int k = 0; k < rank; ++k) drop[k] = (in[k] == 1);
+          for (int k = 0; k < rank; ++k)
+            drop[k] = (in[k] == 1);
         else
-          for (int64_t ax : axes) { if (ax < 0) ax += rank; if (ax >= 0 && ax < rank) drop[ax] = true; }
+          for (int64_t ax : axes) {
+            if (ax < 0)
+              ax += rank;
+            if (ax >= 0 && ax < rank)
+              drop[ax] = true;
+          }
         Shape out;
-        for (int k = 0; k < rank; ++k) if (!drop[k]) out.push_back(in[k]);
-        if (out.empty()) out.push_back(1);
+        for (int k = 0; k < rank; ++k)
+          if (!drop[k])
+            out.push_back(in[k]);
+        if (out.empty())
+          out.push_back(1);
         SH(o) = out;
         break;
       }
@@ -502,22 +602,30 @@ void inferShapes(Graph& g, int64_t batch) {
         // index (rank-0, stored here as [1] with one element) removes the axis. Mirrors GatherCpu
         // exactly so the inferred plan-time shape matches the runtime result (axis-aware).
         const Shape& d = SH(nd.inputs[0]);
-        if (d.empty()) break;
+        if (d.empty())
+          break;
         int64_t rank = (int64_t)d.size();
         int64_t axis = nd.attr.geti("axis", 0);
-        if (axis < 0) axis += rank;
-        if (axis < 0 || axis >= rank) break;
+        if (axis < 0)
+          axis += rank;
+        if (axis < 0 || axis >= rank)
+          break;
         TensorId iid = nd.inputs[1];
         const Shape& is = SH(iid);
-        if (is.empty() && !g.isInitializer(iid)) break;  // indices not resolved yet
+        if (is.empty() && !g.isInitializer(iid))
+          break;  // indices not resolved yet
         int64_t nidx = is.empty() ? 1 : numElements(is);
         bool scalarIndex = is.empty() || (is.size() == 1 && is[0] == 1 && nidx == 1);
         Shape out;
-        for (int64_t i = 0; i < axis; ++i) out.push_back(d[i]);
+        for (int64_t i = 0; i < axis; ++i)
+          out.push_back(d[i]);
         if (!scalarIndex)
-          for (int64_t v : is) out.push_back(v);
-        for (int64_t i = axis + 1; i < rank; ++i) out.push_back(d[i]);
-        if (out.empty()) out.push_back(1);
+          for (int64_t v : is)
+            out.push_back(v);
+        for (int64_t i = axis + 1; i < rank; ++i)
+          out.push_back(d[i]);
+        if (out.empty())
+          out.push_back(1);
         SH(o) = out;
         break;
       }
@@ -526,13 +634,16 @@ void inferShapes(Graph& g, int64_t batch) {
         // UnsqueezeCpu: sort axes, normalize negatives against the growing rank, insert.
         TensorId xid = nd.inputs[0];
         const Shape& in = SH(xid);
-        if (in.empty() && !g.isInitializer(xid)) break;  // input not resolved (allow rank-0 init)
+        if (in.empty() && !g.isInitializer(xid))
+          break;  // input not resolved (allow rank-0 init)
         std::vector<int64_t> axes = readI64Param(g, nd, "axes", 1);
-        if (axes.empty()) break;  // a real Unsqueeze always has axes; wait for the param to const-fold
+        if (axes.empty())
+          break;  // a real Unsqueeze always has axes; wait for the param to const-fold
         Shape out = in;
         std::sort(axes.begin(), axes.end());
         for (int64_t ax : axes) {
-          if (ax < 0) ax += (int64_t)out.size() + 1;
+          if (ax < 0)
+            ax += (int64_t)out.size() + 1;
           ax = std::max<int64_t>(0, std::min<int64_t>(ax, (int64_t)out.size()));
           out.insert(out.begin() + ax, 1);
         }
@@ -545,61 +656,97 @@ void inferShapes(Graph& g, int64_t batch) {
   }
 }
 
-// Lower the two batched-matmul Einsum equations to Unsqueeze + MatMul (+ Squeeze) so they run on the
-// validated flat MatMul GPU kernel instead of the CPU einsum. The remaining "i,j->ij" outer product
-// keeps its own GPU kernel. Run after shapes are resolved (the einsum operand shapes must be known).
+// Lower the two batched-matmul Einsum equations to Unsqueeze + MatMul (+ Squeeze) so they run on
+// the validated flat MatMul GPU kernel instead of the CPU einsum. The remaining "i,j->ij" outer
+// product keeps its own GPU kernel. Run after shapes are resolved (the einsum operand shapes must
+// be known).
 void lowerEinsum(Graph& g) {
   auto axesAttr = [](std::vector<int64_t> ax) {
-    Attr a; a.kind = Attr::kInts; a.ints = std::move(ax); return a;
+    Attr a;
+    a.kind = Attr::kInts;
+    a.ints = std::move(ax);
+    return a;
   };
   std::vector<Node> added;
   std::vector<int> remove;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& n = g.nodes[i];
-    if (n.type != OpType::kEinsum || n.inputs.size() < 2) continue;
+    if (n.type != OpType::kEinsum || n.inputs.size() < 2)
+      continue;
     std::string eq;
     for (char c : n.attr.gets("equation", ""))
-      if (c != ' ' && c != '\t') eq += c;
+      if (c != ' ' && c != '\t')
+        eq += c;
     TensorId A = n.inputs[0], B = n.inputs[1], out = n.outputs[0];
     // Copy shapes/descs/names BY VALUE up front: g.addTensor() below reallocates g.tensors, which
-    // would dangle any reference into it (a stale xs.size() read produced axes=[0] -> wrong unsqueeze).
+    // would dangle any reference into it (a stale xs.size() read produced axes=[0] -> wrong
+    // unsqueeze).
     if (eq == "...ab,...b->...a") {
       // y[...,a] = sum_b A[...,a,b]*x[...,b]  ==  Squeeze(MatMul(A, Unsqueeze(x,-1)), -1)
       Shape xs = g.desc(B).shape;
-      if (xs.empty()) continue;
+      if (xs.empty())
+        continue;
       int64_t xrank = (int64_t)xs.size();
       Shape outShape = g.desc(out).shape;
       int64_t outRank = (int64_t)outShape.size();
       TensorDesc dxp = g.desc(B);
-      dxp.name = dxp.name + "#e_unsq"; dxp.isInitializer = dxp.isInput = dxp.isOutput = false;
-      dxp.shape = xs; dxp.shape.push_back(1);
+      dxp.name = dxp.name + "#e_unsq";
+      dxp.isInitializer = dxp.isInput = dxp.isOutput = false;
+      dxp.shape = xs;
+      dxp.shape.push_back(1);
       TensorId xp = g.addTensor(dxp);
       TensorDesc dmm = g.desc(out);
-      dmm.name = dmm.name + "#e_mm"; dmm.isInitializer = dmm.isInput = dmm.isOutput = false;
-      dmm.shape = outShape; dmm.shape.push_back(1);
+      dmm.name = dmm.name + "#e_mm";
+      dmm.isInitializer = dmm.isInput = dmm.isOutput = false;
+      dmm.shape = outShape;
+      dmm.shape.push_back(1);
       TensorId mm = g.addTensor(dmm);
-      Node un; un.type = OpType::kUnsqueeze; un.name = n.name + "#unsq";
-      un.inputs = {B}; un.outputs = {xp}; un.attr.map["axes"] = axesAttr({xrank});
-      Node mul; mul.type = OpType::kMatMul; mul.name = n.name + "#mm";
-      mul.inputs = {A, xp}; mul.outputs = {mm};
-      Node sq; sq.type = OpType::kSqueeze; sq.name = n.name + "#sq";
-      sq.inputs = {mm}; sq.outputs = {out};
+      Node un;
+      un.type = OpType::kUnsqueeze;
+      un.name = n.name + "#unsq";
+      un.inputs = {B};
+      un.outputs = {xp};
+      un.attr.map["axes"] = axesAttr({xrank});
+      Node mul;
+      mul.type = OpType::kMatMul;
+      mul.name = n.name + "#mm";
+      mul.inputs = {A, xp};
+      mul.outputs = {mm};
+      Node sq;
+      sq.type = OpType::kSqueeze;
+      sq.name = n.name + "#sq";
+      sq.inputs = {mm};
+      sq.outputs = {out};
       sq.attr.map["axes"] = axesAttr({outRank});
-      added.push_back(un); added.push_back(mul); added.push_back(sq);
+      added.push_back(un);
+      added.push_back(mul);
+      added.push_back(sq);
       remove.push_back((int)i);
     } else if (eq == "bij,bnjk->bnik") {
-      // C[b,n,i,k] = sum_j A[b,i,j]*B[b,n,j,k]  ==  MatMul(Unsqueeze(A,1), B)  (A broadcasts over n)
+      // C[b,n,i,k] = sum_j A[b,i,j]*B[b,n,j,k]  ==  MatMul(Unsqueeze(A,1), B)  (A broadcasts over
+      // n)
       Shape as = g.desc(A).shape;
-      if (as.empty()) continue;
+      if (as.empty())
+        continue;
       TensorDesc dap = g.desc(A);
-      dap.name = dap.name + "#e_unsq"; dap.isInitializer = dap.isInput = dap.isOutput = false;
-      dap.shape = as; dap.shape.insert(dap.shape.begin() + 1, 1);
+      dap.name = dap.name + "#e_unsq";
+      dap.isInitializer = dap.isInput = dap.isOutput = false;
+      dap.shape = as;
+      dap.shape.insert(dap.shape.begin() + 1, 1);
       TensorId ap = g.addTensor(dap);
-      Node un; un.type = OpType::kUnsqueeze; un.name = n.name + "#unsq";
-      un.inputs = {A}; un.outputs = {ap}; un.attr.map["axes"] = axesAttr({1});
-      Node mul; mul.type = OpType::kMatMul; mul.name = n.name + "#mm";
-      mul.inputs = {ap, B}; mul.outputs = {out};
-      added.push_back(un); added.push_back(mul);
+      Node un;
+      un.type = OpType::kUnsqueeze;
+      un.name = n.name + "#unsq";
+      un.inputs = {A};
+      un.outputs = {ap};
+      un.attr.map["axes"] = axesAttr({1});
+      Node mul;
+      mul.type = OpType::kMatMul;
+      mul.name = n.name + "#mm";
+      mul.inputs = {ap, B};
+      mul.outputs = {out};
+      added.push_back(un);
+      added.push_back(mul);
       remove.push_back((int)i);
     }
   }
@@ -607,8 +754,10 @@ void lowerEinsum(Graph& g) {
     std::set<int> rm(remove.begin(), remove.end());
     std::vector<Node> kept;
     for (size_t i = 0; i < g.nodes.size(); ++i)
-      if (!rm.count((int)i)) kept.push_back(std::move(g.nodes[i]));
-    for (auto& a : added) kept.push_back(std::move(a));
+      if (!rm.count((int)i))
+        kept.push_back(std::move(g.nodes[i]));
+    for (auto& a : added)
+      kept.push_back(std::move(a));
     g.nodes = std::move(kept);
     g.topoSort();
     VX_INFO << "lowerEinsum: lowered " << remove.size() << " batched einsum(s) to MatMul";
@@ -617,7 +766,8 @@ void lowerEinsum(Graph& g) {
 
 int constFold(Graph& g) {
   std::set<TensorId> known;
-  for (auto& kv : g.initializers) known.insert(kv.first);
+  for (auto& kv : g.initializers)
+    known.insert(kv.first);
   std::vector<RtTensor> pool(g.tensors.size());
   for (size_t i = 0; i < pool.size(); ++i) {
     pool[i].id = (TensorId)i;
@@ -656,9 +806,11 @@ int constFold(Graph& g) {
       case OpType::kTranspose:
       case OpType::kCast:
       case OpType::kReduce: {
-        if (nd.inputs.empty()) return false;
+        if (nd.inputs.empty())
+          return false;
         for (TensorId in : nd.inputs)
-          if (in != kNoTensor && !known.count(in)) return false;
+          if (in != kNoTensor && !known.count(in))
+            return false;
         return true;
       }
       // The transformer's dynamic-shape subgraph computes Reshape/Expand/Tile target vectors with
@@ -670,21 +822,26 @@ int constFold(Graph& g) {
       case OpType::kEqual:
       case OpType::kEyeLike:  // identity matrix is constant once the (now-known) shape is fixed
       case OpType::kConstantOfShape: {
-        if (nd.inputs.empty()) return false;
+        if (nd.inputs.empty())
+          return false;
         int64_t maxElems = 1;
         for (TensorId in : nd.inputs) {
-          if (in == kNoTensor) continue;
-          if (!known.count(in)) return false;
+          if (in == kNoTensor)
+            continue;
+          if (!known.count(in))
+            return false;
           maxElems = std::max(maxElems, numElements(g.desc(in).shape));
         }
         if (nd.type == OpType::kConstantOfShape) {
           // output size = product of the const shape-vector's values
           auto it = g.initializers.find(nd.inputs[0]);
-          if (it == g.initializers.end()) return false;
+          if (it == g.initializers.end())
+            return false;
           const HostBuffer& hb = it->second;
           bool i64 = g.desc(nd.inputs[0]).dtype == DType::kInt64;
           int64_t r = numElements(g.desc(nd.inputs[0]).shape);
-          if (r <= 0) r = (int64_t)(hb.bytes.size() / (i64 ? 8 : 4));
+          if (r <= 0)
+            r = (int64_t)(hb.bytes.size() / (i64 ? 8 : 4));
           int64_t prod = 1;
           for (int64_t i = 0; i < r; ++i) {
             int64_t dv = i64 ? hb.i64()[i] : (int64_t)hb.f32()[i];
@@ -694,15 +851,17 @@ int constFold(Graph& g) {
         }
         return maxElems <= (1 << 16);
       }
-      // Expand/Tile of all-constant operands fold too (bounded). Critical for the RoPE position index:
-      // an int64 arange built via Expand->Add->Reshape->Gather; left on the GPU float path the int64
-      // positions corrupt to zeros, so the rotary embedding loses all position information. Folding it
-      // computes the (small, constant) position index on the CPU exactly.
+      // Expand/Tile of all-constant operands fold too (bounded). Critical for the RoPE position
+      // index: an int64 arange built via Expand->Add->Reshape->Gather; left on the GPU float path
+      // the int64 positions corrupt to zeros, so the rotary embedding loses all position
+      // information. Folding it computes the (small, constant) position index on the CPU exactly.
       case OpType::kExpand:
       case OpType::kTile: {
-        if (nd.inputs.size() < 2) return false;
+        if (nd.inputs.size() < 2)
+          return false;
         for (TensorId in : nd.inputs)
-          if (in != kNoTensor && !known.count(in)) return false;
+          if (in != kNoTensor && !known.count(in))
+            return false;
         const Shape& in = g.desc(nd.inputs[0]).shape;
         std::vector<int64_t> p =
             readI64Param(g, nd, nd.type == OpType::kTile ? "repeats" : "shape", 1);
@@ -720,9 +879,9 @@ int constFold(Graph& g) {
         }
         // Integer (index / shape) tensors MUST fold even when large: they cannot run on the GPU's
         // float buffers — an int64 value reinterpreted as float corrupts to ~0 (e.g. the ScatterND
-        // upsample meshgrid index [2,1024,2048,3], 12.6M elems, came out all-zeros on device, so the
-        // scatter wrote everything to token 0). Float tensors keep the small bound so a large all-const
-        // broadcast isn't baked into the model.
+        // upsample meshgrid index [2,1024,2048,3], 12.6M elems, came out all-zeros on device, so
+        // the scatter wrote everything to token 0). Float tensors keep the small bound so a large
+        // all-const broadcast isn't baked into the model.
         DType idt = g.desc(nd.inputs[0]).dtype;
         bool isInt = idt == DType::kInt64 || idt == DType::kInt32;
         return out > 0 && out <= (isInt ? (int64_t(1) << 26) : (int64_t(1) << 18));
@@ -734,18 +893,22 @@ int constFold(Graph& g) {
 
   for (size_t ni = 0; ni < g.nodes.size(); ++ni) {
     Node& nd = g.nodes[ni];
-    if (!foldable(nd)) continue;
+    if (!foldable(nd))
+      continue;
     // ensure Shape's input has a shape-only RtTensor
-    if (nd.type == OpType::kShape) pool[nd.inputs[0]].shape = g.desc(nd.inputs[0]).shape;
+    if (nd.type == OpType::kShape)
+      pool[nd.inputs[0]].shape = g.desc(nd.inputs[0]).shape;
     auto op = CpuOpRegistry::instance().create(nd.type);
-    if (!op) continue;
+    if (!op)
+      continue;
     try {
       op->run(nd, ctx);
     } catch (...) {
       continue;
     }
     for (TensorId o : nd.outputs) {
-      if (o == kNoTensor) continue;
+      if (o == kNoTensor)
+        continue;
       g.initializers[o] = pool[o].host;
       g.desc(o).isInitializer = true;
       g.desc(o).shape = pool[o].shape;
@@ -757,7 +920,8 @@ int constFold(Graph& g) {
   if (!removeNodes.empty()) {
     std::vector<Node> kept;
     for (size_t i = 0; i < g.nodes.size(); ++i)
-      if (!removeNodes.count((int)i)) kept.push_back(g.nodes[i]);
+      if (!removeNodes.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "constFold: folded " << removeNodes.size() << " shape-path node(s)";
   }
@@ -773,20 +937,25 @@ void foldBatchNorm(Graph& g) {
   std::vector<int> producer(g.tensors.size(), -1);
   for (size_t i = 0; i < g.nodes.size(); ++i)
     for (TensorId o : g.nodes[i].outputs)
-      if (o != kNoTensor) producer[o] = (int)i;
+      if (o != kNoTensor)
+        producer[o] = (int)i;
 
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& bn = g.nodes[i];
-    if (bn.type != OpType::kBatchNorm) continue;
+    if (bn.type != OpType::kBatchNorm)
+      continue;
     int pi = producer[bn.inputs[0]];
-    if (pi < 0 || g.nodes[pi].type != OpType::kConv) continue;
+    if (pi < 0 || g.nodes[pi].type != OpType::kConv)
+      continue;
     Node& conv = g.nodes[pi];
     // only fold if conv output feeds only this BN
     int consumers = 0;
     for (auto& nn : g.nodes)
       for (TensorId in : nn.inputs)
-        if (in == conv.outputs[0]) consumers++;
-    if (consumers != 1) continue;
+        if (in == conv.outputs[0])
+          consumers++;
+    if (consumers != 1)
+      continue;
 
     const auto& scale = g.initializers[bn.inputs[1]].f32();
     const auto& bias = g.initializers[bn.inputs[2]].f32();
@@ -807,7 +976,8 @@ void foldBatchNorm(Graph& g) {
     for (int64_t oc = 0; oc < outC; ++oc) {
       float a = scale[oc] / std::sqrt(var[oc] + eps);
       float* w = W.f32() + oc * perOC;
-      for (int64_t k = 0; k < perOC; ++k) w[k] *= a;
+      for (int64_t k = 0; k < perOC; ++k)
+        w[k] *= a;
       Bb.f32()[oc] = (Bb.f32()[oc] - mean[oc]) * a + bias[oc];
     }
     if (biasId == kNoTensor) {
@@ -817,23 +987,27 @@ void foldBatchNorm(Graph& g) {
       d.isInitializer = true;
       TensorId nb = g.addTensor(d);
       g.initializers[nb] = std::move(biasBuf);
-      if (conv.inputs.size() < 3) conv.inputs.resize(3, kNoTensor);
+      if (conv.inputs.size() < 3)
+        conv.inputs.resize(3, kNoTensor);
       conv.inputs[2] = nb;
     }
     // rewire: BN consumers now read conv output
     TensorId bnOut = bn.outputs[0], convOut = conv.outputs[0];
     for (auto& nn : g.nodes)
       for (TensorId& in : nn.inputs)
-        if (in == bnOut) in = convOut;
+        if (in == bnOut)
+          in = convOut;
     for (TensorId& go : g.outputs)
-      if (go == bnOut) go = convOut;
+      if (go == bnOut)
+        go = convOut;
     remove.insert((int)i);
     folded++;
   }
   if (folded) {
     std::vector<Node> kept;
     for (size_t i = 0; i < g.nodes.size(); ++i)
-      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+      if (!remove.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "foldBatchNorm: folded " << folded << " BN node(s) into Conv";
   }
@@ -843,26 +1017,33 @@ void fuseActivations(Graph& g) {
   std::vector<int> producer(g.tensors.size(), -1);
   for (size_t i = 0; i < g.nodes.size(); ++i)
     for (TensorId o : g.nodes[i].outputs)
-      if (o != kNoTensor) producer[o] = (int)i;
+      if (o != kNoTensor)
+        producer[o] = (int)i;
   std::set<int> remove;
   int fused = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& act = g.nodes[i];
-    if (act.type != OpType::kClip && act.type != OpType::kRelu) continue;
+    if (act.type != OpType::kClip && act.type != OpType::kRelu)
+      continue;
     int pi = producer[act.inputs[0]];
-    if (pi < 0) continue;
+    if (pi < 0)
+      continue;
     Node& prod = g.nodes[pi];
     if (prod.type != OpType::kConv && prod.type != OpType::kGemm && prod.type != OpType::kAdd)
       continue;
-    if (prod.fusedAct != ActType::kNone) continue;
+    if (prod.fusedAct != ActType::kNone)
+      continue;
     // producer output must feed only this activation
     int consumers = 0;
     for (auto& nn : g.nodes)
       for (TensorId in : nn.inputs)
-        if (in == prod.outputs[0]) consumers++;
+        if (in == prod.outputs[0])
+          consumers++;
     for (TensorId go : g.outputs)
-      if (go == prod.outputs[0]) consumers++;
-    if (consumers != 1) continue;
+      if (go == prod.outputs[0])
+        consumers++;
+    if (consumers != 1)
+      continue;
 
     if (act.type == OpType::kRelu) {
       prod.fusedAct = ActType::kRelu;
@@ -872,8 +1053,10 @@ void fuseActivations(Graph& g) {
         lo = g.initializers[act.inputs[1]].f32()[0];
       if (act.inputs.size() > 2 && act.inputs[2] != kNoTensor && g.isInitializer(act.inputs[2]))
         hi = g.initializers[act.inputs[2]].f32()[0];
-      if (act.attr.has("min")) lo = act.attr.getf("min", lo);
-      if (act.attr.has("max")) hi = act.attr.getf("max", hi);
+      if (act.attr.has("min"))
+        lo = act.attr.getf("min", lo);
+      if (act.attr.has("max"))
+        hi = act.attr.getf("max", hi);
       prod.fusedAct = (lo == 0.f && hi == 6.f) ? ActType::kRelu6 : ActType::kClip;
       prod.actLo = lo;
       prod.actHi = hi;
@@ -882,16 +1065,19 @@ void fuseActivations(Graph& g) {
     TensorId actOut = act.outputs[0], prodOut = prod.outputs[0];
     for (auto& nn : g.nodes)
       for (TensorId& in : nn.inputs)
-        if (in == actOut) in = prodOut;
+        if (in == actOut)
+          in = prodOut;
     for (TensorId& go : g.outputs)
-      if (go == actOut) go = prodOut;
+      if (go == actOut)
+        go = prodOut;
     remove.insert((int)i);
     fused++;
   }
   if (fused) {
     std::vector<Node> kept;
     for (size_t i = 0; i < g.nodes.size(); ++i)
-      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+      if (!remove.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "fuseActivations: fused " << fused << " activation(s) into Conv/Gemm";
   }
@@ -903,21 +1089,26 @@ void eliminateIdentity(Graph& g) {
   int n = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& id = g.nodes[i];
-    if (id.type != OpType::kIdentity) continue;
-    if (id.inputs.empty() || id.outputs.empty()) continue;
+    if (id.type != OpType::kIdentity)
+      continue;
+    if (id.inputs.empty() || id.outputs.empty())
+      continue;
     TensorId in = id.inputs[0], out = id.outputs[0];
     for (auto& nn : g.nodes)
       for (TensorId& x : nn.inputs)
-        if (x == out) x = in;
+        if (x == out)
+          x = in;
     for (TensorId& go : g.outputs)
-      if (go == out) go = in;
+      if (go == out)
+        go = in;
     remove.insert((int)i);
     ++n;
   }
   if (n) {
     std::vector<Node> kept;
     for (size_t i = 0; i < g.nodes.size(); ++i)
-      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+      if (!remove.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "eliminateIdentity: removed " << n << " Identity node(s)";
   }
@@ -930,11 +1121,14 @@ void fuseResidualAdd(Graph& g) {
   std::vector<int> producer(g.tensors.size(), -1);
   for (size_t i = 0; i < g.nodes.size(); ++i)
     for (TensorId o : g.nodes[i].outputs)
-      if (o != kNoTensor) producer[o] = (int)i;
+      if (o != kNoTensor)
+        producer[o] = (int)i;
   auto convEligible = [&](const Node& c) {
-    if (c.type != OpType::kConv || c.fusedResidual != kNoTensor) return false;
+    if (c.type != OpType::kConv || c.fusedResidual != kNoTensor)
+      return false;
     auto ints = [&](const char* k, std::vector<int64_t> d) {
-      const auto& v = c.attr.getints(k); return v.empty() ? d : v;
+      const auto& v = c.attr.getints(k);
+      return v.empty() ? d : v;
     };
     auto k = ints("kernel_shape", {1, 1}), s = ints("strides", {1, 1});
     auto p = ints("pads", {0, 0, 0, 0});
@@ -945,24 +1139,34 @@ void fuseResidualAdd(Graph& g) {
   int fused = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& add = g.nodes[i];
-    if (add.type != OpType::kAdd || add.inputs.size() != 2) continue;
+    if (add.type != OpType::kAdd || add.inputs.size() != 2)
+      continue;
     int p0 = producer[add.inputs[0]], p1 = producer[add.inputs[1]];
     int ci = -1;
     TensorId residual = kNoTensor;
-    if (p0 >= 0 && convEligible(g.nodes[p0])) { ci = p0; residual = add.inputs[1]; }
-    else if (p1 >= 0 && convEligible(g.nodes[p1])) { ci = p1; residual = add.inputs[0]; }
-    if (ci < 0) continue;
+    if (p0 >= 0 && convEligible(g.nodes[p0])) {
+      ci = p0;
+      residual = add.inputs[1];
+    } else if (p1 >= 0 && convEligible(g.nodes[p1])) {
+      ci = p1;
+      residual = add.inputs[0];
+    }
+    if (ci < 0)
+      continue;
     // the conv output must feed only this Add
     int consumers = 0;
     for (auto& nn : g.nodes)
       for (TensorId in : nn.inputs)
-        if (in == g.nodes[ci].outputs[0]) consumers++;
+        if (in == g.nodes[ci].outputs[0])
+          consumers++;
     for (TensorId go : g.outputs)
-      if (go == g.nodes[ci].outputs[0]) consumers++;
-    if (consumers != 1) continue;
+      if (go == g.nodes[ci].outputs[0])
+        consumers++;
+    if (consumers != 1)
+      continue;
     Node& conv = g.nodes[ci];
     conv.fusedResidual = residual;
-    conv.inputs.push_back(residual);  // keep it live for DCE / buffer allocation / scheduling
+    conv.inputs.push_back(residual);        // keep it live for DCE / buffer allocation / scheduling
     if (conv.fusedAct == ActType::kNone) {  // carry any activation that was folded into the Add
       conv.fusedAct = add.fusedAct;
       conv.actLo = add.actLo;
@@ -971,16 +1175,19 @@ void fuseResidualAdd(Graph& g) {
     TensorId addOut = add.outputs[0], convOut = conv.outputs[0];
     for (auto& nn : g.nodes)
       for (TensorId& in : nn.inputs)
-        if (in == addOut) in = convOut;
+        if (in == addOut)
+          in = convOut;
     for (TensorId& go : g.outputs)
-      if (go == addOut) go = convOut;
+      if (go == addOut)
+        go = convOut;
     remove.insert((int)i);
     fused++;
   }
   if (fused) {
     std::vector<Node> kept;
     for (size_t i = 0; i < g.nodes.size(); ++i)
-      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+      if (!remove.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "fuseResidualAdd: fused " << fused << " residual Add(s) into Conv";
   }
@@ -988,52 +1195,62 @@ void fuseResidualAdd(Graph& g) {
 
 void fuseSqueezeExcite(Graph& g) {
   // Collapse the Squeeze-Excite scale chain GlobalAvgPool -> Conv1x1(+relu) -> Conv1x1 ->
-  // HardSigmoid into ONE kFusedSE node that emits the channel scale. The following channel-broadcast
-  // Mul (scale * feature) is left intact. MobileNetV3 has ~11 of these tiny multi-dispatch chains.
+  // HardSigmoid into ONE kFusedSE node that emits the channel scale. The following
+  // channel-broadcast Mul (scale * feature) is left intact. MobileNetV3 has ~11 of these tiny
+  // multi-dispatch chains.
   std::vector<int> producer(g.tensors.size(), -1);
   std::vector<int> consumers(g.tensors.size(), 0);
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     for (TensorId o : g.nodes[i].outputs)
-      if (o != kNoTensor) producer[o] = (int)i;
+      if (o != kNoTensor)
+        producer[o] = (int)i;
     for (TensorId in : g.nodes[i].inputs)
-      if (in != kNoTensor) consumers[in]++;
+      if (in != kNoTensor)
+        consumers[in]++;
   }
   auto single = [&](TensorId t) { return t != kNoTensor && consumers[t] == 1; };
   std::set<int> remove;
   int fused = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& hs = g.nodes[i];
-    if (hs.type != OpType::kUnary || (UnaryType)hs.subOp != UnaryType::kHardSigmoid) continue;
+    if (hs.type != OpType::kUnary || (UnaryType)hs.subOp != UnaryType::kHardSigmoid)
+      continue;
     int p2 = producer[hs.inputs[0]];
-    if (p2 < 0 || g.nodes[p2].type != OpType::kConv || !single(g.nodes[p2].outputs[0])) continue;
+    if (p2 < 0 || g.nodes[p2].type != OpType::kConv || !single(g.nodes[p2].outputs[0]))
+      continue;
     Node& conv2 = g.nodes[p2];
     int p1 = producer[conv2.inputs[0]];
-    if (p1 < 0 || g.nodes[p1].type != OpType::kConv || !single(g.nodes[p1].outputs[0])) continue;
+    if (p1 < 0 || g.nodes[p1].type != OpType::kConv || !single(g.nodes[p1].outputs[0]))
+      continue;
     Node& conv1 = g.nodes[p1];
-    if (conv1.fusedAct != ActType::kRelu) continue;
+    if (conv1.fusedAct != ActType::kRelu)
+      continue;
     // Require a GlobalAvgPool feeding conv1, but KEEP it (its reduction is parallel). We fuse only
-    // the tiny [N,C,1,1] middle: conv1(relu)->conv2->hardsigmoid -> one kernel that reads the pooled
-    // avg directly. Fusing the pool into one workgroup regressed; this keeps GAP + Mul parallel.
+    // the tiny [N,C,1,1] middle: conv1(relu)->conv2->hardsigmoid -> one kernel that reads the
+    // pooled avg directly. Fusing the pool into one workgroup regressed; this keeps GAP + Mul
+    // parallel.
     int pg = producer[conv1.inputs[0]];
-    if (pg < 0 || g.nodes[pg].type != OpType::kGlobalAvgPool) continue;
-    TensorId avg = conv1.inputs[0];      // the pooled [N,C,1,1] tensor
+    if (pg < 0 || g.nodes[pg].type != OpType::kGlobalAvgPool)
+      continue;
+    TensorId avg = conv1.inputs[0];  // the pooled [N,C,1,1] tensor
     auto bias = [](const Node& c) { return c.inputs.size() > 2 ? c.inputs[2] : kNoTensor; };
     Node se;
     se.type = OpType::kFusedSE;
     se.name = conv1.name + "#se";
     se.inputs = {avg, conv1.inputs[1], bias(conv1), conv2.inputs[1], bias(conv2)};
-    se.outputs = {hs.outputs[0]};        // the scale tensor (Mul still consumes it)
-    se.actLo = hs.actLo;                  // hardsigmoid alpha/beta
+    se.outputs = {hs.outputs[0]};  // the scale tensor (Mul still consumes it)
+    se.actLo = hs.actLo;           // hardsigmoid alpha/beta
     se.actHi = hs.actHi;
-    g.nodes[i] = se;                      // replace hardsigmoid node with the fused node
-    remove.insert(p1);                    // remove conv1 + conv2 (gap stays)
+    g.nodes[i] = se;    // replace hardsigmoid node with the fused node
+    remove.insert(p1);  // remove conv1 + conv2 (gap stays)
     remove.insert(p2);
     fused++;
   }
   if (fused) {
     std::vector<Node> kept;
     for (size_t i = 0; i < g.nodes.size(); ++i)
-      if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+      if (!remove.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "fuseSqueezeExcite: fused " << fused << " SE chain(s)";
   }
@@ -1047,8 +1264,12 @@ void fuseSwish(Graph& g) {
   std::vector<int> producer(g.tensors.size(), -1);
   std::vector<int> consumers(g.tensors.size(), 0);
   for (size_t i = 0; i < g.nodes.size(); ++i) {
-    for (TensorId o : g.nodes[i].outputs) if (o != kNoTensor) producer[o] = (int)i;
-    for (TensorId in : g.nodes[i].inputs) if (in != kNoTensor) consumers[in]++;
+    for (TensorId o : g.nodes[i].outputs)
+      if (o != kNoTensor)
+        producer[o] = (int)i;
+    for (TensorId in : g.nodes[i].inputs)
+      if (in != kNoTensor)
+        consumers[in]++;
   }
   std::set<int> remove;
   int fusedC = 0, fusedU = 0;
@@ -1061,19 +1282,25 @@ void fuseSwish(Graph& g) {
     TensorId x = kNoTensor;
     for (int e = 0; e < 2; ++e) {
       int pc = producer[M.inputs[e]];
-      if (pc < 0 || g.nodes[pc].type != OpType::kUnary) continue;
+      if (pc < 0 || g.nodes[pc].type != OpType::kUnary)
+        continue;
       UnaryType su = (UnaryType)g.nodes[pc].subOp;
       if ((su == UnaryType::kHardSigmoid || su == UnaryType::kSigmoid) &&
           g.nodes[pc].inputs[0] == M.inputs[1 - e]) {
-        sigIdx = pc; x = M.inputs[1 - e]; break;
+        sigIdx = pc;
+        x = M.inputs[1 - e];
+        break;
       }
     }
-    if (sigIdx < 0) continue;
-    if (consumers[g.nodes[sigIdx].outputs[0]] != 1) continue;  // gate feeds only this Mul
+    if (sigIdx < 0)
+      continue;
+    if (consumers[g.nodes[sigIdx].outputs[0]] != 1)
+      continue;  // gate feeds only this Mul
     ActType act = (UnaryType)g.nodes[sigIdx].subOp == UnaryType::kHardSigmoid ? ActType::kHardSwish
                                                                               : ActType::kSiLU;
     int px = producer[x];
-    bool fuseConv = px >= 0 && (g.nodes[px].type == OpType::kConv || g.nodes[px].type == OpType::kGemm) &&
+    bool fuseConv = px >= 0 &&
+                    (g.nodes[px].type == OpType::kConv || g.nodes[px].type == OpType::kGemm) &&
                     g.nodes[px].fusedAct == ActType::kNone && consumers[x] == 2;
     if (fuseConv) {
       g.nodes[px].fusedAct = act;
@@ -1095,7 +1322,9 @@ void fuseSwish(Graph& g) {
   }
   if (!remove.empty()) {
     std::vector<Node> kept;
-    for (size_t i = 0; i < g.nodes.size(); ++i) if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+    for (size_t i = 0; i < g.nodes.size(); ++i)
+      if (!remove.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "fuseSwish: fused " << fusedC << " into conv, collapsed " << fusedU << " to unary";
   }
@@ -1109,30 +1338,42 @@ void fuseDwPw(Graph& g) {
   std::vector<int> producer(g.tensors.size(), -1);
   std::vector<int> consumers(g.tensors.size(), 0);
   for (size_t i = 0; i < g.nodes.size(); ++i) {
-    for (TensorId o : g.nodes[i].outputs) if (o != kNoTensor) producer[o] = (int)i;
-    for (TensorId in : g.nodes[i].inputs) if (in != kNoTensor) consumers[in]++;
+    for (TensorId o : g.nodes[i].outputs)
+      if (o != kNoTensor)
+        producer[o] = (int)i;
+    for (TensorId in : g.nodes[i].inputs)
+      if (in != kNoTensor)
+        consumers[in]++;
   }
   auto ints = [](const Node& n, const char* k, std::vector<int64_t> d) {
-    const auto& v = n.attr.getints(k); return v.empty() ? d : v;
+    const auto& v = n.attr.getints(k);
+    return v.empty() ? d : v;
   };
   std::set<int> remove;
   int fused = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& P = g.nodes[i];
-    if (P.type != OpType::kConv) continue;
+    if (P.type != OpType::kConv)
+      continue;
     const Shape& pw = g.desc(P.inputs[1]).shape;  // [Cout, Cin, 1, 1]
-    if (pw.size() != 4 || pw[2] != 1 || pw[3] != 1) continue;
-    if (P.attr.geti("group", 1) != 1) continue;
+    if (pw.size() != 4 || pw[2] != 1 || pw[3] != 1)
+      continue;
+    if (P.attr.geti("group", 1) != 1)
+      continue;
     auto ps = ints(P, "strides", {1, 1}), pp = ints(P, "pads", {0, 0, 0, 0});
-    if (ps[0] != 1 || ps[1] != 1 || pp[0] || pp[1] || pp[2] || pp[3]) continue;
+    if (ps[0] != 1 || ps[1] != 1 || pp[0] || pp[1] || pp[2] || pp[3])
+      continue;
     int di = producer[P.inputs[0]];
-    if (di < 0 || g.nodes[di].type != OpType::kConv) continue;
+    if (di < 0 || g.nodes[di].type != OpType::kConv)
+      continue;
     Node& D = g.nodes[di];
-    if (consumers[D.outputs[0]] != 1) continue;  // D feeds only P
+    if (consumers[D.outputs[0]] != 1)
+      continue;                                   // D feeds only P
     const Shape& dw = g.desc(D.inputs[1]).shape;  // [C,1,KH,KW]
     NCHW dx = NCHW::from(g.desc(D.inputs[0]).shape);
     bool depthwise = (D.attr.geti("group", 1) == dx.c && dw.size() == 4 && dw[1] == 1);
-    if (!depthwise) continue;
+    if (!depthwise)
+      continue;
     // D's activation must be parameterless (None/Relu/Relu6); skip custom Clip and hardswish-dw.
     if (D.fusedAct != ActType::kNone && D.fusedAct != ActType::kRelu &&
         D.fusedAct != ActType::kRelu6)
@@ -1142,19 +1383,25 @@ void fuseDwPw(Graph& g) {
     f.type = OpType::kFusedDwPw;
     f.name = D.name + "#dwpw";
     f.inputs = {D.inputs[0], D.inputs[1], bias(D), P.inputs[1], bias(P)};
-    if (P.fusedResidual != kNoTensor) { f.inputs.push_back(P.fusedResidual); f.fusedResidual = P.fusedResidual; }
+    if (P.fusedResidual != kNoTensor) {
+      f.inputs.push_back(P.fusedResidual);
+      f.fusedResidual = P.fusedResidual;
+    }
     f.outputs = {P.outputs[0]};
-    f.attr = D.attr;                 // carry dw strides/pads/kernel for shape inference + kernel
-    f.subOp = (int32_t)D.fusedAct;   // dw activation
-    f.fusedAct = P.fusedAct;         // project activation
-    f.actLo = P.actLo; f.actHi = P.actHi;
-    g.nodes[i] = f;                  // replace P with the fused node
-    remove.insert(di);              // remove D
+    f.attr = D.attr;                // carry dw strides/pads/kernel for shape inference + kernel
+    f.subOp = (int32_t)D.fusedAct;  // dw activation
+    f.fusedAct = P.fusedAct;        // project activation
+    f.actLo = P.actLo;
+    f.actHi = P.actHi;
+    g.nodes[i] = f;     // replace P with the fused node
+    remove.insert(di);  // remove D
     fused++;
   }
   if (fused) {
     std::vector<Node> kept;
-    for (size_t i = 0; i < g.nodes.size(); ++i) if (!remove.count((int)i)) kept.push_back(g.nodes[i]);
+    for (size_t i = 0; i < g.nodes.size(); ++i)
+      if (!remove.count((int)i))
+        kept.push_back(g.nodes[i]);
     g.nodes = std::move(kept);
     VX_INFO << "fuseDwPw: fused " << fused << " depthwise+project pair(s)";
   }
@@ -1166,15 +1413,18 @@ void eliminateDeadNodes(Graph& g) {
   std::vector<int> producer(g.tensors.size(), -1);
   for (size_t i = 0; i < g.nodes.size(); ++i)
     for (TensorId o : g.nodes[i].outputs)
-      if (o != kNoTensor) producer[o] = (int)i;
+      if (o != kNoTensor)
+        producer[o] = (int)i;
   // propagate liveness backward
   while (changed) {
     changed = false;
     for (auto& nd : g.nodes) {
       bool nodeLive = false;
       for (TensorId o : nd.outputs)
-        if (o != kNoTensor && live.count(o)) nodeLive = true;
-      if (!nodeLive) continue;
+        if (o != kNoTensor && live.count(o))
+          nodeLive = true;
+      if (!nodeLive)
+        continue;
       for (TensorId in : nd.inputs)
         if (in != kNoTensor && !live.count(in)) {
           live.insert(in);
@@ -1187,7 +1437,8 @@ void eliminateDeadNodes(Graph& g) {
   for (auto& nd : g.nodes) {
     bool nodeLive = false;
     for (TensorId o : nd.outputs)
-      if (o != kNoTensor && live.count(o)) nodeLive = true;
+      if (o != kNoTensor && live.count(o))
+        nodeLive = true;
     if (nodeLive)
       kept.push_back(nd);
     else
@@ -1210,7 +1461,7 @@ static bool gpuFlatNode(const Graph& g, const Node& n) {
     case OpType::kSlice:
     case OpType::kExpand:        // numpy broadcast to a target shape, flat row-major gather
     case OpType::kTile:          // repeat each dim, flat row-major gather
-    case OpType::kLayerNorm:  // always flat: reduce over the trailing axes, row-major
+    case OpType::kLayerNorm:     // always flat: reduce over the trailing axes, row-major
     case OpType::kDepthToSpace:  // spatial<->channel index remap, flat row-major gather
     case OpType::kReduce:        // generic N-D reduce (incl. ReduceL2) runs flat
     case OpType::kMatMul:        // batched N-D matmul runs on the flat row-major path
@@ -1218,7 +1469,8 @@ static bool gpuFlatNode(const Graph& g, const Node& n) {
     case OpType::kEqual:         // A==B, broadcasting flat compare
       return true;
     case OpType::kGather:
-      // Flat row-major gather along an axis; index may be constant or a runtime float activation (RoPE).
+      // Flat row-major gather along an axis; index may be constant or a runtime float activation
+      // (RoPE).
       return n.inputs.size() >= 2;
     case OpType::kClip:
       return true;  // flat elementwise clamp (geometry-tail Clip is rank-6, can't be NC4HW4)
@@ -1227,10 +1479,12 @@ static bool gpuFlatNode(const Graph& g, const Node& n) {
       const Shape& in = sh(n.inputs[0]);
       int rank = (int)in.size();
       int64_t axis = n.attr.geti("axis", 0);
-      if (axis < 0) axis += rank;
+      if (axis < 0)
+        axis += rank;
       if (rank == 4 && axis == 1) {
         for (TensorId o : n.outputs)
-          if (o != kNoTensor && (sh(o).size() != 4 || sh(o)[1] % 4 != 0)) return true;
+          if (o != kNoTensor && (sh(o).size() != 4 || sh(o)[1] % 4 != 0))
+            return true;
         return false;
       }
       return true;
@@ -1242,44 +1496,56 @@ static bool gpuFlatNode(const Graph& g, const Node& n) {
       // Only the "i,j->ij" outer product runs on the GPU; other equations use the CPU op.
       std::string eq;
       for (char c : n.attr.gets("equation", ""))
-        if (c != ' ' && c != '\t') eq += c;
+        if (c != ' ' && c != '\t')
+          eq += c;
       return eq == "i,j->ij";
     }
     case OpType::kSoftmax: {
-      if (n.inputs.empty()) return false;
+      if (n.inputs.empty())
+        return false;
       const Shape& s = sh(n.inputs[0]);
-      if (s.size() < 2) return true;
+      if (s.size() < 2)
+        return true;
       int rank = (int)s.size();
       int64_t axis = n.attr.geti("axis", -1);
-      if (axis < 0) axis += rank;
+      if (axis < 0)
+        axis += rank;
       NCHW x = NCHW::from(s);
       int64_t inner = 1;
-      for (int k = (int)axis; k < rank; ++k) inner *= s[k];
+      for (int k = (int)axis; k < rank; ++k)
+        inner *= s[k];
       return !(x.h * x.w == 1 && inner == x.c);  // channel softmax stays NC4HW4
     }
     case OpType::kConcat: {
       const Shape& o = sh(n.outputs[0]);
       int rank = (int)o.size();
       int64_t axis = n.attr.geti("axis", 1);
-      if (axis < 0) axis += rank;
-      if (rank != 4 || axis != 1) return true;
+      if (axis < 0)
+        axis += rank;
+      if (rank != 4 || axis != 1)
+        return true;
       for (TensorId in : n.inputs)
-        if (sh(in).size() != 4 || sh(in)[1] % 4 != 0) return true;
+        if (sh(in).size() != 4 || sh(in)[1] % 4 != 0)
+          return true;
       return false;
     }
     case OpType::kBinary:
     case OpType::kAdd: {
-      if (n.inputs.size() != 2) return false;
-      if (g.isInitializer(n.inputs[0]) || g.isInitializer(n.inputs[1])) return true;
+      if (n.inputs.size() != 2)
+        return false;
+      if (g.isInitializer(n.inputs[0]) || g.isInitializer(n.inputs[1]))
+        return true;
       const Shape& a = sh(n.inputs[0]);
       const Shape& b = sh(n.inputs[1]);
-      if (a.size() == 4 && b.size() == 4 && a == b) return false;  // NC4HW4 same-shape
+      if (a.size() == 4 && b.size() == 4 && a == b)
+        return false;  // NC4HW4 same-shape
       if (n.type == OpType::kBinary) {
         auto bc = [](const Shape& s, const Shape& f) {
           return s.size() == 4 && f.size() == 4 && s[0] == f[0] && s[1] == f[1] && s[2] == 1 &&
                  s[3] == 1 && (f[2] > 1 || f[3] > 1);
         };
-        if (bc(a, b) || bc(b, a)) return false;  // NC4HW4 channel-broadcast
+        if (bc(a, b) || bc(b, a))
+          return false;  // NC4HW4 channel-broadcast
       }
       return true;
     }
@@ -1292,14 +1558,15 @@ void insertLayoutConverts(Graph& g) {
   // Mark each tensor's GPU format from its producer (flat if produced by a flat op), then for every
   // node input whose format differs from what the consumer needs, splice in a ConvertLayout node.
   auto agnostic = [](const Node& n) {
-    // metadata reshape / no-op copy: keeps the producer's layout (input and output bytes identical).
-    return n.type == OpType::kReshape || n.type == OpType::kFlatten ||
-           n.type == OpType::kSqueeze || n.type == OpType::kUnsqueeze || n.type == OpType::kCast;
+    // metadata reshape / no-op copy: keeps the producer's layout (input and output bytes
+    // identical).
+    return n.type == OpType::kReshape || n.type == OpType::kFlatten || n.type == OpType::kSqueeze ||
+           n.type == OpType::kUnsqueeze || n.type == OpType::kCast;
   };
-  // Mark each tensor's GPU format in topo order. Reshape/Flatten are layout-agnostic: a flat reshape
-  // is a plain row-major copy (valid for ANY shape), while the NC4HW4 byte-copy is only valid when
-  // the channel count is unchanged (else the vec4 interleave shifts). So a reshape is flat if its
-  // input is flat OR it changes the channel count; otherwise it stays NC4HW4.
+  // Mark each tensor's GPU format in topo order. Reshape/Flatten are layout-agnostic: a flat
+  // reshape is a plain row-major copy (valid for ANY shape), while the NC4HW4 byte-copy is only
+  // valid when the channel count is unchanged (else the vec4 interleave shifts). So a reshape is
+  // flat if its input is flat OR it changes the channel count; otherwise it stays NC4HW4.
   for (auto& nd : g.nodes) {
     bool f;
     if (agnostic(nd) && !nd.inputs.empty() && nd.inputs[0] != kNoTensor) {
@@ -1311,22 +1578,28 @@ void insertLayoutConverts(Graph& g) {
       f = gpuFlatNode(g, nd);
     }
     for (TensorId o : nd.outputs)
-      if (o != kNoTensor) g.desc(o).gpuFlat = f;
+      if (o != kNoTensor)
+        g.desc(o).gpuFlat = f;
   }
   // NC4HW4 can only represent rank <= 4 (NCHW::from collapses rank>4 to (1,1,1,1)). Any tensor with
-  // rank > 4 MUST be a flat row-major buffer — including graph inputs with no producer (the YoNoSplat
-  // image input is [1,2,3,224,224]; left NC4HW4 it would be mis-packed and corrupt the whole encoder).
+  // rank > 4 MUST be a flat row-major buffer — including graph inputs with no producer (the
+  // YoNoSplat image input is [1,2,3,224,224]; left NC4HW4 it would be mis-packed and corrupt the
+  // whole encoder).
   for (auto& t : g.tensors)
-    if (t.shape.size() > 4) t.gpuFlat = true;
+    if (t.shape.size() > 4)
+      t.gpuFlat = true;
   std::map<std::pair<TensorId, bool>, TensorId> cache;  // (tensor, needFlat) -> converted tensor
   std::vector<Node> converts;
   int n = 0;
   for (auto& nd : g.nodes) {
-    if (nd.outputs.empty() || nd.outputs[0] == kNoTensor) continue;
+    if (nd.outputs.empty() || nd.outputs[0] == kNoTensor)
+      continue;
     bool needFlat = g.desc(nd.outputs[0]).gpuFlat;  // the format this node operates in
     for (TensorId& in : nd.inputs) {
-      if (in == kNoTensor || g.isInitializer(in)) continue;  // constants handled inside flat ops
-      if (g.desc(in).gpuFlat == needFlat) continue;
+      if (in == kNoTensor || g.isInitializer(in))
+        continue;  // constants handled inside flat ops
+      if (g.desc(in).gpuFlat == needFlat)
+        continue;
       auto key = std::make_pair(in, needFlat);
       auto it = cache.find(key);
       if (it == cache.end()) {
@@ -1348,7 +1621,8 @@ void insertLayoutConverts(Graph& g) {
     }
   }
   if (!converts.empty()) {
-    for (auto& c : converts) g.nodes.push_back(std::move(c));
+    for (auto& c : converts)
+      g.nodes.push_back(std::move(c));
     g.topoSort();
     VX_INFO << "insertLayoutConverts: inserted " << converts.size() << " layout convert(s)";
   }
@@ -1360,15 +1634,19 @@ void runStandardPasses(Graph& g, int64_t batch) {
   foldBatchNorm(g);
   fuseActivations(g);
   fuseResidualAdd(g);
-  if (!std::getenv("VXRT_NO_FUSE_SWISH")) fuseSwish(g);  // HardSwish/SiLU into conv epilogue (default on)
-  if (std::getenv("VXRT_FUSE_SE")) fuseSqueezeExcite(g);
-  if (std::getenv("VXRT_FUSE_DWPW")) fuseDwPw(g);
+  if (!std::getenv("VXRT_NO_FUSE_SWISH"))
+    fuseSwish(g);  // HardSwish/SiLU into conv epilogue (default on)
+  if (std::getenv("VXRT_FUSE_SE"))
+    fuseSqueezeExcite(g);
+  if (std::getenv("VXRT_FUSE_DWPW"))
+    fuseDwPw(g);
   // Iterate fold+infer: folding a Shape/Gather/Concat chain turns a dynamic Reshape's shape input
   // into a constant, which lets the next inferShapes resolve that Reshape statically, which in turn
   // exposes more foldable shape ops downstream (YOLO's DFL/box-decode head). Converges in a couple
   // rounds; the loop just runs until constFold stops removing nodes.
   for (int iter = 0; iter < 8; ++iter) {
-    if (constFold(g) == 0) break;
+    if (constFold(g) == 0)
+      break;
     inferShapes(g, batch);
   }
   eliminateDeadNodes(g);
@@ -1378,11 +1656,13 @@ void runStandardPasses(Graph& g, int64_t batch) {
   if (std::getenv("VXRT_DUMP_BIG")) {
     for (const Node& n : g.nodes)
       for (TensorId o : n.outputs) {
-        if (o == kNoTensor) continue;
+        if (o == kNoTensor)
+          continue;
         int64_t ne = numElements(g.desc(o).shape);
         if (ne > 50000000) {
           std::string sh;
-          for (int64_t d : g.desc(o).shape) sh += std::to_string(d) + ",";
+          for (int64_t d : g.desc(o).shape)
+            sh += std::to_string(d) + ",";
           VX_WARN << "BIG tensor " << ne << " elems from " << opTypeName(n.type) << " " << n.name
                   << " shape=[" << sh << "]";
         }

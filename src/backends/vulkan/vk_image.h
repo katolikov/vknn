@@ -9,7 +9,7 @@ namespace vx {
 namespace vk {
 
 class Image {
- public:
+public:
   Image(VulkanContext& ctx, int width, int height);
   ~Image();
   Image(const Image&) = delete;
@@ -28,7 +28,7 @@ class Image {
   // Whether the device supports RGBA16F storage images at all.
   static bool supported(VulkanContext& ctx);
 
- private:
+private:
   VulkanContext& ctx_;
   int w_, h_;
   VkImage img_ = VK_NULL_HANDLE;

@@ -1,7 +1,8 @@
 // Inference BatchNorm on the GPU: fold the 4 params into a per-channel affine (scale,bias) on the
-// host, then apply y = scale[c]*x + bias[c] over NC4HW4. For pre-activation nets (DenseNet) whose BN
-// can't fold into a preceding conv. inputs: X, gamma, beta, mean, var.
+// host, then apply y = scale[c]*x + bias[c] over NC4HW4. For pre-activation nets (DenseNet) whose
+// BN can't fold into a preceding conv. inputs: X, gamma, beta, mean, var.
 #include <cmath>
+
 #include "vk_op_common.h"
 
 namespace vx {
@@ -32,12 +33,14 @@ struct BatchNormOp : VulkanOp {
     std::string tag = node.name;
     scaleBuf = uploadCached(env, tag + "#bn_scale", [&] {
       std::vector<float> a(padded, 0.f);
-      for (int64_t c = 0; c < x.c; ++c) a[c] = gamma[c] / std::sqrt(var[c] + eps);
+      for (int64_t c = 0; c < x.c; ++c)
+        a[c] = gamma[c] / std::sqrt(var[c] + eps);
       return a;
     });
     biasBuf = uploadCached(env, tag + "#bn_bias", [&] {
       std::vector<float> b(padded, 0.f);
-      for (int64_t c = 0; c < x.c; ++c) b[c] = beta[c] - mean[c] * (gamma[c] / std::sqrt(var[c] + eps));
+      for (int64_t c = 0; c < x.c; ++c)
+        b[c] = beta[c] - mean[c] * (gamma[c] / std::sqrt(var[c] + eps));
       return b;
     });
     pc = {(int)(x.n * Cb * 4 * x.h * x.w), (int)Cb, (int)(x.h * x.w)};

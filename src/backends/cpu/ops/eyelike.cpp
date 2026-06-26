@@ -25,7 +25,8 @@ struct EyeLikeCpu : CpuOp {
     int64_t k = node.attr.geti("k", 0);  // diagonal offset
     float* y = cpu::allocOut(Y, s);
     for (int64_t i = 0; i < rows; ++i)
-      for (int64_t j = 0; j < cols; ++j) y[i * cols + j] = (j - i == k) ? 1.f : 0.f;
+      for (int64_t j = 0; j < cols; ++j)
+        y[i * cols + j] = (j - i == k) ? 1.f : 0.f;
   }
   bool supportsDType(DType) const override { return true; }
 };

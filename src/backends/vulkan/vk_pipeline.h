@@ -1,10 +1,11 @@
 // compute pipeline, shader-module cache, on-disk VkPipelineCache.
 #pragma once
-#include "vk_context.h"
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "vk_context.h"
 
 namespace vx {
 // Provided by the build-time-generated translation unit (tools/embed_spirv.py).
@@ -14,14 +15,14 @@ namespace vk {
 
 /// Serializable VkPipelineCache keyed by device+driver. Speeds warm session creation.
 class PipelineCache {
- public:
+public:
   PipelineCache(VulkanContext& ctx, std::string path);
   ~PipelineCache();
   VkPipelineCache handle() const { return cache_; }
   void save();
   size_t diskBytes() const { return diskBytes_; }
 
- private:
+private:
   VulkanContext& ctx_;
   std::string path_;
   VkPipelineCache cache_ = VK_NULL_HANDLE;
@@ -31,7 +32,7 @@ class PipelineCache {
 /// A compute pipeline bound to N storage buffers (via push descriptors) with a
 /// push-constant block and optional specialization constants.
 class ComputePipeline {
- public:
+public:
   ComputePipeline(VulkanContext& ctx, const std::string& shaderName, uint32_t numBuffers,
                   uint32_t pushConstBytes, const std::vector<uint32_t>& specData = {},
                   VkPipelineCache cache = VK_NULL_HANDLE);
@@ -45,7 +46,7 @@ class ComputePipeline {
   void dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer>& buffers, const void* pushConst,
                 uint32_t pcBytes, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1);
 
- private:
+private:
   VulkanContext& ctx_;
   VkShaderModule module_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;

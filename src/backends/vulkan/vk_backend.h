@@ -4,11 +4,12 @@
 #include <map>
 #include <memory>
 #include <vector>
-#include "vx/backend.h"
+
 #include "vk_buffer.h"
 #include "vk_command.h"
 #include "vk_context.h"
 #include "vk_pipeline.h"
+#include "vx/backend.h"
 
 namespace vx {
 
@@ -21,7 +22,7 @@ struct DeviceStorage {
 /// Skips the host repacking work on warm session creation. Format is a simple length-prefixed
 /// blob written/read atomically.
 class WeightCache {
- public:
+public:
   void load(const std::string& path);
   void save() const;
   bool enabled() const { return !path_.empty(); }
@@ -31,7 +32,7 @@ class WeightCache {
   int tuned(const std::string& sig, int dflt) const;
   void setTuned(const std::string& sig, int val);
 
- private:
+private:
   std::string path_;
   std::map<std::string, std::vector<float>> weights_;
   std::map<std::string, int> tune_;
@@ -59,7 +60,7 @@ struct VkOpEnv {
 
 /// One operator on the Vulkan backend. Adding an op: subclass + VX_REGISTER_VK_OP.
 class VulkanOp {
- public:
+public:
   virtual ~VulkanOp() = default;
   /// Create pipeline(s), prepack + upload weights, allocate op-private buffers.
   virtual void prepare(const Node& node, VkOpEnv& env) = 0;
@@ -70,7 +71,7 @@ class VulkanOp {
 using VkOpFactory = std::function<std::unique_ptr<VulkanOp>()>;
 
 class VkOpRegistry {
- public:
+public:
   static VkOpRegistry& instance();
   void reg(OpType t, VkOpFactory f) { factories_[t] = std::move(f); }
   bool has(OpType t) const { return factories_.count(t) > 0; }
@@ -79,7 +80,7 @@ class VkOpRegistry {
     return it == factories_.end() ? nullptr : it->second();
   }
 
- private:
+private:
   std::map<OpType, VkOpFactory> factories_;
 };
 

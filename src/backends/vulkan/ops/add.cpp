@@ -19,7 +19,11 @@ struct AddOp : VulkanOp {
   bool flat = false;
 
   void prepare(const Node& node, VkOpEnv& env) override {
-    if (opIsFlat(node, env)) { flat = true; flatImpl.prepare(node, env); return; }
+    if (opIsFlat(node, env)) {
+      flat = true;
+      flatImpl.prepare(node, env);
+      return;
+    }
     pc = {(uint32_t)packedElems(env.graph->desc(node.outputs[0]).shape), (int)node.fusedAct,
           node.actLo, node.actHi};
     pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("add", env.useFp16), 3,
@@ -28,7 +32,10 @@ struct AddOp : VulkanOp {
   }
 
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
-    if (flat) { flatImpl.record(cmd, node, env); return; }
+    if (flat) {
+      flatImpl.record(cmd, node, env);
+      return;
+    }
     vk::Buffer* a = env.devBuf(node.inputs[0]);
     vk::Buffer* b = env.devBuf(node.inputs[1]);
     vk::Buffer* y = env.devBuf(node.outputs[0]);

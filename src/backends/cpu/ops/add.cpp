@@ -1,7 +1,8 @@
 // Elementwise add with NumPy-style broadcasting. Equal-shape inputs (the residual connections)
 // take a NEON fast path; broadcasting falls back to the general index walk.
-#include "backends/cpu/cpu_backend.h"
 #include <algorithm>
+
+#include "backends/cpu/cpu_backend.h"
 #include "vx/logging.h"
 #if defined(VXRT_ENABLE_NEON) && defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -26,7 +27,8 @@ struct AddCpu : CpuOp {
         size_t off = rank - s.size();
         return i < off ? 1 : s[i - off];
       };
-      for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
+      for (size_t i = 0; i < rank; ++i)
+        out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
       int64_t n = numElements(out);
       int64_t* y = cpu::allocOutI64(Y, out);
       auto val = [](const RtTensor& T, int64_t i) {
@@ -44,7 +46,8 @@ struct AddCpu : CpuOp {
         int64_t ia = 0, ib = 0;
         for (size_t d = 0; d < rank; ++d) {
           int64_t stride = 1;
-          for (size_t e = d + 1; e < rank; ++e) stride *= out[e];
+          for (size_t e = d + 1; e < rank; ++e)
+            stride *= out[e];
           int64_t id = (lin / stride) % out[d];
           ia += id * oa[d];
           ib += id * ob[d];
@@ -61,9 +64,11 @@ struct AddCpu : CpuOp {
       const float* b = B.host.f32();
       int64_t i = 0;
 #if defined(VX_HAS_NEON)
-      for (; i + 4 <= n; i += 4) vst1q_f32(y + i, vaddq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
+      for (; i + 4 <= n; i += 4)
+        vst1q_f32(y + i, vaddq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
 #endif
-      for (; i < n; ++i) y[i] = a[i] + b[i];
+      for (; i < n; ++i)
+        y[i] = a[i] + b[i];
       cpu::applyAct(y, n, node.fusedAct, node.actLo, node.actHi);  // fused Relu (e.g. ResNet)
       return;
     }
@@ -74,7 +79,8 @@ struct AddCpu : CpuOp {
       size_t off = rank - s.size();
       return i < off ? 1 : s[i - off];
     };
-    for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
+    for (size_t i = 0; i < rank; ++i)
+      out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
     int64_t n = numElements(out);
     float* y = cpu::allocOut(Y, out);
     const float* a = A.host.f32();
@@ -91,7 +97,8 @@ struct AddCpu : CpuOp {
       int64_t ia = 0, ib = 0;
       for (size_t d = 0; d < rank; ++d) {
         int64_t stride = 1;
-        for (size_t e = d + 1; e < rank; ++e) stride *= out[e];
+        for (size_t e = d + 1; e < rank; ++e)
+          stride *= out[e];
         int64_t id = (lin / stride) % out[d];
         ia += id * oa[d];
         ib += id * ob[d];

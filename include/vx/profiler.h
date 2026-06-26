@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+
 #include "vx/op.h"
 
 namespace vx {
@@ -21,12 +22,13 @@ struct OpRecord {
 };
 
 class Profiler {
- public:
+public:
   void setEnabled(bool e) { enabled_ = e; }
   bool enabled() const { return enabled_; }
   void clear() { records_.clear(); }
   void add(const OpRecord& r) {
-    if (enabled_) records_.push_back(r);
+    if (enabled_)
+      records_.push_back(r);
   }
   const std::vector<OpRecord>& records() const { return records_; }
 
@@ -36,7 +38,7 @@ class Profiler {
   double totalCpuMs() const;
   double totalGpuMs() const;
 
- private:
+private:
   bool enabled_ = false;
   std::vector<OpRecord> records_;
 };

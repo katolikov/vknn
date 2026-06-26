@@ -1,8 +1,9 @@
 // Vulkan buffer + memory. Exploits UMA (device-local + host-visible) on Xclipse
 // so uploads/downloads are direct memcpy with no staging copy.
 #pragma once
-#include "vk_context.h"
 #include <cstring>
+
+#include "vk_context.h"
 
 namespace vx {
 namespace vk {
@@ -16,7 +17,7 @@ enum class MemPref {
 /// A GPU buffer backed by a dedicated allocation. On UMA the memory is persistently
 /// mapped, so host()/upload()/download() are plain memcpy.
 class Buffer {
- public:
+public:
   Buffer(VulkanContext& ctx, size_t bytes, MemPref pref = MemPref::kAuto,
          VkBufferUsageFlags extraUsage = 0);
   ~Buffer();
@@ -36,7 +37,7 @@ class Buffer {
   static Buffer* importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
                                 VkBufferUsageFlags extraUsage = 0);
 
- private:
+private:
   Buffer(VulkanContext& ctx) : ctx_(ctx) {}
   uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags want,
                           VkMemoryPropertyFlags avoid = 0);

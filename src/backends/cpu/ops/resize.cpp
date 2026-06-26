@@ -1,26 +1,36 @@
 // Resize / Upsample (spatial), NCHW reference. nearest + linear(bilinear); coordinate transform
-// modes half_pixel / align_corners / asymmetric / pytorch_half_pixel. Output shape from inferShapes.
+// modes half_pixel / align_corners / asymmetric / pytorch_half_pixel. Output shape from
+// inferShapes.
 #include <algorithm>
 #include <cmath>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
 namespace vx {
 
 // mode codes shared with the shader
-int vxResizeMode(const std::string& s) { return s == "linear" || s == "bilinear" ? 1 : 0; }
+int vxResizeMode(const std::string& s) {
+  return s == "linear" || s == "bilinear" ? 1 : 0;
+}
 int vxResizeCoord(const std::string& s) {
-  if (s == "align_corners") return 1;
-  if (s == "asymmetric") return 2;
-  if (s == "pytorch_half_pixel") return 3;
+  if (s == "align_corners")
+    return 1;
+  if (s == "asymmetric")
+    return 2;
+  if (s == "pytorch_half_pixel")
+    return 3;
   return 0;  // half_pixel
 }
 static float srcCoord(int d, int outS, int inS, int cm) {
   float scale = (float)outS / (float)inS;
-  if (cm == 1) return outS > 1 ? (float)d * (inS - 1) / (outS - 1) : 0.f;  // align_corners
-  if (cm == 2) return (float)d / scale;                                    // asymmetric
-  if (cm == 3) return outS > 1 ? ((float)d + 0.5f) / scale - 0.5f : 0.f;   // pytorch_half_pixel
-  return ((float)d + 0.5f) / scale - 0.5f;                                 // half_pixel
+  if (cm == 1)
+    return outS > 1 ? (float)d * (inS - 1) / (outS - 1) : 0.f;  // align_corners
+  if (cm == 2)
+    return (float)d / scale;  // asymmetric
+  if (cm == 3)
+    return outS > 1 ? ((float)d + 0.5f) / scale - 0.5f : 0.f;  // pytorch_half_pixel
+  return ((float)d + 0.5f) / scale - 0.5f;                     // half_pixel
 }
 
 namespace {
@@ -46,9 +56,14 @@ struct ResizeCpu : CpuOp {
             float fx = srcCoord(ox, OW, (int)x.w, cm);
             float v;
             if (mode == 0) {  // nearest (round_prefer_floor)
-              int iy = (int)std::floor(fy); if (fy - iy > 0.5f) iy++;
-              int ix = (int)std::floor(fx); if (fx - ix > 0.5f) ix++;
-              iy = clampi(iy, 0, (int)x.h - 1); ix = clampi(ix, 0, (int)x.w - 1);
+              int iy = (int)std::floor(fy);
+              if (fy - iy > 0.5f)
+                iy++;
+              int ix = (int)std::floor(fx);
+              if (fx - ix > 0.5f)
+                ix++;
+              iy = clampi(iy, 0, (int)x.h - 1);
+              ix = clampi(ix, 0, (int)x.w - 1);
               v = xc[iy * x.w + ix];
             } else {  // bilinear
               int iy0 = (int)std::floor(fy), ix0 = (int)std::floor(fx);

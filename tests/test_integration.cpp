@@ -1,8 +1,10 @@
 // vxrt integration test: full MobileNetV2 on the CPU backend vs the onnxruntime golden.
 // Skips gracefully if assets are not present (run scripts/get_golden.py first).
 #include <gtest/gtest.h>
+
 #include <cmath>
 #include <fstream>
+
 #include "vx/session.h"
 
 using namespace vx;
@@ -44,8 +46,10 @@ TEST(Integration, MobileNetV2_CPU_vs_Golden) {
     dot += (double)y[i] * g[i];
     na += (double)y[i] * y[i];
     nb += (double)g[i] * g[i];
-    if (y[i] > y[vTop]) vTop = (int)i;
-    if (g[i] > g[gTop]) gTop = (int)i;
+    if (y[i] > y[vTop])
+      vTop = (int)i;
+    if (g[i] > g[gTop])
+      gTop = (int)i;
   }
   double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
   EXPECT_EQ(vTop, gTop) << "top-1 mismatch";

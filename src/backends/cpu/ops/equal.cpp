@@ -1,7 +1,9 @@
 // ONNX Equal (A == B -> 1.0/0.0) with NumPy-style broadcasting. Output is canonical fp32 (1.0/0.0)
-// so it can feed a downstream Where over fp32 tensors. Inputs may be fp32 or int64 (Equal often runs
-// on int64 shape tensors); each operand is read through its own dtype so the comparison is exact.
+// so it can feed a downstream Where over fp32 tensors. Inputs may be fp32 or int64 (Equal often
+// runs on int64 shape tensors); each operand is read through its own dtype so the comparison is
+// exact.
 #include <algorithm>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
@@ -24,7 +26,8 @@ struct EqualCpu : CpuOp {
       size_t off = rank - s.size();
       return i < off ? 1 : s[i - off];
     };
-    for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
+    for (size_t i = 0; i < rank; ++i)
+      out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
     int64_t n = numElements(out);
     std::vector<int64_t> oa(rank), ob(rank);
     int64_t sA = 1, sB = 1;
@@ -43,7 +46,8 @@ struct EqualCpu : CpuOp {
       int64_t ia = 0, ib = 0;
       for (size_t d = 0; d < rank; ++d) {
         int64_t stride = 1;
-        for (size_t e = d + 1; e < rank; ++e) stride *= out[e];
+        for (size_t e = d + 1; e < rank; ++e)
+          stride *= out[e];
         int64_t id = (lin / stride) % out[d];
         ia += id * oa[d];
         ib += id * ob[d];

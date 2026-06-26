@@ -1,7 +1,7 @@
-// Flat (row-major) Where on the GPU: out = (cond != 0) ? x : y, with N-D broadcasting over all three
-// operands (rank <= 6). Always runs on the flat path (gpuFlatNode returns true). Each operand may be
-// a constant initializer (uploaded flat in prepare()), like flat::Binary but with three inputs.
-// Push-constant block byte-matches shaders/where_select.comp.
+// Flat (row-major) Where on the GPU: out = (cond != 0) ? x : y, with N-D broadcasting over all
+// three operands (rank <= 6). Always runs on the flat path (gpuFlatNode returns true). Each operand
+// may be a constant initializer (uploaded flat in prepare()), like flat::Binary but with three
+// inputs. Push-constant block byte-matches shaders/where_select.comp.
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
@@ -23,14 +23,17 @@ struct WhereVk : VulkanOp {
     int rank = (int)out.size();
     pc.rank = rank;
     pc.total = (int)numElements(out);
-    for (int k = 0; k < rank; ++k) pc.outDim[k] = (int)out[k];
+    for (int k = 0; k < rank; ++k)
+      pc.outDim[k] = (int)out[k];
     int* strideOf[3] = {pc.cStride, pc.xStride, pc.yStride};
     auto setup = [&](TensorId t, int which) {
       Shape s = g.desc(t).shape;
       std::vector<int64_t> ps(rank, 1);  // left-pad to out rank
-      for (int k = 0; k < (int)s.size(); ++k) ps[rank - (int)s.size() + k] = s[k];
+      for (int k = 0; k < (int)s.size(); ++k)
+        ps[rank - (int)s.size() + k] = s[k];
       auto st = flat::rowStrides(ps);
-      for (int k = 0; k < rank; ++k) strideOf[which][k] = ps[k] == 1 ? 0 : (int)st[k];
+      for (int k = 0; k < rank; ++k)
+        strideOf[which][k] = ps[k] == 1 ? 0 : (int)st[k];
       if (g.isInitializer(t)) {
         std::vector<float> cv = initFloats(g, t);  // decodes fp16 (fp16 .vxm); fp32 passthrough
         cv.resize(numElements(s));

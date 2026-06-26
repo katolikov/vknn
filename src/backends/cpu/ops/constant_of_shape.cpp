@@ -17,12 +17,15 @@ struct ConstantOfShapeCpu : CpuOp {
     Shape out;
     if (S.dtype == DType::kInt64) {
       const int64_t* s = S.host.i64();
-      for (int64_t i = 0; i < r; ++i) out.push_back(s[i]);
+      for (int64_t i = 0; i < r; ++i)
+        out.push_back(s[i]);
     } else {
       const float* s = S.host.f32();
-      for (int64_t i = 0; i < r; ++i) out.push_back((int64_t)s[i]);
+      for (int64_t i = 0; i < r; ++i)
+        out.push_back((int64_t)s[i]);
     }
-    if (out.empty()) out = {1};  // scalar fill
+    if (out.empty())
+      out = {1};  // scalar fill
 
     auto it = node.attr.map.find("value");
     bool intVal = it != node.attr.map.end() && it->second.kind == Attr::kInts;
@@ -30,11 +33,14 @@ struct ConstantOfShapeCpu : CpuOp {
     if (intVal) {
       int64_t v = it->second.ints.empty() ? 0 : it->second.ints[0];
       int64_t* y = cpu::allocOutI64(Y, out);
-      for (int64_t i = 0; i < n; ++i) y[i] = v;
+      for (int64_t i = 0; i < n; ++i)
+        y[i] = v;
     } else {
-      float v = (it != node.attr.map.end() && !it->second.floats.empty()) ? it->second.floats[0] : 0.f;
+      float v =
+          (it != node.attr.map.end() && !it->second.floats.empty()) ? it->second.floats[0] : 0.f;
       float* y = cpu::allocOut(Y, out);
-      for (int64_t i = 0; i < n; ++i) y[i] = v;
+      for (int64_t i = 0; i < n; ++i)
+        y[i] = v;
     }
   }
   bool supportsDType(DType) const override { return true; }

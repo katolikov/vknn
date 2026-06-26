@@ -10,9 +10,11 @@ struct FlattenCpu : CpuOp {
     RtTensor& Y = ctx.t(node.outputs[0]);
     int64_t axis = node.attr.geti("axis", 1);
     int64_t rank = (int64_t)X.shape.size();
-    if (axis < 0) axis += rank;
+    if (axis < 0)
+      axis += rank;
     int64_t d0 = 1, d1 = 1;
-    for (int64_t i = 0; i < rank; ++i) (i < axis ? d0 : d1) *= X.shape[i];
+    for (int64_t i = 0; i < rank; ++i)
+      (i < axis ? d0 : d1) *= X.shape[i];
     cpu::copyAs(X, Y, {d0, d1});
   }
   bool supportsDType(DType) const override { return true; }

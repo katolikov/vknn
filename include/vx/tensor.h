@@ -4,6 +4,7 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+
 #include "vx/common.h"
 #include "vx/dtype.h"
 #include "vx/op.h"

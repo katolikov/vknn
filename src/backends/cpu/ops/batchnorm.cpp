@@ -1,7 +1,8 @@
 // BatchNormalization (inference form). MobileNetV2 ships with BN already folded into the
 // convolutions, so this mostly exists to validate the BN->Conv fold pass on other models.
-#include "backends/cpu/cpu_backend.h"
 #include <cmath>
+
+#include "backends/cpu/cpu_backend.h"
 
 namespace vx {
 namespace {
@@ -25,7 +26,8 @@ struct BatchNormCpu : CpuOp {
         float b = bias[c] - mean[c] * a;
         const float* p = xd + (n * x.c + c) * hw;
         float* q = y + (n * x.c + c) * hw;
-        for (int64_t i = 0; i < hw; ++i) q[i] = p[i] * a + b;
+        for (int64_t i = 0; i < hw; ++i)
+          q[i] = p[i] * a + b;
       }
   }
 };

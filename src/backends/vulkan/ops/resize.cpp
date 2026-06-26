@@ -6,7 +6,9 @@ namespace vx {
 int vxResizeMode(const std::string&);
 int vxResizeCoord(const std::string&);
 namespace {
-struct ResizePC { int N, C, IH, IW, OH, OW, mode, cm; };
+struct ResizePC {
+  int N, C, IH, IW, OH, OW, mode, cm;
+};
 struct ResizeOp : VulkanOp {
   std::unique_ptr<vk::ComputePipeline> pipe;
   ResizePC pc{};
@@ -14,7 +16,12 @@ struct ResizeOp : VulkanOp {
   void prepare(const Node& node, VkOpEnv& env) override {
     NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
     NCHW y = NCHW::from(env.graph->desc(node.outputs[0]).shape);
-    pc = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w,
+    pc = {(int)x.n,
+          (int)x.c,
+          (int)x.h,
+          (int)x.w,
+          (int)y.h,
+          (int)y.w,
           vxResizeMode(node.attr.gets("mode", "nearest")),
           vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"))};
     total = (int64_t)x.n * cBlocks(x.c) * y.h * y.w;

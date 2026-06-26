@@ -11,6 +11,7 @@
 //   * returns a clear "unavailable" if asked to compile/run.
 // Replacing the body with a real implementation requires only this file.
 #include <dlfcn.h>
+
 #include "vx/backend.h"
 #include "vx/logging.h"
 
@@ -26,7 +27,7 @@ const char* kEnnLibs[] = {
 };
 
 class EnnBackend : public Backend {
- public:
+public:
   EnnBackend() { probe(); }
 
   BackendKind kind() const override { return BackendKind::kEnn; }
@@ -44,7 +45,7 @@ class EnnBackend : public Backend {
                 "headers available on this device (see LIMITATIONS.md). Use VULKAN or CPU.");
   }
 
- private:
+private:
   void probe() {
     int found = 0;
     std::string present;

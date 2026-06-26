@@ -4,13 +4,14 @@
 #include <memory>
 #include <string>
 #include <vector>
+
 #include "vx/op.h"
 #include "vx/tensor.h"
 
 namespace vx {
 
 class Graph {
- public:
+public:
   std::vector<TensorDesc> tensors;  // indexed by TensorId
   std::vector<Node> nodes;          // topologically ordered after import
   std::map<std::string, TensorId> tensorByName;

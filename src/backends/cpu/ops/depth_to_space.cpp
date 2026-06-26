@@ -14,7 +14,8 @@ struct DepthToSpaceCpu : CpuOp {
     RtTensor& Y = ctx.t(node.outputs[0]);
     NCHW x = NCHW::from(X.shape);
     int64_t b = node.attr.geti("blocksize", 1);
-    if (b < 1) b = 1;
+    if (b < 1)
+      b = 1;
     bool crd = node.attr.gets("mode", "DCR") == "CRD";
     int64_t C2 = x.c / (b * b), OH = x.h * b, OW = x.w * b;
     Shape outShape = {x.n, C2, OH, OW};

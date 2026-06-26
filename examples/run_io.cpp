@@ -1,5 +1,5 @@
-// Generic multi-input / multi-output runner. Loads a model (.onnx or .vxm), feeds raw fp32 .bin files
-// (in model input order), runs, dumps each output to <outdir>/<name>.bin.
+// Generic multi-input / multi-output runner. Loads a model (.onnx or .vxm), feeds raw fp32 .bin
+// files (in model input order), runs, dumps each output to <outdir>/<name>.bin.
 //   vx_run_io model outdir [flags] in0.bin in1.bin ...
 // Flags (no env vars — everything is a flag):
 //   --backend cpu|vulkan   (default vulkan)   --precision fp16|fp32 (default fp16)
@@ -14,34 +14,38 @@
 #include <fstream>
 #include <string>
 #include <vector>
+
 #include "vx/session.h"
 
 using namespace vx;
 
 static bool flag(int c, char** v, const char* k) {
   for (int i = 3; i < c; ++i)
-    if (!strcmp(v[i], k)) return true;
+    if (!strcmp(v[i], k))
+      return true;
   return false;
 }
 static const char* opt(int c, char** v, const char* k, const char* d) {
   for (int i = 3; i < c - 1; ++i)
-    if (!strcmp(v[i], k)) return v[i + 1];
+    if (!strcmp(v[i], k))
+      return v[i + 1];
   return d;
 }
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    printf("usage: %s model outdir [--backend cpu|vulkan] [--precision fp16|fp32] [--no-weight-cache]"
-           " [--opt-level N] [--no-flat] [--timing] [--cache DIR] in0.bin in1.bin ...\n",
-           argv[0]);
+    printf(
+        "usage: %s model outdir [--backend cpu|vulkan] [--precision fp16|fp32] [--no-weight-cache]"
+        " [--opt-level N] [--no-flat] [--timing] [--cache DIR] in0.bin in1.bin ...\n",
+        argv[0]);
     return 1;
   }
   std::string model = argv[1], outdir = argv[2];
 
   Config cfg;
   cfg.backend = backendFromStr(opt(argc, argv, "--backend", "vulkan"));
-  cfg.precision = !strcmp(opt(argc, argv, "--precision", "fp16"), "fp32") ? Precision::kFp32
-                                                                          : Precision::kFp16;
+  cfg.precision =
+      !strcmp(opt(argc, argv, "--precision", "fp16"), "fp32") ? Precision::kFp32 : Precision::kFp16;
   cfg.cacheWeights = !flag(argc, argv, "--no-weight-cache");
   cfg.freeWeightsAfterUpload = !flag(argc, argv, "--keep-weights");
   cfg.optLevel = atoi(opt(argc, argv, "--opt-level", "3"));
@@ -77,7 +81,8 @@ int main(int argc, char** argv) {
     in.data.assign(need, 0);
     if (i < inFiles.size()) {
       std::ifstream f(inFiles[i], std::ios::binary);
-      if (f) f.read(reinterpret_cast<char*>(in.data.data()), need);
+      if (f)
+        f.read(reinterpret_cast<char*>(in.data.data()), need);
     }
     printf("input  '%s'  %s\n", in.name.c_str(), shapeStr(in.shape).c_str());
     ins.push_back(std::move(in));
@@ -93,11 +98,13 @@ int main(int argc, char** argv) {
     // sanitize: tensor names can contain '/' (e.g. "/enc/backbone/..."); flatten to one filename.
     std::string safe = o.name;
     for (char& ch : safe)
-      if (ch == '/' || ch == ':') ch = '_';
+      if (ch == '/' || ch == ':')
+        ch = '_';
     std::string fn = outdir + "/" + safe + ".bin";
     std::ofstream f(fn, std::ios::binary);
     f.write(reinterpret_cast<const char*>(o.data.data()), o.data.size());
-    if (!f) fprintf(stderr, "WARN: failed to write %s\n", fn.c_str());
+    if (!f)
+      fprintf(stderr, "WARN: failed to write %s\n", fn.c_str());
     printf("output '%s'  %s  -> %s\n", o.name.c_str(), shapeStr(o.shape).c_str(), fn.c_str());
   }
   return 0;

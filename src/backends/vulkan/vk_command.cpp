@@ -1,4 +1,5 @@
 #include "vk_command.h"
+
 #include <chrono>
 
 namespace vx {
@@ -14,8 +15,10 @@ CommandRunner::CommandRunner(VulkanContext& ctx) : ctx_(ctx) {
 }
 
 CommandRunner::~CommandRunner() {
-  if (fence_) vkDestroyFence(ctx_.device(), fence_, nullptr);
-  if (pool_) vkDestroyCommandPool(ctx_.device(), pool_, nullptr);
+  if (fence_)
+    vkDestroyFence(ctx_.device(), fence_, nullptr);
+  if (pool_)
+    vkDestroyCommandPool(ctx_.device(), pool_, nullptr);
 }
 
 VkCommandBuffer CommandRunner::allocate() {

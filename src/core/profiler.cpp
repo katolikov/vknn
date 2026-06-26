@@ -1,4 +1,5 @@
 #include "vx/profiler.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -9,13 +10,15 @@ namespace vx {
 
 double Profiler::totalCpuMs() const {
   double s = 0;
-  for (auto& r : records_) s += r.cpuMs;
+  for (auto& r : records_)
+    s += r.cpuMs;
   return s;
 }
 double Profiler::totalGpuMs() const {
   double s = 0;
   for (auto& r : records_)
-    if (r.gpuMs >= 0) s += r.gpuMs;
+    if (r.gpuMs >= 0)
+      s += r.gpuMs;
   return s;
 }
 
@@ -35,11 +38,13 @@ void Profiler::printTable() const {
     if (r.dispatch[0])
       snprintf(disp, sizeof(disp), "%ux%ux%u", r.dispatch[0], r.dispatch[1], r.dispatch[2]);
     char gpu[16] = "-";
-    if (r.gpuMs >= 0) snprintf(gpu, sizeof(gpu), "%.3f", r.gpuMs);
+    if (r.gpuMs >= 0)
+      snprintf(gpu, sizeof(gpu), "%.3f", r.gpuMs);
     printf("%-28.28s %-10s %-7s %10.3f %10s  %s%s\n", r.name.c_str(), r.backend.c_str(),
            opTypeName(r.type), r.cpuMs, gpu, disp, r.fellBack ? "  [FALLBACK]" : "");
     tcpu += r.cpuMs;
-    if (r.gpuMs >= 0) tgpu += r.gpuMs;
+    if (r.gpuMs >= 0)
+      tgpu += r.gpuMs;
     auto& a = byType[opTypeName(r.type)];
     a.first += r.cpuMs;
     a.second += (r.gpuMs >= 0 ? r.gpuMs : 0);
@@ -62,7 +67,8 @@ std::string Profiler::toJson() const {
        << r.backend << "\",\"cpuMs\":" << r.cpuMs << ",\"gpuMs\":" << r.gpuMs << ",\"dispatch\":["
        << r.dispatch[0] << "," << r.dispatch[1] << "," << r.dispatch[2]
        << "],\"fellBack\":" << (r.fellBack ? "true" : "false") << "}";
-    if (i + 1 < records_.size()) os << ",";
+    if (i + 1 < records_.size())
+      os << ",";
   }
   os << "]";
   return os.str();
@@ -71,13 +77,15 @@ std::string Profiler::toJson() const {
 void Profiler::writeChromeTrace(const std::string& path) const {
   // chrome://tracing JSON: one complete event per op, sequential on a single track.
   std::ofstream f(path);
-  if (!f) return;
+  if (!f)
+    return;
   f << "{\"traceEvents\":[";
   double ts = 0;  // microseconds, synthetic timeline
   bool first = true;
   for (const auto& r : records_) {
     double dur = (r.gpuMs >= 0 ? r.gpuMs : r.cpuMs) * 1000.0;  // us
-    if (!first) f << ",";
+    if (!first)
+      f << ",";
     first = false;
     f << "{\"name\":\"" << r.name << "\",\"cat\":\"" << opTypeName(r.type)
       << "\",\"ph\":\"X\",\"pid\":1,\"tid\":1,\"ts\":" << ts << ",\"dur\":" << dur

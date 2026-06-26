@@ -15,7 +15,8 @@ bool BackendRegistry::has(BackendKind k) const {
 }
 std::unique_ptr<Backend> BackendRegistry::create(BackendKind k) const {
   auto it = factories_.find(k);
-  if (it == factories_.end()) return nullptr;
+  if (it == factories_.end())
+    return nullptr;
   return it->second();
 }
 

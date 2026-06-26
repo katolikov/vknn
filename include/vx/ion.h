@@ -11,7 +11,7 @@
 namespace vx {
 
 class IonBuffer {
- public:
+public:
   ~IonBuffer();
   IonBuffer(const IonBuffer&) = delete;
   IonBuffer& operator=(const IonBuffer&) = delete;
@@ -29,7 +29,7 @@ class IonBuffer {
   void* data() const { return map_; }  // CPU-mapped pointer (may be null if mmap failed)
   const std::string& heap() const { return heap_; }
 
- private:
+private:
   IonBuffer() = default;
   int fd_ = -1;
   size_t size_ = 0;

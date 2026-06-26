@@ -1,8 +1,10 @@
-#include <cmath>
 #include "cpu_backend.h"
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
+
 #include "vx/logging.h"
 #include "vx/profiler.h"
 
@@ -33,7 +35,8 @@ int64_t* allocOutI64(RtTensor& rt, const Shape& shape) {
 void applyAct(float* p, int64_t n, ActType act, float lo, float hi) {
   switch (act) {
     case ActType::kRelu:
-      for (int64_t i = 0; i < n; ++i) p[i] = p[i] > 0 ? p[i] : 0;
+      for (int64_t i = 0; i < n; ++i)
+        p[i] = p[i] > 0 ? p[i] : 0;
       break;
     case ActType::kRelu6:
       for (int64_t i = 0; i < n; ++i) {
@@ -48,10 +51,14 @@ void applyAct(float* p, int64_t n, ActType act, float lo, float hi) {
       }
       break;
     case ActType::kHardSwish:
-      for (int64_t i = 0; i < n; ++i) { float v = p[i]; p[i] = v * std::min(std::max(v + 3.f, 0.f), 6.f) / 6.f; }
+      for (int64_t i = 0; i < n; ++i) {
+        float v = p[i];
+        p[i] = v * std::min(std::max(v + 3.f, 0.f), 6.f) / 6.f;
+      }
       break;
     case ActType::kSiLU:
-      for (int64_t i = 0; i < n; ++i) p[i] = p[i] / (1.f + std::exp(-p[i]));
+      for (int64_t i = 0; i < n; ++i)
+        p[i] = p[i] / (1.f + std::exp(-p[i]));
       break;
     default:
       break;
@@ -70,7 +77,7 @@ void copyAs(const RtTensor& X, RtTensor& Y, const Shape& shape) {
 
 // --------------------------- CpuSegment ---------------------------
 class CpuSegment : public Segment {
- public:
+public:
   CpuSegment(const std::vector<int>& idx, Graph& g) : g_(g) {
     nodeIdx = idx;
     for (int i : idx) {
@@ -87,9 +94,11 @@ class CpuSegment : public Segment {
           sh += std::to_string(t) + ":[";
           if (t >= 0) {
             const RtTensor& rt = ctx.t(t);
-            for (auto d : rt.shape) sh += std::to_string(d) + ",";
+            for (auto d : rt.shape)
+              sh += std::to_string(d) + ",";
             sh += rt.hostValid ? "]h " : "]NOHOST ";
-          } else sh += "?] ";
+          } else
+            sh += "?] ";
         }
         VX_INFO << "  cpuop " << opTypeName(node.type) << " '" << node.name << "' ins=" << sh;
       }
@@ -112,20 +121,21 @@ class CpuSegment : public Segment {
     }
   }
 
- private:
+private:
   Graph& g_;
   std::vector<std::unique_ptr<CpuOp>> ops_;
 };
 
 // --------------------------- CpuBackend ---------------------------
 class CpuBackend : public Backend {
- public:
+public:
   BackendKind kind() const override { return BackendKind::kCpu; }
   const char* name() const override { return "CPU"; }
   bool available() const override { return true; }
   bool supports(OpType t, DType dt) const override {
     auto& r = CpuOpRegistry::instance();
-    if (!r.has(t)) return false;
+    if (!r.has(t))
+      return false;
     return dt == DType::kFloat32 || dt == DType::kInt64 || dt == DType::kInt32;
   }
   std::unique_ptr<Segment> compileSegment(const std::vector<int>& idx, Graph& g,

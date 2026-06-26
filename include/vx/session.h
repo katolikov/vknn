@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+
 #include "vx/backend.h"
 #include "vx/config.h"
 #include "vx/graph.h"
@@ -34,7 +35,7 @@ struct IOInfo {
 
 /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.
 class Session {
- public:
+public:
   ~Session();
   /// Build a session from an ONNX model file.
   static std::unique_ptr<Session> createFromOnnx(const std::string& path, const Config& cfg);
@@ -67,9 +68,9 @@ class Session {
   // Per-tensor accessor for layer-dump / debugging (host residency).
   const RtTensor* tensor(const std::string& name) const;
 
- private:
+private:
   Session() = default;
-  void plan();  // assign backends, partition into segments, compile
+  void plan();                // assign backends, partition into segments, compile
   void foldTinyGpuIslands();  // reassign small CPU-bounded GPU runs to CPU (avoid round trips)
   void reconcileInputs(Segment& seg);
 
@@ -90,9 +91,10 @@ class Session {
 
 /// Top-level facade users call.
 class Runtime {
- public:
+public:
   static std::unique_ptr<Session> load(const std::string& path, const Config& cfg = {}) {
-    // Dispatch on extension: a pre-optimized ".vxm" skips ONNX parsing + passes; anything else is ONNX.
+    // Dispatch on extension: a pre-optimized ".vxm" skips ONNX parsing + passes; anything else is
+    // ONNX.
     bool isVxm = path.size() >= 4 && path.compare(path.size() - 4, 4, ".vxm") == 0;
     return isVxm ? Session::createFromVxm(path, cfg) : Session::createFromOnnx(path, cfg);
   }

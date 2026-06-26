@@ -1,4 +1,5 @@
 #include "vk_buffer.h"
+
 #include <unistd.h>
 
 namespace vx {
@@ -12,14 +13,18 @@ uint32_t Buffer::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags want,
                                 VkMemoryPropertyFlags avoid) {
   const auto& mp = ctx_.memProps();
   for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
-    if (!(typeBits & (1u << i))) continue;
+    if (!(typeBits & (1u << i)))
+      continue;
     auto f = mp.memoryTypes[i].propertyFlags;
-    if ((f & want) == want && (f & avoid) == 0) return i;
+    if ((f & want) == want && (f & avoid) == 0)
+      return i;
   }
   // relax avoid
   for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
-    if (!(typeBits & (1u << i))) continue;
-    if ((mp.memoryTypes[i].propertyFlags & want) == want) return i;
+    if (!(typeBits & (1u << i)))
+      continue;
+    if ((mp.memoryTypes[i].propertyFlags & want) == want)
+      return i;
   }
   throw Error(Status::kRuntimeError, "no compatible memory type");
 }
@@ -75,23 +80,29 @@ Buffer::Buffer(VulkanContext& ctx, size_t bytes, MemPref pref, VkBufferUsageFlag
 }
 
 Buffer::~Buffer() {
-  if (mapped_ && !imported_) vkUnmapMemory(ctx_.device(), mem_);
-  if (buf_) vkDestroyBuffer(ctx_.device(), buf_, nullptr);
-  if (mem_) vkFreeMemory(ctx_.device(), mem_, nullptr);
+  if (mapped_ && !imported_)
+    vkUnmapMemory(ctx_.device(), mem_);
+  if (buf_)
+    vkDestroyBuffer(ctx_.device(), buf_, nullptr);
+  if (mem_)
+    vkFreeMemory(ctx_.device(), mem_, nullptr);
 }
 
 void Buffer::upload(const void* src, size_t n, size_t offset) {
-  if (!mapped_) throw Error(Status::kUnsupported, "upload to non-host-visible buffer");
+  if (!mapped_)
+    throw Error(Status::kUnsupported, "upload to non-host-visible buffer");
   std::memcpy((char*)mapped_ + offset, src, n);
 }
 void Buffer::download(void* dst, size_t n, size_t offset) {
-  if (!mapped_) throw Error(Status::kUnsupported, "download from non-host-visible buffer");
+  if (!mapped_)
+    throw Error(Status::kUnsupported, "download from non-host-visible buffer");
   std::memcpy(dst, (char*)mapped_ + offset, n);
 }
 
 Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
                                VkBufferUsageFlags extraUsage) {
-  if (!ctx.caps().externalMemoryFd || !ctx.caps().externalMemoryDmaBuf) return nullptr;
+  if (!ctx.caps().externalMemoryFd || !ctx.caps().externalMemoryDmaBuf)
+    return nullptr;
   auto* b = new Buffer(ctx);
   b->bytes_ = bytes;
   b->imported_ = true;
@@ -122,7 +133,8 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(ctx.device(), b->buf_, &req);
     typeBits &= req.memoryTypeBits;
-    if (typeBits == 0) typeBits = req.memoryTypeBits;  // tolerate driver returning 0 from the query
+    if (typeBits == 0)
+      typeBits = req.memoryTypeBits;  // tolerate driver returning 0 from the query
 
     // For an imported dma-buf the allowed memory types are dictated by the fd; do not
     // over-constrain. Prefer host-visible (so we can also CPU-map it), else any allowed type.
@@ -137,7 +149,8 @@ Buffer* Buffer::importDmaBufFd(VulkanContext& ctx, int fd, size_t bytes,
           pick = (int)i;
           break;
         }
-      if (pick < 0) throw Error(Status::kUnsupported, "no compatible memory type for dma-buf");
+      if (pick < 0)
+        throw Error(Status::kUnsupported, "no compatible memory type for dma-buf");
       typeIdx = (uint32_t)pick;
     }
 

@@ -1,7 +1,9 @@
 // vxrt unit tests (host): dtype/fp16, config JSON, ONNX import, graph passes, CPU ops vs
 // reference, layout packing math. Vulkan correctness is validated on-device (see scripts).
 #include <gtest/gtest.h>
+
 #include <cmath>
+
 #include "vx/config.h"
 #include "vx/dtype.h"
 #include "vx/graph.h"
@@ -148,21 +150,48 @@ TEST(Api, TensorHelpers) {
 TEST(Api, AutoShapesFromModel) {
   // input[1,2,1,1] -> Conv 1x1 (weight 2*I, bias {-3,0}) -> y
   Graph g;
-  TensorDesc xi; xi.name = "x"; xi.shape = {1, 2, 1, 1}; xi.isInput = true;
-  TensorId x = g.addTensor(xi); g.inputs.push_back(x);
-  TensorDesc wi; wi.name = "w"; wi.shape = {2, 2, 1, 1}; wi.isInitializer = true;
+  TensorDesc xi;
+  xi.name = "x";
+  xi.shape = {1, 2, 1, 1};
+  xi.isInput = true;
+  TensorId x = g.addTensor(xi);
+  g.inputs.push_back(x);
+  TensorDesc wi;
+  wi.name = "w";
+  wi.shape = {2, 2, 1, 1};
+  wi.isInitializer = true;
   TensorId w = g.addTensor(wi);
-  HostBuffer wb; wb.resizeElems(4, DType::kFloat32);
-  wb.f32()[0] = 2; wb.f32()[1] = 0; wb.f32()[2] = 0; wb.f32()[3] = 2; g.initializers[w] = wb;
-  TensorDesc bi; bi.name = "b"; bi.shape = {2}; bi.isInitializer = true;
+  HostBuffer wb;
+  wb.resizeElems(4, DType::kFloat32);
+  wb.f32()[0] = 2;
+  wb.f32()[1] = 0;
+  wb.f32()[2] = 0;
+  wb.f32()[3] = 2;
+  g.initializers[w] = wb;
+  TensorDesc bi;
+  bi.name = "b";
+  bi.shape = {2};
+  bi.isInitializer = true;
   TensorId b = g.addTensor(bi);
-  HostBuffer bb; bb.resizeElems(2, DType::kFloat32); bb.f32()[0] = -3; bb.f32()[1] = 0;
+  HostBuffer bb;
+  bb.resizeElems(2, DType::kFloat32);
+  bb.f32()[0] = -3;
+  bb.f32()[1] = 0;
   g.initializers[b] = bb;
-  TensorDesc yo; yo.name = "y"; yo.isOutput = true; TensorId y = g.addTensor(yo);
-  Node conv; conv.type = OpType::kConv; conv.name = "conv"; conv.inputs = {x, w, b};
-  conv.outputs = {y}; g.nodes.push_back(conv); g.outputs = {y};
+  TensorDesc yo;
+  yo.name = "y";
+  yo.isOutput = true;
+  TensorId y = g.addTensor(yo);
+  Node conv;
+  conv.type = OpType::kConv;
+  conv.name = "conv";
+  conv.inputs = {x, w, b};
+  conv.outputs = {y};
+  g.nodes.push_back(conv);
+  g.outputs = {y};
 
-  Config cfg; cfg.backend = BackendKind::kCpu;
+  Config cfg;
+  cfg.backend = BackendKind::kCpu;
   auto sess = Session::create(std::move(g), cfg);
   // query metadata instead of hand-specifying it
   auto in = sess->inputInfo();
@@ -181,16 +210,34 @@ TEST(Api, AutoShapesFromModel) {
 TEST(CpuOps, UnarySigmoidHardSwish) {
   for (int sub : {(int)UnaryType::kSigmoid, (int)UnaryType::kHardSwish}) {
     Graph g;
-    TensorDesc xi; xi.name = "x"; xi.shape = {1, 4}; xi.isInput = true;
-    TensorId x = g.addTensor(xi); g.inputs.push_back(x);
-    TensorDesc yo; yo.name = "y"; yo.isOutput = true; TensorId y = g.addTensor(yo);
-    Node u; u.type = OpType::kUnary; u.name = "u"; u.subOp = sub; u.inputs = {x}; u.outputs = {y};
-    g.nodes.push_back(u); g.outputs = {y};
-    Config cfg; cfg.backend = BackendKind::kCpu;
+    TensorDesc xi;
+    xi.name = "x";
+    xi.shape = {1, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name = "y";
+    yo.isOutput = true;
+    TensorId y = g.addTensor(yo);
+    Node u;
+    u.type = OpType::kUnary;
+    u.name = "u";
+    u.subOp = sub;
+    u.inputs = {x};
+    u.outputs = {y};
+    g.nodes.push_back(u);
+    g.outputs = {y};
+    Config cfg;
+    cfg.backend = BackendKind::kCpu;
     auto sess = Session::create(std::move(g), cfg);
-    IOTensor in; in.name = "x"; in.shape = {1, 4}; in.data.resize(4 * 4);
+    IOTensor in;
+    in.name = "x";
+    in.shape = {1, 4};
+    in.data.resize(4 * 4);
     float vals[4] = {-2.f, -0.5f, 0.5f, 3.f};
-    for (int i = 0; i < 4; ++i) reinterpret_cast<float*>(in.data.data())[i] = vals[i];
+    for (int i = 0; i < 4; ++i)
+      reinterpret_cast<float*>(in.data.data())[i] = vals[i];
     std::vector<IOTensor> outs;
     ASSERT_EQ(sess->run({in}, outs), Status::kOk);
     const float* o = outs[0].f32();
@@ -206,18 +253,42 @@ TEST(CpuOps, UnarySigmoidHardSwish) {
 // Binary family: Mul (with broadcast) on CPU.
 TEST(CpuOps, BinaryMul) {
   Graph g;
-  TensorDesc ai; ai.name = "a"; ai.shape = {1, 3}; ai.isInput = true;
-  TensorId a = g.addTensor(ai); g.inputs.push_back(a);
-  TensorDesc bi; bi.name = "b"; bi.shape = {1}; bi.isInitializer = true;  // broadcast scalar
+  TensorDesc ai;
+  ai.name = "a";
+  ai.shape = {1, 3};
+  ai.isInput = true;
+  TensorId a = g.addTensor(ai);
+  g.inputs.push_back(a);
+  TensorDesc bi;
+  bi.name = "b";
+  bi.shape = {1};
+  bi.isInitializer = true;  // broadcast scalar
   TensorId b = g.addTensor(bi);
-  HostBuffer bb; bb.resizeElems(1, DType::kFloat32); bb.f32()[0] = 3.f; g.initializers[b] = bb;
-  TensorDesc co; co.name = "c"; co.isOutput = true; TensorId c = g.addTensor(co);
-  Node m; m.type = OpType::kBinary; m.name = "mul"; m.subOp = (int)BinaryType::kMul; m.inputs = {a, b}; m.outputs = {c};
-  g.nodes.push_back(m); g.outputs = {c};
-  Config cfg; cfg.backend = BackendKind::kCpu;
+  HostBuffer bb;
+  bb.resizeElems(1, DType::kFloat32);
+  bb.f32()[0] = 3.f;
+  g.initializers[b] = bb;
+  TensorDesc co;
+  co.name = "c";
+  co.isOutput = true;
+  TensorId c = g.addTensor(co);
+  Node m;
+  m.type = OpType::kBinary;
+  m.name = "mul";
+  m.subOp = (int)BinaryType::kMul;
+  m.inputs = {a, b};
+  m.outputs = {c};
+  g.nodes.push_back(m);
+  g.outputs = {c};
+  Config cfg;
+  cfg.backend = BackendKind::kCpu;
   auto sess = Session::create(std::move(g), cfg);
-  IOTensor in; in.name = "a"; in.shape = {1, 3}; in.data.resize(3 * 4);
-  for (int i = 0; i < 3; ++i) reinterpret_cast<float*>(in.data.data())[i] = (float)(i + 1);
+  IOTensor in;
+  in.name = "a";
+  in.shape = {1, 3};
+  in.data.resize(3 * 4);
+  for (int i = 0; i < 3; ++i)
+    reinterpret_cast<float*>(in.data.data())[i] = (float)(i + 1);
   std::vector<IOTensor> outs;
   ASSERT_EQ(sess->run({in}, outs), Status::kOk);
   const float* o = outs[0].f32();
@@ -264,7 +335,8 @@ TEST(CpuOps, AddBroadcast) {
   in.name = "a";
   in.shape = {1, 3};
   in.data.resize(3 * 4);
-  for (int i = 0; i < 3; ++i) reinterpret_cast<float*>(in.data.data())[i] = (float)i;
+  for (int i = 0; i < 3; ++i)
+    reinterpret_cast<float*>(in.data.data())[i] = (float)i;
   std::vector<IOTensor> outs;
   ASSERT_EQ(sess->run({in}, outs), Status::kOk);
   const float* o = outs[0].f32();

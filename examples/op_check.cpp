@@ -1,9 +1,11 @@
 // vx_op_check - M1 foundation test: GPU elementwise add vs CPU, + pipeline cache.
+#include <sys/stat.h>
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <sys/stat.h>
 #include <vector>
+
 #include "vx/logging.h"
 #if defined(VXRT_ENABLE_VULKAN)
 #include "backends/vulkan/vk_buffer.h"

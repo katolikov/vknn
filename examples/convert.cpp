@@ -1,14 +1,16 @@
 // vx_convert — pre-convert an ONNX model to an optimized ".vxm" so the runtime skips ONNX parsing
 // AND all graph passes (fusion/fold/shape-infer). With --fp16, weights are stored as fp16, which
-// halves the file and, more importantly, the runtime host memory (a 965M-param model: 3.85GB -> 1.9GB)
-// — the difference between fitting an 8GB device and OOM. The Vulkan layout pass (NC4HW4<->flat) is
-// applied per-target at load, so a .vxm is backend-agnostic: convert once on the host, run on device.
+// halves the file and, more importantly, the runtime host memory (a 965M-param model: 3.85GB
+// -> 1.9GB) — the difference between fitting an 8GB device and OOM. The Vulkan layout pass
+// (NC4HW4<->flat) is applied per-target at load, so a .vxm is backend-agnostic: convert once on the
+// host, run on device.
 //
 //   vx_convert model.onnx out.vxm [--fp16]
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
 #include "import/passes.h"
 #include "vx/dtype.h"
 #include "vx/graph.h"
@@ -23,7 +25,8 @@ int main(int argc, char** argv) {
   std::string onnx = argv[1], out = argv[2];
   bool fp16 = false;
   for (int i = 3; i < argc; ++i)
-    if (!strcmp(argv[i], "--fp16")) fp16 = true;
+    if (!strcmp(argv[i], "--fp16"))
+      fp16 = true;
 
   printf("[convert] importing %s ...\n", onnx.c_str());
   Graph g = importOnnx(onnx);
@@ -46,7 +49,8 @@ int main(int argc, char** argv) {
       const float* src = kv.second.f32();
       std::vector<uint8_t> half((size_t)n * 2);
       fp16_t* h = reinterpret_cast<fp16_t*>(half.data());
-      for (int64_t i = 0; i < n; ++i) h[i] = floatToHalf(src[i]);
+      for (int64_t i = 0; i < n; ++i)
+        h[i] = floatToHalf(src[i]);
       kv.second.bytes = std::move(half);
       d.dtype = DType::kFloat16;
       after += (int64_t)kv.second.bytes.size();

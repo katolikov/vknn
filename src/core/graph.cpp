@@ -1,4 +1,5 @@
 #include "vx/graph.h"
+
 #include <algorithm>
 #include <sstream>
 #include <unordered_map>
@@ -13,7 +14,8 @@ TensorId Graph::find(const std::string& name) const {
 
 TensorId Graph::findOrAdd(const std::string& name) {
   auto it = tensorByName.find(name);
-  if (it != tensorByName.end()) return it->second;
+  if (it != tensorByName.end())
+    return it->second;
   TensorDesc d;
   d.name = name;
   return addTensor(std::move(d));
@@ -21,7 +23,8 @@ TensorId Graph::findOrAdd(const std::string& name) {
 
 TensorId Graph::addTensor(TensorDesc d) {
   TensorId id = (TensorId)tensors.size();
-  if (!d.name.empty()) tensorByName[d.name] = id;
+  if (!d.name.empty())
+    tensorByName[d.name] = id;
   tensors.push_back(std::move(d));
   return id;
 }
@@ -34,14 +37,16 @@ void Graph::topoSort() {
   std::unordered_map<int, int> producer;
   for (size_t i = 0; i < n; ++i)
     for (TensorId o : nodes[i].outputs)
-      if (o != kNoTensor) producer[o] = (int)i;
+      if (o != kNoTensor)
+        producer[o] = (int)i;
 
   std::vector<std::vector<int>> succ(n);
   for (size_t i = 0; i < n; ++i) {
     std::unordered_set<int> preds;
     for (TensorId in : nodes[i].inputs) {
       auto it = producer.find(in);
-      if (it != producer.end() && it->second != (int)i) preds.insert(it->second);
+      if (it != producer.end() && it->second != (int)i)
+        preds.insert(it->second);
     }
     for (int p : preds) {
       succ[p].push_back((int)i);
@@ -50,7 +55,8 @@ void Graph::topoSort() {
   }
   std::vector<int> q;
   for (size_t i = 0; i < n; ++i)
-    if (indeg[i] == 0) q.push_back((int)i);
+    if (indeg[i] == 0)
+      q.push_back((int)i);
   std::vector<Node> ordered;
   ordered.reserve(n);
   size_t head = 0;
@@ -58,9 +64,11 @@ void Graph::topoSort() {
     int u = q[head++];
     ordered.push_back(nodes[u]);
     for (int v : succ[u])
-      if (--indeg[v] == 0) q.push_back(v);
+      if (--indeg[v] == 0)
+        q.push_back(v);
   }
-  if (ordered.size() != n) throw Error(Status::kInvalidArgument, "graph has a cycle");
+  if (ordered.size() != n)
+    throw Error(Status::kInvalidArgument, "graph has a cycle");
   nodes = std::move(ordered);
 }
 
@@ -81,7 +89,8 @@ std::string Graph::dump() const {
     for (size_t k = 0; k < nd.outputs.size(); ++k)
       os << tensors[nd.outputs[k]].name << (k + 1 < nd.outputs.size() ? "," : "");
     os << ")";
-    if (nd.fusedAct != ActType::kNone) os << " +act" << (int)nd.fusedAct;
+    if (nd.fusedAct != ActType::kNone)
+      os << " +act" << (int)nd.fusedAct;
     os << "\n";
   }
   return os.str();

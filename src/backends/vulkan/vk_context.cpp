@@ -1,4 +1,5 @@
 #include "vk_context.h"
+
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -38,8 +39,10 @@ VulkanContext::VulkanContext() {
 }
 
 VulkanContext::~VulkanContext() {
-  if (device_) vkDestroyDevice(device_, nullptr);
-  if (instance_) vkDestroyInstance(instance_, nullptr);
+  if (device_)
+    vkDestroyDevice(device_, nullptr);
+  if (instance_)
+    vkDestroyInstance(instance_, nullptr);
 }
 
 void VulkanContext::createInstance() {
@@ -58,7 +61,8 @@ void VulkanContext::createInstance() {
 void VulkanContext::selectPhysicalDevice() {
   uint32_t n = 0;
   VK_CHECK(vkEnumeratePhysicalDevices(instance_, &n, nullptr));
-  if (n == 0) throw Error(Status::kNotFound, "no Vulkan physical devices");
+  if (n == 0)
+    throw Error(Status::kNotFound, "no Vulkan physical devices");
   std::vector<VkPhysicalDevice> devs(n);
   VK_CHECK(vkEnumeratePhysicalDevices(instance_, &n, devs.data()));
   // Prefer an integrated/discrete GPU with a compute queue. On phones there is one.
@@ -80,7 +84,8 @@ void VulkanContext::queryCaps() {
   vkEnumerateDeviceExtensionProperties(phys_, nullptr, &extCount, nullptr);
   std::vector<VkExtensionProperties> exts(extCount);
   vkEnumerateDeviceExtensionProperties(phys_, nullptr, &extCount, exts.data());
-  for (auto& e : exts) caps_.deviceExtensions.insert(e.extensionName);
+  for (auto& e : exts)
+    caps_.deviceExtensions.insert(e.extensionName);
 
   // --- properties (+ driver, subgroup) via pNext chain ---
   VkPhysicalDeviceSubgroupProperties subgroup{
@@ -159,15 +164,18 @@ void VulkanContext::createDevice() {
   int chosen = -1, fallback = -1;
   for (uint32_t i = 0; i < qn; ++i) {
     if (qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-      if (fallback < 0) fallback = (int)i;
+      if (fallback < 0)
+        fallback = (int)i;
       if (!(qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
         chosen = (int)i;
         break;
       }
     }
   }
-  if (chosen < 0) chosen = fallback;
-  if (chosen < 0) throw Error(Status::kNotFound, "no compute queue family");
+  if (chosen < 0)
+    chosen = fallback;
+  if (chosen < 0)
+    throw Error(Status::kNotFound, "no compute queue family");
   queueFamily_ = (uint32_t)chosen;
   VX_INFO << "Compute queue family = " << queueFamily_
           << (qfs[chosen].queueFlags & VK_QUEUE_GRAPHICS_BIT ? " (shared w/ graphics)"
@@ -181,7 +189,8 @@ void VulkanContext::createDevice() {
 
   // Enable available perf extensions.
   auto addExt = [&](const char* e) {
-    if (caps_.has(e)) enabledDeviceExts_.push_back(e);
+    if (caps_.has(e))
+      enabledDeviceExts_.push_back(e);
   };
   addExt("VK_KHR_push_descriptor");
   addExt("VK_KHR_dedicated_allocation");

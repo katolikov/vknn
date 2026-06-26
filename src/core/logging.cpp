@@ -1,10 +1,11 @@
 #include "vx/logging.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <unordered_map>
-#include <ctime>
 
 #if defined(VXRT_ANDROID)
 #include <android/log.h>
@@ -19,7 +20,8 @@ std::unordered_map<std::string, int> g_counts;
 bool g_init = false;
 
 void ensureInit() {
-  if (g_init) return;
+  if (g_init)
+    return;
   g_init = true;
   if (const char* e = std::getenv("VXRT_LOG_LEVEL")) {
     if (!strcasecmp(e, "DEBUG"))
@@ -83,7 +85,8 @@ void Log::setColor(bool on) {
 void Log::emit(LogLevel lvl, const std::string& msg, const std::string& key, int throttleAfter) {
   std::lock_guard<std::mutex> g(g_mu);
   ensureInit();
-  if (lvl < g_level) return;
+  if (lvl < g_level)
+    return;
   if (throttleAfter > 0 && !key.empty()) {
     int& c = g_counts[key];
     ++c;

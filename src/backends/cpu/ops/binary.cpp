@@ -1,6 +1,7 @@
 // Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting.
 #include <algorithm>
 #include <cmath>
+
 #include "backends/cpu/cpu_backend.h"
 #include "vx/op.h"
 
@@ -9,13 +10,20 @@ namespace {
 
 static float binary(float a, float b, BinaryType op) {
   switch (op) {
-    case BinaryType::kMul: return a * b;
-    case BinaryType::kSub: return a - b;
-    case BinaryType::kDiv: return a / b;
-    case BinaryType::kMax: return std::max(a, b);
-    case BinaryType::kMin: return std::min(a, b);
-    case BinaryType::kPow: return std::pow(a, b);
-    default: break;
+    case BinaryType::kMul:
+      return a * b;
+    case BinaryType::kSub:
+      return a - b;
+    case BinaryType::kDiv:
+      return a / b;
+    case BinaryType::kMax:
+      return std::max(a, b);
+    case BinaryType::kMin:
+      return std::min(a, b);
+    case BinaryType::kPow:
+      return std::pow(a, b);
+    default:
+      break;
   }
   return a + b;
 }
@@ -32,7 +40,8 @@ struct BinaryCpu : CpuOp {
       size_t off = rank - s.size();
       return i < off ? 1 : s[i - off];
     };
-    for (size_t i = 0; i < rank; ++i) out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
+    for (size_t i = 0; i < rank; ++i)
+      out[i] = std::max(dimOf(sa, i), dimOf(sb, i));
     int64_t n = numElements(out);
     auto strides = [&](std::vector<int64_t>& oa, std::vector<int64_t>& ob) {
       int64_t sA = 1, sB = 1;
@@ -48,14 +57,16 @@ struct BinaryCpu : CpuOp {
       ia = ib = 0;
       for (size_t d = 0; d < rank; ++d) {
         int64_t stride = 1;
-        for (size_t e = d + 1; e < rank; ++e) stride *= out[e];
+        for (size_t e = d + 1; e < rank; ++e)
+          stride *= out[e];
         int64_t id = (lin / stride) % out[d];
         ia += id * oa[d];
         ib += id * ob[d];
       }
     };
     // Shape arithmetic is int64 (Shape/Gather feed Add/Div/Mul to compute slice/reshape bounds).
-    // Compute it in int64 so const-folding stays exact — reading those bytes as float corrupts them.
+    // Compute it in int64 so const-folding stays exact — reading those bytes as float corrupts
+    // them.
     if (A.dtype == DType::kInt64 || B.dtype == DType::kInt64) {
       int64_t* y = cpu::allocOutI64(Y, out);
       std::vector<int64_t> oa(rank), ob(rank);
@@ -68,12 +79,24 @@ struct BinaryCpu : CpuOp {
         idx(oa, ob, lin, ia, ib);
         int64_t av = val(A, ia), bv = val(B, ib);
         switch ((BinaryType)node.subOp) {
-          case BinaryType::kMul: y[lin] = av * bv; break;
-          case BinaryType::kSub: y[lin] = av - bv; break;
-          case BinaryType::kDiv: y[lin] = bv ? av / bv : 0; break;
-          case BinaryType::kMax: y[lin] = std::max(av, bv); break;
-          case BinaryType::kMin: y[lin] = std::min(av, bv); break;
-          default: y[lin] = av + bv; break;
+          case BinaryType::kMul:
+            y[lin] = av * bv;
+            break;
+          case BinaryType::kSub:
+            y[lin] = av - bv;
+            break;
+          case BinaryType::kDiv:
+            y[lin] = bv ? av / bv : 0;
+            break;
+          case BinaryType::kMax:
+            y[lin] = std::max(av, bv);
+            break;
+          case BinaryType::kMin:
+            y[lin] = std::min(av, bv);
+            break;
+          default:
+            y[lin] = av + bv;
+            break;
         }
       }
       return;
@@ -93,7 +116,8 @@ struct BinaryCpu : CpuOp {
       int64_t ia = 0, ib = 0;
       for (size_t d = 0; d < rank; ++d) {
         int64_t stride = 1;
-        for (size_t e = d + 1; e < rank; ++e) stride *= out[e];
+        for (size_t e = d + 1; e < rank; ++e)
+          stride *= out[e];
         int64_t id = (lin / stride) % out[d];
         ia += id * oa[d];
         ib += id * ob[d];

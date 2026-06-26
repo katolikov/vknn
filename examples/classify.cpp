@@ -19,24 +19,28 @@
 #include <fstream>
 #include <string>
 #include <vector>
+
 #include "vx/session.h"
 
 using namespace vx;
 
 static std::vector<uint8_t> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
-  if (!f) return {};
+  if (!f)
+    return {};
   return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
                               std::istreambuf_iterator<char>());
 }
 static const char* argval(int argc, char** argv, const char* key, const char* def) {
   for (int i = 1; i < argc - 1; ++i)
-    if (!strcmp(argv[i], key)) return argv[i + 1];
+    if (!strcmp(argv[i], key))
+      return argv[i + 1];
   return def;
 }
 static bool hasflag(int argc, char** argv, const char* key) {
   for (int i = 1; i < argc; ++i)
-    if (!strcmp(argv[i], key)) return true;
+    if (!strcmp(argv[i], key))
+      return true;
   return false;
 }
 
@@ -53,11 +57,13 @@ int main(int argc, char** argv) {
   std::string cfgpath = argval(argc, argv, "--config", "");
 
   Config cfg;
-  if (!cfgpath.empty()) cfg = Config::fromJsonFile(cfgpath);
+  if (!cfgpath.empty())
+    cfg = Config::fromJsonFile(cfgpath);
   cfg.backend = backendFromStr(backend);
   cfg.precision = (precision == "fp32") ? Precision::kFp32 : Precision::kFp16;
   cfg.cacheDir = argval(argc, argv, "--cache", cfg.cacheDir.c_str());
-  if (hasflag(argc, argv, "--profile")) cfg.profile = true;
+  if (hasflag(argc, argv, "--profile"))
+    cfg.profile = true;
   if (hasflag(argc, argv, "--layer-dump")) {
     cfg.layerDump = true;
     cfg.layerDumpDir = argval(argc, argv, "--layer-dump", cfg.layerDumpDir.c_str());
@@ -70,7 +76,8 @@ int main(int argc, char** argv) {
     while ((pos = s.find(',')) != std::string::npos || !s.empty()) {
       std::string tok = s.substr(0, pos);
       shape.push_back(std::stoll(tok));
-      if (pos == std::string::npos) break;
+      if (pos == std::string::npos)
+        break;
       s = s.substr(pos + 1);
     }
   }
@@ -123,7 +130,8 @@ int main(int argc, char** argv) {
   const float* y = outs[0].f32();
   int64_t n = numElements(outs[0].shape);
   std::vector<int> idx(n);
-  for (int64_t i = 0; i < n; ++i) idx[i] = (int)i;
+  for (int64_t i = 0; i < n; ++i)
+    idx[i] = (int)i;
   std::partial_sort(idx.begin(), idx.begin() + std::min<int64_t>(5, n), idx.end(),
                     [&](int a, int b) { return y[a] > y[b]; });
   printf("top-5:\n");
@@ -145,12 +153,14 @@ int main(int argc, char** argv) {
     double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
     int goldTop = 0;
     for (int64_t i = 1; i < m; ++i)
-      if (g[i] > g[goldTop]) goldTop = (int)i;
+      if (g[i] > g[goldTop])
+        goldTop = (int)i;
     printf("golden compare: cosine=%.6f maxAbsErr=%.4e  top1 vxrt=%d golden=%d  => %s\n", cos,
            maxErr, idx[0], goldTop, (idx[0] == goldTop && cos >= 0.99) ? "PASS" : "CHECK");
   }
 
-  if (cfg.profile) sess->profiler().printTable();
+  if (cfg.profile)
+    sess->profiler().printTable();
 
   // Optional latency benchmark: --bench N  (warmup 5, then N timed runs).
   int benchN = atoi(argval(argc, argv, "--bench", "0"));
@@ -159,9 +169,11 @@ int main(int argc, char** argv) {
       auto c0 = std::chrono::high_resolution_clock::now();
       sess->run({in}, outs);
       auto c1 = std::chrono::high_resolution_clock::now();
-      printf("cold (first run): %.2f ms\n", std::chrono::duration<double, std::milli>(c1 - c0).count());
+      printf("cold (first run): %.2f ms\n",
+             std::chrono::duration<double, std::milli>(c1 - c0).count());
     }
-    for (int i = 0; i < 5; ++i) sess->run({in}, outs);  // warmup
+    for (int i = 0; i < 5; ++i)
+      sess->run({in}, outs);  // warmup
     std::vector<double> ms;
     for (int i = 0; i < benchN; ++i) {
       auto t0 = std::chrono::high_resolution_clock::now();
@@ -171,7 +183,8 @@ int main(int argc, char** argv) {
     }
     std::sort(ms.begin(), ms.end());
     double mean = 0;
-    for (double v : ms) mean += v;
+    for (double v : ms)
+      mean += v;
     mean /= ms.size();
     double med = ms[ms.size() / 2];
     double p90 = ms[(size_t)(ms.size() * 0.9)];

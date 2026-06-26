@@ -1,9 +1,10 @@
 // Vulkan instance/device context and capability discovery.
 #pragma once
-#include "vk_common.h"
 #include <set>
 #include <string>
 #include <vector>
+
+#include "vk_common.h"
 
 namespace vx {
 namespace vk {
@@ -53,7 +54,7 @@ struct VulkanCaps {
 
 /// Owns the VkInstance/VkDevice/queue and exposes caps. One per process is typical.
 class VulkanContext {
- public:
+public:
   VulkanContext();
   ~VulkanContext();
   VulkanContext(const VulkanContext&) = delete;
@@ -73,7 +74,7 @@ class VulkanContext {
   PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
   PFN_vkGetMemoryFdKHR getMemoryFd = nullptr;
 
- private:
+private:
   void createInstance();
   void selectPhysicalDevice();
   void queryCaps();

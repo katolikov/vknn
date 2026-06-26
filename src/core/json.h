@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+
 #include "vx/common.h"
 
 namespace vx {
@@ -18,7 +19,8 @@ struct JsonValue {
 
   bool isObject() const { return type == kObject; }
   const JsonValue* get(const std::string& k) const {
-    if (type != kObject) return nullptr;
+    if (type != kObject)
+      return nullptr;
     auto it = obj.find(k);
     return it == obj.end() ? nullptr : &it->second;
   }
@@ -28,7 +30,7 @@ struct JsonValue {
 };
 
 class JsonParser {
- public:
+public:
   static JsonValue parse(const std::string& s) {
     JsonParser p(s);
     p.ws();
@@ -36,7 +38,7 @@ class JsonParser {
     return v;
   }
 
- private:
+private:
   explicit JsonParser(const std::string& s) : s_(s) {}
   const std::string& s_;
   size_t i_ = 0;
@@ -51,8 +53,10 @@ class JsonParser {
   JsonValue value() {
     ws();
     char c = peek();
-    if (c == '{') return object();
-    if (c == '[') return array();
+    if (c == '{')
+      return object();
+    if (c == '[')
+      return array();
     if (c == '"') {
       JsonValue v;
       v.type = JsonValue::kString;
@@ -84,11 +88,13 @@ class JsonParser {
       ws();
       std::string key = str();
       ws();
-      if (peek() == ':') ++i_;
+      if (peek() == ':')
+        ++i_;
       v.obj[key] = value();
       ws();
     }
-    if (peek() == '}') ++i_;
+    if (peek() == '}')
+      ++i_;
     return v;
   }
   JsonValue array() {
@@ -100,12 +106,14 @@ class JsonParser {
       v.arr.push_back(value());
       ws();
     }
-    if (peek() == ']') ++i_;
+    if (peek() == ']')
+      ++i_;
     return v;
   }
   std::string str() {
     std::string out;
-    if (peek() != '"') return out;
+    if (peek() != '"')
+      return out;
     ++i_;
     while (i_ < s_.size() && s_[i_] != '"') {
       char c = s_[i_++];
@@ -133,7 +141,8 @@ class JsonParser {
       } else
         out += c;
     }
-    if (peek() == '"') ++i_;
+    if (peek() == '"')
+      ++i_;
     return out;
   }
   bool boolean() {
