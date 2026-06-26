@@ -79,12 +79,14 @@ void main() {
     barrier();
   }
 
-  // ---- store M[p][tile][ocb] ----  mbuf[(p*nT + tile)*Coutb + ocb]
+  // ---- store M[p][ocb][tile] ----  mbuf[(p*Coutb + ocb)*nT + tile]. tile is innermost so the
+  // 8 consecutive-tIdM threads write 8 contiguous addresses (coalesced); wino_out then reads
+  // contiguous tiles per (p,ocb) too. The old [p][tile][ocb] layout strided both by Coutb.
   int ocb = nb0 + tIdN;
   if (ocb < Coutb) {
-    int cBaseP = p * pc.nT * Coutb;
+    int cBase = (p * Coutb + ocb) * pc.nT;
     int m = m0 + tIdM;
     for (int r = 0; r < RM; ++r)
-      if (m + r * MDIM < pc.nT) mbuf[cBaseP + (m + r * MDIM) * Coutb + ocb] = f16vec4(acc[r]);
+      if (m + r * MDIM < pc.nT) mbuf[cBase + (m + r * MDIM)] = f16vec4(acc[r]);
   }
 }

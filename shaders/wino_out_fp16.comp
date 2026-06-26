@@ -26,10 +26,10 @@ void main() {
   int ty = (tile / pc.nTW) % pc.nTH;
   int n = tile / (pc.nTH * pc.nTW);
 
-  // mbuf index for position p, this (tile,ocb): (p*nT + tile)*Coutb + ocb
+  // M[p][ocb][tile] layout (matches wino_gemm): mbuf[(p*Coutb + ocb)*nT + tile]
   vec4 M[16];
   for (int p = 0; p < 16; ++p)
-    M[p] = vec4(mbuf[(p * nT + tile) * Coutb + ocb]);
+    M[p] = vec4(mbuf[(p * Coutb + ocb) * nT + tile]);
 
   vec4 b = vec4(bias[ocb]);
   vec4 t00 = M[0] + M[4] + M[8], t01 = M[1] + M[5] + M[9];
