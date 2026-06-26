@@ -64,16 +64,19 @@ void main() {
     barrier();
 
     // ---- register-blocked multiply: RM tiles x (1 ocb = 4 oc) per thread ----
+    // Operands stay f16vec4 so the multiply is RDNA "rapid packed math" (v_pk_*_f16, 2x ALU,
+    // half the power); only the cross-K accumulation is fp32 (full precision). Converting to fp32
+    // before the dot (as before) defeats packing.
     int kmax = min(KWG, Cinb - k0);
     int ocb = tIdN;            // this thread's output channel-block within the tile
     for (int kk = 0; kk < kmax; ++kk) {
-      vec4 b0 = vec4(sB[kk][ocb * 4 + 0]);
-      vec4 b1 = vec4(sB[kk][ocb * 4 + 1]);
-      vec4 b2 = vec4(sB[kk][ocb * 4 + 2]);
-      vec4 b3 = vec4(sB[kk][ocb * 4 + 3]);
+      f16vec4 b0 = sB[kk][ocb * 4 + 0];
+      f16vec4 b1 = sB[kk][ocb * 4 + 1];
+      f16vec4 b2 = sB[kk][ocb * 4 + 2];
+      f16vec4 b3 = sB[kk][ocb * 4 + 3];
       for (int r = 0; r < RM; ++r) {
-        vec4 a = vec4(sA[kk][tIdM + r * MDIM]);
-        acc[r] += vec4(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+        f16vec4 a = sA[kk][tIdM + r * MDIM];
+        acc[r] += vec4(float(dot(a, b0)), float(dot(a, b1)), float(dot(a, b2)), float(dot(a, b3)));
       }
     }
     barrier();
