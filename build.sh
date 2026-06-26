@@ -12,16 +12,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-android=0 clear=0 convert_only=0
+android=0 clear=0 convert_only=0 docs=0
 for a in "$@"; do
   case "$a" in
     --android) android=1 ;;
     --clear)   clear=1 ;;
     --convert) convert_only=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --docs)    docs=1 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "build.sh: unknown flag '$a' (try --help)" >&2; exit 1 ;;
   esac
 done
+
+# --docs: generate the themed HTML API site into docs/api/html (needs doxygen) and exit.
+if [[ $docs -eq 1 ]]; then
+  command -v doxygen >/dev/null || { echo "ERROR: doxygen not installed" >&2; exit 1; }
+  echo ">> generating API docs -> docs/api/html"
+  doxygen docs/Doxyfile
+  echo ">> open docs/api/html/index.html"
+  exit 0
+fi
 
 jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 

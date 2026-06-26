@@ -1,8 +1,8 @@
-# Doxygen configuration for vxrt API docs. Run: ./scripts/gen_docs.sh
-PROJECT_NAME           = "vxrt"
-PROJECT_BRIEF          = "Vulkan-eXynos RunTime — on-device CNN inference engine"
+# Doxygen configuration for the VKNN API docs. Run: ./build.sh --docs  (or ./scripts/gen_docs.sh)
+PROJECT_NAME           = "VKNN"
+PROJECT_BRIEF          = "Vulkan Neural Network — on-device inference engine (CNNs, transformers, 3D Gaussian Splatting)"
 OUTPUT_DIRECTORY       = docs/api
-INPUT                  = include/vx src
+INPUT                  = include/vknn src
 FILE_PATTERNS          = *.h *.hpp *.cpp *.glsl *.comp
 RECURSIVE              = YES
 EXTRACT_ALL            = YES
@@ -15,7 +15,14 @@ JAVADOC_AUTOBRIEF      = YES
 QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = NO
 SOURCE_BROWSER         = YES
-GENERATE_TREEVIEW      = YES
 USE_MDFILE_AS_MAINPAGE = README.md
 INPUT                 += README.md docs/ARCHITECTURE.md docs/ADDING_AN_OPERATOR.md \
                          docs/ADDING_A_BACKEND.md docs/CONFIG.md docs/LIMITATIONS.md
+
+# --- doxygen-awesome-css theme (vendored in docs/theme; a stylesheet, no toolchain dependency) ---
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+HTML_COLORSTYLE        = LIGHT
+HTML_EXTRA_STYLESHEET  = docs/theme/doxygen-awesome.css \
+                         docs/theme/doxygen-awesome-sidebar-only.css
