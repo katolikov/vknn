@@ -80,15 +80,17 @@ the timed loop. Even so, VKNN is faster on **8 of 9** models:
 | Inception-v3 | 15.46 ms | 19.35 ms (CPU-4t) | **VKNN −20%** |
 | DenseNet-121 | 13.90 ms | 15.37 ms (CPU-4t) | **VKNN −10%** |
 | YOLOv8n (640²) | 20.00 ms | 24.71 ms (OpenCL) | **VKNN −19%** |
-| ResNet-50 | 12.07 ms | 10.34 ms (OpenCL) | **MNN −14%** |
+| ResNet-50 | 10.26 ms (cool) | 10.30 ms (OpenCL) | **parity** |
 
 The conv-heavy nets (Inception, DenseNet, YOLO, ResNet) run a **tiled-GEMM Winograd** kernel — see below.
 
-**ResNet-50 is the one model where MNN still wins**, and the gap is now small (+14%, down from +43% in
-earlier builds). On a *cool* device the two tie (~10.5 ms each); MNN keeps its edge under sustained 20-run
-load because its kernels throttle less — partly real (its kernels draw less power) and partly a
-benchmark-structure artifact (MNN's `MNNV2Basic` does host work between runs, spacing out GPU load, while
-VKNN's loop is tight and self-heats the GPU).
+**ResNet-50 is now at parity with MNN's best** (it was MNN +43% in earlier builds). From a cool device
+VKNN-wino runs it in 9.96 / 10.26 ms (min/median) — faster than MNN's *buffer* OpenCL (10.51 ms) and even
+with MNN's *image* OpenCL (10.30 ms). MNN keeps a small edge only when the device is already warm: VKNN
+slows to ~11.7 ms there while MNN stays ~10.3. That is **not** an image-vs-buffer effect (MNN's SSBO/buffer
+path is just as stable) — it's kernel power: MNN's GEMM draws a little less per inference, so it sits
+further from the throttle threshold. Closing that last bit means cutting VKNN's per-layer V/M traffic
+(~3 MB) or a more ALU-efficient GEMM.
 
 ### Winograd: a tiled-GEMM kernel, autotuned per shape
 
