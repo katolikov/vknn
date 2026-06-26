@@ -165,19 +165,22 @@ int main(int argc, char** argv) {
   // Optional latency benchmark: --bench N  (warmup 5, then N timed runs).
   int benchN = atoi(argval(argc, argv, "--bench", "0"));
   if (benchN > 0) {
+    // Bind the input vector ONCE and reuse it; reconstructing {in} each call re-copies the whole
+    // input tensor (large mmap/free per run) which is benchmark-harness noise, not engine cost.
+    std::vector<IOTensor> invec{in};
     {  // cold latency: very first run after session create (matches MNN's no-warmup protocol)
       auto c0 = std::chrono::high_resolution_clock::now();
-      sess->run({in}, outs);
+      sess->run(invec, outs);
       auto c1 = std::chrono::high_resolution_clock::now();
       printf("cold (first run): %.2f ms\n",
              std::chrono::duration<double, std::milli>(c1 - c0).count());
     }
     for (int i = 0; i < 5; ++i)
-      sess->run({in}, outs);  // warmup
+      sess->run(invec, outs);  // warmup
     std::vector<double> ms;
     for (int i = 0; i < benchN; ++i) {
       auto t0 = std::chrono::high_resolution_clock::now();
-      sess->run({in}, outs);
+      sess->run(invec, outs);
       auto t1 = std::chrono::high_resolution_clock::now();
       ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
     }

@@ -375,6 +375,9 @@ const RtTensor* Session::tensor(const std::string& name) const {
 }
 
 Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& outputs) {
+  const bool tm = std::getenv("VKNN_TIMING") != nullptr;
+  auto now = [] { return std::chrono::high_resolution_clock::now(); };
+  auto tA = now();
   ExecContext ctx;
   ctx.pool = &pool_;
   ctx.graph = &graph_;
@@ -402,6 +405,7 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
     rt.deviceValid = false;
   }
 
+  auto tB = now();
   // --- run segments in order ---
   try {
     bool dbg = std::getenv("VKNN_DEBUG_SEG") != nullptr;
@@ -415,6 +419,7 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
     VKNN_ERROR << "run failed: " << e.what();
     return Status::kRuntimeError;
   }
+  auto tC = now();
 
   // --- layer dump ---
   if (cfg_.layerDump) {
@@ -444,6 +449,14 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
     io.dtype = rt.dtype;
     io.data = rt.host.bytes;
     outputs.push_back(std::move(io));
+  }
+  if (tm) {
+    auto tD = now();
+    auto ms = [&](auto a, auto b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    VKNN_INFO << "sess::run bind=" << ms(tA, tB) << "ms segments=" << ms(tB, tC)
+            << "ms collect=" << ms(tC, tD) << "ms";
   }
   return Status::kOk;
 }
