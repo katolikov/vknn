@@ -360,9 +360,16 @@ tr:nth-child(even) td{background:#fafbfc}
 
 
 def main():
+    import shutil
     os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, "styles.css"), "w") as f:
         f.write(STYLES)
+
+    # Copy docs/images/ into the site so README/doc image references resolve (pages rewrite
+    # the "docs/images/" prefix to "images/" since they live one level down from the repo root).
+    src_img = os.path.join(ROOT, "docs", "images")
+    if os.path.isdir(src_img):
+        shutil.copytree(src_img, os.path.join(OUT, "images"), dirs_exist_ok=True)
 
     # If doxygen produced an API reference, link it from the sidebar footer.
     api_link = ""
@@ -378,6 +385,7 @@ def main():
             md = f.read()
         body = convert(md)
         page = PAGE.format(title=html.escape(title), nav=nav_html(out), body=body, api=api_link)
+        page = page.replace("docs/images/", "images/")  # repo-root path -> site-relative
         with open(os.path.join(OUT, out), "w") as f:
             f.write(page)
     print("  wrote %d pages -> docs/site/" % len(PAGES))

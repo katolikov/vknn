@@ -37,6 +37,11 @@ Inception, DenseNet, ShuffleNet), detection (YOLOv8n), and a 965M-parameter tran
 encoder (the YoNoSplat feed-forward 3D Gaussian Splatting model), plus a from-scratch Vulkan
 3DGS rasterizer — all on the GPU.
 
+<p align="center">
+  <img src="docs/images/vknn_gpu_outputs.png" alt="VKNN classifying a real photo on the Vulkan GPU" width="780">
+</p>
+<p align="center"><sub>The benchmark CNNs classifying a real photo on the Vulkan GPU (fp16), with top-5 ImageNet labels.</sub></p>
+
 ## Highlights
 
 - **No third-party runtime dependencies.** ONNX import is a hand-rolled protobuf parser; the
