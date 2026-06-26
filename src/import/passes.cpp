@@ -1003,7 +1003,7 @@ void fuseSqueezeExcite(Graph& g) {
   int fused = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& hs = g.nodes[i];
-    if (hs.type != OpType::kUnary || hs.subOp != kUHardSigmoid) continue;
+    if (hs.type != OpType::kUnary || (UnaryType)hs.subOp != UnaryType::kHardSigmoid) continue;
     int p2 = producer[hs.inputs[0]];
     if (p2 < 0 || g.nodes[p2].type != OpType::kConv || !single(g.nodes[p2].outputs[0])) continue;
     Node& conv2 = g.nodes[p2];
@@ -1054,20 +1054,24 @@ void fuseSwish(Graph& g) {
   int fusedC = 0, fusedU = 0;
   for (size_t i = 0; i < g.nodes.size(); ++i) {
     Node& M = g.nodes[i];
-    if (M.type != OpType::kBinary || M.subOp != kBMul || M.inputs.size() != 2) continue;
+    if (M.type != OpType::kBinary || (BinaryType)M.subOp != BinaryType::kMul ||
+        M.inputs.size() != 2)
+      continue;
     int sigIdx = -1;
     TensorId x = kNoTensor;
     for (int e = 0; e < 2; ++e) {
       int pc = producer[M.inputs[e]];
       if (pc < 0 || g.nodes[pc].type != OpType::kUnary) continue;
-      int su = g.nodes[pc].subOp;
-      if ((su == kUHardSigmoid || su == kUSigmoid) && g.nodes[pc].inputs[0] == M.inputs[1 - e]) {
+      UnaryType su = (UnaryType)g.nodes[pc].subOp;
+      if ((su == UnaryType::kHardSigmoid || su == UnaryType::kSigmoid) &&
+          g.nodes[pc].inputs[0] == M.inputs[1 - e]) {
         sigIdx = pc; x = M.inputs[1 - e]; break;
       }
     }
     if (sigIdx < 0) continue;
     if (consumers[g.nodes[sigIdx].outputs[0]] != 1) continue;  // gate feeds only this Mul
-    ActType act = g.nodes[sigIdx].subOp == kUHardSigmoid ? ActType::kHardSwish : ActType::kSiLU;
+    ActType act = (UnaryType)g.nodes[sigIdx].subOp == UnaryType::kHardSigmoid ? ActType::kHardSwish
+                                                                              : ActType::kSiLU;
     int px = producer[x];
     bool fuseConv = px >= 0 && (g.nodes[px].type == OpType::kConv || g.nodes[px].type == OpType::kGemm) &&
                     g.nodes[px].fusedAct == ActType::kNone && consumers[x] == 2;
@@ -1083,7 +1087,7 @@ void fuseSwish(Graph& g) {
     } else {
       // collapse [gate, Mul] -> one unary
       M.type = OpType::kUnary;
-      M.subOp = (act == ActType::kHardSwish) ? kUHardSwish : kUSiLU;
+      M.subOp = (int)(act == ActType::kHardSwish ? UnaryType::kHardSwish : UnaryType::kSiLU);
       M.inputs = {x};
       remove.insert(sigIdx);
       fusedU++;

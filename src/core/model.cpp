@@ -76,7 +76,7 @@ static std::vector<TensorInfo> toInfos(const std::vector<IOInfo>& v) {
     TensorInfo t;
     t.name = i.name;
     t.shape = i.shape;
-    t.dtype = Precision::kFp32;
+    t.dtype = DType::kFloat32;  // values cross the high-level API as fp32
     t.count = i.elems;
     out.push_back(std::move(t));
   }

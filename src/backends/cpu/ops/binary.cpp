@@ -7,14 +7,15 @@
 namespace vx {
 namespace {
 
-static float binary(float a, float b, int op) {
+static float binary(float a, float b, BinaryType op) {
   switch (op) {
-    case kBMul: return a * b;
-    case kBSub: return a - b;
-    case kBDiv: return a / b;
-    case kBMax: return std::max(a, b);
-    case kBMin: return std::min(a, b);
-    case kBPow: return std::pow(a, b);
+    case BinaryType::kMul: return a * b;
+    case BinaryType::kSub: return a - b;
+    case BinaryType::kDiv: return a / b;
+    case BinaryType::kMax: return std::max(a, b);
+    case BinaryType::kMin: return std::min(a, b);
+    case BinaryType::kPow: return std::pow(a, b);
+    default: break;
   }
   return a + b;
 }
@@ -66,12 +67,12 @@ struct BinaryCpu : CpuOp {
         int64_t ia, ib;
         idx(oa, ob, lin, ia, ib);
         int64_t av = val(A, ia), bv = val(B, ib);
-        switch (node.subOp) {
-          case kBMul: y[lin] = av * bv; break;
-          case kBSub: y[lin] = av - bv; break;
-          case kBDiv: y[lin] = bv ? av / bv : 0; break;
-          case kBMax: y[lin] = std::max(av, bv); break;
-          case kBMin: y[lin] = std::min(av, bv); break;
+        switch ((BinaryType)node.subOp) {
+          case BinaryType::kMul: y[lin] = av * bv; break;
+          case BinaryType::kSub: y[lin] = av - bv; break;
+          case BinaryType::kDiv: y[lin] = bv ? av / bv : 0; break;
+          case BinaryType::kMax: y[lin] = std::max(av, bv); break;
+          case BinaryType::kMin: y[lin] = std::min(av, bv); break;
           default: y[lin] = av + bv; break;
         }
       }
@@ -97,7 +98,7 @@ struct BinaryCpu : CpuOp {
         ia += id * oa[d];
         ib += id * ob[d];
       }
-      y[lin] = binary(a[ia], b[ib], node.subOp);
+      y[lin] = binary(a[ia], b[ib], (BinaryType)node.subOp);
     }
   }
 };

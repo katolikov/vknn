@@ -171,7 +171,7 @@ struct Binary {
     int rank = (int)out.size();
     pc.rank = rank;
     pc.total = (int)numElements(out);
-    pc.op = node.type == OpType::kAdd ? kBAdd : node.subOp;
+    pc.op = node.type == OpType::kAdd ? (int)BinaryType::kAdd : node.subOp;
     // A fused activation (e.g. a Linear+Relu fused into the Add epilogue, as in the camera_head
     // res_conv) must be applied here too — the NC4HW4 add does it; the flat path used to drop it.
     pc.act = (int)node.fusedAct;

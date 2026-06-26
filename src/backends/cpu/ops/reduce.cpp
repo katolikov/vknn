@@ -21,7 +21,7 @@ struct ReduceCpu : CpuOp {
     if (axes.empty()) for (int i = 0; i < rank; ++i) axes.push_back(i);
     std::set<int> ax;
     for (int64_t a : axes) ax.insert((int)(a < 0 ? a + rank : a));
-    int op = node.subOp;  // ReduceType
+    ReduceType op = (ReduceType)node.subOp;
     Shape out = ctx.graph->desc(node.outputs[0]).shape;
     int64_t outElems = numElements(out), n = X.elems();
     std::vector<int64_t> inStride(rank, 1);
@@ -31,9 +31,9 @@ struct ReduceCpu : CpuOp {
     for (int i = 0; i < rank; ++i) if (!ax.count(i)) kept.push_back(i);
     std::vector<int64_t> outStrideK(kept.size(), 1);
     for (int i = (int)kept.size() - 2; i >= 0; --i) outStrideK[i] = outStrideK[i + 1] * X.shape[kept[i + 1]];
-    float init = op == kRMax ? -std::numeric_limits<float>::infinity()
-               : op == kRMin ? std::numeric_limits<float>::infinity()
-               : op == kRProd ? 1.f : 0.f;
+    float init = op == ReduceType::kMax ? -std::numeric_limits<float>::infinity()
+               : op == ReduceType::kMin ? std::numeric_limits<float>::infinity()
+               : op == ReduceType::kProd ? 1.f : 0.f;
     std::vector<float> acc(outElems, init);
     std::vector<int64_t> cnt(outElems, 0);
     const float* x = X.host.f32();
@@ -41,18 +41,18 @@ struct ReduceCpu : CpuOp {
       int64_t rem = i, oi = 0;
       for (size_t k = 0; k < kept.size(); ++k) { int64_t c = (i / inStride[kept[k]]) % X.shape[kept[k]]; oi += c * outStrideK[k]; }
       float v = x[i];
-      if (op == kRMax) acc[oi] = std::max(acc[oi], v);
-      else if (op == kRMin) acc[oi] = std::min(acc[oi], v);
-      else if (op == kRProd) acc[oi] *= v;
-      else if (op == kRL2) acc[oi] += v * v;  // sum of squares; sqrt below
+      if (op == ReduceType::kMax) acc[oi] = std::max(acc[oi], v);
+      else if (op == ReduceType::kMin) acc[oi] = std::min(acc[oi], v);
+      else if (op == ReduceType::kProd) acc[oi] *= v;
+      else if (op == ReduceType::kL2) acc[oi] += v * v;  // sum of squares; sqrt below
       else acc[oi] += v;
       cnt[oi]++;
       (void)rem;
     }
     float* y = cpu::allocOut(Y, out);
     for (int64_t i = 0; i < outElems; ++i) {
-      if (op == kRMean && cnt[i]) y[i] = acc[i] / cnt[i];
-      else if (op == kRL2) y[i] = std::sqrt(acc[i]);
+      if (op == ReduceType::kMean && cnt[i]) y[i] = acc[i] / cnt[i];
+      else if (op == ReduceType::kL2) y[i] = std::sqrt(acc[i]);
       else y[i] = acc[i];
     }
   }

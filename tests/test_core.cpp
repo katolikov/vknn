@@ -179,7 +179,7 @@ TEST(Api, AutoShapesFromModel) {
 
 // Unary family: Sigmoid + HardSwish on CPU.
 TEST(CpuOps, UnarySigmoidHardSwish) {
-  for (int sub : {(int)kUSigmoid, (int)kUHardSwish}) {
+  for (int sub : {(int)UnaryType::kSigmoid, (int)UnaryType::kHardSwish}) {
     Graph g;
     TensorDesc xi; xi.name = "x"; xi.shape = {1, 4}; xi.isInput = true;
     TensorId x = g.addTensor(xi); g.inputs.push_back(x);
@@ -195,7 +195,7 @@ TEST(CpuOps, UnarySigmoidHardSwish) {
     ASSERT_EQ(sess->run({in}, outs), Status::kOk);
     const float* o = outs[0].f32();
     for (int i = 0; i < 4; ++i) {
-      float e = sub == (int)kUSigmoid
+      float e = sub == (int)UnaryType::kSigmoid
                     ? 1.f / (1.f + std::exp(-vals[i]))
                     : vals[i] * std::min(std::max(vals[i] + 3.f, 0.f), 6.f) / 6.f;
       EXPECT_NEAR(o[i], e, 1e-5) << "sub=" << sub << " i=" << i;
@@ -212,7 +212,7 @@ TEST(CpuOps, BinaryMul) {
   TensorId b = g.addTensor(bi);
   HostBuffer bb; bb.resizeElems(1, DType::kFloat32); bb.f32()[0] = 3.f; g.initializers[b] = bb;
   TensorDesc co; co.name = "c"; co.isOutput = true; TensorId c = g.addTensor(co);
-  Node m; m.type = OpType::kBinary; m.name = "mul"; m.subOp = kBMul; m.inputs = {a, b}; m.outputs = {c};
+  Node m; m.type = OpType::kBinary; m.name = "mul"; m.subOp = (int)BinaryType::kMul; m.inputs = {a, b}; m.outputs = {c};
   g.nodes.push_back(m); g.outputs = {c};
   Config cfg; cfg.backend = BackendKind::kCpu;
   auto sess = Session::create(std::move(g), cfg);

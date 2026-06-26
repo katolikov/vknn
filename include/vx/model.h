@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include "vx/config.h"
+#include "vx/dtype.h"
 
 namespace vx {
 
@@ -21,9 +22,9 @@ class Session;
 struct TensorInfo {
   std::string name;
   std::vector<int64_t> shape;
-  Precision dtype = Precision::kFp32;  // value dtype is fp32 at the API boundary
-  int64_t count = 0;                   // number of elements
-  std::string shapeString() const;     // e.g. "1x3x224x224"
+  DType dtype = DType::kFloat32;     // the tensor's element type (values cross the API as fp32)
+  int64_t count = 0;                 // number of elements
+  std::string shapeString() const;   // e.g. "1x3x224x224"
 };
 
 /// A tensor going in or out of a model. Carries its own shape + data; all the accessors you'd want

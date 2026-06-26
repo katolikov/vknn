@@ -63,21 +63,28 @@ enum class OpType {
   kConvertLayout,
 };
 
-// Sub-codes for the kUnary/kBinary families (kept in sync with shaders/common.glsl).
-enum UnaryType {
-  kUSigmoid = 0, kUTanh = 1, kUHardSwish = 2, kUHardSigmoid = 3, kULeakyRelu = 4, kUElu = 5,
-  kUAbs = 6, kUNeg = 7, kUExp = 8, kULog = 9, kUSqrt = 10, kUFloor = 11, kUCeil = 12, kURelu = 13, kUSiLU = 14,
-  kUErf = 15, kUCos = 16, kUSin = 17, kUReciprocal = 18, kUSoftplus = 19  // transformer: GELU, RoPE, ...
+// Sub-codes for the kUnary/kBinary/kReduce families, stored in Node::subOp. The integer values are
+// kept in sync with the switch in shaders/common.glsl, so they are fixed and explicit. kInvalid (-1)
+// marks "this ONNX op is not in the family".
+enum class UnaryType : int32_t {
+  kInvalid = -1,
+  kSigmoid = 0, kTanh = 1, kHardSwish = 2, kHardSigmoid = 3, kLeakyRelu = 4, kElu = 5,
+  kAbs = 6, kNeg = 7, kExp = 8, kLog = 9, kSqrt = 10, kFloor = 11, kCeil = 12, kRelu = 13, kSiLU = 14,
+  kErf = 15, kCos = 16, kSin = 17, kReciprocal = 18, kSoftplus = 19  // transformer: GELU, RoPE, ...
 };
-enum BinaryType { kBMul = 0, kBSub = 1, kBDiv = 2, kBMax = 3, kBMin = 4, kBPow = 5, kBAdd = 6 };
-enum ReduceType { kRMean = 0, kRSum = 1, kRMax = 2, kRMin = 3, kRProd = 4, kRL2 = 5 };
+enum class BinaryType : int32_t {
+  kInvalid = -1, kMul = 0, kSub = 1, kDiv = 2, kMax = 3, kMin = 4, kPow = 5, kAdd = 6
+};
+enum class ReduceType : int32_t {
+  kInvalid = -1, kMean = 0, kSum = 1, kMax = 2, kMin = 3, kProd = 4, kL2 = 5
+};
 
 const char* opTypeName(OpType t);
 OpType opTypeFromOnnx(const std::string& s);
-// Returns the UnaryType/BinaryType code for an ONNX op name, or -1 if not in that family.
-int unaryFromOnnx(const std::string& s);
-int binaryFromOnnx(const std::string& s);
-int reduceFromOnnx(const std::string& s);
+// The UnaryType/BinaryType/ReduceType for an ONNX op name, or k*::kInvalid if not in that family.
+UnaryType unaryFromOnnx(const std::string& s);
+BinaryType binaryFromOnnx(const std::string& s);
+ReduceType reduceFromOnnx(const std::string& s);
 
 /// A single attribute value (subset needed for CNNs).
 struct Attr {

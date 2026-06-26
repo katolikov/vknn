@@ -98,33 +98,36 @@ const char* opTypeName(OpType t) {
   }
 }
 
-int unaryFromOnnx(const std::string& s) {
-  static const std::unordered_map<std::string, int> m = {
-      {"Sigmoid", kUSigmoid},     {"Tanh", kUTanh},   {"HardSwish", kUHardSwish},
-      {"HardSigmoid", kUHardSigmoid}, {"LeakyRelu", kULeakyRelu}, {"Elu", kUElu},
-      {"Abs", kUAbs},             {"Neg", kUNeg},     {"Exp", kUExp},
-      {"Log", kULog},             {"Sqrt", kUSqrt},   {"Floor", kUFloor},
-      {"Ceil", kUCeil},
-      {"Erf", kUErf},             {"Cos", kUCos},     {"Sin", kUSin},
-      {"Reciprocal", kUReciprocal}, {"Softplus", kUSoftplus}};
+UnaryType unaryFromOnnx(const std::string& s) {
+  using U = UnaryType;
+  static const std::unordered_map<std::string, UnaryType> m = {
+      {"Sigmoid", U::kSigmoid},     {"Tanh", U::kTanh},   {"HardSwish", U::kHardSwish},
+      {"HardSigmoid", U::kHardSigmoid}, {"LeakyRelu", U::kLeakyRelu}, {"Elu", U::kElu},
+      {"Abs", U::kAbs},             {"Neg", U::kNeg},     {"Exp", U::kExp},
+      {"Log", U::kLog},             {"Sqrt", U::kSqrt},   {"Floor", U::kFloor},
+      {"Ceil", U::kCeil},
+      {"Erf", U::kErf},             {"Cos", U::kCos},     {"Sin", U::kSin},
+      {"Reciprocal", U::kReciprocal}, {"Softplus", U::kSoftplus}};
   auto it = m.find(s);
-  return it == m.end() ? -1 : it->second;
+  return it == m.end() ? U::kInvalid : it->second;
 }
-int reduceFromOnnx(const std::string& s) {
-  if (s == "ReduceMean") return kRMean;
-  if (s == "ReduceSum") return kRSum;
-  if (s == "ReduceMax") return kRMax;
-  if (s == "ReduceMin") return kRMin;
-  if (s == "ReduceProd") return kRProd;
-  if (s == "ReduceL2") return kRL2;
-  return -1;
+ReduceType reduceFromOnnx(const std::string& s) {
+  using R = ReduceType;
+  if (s == "ReduceMean") return R::kMean;
+  if (s == "ReduceSum") return R::kSum;
+  if (s == "ReduceMax") return R::kMax;
+  if (s == "ReduceMin") return R::kMin;
+  if (s == "ReduceProd") return R::kProd;
+  if (s == "ReduceL2") return R::kL2;
+  return R::kInvalid;
 }
-int binaryFromOnnx(const std::string& s) {
-  static const std::unordered_map<std::string, int> m = {{"Mul", kBMul}, {"Sub", kBSub},
-                                                         {"Div", kBDiv}, {"Max", kBMax},
-                                                         {"Min", kBMin}, {"Pow", kBPow}};
+BinaryType binaryFromOnnx(const std::string& s) {
+  using B = BinaryType;
+  static const std::unordered_map<std::string, BinaryType> m = {{"Mul", B::kMul}, {"Sub", B::kSub},
+                                                                {"Div", B::kDiv}, {"Max", B::kMax},
+                                                                {"Min", B::kMin}, {"Pow", B::kPow}};
   auto it = m.find(s);
-  return it == m.end() ? -1 : it->second;
+  return it == m.end() ? B::kInvalid : it->second;
 }
 
 OpType opTypeFromOnnx(const std::string& s) {
@@ -177,8 +180,8 @@ OpType opTypeFromOnnx(const std::string& s) {
   if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd" ||
       s == "ReduceL2")
     return OpType::kReduce;
-  if (unaryFromOnnx(s) >= 0) return OpType::kUnary;
-  if (binaryFromOnnx(s) >= 0) return OpType::kBinary;
+  if (unaryFromOnnx(s) != UnaryType::kInvalid) return OpType::kUnary;
+  if (binaryFromOnnx(s) != BinaryType::kInvalid) return OpType::kBinary;
   return OpType::kUnknown;
 }
 

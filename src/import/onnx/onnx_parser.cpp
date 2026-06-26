@@ -419,18 +419,19 @@ static void parseNode(Reader r, Graph& g, Node& node) {
   }
   node.type = opTypeFromOnnx(opType);
   if (node.type == OpType::kUnary) {
-    node.subOp = unaryFromOnnx(opType);
+    UnaryType u = unaryFromOnnx(opType);
+    node.subOp = (int32_t)u;
     // params (defaults per ONNX): LeakyRelu alpha=0.01, Elu alpha=1.0, HardSigmoid alpha,beta
-    if (node.subOp == kULeakyRelu) node.actLo = node.attr.getf("alpha", 0.01f);
-    else if (node.subOp == kUElu) node.actLo = node.attr.getf("alpha", 1.0f);
-    else if (node.subOp == kUHardSigmoid) {
+    if (u == UnaryType::kLeakyRelu) node.actLo = node.attr.getf("alpha", 0.01f);
+    else if (u == UnaryType::kElu) node.actLo = node.attr.getf("alpha", 1.0f);
+    else if (u == UnaryType::kHardSigmoid) {
       node.actLo = node.attr.getf("alpha", 0.2f);
       node.actHi = node.attr.getf("beta", 0.5f);
     }
   } else if (node.type == OpType::kBinary) {
-    node.subOp = binaryFromOnnx(opType);
+    node.subOp = (int32_t)binaryFromOnnx(opType);
   } else if (node.type == OpType::kReduce) {
-    node.subOp = reduceFromOnnx(opType);
+    node.subOp = (int32_t)reduceFromOnnx(opType);
   }
   if (node.type == OpType::kUnknown)
     VX_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
