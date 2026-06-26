@@ -54,14 +54,27 @@ struct ConvOp : VulkanOp {
         std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)}, env.cache->handle());
   }
 
-  // --- Winograd F(2x2,3x3) state (used for 3x3, stride 1, pad 1, group 1, fp16) ---
+  // --- Winograd F(2x2,3x3) state (3x3, stride 1, pad 1, group 1, fp16) ---
+  // Three structural variants were implemented and verified (cosine 1.0 on ResNet-50) but ALL
+  // regress vs the direct 3x3 kernel (~11.2 ms GPU) on this driver — Winograd's 2.25x FLOP saving
+  // can't overcome the driver's punishment of memory/register/LDS pressure. DO NOT RE-TRY:
+  //   - 2-pass (VKNN_WINOGRAD): input transform -> V in GLOBAL, then fused matmul+output transform
+  //     with 16 register accumulators/thread. ~15 ms. MEMORY-bound: V is ~4x the input for F(2,3)
+  //     and round-trips to DRAM. Splitting the 16 accumulators across 4 cooperating threads
+  //     (VKNN_WINO2, wino_fused2) does NOT help -> confirms it's bandwidth, not occupancy.
+  //   - fully-fused (VKNN_WINOFULL, wino_full): one kernel, V staged in LDS (no global round-trip).
+  //     ~88 ms. OCCUPANCY collapse: the 16 KB static sV LDS array caps workgroups/SM to ~2-3 and
+  //     starves the GPU. This is the "production fused-LDS Winograd" approach; it dies here.
+  // The variants are kept behind env flags (default OFF) as a documented negative result.
   // Two passes: input transform -> V (global), then a FUSED matmul+output-transform kernel that
   // keeps the 16 transform-domain accumulators in registers (no M global buffer).
-  std::unique_ptr<vk::ComputePipeline> wInPipe, wFusedPipe;
+  std::unique_ptr<vk::ComputePipeline> wInPipe, wFusedPipe, wFullPipe;
   std::shared_ptr<vk::Buffer> ubuf, vbuf;
   WinoInPC wInPC{};
   WinoFusedPC wFusedPC{};
-  int64_t wInGroups = 0, wFusedGroups = 0;
+  int64_t wInGroups = 0, wFusedGroups = 0, wFullGroups = 0;
+  bool wino2 = false;     // occupancy-friendly 2-pass matmul (4 threads/tile, M split across quads)
+  bool winofull = false;  // single fully-fused kernel: V stays in LDS, no global round-trip
 
   void prepareWinograd(const Node& node, VkOpEnv& env, NCHW x, NCHW y, int64_t Cout,
                        int64_t Coutb) {
@@ -93,21 +106,32 @@ struct ConvOp : VulkanOp {
       return U;
     });
 
+    wFusedPC = {(int)x.n, (int)Cin, (int)Cout,          (int)y.h,   (int)y.w,
+                (int)nTH, (int)nTW, (int)node.fusedAct, node.actLo, node.actHi};
+    winofull = std::getenv("VKNN_WINOFULL") != nullptr;
+    if (winofull) {
+      // Single fused kernel: one workgroup per (tile, ocb-group of 16). No V buffer, no input pass.
+      int64_t ocbGroups = (Coutb + 15) / 16;
+      wFullGroups = nT * ocbGroups;
+      wFullPipe = std::make_unique<vk::ComputePipeline>(
+          *env.ctx, "wino_full_fp16", 4, sizeof(WinoFusedPC), std::vector<uint32_t>{},
+          env.cache->handle());
+      return;
+    }
     int el = 2;  // fp16
     vbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * Cinb * nT * 4 * el,
                                         vk::MemPref::kDeviceOnly);
-
     wInPC = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)nTH, (int)nTW};
-    wFusedPC = {(int)x.n, (int)Cin, (int)Cout,          (int)y.h,   (int)y.w,
-                (int)nTH, (int)nTW, (int)node.fusedAct, node.actLo, node.actHi};
     wInGroups = groups(Cinb * nT, 64);
-    wFusedGroups = groups(Coutb * nT, 64);
+    wino2 = std::getenv("VKNN_WINO2") != nullptr;
+    // wino2: 4 threads cooperate per (ocb,tile) -> 4x the threads, dispatched 64/workgroup.
+    wFusedGroups = wino2 ? groups(Coutb * nT * 4, 64) : groups(Coutb * nT, 64);
     wInPipe =
         std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC),
                                               std::vector<uint32_t>{}, env.cache->handle());
-    wFusedPipe =
-        std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_fused_fp16", 4, sizeof(WinoFusedPC),
-                                              std::vector<uint32_t>{}, env.cache->handle());
+    wFusedPipe = std::make_unique<vk::ComputePipeline>(
+        *env.ctx, wino2 ? "wino_fused2_fp16" : "wino_fused_fp16", 4, sizeof(WinoFusedPC),
+        std::vector<uint32_t>{}, env.cache->handle());
   }
 
   // Try a few workgroup sizes for this exact shape, keep the fastest, and remember it so the
@@ -297,6 +321,12 @@ struct ConvOp : VulkanOp {
     vk::Buffer* src = env.devBuf(node.inputs[0]);
     vk::Buffer* dst = env.devBuf(node.outputs[0]);
     if (winograd) {
+      if (winofull) {
+        // single fully-fused dispatch: U, raw input src, bias, dst. V stays in LDS.
+        wFullPipe->dispatch(cmd, {ubuf->handle(), src->handle(), bbuf->handle(), dst->handle()},
+                            &wFusedPC, sizeof(wFusedPC), (uint32_t)wFullGroups);
+        return;
+      }
       // 2 stages: input transform -> V, then fused matmul + output transform -> dst.
       wInPipe->dispatch(cmd, {src->handle(), vbuf->handle()}, &wInPC, sizeof(wInPC),
                         (uint32_t)wInGroups);

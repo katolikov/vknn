@@ -1,0 +1,113 @@
+#version 450
+// Winograd F(2x2,3x3) fused matmul + output transform, OCCUPANCY-FRIENDLY variant.
+//
+// The straightforward fused kernel (wino_fused) gives one thread the whole job for an
+// (output channel-block, tile): it accumulates all 16 transform-domain products M[16] in
+// registers (64 fp32) and then does the output transform. That register pressure caps
+// occupancy on this GPU and the kernel ends up slower than the direct 3x3 conv.
+//
+// Here FOUR threads cooperate on one (ocb, tile). Each thread owns a "position quad" q in
+// {0,1,2,3} and only accumulates M[4q .. 4q+3] (4 fp32 vec4 instead of 16) over the input
+// channels. The four partial M-quads are exchanged through shared memory, then each of the
+// four threads reads the 16 M values back and writes ONE of the 2x2 output pixels (q->pixel).
+// Same total loads and FLOPs as wino_fused, 4x fewer accumulators per thread, 4x more threads
+// in flight -> much higher occupancy, which is what this driver rewards.
+//
+// Workgroup = 64 threads = 16 outputs x 4 quads. local id = output*4 + q.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer U { f16vec4 ubuf[]; };
+layout(std430, binding = 1) readonly buffer V { f16vec4 vbuf[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, Cout, OH, OW, nTH, nTW, act;
+  float actLo, actHi;
+}
+pc;
+
+// 16 outputs/workgroup x 16 positions, fp32 for an exact output transform.
+shared vec4 sM[16][16];
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+
+  uint lid = gl_LocalInvocationID.x;
+  uint outSlot = lid >> 2;       // 0..15 : which output in this workgroup
+  uint q = lid & 3u;             // 0..3  : position quad / output pixel
+  uint globalOut = gl_WorkGroupID.x * 16u + outSlot;
+  bool valid = globalOut < uint(Coutb * nT);
+
+  int tile = valid ? int(globalOut) % nT : 0;
+  int ocb = valid ? int(globalOut) / nT : 0;
+
+  // accumulate M[4q .. 4q+3] over the input channel blocks
+  vec4 Mq0 = vec4(0.0), Mq1 = vec4(0.0), Mq2 = vec4(0.0), Mq3 = vec4(0.0);
+  if (valid) {
+    int ubaseOc = ocb * 4 * Cinb;
+    int p0 = int(q) * 4;
+    for (int icb = 0; icb < Cinb; ++icb) {
+      vec4 v0 = vec4(vbuf[((p0 + 0) * Cinb + icb) * nT + tile]);
+      vec4 v1 = vec4(vbuf[((p0 + 1) * Cinb + icb) * nT + tile]);
+      vec4 v2 = vec4(vbuf[((p0 + 2) * Cinb + icb) * nT + tile]);
+      vec4 v3 = vec4(vbuf[((p0 + 3) * Cinb + icb) * nT + tile]);
+      int ub0 = (p0 + 0) * pc.Cout * Cinb + ubaseOc + icb;
+      int ub1 = (p0 + 1) * pc.Cout * Cinb + ubaseOc + icb;
+      int ub2 = (p0 + 2) * pc.Cout * Cinb + ubaseOc + icb;
+      int ub3 = (p0 + 3) * pc.Cout * Cinb + ubaseOc + icb;
+      Mq0.x += dot(v0, vec4(ubuf[ub0]));            Mq0.y += dot(v0, vec4(ubuf[ub0 + Cinb]));
+      Mq0.z += dot(v0, vec4(ubuf[ub0 + 2 * Cinb])); Mq0.w += dot(v0, vec4(ubuf[ub0 + 3 * Cinb]));
+      Mq1.x += dot(v1, vec4(ubuf[ub1]));            Mq1.y += dot(v1, vec4(ubuf[ub1 + Cinb]));
+      Mq1.z += dot(v1, vec4(ubuf[ub1 + 2 * Cinb])); Mq1.w += dot(v1, vec4(ubuf[ub1 + 3 * Cinb]));
+      Mq2.x += dot(v2, vec4(ubuf[ub2]));            Mq2.y += dot(v2, vec4(ubuf[ub2 + Cinb]));
+      Mq2.z += dot(v2, vec4(ubuf[ub2 + 2 * Cinb])); Mq2.w += dot(v2, vec4(ubuf[ub2 + 3 * Cinb]));
+      Mq3.x += dot(v3, vec4(ubuf[ub3]));            Mq3.y += dot(v3, vec4(ubuf[ub3 + Cinb]));
+      Mq3.z += dot(v3, vec4(ubuf[ub3 + 2 * Cinb])); Mq3.w += dot(v3, vec4(ubuf[ub3 + 3 * Cinb]));
+    }
+  }
+  int p0 = int(q) * 4;
+  sM[outSlot][p0 + 0] = Mq0;
+  sM[outSlot][p0 + 1] = Mq1;
+  sM[outSlot][p0 + 2] = Mq2;
+  sM[outSlot][p0 + 3] = Mq3;
+  barrier();
+  if (!valid) return;
+
+  // Each quad-thread emits one of the 2x2 output pixels. Output transform Y = At*M*A with
+  // At rows [1,1,1,0] (top) / [0,1,-1,-1] (bottom); columns via A.
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+  int oy = ty * 2 + (int(q) >> 1);   // q in {2,3} -> bottom row
+  int ox = tx * 2 + (int(q) & 1);    // q in {1,3} -> right col
+  if (oy >= pc.OH || ox >= pc.OW) return;
+
+  // column combine first (At * M) for the needed output row, then row combine (* A) for the col.
+  // top row uses M[0..3]+M[4..7]+M[8..11]; bottom row uses M[4..7]-M[8..11]-M[12..15].
+  vec4 c0, c1, c2, c3;
+  if ((int(q) >> 1) == 0) {  // top output row
+    c0 = sM[outSlot][0] + sM[outSlot][4] + sM[outSlot][8];
+    c1 = sM[outSlot][1] + sM[outSlot][5] + sM[outSlot][9];
+    c2 = sM[outSlot][2] + sM[outSlot][6] + sM[outSlot][10];
+    c3 = sM[outSlot][3] + sM[outSlot][7] + sM[outSlot][11];
+  } else {  // bottom output row
+    c0 = sM[outSlot][4] - sM[outSlot][8] - sM[outSlot][12];
+    c1 = sM[outSlot][5] - sM[outSlot][9] - sM[outSlot][13];
+    c2 = sM[outSlot][6] - sM[outSlot][10] - sM[outSlot][14];
+    c3 = sM[outSlot][7] - sM[outSlot][11] - sM[outSlot][15];
+  }
+  vec4 y = vec4(bias[ocb]);
+  if ((int(q) & 1) == 0)  // left output col:  c0 + c1 + c2
+    y += c0 + c1 + c2;
+  else                    // right output col: c1 - c2 - c3
+    y += c1 - c2 - c3;
+
+  int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
+  dst[obase + oy * pc.OW + ox] =
+      f16vec4(vx_act(y.x, pc.act, pc.actLo, pc.actHi), vx_act(y.y, pc.act, pc.actLo, pc.actHi),
+              vx_act(y.z, pc.act, pc.actLo, pc.actHi), vx_act(y.w, pc.act, pc.actLo, pc.actHi));
+}

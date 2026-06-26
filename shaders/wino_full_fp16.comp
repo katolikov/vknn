@@ -1,0 +1,145 @@
+#version 450
+// Winograd F(2x2,3x3) FULLY FUSED: input transform + matmul + output transform in one kernel.
+// The transform-domain activations V never touch global memory - they are produced into shared
+// memory and consumed there. The 2-pass kernels (wino_input -> global V -> wino_fused) are
+// memory-bound: V is ~4x the input size for F(2,3) and round-trips to DRAM, which on this GPU
+// costs more than the 2.25x FLOP saving buys. Keeping V on chip removes that round-trip.
+//
+// One workgroup = one (tile, ocb-group). 64 threads = 16 output channel-blocks x 4 "quads".
+//   phase 1: all 64 threads cooperatively transform the 4x4 input window for every input
+//            channel-block into sV[16 positions][Cinb]   (Bt * d * B).
+//   phase 2: the 4 quad-threads of an output split the 16 transform positions (4 each), each
+//            accumulating its M-quad over Cin (V from LDS, U from global), then exchange the
+//            partial M through sM and each quad writes ONE of the 2x2 output pixels.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer U { f16vec4 ubuf[]; };
+layout(std430, binding = 1) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, Cout, OH, OW, nTH, nTW, act;
+  float actLo, actHi;
+}
+pc;
+
+// Max Cin channel-blocks staged at once. 512ch -> 128 blocks; 16 pos * 128 * 8B = 16 KB.
+#define MAXCB 128
+shared f16vec4 sV[16][MAXCB];  // V[position][icb], on chip
+shared vec4 sM[16][16];        // M[outSlot][position] for the output transform
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+  int ocbGroups = (Coutb + 15) / 16;
+
+  uint wg = gl_WorkGroupID.x;
+  int tile = int(wg) / ocbGroups;
+  int ocbGroup = int(wg) % ocbGroups;
+  if (tile >= nT) return;
+
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+
+  uint lid = gl_LocalInvocationID.x;
+
+  // ---- phase 1: input transform of this tile into sV (all input channel-blocks) ----
+  // F(2,3) stride-1 pad-1 k-3: input H,W equal output OH,OW.
+  int IH = pc.OH, IW = pc.OW;
+  for (int icb = int(lid); icb < Cinb; icb += 64) {
+    vec4 d[4][4];
+    int base = (n * Cinb + icb) * IH * IW;
+    for (int r = 0; r < 4; ++r) {
+      int iy = ty * 2 - 1 + r;
+      for (int c = 0; c < 4; ++c) {
+        int ix = tx * 2 - 1 + c;
+        d[r][c] = (iy >= 0 && iy < IH && ix >= 0 && ix < IW) ? vec4(src[base + iy * IW + ix])
+                                                             : vec4(0.0);
+      }
+    }
+    // tmp = Bt * d
+    vec4 t[4][4];
+    for (int c = 0; c < 4; ++c) {
+      t[0][c] = d[0][c] - d[2][c];
+      t[1][c] = d[1][c] + d[2][c];
+      t[2][c] = d[2][c] - d[1][c];
+      t[3][c] = d[1][c] - d[3][c];
+    }
+    // V = tmp * B
+    for (int r = 0; r < 4; ++r) {
+      sV[r * 4 + 0][icb] = f16vec4(t[r][0] - t[r][2]);
+      sV[r * 4 + 1][icb] = f16vec4(t[r][1] + t[r][2]);
+      sV[r * 4 + 2][icb] = f16vec4(t[r][2] - t[r][1]);
+      sV[r * 4 + 3][icb] = f16vec4(t[r][1] - t[r][3]);
+    }
+  }
+  barrier();
+
+  // ---- phase 2: matmul (V from LDS, U from global) + output transform ----
+  uint outSlot = lid >> 2;  // 0..15
+  uint q = lid & 3u;        // 0..3
+  int ocb = ocbGroup * 16 + int(outSlot);
+  bool valid = ocb < Coutb;
+
+  vec4 Mq0 = vec4(0.0), Mq1 = vec4(0.0), Mq2 = vec4(0.0), Mq3 = vec4(0.0);
+  if (valid) {
+    int ubaseOc = ocb * 4 * Cinb;
+    int p0 = int(q) * 4;
+    for (int icb = 0; icb < Cinb; ++icb) {
+      vec4 v0 = vec4(sV[p0 + 0][icb]);
+      vec4 v1 = vec4(sV[p0 + 1][icb]);
+      vec4 v2 = vec4(sV[p0 + 2][icb]);
+      vec4 v3 = vec4(sV[p0 + 3][icb]);
+      int ub0 = (p0 + 0) * pc.Cout * Cinb + ubaseOc + icb;
+      int ub1 = (p0 + 1) * pc.Cout * Cinb + ubaseOc + icb;
+      int ub2 = (p0 + 2) * pc.Cout * Cinb + ubaseOc + icb;
+      int ub3 = (p0 + 3) * pc.Cout * Cinb + ubaseOc + icb;
+      Mq0.x += dot(v0, vec4(ubuf[ub0]));            Mq0.y += dot(v0, vec4(ubuf[ub0 + Cinb]));
+      Mq0.z += dot(v0, vec4(ubuf[ub0 + 2 * Cinb])); Mq0.w += dot(v0, vec4(ubuf[ub0 + 3 * Cinb]));
+      Mq1.x += dot(v1, vec4(ubuf[ub1]));            Mq1.y += dot(v1, vec4(ubuf[ub1 + Cinb]));
+      Mq1.z += dot(v1, vec4(ubuf[ub1 + 2 * Cinb])); Mq1.w += dot(v1, vec4(ubuf[ub1 + 3 * Cinb]));
+      Mq2.x += dot(v2, vec4(ubuf[ub2]));            Mq2.y += dot(v2, vec4(ubuf[ub2 + Cinb]));
+      Mq2.z += dot(v2, vec4(ubuf[ub2 + 2 * Cinb])); Mq2.w += dot(v2, vec4(ubuf[ub2 + 3 * Cinb]));
+      Mq3.x += dot(v3, vec4(ubuf[ub3]));            Mq3.y += dot(v3, vec4(ubuf[ub3 + Cinb]));
+      Mq3.z += dot(v3, vec4(ubuf[ub3 + 2 * Cinb])); Mq3.w += dot(v3, vec4(ubuf[ub3 + 3 * Cinb]));
+    }
+  }
+  int p0 = int(q) * 4;
+  sM[outSlot][p0 + 0] = Mq0;
+  sM[outSlot][p0 + 1] = Mq1;
+  sM[outSlot][p0 + 2] = Mq2;
+  sM[outSlot][p0 + 3] = Mq3;
+  barrier();
+  if (!valid) return;
+
+  int oy = ty * 2 + (int(q) >> 1);
+  int ox = tx * 2 + (int(q) & 1);
+  if (oy >= pc.OH || ox >= pc.OW) return;
+
+  vec4 c0, c1, c2, c3;
+  if ((int(q) >> 1) == 0) {
+    c0 = sM[outSlot][0] + sM[outSlot][4] + sM[outSlot][8];
+    c1 = sM[outSlot][1] + sM[outSlot][5] + sM[outSlot][9];
+    c2 = sM[outSlot][2] + sM[outSlot][6] + sM[outSlot][10];
+    c3 = sM[outSlot][3] + sM[outSlot][7] + sM[outSlot][11];
+  } else {
+    c0 = sM[outSlot][4] - sM[outSlot][8] - sM[outSlot][12];
+    c1 = sM[outSlot][5] - sM[outSlot][9] - sM[outSlot][13];
+    c2 = sM[outSlot][6] - sM[outSlot][10] - sM[outSlot][14];
+    c3 = sM[outSlot][7] - sM[outSlot][11] - sM[outSlot][15];
+  }
+  vec4 y = vec4(bias[ocb]);
+  if ((int(q) & 1) == 0)
+    y += c0 + c1 + c2;
+  else
+    y += c1 - c2 - c3;
+
+  int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
+  dst[obase + oy * pc.OW + ox] =
+      f16vec4(vx_act(y.x, pc.act, pc.actLo, pc.actHi), vx_act(y.y, pc.act, pc.actLo, pc.actHi),
+              vx_act(y.z, pc.act, pc.actLo, pc.actHi), vx_act(y.w, pc.act, pc.actLo, pc.actHi));
+}
