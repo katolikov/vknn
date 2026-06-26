@@ -1,0 +1,71 @@
+#version 450
+// 3DGS preprocess: one thread per gaussian. Projects the world-space mean to 2D, projects the
+// world-space 3D covariance to a 2D conic via the perspective Jacobian (+0.3 screen-space low-pass),
+// computes the screen radius and packs everything the per-tile compositor needs. Matches the gsplat
+// 'classic' math in scripts/yonosplat/ref_rasterizer.py.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Means { float means[]; };   // [N][3] world
+layout(std430, binding = 1) readonly buffer Covs  { float covs[]; };    // [N][9] world 3x3 row-major
+layout(std430, binding = 2) readonly buffer Cols  { float cols[]; };    // [N][3] final RGB
+layout(std430, binding = 3) readonly buffer Opac  { float opac[]; };    // [N]
+layout(std430, binding = 4) writeonly buffer Out  { float gd[]; };       // [N][12], see layout below
+layout(push_constant) uniform PC {
+  ivec4 dims;   // N, H, W, _
+  vec4 cam;     // near, fx, fy, cx
+  vec4 cam2;    // cy, _, _, _
+  vec4 r0, r1, r2;  // world->camera rows: .xyz = R row, .w = t component
+} pc;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= uint(pc.dims.x)) return;
+  uint o = i * 12u;
+  // default: invalid
+  gd[o + 11u] = 0.0;
+  vec3 m = vec3(means[3u*i], means[3u*i+1u], means[3u*i+2u]);
+  vec3 p = vec3(dot(pc.r0.xyz, m) + pc.r0.w, dot(pc.r1.xyz, m) + pc.r1.w, dot(pc.r2.xyz, m) + pc.r2.w);
+  float z = p.z, near = pc.cam.x, fx = pc.cam.y, fy = pc.cam.z, cx = pc.cam.w, cy = pc.cam2.x;
+  if (z <= near) return;
+  float u = fx * p.x / z + cx;
+  float v = fy * p.y / z + cy;
+  // Scam = R * Sworld * R^T  (R = pc.r*.xyz rows)
+  float R[9] = float[9](pc.r0.x, pc.r0.y, pc.r0.z, pc.r1.x, pc.r1.y, pc.r1.z, pc.r2.x, pc.r2.y, pc.r2.z);
+  float Sw[9];
+  for (int k = 0; k < 9; ++k) Sw[k] = covs[9u*i + uint(k)];
+  float Tm[9];
+  for (int a = 0; a < 3; ++a)
+    for (int b = 0; b < 3; ++b) {
+      float s = 0.0;
+      for (int c = 0; c < 3; ++c) s += R[a*3+c] * Sw[c*3+b];
+      Tm[a*3+b] = s;
+    }
+  float Sc[9];
+  for (int a = 0; a < 3; ++a)
+    for (int b = 0; b < 3; ++b) {
+      float s = 0.0;
+      for (int c = 0; c < 3; ++c) s += Tm[a*3+c] * R[b*3+c];  // * R^T
+      Sc[a*3+b] = s;
+    }
+  // J (2x3): row0=(fx/z,0,-fx*px/z^2), row1=(0,fy/z,-fy*py/z^2)
+  float J00 = fx / z, J02 = -fx * p.x / (z*z), J11 = fy / z, J12 = -fy * p.y / (z*z);
+  // JS = J * Sc  (2x3)
+  float JS0[3], JS1[3];
+  for (int k = 0; k < 3; ++k) {
+    JS0[k] = J00 * Sc[0*3+k] + J02 * Sc[2*3+k];
+    JS1[k] = J11 * Sc[1*3+k] + J12 * Sc[2*3+k];
+  }
+  float c00 = JS0[0]*J00 + JS0[2]*J02 + 0.3;
+  float c01 = JS0[1]*J11 + JS0[2]*J12;
+  float c11 = JS1[1]*J11 + JS1[2]*J12 + 0.3;
+  float det = c00*c11 - c01*c01;
+  if (det <= 1e-12) return;
+  float mid = 0.5 * (c00 + c11);
+  float lam = mid + sqrt(max(0.1, mid*mid - det));
+  float radius = ceil(3.0 * sqrt(lam));
+  gd[o+0u] = u; gd[o+1u] = v; gd[o+2u] = z;
+  gd[o+3u] = c11/det; gd[o+4u] = -c01/det; gd[o+5u] = c00/det;  // conic (a,b,c)
+  gd[o+6u] = cols[3u*i]; gd[o+7u] = cols[3u*i+1u]; gd[o+8u] = cols[3u*i+2u];
+  gd[o+9u] = opac[i];
+  gd[o+10u] = radius;
+  gd[o+11u] = 1.0;  // valid
+}

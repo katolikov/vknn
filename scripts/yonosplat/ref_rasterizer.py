@@ -63,13 +63,13 @@ def render_view(means, covs, colors, opac, w2c, K, H, W):
         a, b, c = conic[n]
         power = -0.5 * (a * dx * dx + c * dy * dy) - b * dx * dy
         alpha = np.minimum(0.99, opac[n] * np.exp(np.minimum(power, 0.0)))
-        m = alpha > (1.0 / 255.0)
-        if not m.any():
+        da = np.where(alpha > (1.0 / 255.0), alpha, 0.0)   # gate out negligible alphas
+        if not (da > 0).any():
             continue
         Tt = Tacc[y0:y1, x0:x1]
-        w = np.where(m, alpha * Tt, 0.0)
+        w = da * Tt                                         # contribution = alpha * transmittance
         img[y0:y1, x0:x1] += w[..., None] * colors[n][None, None, :]
-        Tacc[y0:y1, x0:x1] = Tt * (1.0 - w)
+        Tacc[y0:y1, x0:x1] = Tt * (1.0 - da)                # transmittance *= (1 - alpha)
     return np.clip(img, 0.0, 1.0), 1.0 - Tacc
 
 

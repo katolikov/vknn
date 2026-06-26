@@ -1,0 +1,38 @@
+#version 450
+// 3DGS per-tile compositor: one workgroup per 16x16 screen tile, one thread per pixel. Walks the
+// tile's depth-sorted gaussian list (built on the host) front-to-back, evaluating each 2D gaussian's
+// alpha and alpha-compositing colour with transmittance. Matches ref_rasterizer.py's per-pixel loop.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer GD     { float gd[]; };       // [N][12] from preprocess
+layout(std430, binding = 1) readonly buffer Sorted { int sortedIdx[]; };  // flat depth-sorted gaussian ids
+layout(std430, binding = 2) readonly buffer Ranges { int ranges[]; };     // [numTiles][2] = (start,count)
+layout(std430, binding = 3) writeonly buffer Img   { float img[]; };       // [H*W*3]
+layout(push_constant) uniform PC { ivec4 dims; } pc;  // H, W, numTilesX, _
+
+void main() {
+  int H = pc.dims.x, W = pc.dims.y, ntx = pc.dims.z;
+  int px = int(gl_GlobalInvocationID.x), py = int(gl_GlobalInvocationID.y);
+  if (px >= W || py >= H) return;
+  int tile = (py / 16) * ntx + (px / 16);
+  int start = ranges[2*tile], count = ranges[2*tile+1];
+  vec3 C = vec3(0.0);
+  float T = 1.0;
+  for (int k = 0; k < count; ++k) {
+    int gi = sortedIdx[start + k];
+    uint o = uint(gi) * 12u;
+    float dx = float(px) - gd[o+0u];
+    float dy = float(py) - gd[o+1u];
+    float power = -0.5 * (gd[o+3u]*dx*dx + gd[o+5u]*dy*dy) - gd[o+4u]*dx*dy;
+    if (power > 0.0) continue;
+    float alpha = min(0.99, gd[o+9u] * exp(power));
+    if (alpha < (1.0/255.0)) continue;
+    float w = alpha * T;
+    C += w * vec3(gd[o+6u], gd[o+7u], gd[o+8u]);
+    T *= (1.0 - alpha);
+    if (T < 1e-4) break;
+  }
+  uint pix = (uint(py) * uint(W) + uint(px)) * 3u;
+  img[pix+0u] = clamp(C.x, 0.0, 1.0);
+  img[pix+1u] = clamp(C.y, 0.0, 1.0);
+  img[pix+2u] = clamp(C.z, 0.0, 1.0);
+}
