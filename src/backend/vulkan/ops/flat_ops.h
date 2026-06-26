@@ -81,6 +81,58 @@ namespace vknn {
             }
         };
 
+        // ---- Pad (constant/edge/reflect): out[i] maps to an input element, pad region filled per mode ----
+        struct Pad {
+            struct PC {
+                int   rank, total, mode;
+                float cval;
+                int   outDim[kMaxRank], inDim[kMaxRank], inStride[kMaxRank], padBegin[kMaxRank];
+            } pc {};
+            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
+            void                                 prepare(const Node &node, VkOpEnv &env) {
+                const Graph &g   = *env.graph;
+                Shape        in  = g.desc(node.inputs[0]).shape;
+                Shape        out = g.desc(node.outputs[0]).shape;
+                int          rank     = (int) out.size();
+                auto         inStride = rowStrides(in);
+                auto         pads     = readI64Param(g, node, "pads", 1); // [begin..., end...]; begins are pads[0..rank-1]
+                std::string  mode     = node.attr.gets("mode", "constant");
+                float        cval     = node.attr.getf("value", 0.f);
+                if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor && g.isInitializer(node.inputs[2]))
+                {
+                    // The pad value is a 0-D scalar; read its single element from the initializer bytes
+                    // directly (numElements is 0 for an empty shape, so initFloats yields an empty vector).
+                    const HostBuffer &hb = g.initializers.at(node.inputs[2]);
+                    if (g.desc(node.inputs[2]).dtype == DType::kFloat16)
+                    {
+                        if (hb.bytes.size() >= sizeof(fp16_t))
+                        {
+                            cval = halfToFloat(*reinterpret_cast<const fp16_t *>(hb.bytes.data()));
+                        }
+                    } else if (hb.bytes.size() >= sizeof(float))
+                    {
+                        cval = hb.f32()[0];
+                    }
+                }
+                pc.rank  = rank;
+                pc.total = (int) numElements(out);
+                pc.mode  = (mode == "edge") ? 1 : (mode == "reflect") ? 2 : 0;
+                pc.cval  = cval;
+                for (int k = 0; k < rank; ++k)
+                {
+                    pc.outDim[k]   = (int) out[k];
+                    pc.inDim[k]    = (int) in[k];
+                    pc.inStride[k] = (int) inStride[k];
+                    pc.padBegin[k] = pads.empty() ? 0 : (int) pads[k];
+                }
+                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_pad", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+            }
+            void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
+                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+            }
+        };
+
         // ---- Expand / Tile: out[i] = in[ sum_k (outCoord_k % inDim_k) * inStride_k ] ----
         // One shader (flat_broadcast) for both: the modulo gives broadcast (inDim==1 => index 0) for Expand
         // and wraparound for Tile. Input dims/strides are right-aligned into the output rank.

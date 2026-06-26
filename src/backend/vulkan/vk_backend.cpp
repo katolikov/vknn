@@ -188,6 +188,26 @@ namespace vknn {
                 // flat broadcast/tile gather decodes up to kMaxRank=6 output dims.
                 return g.desc(nd.outputs[0]).shape.size() <= 8;
             }
+            if (nd.type == OpType::kPad)
+            {
+                // Flat pad runs on the GPU only for static pads + a supported mode (else CPU). Mirrors
+                // gpuFlatNode so a GPU-assigned Pad is always marked flat by the layout pass.
+                if (g.desc(nd.outputs[0]).shape.size() > 8)
+                {
+                    return false;
+                }
+                std::string mode = nd.attr.gets("mode", "constant");
+                if (mode != "constant" && mode != "edge" && mode != "reflect")
+                {
+                    return false;
+                }
+                bool padsKnown = !nd.attr.getints("pads").empty() || (nd.inputs.size() > 1 && nd.inputs[1] != kNoTensor && g.isInitializer(nd.inputs[1]));
+                if (!padsKnown)
+                {
+                    return false;
+                }
+                return !(nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]));
+            }
             if (nd.type == OpType::kMatMul)
             {
                 // Batched N-D matmul on the flat row-major path; the kernel decodes up to kMaxRank=6 out

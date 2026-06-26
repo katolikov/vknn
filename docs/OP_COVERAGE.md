@@ -54,7 +54,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | GridSample | ✅* | ✅ | GPU for a constant grid; runtime grid on CPU |
 | Reduce (Mean/Sum/Max/Min/Prod/L2) | ✅ | ✅ | arbitrary axes |
 | Cast | ✅ | ✅ | float ↔ int32/int64 |
-| Pad | — | ✅ | constant / edge / reflect |
+| Pad | ✅ | ✅ | constant / edge / reflect; GPU = flat row-major, static pads |
 | Shape / Constant / ConstantOfShape / EyeLike | const-fold | ✅ | resolved at compile time |
 | Identity | — | ✅ | |
 

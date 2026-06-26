@@ -2031,6 +2031,25 @@ namespace vknn {
             case OpType::kWhere:        // cond?X:Y, broadcasting flat select
             case OpType::kEqual:        // A==B, broadcasting flat compare
                 return true;
+            case OpType::kPad: {
+                // Flat row-major pad (constant/edge/reflect). Needs static pads (attr or a constant
+                // input[1]) and rank within the flat limit; a runtime pad value falls back to CPU.
+                if (sh(n.outputs[0]).size() > 8)
+                {
+                    return false;
+                }
+                std::string mode = n.attr.gets("mode", "constant");
+                if (mode != "constant" && mode != "edge" && mode != "reflect")
+                {
+                    return false;
+                }
+                bool padsKnown = !n.attr.getints("pads").empty() || (n.inputs.size() > 1 && n.inputs[1] != kNoTensor && g.isInitializer(n.inputs[1]));
+                if (!padsKnown)
+                {
+                    return false;
+                }
+                return !(n.inputs.size() > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
+            }
             case OpType::kGather:
                 // Flat row-major gather along an axis; index may be constant or a runtime float activation
                 // (RoPE).
