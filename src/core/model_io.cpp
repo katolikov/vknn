@@ -1,6 +1,6 @@
 // Save/load the optimized vknn graph (post-import, post-passes) as a compact binary ".vxm" so a
 // reload skips both ONNX protobuf parsing and all graph passes. Self-contained (embeds weights).
-// Pairs with the existing weight/pipeline/tuning caches for fast warm starts.
+// Complements the weight/pipeline/tuning caches for fast warm starts.
 #include "vknn/graph.h"
 #include "vknn/logging.h"
 #include "vknn/op.h"

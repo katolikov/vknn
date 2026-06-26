@@ -57,13 +57,12 @@ namespace vknn {
 
             // --- Winograd F(2x2,3x3) state (3x3, stride 1, pad 1, group 1, fp16) ---
             // The default Winograd kernel is the 3-pass tiled GEMM (wino_input -> wino_gemm -> wino_out);
-            // it beats the direct 3x3 on deep/square convs (ResNet-50 12.6 -> 10.5 ms) and tuneWino picks
-            // it per shape. The earlier non-GEMM matmul variants all regressed and are kept only behind
-            // Hint::kWinogradVariant as documented negative results: a 2-pass with a naive 16-accumulator
-            // matmul (~15 ms, memory-bound on the global V round-trip), the same split 4 ways (wino_fused2,
-            // no help -> bandwidth not occupancy), a fully-fused kernel with V in LDS (wino_full, ~88 ms,
-            // the 16 KB static LDS array collapses occupancy), and a subgroup-shuffle GEMM (wino_gemm_sg,
-            // +47% — shuffle costs more than LDS here).
+            // tuneWino picks it per shape against the direct 3x3. The non-GEMM matmul variants all
+            // regress on this GPU and are gated behind Hint::kWinogradVariant as documented negative
+            // results: a 2-pass naive-matmul (memory-bound on the global V round-trip), the same split
+            // 4 ways (wino_fused2, bandwidth- not occupancy-bound), a fully-fused kernel keeping V in LDS
+            // (wino_full, the static LDS array collapses occupancy), and a subgroup-shuffle GEMM
+            // (wino_gemm_sg, shuffle costs more than LDS here).
             std::unique_ptr<vk::ComputePipeline> wInPipe, wFusedPipe, wFullPipe;
             std::shared_ptr<vk::Buffer>          ubuf, vbuf;
             WinoInPC                             wInPC {};
@@ -147,9 +146,9 @@ namespace vknn {
                 wInPC     = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
                 wInGroups = groups(Cinb * nT, 64);
 
-                // The tiled-GEMM 3-pass is the production Winograd kernel (default, variant 0). Variant 4 =
-                // the same 3-pass but with the subgroup-shuffle GEMM (no LDS). The fused / fused-split
-                // variants are kept only as Hint-gated experiments (documented regressions above).
+                // The tiled-GEMM 3-pass is the default Winograd kernel (variant 0). Variant 4 is the same
+                // 3-pass with the subgroup-shuffle GEMM (no LDS). The fused / fused-split variants are
+                // Hint-gated regressions (see above).
                 winogemm = (wvar == 0 || wvar == 4);
                 if (winogemm)
                 {
@@ -176,10 +175,10 @@ namespace vknn {
                                                                    env.cache->handle());
             }
 
-            // Try a few workgroup sizes for this exact shape, keep the fastest, and remember it so the
-            // next session (or run) skips the measurement. Only the group==1 conv shader is tunable.
-            // The timing dispatches run on dedicated SCRATCH buffers, never the real activation buffers -
-            // tuning must not write into the data path (doing so raced the first real run and corrupted it).
+            // Try a few workgroup sizes for this exact shape, keep the fastest, and cache it so later
+            // runs skip the measurement. Only the group==1 conv shader is tunable. Timing dispatches must
+            // run on dedicated scratch buffers, never the real activation buffers, or they race and
+            // corrupt the data path.
             uint32_t pickLocalSize(VkOpEnv &env) {
                 if (env.tuning == TuningLevel::kOff)
                 {
@@ -244,7 +243,7 @@ namespace vknn {
                 }
                 if (cfgHint(env, Hint::kWinogradUnit) == 4)
                 {
-                    return 2; // force F(4,3) (research; numerically fine but register-heavy transforms)
+                    return 2; // force F(4,3) (numerically fine but register-heavy transforms)
                 }
                 bool forceOn = (env.winograd == WinogradMode::kOn);
                 if (env.tuning == TuningLevel::kOff || !env.runner)
@@ -334,9 +333,9 @@ namespace vknn {
                 hasRes             = (node.fusedResidual != kNoTensor); // set by the residual-Add fusion pass (1x1 only)
                 depthwise          = (group == x.c && group == Cout && inCg == 1);
                 pointwise = (!depthwise && group == 1 && KH == 1 && KW == 1 && st[0] == 1 && st[1] == 1 && pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
-                // Winograd F(2,3) via a tiled GEMM (the structure MNN's OpenCL backend uses). It beats the
-                // direct kernel on deep, square 3x3 (ResNet-50: 12.6 -> 10.5 ms, matching MNN's tuned OpenCL)
-                // but loses on small-channel / spatially-large 3x3, so tuneWino picks per-shape and caches.
+                // Winograd F(2,3) via a tiled GEMM is eligible only for deep, square 3x3/s1/p1 group-1
+                // convs in fp16; tuneWino picks it per shape (it loses on small-channel / spatially-large
+                // 3x3) and caches the choice.
                 bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && x.c >= 32 && Cout >= 32);
                 int wchoice = winoShape ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
                 winograd    = (wchoice > 0);
@@ -443,8 +442,8 @@ namespace vknn {
                         pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC), std::vector<uint32_t> {}, env.cache->handle());
                     } else if (cfgHint(env, Hint::kDirectConv3x3) == 1)
                     {
-                        // register-tiled implicit-im2col (opt-in): regresses 3x3 on this GPU (small weight tensors
-                        // already cache well; WTILE overhead + extra input loads dominate). Kept for experiments.
+                        // register-tiled implicit-im2col (opt-in). Regresses 3x3 on this GPU: small weight
+                        // tensors already cache well, so WTILE overhead + extra input loads dominate.
                         reg        = true;
                         int64_t HW = y.h * y.w;
                         total      = x.n * Coutb * ((HW + kTile - 1) / kTile);

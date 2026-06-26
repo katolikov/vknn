@@ -1,4 +1,4 @@
-// The friendly API in action: load a model, run it, read the result — no tensor wiring.
+// vknn_predict - high-level Model API: load a model, run it, read the result with no tensor wiring.
 //   vknn_predict model.onnx input.bin
 #include "vknn/model.h"
 #include <cstdio>
@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    vknn::Tensor out = net.run(input); // one line to run
+    vknn::Tensor out = net.run(input);
     printf("result: shape=%s  top1=%lld  max=%.4f\n", out.shapeString().c_str(), (long long) out.argmax(), out.max());
 
     if (argc >= 4)

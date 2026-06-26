@@ -1,6 +1,6 @@
 #version 450
 #include "precision.glsl"
-// fp16 variant of clip.comp (data is STORE; clamp computed in float).
+// Clip/clamp each element to [lo, hi]. fp16/fp32 storage (STORE), clamp computed in float.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };

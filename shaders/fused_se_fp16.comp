@@ -1,7 +1,7 @@
 #version 450
 // Fused SE middle (one workgroup per image): reads the pooled avg [N,C,1,1], does FC1(relu) ->
-// FC2 -> hardsigmoid, writes the channel scale [N,C,1,1]. GlobalAvgPool + the broadcast Mul stay as
-// their own (parallel) ops; this only collapses the tiny [N,C,1,1] middle dispatches into one.
+// FC2 -> hardsigmoid, writes the channel scale [N,C,1,1]. GlobalAvgPool and the broadcast Mul remain
+// separate ops; this fuses only the FC1/FC2 middle on the tiny [N,C,1,1] tensor.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "common.glsl"

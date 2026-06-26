@@ -1,6 +1,6 @@
 #version 450
 #include "precision.glsl"
-// EyeLike fill, fp16/fp32 storage (see eyelike.comp).
+// EyeLike fill. STORE selects fp16/fp32 storage.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) writeonly buffer D { STORE d[]; };

@@ -1,17 +1,17 @@
 # Adding a Backend to VKNN
 
-This guide explains how to add a new execution backend (a new piece of hardware
+This guide describes how to add a new execution backend (a piece of hardware
 or runtime that can run inference) to **VKNN**. The contract is small: subclass
 `vknn::Backend`, implement a handful of virtual methods, register the class with
-`VKNN_REGISTER_BACKEND`, and make it selectable from `vknn::Config`. No edits to the
-core dispatch, the importer, or the graph passes are needed — self-registration
+`VKNN_REGISTER_BACKEND`, and make it selectable from `vknn::Config`. The core
+dispatch, the importer, and the graph passes require no edits — self-registration
 plus whole-archive linking wires everything together at startup.
 
-Two backends in the tree work as references: `src/backend/cpu/`
+Two backends in the tree serve as references: `src/backend/cpu/`
 (`CpuBackend` — the NCHW-native reference path and automatic fallback) and
 `src/backend/vulkan/` (`VulkanBackend` — a full GPU backend with packing, pipelines,
 and a pre-recorded command buffer). The CPU backend is the smaller of the two and the
-best one to read first.
+best starting point to read.
 
 ---
 
@@ -96,12 +96,12 @@ const char* name() const override { return "CPU"; }
 ### `available()` — usable on this device?
 
 Return `false` to remove the backend from selection entirely (e.g. the required
-driver/extension is missing, or you are on the host build). When `available()`
-is `false`, the `Session` skips the backend without ever calling `supports()` or
+driver/extension is missing, or on a host build). When `available()`
+is `false`, the `Session` skips the backend without calling `supports()` or
 `compileSegment()`. The CPU backend is always available; `VulkanBackend::available()`
 returns `true` only after it creates a Vulkan instance/device and finds a
-compute queue. A real backend probes its dependencies here (or in the
-constructor) and returns `true` only if it can actually run something.
+compute queue. A backend probes its dependencies here (or in the
+constructor) and returns `true` only if it can run.
 
 ### `supports(OpType, DType)` / `supportsNode(...)` — per-op capability
 
@@ -115,14 +115,14 @@ you decline are handed to the next backend in the fallback list (typically
 when support depends on the node's attributes or shapes — `VulkanBackend` uses it to
 accept a `Concat` only on a 4-aligned channel axis, or a `Binary` only for layouts its
 kernels can broadcast. `OpType` lives in `include/vknn/op.h` and `DType` in
-`include/vknn/tensor.h`. This is where you encode "I can do Conv and Gemm in fp16 but
+`include/vknn/tensor.h`. This is where a backend encodes "Conv and Gemm in fp16 but
 not Softmax", which shapes how the graph is partitioned.
 
 ### `compileSegment(...)` — turn nodes into a `Segment`
 
-Called once per assigned segment, at session-creation time. You receive the
-node indices (into `g.nodes`), the mutable `Graph`, and the `Config`. You return
-a `std::unique_ptr<Segment>` whose `run()` will be invoked at inference time.
+Called once per assigned segment, at session-creation time. It receives the
+node indices (into `g.nodes`), the mutable `Graph`, and the `Config`, and returns
+a `std::unique_ptr<Segment>` whose `run()` is invoked at inference time.
 
 This is where backends do their expensive, one-time work:
 
@@ -152,11 +152,11 @@ leaves both at their defaults, as `CpuBackend` does.
 
 ### `finalize()` — flush caches
 
-Called once after all segments are compiled. Use it to persist anything you want
-to reuse on the next cold start. The Vulkan backend flushes its `VkPipelineCache`,
-the prepacked-weights cache, and the autotune cache to `config.cacheDir` here —
-that's what turns a cold start into a much faster warm start. Most new backends
-leave it empty until they have something worth caching.
+Called once after all segments are compiled. Use it to persist anything to
+reuse on the next cold start. The Vulkan backend flushes its `VkPipelineCache`,
+the prepacked-weights cache, and the autotune cache to `config.cacheDir` here,
+which turns a cold start into a faster warm start. A backend leaves it
+empty until it has something worth caching.
 
 ---
 
@@ -180,7 +180,7 @@ public:
 };
 ```
 
-Your `compileSegment` returns a subclass of `Segment` and is expected to fill in:
+`compileSegment` returns a subclass of `Segment` and fills in:
 
 - `backend` — pointer back to the owning backend (used for boundary `toHost`/`toDevice`).
 - `nodeIdx` — the nodes this segment covers (usually just the `nodeIdx` you were handed).
@@ -192,7 +192,7 @@ Your `compileSegment` returns a subclass of `Segment` and is expected to fill in
   primary backend declined those ops; it drives the fallback warning and the
   profiler tag. A normal backend leaves it `false`.
 
-`run(ExecContext&)` is the hot path. Do as little per-call work as
+`run(ExecContext&)` is the hot path and does as little per-call work as
 possible — all setup belongs in `compileSegment`. The Vulkan backend's `run()`
 submits one pre-recorded command buffer and not much else.
 
@@ -243,15 +243,15 @@ VKNN_REGISTER_BACKEND(BackendKind::kCpu, CpuBackend);
 constructor runs before `main()` and inserts a factory lambda under `KIND`. When
 the `Session` needs a backend, it calls `BackendRegistry::instance().create(k)`.
 
-> **Why the static initializer actually runs.** VKNN is a static library, so the
+> **Why the static initializer runs.** VKNN is a static library, so the
 > linker would normally drop object files that hold only unreferenced static
 > initializers. The build links the library whole-archive
 > (`$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>` in CMake), which forces every object —
 > and so every `VKNN_REGISTER_BACKEND` initializer — to be retained. The same
 > mechanism makes `VKNN_REGISTER_CPU_OP` and `VKNN_REGISTER_VK_OP`
-> work. If you add a backend in a new `.cpp` and it never seems to register,
-> check that the file is part of the `vknn` target and that whole-archive linking
-> is in effect.
+> work. If a backend in a new `.cpp` never registers,
+> the file must be part of the `vknn` target and whole-archive linking
+> must be in effect.
 
 ---
 
@@ -272,7 +272,7 @@ At session creation the `Session`:
 3. partitions the topo-ordered nodes into maximal same-backend segments;
 4. calls `compileSegment` per segment and `finalize` once at the end.
 
-So selecting Vulkan with a CPU fallback is purely config:
+Selecting Vulkan with a CPU fallback is purely config:
 
 ```jsonc
 {
@@ -284,14 +284,14 @@ So selecting Vulkan with a CPU fallback is purely config:
 
 The same machinery handles partial fallback: when the primary backend declines a few
 ops in the middle of a graph, those nodes become a small CPU segment and the rest stays
-on the GPU. Forcing a few ops to CPU is a quick way to exercise the boundary path and
-confirm it still yields cosine 1.000000 against the reference.
+on the GPU. Forcing a few ops to CPU exercises the boundary path and
+confirms it still yields cosine 1.000000 against the reference.
 
 ---
 
 ## 6. Minimal skeleton for a new backend
 
-A new backend file looks like this:
+A backend file has this shape:
 
 ```cpp
 #include "vknn/backend.h"
@@ -356,7 +356,7 @@ other changes.
 
 Both in-tree backends compile *on device, from the IR, at session creation* —
 the Vulkan backend JITs SPIR-V pipelines, the CPU backend instantiates per-node ops.
-Some accelerators (vendor NPU SDKs, DSPs) don't work that way: they consume a
+Some accelerators (vendor NPU SDKs, DSPs) work differently: they consume a
 **pre-compiled model artifact** produced by an offline, host-side toolchain, and the
 on-device runtime only loads and executes it.
 
@@ -368,21 +368,21 @@ mapping of the abstract methods differs:
 - **`supports()` / `supportsNode()`** — return `true` for the ops the offline compile
   covers. Because such toolchains compile a whole (sub)graph ahead of time, the natural
   unit is a large segment, not per-op JIT.
-- **`compileSegment()`** — rather than compiling on device, locate (or be shipped) the
+- **`compileSegment()`** — rather than compiling on device, locate (or receive) the
   precompiled artifact for this segment, load it through the runtime API, and wrap the
   execution handle in a `Segment` whose `run()` binds I/O buffers and dispatches.
 - **`toDevice()` / `toHost()`** — bridge `RtTensor` host NCHW data to the accelerator's
   expected I/O buffer layout. On a UMA device whose memory is
   `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` and that supports
-  `VK_EXT_external_memory_dma_buf`, a zero-copy path could share dma-buf-backed buffers
-  the same way the Vulkan backend already imports dma-buf fds — avoiding host&harr;device
+  `VK_EXT_external_memory_dma_buf`, a zero-copy path shares dma-buf-backed buffers
+  the same way the Vulkan backend imports dma-buf fds — avoiding host&harr;device
   copies at segment boundaries.
-- **`finalize()`** — nothing to JIT-cache (the artifact is already compiled), but this
-  is where you would drop any session/handle caches.
+- **`finalize()`** — nothing to JIT-cache (the artifact is already compiled); this
+  is where session/handle caches go.
 
-The point: **only this one file changes.** The segment execution model,
-residency reconciliation, config selection, and fallback are all already in place, so a
-new backend — JIT or offline-compiled — drops in as a single `.cpp`.
+**Only this one file changes.** The segment execution model,
+residency reconciliation, config selection, and fallback are all in place, so a
+backend — JIT or offline-compiled — drops in as a single `.cpp`.
 
 ---
 

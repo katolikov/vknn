@@ -48,17 +48,17 @@ encoder (the YoNoSplat feed-forward 3D Gaussian Splatting model), plus a from-sc
   only link-time deps are Vulkan + the C++ standard library (+ GoogleTest for the test target).
 - **One build entry point** — `./build.sh` (host) / `./build.sh --android` (NDK arm64-v8a).
 - **Pluggable backends and operators** via self-registration; adding an op or a backend is a
-  new file, no edits to core dispatch.
+  new file, with no edits to core dispatch.
 - **Static, pre-recorded execution.** A model is planned once for a fixed input shape; the
   Vulkan backend records one command buffer per segment and replays it every run.
-- **Honest, reproducible numbers.** Every figure comes from on-device runs compared
+- **Reproducible numbers.** Every figure comes from on-device runs compared
   against an onnxruntime golden — see [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Benchmarks
 
 VKNN vs [MNN](https://github.com/alibaba/MNN) (Alibaba's production engine), same model, same device,
-fp16, thermal-controlled medians. Against both of MNN's GPU backends — Vulkan, and **OpenCL with HEAVY
-autotuning** (MNN's strongest path here, ANGLE-translated to Vulkan) — VKNN wins or ties everywhere:
+fp16, thermal-controlled medians. The comparison covers both of MNN's GPU backends — Vulkan, and OpenCL
+with HEAVY autotuning (MNN's strongest path here, ANGLE-translated to Vulkan):
 
 | Model (fp16) | VKNN | MNN-Vulkan | MNN-OpenCL (HEAVY) | VKNN vs ORT |
 |---|---|---|---|---|
@@ -72,15 +72,14 @@ autotuning** (MNN's strongest path here, ANGLE-translated to Vulkan) — VKNN wi
 | YoNoSplat encoder (965M params) | ~13.5 s | cannot convert | cannot convert | 6 outputs, cosine 0.999+ |
 
 The VKNN figure is the full `run()` wall — it *includes* the host↔device copies — while MNN's is
-inference-only, so the table is generous to MNN. Even so, measured against MNN's *absolute* best (the
-min over OpenCL-HEAVY, CPU-4-thread, and Vulkan), VKNN is faster on **8 of 9** models and at **parity on
-ResNet-50**. The conv-heavy nets (ResNet, Inception, DenseNet, YOLO) run a tiled-GEMM **Winograd F(2,3)**
-kernel, picked per shape against the direct kernel by an on-device autotuner — that took ResNet-50 from
-MNN +43% to a dead heat (it matches MNN-OpenCL on a cool device; MNN holds a slim edge only once the
-device is warm). YoNoSplat — a 965M-parameter transformer encoder — runs end-to-end on the GPU, a model
-MNN's converter can't handle at all.
+inference-only. Measured against MNN's *absolute* best (the min over OpenCL-HEAVY, CPU-4-thread, and
+Vulkan), VKNN is faster on **8 of 9** models and at **parity on ResNet-50**. The conv-heavy nets
+(ResNet, Inception, DenseNet, YOLO) run a tiled-GEMM **Winograd F(2,3)** kernel, picked per shape
+against the direct kernel by an on-device autotuner; on ResNet-50 this matches MNN-OpenCL on a cool
+device, and MNN holds a slim edge once the device is warm. YoNoSplat — a 965M-parameter transformer
+encoder — runs end-to-end on the GPU, a model MNN's converter does not handle.
 
-**End-to-end, per stage** (ResNet-50, Vulkan fp16, warm). A first result is more than the GPU run —
+**End-to-end, per stage** (ResNet-50, Vulkan fp16, warm). A first result covers more than the GPU run —
 open the model, build the session, copy in, run, copy out:
 
 | Stage | VKNN | MNN-Vulkan |
@@ -91,9 +90,9 @@ open the model, build the session, copy in, run, copy out:
 | copy out (device→host) | 0.03 ms | not exposed |
 | **end-to-end (load + 1 run)** | **~316 ms** | **~985 ms** |
 
-VKNN is ready in ~3× less wall time — MNN-Vulkan spends ~0.9 s compiling pipelines at session
-creation, and on this UMA device VKNN's host↔device copies are sub-millisecond. Full methodology, the
-per-stage MobileNetV3 numbers, and the OpenCL-tuned comparison: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+VKNN is ready in ~3× less wall time: MNN-Vulkan spends ~0.9 s compiling pipelines at session creation,
+and on this UMA device VKNN's host↔device copies are sub-millisecond. Full methodology, the per-stage
+MobileNetV3 numbers, and the OpenCL-tuned comparison: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Quickstart
 
@@ -140,8 +139,8 @@ int cls = out.argmax();
 `Model::load` reads names, shapes, and dtypes from the model — you never wire tensors by hand.
 For full control (backend, precision, caching, zero-copy) use `vknn::Config` with
 `Model::load(path, cfg)` or the lower-level `vknn::Session` / `Runtime::load`. **Everything is
-configured through `Config` — the engine reads no environment variables.** The defaults are the
-best+fast config; advanced kernel choices use an MNN-style `setHint`:
+configured through `Config`; the engine reads no environment variables.** The defaults select the
+fastest correct configuration; advanced kernel choices use an MNN-style `setHint`:
 
 ```cpp
 vknn::Config cfg;                                  // defaults: fp16, Vulkan, per-shape autotune
@@ -154,7 +153,7 @@ See [docs/CONFIG.md](docs/CONFIG.md).
 ## Compile and run a model
 
 **1. Compile ONNX → optimized `.vxm`.** `vknn_compile` runs the ONNX import + graph passes once and
-writes an optimized, backend-agnostic `.vxm` (weights optionally fp16). Loading a `.vxm` later skips
+writes an optimized, backend-agnostic `.vxm` (weights optionally fp16). Loading a `.vxm` skips
 ONNX parsing and the passes, which pays off for large models.
 
 ```sh

@@ -1,9 +1,9 @@
 #version 450
-// Winograd F(2x2,3x3) FULLY FUSED: input transform + matmul + output transform in one kernel.
+// Winograd F(2x2,3x3) fully fused: input transform + matmul + output transform in one kernel.
 // The transform-domain activations V never touch global memory - they are produced into shared
-// memory and consumed there. The 2-pass kernels (wino_input -> global V -> wino_fused) are
-// memory-bound: V is ~4x the input size for F(2,3) and round-trips to DRAM, which on this GPU
-// costs more than the 2.25x FLOP saving buys. Keeping V on chip removes that round-trip.
+// memory and consumed there. This avoids the DRAM round-trip of the 2-pass path (wino_input ->
+// global V -> wino_fused), where V is ~4x the input size for F(2,3) and the traffic outweighs the
+// 2.25x FLOP saving on this GPU.
 //
 // One workgroup = one (tile, ocb-group). 64 threads = 16 output channel-blocks x 4 "quads".
 //   phase 1: all 64 threads cooperatively transform the 4x4 input window for every input

@@ -197,7 +197,7 @@ namespace vknn {
                 pc.total          = (int) numElements(out);
                 pc.op             = node.type == OpType::kAdd ? (int) BinaryType::kAdd : node.subOp;
                 // A fused activation (e.g. a Linear+Relu fused into the Add epilogue, as in the camera_head
-                // res_conv) must be applied here too — the NC4HW4 add does it; the flat path used to drop it.
+                // res_conv) is applied here, matching the NC4HW4 add.
                 pc.act   = (int) node.fusedAct;
                 pc.actLo = node.actLo;
                 pc.actHi = node.actHi;

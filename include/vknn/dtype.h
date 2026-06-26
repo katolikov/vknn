@@ -1,4 +1,4 @@
-// Tensor element types. Kept as an enum so int8 can be bolted on later without churn.
+// Tensor element types.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +10,7 @@ namespace vknn {
         kFloat32 = 0,
         kFloat16 = 1,
         kInt32   = 2,
-        kInt8    = 3, // reserved for the int8 stretch goal
+        kInt8    = 3,
         kUInt8   = 4,
         kInt64   = 5,
     };

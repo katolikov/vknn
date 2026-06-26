@@ -5,8 +5,9 @@ caching, zero-copy, profiling, and autotuning for a `vknn::Session`. It is defin
 in [`include/vknn/config.h`](../include/vknn/config.h) and parsed/serialized in
 [`src/core/config.cpp`](../src/core/config.cpp).
 
-**The engine reads no environment variables** — every knob, including the research/debug ones, is
-a `Config` field or a `Config::setHint(Hint, value)` (MNN-style). Defaults are the best+fast config.
+The engine reads no environment variables. Every knob, including the research/debug ones, is
+a `Config` field or a `Config::setHint(Hint, value)` (MNN-style). The defaults select the
+best-and-fast configuration.
 
 A `Config` can be built three ways:
 
@@ -45,10 +46,10 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `layerDump` | bool | `true` / `false` | `false` | Dump every layer's output tensor to disk for debugging. |
 | `layerDumpDir` | string | filesystem path | `"/data/local/tmp/vxrt/dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
 | `tuning` | string | `"off"`, `"fast"`, `"thorough"` | `"fast"` | Autotuning level for conv workgroup-size search. `off` uses defaults, `fast` does a quick search, `thorough` searches more candidates. |
-| `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection. `auto` (best+fast) measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. `auto` needs `tuning` != `off`. |
+| `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection. `auto` measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. `auto` requires `tuning` != `off`. |
 | `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
-| `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (demonstrates the CPU-fallback path). |
+| `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). |
 | `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
 
 ### Enum reference
@@ -66,13 +67,13 @@ enum class TensorFormat : uint8_t { kNCHW, kNHWC, kNC4HW4, kUnknown };
 
 ### Advanced hints — `Config::setHint`
 
-Research / experimental kernel selection goes through an MNN-style hint API (the defaults are the
-production kernels; you never need these for normal use). There are **no environment variables**.
+Research and experimental kernel selection goes through an MNN-style hint API. The defaults are the
+production kernels; normal use needs none of these. There are no environment variables.
 
 ```cpp
 enum class Hint {
   kWinogradVariant = 0,  // 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused
-  kWinogradUnit    = 1,  // 0 = F(2,3) (default), 4 = F(4,3) (numerically fine, but slower here)
+  kWinogradUnit    = 1,  // 0 = F(2,3) (default), 4 = F(4,3) (numerically equivalent, slower here)
   kDirectConv3x3   = 2,  // 0 = autotuned (default), 1 = register-tiled, 2 = LDS input-halo
 };
 cfg.setHint(Hint::kWinogradUnit, 4);   // force F(4,3) Winograd
@@ -115,7 +116,7 @@ lists all of them, with non-default values where useful:
 }
 ```
 
-This is the exact shape `Config::toJson()` produces, so it round-trips:
+This is the exact shape `Config::toJson()` produces, so configs round-trip:
 serialize a configured `Config`, edit the JSON, reload it.
 
 ---
@@ -153,8 +154,8 @@ auto session = Runtime::load("assets/mobilenetv2.onnx", cfg);
 
 ## How the `classify` example exposes config flags
 
-[`examples/classify.cpp`](../examples/classify.cpp) (`vknn_classify`) shows how
-file config and CLI overrides layer. It loads `--config` first (if given), then
+[`examples/classify.cpp`](../examples/classify.cpp) (`vknn_classify`) layers
+file config and CLI overrides. It loads `--config` first (if given), then
 lets individual flags override specific fields:
 
 ```cpp
@@ -186,11 +187,11 @@ Flags that are not config fields (model/input handling and benchmarking):
 `--model PATH`, `--input PATH`, `--shape N,C,H,W`, `--golden PATH`,
 `--show-graph`, `--bench N`.
 
-Watch the precedence: `--config` loads first, then the explicit flags overwrite
+Precedence: `--config` loads first, then the explicit flags overwrite
 whatever the JSON set. `--backend` and `--precision` always assign
 `cfg.backend`/`cfg.precision` (they carry CLI defaults), so a `backend` or
-`precision` value in the JSON file gets overridden by the flag defaults unless
-you pass the matching flag. Watch for this when mixing `--config` with these two
+`precision` value in the JSON file is overridden by the flag defaults unless
+the matching flag is passed. This applies when mixing `--config` with these two
 flags.
 
 Example invocations:

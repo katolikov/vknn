@@ -8,7 +8,7 @@ export recipe live in [`../scripts/yonosplat/`](../scripts/yonosplat/) (see its
 ## What runs where
 
 - The **encoder** (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian/camera heads, 965M params) is a
-  normal VKNN `Session` — it runs 100% on the GPU and produces 6 Gaussian outputs
+  normal VKNN `Session`. It runs 100% on the GPU and produces 6 Gaussian outputs
   (means, covariances, harmonics, opacities, rotations, scales).
 - The **rasterizer** is a from-scratch Vulkan compute pipeline (preprocess -> tile-bin -> bitonic sort
   -> per-tile alpha compositing), all in one GPU command buffer. `examples/yonosplat.cpp` wires the two
@@ -56,5 +56,4 @@ python3 scripts/yonosplat/gen_golden.py
   validated cos=1.0 on synthetic and real encoder outputs.
 
 Re-push `build-android/vknn_yonosplat` after every Android rebuild. The project memory / docs cover the
-debugging history of the transformer kernels (LayerNorm, batched MatMul, attention Softmax, RoPE,
-Einsum lowering).
+transformer kernels (LayerNorm, batched MatMul, attention Softmax, RoPE, Einsum lowering).

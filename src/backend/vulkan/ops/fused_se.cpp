@@ -17,8 +17,8 @@ namespace vknn {
             void                                 prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g = *env.graph;
                 NCHW         x = NCHW::from(g.desc(node.inputs[0]).shape);
-                int64_t      C = x.c, Cr = g.desc(node.inputs[3]).shape[0]; // W2 is [C][Cr] -> rows=C; use W1 rows
-                Cr = g.desc(node.inputs[1]).shape[0];                       // W1 is [Cr][C] -> Cr = rows of W1
+                int64_t      C = x.c, Cr = g.desc(node.inputs[3]).shape[0];
+                Cr = g.desc(node.inputs[1]).shape[0]; // W1 is [Cr][C], so Cr is the row count of W1
                 pc = {(int) x.n, (int) C, (int) Cr, node.actLo, node.actHi};
                 w1 = uploadCached(env, node.name + "#w1", [&] {
                     return initFloats(g, node.inputs[1]);

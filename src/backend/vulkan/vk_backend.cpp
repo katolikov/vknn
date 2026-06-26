@@ -162,7 +162,7 @@ namespace vknn {
                 return false;
             }
             // Debug/fallback hook: Config::disableVkOps="Add,Conv" forces those ops to fall back
-            // (used to demonstrate the NEON CPU fallback path, M5).
+            // to the CPU path.
             if (!disabledOps_.empty() && disabledOps_.find(opTypeName(t)) != std::string::npos)
             {
                 return false;
@@ -883,8 +883,8 @@ namespace vknn {
             // Hazard tracking is at the BUFFER level, not the tensor level: the liveness planner aliases
             // multiple tensors onto one buffer, so a node that writes a reused buffer has a
             // write-after-read hazard against the previous occupant that a tensor-level check would miss.
-            // For non-aliased buffers this is identical to the old per-tensor read-after-write (single
-            // writer per buffer), so the independent-op overlap (Inception/YOLO) is preserved.
+            // For non-aliased buffers this reduces to per-tensor read-after-write (single writer per
+            // buffer), so independent-op overlap (Inception/YOLO) is preserved.
             std::set<vk::Buffer *> writtenBufs, readBufs;
             auto                   bufOf = [&](TensorId t) -> vk::Buffer                   *{
                 if (t == kNoTensor)
@@ -1002,11 +1002,9 @@ namespace vknn {
             auto t0 = now();
             // attach boundary buffers to RtTensors (cross-segment residency) + upload inputs.
             // Each segment owns a SEPARATE buffer per tensor, so a boundary input must be (re)packed into
-            // THIS segment's buffer unless that exact buffer already holds the data. The old `!deviceValid`
-            // guard checked only "some buffer has it" — when a tensor was produced by an earlier GPU
-            // segment (deviceValid set, but pointing at that segment's buffer) a later GPU consumer skipped
-            // the pack and read its own never-written buffer (zeros). Seen as YOLO's P3/P4 class logits
-            // collapsing.
+            // THIS segment's buffer unless that exact buffer already holds the data. Matching on the exact
+            // buffer (not just rt.deviceValid) is required: a tensor produced by an earlier GPU segment is
+            // deviceValid but points at that segment's buffer, so this segment must repack into its own.
             for (TensorId tid: boundaryInputs)
             {
                 RtTensor &rt  = ctx.t(tid);

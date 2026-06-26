@@ -1,7 +1,7 @@
 #version 450
 #include "precision.glsl"
-// fp16 variant of flat_broadcast: out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ].
-// Half-precision storage, read/written via float. See flat_broadcast.comp for the index math.
+// Flat broadcast: out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ].
+// STORE selects fp16/fp32 storage; values are read and written via float.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };

@@ -10,7 +10,7 @@
 
 namespace vknn {
 
-    // Push-constant layouts. If you touch one of these, change the matching shader too.
+    // Push-constant layouts, byte-matched to the matching shaders/*.comp.
     struct ConvPC {
         int   N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
         float actLo, actHi;

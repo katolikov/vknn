@@ -1,4 +1,4 @@
-// MaxPool2D (scalar reference). Used by ResNet/SqueezeNet-style nets.
+// MaxPool2D (scalar reference), NCHW fp32.
 #include "backend/cpu/cpu_backend.h"
 #include <limits>
 

@@ -1,17 +1,13 @@
 #version 450
-// Winograd F(2x2,3x3) fused matmul + output transform, OCCUPANCY-FRIENDLY variant.
+// Winograd F(2x2,3x3) fused matmul + output transform, occupancy-friendly variant.
 //
-// The straightforward fused kernel (wino_fused) gives one thread the whole job for an
-// (output channel-block, tile): it accumulates all 16 transform-domain products M[16] in
-// registers (64 fp32) and then does the output transform. That register pressure caps
-// occupancy on this GPU and the kernel ends up slower than the direct 3x3 conv.
-//
-// Here FOUR threads cooperate on one (ocb, tile). Each thread owns a "position quad" q in
-// {0,1,2,3} and only accumulates M[4q .. 4q+3] (4 fp32 vec4 instead of 16) over the input
-// channels. The four partial M-quads are exchanged through shared memory, then each of the
-// four threads reads the 16 M values back and writes ONE of the 2x2 output pixels (q->pixel).
-// Same total loads and FLOPs as wino_fused, 4x fewer accumulators per thread, 4x more threads
-// in flight -> much higher occupancy, which is what this driver rewards.
+// Four threads cooperate on one (output channel-block, tile). Each owns a position quad q in
+// {0,1,2,3} and accumulates only M[4q .. 4q+3] (4 fp32 vec4 instead of all 16) over the input
+// channels. The four partial M-quads are exchanged through shared memory, then each thread reads
+// the 16 M values back and writes ONE of the 2x2 output pixels (q->pixel). Same total loads and
+// FLOPs as wino_fused with 4x fewer accumulators per thread and 4x more threads in flight; the
+// single-thread wino_fused variant carries all 16 M[] in registers and its register pressure caps
+// occupancy on this GPU.
 //
 // Workgroup = 64 threads = 16 outputs x 4 quads. local id = output*4 + q.
 #extension GL_EXT_shader_16bit_storage : require

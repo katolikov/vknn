@@ -1,8 +1,7 @@
 #version 450
-// Winograd F(2x2,3x3) transform-domain matmul, as a TILED batched GEMM (the structure MNN's
-// OpenCL backend uses via CLBlast XgemmBatched). This is the piece that makes Winograd actually
-// win: the naive 1-thread-per-output matmul is memory-bound on the global V/M traffic, but a
-// register-blocked, LDS-staged GEMM amortizes those loads across a workgroup tile.
+// Winograd F(2x2,3x3) transform-domain matmul as a tiled batched GEMM. A register-blocked,
+// LDS-staged GEMM amortizes the global V/M loads across a workgroup tile (a 1-thread-per-output
+// matmul is memory-bound on that traffic).
 //
 // For each of the 16 transform positions p:  M[p][tile][oc] = sum_ic V[p][ic][tile] * U[p][oc][ic]
 //   A = V[p]  : [K=Cinb][M=nT]      vec4 over 4 input channels   (from wino_input)
@@ -18,7 +17,7 @@
 
 #define MDIM 8      // threads in M
 #define NDIM 8      // threads in N   (MDIM*NDIM = 64)
-#define RM 4        // tiles per thread (M micro-tile); 8 regresses (register pressure)
+#define RM 4        // tiles per thread (M micro-tile); 8 costs too much register pressure
 #define KWG 16      // input channel-blocks (K) staged per chunk
 #define TILE_M (MDIM * RM)   // output tiles (M) per workgroup
 #define TILE_NB NDIM         // output channel-blocks (N) per workgroup
@@ -64,9 +63,9 @@ void main() {
     barrier();
 
     // ---- register-blocked multiply: RM tiles x (1 ocb = 4 oc) per thread ----
-    // Operands stay f16vec4 so the multiply is RDNA "rapid packed math" (v_pk_*_f16, 2x ALU,
+    // Operands stay f16vec4 so the multiply uses RDNA "rapid packed math" (v_pk_*_f16, 2x ALU,
     // half the power); only the cross-K accumulation is fp32 (full precision). Converting to fp32
-    // before the dot (as before) defeats packing.
+    // before the dot defeats packing.
     int kmax = min(KWG, Cinb - k0);
     int ocb = tIdN;            // this thread's output channel-block within the tile
     for (int kk = 0; kk < kmax; ++kk) {
@@ -83,8 +82,8 @@ void main() {
   }
 
   // ---- store M[p][ocb][tile] ----  mbuf[(p*Coutb + ocb)*nT + tile]. tile is innermost so the
-  // 8 consecutive-tIdM threads write 8 contiguous addresses (coalesced); wino_out then reads
-  // contiguous tiles per (p,ocb) too. The old [p][tile][ocb] layout strided both by Coutb.
+  // 8 consecutive-tIdM threads write 8 contiguous addresses (coalesced); wino_out reads
+  // contiguous tiles per (p,ocb) too.
   int ocb = nb0 + tIdN;
   if (ocb < Coutb) {
     int cBase = (p * Coutb + ocb) * pc.nT;

@@ -1,8 +1,8 @@
 // ONNX Where (cond ? X : Y) with full NumPy-style broadcasting over all three inputs. cond is bool/
 // uint8 in ONNX but arrives here as fp32 (or int64); it is treated as "true" iff != 0. X and Y are
-// the value operands. Output dtype follows X/Y: the dynamic-shape subgraph runs Where on INT64
-// shape vectors (e.g. Where(Equal(dim,-1), input_shape, target)), so reading/writing those as fp32
-// would reinterpret the int bytes as garbage — the value operands are read in their native dtype.
+// the value operands. Output dtype follows X/Y, and the value operands are read in their native
+// dtype: the dynamic-shape subgraph runs Where on INT64 shape vectors (e.g.
+// Where(Equal(dim,-1), input_shape, target)), where reading int bytes as fp32 would corrupt them.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 #include <algorithm>

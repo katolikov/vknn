@@ -1,6 +1,6 @@
 #version 450
 #include "precision.glsl"
-// ScatterND copy pass, fp16/fp32 storage (see scatternd_copy.comp).
+// ScatterND copy pass: element-wise copy of the data tensor (STORE, fp16/fp32) before the scatter.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };

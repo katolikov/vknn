@@ -1,8 +1,8 @@
 #version 450
-// Fused depthwise-3x3 + 1x1-project (NC4HW4, fp16). ONE workgroup per output pixel: phase A computes
-// the depthwise output for ALL expanded channel-blocks of this pixel into LDS (computed once, no
-// recompute), phase B does the 1x1 project reading from LDS. The expanded intermediate never touches
-// global memory and one dispatch+barrier per block is removed. Parallelism = N*OH*OW workgroups.
+// Fused depthwise-3x3 + 1x1-project (NC4HW4, fp32). One workgroup per output pixel: phase A computes
+// the depthwise output for all expanded channel-blocks of this pixel into LDS, phase B does the 1x1
+// project reading from LDS. The expanded intermediate stays in LDS and never touches global memory.
+// Parallelism = N*OH*OW workgroups.
 #include "common.glsl"
 layout(constant_id = 0) const int HAS_RES = 0;
 layout(local_size_x = 64) in;

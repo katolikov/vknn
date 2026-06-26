@@ -56,9 +56,9 @@ namespace vknn {
                     }
                     return bias;
                 });
-                // M = batch rows: classifiers have M=1; the YoNoSplat camera head is M=2 (two views) — without
-                // this the fc kernel computed only row 0. Per-row stride differs by layout: NC4HW4 pads
-                // channels to a multiple of 4 (H=W=1), a gpuFlat operand is exactly C.
+                // M = batch rows: classifiers have M=1, the YoNoSplat camera head M=2 (two views). Per-row
+                // stride differs by layout: NC4HW4 pads channels to a multiple of 4 (H=W=1), a gpuFlat
+                // operand is exactly C.
                 int64_t M = Cin > 0 ? numElements(g.desc(node.inputs[0]).shape) / Cin : 1;
                 if (M < 1)
                 {

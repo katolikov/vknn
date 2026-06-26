@@ -1,9 +1,8 @@
 // ONNX Gather along an arbitrary axis: out = data[:axis] + indices.shape + data[axis+1:]. A scalar
-// index (rank-0, stored here as [1] with one element) removes the gathered axis. Used both for the
-// classifier-preamble shape math (axis-0 vectors) AND the transformer attention Q/K/V split, which
-// gathers a single index along axis 2 of the permuted qkv tensor — so honoring `axis` is required
-// for correctness (an axis-0-only gather silently corrupts every non-axis-0 Gather + its
-// const-fold).
+// index (rank-0, stored here as [1] with one element) removes the gathered axis. Used both for
+// classifier-preamble shape math (axis-0 vectors) and the transformer attention Q/K/V split, which
+// gathers a single index along axis 2 of the permuted qkv tensor; honoring `axis` (not assuming
+// axis 0) is required for correctness.
 #include "backend/cpu/cpu_backend.h"
 #include <algorithm>
 

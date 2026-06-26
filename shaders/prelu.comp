@@ -1,5 +1,5 @@
 #version 450
-// PRelu over NC4HW4 (fp16). slope is per-channel, packed [Cb][4]; element i belongs to block (i/HW)%Cb.
+// PRelu over NC4HW4 (fp32). slope is per-channel, packed [Cb][4]; element i belongs to block (i/HW)%Cb.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };

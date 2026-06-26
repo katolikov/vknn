@@ -50,7 +50,7 @@ namespace vknn { namespace vk {
 
         VkInstanceCreateInfo ci {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         ci.pApplicationInfo = &app;
-        // We only need core + KHR get-physical-device-properties2 (core in 1.1).
+        // Needs only core + KHR get-physical-device-properties2 (core in 1.1).
         VK_CHECK(vkCreateInstance(&ci, nullptr, &instance_));
     }
 

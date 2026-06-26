@@ -1,7 +1,7 @@
 #version 450
 #include "precision.glsl"
-// GlobalAveragePool, NC4HW4, fp16/fp32 storage + fp32 accumulation. ONE workgroup per (n, channel-block);
-// its 256 threads cooperatively reduce H*W then tree-reduce in shared memory (see avgpool.comp).
+// GlobalAveragePool, NC4HW4, fp16/fp32 storage + fp32 accumulation. One workgroup per (n, channel-block);
+// its 256 threads cooperatively reduce over H*W, then tree-reduce the partial sums in shared memory.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Src { STORE src[]; };

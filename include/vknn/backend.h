@@ -1,12 +1,11 @@
 // Backend interface, the segment execution model, and the backend registry.
 //
-// How execution works: the Session walks the topo-sorted nodes and groups consecutive nodes
-// that landed on the same backend into a "segment". Each backend turns its segment into a
-// Segment object - the Vulkan backend records one command buffer for the whole thing, the CPU
-// backend just keeps a list of ops. Segments run in order; when a tensor crosses from one
-// backend to another we sync it at the boundary (toHost/toDevice). That's what gives us both a
-// single pre-recorded GPU submit for the common case and a working CPU fallback when the GPU
-// can't do an op, without much copying.
+// The Session walks the topo-sorted nodes and groups consecutive nodes that landed on the same
+// backend into a "segment". Each backend turns its segment into a Segment object: the Vulkan
+// backend records one command buffer for the whole thing, the CPU backend keeps a list of ops.
+// Segments run in order; a tensor crossing a backend boundary is synced there (toHost/toDevice).
+// This yields a single pre-recorded GPU submit for the common case plus a CPU fallback for ops the
+// GPU cannot run, with minimal copying.
 #pragma once
 #include "vknn/config.h"
 #include "vknn/graph.h"
@@ -74,8 +73,8 @@ namespace vknn {
         virtual ~Segment()                 = default;
         virtual void run(ExecContext &ctx) = 0;
         Backend     *backend               = nullptr;
-        bool         isFallback            = false; // true if this CPU segment exists because the primary backend
-                                                    // could not run these ops (drives the fallback warning + profiler tag)
+        bool         isFallback            = false; // this CPU segment exists because the primary backend could not
+                                                    // run these ops (drives the fallback warning + profiler tag)
         std::vector<int> nodeIdx;
         // tensor ids this segment consumes from outside / produces for outside (boundary set)
         std::vector<TensorId> boundaryInputs;

@@ -1,6 +1,7 @@
 #version 450
 #include "precision.glsl"
-// NC4HW4 <-> flat row-major conversion, fp16/fp32 storage (see convert_layout.comp).
+// NC4HW4 <-> flat row-major conversion. STORE element type (fp16/fp32) comes from precision.glsl.
+// dir==0: NC4HW4 -> flat row-major; dir==1: flat row-major -> NC4HW4.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };

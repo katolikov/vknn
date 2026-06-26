@@ -1,7 +1,7 @@
 # AGENTS.md — orientation for contributors (human or AI)
 
-Read this first. It maps the repo, the conventions that are easy to get wrong, and where to go for
-depth. The deeper guides live in [`docs/`](docs/) and [`skills/`](skills/).
+This file maps the repo, the conventions that are easy to get wrong, and where to go for depth. The
+deeper guides live in [`docs/`](docs/) and [`skills/`](skills/).
 
 ## What VKNN is
 
@@ -61,7 +61,7 @@ Adding an op touches: the `OpType` enum (`include/vknn/op.h`), the ONNX-name map
 (`src/core/op.cpp`), a shape rule in `inferShapes` (`src/import/passes.cpp`), a CPU oracle
 (`src/backend/cpu/ops/<op>.cpp`), and optionally a Vulkan op + GLSL shader gated by
 `supportsNode`. The CMake globs use `CONFIGURE_DEPENDS`, so a new file is picked up on the next
-configure (which `./build.sh` always runs). Full recipe: [skills/add-an-operator.md](skills/add-an-operator.md)
+configure (which `./build.sh` runs). Full recipe: [skills/add-an-operator.md](skills/add-an-operator.md)
 and [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md). Backends:
 [skills/add-a-backend.md](skills/add-a-backend.md) / [docs/ADDING_A_BACKEND.md](docs/ADDING_A_BACKEND.md).
 
@@ -80,7 +80,7 @@ adb shell /data/local/tmp/vxrt/vknn_run_io M.vxm /data/local/tmp/vxrt/out in0.bi
 ```
 
 Check correctness with **cosine vs an onnxruntime golden**, and for any perf-sensitive change,
-**measure runtime too** — beating MNN is a standing goal, so a change that keeps cosine but slows the
+**measure runtime too**: beating MNN is a standing goal, so a change that keeps cosine but slows the
 GPU is a regression. See [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md) and
 [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
@@ -106,8 +106,8 @@ committing.
   loops.
 - **BSD `sed`** (macOS) has no `\b` word boundary. Use `[[:<:]]`/`[[:>:]]`, or a literal pattern.
 - **Re-push the `vknn_*` binaries** to the device after **every** Android rebuild — a stale binary on
-  the device silently invalidates a "fix".
-- **Thermal throttling is real and fast.** Before each benchmark run, `adb shell sleep 12-14` to cool
+  the device silently invalidates a change.
+- **Thermal throttling is fast.** Before each benchmark run, `adb shell sleep 12-14` to cool
   the GPU; never A/B two builds back-to-back. Use `VKNN_TIMING=1` for real submit+GPU time — the
   profiler's per-op sum is inflated by forced per-op barriers. `rm -rf` the model's cache dir before
   timing it.

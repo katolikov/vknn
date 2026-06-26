@@ -1,8 +1,8 @@
 # skills/ — focused how-to guides
 
-Short, task-oriented guides for the things you actually do in this repo. Each is a checklist with the
-exact commands and code patterns; the reference docs in [`../docs/`](../docs/) cover the *why*. Start
-from [`../AGENTS.md`](../AGENTS.md) for the overall map.
+Task-oriented guides for common operations in this repo. Each guide is a checklist with the exact
+commands and code patterns; the reference docs in [`../docs/`](../docs/) cover the *why*.
+[`../AGENTS.md`](../AGENTS.md) holds the overall map.
 
 | Guide | When you need it |
 |---|---|

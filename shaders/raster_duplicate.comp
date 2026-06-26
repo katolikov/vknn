@@ -2,7 +2,7 @@
 // GPU tile binning: one thread per gaussian. For each 16x16 tile the gaussian's screen bbox covers,
 // emit a sort entry: key = (tileId << DB) | quantized-depth, value = gaussian index. A single global
 // atomic counter hands out contiguous slots (no host prefix-sum). Sorting these keys then groups
-// gaussians by tile and orders them front-to-back within each tile. Replaces the old host bin+sort.
+// gaussians by tile and orders them front-to-back within each tile.
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer GD   { float gd[]; };   // [N][12] from preprocess
 layout(std430, binding = 1) buffer Counter       { uint counter[]; }; // [1] atomic

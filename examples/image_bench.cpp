@@ -1,5 +1,5 @@
-// vknn_image_bench - settle the "does VkImage beat SSBO on this GPU?" question with a real number.
-// Runs the SAME 1x1 conv two ways on representative shapes: (a) our SSBO c-tiled kernel,
+// vknn_image_bench - compares VkImage vs SSBO for a 1x1 conv on a given GPU.
+// Runs the same 1x1 conv two ways on representative shapes: (a) the SSBO c-tiled kernel,
 // (b) an image-backed c8w4 kernel reading via imageLoad (texture cache). Verifies both against a
 // CPU reference and reports timing. Usage: vknn_image_bench [Cin Cout H W] [iters]
 #include "vknn/dtype.h"
@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
         return dot / (sqrt(na) * sqrt(nb) + 1e-12);
     };
 
-    // ============ SSBO path (our current kernel) ============
+    // ============ SSBO path ============
     double             ssboMs = 0;
     std::vector<float> ssboOut(Cout * H * W);
     {

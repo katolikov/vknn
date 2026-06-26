@@ -1,6 +1,7 @@
 #version 450
 #include "precision.glsl"
-// fp16 variant of gather.comp (data/index/output are STORE).
+// Gather along one axis; data, index, and output use STORE (fp16/fp32). Negative indices wrap by
+// axisSize.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };

@@ -3,8 +3,8 @@
 VKNN imports ONNX and lowers it to its IR. Each operator has a **CPU oracle** (the bit-exact
 reference and automatic fallback) and, for most, a **Vulkan kernel**. CNN-shaped tensors default to
 the NC4HW4 GPU layout (channels packed in vec4 blocks); transformer-shaped tensors (attention, RoPE,
-geometry) ride a **flat row-major GPU path** (rank up to 8), and the layout pass splices NC4HW4&harr;flat
-converts in at the boundaries. Everything below is checked against onnxruntime (cosine ≥ 0.999 on the
+geometry) use a **flat row-major GPU path** (rank up to 8), and the layout pass splices NC4HW4&harr;flat
+converts in at the boundaries. Every operator is checked against onnxruntime (cosine ≥ 0.999 on the
 GPU fp16 path, 1.0 on the CPU fp32 path).
 
 Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one op per file).
@@ -60,17 +60,17 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 
 ## Fusions
 
-Applied by the graph passes (and `vknn_compile`):
+The graph passes (and `vknn_compile`) apply the following fusions:
 
-- **Activation + residual-Add + Relu** folded into the Conv/Gemm epilogue (default on).
-- **Swish / SiLU** (`x · sigmoid(x)`) folded into the producing Conv (default on; opt out with `--no-fuse-swish`).
-- **Squeeze-Excite** chain → one kernel (`--fuse-se`, experimental).
-- **Depthwise-3×3 + 1×1-project** → one kernel, expanded intermediate stays on-chip (`--fuse-dwpw`, experimental).
+- **Activation + residual-Add + Relu** folds into the Conv/Gemm epilogue. Enabled by default.
+- **Swish / SiLU** (`x · sigmoid(x)`) folds into the producing Conv. Enabled by default; opt out with `--no-fuse-swish`.
+- **Squeeze-Excite** chain folds to one kernel (`--fuse-se`, experimental).
+- **Depthwise-3×3 + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`--fuse-dwpw`, experimental).
 - **Einsum lowering** to MatMul/Transpose/Unsqueeze.
 
 ## Adding an operator
 
-It's mechanical: enum in `include/vknn/op.h`, ONNX name in `src/core/op.cpp`, a shape rule in
-`src/import/passes.cpp` `inferShapes`, a CPU oracle in `src/backend/cpu/ops/`, and (when the layout
+An operator requires: an enum in `include/vknn/op.h`, an ONNX name in `src/core/op.cpp`, a shape rule
+in `src/import/passes.cpp` `inferShapes`, a CPU oracle in `src/backend/cpu/ops/`, and (when the layout
 allows) a Vulkan op + GLSL shader gated by `Backend::supportsNode()`. See
 [ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md) and [../skills/add-an-operator.md](../skills/add-an-operator.md).

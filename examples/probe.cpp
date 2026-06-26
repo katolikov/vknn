@@ -1,4 +1,4 @@
-// vknn_probe - enumerate the device's Vulkan compute capabilities (M0 hello-vulkan).
+// vknn_probe - enumerate the device's Vulkan compute capabilities.
 #include "vknn/logging.h"
 #include <cstdio>
 #if defined(VKNN_ENABLE_VULKAN)

@@ -1,17 +1,17 @@
 # How to add an operator
 
-Goal: import a new ONNX op, run it correctly on the CPU (the reference), and optionally accelerate it
-on the GPU. The rule that matters: **one operator per file**. Full writeup:
+Importing a new ONNX op requires a CPU reference implementation (the correctness oracle) and an
+optional GPU kernel. The convention is **one operator per file**. Full writeup:
 [../docs/ADDING_AN_OPERATOR.md](../docs/ADDING_AN_OPERATOR.md).
 
 ## The five touch points
 
 1. **`include/vknn/op.h`** — add an `OpType::kFoo` enumerator.
 2. **`src/core/op.cpp`** — map the ONNX op name to `OpType::kFoo` in `opTypeFromOnnx` (and back, if you
-   serialize). Read list/scalar attributes via the helpers there.
+   serialize). List/scalar attributes are read via the helpers there.
 3. **`src/import/passes.cpp`** — add a shape rule for `kFoo` in `inferShapes` so the planner can size
    buffers. (`readI64Param` reads a param from an attribute *or* an initializer.) The Vulkan path
-   needs concrete shapes at plan time.
+   requires concrete shapes at plan time.
 4. **`src/backend/cpu/ops/foo.cpp`** — the CPU oracle (always required; it is the correctness ground
    truth and the fallback).
 5. **`src/backend/vulkan/ops/foo.cpp`** + **`shaders/foo.comp`** — optional GPU kernel, gated by
@@ -42,7 +42,7 @@ VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpu);
 
 ## Vulkan op pattern
 
-`src/backend/vulkan/ops/foo.cpp` — split `prepare()` (one-time: build the pipeline, read shapes) from
+`src/backend/vulkan/ops/foo.cpp` — `prepare()` (one-time: build the pipeline, read shapes) is split from
 `record()` (hot path: bind buffers, dispatch). `shader("foo", env.useFp16)` resolves to `foo.spv` /
 `foo_fp16.spv`.
 
@@ -71,28 +71,28 @@ VKNN_REGISTER_VK_OP(OpType::kFoo, FooOp);
 }  // namespace vknn
 ```
 
-Override `supportsNode` in the Vulkan backend to declare which shapes/dtypes the GPU kernel actually
-accepts; anything you decline falls back to the CPU oracle at a segment boundary.
+`supportsNode` in the Vulkan backend declares which shapes/dtypes the GPU kernel accepts; a declined
+node falls back to the CPU oracle at a segment boundary.
 
 ### Layout notes
 
 - The default GPU layout is **NC4HW4** (channels packed in vec4 blocks). `packedElems` accounts for
-  channel padding; a flat (row-major) tensor is `numElements`-sized — for the **flat path** (rank > 4,
-  transformer shapes) dispatch over `numElements`, not `packedElems`. See `flat_ops.h` and the
+  channel padding; a flat (row-major) tensor is `numElements`-sized. The **flat path** (rank > 4,
+  transformer shapes) dispatches over `numElements`, not `packedElems`. See `flat_ops.h` and the
   `shaders/flat_*.comp` kernels.
-- Read weights with `initFloats(graph, id)` so a model loaded from an **fp16 `.vxm`** works unchanged.
-- Use `operandBuf(env, tensor, hold)` instead of `env.devBuf` when an input may be a constant
-  initializer (it uploads the constant flat instead of dereferencing a null device buffer).
+- `initFloats(graph, id)` reads weights so a model loaded from an **fp16 `.vxm`** works unchanged.
+- `operandBuf(env, tensor, hold)` replaces `env.devBuf` when an input may be a constant initializer; it
+  uploads the constant flat instead of dereferencing a null device buffer.
 
 ## Validate
 
 Build host (CPU oracle) and Android (GPU), then check cosine against an onnxruntime golden. For a small
 synthetic op, build a tiny ONNX + golden with `scripts/yonosplat/op_test.py` and run `vknn_run_io
---backend vulkan` vs `--backend cpu`. A logic bug shows up in **fp32** where fp16 noise would mask it.
+--backend vulkan` vs `--backend cpu`. A logic bug surfaces in **fp32** where fp16 noise would mask it.
 
 ```sh
 ./build.sh && ./build-host/vknn_tests        # host: passes
 ./build.sh --android                          # GPU: shaders compile
 ```
 
-If a new `.cpp` is not compiled, re-run `./build.sh` (CMake reconfigures + re-globs).
+A new `.cpp` that is not compiled requires re-running `./build.sh` (CMake reconfigures + re-globs).

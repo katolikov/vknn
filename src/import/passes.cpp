@@ -41,9 +41,9 @@ namespace vknn {
     }
 
     // Redirect every reference to tensor `from` so it points at `to`: node inputs, the fused-residual
-    // edge (NOT in the inputs list on every op), and graph outputs. Fusion passes that delete a node
-    // and fold its output into a producer MUST use this — rewiring only node.inputs leaves a stale
-    // fusedResidual edge dangling at a dead tensor (the cause of a hard crash in conv residual reads).
+    // edge (which is not in the inputs list on every op), and graph outputs. Fusion passes that delete a
+    // node and fold its output into a producer must use this; rewiring only node.inputs leaves a stale
+    // fusedResidual edge dangling at a dead tensor, which crashes a conv residual read.
     static void rewireTensor(Graph &g, TensorId from, TensorId to) {
         if (from == to || from == kNoTensor)
         {
@@ -425,14 +425,12 @@ namespace vknn {
                     std::vector<int64_t> ends   = readI64Param(g, nd, "ends", 2);
                     std::vector<int64_t> axes   = readI64Param(g, nd, "axes", 3);
                     std::vector<int64_t> steps  = readI64Param(g, nd, "steps", 4);
-                    // The number of axes this Slice bounds = length of the starts/ends params (known from the
-                    // param tensor's shape even while its VALUES are still runtime). If a bound can't be read
-                    // as a constant yet — e.g. a head_dim/2 derived from Shape() arithmetic that const-folds
-                    // only on a later pass — DON'T fabricate the sliced axis at its full input size. That wrong
-                    // dim can be frozen by a downstream Shape() fold (this masked the RoPE attention:
-                    // Shape(rotated_q)[-1] froze at 4*head_dim, so the 1/sqrt(d) scale came out half). Defer
-                    // (leave the output unresolved); inferShapes re-runs and resolves it once the bounds
-                    // const-fold.
+                    // The number of axes this Slice bounds equals the length of the starts/ends params (known
+                    // from the param tensor's shape even while its values are still runtime). When a bound
+                    // cannot be read as a constant yet (e.g. a head_dim/2 derived from Shape() arithmetic that
+                    // const-folds only on a later pass), leave the output unresolved rather than fabricating
+                    // the sliced axis at its full input size: a wrong dim here can be frozen by a downstream
+                    // Shape() fold. inferShapes re-runs and resolves it once the bounds const-fold.
                     auto declLen = [&](int idx) -> int64_t {
                         if (idx >= (int) nd.inputs.size() || nd.inputs[idx] == kNoTensor)
                         {
@@ -527,9 +525,8 @@ namespace vknn {
                 }
                 case OpType::kBinary:
                 case OpType::kAdd: {
-                    // True NumPy broadcasting (per-dim max over right-aligned shapes). The old "bigger element
-                    // count wins" heuristic is wrong for outer-product style ops (e.g.
-                    // [..,3,1]*[..,1,3]->[..,3,3] in the per-pixel ray math) and for a trailing broadcast
+                    // NumPy broadcasting: per-dim max over right-aligned shapes. Required for outer-product
+                    // ops ([..,3,1]*[..,1,3]->[..,3,3] in the per-pixel ray math) and trailing broadcasts
                     // ([2,224,224,1]*[3]->[2,224,224,3]).
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
@@ -918,9 +915,8 @@ namespace vknn {
                 }
             }
             TensorId A = n.inputs[0], B = n.inputs[1], out = n.outputs[0];
-            // Copy shapes/descs/names BY VALUE up front: g.addTensor() below reallocates g.tensors, which
-            // would dangle any reference into it (a stale xs.size() read produced axes=[0] -> wrong
-            // unsqueeze).
+            // Copy shapes/descs/names by value up front: g.addTensor() below reallocates g.tensors, which
+            // would dangle any reference held into it.
             if (eq == "...ab,...b->...a")
             {
                 // y[...,a] = sum_b A[...,a,b]*x[...,b]  ==  Squeeze(MatMul(A, Unsqueeze(x,-1)), -1)
@@ -1128,10 +1124,10 @@ namespace vknn {
                     }
                     return maxElems <= (1 << 16);
                 }
-                // Expand/Tile of all-constant operands fold too (bounded). Critical for the RoPE position
-                // index: an int64 arange built via Expand->Add->Reshape->Gather; left on the GPU float path
-                // the int64 positions corrupt to zeros, so the rotary embedding loses all position
-                // information. Folding it computes the (small, constant) position index on the CPU exactly.
+                // Expand/Tile of all-constant operands fold too (bounded). Required for integer index/shape
+                // tensors such as the RoPE position arange (int64, built via Expand->Add->Reshape->Gather):
+                // on the GPU float path the int64 positions corrupt to zeros and the rotary embedding loses
+                // all position information, so folding computes the small constant index on the CPU exactly.
                 case OpType::kExpand:
                 case OpType::kTile: {
                     if (nd.inputs.size() < 2)
@@ -1164,11 +1160,11 @@ namespace vknn {
                             out *= std::max<int64_t>(std::max(a, b), 1);
                         }
                     }
-                    // Integer (index / shape) tensors MUST fold even when large: they cannot run on the GPU's
-                    // float buffers — an int64 value reinterpreted as float corrupts to ~0 (e.g. the ScatterND
-                    // upsample meshgrid index [2,1024,2048,3], 12.6M elems, came out all-zeros on device, so
-                    // the scatter wrote everything to token 0). Float tensors keep the small bound so a large
-                    // all-const broadcast isn't baked into the model.
+                    // Integer (index / shape) tensors must fold even when large: they cannot run on the GPU's
+                    // float buffers, where an int64 value reinterpreted as float corrupts to ~0 (e.g. a large
+                    // ScatterND upsample meshgrid index would come out all-zeros and scatter everything to
+                    // token 0). Float tensors keep the small bound so a large all-const broadcast is not baked
+                    // into the model.
                     DType idt   = g.desc(nd.inputs[0]).dtype;
                     bool  isInt = idt == DType::kInt64 || idt == DType::kInt32;
                     return out > 0 && out <= (isInt ? (int64_t(1) << 26) : (int64_t(1) << 18));

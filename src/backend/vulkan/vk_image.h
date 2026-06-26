@@ -1,6 +1,6 @@
-// Minimal 2D fp16 texture (RGBA16F) used to test the image-backend hypothesis: store NC4HW4 as a
-// texture (each texel = 4 channels) so reads hit the GPU's texture cache. Kept GENERAL-layout and
-// storage-typed so shaders use imageLoad/imageStore without samplers or layout transitions.
+// Minimal 2D fp16 texture (RGBA16F) holding NC4HW4 data as a texture (each texel = 4 channels) so
+// reads hit the GPU's texture cache. GENERAL-layout and storage-typed so shaders use
+// imageLoad/imageStore without samplers or layout transitions.
 #pragma once
 #include "vk_command.h"
 #include "vk_context.h"

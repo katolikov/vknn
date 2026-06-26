@@ -1,4 +1,4 @@
-// Runtime config (the knobs MNN exposes were the starting point). Plain struct + a JSON loader.
+// Runtime config: a plain struct of knobs plus a JSON loader. Field set mirrors MNN's config.
 // Every field is documented in docs/CONFIG.md.
 #pragma once
 #include "vknn/common.h"
@@ -12,19 +12,18 @@ namespace vknn {
     enum class Precision { kFp32 = 0, kFp16 = 1, kAuto = 2 };
     enum class PowerHint { kNormal = 0, kHigh = 1, kLow = 2 };
     enum class TuningLevel { kOff = 0, kFast = 1, kThorough = 2 };
-    // How the 3x3-conv Winograd F(2,3) kernel is selected. kAuto (the recommended, best+fast default)
-    // measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; kOn
-    // forces Winograd on every eligible 3x3; kOff always uses the direct kernel.
+    // How the 3x3-conv Winograd F(2,3) kernel is selected. kAuto measures the tiled-GEMM Winograd
+    // against the direct kernel per shape and keeps the faster; kOn forces Winograd on every eligible
+    // 3x3; kOff always uses the direct kernel.
     enum class WinogradMode { kAuto = 0, kOn = 1, kOff = 2 };
 
-    // Advanced kernel-selection hints (MNN-style Config::setHint). The defaults (value 0) are the
-    // best/fast production kernels; non-zero values select experimental or research variants and are
-    // not needed for normal use.
+    // Advanced kernel-selection hints (MNN-style Config::setHint). Default (value 0) selects the
+    // production kernels; non-zero values select experimental variants.
     enum class Hint {
-        // Winograd matmul variant: 0 = tiled-GEMM (default/best), 1 = fused, 2 = fused-split, 3 = fully-fused.
+        // Winograd matmul variant: 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused.
         kWinogradVariant = 0,
         // Winograd output-tile size: 0 = F(2,3) (default), 4 = force F(4,3) (0.56x V/M traffic, 4x FLOP
-        // saving, but register-heavy 6x6 transforms — usually slower on this GPU; for research).
+        // saving, but register-heavy 6x6 transforms — usually slower on this GPU).
         kWinogradUnit = 1,
         // Direct 3x3 kernel: 0 = autotuned (default), 1 = register-tiled (conv_reg), 2 = LDS input-halo.
         kDirectConv3x3 = 2,
@@ -78,10 +77,10 @@ namespace vknn {
         // Tuning. kFast (default) measures a few candidates per shape and caches the winner.
         TuningLevel tuning = TuningLevel::kFast;
         // 3x3 Winograd selection. kAuto picks the faster of tiled-GEMM Winograd vs the direct kernel per
-        // shape (best+fast). Needs tuning != kOff to measure; with tuning off it stays on the direct kernel.
+        // shape. Needs tuning != kOff to measure; with tuning off it stays on the direct kernel.
         WinogradMode winograd = WinogradMode::kAuto;
 
-        // Advanced research/experimental kernel hints (MNN-style). Default = best production kernels.
+        // Advanced experimental kernel hints (MNN-style). Default selects the production kernels.
         // e.g. cfg.setHint(Hint::kWinogradUnit, 4) to force F(4,3).
         std::vector<int> hints; // indexed by (int)Hint; 0 = default. Use setHint()/hint().
         void             setHint(Hint h, int value) {

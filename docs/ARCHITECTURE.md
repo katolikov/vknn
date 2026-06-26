@@ -6,10 +6,10 @@ graph passes, partitions it into backend-specific *segments*, and executes those
 segments — primarily on a Vulkan compute backend tuned for an AMD RDNA-class mobile
 GPU, with a CPU backend that doubles as the reference path and the fallback.
 
-What follows covers the end-to-end pipeline, the core abstractions, the internal
-`NC4HW4` tensor layout, the segment execution model (which gives both pre-recorded
+This document covers the end-to-end pipeline, the core abstractions, the internal
+`NC4HW4` tensor layout, the segment execution model (which provides both pre-recorded
 Vulkan command buffers *and* transparent CPU fallback), and the cache subsystem. It
-references real source under `include/vknn/` and `src/`.
+references source under `include/vknn/` and `src/`.
 
 ---
 
@@ -71,7 +71,7 @@ references real source under `include/vknn/` and `src/`.
 
 The canonical IR layout is **NCHW** throughout (`graph.h` header comment, and
 `TensorFormat::kNCHW` is the default in `TensorDesc`). Only the Vulkan backend
-re-packs into `NC4HW4` internally; the rest of the engine never sees that.
+re-packs into `NC4HW4` internally; the rest of the engine never sees that layout.
 
 ---
 
@@ -112,8 +112,8 @@ There are two tensor representations, split by lifetime:
   `DeviceStorage` (forward-declared in the core; the Vulkan backend defines it as a
   `std::shared_ptr<vk::Buffer>` in `vk_backend.h`), tagged with its own
   `deviceFormat` (e.g. `kNC4HW4`) and `deviceDtype` (e.g. fp16). The two `*Valid`
-  flags are what the residency-reconciliation logic (§4.3) reads and writes, so a
-  tensor is packed, unpacked, or copied only when it's actually needed.
+  flags drive the residency-reconciliation logic (§4.3): a tensor is packed,
+  unpacked, or copied only when needed.
 
 ### 2.2 Graph IR: `Graph`, `Node`, `Attributes` (`include/vknn/graph.h`, `include/vknn/op.h`)
 
@@ -194,7 +194,7 @@ pool (with `RtTensor& t(TensorId)`), the `Graph`, the `Config`, and the `Profile
 
 Backends self-register via `VKNN_REGISTER_BACKEND(KIND, TYPE)` into the
 `BackendRegistry` singleton; `Session::plan()` calls `BackendRegistry::create(kind)`.
-This works only because the static lib is linked whole-archive
+This requires the static lib to be linked whole-archive
 (`$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>`), which keeps the registrar globals from being stripped.
 
 ### 2.4 Config (`include/vknn/config.h`)
@@ -262,15 +262,14 @@ Why pack this way:
 
 - **vec4 = the GPU's natural width.** RDNA-class compute lanes load and ALU
   `vec4`s efficiently; packing 4 channels per element keeps memory accesses
-  coalesced and lets every kernel work in `vec4` granularity. That matters here
-  because the device exposes **no `VK_KHR_cooperative_matrix`**, so GEMM
-  and conv run on subgroup + `vec4` math rather than tensor-core-style
-  matrix ops.
+  coalesced and lets every kernel work in `vec4` granularity. The device exposes
+  **no `VK_KHR_cooperative_matrix`**, so GEMM and conv run on subgroup + `vec4`
+  math rather than tensor-core-style matrix ops.
 - **Channel-major-in-blocks suits CNN access patterns.** Conv accumulates over
   input channels; grouping channels into blocks of 4 makes the inner loop a tidy
   `vec4` reduction.
 - **fp16 storage, fp32 accumulate.** With `precision = fp16` the packed buffers are
-  16-bit (`shaderFloat16`, 16-bit storage are both supported), but kernels still
+  16-bit (`shaderFloat16` and 16-bit storage are both supported), but kernels
   accumulate in fp32 to preserve accuracy. On MobileNetV2 this yields cosine
   `0.999965` vs the fp32 path.
 
@@ -281,9 +280,9 @@ segment boundaries via the `pack` / `unpack` compute shaders (§4.3, §5).
 
 ## 4. Segments: pre-recorded Vulkan command buffers *and* CPU fallback
 
-The segment model is the heart of the design. It's what lets the engine both
-pre-record a single static GPU command buffer *and* drop transparently to the CPU
-for any op the GPU can't run — with no special-casing in the core dispatch loop.
+The segment model lets the engine both pre-record a single static GPU command
+buffer *and* drop transparently to the CPU for any op the GPU cannot run, with no
+special-casing in the core dispatch loop.
 
 ### 4.1 Backend assignment and partitioning (`session.cpp`)
 
@@ -305,9 +304,9 @@ for (size_t n = 0; n < graph_.nodes.size(); ++n) {
 }
 ```
 
-So an all-Vulkan model is one big segment; forcing two ops to CPU
+An all-Vulkan model is one segment. Forcing two ops to CPU
 (`VKNN_DISABLE_VK_OPS="Add,GlobalAveragePool"`) fragments MobileNetV2 into 23
-Vulkan/CPU segments — and the output is still cosine `1.000000`, because boundaries
+Vulkan/CPU segments, and the output remains cosine `1.000000` because boundaries
 reconcile residency.
 
 ### 4.2 Boundary sets
@@ -355,9 +354,9 @@ void run(ExecContext& ctx) override {
 
 The `hostValid && !deviceValid` guard is the residency check: a tensor is
 packed only if the host is its sole valid copy. Internal activations never touch the
-host. That's why a CPU segment in the middle of a Vulkan model "just works" — the
-Vulkan segment before it unpacks its outputs to host, the CPU segment reads and writes
-host, and the next Vulkan segment packs them back.
+host. A CPU segment in the middle of a Vulkan model therefore requires no special
+handling: the Vulkan segment before it unpacks its outputs to host, the CPU segment
+reads and writes host, and the next Vulkan segment packs them back.
 
 ### 4.4 Pre-recorded command buffers
 
@@ -381,7 +380,7 @@ void record() {
 }
 ```
 
-At run time `run()` only re-submits `cmd_` (`submitAndWait`) — no re-recording, no
+At run time `run()` only re-submits `cmd_` (`submitAndWait`): no re-recording, no
 per-op host round-trips. Ops bind their data with **push descriptors** (no
 descriptor-set allocation churn), and each segment owns a timestamp `VkQueryPool`
 (2 queries per node) for the profiler. The `VulkanOp` interface
@@ -389,13 +388,13 @@ descriptor-set allocation churn), and each segment owns a timestamp `VkQueryPool
 `devBuf` activation-buffer lookup, `useFp16`, tuning level, command runner for
 autotune benchmarks) keep each op self-contained.
 
-On MobileNetV2 fp32 this gives 24.35 ms / 41 fps (GPU compute alone 12.1 ms by
+On MobileNetV2 fp32, this gives 24.35 ms / 41 fps (GPU compute alone 12.1 ms by
 timestamp; the rest is pack/unpack and host↔device transfer); fp16 is 22.0 ms /
 45.4 fps. The CPU reference path is 672 ms / 1.5 fps with cosine `1.000000`.
 
-The CPU counterpart, `CpuSegment::run`, is the trivial version of the same model: it
-iterates its ops calling `op->run(node, ctx)` against the host pool, timing each
-into the profiler and propagating `isFallback`.
+The CPU counterpart, `CpuSegment::run`, follows the same model: it iterates its ops
+calling `op->run(node, ctx)` against the host pool, timing each into the profiler and
+propagating `isFallback`.
 
 ---
 
@@ -417,23 +416,23 @@ workgroup size per conv signature.
 
 ## 6. ION / DMA-BUF zero-copy (`include/vknn/ion.h`, `src/core/ion.cpp`)
 
-On the target device `/dev/ion` no longer exists, so zero-copy uses **DMA-BUF heaps**
+The target device has no `/dev/ion`, so zero-copy uses **DMA-BUF heaps**
 (`/dev/dma_heap/system`) via `DMA_HEAP_IOCTL_ALLOC`, importing the resulting dma-buf
 fd into Vulkan with `VkImportMemoryFdInfoKHR` (handle type `DMA_BUF_BIT_EXT`). Two
 modes are exposed by `vknn::IonBuffer`: **Mode A** allocates a heap buffer, **Mode B**
 (`wrapFd`) wraps an externally provided fd; the import itself is
 `vk::Buffer::importDmaBufFd`. Because the platform is UMA (all memory types are
 `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) there are no staging copies. Both modes
-are verified on-device, bit-exact against the staged path (`maxAbsErr 0`). Enabled
-via `Config::enableZeroCopy`.
+are bit-exact against the staged path (`maxAbsErr 0`). Enabled via
+`Config::enableZeroCopy`.
 
 ---
 
 ## 7. Caches (`config.cacheDir`)
 
-Three content/configuration-keyed caches make warm session creation much
-faster (cold first run + autotune 445 ms; cold no-tune ~152 ms; warm all-caches
-68 ms — up to 6.5× faster warm):
+Three content/configuration-keyed caches accelerate warm session creation. Session
+creation timings: cold first run + autotune 445 ms; cold no-tune ~152 ms; warm
+all-caches 68 ms (up to 6.5× faster warm).
 
 - **Vulkan pipeline cache** — `VkPipelineCache` persisted to
   `cacheDir/pipeline.bin` (`vk::PipelineCache`, created in `VulkanBackend` when

@@ -1,7 +1,7 @@
 #version 450
 // Fused SE middle (one workgroup per image): reads the pooled avg [N,C,1,1], does FC1(relu) ->
-// FC2 -> hardsigmoid, writes the channel scale [N,C,1,1]. GlobalAvgPool + the broadcast Mul stay as
-// their own (parallel) ops; this only collapses the tiny [N,C,1,1] middle dispatches into one.
+// FC2 -> hardsigmoid, writes the channel scale [N,C,1,1]. GlobalAvgPool and the broadcast Mul remain
+// separate ops; this fuses only the FC1/FC2 middle on the tiny [N,C,1,1] tensor.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Avg { vec4 avgbuf[]; };

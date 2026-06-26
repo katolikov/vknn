@@ -1,6 +1,6 @@
 #version 450
 #include "precision.glsl"
-// Inference BatchNorm over NC4HW4, fp16/fp32 storage + fp32 math (see batchnorm.comp).
+// Inference BatchNorm over NC4HW4: out = in * scale + bias, per channel. fp16/fp32 storage, fp32 math.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };

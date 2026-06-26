@@ -1,7 +1,7 @@
-// Cast on the GPU. Every runtime Cast in the transformer is to float32 (mixed-precision shims that
-// became no-ops once the whole graph runs in one precision), so on the flat row-major path it's a
-// pure buffer copy. The layout pass marks Cast layout-agnostic; supportsNode gates to float outputs
-// (an int-target Cast — none here — would fall back to the CPU op).
+// Cast on the GPU. Every runtime Cast here targets float32, so on the flat row-major path it is a
+// pure buffer copy (the graph runs in one precision, leaving these casts as no-ops). The layout pass
+// marks Cast layout-agnostic; supportsNode gates to float outputs (an int-target Cast would fall
+// back to the CPU op).
 #include "vk_op_common.h"
 
 namespace vknn {

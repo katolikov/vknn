@@ -1,6 +1,6 @@
-// The friendly, high-level API. Load a model and run it — no tensor names, shapes, or dtypes to
-// wire up by hand; everything is read from the model. Most users want this; the lower-level
-// Session / IOTensor in session.h stay available for advanced control.
+// High-level API. Load a model and run it — no tensor names, shapes, or dtypes to wire up by hand;
+// everything is read from the model. The lower-level Session / IOTensor in session.h remain
+// available for advanced control.
 //
 //   vknn::Model net = vknn::Model::load("mobilenet.onnx");
 //   vknn::Tensor out = net.run(pixels);   // pixels: std::vector<float>, NCHW
@@ -90,7 +90,7 @@ namespace vknn {
     class Model {
       public:
         /// Load an ONNX model. Picks the Vulkan backend if available (CPU fallback), and the given
-        /// precision (Auto = fp16 on GPU). This is all the configuration most users need.
+        /// precision (Auto = fp16 on GPU).
         static Model load(const std::string &onnxPath, Precision precision = Precision::kAuto);
         /// Advanced: full control via Config.
         static Model load(const std::string &onnxPath, const Config &cfg);

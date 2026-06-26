@@ -1,25 +1,25 @@
 # How to add a backend
 
-Goal: run a new piece of hardware or runtime as a backend, selectable from `Config`, with no edits to
-core dispatch. For the deep dive — worked snippets and the offline-compiled-accelerator pattern — see
+A backend runs a piece of hardware or runtime, selectable from `Config`, with no edits to core
+dispatch. For the deep dive — worked snippets and the offline-compiled-accelerator pattern — see
 [../docs/ADDING_A_BACKEND.md](../docs/ADDING_A_BACKEND.md).
 
 ## The contract
 
 Subclass `vknn::Backend` (see `include/vknn/backend.h`) and implement:
 
-- `kind()` / `name()` — your `BackendKind` tag (add the enumerator + JSON spelling to
+- `kind()` / `name()` — the `BackendKind` tag (add the enumerator + JSON spelling to
   `include/vknn/config.h`) and a short label.
-- `available()` — return `false` to be skipped entirely (missing driver/extension, host build).
+- `available()` — returns `false` to be skipped entirely (missing driver/extension, host build).
 - `supports(OpType, DType)` — the coarse per-op capability check. Override `supportsNode(graph, node,
   dt)` when support depends on attributes/shapes (e.g. a Concat axis, a broadcast layout).
-- `compileSegment(nodeIdx, graph, cfg)` — do the expensive one-time work here (build pipelines, pack
-  weights, plan buffers, pre-record a command buffer) and return a `Segment`.
-- `toHost` / `toDevice` — move a tensor to/from your device layout at segment boundaries. Leave them
-  as no-ops if your native layout is host NCHW.
-- `finalize()` — flush any caches to `cfg.cacheDir` (optional).
+- `compileSegment(nodeIdx, graph, cfg)` — performs the expensive one-time work (build pipelines, pack
+  weights, plan buffers, pre-record a command buffer) and returns a `Segment`.
+- `toHost` / `toDevice` — move a tensor to/from the device layout at segment boundaries. They are
+  no-ops when the native layout is host NCHW.
+- `finalize()` — flushes any caches to `cfg.cacheDir` (optional).
 
-A `Segment` subclass holds the compiled work; its `run(ExecContext&)` is the hot path, so keep it
+A `Segment` subclass holds the compiled work; its `run(ExecContext&)` is the hot path and stays
 minimal. Fill `backend`, `nodeIdx`, `boundaryInputs`, `boundaryOutputs`.
 
 ## Register it

@@ -1,5 +1,5 @@
 // BatchNormalization (inference form). MobileNetV2 ships with BN already folded into the
-// convolutions, so this mostly exists to validate the BN->Conv fold pass on other models.
+// convolutions; this path serves models where BN is not folded and validates the BN->Conv fold.
 #include "backend/cpu/cpu_backend.h"
 #include <cmath>
 

@@ -1,10 +1,9 @@
 #version 450
-// Winograd transform-domain matmul, SUBGROUP-SHUFFLE variant (no shared memory).
-// RESULT (this GPU): REGRESSES ~47% vs the LDS wino_gemm (15.1 vs 10.3 ms on ResNet-50, cosine
-// 0.999999). On the SPAL/Xclipse driver subgroupShuffle (+ the fp16<->uvec2 pack/unpack) costs more
-// than the LDS reads it replaces, and since the GEMM is GLOBAL-traffic-bound (the V/U loads are
-// identical either way) the shuffle is pure added overhead. Kept gated (Hint::kWinogradVariant=4) as
-// a documented negative result; the LDS GEMM (variant 0) is the default.
+// Winograd transform-domain matmul, subgroup-shuffle variant (no shared memory).
+// Gated behind Hint::kWinogradVariant=4; the LDS GEMM (variant 0) is the default. The GEMM is
+// global-traffic-bound (V/U loads are identical either way), so on this driver the shuffle plus
+// the fp16<->uvec2 pack/unpack is pure added overhead and runs slower than the LDS reads it
+// replaces.
 //
 // The 64-wide wave shares operands through subgroupShuffle instead of staging them in LDS — no LDS
 // writes/reads, no barriers, no bank conflicts. Per K-step each of the 64 lanes loads one operand:

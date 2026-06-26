@@ -1,4 +1,4 @@
-// vknn_op_check - M1 foundation test: GPU elementwise add vs CPU, + pipeline cache.
+// vknn_op_check - GPU elementwise add vs CPU reference, exercising the pipeline cache.
 #include "vknn/logging.h"
 #include <cmath>
 #include <cstdio>

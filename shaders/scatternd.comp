@@ -1,10 +1,11 @@
 #version 450
 #include "precision.glsl"
-// ScatterND scatter pass, fp16/fp32 storage (see scatternd.comp). indices stay int.
+// ScatterND scatter pass. Data, updates, and indices all use STORE (fp16/fp32); index values are
+// cast back to int. Computes a flat offset per slice from the index row, then writes the update slot.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer U   { STORE u[]; };
-layout(std430, binding = 1) readonly  buffer IDX { STORE ix[]; };  // fp16 index (const + runtime share one kernel)
+layout(std430, binding = 1) readonly  buffer IDX { STORE ix[]; };  // index in STORE; one kernel for const and runtime indices
 layout(std430, binding = 2) buffer            D   { STORE d[]; };
 layout(push_constant) uniform PC {
   uint total;

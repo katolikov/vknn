@@ -465,8 +465,8 @@ namespace vknn {
 
         // --- free the host weights: GPU ops have uploaded them to the device, CPU-consumed ones were
         //     decoded into the pool above. Reclaims the full weight blob (a 965M fp16 model: ~1.9GB) so
-        //     only the GPU buffers + activations remain resident. (Kept under a config flag so a future
-        //     re-plan / weight-introspection path can opt out.)
+        //     only the GPU buffers + activations remain resident. Gated by a config flag so callers that
+        //     need weights resident (re-plan, weight introspection) can opt out.
         if (cfg_.freeWeightsAfterUpload)
         {
             size_t freed = 0;

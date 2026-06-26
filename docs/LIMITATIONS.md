@@ -1,13 +1,13 @@
 # VKNN — Limitations & Known Gaps
 
-This is what VKNN (`vknn::`) does **not** do, what is stubbed, and where the verified
-numbers fall short of state of the art. Everything below was measured on **one** device
-(see [Test coverage](#test-coverage-one-device)) unless stated otherwise. No numbers here
-are aspirational — they come from on-device runs against onnxruntime goldens.
+This document describes what VKNN (`vknn::`) does **not** do, what is stubbed, and where
+the verified numbers fall short of state of the art. Every number below is measured on
+**one** device (see [Test coverage](#9-test-coverage-one-device)) unless stated otherwise.
+All numbers come from on-device runs against onnxruntime goldens.
 
 VKNN runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
 YOLOv8n detection, and the 965M-param YoNoSplat transformer encoder. Per-model latencies and the
-VKNN-vs-MNN comparison are in [BENCHMARK.md](BENCHMARK.md); this document is about what the engine
+VKNN-vs-MNN comparison are in [BENCHMARK.md](BENCHMARK.md); this document covers what the engine
 does **not** do.
 
 ---
@@ -25,11 +25,11 @@ Concretely:
 
 - `batch = 1` only. Dynamic batch, dynamic spatial dims, and symbolic dimensions
   are not supported. A model with an unresolved dim will not plan.
-- Changing input size means **building a new `Session`** (and paying cold-start cost,
+- Changing input size requires **building a new `Session`** (and paying cold-start cost,
   see below).
 - This is a deliberate trade: static planning is what makes the pre-recorded
-  command buffer + push-descriptor + prepacked-weight design possible. It's not a
-  bug, but it is a hard constraint callers have to design around.
+  command buffer + push-descriptor + prepacked-weight design possible. It is a hard
+  constraint callers must design around.
 
 ---
 
@@ -39,9 +39,9 @@ The backends are **Vulkan** (the on-device compute path) and **CPU** (host oracl
 fallback). There is no NPU / vendor-accelerator backend. Such accelerators usually
 consume a model artifact built by an **offline**, host-side toolchain rather than
 JIT-compiling from ONNX on device, and that toolchain (plus matching public headers)
-wasn't available for the target hardware.
+is not available for the target hardware.
 
-The pluggable-backend architecture stays open for one: adding a backend is just a new
+The pluggable-backend architecture supports one: adding a backend is a new
 `Backend` subclass + `VKNN_REGISTER_BACKEND`, with no edits to core dispatch — see
 `docs/ADDING_A_BACKEND.md`, which documents the offline-compiled-accelerator pattern.
 
@@ -56,30 +56,29 @@ YOLOv8n 1.000000), with small absolute error on intermediate activations. The Vu
 bit-close (cosine 1.0, maxAbsErr ~1e-5), and the CPU backend is the bit-exact reference.
 
 For accuracy-sensitive callers, set `precision = Precision::kFp32` or fall back to CPU. fp16 is the
-default in `vknn::Config` because the accuracy cost is tiny and the bandwidth saving is real.
+default in `vknn::Config` because the accuracy cost is small and the bandwidth saving is real.
 
 ---
 
 ## 4. Conv kernels trail a years-tuned engine on the 3×3-heavy nets
 
-VKNN beats MNN's Vulkan backend on every benchmarked model (often ~4×), but against MNN's
-**OpenCL HEAVY-tuned** best, VKNN is faster on 8 of 9 models and at **parity on the 9th, ResNet-50**
-(it was MNN +43% in earlier builds). The remaining ResNet edge appears only under a warm device.
+VKNN beats MNN's Vulkan backend on every benchmarked model (often ~4×). Against MNN's
+**OpenCL HEAVY-tuned** best, VKNN is faster on 8 of 9 models and at **parity on the 9th, ResNet-50**.
+The remaining ResNet edge appears only under a warm device.
 
 - **Winograd F(2,3) via a tiled GEMM** is the default for deep/square 3×3 convs (`Config::winograd =
-  kAuto`, autotuned vs the direct kernel per shape). This is what closed the ResNet gap.
+  kAuto`, autotuned vs the direct kernel per shape).
 - **No cooperative-matrix / matrix-core path.** `VK_KHR_cooperative_matrix` is **absent on the
-  target driver**, so that avenue is closed regardless.
+  target driver**, so that avenue is closed.
 - **F(4,3) Winograd** is implemented (numerically fine at fp16) but slower here — its 6×6 transforms
   are register-heavy; available via `setHint(Hint::kWinogradUnit, 4)` for research.
 
-The proven kernels here are the tiled-GEMM Winograd 3×3, a direct 3×3, a register-tiled (WTILE=4) 1×1,
+The proven kernels are the tiled-GEMM Winograd 3×3, a direct 3×3, a register-tiled (WTILE=4) 1×1,
 an untiled depthwise, and **split-K** for deep low-parallelism 1×1 convs. Other restructurings that add
 register/LDS/occupancy pressure (register-tiled 3×3, LDS input-halo, naive-matmul Winograd, packed-math)
-were measured and **regressed** on this driver — it punishes occupancy pressure, and the 3×3 weights
-already L2-cache, so
-cutting weight reads doesn't cut DRAM traffic. Matching MNN on ResNet/YOLO needs a production
-fused-cooperative Winograd, a big kernel. See [BENCHMARK.md](BENCHMARK.md).
+regress on this driver — it punishes occupancy pressure, and the 3×3 weights already L2-cache, so
+cutting weight reads does not cut DRAM traffic. Matching MNN on ResNet/YOLO requires a production
+fused-cooperative Winograd, a large kernel. See [BENCHMARK.md](BENCHMARK.md).
 
 ---
 
@@ -87,16 +86,16 @@ fused-cooperative Winograd, a big kernel. See [BENCHMARK.md](BENCHMARK.md).
 
 Converting the caller's NCHW fp32 input into the internal `NC4HW4` packed layout (and the reverse on
 output), plus the `toHost`/`toDevice` residency reconciliation at segment boundaries
-(`Backend::toHost` / `Backend::toDevice` in `include/vknn/backend.h`), is real host-side overhead. On
-small CNNs where GPU compute is only a few milliseconds, this boundary work can be a large fraction of
+(`Backend::toHost` / `Backend::toDevice` in `include/vknn/backend.h`), is host-side overhead. On
+small CNNs where GPU compute is only a few milliseconds, this boundary work is a large fraction of
 the wall time.
 
 The device is UMA (memory types are `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`, so there are **no
-staging copies**), yet the pack/unpack itself is CPU work. Feeding NC4HW4 directly, or doing the
-conversion on the GPU, would remove most of it. It hasn't been optimized.
+staging copies**), but the pack/unpack itself is CPU work. Feeding NC4HW4 directly, or doing the
+conversion on the GPU, would remove most of it. It is not optimized.
 
 > Zero-copy I/O (`enableZeroCopy`, `vknn::IonBuffer` over DMA-BUF heaps) removes the
-> *input/output buffer copy*, and was verified bit-identical to the staged path
+> *input/output buffer copy*, and is verified bit-identical to the staged path
 > (maxAbsErr 0, both `Mode A` alloc and `Mode B` `wrapFd`). It does **not** remove the
 > layout pack/unpack, which is the dominant host cost above.
 
@@ -108,7 +107,7 @@ The device advertises the capabilities for it (`shaderInt8 = 1`, 8-bit storage,
 `VK_KHR_shader_integer_dot_product`), and `Config::precision` only exposes
 `kFp32 | kFp16 | kAuto` — there is **no int8 enum value**. There is no quantization
 pass, no int8 kernel, and no calibration tooling. int8 inference is a documented
-stretch goal that was **not** built.
+stretch goal that is **not** built.
 
 ---
 
@@ -122,9 +121,9 @@ fused producer writes the post-activation result directly.
 
 In practice: a dumped Conv-with-fused-Clip6 tensor corresponds to the
 golden's **post-Clip** name, not a separate pre-activation Conv output. `tools/compare_layers.py`
-matches dumps to goldens by name, so when you're hunting a first divergence, expect the
-fused layers to line up against the activation-output golden, not an (absent)
-pre-activation one. This is correct behavior, but it can trip you up while debugging.
+matches dumps to goldens by name, so when hunting a first divergence, the
+fused layers line up against the activation-output golden, not an (absent)
+pre-activation one. This is correct behavior, but it can be confusing while debugging.
 
 ---
 
@@ -141,7 +140,7 @@ ops. The full table with per-op GPU/CPU coverage is in [OP_COVERAGE.md](OP_COVER
 
 **Not** supported: RNN/LSTM/GRU, dynamic control flow (`Loop` / `If` / `Scan`), training ops, sparse
 tensors, and the long tail of the ONNX opset. Adding an op is mechanical (see
-[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md)), but until it's in the table the model won't
+[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md)); until it is in the table the model will not
 import.
 
 ---
@@ -158,9 +157,9 @@ There is no cross-device, cross-driver, or cross-vendor validation. Key behavior
 the UMA `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` memory types (no staging), the
 DMA-BUF-heap zero-copy import path (`/dev/ion` is gone; uses
 `/dev/dma_heap/system`), and the autotuned workgroup sizes are all tuned to **this
-GPU and this driver**. On other hardware the correctness should hold (the CPU
+GPU and this driver**. On other hardware the correctness holds (the CPU
 reference is the ground truth and is bit-exact), but the **performance numbers and
-the zero-copy / capability assumptions do not transfer** and have not been retested.
+the zero-copy / capability assumptions do not transfer** and are not retested.
 
 ---
 

@@ -1,6 +1,7 @@
 #version 450
 #include "precision.glsl"
-// Flat batched MatMul, fp16/fp32 storage + fp32 accumulation (see matmul.comp).
+// Flat batched MatMul: fp16/fp32 storage (STORE) with fp32 accumulation. One thread per output
+// element; per-operand strides handle broadcasting and batching.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
