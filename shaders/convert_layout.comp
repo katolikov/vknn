@@ -1,18 +1,17 @@
 #version 450
-// Convert between the packed NC4HW4 layout and a flat row-major NCHW buffer, on the GPU. dir==0:
-// NC4HW4 -> flat (de-interleave channel blocks); dir==1: flat -> NC4HW4 (interleave, zero-pad the
-// tail lanes). The bridge between conv/pool (NC4HW4) and the generic flat head ops (transpose, etc.).
+#include "precision.glsl"
+// NC4HW4 <-> flat row-major conversion, fp16/fp32 storage (see convert_layout.comp).
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int N, C, H, W, dir; } pc;
 
 void main() {
   uint gid = gl_GlobalInvocationID.x;
   int Cb = (pc.C + 3) / 4;
   int HW = pc.H * pc.W;
-  if (pc.dir == 0) {  // NC4HW4 -> flat: one thread per flat element
+  if (pc.dir == 0) {
     if (gid >= uint(pc.N * pc.C * HW)) return;
     int w = int(gid) % pc.W;
     int h = (int(gid) / pc.W) % pc.H;
@@ -20,7 +19,7 @@ void main() {
     int n = int(gid) / (pc.C * HW);
     int cb = c / 4, l = c % 4;
     d[gid] = s[(((n * Cb + cb) * pc.H + h) * pc.W + w) * 4 + l];
-  } else {  // flat -> NC4HW4: one thread per packed element
+  } else {
     if (gid >= uint(pc.N * Cb * HW * 4)) return;
     int l = int(gid) % 4;
     int w = (int(gid) / 4) % pc.W;
@@ -28,6 +27,6 @@ void main() {
     int cb = (int(gid) / (4 * HW)) % Cb;
     int n = int(gid) / (4 * HW * Cb);
     int c = cb * 4 + l;
-    d[gid] = (c < pc.C) ? s[((n * pc.C + c) * pc.H + h) * pc.W + w] : 0.0;
+    d[gid] = (c < pc.C) ? s[((n * pc.C + c) * pc.H + h) * pc.W + w] : STORE(0.0);
   }
 }

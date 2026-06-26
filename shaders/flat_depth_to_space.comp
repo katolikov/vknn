@@ -1,12 +1,10 @@
 #version 450
-// Flat row-major DepthToSpace: [N,C,H,W] -> [N,C2,OH,OW] with C2=C/(b*b), OH=H*b, OW=W*b.
-// One thread per output element; reconstruct (n,c,h,w) from gid, map to the source channel/spatial.
-//   ih=h/b, bh=h%b, iw=w/b, bw=w%b, blk=bh*b+bw
-//   DCR (mode==0): inC = blk*C2 + c ;  CRD (mode==1): inC = c*(b*b) + blk
+#include "precision.glsl"
+// Flat DepthToSpace.
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int total, N, C, H, W, C2, OH, OW, b, mode; } pc;
 
 void main() {

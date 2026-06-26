@@ -1,13 +1,10 @@
 #version 450
-// Flat row-major reduce over a set of axes. One thread per OUTPUT element. Each thread reconstructs
-// the kept-axis coords from gid (kept axes only, in input order), forms the base input offset, then
-// iterates the cartesian product of the reduced axes accumulating per `op` (ReduceType).
-//   op: 0=Mean 1=Sum 2=Max 3=Min 4=Prod 5=L2 (sum of squares -> sqrt)
-// Push: rank, total(outElems), op; inDim[k], inStride[k], reduce[k] (1 if axis k is reduced).
+#include "precision.glsl"
+// Flat row-major reduce.
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC {
   int rank, total, op;
   int inDim[8];
@@ -19,7 +16,6 @@ void main() {
   uint gid = gl_GlobalInvocationID.x;
   if (gid >= uint(pc.total)) return;
 
-  // Reconstruct kept-axis coords from gid (kept axes, input order, last-to-first) -> base offset.
   int rem = int(gid);
   int base = 0;
   for (int k = pc.rank - 1; k >= 0; --k) {
@@ -29,7 +25,6 @@ void main() {
     base += c * pc.inStride[k];
   }
 
-  // Total number of reduced elements and per-step decode of the reduced cartesian product.
   int rcount = 1;
   for (int k = 0; k < pc.rank; ++k) if (pc.reduce[k] != 0) rcount *= pc.inDim[k];
 
@@ -42,14 +37,14 @@ void main() {
       rr /= pc.inDim[k];
       off += c * pc.inStride[k];
     }
-    float v = s[off];
+    float v = float(s[off]);
     if (pc.op == 2) acc = max(acc, v);
     else if (pc.op == 3) acc = min(acc, v);
     else if (pc.op == 4) acc *= v;
     else if (pc.op == 5) acc += v * v;
-    else acc += v;  // sum / mean
+    else acc += v;
   }
-  if (pc.op == 0 && rcount > 0) acc /= float(rcount);  // mean
-  else if (pc.op == 5) acc = sqrt(acc);                // L2
-  d[gid] = acc;
+  if (pc.op == 0 && rcount > 0) acc /= float(rcount);
+  else if (pc.op == 5) acc = sqrt(acc);
+  d[gid] = STORE(acc);
 }

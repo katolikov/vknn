@@ -1,13 +1,11 @@
 #version 450
-// Flat row-major Gather along an axis: out[outer, idxPart, inner] = data[outer, idx[idxPart], inner].
-// The index is read as float (so the SAME kernel serves const indices — uploaded as float — and the
-// runtime float index activations of RoPE), truncated to int, with negative wrap. nIdx = number of
-// index elements (1 for a scalar index, which drops the gathered axis).
+#include "precision.glsl"
+// fp16 variant of gather.comp (data/index/output are STORE).
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) readonly  buffer I { float idx[]; };
-layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) readonly  buffer I { STORE idx[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int total, outer, axisSize, inner, nIdx; } pc;
 
 void main() {

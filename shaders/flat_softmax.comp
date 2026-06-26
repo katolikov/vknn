@@ -1,10 +1,10 @@
 #version 450
-// Flat row-major softmax over one axis. One thread per (outer,inner) position; it walks the axis to
-// find max, sum exp, then normalize. Layout = [outer][axis][inner] row-major.
+#include "precision.glsl"
+// Flat softmax over one axis.
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int outer, axis, inner; } pc;
 
 void main() {
@@ -13,8 +13,9 @@ void main() {
   int o = int(gid) / pc.inner, i = int(gid) % pc.inner;
   int base = o * pc.axis * pc.inner + i;
   float m = -3.4e38;
-  for (int a = 0; a < pc.axis; ++a) m = max(m, s[base + a * pc.inner]);
+  for (int a = 0; a < pc.axis; ++a) m = max(m, float(s[base + a * pc.inner]));
   float sum = 0.0;
-  for (int a = 0; a < pc.axis; ++a) sum += exp(s[base + a * pc.inner] - m);
-  for (int a = 0; a < pc.axis; ++a) d[base + a * pc.inner] = exp(s[base + a * pc.inner] - m) / sum;
+  for (int a = 0; a < pc.axis; ++a) sum += exp(float(s[base + a * pc.inner]) - m);
+  for (int a = 0; a < pc.axis; ++a)
+    d[base + a * pc.inner] = STORE(exp(float(s[base + a * pc.inner]) - m) / sum);
 }

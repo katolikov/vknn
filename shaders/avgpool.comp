@@ -1,20 +1,19 @@
 #version 450
-// GlobalAveragePool over NC4HW4 -> [N,C,1,1] packed. ONE workgroup per (n, channel-block); its
-// 256 threads cooperatively reduce H*W (strided) then tree-reduce in shared memory. The old
-// one-thread-per-channel-block version left the GPU almost idle on large-spatial / few-channel
-// SE-squeeze reductions (e.g. 32ch x 112x112 ran on 8 threads). Parallelism is what this driver wants.
+#include "precision.glsl"
+// GlobalAveragePool, NC4HW4, fp16/fp32 storage + fp32 accumulation. ONE workgroup per (n, channel-block);
+// its 256 threads cooperatively reduce H*W then tree-reduce in shared memory (see avgpool.comp).
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer Src { float src[]; };
-layout(std430, binding = 1) writeonly buffer Dst { float dst[]; };
+layout(std430, binding = 0) readonly  buffer Src { STORE src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { STORE dst[]; };
 layout(push_constant) uniform PC { int N, C, H, W; } pc;
 
 shared vec4 partial[256];
 
 void main() {
   int Cb = (pc.C + 3) / 4;
-  uint wg = gl_WorkGroupID.x;            // one workgroup per (n, channel-block)
-  if (wg >= uint(pc.N * Cb)) return;     // whole workgroup exits together (no barrier skew)
+  uint wg = gl_WorkGroupID.x;
+  if (wg >= uint(pc.N * Cb)) return;
   int cb = int(wg) % Cb;
   int n = int(wg) / Cb;
   int hw = pc.H * pc.W;
@@ -23,7 +22,7 @@ void main() {
   vec4 acc = vec4(0.0);
   for (int i = int(t); i < hw; i += 256) {
     int idx = base + i * 4;
-    acc += vec4(src[idx], src[idx + 1], src[idx + 2], src[idx + 3]);
+    acc += vec4(float(src[idx]), float(src[idx + 1]), float(src[idx + 2]), float(src[idx + 3]));
   }
   partial[t] = acc;
   barrier();
@@ -34,6 +33,6 @@ void main() {
   if (t == 0u) {
     vec4 r = partial[0] / float(hw);
     int didx = (n * Cb + cb) * 4;
-    for (int l = 0; l < 4; ++l) dst[didx + l] = r[l];
+    for (int l = 0; l < 4; ++l) dst[didx + l] = STORE(r[l]);
   }
 }

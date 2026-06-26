@@ -1,13 +1,11 @@
 #version 450
-// Flat row-major broadcast/tile gather: out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ].
-// One thread per output element. The modulo handles BOTH cases with a single rule:
-//   Expand  : a broadcast (size-1) input dim has inDim[k]==1, so (c % 1)==0 -> reads element 0.
-//   Tile    : a repeated input dim wraps, so (c % inDim[k]) cycles through the source dim.
-// Input rank is right-aligned into the output rank by the host (left-pad inDim with 1, inStride with 0).
+#include "precision.glsl"
+// fp16 variant of flat_broadcast: out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ].
+// Half-precision storage, read/written via float. See flat_broadcast.comp for the index math.
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int rank, total, mode; int outDim[8]; int inDim[8]; int inStride[8]; } pc;
 
 void main() {
@@ -19,5 +17,5 @@ void main() {
     rem /= pc.outDim[k];
     inIdx += (c % pc.inDim[k]) * pc.inStride[k];
   }
-  d[gid] = s[inIdx];
+  d[gid] = STORE(float(s[inIdx]));
 }

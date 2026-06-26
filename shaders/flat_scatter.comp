@@ -1,10 +1,11 @@
 #version 450
+#include "precision.glsl"
 // Flat row-major scatter: out[base + sum_k inCoord_k * outStride_k] = in[i]. Drives Concat — each
 // input is scattered into the output at its axis offset (base = offset * outStride[axis]).
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int rank, total, base; int inDim[8]; int outStride[8]; } pc;
 
 void main() {

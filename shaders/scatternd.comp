@@ -1,18 +1,16 @@
 #version 450
-// ScatterND pass 2: scatter updates into out. One thread per update element. The flat thread id maps
-// to (row, slot): row picks the q-length index tuple, slot is the position within the contiguous
-// update slice. The destination offset is base(row) + slot, where base = sum_c idx[row*q+c]*stride[c].
-// indices are a raw int buffer (one int per index component, row-major [rows, q]).
+#include "precision.glsl"
+// ScatterND scatter pass, fp16/fp32 storage (see scatternd.comp). indices stay int.
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer U   { float u[]; };
-layout(std430, binding = 1) readonly  buffer IDX { float ix[]; };  // float so const + runtime indices share one kernel
-layout(std430, binding = 2) buffer            D   { float d[]; };
+layout(std430, binding = 0) readonly  buffer U   { STORE u[]; };
+layout(std430, binding = 1) readonly  buffer IDX { STORE ix[]; };  // fp16 index (const + runtime share one kernel)
+layout(std430, binding = 2) buffer            D   { STORE d[]; };
 layout(push_constant) uniform PC {
-  uint total;     // rows * sliceSize
-  int  q;         // index tuple length
-  int  sliceSize; // elements per update row
-  int  rank;      // data rank
+  uint total;
+  int  q;
+  int  sliceSize;
+  int  rank;
   int  dataDim[8];
   int  stride[8];
 } pc;

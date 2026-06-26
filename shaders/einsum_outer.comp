@@ -1,14 +1,14 @@
 #version 450
-// Einsum "i,j->ij" outer product on the flat path: out[i*J+j] = a[i] * b[j]. One thread per output
-// element. (The RoPE frequency tables; the other two einsum equations stay on the CPU op.)
+#include "precision.glsl"
+// Einsum "i,j->ij" outer product.
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer A { float a[]; };
-layout(std430, binding = 1) readonly  buffer B { float b[]; };
-layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { uint total; int I, J; } pc;
 void main() {
   uint gid = gl_GlobalInvocationID.x;
   if (gid >= pc.total) return;
-  d[gid] = a[int(gid) / pc.J] * b[int(gid) % pc.J];
+  d[gid] = STORE(float(a[int(gid) / pc.J]) * float(b[int(gid) % pc.J]));
 }

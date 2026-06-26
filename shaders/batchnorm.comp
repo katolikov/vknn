@@ -1,13 +1,12 @@
 #version 450
-// Inference BatchNorm over NC4HW4: a per-channel affine y = scale[c]*x + bias[c], where
-// scale=gamma/sqrt(var+eps), bias=beta-mean*scale are precomputed on the host. Lets pre-activation
-// nets (DenseNet) keep BN on the GPU instead of round-tripping to the CPU op.
+#include "precision.glsl"
+// Inference BatchNorm over NC4HW4, fp16/fp32 storage + fp32 math (see batchnorm.comp).
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) readonly  buffer A { float sc[]; };
-layout(std430, binding = 2) readonly  buffer B { float bi[]; };
-layout(std430, binding = 3) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) readonly  buffer A { STORE sc[]; };
+layout(std430, binding = 2) readonly  buffer B { STORE bi[]; };
+layout(std430, binding = 3) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int count, Cb, HW; } pc;
 
 void main() {
@@ -16,5 +15,5 @@ void main() {
   int lane = int(gid) % 4;
   int cb = (int(gid) / 4 / pc.HW) % pc.Cb;
   int c = cb * 4 + lane;
-  d[gid] = s[gid] * sc[c] + bi[c];
+  d[gid] = STORE(float(s[gid]) * float(sc[c]) + float(bi[c]));
 }

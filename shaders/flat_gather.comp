@@ -1,10 +1,11 @@
 #version 450
+#include "precision.glsl"
 // Flat row-major gather: out[i] = in[base + sum_k outCoord_k * inStride_k]. Drives Transpose
 // (inStride = permuted input strides) and Slice (base = start offset, inStride = step*inputStride).
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { float s[]; };
-layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int rank, total, base; int outDim[8]; int inStride[8]; } pc;
 
 void main() {

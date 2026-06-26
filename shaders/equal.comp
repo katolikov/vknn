@@ -1,12 +1,11 @@
 #version 450
-// Flat row-major elementwise Equal with N-D broadcasting: out[i] = (a[ai] == b[bi]) ? 1.0 : 0.0.
-// ai/bi are computed from out coords using per-operand strides (stride 0 on a broadcast dim).
-// Modeled on flat_binary.comp.
+#include "precision.glsl"
+// Flat broadcasting Equal.
 #include "common.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer A { float a[]; };
-layout(std430, binding = 1) readonly  buffer B { float b[]; };
-layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int rank, total; int outDim[8]; int aStride[8]; int bStride[8]; } pc;
 
 void main() {
@@ -19,5 +18,5 @@ void main() {
     ai += c * pc.aStride[k];
     bi += c * pc.bStride[k];
   }
-  d[gid] = (a[ai] == b[bi]) ? 1.0 : 0.0;
+  d[gid] = STORE((float(a[ai]) == float(b[bi])) ? 1.0 : 0.0);
 }

@@ -49,10 +49,25 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
       OUTPUT ${_spv}
       COMMAND ${GLSLC} -O --target-env=vulkan1.3 -fshader-stage=compute
               ${_comp} -o ${_spv}
-      DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl
+      DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl
       COMMENT "glslc ${_name}.comp -> ${_name}.spv"
       VERBATIM)
     list(APPEND _spv_files ${_spv})
+    # A precision-templated shader (one that #includes precision.glsl) also compiles to an fp16
+    # variant <name>_fp16.spv with -DUSE_FP16 — one source of truth for both, no hand-written
+    # _fp16.comp duplicate.
+    file(READ ${_comp} _src)
+    if(_src MATCHES "precision.glsl" AND NOT _name MATCHES "_fp16$")
+      set(_spv16 ${VKNN_SHADER_GEN_DIR}/${_name}_fp16.spv)
+      add_custom_command(
+        OUTPUT ${_spv16}
+        COMMAND ${GLSLC} -O -DUSE_FP16=1 --target-env=vulkan1.3 -fshader-stage=compute
+                ${_comp} -o ${_spv16}
+        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl
+        COMMENT "glslc ${_name}.comp -DUSE_FP16 -> ${_name}_fp16.spv"
+        VERBATIM)
+      list(APPEND _spv_files ${_spv16})
+    endif()
   endforeach()
 
   add_custom_command(
