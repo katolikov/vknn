@@ -5,6 +5,9 @@ caching, zero-copy, profiling, and autotuning for a `vknn::Session`. It is defin
 in [`include/vknn/config.h`](../include/vknn/config.h) and parsed/serialized in
 [`src/core/config.cpp`](../src/core/config.cpp).
 
+**The engine reads no environment variables** — every knob, including the research/debug ones, is
+a `Config` field or a `Config::setHint(Hint, value)` (MNN-style). Defaults are the best+fast config.
+
 A `Config` can be built three ways:
 
 - Default-constructed in C++ (`vknn::Config cfg;`) and field-assigned.
@@ -43,6 +46,10 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `layerDumpDir` | string | filesystem path | `"/data/local/tmp/vxrt/dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
 | `tuning` | string | `"off"`, `"fast"`, `"thorough"` | `"fast"` | Autotuning level for conv workgroup-size search. `off` uses defaults, `fast` does a quick search, `thorough` searches more candidates. |
 | `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection. `auto` (best+fast) measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. `auto` needs `tuning` != `off`. |
+| `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
+| `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
+| `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (demonstrates the CPU-fallback path). |
+| `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
 
 ### Enum reference
 
@@ -56,6 +63,23 @@ enum class TuningLevel  { kOff, kFast, kThorough };
 enum class WinogradMode { kAuto, kOn, kOff };   // kAuto = per-shape autotune (recommended default)
 enum class TensorFormat : uint8_t { kNCHW, kNHWC, kNC4HW4, kUnknown };
 ```
+
+### Advanced hints — `Config::setHint`
+
+Research / experimental kernel selection goes through an MNN-style hint API (the defaults are the
+production kernels; you never need these for normal use). There are **no environment variables**.
+
+```cpp
+enum class Hint {
+  kWinogradVariant = 0,  // 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused
+  kWinogradUnit    = 1,  // 0 = F(2,3) (default), 4 = F(4,3) (numerically fine, but slower here)
+  kDirectConv3x3   = 2,  // 0 = autotuned (default), 1 = register-tiled, 2 = LDS input-halo
+};
+cfg.setHint(Hint::kWinogradUnit, 4);   // force F(4,3) Winograd
+int v = cfg.hint(Hint::kWinogradUnit); // read back (0 if unset)
+```
+
+In JSON, hints are an array indexed by the enum value: `"hints": [0, 4, 0]`.
 
 `NC4HW4` is the internal Vulkan packed layout (channels in vec4 blocks) and is
 not a valid `inputLayout`/`outputLayout` value — only `NCHW` and `NHWC` are

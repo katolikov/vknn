@@ -63,20 +63,21 @@ default in `vknn::Config` because the accuracy cost is tiny and the bandwidth sa
 ## 4. Conv kernels trail a years-tuned engine on the 3×3-heavy nets
 
 VKNN beats MNN's Vulkan backend on every benchmarked model (often ~4×), but against MNN's
-**OpenCL HEAVY-tuned** best it trails on the 3×3-convolution-heavy nets — ResNet-50 (~+43% for MNN)
-and YOLOv8n (~+50%). The gap is conv-kernel quality. The Conv/GEMM kernels are deliberately
-straightforward:
+**OpenCL HEAVY-tuned** best, VKNN is faster on 8 of 9 models and at **parity on the 9th, ResNet-50**
+(it was MNN +43% in earlier builds). The remaining ResNet edge appears only under a warm device.
 
-- **No Winograd** for 3×3 convolutions (implemented and verified correct, but slower here — see
-  below — so it stays behind `VKNN_WINOGRAD=1`).
+- **Winograd F(2,3) via a tiled GEMM** is the default for deep/square 3×3 convs (`Config::winograd =
+  kAuto`, autotuned vs the direct kernel per shape). This is what closed the ResNet gap.
 - **No cooperative-matrix / matrix-core path.** `VK_KHR_cooperative_matrix` is **absent on the
   target driver**, so that avenue is closed regardless.
-- **No register-blocked tiled GEMM** for the large 3×3 convs.
+- **F(4,3) Winograd** is implemented (numerically fine at fp16) but slower here — its 6×6 transforms
+  are register-heavy; available via `setHint(Hint::kWinogradUnit, 4)` for research.
 
-The proven kernels here are a direct 3×3, a register-tiled (WTILE=4) 1×1, an untiled depthwise, and
-**split-K** for deep low-parallelism 1×1 convs. Everything that adds register/LDS/occupancy pressure
-(register-tiled 3×3, LDS input-halo, Winograd 3-pass and fused, packed-math) was measured and
-**regressed** on this driver — it punishes occupancy pressure, and the 3×3 weights already L2-cache, so
+The proven kernels here are the tiled-GEMM Winograd 3×3, a direct 3×3, a register-tiled (WTILE=4) 1×1,
+an untiled depthwise, and **split-K** for deep low-parallelism 1×1 convs. Other restructurings that add
+register/LDS/occupancy pressure (register-tiled 3×3, LDS input-halo, naive-matmul Winograd, packed-math)
+were measured and **regressed** on this driver — it punishes occupancy pressure, and the 3×3 weights
+already L2-cache, so
 cutting weight reads doesn't cut DRAM traffic. Matching MNN on ResNet/YOLO needs a production
 fused-cooperative Winograd, a big kernel. See [BENCHMARK.md](BENCHMARK.md).
 

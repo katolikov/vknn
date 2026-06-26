@@ -59,7 +59,7 @@ its cached pipelines/weights and one pre-recorded command buffer. Steady-state i
 faster too, and the pack/unpack at the I/O boundary costs almost nothing.
 
 Methodology: VKNN stages come from a small timer using the public API (`loadGraphBin` = open model,
-`Runtime::load` = open + create session, `VKNN_TIMING` = pack / submit+gpu / unpack). MNN stages come
+`Runtime::load` = open + create session, `Config::timing` = pack / submit+gpu / unpack). MNN stages come
 from `MNNV2Basic.out` (the `Resize` cost = create session, `Run Avg` = inference). Both warm, 12+ runs,
 GPU cooled between measurements.
 
@@ -103,15 +103,24 @@ memory-bound) — the algorithm was never the problem; the GEMM quality was.
 
 Winograd helps deep / square 3×3 (ResNet, DenseNet) but loses on small-channel or spatially-large 3×3,
 so `tuneWino` measures the tiled-GEMM Winograd against the direct kernel **per shape** on scratch buffers
-and caches the winner (like the local-size tune; default `fast` tuning, `VKNN_WINOGRAD` / `VKNN_NO_WINOGRAD`
+and caches the winner (like the local-size tune; default `fast` tuning, `Config::winograd` = `kOn`/`kOff`
 force it). Net effect vs the previous direct-only builds: DenseNet 15.5→13.9 (flips a tie to a win),
 Inception 16.0→15.5, YOLOv8n 25.8→20.0, ResNet-50 12.6→12.1 (and ~10.5 cool). cosine ≥ 0.9995 throughout.
 
-Three earlier *non*-GEMM Winograd variants regressed and are kept env-gated as a documented negative
-result: 2-pass with a naive matmul (~15 ms, memory-bound on the global V round-trip), the same split 4
-ways (no help → bandwidth- not occupancy-bound), and a fully-fused single kernel with V in LDS (~88 ms,
-the static LDS array collapses occupancy). int8 weight-only on the deep 1×1 has a bandwidth ceiling
-(~0.2 ms; RDNA-pre-4 gives int8 == fp16 compute), so it cannot close ResNet alone.
+Three earlier *non*-GEMM Winograd variants regressed and are kept as documented negative results
+(`Config::setHint(Hint::kWinogradVariant, …)`): 2-pass with a naive matmul (~15 ms, memory-bound on the
+global V round-trip), the same split 4 ways (no help → bandwidth- not occupancy-bound), and a fully-fused
+single kernel with V in LDS (~88 ms, the static LDS array collapses occupancy). int8 weight-only on the
+deep 1×1 has a bandwidth ceiling (~0.2 ms; RDNA-pre-4 gives int8 == fp16 compute), so it cannot close
+ResNet alone.
+
+**F(4×4,3×3)** was implemented too (`setHint(Hint::kWinogradUnit, 4)`): it cuts the transform-domain V/M
+traffic to 0.56× and the multiplies to 4× (vs F(2,3)'s 2.25×), and it is numerically fine at fp16
+(ResNet cosine 0.999999 — the larger transform coefficients do *not* break half precision here). But it
+is **slower** on this GPU (~11.5 vs F(2,3)'s 10.5 ms): the 6×6 transforms hold `d[6][6]`+`t[6][6]` = 72
+`vec4` per thread (register pressure) and the GEMM has 4× fewer tiles (less parallelism). So the traffic
+saving is real but the register-heavy transforms eat it — F(2,3) stays the default; F(4,3) is a hint for
+research / future transform-LDS work.
 
 ## YoNoSplat encoder (965M-param transformer)
 
@@ -130,7 +139,7 @@ this driver); the rasterizer that consumes the 6 Gaussian outputs is a separate 
 
 ## Measurement notes
 
-- Use `VKNN_TIMING=1` for the real submit+GPU time (pack / submit+gpu / unpack). The per-op profiler
+- Set `Config::timing` (the `--timing` flag) for the real submit+GPU time (pack / submit+gpu / unpack). The per-op profiler
   sum is inflated by forced per-op barriers — relative only.
 - `rm -rf` the model's cache dir before timing a fresh build.
 - VKNN's latency is very consistent (the whole static graph is one pre-recorded command buffer);

@@ -137,8 +137,17 @@ int cls = out.argmax();
 
 `Model::load` reads names, shapes, and dtypes from the model — you never wire tensors by hand.
 For full control (backend, precision, caching, zero-copy) use `vknn::Config` with
-`Model::load(path, cfg)` or the lower-level `vknn::Session` / `Runtime::load`. See
-[docs/CONFIG.md](docs/CONFIG.md).
+`Model::load(path, cfg)` or the lower-level `vknn::Session` / `Runtime::load`. **Everything is
+configured through `Config` — the engine reads no environment variables.** The defaults are the
+best+fast config; advanced kernel choices use an MNN-style `setHint`:
+
+```cpp
+vknn::Config cfg;                                  // defaults: fp16, Vulkan, per-shape autotune
+cfg.winograd = vknn::WinogradMode::kAuto;          // 3x3 Winograd auto-picked vs direct, per shape
+cfg.setHint(vknn::Hint::kWinogradUnit, 4);         // (research) force F(4,3) Winograd
+```
+
+See [docs/CONFIG.md](docs/CONFIG.md).
 
 ## Compile and run a model
 
