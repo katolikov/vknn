@@ -46,19 +46,63 @@ adb shell /data/local/tmp/vxrt/vknn_run_io model.vxm /data/local/tmp/vxrt/out in
 `vknn_run_io` flags: `--backend vulkan|cpu`, `--precision fp16|fp32`, `--no-weight-cache`,
 `--keep-weights`, `--opt-level N`, `--no-flat`, `--timing`.
 
-## 3. Choose a Config (from code)
-
-```cpp
-vknn::Config cfg;
-cfg.backend   = vknn::BackendKind::kVulkan;   // CPU is the implicit final fallback
-cfg.precision = vknn::Precision::kFp16;        // kFp32 for a bit-exact path
-cfg.cacheDir  = "/data/local/tmp/vxrt/cache";  // pipeline + weight + tuning caches
-auto net = vknn::Model::load("model.vxm", cfg);
-auto out = net.run(pixels);                    // pixels = std::vector<float>, NCHW
-```
+## 3. Run from C++
 
 The simplest form, `vknn::Model::load("model.onnx")`, picks Vulkan-if-available + `Precision::kAuto`
-(fp16 on GPU) and reads all shapes/names from the model.
+(fp16 on GPU) and reads all shapes/names from the model:
+
+```cpp
+vknn::Model net = vknn::Model::load("model.vxm");
+vknn::Tensor out = net.run(pixels);   // pixels = std::vector<float>, NCHW
+int cls = out.argmax();
+```
+
+Full control — Vulkan, fp16, **maximum autotuning**, all fusions, a **two-input → two-output** model:
+
+```cpp
+#include "vknn/model.h"
+#include <cstdio>
+#include <fstream>
+#include <vector>
+
+// Read a raw fp32 .bin into a float vector.
+static std::vector<float> readBin(const char* path) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  size_t n = f ? (size_t)f.tellg() / sizeof(float) : 0;
+  std::vector<float> v(n);
+  if (f) { f.seekg(0); f.read(reinterpret_cast<char*>(v.data()), n * sizeof(float)); }
+  return v;
+}
+
+int main() {
+  vknn::Config cfg;
+  cfg.backend   = vknn::BackendKind::kVulkan;    // run on the GPU (CPU is the implicit fallback)
+  cfg.precision = vknn::Precision::kFp16;        // fp16 storage, fp32 accumulation
+  cfg.tuning    = vknn::TuningLevel::kThorough;  // maximum autotuning (cached to cfg.cacheDir)
+  cfg.optLevel  = 3;                             // all graph fusions (the default)
+
+  vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
+  if (!net) { fprintf(stderr, "failed to load model\n"); return 1; }
+
+  auto in = net.inputs();  // two inputs; names + shapes come from the model
+  vknn::Tensor a(readBin("in0.bin"), in[0].shape, in[0].name);
+  vknn::Tensor b(readBin("in1.bin"), in[1].shape, in[1].name);
+
+  std::vector<vknn::Tensor> outs = net.run({a, b});  // two inputs -> two outputs
+
+  for (const vknn::Tensor& o : outs)
+    printf("output '%s'  %s  max=%.4f\n", o.name().c_str(), o.shapeString().c_str(), o.max());
+
+  if (const vknn::Tensor* y = vknn::findTensor(outs, net.outputs()[0].name))
+    printf("argmax of '%s' = %lld\n", net.outputs()[0].name.c_str(), (long long)y->argmax());
+  return 0;
+}
+```
+
+Link the static lib **whole-archive** (so the self-registering operators survive) — drop the `.cpp`
+into `examples/` and add its name to the `examples` list in `CMakeLists.txt`, which already does this.
+The lower-level `vknn::Session` / `IOTensor` API (`include/vknn/session.h`) takes the same `Config` for
+finer control (per-tensor residency, DMA-BUF zero-copy).
 
 ## 4. Validate
 
