@@ -107,12 +107,15 @@ and caches the winner (like the local-size tune; default `fast` tuning, `Config:
 force it). Net effect vs the previous direct-only builds: DenseNet 15.5→13.9 (flips a tie to a win),
 Inception 16.0→15.5, YOLOv8n 25.8→20.0, ResNet-50 12.6→12.1 (and ~10.5 cool). cosine ≥ 0.9995 throughout.
 
-Three earlier *non*-GEMM Winograd variants regressed and are kept as documented negative results
-(`Config::setHint(Hint::kWinogradVariant, …)`): 2-pass with a naive matmul (~15 ms, memory-bound on the
-global V round-trip), the same split 4 ways (no help → bandwidth- not occupancy-bound), and a fully-fused
-single kernel with V in LDS (~88 ms, the static LDS array collapses occupancy). int8 weight-only on the
-deep 1×1 has a bandwidth ceiling (~0.2 ms; RDNA-pre-4 gives int8 == fp16 compute), so it cannot close
-ResNet alone.
+Several alternative GEMM/Winograd variants were measured and regressed; they are kept as documented
+negative results (`Config::setHint(Hint::kWinogradVariant, …)`): a 2-pass naive matmul (~15 ms,
+memory-bound on the global V round-trip), that split 4 ways (no help → bandwidth- not occupancy-bound),
+a fully-fused single kernel with V in LDS (~88 ms, the static LDS array collapses occupancy), and a
+**subgroup-shuffle GEMM** that shares operands across the 64-wide wave instead of LDS (~15 ms, +47% —
+on this driver `subgroupShuffle` costs more than the LDS reads it replaces, and the GEMM is
+global-traffic-bound so the swap doesn't touch the bottleneck). Packed fp16 in the GEMM inner loop is
+neutral (it's memory/LDS-bound, not ALU-bound). int8 weight-only on the deep 1×1 has a bandwidth ceiling
+(~0.2 ms; RDNA-pre-4 gives int8 == fp16 compute), so it cannot close ResNet alone.
 
 **F(4×4,3×3)** was implemented too (`setHint(Hint::kWinogradUnit, 4)`): it cuts the transform-domain V/M
 traffic to 0.56× and the multiplies to 4× (vs F(2,3)'s 2.25×), and it is numerically fine at fp16

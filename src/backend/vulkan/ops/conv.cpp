@@ -77,8 +77,9 @@ namespace vknn {
             bool                                 wino2    = false; // occupancy-friendly 2-pass matmul (4 threads/tile, M split across quads)
             bool                                 winofull = false; // single fully-fused kernel: V stays in LDS, no global round-trip
             // 3-pass with a TILED batched GEMM for the transform-domain multiply (MNN's structure).
-            bool                                 winogemm = false;
-            int                                  winoUnit = 2; // output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic)
+            bool                                 winogemm     = false;
+            bool                                 gemmSubgroup = false; // subgroup-shuffle GEMM (no LDS); U is [pos][icb][oc]
+            int                                  winoUnit     = 2; // output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic)
             std::unique_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
             std::shared_ptr<vk::Buffer>          mbuf;
             WinoGemmPC                           wGemmPC {};
@@ -93,13 +94,17 @@ namespace vknn {
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
 
+                int wvar = cfgHint(env, Hint::kWinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
+                gemmSubgroup = (wvar == 4);
+
                 // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3).
                 static const float G2[4][3] = {{1, 0, 0}, {0.5f, 0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0, 0, 1}};
                 static const float G4[6][3] = {
                     {0.25f, 0, 0}, {-1.f / 6, -1.f / 6, -1.f / 6}, {-1.f / 6, 1.f / 6, -1.f / 6}, {1.f / 24, 1.f / 12, 1.f / 6}, {1.f / 24, -1.f / 12, 1.f / 6},
                     {0, 0, 1}};
-                // Host weight transform U = G g G^T, packed [pos][oc][icb] vec4(4 ic). Cached on disk.
-                ubuf = uploadCached(env, node.name + "#wino" + std::to_string(U_), [&] {
+                // Host weight transform U = G g G^T, vec4(4 ic). Default packed [pos][oc][icb]; the
+                // subgroup GEMM needs [pos][icb][oc] (coalesced per-K output-channel loads). Cached on disk.
+                ubuf = uploadCached(env, node.name + (gemmSubgroup ? "#winosg" : "#wino") + std::to_string(U_), [&] {
                     std::vector<float> U((size_t) nPos * Cout * Cinb * 4, 0.f);
                     for (int64_t oc = 0; oc < Cout; ++oc)
                     {
@@ -120,10 +125,12 @@ namespace vknn {
                             {
                                 for (int j = 0; j < A_; ++j)
                                 {
-                                    const float *Gj                                  = (U_ == 2) ? G2[j] : G4[j];
-                                    float        u                                   = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
-                                    int          pos                                 = i * A_ + j;
-                                    U[(((pos * Cout + oc) * Cinb + icb) * 4) + lane] = u;
+                                    const float *Gj  = (U_ == 2) ? G2[j] : G4[j];
+                                    float        u   = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
+                                    int          pos = i * A_ + j;
+                                    int64_t      uidx =
+                                        gemmSubgroup ? ((pos * Cinb + icb) * Cout + oc) : ((pos * Cout + oc) * Cinb + icb);
+                                    U[uidx * 4 + lane] = u;
                                 }
                             }
                         }
@@ -132,7 +139,6 @@ namespace vknn {
                 });
 
                 wFusedPC = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, (int) node.fusedAct, node.actLo, node.actHi};
-                int wvar = cfgHint(env, Hint::kWinogradVariant); // 0=tiled-GEMM 1=fused 2=fused-split 3=full
                 winofull = (wvar == 3);
                 if (winofull)
                 {
@@ -147,21 +153,23 @@ namespace vknn {
                 wInPC     = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
                 wInGroups = groups(Cinb * nT, 64);
 
-                // The tiled-GEMM 3-pass is the production Winograd kernel (default, variant 0). The fused /
-                // fused-split variants are kept only as Hint-gated experiments (documented regressions above).
-                winogemm = (wvar == 0);
+                // The tiled-GEMM 3-pass is the production Winograd kernel (default, variant 0). Variant 4 =
+                // the same 3-pass but with the subgroup-shuffle GEMM (no LDS). The fused / fused-split
+                // variants are kept only as Hint-gated experiments (documented regressions above).
+                winogemm = (wvar == 0 || wvar == 4);
                 if (winogemm)
                 {
                     // 3-pass: input transform -> V, TILED batched GEMM -> M, output transform -> dst.
                     mbuf             = std::make_shared<vk::Buffer>(*env.ctx, (size_t) nPos * nT * Coutb * 4 * el, vk::MemPref::kDeviceOnly);
                     wGemmPC          = {(int) Cin, (int) Cout, (int) nT};
-                    const int TILE_M = 32, TILE_NB = 8; // must match wino_gemm_fp16.comp (MDIM*RM, NDIM)
+                    const int TILE_M = 32, TILE_NB = 8; // must match the GEMM shader (MDIM*RM, NDIM)
                     wGemmGX = groups(nT, TILE_M);       // workgroups over M (tiles)
                     wGemmGY = groups(Coutb, TILE_NB);   // workgroups over N (ocb)
                     wGemmGZ = nPos;                     // one GEMM per transform position (16 or 36)
                     wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {},
                                                                     env.cache->handle());
-                    wGemmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_gemm_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {}, env.cache->handle());
+                    wGemmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC),
+                                                                      std::vector<uint32_t> {}, env.cache->handle());
                     wOutPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC), std::vector<uint32_t> {},
                                                                      env.cache->handle());
                     return;

@@ -1,0 +1,81 @@
+#version 450
+// Winograd transform-domain matmul, SUBGROUP-SHUFFLE variant (no shared memory).
+// RESULT (this GPU): REGRESSES ~47% vs the LDS wino_gemm (15.1 vs 10.3 ms on ResNet-50, cosine
+// 0.999999). On the SPAL/Xclipse driver subgroupShuffle (+ the fp16<->uvec2 pack/unpack) costs more
+// than the LDS reads it replaces, and since the GEMM is GLOBAL-traffic-bound (the V/U loads are
+// identical either way) the shuffle is pure added overhead. Kept gated (Hint::kWinogradVariant=4) as
+// a documented negative result; the LDS GEMM (variant 0) is the default.
+//
+// The 64-wide wave shares operands through subgroupShuffle instead of staging them in LDS — no LDS
+// writes/reads, no barriers, no bank conflicts. Per K-step each of the 64 lanes loads one operand:
+//   lanes  0..31 -> V[p][k][m0+lane]      (one Winograd tile each)
+//   lanes 32..63 -> U[p][k][oc0+lane-32]  (one output channel each; U is [pos][icb][oc] here)
+// then every thread shuffles in the 4 tiles + 4 output channels of its micro-tile.
+// Workgroup = 64 = one subgroup (device subgroupSize 64). Output tile 32 tiles x 32 ch; each thread
+// owns 4 tiles x 1 ocb (4 acc). M store matches wino_gemm: [p][ocb][tile].
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer V { f16vec4 vbuf[]; };
+layout(std430, binding = 1) readonly buffer U { f16vec4 ubuf[]; };  // [pos][icb][oc]
+layout(std430, binding = 2) writeonly buffer M { f16vec4 mbuf[]; };
+layout(push_constant) uniform PC { int Cin, Cout, nT; } pc;
+
+// Shuffle an f16vec4 across the subgroup by packing it into a uvec2 (core subgroup shuffle works on
+// 32-bit vectors; shuffling f16 directly would need GL_EXT_shader_subgroup_extended_types_float16).
+f16vec4 unpk(uvec2 p) {
+  return f16vec4(unpackFloat2x16(p.x), unpackFloat2x16(p.y));
+}
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int p = int(gl_WorkGroupID.z);
+  int m0 = int(gl_WorkGroupID.x) * 32;   // first tile
+  int nb0 = int(gl_WorkGroupID.y) * 8;   // first ocb
+  int oc0 = nb0 * 4;                      // first output channel
+
+  uint lid = gl_LocalInvocationID.x;
+  int tIdM = int(lid) % 8;   // 0..7
+  int tIdN = int(lid) / 8;   // 0..7
+
+  int vBaseP = p * Cinb * pc.nT;     // vbuf[(p*Cinb + k)*nT + m]
+  int uBaseP = p * Cinb * pc.Cout;   // ubuf[(p*Cinb + k)*Cout + oc]
+
+  vec4 acc0 = vec4(0.0), acc1 = vec4(0.0), acc2 = vec4(0.0), acc3 = vec4(0.0);
+  for (int k = 0; k < Cinb; ++k) {
+    f16vec4 mine;
+    if (int(lid) < 32) {
+      int m = m0 + int(lid);
+      mine = (m < pc.nT) ? vbuf[vBaseP + k * pc.nT + m] : f16vec4(0.0);
+    } else {
+      int oc = oc0 + (int(lid) - 32);
+      mine = (oc < pc.Cout) ? ubuf[uBaseP + k * pc.Cout + oc] : f16vec4(0.0);
+    }
+    uvec2   mpk = uvec2(packFloat2x16(mine.xy), packFloat2x16(mine.zw));
+    f16vec4 a0  = unpk(subgroupShuffle(mpk, uint(tIdM + 0 * 8)));
+    f16vec4 a1  = unpk(subgroupShuffle(mpk, uint(tIdM + 1 * 8)));
+    f16vec4 a2  = unpk(subgroupShuffle(mpk, uint(tIdM + 2 * 8)));
+    f16vec4 a3  = unpk(subgroupShuffle(mpk, uint(tIdM + 3 * 8)));
+    f16vec4 b0  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 0)));
+    f16vec4 b1  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 1)));
+    f16vec4 b2  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 2)));
+    f16vec4 b3  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 3)));
+    acc0 += vec4(float(dot(a0, b0)), float(dot(a0, b1)), float(dot(a0, b2)), float(dot(a0, b3)));
+    acc1 += vec4(float(dot(a1, b0)), float(dot(a1, b1)), float(dot(a1, b2)), float(dot(a1, b3)));
+    acc2 += vec4(float(dot(a2, b0)), float(dot(a2, b1)), float(dot(a2, b2)), float(dot(a2, b3)));
+    acc3 += vec4(float(dot(a3, b0)), float(dot(a3, b1)), float(dot(a3, b2)), float(dot(a3, b3)));
+  }
+
+  int ocb = nb0 + tIdN;
+  if (ocb < Coutb) {
+    int cBase = (p * Coutb + ocb) * pc.nT;
+    int m = m0 + tIdM;
+    if (m + 0 * 8 < pc.nT) mbuf[cBase + m + 0 * 8] = f16vec4(acc0);
+    if (m + 1 * 8 < pc.nT) mbuf[cBase + m + 1 * 8] = f16vec4(acc1);
+    if (m + 2 * 8 < pc.nT) mbuf[cBase + m + 2 * 8] = f16vec4(acc2);
+    if (m + 3 * 8 < pc.nT) mbuf[cBase + m + 3 * 8] = f16vec4(acc3);
+  }
+}
