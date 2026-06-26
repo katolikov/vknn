@@ -83,6 +83,28 @@ inline float halfToFloat(fp16_t h) {
   return out;
 }
 
+// Bulk fp16 -> fp32 for contiguous buffers (the flat-output download path, e.g. YOLO's 705K-element
+// detection tensor). AArch64 NEON has a hardware half->single convert (vcvt_f32_f16, baseline
+// ARMv8 - no fp16-arithmetic feature needed), 4 lanes/instr, ~6x the scalar bit-twiddle. Falls back
+// to the scalar path on other targets / the tail.
+#if defined(__aarch64__)
+#include <arm_neon.h>
+inline void halfToFloatBulk(const fp16_t* src, float* dst, int64_t n) {
+  int64_t i = 0;
+  for (; i + 4 <= n; i += 4) {
+    uint16x4_t u = vld1_u16(src + i);
+    vst1q_f32(dst + i, vcvt_f32_f16(vreinterpret_f16_u16(u)));
+  }
+  for (; i < n; ++i)
+    dst[i] = halfToFloat(src[i]);
+}
+#else
+inline void halfToFloatBulk(const fp16_t* src, float* dst, int64_t n) {
+  for (int64_t i = 0; i < n; ++i)
+    dst[i] = halfToFloat(src[i]);
+}
+#endif
+
 inline fp16_t floatToHalf(float v) {
   uint32_t f;
   std::memcpy(&f, &v, 4);

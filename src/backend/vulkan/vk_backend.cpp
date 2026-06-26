@@ -379,9 +379,7 @@ public:
       rt.dtype = DType::kFloat32;
       float* dst = rt.host.f32();
       if (fp16) {
-        const fp16_t* src = reinterpret_cast<const fp16_t*>(buf->host());
-        for (int64_t i = 0; i < n; ++i)
-          dst[i] = halfToFloat(src[i]);
+        halfToFloatBulk(reinterpret_cast<const fp16_t*>(buf->host()), dst, n);
       } else {
         std::memcpy(dst, buf->host(), (size_t)n * 4);
       }
