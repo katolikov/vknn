@@ -1628,17 +1628,18 @@ void insertLayoutConverts(Graph& g) {
   }
 }
 
-void runStandardPasses(Graph& g, int64_t batch) {
+void runStandardPasses(Graph& g, const PassOptions& opt) {
+  int64_t batch = opt.batch;
   inferShapes(g, batch);
   eliminateIdentity(g);
   foldBatchNorm(g);
   fuseActivations(g);
   fuseResidualAdd(g);
-  if (!std::getenv("VKNN_NO_FUSE_SWISH"))
+  if (opt.fuseSwish)
     fuseSwish(g);  // HardSwish/SiLU into conv epilogue (default on)
-  if (std::getenv("VKNN_FUSE_SE"))
+  if (opt.fuseSqueezeExcite)
     fuseSqueezeExcite(g);
-  if (std::getenv("VKNN_FUSE_DWPW"))
+  if (opt.fuseDwPw)
     fuseDwPw(g);
   // Iterate fold+infer: folding a Shape/Gather/Concat chain turns a dynamic Reshape's shape input
   // into a constant, which lets the next inferShapes resolve that Reshape statically, which in turn
@@ -1653,7 +1654,7 @@ void runStandardPasses(Graph& g, int64_t batch) {
   inferShapes(g, batch);  // refresh shapes after fusion/folding
   lowerEinsum(g);         // batched einsums -> MatMul (needs the operand shapes resolved above)
   inferShapes(g, batch);  // resolve the inserted Unsqueeze/MatMul/Squeeze
-  if (std::getenv("VKNN_DUMP_BIG")) {
+  if (opt.dumpBig) {
     for (const Node& n : g.nodes)
       for (TensorId o : n.outputs) {
         if (o == kNoTensor)

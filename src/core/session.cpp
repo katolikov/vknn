@@ -147,7 +147,7 @@ void Session::plan() {
   // --- graph optimization passes (NCHW IR, static batch=1) ---
   // Skipped when the graph came from a .vxm (passes already applied at save time).
   if (!graphOptimized_)
-    runStandardPasses(graph_, 1);
+    runStandardPasses(graph_);  // defaults; the compiler tool sets fusion options explicitly
   graph_.topoSort();
 
   // --- instantiate backends in priority order: primary, fallbacks..., CPU last ---

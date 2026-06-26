@@ -26,8 +26,18 @@ void fuseSwish(Graph& g);
 void eliminateIdentity(Graph& g);
 // Remove nodes whose outputs are unused (keeps graph outputs alive).
 void eliminateDeadNodes(Graph& g);
+// Options for the standard pass pipeline (compile time). The model compiler exposes these as flags
+// so conversion behaviour is explicit and reproducible — no environment variables involved.
+struct PassOptions {
+  int64_t batch = 1;
+  bool fuseSwish = true;           // fold HardSwish/SiLU self-gating into the conv epilogue
+  bool fuseSqueezeExcite = false;  // fuse the SE squeeze->FC->scale chain (experimental)
+  bool fuseDwPw = false;           // fuse depthwise-3x3 + 1x1-project (experimental)
+  bool dumpBig = false;            // debug: log tensors > 50M elements after shape inference
+};
+
 // Run the standard pipeline used before backend planning.
-void runStandardPasses(Graph& g, int64_t batch = 1);
+void runStandardPasses(Graph& g, const PassOptions& opt = {});
 // Read an int64 list param from a node attribute or an initializer input (Slice/Pad/Reduce style).
 std::vector<int64_t> readI64Param(const Graph& g, const Node& nd, const char* attrName,
                                   int inputIdx);
