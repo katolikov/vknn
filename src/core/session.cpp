@@ -205,6 +205,8 @@ void Session::plan() {
   // the graph weights after upload — essential for fitting a 965M-param fp16 model on-device.
 
   // --- per-node backend assignment (highest-priority backend that supports it) ---
+  for (auto& b : backends_)
+    b->configure(cfg_);  // apply Config (e.g. disableVkOps) before capability queries
   nodeBackendIdx_.assign(graph_.nodes.size(), -1);
   for (size_t n = 0; n < graph_.nodes.size(); ++n) {
     const Node& nd = graph_.nodes[n];
@@ -375,7 +377,7 @@ const RtTensor* Session::tensor(const std::string& name) const {
 }
 
 Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& outputs) {
-  const bool tm = std::getenv("VKNN_TIMING") != nullptr;
+  const bool tm = cfg_.timing;
   auto now = [] { return std::chrono::high_resolution_clock::now(); };
   auto tA = now();
   ExecContext ctx;
@@ -408,7 +410,7 @@ Status Session::run(const std::vector<IOTensor>& inputs, std::vector<IOTensor>& 
   auto tB = now();
   // --- run segments in order ---
   try {
-    bool dbg = std::getenv("VKNN_DEBUG_SEG") != nullptr;
+    bool dbg = cfg_.debugSegments;
     for (size_t si = 0; si < segments_.size(); ++si) {
       if (dbg)
         VKNN_INFO << "RUN segment " << si << "/" << segments_.size()

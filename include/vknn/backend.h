@@ -40,6 +40,9 @@ public:
   virtual const char* name() const = 0;
   /// Whether the backend is usable on this device (false => skip in selection).
   virtual bool available() const = 0;
+  /// Apply session Config to the backend before planning (e.g. the debug op-disable list). Default
+  /// no-op. Called once per session create, before supportsNode() is used for assignment.
+  virtual void configure(const Config& cfg) {}
   /// Capability query used for per-op backend assignment / fallback decisions.
   virtual bool supports(OpType t, DType dt) const = 0;
   /// Shape-aware capability query. Defaults to the type-only check; backends override this when

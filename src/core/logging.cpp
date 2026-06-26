@@ -19,22 +19,9 @@ bool g_color = true;
 std::unordered_map<std::string, int> g_counts;
 bool g_init = false;
 
+// The log level is set from Config::verbosity (applyLogLevel) — there are no environment variables.
 void ensureInit() {
-  if (g_init)
-    return;
   g_init = true;
-  if (const char* e = std::getenv("VKNN_LOG_LEVEL")) {
-    if (!strcasecmp(e, "DEBUG"))
-      g_level = LogLevel::kDebug;
-    else if (!strcasecmp(e, "INFO"))
-      g_level = LogLevel::kInfo;
-    else if (!strcasecmp(e, "WARN"))
-      g_level = LogLevel::kWarn;
-    else if (!strcasecmp(e, "ERROR"))
-      g_level = LogLevel::kError;
-    else if (!strcasecmp(e, "NONE"))
-      g_level = LogLevel::kNone;
-  }
 }
 
 const char* levelTag(LogLevel l) {

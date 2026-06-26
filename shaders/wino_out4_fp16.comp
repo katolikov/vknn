@@ -1,0 +1,64 @@
+#version 450
+// Winograd F(4x4,3x3) output transform: Y = At * M * A, a 4x4 output per tile. M[p][ocb][tile]
+// (p = i*6+j, matching wino_gemm's coalesced store). At (4x6):
+//   [1  1  1  1  1  0]
+//   [0  1 -1  2 -2  0]
+//   [0  1  1  4  4  0]
+//   [0  1 -1  8 -8  1]
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer M { f16vec4 mbuf[]; };
+layout(std430, binding = 1) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 2) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, Cout, OH, OW, nTH, nTW, act;
+  float actLo, actHi;
+}
+pc;
+
+void main() {
+  int Coutb = (pc.Cout + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(Coutb * nT)) return;
+  int tile = int(gid) % nT;
+  int ocb = int(gid) / nT;
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+
+  vec4 M[6][6];
+  for (int i = 0; i < 6; ++i)
+    for (int j = 0; j < 6; ++j)
+      M[i][j] = vec4(mbuf[((i * 6 + j) * Coutb + ocb) * nT + tile]);
+
+  // tmp = At * M  (4x6)
+  vec4 t[4][6];
+  for (int j = 0; j < 6; ++j) {
+    t[0][j] = M[0][j] + M[1][j] + M[2][j] + M[3][j] + M[4][j];
+    t[1][j] = M[1][j] - M[2][j] + 2.0 * M[3][j] - 2.0 * M[4][j];
+    t[2][j] = M[1][j] + M[2][j] + 4.0 * M[3][j] + 4.0 * M[4][j];
+    t[3][j] = M[1][j] - M[2][j] + 8.0 * M[3][j] - 8.0 * M[4][j] + M[5][j];
+  }
+  vec4 b = vec4(bias[ocb]);
+  int oy = ty * 4, ox = tx * 4;
+  int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
+#define ACT(v)                                                                                    \
+  f16vec4(vx_act((v).x, pc.act, pc.actLo, pc.actHi), vx_act((v).y, pc.act, pc.actLo, pc.actHi),   \
+          vx_act((v).z, pc.act, pc.actLo, pc.actHi), vx_act((v).w, pc.act, pc.actLo, pc.actHi))
+  for (int i = 0; i < 4; ++i) {
+    if (oy + i >= pc.OH) continue;
+    int row = obase + (oy + i) * pc.OW;
+    vec4 y0 = t[i][0] + t[i][1] + t[i][2] + t[i][3] + t[i][4] + b;
+    vec4 y1 = t[i][1] - t[i][2] + 2.0 * t[i][3] - 2.0 * t[i][4] + b;
+    vec4 y2 = t[i][1] + t[i][2] + 4.0 * t[i][3] + 4.0 * t[i][4] + b;
+    vec4 y3 = t[i][1] - t[i][2] + 8.0 * t[i][3] - 8.0 * t[i][4] + t[i][5] + b;
+    if (ox + 0 < pc.OW) dst[row + ox + 0] = ACT(y0);
+    if (ox + 1 < pc.OW) dst[row + ox + 1] = ACT(y1);
+    if (ox + 2 < pc.OW) dst[row + ox + 2] = ACT(y2);
+    if (ox + 3 < pc.OW) dst[row + ox + 3] = ACT(y3);
+  }
+#undef ACT
+}

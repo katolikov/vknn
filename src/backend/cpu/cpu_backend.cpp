@@ -88,7 +88,7 @@ public:
   void run(ExecContext& ctx) override {
     for (size_t k = 0; k < nodeIdx.size(); ++k) {
       const Node& node = ctx.graph->nodes[nodeIdx[k]];
-      if (std::getenv("VKNN_DEBUG_SEG")) {
+      if (ctx.config && ctx.config->debugSegments) {
         std::string sh;
         for (auto t : node.inputs) {
           sh += std::to_string(t) + ":[";

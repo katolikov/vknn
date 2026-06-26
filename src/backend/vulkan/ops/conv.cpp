@@ -11,6 +11,9 @@
 namespace vknn {
 namespace {
 
+// Read an advanced kernel hint from the session Config (no env vars; see include/vknn/config.h).
+inline int cfgHint(const VkOpEnv& env, Hint h) { return env.config ? env.config->hint(h) : 0; }
+
 struct ConvOp : VulkanOp {
   static constexpr int kTile = 4;  // output pixels per thread in the 1x1 kernel (matches shader)
   bool depthwise = false;
@@ -78,6 +81,7 @@ struct ConvOp : VulkanOp {
   bool winofull = false;  // single fully-fused kernel: V stays in LDS, no global round-trip
   // 3-pass with a TILED batched GEMM for the transform-domain multiply (MNN's structure).
   bool winogemm = false;
+  int winoUnit = 2;  // output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic)
   std::unique_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
   std::shared_ptr<vk::Buffer> mbuf;
   WinoGemmPC wGemmPC{};
@@ -87,26 +91,38 @@ struct ConvOp : VulkanOp {
                        int64_t Coutb) {
     const Graph& g = *env.graph;
     int64_t Cin = x.c, Cinb = cBlocks(x.c);
-    int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
+    const int U_ = winoUnit, A_ = U_ + 2;     // output edge, transform-domain edge (4 or 6)
+    const int nPos = A_ * A_;                  // 16 (F2,3) or 36 (F4,3)
+    int64_t nTH = (y.h + U_ - 1) / U_, nTW = (y.w + U_ - 1) / U_, nT = x.n * nTH * nTW;
     std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
     const float* wsrc = wsrcv.data();
 
+    // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3).
+    static const float G2[4][3] = {{1, 0, 0}, {0.5f, 0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0, 0, 1}};
+    static const float G4[6][3] = {{0.25f, 0, 0},
+                                   {-1.f / 6, -1.f / 6, -1.f / 6},
+                                   {-1.f / 6, 1.f / 6, -1.f / 6},
+                                   {1.f / 24, 1.f / 12, 1.f / 6},
+                                   {1.f / 24, -1.f / 12, 1.f / 6},
+                                   {0, 0, 1}};
     // Host weight transform U = G g G^T, packed [pos][oc][icb] vec4(4 ic). Cached on disk.
-    ubuf = uploadCached(env, node.name + "#wino", [&] {
-      const float G[4][3] = {{1, 0, 0}, {0.5f, 0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0, 0, 1}};
-      std::vector<float> U((size_t)16 * Cout * Cinb * 4, 0.f);
+    ubuf = uploadCached(env, node.name + "#wino" + std::to_string(U_), [&] {
+      std::vector<float> U((size_t)nPos * Cout * Cinb * 4, 0.f);
       for (int64_t oc = 0; oc < Cout; ++oc)
         for (int64_t ic = 0; ic < Cin; ++ic) {
           const float* gk = wsrc + (oc * Cin + ic) * 9;  // 3x3
-          float Gg[4][3];
-          for (int i = 0; i < 4; ++i)
-            for (int j = 0; j < 3; ++j)
-              Gg[i][j] = G[i][0] * gk[j] + G[i][1] * gk[3 + j] + G[i][2] * gk[6 + j];
+          float Gg[6][3];
+          for (int i = 0; i < A_; ++i)
+            for (int j = 0; j < 3; ++j) {
+              const float* Gi = (U_ == 2) ? G2[i] : G4[i];
+              Gg[i][j] = Gi[0] * gk[j] + Gi[1] * gk[3 + j] + Gi[2] * gk[6 + j];
+            }
           int64_t icb = ic / 4, lane = ic % 4;
-          for (int i = 0; i < 4; ++i)
-            for (int j = 0; j < 4; ++j) {
-              float u = Gg[i][0] * G[j][0] + Gg[i][1] * G[j][1] + Gg[i][2] * G[j][2];
-              int pos = i * 4 + j;
+          for (int i = 0; i < A_; ++i)
+            for (int j = 0; j < A_; ++j) {
+              const float* Gj = (U_ == 2) ? G2[j] : G4[j];
+              float u = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
+              int pos = i * A_ + j;
               U[(((pos * Cout + oc) * Cinb + icb) * 4) + lane] = u;
             }
         }
@@ -115,7 +131,8 @@ struct ConvOp : VulkanOp {
 
     wFusedPC = {(int)x.n, (int)Cin, (int)Cout,          (int)y.h,   (int)y.w,
                 (int)nTH, (int)nTW, (int)node.fusedAct, node.actLo, node.actHi};
-    winofull = std::getenv("VKNN_WINOFULL") != nullptr;
+    int wvar = cfgHint(env, Hint::kWinogradVariant);  // 0=tiled-GEMM 1=fused 2=fused-split 3=full
+    winofull = (wvar == 3);
     if (winofull) {
       // Single fused kernel: one workgroup per (tile, ocb-group of 16). No V buffer, no input pass.
       int64_t ocbGroups = (Coutb + 15) / 16;
@@ -126,35 +143,35 @@ struct ConvOp : VulkanOp {
       return;
     }
     int el = 2;  // fp16
-    vbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * Cinb * nT * 4 * el,
+    vbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)nPos * Cinb * nT * 4 * el,
                                         vk::MemPref::kDeviceOnly);
     wInPC = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)nTH, (int)nTW};
     wInGroups = groups(Cinb * nT, 64);
 
-    // The tiled-GEMM 3-pass is the production Winograd kernel (default). The fused / fused2 / full
-    // variants are kept only as env-gated experiments (documented regressions above).
-    winogemm = !std::getenv("VKNN_WINO_FUSED") && !std::getenv("VKNN_WINO2");
+    // The tiled-GEMM 3-pass is the production Winograd kernel (default, variant 0). The fused /
+    // fused-split variants are kept only as Hint-gated experiments (documented regressions above).
+    winogemm = (wvar == 0);
     if (winogemm) {
       // 3-pass: input transform -> V, TILED batched GEMM -> M, output transform -> dst.
-      mbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * nT * Coutb * 4 * el,
+      mbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)nPos * nT * Coutb * 4 * el,
                                           vk::MemPref::kDeviceOnly);
       wGemmPC = {(int)Cin, (int)Cout, (int)nT};
       const int TILE_M = 32, TILE_NB = 8;    // must match wino_gemm_fp16.comp (MDIM*RM, NDIM)
       wGemmGX = groups(nT, TILE_M);          // workgroups over M (tiles)
       wGemmGY = groups(Coutb, TILE_NB);      // workgroups over N (ocb)
-      wGemmGZ = 16;                          // one per transform position
-      wInPipe =
-          std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC),
-                                                std::vector<uint32_t>{}, env.cache->handle());
+      wGemmGZ = nPos;                        // one GEMM per transform position (16 or 36)
+      wInPipe = std::make_unique<vk::ComputePipeline>(
+          *env.ctx, U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC),
+          std::vector<uint32_t>{}, env.cache->handle());
       wGemmPipe =
           std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_gemm_fp16", 3, sizeof(WinoGemmPC),
                                                 std::vector<uint32_t>{}, env.cache->handle());
-      wOutPipe =
-          std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_out_fp16", 3, sizeof(WinoFusedPC),
-                                                std::vector<uint32_t>{}, env.cache->handle());
+      wOutPipe = std::make_unique<vk::ComputePipeline>(
+          *env.ctx, U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC),
+          std::vector<uint32_t>{}, env.cache->handle());
       return;
     }
-    wino2 = std::getenv("VKNN_WINO2") != nullptr;
+    wino2 = (wvar == 2);
     // wino2: 4 threads cooperate per (ocb,tile) -> 4x the threads, dispatched 64/workgroup.
     wFusedGroups = wino2 ? groups(Coutb * nT * 4, 64) : groups(Coutb * nT, 64);
     wInPipe =
@@ -217,15 +234,18 @@ struct ConvOp : VulkanOp {
     return best;
   }
 
-  // Autotune: is the tiled-GEMM Winograd faster than the direct 3x3 kernel for THIS shape? Winograd
-  // wins big on the deep, square ResNet 3x3 but loses on small-channel / spatially-large 3x3 (the
-  // transform passes aren't amortized there), so the choice is per-shape, measured on scratch
-  // buffers and cached like the local-size tune. VKNN_WINOGRAD / VKNN_NO_WINOGRAD force it on/off.
-  bool tuneWino(VkOpEnv& env, NCHW x, NCHW y, int64_t Cin, int64_t Cout, int act) {
-    if (env.winograd == WinogradMode::kOn)
-      return true;
-    if (env.winograd == WinogradMode::kOff || env.tuning == TuningLevel::kOff || !env.runner)
-      return false;
+  // Autotune the 3x3 conv kernel for THIS shape: 0 = direct, 1 = F(2,3) Winograd, 2 = F(4,3)
+  // Winograd. Winograd wins big on deep, square 3x3 but loses on small-channel / spatially-large 3x3,
+  // so the choice is measured per-shape on scratch buffers and cached like the local-size tune.
+  // F(4,3) (0.56x the V/M traffic, 4x FLOP saving) is only considered when fp16-safe (allowF4).
+  int tuneWino(VkOpEnv& env, NCHW x, NCHW y, int64_t Cin, int64_t Cout, int act) {
+    if (env.winograd == WinogradMode::kOff)
+      return 0;
+    if (cfgHint(env, Hint::kWinogradUnit) == 4)
+      return 2;  // force F(4,3) (research; numerically fine but register-heavy transforms)
+    bool forceOn = (env.winograd == WinogradMode::kOn);
+    if (env.tuning == TuningLevel::kOff || !env.runner)
+      return forceOn ? 1 : 0;
     int64_t Cinb = cBlocks(Cin), Coutb = cBlocks(Cout);
     int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
     char buf[128];
@@ -234,7 +254,7 @@ struct ConvOp : VulkanOp {
     if (env.weights) {
       int c = env.weights->tuned(sig, -1);
       if (c >= 0)
-        return c > 0;
+        return c;
     }
     auto mk = [&](size_t bytes) {
       return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16),
@@ -289,12 +309,11 @@ struct ConvOp : VulkanOp {
                      groups(Coutb * nT, 64));
       vk::computeBarrier(cmd);
     });
-    bool useWino = wms < dms;
-    VKNN_DEBUG << "tuneWino " << sig << " direct=" << dms << " wino=" << wms << " -> "
-             << (useWino ? "WINO" : "direct");
+    int choice = (forceOn || wms < dms) ? 1 : 0;
+    VKNN_DEBUG << "tuneWino " << sig << " direct=" << dms << " wino=" << wms << " -> " << choice;
     if (env.weights)
-      env.weights->setTuned(sig, useWino ? 1 : 0);
-    return useWino;
+      env.weights->setTuned(sig, choice);
+    return choice;
   }
 
   void prepare(const Node& node, VkOpEnv& env) override {
@@ -318,7 +337,9 @@ struct ConvOp : VulkanOp {
     bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 &&
                       st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 &&
                       x.c >= 32 && Cout >= 32);
-    winograd = winoShape && tuneWino(env, x, y, x.c, Cout, (int)node.fusedAct);
+    int wchoice = winoShape ? tuneWino(env, x, y, x.c, Cout, (int)node.fusedAct) : 0;
+    winograd = (wchoice > 0);
+    winoUnit = (wchoice == 2) ? 4 : 2;
 
     std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
     const float* wsrc = wsrcv.data();
@@ -397,9 +418,9 @@ struct ConvOp : VulkanOp {
               *env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
               std::vector<uint32_t>{(uint32_t)(hasRes ? 1 : 0)}, env.cache->handle());
         }
-      } else if (std::getenv("VKNN_LDS") && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 &&
-                 st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 &&
-                 dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14) {
+      } else if (cfgHint(env, Hint::kDirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 &&
+                 st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 &&
+                 pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14) {
         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
         // layer4 stays on the direct kernel (tile barely fills, halo overhead dominates).
         lds = true;
@@ -408,7 +429,7 @@ struct ConvOp : VulkanOp {
         pipe =
             std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC),
                                                   std::vector<uint32_t>{}, env.cache->handle());
-      } else if (std::getenv("VKNN_CONV_REG")) {
+      } else if (cfgHint(env, Hint::kDirectConv3x3) == 1) {
         // register-tiled implicit-im2col (opt-in): regresses 3x3 on this GPU (small weight tensors
         // already cache well; WTILE overhead + extra input loads dominate). Kept for experiments.
         reg = true;

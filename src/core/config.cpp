@@ -116,6 +116,14 @@ Config Config::fromJsonString(const std::string& json) {
     c.tuning = tuneFromStr(j->asStr("fast"));
   if (auto* j = v.get("winograd"))
     c.winograd = winoFromStr(j->asStr("auto"));
+  B("debugSegments", c.debugSegments);
+  S("disableVkOps", c.disableVkOps);
+  S("dumpTensors", c.dumpTensors);
+  if (auto* j = v.get("hints")) {  // {"hints": [v0, v1, ...]} indexed by (int)Hint
+    if (j->type == JsonValue::kArray)
+      for (auto& e : j->arr)
+        c.hints.push_back((int)e.asNum(0));
+  }
   if (auto* j = v.get("power")) {
     std::string p = j->asStr("normal");
     c.power = p == "high" ? PowerHint::kHigh : p == "low" ? PowerHint::kLow : PowerHint::kNormal;
@@ -150,6 +158,8 @@ std::string Config::toJson() const {
   os << "  \"verbosity\": " << verbosity << ",\n";
   os << "  \"layerDump\": " << (layerDump ? "true" : "false") << ",\n";
   os << "  \"layerDumpDir\": \"" << layerDumpDir << "\",\n";
+  os << "  \"timing\": " << (timing ? "true" : "false") << ",\n";
+  os << "  \"debugSegments\": " << (debugSegments ? "true" : "false") << ",\n";
   os << "  \"tuning\": \"" << tuneStr(tuning) << "\",\n";
   os << "  \"winograd\": \"" << winoStr(winograd) << "\"\n";
   os << "}\n";

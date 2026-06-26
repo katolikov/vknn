@@ -8,6 +8,10 @@
 //   --precision P     fp32|fp16 (default fp16)
 //   --winograd MODE   auto|on|off  3x3 Winograd selection (default auto = best+fast per-shape pick)
 //   --tuning LEVEL    off|fast|thorough  kernel autotuning (default fast)
+//   --wino-unit N     0=auto (default), 4=force F(4,3) Winograd (research)
+//   --wino-variant N  0=tiled-GEMM (default), 1/2/3 = experimental fused variants
+//   --timing          print pack/submit/unpack + per-stage timing (was VKNN_TIMING env)
+//   --debug-seg       trace per-segment execution (was VKNN_DEBUG_SEG env)
 //   --config PATH     JSON config (overrides flags it sets)
 //   --golden PATH     raw float32 golden output for cosine/top-1 check
 //   --profile         enable per-op profiler + print table
@@ -76,7 +80,18 @@ int main(int argc, char** argv) {
       cfg.tuning = TuningLevel::kThorough;
     else if (t == "fast")
       cfg.tuning = TuningLevel::kFast;
+    // Advanced hints (replace the old env vars): force Winograd unit / variant for research.
+    int wu = atoi(argval(argc, argv, "--wino-unit", "0"));  // 0=auto, 4=force F(4,3)
+    if (wu)
+      cfg.setHint(Hint::kWinogradUnit, wu);
+    int wv = atoi(argval(argc, argv, "--wino-variant", "0"));  // 0=tiled-GEMM,1=fused,2=split,3=full
+    if (wv)
+      cfg.setHint(Hint::kWinogradVariant, wv);
   }
+  if (hasflag(argc, argv, "--timing"))
+    cfg.timing = true;
+  if (hasflag(argc, argv, "--debug-seg"))
+    cfg.debugSegments = true;
   if (hasflag(argc, argv, "--profile"))
     cfg.profile = true;
   if (hasflag(argc, argv, "--layer-dump")) {

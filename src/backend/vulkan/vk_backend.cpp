@@ -125,16 +125,14 @@ public:
   BackendKind kind() const override { return BackendKind::kVulkan; }
   const char* name() const override { return "Vulkan"; }
   bool available() const override { return ctx_ && ctx_->initialized(); }
+  void configure(const Config& cfg) override { disabledOps_ = cfg.disableVkOps; }
   bool supports(OpType t, DType dt) const override {
     if (!available())
       return false;
-    // Debug/fallback hook: VKNN_DISABLE_VK_OPS="Add,Conv" forces those ops to fall back
+    // Debug/fallback hook: Config::disableVkOps="Add,Conv" forces those ops to fall back
     // (used to demonstrate the NEON CPU fallback path, M5).
-    if (const char* dis = std::getenv("VKNN_DISABLE_VK_OPS")) {
-      std::string list = dis, name = opTypeName(t);
-      if (list.find(name) != std::string::npos)
-        return false;
-    }
+    if (!disabledOps_.empty() && disabledOps_.find(opTypeName(t)) != std::string::npos)
+      return false;
     return VkOpRegistry::instance().has(t);
   }
 
@@ -420,6 +418,7 @@ private:
   std::unique_ptr<vk::CommandRunner> runner_;
   std::unique_ptr<vk::PipelineCache> cache_;
   std::unique_ptr<WeightCache> wcache_;
+  std::string disabledOps_;  // Config::disableVkOps (debug op-fallback list)
 };
 
 // ============================ VulkanSegment ============================
@@ -467,11 +466,11 @@ public:
             readBack.insert(in);
       }
     }
-    // Debug: VKNN_DUMP_NAMES="substr1,substr2" forces matching tensors to dedicated (un-aliased)
+    // Debug: Config::dumpTensors="substr1,substr2" forces matching tensors to dedicated (un-aliased)
     // readback buffers and dumps them to /data/local/tmp/vxrt/dump after the run — so intermediate
     // activations can be diffed despite the liveness planner reusing buffers. A few tensors only.
-    if (const char* dn = std::getenv("VKNN_DUMP_NAMES")) {
-      std::string list = dn;
+    if (!cfg_.dumpTensors.empty()) {
+      std::string list = cfg_.dumpTensors;
       for (TensorId tid : acts) {
         const std::string& nm = g.tensors[tid].name;
         if (nm.empty())
@@ -724,7 +723,7 @@ public:
   }
 
   void run(ExecContext& ctx) override {
-    const bool timing = std::getenv("VKNN_TIMING") != nullptr;
+    const bool timing = cfg_.timing;
     auto now = [] { return std::chrono::high_resolution_clock::now(); };
     auto t0 = now();
     // attach boundary buffers to RtTensors (cross-segment residency) + upload inputs.
