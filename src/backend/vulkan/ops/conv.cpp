@@ -3,6 +3,7 @@
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
 #include <cstdlib>
+#include <functional>
 
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -75,6 +76,12 @@ struct ConvOp : VulkanOp {
   int64_t wInGroups = 0, wFusedGroups = 0, wFullGroups = 0;
   bool wino2 = false;     // occupancy-friendly 2-pass matmul (4 threads/tile, M split across quads)
   bool winofull = false;  // single fully-fused kernel: V stays in LDS, no global round-trip
+  // 3-pass with a TILED batched GEMM for the transform-domain multiply (MNN's structure).
+  bool winogemm = false;
+  std::unique_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
+  std::shared_ptr<vk::Buffer> mbuf;
+  WinoGemmPC wGemmPC{};
+  int64_t wGemmGX = 0, wGemmGY = 0, wGemmGZ = 0;
 
   void prepareWinograd(const Node& node, VkOpEnv& env, NCHW x, NCHW y, int64_t Cout,
                        int64_t Coutb) {
@@ -123,6 +130,30 @@ struct ConvOp : VulkanOp {
                                         vk::MemPref::kDeviceOnly);
     wInPC = {(int)x.n, (int)x.c, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)nTH, (int)nTW};
     wInGroups = groups(Cinb * nT, 64);
+
+    // The tiled-GEMM 3-pass is the production Winograd kernel (default). The fused / fused2 / full
+    // variants are kept only as env-gated experiments (documented regressions above).
+    winogemm = !std::getenv("VKNN_WINO_FUSED") && !std::getenv("VKNN_WINO2");
+    if (winogemm) {
+      // 3-pass: input transform -> V, TILED batched GEMM -> M, output transform -> dst.
+      mbuf = std::make_shared<vk::Buffer>(*env.ctx, (size_t)16 * nT * Coutb * 4 * el,
+                                          vk::MemPref::kDeviceOnly);
+      wGemmPC = {(int)Cin, (int)Cout, (int)nT};
+      const int TILE_M = 32, TILE_NB = 8;    // must match wino_gemm_fp16.comp (MDIM*RM, NDIM)
+      wGemmGX = groups(nT, TILE_M);          // workgroups over M (tiles)
+      wGemmGY = groups(Coutb, TILE_NB);      // workgroups over N (ocb)
+      wGemmGZ = 16;                          // one per transform position
+      wInPipe =
+          std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC),
+                                                std::vector<uint32_t>{}, env.cache->handle());
+      wGemmPipe =
+          std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_gemm_fp16", 3, sizeof(WinoGemmPC),
+                                                std::vector<uint32_t>{}, env.cache->handle());
+      wOutPipe =
+          std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_out_fp16", 3, sizeof(WinoFusedPC),
+                                                std::vector<uint32_t>{}, env.cache->handle());
+      return;
+    }
     wino2 = std::getenv("VKNN_WINO2") != nullptr;
     // wino2: 4 threads cooperate per (ocb,tile) -> 4x the threads, dispatched 64/workgroup.
     wFusedGroups = wino2 ? groups(Coutb * nT * 4, 64) : groups(Coutb * nT, 64);
@@ -186,6 +217,86 @@ struct ConvOp : VulkanOp {
     return best;
   }
 
+  // Autotune: is the tiled-GEMM Winograd faster than the direct 3x3 kernel for THIS shape? Winograd
+  // wins big on the deep, square ResNet 3x3 but loses on small-channel / spatially-large 3x3 (the
+  // transform passes aren't amortized there), so the choice is per-shape, measured on scratch
+  // buffers and cached like the local-size tune. VKNN_WINOGRAD / VKNN_NO_WINOGRAD force it on/off.
+  bool tuneWino(VkOpEnv& env, NCHW x, NCHW y, int64_t Cin, int64_t Cout, int act) {
+    if (std::getenv("VKNN_WINOGRAD"))
+      return true;
+    if (std::getenv("VKNN_NO_WINOGRAD") || env.tuning == TuningLevel::kOff || !env.runner)
+      return false;
+    int64_t Cinb = cBlocks(Cin), Coutb = cBlocks(Cout);
+    int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "wino_%d_%d_%d_%d", (int)Cin, (int)Cout, (int)y.h, (int)y.w);
+    std::string sig = buf;
+    if (env.weights) {
+      int c = env.weights->tuned(sig, -1);
+      if (c >= 0)
+        return c > 0;
+    }
+    auto mk = [&](size_t bytes) {
+      return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16),
+                                          vk::MemPref::kDeviceOnly);
+    };
+    auto sSrc = mk((size_t)x.n * Cinb * x.h * x.w * 8);
+    auto sU = mk((size_t)16 * Cout * Cinb * 8);
+    auto sV = mk((size_t)16 * Cinb * nT * 8);
+    auto sM = mk((size_t)16 * nT * Coutb * 8);
+    auto sBias = mk((size_t)Coutb * 8);
+    auto sWt = mk((size_t)Cout * Cinb * 9 * 8);
+    auto sDst = mk((size_t)x.n * Coutb * y.h * y.w * 8);
+    ConvPC dpc = {(int)x.n, (int)Cin, (int)x.h, (int)x.w, (int)Cout, (int)y.h, (int)y.w, 3, 3,
+                  1,        1,        1,        1,        1,        1,        act,      0.f, 0.f};
+    WinoInPC ipc = {(int)x.n, (int)Cin, (int)x.h, (int)x.w, (int)y.h, (int)y.w, (int)nTH, (int)nTW};
+    WinoGemmPC gpc = {(int)Cin, (int)Cout, (int)nT};
+    WinoFusedPC opc = {(int)x.n, (int)Cin, (int)Cout, (int)y.h, (int)y.w,
+                       (int)nTH, (int)nTW, act,        0.f,     0.f};
+    vk::ComputePipeline inPipe(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC), {},
+                               env.cache->handle());
+    vk::ComputePipeline gPipe(*env.ctx, "wino_gemm_fp16", 3, sizeof(WinoGemmPC), {},
+                              env.cache->handle());
+    vk::ComputePipeline oPipe(*env.ctx, "wino_out_fp16", 3, sizeof(WinoFusedPC), {},
+                              env.cache->handle());
+    uint32_t gx = groups(nT, 32), gy = groups(Coutb, 8);
+    auto timeIt = [&](const std::function<void(VkCommandBuffer)>& rec) {
+      VkCommandBuffer cmd = env.runner->allocate();
+      env.runner->begin(cmd);
+      for (int r = 0; r < 8; ++r)
+        rec(cmd);
+      env.runner->end(cmd);
+      double ms = env.runner->submitAndWait(cmd);
+      vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
+      return ms;
+    };
+    double dms = 1e30;
+    for (uint32_t ls : {64u, 128u, 256u}) {  // compare against the direct kernel's best local size
+      vk::ComputePipeline dPipe(*env.ctx, "conv_fp16", 4, sizeof(ConvPC), {ls}, env.cache->handle());
+      uint32_t dg = groups(x.n * Coutb * y.h * y.w, ls);
+      dms = std::min(dms, timeIt([&](VkCommandBuffer cmd) {
+              dPipe.dispatch(cmd, {sSrc->handle(), sWt->handle(), sBias->handle(), sDst->handle()},
+                             &dpc, sizeof(dpc), dg);
+              vk::computeBarrier(cmd);
+            }));
+    }
+    double wms = timeIt([&](VkCommandBuffer cmd) {
+      inPipe.dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
+      vk::computeBarrier(cmd);
+      gPipe.dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, 16);
+      vk::computeBarrier(cmd);
+      oPipe.dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc),
+                     groups(Coutb * nT, 64));
+      vk::computeBarrier(cmd);
+    });
+    bool useWino = wms < dms;
+    VKNN_DEBUG << "tuneWino " << sig << " direct=" << dms << " wino=" << wms << " -> "
+             << (useWino ? "WINO" : "direct");
+    if (env.weights)
+      env.weights->setTuned(sig, useWino ? 1 : 0);
+    return useWino;
+  }
+
   void prepare(const Node& node, VkOpEnv& env) override {
     const Graph& g = *env.graph;
     NCHW x = NCHW::from(g.desc(node.inputs[0]).shape);
@@ -200,14 +311,13 @@ struct ConvOp : VulkanOp {
     depthwise = (group == x.c && group == Cout && inCg == 1);
     pointwise = (!depthwise && group == 1 && KH == 1 && KW == 1 && st[0] == 1 && st[1] == 1 &&
                  pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
-    // Winograd F(2,3) for 3x3 stride-1 pad-1 group-1 convs (fp16). Correct (cosine 0.999999) but
-    // the un-fused 3-pass version is memory-bound and currently slower than the direct kernel on
-    // this GPU, so it's opt-in via VKNN_WINOGRAD=1 until the transforms are fused. See
-    // BENCHMARK.md.
-    bool winoEnabled = std::getenv("VKNN_WINOGRAD") != nullptr;
-    winograd = (winoEnabled && env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 &&
-                st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 &&
-                pad[3] == 1 && x.c >= 16);
+    // Winograd F(2,3) via a tiled GEMM (the structure MNN's OpenCL backend uses). It beats the
+    // direct kernel on deep, square 3x3 (ResNet-50: 12.6 -> 10.5 ms, matching MNN's tuned OpenCL)
+    // but loses on small-channel / spatially-large 3x3, so tuneWino picks per-shape and caches.
+    bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 &&
+                      st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 &&
+                      x.c >= 32 && Cout >= 32);
+    winograd = winoShape && tuneWino(env, x, y, x.c, Cout, (int)node.fusedAct);
 
     std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
     const float* wsrc = wsrcv.data();
@@ -325,6 +435,21 @@ struct ConvOp : VulkanOp {
         // single fully-fused dispatch: U, raw input src, bias, dst. V stays in LDS.
         wFullPipe->dispatch(cmd, {ubuf->handle(), src->handle(), bbuf->handle(), dst->handle()},
                             &wFusedPC, sizeof(wFusedPC), (uint32_t)wFullGroups);
+        return;
+      }
+      if (winogemm) {
+        // 3-pass: input transform -> V, tiled batched GEMM -> M, output transform -> dst.
+        wInPipe->dispatch(cmd, {src->handle(), vbuf->handle()}, &wInPC, sizeof(wInPC),
+                          (uint32_t)wInGroups);
+        vk::computeBarrier(cmd);
+        wGemmPipe->dispatch(cmd, {vbuf->handle(), ubuf->handle(), mbuf->handle()}, &wGemmPC,
+                            sizeof(wGemmPC), (uint32_t)wGemmGX, (uint32_t)wGemmGY,
+                            (uint32_t)wGemmGZ);
+        vk::computeBarrier(cmd);
+        wOutPipe->dispatch(cmd, {mbuf->handle(), bbuf->handle(), dst->handle()}, &wFusedPC,
+                           sizeof(wFusedPC), (uint32_t)groups(cBlocks(wFusedPC.Cout) * wInPC.nTH *
+                                                                  wInPC.nTW * wFusedPC.N,
+                                                              64));
         return;
       }
       // 2 stages: input transform -> V, then fused matmul + output transform -> dst.

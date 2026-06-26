@@ -1,0 +1,54 @@
+#version 450
+// Winograd F(2x2,3x3) output transform: M (transform-domain, from wino_gemm) -> output.
+// One thread per (output channel-block, tile): read the 16 M values, Y = At*M*A, add bias,
+// activate, scatter the 2x2 output. M layout: mbuf[(p*nT + tile)*Coutb + ocb].
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer M { f16vec4 mbuf[]; };
+layout(std430, binding = 1) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 2) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, Cout, OH, OW, nTH, nTW, act;
+  float actLo, actHi;
+}
+pc;
+
+void main() {
+  int Coutb = (pc.Cout + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= uint(Coutb * nT)) return;
+  int tile = int(gid) % nT;
+  int ocb = int(gid) / nT;
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+
+  // mbuf index for position p, this (tile,ocb): (p*nT + tile)*Coutb + ocb
+  vec4 M[16];
+  for (int p = 0; p < 16; ++p)
+    M[p] = vec4(mbuf[(p * nT + tile) * Coutb + ocb]);
+
+  vec4 b = vec4(bias[ocb]);
+  vec4 t00 = M[0] + M[4] + M[8], t01 = M[1] + M[5] + M[9];
+  vec4 t02 = M[2] + M[6] + M[10], t03 = M[3] + M[7] + M[11];
+  vec4 t10 = M[4] - M[8] - M[12], t11 = M[5] - M[9] - M[13];
+  vec4 t12 = M[6] - M[10] - M[14], t13 = M[7] - M[11] - M[15];
+  vec4 y00 = t00 + t01 + t02 + b, y01 = t01 - t02 - t03 + b;
+  vec4 y10 = t10 + t11 + t12 + b, y11 = t11 - t12 - t13 + b;
+
+  int oy = ty * 2, ox = tx * 2;
+  int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
+#define WRITE(yy, ROW, COL)                                                                       \
+  if ((oy + ROW) < pc.OH && (ox + COL) < pc.OW)                                                   \
+    dst[obase + (oy + ROW) * pc.OW + (ox + COL)] =                                                \
+        f16vec4(vx_act(yy.x, pc.act, pc.actLo, pc.actHi), vx_act(yy.y, pc.act, pc.actLo, pc.actHi),\
+                vx_act(yy.z, pc.act, pc.actLo, pc.actHi), vx_act(yy.w, pc.act, pc.actLo, pc.actHi))
+  WRITE(y00, 0, 0);
+  WRITE(y01, 0, 1);
+  WRITE(y10, 1, 0);
+  WRITE(y11, 1, 1);
+#undef WRITE
+}

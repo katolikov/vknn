@@ -59,6 +59,9 @@ struct WinoFusedPC {
   int N, Cin, Cout, OH, OW, nTH, nTW, act;
   float actLo, actHi;
 };
+struct WinoGemmPC {
+  int Cin, Cout, nT;
+};
 
 // attribute ints with a fallback
 inline std::vector<int64_t> attrInts(const Node& n, const char* k, std::vector<int64_t> dflt) {
