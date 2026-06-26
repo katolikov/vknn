@@ -77,8 +77,56 @@ adb shell /data/local/tmp/vknn/vknn_classify --model model.onnx --input input.bi
 ```
 
 `vknn_compile` turns an ONNX model into an optimized `.vxm` (skips parsing/passes at load; optional
-fp16 weights); `vknn_run_io` runs any multi-input/multi-output model. Full flow (compile, run, the C++
-`vknn::Model` API, YoNoSplat): [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md).
+fp16 weights); `vknn_run_io` runs any multi-input/multi-output model. Full flow (compile, run,
+YoNoSplat): [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md).
+
+**Or from C++.** `vknn::Model` reads each input/output name and shape from the model — you supply only
+the data. Vulkan, fp16, maximum autotuning, all fusions; two inputs → two outputs:
+
+```cpp
+#include "vknn/model.h"
+#include <cstdio>
+#include <fstream>
+#include <vector>
+
+// Read a raw fp32 .bin into a float vector.
+static std::vector<float> readBin(const char* path) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  size_t n = f ? (size_t)f.tellg() / sizeof(float) : 0;
+  std::vector<float> v(n);
+  if (f) { f.seekg(0); f.read(reinterpret_cast<char*>(v.data()), n * sizeof(float)); }
+  return v;
+}
+
+int main() {
+  vknn::Config cfg;
+  cfg.backend   = vknn::BackendKind::kVulkan;    // run on the GPU (CPU is the implicit fallback)
+  cfg.precision = vknn::Precision::kFp16;        // fp16 storage, fp32 accumulation
+  cfg.tuning    = vknn::TuningLevel::kThorough;  // maximum autotuning (cached to cfg.cacheDir)
+  cfg.optLevel  = 3;                             // all graph fusions (the default)
+
+  vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
+  if (!net) { fprintf(stderr, "failed to load model\n"); return 1; }
+
+  // Names + shapes come from the model; you supply only the data.
+  auto in = net.inputs();
+  vknn::Tensor a(readBin("in0.bin"), in[0].shape, in[0].name);
+  vknn::Tensor b(readBin("in1.bin"), in[1].shape, in[1].name);
+
+  std::vector<vknn::Tensor> outs = net.run({a, b});  // two inputs -> two outputs
+
+  for (const vknn::Tensor& o : outs)
+    printf("output '%s'  %s  max=%.4f\n", o.name().c_str(), o.shapeString().c_str(), o.max());
+
+  // ...or fetch a specific output by name:
+  if (const vknn::Tensor* y = vknn::findTensor(outs, net.outputs()[0].name))
+    printf("argmax of '%s' = %lld\n", net.outputs()[0].name.c_str(), (long long)y->argmax());
+  return 0;
+}
+```
+
+Link the static lib **whole-archive** so the self-registering operators/backends survive (drop the
+`.cpp` in `examples/` and add it to the `examples` list in `CMakeLists.txt`, which already does this).
 Everything is configured through `vknn::Config` — the engine reads no environment variables
 ([docs/CONFIG.md](docs/CONFIG.md)).
 
