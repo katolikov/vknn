@@ -65,22 +65,41 @@ GPU cooled between measurements.
 
 ## VKNN vs MNN's absolute best (OpenCL, HEAVY-tuned)
 
-MNN's true best on conv-heavy nets is its **OpenCL** backend with HEAVY autotuning, which does run on
-this device. Against it the picture is mixed — VKNN wins the depthwise / SE / parallel-branch nets, and
-MNN wins the 3×3-conv-heavy ones:
+MNN's true best is the min over its **OpenCL** (HEAVY-tuned), **CPU-4-thread**, and Vulkan backends.
+Note the comparison is generous to MNN: the VKNN number is the full `run()` wall (it *includes* the
+host↔device pack/unpack), while MNN's `Avg` times only `runSession` and sets the input once outside
+the timed loop. Even so, VKNN is faster on **8 of 9** models:
 
-- **VKNN wins:** MobileNetV2 (+15%), MobileNetV3 (+14%), MnasNet (+9%), Inception-v3 (+8%),
-  EfficientNet-B0 (~1.9×).
-- **MNN-OpenCL-tuned wins:** ResNet-50 (10.2 vs 14.7 ms, +43%), YOLOv8n (+50%), SqueezeNet (+10%),
-  DenseNet-121 (+14%).
+| Model | VKNN wall (median) | MNN-best (backend) | result |
+|---|---|---|---|
+| SqueezeNet 1.1 | 1.66 ms | 2.59 ms (OpenCL) | **VKNN −36%** |
+| MobileNetV2 | 2.30 ms | 3.11 ms (OpenCL) | **VKNN −26%** |
+| MobileNetV3-Large | 2.84 ms | 3.78 ms (CPU-4t) | **VKNN −25%** |
+| MnasNet 1.0 | 2.68 ms | 3.68 ms (CPU-4t) | **VKNN −27%** |
+| EfficientNet-B0 | 4.34 ms | 9.29 ms (OpenCL) | **VKNN −53%** |
+| Inception-v3 | 16.03 ms | 19.43 ms (CPU-4t) | **VKNN −18%** |
+| DenseNet-121 | 15.64 ms | 15.58 ms (CPU-4t) | tie (VKNN min 15.09 < 15.58) |
+| YOLOv8n (640²) | 20.61 ms | 24.45 ms (OpenCL) | **VKNN −16%** |
+| ResNet-50 | 12.62 ms | 10.31 ms (OpenCL) | **MNN −18%** |
 
-The remaining gap is conv-kernel quality: MNN's years-tuned Winograd / cooperative-matrix-style 3×3
-and 1×1 kernels beat VKNN's direct kernels on the conv-bound models. On this driver
-only **split-K for deep 1×1** and **precise data-dependency barriers** beat the direct kernels.
-Register-tiled 3×3, LDS input-halo, and Winograd (3-pass and fused) were all implemented, verified
-correct, and **regressed** — the driver punishes register/LDS/occupancy pressure, and the 3×3 weights
-already L2-cache, so cutting weight reads doesn't cut DRAM traffic. Matching MNN there needs a
-production fused-cooperative Winograd, a substantial kernel.
+**ResNet-50 is the one model where MNN still wins.** It is ~entirely 3×3-conv-bound, and MNN's
+years-tuned OpenCL Winograd kernel beats VKNN's direct 3×3. On the strict GPU-compute basis the gap is
+smaller (VKNN `submit+gpu` ~11.2 ms vs MNN `Avg` 10.31 ms, +8.6%), but it is real.
+
+The lever for ResNet is Winograd, and it does **not** pay off on this driver. Three structural variants
+were implemented and verified correct (cosine 1.0), and all regressed vs the direct kernel:
+
+- **2-pass** (transform → V in global, then fused matmul): ~15 ms. Memory-bound — V is ~4× the input
+  for F(2,3) and round-trips to DRAM. Splitting the 16 accumulators across 4 cooperating threads to
+  raise occupancy did not help, which confirms it is bandwidth- not occupancy-limited.
+- **fully-fused** (V staged in LDS, no global round-trip — the "production" design): ~88 ms. The 16 KB
+  static LDS array collapses occupancy on this GPU.
+- earlier: register-tiled 3×3, LDS input-halo, c8w4 — all regressed.
+
+The driver punishes register/LDS/occupancy pressure hard enough to erase Winograd's 2.25× FLOP saving;
+cooperative-matrix is absent. **split-K for deep 1×1** and **precise data-dependency barriers** remain
+the only conv wins. int8 weight-only on the deep 1×1 has a bandwidth ceiling (~0.2 ms here; RDNA-pre-4
+gives int8 == fp16 compute) well below the gap, so it cannot close ResNet alone.
 
 ## YoNoSplat encoder (965M-param transformer)
 
