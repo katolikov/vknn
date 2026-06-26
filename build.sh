@@ -5,6 +5,7 @@
 #   ./build.sh --android        Android arm64-v8a build (Vulkan backend, NDK toolchain)
 #   ./build.sh --clear          wipe the build directory first (clean build)
 #   ./build.sh --convert        build only the model compiler (vknn_compile) for the chosen target
+#   ./build.sh --docs           generate the themed HTML API docs into docs/api/html (needs doxygen)
 #
 # Flags combine, e.g.  ./build.sh --android --clear   or   ./build.sh --clear --convert
 # Override the NDK with ANDROID_NDK=..., the API level with ANDROID_API=...
