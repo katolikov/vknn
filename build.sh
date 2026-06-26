@@ -20,7 +20,7 @@ for a in "$@"; do
     --clear)   clear=1 ;;
     --convert) convert_only=1 ;;
     --docs)    docs=1 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "build.sh: unknown flag '$a' (try --help)" >&2; exit 1 ;;
   esac
 done
