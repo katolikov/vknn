@@ -75,56 +75,62 @@ int main(int argc, char** argv) {
   ppc.cam[0]=NEAR; ppc.cam[1]=fx; ppc.cam[2]=fy; ppc.cam[3]=cx; ppc.cam2[0]=cy;
   for (int c=0;c<3;++c){ ppc.r0[c]=Rt[c]; ppc.r1[c]=Rt[3+c]; ppc.r2[c]=Rt[6+c]; }
   ppc.r0[3]=tp[0]; ppc.r1[3]=tp[1]; ppc.r2[3]=tp[2];
-  {
-    vk::ComputePipeline pre(ctx, "raster_preprocess", 5, sizeof(PrePC));
-    VkCommandBuffer cmd = runner.allocate(); runner.begin(cmd);
+  // ---- fully-GPU rasterizer: preprocess -> bin (atomic) -> bitonic sort -> ranges -> composite ----
+  int ntx = (W + 15) / 16, nty = (H + 15) / 16, nTiles = ntx * nty;
+  int tileBits = 1; while ((1 << tileBits) < nTiles) ++tileBits;
+  int DB = 32 - tileBits;                                  // depth bits in the 32-bit sort key
+  int64_t CAP = 1; while (CAP < (int64_t)N * 8 || CAP < (1 << 16)) CAP <<= 1;  // padded key capacity (pow2)
+  float FAR = 256.0f, invRange = 1.0f / (FAR - NEAR);
+
+  vk::Buffer cntB(ctx, 4), keyB(ctx, CAP * 4), valB(ctx, CAP * 4), rgB(ctx, (size_t)nTiles * 2 * 4);
+  vk::Buffer imB(ctx, (size_t)H * W * 3 * 4, vk::MemPref::kReadback);
+  vk::ComputePipeline pre(ctx, "raster_preprocess", 5, sizeof(PrePC));
+  struct FillPC { uint32_t count, value; };
+  vk::ComputePipeline fill(ctx, "raster_fill", 1, sizeof(FillPC));
+  struct DupPC { int32_t N, ntx, nty, DB, CAP; float near, invRange; }
+  dpc{N, ntx, nty, DB, (int)CAP, NEAR, invRange};
+  vk::ComputePipeline dup(ctx, "raster_duplicate", 4, sizeof(DupPC));
+  struct BitPC { uint32_t j, k, n; };
+  vk::ComputePipeline bit(ctx, "raster_bitonic", 2, sizeof(BitPC));
+  struct RngPC { int32_t mode, nTiles, CAP, DB; };
+  vk::ComputePipeline rng(ctx, "raster_ranges", 2, sizeof(RngPC));
+  struct CompPC { int32_t dims[4]; } cpc{}; cpc.dims[0] = H; cpc.dims[1] = W; cpc.dims[2] = ntx;
+  vk::ComputePipeline comp(ctx, "raster_composite", 4, sizeof(CompPC));
+
+  auto record = [&](VkCommandBuffer cmd) {
     pre.dispatch(cmd, {mB.handle(), cvB.handle(), clB.handle(), opB.handle(), gdB.handle()}, &ppc,
                  sizeof(ppc), (uint32_t)((N + 63) / 64));
-    runner.end(cmd); runner.submitAndWait(cmd);
-    vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &cmd);
-  }
-  std::vector<float> gd((size_t)N*12);
-  gdB.download(gd.data(), gd.size()*4);
-
-  // ---- host: tile binning + per-tile depth sort ----
-  int ntx = (W + 15) / 16, nty = (H + 15) / 16, nTiles = ntx * nty;
-  std::vector<std::vector<int>> tileG(nTiles);
-  for (int i = 0; i < N; ++i) {
-    const float* g = &gd[(size_t)i*12];
-    if (g[11] < 0.5f) continue;  // invalid
-    float u = g[0], v = g[1], r = g[10];
-    int tx0 = std::max(0, (int)((u - r) / 16)), tx1 = std::min(ntx - 1, (int)((u + r) / 16));
-    int ty0 = std::max(0, (int)((v - r) / 16)), ty1 = std::min(nty - 1, (int)((v + r) / 16));
-    for (int ty = ty0; ty <= ty1; ++ty)
-      for (int tx = tx0; tx <= tx1; ++tx) tileG[ty * ntx + tx].push_back(i);
-  }
-  std::vector<int> sortedIdx, ranges(nTiles * 2);
-  for (int t = 0; t < nTiles; ++t) {
-    auto& lst = tileG[t];
-    std::sort(lst.begin(), lst.end(), [&](int a, int b) { return gd[(size_t)a*12+2] < gd[(size_t)b*12+2]; });
-    ranges[2*t] = (int)sortedIdx.size();
-    ranges[2*t+1] = (int)lst.size();
-    sortedIdx.insert(sortedIdx.end(), lst.begin(), lst.end());
-  }
-  if (sortedIdx.empty()) sortedIdx.push_back(0);
-  printf("binned: %zu tile-gaussian entries over %d tiles\n", sortedIdx.size(), nTiles);
-
-  // ---- composite on GPU ----
-  vk::Buffer siB(ctx, sortedIdx.size()*4), rgB(ctx, ranges.size()*4);
-  vk::Buffer imB(ctx, (size_t)H*W*3*4, vk::MemPref::kReadback);
-  siB.upload(sortedIdx.data(), sortedIdx.size()*4);
-  rgB.upload(ranges.data(), ranges.size()*4);
-  struct CompPC { int32_t dims[4]; } cpc{}; cpc.dims[0]=H; cpc.dims[1]=W; cpc.dims[2]=ntx;
-  {
-    vk::ComputePipeline comp(ctx, "raster_composite", 4, sizeof(CompPC));
-    VkCommandBuffer cmd = runner.allocate(); runner.begin(cmd);
-    comp.dispatch(cmd, {gdB.handle(), siB.handle(), rgB.handle(), imB.handle()}, &cpc, sizeof(cpc),
+    vk::computeBarrier(cmd);
+    FillPC fk{(uint32_t)CAP, 0xffffffffu}, fc{1u, 0u};
+    fill.dispatch(cmd, {keyB.handle()}, &fk, sizeof(fk), (uint32_t)((CAP + 255) / 256));
+    fill.dispatch(cmd, {cntB.handle()}, &fc, sizeof(fc), 1);
+    vk::computeBarrier(cmd);
+    dup.dispatch(cmd, {gdB.handle(), cntB.handle(), keyB.handle(), valB.handle()}, &dpc, sizeof(dpc),
+                 (uint32_t)((N + 63) / 64));
+    vk::computeBarrier(cmd);
+    for (uint32_t k = 2; k <= (uint32_t)CAP; k <<= 1)
+      for (uint32_t j = k >> 1; j > 0; j >>= 1) {
+        BitPC bp{j, k, (uint32_t)CAP};
+        bit.dispatch(cmd, {keyB.handle(), valB.handle()}, &bp, sizeof(bp), (uint32_t)((CAP + 255) / 256));
+        vk::computeBarrier(cmd);
+      }
+    RngPC rc{0, nTiles, (int)CAP, DB}, ra{1, nTiles, (int)CAP, DB};
+    rng.dispatch(cmd, {keyB.handle(), rgB.handle()}, &rc, sizeof(rc), (uint32_t)((nTiles + 255) / 256));
+    vk::computeBarrier(cmd);
+    rng.dispatch(cmd, {keyB.handle(), rgB.handle()}, &ra, sizeof(ra), (uint32_t)((CAP + 255) / 256));
+    vk::computeBarrier(cmd);
+    comp.dispatch(cmd, {gdB.handle(), valB.handle(), rgB.handle(), imB.handle()}, &cpc, sizeof(cpc),
                   (uint32_t)((W + 15) / 16), (uint32_t)((H + 15) / 16));
-    runner.end(cmd); runner.submitAndWait(cmd);
-    vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &cmd);
-  }
-  std::vector<float> img((size_t)H*W*3);
-  imB.download(img.data(), img.size()*4);
+  };
+  VkCommandBuffer cmd = runner.allocate();
+  runner.begin(cmd); record(cmd); runner.end(cmd);
+  runner.submitAndWait(cmd);                       // warm
+  double rasterMs = runner.submitAndWait(cmd);     // timed (idempotent: counter is re-zeroed in-buffer)
+  vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &cmd);
+  printf("rasterizer GPU time = %.3f ms  (N=%d, CAP=%lld, %d tiles, fully on GPU)\n", rasterMs, N,
+         (long long)CAP, nTiles);
+  std::vector<float> img((size_t)H * W * 3);
+  imB.download(img.data(), img.size() * 4);
 
   // ---- save ----
   std::string base = outdir + "/vk_view" + std::to_string(view);

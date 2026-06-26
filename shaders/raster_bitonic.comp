@@ -1,0 +1,21 @@
+#version 450
+// One stage/pass of a bitonic sort over (key, value) pairs, ascending by key. The host dispatches
+// this once per (k, j) of the bitonic network (k = subsequence size, j = compare distance). Sorts the
+// tile-binning entries so that, after all passes, each tile's gaussians are contiguous and ordered
+// front-to-back (key = tile<<DB | depth). CAP is padded to a power of two; unused slots hold key=~0u.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Keys { uint keys[]; };
+layout(std430, binding = 1) buffer Vals { uint vals[]; };
+layout(push_constant) uniform PC { uint j, k, n; } pc;
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  uint ixj = i ^ pc.j;
+  if (ixj <= i) return;               // each pair handled once, by the lower index
+  bool ascending = (i & pc.k) == 0u;  // direction for this bitonic subsequence
+  uint ki = keys[i], kj = keys[ixj];
+  if ((ki > kj) == ascending) {       // out of order -> swap key + value together
+    keys[i] = kj;   keys[ixj] = ki;
+    uint vi = vals[i]; vals[i] = vals[ixj]; vals[ixj] = vi;
+  }
+}
