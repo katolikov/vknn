@@ -5,7 +5,7 @@
       "serial": "",
       "precision": "fp16",
       "dir": "/data/local/tmp/vxrt/bench",
-      "no_weight_cache": true,
+      "no_weight_cache": false,
       "max_submit_nodes": 500,
       "cooldown": 22
     }
@@ -21,7 +21,9 @@
         "intrinsics": "models/intr8.npy"
       },
       "outputs": {
-        "save": ["npy"],
+        "save": [
+          "npy"
+        ],
         "golden": {
           "means": "models/means_gold.npy",
           "covariances": "models/covariances_gold.npy",
@@ -30,7 +32,13 @@
           "rotations": "models/rotations_gold.npy",
           "scales": "models/scales_gold.npy"
         },
-        "metrics": ["cosine", "psnr", "snr", "relL2", "max"]
+        "metrics": [
+          "cosine",
+          "psnr",
+          "snr",
+          "relL2",
+          "max"
+        ]
       },
       "bench": 3,
       "tolerance": 0.999,
