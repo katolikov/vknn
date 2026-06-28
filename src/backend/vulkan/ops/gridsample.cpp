@@ -40,5 +40,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kGridSample, GridSampleOp);
+    VKNN_REGISTER_VK_OP(OpType::GridSample, GridSampleOp);
 } // namespace vknn

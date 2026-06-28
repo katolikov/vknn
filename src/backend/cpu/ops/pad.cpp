@@ -81,5 +81,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kPad, PadCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Pad, PadCpu);
 } // namespace vknn

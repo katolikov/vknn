@@ -97,7 +97,7 @@ namespace vknn {
             TensorInfo t;
             t.name  = i.name;
             t.shape = i.shape;
-            t.dtype = DType::kFloat32; // values cross the high-level API as fp32
+            t.dtype = DType::Float32; // values cross the high-level API as fp32
             t.count = i.elems;
             out.push_back(std::move(t));
         }
@@ -133,7 +133,7 @@ namespace vknn {
             const Tensor &t = inputs[i];
             ins[i].name     = !t.name().empty() ? t.name() : (i < info.size() ? info[i].name : "");
             ins[i].shape    = !t.shape().empty() ? t.shape() : (i < info.size() ? info[i].shape : Shape {});
-            ins[i].dtype    = DType::kFloat32;
+            ins[i].dtype    = DType::Float32;
             if (t.dmaBufFd() >= 0)
             {
                 ins[i].dmaBufFd = t.dmaBufFd(); // zero-copy: the engine reads this fd as the GPU input buffer
@@ -157,7 +157,7 @@ namespace vknn {
                 outs.push_back(std::move(b));
             }
         }
-        if (sess_->run(ins, outs) != Status::kOk)
+        if (sess_->run(ins, outs) != Status::Ok)
         {
             return {};
         }

@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
 
     Config cfg;
     cfg.backend   = backendFromStr(argval(argc, argv, "--backend", "vulkan"));
-    cfg.precision = strcmp(argval(argc, argv, "--precision", "fp16"), "fp32") == 0 ? Precision::kFp32 : Precision::kFp16;
+    cfg.precision = strcmp(argval(argc, argv, "--precision", "fp16"), "fp32") == 0 ? Precision::Fp32 : Precision::Fp16;
     cfg.profile   = true;
 
     auto sess = Runtime::load(model, cfg);
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
     IOTensor in;
     in.name  = "input";
     in.shape = {1, 3, 224, 224};
-    in.dtype = DType::kFloat32;
+    in.dtype = DType::Float32;
     in.data  = readFile(inpath);
     if (in.data.size() < numElements(in.shape) * 4)
     {

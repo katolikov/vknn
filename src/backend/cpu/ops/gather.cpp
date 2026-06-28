@@ -25,7 +25,7 @@ namespace vknn {
                 int64_t nidx = I.elems();
                 // Index dtype varies: const int64 (attention Q/K/V) or a runtime float activation (RoPE).
                 auto indexAt = [&](int64_t k) -> int64_t {
-                    return I.dtype == DType::kInt64 ? I.host.i64()[k] : (int64_t) I.host.f32()[k];
+                    return I.dtype == DType::Int64 ? I.host.i64()[k] : (int64_t) I.host.f32()[k];
                 };
                 int64_t axisSize = (rank > 0) ? D.shape[axis] : 1;
                 int64_t outer    = 1;
@@ -79,7 +79,7 @@ namespace vknn {
                         }
                     }
                 };
-                if (D.dtype == DType::kInt64)
+                if (D.dtype == DType::Int64)
                 {
                     int64_t *y = cpu::allocOutI64(Y, outShape);
                     copy(y, D.host.i64());
@@ -95,5 +95,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kGather, GatherCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Gather, GatherCpu);
 } // namespace vknn

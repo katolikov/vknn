@@ -59,5 +59,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kEqual, EqualVk);
+    VKNN_REGISTER_VK_OP(OpType::Equal, EqualVk);
 } // namespace vknn

@@ -57,6 +57,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kBatchNorm, BatchNormOp);
+    VKNN_REGISTER_VK_OP(OpType::BatchNorm, BatchNormOp);
 
 } // namespace vknn

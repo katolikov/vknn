@@ -76,10 +76,10 @@ namespace vknn {
                     std::vector<float> idxf((size_t) std::max<int64_t>(nIdx, 4), 0.f);
                     for (int64_t i = 0; i < nIdx; ++i)
                     {
-                        if (idt == DType::kInt64)
+                        if (idt == DType::Int64)
                         {
                             idxf[(size_t) i] = (float) ib.i64()[i];
-                        } else if (idt == DType::kFloat16)
+                        } else if (idt == DType::Float16)
                         {
                             idxf[(size_t) i] = halfToFloat(reinterpret_cast<const fp16_t *>(ib.bytes.data())[i]);
                         } else
@@ -117,5 +117,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kScatterND, ScatterNDOp);
+    VKNN_REGISTER_VK_OP(OpType::ScatterND, ScatterNDOp);
 } // namespace vknn

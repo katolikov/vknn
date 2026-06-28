@@ -27,5 +27,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kFlatten, FlattenCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Flatten, FlattenCpu);
 } // namespace vknn

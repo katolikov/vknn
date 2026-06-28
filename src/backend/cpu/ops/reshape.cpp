@@ -43,5 +43,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kReshape, ReshapeCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Reshape, ReshapeCpu);
 } // namespace vknn

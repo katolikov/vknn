@@ -8,25 +8,25 @@
 
 namespace vknn {
 
-    enum class BackendKind { kVulkan = 0, kCpu = 1 };
-    enum class Precision { kFp32 = 0, kFp16 = 1, kAuto = 2 };
-    enum class PowerHint { kNormal = 0, kHigh = 1, kLow = 2 };
-    enum class TuningLevel { kOff = 0, kFast = 1, kThorough = 2 };
+    enum class BackendKind { Vulkan = 0, Cpu = 1 };
+    enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2 };
+    enum class PowerHint { Normal = 0, High = 1, Low = 2 };
+    enum class TuningLevel { Off = 0, Fast = 1, Thorough = 2 };
     // How the 3x3-conv Winograd F(2,3) kernel is selected. kAuto measures the tiled-GEMM Winograd
     // against the direct kernel per shape and keeps the faster; kOn forces Winograd on every eligible
     // 3x3; kOff always uses the direct kernel.
-    enum class WinogradMode { kAuto = 0, kOn = 1, kOff = 2 };
+    enum class WinogradMode { Auto = 0, On = 1, Off = 2 };
 
     // Advanced kernel-selection hints (MNN-style Config::setHint). Default (value 0) selects the
     // production kernels; non-zero values select experimental variants.
     enum class Hint {
         // Winograd matmul variant: 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused.
-        kWinogradVariant = 0,
+        WinogradVariant = 0,
         // Winograd output-tile size: 0 = F(2,3) (default), 4 = force F(4,3) (0.56x V/M traffic, 4x FLOP
         // saving, but register-heavy 6x6 transforms — usually slower on this GPU).
-        kWinogradUnit = 1,
+        WinogradUnit = 1,
         // Direct 3x3 kernel: 0 = autotuned (default), 1 = register-tiled (conv_reg), 2 = LDS input-halo.
-        kDirectConv3x3 = 2,
+        DirectConv3x3 = 2,
     };
 
     const char *backendName(BackendKind k);
@@ -34,17 +34,17 @@ namespace vknn {
 
     struct Config {
         // Backend selection + ordered fallback list (CPU is always an implicit final fallback).
-        BackendKind              backend          = BackendKind::kVulkan;
-        std::vector<BackendKind> fallback         = {BackendKind::kCpu};
+        BackendKind              backend          = BackendKind::Vulkan;
+        std::vector<BackendKind> fallback         = {BackendKind::Cpu};
         bool                     allowCpuFallback = true;
 
-        Precision precision  = Precision::kFp16;
-        PowerHint power      = PowerHint::kNormal;
+        Precision precision  = Precision::Fp16;
+        PowerHint power      = PowerHint::Normal;
         int       cpuThreads = 4;
 
         // I/O layout the user supplies / wants back (engine converts internally).
-        TensorFormat inputLayout  = TensorFormat::kNCHW;
-        TensorFormat outputLayout = TensorFormat::kNCHW;
+        TensorFormat inputLayout  = TensorFormat::NCHW;
+        TensorFormat outputLayout = TensorFormat::NCHW;
 
         // Caches. The unified per-model cache file bundles the compiled-pipeline blob and the
         // prepacked-weight + autotune blob; loading it skips shader compilation, conv autotuning, and
@@ -88,13 +88,13 @@ namespace vknn {
         std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
 
         // Tuning. kFast (default) measures a few candidates per shape and caches the winner.
-        TuningLevel tuning = TuningLevel::kFast;
+        TuningLevel tuning = TuningLevel::Fast;
         // 3x3 Winograd selection. kAuto picks the faster of tiled-GEMM Winograd vs the direct kernel per
         // shape. Needs tuning != kOff to measure; with tuning off it stays on the direct kernel.
-        WinogradMode winograd = WinogradMode::kAuto;
+        WinogradMode winograd = WinogradMode::Auto;
 
         // Advanced experimental kernel hints (MNN-style). Default selects the production kernels.
-        // e.g. cfg.setHint(Hint::kWinogradUnit, 4) to force F(4,3).
+        // e.g. cfg.setHint(Hint::WinogradUnit, 4) to force F(4,3).
         std::vector<int> hints; // indexed by (int)Hint; 0 = default. Use setHint()/hint().
         void             setHint(Hint h, int value) {
             if ((int) h >= (int) hints.size())

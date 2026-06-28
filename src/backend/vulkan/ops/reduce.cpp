@@ -55,5 +55,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kReduce, ReduceOp);
+    VKNN_REGISTER_VK_OP(OpType::Reduce, ReduceOp);
 } // namespace vknn

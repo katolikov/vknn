@@ -56,5 +56,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kConcat, ConcatOp);
+    VKNN_REGISTER_VK_OP(OpType::Concat, ConcatOp);
 } // namespace vknn

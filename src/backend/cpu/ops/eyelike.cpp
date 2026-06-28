@@ -40,5 +40,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kEyeLike, EyeLikeCpu);
+    VKNN_REGISTER_CPU_OP(OpType::EyeLike, EyeLikeCpu);
 } // namespace vknn

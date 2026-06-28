@@ -71,6 +71,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_CPU_OP(OpType::kGemm, GemmCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Gemm, GemmCpu);
 
 } // namespace vknn

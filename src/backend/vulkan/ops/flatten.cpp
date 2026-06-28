@@ -20,5 +20,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kFlatten, FlattenOp);
+    VKNN_REGISTER_VK_OP(OpType::Flatten, FlattenOp);
 } // namespace vknn

@@ -86,7 +86,7 @@ static void freeDmaBuf(UserBuf &b) {
 // IOInfo::deviceFormat). A real app fills its dma-buf this way (or its camera/preprocessor produces it).
 static void packDevice(const IOInfo &info, const float *nchw, void *dst) {
     fp16_t *d = (fp16_t *) dst;
-    if (info.deviceFormat == TensorFormat::kNCHW)
+    if (info.deviceFormat == TensorFormat::NCHW)
     {
         for (int64_t i = 0; i < info.elems; ++i)
         {
@@ -117,7 +117,7 @@ static void packDevice(const IOInfo &info, const float *nchw, void *dst) {
 }
 static void unpackDevice(const IOInfo &info, const void *src, float *nchw) {
     const fp16_t *s = (const fp16_t *) src;
-    if (info.deviceFormat == TensorFormat::kNCHW)
+    if (info.deviceFormat == TensorFormat::NCHW)
     {
         for (int64_t i = 0; i < info.elems; ++i)
         {

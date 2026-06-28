@@ -37,5 +37,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kSoftmax, SoftmaxOp);
+    VKNN_REGISTER_VK_OP(OpType::Softmax, SoftmaxOp);
 } // namespace vknn

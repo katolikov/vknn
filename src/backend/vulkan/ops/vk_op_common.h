@@ -123,7 +123,7 @@ namespace vknn {
         const HostBuffer  &hb = g.initializers.at(id);
         int64_t            n  = numElements(g.desc(id).shape);
         std::vector<float> out((size_t) std::max<int64_t>(n, 0));
-        if (g.desc(id).dtype == DType::kFloat16)
+        if (g.desc(id).dtype == DType::Float16)
         {
             const fp16_t *h = reinterpret_cast<const fp16_t *>(hb.bytes.data());
             for (int64_t i = 0; i < n; ++i)
@@ -150,7 +150,7 @@ namespace vknn {
         const Graph      &g  = *env.graph;
         const HostBuffer &hb = g.initializers.at(id);
         int64_t           n  = numElements(shape);
-        if (env.useFp16 && g.desc(id).dtype == DType::kFloat16 && hb.bytes.size() == (size_t) n * 2)
+        if (env.useFp16 && g.desc(id).dtype == DType::Float16 && hb.bytes.size() == (size_t) n * 2)
         {
             auto b = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) n, 4) * 2, vk::MemPref::kAuto);
             b->upload(hb.bytes.data(), (size_t) n * 2);

@@ -82,6 +82,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kGemm, GemmOp);
+    VKNN_REGISTER_VK_OP(OpType::Gemm, GemmOp);
 
 } // namespace vknn

@@ -26,6 +26,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kGlobalAvgPool, GlobalAvgPoolOp);
+    VKNN_REGISTER_VK_OP(OpType::GlobalAvgPool, GlobalAvgPoolOp);
 
 } // namespace vknn

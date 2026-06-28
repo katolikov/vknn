@@ -442,7 +442,7 @@ int main(int argc, char **argv) {
     }
     Config cfg;
     cfg.backend                = backendFromStr(str("backend", "vulkan"));
-    cfg.precision              = str("precision", "fp16") == "fp32" ? Precision::kFp32 : Precision::kFp16;
+    cfg.precision              = str("precision", "fp16") == "fp32" ? Precision::Fp32 : Precision::Fp16;
     cfg.freeWeightsAfterUpload = true;
     cfg.cacheWeights           = !flag("no_weight_cache", true);
     cfg.timing                 = flag("timing", false);
@@ -488,7 +488,7 @@ int main(int argc, char **argv) {
         IOTensor t;
         t.name  = infos[i].name;
         t.shape = infos[i].shape;
-        t.dtype = DType::kFloat32;
+        t.dtype = DType::Float32;
         t.data.assign((size_t) infos[i].elems * 4, 0); // default zeros (runtime-only)
         if (haveIns)
         {
@@ -531,7 +531,7 @@ int main(int argc, char **argv) {
 
     std::vector<IOTensor> outs;
     auto                  t1 = Clock::now();
-    if (sess->run(ins, outs) != Status::kOk)
+    if (sess->run(ins, outs) != Status::Ok)
     {
         fprintf(stderr, "inference failed\n");
         return 2;

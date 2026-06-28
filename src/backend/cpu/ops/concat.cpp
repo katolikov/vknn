@@ -35,7 +35,7 @@ namespace vknn {
                 {
                     outer *= first.shape[i];
                 }
-                bool isI64 = first.dtype == DType::kInt64;
+                bool isI64 = first.dtype == DType::Int64;
                 if (isI64)
                 {
                     int64_t *y        = cpu::allocOutI64(Y, out);
@@ -72,5 +72,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kConcat, ConcatCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Concat, ConcatCpu);
 } // namespace vknn

@@ -47,5 +47,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kDepthToSpace, DepthToSpaceCpu);
+    VKNN_REGISTER_CPU_OP(OpType::DepthToSpace, DepthToSpaceCpu);
 } // namespace vknn

@@ -71,8 +71,8 @@ int main(int argc, char **argv) {
 
     // ---------- 1. encoder: image + intrinsics -> 6 Gaussian outputs (vknn Vulkan) ----------
     Config cfg;
-    cfg.backend                = BackendKind::kVulkan;
-    cfg.precision              = Precision::kFp16;
+    cfg.backend                = BackendKind::Vulkan;
+    cfg.precision              = Precision::Fp16;
     cfg.cacheWeights           = false;
     cfg.freeWeightsAfterUpload = true;
     auto sess                  = Runtime::load(enc, cfg);
@@ -87,13 +87,13 @@ int main(int argc, char **argv) {
         IOTensor t;
         t.name  = info.name;
         t.shape = info.shape;
-        t.dtype = DType::kFloat32;
+        t.dtype = DType::Float32;
         t.data  = readFile(info.name == sess->inputInfo()[0].name ? imgp : intp);
         t.data.resize((size_t) numElements(info.shape) * 4, 0);
         ins.push_back(std::move(t));
     }
     printf("[encoder] running on GPU ...\n");
-    if (sess->run(ins, outs) != Status::kOk)
+    if (sess->run(ins, outs) != Status::Ok)
     {
         fprintf(stderr, "encoder run failed\n");
         return 2;

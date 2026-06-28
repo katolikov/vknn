@@ -10,17 +10,17 @@ namespace vknn {
         static float binary(float a, float b, BinaryType op) {
             switch (op)
             {
-                case BinaryType::kMul:
+                case BinaryType::Mul:
                     return a * b;
-                case BinaryType::kSub:
+                case BinaryType::Sub:
                     return a - b;
-                case BinaryType::kDiv:
+                case BinaryType::Div:
                     return a / b;
-                case BinaryType::kMax:
+                case BinaryType::Max:
                     return std::max(a, b);
-                case BinaryType::kMin:
+                case BinaryType::Min:
                     return std::min(a, b);
-                case BinaryType::kPow:
+                case BinaryType::Pow:
                     return std::pow(a, b);
                 default:
                     break;
@@ -72,13 +72,13 @@ namespace vknn {
                 // Shape arithmetic is int64 (Shape/Gather feed Add/Div/Mul to compute slice/reshape bounds).
                 // Compute it in int64 so const-folding stays exact — reading those bytes as float corrupts
                 // them.
-                if (A.dtype == DType::kInt64 || B.dtype == DType::kInt64)
+                if (A.dtype == DType::Int64 || B.dtype == DType::Int64)
                 {
                     int64_t             *y = cpu::allocOutI64(Y, out);
                     std::vector<int64_t> oa(rank), ob(rank);
                     strides(oa, ob);
                     auto val = [](const RtTensor &T, int64_t i) {
-                        return T.dtype == DType::kInt64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
+                        return T.dtype == DType::Int64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
                     };
                     for (int64_t lin = 0; lin < n; ++lin)
                     {
@@ -87,19 +87,19 @@ namespace vknn {
                         int64_t av = val(A, ia), bv = val(B, ib);
                         switch ((BinaryType) node.subOp)
                         {
-                            case BinaryType::kMul:
+                            case BinaryType::Mul:
                                 y[lin] = av * bv;
                                 break;
-                            case BinaryType::kSub:
+                            case BinaryType::Sub:
                                 y[lin] = av - bv;
                                 break;
-                            case BinaryType::kDiv:
+                            case BinaryType::Div:
                                 y[lin] = bv ? av / bv : 0;
                                 break;
-                            case BinaryType::kMax:
+                            case BinaryType::Max:
                                 y[lin] = std::max(av, bv);
                                 break;
-                            case BinaryType::kMin:
+                            case BinaryType::Min:
                                 y[lin] = std::min(av, bv);
                                 break;
                             default:
@@ -141,5 +141,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kBinary, BinaryCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Binary, BinaryCpu);
 } // namespace vknn

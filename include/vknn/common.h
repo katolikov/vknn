@@ -9,31 +9,31 @@ namespace vknn {
 
     /// Status codes returned across the public API.
     enum class Status {
-        kOk = 0,
-        kInvalidArgument,
-        kUnsupported,
-        kNotFound,
-        kRuntimeError,
-        kDeviceLost,
-        kIoError,
+        Ok = 0,
+        InvalidArgument,
+        Unsupported,
+        NotFound,
+        RuntimeError,
+        DeviceLost,
+        IoError,
     };
 
     inline const char *statusStr(Status s) {
         switch (s)
         {
-            case Status::kOk:
+            case Status::Ok:
                 return "Ok";
-            case Status::kInvalidArgument:
+            case Status::InvalidArgument:
                 return "InvalidArgument";
-            case Status::kUnsupported:
+            case Status::Unsupported:
                 return "Unsupported";
-            case Status::kNotFound:
+            case Status::NotFound:
                 return "NotFound";
-            case Status::kRuntimeError:
+            case Status::RuntimeError:
                 return "RuntimeError";
-            case Status::kDeviceLost:
+            case Status::DeviceLost:
                 return "DeviceLost";
-            case Status::kIoError:
+            case Status::IoError:
                 return "IoError";
         }
         return "?";

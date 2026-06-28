@@ -58,7 +58,7 @@ namespace vknn {
             // --- Winograd F(2x2,3x3) state (3x3, stride 1, pad 1, group 1, fp16) ---
             // The default Winograd kernel is the 3-pass tiled GEMM (wino_input -> wino_gemm -> wino_out);
             // tuneWino picks it per shape against the direct 3x3. The non-GEMM matmul variants all
-            // regress on this GPU and are gated behind Hint::kWinogradVariant as documented negative
+            // regress on this GPU and are gated behind Hint::WinogradVariant as documented negative
             // results: a 2-pass naive-matmul (memory-bound on the global V round-trip), the same split
             // 4 ways (wino_fused2, bandwidth- not occupancy-bound), a fully-fused kernel keeping V in LDS
             // (wino_full, the static LDS array collapses occupancy), and a subgroup-shuffle GEMM
@@ -88,7 +88,7 @@ namespace vknn {
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
 
-                int wvar     = cfgHint(env, Hint::kWinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
+                int wvar     = cfgHint(env, Hint::WinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
                 gemmSubgroup = (wvar == 4);
 
                 // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3).
@@ -180,7 +180,7 @@ namespace vknn {
             // run on dedicated scratch buffers, never the real activation buffers, or they race and
             // corrupt the data path.
             uint32_t pickLocalSize(VkOpEnv &env) {
-                if (env.tuning == TuningLevel::kOff)
+                if (env.tuning == TuningLevel::Off)
                 {
                     return 64;
                 }
@@ -196,14 +196,14 @@ namespace vknn {
                     }
                 }
                 uint32_t best = 64;
-                if (env.tuning != TuningLevel::kOff && env.runner)
+                if (env.tuning != TuningLevel::Off && env.runner)
                 {
                     int    es       = env.useFp16 ? 2 : 4;
                     size_t srcBytes = (size_t) pc.N * cBlocks(pc.Cin) * pc.H * pc.W * 4 * es;
                     size_t dstBytes = (size_t) pc.N * cBlocks(pc.Cout) * pc.OH * pc.OW * 4 * es;
                     auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
                     auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
-                    std::vector<uint32_t> cands = (env.tuning == TuningLevel::kThorough) ? std::vector<uint32_t> {32, 64, 128, 256} : std::vector<uint32_t> {64, 128, 256};
+                    std::vector<uint32_t> cands = (env.tuning == TuningLevel::Thorough) ? std::vector<uint32_t> {32, 64, 128, 256} : std::vector<uint32_t> {64, 128, 256};
                     double bestMs = 1e30;
                     for (uint32_t ls: cands)
                     {
@@ -237,16 +237,16 @@ namespace vknn {
             // so the choice is measured per-shape on scratch buffers and cached like the local-size tune.
             // F(4,3) (0.56x the V/M traffic, 4x FLOP saving) is only considered when fp16-safe (allowF4).
             int tuneWino(VkOpEnv &env, NCHW x, NCHW y, int64_t Cin, int64_t Cout, int act) {
-                if (env.winograd == WinogradMode::kOff)
+                if (env.winograd == WinogradMode::Off)
                 {
                     return 0;
                 }
-                if (cfgHint(env, Hint::kWinogradUnit) == 4)
+                if (cfgHint(env, Hint::WinogradUnit) == 4)
                 {
                     return 2; // force F(4,3) (numerically fine but register-heavy transforms)
                 }
-                bool forceOn = (env.winograd == WinogradMode::kOn);
-                if (env.tuning == TuningLevel::kOff || !env.runner)
+                bool forceOn = (env.winograd == WinogradMode::On);
+                if (env.tuning == TuningLevel::Off || !env.runner)
                 {
                     return forceOn ? 1 : 0;
                 }
@@ -432,7 +432,7 @@ namespace vknn {
                             pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)},
                                                                          env.cache->handle());
                         }
-                    } else if (cfgHint(env, Hint::kDirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
+                    } else if (cfgHint(env, Hint::DirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
                     {
                         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
                         // layer4 stays on the direct kernel (tile barely fills, halo overhead dominates).
@@ -440,7 +440,7 @@ namespace vknn {
                         int64_t nTX = (y.w + 7) / 8, nTY = (y.h + 7) / 8;
                         ldsGroups = x.n * Coutb * nTY * nTX;
                         pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC), std::vector<uint32_t> {}, env.cache->handle());
-                    } else if (cfgHint(env, Hint::kDirectConv3x3) == 1)
+                    } else if (cfgHint(env, Hint::DirectConv3x3) == 1)
                     {
                         // register-tiled implicit-im2col (opt-in). Regresses 3x3 on this GPU: small weight
                         // tensors already cache well, so WTILE overhead + extra input loads dominate.
@@ -527,6 +527,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kConv, ConvOp);
+    VKNN_REGISTER_VK_OP(OpType::Conv, ConvOp);
 
 } // namespace vknn

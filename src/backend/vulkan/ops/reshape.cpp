@@ -26,6 +26,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kReshape, ReshapeOp);
+    VKNN_REGISTER_VK_OP(OpType::Reshape, ReshapeOp);
 
 } // namespace vknn

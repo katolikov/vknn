@@ -31,5 +31,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kDepthToSpace, DepthToSpaceOp);
+    VKNN_REGISTER_VK_OP(OpType::DepthToSpace, DepthToSpaceOp);
 } // namespace vknn

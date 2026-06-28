@@ -17,31 +17,31 @@ TEST(DType, HalfRoundTrip) {
         float r = halfToFloat(floatToHalf(v));
         EXPECT_NEAR(r, v, std::fabs(v) * 0.01f + 1e-3f) << "v=" << v;
     }
-    EXPECT_EQ(dtypeSize(DType::kFloat32), 4u);
-    EXPECT_EQ(dtypeSize(DType::kFloat16), 2u);
+    EXPECT_EQ(dtypeSize(DType::Float32), 4u);
+    EXPECT_EQ(dtypeSize(DType::Float16), 2u);
 }
 
 TEST(Config, JsonRoundTrip) {
     Config c;
-    c.backend      = BackendKind::kVulkan;
-    c.precision    = Precision::kFp16;
+    c.backend      = BackendKind::Vulkan;
+    c.precision    = Precision::Fp16;
     c.cpuThreads   = 8;
     c.profile      = true;
     std::string js = c.toJson();
     Config      d  = Config::fromJsonString(js);
-    EXPECT_EQ(d.backend, BackendKind::kVulkan);
-    EXPECT_EQ(d.precision, Precision::kFp16);
+    EXPECT_EQ(d.backend, BackendKind::Vulkan);
+    EXPECT_EQ(d.precision, Precision::Fp16);
     EXPECT_EQ(d.cpuThreads, 8);
     EXPECT_TRUE(d.profile);
 }
 
 TEST(Config, ParseExplicit) {
     Config c = Config::fromJsonString(R"({"backend":"CPU","precision":"fp32","fallback":["VULKAN","CPU"],"cacheDir":"/tmp/x"})");
-    EXPECT_EQ(c.backend, BackendKind::kCpu);
-    EXPECT_EQ(c.precision, Precision::kFp32);
+    EXPECT_EQ(c.backend, BackendKind::Cpu);
+    EXPECT_EQ(c.precision, Precision::Fp32);
     EXPECT_EQ(c.cacheDir, "/tmp/x");
     ASSERT_EQ(c.fallback.size(), 2u);
-    EXPECT_EQ(c.fallback[0], BackendKind::kVulkan);
+    EXPECT_EQ(c.fallback[0], BackendKind::Vulkan);
 }
 
 TEST(Layout, PackMath) {
@@ -72,7 +72,7 @@ TEST(CpuOps, Conv1x1ReluReference) {
     wi.isInitializer = true;
     TensorId   w     = g.addTensor(wi);
     HostBuffer wb;
-    wb.resizeElems(4, DType::kFloat32);
+    wb.resizeElems(4, DType::Float32);
     wb.f32()[0]       = 2;
     wb.f32()[1]       = 0;
     wb.f32()[2]       = 0;
@@ -84,7 +84,7 @@ TEST(CpuOps, Conv1x1ReluReference) {
     bi.isInitializer = true;
     TensorId   b     = g.addTensor(bi);
     HostBuffer bb;
-    bb.resizeElems(2, DType::kFloat32);
+    bb.resizeElems(2, DType::Float32);
     bb.f32()[0]       = -3;
     bb.f32()[1]       = 0;
     g.initializers[b] = bb;
@@ -94,13 +94,13 @@ TEST(CpuOps, Conv1x1ReluReference) {
     TensorId y  = g.addTensor(yo);
 
     Node conv;
-    conv.type    = OpType::kConv;
+    conv.type    = OpType::Conv;
     conv.name    = "conv";
     conv.inputs  = {x, w, b};
     conv.outputs = {y};
     g.nodes.push_back(conv);
     Node relu;
-    relu.type = OpType::kRelu;
+    relu.type = OpType::Relu;
     relu.name = "relu";
     // relu reads y -> y2
     TensorDesc y2o;
@@ -112,18 +112,18 @@ TEST(CpuOps, Conv1x1ReluReference) {
     g.outputs = {y2};
 
     Config cfg;
-    cfg.backend = BackendKind::kCpu;
+    cfg.backend = BackendKind::Cpu;
     auto sess   = Session::create(std::move(g), cfg);
     ASSERT_TRUE(sess);
     IOTensor in;
     in.name  = "x";
     in.shape = {1, 2, 1, 1};
-    in.dtype = DType::kFloat32;
+    in.dtype = DType::Float32;
     in.data.resize(2 * 4);
     reinterpret_cast<float *>(in.data.data())[0] = 1.0f; // -> 2*1-3 = -1 -> relu 0
     reinterpret_cast<float *>(in.data.data())[1] = 5.0f; // -> 2*5+0 = 10 -> relu 10
     std::vector<IOTensor> outs;
-    ASSERT_EQ(sess->run({in}, outs), Status::kOk);
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
     ASSERT_FALSE(outs.empty());
     const float *o = outs[0].f32();
     EXPECT_NEAR(o[0], 0.0f, 1e-5);
@@ -160,7 +160,7 @@ TEST(Api, AutoShapesFromModel) {
     wi.isInitializer = true;
     TensorId   w     = g.addTensor(wi);
     HostBuffer wb;
-    wb.resizeElems(4, DType::kFloat32);
+    wb.resizeElems(4, DType::Float32);
     wb.f32()[0]       = 2;
     wb.f32()[1]       = 0;
     wb.f32()[2]       = 0;
@@ -172,7 +172,7 @@ TEST(Api, AutoShapesFromModel) {
     bi.isInitializer = true;
     TensorId   b     = g.addTensor(bi);
     HostBuffer bb;
-    bb.resizeElems(2, DType::kFloat32);
+    bb.resizeElems(2, DType::Float32);
     bb.f32()[0]       = -3;
     bb.f32()[1]       = 0;
     g.initializers[b] = bb;
@@ -181,7 +181,7 @@ TEST(Api, AutoShapesFromModel) {
     yo.isOutput = true;
     TensorId y  = g.addTensor(yo);
     Node     conv;
-    conv.type    = OpType::kConv;
+    conv.type    = OpType::Conv;
     conv.name    = "conv";
     conv.inputs  = {x, w, b};
     conv.outputs = {y};
@@ -189,7 +189,7 @@ TEST(Api, AutoShapesFromModel) {
     g.outputs = {y};
 
     Config cfg;
-    cfg.backend = BackendKind::kCpu;
+    cfg.backend = BackendKind::Cpu;
     auto sess   = Session::create(std::move(g), cfg);
     // query metadata instead of hand-specifying it
     auto in = sess->inputInfo();
@@ -206,7 +206,7 @@ TEST(Api, AutoShapesFromModel) {
 
 // Unary family: Sigmoid + HardSwish on CPU.
 TEST(CpuOps, UnarySigmoidHardSwish) {
-    for (int sub: {(int) UnaryType::kSigmoid, (int) UnaryType::kHardSwish})
+    for (int sub: {(int) UnaryType::Sigmoid, (int) UnaryType::HardSwish})
     {
         Graph      g;
         TensorDesc xi;
@@ -220,7 +220,7 @@ TEST(CpuOps, UnarySigmoidHardSwish) {
         yo.isOutput = true;
         TensorId y  = g.addTensor(yo);
         Node     u;
-        u.type    = OpType::kUnary;
+        u.type    = OpType::Unary;
         u.name    = "u";
         u.subOp   = sub;
         u.inputs  = {x};
@@ -228,7 +228,7 @@ TEST(CpuOps, UnarySigmoidHardSwish) {
         g.nodes.push_back(u);
         g.outputs = {y};
         Config cfg;
-        cfg.backend   = BackendKind::kCpu;
+        cfg.backend   = BackendKind::Cpu;
         auto     sess = Session::create(std::move(g), cfg);
         IOTensor in;
         in.name  = "x";
@@ -240,11 +240,11 @@ TEST(CpuOps, UnarySigmoidHardSwish) {
             reinterpret_cast<float *>(in.data.data())[i] = vals[i];
         }
         std::vector<IOTensor> outs;
-        ASSERT_EQ(sess->run({in}, outs), Status::kOk);
+        ASSERT_EQ(sess->run({in}, outs), Status::Ok);
         const float *o = outs[0].f32();
         for (int i = 0; i < 4; ++i)
         {
-            float e = sub == (int) UnaryType::kSigmoid ? 1.f / (1.f + std::exp(-vals[i])) : vals[i] * std::min(std::max(vals[i] + 3.f, 0.f), 6.f) / 6.f;
+            float e = sub == (int) UnaryType::Sigmoid ? 1.f / (1.f + std::exp(-vals[i])) : vals[i] * std::min(std::max(vals[i] + 3.f, 0.f), 6.f) / 6.f;
             EXPECT_NEAR(o[i], e, 1e-5) << "sub=" << sub << " i=" << i;
         }
     }
@@ -265,7 +265,7 @@ TEST(CpuOps, BinaryMul) {
     bi.isInitializer = true; // broadcast scalar
     TensorId   b     = g.addTensor(bi);
     HostBuffer bb;
-    bb.resizeElems(1, DType::kFloat32);
+    bb.resizeElems(1, DType::Float32);
     bb.f32()[0]       = 3.f;
     g.initializers[b] = bb;
     TensorDesc co;
@@ -273,15 +273,15 @@ TEST(CpuOps, BinaryMul) {
     co.isOutput = true;
     TensorId c  = g.addTensor(co);
     Node     m;
-    m.type    = OpType::kBinary;
+    m.type    = OpType::Binary;
     m.name    = "mul";
-    m.subOp   = (int) BinaryType::kMul;
+    m.subOp   = (int) BinaryType::Mul;
     m.inputs  = {a, b};
     m.outputs = {c};
     g.nodes.push_back(m);
     g.outputs = {c};
     Config cfg;
-    cfg.backend   = BackendKind::kCpu;
+    cfg.backend   = BackendKind::Cpu;
     auto     sess = Session::create(std::move(g), cfg);
     IOTensor in;
     in.name  = "a";
@@ -292,7 +292,7 @@ TEST(CpuOps, BinaryMul) {
         reinterpret_cast<float *>(in.data.data())[i] = (float) (i + 1);
     }
     std::vector<IOTensor> outs;
-    ASSERT_EQ(sess->run({in}, outs), Status::kOk);
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
     const float *o = outs[0].f32();
     EXPECT_NEAR(o[0], 3.f, 1e-5);
     EXPECT_NEAR(o[1], 6.f, 1e-5);
@@ -314,7 +314,7 @@ TEST(CpuOps, AddBroadcast) {
     bi.isInitializer = true;
     TensorId   b     = g.addTensor(bi);
     HostBuffer bb;
-    bb.resizeElems(3, DType::kFloat32);
+    bb.resizeElems(3, DType::Float32);
     bb.f32()[0]       = 10;
     bb.f32()[1]       = 20;
     bb.f32()[2]       = 30;
@@ -324,14 +324,14 @@ TEST(CpuOps, AddBroadcast) {
     co.isOutput = true;
     TensorId c  = g.addTensor(co);
     Node     add;
-    add.type    = OpType::kAdd;
+    add.type    = OpType::Add;
     add.name    = "add";
     add.inputs  = {a, b};
     add.outputs = {c};
     g.nodes.push_back(add);
     g.outputs = {c};
     Config cfg;
-    cfg.backend   = BackendKind::kCpu;
+    cfg.backend   = BackendKind::Cpu;
     auto     sess = Session::create(std::move(g), cfg);
     IOTensor in;
     in.name  = "a";
@@ -342,7 +342,7 @@ TEST(CpuOps, AddBroadcast) {
         reinterpret_cast<float *>(in.data.data())[i] = (float) i;
     }
     std::vector<IOTensor> outs;
-    ASSERT_EQ(sess->run({in}, outs), Status::kOk);
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
     const float *o = outs[0].f32();
     EXPECT_NEAR(o[0], 10, 1e-5);
     EXPECT_NEAR(o[1], 21, 1e-5);

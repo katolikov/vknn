@@ -37,5 +37,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kBatchNorm, BatchNormCpu);
+    VKNN_REGISTER_CPU_OP(OpType::BatchNorm, BatchNormCpu);
 } // namespace vknn

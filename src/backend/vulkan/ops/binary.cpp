@@ -57,5 +57,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kBinary, BinaryOp);
+    VKNN_REGISTER_VK_OP(OpType::Binary, BinaryOp);
 } // namespace vknn

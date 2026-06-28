@@ -148,7 +148,7 @@ namespace vknn {
             }
         }
         BackendKind kind() const override {
-            return BackendKind::kVulkan;
+            return BackendKind::Vulkan;
         }
         const char *name() const override {
             return "Vulkan";
@@ -182,16 +182,16 @@ namespace vknn {
             }
             // Generic N-D ops the GPU runs flat (Transpose/Slice always; Concat/Softmax/Binary/Add either
             // NC4HW4 or flat per the layout pass). The flat row-major kernels handle rank <= 6.
-            if (nd.type == OpType::kTranspose || nd.type == OpType::kSlice || nd.type == OpType::kConvertLayout || nd.type == OpType::kConcat || nd.type == OpType::kSoftmax || nd.type == OpType::kSqueeze)
+            if (nd.type == OpType::Transpose || nd.type == OpType::Slice || nd.type == OpType::ConvertLayout || nd.type == OpType::Concat || nd.type == OpType::Softmax || nd.type == OpType::Squeeze)
             {
                 return true;
             }
-            if (nd.type == OpType::kExpand || nd.type == OpType::kTile)
+            if (nd.type == OpType::Expand || nd.type == OpType::Tile)
             {
                 // flat broadcast/tile gather decodes up to kMaxRank=6 output dims.
                 return g.desc(nd.outputs[0]).shape.size() <= 8;
             }
-            if (nd.type == OpType::kPad)
+            if (nd.type == OpType::Pad)
             {
                 // Flat pad runs on the GPU only for static pads + a supported mode (else CPU). Mirrors
                 // gpuFlatNode so a GPU-assigned Pad is always marked flat by the layout pass.
@@ -211,7 +211,7 @@ namespace vknn {
                 }
                 return !(nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]));
             }
-            if (nd.type == OpType::kMatMul)
+            if (nd.type == OpType::MatMul)
             {
                 // Batched N-D matmul on the flat row-major path; the kernel decodes up to kMaxRank=6 out
                 // dims.
@@ -221,20 +221,20 @@ namespace vknn {
                 }
                 return g.desc(nd.outputs[0]).shape.size() <= 8;
             }
-            if (nd.type == OpType::kDepthToSpace)
+            if (nd.type == OpType::DepthToSpace)
             {
                 // [N,C,H,W] -> [N,C/b^2,H*b,W*b]; flat index-remap kernel. Need 4D and C divisible by b^2.
                 const Shape &in = g.desc(nd.inputs[0]).shape;
                 int64_t      b  = nd.attr.geti("blocksize", 1);
                 return in.size() == 4 && b >= 1 && in[1] % (b * b) == 0;
             }
-            if (nd.type == OpType::kReduce)
+            if (nd.type == OpType::Reduce)
             {
                 // flat reduce kernel: one thread per output element, loops the reduced axes. rank <= 6.
                 const Shape &in = g.desc(nd.inputs[0]).shape;
                 return !in.empty() && in.size() <= 8;
             }
-            if (nd.type == OpType::kFusedDwPw)
+            if (nd.type == OpType::FusedDwPw)
             {
                 // LDS holds E depthwise outputs (cap 1024). Run ALL eligible fused nodes on the GPU: a
                 // partial gate (some fused nodes on CPU) creates a GPU/CPU boundary that mis-handles the
@@ -247,14 +247,14 @@ namespace vknn {
                 }
                 return in[1] <= 1024;
             }
-            if (nd.type == OpType::kFusedSE)
+            if (nd.type == OpType::FusedSE)
             {
                 // fixed LDS arrays: avg[1024], s1[256]
                 const Shape &f  = g.desc(nd.inputs[0]).shape;
                 const Shape &w1 = g.desc(nd.inputs[1]).shape;
                 return f.size() == 4 && f[1] <= 1024 && !w1.empty() && w1[0] <= 256;
             }
-            if (nd.type == OpType::kGridSample)
+            if (nd.type == OpType::GridSample)
             {
                 // GPU path needs the grid as a raw constant buffer (it can't be NC4HW4-packed); runtime grids
                 // and cubic mode fall back to the CPU op.
@@ -270,14 +270,14 @@ namespace vknn {
                 std::string m = nd.attr.gets("mode", "bilinear");
                 return m == "bilinear" || m == "linear" || m == "nearest";
             }
-            if (nd.type == OpType::kResize)
+            if (nd.type == OpType::Resize)
             {
                 // GPU kernel resizes spatial dims only; channel/batch resize falls back to the CPU op.
                 const Shape &in  = g.desc(nd.inputs[0]).shape;
                 const Shape &out = g.desc(nd.outputs[0]).shape;
                 return in.size() == 4 && out.size() == 4 && in[0] == out[0] && in[1] == out[1];
             }
-            if (nd.type == OpType::kLayerNorm)
+            if (nd.type == OpType::LayerNorm)
             {
                 // Flat reduction over the trailing axes; scale (and bias, if present) must be const
                 // initializers.
@@ -291,34 +291,34 @@ namespace vknn {
                 }
                 return true;
             }
-            if (nd.type == OpType::kWhere || nd.type == OpType::kEqual)
+            if (nd.type == OpType::Where || nd.type == OpType::Equal)
             {
                 // flat broadcasting kernels (fixed PC arrays) decode up to kMaxRank=6 output dims.
                 return g.desc(nd.outputs[0]).shape.size() <= 8;
             }
-            if (nd.type == OpType::kUnsqueeze)
+            if (nd.type == OpType::Unsqueeze)
             {
                 return true; // metadata copy on the flat path
             }
-            if (nd.type == OpType::kCast)
+            if (nd.type == OpType::Cast)
             {
                 // float->float casts are a no-op copy on the unified-precision buffer; int targets stay CPU.
                 DType o = g.desc(nd.outputs[0]).dtype;
-                return o == DType::kFloat32 || o == DType::kFloat16;
+                return o == DType::Float32 || o == DType::Float16;
             }
-            if (nd.type == OpType::kGather)
+            if (nd.type == OpType::Gather)
             {
                 // flat axis-aware gather; index may be a constant (uploaded) or a runtime float activation
                 // (RoPE).
                 return nd.inputs.size() >= 2;
             }
-            if (nd.type == OpType::kScatterND)
+            if (nd.type == OpType::ScatterND)
             {
                 // flat scatter; index may be a constant or a runtime float activation. Data rank within
                 // kMaxRank.
                 return nd.inputs.size() >= 3 && g.desc(nd.inputs[0]).shape.size() <= 8;
             }
-            if (nd.type == OpType::kEinsum)
+            if (nd.type == OpType::Einsum)
             {
                 // Only "i,j->ij" (outer product) has a GPU kernel; other equations use the CPU op.
                 std::string eq;
@@ -331,7 +331,7 @@ namespace vknn {
                 }
                 return eq == "i,j->ij";
             }
-            if (nd.type == OpType::kBatchNorm)
+            if (nd.type == OpType::BatchNorm)
             {
                 // per-channel affine; needs 4D input and the 4 params (gamma/beta/mean/var) as constants.
                 if (nd.inputs.size() < 5 || g.desc(nd.inputs[0]).shape.size() != 4)
@@ -347,7 +347,7 @@ namespace vknn {
                 }
                 return true;
             }
-            if (nd.type == OpType::kSplit)
+            if (nd.type == OpType::Split)
             {
                 // NC4HW4 channel split (4D, axis 1, 4-aligned outputs) is a block copy; any other split runs
                 // on the flat row-major path (a Slice per output) for rank <= kMaxRank.
@@ -384,7 +384,7 @@ namespace vknn {
                 }
                 return rank <= 8;
             }
-            if (nd.type == OpType::kClip)
+            if (nd.type == OpType::Clip)
             {
                 // const-or-absent scalar bounds (baked into the PC in prepare); runtime bounds fall back.
                 for (int i = 1; i < 3 && i < (int) nd.inputs.size(); ++i)
@@ -398,7 +398,7 @@ namespace vknn {
             }
             // Add/Binary: 2 inputs required. The NC4HW4 kernel does same-shape + channel-broadcast; the
             // flat kernel (chosen by the layout pass) does everything else incl. constant operands.
-            if (nd.type == OpType::kAdd || nd.type == OpType::kBinary)
+            if (nd.type == OpType::Add || nd.type == OpType::Binary)
             {
                 return nd.inputs.size() == 2;
             }
@@ -515,7 +515,7 @@ namespace vknn {
         }
 
         bool useFp16(const Config &cfg) const {
-            return vxVulkanFp16Available() && ctx_->caps().shaderFloat16 && (cfg.precision == Precision::kFp16 || cfg.precision == Precision::kAuto);
+            return vxVulkanFp16Available() && ctx_->caps().shaderFloat16 && (cfg.precision == Precision::Fp16 || cfg.precision == Precision::Auto);
         }
 
         std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) override;
@@ -606,8 +606,8 @@ namespace vknn {
             if (flat)
             { // flat device buffer == host NCHW row-major; straight copy (+ fp16 convert)
                 int64_t n = numElements(rt.shape);
-                rt.host.resizeElems(n, DType::kFloat32);
-                rt.dtype   = DType::kFloat32;
+                rt.host.resizeElems(n, DType::Float32);
+                rt.dtype   = DType::Float32;
                 float *dst = rt.host.f32();
                 if (fp16)
                 {
@@ -621,8 +621,8 @@ namespace vknn {
             }
             NCHW    x  = NCHW::from(rt.shape);
             int64_t Cb = cBlocks(x.c);
-            rt.host.resizeElems(x.elems(), DType::kFloat32);
-            rt.dtype   = DType::kFloat32;
+            rt.host.resizeElems(x.elems(), DType::Float32);
+            rt.dtype   = DType::Float32;
             float *dst = rt.host.f32();
             if (fp16)
             {
@@ -929,7 +929,7 @@ namespace vknn {
                 auto op = VkOpRegistry::instance().create(g.nodes[ni].type);
                 if (!op)
                 {
-                    throw Error(Status::kUnsupported, std::string("no Vulkan kernel for ") + opTypeName(g.nodes[ni].type));
+                    throw Error(Status::Unsupported, std::string("no Vulkan kernel for ") + opTypeName(g.nodes[ni].type));
                 }
                 op->prepare(g.nodes[ni], env_);
                 ops_.push_back(std::move(op));
@@ -967,12 +967,12 @@ namespace vknn {
                 const Node &nn = g_.nodes[idx];
                 OpType      t  = nn.type;
                 // A flat split is a compute dispatch (flat_gather); the NC4HW4 split is a buffer copy.
-                if (t == OpType::kSplit)
+                if (t == OpType::Split)
                 {
                     return nn.outputs.empty() || nn.outputs[0] == kNoTensor || !g_.desc(nn.outputs[0]).gpuFlat;
                 }
                 // Reshape/Flatten/Squeeze/Unsqueeze/Cast are vkCmdCopyBuffer (transfer-stage writes).
-                return t == OpType::kReshape || t == OpType::kFlatten || t == OpType::kSqueeze || t == OpType::kUnsqueeze || t == OpType::kCast;
+                return t == OpType::Reshape || t == OpType::Flatten || t == OpType::Squeeze || t == OpType::Unsqueeze || t == OpType::Cast;
             };
             // Precise barriers: each activation tensor has a single writer, so only a read-after-write
             // needs a barrier. Emit one before an op only when it reads a tensor written since the last
@@ -1200,12 +1200,12 @@ namespace vknn {
                 {
                     // zero-copy: the GPU reads the caller's dma-buf directly (device-native bytes); no pack.
                     rt.deviceValid  = true;
-                    rt.deviceFormat = flat ? TensorFormat::kNCHW : TensorFormat::kNC4HW4;
+                    rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 } else if (rt.hostValid && !alreadyHere)
                 {
                     VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_, flat);
                     rt.deviceValid  = true;
-                    rt.deviceFormat = flat ? TensorFormat::kNCHW : TensorFormat::kNC4HW4;
+                    rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 }
             }
             auto t1 = now();
@@ -1233,7 +1233,7 @@ namespace vknn {
                 }
                 rt.device->buffer = bit->second;
                 rt.deviceValid    = true;
-                rt.deviceFormat   = flat ? TensorFormat::kNCHW : TensorFormat::kNC4HW4;
+                rt.deviceFormat   = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 if (rt.dmaBufFd < 0)
                 {
                     VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_, flat);
@@ -1343,6 +1343,6 @@ namespace vknn {
         return s;
     }
 
-    VKNN_REGISTER_BACKEND(BackendKind::kVulkan, VulkanBackend);
+    VKNN_REGISTER_BACKEND(BackendKind::Vulkan, VulkanBackend);
 
 } // namespace vknn

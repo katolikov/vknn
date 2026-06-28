@@ -38,7 +38,7 @@ namespace vknn {
                     outStride[i] = outStride[i + 1] * out[i + 1];
                 }
                 int64_t        elems = numElements(out);
-                bool           i64   = X.dtype == DType::kInt64;
+                bool           i64   = X.dtype == DType::Int64;
                 const float   *xf    = i64 ? nullptr : X.host.f32();
                 const int64_t *xi    = i64 ? X.host.i64() : nullptr;
                 float         *yf    = i64 ? nullptr : cpu::allocOut(Y, out);
@@ -66,5 +66,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kTranspose, TransposeCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Transpose, TransposeCpu);
 } // namespace vknn

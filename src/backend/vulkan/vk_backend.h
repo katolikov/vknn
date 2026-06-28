@@ -58,8 +58,8 @@ namespace vknn {
         bool                                  useFp16  = false;
         WeightCache                          *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
         vk::CommandRunner                    *runner   = nullptr; // for on-device autotuning benchmarks
-        TuningLevel                           tuning   = TuningLevel::kFast;
-        WinogradMode                          winograd = WinogradMode::kAuto;
+        TuningLevel                           tuning   = TuningLevel::Fast;
+        WinogradMode                          winograd = WinogradMode::Auto;
         // Per-model namespace for the weight cache, so reusing one cacheDir across different models can't
         // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
         std::string modelTag;

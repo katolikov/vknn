@@ -62,7 +62,7 @@ int main(int argc, char **argv) {
         {
             TensorDesc &d = g.tensors[kv.first];
             before += (int64_t) kv.second.bytes.size();
-            if (d.dtype != DType::kFloat32)
+            if (d.dtype != DType::Float32)
             { // int64 shape tensors, etc. — leave as-is
                 after += (int64_t) kv.second.bytes.size();
                 ++kept;
@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
                 h[i] = floatToHalf(src[i]);
             }
             kv.second.bytes = std::move(half);
-            d.dtype         = DType::kFloat16;
+            d.dtype         = DType::Float16;
             after += (int64_t) kv.second.bytes.size();
             ++conv;
         }

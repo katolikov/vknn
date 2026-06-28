@@ -27,5 +27,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kResize, ResizeOp);
+    VKNN_REGISTER_VK_OP(OpType::Resize, ResizeOp);
 } // namespace vknn

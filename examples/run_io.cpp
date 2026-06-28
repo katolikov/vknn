@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
 
     Config cfg;
     cfg.backend                = backendFromStr(opt(argc, argv, "--backend", "vulkan"));
-    cfg.precision              = !strcmp(opt(argc, argv, "--precision", "fp16"), "fp32") ? Precision::kFp32 : Precision::kFp16;
+    cfg.precision              = !strcmp(opt(argc, argv, "--precision", "fp16"), "fp32") ? Precision::Fp32 : Precision::Fp16;
     cfg.cacheWeights           = !flag(argc, argv, "--no-weight-cache");
     cfg.freeWeightsAfterUpload = !flag(argc, argv, "--keep-weights");
     cfg.optLevel               = atoi(opt(argc, argv, "--opt-level", "3"));
@@ -89,7 +89,7 @@ int main(int argc, char **argv) {
         IOTensor in;
         in.name      = infos[i].name;
         in.shape     = infos[i].shape;
-        in.dtype     = DType::kFloat32;
+        in.dtype     = DType::Float32;
         int64_t need = numElements(in.shape) * 4;
         in.data.assign(need, 0);
         if (i < inFiles.size())
@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
 
     std::vector<IOTensor> outs;
     Status                st = sess->run(ins, outs);
-    if (st != Status::kOk)
+    if (st != Status::Ok)
     {
         fprintf(stderr, "run failed (status %d)\n", (int) st);
         return 2;

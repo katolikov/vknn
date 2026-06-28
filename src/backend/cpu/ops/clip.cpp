@@ -40,5 +40,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kClip, ClipCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Clip, ClipCpu);
 } // namespace vknn

@@ -53,10 +53,10 @@ namespace vknn {
                 {
                     outStrideK[i] = outStrideK[i + 1] * X.shape[kept[i + 1]];
                 }
-                float                init = op == ReduceType::kMax  ? -std::numeric_limits<float>::infinity() :
-                                            op == ReduceType::kMin  ? std::numeric_limits<float>::infinity() :
-                                            op == ReduceType::kProd ? 1.f :
-                                                                      0.f;
+                float                init = op == ReduceType::Max  ? -std::numeric_limits<float>::infinity() :
+                                            op == ReduceType::Min  ? std::numeric_limits<float>::infinity() :
+                                            op == ReduceType::Prod ? 1.f :
+                                                                     0.f;
                 std::vector<float>   acc(outElems, init);
                 std::vector<int64_t> cnt(outElems, 0);
                 const float         *x = X.host.f32();
@@ -69,16 +69,16 @@ namespace vknn {
                         oi += c * outStrideK[k];
                     }
                     float v = x[i];
-                    if (op == ReduceType::kMax)
+                    if (op == ReduceType::Max)
                     {
                         acc[oi] = std::max(acc[oi], v);
-                    } else if (op == ReduceType::kMin)
+                    } else if (op == ReduceType::Min)
                     {
                         acc[oi] = std::min(acc[oi], v);
-                    } else if (op == ReduceType::kProd)
+                    } else if (op == ReduceType::Prod)
                     {
                         acc[oi] *= v;
-                    } else if (op == ReduceType::kL2)
+                    } else if (op == ReduceType::L2)
                     {
                         acc[oi] += v * v; // sum of squares; sqrt below
                     } else
@@ -91,10 +91,10 @@ namespace vknn {
                 float *y = cpu::allocOut(Y, out);
                 for (int64_t i = 0; i < outElems; ++i)
                 {
-                    if (op == ReduceType::kMean && cnt[i])
+                    if (op == ReduceType::Mean && cnt[i])
                     {
                         y[i] = acc[i] / cnt[i];
-                    } else if (op == ReduceType::kL2)
+                    } else if (op == ReduceType::L2)
                     {
                         y[i] = std::sqrt(acc[i]);
                     } else
@@ -105,5 +105,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kReduce, ReduceCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Reduce, ReduceCpu);
 } // namespace vknn

@@ -24,7 +24,7 @@ namespace vknn {
                 {
                     inner *= X.shape[i];
                 }
-                bool    i64 = X.dtype == DType::kInt64;
+                bool    i64 = X.dtype == DType::Int64;
                 int64_t off = 0; // running offset along axis
                 for (int64_t k = 0; k < nout; ++k)
                 {
@@ -68,5 +68,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kSplit, SplitCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Split, SplitCpu);
 } // namespace vknn

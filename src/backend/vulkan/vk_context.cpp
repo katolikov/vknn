@@ -59,7 +59,7 @@ namespace vknn { namespace vk {
         VK_CHECK(vkEnumeratePhysicalDevices(instance_, &n, nullptr));
         if (n == 0)
         {
-            throw Error(Status::kNotFound, "no Vulkan physical devices");
+            throw Error(Status::NotFound, "no Vulkan physical devices");
         }
         std::vector<VkPhysicalDevice> devs(n);
         VK_CHECK(vkEnumeratePhysicalDevices(instance_, &n, devs.data()));
@@ -181,7 +181,7 @@ namespace vknn { namespace vk {
         }
         if (chosen < 0)
         {
-            throw Error(Status::kNotFound, "no compute queue family");
+            throw Error(Status::NotFound, "no compute queue family");
         }
         queueFamily_ = (uint32_t) chosen;
         VKNN_INFO << "Compute queue family = " << queueFamily_ << (qfs[chosen].queueFlags & VK_QUEUE_GRAPHICS_BIT ? " (shared w/ graphics)" : " (dedicated compute)");

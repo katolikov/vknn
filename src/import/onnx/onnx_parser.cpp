@@ -271,7 +271,7 @@ namespace vknn {
 
         // Materialize a TensorProto into a float32 HostBuffer (raw_data or typed data).
         static void fillHostFloat(const TensorProto &t, HostBuffer &hb, int64_t elems) {
-            hb.resizeElems(elems, DType::kFloat32);
+            hb.resizeElems(elems, DType::Float32);
             float *dst = hb.f32();
             if (!t.raw.empty())
             {
@@ -303,7 +303,7 @@ namespace vknn {
 
         // Materialize as int64 (for shape tensors).
         static void fillHostI64(const TensorProto &t, HostBuffer &hb, int64_t elems) {
-            hb.resizeElems(elems, DType::kInt64);
+            hb.resizeElems(elems, DType::Int64);
             int64_t *dst = hb.i64();
             if (!t.raw.empty() && t.dataType == 7)
             {
@@ -336,17 +336,17 @@ namespace vknn {
                     case 2: {
                         uint32_t b = r.fixed32();
                         std::memcpy(&a.f, &b, 4);
-                        a.kind = Attr::kFloat;
+                        a.kind = Attr::Float;
                         break;
                     }
                     case 3:
                         a.i    = (int64_t) r.varint();
-                        a.kind = Attr::kInt;
+                        a.kind = Attr::Int;
                         break;
                     case 4: {
                         auto b = r.bytes();
                         a.str.assign((const char *) b.data(), b.size());
-                        a.kind = Attr::kString;
+                        a.kind = Attr::String;
                         break;
                     }
                     case 7: {
@@ -358,7 +358,7 @@ namespace vknn {
                             std::memcpy(&fv, &b, 4);
                             a.floats.push_back(fv);
                         }
-                        a.kind = Attr::kFloats;
+                        a.kind = Attr::Floats;
                         break;
                     }
                     case 8: {
@@ -373,7 +373,7 @@ namespace vknn {
                         {
                             a.ints.push_back((int64_t) r.varint());
                         }
-                        a.kind = Attr::kInts;
+                        a.kind = Attr::Ints;
                         break;
                     }
                     case 5: {
@@ -389,7 +389,7 @@ namespace vknn {
             if (hasTp)
             {
                 // store as a float-ints attribute when it's a small shape/scalar constant
-                a.kind    = Attr::kFloats;
+                a.kind    = Attr::Floats;
                 a.shape   = tp.dims; // keep dims so a Constant node emits its true shape (e.g. anchor grids)
                 int64_t n = 1;
                 for (auto d: tp.dims)
@@ -402,7 +402,7 @@ namespace vknn {
                 }
                 if (!tp.int64Data.empty() || tp.dataType == 7)
                 {
-                    a.kind = Attr::kInts;
+                    a.kind = Attr::Ints;
                     if (!tp.int64Data.empty())
                     {
                         a.ints = tp.int64Data;
@@ -539,28 +539,28 @@ namespace vknn {
                 }
             }
             node.type = opTypeFromOnnx(opType);
-            if (node.type == OpType::kUnary)
+            if (node.type == OpType::Unary)
             {
                 UnaryType u = unaryFromOnnx(opType);
                 node.subOp  = (int32_t) u;
                 // params (defaults per ONNX): LeakyRelu alpha=0.01, Elu alpha=1.0, HardSigmoid alpha,beta
-                if (u == UnaryType::kLeakyRelu)
+                if (u == UnaryType::LeakyRelu)
                 {
                     node.actLo = node.attr.getf("alpha", 0.01f);
-                } else if (u == UnaryType::kElu)
+                } else if (u == UnaryType::Elu)
                 {
                     node.actLo = node.attr.getf("alpha", 1.0f);
-                } else if (u == UnaryType::kHardSigmoid)
+                } else if (u == UnaryType::HardSigmoid)
                 {
                     node.actLo = node.attr.getf("alpha", 0.2f);
                     node.actHi = node.attr.getf("beta", 0.5f);
                 }
-            } else if (node.type == OpType::kBinary)
+            } else if (node.type == OpType::Binary)
             {
                 node.subOp = (int32_t) binaryFromOnnx(opType);
-            } else if (node.type == OpType::kReduce)
+            } else if (node.type == OpType::Reduce)
             { node.subOp = (int32_t) reduceFromOnnx(opType); }
-            if (node.type == OpType::kUnknown)
+            if (node.type == OpType::Unknown)
             {
                 VKNN_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
             }
@@ -669,11 +669,11 @@ namespace vknn {
                 HostBuffer hb;
                 if (pi.tp.dataType == 7)
                 {
-                    d.dtype = DType::kInt64;
+                    d.dtype = DType::Int64;
                     fillHostI64(pi.tp, hb, n);
                 } else
                 {
-                    d.dtype = DType::kFloat32;
+                    d.dtype = DType::Float32;
                     fillHostFloat(pi.tp, hb, n);
                 }
                 g.initializers[id] = std::move(hb);
@@ -697,7 +697,7 @@ namespace vknn {
         std::ifstream f(path, std::ios::binary);
         if (!f)
         {
-            throw Error(Status::kIoError, "cannot open ONNX file: " + path);
+            throw Error(Status::IoError, "cannot open ONNX file: " + path);
         }
         std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         // Directory the model lives in — external_data locations are relative to it.
@@ -721,7 +721,7 @@ namespace vknn {
         }
         if (!foundGraph)
         {
-            throw Error(Status::kInvalidArgument, "no GraphProto in ONNX model");
+            throw Error(Status::InvalidArgument, "no GraphProto in ONNX model");
         }
         g.topoSort();
         VKNN_INFO << "Imported ONNX: " << g.nodes.size() << " nodes, " << g.initializers.size() << " initializers, " << g.inputs.size() << " inputs, "

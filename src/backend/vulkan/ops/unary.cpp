@@ -30,5 +30,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kUnary, UnaryOp);
+    VKNN_REGISTER_VK_OP(OpType::Unary, UnaryOp);
 } // namespace vknn

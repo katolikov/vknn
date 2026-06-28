@@ -94,5 +94,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kGridSample, GridSampleCpu);
+    VKNN_REGISTER_CPU_OP(OpType::GridSample, GridSampleCpu);
 } // namespace vknn

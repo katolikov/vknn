@@ -13,7 +13,7 @@
 namespace vknn {
     namespace {
         std::mutex                           g_mu;
-        LogLevel                             g_level = LogLevel::kInfo;
+        LogLevel                             g_level = LogLevel::Info;
         bool                                 g_color = true;
         std::unordered_map<std::string, int> g_counts;
         bool                                 g_init = false;
@@ -26,13 +26,13 @@ namespace vknn {
         const char *levelTag(LogLevel l) {
             switch (l)
             {
-                case LogLevel::kDebug:
+                case LogLevel::Debug:
                     return "DEBUG";
-                case LogLevel::kInfo:
+                case LogLevel::Info:
                     return "INFO ";
-                case LogLevel::kWarn:
+                case LogLevel::Warn:
                     return "WARN ";
-                case LogLevel::kError:
+                case LogLevel::Error:
                     return "ERROR";
                 default:
                     return "?????";
@@ -41,13 +41,13 @@ namespace vknn {
         const char *levelColor(LogLevel l) {
             switch (l)
             {
-                case LogLevel::kDebug:
+                case LogLevel::Debug:
                     return "\033[2;37m"; // dim grey
-                case LogLevel::kInfo:
+                case LogLevel::Info:
                     return "\033[36m"; // cyan
-                case LogLevel::kWarn:
+                case LogLevel::Warn:
                     return "\033[33m"; // yellow
-                case LogLevel::kError:
+                case LogLevel::Error:
                     return "\033[1;31m"; // bold red
                 default:
                     return "";
@@ -97,16 +97,16 @@ namespace vknn {
         int prio = ANDROID_LOG_INFO;
         switch (lvl)
         {
-            case LogLevel::kDebug:
+            case LogLevel::Debug:
                 prio = ANDROID_LOG_DEBUG;
                 break;
-            case LogLevel::kInfo:
+            case LogLevel::Info:
                 prio = ANDROID_LOG_INFO;
                 break;
-            case LogLevel::kWarn:
+            case LogLevel::Warn:
                 prio = ANDROID_LOG_WARN;
                 break;
-            case LogLevel::kError:
+            case LogLevel::Error:
                 prio = ANDROID_LOG_ERROR;
                 break;
             default:

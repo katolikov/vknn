@@ -93,6 +93,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_CPU_OP(OpType::kConv, ConvCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Conv, ConvCpu);
 
 } // namespace vknn

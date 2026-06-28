@@ -107,5 +107,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kFusedDwPw, FusedDwPwOp);
+    VKNN_REGISTER_VK_OP(OpType::FusedDwPw, FusedDwPwOp);
 } // namespace vknn

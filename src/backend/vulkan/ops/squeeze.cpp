@@ -25,6 +25,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kSqueeze, SqueezeOp);
+    VKNN_REGISTER_VK_OP(OpType::Squeeze, SqueezeOp);
 
 } // namespace vknn

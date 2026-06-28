@@ -12,7 +12,7 @@ namespace vknn {
         struct EqualCpu: CpuOp {
             // Accept fp32 + int64 (shape tensors) like the rest of the broadcasting elementwise ops.
             bool supportsDType(DType dt) const override {
-                return dt == DType::kFloat32 || dt == DType::kInt64 || dt == DType::kInt32;
+                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
             }
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &A  = ctx.t(node.inputs[0]);
@@ -41,7 +41,7 @@ namespace vknn {
                 }
                 // Read each operand in its native dtype; compare in double so int64 magnitudes stay exact.
                 auto val = [](const RtTensor &T, int64_t i) -> double {
-                    return T.dtype == DType::kInt64 ? (double) T.host.i64()[i] : (double) T.host.f32()[i];
+                    return T.dtype == DType::Int64 ? (double) T.host.i64()[i] : (double) T.host.f32()[i];
                 };
                 float *y = cpu::allocOut(Y, out); // canonical fp32 output (1.0 / 0.0)
                 for (int64_t lin = 0; lin < n; ++lin)
@@ -64,5 +64,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kEqual, EqualCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Equal, EqualCpu);
 } // namespace vknn

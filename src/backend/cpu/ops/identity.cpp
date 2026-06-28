@@ -17,5 +17,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kIdentity, IdentityCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Identity, IdentityCpu);
 } // namespace vknn

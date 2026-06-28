@@ -21,7 +21,7 @@ namespace vknn {
     struct IOTensor {
         std::string          name;
         Shape                shape;
-        DType                dtype    = DType::kFloat32;
+        DType                dtype    = DType::Float32;
         int                  dmaBufFd = -1; // >=0 => zero-copy: this fd IS the GPU boundary buffer
         std::vector<uint8_t> data;
         float               *f32() {
@@ -37,12 +37,12 @@ namespace vknn {
     struct IOInfo {
         std::string name;
         Shape       shape;
-        DType       dtype = DType::kFloat32;
+        DType       dtype = DType::Float32;
         int64_t     elems = 0; // product of shape = number of fp32 values expected/produced
         // For zero-copy (IOTensor::dmaBufFd): the size and layout of the device-native boundary buffer
         // the caller must put in the dma-buf. Row-major NCHW at the model's compute precision (fp16/fp32).
         int64_t      deviceBytes  = 0;
-        TensorFormat deviceFormat = TensorFormat::kNCHW;
+        TensorFormat deviceFormat = TensorFormat::NCHW;
     };
 
     /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.

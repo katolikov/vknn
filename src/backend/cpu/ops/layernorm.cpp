@@ -76,5 +76,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kLayerNorm, LayerNormCpu);
+    VKNN_REGISTER_CPU_OP(OpType::LayerNorm, LayerNormCpu);
 } // namespace vknn

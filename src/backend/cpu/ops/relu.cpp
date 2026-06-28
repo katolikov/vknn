@@ -19,5 +19,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kRelu, ReluCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Relu, ReluCpu);
 } // namespace vknn

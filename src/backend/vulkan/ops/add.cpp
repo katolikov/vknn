@@ -44,6 +44,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kAdd, AddOp);
+    VKNN_REGISTER_VK_OP(OpType::Add, AddOp);
 
 } // namespace vknn

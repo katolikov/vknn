@@ -10,47 +10,47 @@ namespace vknn {
         static float unary(float x, UnaryType op, float a, float b) {
             switch (op)
             {
-                case UnaryType::kSigmoid:
+                case UnaryType::Sigmoid:
                     return 1.f / (1.f + std::exp(-x));
-                case UnaryType::kTanh:
+                case UnaryType::Tanh:
                     return std::tanh(x);
-                case UnaryType::kHardSwish:
+                case UnaryType::HardSwish:
                     return x * std::min(std::max(x + 3.f, 0.f), 6.f) / 6.f;
-                case UnaryType::kHardSigmoid:
+                case UnaryType::HardSigmoid:
                     return std::min(std::max(a * x + b, 0.f), 1.f);
-                case UnaryType::kLeakyRelu:
+                case UnaryType::LeakyRelu:
                     return x > 0 ? x : a * x;
-                case UnaryType::kElu:
+                case UnaryType::Elu:
                     return x > 0 ? x : a * (std::exp(x) - 1.f);
-                case UnaryType::kAbs:
+                case UnaryType::Abs:
                     return std::fabs(x);
-                case UnaryType::kNeg:
+                case UnaryType::Neg:
                     return -x;
-                case UnaryType::kExp:
+                case UnaryType::Exp:
                     return std::exp(x);
-                case UnaryType::kLog:
+                case UnaryType::Log:
                     return std::log(x);
-                case UnaryType::kSqrt:
+                case UnaryType::Sqrt:
                     return std::sqrt(x);
-                case UnaryType::kFloor:
+                case UnaryType::Floor:
                     return std::floor(x);
-                case UnaryType::kCeil:
+                case UnaryType::Ceil:
                     return std::ceil(x);
-                case UnaryType::kRelu:
+                case UnaryType::Relu:
                     return x > 0 ? x : 0;
-                case UnaryType::kSiLU:
+                case UnaryType::SiLU:
                     return x / (1.f + std::exp(-x));
-                case UnaryType::kErf:
+                case UnaryType::Erf:
                     return std::erf(x);
-                case UnaryType::kCos:
+                case UnaryType::Cos:
                     return std::cos(x);
-                case UnaryType::kSin:
+                case UnaryType::Sin:
                     return std::sin(x);
-                case UnaryType::kReciprocal:
+                case UnaryType::Reciprocal:
                     return 1.f / x;
-                case UnaryType::kSoftplus:
+                case UnaryType::Softplus:
                     return std::max(x, 0.f) + std::log1p(std::exp(-std::fabs(x)));
-                case UnaryType::kInvalid:
+                case UnaryType::Invalid:
                     break;
             }
             return x;
@@ -71,5 +71,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kUnary, UnaryCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Unary, UnaryCpu);
 } // namespace vknn

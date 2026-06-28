@@ -59,5 +59,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kFusedSE, FusedSeOp);
+    VKNN_REGISTER_VK_OP(OpType::FusedSE, FusedSeOp);
 } // namespace vknn

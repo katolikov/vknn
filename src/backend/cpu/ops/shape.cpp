@@ -18,5 +18,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kShape, ShapeCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Shape, ShapeCpu);
 } // namespace vknn

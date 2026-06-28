@@ -105,5 +105,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kResize, ResizeCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Resize, ResizeCpu);
 } // namespace vknn

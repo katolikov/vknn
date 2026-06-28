@@ -21,16 +21,16 @@ TEST(Integration, MobileNetV2_CPU_vs_Golden) {
         GTEST_SKIP() << "assets missing (run scripts/get_golden.py)";
     }
     Config cfg;
-    cfg.backend = BackendKind::kCpu;
+    cfg.backend = BackendKind::Cpu;
     auto sess   = Runtime::load(model, cfg);
     ASSERT_TRUE(sess);
     IOTensor in;
     in.name  = "input";
     in.shape = {1, 3, 224, 224};
-    in.dtype = DType::kFloat32;
+    in.dtype = DType::Float32;
     in.data  = inData;
     std::vector<IOTensor> outs;
-    ASSERT_EQ(sess->run({in}, outs), Status::kOk);
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
     ASSERT_FALSE(outs.empty());
 
     const float *y = outs[0].f32();

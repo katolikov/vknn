@@ -41,7 +41,7 @@ namespace vknn {
                 pc.rank               = rank;
                 pc.total              = (int) numElements(out);
                 pc.base               = 0;
-                if (node.type == OpType::kTranspose)
+                if (node.type == OpType::Transpose)
                 {
                     const auto &perm = node.attr.getints("perm");
                     for (int k = 0; k < rank; ++k)
@@ -104,7 +104,7 @@ namespace vknn {
                     // The pad value is a 0-D scalar; read its single element from the initializer bytes
                     // directly (numElements is 0 for an empty shape, so initFloats yields an empty vector).
                     const HostBuffer &hb = g.initializers.at(node.inputs[2]);
-                    if (g.desc(node.inputs[2]).dtype == DType::kFloat16)
+                    if (g.desc(node.inputs[2]).dtype == DType::Float16)
                     {
                         if (hb.bytes.size() >= sizeof(fp16_t))
                         {
@@ -151,7 +151,7 @@ namespace vknn {
                 int          pad          = rank - (int) in.size(); // right-align input into output rank
                 pc.rank                   = rank;
                 pc.total                  = (int) numElements(out);
-                pc.mode                   = (node.type == OpType::kTile) ? 1 : 0;
+                pc.mode                   = (node.type == OpType::Tile) ? 1 : 0;
                 for (int k = 0; k < rank; ++k)
                 {
                     pc.outDim[k]   = (int) out[k];
@@ -243,7 +243,7 @@ namespace vknn {
                 int          rank = (int) out.size();
                 pc.rank           = rank;
                 pc.total          = (int) numElements(out);
-                pc.op             = node.type == OpType::kAdd ? (int) BinaryType::kAdd : node.subOp;
+                pc.op             = node.type == OpType::Add ? (int) BinaryType::Add : node.subOp;
                 // A fused activation (e.g. a Linear+Relu fused into the Add epilogue, as in the camera_head
                 // res_conv) is applied here, matching the NC4HW4 add.
                 pc.act   = (int) node.fusedAct;

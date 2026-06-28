@@ -16,16 +16,16 @@ namespace vknn {
     namespace cpu {
         float *allocOut(RtTensor &rt, const Shape &shape) {
             rt.shape = shape;
-            rt.dtype = DType::kFloat32;
-            rt.host.resizeElems(numElements(shape), DType::kFloat32);
+            rt.dtype = DType::Float32;
+            rt.host.resizeElems(numElements(shape), DType::Float32);
             rt.hostValid   = true;
             rt.deviceValid = false;
             return rt.host.f32();
         }
         int64_t *allocOutI64(RtTensor &rt, const Shape &shape) {
             rt.shape = shape;
-            rt.dtype = DType::kInt64;
-            rt.host.resizeElems(numElements(shape), DType::kInt64);
+            rt.dtype = DType::Int64;
+            rt.host.resizeElems(numElements(shape), DType::Int64);
             rt.hostValid   = true;
             rt.deviceValid = false;
             return rt.host.i64();
@@ -33,34 +33,34 @@ namespace vknn {
         void applyAct(float *p, int64_t n, ActType act, float lo, float hi) {
             switch (act)
             {
-                case ActType::kRelu:
+                case ActType::Relu:
                     for (int64_t i = 0; i < n; ++i)
                     {
                         p[i] = p[i] > 0 ? p[i] : 0;
                     }
                     break;
-                case ActType::kRelu6:
+                case ActType::Relu6:
                     for (int64_t i = 0; i < n; ++i)
                     {
                         float v = p[i];
                         p[i]    = v < 0 ? 0 : (v > 6 ? 6 : v);
                     }
                     break;
-                case ActType::kClip:
+                case ActType::Clip:
                     for (int64_t i = 0; i < n; ++i)
                     {
                         float v = p[i];
                         p[i]    = v < lo ? lo : (v > hi ? hi : v);
                     }
                     break;
-                case ActType::kHardSwish:
+                case ActType::HardSwish:
                     for (int64_t i = 0; i < n; ++i)
                     {
                         float v = p[i];
                         p[i]    = v * std::min(std::max(v + 3.f, 0.f), 6.f) / 6.f;
                     }
                     break;
-                case ActType::kSiLU:
+                case ActType::SiLU:
                     for (int64_t i = 0; i < n; ++i)
                     {
                         p[i] = p[i] / (1.f + std::exp(-p[i]));
@@ -119,7 +119,7 @@ namespace vknn {
                 CpuOp *op = ops_[k].get();
                 if (!op)
                 {
-                    throw Error(Status::kUnsupported, std::string("no CPU kernel for op ") + opTypeName(node.type) + " (" + node.name + ")");
+                    throw Error(Status::Unsupported, std::string("no CPU kernel for op ") + opTypeName(node.type) + " (" + node.name + ")");
                 }
                 auto t0 = std::chrono::high_resolution_clock::now();
                 op->run(node, ctx);
@@ -146,7 +146,7 @@ namespace vknn {
     class CpuBackend: public Backend {
       public:
         BackendKind kind() const override {
-            return BackendKind::kCpu;
+            return BackendKind::Cpu;
         }
         const char *name() const override {
             return "CPU";
@@ -160,7 +160,7 @@ namespace vknn {
             {
                 return false;
             }
-            return dt == DType::kFloat32 || dt == DType::kInt64 || dt == DType::kInt32;
+            return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
         }
         std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &) override {
             auto s     = std::make_unique<CpuSegment>(idx, g);
@@ -169,6 +169,6 @@ namespace vknn {
         }
     };
 
-    VKNN_REGISTER_BACKEND(BackendKind::kCpu, CpuBackend);
+    VKNN_REGISTER_BACKEND(BackendKind::Cpu, CpuBackend);
 
 } // namespace vknn

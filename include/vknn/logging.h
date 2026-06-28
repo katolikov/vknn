@@ -7,7 +7,7 @@
 
 namespace vknn {
 
-    enum class LogLevel { kDebug = 0, kInfo = 1, kWarn = 2, kError = 3, kNone = 4 };
+    enum class LogLevel { Debug = 0, Info = 1, Warn = 2, Error = 3, None = 4 };
 
     /// Global logger. Thread-safe. Honors VKNN_LOG_LEVEL env (DEBUG/INFO/WARN/ERROR).
     class Log {
@@ -42,9 +42,9 @@ namespace vknn {
 } // namespace vknn
 
 #define VKNN_LOG(LVL) ::vknn::detail::LogStream(::vknn::LogLevel::LVL)
-#define VKNN_DEBUG    VKNN_LOG(kDebug)
-#define VKNN_INFO     VKNN_LOG(kInfo)
-#define VKNN_WARN     VKNN_LOG(kWarn)
-#define VKNN_ERROR    VKNN_LOG(kError)
+#define VKNN_DEBUG    VKNN_LOG(Debug)
+#define VKNN_INFO     VKNN_LOG(Info)
+#define VKNN_WARN     VKNN_LOG(Warn)
+#define VKNN_ERROR    VKNN_LOG(Error)
 // Throttled warning: WARN that collapses after N repeats keyed by KEY.
-#define VKNN_WARN_THROTTLE(KEY, N) ::vknn::detail::LogStream(::vknn::LogLevel::kWarn, KEY, N)
+#define VKNN_WARN_THROTTLE(KEY, N) ::vknn::detail::LogStream(::vknn::LogLevel::Warn, KEY, N)

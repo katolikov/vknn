@@ -6,93 +6,93 @@ namespace vknn {
     const char *opTypeName(OpType t) {
         switch (t)
         {
-            case OpType::kConv:
+            case OpType::Conv:
                 return "Conv";
-            case OpType::kClip:
+            case OpType::Clip:
                 return "Clip";
-            case OpType::kRelu:
+            case OpType::Relu:
                 return "Relu";
-            case OpType::kAdd:
+            case OpType::Add:
                 return "Add";
-            case OpType::kGlobalAvgPool:
+            case OpType::GlobalAvgPool:
                 return "GlobalAveragePool";
-            case OpType::kAvgPool:
+            case OpType::AvgPool:
                 return "AveragePool";
-            case OpType::kMaxPool:
+            case OpType::MaxPool:
                 return "MaxPool";
-            case OpType::kGemm:
+            case OpType::Gemm:
                 return "Gemm";
-            case OpType::kMatMul:
+            case OpType::MatMul:
                 return "MatMul";
-            case OpType::kEinsum:
+            case OpType::Einsum:
                 return "Einsum";
-            case OpType::kReshape:
+            case OpType::Reshape:
                 return "Reshape";
-            case OpType::kExpand:
+            case OpType::Expand:
                 return "Expand";
-            case OpType::kTile:
+            case OpType::Tile:
                 return "Tile";
-            case OpType::kSqueeze:
+            case OpType::Squeeze:
                 return "Squeeze";
-            case OpType::kFlatten:
+            case OpType::Flatten:
                 return "Flatten";
-            case OpType::kSoftmax:
+            case OpType::Softmax:
                 return "Softmax";
-            case OpType::kLayerNorm:
+            case OpType::LayerNorm:
                 return "LayerNormalization";
-            case OpType::kBatchNorm:
+            case OpType::BatchNorm:
                 return "BatchNormalization";
-            case OpType::kConcat:
+            case OpType::Concat:
                 return "Concat";
-            case OpType::kPad:
+            case OpType::Pad:
                 return "Pad";
-            case OpType::kIdentity:
+            case OpType::Identity:
                 return "Identity";
-            case OpType::kConstant:
+            case OpType::Constant:
                 return "Constant";
-            case OpType::kShape:
+            case OpType::Shape:
                 return "Shape";
-            case OpType::kGather:
+            case OpType::Gather:
                 return "Gather";
-            case OpType::kUnsqueeze:
+            case OpType::Unsqueeze:
                 return "Unsqueeze";
-            case OpType::kUnary:
+            case OpType::Unary:
                 return "Unary";
-            case OpType::kBinary:
+            case OpType::Binary:
                 return "Binary";
-            case OpType::kPRelu:
+            case OpType::PRelu:
                 return "PRelu";
-            case OpType::kResize:
+            case OpType::Resize:
                 return "Resize";
-            case OpType::kGridSample:
+            case OpType::GridSample:
                 return "GridSample";
-            case OpType::kTranspose:
+            case OpType::Transpose:
                 return "Transpose";
-            case OpType::kSlice:
+            case OpType::Slice:
                 return "Slice";
-            case OpType::kReduce:
+            case OpType::Reduce:
                 return "Reduce";
-            case OpType::kDepthToSpace:
+            case OpType::DepthToSpace:
                 return "DepthToSpace";
-            case OpType::kCast:
+            case OpType::Cast:
                 return "Cast";
-            case OpType::kSplit:
+            case OpType::Split:
                 return "Split";
-            case OpType::kWhere:
+            case OpType::Where:
                 return "Where";
-            case OpType::kEqual:
+            case OpType::Equal:
                 return "Equal";
-            case OpType::kConstantOfShape:
+            case OpType::ConstantOfShape:
                 return "ConstantOfShape";
-            case OpType::kEyeLike:
+            case OpType::EyeLike:
                 return "EyeLike";
-            case OpType::kScatterND:
+            case OpType::ScatterND:
                 return "ScatterND";
-            case OpType::kFusedSE:
+            case OpType::FusedSE:
                 return "FusedSE";
-            case OpType::kFusedDwPw:
+            case OpType::FusedDwPw:
                 return "FusedDwPw";
-            case OpType::kConvertLayout:
+            case OpType::ConvertLayout:
                 return "ConvertLayout";
             default:
                 return "Unknown";
@@ -101,90 +101,90 @@ namespace vknn {
 
     UnaryType unaryFromOnnx(const std::string &s) {
         using U = UnaryType;
-        static const std::unordered_map<std::string, UnaryType> m = {{"Sigmoid", U::kSigmoid}, {"Tanh", U::kTanh}, {"HardSwish", U::kHardSwish}, {"HardSigmoid", U::kHardSigmoid}, {"LeakyRelu", U::kLeakyRelu}, {"Elu", U::kElu}, {"Abs", U::kAbs}, {"Neg", U::kNeg}, {"Exp", U::kExp}, {"Log", U::kLog}, {"Sqrt", U::kSqrt}, {"Floor", U::kFloor}, {"Ceil", U::kCeil}, {"Erf", U::kErf}, {"Cos", U::kCos}, {"Sin", U::kSin}, {"Reciprocal", U::kReciprocal}, {"Softplus", U::kSoftplus}};
+        static const std::unordered_map<std::string, UnaryType> m = {{"Sigmoid", U::Sigmoid}, {"Tanh", U::Tanh}, {"HardSwish", U::HardSwish}, {"HardSigmoid", U::HardSigmoid}, {"LeakyRelu", U::LeakyRelu}, {"Elu", U::Elu}, {"Abs", U::Abs}, {"Neg", U::Neg}, {"Exp", U::Exp}, {"Log", U::Log}, {"Sqrt", U::Sqrt}, {"Floor", U::Floor}, {"Ceil", U::Ceil}, {"Erf", U::Erf}, {"Cos", U::Cos}, {"Sin", U::Sin}, {"Reciprocal", U::Reciprocal}, {"Softplus", U::Softplus}};
         auto it = m.find(s);
-        return it == m.end() ? U::kInvalid : it->second;
+        return it == m.end() ? U::Invalid : it->second;
     }
     ReduceType reduceFromOnnx(const std::string &s) {
         using R = ReduceType;
         if (s == "ReduceMean")
         {
-            return R::kMean;
+            return R::Mean;
         }
         if (s == "ReduceSum")
         {
-            return R::kSum;
+            return R::Sum;
         }
         if (s == "ReduceMax")
         {
-            return R::kMax;
+            return R::Max;
         }
         if (s == "ReduceMin")
         {
-            return R::kMin;
+            return R::Min;
         }
         if (s == "ReduceProd")
         {
-            return R::kProd;
+            return R::Prod;
         }
         if (s == "ReduceL2")
         {
-            return R::kL2;
+            return R::L2;
         }
-        return R::kInvalid;
+        return R::Invalid;
     }
     BinaryType binaryFromOnnx(const std::string &s) {
         using B                                                     = BinaryType;
-        static const std::unordered_map<std::string, BinaryType> m  = {{"Mul", B::kMul}, {"Sub", B::kSub}, {"Div", B::kDiv},
-                                                                       {"Max", B::kMax}, {"Min", B::kMin}, {"Pow", B::kPow}};
+        static const std::unordered_map<std::string, BinaryType> m  = {{"Mul", B::Mul}, {"Sub", B::Sub}, {"Div", B::Div},
+                                                                       {"Max", B::Max}, {"Min", B::Min}, {"Pow", B::Pow}};
         auto                                                     it = m.find(s);
-        return it == m.end() ? B::kInvalid : it->second;
+        return it == m.end() ? B::Invalid : it->second;
     }
 
     OpType opTypeFromOnnx(const std::string &s) {
         static const std::unordered_map<std::string, OpType> m = {
-            {"Conv", OpType::kConv},
-            {"Clip", OpType::kClip},
-            {"Relu", OpType::kRelu},
-            {"Add", OpType::kAdd},
-            {"GlobalAveragePool", OpType::kGlobalAvgPool},
+            {"Conv", OpType::Conv},
+            {"Clip", OpType::Clip},
+            {"Relu", OpType::Relu},
+            {"Add", OpType::Add},
+            {"GlobalAveragePool", OpType::GlobalAvgPool},
             // ReduceMean over the spatial dims (keepdims) is exactly a global average pool; that's how
             // it shows up in ResNet exports, so we route it to the same kernel.
-            {"ReduceMean", OpType::kGlobalAvgPool},
-            {"AveragePool", OpType::kAvgPool},
-            {"MaxPool", OpType::kMaxPool},
-            {"Gemm", OpType::kGemm},
-            {"MatMul", OpType::kMatMul},
-            {"Einsum", OpType::kEinsum},
-            {"Reshape", OpType::kReshape},
-            {"Expand", OpType::kExpand},
-            {"Tile", OpType::kTile},
-            {"Squeeze", OpType::kSqueeze},
-            {"Flatten", OpType::kFlatten},
-            {"Softmax", OpType::kSoftmax},
-            {"LayerNormalization", OpType::kLayerNorm},
-            {"BatchNormalization", OpType::kBatchNorm},
-            {"Concat", OpType::kConcat},
-            {"Pad", OpType::kPad},
-            {"Identity", OpType::kIdentity},
-            {"Constant", OpType::kConstant},
-            {"Shape", OpType::kShape},
-            {"Gather", OpType::kGather},
-            {"Unsqueeze", OpType::kUnsqueeze},
-            {"PRelu", OpType::kPRelu},
-            {"Resize", OpType::kResize},
-            {"Upsample", OpType::kResize},
-            {"GridSample", OpType::kGridSample},
-            {"Transpose", OpType::kTranspose},
-            {"Slice", OpType::kSlice},
-            {"DepthToSpace", OpType::kDepthToSpace},
-            {"Cast", OpType::kCast},
-            {"Split", OpType::kSplit},
-            {"Where", OpType::kWhere},
-            {"Equal", OpType::kEqual},
-            {"ConstantOfShape", OpType::kConstantOfShape},
-            {"EyeLike", OpType::kEyeLike},
-            {"ScatterND", OpType::kScatterND},
+            {"ReduceMean", OpType::GlobalAvgPool},
+            {"AveragePool", OpType::AvgPool},
+            {"MaxPool", OpType::MaxPool},
+            {"Gemm", OpType::Gemm},
+            {"MatMul", OpType::MatMul},
+            {"Einsum", OpType::Einsum},
+            {"Reshape", OpType::Reshape},
+            {"Expand", OpType::Expand},
+            {"Tile", OpType::Tile},
+            {"Squeeze", OpType::Squeeze},
+            {"Flatten", OpType::Flatten},
+            {"Softmax", OpType::Softmax},
+            {"LayerNormalization", OpType::LayerNorm},
+            {"BatchNormalization", OpType::BatchNorm},
+            {"Concat", OpType::Concat},
+            {"Pad", OpType::Pad},
+            {"Identity", OpType::Identity},
+            {"Constant", OpType::Constant},
+            {"Shape", OpType::Shape},
+            {"Gather", OpType::Gather},
+            {"Unsqueeze", OpType::Unsqueeze},
+            {"PRelu", OpType::PRelu},
+            {"Resize", OpType::Resize},
+            {"Upsample", OpType::Resize},
+            {"GridSample", OpType::GridSample},
+            {"Transpose", OpType::Transpose},
+            {"Slice", OpType::Slice},
+            {"DepthToSpace", OpType::DepthToSpace},
+            {"Cast", OpType::Cast},
+            {"Split", OpType::Split},
+            {"Where", OpType::Where},
+            {"Equal", OpType::Equal},
+            {"ConstantOfShape", OpType::ConstantOfShape},
+            {"EyeLike", OpType::EyeLike},
+            {"ScatterND", OpType::ScatterND},
         };
         auto it = m.find(s);
         if (it != m.end())
@@ -193,17 +193,17 @@ namespace vknn {
         }
         if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd" || s == "ReduceL2")
         {
-            return OpType::kReduce;
+            return OpType::Reduce;
         }
-        if (unaryFromOnnx(s) != UnaryType::kInvalid)
+        if (unaryFromOnnx(s) != UnaryType::Invalid)
         {
-            return OpType::kUnary;
+            return OpType::Unary;
         }
-        if (binaryFromOnnx(s) != BinaryType::kInvalid)
+        if (binaryFromOnnx(s) != BinaryType::Invalid)
         {
-            return OpType::kBinary;
+            return OpType::Binary;
         }
-        return OpType::kUnknown;
+        return OpType::Unknown;
     }
 
 } // namespace vknn

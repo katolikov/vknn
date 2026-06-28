@@ -43,7 +43,7 @@ namespace vknn {
                 }
 
                 const int64_t *idx = I.host.i64();
-                bool           i64 = D.dtype == DType::kInt64;
+                bool           i64 = D.dtype == DType::Int64;
 
                 if (i64)
                 {
@@ -91,5 +91,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kScatterND, ScatterNDCpu);
+    VKNN_REGISTER_CPU_OP(OpType::ScatterND, ScatterNDCpu);
 } // namespace vknn

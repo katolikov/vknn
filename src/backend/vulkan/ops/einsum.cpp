@@ -50,5 +50,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kEinsum, EinsumOp);
+    VKNN_REGISTER_VK_OP(OpType::Einsum, EinsumOp);
 } // namespace vknn

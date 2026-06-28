@@ -7,28 +7,28 @@
 namespace vknn {
 
     enum class DType : uint8_t {
-        kFloat32 = 0,
-        kFloat16 = 1,
-        kInt32   = 2,
-        kInt8    = 3,
-        kUInt8   = 4,
-        kInt64   = 5,
+        Float32 = 0,
+        Float16 = 1,
+        Int32   = 2,
+        Int8    = 3,
+        UInt8   = 4,
+        Int64   = 5,
     };
 
     inline size_t dtypeSize(DType d) {
         switch (d)
         {
-            case DType::kFloat32:
+            case DType::Float32:
                 return 4;
-            case DType::kFloat16:
+            case DType::Float16:
                 return 2;
-            case DType::kInt32:
+            case DType::Int32:
                 return 4;
-            case DType::kInt8:
+            case DType::Int8:
                 return 1;
-            case DType::kUInt8:
+            case DType::UInt8:
                 return 1;
-            case DType::kInt64:
+            case DType::Int64:
                 return 8;
         }
         return 0;
@@ -37,17 +37,17 @@ namespace vknn {
     inline const char *dtypeStr(DType d) {
         switch (d)
         {
-            case DType::kFloat32:
+            case DType::Float32:
                 return "f32";
-            case DType::kFloat16:
+            case DType::Float16:
                 return "f16";
-            case DType::kInt32:
+            case DType::Int32:
                 return "i32";
-            case DType::kInt8:
+            case DType::Int8:
                 return "i8";
-            case DType::kUInt8:
+            case DType::UInt8:
                 return "u8";
-            case DType::kInt64:
+            case DType::Int64:
                 return "i64";
         }
         return "?";

@@ -2,7 +2,7 @@
 //
 // Adding a CPU op (see docs/ADDING_AN_OPERATOR.md):
 //   1. subclass CpuOp, implement run().
-//   2. VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpuOp);
+//   2. VKNN_REGISTER_CPU_OP(OpType::Foo, FooCpuOp);
 // No edits to core dispatch are required.
 #pragma once
 #include "vknn/backend.h"
@@ -20,7 +20,7 @@ namespace vknn {
         virtual void run(const Node &node, ExecContext &ctx) = 0;
         // Which dtypes this op supports (for capability/fallback). Default: fp32.
         virtual bool supportsDType(DType dt) const {
-            return dt == DType::kFloat32 || dt == DType::kInt64;
+            return dt == DType::Float32 || dt == DType::Int64;
         }
     };
 

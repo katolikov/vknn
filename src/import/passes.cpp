@@ -22,7 +22,7 @@ namespace vknn {
             if (it != g.initializers.end())
             {
                 const HostBuffer &hb = it->second;
-                if (g.tensors[nd.inputs[inputIdx]].dtype == DType::kInt64)
+                if (g.tensors[nd.inputs[inputIdx]].dtype == DType::Int64)
                 {
                     int64_t n = (int64_t) hb.bytes.size() / 8;
                     return std::vector<int64_t>(hb.i64(), hb.i64() + n);
@@ -97,7 +97,7 @@ namespace vknn {
             TensorId o = nd.outputs[0];
             switch (nd.type)
             {
-                case OpType::kConv: {
+                case OpType::Conv: {
                     if (SH(nd.inputs[0]).empty())
                     {
                         break; // input unresolved: leave output empty (don't
@@ -123,19 +123,19 @@ namespace vknn {
                     SH(o)       = {x.n, outC, oh, ow};
                     break;
                 }
-                case OpType::kClip:
-                case OpType::kRelu:
-                case OpType::kBatchNorm:
-                case OpType::kIdentity:
-                case OpType::kUnary:
-                case OpType::kSoftmax:
-                case OpType::kLayerNorm:
-                case OpType::kPRelu:
-                case OpType::kEyeLike:   // identity-like, same shape as input
-                case OpType::kScatterND: // same shape as data (input[0])
+                case OpType::Clip:
+                case OpType::Relu:
+                case OpType::BatchNorm:
+                case OpType::Identity:
+                case OpType::Unary:
+                case OpType::Softmax:
+                case OpType::LayerNorm:
+                case OpType::PRelu:
+                case OpType::EyeLike:   // identity-like, same shape as input
+                case OpType::ScatterND: // same shape as data (input[0])
                     SH(o) = SH(nd.inputs[0]);
                     break;
-                case OpType::kEqual: {
+                case OpType::Equal: {
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
                     if (a.empty() && b.empty())
@@ -160,7 +160,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kEinsum: {
+                case OpType::Einsum: {
                     std::string eq;
                     for (char c: nd.attr.gets("equation", ""))
                     {
@@ -196,7 +196,7 @@ namespace vknn {
                     { SH(o) = {a[0], b[1], a[1], b[3]}; }
                     break;
                 }
-                case OpType::kWhere: {
+                case OpType::Where: {
                     // Broadcast cond (in[0]), X (in[1]), Y (in[2]); output dims = elementwise-max.
                     size_t rank = 0;
                     for (TensorId t: nd.inputs)
@@ -223,7 +223,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kConstantOfShape: {
+                case OpType::ConstantOfShape: {
                     // Output shape = the int64 values of the shape initializer input.
                     TensorId sid = nd.inputs[0];
                     if (g.isInitializer(sid))
@@ -239,7 +239,7 @@ namespace vknn {
                             break; // a shape vector has at most a handful of dims
                         }
                         Shape out(r);
-                        if (g.tensors[sid].dtype == DType::kInt64)
+                        if (g.tensors[sid].dtype == DType::Int64)
                         {
                             for (int64_t i = 0; i < r; ++i)
                             {
@@ -256,7 +256,7 @@ namespace vknn {
                     }
                     break;
                 }
-                case OpType::kGridSample: {
+                case OpType::GridSample: {
                     const Shape &xs = SH(nd.inputs[0]);
                     const Shape &gs = SH(nd.inputs[1]);
                     if (xs.size() == 4 && gs.size() == 4)
@@ -265,12 +265,12 @@ namespace vknn {
                     }
                     break;
                 }
-                case OpType::kCast:
-                case OpType::kConvertLayout: {
+                case OpType::Cast:
+                case OpType::ConvertLayout: {
                     SH(o) = SH(nd.inputs[0]);
                     break;
                 }
-                case OpType::kFusedSE: {
+                case OpType::FusedSE: {
                     if (SH(nd.inputs[0]).empty())
                     {
                         break;
@@ -279,7 +279,7 @@ namespace vknn {
                     SH(o)  = {x.n, x.c, 1, 1}; // channel scale
                     break;
                 }
-                case OpType::kFusedDwPw: {
+                case OpType::FusedDwPw: {
                     if (SH(nd.inputs[0]).empty())
                     {
                         break;
@@ -297,7 +297,7 @@ namespace vknn {
                     SH(o)      = {x.n, pw.empty() ? x.c : pw[0], oh, ow};
                     break;
                 }
-                case OpType::kSplit: {
+                case OpType::Split: {
                     const Shape &a = SH(nd.inputs[0]);
                     if (a.empty())
                     {
@@ -331,7 +331,7 @@ namespace vknn {
                     }
                     break;
                 }
-                case OpType::kTranspose: {
+                case OpType::Transpose: {
                     const Shape &a    = SH(nd.inputs[0]);
                     const auto  &perm = nd.attr.getints("perm");
                     Shape        out(a.size());
@@ -342,7 +342,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kReduce: {
+                case OpType::Reduce: {
                     const Shape &a = SH(nd.inputs[0]);
                     if (a.empty())
                     {
@@ -384,7 +384,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kDepthToSpace: {
+                case OpType::DepthToSpace: {
                     // [N,C,H,W] -> [N, C/(b*b), H*b, W*b]
                     if (SH(nd.inputs[0]).empty())
                     {
@@ -399,7 +399,7 @@ namespace vknn {
                     SH(o) = {x.n, x.c / (b * b), x.h * b, x.w * b};
                     break;
                 }
-                case OpType::kPad: {
+                case OpType::Pad: {
                     const Shape         &a    = SH(nd.inputs[0]);
                     int64_t              rank = (int64_t) a.size();
                     std::vector<int64_t> pads = readI64Param(g, nd, "pads", 1);
@@ -414,7 +414,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kSlice: {
+                case OpType::Slice: {
                     const Shape &a = SH(nd.inputs[0]);
                     if (a.empty())
                     {
@@ -470,7 +470,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kResize: {
+                case OpType::Resize: {
                     // output = round(input * scales) or explicit sizes; scales/sizes are initializer inputs.
                     Shape s = SH(nd.inputs[0]);
                     if (s.size() == 4)
@@ -486,8 +486,8 @@ namespace vknn {
                             {
                                 return false;
                             }
-                            int64_t n = (int64_t) it->second.bytes.size() / (g.tensors[nd.inputs[idx]].dtype == DType::kInt64 ? 8 : 4);
-                            if (g.tensors[nd.inputs[idx]].dtype == DType::kInt64)
+                            int64_t n = (int64_t) it->second.bytes.size() / (g.tensors[nd.inputs[idx]].dtype == DType::Int64 ? 8 : 4);
+                            if (g.tensors[nd.inputs[idx]].dtype == DType::Int64)
                             {
                                 const int64_t *p = it->second.i64();
                                 for (int64_t k = 0; k < n; ++k)
@@ -523,8 +523,8 @@ namespace vknn {
                     SH(o) = s;
                     break;
                 }
-                case OpType::kBinary:
-                case OpType::kAdd: {
+                case OpType::Binary:
+                case OpType::Add: {
                     // NumPy broadcasting: per-dim max over right-aligned shapes. Required for outer-product
                     // ops ([..,3,1]*[..,1,3]->[..,3,3] in the per-pixel ray math) and trailing broadcasts
                     // ([2,224,224,1]*[3]->[2,224,224,3]).
@@ -552,7 +552,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kGlobalAvgPool: {
+                case OpType::GlobalAvgPool: {
                     if (SH(nd.inputs[0]).empty())
                     {
                         break;
@@ -561,8 +561,8 @@ namespace vknn {
                     SH(o)  = {x.n, x.c, 1, 1};
                     break;
                 }
-                case OpType::kMaxPool:
-                case OpType::kAvgPool: {
+                case OpType::MaxPool:
+                case OpType::AvgPool: {
                     if (SH(nd.inputs[0]).empty())
                     {
                         break;
@@ -580,7 +580,7 @@ namespace vknn {
                     SH(o)       = {x.n, x.c, oh, ow};
                     break;
                 }
-                case OpType::kGemm: {
+                case OpType::Gemm: {
                     const Shape &a = SH(nd.inputs[0]);
                     if (a.empty())
                     {
@@ -593,7 +593,7 @@ namespace vknn {
                     SH(o)               = {M, N};
                     break;
                 }
-                case OpType::kMatMul: {
+                case OpType::MatMul: {
                     Shape a = SH(nd.inputs[0]);
                     Shape b = SH(nd.inputs[1]);
                     if (a.empty() || b.empty())
@@ -638,7 +638,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kFlatten: {
+                case OpType::Flatten: {
                     const Shape &a = SH(nd.inputs[0]);
                     if (a.empty())
                     {
@@ -652,7 +652,7 @@ namespace vknn {
                     SH(o) = {d0, d1};
                     break;
                 }
-                case OpType::kConcat: {
+                case OpType::Concat: {
                     Shape s = SH(nd.inputs[0]);
                     if (!s.empty())
                     {
@@ -680,7 +680,7 @@ namespace vknn {
                     }
                     break;
                 }
-                case OpType::kReshape: {
+                case OpType::Reshape: {
                     TensorId sid = nd.inputs[1];
                     if (!g.isInitializer(sid))
                     {
@@ -718,7 +718,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kExpand: {
+                case OpType::Expand: {
                     // out = numpy-broadcast(in.shape, target). target is the int64 input[1].
                     const Shape         &in  = SH(nd.inputs[0]);
                     std::vector<int64_t> tgt = readI64Param(g, nd, "shape", 1);
@@ -741,7 +741,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kTile: {
+                case OpType::Tile: {
                     // out.shape[k] = in.shape[k] * repeats[k]. repeats is the int64 input[1].
                     const Shape         &in   = SH(nd.inputs[0]);
                     std::vector<int64_t> reps = readI64Param(g, nd, "repeats", 1);
@@ -757,7 +757,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kSqueeze: {
+                case OpType::Squeeze: {
                     // remove the listed size-1 axes, or every size-1 dim when axes is absent.
                     const Shape &in = SH(nd.inputs[0]);
                     if (in.empty())
@@ -802,7 +802,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kGather: {
+                case OpType::Gather: {
                     // ONNX Gather: out = data.shape[:axis] + indices.shape + data.shape[axis+1:]. A scalar
                     // index (rank-0, stored here as [1] with one element) removes the axis. Mirrors GatherCpu
                     // exactly so the inferred plan-time shape matches the runtime result (axis-aware).
@@ -852,7 +852,7 @@ namespace vknn {
                     SH(o) = out;
                     break;
                 }
-                case OpType::kUnsqueeze: {
+                case OpType::Unsqueeze: {
                     // Insert size-1 dims at `axes` (attr for opset<13, input[1] for opset>=13). Mirrors
                     // UnsqueezeCpu: sort axes, normalize negatives against the growing rank, insert.
                     TensorId     xid = nd.inputs[0];
@@ -893,7 +893,7 @@ namespace vknn {
     void lowerEinsum(Graph &g) {
         auto axesAttr = [](std::vector<int64_t> ax) {
             Attr a;
-            a.kind = Attr::kInts;
+            a.kind = Attr::Ints;
             a.ints = std::move(ax);
             return a;
         };
@@ -902,7 +902,7 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &n = g.nodes[i];
-            if (n.type != OpType::kEinsum || n.inputs.size() < 2)
+            if (n.type != OpType::Einsum || n.inputs.size() < 2)
             {
                 continue;
             }
@@ -941,18 +941,18 @@ namespace vknn {
                 dmm.shape.push_back(1);
                 TensorId mm = g.addTensor(dmm);
                 Node     un;
-                un.type             = OpType::kUnsqueeze;
+                un.type             = OpType::Unsqueeze;
                 un.name             = n.name + "#unsq";
                 un.inputs           = {B};
                 un.outputs          = {xp};
                 un.attr.map["axes"] = axesAttr({xrank});
                 Node mul;
-                mul.type    = OpType::kMatMul;
+                mul.type    = OpType::MatMul;
                 mul.name    = n.name + "#mm";
                 mul.inputs  = {A, xp};
                 mul.outputs = {mm};
                 Node sq;
-                sq.type             = OpType::kSqueeze;
+                sq.type             = OpType::Squeeze;
                 sq.name             = n.name + "#sq";
                 sq.inputs           = {mm};
                 sq.outputs          = {out};
@@ -977,13 +977,13 @@ namespace vknn {
                 dap.shape.insert(dap.shape.begin() + 1, 1);
                 TensorId ap = g.addTensor(dap);
                 Node     un;
-                un.type             = OpType::kUnsqueeze;
+                un.type             = OpType::Unsqueeze;
                 un.name             = n.name + "#unsq";
                 un.inputs           = {A};
                 un.outputs          = {ap};
                 un.attr.map["axes"] = axesAttr({1});
                 Node mul;
-                mul.type    = OpType::kMatMul;
+                mul.type    = OpType::MatMul;
                 mul.name    = n.name + "#mm";
                 mul.inputs  = {ap, B};
                 mul.outputs = {out};
@@ -1041,25 +1041,25 @@ namespace vknn {
         auto          foldable = [&](const Node &nd) {
             switch (nd.type)
             {
-                case OpType::kConstant:
+                case OpType::Constant:
                     return true;
-                case OpType::kShape:
+                case OpType::Shape:
                     return !g.desc(nd.inputs[0]).shape.empty(); // shape known
                 // Any op whose every input is a known constant can be evaluated now. This collapses the
                 // shape-arithmetic that detection heads (YOLO) build at runtime — Shape/Gather feeding scalar
                 // Binary/Add to derive per-level strides — into plain constants, so those ops never need a
                 // backend at all (neither CPU nor GPU).
-                case OpType::kGather:
-                case OpType::kUnsqueeze:
-                case OpType::kSqueeze:
-                case OpType::kConcat:
-                case OpType::kBinary:
-                case OpType::kAdd:
-                case OpType::kReshape:
-                case OpType::kSlice:
-                case OpType::kTranspose:
-                case OpType::kCast:
-                case OpType::kReduce: {
+                case OpType::Gather:
+                case OpType::Unsqueeze:
+                case OpType::Squeeze:
+                case OpType::Concat:
+                case OpType::Binary:
+                case OpType::Add:
+                case OpType::Reshape:
+                case OpType::Slice:
+                case OpType::Transpose:
+                case OpType::Cast:
+                case OpType::Reduce: {
                     if (nd.inputs.empty())
                     {
                         return false;
@@ -1078,10 +1078,10 @@ namespace vknn {
                 // and ConstantOfShape. Fold these when all inputs are constant so the targets become readable
                 // initializers — but bound the output size so a large all-const fill/select isn't baked in
                 // (its shape is still inferred by inferShapes, and it runs at runtime).
-                case OpType::kWhere:
-                case OpType::kEqual:
-                case OpType::kEyeLike: // identity matrix is constant once the (now-known) shape is fixed
-                case OpType::kConstantOfShape: {
+                case OpType::Where:
+                case OpType::Equal:
+                case OpType::EyeLike: // identity matrix is constant once the (now-known) shape is fixed
+                case OpType::ConstantOfShape: {
                     if (nd.inputs.empty())
                     {
                         return false;
@@ -1099,7 +1099,7 @@ namespace vknn {
                         }
                         maxElems = std::max(maxElems, numElements(g.desc(in).shape));
                     }
-                    if (nd.type == OpType::kConstantOfShape)
+                    if (nd.type == OpType::ConstantOfShape)
                     {
                         // output size = product of the const shape-vector's values
                         auto it = g.initializers.find(nd.inputs[0]);
@@ -1108,7 +1108,7 @@ namespace vknn {
                             return false;
                         }
                         const HostBuffer &hb  = it->second;
-                        bool              i64 = g.desc(nd.inputs[0]).dtype == DType::kInt64;
+                        bool              i64 = g.desc(nd.inputs[0]).dtype == DType::Int64;
                         int64_t           r   = numElements(g.desc(nd.inputs[0]).shape);
                         if (r <= 0)
                         {
@@ -1128,8 +1128,8 @@ namespace vknn {
                 // tensors such as the RoPE position arange (int64, built via Expand->Add->Reshape->Gather):
                 // on the GPU float path the int64 positions corrupt to zeros and the rotary embedding loses
                 // all position information, so folding computes the small constant index on the CPU exactly.
-                case OpType::kExpand:
-                case OpType::kTile: {
+                case OpType::Expand:
+                case OpType::Tile: {
                     if (nd.inputs.size() < 2)
                     {
                         return false;
@@ -1142,9 +1142,9 @@ namespace vknn {
                         }
                     }
                     const Shape         &in  = g.desc(nd.inputs[0]).shape;
-                    std::vector<int64_t> p   = readI64Param(g, nd, nd.type == OpType::kTile ? "repeats" : "shape", 1);
+                    std::vector<int64_t> p   = readI64Param(g, nd, nd.type == OpType::Tile ? "repeats" : "shape", 1);
                     int64_t              out = 1;
-                    if (nd.type == OpType::kTile)
+                    if (nd.type == OpType::Tile)
                     {
                         for (size_t k = 0; k < in.size(); ++k)
                         {
@@ -1166,7 +1166,7 @@ namespace vknn {
                     // token 0). Float tensors keep the small bound so a large all-const broadcast is not baked
                     // into the model.
                     DType idt   = g.desc(nd.inputs[0]).dtype;
-                    bool  isInt = idt == DType::kInt64 || idt == DType::kInt32;
+                    bool  isInt = idt == DType::Int64 || idt == DType::Int32;
                     return out > 0 && out <= (isInt ? (int64_t(1) << 26) : (int64_t(1) << 18));
                 }
                 default:
@@ -1182,7 +1182,7 @@ namespace vknn {
                 continue;
             }
             // ensure Shape's input has a shape-only RtTensor
-            if (nd.type == OpType::kShape)
+            if (nd.type == OpType::Shape)
             {
                 pool[nd.inputs[0]].shape = g.desc(nd.inputs[0]).shape;
             }
@@ -1245,12 +1245,12 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &bn = g.nodes[i];
-            if (bn.type != OpType::kBatchNorm)
+            if (bn.type != OpType::BatchNorm)
             {
                 continue;
             }
             int pi = producer[bn.inputs[0]];
-            if (pi < 0 || g.nodes[pi].type != OpType::kConv)
+            if (pi < 0 || g.nodes[pi].type != OpType::Conv)
             {
                 continue;
             }
@@ -1285,7 +1285,7 @@ namespace vknn {
             HostBuffer biasBuf;
             if (biasId == kNoTensor)
             {
-                biasBuf.resizeElems(outC, DType::kFloat32);
+                biasBuf.resizeElems(outC, DType::Float32);
             }
             HostBuffer &Bb = (biasId == kNoTensor) ? biasBuf : g.initializers[biasId];
             for (int64_t oc = 0; oc < outC; ++oc)
@@ -1366,7 +1366,7 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &act = g.nodes[i];
-            if (act.type != OpType::kClip && act.type != OpType::kRelu)
+            if (act.type != OpType::Clip && act.type != OpType::Relu)
             {
                 continue;
             }
@@ -1376,11 +1376,11 @@ namespace vknn {
                 continue;
             }
             Node &prod = g.nodes[pi];
-            if (prod.type != OpType::kConv && prod.type != OpType::kGemm && prod.type != OpType::kAdd)
+            if (prod.type != OpType::Conv && prod.type != OpType::Gemm && prod.type != OpType::Add)
             {
                 continue;
             }
-            if (prod.fusedAct != ActType::kNone)
+            if (prod.fusedAct != ActType::None)
             {
                 continue;
             }
@@ -1408,9 +1408,9 @@ namespace vknn {
                 continue;
             }
 
-            if (act.type == OpType::kRelu)
+            if (act.type == OpType::Relu)
             {
-                prod.fusedAct = ActType::kRelu;
+                prod.fusedAct = ActType::Relu;
             } else
             {
                 float lo = 0, hi = 6; // default relu6
@@ -1430,7 +1430,7 @@ namespace vknn {
                 {
                     hi = act.attr.getf("max", hi);
                 }
-                prod.fusedAct = (lo == 0.f && hi == 6.f) ? ActType::kRelu6 : ActType::kClip;
+                prod.fusedAct = (lo == 0.f && hi == 6.f) ? ActType::Relu6 : ActType::Clip;
                 prod.actLo    = lo;
                 prod.actHi    = hi;
             }
@@ -1478,7 +1478,7 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &id = g.nodes[i];
-            if (id.type != OpType::kIdentity)
+            if (id.type != OpType::Identity)
             {
                 continue;
             }
@@ -1538,7 +1538,7 @@ namespace vknn {
             }
         }
         auto convEligible = [&](const Node &c) {
-            if (c.type != OpType::kConv || c.fusedResidual != kNoTensor)
+            if (c.type != OpType::Conv || c.fusedResidual != kNoTensor)
             {
                 return false;
             }
@@ -1555,7 +1555,7 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &add = g.nodes[i];
-            if (add.type != OpType::kAdd || add.inputs.size() != 2)
+            if (add.type != OpType::Add || add.inputs.size() != 2)
             {
                 continue;
             }
@@ -1601,7 +1601,7 @@ namespace vknn {
             Node &conv         = g.nodes[ci];
             conv.fusedResidual = residual;
             conv.inputs.push_back(residual); // keep it live for DCE / buffer allocation / scheduling
-            if (conv.fusedAct == ActType::kNone)
+            if (conv.fusedAct == ActType::None)
             { // carry any activation that was folded into the Add
                 conv.fusedAct = add.fusedAct;
                 conv.actLo    = add.actLo;
@@ -1675,23 +1675,23 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &hs = g.nodes[i];
-            if (hs.type != OpType::kUnary || (UnaryType) hs.subOp != UnaryType::kHardSigmoid)
+            if (hs.type != OpType::Unary || (UnaryType) hs.subOp != UnaryType::HardSigmoid)
             {
                 continue;
             }
             int p2 = producer[hs.inputs[0]];
-            if (p2 < 0 || g.nodes[p2].type != OpType::kConv || !single(g.nodes[p2].outputs[0]))
+            if (p2 < 0 || g.nodes[p2].type != OpType::Conv || !single(g.nodes[p2].outputs[0]))
             {
                 continue;
             }
             Node &conv2 = g.nodes[p2];
             int   p1    = producer[conv2.inputs[0]];
-            if (p1 < 0 || g.nodes[p1].type != OpType::kConv || !single(g.nodes[p1].outputs[0]))
+            if (p1 < 0 || g.nodes[p1].type != OpType::Conv || !single(g.nodes[p1].outputs[0]))
             {
                 continue;
             }
             Node &conv1 = g.nodes[p1];
-            if (conv1.fusedAct != ActType::kRelu)
+            if (conv1.fusedAct != ActType::Relu)
             {
                 continue;
             }
@@ -1700,7 +1700,7 @@ namespace vknn {
             // pooled avg directly. Fusing the pool into one workgroup regressed; this keeps GAP + Mul
             // parallel.
             int pg = producer[conv1.inputs[0]];
-            if (pg < 0 || g.nodes[pg].type != OpType::kGlobalAvgPool)
+            if (pg < 0 || g.nodes[pg].type != OpType::GlobalAvgPool)
             {
                 continue;
             }
@@ -1709,7 +1709,7 @@ namespace vknn {
                 return c.inputs.size() > 2 ? c.inputs[2] : kNoTensor;
             };
             Node se;
-            se.type    = OpType::kFusedSE;
+            se.type    = OpType::FusedSE;
             se.name    = conv1.name + "#se";
             se.inputs  = {avg, conv1.inputs[1], bias(conv1), conv2.inputs[1], bias(conv2)};
             se.outputs = {hs.outputs[0]}; // the scale tensor (Mul still consumes it)
@@ -1764,7 +1764,7 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &M = g.nodes[i];
-            if (M.type != OpType::kBinary || (BinaryType) M.subOp != BinaryType::kMul || M.inputs.size() != 2)
+            if (M.type != OpType::Binary || (BinaryType) M.subOp != BinaryType::Mul || M.inputs.size() != 2)
             {
                 continue;
             }
@@ -1773,12 +1773,12 @@ namespace vknn {
             for (int e = 0; e < 2; ++e)
             {
                 int pc = producer[M.inputs[e]];
-                if (pc < 0 || g.nodes[pc].type != OpType::kUnary)
+                if (pc < 0 || g.nodes[pc].type != OpType::Unary)
                 {
                     continue;
                 }
                 UnaryType su = (UnaryType) g.nodes[pc].subOp;
-                if ((su == UnaryType::kHardSigmoid || su == UnaryType::kSigmoid) && g.nodes[pc].inputs[0] == M.inputs[1 - e])
+                if ((su == UnaryType::HardSigmoid || su == UnaryType::Sigmoid) && g.nodes[pc].inputs[0] == M.inputs[1 - e])
                 {
                     sigIdx = pc;
                     x      = M.inputs[1 - e];
@@ -1793,9 +1793,9 @@ namespace vknn {
             {
                 continue; // gate feeds only this Mul
             }
-            ActType act = (UnaryType) g.nodes[sigIdx].subOp == UnaryType::kHardSigmoid ? ActType::kHardSwish : ActType::kSiLU;
+            ActType act = (UnaryType) g.nodes[sigIdx].subOp == UnaryType::HardSigmoid ? ActType::HardSwish : ActType::SiLU;
             int     px  = producer[x];
-            bool fuseConv = px >= 0 && (g.nodes[px].type == OpType::kConv || g.nodes[px].type == OpType::kGemm) && g.nodes[px].fusedAct == ActType::kNone && consumers[x] == 2;
+            bool fuseConv = px >= 0 && (g.nodes[px].type == OpType::Conv || g.nodes[px].type == OpType::Gemm) && g.nodes[px].fusedAct == ActType::None && consumers[x] == 2;
             if (fuseConv)
             {
                 g.nodes[px].fusedAct = act;
@@ -1809,8 +1809,8 @@ namespace vknn {
             } else
             {
                 // collapse [gate, Mul] -> one unary
-                M.type   = OpType::kUnary;
-                M.subOp  = (int) (act == ActType::kHardSwish ? UnaryType::kHardSwish : UnaryType::kSiLU);
+                M.type   = OpType::Unary;
+                M.subOp  = (int) (act == ActType::HardSwish ? UnaryType::HardSwish : UnaryType::SiLU);
                 M.inputs = {x};
                 remove.insert(sigIdx);
                 fusedU++;
@@ -1864,7 +1864,7 @@ namespace vknn {
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             Node &P = g.nodes[i];
-            if (P.type != OpType::kConv)
+            if (P.type != OpType::Conv)
             {
                 continue;
             }
@@ -1883,7 +1883,7 @@ namespace vknn {
                 continue;
             }
             int di = producer[P.inputs[0]];
-            if (di < 0 || g.nodes[di].type != OpType::kConv)
+            if (di < 0 || g.nodes[di].type != OpType::Conv)
             {
                 continue;
             }
@@ -1900,7 +1900,7 @@ namespace vknn {
                 continue;
             }
             // D's activation must be parameterless (None/Relu/Relu6); skip custom Clip and hardswish-dw.
-            if (D.fusedAct != ActType::kNone && D.fusedAct != ActType::kRelu && D.fusedAct != ActType::kRelu6)
+            if (D.fusedAct != ActType::None && D.fusedAct != ActType::Relu && D.fusedAct != ActType::Relu6)
             {
                 continue;
             }
@@ -1908,7 +1908,7 @@ namespace vknn {
                 return c.inputs.size() > 2 ? c.inputs[2] : kNoTensor;
             };
             Node f;
-            f.type   = OpType::kFusedDwPw;
+            f.type   = OpType::FusedDwPw;
             f.name   = D.name + "#dwpw";
             f.inputs = {D.inputs[0], D.inputs[1], bias(D), P.inputs[1], bias(P)};
             if (P.fusedResidual != kNoTensor)
@@ -2020,18 +2020,18 @@ namespace vknn {
         };
         switch (n.type)
         {
-            case OpType::kTranspose:
-            case OpType::kSlice:
-            case OpType::kExpand:       // numpy broadcast to a target shape, flat row-major gather
-            case OpType::kTile:         // repeat each dim, flat row-major gather
-            case OpType::kLayerNorm:    // always flat: reduce over the trailing axes, row-major
-            case OpType::kDepthToSpace: // spatial<->channel index remap, flat row-major gather
-            case OpType::kReduce:       // generic N-D reduce (incl. ReduceL2) runs flat
-            case OpType::kMatMul:       // batched N-D matmul runs on the flat row-major path
-            case OpType::kWhere:        // cond?X:Y, broadcasting flat select
-            case OpType::kEqual:        // A==B, broadcasting flat compare
+            case OpType::Transpose:
+            case OpType::Slice:
+            case OpType::Expand:       // numpy broadcast to a target shape, flat row-major gather
+            case OpType::Tile:         // repeat each dim, flat row-major gather
+            case OpType::LayerNorm:    // always flat: reduce over the trailing axes, row-major
+            case OpType::DepthToSpace: // spatial<->channel index remap, flat row-major gather
+            case OpType::Reduce:       // generic N-D reduce (incl. ReduceL2) runs flat
+            case OpType::MatMul:       // batched N-D matmul runs on the flat row-major path
+            case OpType::Where:        // cond?X:Y, broadcasting flat select
+            case OpType::Equal:        // A==B, broadcasting flat compare
                 return true;
-            case OpType::kPad: {
+            case OpType::Pad: {
                 // Flat row-major pad (constant/edge/reflect). Needs static pads (attr or a constant
                 // input[1]) and rank within the flat limit; a runtime pad value falls back to CPU.
                 if (sh(n.outputs[0]).size() > 8)
@@ -2050,13 +2050,13 @@ namespace vknn {
                 }
                 return !(n.inputs.size() > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
             }
-            case OpType::kGather:
+            case OpType::Gather:
                 // Flat row-major gather along an axis; index may be constant or a runtime float activation
                 // (RoPE).
                 return n.inputs.size() >= 2;
-            case OpType::kClip:
+            case OpType::Clip:
                 return true; // flat elementwise clamp (geometry-tail Clip is rank-6, can't be NC4HW4)
-            case OpType::kSplit: {
+            case OpType::Split: {
                 // Channel-axis 4-aligned split stays NC4HW4 (contiguous block copy); any other split is flat.
                 const Shape &in   = sh(n.inputs[0]);
                 int          rank = (int) in.size();
@@ -2078,10 +2078,10 @@ namespace vknn {
                 }
                 return true;
             }
-            case OpType::kScatterND:
+            case OpType::ScatterND:
                 // GPU flat scatter; index may be a constant or a runtime float activation.
                 return n.inputs.size() >= 3;
-            case OpType::kEinsum: {
+            case OpType::Einsum: {
                 // Only the "i,j->ij" outer product runs on the GPU; other equations use the CPU op.
                 std::string eq;
                 for (char c: n.attr.gets("equation", ""))
@@ -2093,7 +2093,7 @@ namespace vknn {
                 }
                 return eq == "i,j->ij";
             }
-            case OpType::kSoftmax: {
+            case OpType::Softmax: {
                 if (n.inputs.empty())
                 {
                     return false;
@@ -2117,7 +2117,7 @@ namespace vknn {
                 }
                 return !(x.h * x.w == 1 && inner == x.c); // channel softmax stays NC4HW4
             }
-            case OpType::kConcat: {
+            case OpType::Concat: {
                 const Shape &o    = sh(n.outputs[0]);
                 int          rank = (int) o.size();
                 int64_t      axis = n.attr.geti("axis", 1);
@@ -2138,8 +2138,8 @@ namespace vknn {
                 }
                 return false;
             }
-            case OpType::kBinary:
-            case OpType::kAdd: {
+            case OpType::Binary:
+            case OpType::Add: {
                 if (n.inputs.size() != 2)
                 {
                     return false;
@@ -2154,7 +2154,7 @@ namespace vknn {
                 {
                     return false; // NC4HW4 same-shape
                 }
-                if (n.type == OpType::kBinary)
+                if (n.type == OpType::Binary)
                 {
                     auto bc = [](const Shape &s, const Shape &f) {
                         return s.size() == 4 && f.size() == 4 && s[0] == f[0] && s[1] == f[1] && s[2] == 1 && s[3] == 1 && (f[2] > 1 || f[3] > 1);
@@ -2177,7 +2177,7 @@ namespace vknn {
         auto agnostic = [](const Node &n) {
             // metadata reshape / no-op copy: keeps the producer's layout (input and output bytes
             // identical).
-            return n.type == OpType::kReshape || n.type == OpType::kFlatten || n.type == OpType::kSqueeze || n.type == OpType::kUnsqueeze || n.type == OpType::kCast;
+            return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast;
         };
         // Mark each tensor's GPU format in topo order. Reshape/Flatten are layout-agnostic: a flat
         // reshape is a plain row-major copy (valid for ANY shape), while the NC4HW4 byte-copy is only
@@ -2245,7 +2245,7 @@ namespace vknn {
                     d.gpuFlat                                = needFlat;
                     TensorId t2                              = g.addTensor(d);
                     Node     cv;
-                    cv.type    = OpType::kConvertLayout;
+                    cv.type    = OpType::ConvertLayout;
                     cv.name    = "convert" + std::to_string(n++);
                     cv.subOp   = needFlat ? 0 : 1; // 0: NC4HW4->flat, 1: flat->NC4HW4
                     cv.inputs  = {in};

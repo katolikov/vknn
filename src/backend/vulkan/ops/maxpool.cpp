@@ -33,5 +33,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kMaxPool, MaxPoolOp);
+    VKNN_REGISTER_VK_OP(OpType::MaxPool, MaxPoolOp);
 } // namespace vknn

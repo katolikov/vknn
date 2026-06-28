@@ -46,5 +46,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kFusedSE, FusedSeCpu);
+    VKNN_REGISTER_CPU_OP(OpType::FusedSE, FusedSeCpu);
 } // namespace vknn

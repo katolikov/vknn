@@ -37,14 +37,14 @@ namespace vknn { namespace vk {
         }
     }
 
-#define VK_CHECK(expr)                                                                                                                               \
-    do                                                                                                                                               \
-    {                                                                                                                                                \
-        VkResult _vr = (expr);                                                                                                                       \
-        if (_vr != VK_SUCCESS)                                                                                                                       \
-        {                                                                                                                                            \
-            throw ::vknn::Error(::vknn::Status::kRuntimeError, std::string("Vulkan call failed: ") + #expr + " -> " + ::vknn::vk::vkResultStr(_vr)); \
-        }                                                                                                                                            \
+#define VK_CHECK(expr)                                                                                                                              \
+    do                                                                                                                                              \
+    {                                                                                                                                               \
+        VkResult _vr = (expr);                                                                                                                      \
+        if (_vr != VK_SUCCESS)                                                                                                                      \
+        {                                                                                                                                           \
+            throw ::vknn::Error(::vknn::Status::RuntimeError, std::string("Vulkan call failed: ") + #expr + " -> " + ::vknn::vk::vkResultStr(_vr)); \
+        }                                                                                                                                           \
     } while (0)
 
 }} // namespace vknn::vk

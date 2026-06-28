@@ -19,5 +19,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kUnsqueeze, UnsqueezeOp);
+    VKNN_REGISTER_VK_OP(OpType::Unsqueeze, UnsqueezeOp);
 } // namespace vknn

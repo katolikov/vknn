@@ -17,6 +17,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kPad, PadOp);
+    VKNN_REGISTER_VK_OP(OpType::Pad, PadOp);
 
 } // namespace vknn

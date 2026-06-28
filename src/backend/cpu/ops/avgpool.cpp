@@ -63,5 +63,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kAvgPool, AvgPoolCpu);
+    VKNN_REGISTER_CPU_OP(OpType::AvgPool, AvgPoolCpu);
 } // namespace vknn

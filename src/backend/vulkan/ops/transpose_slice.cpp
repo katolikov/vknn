@@ -25,7 +25,7 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kTranspose, TransposeOp);
-    VKNN_REGISTER_VK_OP(OpType::kSlice, SliceOp);
+    VKNN_REGISTER_VK_OP(OpType::Transpose, TransposeOp);
+    VKNN_REGISTER_VK_OP(OpType::Slice, SliceOp);
 
 } // namespace vknn

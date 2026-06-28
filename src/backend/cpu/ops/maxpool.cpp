@@ -59,5 +59,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kMaxPool, MaxPoolCpu);
+    VKNN_REGISTER_CPU_OP(OpType::MaxPool, MaxPoolCpu);
 } // namespace vknn

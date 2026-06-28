@@ -31,7 +31,7 @@ namespace vknn { namespace vk {
                 return i;
             }
         }
-        throw Error(Status::kRuntimeError, "no compatible memory type");
+        throw Error(Status::RuntimeError, "no compatible memory type");
     }
 
     Buffer::Buffer(VulkanContext &ctx, size_t bytes, MemPref pref, VkBufferUsageFlags extraUsage): ctx_(ctx), bytes_(bytes) {
@@ -103,14 +103,14 @@ namespace vknn { namespace vk {
     void Buffer::upload(const void *src, size_t n, size_t offset) {
         if (!mapped_)
         {
-            throw Error(Status::kUnsupported, "upload to non-host-visible buffer");
+            throw Error(Status::Unsupported, "upload to non-host-visible buffer");
         }
         std::memcpy((char *) mapped_ + offset, src, n);
     }
     void Buffer::download(void *dst, size_t n, size_t offset) {
         if (!mapped_)
         {
-            throw Error(Status::kUnsupported, "download from non-host-visible buffer");
+            throw Error(Status::Unsupported, "download from non-host-visible buffer");
         }
         std::memcpy(dst, (char *) mapped_ + offset, n);
     }
@@ -175,7 +175,7 @@ namespace vknn { namespace vk {
                 }
                 if (pick < 0)
                 {
-                    throw Error(Status::kUnsupported, "no compatible memory type for dma-buf");
+                    throw Error(Status::Unsupported, "no compatible memory type for dma-buf");
                 }
                 typeIdx = (uint32_t) pick;
             }

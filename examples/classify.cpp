@@ -76,30 +76,30 @@ int main(int argc, char **argv) {
         cfg = Config::fromJsonFile(cfgpath);
     }
     cfg.backend   = backendFromStr(backend);
-    cfg.precision = (precision == "fp32") ? Precision::kFp32 : Precision::kFp16;
+    cfg.precision = (precision == "fp32") ? Precision::Fp32 : Precision::Fp16;
     cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());
     {
         std::string w = argval(argc, argv, "--winograd", "auto"); // auto|on|off
-        cfg.winograd  = (w == "on") ? WinogradMode::kOn : (w == "off") ? WinogradMode::kOff : WinogradMode::kAuto;
+        cfg.winograd  = (w == "on") ? WinogradMode::On : (w == "off") ? WinogradMode::Off : WinogradMode::Auto;
         std::string t = argval(argc, argv, "--tuning", ""); // off|fast|thorough
         if (t == "off")
         {
-            cfg.tuning = TuningLevel::kOff;
+            cfg.tuning = TuningLevel::Off;
         } else if (t == "thorough")
         {
-            cfg.tuning = TuningLevel::kThorough;
+            cfg.tuning = TuningLevel::Thorough;
         } else if (t == "fast")
-        { cfg.tuning = TuningLevel::kFast; }
+        { cfg.tuning = TuningLevel::Fast; }
         // Advanced hints: force Winograd unit / variant for research.
         int wu = atoi(argval(argc, argv, "--wino-unit", "0")); // 0=auto, 4=force F(4,3)
         if (wu)
         {
-            cfg.setHint(Hint::kWinogradUnit, wu);
+            cfg.setHint(Hint::WinogradUnit, wu);
         }
         int wv = atoi(argval(argc, argv, "--wino-variant", "0")); // 0=tiled-GEMM,1=fused,2=split,3=full
         if (wv)
         {
-            cfg.setHint(Hint::kWinogradVariant, wv);
+            cfg.setHint(Hint::WinogradVariant, wv);
         }
     }
     if (hasflag(argc, argv, "--timing"))
@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
         in.name  = "input";
         in.shape = shape;
     }
-    in.dtype     = DType::kFloat32;
+    in.dtype     = DType::Float32;
     in.data      = readFile(inpath);
     int64_t need = numElements(in.shape) * 4;
     if ((int64_t) in.data.size() < need)
@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
 
     std::vector<IOTensor> outs;
     Status                st = sess->run({in}, outs);
-    if (st != Status::kOk || outs.empty())
+    if (st != Status::Ok || outs.empty())
     {
         fprintf(stderr, "run failed\n");
         return 2;

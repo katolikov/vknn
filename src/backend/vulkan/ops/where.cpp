@@ -61,5 +61,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kWhere, WhereVk);
+    VKNN_REGISTER_VK_OP(OpType::Where, WhereVk);
 } // namespace vknn

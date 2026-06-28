@@ -9,9 +9,9 @@ namespace vknn {
     const char *backendName(BackendKind k) {
         switch (k)
         {
-            case BackendKind::kVulkan:
+            case BackendKind::Vulkan:
                 return "VULKAN";
-            case BackendKind::kCpu:
+            case BackendKind::Cpu:
                 return "CPU";
         }
         return "?";
@@ -19,58 +19,58 @@ namespace vknn {
     BackendKind backendFromStr(const std::string &s) {
         if (s == "VULKAN" || s == "vulkan")
         {
-            return BackendKind::kVulkan;
+            return BackendKind::Vulkan;
         }
-        return BackendKind::kCpu;
+        return BackendKind::Cpu;
     }
     static Precision precFromStr(const std::string &s) {
         if (s == "fp16" || s == "FP16" || s == "low")
         {
-            return Precision::kFp16;
+            return Precision::Fp16;
         }
         if (s == "auto")
         {
-            return Precision::kAuto;
+            return Precision::Auto;
         }
-        return Precision::kFp32;
+        return Precision::Fp32;
     }
     static const char *precStr(Precision p) {
-        return p == Precision::kFp16 ? "fp16" : p == Precision::kAuto ? "auto" : "fp32";
+        return p == Precision::Fp16 ? "fp16" : p == Precision::Auto ? "auto" : "fp32";
     }
     static TensorFormat fmtFromStr(const std::string &s) {
         if (s == "NHWC")
         {
-            return TensorFormat::kNHWC;
+            return TensorFormat::NHWC;
         }
-        return TensorFormat::kNCHW;
+        return TensorFormat::NCHW;
     }
     static TuningLevel tuneFromStr(const std::string &s) {
         if (s == "off")
         {
-            return TuningLevel::kOff;
+            return TuningLevel::Off;
         }
         if (s == "thorough")
         {
-            return TuningLevel::kThorough;
+            return TuningLevel::Thorough;
         }
-        return TuningLevel::kFast;
+        return TuningLevel::Fast;
     }
     static const char *tuneStr(TuningLevel t) {
-        return t == TuningLevel::kOff ? "off" : t == TuningLevel::kThorough ? "thorough" : "fast";
+        return t == TuningLevel::Off ? "off" : t == TuningLevel::Thorough ? "thorough" : "fast";
     }
     static WinogradMode winoFromStr(const std::string &s) {
         if (s == "on")
         {
-            return WinogradMode::kOn;
+            return WinogradMode::On;
         }
         if (s == "off")
         {
-            return WinogradMode::kOff;
+            return WinogradMode::Off;
         }
-        return WinogradMode::kAuto;
+        return WinogradMode::Auto;
     }
     static const char *winoStr(WinogradMode w) {
-        return w == WinogradMode::kOn ? "on" : w == WinogradMode::kOff ? "off" : "auto";
+        return w == WinogradMode::On ? "on" : w == WinogradMode::Off ? "off" : "auto";
     }
 
     Config Config::fromJsonFile(const std::string &path) {
@@ -174,7 +174,7 @@ namespace vknn {
         if (auto *j = v.get("power"))
         {
             std::string p = j->asStr("normal");
-            c.power       = p == "high" ? PowerHint::kHigh : p == "low" ? PowerHint::kLow : PowerHint::kNormal;
+            c.power       = p == "high" ? PowerHint::High : p == "low" ? PowerHint::Low : PowerHint::Normal;
         }
         return c;
     }
@@ -191,7 +191,7 @@ namespace vknn {
         os << "],\n";
         os << "  \"allowCpuFallback\": " << (allowCpuFallback ? "true" : "false") << ",\n";
         os << "  \"precision\": \"" << precStr(precision) << "\",\n";
-        os << "  \"power\": \"" << (power == PowerHint::kHigh ? "high" : power == PowerHint::kLow ? "low" : "normal") << "\",\n";
+        os << "  \"power\": \"" << (power == PowerHint::High ? "high" : power == PowerHint::Low ? "low" : "normal") << "\",\n";
         os << "  \"cpuThreads\": " << cpuThreads << ",\n";
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
         os << "  \"inputLayout\": \"" << formatStr(inputLayout) << "\",\n";
@@ -217,13 +217,13 @@ namespace vknn {
         switch (verbosity)
         {
             case 0:
-                Log::setLevel(LogLevel::kWarn);
+                Log::setLevel(LogLevel::Warn);
                 break;
             case 1:
-                Log::setLevel(LogLevel::kInfo);
+                Log::setLevel(LogLevel::Info);
                 break;
             default:
-                Log::setLevel(LogLevel::kDebug);
+                Log::setLevel(LogLevel::Debug);
                 break;
         }
     }

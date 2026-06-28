@@ -11,7 +11,7 @@ namespace vknn {
 
     struct OpRecord {
         std::string             name;
-        OpType                  type = OpType::kUnknown;
+        OpType                  type = OpType::Unknown;
         std::string             backend;
         double                  cpuMs    = 0.0;
         double                  gpuMs    = -1.0; // <0 => not measured

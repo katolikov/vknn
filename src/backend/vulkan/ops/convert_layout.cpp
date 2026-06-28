@@ -34,6 +34,6 @@ namespace vknn {
 
     } // namespace
 
-    VKNN_REGISTER_VK_OP(OpType::kConvertLayout, ConvertLayoutOp);
+    VKNN_REGISTER_VK_OP(OpType::ConvertLayout, ConvertLayoutOp);
 
 } // namespace vknn

@@ -15,8 +15,8 @@ namespace vknn {
     struct TensorDesc {
         std::string  name;
         Shape        shape; // logical NCHW shape (may have dynamic dims as -1)
-        DType        dtype         = DType::kFloat32;
-        TensorFormat format        = TensorFormat::kNCHW;
+        DType        dtype         = DType::Float32;
+        TensorFormat format        = TensorFormat::NCHW;
         bool         isInput       = false;
         bool         isOutput      = false;
         bool         isInitializer = false;
@@ -54,7 +54,7 @@ namespace vknn {
     struct RtTensor {
         TensorId id = kNoTensor;
         Shape    shape;
-        DType    dtype = DType::kFloat32;
+        DType    dtype = DType::Float32;
 
         // ---- host residency (canonical NCHW, fp32 for compute/IO) ----
         HostBuffer host;
@@ -62,8 +62,8 @@ namespace vknn {
 
         // ---- device residency (managed by a backend) ----
         std::shared_ptr<DeviceStorage> device; // null until a backend allocates it
-        TensorFormat                   deviceFormat = TensorFormat::kUnknown;
-        DType                          deviceDtype  = DType::kFloat32;
+        TensorFormat                   deviceFormat = TensorFormat::Unknown;
+        DType                          deviceDtype  = DType::Float32;
         bool                           deviceValid  = false;
         // Zero-copy boundary: caller dma-buf fd to use directly as this tensor's GPU buffer (-1 = none).
         int dmaBufFd = -1;

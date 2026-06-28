@@ -75,7 +75,7 @@ namespace vknn {
         int cpuIdx = -1;
         for (size_t i = 0; i < backends_.size(); ++i)
         {
-            if (backends_[i]->kind() == BackendKind::kCpu)
+            if (backends_[i]->kind() == BackendKind::Cpu)
             {
                 cpuIdx = (int) i;
             }
@@ -85,13 +85,13 @@ namespace vknn {
             return; // no CPU backend to fall back to
         }
         auto isCpu = [&](int ni) {
-            return backends_[nodeBackendIdx_[ni]]->kind() == BackendKind::kCpu;
+            return backends_[nodeBackendIdx_[ni]]->kind() == BackendKind::Cpu;
         };
         // Approximate per-node work: a conv/gemm output costs Cin*KH*KW per element, everything else ~1.
         auto nodeCost = [&](int ni) -> int64_t {
             const Node &nd       = graph_.nodes[ni];
             int64_t     outElems = nd.outputs.empty() || nd.outputs[0] == kNoTensor ? 0 : numElements(graph_.desc(nd.outputs[0]).shape);
-            if ((nd.type == OpType::kConv || nd.type == OpType::kGemm) && nd.inputs.size() > 1)
+            if ((nd.type == OpType::Conv || nd.type == OpType::Gemm) && nd.inputs.size() > 1)
             {
                 const Shape &w = graph_.desc(nd.inputs[1]).shape;
                 int64_t      k = 1;
@@ -184,7 +184,7 @@ namespace vknn {
                 bool cpuOk = true;
                 for (int ni: runNodes[r])
                 {
-                    if (!backends_[cpuIdx]->supportsNode(graph_, graph_.nodes[ni], DType::kFloat32))
+                    if (!backends_[cpuIdx]->supportsNode(graph_, graph_.nodes[ni], DType::Float32))
                     {
                         cpuOk = false;
                         break;
@@ -221,7 +221,7 @@ namespace vknn {
         }
         if (cfg_.allowCpuFallback)
         {
-            order.push_back(BackendKind::kCpu);
+            order.push_back(BackendKind::Cpu);
         }
         std::set<BackendKind> seen;
         auto                 &reg = BackendRegistry::instance();
@@ -248,7 +248,7 @@ namespace vknn {
         }
         if (backends_.empty())
         {
-            throw Error(Status::kRuntimeError, "no usable backend");
+            throw Error(Status::RuntimeError, "no usable backend");
         }
         VKNN_INFO << "Active backends (priority): " << [&] {
             std::string s;
@@ -262,7 +262,7 @@ namespace vknn {
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
         //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
         //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).
-        if (byKind_.count(BackendKind::kVulkan) && !cfg_.noFlatOps)
+        if (byKind_.count(BackendKind::Vulkan) && !cfg_.noFlatOps)
         {
             insertLayoutConverts(graph_);
             graph_.topoSort();
@@ -290,7 +290,7 @@ namespace vknn {
         for (size_t n = 0; n < graph_.nodes.size(); ++n)
         {
             const Node &nd     = graph_.nodes[n];
-            DType       dt     = DType::kFloat32; // compute dtype at IR level
+            DType       dt     = DType::Float32; // compute dtype at IR level
             int         chosen = -1;
             for (size_t bi = 0; bi < backends_.size(); ++bi)
             {
@@ -302,7 +302,7 @@ namespace vknn {
             }
             if (chosen < 0)
             {
-                throw Error(Status::kUnsupported, std::string("no backend supports op ") + opTypeName(nd.type) + " (" + nd.name + ")");
+                throw Error(Status::Unsupported, std::string("no backend supports op ") + opTypeName(nd.type) + " (" + nd.name + ")");
             }
             nodeBackendIdx_[n] = chosen;
             // warn if the primary backend couldn't take it
@@ -329,7 +329,7 @@ namespace vknn {
             std::set<TensorId> cpuNeeded;
             for (size_t n = 0; n < graph_.nodes.size(); ++n)
             {
-                bool isCpu = nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::kCpu;
+                bool isCpu = nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Cpu;
                 if (!isCpu)
                 {
                     continue;
@@ -354,7 +354,7 @@ namespace vknn {
                 RtTensor         &rt  = pool_[id];
                 const HostBuffer &src = graph_.initializers[id];
                 rt.shape              = graph_.tensors[id].shape;
-                if (graph_.tensors[id].dtype == DType::kFloat16)
+                if (graph_.tensors[id].dtype == DType::Float16)
                 {
                     int64_t       nel = numElements(rt.shape);
                     const fp16_t *h   = reinterpret_cast<const fp16_t *>(src.bytes.data());
@@ -364,7 +364,7 @@ namespace vknn {
                     {
                         f[i] = halfToFloat(h[i]);
                     }
-                    rt.dtype = DType::kFloat32;
+                    rt.dtype = DType::Float32;
                 } else
                 {
                     rt.host  = src;
@@ -470,7 +470,7 @@ namespace vknn {
             seg->boundaryInputs.assign(ins.begin(), ins.end());
             seg->boundaryOutputs.assign(outs.begin(), outs.end());
             // tag a CPU segment as a fallback when the configured primary backend isn't CPU.
-            if (backends_[bi]->kind() == BackendKind::kCpu && cfg_.backend != BackendKind::kCpu)
+            if (backends_[bi]->kind() == BackendKind::Cpu && cfg_.backend != BackendKind::Cpu)
             {
                 seg->isFallback = true;
             }
@@ -492,7 +492,7 @@ namespace vknn {
             std::set<TensorId> freeable;
             for (const auto &nd: graph_.nodes)
             {
-                if (nd.type == OpType::kConv || nd.type == OpType::kMatMul || nd.type == OpType::kGemm)
+                if (nd.type == OpType::Conv || nd.type == OpType::MatMul || nd.type == OpType::Gemm)
                 {
                     for (TensorId in: nd.inputs)
                     {
@@ -524,7 +524,7 @@ namespace vknn {
         std::vector<BackendKind> v;
         for (int bi: nodeBackendIdx_)
         {
-            v.push_back(bi >= 0 ? backends_[bi]->kind() : BackendKind::kCpu);
+            v.push_back(bi >= 0 ? backends_[bi]->kind() : BackendKind::Cpu);
         }
         return v;
     }
@@ -564,7 +564,7 @@ namespace vknn {
                 } else
                 {
                     VKNN_ERROR << "input not found: " << io.name;
-                    return Status::kInvalidArgument;
+                    return Status::InvalidArgument;
                 }
             }
             RtTensor &rt = pool_[id];
@@ -620,7 +620,7 @@ namespace vknn {
         } catch (const std::exception &e)
         {
             VKNN_ERROR << "run failed: " << e.what();
-            return Status::kRuntimeError;
+            return Status::RuntimeError;
         }
         auto tC = now();
 
@@ -677,7 +677,7 @@ namespace vknn {
             };
             VKNN_INFO << "sess::run bind=" << ms(tA, tB) << "ms segments=" << ms(tB, tC) << "ms collect=" << ms(tC, tD) << "ms";
         }
-        return Status::kOk;
+        return Status::Ok;
     }
 
     // --- ergonomic API ------------------------------------------------------------------------------
@@ -691,16 +691,16 @@ namespace vknn {
         // Zero-copy boundary buffer the caller provides: the segment's device layout for this tensor at
         // the compute precision (fp16 -> 2 bytes/elem). Flat boundaries are row-major NCHW; the rest are
         // NC4HW4 (channels in groups of 4, padded), whose byte size includes the channel padding.
-        int64_t elemSize = (prec == Precision::kFp32) ? 4 : 2;
+        int64_t elemSize = (prec == Precision::Fp32) ? 4 : 2;
         if (g.desc(id).gpuFlat)
         {
             info.deviceBytes  = info.elems * elemSize;
-            info.deviceFormat = TensorFormat::kNCHW;
+            info.deviceFormat = TensorFormat::NCHW;
         } else
         {
             NCHW x            = NCHW::from(info.shape);
             info.deviceBytes  = x.n * cBlocks(x.c) * 4 * x.h * x.w * elemSize;
-            info.deviceFormat = TensorFormat::kNC4HW4;
+            info.deviceFormat = TensorFormat::NC4HW4;
         }
         return info;
     }
@@ -727,7 +727,7 @@ namespace vknn {
         if (inputData.size() != graph_.inputs.size())
         {
             VKNN_ERROR << "run: expected " << graph_.inputs.size() << " input(s), got " << inputData.size();
-            return Status::kInvalidArgument;
+            return Status::InvalidArgument;
         }
         std::vector<IOTensor> ins(graph_.inputs.size());
         for (size_t i = 0; i < graph_.inputs.size(); ++i)
@@ -739,11 +739,11 @@ namespace vknn {
             if (want > 0 && (int64_t) inputData[i].size() != want)
             {
                 VKNN_ERROR << "run: input '" << d.name << "' expects " << want << " values, got " << inputData[i].size();
-                return Status::kInvalidArgument;
+                return Status::InvalidArgument;
             }
             ins[i].name      = d.name;
             ins[i].shape     = d.shape;
-            ins[i].dtype     = DType::kFloat32;
+            ins[i].dtype     = DType::Float32;
             const uint8_t *p = reinterpret_cast<const uint8_t *>(inputData[i].data());
             ins[i].data.assign(p, p + inputData[i].size() * sizeof(float));
         }
@@ -752,7 +752,7 @@ namespace vknn {
 
     std::vector<float> Session::infer(const std::vector<float> &input) {
         std::vector<IOTensor> outs;
-        if (run({input}, outs) != Status::kOk || outs.empty())
+        if (run({input}, outs) != Status::Ok || outs.empty())
         {
             return {};
         }

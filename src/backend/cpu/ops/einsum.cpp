@@ -115,5 +115,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kEinsum, EinsumCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Einsum, EinsumCpu);
 } // namespace vknn

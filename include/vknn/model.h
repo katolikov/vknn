@@ -20,9 +20,9 @@ namespace vknn {
     struct TensorInfo {
         std::string          name;
         std::vector<int64_t> shape;
-        DType                dtype = DType::kFloat32; // the tensor's element type (values cross the API as fp32)
-        int64_t              count = 0;               // number of elements
-        std::string          shapeString() const;     // e.g. "1x3x224x224"
+        DType                dtype = DType::Float32; // the tensor's element type (values cross the API as fp32)
+        int64_t              count = 0;              // number of elements
+        std::string          shapeString() const;    // e.g. "1x3x224x224"
     };
 
     /// A tensor going in or out of a model. Carries its own shape + data; all the accessors you'd want
@@ -95,7 +95,7 @@ namespace vknn {
       public:
         /// Load an ONNX model. Picks the Vulkan backend if available (CPU fallback), and the given
         /// precision (Auto = fp16 on GPU).
-        static Model load(const std::string &onnxPath, Precision precision = Precision::kAuto);
+        static Model load(const std::string &onnxPath, Precision precision = Precision::Auto);
         /// Advanced: full control via Config.
         static Model load(const std::string &onnxPath, const Config &cfg);
         /// Save the optimized model to a ".vxm" file. A later Model::load() on that path skips ONNX

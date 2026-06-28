@@ -19,7 +19,7 @@ namespace vknn {
                 const Shape    &sa = A.shape, &sb = B.shape;
 
                 // int64 path: shape arithmetic (Shape/Gather + Add) const-folded for slice/reshape bounds.
-                if (A.dtype == DType::kInt64 || B.dtype == DType::kInt64)
+                if (A.dtype == DType::Int64 || B.dtype == DType::Int64)
                 {
                     size_t rank = std::max(sa.size(), sb.size());
                     Shape  out(rank, 1);
@@ -34,7 +34,7 @@ namespace vknn {
                     int64_t  n   = numElements(out);
                     int64_t *y   = cpu::allocOutI64(Y, out);
                     auto     val = [](const RtTensor &T, int64_t i) {
-                        return T.dtype == DType::kInt64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
+                        return T.dtype == DType::Int64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
                     };
                     std::vector<int64_t> oa(rank), ob(rank);
                     int64_t              sA = 1, sB = 1;
@@ -128,5 +128,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kAdd, AddCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Add, AddCpu);
 } // namespace vknn

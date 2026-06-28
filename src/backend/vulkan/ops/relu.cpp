@@ -22,5 +22,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kRelu, ReluOp);
+    VKNN_REGISTER_VK_OP(OpType::Relu, ReluOp);
 } // namespace vknn

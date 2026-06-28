@@ -15,7 +15,7 @@ namespace vknn {
                 // The shape operand is an int64 vector; derive the output shape from it.
                 int64_t r = S.elems();
                 Shape   out;
-                if (S.dtype == DType::kInt64)
+                if (S.dtype == DType::Int64)
                 {
                     const int64_t *s = S.host.i64();
                     for (int64_t i = 0; i < r; ++i)
@@ -36,7 +36,7 @@ namespace vknn {
                 }
 
                 auto    it     = node.attr.map.find("value");
-                bool    intVal = it != node.attr.map.end() && it->second.kind == Attr::kInts;
+                bool    intVal = it != node.attr.map.end() && it->second.kind == Attr::Ints;
                 int64_t n      = numElements(out);
                 if (intVal)
                 {
@@ -62,5 +62,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kConstantOfShape, ConstantOfShapeCpu);
+    VKNN_REGISTER_CPU_OP(OpType::ConstantOfShape, ConstantOfShapeCpu);
 } // namespace vknn

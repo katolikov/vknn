@@ -57,10 +57,10 @@ namespace vknn {
                     std::vector<float> iv((size_t) nIdx);
                     for (int64_t i = 0; i < nIdx; ++i)
                     {
-                        if (idt == DType::kInt64)
+                        if (idt == DType::Int64)
                         {
                             iv[(size_t) i] = (float) hb.i64()[i];
-                        } else if (idt == DType::kFloat16)
+                        } else if (idt == DType::Float16)
                         {
                             iv[(size_t) i] = halfToFloat(reinterpret_cast<const fp16_t *>(hb.bytes.data())[i]);
                         } else
@@ -82,5 +82,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kGather, GatherOp);
+    VKNN_REGISTER_VK_OP(OpType::Gather, GatherOp);
 } // namespace vknn

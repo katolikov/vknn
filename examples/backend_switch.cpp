@@ -25,8 +25,8 @@ static const char *argval(int c, char **v, const char *k, const char *d) {
 static void runWith(const std::string &model, const std::vector<uint8_t> &inData, BackendKind be) {
     Config cfg;
     cfg.backend   = be;
-    cfg.fallback  = {BackendKind::kVulkan, BackendKind::kCpu}; // others fall back through these
-    cfg.precision = Precision::kFp16;
+    cfg.fallback  = {BackendKind::Vulkan, BackendKind::Cpu}; // others fall back through these
+    cfg.precision = Precision::Fp16;
     printf("\n=== config.backend = %s ===\n", backendName(be));
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -37,10 +37,10 @@ static void runWith(const std::string &model, const std::vector<uint8_t> &inData
     IOTensor in;
     in.name  = "input";
     in.shape = {1, 3, 224, 224};
-    in.dtype = DType::kFloat32;
+    in.dtype = DType::Float32;
     in.data  = inData;
     std::vector<IOTensor> outs;
-    if (sess->run({in}, outs) != Status::kOk)
+    if (sess->run({in}, outs) != Status::Ok)
     {
         printf("  run failed\n");
         return;
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
     {
         in.assign(1 * 3 * 224 * 224 * 4, 0);
     }
-    for (BackendKind be: {BackendKind::kVulkan, BackendKind::kCpu})
+    for (BackendKind be: {BackendKind::Vulkan, BackendKind::Cpu})
     {
         runWith(model, in, be);
     }

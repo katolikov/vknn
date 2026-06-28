@@ -12,7 +12,7 @@ namespace vknn {
 
         struct WhereCpu: CpuOp {
             bool supportsDType(DType dt) const override {
-                return dt == DType::kFloat32 || dt == DType::kInt64 || dt == DType::kInt32;
+                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
             }
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &C   = ctx.t(node.inputs[0]);
@@ -44,7 +44,7 @@ namespace vknn {
                 }
                 // cond read through its native dtype (bool/uint8 imported as fp32; int64 shape masks possible).
                 auto condTrue = [](const RtTensor &T, int64_t i) -> bool {
-                    return T.dtype == DType::kInt64 ? T.host.i64()[i] != 0 : T.host.f32()[i] != 0.0f;
+                    return T.dtype == DType::Int64 ? T.host.i64()[i] != 0 : T.host.f32()[i] != 0.0f;
                 };
                 // broadcast-index helper: maps a linear output index to (cond, X, Y) source offsets.
                 auto offsets = [&](int64_t lin, int64_t &ic, int64_t &ix, int64_t &iy) {
@@ -63,7 +63,7 @@ namespace vknn {
                     }
                 };
                 // Output type follows the value operands (int64 for the shape-arithmetic Where).
-                bool i64 = X.dtype == DType::kInt64 && Yv.dtype == DType::kInt64;
+                bool i64 = X.dtype == DType::Int64 && Yv.dtype == DType::Int64;
                 if (i64)
                 {
                     int64_t       *o = cpu::allocOutI64(Out, out);
@@ -91,5 +91,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kWhere, WhereCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Where, WhereCpu);
 } // namespace vknn

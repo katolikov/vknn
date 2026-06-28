@@ -18,7 +18,7 @@ namespace vknn {
                     }
                     return {(int64_t) n};
                 };
-                if (it != node.attr.map.end() && it->second.kind == Attr::kInts)
+                if (it != node.attr.map.end() && it->second.kind == Attr::Ints)
                 {
                     const auto &v = it->second.ints;
                     int64_t    *y = cpu::allocOutI64(Y, shapeOf(v.size()));
@@ -26,7 +26,7 @@ namespace vknn {
                     {
                         y[i] = v[i];
                     }
-                } else if (it != node.attr.map.end() && it->second.kind == Attr::kFloats)
+                } else if (it != node.attr.map.end() && it->second.kind == Attr::Floats)
                 {
                     const auto &v = it->second.floats;
                     float      *y = cpu::allocOut(Y, shapeOf(v.size()));
@@ -45,5 +45,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kConstant, ConstantCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Constant, ConstantCpu);
 } // namespace vknn

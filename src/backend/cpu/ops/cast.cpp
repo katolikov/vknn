@@ -11,7 +11,7 @@ namespace vknn {
                 RtTensor       &Y      = ctx.t(node.outputs[0]);
                 int64_t         to     = node.attr.geti("to", 1); // ONNX TensorProto: 1=FLOAT, 7=INT64, 6=INT32
                 int64_t         n      = X.elems();
-                bool            inI64  = X.dtype == DType::kInt64;
+                bool            inI64  = X.dtype == DType::Int64;
                 bool            outI64 = (to == 7 || to == 6 || to == 5 || to == 3); // integer targets -> carry as int64
                 if (outI64)
                 {
@@ -56,5 +56,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kCast, CastCpu);
+    VKNN_REGISTER_CPU_OP(OpType::Cast, CastCpu);
 } // namespace vknn

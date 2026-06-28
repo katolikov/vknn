@@ -162,5 +162,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kMatMul, MatMulOp);
+    VKNN_REGISTER_VK_OP(OpType::MatMul, MatMulOp);
 } // namespace vknn

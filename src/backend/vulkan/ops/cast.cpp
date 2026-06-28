@@ -20,5 +20,5 @@ namespace vknn {
         };
 
     } // namespace
-    VKNN_REGISTER_VK_OP(OpType::kCast, CastOp);
+    VKNN_REGISTER_VK_OP(OpType::Cast, CastOp);
 } // namespace vknn

@@ -6,20 +6,20 @@
 namespace vknn {
 
     enum class TensorFormat : uint8_t {
-        kNCHW    = 0, // canonical (ONNX/Caffe). N, C, H, W.
-        kNHWC    = 1, // channel-last (common I/O layout).
-        kNC4HW4  = 2, // internal Vulkan packed layout: channels in vec4 blocks.
-        kUnknown = 255,
+        NCHW    = 0, // canonical (ONNX/Caffe). N, C, H, W.
+        NHWC    = 1, // channel-last (common I/O layout).
+        NC4HW4  = 2, // internal Vulkan packed layout: channels in vec4 blocks.
+        Unknown = 255,
     };
 
     inline const char *formatStr(TensorFormat f) {
         switch (f)
         {
-            case TensorFormat::kNCHW:
+            case TensorFormat::NCHW:
                 return "NCHW";
-            case TensorFormat::kNHWC:
+            case TensorFormat::NHWC:
                 return "NHWC";
-            case TensorFormat::kNC4HW4:
+            case TensorFormat::NC4HW4:
                 return "NC4HW4";
             default:
                 return "?";

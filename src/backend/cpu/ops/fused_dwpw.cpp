@@ -86,5 +86,5 @@ namespace vknn {
             }
         };
     } // namespace
-    VKNN_REGISTER_CPU_OP(OpType::kFusedDwPw, FusedDwPwCpu);
+    VKNN_REGISTER_CPU_OP(OpType::FusedDwPw, FusedDwPwCpu);
 } // namespace vknn

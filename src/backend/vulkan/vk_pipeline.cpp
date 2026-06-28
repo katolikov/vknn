@@ -38,7 +38,7 @@ namespace vknn { namespace vk {
         auto it = embeddedShaders().find(shaderName);
         if (it == embeddedShaders().end())
         {
-            throw Error(Status::kNotFound, "shader not found: " + shaderName);
+            throw Error(Status::NotFound, "shader not found: " + shaderName);
         }
         const auto &spv = it->second;
 

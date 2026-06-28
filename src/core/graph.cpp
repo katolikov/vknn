@@ -92,7 +92,7 @@ namespace vknn {
         }
         if (ordered.size() != n)
         {
-            throw Error(Status::kInvalidArgument, "graph has a cycle");
+            throw Error(Status::InvalidArgument, "graph has a cycle");
         }
         nodes = std::move(ordered);
     }
@@ -121,7 +121,7 @@ namespace vknn {
                 os << tensors[nd.outputs[k]].name << (k + 1 < nd.outputs.size() ? "," : "");
             }
             os << ")";
-            if (nd.fusedAct != ActType::kNone)
+            if (nd.fusedAct != ActType::None)
             {
                 os << " +act" << (int) nd.fusedAct;
             }
