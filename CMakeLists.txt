@@ -132,12 +132,24 @@ target_link_libraries(vknn PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io yonosplat validate)
+  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io yonosplat)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vknn_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       # whole-archive so self-registering backend/operators (static initializers in the
       # static lib) are retained even though no symbol references them directly.
       target_link_libraries(vknn_${ex} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
+    endif()
+  endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# Benchmark on-device tools (driven by benchmark/benchmark.py)
+# ---------------------------------------------------------------------------
+if(VKNN_BUILD_EXAMPLES)
+  foreach(bt validate)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/${bt}.cpp)
+      add_executable(vknn_${bt} ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/${bt}.cpp)
+      target_link_libraries(vknn_${bt} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
     endif()
   endforeach()
 endif()

@@ -270,6 +270,10 @@ int main(int argc, char **argv) {
     {
         cfg.cacheWeights = !j->asBool(true);
     }
+    if (auto *j = js.get("timing"))
+    {
+        cfg.timing = j->asBool(false); // engine prints pack / submit+gpu / unpack
+    }
     double tol = js.get("tolerance") ? js.get("tolerance")->asNum(0.999) : 0.999;
 
     auto sess = Runtime::load(resolve(base, model), cfg);

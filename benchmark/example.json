@@ -1,0 +1,20 @@
+{
+  "onnx": "/tmp/YoNoSplat/onnx/yonosplat_encoder.onnx",
+  "model": "encoder8_fp16.vxm",
+  "fp16": true,
+  "backend": "vulkan",
+  "precision": "fp16",
+  "device_dir": "/data/local/tmp/vxrt/bench",
+  "inputs": { "image": "image8.npy", "intrinsics": "intr8.npy" },
+  "outputs": {
+    "means": "means_gold.npy",
+    "covariances": "covariances_gold.npy",
+    "harmonics": "harmonics_gold.npy",
+    "opacities": "opacities_gold.npy",
+    "rotations": "rotations_gold.npy",
+    "scales": "scales_gold.npy"
+  },
+  "tolerance": 0.999,
+  "cooldown": 22,
+  "bench": 5
+}
