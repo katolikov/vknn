@@ -1001,6 +1001,20 @@ namespace vknn {
                 {
                     copySinceBarrier = true;
                 }
+                // Split the segment into multiple command buffers so no single submit runs long
+                // enough to trip the GPU watchdog (a ~20s single submit on this driver gets reset
+                // silently, zeroing the unexecuted tail). The submit fence between chunks is a full
+                // barrier, so buffer reuse stays correct across the boundary. Only when not profiling.
+                if (!queryPool_ && kChunkNodes > 0 && (k + 1) % kChunkNodes == 0 && k + 1 < nodeIdx.size())
+                {
+                    be_->runner().end(cmd_);
+                    cmds_.push_back(cmd_);
+                    cmd_ = be_->runner().allocate();
+                    be_->runner().begin(cmd_);
+                    writtenBufs.clear();
+                    readBufs.clear();
+                    copySinceBarrier = false;
+                }
             }
             // Final barrier so the segment outputs are complete + visible before the host reads them.
             if (copySinceBarrier)
@@ -1011,6 +1025,7 @@ namespace vknn {
                 vk::computeBarrier(cmd_);
             }
             be_->runner().end(cmd_);
+            cmds_.push_back(cmd_);
             recorded_ = true;
         }
 
@@ -1049,8 +1064,12 @@ namespace vknn {
             }
             auto t1 = now();
 
-            double wall = be_->runner().submitAndWait(cmd_);
-            auto   t2   = now();
+            double wall = 0;
+            for (VkCommandBuffer c: cmds_)
+            {
+                wall += be_->runner().submitAndWait(c);
+            }
+            auto t2 = now();
 
             // download boundary outputs to host.
             for (TensorId tid: boundaryOutputs)
@@ -1157,9 +1176,11 @@ namespace vknn {
         std::map<TensorId, std::shared_ptr<vk::Buffer>> buffers_;
         std::vector<std::unique_ptr<VulkanOp>>          ops_;
         VkOpEnv                                         env_;
-        VkCommandBuffer                                 cmd_       = VK_NULL_HANDLE;
-        VkQueryPool                                     queryPool_ = VK_NULL_HANDLE;
-        bool                                            recorded_  = false;
+        VkCommandBuffer                                 cmd_ = VK_NULL_HANDLE;
+        std::vector<VkCommandBuffer>                    cmds_;             // chunked submits (one entry unless the segment is split for the GPU watchdog)
+        static constexpr int                            kChunkNodes = 500; // nodes per command-buffer chunk
+        VkQueryPool                                     queryPool_  = VK_NULL_HANDLE;
+        bool                                            recorded_   = false;
         std::vector<TensorId>                           dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
     };
 
