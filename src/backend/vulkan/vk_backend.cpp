@@ -1,6 +1,8 @@
 #include "vk_backend.h"
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <set>
 #include <sys/stat.h>
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
@@ -27,15 +29,17 @@ namespace vknn {
     // ============================ WeightCache ============================
     // Binary format: [u32 nWeights]{[u32 klen][key][u32 nfloats][floats]} [u32 nTune]{[u32
     // klen][key][i32 val]}
-    void WeightCache::load(const std::string &path) {
-        path_   = path;
-        FILE *f = fopen(path.c_str(), "rb");
-        if (!f)
-        {
-            return;
-        }
-        auto rd32 = [&](uint32_t &v) {
-            return fread(&v, 4, 1, f) == 1;
+    void WeightCache::loadBytes(const uint8_t *data, size_t n, bool enable) {
+        enabled_   = enable;
+        size_t off = 0;
+        auto   rd32 = [&](uint32_t &v) {
+            if (off + 4 > n)
+            {
+                return false;
+            }
+            std::memcpy(&v, data + off, 4);
+            off += 4;
+            return true;
         };
         uint32_t nw = 0;
         if (rd32(nw))
@@ -43,18 +47,19 @@ namespace vknn {
             for (uint32_t i = 0; i < nw; ++i)
             {
                 uint32_t kl = 0, nf = 0;
-                if (!rd32(kl))
+                if (!rd32(kl) || off + kl > n)
                 {
                     break;
                 }
-                std::string k(kl, 0);
-                fread(&k[0], 1, kl, f);
-                if (!rd32(nf))
+                std::string k((const char *) data + off, kl);
+                off += kl;
+                if (!rd32(nf) || off + (size_t) nf * 4 > n)
                 {
                     break;
                 }
                 std::vector<float> d(nf);
-                fread(d.data(), 4, nf, f);
+                std::memcpy(d.data(), data + off, (size_t) nf * 4);
+                off += (size_t) nf * 4;
                 weights_[k] = std::move(d);
             }
             uint32_t nt = 0;
@@ -64,53 +69,51 @@ namespace vknn {
                 {
                     uint32_t kl  = 0;
                     int32_t  val = 0;
-                    if (!rd32(kl))
+                    if (!rd32(kl) || off + kl > n)
                     {
                         break;
                     }
-                    std::string k(kl, 0);
-                    fread(&k[0], 1, kl, f);
-                    fread(&val, 4, 1, f);
+                    std::string k((const char *) data + off, kl);
+                    off += kl;
+                    if (off + 4 > n)
+                    {
+                        break;
+                    }
+                    std::memcpy(&val, data + off, 4);
+                    off += 4;
                     tune_[k] = val;
                 }
             }
         }
-        fclose(f);
-        VKNN_INFO << "WeightCache: loaded " << weights_.size() << " prepacked weights, " << tune_.size() << " tuning entries from " << path;
+        VKNN_INFO << "WeightCache: loaded " << weights_.size() << " prepacked weights, " << tune_.size() << " tuning entries";
     }
-    void WeightCache::save() const {
-        if (path_.empty() || !dirty_)
-        {
-            return;
-        }
-        FILE *f = fopen(path_.c_str(), "wb");
-        if (!f)
-        {
-            VKNN_WARN << "WeightCache: cannot write " << path_;
-            return;
-        }
-        auto wr32 = [&](uint32_t v) {
-            fwrite(&v, 4, 1, f);
+    std::vector<uint8_t> WeightCache::serialize() const {
+        std::vector<uint8_t> out;
+        auto                 wr32 = [&](uint32_t v) {
+            const uint8_t *p = (const uint8_t *) &v;
+            out.insert(out.end(), p, p + 4);
+        };
+        auto wrBytes = [&](const void *p, size_t bytes) {
+            const uint8_t *b = (const uint8_t *) p;
+            out.insert(out.end(), b, b + bytes);
         };
         wr32((uint32_t) weights_.size());
         for (auto &kv: weights_)
         {
             wr32((uint32_t) kv.first.size());
-            fwrite(kv.first.data(), 1, kv.first.size(), f);
+            wrBytes(kv.first.data(), kv.first.size());
             wr32((uint32_t) kv.second.size());
-            fwrite(kv.second.data(), 4, kv.second.size(), f);
+            wrBytes(kv.second.data(), kv.second.size() * 4);
         }
         wr32((uint32_t) tune_.size());
         for (auto &kv: tune_)
         {
             wr32((uint32_t) kv.first.size());
-            fwrite(kv.first.data(), 1, kv.first.size(), f);
+            wrBytes(kv.first.data(), kv.first.size());
             int32_t v = kv.second;
-            fwrite(&v, 4, 1, f);
+            wrBytes(&v, 4);
         }
-        fclose(f);
-        dirty_ = false;
-        VKNN_INFO << "WeightCache: saved " << weights_.size() << " weights + " << tune_.size() << " tuning entries -> " << path_;
+        return out;
     }
     bool WeightCache::get(const std::string &key, std::vector<float> &out) const {
         auto it = weights_.find(key);
@@ -408,37 +411,107 @@ namespace vknn {
         vk::CommandRunner &runner() {
             return *runner_;
         }
+        // Read cfg.cacheFile once and split it into the pipeline + weight sections. Empty cacheFile
+        // (e.g. a session built from an in-memory graph) leaves both sections empty -> caches stay
+        // in-memory only and saveCaches() is a no-op.
+        void loadUnified(const Config &cfg) {
+            if (unifiedLoaded_)
+            {
+                return;
+            }
+            unifiedLoaded_ = true;
+            cacheFile_     = cfg.cacheFile;
+            savePipeline_  = cfg.cachePipeline;
+            saveWeights_   = cfg.cacheWeights;
+            if (cacheFile_.empty())
+            {
+                return;
+            }
+            std::ifstream f(cacheFile_, std::ios::binary);
+            if (!f)
+            {
+                return;
+            }
+            loadedBytes_.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+            const uint8_t *p = loadedBytes_.data();
+            size_t         n = loadedBytes_.size();
+            if (n < 8 || std::memcmp(p, "VKNNCAC1", 8) != 0)
+            {
+                return; // absent / unrecognized -> regenerate
+            }
+            size_t off  = 8;
+            auto   rd32 = [&](uint32_t &v) {
+                if (off + 4 > n)
+                {
+                    return false;
+                }
+                std::memcpy(&v, p + off, 4);
+                off += 4;
+                return true;
+            };
+            uint32_t pl = 0;
+            if (rd32(pl) && off + pl <= n)
+            {
+                pipeInit_.assign((const char *) p + off, (const char *) p + off + pl);
+                off += pl;
+                uint32_t wl = 0;
+                if (rd32(wl) && off + wl <= n)
+                {
+                    weightInit_.assign(p + off, p + off + wl);
+                }
+            }
+        }
         vk::PipelineCache *pipelineCache(const Config &cfg) {
             if (!cache_)
             {
-                ::mkdir(cfg.cacheDir.c_str(), 0755);
-                cache_ = std::make_unique<vk::PipelineCache>(*ctx_, cfg.cacheDir + "/pipeline.bin");
+                loadUnified(cfg);
+                cache_ = std::make_unique<vk::PipelineCache>(*ctx_, cfg.cachePipeline ? pipeInit_ : std::vector<char> {});
             }
             return cache_.get();
         }
         WeightCache *weightCache(const Config &cfg) {
             if (!wcache_)
             {
-                wcache_ = std::make_unique<WeightCache>();
-                if (cfg.cacheWeights)
-                {
-                    wcache_->load(cfg.cacheDir + "/weights.bin");
-                } else
-                {
-                    wcache_->load(""); // disabled (no path)
-                }
+                loadUnified(cfg);
+                wcache_      = std::make_unique<WeightCache>();
+                bool persist = cfg.cacheWeights && !cacheFile_.empty();
+                wcache_->loadBytes(cfg.cacheWeights ? weightInit_.data() : nullptr, cfg.cacheWeights ? weightInit_.size() : 0, persist);
             }
             return wcache_.get();
         }
+        // Write the unified cache file, but only when the serialized cache differs from what was loaded
+        // (so an unchanged warm session leaves the file untouched). Called from Session::updateCache().
         void saveCaches() {
-            if (cache_)
+            if (cacheFile_.empty())
             {
-                cache_->save();
+                return;
             }
-            if (wcache_)
+            std::vector<char>    pipe = (cache_ && savePipeline_) ? cache_->getData() : pipeInit_;
+            std::vector<uint8_t> w    = (wcache_ && saveWeights_) ? wcache_->serialize() : weightInit_;
+            std::vector<uint8_t> out;
+            auto                 wr32 = [&](uint32_t v) {
+                const uint8_t *b = (const uint8_t *) &v;
+                out.insert(out.end(), b, b + 4);
+            };
+            const char magic[8] = {'V', 'K', 'N', 'N', 'C', 'A', 'C', '1'};
+            out.insert(out.end(), magic, magic + 8);
+            wr32((uint32_t) pipe.size());
+            out.insert(out.end(), pipe.begin(), pipe.end());
+            wr32((uint32_t) w.size());
+            out.insert(out.end(), w.begin(), w.end());
+            if (out == loadedBytes_)
             {
-                wcache_->save();
+                return; // unchanged
             }
+            std::ofstream f(cacheFile_, std::ios::binary | std::ios::trunc);
+            if (!f)
+            {
+                VKNN_WARN << "cannot write cache file " << cacheFile_;
+                return;
+            }
+            f.write((const char *) out.data(), (std::streamsize) out.size());
+            loadedBytes_ = out;
+            VKNN_INFO << "Saved cache (" << out.size() << " bytes: pipeline " << pipe.size() << " + weights " << w.size() << ") -> " << cacheFile_;
         }
 
         bool useFp16(const Config &cfg) const {
@@ -597,6 +670,13 @@ namespace vknn {
         std::unique_ptr<vk::PipelineCache> cache_;
         std::unique_ptr<WeightCache>       wcache_;
         std::string                        disabledOps_; // Config::disableVkOps (debug op-fallback list)
+        // Unified per-model cache file (cfg.cacheFile): one file bundling the pipeline + weight/tuning
+        // blobs, read once and split into pipeInit_/weightInit_, rewritten by saveCaches() only when the
+        // serialized cache differs from what was loaded.
+        std::string          cacheFile_;
+        std::vector<char>    pipeInit_;
+        std::vector<uint8_t> weightInit_, loadedBytes_;
+        bool                 unifiedLoaded_ = false, savePipeline_ = true, saveWeights_ = true;
     };
 
     // ============================ VulkanSegment ============================

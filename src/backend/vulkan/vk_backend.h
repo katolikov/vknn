@@ -17,15 +17,20 @@ namespace vknn {
         std::shared_ptr<vk::Buffer> buffer;
     };
 
-    /// Disk cache of prepacked weights (keyed by op+role+shape) and autotuned workgroup sizes.
-    /// Skips the host repacking work on warm session creation. Format is a simple length-prefixed
-    /// blob written/read atomically.
+    /// In-memory cache of prepacked weights (keyed by op+role+shape) and autotuned workgroup sizes.
+    /// Skips the host repacking + per-shape autotune on warm session creation. Serializes to a simple
+    /// length-prefixed blob that the backend bundles into the unified per-model cache file.
     class WeightCache {
       public:
-        void load(const std::string &path);
-        void save() const;
-        bool enabled() const {
-            return !path_.empty();
+        // Populate from a serialized blob (the weights section of the unified cache file). `enable`
+        // marks the cache active so prepacked weights are retained for the next save.
+        void                 loadBytes(const uint8_t *data, size_t n, bool enable);
+        std::vector<uint8_t> serialize() const; // weights + tuning -> blob
+        bool                 enabled() const {
+            return enabled_;
+        }
+        bool dirty() const {
+            return dirty_;
         }
         bool get(const std::string &key, std::vector<float> &out) const;
         void put(const std::string &key, const std::vector<float> &data);
@@ -34,10 +39,10 @@ namespace vknn {
         void setTuned(const std::string &sig, int val);
 
       private:
-        std::string                               path_;
         std::map<std::string, std::vector<float>> weights_;
         std::map<std::string, int>                tune_;
-        mutable bool                              dirty_ = false;
+        bool                                      enabled_ = false;
+        mutable bool                              dirty_   = false;
     };
 
     class VulkanBackend;

@@ -9,11 +9,25 @@
 
 namespace vknn {
 
-    Session::~Session() = default;
+    Session::~Session() {
+        updateCache(); // persist anything learned this session (autotune, pipelines) if it changed
+    }
+
+    void Session::updateCache() {
+        for (auto &b: backends_)
+        {
+            b->finalize(); // writes the unified cache file when its contents changed
+        }
+    }
 
     std::unique_ptr<Session> Session::createFromOnnx(const std::string &path, const Config &cfg) {
+        Config c = cfg;
+        if (c.cacheFile.empty())
+        {
+            c.cacheFile = Runtime::defaultCacheFile(path);
+        }
         Graph g = importOnnx(path);
-        return create(std::move(g), cfg);
+        return create(std::move(g), c);
     }
 
     std::unique_ptr<Session> Session::createFromVxm(const std::string &path, const Config &cfg) {
@@ -27,6 +41,10 @@ namespace vknn {
         s->graphOptimized_ = true; // passes already baked in
         s->graph_          = std::move(g);
         s->cfg_            = cfg;
+        if (s->cfg_.cacheFile.empty())
+        {
+            s->cfg_.cacheFile = Runtime::defaultCacheFile(path);
+        }
         cfg.applyLogLevel();
         s->profiler_.setEnabled(cfg.profile);
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -458,10 +476,8 @@ namespace vknn {
             }
             segments_.push_back(std::move(seg));
         }
-        for (auto &b: backends_)
-        {
-            b->finalize(); // flush pipeline/weight/tuning caches
-        }
+        // The pipeline/weight/tuning caches are flushed once at teardown (Session::updateCache, from the
+        // destructor), not here, so everything learned this session lands in the unified cache file.
 
         // --- free the host weights: GPU ops have uploaded them to the device, CPU-consumed ones were
         //     decoded into the pool above. Reclaims the full weight blob (a 965M fp16 model: ~1.9GB) so

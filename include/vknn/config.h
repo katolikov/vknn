@@ -49,7 +49,13 @@ namespace vknn {
         // Zero-copy (ION / dma-buf).
         bool enableZeroCopy = false;
 
-        // Caches.
+        // Caches. The unified per-model cache file bundles the compiled-pipeline blob and the
+        // prepacked-weight + autotune blob; loading it skips shader compilation, conv autotuning, and
+        // the Winograd weight transform on a warm start. Set via the Runtime::load() cacheFile argument
+        // (empty there -> "<model>.cache" next to the model). cachePipeline/cacheWeights/cacheTuning
+        // select what the file includes. cacheDir is the fallback location for sessions built from an
+        // in-memory graph (no model path).
+        std::string cacheFile;     // unified cache path (resolved by Runtime::load; empty = no file cache)
         std::string cacheDir      = "/data/local/tmp/vxrt/cache";
         bool        cachePipeline = true;
         bool        cacheWeights  = true;

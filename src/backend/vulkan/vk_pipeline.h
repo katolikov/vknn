@@ -12,22 +12,23 @@ namespace vknn {
 
     namespace vk {
 
-        /// Serializable VkPipelineCache keyed by device+driver. Speeds warm session creation.
+        /// Serializable VkPipelineCache keyed by device+driver. Speeds warm session creation. Built from
+        /// the pipeline section of the unified per-model cache file; getData() returns the bytes the
+        /// backend writes back.
         class PipelineCache {
           public:
-            PipelineCache(VulkanContext &ctx, std::string path);
+            explicit PipelineCache(VulkanContext &ctx, const std::vector<char> &initialData = {});
             ~PipelineCache();
             VkPipelineCache handle() const {
                 return cache_;
             }
-            void   save();
-            size_t diskBytes() const {
+            std::vector<char> getData() const; // serialize the current cache (for the unified file)
+            size_t            diskBytes() const {
                 return diskBytes_;
             }
 
           private:
             VulkanContext  &ctx_;
-            std::string     path_;
             VkPipelineCache cache_     = VK_NULL_HANDLE;
             size_t          diskBytes_ = 0;
         };

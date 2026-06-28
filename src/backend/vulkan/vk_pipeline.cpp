@@ -5,36 +5,24 @@
 namespace vknn { namespace vk {
 
     // ----------------------------- PipelineCache -----------------------------
-    PipelineCache::PipelineCache(VulkanContext &ctx, std::string path): ctx_(ctx), path_(std::move(path)) {
-        std::vector<char> initial;
-        std::ifstream     f(path_, std::ios::binary);
-        if (f)
+    PipelineCache::PipelineCache(VulkanContext &ctx, const std::vector<char> &initialData): ctx_(ctx) {
+        diskBytes_ = initialData.size();
+        if (diskBytes_)
         {
-            initial.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-            diskBytes_ = initial.size();
-            VKNN_INFO << "Loaded pipeline cache (" << diskBytes_ << " bytes) from " << path_;
+            VKNN_INFO << "Loaded pipeline cache (" << diskBytes_ << " bytes)";
         }
         VkPipelineCacheCreateInfo ci {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-        ci.initialDataSize = initial.size();
-        ci.pInitialData    = initial.empty() ? nullptr : initial.data();
+        ci.initialDataSize = initialData.size();
+        ci.pInitialData    = initialData.empty() ? nullptr : initialData.data();
         VK_CHECK(vkCreatePipelineCache(ctx_.device(), &ci, nullptr, &cache_));
     }
 
-    void PipelineCache::save() {
+    std::vector<char> PipelineCache::getData() const {
         size_t sz = 0;
         vkGetPipelineCacheData(ctx_.device(), cache_, &sz, nullptr);
         std::vector<char> data(sz);
         vkGetPipelineCacheData(ctx_.device(), cache_, &sz, data.data());
-        std::ofstream f(path_, std::ios::binary | std::ios::trunc);
-        if (f)
-        {
-            f.write(data.data(), sz);
-            diskBytes_ = sz;
-            VKNN_INFO << "Saved pipeline cache (" << sz << " bytes) -> " << path_;
-        } else
-        {
-            VKNN_WARN << "could not write pipeline cache to " << path_;
-        }
+        return data;
     }
 
     PipelineCache::~PipelineCache() {

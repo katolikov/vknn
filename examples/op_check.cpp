@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <sys/stat.h>
 #include <vector>
 #if defined(VKNN_ENABLE_VULKAN)
@@ -24,7 +25,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    vk::PipelineCache   cache(ctx, cacheDir + "/pipeline.bin");
+    std::string       cachePath = cacheDir + "/pipeline.bin";
+    std::vector<char> cacheInit;
+    if (std::ifstream cf {cachePath, std::ios::binary})
+    {
+        cacheInit.assign(std::istreambuf_iterator<char>(cf), std::istreambuf_iterator<char>());
+    }
+    vk::PipelineCache   cache(ctx, cacheInit);
     vk::CommandRunner   runner(ctx);
     vk::ComputePipeline add(ctx, "add", /*numBuffers=*/3, /*pushBytes=*/sizeof(uint32_t), {}, cache.handle());
 
@@ -53,7 +60,11 @@ int main(int argc, char **argv) {
         maxErr = std::max(maxErr, (double) std::fabs(c[i] - (a[i] + b[i])));
     }
 
-    cache.save();
+    if (std::ofstream of {cachePath, std::ios::binary | std::ios::trunc})
+    {
+        auto data = cache.getData();
+        of.write(data.data(), (std::streamsize) data.size());
+    }
     printf("add %u elems: maxAbsErr=%.3e  pipelineCache=%zu bytes  => %s\n", N, maxErr, cache.diskBytes(), maxErr < 1e-4 ? "PASS" : "FAIL");
     return maxErr < 1e-4 ? 0 : 3;
 #else
