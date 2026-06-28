@@ -10,7 +10,7 @@
 namespace vknn {
 
     Session::~Session() {
-        updateCache(); // persist anything learned this session (autotune, pipelines) if it changed
+        updateCache(); // flush autotune/pipeline changes to the cache file if any
     }
 
     void Session::updateCache() {
@@ -477,7 +477,7 @@ namespace vknn {
             segments_.push_back(std::move(seg));
         }
         // The pipeline/weight/tuning caches are flushed once at teardown (Session::updateCache, from the
-        // destructor), not here, so everything learned this session lands in the unified cache file.
+        // destructor), not here, so any autotune/pipeline results land in the unified cache file.
 
         // --- free the host weights: GPU ops have uploaded them to the device, CPU-consumed ones were
         //     decoded into the pool above. Reclaims the full weight blob (a 965M fp16 model: ~1.9GB) so
@@ -485,12 +485,34 @@ namespace vknn {
         //     need weights resident (re-plan, weight introspection) can opt out.
         if (cfg_.freeWeightsAfterUpload)
         {
-            size_t freed = 0;
-            for (auto &kv: graph_.initializers)
+            // Free the bulk weights — Conv/MatMul/Gemm operands, which their ops upload + cache at compile.
+            // KEEP the remaining (small) constants: some ops read their initializers while recording the
+            // command buffer, which the zero-copy path re-records, so those initializers must stay
+            // resolvable. Keeping them costs little (KB-scale shapes/biases/tables).
+            std::set<TensorId> freeable;
+            for (const auto &nd: graph_.nodes)
             {
-                freed += kv.second.bytes.size();
+                if (nd.type == OpType::kConv || nd.type == OpType::kMatMul || nd.type == OpType::kGemm)
+                {
+                    for (TensorId in: nd.inputs)
+                    {
+                        if (in != kNoTensor && graph_.isInitializer(in))
+                        {
+                            freeable.insert(in);
+                        }
+                    }
+                }
             }
-            graph_.initializers.clear();
+            size_t freed = 0;
+            for (TensorId id: freeable)
+            {
+                auto it = graph_.initializers.find(id);
+                if (it != graph_.initializers.end())
+                {
+                    freed += it->second.bytes.size();
+                    graph_.initializers.erase(it);
+                }
+            }
             VKNN_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
         }
 
@@ -529,7 +551,7 @@ namespace vknn {
         ctx.profiler = &profiler_;
         profiler_.clear();
 
-        // --- bind inputs ---
+        // --- bind inputs (host data, or a zero-copy dma-buf fd) ---
         for (const auto &io: inputs)
         {
             TensorId id = graph_.find(io.name);
@@ -545,12 +567,41 @@ namespace vknn {
                     return Status::kInvalidArgument;
                 }
             }
-            RtTensor &rt   = pool_[id];
-            rt.shape       = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
-            rt.dtype       = io.dtype;
-            rt.host.bytes  = io.data;
-            rt.hostValid   = true;
+            RtTensor &rt = pool_[id];
+            rt.shape     = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
+            rt.dtype     = io.dtype;
+            rt.dmaBufFd  = io.dmaBufFd;
+            if (io.dmaBufFd >= 0)
+            {
+                rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
+            } else
+            {
+                rt.host.bytes = io.data;
+                rt.hostValid  = true;
+            }
             rt.deviceValid = false;
+        }
+        // Read zero-copy output fd bindings from the incoming `outputs` (set before the segments run so
+        // the GPU writes into them), before it is cleared and refilled with results below.
+        for (TensorId oid: graph_.outputs)
+        {
+            pool_[oid].dmaBufFd = -1;
+        }
+        for (const auto &b: outputs)
+        {
+            if (b.dmaBufFd < 0)
+            {
+                continue;
+            }
+            TensorId id = graph_.find(b.name);
+            if (id == kNoTensor && graph_.outputs.size() == 1)
+            {
+                id = graph_.outputs[0];
+            }
+            if (id != kNoTensor)
+            {
+                pool_[id].dmaBufFd = b.dmaBufFd;
+            }
         }
 
         auto tB = now();
@@ -607,11 +658,16 @@ namespace vknn {
         {
             RtTensor &rt = pool_[oid];
             IOTensor  io;
-            io.name  = graph_.tensors[oid].name;
-            io.shape = rt.shape;
-            io.dtype = rt.dtype;
-            io.data  = rt.host.bytes;
+            io.name     = graph_.tensors[oid].name;
+            io.shape    = rt.shape;
+            io.dtype    = rt.dtype;
+            io.dmaBufFd = rt.dmaBufFd;
+            if (rt.dmaBufFd < 0)
+            {
+                io.data = rt.host.bytes; // a bound output lives in the caller's fd, not here
+            }
             outputs.push_back(std::move(io));
+            rt.dmaBufFd = -1; // reset for the next run
         }
         if (tm)
         {
@@ -626,12 +682,26 @@ namespace vknn {
 
     // --- ergonomic API ------------------------------------------------------------------------------
 
-    static IOInfo ioInfoOf(const Graph &g, TensorId id) {
+    static IOInfo ioInfoOf(const Graph &g, TensorId id, Precision prec) {
         IOInfo info;
         info.name  = g.tensors[id].name;
         info.shape = g.tensors[id].shape;
         info.dtype = g.tensors[id].dtype;
         info.elems = numElements(info.shape);
+        // Zero-copy boundary buffer the caller provides: the segment's device layout for this tensor at
+        // the compute precision (fp16 -> 2 bytes/elem). Flat boundaries are row-major NCHW; the rest are
+        // NC4HW4 (channels in groups of 4, padded), whose byte size includes the channel padding.
+        int64_t elemSize = (prec == Precision::kFp32) ? 4 : 2;
+        if (g.desc(id).gpuFlat)
+        {
+            info.deviceBytes  = info.elems * elemSize;
+            info.deviceFormat = TensorFormat::kNCHW;
+        } else
+        {
+            NCHW x            = NCHW::from(info.shape);
+            info.deviceBytes  = x.n * cBlocks(x.c) * 4 * x.h * x.w * elemSize;
+            info.deviceFormat = TensorFormat::kNC4HW4;
+        }
         return info;
     }
 
@@ -639,7 +709,7 @@ namespace vknn {
         std::vector<IOInfo> v;
         for (TensorId id: graph_.inputs)
         {
-            v.push_back(ioInfoOf(graph_, id));
+            v.push_back(ioInfoOf(graph_, id, cfg_.precision));
         }
         return v;
     }
@@ -648,7 +718,7 @@ namespace vknn {
         std::vector<IOInfo> v;
         for (TensorId id: graph_.outputs)
         {
-            v.push_back(ioInfoOf(graph_, id));
+            v.push_back(ioInfoOf(graph_, id, cfg_.precision));
         }
         return v;
     }

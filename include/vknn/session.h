@@ -13,11 +13,16 @@
 
 namespace vknn {
 
-    /// A named tensor handed in/out of the engine (host side, NCHW canonical, fp32).
+    /// A named tensor handed in/out of the engine (host side, NCHW canonical, fp32). For zero-copy I/O,
+    /// set dmaBufFd >= 0 instead of filling `data`: the engine imports the fd as the boundary GPU buffer
+    /// and reads the input from it / writes the output into it directly (no host buffer). The fd's memory
+    /// must be the device-native boundary buffer (NCHW at the model's compute precision — see
+    /// IOInfo::deviceBytes); the engine never allocates it.
     struct IOTensor {
         std::string          name;
         Shape                shape;
-        DType                dtype = DType::kFloat32;
+        DType                dtype    = DType::kFloat32;
+        int                  dmaBufFd = -1; // >=0 => zero-copy: this fd IS the GPU boundary buffer
         std::vector<uint8_t> data;
         float               *f32() {
             return reinterpret_cast<float *>(data.data());
@@ -34,6 +39,10 @@ namespace vknn {
         Shape       shape;
         DType       dtype = DType::kFloat32;
         int64_t     elems = 0; // product of shape = number of fp32 values expected/produced
+        // For zero-copy (IOTensor::dmaBufFd): the size and layout of the device-native boundary buffer
+        // the caller must put in the dma-buf. Row-major NCHW at the model's compute precision (fp16/fp32).
+        int64_t      deviceBytes  = 0;
+        TensorFormat deviceFormat = TensorFormat::kNCHW;
     };
 
     /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.
@@ -49,10 +58,13 @@ namespace vknn {
         /// Serialize the optimized graph to a ".vxm" file for fast reloads.
         bool saveOptimized(const std::string &path) const;
 
-        /// Write the unified cache file (cfg.cacheFile) if the cache changed during this session.
-        /// Called automatically from ~Session(); also callable manually (e.g. before a checkpoint).
+        /// Write the unified cache file (cfg.cacheFile) if the cache changed. Called automatically from
+        /// ~Session(); also callable manually (e.g. before a checkpoint).
         void updateCache();
 
+        /// Run the model. To bind a zero-copy output, pre-fill `outputs` with an entry whose name +
+        /// dmaBufFd select that output's caller buffer; that output is written into the fd and returned
+        /// with no host data. `outputs` is then (re)filled with all results.
         Status run(const std::vector<IOTensor> &inputs, std::vector<IOTensor> &outputs);
 
         // --- ergonomic API: names/shapes/dtypes come from the model; the caller passes only data ---

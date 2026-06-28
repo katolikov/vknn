@@ -30,8 +30,8 @@ namespace vknn {
     // Binary format: [u32 nWeights]{[u32 klen][key][u32 nfloats][floats]} [u32 nTune]{[u32
     // klen][key][i32 val]}
     void WeightCache::loadBytes(const uint8_t *data, size_t n, bool enable) {
-        enabled_   = enable;
-        size_t off = 0;
+        enabled_    = enable;
+        size_t off  = 0;
         auto   rd32 = [&](uint32_t &v) {
             if (off + 4 > n)
             {
@@ -1117,6 +1117,65 @@ namespace vknn {
                 return std::chrono::high_resolution_clock::now();
             };
             auto t0 = now();
+            // --- zero-copy: bind a caller dma-buf fd (rt.dmaBufFd) as the boundary GPU buffer so the GPU
+            //     reads/writes it directly. Re-record the command buffer when the bound-buffer set changes;
+            //     the imported buffer is cached by fd, so a reused dma-buf re-records once. Import failure
+            //     keeps the pooled buffer (the copy path). Boundary I/O buffers are dedicated (not
+            //     pool-aliased), so swapping them is safe.
+            {
+                bool reRecord = false;
+                auto rebind   = [&](TensorId tid) {
+                    auto bit = buffers_.find(tid);
+                    if (bit == buffers_.end())
+                    {
+                        return;
+                    }
+                    if (!origBoundary_.count(tid))
+                    {
+                        origBoundary_[tid] = bit->second; // snapshot the pooled boundary buffer
+                    }
+                    std::shared_ptr<vk::Buffer> want = origBoundary_[tid];
+                    int                         fd   = ctx.t(tid).dmaBufFd;
+                    if (fd >= 0)
+                    {
+                        auto it = importedFd_.find(fd);
+                        if (it == importedFd_.end())
+                        {
+                            vk::Buffer *imp = vk::Buffer::importDmaBufFd(be_->ctx(), fd, origBoundary_[tid]->bytes());
+                            if (imp)
+                            {
+                                it = importedFd_.emplace(fd, std::shared_ptr<vk::Buffer>(imp)).first;
+                            }
+                        }
+                        if (it != importedFd_.end())
+                        {
+                            want = it->second; // else: import unsupported -> keep the pooled buffer (fallback)
+                        }
+                    }
+                    if (bit->second != want)
+                    {
+                        bit->second = want;
+                        reRecord    = true;
+                    }
+                };
+                for (TensorId tid: boundaryInputs)
+                {
+                    rebind(tid);
+                }
+                for (TensorId tid: boundaryOutputs)
+                {
+                    rebind(tid);
+                }
+                if (reRecord)
+                {
+                    if (!cmds_.empty())
+                    {
+                        vkFreeCommandBuffers(be_->ctx().device(), be_->runner().pool(), (uint32_t) cmds_.size(), cmds_.data());
+                        cmds_.clear();
+                    }
+                    record();
+                }
+            }
             // attach boundary buffers to RtTensors (cross-segment residency) + upload inputs.
             // Each segment owns a SEPARATE buffer per tensor, so a boundary input must be (re)packed into
             // THIS segment's buffer unless that exact buffer already holds the data. Matching on the exact
@@ -1137,7 +1196,12 @@ namespace vknn {
                     rt.device = std::make_shared<DeviceStorage>();
                 }
                 rt.device->buffer = bit->second;
-                if (rt.hostValid && !alreadyHere)
+                if (rt.dmaBufFd >= 0)
+                {
+                    // zero-copy: the GPU reads the caller's dma-buf directly (device-native bytes); no pack.
+                    rt.deviceValid  = true;
+                    rt.deviceFormat = flat ? TensorFormat::kNCHW : TensorFormat::kNC4HW4;
+                } else if (rt.hostValid && !alreadyHere)
                 {
                     VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_, flat);
                     rt.deviceValid  = true;
@@ -1170,7 +1234,11 @@ namespace vknn {
                 rt.device->buffer = bit->second;
                 rt.deviceValid    = true;
                 rt.deviceFormat   = flat ? TensorFormat::kNCHW : TensorFormat::kNC4HW4;
-                VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_, flat);
+                if (rt.dmaBufFd < 0)
+                {
+                    VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_, flat);
+                }
+                // else: the GPU wrote device-native bytes straight into the caller's dma-buf; caller reads it.
             }
             if (timing)
             {
@@ -1263,6 +1331,10 @@ namespace vknn {
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;
         std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
+        // Zero-copy: each boundary tensor's pooled buffer (the fallback) and the imported dma-buf per fd
+        // (a reused fd re-records the command buffer only once).
+        std::map<TensorId, std::shared_ptr<vk::Buffer>> origBoundary_;
+        std::map<int, std::shared_ptr<vk::Buffer>>      importedFd_;
     };
 
     std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) {

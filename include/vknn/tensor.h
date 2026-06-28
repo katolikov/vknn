@@ -65,6 +65,8 @@ namespace vknn {
         TensorFormat                   deviceFormat = TensorFormat::kUnknown;
         DType                          deviceDtype  = DType::kFloat32;
         bool                           deviceValid  = false;
+        // Zero-copy boundary: caller dma-buf fd to use directly as this tensor's GPU buffer (-1 = none).
+        int dmaBufFd = -1;
 
         int64_t elems() const {
             return numElements(shape);
