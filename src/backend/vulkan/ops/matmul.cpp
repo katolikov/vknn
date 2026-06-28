@@ -23,6 +23,9 @@ namespace vknn {
             std::unique_ptr<vk::ComputePipeline> pipe;
             MatMulPC                             pc {};
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
+            bool                                 useTiled = false;
+            int                                  numBatch = 1;
+            static constexpr int                 kTile    = 64; // must match TM/TN in matmul_tiled.comp
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g   = *env.graph;
@@ -131,14 +134,31 @@ namespace vknn {
                 maybeUpload(node.inputs[0], 0, g.desc(node.inputs[0]).shape);
                 maybeUpload(node.inputs[1], 1, g.desc(node.inputs[1]).shape);
 
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("matmul", env.useFp16), 3, sizeof(MatMulPC), std::vector<uint32_t> {}, env.cache->handle());
+                // Use the register-blocked tiled GEMM for the standard (non-mat-vec) case with large
+                // enough matrices; it assumes M at out[rank-2], N at out[rank-1], so the batch dims are
+                // exactly out[0..rank-3] (true when neither operand was 1-D). Tiny / mat-vec / 1-D cases
+                // keep the naive 1-thread/output kernel.
+                useTiled = !aWas1D && !bWas1D && M >= 32 && N >= 32 && K >= 32;
+                numBatch = (M > 0 && N > 0) ? pc.total / (int) (M * N) : 1;
+
+                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader(useTiled ? "matmul_tiled" : "matmul", env.useFp16), 3, sizeof(MatMulPC), std::vector<uint32_t> {},
+                                                             env.cache->handle());
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                std::vector<VkBuffer> bufs {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()};
+                if (useTiled)
+                {
+                    uint32_t gx = (uint32_t) ((pc.N + kTile - 1) / kTile);
+                    uint32_t gy = (uint32_t) ((pc.M + kTile - 1) / kTile);
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gx, gy, (uint32_t) numBatch);
+                } else
+                {
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
+                }
             }
         };
 

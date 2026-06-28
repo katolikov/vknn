@@ -1,0 +1,93 @@
+#version 450
+#include "precision.glsl"
+#include "common.glsl"
+// Register-blocked, LDS-tiled batched GEMM for the standard case
+//   out[batch, m, n] = sum_k A[batch, m, k] * B[batch, k, n]
+// with A row-major [M,K] (a[aBase + m*K + k]), B row-major [K,N] (b[bBase + k*N + n]) and the
+// output contiguous per batch (d[batch*M*N + m*N + n]). Batch base offsets come from the per-dim
+// strides (broadcast-aware), decomposed once per workgroup. Replaces the naive 1-thread/output
+// matmul.comp for large matrices; matmul.cpp keeps the naive kernel for tiny / mat-vec / non-standard
+// cases. Dispatch: (ceil(N/TN), ceil(M/TM), numBatch). Each workgroup computes a TMxTN output tile;
+// each thread computes an RMxRN micro-tile from registers, looping over K in TK-wide LDS panels.
+
+#define TM 64
+#define TN 64
+#define TK 16
+#define TILE 16        // threads per dim (16x16 = 256)
+#define RM (TM / TILE) // 4 output rows per thread
+#define RN (TN / TILE) // 4 output cols per thread
+
+layout(local_size_x = TILE, local_size_y = TILE) in;
+layout(std430, binding = 0) readonly buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly buffer B { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK;
+  int outDim[8]; int aStride[8]; int bStride[8];
+} pc;
+
+shared float As[TK][TM]; // transposed (k-major) so the inner loop reads As[kk][m] across threads
+shared float Bs[TK][TN];
+
+void main() {
+  int M = pc.M, N = pc.N, K = pc.K;
+  // Batch base offsets: decompose the workgroup's batch index over the batch dims outDim[0..rank-3].
+  int batch = int(gl_WorkGroupID.z);
+  int aBase = 0, bBase = 0, rem = batch;
+  for (int k = pc.rank - 3; k >= 0; --k) {
+    int c = rem % pc.outDim[k];
+    rem /= pc.outDim[k];
+    aBase += c * pc.aStride[k];
+    bBase += c * pc.bStride[k];
+  }
+  int dBase = batch * M * N;
+
+  int tileM = int(gl_WorkGroupID.y) * TM;
+  int tileN = int(gl_WorkGroupID.x) * TN;
+  int tx  = int(gl_LocalInvocationID.x);
+  int ty  = int(gl_LocalInvocationID.y);
+  int tid = ty * TILE + tx;
+
+  float acc[RM][RN];
+  for (int i = 0; i < RM; ++i)
+    for (int j = 0; j < RN; ++j)
+      acc[i][j] = 0.0;
+
+  for (int k0 = 0; k0 < K; k0 += TK) {
+    // Cooperative coalesced load of the A panel (transposed into As[k][m]) and the B panel.
+    for (int t = 0; t < (TM * TK) / (TILE * TILE); ++t) {
+      int idx = tid + t * (TILE * TILE); // 0 .. TM*TK-1, laid out as m*TK + k
+      int m = idx / TK, k = idx % TK;
+      int gm = tileM + m, gk = k0 + k;
+      As[k][m] = (gm < M && gk < K) ? float(a[aBase + gm * K + gk]) : 0.0;
+    }
+    for (int t = 0; t < (TK * TN) / (TILE * TILE); ++t) {
+      int idx = tid + t * (TILE * TILE); // 0 .. TK*TN-1, laid out as k*TN + n
+      int k = idx / TN, n = idx % TN;
+      int gk = k0 + k, gn = tileN + n;
+      Bs[k][n] = (gk < K && gn < N) ? float(b[bBase + gk * N + gn]) : 0.0;
+    }
+    barrier();
+    for (int kk = 0; kk < TK; ++kk) {
+      float av[RM], bv[RN];
+      for (int i = 0; i < RM; ++i)
+        av[i] = As[kk][ty * RM + i];
+      for (int j = 0; j < RN; ++j)
+        bv[j] = Bs[kk][tx * RN + j];
+      for (int i = 0; i < RM; ++i)
+        for (int j = 0; j < RN; ++j)
+          acc[i][j] += av[i] * bv[j];
+    }
+    barrier();
+  }
+
+  for (int i = 0; i < RM; ++i) {
+    int m = tileM + ty * RM + i;
+    if (m >= M) continue;
+    for (int j = 0; j < RN; ++j) {
+      int n = tileN + tx * RN + j;
+      if (n >= N) continue;
+      d[dBase + m * N + n] = STORE(acc[i][j]);
+    }
+  }
+}
