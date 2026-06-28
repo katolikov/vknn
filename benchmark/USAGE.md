@@ -57,6 +57,7 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
   "defaults": {
     "device": {
       "backend": "vulkan",
+      "serial": "",
       "precision": "fp16",
       "dir": "/data/local/tmp/vxrt/bench",
       "no_weight_cache": true,
@@ -113,9 +114,11 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
 - **`model`** — exactly one of `onnx` (compiled to `.vxm` with `convert` options) or `vxm` (run as-is).
 - **`convert`** — convert-time optimization options (only when `onnx` is given): `fp16`,
   `no_fuse_swish`, `fuse_se`, `fuse_dwpw`, `out` (output `.vxm` name).
-- **`device`** — runtime options: `backend` (vulkan/cpu), `precision` (fp16/fp32), `dir` (device
-  staging dir), `no_weight_cache`, `max_submit_nodes` (GPU-watchdog chunk size; 0 = single submit),
-  `cooldown` (seconds slept before each run — the device throttles).
+- **`device`** — runtime options: `backend` (vulkan/cpu), `serial` (adb device serial/id; empty = the
+  single attached device — **required when several devices are attached**), `precision` (fp16/fp32),
+  `dir` (device staging dir), `no_weight_cache`, `max_submit_nodes` (GPU-watchdog chunk size; 0 =
+  single submit), `cooldown` (seconds slept before each run — the device throttles). Each stage may
+  target a different `serial`. Find serials with `adb devices`.
 - **`inputs`** — `.npy`/`.bin` per input, by name (object) or positionally (array). Omit for
   runtime-only.
 - **`outputs`** — `save` formats, `golden` map, `metrics` list.

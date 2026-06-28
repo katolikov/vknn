@@ -2,6 +2,7 @@
   "defaults": {
     "device": {
       "backend": "vulkan",
+      "serial": "",
       "precision": "fp16",
       "dir": "/data/local/tmp/vxrt/bench",
       "no_weight_cache": true,

@@ -70,7 +70,8 @@ Sectioned and **staged** — each stage is independent; `defaults` is merged int
 ```
 - `model`: one of `onnx` (converted with `convert` options) or `vxm` (as-is).
 - `convert`: convert-time opts (`fp16`, `no_fuse_swish`, `fuse_se`, `fuse_dwpw`, `out`).
-- `device`: runtime opts (`backend`, `precision`, `dir`, `no_weight_cache`, `max_submit_nodes`, `cooldown`).
+- `device`: runtime opts (`backend`, `serial` (adb device id — set it when multiple devices are
+  attached; `adb devices` lists them), `precision`, `dir`, `no_weight_cache`, `max_submit_nodes`, `cooldown`).
 - `metrics`: any of cosine / psnr / snr / relL2 / max. Pass = `cosine ≥ tolerance` and no NaN.
 
 ## 4. Run

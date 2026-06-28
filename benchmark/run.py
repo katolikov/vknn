@@ -16,8 +16,8 @@ Config (sectioned; see benchmark/example.json and USAGE.md):
       { "name": "encoder8",
         "model":   { "onnx": "encoder.onnx" },          # or { "vxm": "encoder.vxm" }
         "convert": { "fp16": true, "fuse_se": false, "fuse_dwpw": false, "no_fuse_swish": false },
-        "device":  { "backend": "vulkan", "precision": "fp16", "dir": "/data/local/tmp/vxrt/bench",
-                     "no_weight_cache": true, "max_submit_nodes": 500, "cooldown": 22 },
+        "device":  { "backend": "vulkan", "serial": "", "precision": "fp16", "dir": "/data/local/tmp/vxrt/bench",
+                     "no_weight_cache": true, "max_submit_nodes": 500, "cooldown": 22 },  # serial: adb id (multi-device)
         "inputs":  { "image": "image8.npy", "intrinsics": "intr8.bin" },   # or [...]; omit -> runtime only
         "outputs": { "save": ["npy","png"], "golden": { "means": "means_gold.npy" },
                      "metrics": ["cosine","psnr","snr"] },
@@ -33,14 +33,28 @@ def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+# Target device (adb serial / id). Set per-stage from device.serial so a host with several phones
+# attached is unambiguous; None = whatever single device adb finds.
+_SERIAL = None
+
+
+def set_serial(s):
+    global _SERIAL
+    _SERIAL = s or None
+
+
 def adb(args):
-    return sh(["adb"] + args)
+    return sh(["adb"] + (["-s", _SERIAL] if _SERIAL else []) + args)
 
 
 def need_device():
-    devs = [l.split()[0] for l in adb(["devices"]).stdout.splitlines()[1:] if "\tdevice" in l]
+    devs = [l.split()[0] for l in sh(["adb", "devices"]).stdout.splitlines()[1:] if "\tdevice" in l]
     if not devs:
         sys.exit("no adb device (check `adb devices`; the phone may be asleep)")
+    if _SERIAL and _SERIAL not in devs:
+        sys.exit(f"device serial '{_SERIAL}' not attached. connected: {', '.join(devs) or '(none)'}")
+    if not _SERIAL and len(devs) > 1:
+        sys.exit(f"multiple devices attached ({', '.join(devs)}); set device.serial in the config")
 
 
 def host_bin(name):
@@ -117,6 +131,7 @@ def run_stage(stage, base, idx, where_convert="host"):
     model = stage.get("model", {})
     dev = stage.get("device", {})
     ddir = dev.get("dir", "/data/local/tmp/vxrt/bench")
+    set_serial(dev.get("serial") or dev.get("id") or dev.get("hash"))  # pick this stage's device
     need_device()
     adb(["shell", "mkdir", "-p", ddir])
 
@@ -213,9 +228,11 @@ def main():
     c.add_argument("--fp16", action="store_true", default=True); c.add_argument("--fp32", dest="fp16", action="store_false")
     c.add_argument("--fuse-se", action="store_true"); c.add_argument("--fuse-dwpw", action="store_true")
     c.add_argument("--no-fuse-swish", action="store_true"); c.add_argument("--on", choices=["host", "device"], default="host")
+    c.add_argument("--serial", default=None, help="adb device serial (for --on device with multiple devices)")
     args = ap.parse_args()
 
     if args.cmd == "convert":
+        set_serial(args.serial)
         convert(args.onnx, args.out, {"fp16": args.fp16, "fuse_se": args.fuse_se, "fuse_dwpw": args.fuse_dwpw,
                                       "no_fuse_swish": args.no_fuse_swish}, args.on)
         print("done.")
