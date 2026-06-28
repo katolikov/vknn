@@ -16,8 +16,8 @@ namespace vknn {
                 const RtTensor &U = ctx.t(node.inputs[2]); // updates
                 RtTensor       &Y = ctx.t(node.outputs[0]);
 
-                const Shape &ds = D.shape;
-                int          dr = (int) ds.size();
+                const Shape &ds       = D.shape;
+                int          dataRank = (int) ds.size();
                 // q = size of the last index dim; number of index rows = product of the leading index dims.
                 int     q    = I.shape.empty() ? 1 : (int) I.shape.back();
                 int64_t rows = 1;
@@ -31,13 +31,13 @@ namespace vknn {
                 }
 
                 // Row-major strides of data; sliceSize = elements written per index row.
-                std::vector<int64_t> stride(dr, 1);
-                for (int k = dr - 2; k >= 0; --k)
+                std::vector<int64_t> stride(dataRank, 1);
+                for (int k = dataRank - 2; k >= 0; --k)
                 {
                     stride[k] = stride[k + 1] * ds[k + 1];
                 }
                 int64_t sliceSize = 1;
-                for (int k = q; k < dr; ++k)
+                for (int k = q; k < dataRank; ++k)
                 {
                     sliceSize *= ds[k];
                 }

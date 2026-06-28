@@ -46,11 +46,11 @@ namespace vknn {
                 }
                 if (eq == "...ab,...b->...a")
                 {
-                    const Shape &as = A.shape;
-                    int          ar = (int) as.size();
-                    int64_t      aN = as[ar - 2], bN = as[ar - 1];
+                    const Shape &as    = A.shape;
+                    int          aRank = (int) as.size();
+                    int64_t      aN = as[aRank - 2], bN = as[aRank - 1];
                     int64_t      batch = 1;
-                    for (int k = 0; k < ar - 2; ++k)
+                    for (int k = 0; k < aRank - 2; ++k)
                     {
                         batch *= as[k];
                     }

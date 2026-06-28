@@ -1877,17 +1877,17 @@ namespace vknn {
             {
                 continue;
             }
-            auto ps = ints(P, "strides", {1, 1}), pp = ints(P, "pads", {0, 0, 0, 0});
-            if (ps[0] != 1 || ps[1] != 1 || pp[0] || pp[1] || pp[2] || pp[3])
+            auto poolStrides = ints(P, "strides", {1, 1}), poolPads = ints(P, "pads", {0, 0, 0, 0});
+            if (poolStrides[0] != 1 || poolStrides[1] != 1 || poolPads[0] || poolPads[1] || poolPads[2] || poolPads[3])
             {
                 continue;
             }
-            int di = producer[P.inputs[0]];
-            if (di < 0 || g.nodes[di].type != OpType::Conv)
+            int prodIdx = producer[P.inputs[0]];
+            if (prodIdx < 0 || g.nodes[prodIdx].type != OpType::Conv)
             {
                 continue;
             }
-            Node &D = g.nodes[di];
+            Node &D = g.nodes[prodIdx];
             if (consumers[D.outputs[0]] != 1)
             {
                 continue; // D feeds only P
@@ -1922,8 +1922,8 @@ namespace vknn {
             f.fusedAct = P.fusedAct;           // project activation
             f.actLo    = P.actLo;
             f.actHi    = P.actHi;
-            g.nodes[i] = f;    // replace P with the fused node
-            remove.insert(di); // remove D
+            g.nodes[i] = f;         // replace P with the fused node
+            remove.insert(prodIdx); // remove D
             fused++;
         }
         if (fused)

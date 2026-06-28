@@ -27,17 +27,17 @@ namespace vknn {
         }
         return 0; // half_pixel
     }
-    static float srcCoord(int d, int outS, int inS, int cm) {
+    static float srcCoord(int d, int outS, int inS, int coordMode) {
         float scale = (float) outS / (float) inS;
-        if (cm == 1)
+        if (coordMode == 1)
         {
             return outS > 1 ? (float) d * (inS - 1) / (outS - 1) : 0.f; // align_corners
         }
-        if (cm == 2)
+        if (coordMode == 2)
         {
             return (float) d / scale; // asymmetric
         }
-        if (cm == 3)
+        if (coordMode == 3)
         {
             return outS > 1 ? ((float) d + 0.5f) / scale - 0.5f : 0.f; // pytorch_half_pixel
         }
@@ -52,11 +52,11 @@ namespace vknn {
                 Shape           os = ctx.graph->desc(node.outputs[0]).shape;
                 NCHW            x  = NCHW::from(X.shape);
                 int             OH = (int) os[2], OW = (int) os[3];
-                int             mode   = vxResizeMode(node.attr.gets("mode", "nearest"));
-                int             cm     = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
-                float          *y      = cpu::allocOut(Y, os);
-                const float    *xd     = X.host.f32();
-                auto            clampi = [](int v, int lo, int hi) {
+                int             mode      = vxResizeMode(node.attr.gets("mode", "nearest"));
+                int             coordMode = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
+                float          *y         = cpu::allocOut(Y, os);
+                const float    *xd        = X.host.f32();
+                auto            clampi    = [](int v, int lo, int hi) {
                     return v < lo ? lo : (v > hi ? hi : v);
                 };
                 for (int64_t n = 0; n < x.n; ++n)
@@ -67,10 +67,10 @@ namespace vknn {
                         float       *yc = y + (n * x.c + c) * OH * OW;
                         for (int oy = 0; oy < OH; ++oy)
                         {
-                            float fy = srcCoord(oy, OH, (int) x.h, cm);
+                            float fy = srcCoord(oy, OH, (int) x.h, coordMode);
                             for (int ox = 0; ox < OW; ++ox)
                             {
-                                float fx = srcCoord(ox, OW, (int) x.w, cm);
+                                float fx = srcCoord(ox, OW, (int) x.w, coordMode);
                                 float v;
                                 if (mode == 0)
                                 { // nearest (round_prefer_floor)
