@@ -14,10 +14,13 @@ The YoNoSplat encoder is too large for git, so the ONNX + weights + compiled `.v
 HuggingFace model repo. Fetch them with:
 ```sh
 pip install huggingface_hub
-python benchmark/fetch_model.py --repo katolikov/yonosplat-vknn --out ./models
+python benchmark/fetch_model.py --repo katolikov/yonosplat-vknn --out benchmark/models
+python benchmark/run.py run benchmark/yonosplat.json     # ready-made example (uses the vxm)
 ```
-(`fetch_model.py` pulls `yonosplat_encoder.onnx` + `weights.bin` + `encoder8_fp16.vxm`; a private repo
-needs `hf auth login`.) Publishing them is a one-time step via `upload_model.py`.
+`fetch_model.py` pulls the model (`yonosplat_encoder.onnx` + `weights.bin` + `encoder8_fp16.vxm`) and
+the sample inputs/goldens the example config uses; a private repo needs `hf auth login`. `yonosplat.json`
+runs the compiled vxm (validate stage with golden metrics + a runtime-only stage). Publishing the
+artifacts is a one-time step via `upload_model.py`.
 
 ## Contents
 - `run.py` — host driver (per-stage: convert + `adb push` + on-device run + validate + timing).

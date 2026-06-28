@@ -18,6 +18,8 @@ compiled to a fp16 [vknn](https://github.com/katolikov/vknn) `.vxm` for on-devic
 | `yonosplat_encoder.onnx` | encoder graph, opset 17 (weights external in `weights.bin`) |
 | `weights.bin` | fp32 weights for the ONNX (~3.6 GB) |
 | `encoder8_fp16.vxm` | compiled fp16 vknn model, ready to run (~2.9 GB) |
+| `image8.npy`, `intr8.npy` | sample real 8-frame input (RealEstate10K scene) |
+| `*_gold.npy` | onnxruntime goldens for the six outputs |
 
 **Input:** `image [1,8,3,224,224]`, `intrinsics [1,8,3,3]`.
 **Output:** `means [1,401408,3]`, `covariances`, `harmonics`, `opacities`, `rotations`, `scales`
@@ -27,9 +29,9 @@ compiled to a fp16 [vknn](https://github.com/katolikov/vknn) `.vxm` for on-devic
 
 ```sh
 pip install huggingface_hub
-python benchmark/fetch_model.py --repo katolikov/yonosplat-vknn --out ./models
+python benchmark/fetch_model.py --repo katolikov/yonosplat-vknn --out benchmark/models
 # then run + validate on device with the benchmark tool (see vknn/benchmark/USAGE.md)
-python benchmark/run.py run benchmark/example.json
+python benchmark/run.py run benchmark/yonosplat.json
 ```
 
 On the Samsung Xclipse 960 (Vulkan, fp16) the compiled encoder matches an onnxruntime golden at
