@@ -54,23 +54,54 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
 
 ```jsonc
 {
-  "defaults": { "device": { "backend": "vulkan", "precision": "fp16",
-                            "dir": "/data/local/tmp/vxrt/bench", "no_weight_cache": true,
-                            "max_submit_nodes": 500, "cooldown": 22 } },
+  "defaults": {
+    "device": {
+      "backend": "vulkan",
+      "precision": "fp16",
+      "dir": "/data/local/tmp/vxrt/bench",
+      "no_weight_cache": true,
+      "max_submit_nodes": 500,
+      "cooldown": 22
+    }
+  },
   "stages": [
     {
       "name": "encoder8",
-      "model":   { "onnx": "encoder.onnx" },          // OR { "vxm": "encoder.vxm" } to skip convert
-      "convert": { "fp16": true, "fuse_se": false, "fuse_dwpw": false, "no_fuse_swish": false,
-                   "out": "encoder8_fp16.vxm" },       // convert-time options (ignored for a vxm)
-      "device":  { "backend": "vulkan", "precision": "fp16", "dir": "/data/local/tmp/vxrt/bench",
-                   "no_weight_cache": true, "max_submit_nodes": 500, "cooldown": 22 },
-      "inputs":  { "image": "image8.npy", "intrinsics": "intr8.bin" },  // by name; or ["a.npy","b.bin"]; omit -> runtime only
-      "outputs": { "save": ["npy", "png"],
-                   "golden": { "means": "means_gold.npy", "scales": "scales_gold.npy" },
-                   "metrics": ["cosine", "psnr", "snr", "relL2", "max"] },
-      "profile": true,            // per-operator GPU timing in the result JSON
-      "bench": 5,                 // repeat N timed runs (median reported); default 1
+
+      "model": {
+        "onnx": "encoder.onnx"            // OR  "vxm": "encoder.vxm"  to skip convert
+      },
+      "convert": {                        // convert-time options (ignored when a vxm is given)
+        "fp16": true,
+        "fuse_se": false,
+        "fuse_dwpw": false,
+        "no_fuse_swish": false,
+        "out": "encoder8_fp16.vxm"
+      },
+      "device": {
+        "backend": "vulkan",
+        "precision": "fp16",
+        "dir": "/data/local/tmp/vxrt/bench",
+        "no_weight_cache": true,
+        "max_submit_nodes": 500,
+        "cooldown": 22
+      },
+
+      "inputs": {                         // by name; or an array ["a.npy", "b.bin"]; omit -> runtime only
+        "image": "image8.npy",
+        "intrinsics": "intr8.bin"
+      },
+      "outputs": {
+        "save": ["npy", "png"],
+        "golden": {
+          "means": "means_gold.npy",
+          "scales": "scales_gold.npy"
+        },
+        "metrics": ["cosine", "psnr", "snr", "relL2", "max"]
+      },
+
+      "profile": true,                    // per-operator GPU timing in the result JSON
+      "bench": 5,                         // repeat N timed runs (median reported); default 1
       "tolerance": 0.999,
       "result": "encoder8.result.json"
     }
@@ -97,14 +128,42 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
 
 Each stage writes `results/<result>` on the host:
 ```jsonc
-{ "model": "encoder8_fp16.vxm", "backend": "VULKAN",
-  "timing_ms": { "load": 12743.3, "run": 9756.9 },
-  "profile": [ { "name": "...", "type": "MatMul", "gpu_ms": 1.2, "cpu_ms": 0 }, ... ],  // if profile
-  "profile_by_type_ms": { "MatMul": 1856.5, "Conv": 53.4, ... },                        // if profile
-  "gpu_total_ms": 10.18,                                                                 // if profile
-  "outputs": [ { "name": "means", "shape": [1,401408,3], "saved": ["means.npy"],
-                 "metrics": { "cosine": 0.999972, "psnr": 49.1, "snr": 36.0, "relL2": 0.016,
-                              "max": 0.29, "nan": 0 }, "pass": true } ] }
+{
+  "model": "encoder8_fp16.vxm",
+  "backend": "VULKAN",
+  "timing_ms": {
+    "load": 12743.3,
+    "run": 9756.9
+  },
+
+  // the next three keys appear only when "profile" is true
+  "profile": [
+    { "name": "/enc/.../MatMul", "type": "MatMul", "gpu_ms": 1.2, "cpu_ms": 0 }
+    // ... one entry per operator ...
+  ],
+  "profile_by_type_ms": {
+    "MatMul": 1856.5,
+    "Conv": 53.4
+  },
+  "gpu_total_ms": 10.18,
+
+  "outputs": [
+    {
+      "name": "means",
+      "shape": [1, 401408, 3],
+      "saved": ["means.npy"],
+      "metrics": {
+        "cosine": 0.999972,
+        "psnr": 49.1,
+        "snr": 36.0,
+        "relL2": 0.016,
+        "max": 0.29,
+        "nan": 0
+      },
+      "pass": true
+    }
+  ]
+}
 ```
 
 ## 5. Generating goldens

@@ -29,16 +29,44 @@ python benchmark/make_golden.py model.onnx out/ image=image.npy intrinsics=intr.
 
 Sectioned and **staged** — each stage is independent; `defaults` is merged into all stages:
 ```jsonc
-{ "defaults": { "device": { "backend": "vulkan", "precision": "fp16",
-                            "dir": "/data/local/tmp/vxrt/bench", "max_submit_nodes": 500, "cooldown": 22 } },
+{
+  "defaults": {
+    "device": {
+      "backend": "vulkan",
+      "precision": "fp16",
+      "dir": "/data/local/tmp/vxrt/bench",
+      "max_submit_nodes": 500,
+      "cooldown": 22
+    }
+  },
   "stages": [
-    { "name": "m",
-      "model":   { "onnx": "m.onnx" },                 // or { "vxm": "m.vxm" } to skip convert
-      "convert": { "fp16": true, "fuse_se": false, "out": "m.vxm" },
-      "inputs":  { "image": "image.npy" },             // or ["a.npy","b.bin"]; omit -> runtime only
-      "outputs": { "save": ["npy","png"], "golden": { "out": "out_gold.npy" },
-                   "metrics": ["cosine","psnr","snr","relL2","max"] },
-      "profile": true, "bench": 5, "tolerance": 0.999, "result": "m.result.json" } ] }
+    {
+      "name": "m",
+      "model": {
+        "onnx": "m.onnx"                  // or  "vxm": "m.vxm"  to skip convert
+      },
+      "convert": {
+        "fp16": true,
+        "fuse_se": false,
+        "out": "m.vxm"
+      },
+      "inputs": {                         // or ["a.npy", "b.bin"]; omit -> runtime only
+        "image": "image.npy"
+      },
+      "outputs": {
+        "save": ["npy", "png"],
+        "golden": {
+          "out": "out_gold.npy"
+        },
+        "metrics": ["cosine", "psnr", "snr", "relL2", "max"]
+      },
+      "profile": true,
+      "bench": 5,
+      "tolerance": 0.999,
+      "result": "m.result.json"
+    }
+  ]
+}
 ```
 - `model`: one of `onnx` (converted with `convert` options) or `vxm` (as-is).
 - `convert`: convert-time opts (`fp16`, `no_fuse_swish`, `fuse_se`, `fuse_dwpw`, `out`).
