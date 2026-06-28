@@ -60,6 +60,16 @@ namespace vknn {
         // the full weight blob — needed to fit large (e.g. 965M-param fp16) models on-device.
         bool freeWeightsAfterUpload = true;
 
+        // Split a GPU segment whose recorded node count exceeds this into chunks of this many nodes,
+        // each its own command-buffer submit, so no single submit runs long enough to trip the GPU
+        // watchdog (an over-long submit is silently reset by the driver, zeroing its unexecuted tail
+        // and corrupting the output). The submit fence between chunks is a full barrier, so buffer
+        // reuse stays correct and results are numerically identical. Small graphs (every CNN) stay a
+        // single submit. 0 disables chunking. Vulkan exposes no watchdog limit to auto-detect, so this
+        // is a tunable knob; the default is conservative and forward-safe (a faster GPU runs each
+        // chunk quicker, never slower). Only the very large YoNoSplat-class transformer needs it.
+        int maxSubmitNodes = 500;
+
         // Optimization / debug.
         int         optLevel      = 3;     // graph optimization level 0..3 (fusions). 0 = none.
         bool        noFlatOps     = false; // disable the flat-layout GPU pass

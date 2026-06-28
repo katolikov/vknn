@@ -140,6 +140,7 @@ namespace vknn {
             c.outputLayout = fmtFromStr(j->asStr("NCHW"));
         }
         I("cpuThreads", c.cpuThreads);
+        I("maxSubmitNodes", c.maxSubmitNodes);
         B("enableZeroCopy", c.enableZeroCopy);
         S("cacheDir", c.cacheDir);
         B("cachePipeline", c.cachePipeline);
@@ -192,6 +193,7 @@ namespace vknn {
         os << "  \"precision\": \"" << precStr(precision) << "\",\n";
         os << "  \"power\": \"" << (power == PowerHint::kHigh ? "high" : power == PowerHint::kLow ? "low" : "normal") << "\",\n";
         os << "  \"cpuThreads\": " << cpuThreads << ",\n";
+        os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
         os << "  \"inputLayout\": \"" << formatStr(inputLayout) << "\",\n";
         os << "  \"outputLayout\": \"" << formatStr(outputLayout) << "\",\n";
         os << "  \"enableZeroCopy\": " << (enableZeroCopy ? "true" : "false") << ",\n";

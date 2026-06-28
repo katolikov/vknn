@@ -1004,8 +1004,10 @@ namespace vknn {
                 // Split the segment into multiple command buffers so no single submit runs long
                 // enough to trip the GPU watchdog (a ~20s single submit on this driver gets reset
                 // silently, zeroing the unexecuted tail). The submit fence between chunks is a full
-                // barrier, so buffer reuse stays correct across the boundary. Only when not profiling.
-                if (!queryPool_ && kChunkNodes > 0 && (k + 1) % kChunkNodes == 0 && k + 1 < nodeIdx.size())
+                // barrier, so buffer reuse stays correct across the boundary. Config::maxSubmitNodes
+                // controls the chunk size (0 disables). Only when not profiling.
+                const int chunkNodes = cfg_.maxSubmitNodes;
+                if (!queryPool_ && chunkNodes > 0 && (k + 1) % chunkNodes == 0 && k + 1 < nodeIdx.size())
                 {
                     be_->runner().end(cmd_);
                     cmds_.push_back(cmd_);
@@ -1177,11 +1179,10 @@ namespace vknn {
         std::vector<std::unique_ptr<VulkanOp>>          ops_;
         VkOpEnv                                         env_;
         VkCommandBuffer                                 cmd_ = VK_NULL_HANDLE;
-        std::vector<VkCommandBuffer>                    cmds_;             // chunked submits (one entry unless the segment is split for the GPU watchdog)
-        static constexpr int                            kChunkNodes = 500; // nodes per command-buffer chunk
-        VkQueryPool                                     queryPool_  = VK_NULL_HANDLE;
-        bool                                            recorded_   = false;
-        std::vector<TensorId>                           dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
+        std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
+        VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
+        bool                         recorded_  = false;
+        std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
     };
 
     std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) {
