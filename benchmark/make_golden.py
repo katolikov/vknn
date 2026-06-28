@@ -15,15 +15,15 @@ import sys, os, json, argparse
 import numpy as np
 import onnxruntime as ort
 
-ap = argparse.ArgumentParser()
-ap.add_argument("model")
-ap.add_argument("out_dir")
-ap.add_argument("inputs", nargs="+", help="NAME=path.npy per model input")
-ap.add_argument("--model-on-device", default=None, help="model filename as referenced in config (default: basename of model)")
-ap.add_argument("--backend", default="vulkan")
-ap.add_argument("--precision", default="fp16")
-ap.add_argument("--tol", type=float, default=0.999)
-args = ap.parse_args()
+parser = argparse.ArgumentParser()
+parser.add_argument("model")
+parser.add_argument("out_dir")
+parser.add_argument("inputs", nargs="+", help="NAME=path.npy per model input")
+parser.add_argument("--model-on-device", default=None, help="model filename as referenced in config (default: basename of model)")
+parser.add_argument("--backend", default="vulkan")
+parser.add_argument("--precision", default="fp16")
+parser.add_argument("--tol", type=float, default=0.999)
+args = parser.parse_args()
 
 os.makedirs(args.out_dir, exist_ok=True)
 feeds, in_files = {}, {}

@@ -13,16 +13,16 @@ end users only ever run fetch_model.py.
 import argparse, glob, os
 from huggingface_hub import HfApi, create_repo
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--repo", default="katolikov/yonosplat-vknn")
-ap.add_argument("--private", action="store_true")
-ap.add_argument("--onnx", required=True)
-ap.add_argument("--weights", required=True)
-ap.add_argument("--vxm", required=True)
-ap.add_argument("--samples", default=None, help="dir whose *.npy are uploaded at the repo root")
-ap.add_argument("--card", default=os.path.join(os.path.dirname(__file__), "hf_README.md"))
-ap.add_argument("--token", default=os.environ.get("HF_TOKEN"))
-args = ap.parse_args()
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", default="katolikov/yonosplat-vknn")
+parser.add_argument("--private", action="store_true")
+parser.add_argument("--onnx", required=True)
+parser.add_argument("--weights", required=True)
+parser.add_argument("--vxm", required=True)
+parser.add_argument("--samples", default=None, help="dir whose *.npy are uploaded at the repo root")
+parser.add_argument("--card", default=os.path.join(os.path.dirname(__file__), "hf_README.md"))
+parser.add_argument("--token", default=os.environ.get("HF_TOKEN"))
+args = parser.parse_args()
 
 api = HfApi(token=args.token)
 create_repo(args.repo, repo_type="model", private=args.private, exist_ok=True, token=args.token)

@@ -351,18 +351,28 @@ def run_stage(stage, base, idx, where_convert="host"):
 
 def main():
     global VERBOSE, BUILD
-    ap = argparse.ArgumentParser(description="VKNN benchmark: convert + run + validate + profile on device")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run"); r.add_argument("config"); r.add_argument("--convert-on", choices=["host", "device"], default="host")
-    r.add_argument("-v", "--verbose", action="store_true", help="print device stdout/stderr and the generated config")
-    r.add_argument("--no-build", action="store_true", help="skip the automatic ./build.sh --android")
-    c = sub.add_parser("convert"); c.add_argument("onnx"); c.add_argument("out")
-    c.add_argument("--fp16", action="store_true", default=True); c.add_argument("--fp32", dest="fp16", action="store_false")
-    c.add_argument("--fuse-se", action="store_true"); c.add_argument("--fuse-dwpw", action="store_true")
-    c.add_argument("--no-fuse-swish", action="store_true"); c.add_argument("--on", choices=["host", "device"], default="host")
-    c.add_argument("--serial", default=None, help="adb device serial (for --on device with multiple devices)")
-    c.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="VKNN benchmark: convert + run + validate + profile on device")
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("config")
+    run_parser.add_argument("--convert-on", choices=["host", "device"], default="host")
+    run_parser.add_argument("-v", "--verbose", action="store_true", help="print device stdout/stderr and the generated config")
+    run_parser.add_argument("--no-build", action="store_true", help="skip the automatic ./build.sh --android")
+
+    convert_parser = subparsers.add_parser("convert")
+    convert_parser.add_argument("onnx")
+    convert_parser.add_argument("out")
+    convert_parser.add_argument("--fp16", action="store_true", default=True)
+    convert_parser.add_argument("--fp32", dest="fp16", action="store_false")
+    convert_parser.add_argument("--fuse-se", action="store_true")
+    convert_parser.add_argument("--fuse-dwpw", action="store_true")
+    convert_parser.add_argument("--no-fuse-swish", action="store_true")
+    convert_parser.add_argument("--on", choices=["host", "device"], default="host")
+    convert_parser.add_argument("--serial", default=None, help="adb device serial (for --on device with multiple devices)")
+    convert_parser.add_argument("-v", "--verbose", action="store_true")
+
+    args = parser.parse_args()
     VERBOSE = getattr(args, "verbose", False)
     BUILD = not getattr(args, "no_build", False)
 

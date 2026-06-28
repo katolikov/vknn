@@ -19,12 +19,12 @@ A private repo needs a token: `hf auth login`, or pass --token, or set HF_TOKEN.
 import argparse, os
 from huggingface_hub import hf_hub_download, snapshot_download
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--repo", default="katolikov/yonosplat-vknn")
-ap.add_argument("--out", default="benchmark/models")
-ap.add_argument("--files", nargs="*", default=None, help="specific files; default = whole repo")
-ap.add_argument("--token", default=os.environ.get("HF_TOKEN"))
-args = ap.parse_args()
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", default="katolikov/yonosplat-vknn")
+parser.add_argument("--out", default="benchmark/models")
+parser.add_argument("--files", nargs="*", default=None, help="specific files; default = whole repo")
+parser.add_argument("--token", default=os.environ.get("HF_TOKEN"))
+args = parser.parse_args()
 
 os.makedirs(args.out, exist_ok=True)
 if args.files:
