@@ -567,10 +567,12 @@ namespace vknn {
                     return Status::InvalidArgument;
                 }
             }
-            RtTensor &rt = pool_[id];
-            rt.shape     = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
-            rt.dtype     = io.dtype;
-            rt.dmaBufFd  = io.dmaBufFd;
+            RtTensor &rt    = pool_[id];
+            rt.shape        = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
+            rt.dtype        = io.dtype;
+            rt.dmaBufFd     = io.dmaBufFd;
+            rt.dmaBufFormat = io.dmaBufFormat;
+            rt.dmaBufDtype  = io.dmaBufDtype;
             if (io.dmaBufFd >= 0)
             {
                 rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
@@ -585,7 +587,9 @@ namespace vknn {
         // the GPU writes into them), before it is cleared and refilled with results below.
         for (TensorId oid: graph_.outputs)
         {
-            pool_[oid].dmaBufFd = -1;
+            pool_[oid].dmaBufFd     = -1;
+            pool_[oid].dmaBufFormat = TensorFormat::NCHW;
+            pool_[oid].dmaBufDtype  = DType::Float32;
         }
         for (const auto &b: outputs)
         {
@@ -600,7 +604,9 @@ namespace vknn {
             }
             if (id != kNoTensor)
             {
-                pool_[id].dmaBufFd = b.dmaBufFd;
+                pool_[id].dmaBufFd     = b.dmaBufFd;
+                pool_[id].dmaBufFormat = b.dmaBufFormat;
+                pool_[id].dmaBufDtype  = b.dmaBufDtype;
             }
         }
 
@@ -692,6 +698,7 @@ namespace vknn {
         // the compute precision (fp16 -> 2 bytes/elem). Flat boundaries are row-major NCHW; the rest are
         // NC4HW4 (channels in groups of 4, padded), whose byte size includes the channel padding.
         int64_t elemSize = (prec == Precision::Fp32) ? 4 : 2;
+        info.deviceDtype = (prec == Precision::Fp32) ? DType::Float32 : DType::Float16;
         if (g.desc(id).gpuFlat)
         {
             info.deviceBytes  = info.elems * elemSize;

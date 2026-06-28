@@ -1,0 +1,60 @@
+#version 450
+// Boundary layout + dtype conversion between a caller's declared dma-buf format and the device-native
+// boundary buffer. One thread per DESTINATION element: decode its (n,c,h,w) from the destination
+// layout, then read the source element from the source layout (or write 0 for an NC4HW4 padding lane),
+// converting dtype on the way. Layouts are push-constant codes (0=NCHW, 1=NHWC, 2=NC4HW4); the dtype of
+// each side is a compile variant (SRC_T/DST_T) — four SPIR-V: f32_f32, f32_f16, f16_f32, f16_f16.
+// Index math matches VulkanBackend::packToBuffer / unpackFromBuffer.
+#ifdef NEED_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+#ifndef SRC_T
+#define SRC_T float
+#endif
+#ifndef DST_T
+#define DST_T float
+#endif
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer S { SRC_T s[]; };
+layout(std430, binding = 1) writeonly buffer D { DST_T d[]; };
+layout(push_constant) uniform PC { int N, C, H, W, srcFmt, dstFmt, count; } pc;
+
+int encode(int fmt, int n, int c, int h, int w) {
+  int HW = pc.H * pc.W;
+  if (fmt == 1) { // NHWC
+    return ((n * pc.H + h) * pc.W + w) * pc.C + c;
+  } else if (fmt == 2) { // NC4HW4
+    int Cb = (pc.C + 3) / 4, cb = c / 4, l = c % 4;
+    return ((((n * Cb + cb) * pc.H + h) * pc.W + w) * 4) + l;
+  }
+  return ((n * pc.C + c) * pc.H + h) * pc.W + w; // NCHW
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.count)) return;
+  int i = int(gid);
+  int n, c, h, w;
+  if (pc.dstFmt == 2) { // NC4HW4 destination (includes padding lanes)
+    int Cb = (pc.C + 3) / 4;
+    int l = i % 4, t = i / 4;
+    w = t % pc.W; t /= pc.W;
+    h = t % pc.H; t /= pc.H;
+    int cb = t % Cb; t /= Cb;
+    n = t; c = cb * 4 + l;
+  } else if (pc.dstFmt == 1) { // NHWC destination
+    c = i % pc.C; int t = i / pc.C;
+    w = t % pc.W; t /= pc.W;
+    h = t % pc.H; t /= pc.H;
+    n = t;
+  } else { // NCHW destination
+    w = i % pc.W; int t = i / pc.W;
+    h = t % pc.H; t /= pc.H;
+    c = t % pc.C; t /= pc.C;
+    n = t;
+  }
+  if (c >= pc.C) { d[i] = DST_T(0); return; } // NC4HW4 padding channel
+  d[i] = DST_T(s[encode(pc.srcFmt, n, c, h, w)]);
+}

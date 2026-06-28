@@ -28,16 +28,19 @@ namespace vknn {
     Tensor::Tensor(std::vector<float> data): shape_ {(int64_t) data.size()}, data_(std::move(data)) {
     }
 
-    Tensor Tensor::fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name) {
+    Tensor Tensor::fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name, TensorFormat layout, DType dtype) {
         Tensor t;
-        t.shape_ = std::move(shape);
-        t.name_  = std::move(name);
-        t.fd_    = fd;
+        t.shape_        = std::move(shape);
+        t.name_         = std::move(name);
+        t.fd_           = fd;
+        t.dmaBufFormat_ = layout;
+        t.dmaBufDtype_  = dtype;
         return t;
     }
 
-    Tensor Tensor::toDmaBuf(int fd, std::vector<int64_t> shape, std::string name) {
-        return fromDmaBuf(fd, std::move(shape), std::move(name)); // same carrier; output vs input is by list
+    Tensor Tensor::toDmaBuf(int fd, std::vector<int64_t> shape, std::string name, TensorFormat layout, DType dtype) {
+        // same carrier; output vs input is by list position in Model::run
+        return fromDmaBuf(fd, std::move(shape), std::move(name), layout, dtype);
     }
 
     const Tensor *findTensor(const std::vector<Tensor> &tensors, const std::string &name) {
@@ -136,7 +139,9 @@ namespace vknn {
             ins[i].dtype    = DType::Float32;
             if (t.dmaBufFd() >= 0)
             {
-                ins[i].dmaBufFd = t.dmaBufFd(); // zero-copy: the engine reads this fd as the GPU input buffer
+                ins[i].dmaBufFd     = t.dmaBufFd(); // zero-copy: the engine reads this fd as the GPU input buffer
+                ins[i].dmaBufFormat = t.dmaBufFormat();
+                ins[i].dmaBufDtype  = t.dmaBufDtype();
             } else
             {
                 const uint8_t *p = reinterpret_cast<const uint8_t *>(t.data());
@@ -151,9 +156,11 @@ namespace vknn {
             if (o.dmaBufFd() >= 0)
             {
                 IOTensor b;
-                b.name     = o.name();
-                b.shape    = o.shape();
-                b.dmaBufFd = o.dmaBufFd();
+                b.name         = o.name();
+                b.shape        = o.shape();
+                b.dmaBufFd     = o.dmaBufFd();
+                b.dmaBufFormat = o.dmaBufFormat();
+                b.dmaBufDtype  = o.dmaBufDtype();
                 outs.push_back(std::move(b));
             }
         }

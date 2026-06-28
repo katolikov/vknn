@@ -15,14 +15,18 @@ namespace vknn {
 
     /// A named tensor handed in/out of the engine (host side, NCHW canonical, fp32). For zero-copy I/O,
     /// set dmaBufFd >= 0 instead of filling `data`: the engine imports the fd as the boundary GPU buffer
-    /// and reads the input from it / writes the output into it directly (no host buffer). The fd's memory
-    /// must be the device-native boundary buffer (NCHW at the model's compute precision — see
-    /// IOInfo::deviceBytes); the engine never allocates it.
+    /// and reads the input from it / writes the output into it directly (no host buffer). dmaBufFormat /
+    /// dmaBufDtype declare the fd's layout + dtype; when they match the device-native boundary (see
+    /// IOInfo) the fd is bound directly, otherwise the GPU converts. The engine never allocates the fd.
     struct IOTensor {
-        std::string          name;
-        Shape                shape;
-        DType                dtype    = DType::Float32;
-        int                  dmaBufFd = -1; // >=0 => zero-copy: this fd IS the GPU boundary buffer
+        std::string name;
+        Shape       shape;
+        DType       dtype    = DType::Float32;
+        int         dmaBufFd = -1; // >=0 => zero-copy: this fd IS the GPU boundary buffer
+        // The layout + dtype of the dma-buf bytes (when dmaBufFd >= 0). Matching the device-native
+        // boundary binds the fd directly; otherwise the GPU converts. Auto = bytes are device-native.
+        TensorFormat         dmaBufFormat = TensorFormat::NCHW;
+        DType                dmaBufDtype  = DType::Float32;
         std::vector<uint8_t> data;
         float               *f32() {
             return reinterpret_cast<float *>(data.data());
@@ -39,10 +43,12 @@ namespace vknn {
         Shape       shape;
         DType       dtype = DType::Float32;
         int64_t     elems = 0; // product of shape = number of fp32 values expected/produced
-        // For zero-copy (IOTensor::dmaBufFd): the size and layout of the device-native boundary buffer
-        // the caller must put in the dma-buf. Row-major NCHW at the model's compute precision (fp16/fp32).
+        // For zero-copy (IOTensor::dmaBufFd): the size, layout and dtype of the device-native boundary
+        // buffer. Declaring this exact (deviceFormat, deviceDtype) on fromDmaBuf/toDmaBuf — or Auto —
+        // binds the fd directly; any other declared format is GPU-converted to/from it.
         int64_t      deviceBytes  = 0;
         TensorFormat deviceFormat = TensorFormat::NCHW;
+        DType        deviceDtype  = DType::Float32;
     };
 
     /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.

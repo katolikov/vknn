@@ -8,6 +8,7 @@
 #pragma once
 #include "vknn/config.h"
 #include "vknn/dtype.h"
+#include "vknn/tensor_format.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,14 +36,25 @@ namespace vknn {
         explicit Tensor(std::vector<float> data);
         /// Zero-copy INPUT from a DMA-BUF fd (e.g. a camera/ION buffer the caller owns). vknn reads the
         /// input straight from the fd instead of from a caller host buffer. `name` selects which model
-        /// input this feeds (optional for single-input). The fd is read as row-major fp32 in `shape`.
-        static Tensor fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "");
+        /// input this feeds (optional for single-input). `layout`/`dtype` declare the fd's bytes: when
+        /// they match the model's device-native boundary (see IOInfo::deviceFormat/deviceDtype) the fd is
+        /// bound directly, otherwise the GPU converts on read. TensorFormat::Auto means "already
+        /// device-native — bind directly".
+        static Tensor fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "", TensorFormat layout = TensorFormat::NCHW, DType dtype = DType::Float32);
         /// Zero-copy OUTPUT binding: pass in Model::run()'s `outputs` list to have vknn write that
-        /// output straight into the caller's DMA-BUF fd (row-major fp32, `shape`), no host output
-        /// buffer. `name` selects which model output (required when the model has several).
-        static Tensor toDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "");
-        int           dmaBufFd() const {
+        /// output straight into the caller's DMA-BUF fd, no host output buffer. `name` selects which
+        /// model output (required when the model has several). `layout`/`dtype` declare the fd's bytes;
+        /// the GPU converts the device-native result into them, or writes directly when they match
+        /// (or layout is Auto).
+        static Tensor toDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "", TensorFormat layout = TensorFormat::NCHW, DType dtype = DType::Float32);
+        int dmaBufFd() const {
             return fd_;
+        }
+        TensorFormat dmaBufFormat() const {
+            return dmaBufFormat_;
+        }
+        DType dmaBufDtype() const {
+            return dmaBufDtype_;
         }
 
         const std::string &name() const {
@@ -87,7 +99,9 @@ namespace vknn {
         std::string          name_;
         std::vector<int64_t> shape_;
         std::vector<float>   data_;
-        int                  fd_ = -1; // DMA-BUF fd for zero-copy input (-1 = host data in data_)
+        int                  fd_           = -1;                 // DMA-BUF fd for zero-copy I/O (-1 = host data in data_)
+        TensorFormat         dmaBufFormat_ = TensorFormat::NCHW; // declared layout of the fd's bytes
+        DType                dmaBufDtype_  = DType::Float32;     // declared dtype of the fd's bytes
     };
 
     /// A loaded, ready-to-run model. Copyable handle (shares the underlying engine).

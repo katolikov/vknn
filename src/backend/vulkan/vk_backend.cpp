@@ -8,6 +8,7 @@
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+#include "ops/boundary_convert.h"
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
 #include "vknn/profiler.h"
@@ -963,6 +964,29 @@ namespace vknn {
             {
                 vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t) (nodeIdx.size() * 2));
             }
+            // Declared-format zero-copy inputs: convert each caller dma-buf (declared layout/dtype) into
+            // this segment's device-native boundary buffer, then a barrier before the ops read it.
+            {
+                bool any = false;
+                for (const auto &kv: convert_)
+                {
+                    if (!kv.second.isInput)
+                    {
+                        continue;
+                    }
+                    const ConvertBinding &c = kv.second;
+                    if (!conv_)
+                    {
+                        conv_ = std::make_unique<BoundaryConvert>();
+                    }
+                    conv_->record(cmd_, *env_.ctx, env_.cache, c.imported.get(), buffers_[kv.first].get(), c.shape, c.declFmt, c.declDtype, c.devFmt, c.devDtype);
+                    any = true;
+                }
+                if (any)
+                {
+                    vk::computeBarrier(cmd_);
+                }
+            }
             auto isCopy = [&](int idx) {
                 const Node &nn = g_.nodes[idx];
                 OpType      t  = nn.type;
@@ -1106,9 +1130,33 @@ namespace vknn {
             {
                 vk::computeBarrier(cmd_);
             }
+            // Declared-format zero-copy outputs: convert the device-native boundary buffer into each
+            // caller dma-buf (declared layout/dtype), then a barrier before the host reads it.
+            {
+                bool any = false;
+                for (const auto &kv: convert_)
+                {
+                    if (kv.second.isInput)
+                    {
+                        continue;
+                    }
+                    const ConvertBinding &c = kv.second;
+                    if (!conv_)
+                    {
+                        conv_ = std::make_unique<BoundaryConvert>();
+                    }
+                    conv_->record(cmd_, *env_.ctx, env_.cache, buffers_[kv.first].get(), c.imported.get(), c.shape, c.devFmt, c.devDtype, c.declFmt, c.declDtype);
+                    any = true;
+                }
+                if (any)
+                {
+                    vk::computeBarrier(cmd_);
+                }
+            }
             be_->runner().end(cmd_);
             cmds_.push_back(cmd_);
-            recorded_ = true;
+            recorded_        = true;
+            recordedConvert_ = convert_;
         }
 
         void run(ExecContext &ctx) override {
@@ -1124,7 +1172,8 @@ namespace vknn {
             //     pool-aliased), so swapping them is safe.
             {
                 bool reRecord = false;
-                auto rebind   = [&](TensorId tid) {
+                convert_.clear();
+                auto rebind = [&](TensorId tid, bool isInput) {
                     auto bit = buffers_.find(tid);
                     if (bit == buffers_.end())
                     {
@@ -1135,22 +1184,50 @@ namespace vknn {
                         origBoundary_[tid] = bit->second; // snapshot the pooled boundary buffer
                     }
                     std::shared_ptr<vk::Buffer> want = origBoundary_[tid];
-                    int                         fd   = ctx.t(tid).dmaBufFd;
+                    RtTensor                   &rt   = ctx.t(tid);
+                    int                         fd   = rt.dmaBufFd;
                     if (fd >= 0)
                     {
-                        auto it = importedFd_.find(fd);
-                        if (it == importedFd_.end())
+                        bool         flat    = g_.desc(tid).gpuFlat;
+                        TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+                        DType        devDt   = useFp16_ ? DType::Float16 : DType::Float32;
+                        TensorFormat declFmt = rt.dmaBufFormat;
+                        DType        declDt  = rt.dmaBufDtype;
+                        bool         direct  = declFmt == TensorFormat::Auto || (declFmt == devFmt && declDt == devDt);
+                        NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
+                        // Import sized for what the dma-buf actually holds: the device-native bytes for a
+                        // direct bind, the declared-format bytes for a convert. Re-import when this
+                        // tensor's fd or size changes.
+                        size_t    needB = direct ? origBoundary_[tid]->bytes() : (size_t) (formatElems(declFmt, x) * dtypeSize(declDt));
+                        uint64_t  id    = dmaBufId(fd);
+                        Imported &imp   = imported_[tid];
+                        bool      stale = !imp.buf || imp.bytes != needB || (id != 0 ? imp.id != id : imp.fd != fd);
+                        if (stale)
                         {
-                            vk::Buffer *imp = vk::Buffer::importDmaBufFd(be_->ctx(), fd, origBoundary_[tid]->bytes());
-                            if (imp)
+                            vk::Buffer *b = vk::Buffer::importDmaBufFd(be_->ctx(), fd, needB);
+                            imp           = {id, fd, needB, b ? std::shared_ptr<vk::Buffer>(b) : nullptr};
+                        }
+                        if (imp.buf)
+                        {
+                            if (direct)
                             {
-                                it = importedFd_.emplace(fd, std::shared_ptr<vk::Buffer>(imp)).first;
+                                want = imp.buf; // declared == device-native: bind the fd directly
+                            } else
+                            {
+                                // declared != device-native: keep the pooled boundary buffer; the GPU converts
+                                // between the imported buffer and it (recorded in record()).
+                                ConvertBinding cb;
+                                cb.imported   = imp.buf;
+                                cb.isInput    = isInput;
+                                cb.shape      = x;
+                                cb.declFmt    = declFmt;
+                                cb.declDtype  = declDt;
+                                cb.devFmt     = devFmt;
+                                cb.devDtype   = devDt;
+                                convert_[tid] = cb;
                             }
                         }
-                        if (it != importedFd_.end())
-                        {
-                            want = it->second; // else: import unsupported -> keep the pooled buffer (fallback)
-                        }
+                        // else: import unsupported -> keep the pooled buffer (staged-copy fallback)
                     }
                     if (bit->second != want)
                     {
@@ -1160,11 +1237,15 @@ namespace vknn {
                 };
                 for (TensorId tid: boundaryInputs)
                 {
-                    rebind(tid);
+                    rebind(tid, true);
                 }
                 for (TensorId tid: boundaryOutputs)
                 {
-                    rebind(tid);
+                    rebind(tid, false);
+                }
+                if (!sameConvert(convert_, recordedConvert_))
+                {
+                    reRecord = true;
                 }
                 if (reRecord)
                 {
@@ -1331,10 +1412,58 @@ namespace vknn {
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;
         std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
-        // Zero-copy: each boundary tensor's pooled buffer (the fallback) and the imported dma-buf per fd
-        // (a reused fd re-records the command buffer only once).
+        // Zero-copy: each boundary tensor's pooled buffer (the fallback) and its imported dma-buf. The
+        // import is kept per boundary tensor and refreshed when that tensor's dma-buf or required size
+        // changes. Identity is the dma-buf inode (fstat), not the fd: fd numbers are recycled by the OS,
+        // so keying on the raw fd would alias a reused number to a stale buffer.
         std::map<TensorId, std::shared_ptr<vk::Buffer>> origBoundary_;
-        std::map<int, std::shared_ptr<vk::Buffer>>      importedFd_;
+        struct Imported {
+            uint64_t                    id    = 0; // dma-buf inode (0 = unknown, fall back to fd)
+            int                         fd    = -1;
+            size_t                      bytes = 0;
+            std::shared_ptr<vk::Buffer> buf;
+        };
+        std::map<TensorId, Imported> imported_;
+        static uint64_t              dmaBufId(int fd) {
+            struct stat st;
+            return ::fstat(fd, &st) == 0 ? (uint64_t) st.st_ino : 0;
+        }
+        // Declared-format zero-copy: boundary tensors whose declared dma-buf layout/dtype differs from the
+        // device-native boundary, so the GPU converts between the imported buffer and the pooled boundary
+        // buffer instead of binding the fd directly. `convert_` is rebuilt each run; `recordedConvert_` is
+        // what the current command buffer encodes (a change re-records).
+        struct ConvertBinding {
+            std::shared_ptr<vk::Buffer> imported;
+            bool                        isInput = true;
+            NCHW                        shape;
+            TensorFormat                declFmt   = TensorFormat::NCHW;
+            DType                       declDtype = DType::Float32;
+            TensorFormat                devFmt    = TensorFormat::NCHW;
+            DType                       devDtype  = DType::Float32;
+        };
+        std::map<TensorId, ConvertBinding> convert_, recordedConvert_;
+        std::unique_ptr<BoundaryConvert>   conv_;
+        static bool                        sameConvert(const std::map<TensorId, ConvertBinding> &a, const std::map<TensorId, ConvertBinding> &b) {
+            if (a.size() != b.size())
+            {
+                return false;
+            }
+            for (const auto &kv: a)
+            {
+                auto it = b.find(kv.first);
+                if (it == b.end())
+                {
+                    return false;
+                }
+                const ConvertBinding &x = kv.second, &y = it->second;
+                if (x.imported.get() != y.imported.get() || x.isInput != y.isInput || x.declFmt != y.declFmt || x.declDtype != y.declDtype || x.devFmt != y.devFmt || x.devDtype != y.devDtype ||
+                    x.shape.n != y.shape.n || x.shape.c != y.shape.c || x.shape.h != y.shape.h || x.shape.w != y.shape.w)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
     };
 
     std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) {

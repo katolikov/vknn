@@ -44,6 +44,10 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
   file(GLOB VKNN_COMP_SHADERS CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.comp)
   foreach(_comp ${VKNN_COMP_SHADERS})
     get_filename_component(_name ${_comp} NAME_WE)
+    # boundary_convert is built below as four cross-dtype variants, not the fp32/fp16 pair.
+    if(_name STREQUAL "boundary_convert")
+      continue()
+    endif()
     set(_spv ${VKNN_SHADER_GEN_DIR}/${_name}.spv)
     add_custom_command(
       OUTPUT ${_spv}
@@ -69,6 +73,25 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
       list(APPEND _spv_files ${_spv16})
     endif()
   endforeach()
+
+  # boundary_convert: one source -> four cross-dtype SPIR-V (declared <-> device-native), selected at
+  # runtime by (srcDtype, dstDtype). The fp16 variants enable the 16-bit storage extensions.
+  set(_bc ${VKNN_SHADER_DIR}/boundary_convert.comp)
+  function(bc_variant suffix srct dstt extra)
+    set(_o ${VKNN_SHADER_GEN_DIR}/boundary_convert_${suffix}.spv)
+    add_custom_command(
+      OUTPUT ${_o}
+      COMMAND ${GLSLC} -O --target-env=vulkan1.3 -fshader-stage=compute
+              ${extra} -DSRC_T=${srct} -DDST_T=${dstt} ${_bc} -o ${_o}
+      DEPENDS ${_bc}
+      COMMENT "glslc boundary_convert ${suffix}"
+      VERBATIM)
+    set(_spv_files ${_spv_files} ${_o} PARENT_SCOPE)
+  endfunction()
+  bc_variant(f32_f32 float      float      "")
+  bc_variant(f32_f16 float      float16_t  -DNEED_FP16=1)
+  bc_variant(f16_f32 float16_t  float      -DNEED_FP16=1)
+  bc_variant(f16_f16 float16_t  float16_t  -DNEED_FP16=1)
 
   add_custom_command(
     OUTPUT ${EMBEDDED_SHADERS_CPP}
