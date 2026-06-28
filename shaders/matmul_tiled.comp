@@ -10,12 +10,12 @@
 // cases. Dispatch: (ceil(N/TN), ceil(M/TM), numBatch). Each workgroup computes a TMxTN output tile;
 // each thread computes an RMxRN micro-tile from registers, looping over K in TK-wide LDS panels.
 
-#define TM 64
-#define TN 64
+#define TM 128
+#define TN 128
 #define TK 16
 #define TILE 16        // threads per dim (16x16 = 256)
-#define RM (TM / TILE) // 4 output rows per thread
-#define RN (TN / TILE) // 4 output cols per thread
+#define RM (TM / TILE) // 8 output rows per thread
+#define RN (TN / TILE) // 8 output cols per thread
 
 layout(local_size_x = TILE, local_size_y = TILE) in;
 layout(std430, binding = 0) readonly buffer A { STORE a[]; };

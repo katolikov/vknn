@@ -25,7 +25,7 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
             bool                                 useTiled = false;
             int                                  numBatch = 1;
-            static constexpr int                 kTile    = 64; // must match TM/TN in matmul_tiled.comp
+            static constexpr int                 kTile    = 128; // must match TM/TN in matmul_tiled.comp
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g   = *env.graph;
