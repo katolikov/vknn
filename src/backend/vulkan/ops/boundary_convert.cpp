@@ -7,7 +7,8 @@ namespace vknn {
     namespace {
 
         struct BoundaryPC {
-            int N, C, H, W, srcFmt, dstFmt, count;
+            int      N, C, H, W, srcFmt, dstFmt;
+            uint32_t count; // unsigned: the shader's bounds check stays correct up to 2^32 elements
         };
 
         int fmtCode(TensorFormat f) {
@@ -28,7 +29,7 @@ namespace vknn {
             pipes_[idx] = std::make_unique<vk::ComputePipeline>(ctx, variantName(srcDt, dstDt), 2, sizeof(BoundaryPC), std::vector<uint32_t> {}, cache ? cache->handle() : VK_NULL_HANDLE);
         }
         int64_t    count = formatElems(dstFmt, shape);
-        BoundaryPC pc {(int) shape.n, (int) shape.c, (int) shape.h, (int) shape.w, fmtCode(srcFmt), fmtCode(dstFmt), (int) count};
+        BoundaryPC pc {(int) shape.n, (int) shape.c, (int) shape.h, (int) shape.w, fmtCode(srcFmt), fmtCode(dstFmt), (uint32_t) count};
         pipes_[idx]->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), groups(count, 256));
     }
 

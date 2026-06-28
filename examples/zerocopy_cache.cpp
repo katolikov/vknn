@@ -14,10 +14,12 @@
 #include "vknn/session.h"
 #include "vknn/tensor_format.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fcntl.h>
+#include <functional>
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -388,8 +390,20 @@ int main(int argc, char **argv) {
         hostInputs.push_back(Tensor(refIn[i], inInfo[i].shape, inInfo[i].name));
     }
 
-    // (1) host path — normal fp32 in, fp32 out (the reference)
+    // (1) host path — normal fp32 in, fp32 out (the reference; this is the non-zero-copy path)
     auto hostOut = net.run(hostInputs);
+
+    // If a <output>_gold.npy sits next to us (e.g. the encoder goldens), check the non-zero-copy host
+    // path against it — confirms the model itself is correct, independent of the zero-copy boundary.
+    for (size_t i = 0; i < outInfo.size(); ++i)
+    {
+        std::vector<float> gold = loadNpyF32(outInfo[i].name + "_gold.npy");
+        const Tensor      *h    = findTensor(hostOut, outInfo[i].name);
+        if (!gold.empty() && h && (int64_t) gold.size() >= outInfo[i].elems)
+        {
+            printf("  non-zero-copy '%s' vs golden: cos=%.5f\n", outInfo[i].name.c_str(), cosine(h->values().data(), gold.data(), outInfo[i].elems));
+        }
+    }
 
     // (2) declared-format zero-copy — one caller DMA-BUF per input/output, in each declared format,
     // exercising the input convert and the output convert in isolation and together.
@@ -425,6 +439,66 @@ int main(int argc, char **argv) {
     }
 
     printf("declared-format zero-copy %s host  (all formats)\n", allOk ? "MATCHES" : "DIFFERS FROM");
+
+    // runtime: host path (packs the input, unpacks every output) vs device-native zero-copy (the GPU
+    // reads/writes the caller's DMA-BUFs directly — no host pack/unpack). Same GPU compute either way;
+    // the difference is the boundary I/O the zero-copy path removes.
+    auto wallMs = [](const std::function<void()> &body, int iters) {
+        body(); // warm
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < iters; ++i)
+        {
+            body();
+        }
+        return std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() / iters;
+    };
+    std::vector<UserBuf> zbIn, zbOut;
+    std::vector<Tensor>  zIn, zOut;
+    bool                 zok = true;
+    for (size_t i = 0; i < inInfo.size() && zok; ++i)
+    {
+        UserBuf b = allocDmaBuf((size_t) inInfo[i].deviceBytes);
+        zok       = b.fd >= 0 && b.map;
+        if (zok)
+        {
+            packDecl(inInfo[i].shape, inInfo[i].deviceFormat, inInfo[i].deviceDtype, refIn[i].data(), b.map);
+            zbIn.push_back(b);
+            zIn.push_back(Tensor::fromDmaBuf(b.fd, inInfo[i].shape, inInfo[i].name, TensorFormat::Auto));
+        }
+    }
+    for (size_t i = 0; i < outInfo.size() && zok; ++i)
+    {
+        UserBuf b = allocDmaBuf((size_t) outInfo[i].deviceBytes);
+        zok       = b.fd >= 0 && b.map;
+        if (zok)
+        {
+            zbOut.push_back(b);
+            zOut.push_back(Tensor::toDmaBuf(b.fd, outInfo[i].shape, outInfo[i].name, TensorFormat::Auto));
+        }
+    }
+    if (zok)
+    {
+        double hostMs = wallMs(
+            [&] {
+                net.run(hostInputs);
+            },
+            5);
+        double zcMs = wallMs(
+            [&] {
+                net.run(zIn, zOut);
+            },
+            5);
+        printf("runtime (mean of 5): host=%.2f ms  zero-copy=%.2f ms  (%.1f%% of host)\n", hostMs, zcMs, 100.0 * zcMs / hostMs);
+    }
+    for (auto &b: zbIn)
+    {
+        freeDmaBuf(b);
+    }
+    for (auto &b: zbOut)
+    {
+        freeDmaBuf(b);
+    }
+
     printf("cache file: %s\n", sess->config().cacheFile.c_str());
     return allOk ? 0 : 3;
 }

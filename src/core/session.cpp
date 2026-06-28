@@ -552,6 +552,14 @@ namespace vknn {
         profiler_.clear();
 
         // --- bind inputs (host data, or a zero-copy dma-buf fd) ---
+        // Clear any prior zero-copy binding on every input first, so a binding declared in an earlier
+        // run can't linger on an input the caller omits this run.
+        for (TensorId iid: graph_.inputs)
+        {
+            pool_[iid].dmaBufFd     = -1;
+            pool_[iid].dmaBufFormat = TensorFormat::NCHW;
+            pool_[iid].dmaBufDtype  = DType::Float32;
+        }
         for (const auto &io: inputs)
         {
             TensorId id = graph_.find(io.name);
@@ -664,16 +672,20 @@ namespace vknn {
         {
             RtTensor &rt = pool_[oid];
             IOTensor  io;
-            io.name     = graph_.tensors[oid].name;
-            io.shape    = rt.shape;
-            io.dtype    = rt.dtype;
-            io.dmaBufFd = rt.dmaBufFd;
+            io.name         = graph_.tensors[oid].name;
+            io.shape        = rt.shape;
+            io.dtype        = rt.dtype;
+            io.dmaBufFd     = rt.dmaBufFd;
+            io.dmaBufFormat = rt.dmaBufFormat;
+            io.dmaBufDtype  = rt.dmaBufDtype;
             if (rt.dmaBufFd < 0)
             {
                 io.data = rt.host.bytes; // a bound output lives in the caller's fd, not here
             }
             outputs.push_back(std::move(io));
-            rt.dmaBufFd = -1; // reset for the next run
+            rt.dmaBufFd     = -1; // reset for the next run
+            rt.dmaBufFormat = TensorFormat::NCHW;
+            rt.dmaBufDtype  = DType::Float32;
         }
         if (tm)
         {

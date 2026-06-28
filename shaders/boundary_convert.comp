@@ -19,7 +19,7 @@
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer S { SRC_T s[]; };
 layout(std430, binding = 1) writeonly buffer D { DST_T d[]; };
-layout(push_constant) uniform PC { int N, C, H, W, srcFmt, dstFmt, count; } pc;
+layout(push_constant) uniform PC { int N, C, H, W, srcFmt, dstFmt; uint count; } pc;
 
 int encode(int fmt, int n, int c, int h, int w) {
   int HW = pc.H * pc.W;
@@ -34,7 +34,7 @@ int encode(int fmt, int n, int c, int h, int w) {
 
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(pc.count)) return;
+  if (gid >= pc.count) return;
   int i = int(gid);
   int n, c, h, w;
   if (pc.dstFmt == 2) { // NC4HW4 destination (includes padding lanes)

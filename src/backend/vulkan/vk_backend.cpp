@@ -1198,36 +1198,45 @@ namespace vknn {
                         // Import sized for what the dma-buf actually holds: the device-native bytes for a
                         // direct bind, the declared-format bytes for a convert. Re-import when this
                         // tensor's fd or size changes.
-                        size_t    needB = direct ? origBoundary_[tid]->bytes() : (size_t) (formatElems(declFmt, x) * dtypeSize(declDt));
-                        uint64_t  id    = dmaBufId(fd);
-                        Imported &imp   = imported_[tid];
-                        bool      stale = !imp.buf || imp.bytes != needB || (id != 0 ? imp.id != id : imp.fd != fd);
-                        if (stale)
+                        size_t needB = direct ? origBoundary_[tid]->bytes() : (size_t) (formatElems(declFmt, x) * dtypeSize(declDt));
+                        if (needB > 0)
                         {
-                            vk::Buffer *b = vk::Buffer::importDmaBufFd(be_->ctx(), fd, needB);
-                            imp           = {id, fd, needB, b ? std::shared_ptr<vk::Buffer>(b) : nullptr};
-                        }
-                        if (imp.buf)
-                        {
-                            if (direct)
+                            uint64_t  id    = dmaBufId(fd);
+                            Imported &imp   = imported_[tid];
+                            bool      stale = !imp.buf || imp.bytes != needB || (id != 0 ? imp.id != id : imp.fd != fd);
+                            if (stale)
                             {
-                                want = imp.buf; // declared == device-native: bind the fd directly
-                            } else
+                                vk::Buffer *b = vk::Buffer::importDmaBufFd(be_->ctx(), fd, needB);
+                                imp           = {id, fd, needB, b ? std::shared_ptr<vk::Buffer>(b) : nullptr};
+                                if (!b)
+                                {
+                                    // No dma-buf import on this device: zero-copy can't be honored. The
+                                    // pooled buffer holds no caller data, so the result for this input is
+                                    // invalid — surface it rather than read silently undefined memory.
+                                    VKNN_WARN_THROTTLE("zerocopy-import-fail", 1) << "dma-buf import failed for '" << g_.tensors[tid].name << "' (device lacks dma-buf import); zero-copy unavailable";
+                                }
+                            }
+                            if (imp.buf)
                             {
-                                // declared != device-native: keep the pooled boundary buffer; the GPU converts
-                                // between the imported buffer and it (recorded in record()).
-                                ConvertBinding cb;
-                                cb.imported   = imp.buf;
-                                cb.isInput    = isInput;
-                                cb.shape      = x;
-                                cb.declFmt    = declFmt;
-                                cb.declDtype  = declDt;
-                                cb.devFmt     = devFmt;
-                                cb.devDtype   = devDt;
-                                convert_[tid] = cb;
+                                if (direct)
+                                {
+                                    want = imp.buf; // declared == device-native: bind the fd directly
+                                } else
+                                {
+                                    // declared != device-native: keep the pooled boundary buffer; the GPU
+                                    // converts between the imported buffer and it (recorded in record()).
+                                    ConvertBinding cb;
+                                    cb.imported   = imp.buf;
+                                    cb.isInput    = isInput;
+                                    cb.shape      = x;
+                                    cb.declFmt    = declFmt;
+                                    cb.declDtype  = declDt;
+                                    cb.devFmt     = devFmt;
+                                    cb.devDtype   = devDt;
+                                    convert_[tid] = cb;
+                                }
                             }
                         }
-                        // else: import unsupported -> keep the pooled buffer (staged-copy fallback)
                     }
                     if (bit->second != want)
                     {
@@ -1414,11 +1423,11 @@ namespace vknn {
         std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
         // Zero-copy: each boundary tensor's pooled buffer (the fallback) and its imported dma-buf. The
         // import is kept per boundary tensor and refreshed when that tensor's dma-buf or required size
-        // changes. Identity is the dma-buf inode (fstat), not the fd: fd numbers are recycled by the OS,
-        // so keying on the raw fd would alias a reused number to a stale buffer.
+        // changes. Identity is the dma-buf's (device, inode) from fstat, not the fd: fd numbers are
+        // recycled by the OS, so keying on the raw fd would alias a reused number to a stale buffer.
         std::map<TensorId, std::shared_ptr<vk::Buffer>> origBoundary_;
         struct Imported {
-            uint64_t                    id    = 0; // dma-buf inode (0 = unknown, fall back to fd)
+            uint64_t                    id    = 0; // dma-buf (dev,inode) hash (0 = unknown, fall back to fd)
             int                         fd    = -1;
             size_t                      bytes = 0;
             std::shared_ptr<vk::Buffer> buf;
@@ -1426,7 +1435,11 @@ namespace vknn {
         std::map<TensorId, Imported> imported_;
         static uint64_t              dmaBufId(int fd) {
             struct stat st;
-            return ::fstat(fd, &st) == 0 ? (uint64_t) st.st_ino : 0;
+            if (::fstat(fd, &st) != 0)
+            {
+                return 0;
+            }
+            return ((uint64_t) st.st_dev * 1099511628211ull) ^ (uint64_t) st.st_ino; // (dev,inode) -> stable id
         }
         // Declared-format zero-copy: boundary tensors whose declared dma-buf layout/dtype differs from the
         // device-native boundary, so the GPU converts between the imported buffer and the pooled boundary
