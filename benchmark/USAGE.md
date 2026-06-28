@@ -8,7 +8,14 @@ per-stage result JSON with timing and (optional) per-operator profiling. The on-
 ```sh
 ./build.sh && ./build.sh --android        # host vknn_compile + device binaries
 python benchmark/run.py run benchmark/example.json
+python benchmark/run.py run benchmark/example.json -v   # also print device stdout/stderr + the staged config
 ```
+
+`run.py` logs each stage as it goes: the device serial/dir, every file pushed (or `MISSING` and skipped —
+the device may already hold a copy), the inputs/goldens the device run will use, the run command and its
+timing, and whether a `result.json` came back. The on-device executor writes its timing **and errors** to
+stderr; `run.py` surfaces that stderr when a run produces no timing, and `-v` prints all of it plus the
+generated config. A run that writes no `result.json` is reported as a failure (exit 3), not a silent pass.
 
 ## 1. Input / output files
 
