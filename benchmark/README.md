@@ -8,6 +8,17 @@ GPU, **save**/**validate** outputs, and collect **timing + profiling**.
 python benchmark/run.py run benchmark/example.json
 ```
 
+## Model files (HuggingFace)
+
+The YoNoSplat encoder is too large for git, so the ONNX + weights + compiled `.vxm` live in a
+HuggingFace model repo. Fetch them with:
+```sh
+pip install huggingface_hub
+python benchmark/fetch_model.py --repo katolikov/yonosplat-vknn --out ./models
+```
+(`fetch_model.py` pulls `yonosplat_encoder.onnx` + `weights.bin` + `encoder8_fp16.vxm`; a private repo
+needs `hf auth login`.) Publishing them is a one-time step via `upload_model.py`.
+
 ## Contents
 - `run.py` — host driver (per-stage: convert + `adb push` + on-device run + validate + timing).
 - `benchmark.cpp` → `vknn_benchmark` — on-device executor: `.npy` or raw (`.bin`/`.raw`) inputs (or none
