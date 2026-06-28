@@ -1,21 +1,50 @@
 #version 450
 #include "precision.glsl"
-// Flat softmax over one axis.
 #include "common.glsl"
-layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+// Softmax over one axis. One workgroup per row (the `axis` elements at stride `inner`); the threads
+// cooperatively reduce max + sum through LDS, so a wide attention row (axis up to a few thousand) is
+// parallelised across the workgroup instead of walked by a single thread. The row index spans a 2D
+// workgroup grid (ComputePipeline::dispatch spills the count into y past the per-dim limit), so the
+// >65535-row upscaled-decoder attention works too.
+#define WG 128
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int outer, axis, inner; } pc;
 
+shared float red[WG];
+
 void main() {
-  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(pc.outer * pc.inner)) return;
-  int o = int(gid) / pc.inner, i = int(gid) % pc.inner;
+  uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (row >= uint(pc.outer * pc.inner)) return;
+  int o = int(row) / pc.inner, i = int(row) % pc.inner;
   int base = o * pc.axis * pc.inner + i;
+  uint t = gl_LocalInvocationID.x;
+
   float m = -3.4e38;
-  for (int a = 0; a < pc.axis; ++a) m = max(m, float(s[base + a * pc.inner]));
+  for (int a = int(t); a < pc.axis; a += WG)
+    m = max(m, float(s[base + a * pc.inner]));
+  red[t] = m;
+  barrier();
+  for (uint stride = WG / 2; stride > 0; stride >>= 1) {
+    if (t < stride) red[t] = max(red[t], red[t + stride]);
+    barrier();
+  }
+  m = red[0];
+  barrier();
+
   float sum = 0.0;
-  for (int a = 0; a < pc.axis; ++a) sum += exp(float(s[base + a * pc.inner]) - m);
-  for (int a = 0; a < pc.axis; ++a)
-    d[base + a * pc.inner] = STORE(exp(float(s[base + a * pc.inner]) - m) / sum);
+  for (int a = int(t); a < pc.axis; a += WG)
+    sum += exp(float(s[base + a * pc.inner]) - m);
+  red[t] = sum;
+  barrier();
+  for (uint stride = WG / 2; stride > 0; stride >>= 1) {
+    if (t < stride) red[t] += red[t + stride];
+    barrier();
+  }
+  float rsum = 1.0 / red[0];
+  barrier();
+
+  for (int a = int(t); a < pc.axis; a += WG)
+    d[base + a * pc.inner] = STORE(exp(float(s[base + a * pc.inner]) - m) * rsum);
 }

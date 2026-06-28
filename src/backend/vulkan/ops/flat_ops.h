@@ -91,9 +91,9 @@ namespace vknn {
             std::unique_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
             void                                 prepare(const Node &node, VkOpEnv &env) {
-                const Graph &g   = *env.graph;
-                Shape        in  = g.desc(node.inputs[0]).shape;
-                Shape        out = g.desc(node.outputs[0]).shape;
+                const Graph &g        = *env.graph;
+                Shape        in       = g.desc(node.inputs[0]).shape;
+                Shape        out      = g.desc(node.outputs[0]).shape;
                 int          rank     = (int) out.size();
                 auto         inStride = rowStrides(in);
                 auto         pads     = readI64Param(g, node, "pads", 1); // [begin..., end...]; begins are pads[0..rank-1]
@@ -111,9 +111,7 @@ namespace vknn {
                             cval = halfToFloat(*reinterpret_cast<const fp16_t *>(hb.bytes.data()));
                         }
                     } else if (hb.bytes.size() >= sizeof(float))
-                    {
-                        cval = hb.f32()[0];
-                    }
+                    { cval = hb.f32()[0]; }
                 }
                 pc.rank  = rank;
                 pc.total = (int) numElements(out);
@@ -316,7 +314,8 @@ namespace vknn {
                 pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_softmax", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
-                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups((int64_t) pc.outer * pc.inner, 256));
+                // One workgroup per row (flat_softmax does the LDS reduction across the workgroup).
+                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), (uint32_t) ((int64_t) pc.outer * pc.inner));
             }
         };
 

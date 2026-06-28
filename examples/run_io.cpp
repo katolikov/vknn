@@ -59,6 +59,7 @@ int main(int argc, char **argv) {
     cfg.timing                 = flag(argc, argv, "--timing");
     cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
     cfg.dumpTensors            = opt(argc, argv, "--dump", "");
+    cfg.profile                = flag(argc, argv, "--profile");
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -129,6 +130,11 @@ int main(int argc, char **argv) {
             fprintf(stderr, "WARN: failed to write %s\n", fn.c_str());
         }
         printf("output '%s'  %s  -> %s\n", o.name.c_str(), shapeStr(o.shape).c_str(), fn.c_str());
+    }
+    if (cfg.profile)
+    {
+        sess->profiler().printTable();
+        printf("GPU total: %.1f ms\n", sess->profiler().totalGpuMs());
     }
     return 0;
 }
