@@ -26,8 +26,10 @@ layout(push_constant) uniform PC {
   int outDim[8]; int aStride[8]; int bStride[8];
 } pc;
 
-shared float As[TK][TM]; // transposed (k-major) so the inner loop reads As[kk][m] across threads
-shared float Bs[TK][TN];
+// LDS holds the staged panels in storage precision (fp16 when half) to halve LDS traffic, the GEMM's
+// bottleneck; the math is still fp32 (each load is widened with float()).
+shared STORE As[TK][TM]; // transposed (k-major) so the inner loop reads As[kk][m] across threads
+shared STORE Bs[TK][TN];
 
 void main() {
   int M = pc.M, N = pc.N, K = pc.K;
@@ -59,21 +61,21 @@ void main() {
       int idx = tid + t * (TILE * TILE); // 0 .. TM*TK-1, laid out as m*TK + k
       int m = idx / TK, k = idx % TK;
       int gm = tileM + m, gk = k0 + k;
-      As[k][m] = (gm < M && gk < K) ? float(a[aBase + gm * K + gk]) : 0.0;
+      As[k][m] = (gm < M && gk < K) ? a[aBase + gm * K + gk] : STORE(0.0);
     }
     for (int t = 0; t < (TK * TN) / (TILE * TILE); ++t) {
       int idx = tid + t * (TILE * TILE); // 0 .. TK*TN-1, laid out as k*TN + n
       int k = idx / TN, n = idx % TN;
       int gk = k0 + k, gn = tileN + n;
-      Bs[k][n] = (gk < K && gn < N) ? float(b[bBase + gk * N + gn]) : 0.0;
+      Bs[k][n] = (gk < K && gn < N) ? b[bBase + gk * N + gn] : STORE(0.0);
     }
     barrier();
     for (int kk = 0; kk < TK; ++kk) {
       float av[RM], bv[RN];
       for (int i = 0; i < RM; ++i)
-        av[i] = As[kk][ty * RM + i];
+        av[i] = float(As[kk][ty * RM + i]);
       for (int j = 0; j < RN; ++j)
-        bv[j] = Bs[kk][tx * RN + j];
+        bv[j] = float(Bs[kk][tx * RN + j]);
       for (int i = 0; i < RM; ++i)
         for (int j = 0; j < RN; ++j)
           acc[i][j] += av[i] * bv[j];
