@@ -159,12 +159,10 @@ namespace vknn {
                     pc.inDim[k]    = (j >= 0) ? (int) in[j] : 1;
                     pc.inStride[k] = (j >= 0) ? (int) inStrideFull[j] : 0;
                 }
-                // Expand/Tile of a constant operand (no activation buffer): upload it flat (decodes fp16).
+                // Expand/Tile of a constant operand (no activation buffer): upload it flat (direct fp16).
                 if (g.isInitializer(node.inputs[0]))
                 {
-                    std::vector<float> v = initFloats(g, node.inputs[0]);
-                    v.resize(numElements(in));
-                    constBuf = upload(*env.ctx, v, env.useFp16);
+                    constBuf = uploadInit(env, node.inputs[0], in);
                 }
                 pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_broadcast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
             }
@@ -270,9 +268,7 @@ namespace vknn {
                     }
                     if (g.isInitializer(t))
                     {
-                        auto wv = initFloats(g, t);
-                        wv.resize(numElements(s));
-                        constBuf[which] = upload(*env.ctx, wv, env.useFp16);
+                        constBuf[which] = uploadInit(env, t, s);
                     }
                 };
                 setup(node.inputs[0], 0);

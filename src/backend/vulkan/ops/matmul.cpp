@@ -122,14 +122,13 @@ namespace vknn {
                 }
 
                 // Upload a constant operand flat (row-major NCHW fp32 -> device, fp16 when half precision).
+                // Direct fp16->fp16 passthrough when the stored weight already matches compute precision.
                 auto maybeUpload = [&](TensorId t, int which, const Shape &s) {
                     if (!g.isInitializer(t))
                     {
                         return;
                     }
-                    std::vector<float> wv = initFloats(g, t);
-                    wv.resize(numElements(s));
-                    constBuf[which] = upload(*env.ctx, wv, env.useFp16);
+                    constBuf[which] = uploadInit(env, t, s);
                 };
                 maybeUpload(node.inputs[0], 0, g.desc(node.inputs[0]).shape);
                 maybeUpload(node.inputs[1], 1, g.desc(node.inputs[1]).shape);

@@ -141,6 +141,26 @@ namespace vknn {
         return out;
     }
 
+    // Upload an initializer uploaded FLAT (no transpose/prepack) to a device buffer with at most one
+    // element conversion. When the stored dtype already matches the compute precision the raw bytes are
+    // memcpy'd straight through, skipping the fp16->fp32->fp16 round-trip that initFloats()+upload()
+    // would otherwise do over every weight (the dominant model-load cost for transformer matmuls).
+    // fp16->fp32->fp16 is exact, so the direct copy is bit-identical to the round-trip.
+    inline std::shared_ptr<vk::Buffer> uploadInit(VkOpEnv &env, TensorId id, const Shape &shape) {
+        const Graph      &g  = *env.graph;
+        const HostBuffer &hb = g.initializers.at(id);
+        int64_t           n  = numElements(shape);
+        if (env.useFp16 && g.desc(id).dtype == DType::kFloat16 && hb.bytes.size() == (size_t) n * 2)
+        {
+            auto b = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) n, 4) * 2, vk::MemPref::kAuto);
+            b->upload(hb.bytes.data(), (size_t) n * 2);
+            return b;
+        }
+        std::vector<float> v = initFloats(g, id);
+        v.resize((size_t) std::max<int64_t>(n, 0));
+        return upload(*env.ctx, v, env.useFp16);
+    }
+
     // Resolve an op's DATA operand to a GPU buffer. An activation has a device buffer (env.devBuf); a
     // constant initializer has none, so upload it flat (decoding fp16) into `hold` on first use. Lets
     // any elementwise/data-movement op accept a constant operand (e.g. the RoPE freq tables computed
@@ -151,9 +171,7 @@ namespace vknn {
         {
             if (!hold)
             {
-                std::vector<float> v = initFloats(g, t);
-                v.resize(numElements(g.desc(t).shape));
-                hold = upload(*env.ctx, v, env.useFp16);
+                hold = uploadInit(env, t, g.desc(t).shape);
             }
             return hold.get();
         }
