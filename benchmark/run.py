@@ -253,6 +253,10 @@ def run_stage(stage, base, idx, where_convert="host"):
             "tolerance": stage.get("tolerance", 0.999), "result": "result.json", "save_dir": "."}
     if "max_submit_nodes" in dev:
         dcfg["max_submit_nodes"] = dev["max_submit_nodes"]
+    if dev.get("cache"):  # unified per-model cache file (default on device: <model>.cache)
+        dcfg["cache"] = os.path.basename(dev["cache"])
+    if stage.get("generate_cache") or dev.get("generate_cache"):  # untimed warm-up load to populate it
+        dcfg["generate_cache"] = True
     if stage.get("inputs"):
         dcfg["inputs"] = push_io(stage["inputs"])
     if out_cfg.get("save"):

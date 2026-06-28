@@ -11,6 +11,8 @@
 //     "model": "encoder8_fp16.vxm",         // .onnx or .vxm (required)
 //     "backend": "vulkan", "precision": "fp16",
 //     "no_weight_cache": true,
+//     "cache": "model.cache",               // unified per-model cache file (default "<model>.cache")
+//     "generate_cache": false,              // populate the cache first (untimed), then time a warm load
 //     "max_submit_nodes": 500,              // 0 = single submit
 //     "timing": true,                       // engine prints pack/submit/unpack
 //     "profile": false,                     // per-operator GPU timing in the result json
@@ -451,8 +453,24 @@ int main(int argc, char **argv) {
     }
     double tol = js.get("tolerance") ? js.get("tolerance")->asNum(0.999) : 0.999;
 
+    // Unified per-model cache file. "cache": path (default "<model>.cache" next to the model). With
+    // "generate_cache": true, populate it first in an UNTIMED throwaway load (shader compile + conv
+    // autotune + Winograd transform), written when that session is destroyed, so the timed load below is
+    // a warm start — the cache-build cost is excluded from timing_ms.
+    std::string modelPath = resolve(base, model);
+    std::string cacheFile = str("cache", "");
+    if (!cacheFile.empty())
+    {
+        cacheFile = resolve(base, cacheFile);
+    }
+    if (flag("generate_cache", false))
+    {
+        printf("generating cache (untimed) ...\n");
+        Runtime::load(modelPath, cfg, cacheFile); // throwaway; ~Session writes the cache
+    }
+
     auto t0   = Clock::now();
-    auto sess = Runtime::load(resolve(base, model), cfg);
+    auto sess = Runtime::load(modelPath, cfg, cacheFile);
     if (!sess)
     {
         fprintf(stderr, "failed to load %s\n", model.c_str());
