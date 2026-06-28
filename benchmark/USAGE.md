@@ -6,16 +6,24 @@ per-stage result JSON with timing and (optional) per-operator profiling. The on-
 `vknn_benchmark` (built from `benchmark/benchmark.cpp`); `run.py` stages files over `adb` and runs it.
 
 ```sh
-./build.sh && ./build.sh --android        # host vknn_compile + device binaries
-python benchmark/run.py run benchmark/example.json
-python benchmark/run.py run benchmark/example.json -v   # also print device stdout/stderr + the staged config
+./build.sh                                 # host vknn_compile (for host-side convert)
+python benchmark/run.py run benchmark/example.json       # auto-builds the device binaries first
+python benchmark/run.py run benchmark/example.json -v    # also print device stdout/stderr + the staged config
+python benchmark/run.py run benchmark/example.json --no-build   # reuse existing build-android/ binaries
 ```
+
+`run` first runs `./build.sh --android` for you (incremental Ninja — a near-no-op when nothing changed;
+`--no-build` skips it), so you never have to build the device binaries by hand before a run.
 
 `run.py` logs each stage as it goes: the device serial/dir, every file pushed (or `MISSING` and skipped —
 the device may already hold a copy), the inputs/goldens the device run will use, the run command and its
 timing, and whether a `result.json` came back. The on-device executor writes its timing **and errors** to
 stderr; `run.py` surfaces that stderr when a run produces no timing, and `-v` prints all of it plus the
 generated config. A run that writes no `result.json` is reported as a failure (exit 3), not a silent pass.
+
+Each stage's Android **logcat** is cleared before the run and saved to `results/<stage>.logcat.txt`
+afterwards — that is where the GPU driver, thermal throttling, OOM-killer, and watchdog-reset messages
+land (the executor's own stdout/stderr does not capture them).
 
 ## 1. Input / output files
 

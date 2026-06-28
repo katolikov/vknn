@@ -7,8 +7,12 @@ provide either an ONNX model (converted to .vxm with the given optimization opti
 save outputs as .npy / .png, compare each output against a golden (cosine / PSNR / SNR / relL2 / max),
 and collect a per-stage result.json with timing and (optional) per-operator profiling.
 
-  run.py run    CONFIG.json [-v]     # run every stage (convert if needed, on device); -v = verbose
-  run.py convert ONNX OUT.vxm [opts] # standalone convert (host or device)
+  run.py run    CONFIG.json [-v] [--no-build]  # build (./build.sh --android) + run every stage on device
+  run.py convert ONNX OUT.vxm [opts]           # standalone convert (host or device)
+
+`run` first runs ./build.sh --android (incremental; --no-build to skip), then for each stage logs the
+files it pushes, the inputs it uses, the run timing, the pulled result.json, and saves the device logcat
+to results/<stage>.logcat.txt.
 
 Config (sectioned; see benchmark/example.json and USAGE.md):
   { "defaults": { ...shared sections merged into every stage... },
@@ -108,10 +112,27 @@ def host_bin(name):
     return p if os.path.exists(p) else None
 
 
+# Auto-build the Android binaries so `run` never needs a manual `./build.sh --android` first. The
+# build is incremental (Ninja) — a near-no-op when nothing changed, a rebuild when sources changed.
+# --no-build skips it (e.g. offline from the NDK, reusing existing binaries).
+BUILD = True
+
+
+def build_android():
+    log("  [build] ./build.sh --android")
+    r = subprocess.run(["bash", os.path.join(ROOT, "build.sh"), "--android"], cwd=ROOT)
+    if r.returncode != 0:
+        sys.exit("android build failed (see output above)")
+
+
 def android_bin(name):
     p = os.path.join(ROOT, "build-android", name)
     if not os.path.exists(p):
-        sys.exit(f"missing {p} — build with ./build.sh --android")
+        if not BUILD:
+            sys.exit(f"missing {p} — run ./build.sh --android (or drop --no-build)")
+        build_android()
+        if not os.path.exists(p):
+            sys.exit(f"{name} not produced by ./build.sh --android")
     return p
 
 
@@ -266,6 +287,7 @@ def run_stage(stage, base, idx, where_convert="host"):
     cd = dev.get("cooldown", 22 if n > 1 else 0)
     cmd = f"cd {ddir} && ./vknn_benchmark config.json"
     log(f"  [run] {n}x  cooldown={cd}s  $ {cmd}")
+    adb(["logcat", "-c"])  # start this run's logcat window clean
     times, ok_all, last = [], True, ""
     for i in range(n):
         if cd:
@@ -313,15 +335,27 @@ def run_stage(stage, base, idx, where_convert="host"):
             ls = adb(["shell", f"ls {ddir}/*.{fmt} 2>/dev/null"]).stdout.split()
             if ls:  # left on device — pull them yourself
                 log(f"  [saved:{fmt}] " + ", ".join(os.path.basename(x) for x in ls) + f"  (on device in {ddir})")
+
+    # ---- save this run's logcat (the GPU driver / OOM-killer / watchdog reset logs land here, not in
+    #      the executor's stderr) ----
+    lc_path = os.path.join(results_dir, f"{name}.logcat.txt")
+    lc = adb(["logcat", "-d"])
+    if lc.returncode == 0:
+        with open(lc_path, "w") as f:
+            f.write(lc.stdout)
+        log(f"  [logcat] results/{name}.logcat.txt  ({human(os.path.getsize(lc_path))})")
+    else:
+        log(f"  [logcat] capture failed: {(lc.stderr or lc.stdout).strip()}")
     return ok_all
 
 
 def main():
-    global VERBOSE
+    global VERBOSE, BUILD
     ap = argparse.ArgumentParser(description="VKNN benchmark: convert + run + validate + profile on device")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run"); r.add_argument("config"); r.add_argument("--convert-on", choices=["host", "device"], default="host")
     r.add_argument("-v", "--verbose", action="store_true", help="print device stdout/stderr and the generated config")
+    r.add_argument("--no-build", action="store_true", help="skip the automatic ./build.sh --android")
     c = sub.add_parser("convert"); c.add_argument("onnx"); c.add_argument("out")
     c.add_argument("--fp16", action="store_true", default=True); c.add_argument("--fp32", dest="fp16", action="store_false")
     c.add_argument("--fuse-se", action="store_true"); c.add_argument("--fuse-dwpw", action="store_true")
@@ -330,6 +364,7 @@ def main():
     c.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     VERBOSE = getattr(args, "verbose", False)
+    BUILD = not getattr(args, "no_build", False)
 
     if args.cmd == "convert":
         set_serial(args.serial)
@@ -343,6 +378,8 @@ def main():
     defaults = cfg.get("defaults", {})
     stages = cfg.get("stages") or [cfg]
     log(f"config: {args.config}  ({len(stages)} stage{'s' if len(stages) != 1 else ''})  base={base}")
+    if BUILD:
+        build_android()
     ok = True
     for i, st in enumerate(stages):
         ok = run_stage(merge(defaults, st), base, i, args.convert_on) and ok
