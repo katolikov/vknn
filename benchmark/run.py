@@ -7,8 +7,8 @@ provide either an ONNX model (converted to .vxm with the given optimization opti
 save outputs as .npy / .png, compare each output against a golden (cosine / PSNR / SNR / relL2 / max),
 and collect a per-stage result.json with timing and (optional) per-operator profiling.
 
-  benchmark.py run    CONFIG.json          # run every stage (convert if needed, on device)
-  benchmark.py convert ONNX OUT.vxm [opts] # standalone convert (host or device)
+  run.py run    CONFIG.json          # run every stage (convert if needed, on device)
+  run.py convert ONNX OUT.vxm [opts] # standalone convert (host or device)
 
 Config (sectioned; see benchmark/example.json and USAGE.md):
   { "defaults": { ...shared sections merged into every stage... },
@@ -170,8 +170,8 @@ def run_stage(stage, base, idx, where_convert="host"):
     local_cfg = os.path.join(tempfile.gettempdir(), f".cfg_{name}.json")
     json.dump(dcfg, open(local_cfg, "w"), indent=2)
     adb(["push", local_cfg, f"{ddir}/config.json"])
-    adb(["push", android_bin("vknn_validate"), f"{ddir}/vknn_validate"])
-    adb(["shell", "chmod", "+x", f"{ddir}/vknn_validate"])
+    adb(["push", android_bin("vknn_benchmark"), f"{ddir}/vknn_benchmark"])
+    adb(["shell", "chmod", "+x", f"{ddir}/vknn_benchmark"])
 
     # ---- run (bench times) ----
     n = stage.get("bench", 1)
@@ -180,7 +180,7 @@ def run_stage(stage, base, idx, where_convert="host"):
     for i in range(n):
         if cd:
             adb(["shell", "sleep", str(cd)])
-        last = adb(["shell", f"cd {ddir} && ./vknn_validate config.json"]).stdout
+        last = adb(["shell", f"cd {ddir} && ./vknn_benchmark config.json"]).stdout
         t, rows, ok = parse(last)
         ok_all = ok_all and ok
         if t:

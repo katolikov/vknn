@@ -1,14 +1,13 @@
 # Benchmark & validate: npy files + config reference
 
-`benchmark.py` runs one or more **stages** on the device from a single JSON config: convert a model
+`run.py` runs one or more **stages** on the device from a single JSON config: convert a model
 (or use a ready `.vxm`), feed inputs, optionally save outputs, compare against goldens, and collect a
 per-stage result JSON with timing and (optional) per-operator profiling. The on-device executor is
-`vknn_validate` (built from `benchmark/validate.cpp`); `benchmark.py` stages files over `adb` and runs
-it.
+`vknn_benchmark` (built from `benchmark/benchmark.cpp`); `run.py` stages files over `adb` and runs it.
 
 ```sh
 ./build.sh && ./build.sh --android        # host vknn_compile + device binaries
-python benchmark/benchmark.py run benchmark/example.json
+python benchmark/run.py run benchmark/example.json
 ```
 
 ## 1. Input / output files
@@ -18,15 +17,16 @@ NumPy's array format carries **shape and dtype in its header**, so you never han
 one with `numpy.save("image.npy", arr)`. Reading supports `float32`, `float16`, `float64`, `int64`,
 `int32`, `int8`, `uint8` (all converted to fp32 for the engine); arrays must be C-order.
 
-### raw `.bin` (alternative)
-A headerless little-endian **fp32** dump (`arr.astype(np.float32).tofile("in.bin")`). Because it has
-no shape, the file must contain exactly the model input's element count — the shape is taken from the
-model. Use `.npy` unless you already have `.bin` dumps.
+### raw `.bin` / `.raw` (alternative)
+A headerless little-endian **fp32** dump (`arr.astype(np.float32).tofile("in.raw")`). Any input whose
+name does not end in `.npy` is read as raw — `.bin`, `.raw`, or any extension. Because it has no shape,
+the file must contain exactly the model input's element count (the shape is taken from the model). Use
+`.npy` unless you already have raw dumps.
 
 ### Outputs
 With `"save"` set, each output is written next to the model on the device (pull them yourself), and the
 result JSON lists what was written:
-- `"npy"` — fp32 `.npy` (always works, exact).
+- `"npy"` — fp32 `.npy` (exact); `"raw"` — headerless fp32 `.raw` (always works, exact).
 - `"png"` — written when the tensor looks like an image (`[..,C,H,W]` or `[..,H,W,C]`, C∈{1,3,4});
   values are min–max normalised to 0–255. Non-image tensors are skipped.
 
@@ -117,6 +117,6 @@ python benchmark/make_golden.py model.onnx out/ image=image.npy intrinsics=intr.
 
 ## 6. Direct on-device use (no driver)
 
-`vknn_validate config.json` runs entirely on the device against device-local paths — `benchmark.py`
+`vknn_benchmark config.json` runs entirely on the device against device-local paths — `run.py`
 just stages files and writes that flat config. Run `convert` standalone with
-`benchmark.py convert model.onnx model.vxm --fp16 [--fuse-se ...] [--on host|device]`.
+`run.py convert model.onnx model.vxm --fp16 [--fuse-se ...] [--on host|device]`.

@@ -143,10 +143,10 @@ if(VKNN_BUILD_EXAMPLES)
 endif()
 
 # ---------------------------------------------------------------------------
-# Benchmark on-device tools (driven by benchmark/benchmark.py)
+# Benchmark on-device tools (driven by benchmark/run.py)
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  foreach(bt validate)
+  foreach(bt benchmark)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/${bt}.cpp)
       add_executable(vknn_${bt} ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/${bt}.cpp)
       target_link_libraries(vknn_${bt} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")

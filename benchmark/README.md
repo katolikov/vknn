@@ -5,14 +5,14 @@ GPU, **save**/**validate** outputs, and collect **timing + profiling**.
 
 ```sh
 ./build.sh && ./build.sh --android
-python benchmark/benchmark.py run benchmark/example.json
+python benchmark/run.py run benchmark/example.json
 ```
 
 ## Contents
-- `benchmark.py` — host driver (per-stage: convert + `adb push` + on-device run + validate + timing).
-- `validate.cpp` → `vknn_validate` — on-device executor: `.npy`/raw inputs (or none for runtime-only),
-  save `.npy`/`.png`, golden compare (cosine / PSNR / SNR / relL2 / max), result JSON with timing and
-  optional per-operator profiling.
+- `run.py` — host driver (per-stage: convert + `adb push` + on-device run + validate + timing).
+- `benchmark.cpp` → `vknn_benchmark` — on-device executor: `.npy` or raw (`.bin`/`.raw`) inputs (or none
+  for runtime-only), save `.npy`/`.raw`/`.png`, golden compare (cosine / PSNR / SNR / relL2 / max),
+  result JSON with timing and optional per-operator profiling.
 - `make_golden.py` — generate golden `.npy` (via onnxruntime) + a config from an ONNX.
 - `example.json` — sample two-stage config.
 - **[USAGE.md](USAGE.md)** — full how-to: the `.npy` mechanism and every config field.

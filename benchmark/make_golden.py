@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Build a vknn_validate config (+ ORT golden .npy files) from an ONNX model and input .npy files.
+"""Build a vknn_benchmark config (+ ORT golden .npy files) from an ONNX model and input .npy files.
 
-The companion of the vknn_validate tool: it runs the model once in onnxruntime to produce a golden
-.npy per output, then writes a config.json that vknn_validate consumes to run the same inputs on the
+The companion of the vknn_benchmark tool: it runs the model once in onnxruntime to produce a golden
+.npy per output, then writes a config.json that vknn_benchmark consumes to run the same inputs on the
 device (Vulkan) and check every output against its golden.
 
 Usage:
   make_validate.py MODEL.onnx OUT_DIR  name0=in0.npy [name1=in1.npy ...]  [--model-on-device NAME]
                    [--backend vulkan|cpu] [--precision fp16|fp32] [--tol 0.999]
 
-Then:  adb push OUT_DIR/. /data/local/tmp/vxrt/yono/   &&   vknn_validate config.json
+Then:  adb push OUT_DIR/. /data/local/tmp/vxrt/yono/   &&   vknn_benchmark config.json
 """
 import sys, os, json, argparse
 import numpy as np
@@ -58,4 +58,4 @@ cfg = {
 }
 json.dump(cfg, open(os.path.join(args.out_dir, "config.json"), "w"), indent=2)
 print(f"\nwrote {args.out_dir}/config.json  ({len(in_files)} inputs, {len(golden)} goldens)")
-print(f"next: adb push {args.out_dir}/. /data/local/tmp/vxrt/yono/ && (cd .../yono && ../vknn_validate config.json)")
+print(f"next: adb push {args.out_dir}/. /data/local/tmp/vxrt/yono/ && (cd .../yono && ../vknn_benchmark config.json)")

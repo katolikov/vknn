@@ -9,15 +9,16 @@ in [`../benchmark/`](../benchmark/); the full field reference is
 
 ```sh
 ./build.sh           # host vknn_compile (host-side convert)
-./build.sh --android # device binaries incl. vknn_validate (re-push after every android build)
+./build.sh --android # device binaries incl. vknn_benchmark (re-push after every android build)
 ```
 
-## 2. Inputs/outputs as `.npy` (or raw `.bin`)
+## 2. Inputs/outputs as `.npy` (or raw `.bin`/`.raw`)
 
 `.npy` carries shape + dtype in its header, so nothing is hand-specified — `numpy.save("image.npy",
-arr)`. Reading accepts f32/f16/f64/i64/i32/i8/u8 (→ fp32), C-order. A raw `.bin` is a headerless fp32
-dump sized to the model input (shape from the model). Outputs save as `.npy` (exact) and/or `.png`
-(image-shaped tensors only). **No `inputs` → runtime-only** (zero-filled, nothing saved/checked).
+arr)`. Reading accepts f32/f16/f64/i64/i32/i8/u8 (→ fp32), C-order. Any input not ending in `.npy`
+(`.bin`, `.raw`, …) is a headerless fp32 dump sized to the model input (shape from the model). Outputs
+save as `.npy`/`.raw` (exact) and/or `.png` (image-shaped tensors only). **No `inputs` → runtime-only**
+(zero-filled, nothing saved/checked).
 
 Generate goldens + a config from an ONNX:
 ```sh
@@ -47,8 +48,8 @@ Sectioned and **staged** — each stage is independent; `defaults` is merged int
 ## 4. Run
 
 ```sh
-python benchmark/benchmark.py run config.json          # all stages on the device
-python benchmark/benchmark.py convert m.onnx m.vxm --fp16   # standalone convert
+python benchmark/run.py run config.json          # all stages on the device
+python benchmark/run.py convert m.onnx m.vxm --fp16   # standalone convert
 ```
 Per stage it prints `submit+gpu` (median over `bench` runs) and the per-output metrics, and writes
 `results/<result>` (timing + per-output metrics + per-op `profile` when enabled).

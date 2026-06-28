@@ -1,12 +1,12 @@
-// vknn_validate - run a model on-device from one JSON config: feed .npy or raw .bin inputs (or none,
-// for a runtime-only measurement), optionally save outputs as .npy / .png, compare each named output
-// against a golden (cosine / PSNR / SNR / relL2 / max|d|), and write a result .json with per-call
-// timing and (optional) per-operator profiling.
+// vknn_benchmark - run a model on-device from one JSON config: feed .npy or raw (.bin/.raw) inputs (or
+// none, for a runtime-only measurement), optionally save outputs as .npy / .raw / .png, compare each
+// named output against a golden (cosine / PSNR / SNR / relL2 / max|d|), and write a result .json with
+// per-call timing and (optional) per-operator profiling.
 //
-//   vknn_validate config.json
+//   vknn_benchmark config.json
 //
-// Config (flat; paths relative to the config file or absolute). benchmark.py generates this from its
-// richer model/convert/device/stages config, but it is hand-writable too:
+// Config (flat; paths relative to the config file or absolute). run.py generates this from its richer
+// model/convert/device/stages config, but it is hand-writable too:
 //   {
 //     "model": "encoder8_fp16.vxm",         // .onnx or .vxm (required)
 //     "backend": "vulkan", "precision": "fp16",
@@ -14,9 +14,9 @@
 //     "max_submit_nodes": 500,              // 0 = single submit
 //     "timing": true,                       // engine prints pack/submit/unpack
 //     "profile": false,                     // per-operator GPU timing in the result json
-//     "inputs": ["image.npy", "intr.bin"],  // .npy (shape from header) or raw .bin (model shape); or
-//                                           // { "image": "image.npy" }; OMIT for runtime-only
-//     "save": ["npy", "png"],               // output formats to write (optional)
+//     "inputs": ["image.npy", "intr.raw"],  // .npy (shape from header) or raw .bin/.raw (model shape);
+//                                           // or { "image": "image.npy" }; OMIT for runtime-only
+//     "save": ["npy", "raw", "png"],        // output formats to write (optional)
 //     "save_dir": "out",                    // where to write them (default ".")
 //     "golden": { "means": "means_gold.npy" },          // output-name -> golden (optional)
 //     "metrics": ["cosine","psnr","snr","relL2","max"], // which to report (default: all)
@@ -521,7 +521,7 @@ int main(int argc, char **argv) {
     double runMs = msSince(t1);
     printf("load %.1f ms   run %.1f ms\n", loadMs, runMs);
 
-    // --- save outputs (npy / png) ---
+    // --- save outputs (npy / raw / png) ---
     std::vector<std::string> saveFmts;
     if (auto *j = js.get("save"))
     {
@@ -534,14 +534,15 @@ int main(int argc, char **argv) {
         }
     }
     std::string saveDir = str("save_dir", str("save_outputs", "."));
-    bool        wantNpy = false, wantPng = false;
+    bool        wantNpy = false, wantRaw = false, wantPng = false;
     for (auto &s: saveFmts)
     {
         wantNpy = wantNpy || s == "npy";
+        wantRaw = wantRaw || s == "raw" || s == "bin";
         wantPng = wantPng || s == "png";
     }
     std::map<std::string, std::vector<std::string>> saved;
-    if (haveIns && (wantNpy || wantPng))
+    if (haveIns && (wantNpy || wantRaw || wantPng))
     {
         for (auto &o: outs)
         {
@@ -551,6 +552,13 @@ int main(int argc, char **argv) {
             {
                 std::string p = resolve(base, saveDir) + "/" + nm + ".npy";
                 saveNpy(p, o.shape, o.f32(), cnt);
+                saved[o.name].push_back(baseName(p));
+            }
+            if (wantRaw)
+            {
+                std::string   p = resolve(base, saveDir) + "/" + nm + ".raw";
+                std::ofstream rf(p, std::ios::binary);
+                rf.write(reinterpret_cast<const char *>(o.f32()), (std::streamsize) (cnt * 4)); // fp32 row-major
                 saved[o.name].push_back(baseName(p));
             }
             if (wantPng)
