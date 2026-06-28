@@ -1,26 +1,48 @@
 #version 450
 #include "precision.glsl"
-// Flat LayerNormalization.
 #include "common.glsl"
-layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
-layout(std430, binding = 1) readonly  buffer G { STORE gamma[]; };
-layout(std430, binding = 2) readonly  buffer B { STORE beta[]; };
+// LayerNormalization, one workgroup per row. The threads cooperatively reduce sum and sum-of-squares
+// of the row's `norm` elements through LDS (fp32), so a wide row (norm = 1024 in the encoder) is
+// parallelised across the workgroup instead of walked by one thread. Row index spans a 2D workgroup
+// grid (ComputePipeline::dispatch spills the count into y past the per-dim limit).
+#define WG 256
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer S { STORE s[]; };
+layout(std430, binding = 1) readonly buffer G { STORE gamma[]; };
+layout(std430, binding = 2) readonly buffer B { STORE beta[]; };
 layout(std430, binding = 3) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int outer, norm, hasBeta; float eps; } pc;
 
+shared float rsum[WG];
+shared float rsq[WG];
+
 void main() {
-  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(pc.outer)) return;
-  int base = int(gid) * pc.norm;
-  float mean = 0.0;
-  for (int j = 0; j < pc.norm; ++j) mean += float(s[base + j]);
-  mean /= float(pc.norm);
-  float var = 0.0;
-  for (int j = 0; j < pc.norm; ++j) { float c = float(s[base + j]) - mean; var += c * c; }
-  var /= float(pc.norm);
-  float inv = 1.0 / sqrt(var + pc.eps);
-  for (int j = 0; j < pc.norm; ++j) {
+  uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (row >= uint(pc.outer)) return;
+  int base = int(row) * pc.norm;
+  uint t = gl_LocalInvocationID.x;
+
+  float ps = 0.0, pq = 0.0;
+  for (int j = int(t); j < pc.norm; j += WG) {
+    float v = float(s[base + j]);
+    ps += v;
+    pq += v * v;
+  }
+  rsum[t] = ps;
+  rsq[t] = pq;
+  barrier();
+  for (uint stride = WG / 2; stride > 0; stride >>= 1) {
+    if (t < stride) {
+      rsum[t] += rsum[t + stride];
+      rsq[t] += rsq[t + stride];
+    }
+    barrier();
+  }
+  float mean = rsum[0] / float(pc.norm);
+  float var  = rsq[0] / float(pc.norm) - mean * mean;
+  float inv  = inversesqrt(max(var, 0.0) + pc.eps);
+
+  for (int j = int(t); j < pc.norm; j += WG) {
     float y = (float(s[base + j]) - mean) * inv * float(gamma[j]);
     if (pc.hasBeta != 0) y += float(beta[j]);
     d[base + j] = STORE(y);

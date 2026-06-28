@@ -66,7 +66,8 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), gammaBuf->handle(), betaBuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.outer, 256));
+                // One workgroup per row (flat_layernorm does the LDS reduction across the workgroup).
+                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), gammaBuf->handle(), betaBuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), (uint32_t) pc.outer);
             }
         };
 
