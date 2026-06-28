@@ -1,20 +1,41 @@
 {
-  "onnx": "/tmp/YoNoSplat/onnx/yonosplat_encoder.onnx",
-  "model": "encoder8_fp16.vxm",
-  "fp16": true,
-  "backend": "vulkan",
-  "precision": "fp16",
-  "device_dir": "/data/local/tmp/vxrt/bench",
-  "inputs": { "image": "image8.npy", "intrinsics": "intr8.npy" },
-  "outputs": {
-    "means": "means_gold.npy",
-    "covariances": "covariances_gold.npy",
-    "harmonics": "harmonics_gold.npy",
-    "opacities": "opacities_gold.npy",
-    "rotations": "rotations_gold.npy",
-    "scales": "scales_gold.npy"
+  "defaults": {
+    "device": {
+      "backend": "vulkan",
+      "precision": "fp16",
+      "dir": "/data/local/tmp/vxrt/bench",
+      "no_weight_cache": true,
+      "max_submit_nodes": 500,
+      "cooldown": 22
+    }
   },
-  "tolerance": 0.999,
-  "cooldown": 22,
-  "bench": 5
+  "stages": [
+    {
+      "name": "encoder8_validate",
+      "model": { "onnx": "/tmp/YoNoSplat/onnx/yonosplat_encoder.onnx" },
+      "convert": { "fp16": true, "out": "encoder8_fp16.vxm" },
+      "inputs": { "image": "/tmp/yono_val/image8.npy", "intrinsics": "/tmp/yono_val/intr8.npy" },
+      "outputs": {
+        "save": ["npy"],
+        "golden": {
+          "means": "/tmp/yono_val/means_gold.npy",
+          "covariances": "/tmp/yono_val/covariances_gold.npy",
+          "harmonics": "/tmp/yono_val/harmonics_gold.npy",
+          "opacities": "/tmp/yono_val/opacities_gold.npy",
+          "rotations": "/tmp/yono_val/rotations_gold.npy",
+          "scales": "/tmp/yono_val/scales_gold.npy"
+        },
+        "metrics": ["cosine", "psnr", "snr", "relL2", "max"]
+      },
+      "bench": 3,
+      "tolerance": 0.999,
+      "result": "encoder8.result.json"
+    },
+    {
+      "name": "encoder8_runtime_only",
+      "model": { "vxm": "/tmp/encoder8_fp16.vxm" },
+      "bench": 5,
+      "result": "encoder8_runtime.result.json"
+    }
+  ]
 }

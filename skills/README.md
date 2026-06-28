@@ -9,6 +9,7 @@ commands and code patterns; the reference docs in [`../docs/`](../docs/) cover t
 | [add-an-operator.md](add-an-operator.md) | Add a new ONNX op (CPU oracle + optional Vulkan kernel). |
 | [add-a-backend.md](add-a-backend.md) | Add a new execution backend (new hardware/runtime). |
 | [compile-and-run-a-model.md](compile-and-run-a-model.md) | Compile an ONNX to `.vxm` and run it on the device with the right `Config`. |
+| [benchmark-a-model.md](benchmark-a-model.md) | Convert/run/validate a model on the device from one JSON config (npy/raw I/O, golden metrics, profiling). |
 | [run-yonosplat.md](run-yonosplat.md) | Run the full YoNoSplat 3D Gaussian Splatting pipeline end to end. |
 
 Companion reference docs: [ARCHITECTURE](../docs/ARCHITECTURE.md) ·

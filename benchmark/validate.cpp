@@ -1,29 +1,41 @@
-// vknn_validate - run a model from a small JSON config, feeding .npy inputs and checking each output
-// against a golden .npy. The .npy header carries shape + dtype, so the user never hand-specifies them.
+// vknn_validate - run a model on-device from one JSON config: feed .npy or raw .bin inputs (or none,
+// for a runtime-only measurement), optionally save outputs as .npy / .png, compare each named output
+// against a golden (cosine / PSNR / SNR / relL2 / max|d|), and write a result .json with per-call
+// timing and (optional) per-operator profiling.
 //
 //   vknn_validate config.json
 //
-// config.json (paths are relative to the config file's directory, or absolute):
+// Config (flat; paths relative to the config file or absolute). benchmark.py generates this from its
+// richer model/convert/device/stages config, but it is hand-writable too:
 //   {
-//     "model": "encoder8_fp16.vxm",        // .onnx or .vxm (required)
-//     "backend": "vulkan",                  // vulkan | cpu        (default vulkan)
-//     "precision": "fp16",                  // fp16 | fp32         (default fp16)
-//     "no_weight_cache": true,              // optional (default true)
-//     "tolerance": 0.999,                   // cosine pass threshold (default 0.999)
-//     "inputs": ["image.npy", "intr.npy"],  // positional (model input order); or { "image": "image.npy" }
-//     "outputs": { "means": "means_gold.npy", "scales": "scales_gold.npy" }, // name -> golden (optional)
-//     "save_outputs": "out_dir"             // optional: write every output as <name>.npy here
+//     "model": "encoder8_fp16.vxm",         // .onnx or .vxm (required)
+//     "backend": "vulkan", "precision": "fp16",
+//     "no_weight_cache": true,
+//     "max_submit_nodes": 500,              // 0 = single submit
+//     "timing": true,                       // engine prints pack/submit/unpack
+//     "profile": false,                     // per-operator GPU timing in the result json
+//     "inputs": ["image.npy", "intr.bin"],  // .npy (shape from header) or raw .bin (model shape); or
+//                                           // { "image": "image.npy" }; OMIT for runtime-only
+//     "save": ["npy", "png"],               // output formats to write (optional)
+//     "save_dir": "out",                    // where to write them (default ".")
+//     "golden": { "means": "means_gold.npy" },          // output-name -> golden (optional)
+//     "metrics": ["cosine","psnr","snr","relL2","max"], // which to report (default: all)
+//     "tolerance": 0.999,                   // cosine pass threshold
+//     "result": "result.json"               // write timing + profile + metrics here (optional)
 //   }
 //
-// Exit code 0 iff every checked output passes (cosine >= tolerance and no NaN).
+// Exit code 0 iff every checked output passes (cosine >= tolerance and no NaN), or there is nothing
+// to check (runtime-only).
 #include "core/json.h"
 #include "vknn/dtype.h"
 #include "vknn/session.h"
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -31,38 +43,49 @@ using namespace vknn;
 
 namespace {
 
+    using Clock = std::chrono::high_resolution_clock;
+    double msSince(Clock::time_point a) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - a).count();
+    }
+
     std::string dirOf(const std::string &p) {
         auto s = p.find_last_of("/\\");
         return s == std::string::npos ? std::string() : p.substr(0, s + 1);
     }
+    std::string baseName(const std::string &p) {
+        auto s = p.find_last_of("/\\");
+        return s == std::string::npos ? p : p.substr(s + 1);
+    }
     std::string resolve(const std::string &base, const std::string &p) {
         return (p.empty() || p[0] == '/') ? p : base + p;
+    }
+    std::string sanitize(std::string s) {
+        for (char &c: s)
+        {
+            if (c == '/' || c == ':')
+            {
+                c = '_';
+            }
+        }
+        return s;
+    }
+    bool endsWith(const std::string &s, const char *suf) {
+        size_t n = strlen(suf);
+        return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
     }
 
     std::string readFile(const std::string &path) {
         std::ifstream f(path, std::ios::binary);
-        if (!f)
-        {
-            return {};
-        }
-        return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        return f ? std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()) : std::string();
     }
 
-    // ---- minimal .npy (v1.0/2.0) reader: any numeric dtype -> fp32, C-order only ----
-    struct Npy {
-        std::vector<int64_t> shape;
+    // ---- input loaders: .npy (any numeric dtype -> fp32) or raw .bin (fp32) ----
+    struct Tensor {
+        std::vector<int64_t> shape; // empty for raw .bin
         std::vector<float>   data;
-        int64_t              elems() const {
-            int64_t n = 1;
-            for (auto d: shape)
-            {
-                n *= d;
-            }
-            return shape.empty() ? 0 : n;
-        }
     };
 
-    bool loadNpy(const std::string &path, Npy &out, std::string &err) {
+    bool loadNpy(const std::string &path, Tensor &out, std::string &err) {
         std::ifstream f(path, std::ios::binary);
         if (!f)
         {
@@ -91,34 +114,18 @@ namespace {
         }
         std::string hdr(hlen, '\0');
         f.read(&hdr[0], hlen);
-
-        auto field = [&](const char *key) -> std::string {
-            auto k = hdr.find(key);
-            if (k == std::string::npos)
-            {
-                return {};
-            }
-            k = hdr.find(':', k) + 1;
-            while (k < hdr.size() && (hdr[k] == ' ' || hdr[k] == '\''))
-            {
-                ++k;
-            }
-            auto e = k;
-            while (e < hdr.size() && hdr[e] != '\'' && hdr[e] != ',' && hdr[e] != '}' && hdr[e] != ')')
-            {
-                ++e;
-            }
-            return hdr.substr(k, e - k);
-        };
-        std::string descr = field("descr");
         if (hdr.find("'fortran_order': True") != std::string::npos)
         {
             err = path + ": fortran_order=True unsupported";
             return false;
         }
-        // shape tuple, e.g. (1, 8, 3, 224, 224)
-        auto sp = hdr.find("'shape'");
-        auto lp = hdr.find('(', sp), rp = hdr.find(')', lp);
+        std::string descr;
+        if (auto d = hdr.find("'descr'"); d != std::string::npos)
+        {
+            auto q = hdr.find('\'', hdr.find(':', d) + 1);
+            descr  = hdr.substr(q + 1, hdr.find('\'', q + 1) - q - 1);
+        }
+        auto lp = hdr.find('(', hdr.find("'shape'")), rp = hdr.find(')', lp);
         out.shape.clear();
         for (size_t i = lp + 1; i < rp; ++i)
         {
@@ -132,10 +139,16 @@ namespace {
                 out.shape.push_back(v);
             }
         }
-        int64_t n = out.elems();
+        int64_t n = 1;
+        for (auto d: out.shape)
+        {
+            n *= d;
+        }
+        if (out.shape.empty())
+        {
+            n = 0;
+        }
         out.data.resize((size_t) std::max<int64_t>(n, 0));
-
-        // descr like "<f4", "<f2", "<f8", "<i8", "<i4", "|i1", "|u1" (assume little-endian / native)
         char              tc    = descr.size() >= 2 ? descr[1] : 'f';
         int               bytes = descr.size() >= 3 ? descr[2] - '0' : 4;
         std::vector<char> raw((size_t) n * (size_t) bytes);
@@ -180,7 +193,19 @@ namespace {
         return true;
     }
 
-    void saveNpy(const std::string &path, const Shape &shape, const std::vector<float> &data) {
+    bool loadRaw(const std::string &path, int64_t elems, Tensor &out, std::string &err) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f)
+        {
+            err = "cannot open " + path;
+            return false;
+        }
+        out.data.assign((size_t) elems, 0.f);
+        f.read(reinterpret_cast<char *>(out.data.data()), (std::streamsize) (elems * 4));
+        return true;
+    }
+
+    void saveNpy(const std::string &path, const Shape &shape, const float *data, size_t n) {
         std::string sh = "(";
         for (size_t i = 0; i < shape.size(); ++i)
         {
@@ -188,8 +213,7 @@ namespace {
         }
         sh += ")";
         std::string hdr = "{'descr': '<f4', 'fortran_order': False, 'shape': " + sh + ", }";
-        size_t      pre = 10; // magic(6)+ver(2)+len(2)
-        while ((pre + hdr.size() + 1) % 64 != 0)
+        while ((10 + hdr.size() + 1) % 64 != 0)
         {
             hdr += ' ';
         }
@@ -201,32 +225,181 @@ namespace {
         uint16_t hl = (uint16_t) hdr.size();
         f.write(reinterpret_cast<char *>(&hl), 2);
         f.write(hdr.data(), (std::streamsize) hdr.size());
-        f.write(reinterpret_cast<const char *>(data.data()), (std::streamsize) (data.size() * 4));
+        f.write(reinterpret_cast<const char *>(data), (std::streamsize) (n * 4));
     }
 
-    void compare(const std::string &name, const std::vector<float> &a, const std::vector<float> &b, double tol, bool &allOk) {
-        size_t n   = std::min(a.size(), b.size());
-        double dot = 0, na = 0, nb = 0, maxd = 0, errn = 0;
-        int    nan = 0;
+    // ---- minimal PNG writer (zlib stored/uncompressed blocks: valid PNG, no deps) ----
+    uint32_t crc32of(const uint8_t *p, size_t n, uint32_t crc = 0xffffffffu) {
+        static uint32_t T[256];
+        static bool     init = false;
+        if (!init)
+        {
+            for (uint32_t i = 0; i < 256; ++i)
+            {
+                uint32_t c = i;
+                for (int k = 0; k < 8; ++k)
+                {
+                    c = (c & 1) ? 0xedb88320u ^ (c >> 1) : c >> 1;
+                }
+                T[i] = c;
+            }
+            init = true;
+        }
+        for (size_t i = 0; i < n; ++i)
+        {
+            crc = T[(crc ^ p[i]) & 0xff] ^ (crc >> 8);
+        }
+        return crc;
+    }
+    void putBE(std::vector<uint8_t> &v, uint32_t x) {
+        v.push_back(x >> 24);
+        v.push_back(x >> 16);
+        v.push_back(x >> 8);
+        v.push_back(x);
+    }
+    void chunk(std::ofstream &f, const char *type, const std::vector<uint8_t> &data) {
+        std::vector<uint8_t> len;
+        putBE(len, (uint32_t) data.size());
+        f.write(reinterpret_cast<char *>(len.data()), 4);
+        std::vector<uint8_t> tc(type, type + 4);
+        std::vector<uint8_t> crcbuf = tc;
+        crcbuf.insert(crcbuf.end(), data.begin(), data.end());
+        f.write(type, 4);
+        f.write(reinterpret_cast<const char *>(data.data()), (std::streamsize) data.size());
+        std::vector<uint8_t> crc;
+        putBE(crc, crc32of(crcbuf.data(), crcbuf.size()) ^ 0xffffffffu);
+        f.write(reinterpret_cast<char *>(crc.data()), 4);
+    }
+    void writePng(const std::string &path, int w, int h, int ch, const std::vector<uint8_t> &rgb) {
+        // raw scanlines: filter byte 0 + row bytes
+        std::vector<uint8_t> raw;
+        raw.reserve((size_t) h * (w * ch + 1));
+        for (int y = 0; y < h; ++y)
+        {
+            raw.push_back(0);
+            raw.insert(raw.end(), rgb.begin() + (size_t) y * w * ch, rgb.begin() + (size_t) (y + 1) * w * ch);
+        }
+        // zlib stored blocks + adler32
+        std::vector<uint8_t> z;
+        z.push_back(0x78);
+        z.push_back(0x01);
+        size_t off = 0;
+        while (off < raw.size())
+        {
+            size_t  n     = std::min<size_t>(65535, raw.size() - off);
+            uint8_t final = (off + n >= raw.size()) ? 1 : 0;
+            z.push_back(final);
+            z.push_back(n & 0xff);
+            z.push_back((n >> 8) & 0xff);
+            z.push_back(~n & 0xff);
+            z.push_back((~n >> 8) & 0xff);
+            z.insert(z.end(), raw.begin() + off, raw.begin() + off + n);
+            off += n;
+        }
+        uint32_t a = 1, b = 0;
+        for (uint8_t c: raw)
+        {
+            a = (a + c) % 65521;
+            b = (b + a) % 65521;
+        }
+        putBE(z, (b << 16) | a);
+
+        std::ofstream f(path, std::ios::binary);
+        const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+        f.write(reinterpret_cast<const char *>(sig), 8);
+        std::vector<uint8_t> ihdr;
+        putBE(ihdr, w);
+        putBE(ihdr, h);
+        ihdr.push_back(8);                             // bit depth
+        ihdr.push_back(ch == 1 ? 0 : ch == 3 ? 2 : 6); // color type: gray / RGB / RGBA
+        ihdr.insert(ihdr.end(), {0, 0, 0});
+        chunk(f, "IHDR", ihdr);
+        chunk(f, "IDAT", z);
+        chunk(f, "IEND", {});
+    }
+
+    // Interpret an output tensor as an image and write a PNG (per-image min-max normalised to 0..255).
+    // Handles [..,C,H,W] (C in {1,3,4}) and [..,H,W,C]; otherwise returns false.
+    bool saveOutputPng(const std::string &path, const Shape &shape, const float *d) {
+        int r = (int) shape.size();
+        if (r < 2)
+        {
+            return false;
+        }
+        int64_t W = shape[r - 1], H = shape[r - 2], C = 1;
+        bool    hwc = false;
+        if (r >= 3 && (shape[r - 1] == 1 || shape[r - 1] == 3 || shape[r - 1] == 4) && shape[r - 1] < shape[r - 2])
+        {
+            C   = shape[r - 1];
+            W   = shape[r - 2];
+            H   = shape[r - 3];
+            hwc = true; // [..,H,W,C]
+        } else if (r >= 3 && (shape[r - 3] == 1 || shape[r - 3] == 3 || shape[r - 3] == 4))
+        {
+            C = shape[r - 3]; // [..,C,H,W]
+        }
+        if (W <= 0 || H <= 0 || (C != 1 && C != 3 && C != 4) || W * H * C > 64 * 1024 * 1024)
+        {
+            return false;
+        }
+        size_t plane = (size_t) W * H;
+        float  lo = 1e30f, hi = -1e30f;
+        for (size_t i = 0; i < plane * C; ++i)
+        {
+            lo = std::min(lo, d[i]);
+            hi = std::max(hi, d[i]);
+        }
+        float                scale = hi > lo ? 255.f / (hi - lo) : 0.f;
+        std::vector<uint8_t> img((size_t) W * H * C);
+        for (int64_t y = 0; y < H; ++y)
+        {
+            for (int64_t x = 0; x < W; ++x)
+            {
+                for (int64_t c = 0; c < C; ++c)
+                {
+                    float v                  = hwc ? d[(y * W + x) * C + c] : d[c * plane + y * W + x];
+                    img[(y * W + x) * C + c] = (uint8_t) std::lround(std::min(255.f, std::max(0.f, (v - lo) * scale)));
+                }
+            }
+        }
+        writePng(path, (int) W, (int) H, (int) C, img);
+        return true;
+    }
+
+    struct Metrics {
+        double cosine = 0, relL2 = 0, maxAbs = 0, psnr = 0, snr = 0;
+        int    nan    = 0;
+        bool   sizeOk = true;
+    };
+    Metrics compareAll(const float *a, size_t na, const float *b, size_t nb) {
+        Metrics m;
+        m.sizeOk   = na == nb;
+        size_t n   = std::min(na, nb);
+        double dot = 0, sa = 0, sb = 0, err = 0, lo = 1e300, hi = -1e300;
         for (size_t i = 0; i < n; ++i)
         {
             double x = a[i], y = b[i];
             if (std::isnan(x))
             {
-                ++nan;
+                ++m.nan;
                 continue;
             }
             dot += x * y;
-            na += x * x;
-            nb += y * y;
-            maxd = std::max(maxd, std::fabs(x - y));
-            errn += (x - y) * (x - y);
+            sa += x * x;
+            sb += y * y;
+            double e = x - y;
+            err += e * e;
+            m.maxAbs = std::max(m.maxAbs, std::fabs(e));
+            lo       = std::min(lo, y);
+            hi       = std::max(hi, y);
         }
-        double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
-        double rel = std::sqrt(errn) / (std::sqrt(nb) + 1e-12);
-        bool   ok  = nan == 0 && a.size() == b.size() && cos >= tol;
-        allOk      = allOk && ok;
-        printf("  %-16s cos=%.6f  relL2=%.3e  max|d|=%.3e  nan=%d  %s\n", name.c_str(), cos, rel, maxd, nan, a.size() != b.size() ? "SIZE-MISMATCH" : (ok ? "PASS" : "FAIL"));
+        m.cosine    = dot / (std::sqrt(sa) * std::sqrt(sb) + 1e-12);
+        m.relL2     = std::sqrt(err) / (std::sqrt(sb) + 1e-12);
+        double mse  = err / std::max<size_t>(1, n);
+        double peak = hi - lo;
+        m.psnr      = (mse > 0 && peak > 0) ? 20.0 * std::log10(peak / std::sqrt(mse)) : 1e9;
+        m.snr       = err > 0 ? 10.0 * std::log10(sb / err) : 1e9;
+        return m;
     }
 
 } // namespace
@@ -237,9 +410,8 @@ int main(int argc, char **argv) {
         printf("usage: %s config.json\n", argv[0]);
         return 1;
     }
-    std::string cfgPath = argv[1];
-    std::string base    = dirOf(cfgPath);
-    std::string text    = readFile(cfgPath);
+    std::string cfgPath = argv[1], base = dirOf(cfgPath);
+    std::string text = readFile(cfgPath);
     if (text.empty())
     {
         fprintf(stderr, "cannot read config %s\n", cfgPath.c_str());
@@ -255,6 +427,10 @@ int main(int argc, char **argv) {
         auto *j = js.get(k);
         return j ? j->asStr(d) : d;
     };
+    auto flag = [&](const char *k, bool d) {
+        auto *j = js.get(k);
+        return j ? j->asBool(d) : d;
+    };
 
     std::string model = str("model", "");
     if (model.empty())
@@ -266,133 +442,286 @@ int main(int argc, char **argv) {
     cfg.backend                = backendFromStr(str("backend", "vulkan"));
     cfg.precision              = str("precision", "fp16") == "fp32" ? Precision::kFp32 : Precision::kFp16;
     cfg.freeWeightsAfterUpload = true;
-    if (auto *j = js.get("no_weight_cache"))
+    cfg.cacheWeights           = !flag("no_weight_cache", true);
+    cfg.timing                 = flag("timing", false);
+    cfg.profile                = flag("profile", false);
+    if (auto *j = js.get("max_submit_nodes"))
     {
-        cfg.cacheWeights = !j->asBool(true);
-    }
-    if (auto *j = js.get("timing"))
-    {
-        cfg.timing = j->asBool(false); // engine prints pack / submit+gpu / unpack
+        cfg.maxSubmitNodes = (int) j->asNum(cfg.maxSubmitNodes);
     }
     double tol = js.get("tolerance") ? js.get("tolerance")->asNum(0.999) : 0.999;
 
+    auto t0   = Clock::now();
     auto sess = Runtime::load(resolve(base, model), cfg);
     if (!sess)
     {
         fprintf(stderr, "failed to load %s\n", model.c_str());
         return 1;
     }
-    auto infos = sess->inputInfo();
+    double loadMs = msSince(t0);
+    auto   infos  = sess->inputInfo();
 
-    // Resolve each model input to a .npy path: "inputs" is either an array (positional) or an object
-    // keyed by input name.
+    // --- inputs: .npy / raw .bin / none (runtime-only) ---
+    const JsonValue      *jin     = js.get("inputs");
+    bool                  haveIns = jin && ((jin->type == JsonValue::kArray && !jin->arr.empty()) || (jin->type == JsonValue::kObject && !jin->obj.empty()));
     std::vector<IOTensor> ins;
-    const JsonValue      *jin = js.get("inputs");
     for (size_t i = 0; i < infos.size(); ++i)
     {
-        std::string npyPath;
-        if (jin && jin->type == JsonValue::kArray)
-        {
-            if (i < jin->arr.size())
-            {
-                npyPath = jin->arr[i].asStr("");
-            }
-        } else if (jin && jin->type == JsonValue::kObject)
-        {
-            if (auto *j = jin->get(infos[i].name))
-            {
-                npyPath = j->asStr("");
-            }
-        }
-        if (npyPath.empty())
-        {
-            fprintf(stderr, "no input .npy for '%s'\n", infos[i].name.c_str());
-            return 1;
-        }
-        Npy         npy;
-        std::string err;
-        if (!loadNpy(resolve(base, npyPath), npy, err))
-        {
-            fprintf(stderr, "%s\n", err.c_str());
-            return 1;
-        }
-        if (npy.elems() != infos[i].elems)
-        {
-            fprintf(stderr, "input '%s': %s has %lld elems, model expects %lld\n", infos[i].name.c_str(), npyPath.c_str(), (long long) npy.elems(),
-                    (long long) infos[i].elems);
-            return 1;
-        }
         IOTensor t;
         t.name  = infos[i].name;
         t.shape = infos[i].shape;
         t.dtype = DType::kFloat32;
-        t.data.resize(npy.data.size() * 4);
-        std::memcpy(t.data.data(), npy.data.data(), t.data.size());
-        printf("input  '%s'  %s  <- %s\n", t.name.c_str(), shapeStr(t.shape).c_str(), npyPath.c_str());
+        t.data.assign((size_t) infos[i].elems * 4, 0); // default zeros (runtime-only)
+        if (haveIns)
+        {
+            std::string p;
+            if (jin->type == JsonValue::kArray)
+            {
+                if (i < jin->arr.size())
+                {
+                    p = jin->arr[i].asStr("");
+                }
+            } else if (auto *j = jin->get(infos[i].name))
+            { p = j->asStr(""); }
+            if (p.empty())
+            {
+                fprintf(stderr, "no input for '%s'\n", infos[i].name.c_str());
+                return 1;
+            }
+            Tensor      tn;
+            std::string err;
+            bool        ok = endsWith(p, ".npy") ? loadNpy(resolve(base, p), tn, err) : loadRaw(resolve(base, p), infos[i].elems, tn, err);
+            if (!ok)
+            {
+                fprintf(stderr, "%s\n", err.c_str());
+                return 1;
+            }
+            if ((int64_t) tn.data.size() != infos[i].elems)
+            {
+                fprintf(stderr, "input '%s': %s has %zu elems, model expects %lld\n", infos[i].name.c_str(), p.c_str(), tn.data.size(), (long long) infos[i].elems);
+                return 1;
+            }
+            std::memcpy(t.data.data(), tn.data.data(), t.data.size());
+            printf("input  '%s'  %s  <- %s\n", t.name.c_str(), shapeStr(t.shape).c_str(), baseName(p).c_str());
+        }
         ins.push_back(std::move(t));
+    }
+    if (!haveIns)
+    {
+        printf("(no inputs given -> zero-filled, runtime-only)\n");
     }
 
     std::vector<IOTensor> outs;
+    auto                  t1 = Clock::now();
     if (sess->run(ins, outs) != Status::kOk)
     {
         fprintf(stderr, "inference failed\n");
         return 2;
     }
+    double runMs = msSince(t1);
+    printf("load %.1f ms   run %.1f ms\n", loadMs, runMs);
 
-    std::string saveDir = str("save_outputs", "");
-    if (!saveDir.empty())
+    // --- save outputs (npy / png) ---
+    std::vector<std::string> saveFmts;
+    if (auto *j = js.get("save"))
+    {
+        if (j->type == JsonValue::kArray)
+        {
+            for (auto &e: j->arr)
+            {
+                saveFmts.push_back(e.asStr(""));
+            }
+        }
+    }
+    std::string saveDir = str("save_dir", str("save_outputs", "."));
+    bool        wantNpy = false, wantPng = false;
+    for (auto &s: saveFmts)
+    {
+        wantNpy = wantNpy || s == "npy";
+        wantPng = wantPng || s == "png";
+    }
+    std::map<std::string, std::vector<std::string>> saved;
+    if (haveIns && (wantNpy || wantPng))
     {
         for (auto &o: outs)
         {
-            std::string safe = o.name;
-            for (char &c: safe)
+            std::string nm  = sanitize(o.name);
+            size_t      cnt = o.data.size() / 4;
+            if (wantNpy)
             {
-                if (c == '/' || c == ':')
+                std::string p = resolve(base, saveDir) + "/" + nm + ".npy";
+                saveNpy(p, o.shape, o.f32(), cnt);
+                saved[o.name].push_back(baseName(p));
+            }
+            if (wantPng)
+            {
+                std::string p = resolve(base, saveDir) + "/" + nm + ".png";
+                if (saveOutputPng(p, o.shape, o.f32()))
                 {
-                    c = '_';
+                    saved[o.name].push_back(baseName(p));
                 }
             }
-            saveNpy(resolve(base, saveDir) + "/" + safe + ".npy", o.shape, std::vector<float>(o.f32(), o.f32() + o.data.size() / 4));
-            printf("output '%s'  %s  -> %s/%s.npy\n", o.name.c_str(), shapeStr(o.shape).c_str(), saveDir.c_str(), safe.c_str());
+            printf("output '%s'  %s\n", o.name.c_str(), shapeStr(o.shape).c_str());
         }
     }
 
-    const JsonValue *jout = js.get("outputs");
-    if (!jout || jout->type != JsonValue::kObject || jout->obj.empty())
+    // --- golden comparison ---
+    const JsonValue         *jgold = js.get("golden") ? js.get("golden") : js.get("outputs");
+    std::vector<std::string> wantMetrics;
+    if (auto *j = js.get("metrics"))
     {
-        printf("(no \"outputs\" goldens to validate)\n");
-        return 0;
-    }
-    printf("\nvalidation vs golden .npy (tolerance cos >= %.4f):\n", tol);
-    bool allOk = true;
-    for (auto &kv: jout->obj)
-    {
-        const std::string &oname = kv.first;
-        IOTensor          *o     = nullptr;
-        for (auto &t: outs)
+        if (j->type == JsonValue::kArray)
         {
-            if (t.name == oname)
+            for (auto &e: j->arr)
             {
-                o = &t;
-                break;
+                wantMetrics.push_back(e.asStr(""));
             }
         }
-        if (!o)
-        {
-            printf("  %-16s NOT-AN-OUTPUT\n", oname.c_str());
-            allOk = false;
-            continue;
-        }
-        Npy         g;
-        std::string err;
-        if (!loadNpy(resolve(base, kv.second.asStr("")), g, err))
-        {
-            fprintf(stderr, "%s\n", err.c_str());
-            allOk = false;
-            continue;
-        }
-        compare(oname, std::vector<float>(o->f32(), o->f32() + o->data.size() / 4), g.data, tol, allOk);
     }
-    printf("%s\n", allOk ? "ALL OUTPUTS PASS" : "SOME OUTPUTS FAIL");
+    if (wantMetrics.empty())
+    {
+        wantMetrics = {"cosine", "psnr", "snr", "relL2", "max"};
+    }
+    auto wants = [&](const char *m) {
+        for (auto &s: wantMetrics)
+        {
+            if (s == m)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::map<std::string, Metrics> results;
+    bool                           allOk = true;
+    if (haveIns && jgold && jgold->type == JsonValue::kObject && !jgold->obj.empty())
+    {
+        printf("\nvalidation vs golden (tolerance cos >= %.4f):\n", tol);
+        for (auto &kv: jgold->obj)
+        {
+            IOTensor *o = nullptr;
+            for (auto &t: outs)
+            {
+                if (t.name == kv.first)
+                {
+                    o = &t;
+                }
+            }
+            if (!o)
+            {
+                printf("  %-16s NOT-AN-OUTPUT\n", kv.first.c_str());
+                allOk = false;
+                continue;
+            }
+            Tensor      g;
+            std::string err;
+            if (!loadNpy(resolve(base, kv.second.asStr("")), g, err))
+            {
+                fprintf(stderr, "%s\n", err.c_str());
+                allOk = false;
+                continue;
+            }
+            Metrics m         = compareAll(o->f32(), o->data.size() / 4, g.data.data(), g.data.size());
+            results[kv.first] = m;
+            bool ok           = m.sizeOk && m.nan == 0 && m.cosine >= tol;
+            allOk             = allOk && ok;
+            std::string line  = "  " + kv.first;
+            line.resize(18, ' ');
+            char        buf[256];
+            std::string detail;
+            if (wants("cosine"))
+            {
+                snprintf(buf, sizeof(buf), " cos=%.6f", m.cosine);
+                detail += buf;
+            }
+            if (wants("psnr"))
+            {
+                snprintf(buf, sizeof(buf), " psnr=%.2fdB", m.psnr);
+                detail += buf;
+            }
+            if (wants("snr"))
+            {
+                snprintf(buf, sizeof(buf), " snr=%.2fdB", m.snr);
+                detail += buf;
+            }
+            if (wants("relL2"))
+            {
+                snprintf(buf, sizeof(buf), " relL2=%.3e", m.relL2);
+                detail += buf;
+            }
+            if (wants("max"))
+            {
+                snprintf(buf, sizeof(buf), " max|d|=%.3e", m.maxAbs);
+                detail += buf;
+            }
+            printf("%s%s nan=%d  %s\n", line.c_str(), detail.c_str(), m.nan, !m.sizeOk ? "SIZE-MISMATCH" : (ok ? "PASS" : "FAIL"));
+        }
+        printf("%s\n", allOk ? "ALL OUTPUTS PASS" : "SOME OUTPUTS FAIL");
+    }
+
+    // --- result json: timing + (optional) per-op profile + per-output metrics ---
+    std::string resPath = str("result", "");
+    if (!resPath.empty())
+    {
+        std::ofstream r(resolve(base, resPath));
+        r << "{\n";
+        r << "  \"model\": \"" << sanitize(baseName(model)) << "\",\n";
+        r << "  \"backend\": \"" << backendName(cfg.backend) << "\",\n";
+        r << "  \"timing_ms\": { \"load\": " << loadMs << ", \"run\": " << runMs << " },\n";
+        if (cfg.profile)
+        {
+            std::map<std::string, double> byType;
+            r << "  \"profile\": [";
+            const auto &recs = sess->profiler().records();
+            for (size_t i = 0; i < recs.size(); ++i)
+            {
+                const auto &op = recs[i];
+                byType[opTypeName(op.type)] += op.gpuMs > 0 ? op.gpuMs : 0;
+                r << (i ? ",\n    " : "\n    ") << "{ \"name\": \"" << sanitize(op.name) << "\", \"type\": \"" << opTypeName(op.type) << "\", \"gpu_ms\": " << op.gpuMs << ", \"cpu_ms\": " << op.cpuMs << " }";
+            }
+            r << "\n  ],\n";
+            r << "  \"profile_by_type_ms\": {";
+            bool first = true;
+            for (auto &kv: byType)
+            {
+                r << (first ? " " : ", ") << "\"" << kv.first << "\": " << kv.second;
+                first = false;
+            }
+            r << " },\n";
+            r << "  \"gpu_total_ms\": " << sess->profiler().totalGpuMs() << ",\n";
+        }
+        r << "  \"outputs\": [";
+        bool first = true;
+        for (auto &o: outs)
+        {
+            r << (first ? "\n    " : ",\n    ") << "{ \"name\": \"" << sanitize(o.name) << "\", \"shape\": [";
+            for (size_t k = 0; k < o.shape.size(); ++k)
+            {
+                r << (k ? ", " : "") << o.shape[k];
+            }
+            r << "]";
+            if (saved.count(o.name))
+            {
+                r << ", \"saved\": [";
+                for (size_t k = 0; k < saved[o.name].size(); ++k)
+                {
+                    r << (k ? ", " : "") << "\"" << saved[o.name][k] << "\"";
+                }
+                r << "]";
+            }
+            if (results.count(o.name))
+            {
+                const Metrics &m = results[o.name];
+                r << ", \"metrics\": { \"cosine\": " << m.cosine << ", \"psnr\": " << m.psnr << ", \"snr\": " << m.snr << ", \"relL2\": " << m.relL2 << ", \"max\": " << m.maxAbs << ", \"nan\": " << m.nan << " }";
+                r << ", \"pass\": " << ((m.sizeOk && m.nan == 0 && m.cosine >= tol) ? "true" : "false");
+            }
+            r << " }";
+            first = false;
+        }
+        r << "\n  ]\n}\n";
+        printf("wrote result json -> %s\n", resPath.c_str());
+    }
+
     return allOk ? 0 : 3;
 }
