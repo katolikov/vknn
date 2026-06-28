@@ -34,7 +34,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def sh(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
+    # errors="replace": adb logcat (and other device output) can contain non-UTF-8 bytes that would
+    # otherwise crash the text decoder.
+    return subprocess.run(cmd, capture_output=True, text=True, errors="replace")
 
 
 # Logging. log() is always printed (flushed live, so multi-minute pushes/runs show progress);
