@@ -33,10 +33,14 @@ namespace vknn {
         Tensor(std::vector<float> data, std::vector<int64_t> shape, std::string name = "");
         /// Wrap raw values with a 1-D shape (handy for quick inputs).
         explicit Tensor(std::vector<float> data);
-        /// Zero-copy input from a DMA-BUF fd (e.g. a camera/ION buffer). vknn imports the fd instead of
-        /// copying a host buffer. `name` selects which model input this feeds (optional for
-        /// single-input). The fd's memory is read as row-major fp32 in the given shape.
+        /// Zero-copy INPUT from a DMA-BUF fd (e.g. a camera/ION buffer the caller owns). vknn reads the
+        /// input straight from the fd instead of from a caller host buffer. `name` selects which model
+        /// input this feeds (optional for single-input). The fd is read as row-major fp32 in `shape`.
         static Tensor fromDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "");
+        /// Zero-copy OUTPUT binding: pass in Model::run()'s `outputs` list to have vknn write that
+        /// output straight into the caller's DMA-BUF fd (row-major fp32, `shape`), no host output
+        /// buffer. `name` selects which model output (required when the model has several).
+        static Tensor toDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "");
         int           dmaBufFd() const {
             return fd_;
         }
@@ -111,8 +115,12 @@ namespace vknn {
 
         /// Run with one input tensor; returns all outputs (named + shaped).
         std::vector<Tensor> run(const Tensor &input);
-        /// Run with several inputs (matched to the model's inputs in order).
-        std::vector<Tensor> run(const std::vector<Tensor> &inputs);
+        /// Run with several inputs (matched to the model's inputs in order). Inputs may be host tensors
+        /// or DMA-BUF inputs (Tensor::fromDmaBuf). Optional `outputs` are DMA-BUF output bindings
+        /// (Tensor::toDmaBuf): each named output is written straight into the caller's fd, and the
+        /// returned Tensor for it carries no host copy (empty data). Outputs without a binding come back
+        /// as host tensors as usual.
+        std::vector<Tensor> run(const std::vector<Tensor> &inputs, const std::vector<Tensor> &outputs = {});
         /// Simplest form: raw values in (shaped to the model's single input), first output back.
         Tensor run(const std::vector<float> &input);
 

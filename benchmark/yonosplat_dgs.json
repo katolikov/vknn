@@ -1,0 +1,48 @@
+{
+  "defaults": {
+    "device": {
+      "backend": "vulkan",
+      "serial": "",
+      "precision": "fp16",
+      "dir": "/data/local/tmp/vxrt/bench",
+      "no_weight_cache": false,
+      "max_submit_nodes": 500,
+      "cooldown": 0
+    }
+  },
+  "stages": [
+    {
+      "name": "yonosplat_dgs_validate",
+      "model": {
+        "vxm": "models/encoder8_fp16.vxm"
+      },
+      "inputs": {
+        "image": "models/image.npy",
+        "intrinsics": "models/intrinsics.npy"
+      },
+      "outputs": {
+        "save": [
+          "npy"
+        ],
+        "golden": {
+          "means": "models/means_gold.npy",
+          "covariances": "models/covariances_gold.npy",
+          "harmonics": "models/harmonics_gold.npy",
+          "opacities": "models/opacities_gold.npy",
+          "rotations": "models/rotations_gold.npy",
+          "scales": "models/scales_gold.npy"
+        },
+        "metrics": [
+          "cosine",
+          "psnr",
+          "snr",
+          "relL2",
+          "max"
+        ]
+      },
+      "bench": 1,
+      "tolerance": 0.999,
+      "result": "yonosplat_dgs.result.json"
+    }
+  ]
+}

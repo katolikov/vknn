@@ -1,0 +1,19 @@
+{
+  "model": "encoder8_fp16.vxm",
+  "backend": "vulkan",
+  "precision": "fp16",
+  "no_weight_cache": true,
+  "tolerance": 0.999,
+  "inputs": {
+    "image": "image.npy",
+    "intrinsics": "intrinsics.npy"
+  },
+  "outputs": {
+    "means": "means_gold.npy",
+    "covariances": "covariances_gold.npy",
+    "harmonics": "harmonics_gold.npy",
+    "opacities": "opacities_gold.npy",
+    "rotations": "rotations_gold.npy",
+    "scales": "scales_gold.npy"
+  }
+}

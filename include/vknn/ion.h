@@ -1,12 +1,12 @@
-// ION / DMA-BUF allocation for zero-copy GPU input. See docs/adr/0005.
+// DMA-BUF wrapper for zero-copy model I/O. See docs/adr/0005.
 //
-// Classic /dev/ion is gone on this build, so ION here really means DMA-BUF heaps
-// (/dev/dma_heap/system). An IonBuffer is just a dma-buf fd plus a CPU mmap; the same fd gets
-// imported into Vulkan (VK_EXT_external_memory_dma_buf) so the GPU reads it directly, no copy.
+// vknn never allocates these — the caller owns the buffer (a camera/ION/gralloc dma-buf) and passes
+// its fd. An IonBuffer wraps that fd with a CPU mmap so vknn can read an input straight from it, or
+// write an output straight into it, with no vknn-side host buffer. The same fd can also be imported
+// into Vulkan (VK_EXT_external_memory_dma_buf) via vk::Buffer::importDmaBufFd.
 #pragma once
 #include <cstddef>
 #include <memory>
-#include <string>
 
 namespace vknn {
 
@@ -16,12 +16,8 @@ namespace vknn {
         IonBuffer(const IonBuffer &)            = delete;
         IonBuffer &operator=(const IonBuffer &) = delete;
 
-        // Mode A - library-allocated: allocate `bytes` from a dma-heap (default "system"),
-        // mmap for CPU access. Returns null if the heap/ioctl is unavailable.
-        static std::unique_ptr<IonBuffer> alloc(size_t bytes, const std::string &heap = "system");
-
-        // Mode B - user-supplied fd: wrap an existing dma-buf fd. By default does NOT take
-        // ownership (caller keeps/closes the fd). mmap for CPU access.
+        // Wrap an existing dma-buf fd (`bytes` long) and mmap it for CPU access. By default does NOT
+        // take ownership (the caller keeps/closes the fd). Returns null if the mmap fails.
         static std::unique_ptr<IonBuffer> wrapFd(int fd, size_t bytes, bool takeOwnership = false);
 
         int fd() const {
@@ -33,17 +29,13 @@ namespace vknn {
         void *data() const {
             return map_;
         } // CPU-mapped pointer (may be null if mmap failed)
-        const std::string &heap() const {
-            return heap_;
-        }
 
       private:
-        IonBuffer()       = default;
-        int         fd_   = -1;
-        size_t      size_ = 0;
-        void       *map_  = nullptr;
-        bool        owns_ = false;
-        std::string heap_;
+        IonBuffer()  = default;
+        int    fd_   = -1;
+        size_t size_ = 0;
+        void  *map_  = nullptr;
+        bool   owns_ = false;
     };
 
 } // namespace vknn

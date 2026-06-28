@@ -3,6 +3,7 @@
 #include "vknn/ion.h"
 #include "vknn/session.h"
 #include <algorithm>
+#include <cstring>
 
 namespace vknn {
 
@@ -33,6 +34,10 @@ namespace vknn {
         t.name_  = std::move(name);
         t.fd_    = fd;
         return t;
+    }
+
+    Tensor Tensor::toDmaBuf(int fd, std::vector<int64_t> shape, std::string name) {
+        return fromDmaBuf(fd, std::move(shape), std::move(name)); // same carrier; output vs input is by list
     }
 
     const Tensor *findTensor(const std::vector<Tensor> &tensors, const std::string &name) {
@@ -106,7 +111,16 @@ namespace vknn {
         return sess_ ? toInfos(sess_->outputInfo()) : std::vector<TensorInfo> {};
     }
 
-    std::vector<Tensor> Model::run(const std::vector<Tensor> &inputs) {
+    static int64_t elemCount(const Shape &s) {
+        int64_t n = 1;
+        for (int64_t d: s)
+        {
+            n *= d;
+        }
+        return s.empty() ? 0 : n;
+    }
+
+    std::vector<Tensor> Model::run(const std::vector<Tensor> &inputs, const std::vector<Tensor> &outputs) {
         if (!sess_)
         {
             return {};
@@ -123,8 +137,8 @@ namespace vknn {
             ins[i].dtype    = DType::kFloat32;
             if (t.dmaBufFd() >= 0)
             {
-                // zero-copy: read the input straight from the DMA-BUF (no caller-side host buffer).
-                int64_t n   = numElements(ins[i].shape);
+                // zero-copy input: read straight from the caller's DMA-BUF (no caller-side host buffer).
+                int64_t n   = elemCount(ins[i].shape);
                 auto    ion = IonBuffer::wrapFd(t.dmaBufFd(), (size_t) n * sizeof(float));
                 if (ion && ion->data())
                 {
@@ -146,23 +160,34 @@ namespace vknn {
         std::vector<Tensor> result;
         for (auto &o: outs)
         {
-            int64_t n = 1;
-            for (int64_t d: o.shape)
+            int64_t n = o.shape.empty() ? (int64_t) (o.data.size() / sizeof(float)) : elemCount(o.shape);
+            // zero-copy output: when this output is bound to a caller DMA-BUF fd, write the result
+            // straight into it (no host copy) and return an empty-data Tensor for it. Match by name; a
+            // single unnamed binding feeds a single output.
+            const Tensor *bind = findTensor(outputs, o.name);
+            if (!bind && outputs.size() == 1 && outs.size() == 1 && outputs[0].dmaBufFd() >= 0)
             {
-                n *= d;
+                bind = &outputs[0];
             }
-            if (o.shape.empty())
+            if (bind && bind->dmaBufFd() >= 0)
             {
-                n = (int64_t) (o.data.size() / sizeof(float));
+                auto ion = IonBuffer::wrapFd(bind->dmaBufFd(), (size_t) n * sizeof(float));
+                if (ion && ion->data())
+                {
+                    std::memcpy(ion->data(), o.f32(), (size_t) n * sizeof(float));
+                }
+                result.emplace_back(std::vector<float> {}, o.shape, o.name); // delivered to the caller's fd
+            } else
+            {
+                const float *f = o.f32();
+                result.emplace_back(std::vector<float>(f, f + n), o.shape, o.name);
             }
-            const float *f = o.f32();
-            result.emplace_back(std::vector<float>(f, f + n), o.shape, o.name);
         }
         return result;
     }
 
     std::vector<Tensor> Model::run(const Tensor &input) {
-        return run(std::vector<Tensor> {input});
+        return run(std::vector<Tensor> {input}, {});
     }
 
     Tensor Model::run(const std::vector<float> &input) {

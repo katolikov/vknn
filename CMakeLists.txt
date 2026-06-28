@@ -132,7 +132,7 @@ target_link_libraries(vknn PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  foreach(ex probe classify profile ion_zerocopy backend_switch op_check image_bench predict run_io yonosplat)
+  foreach(ex probe classify profile zerocopy_cache backend_switch op_check image_bench predict run_io yonosplat)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vknn_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       # whole-archive so self-registering backend/operators (static initializers in the

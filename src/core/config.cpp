@@ -141,7 +141,7 @@ namespace vknn {
         }
         I("cpuThreads", c.cpuThreads);
         I("maxSubmitNodes", c.maxSubmitNodes);
-        B("enableZeroCopy", c.enableZeroCopy);
+        S("cacheFile", c.cacheFile);
         S("cacheDir", c.cacheDir);
         B("cachePipeline", c.cachePipeline);
         B("cacheWeights", c.cacheWeights);
@@ -196,7 +196,7 @@ namespace vknn {
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
         os << "  \"inputLayout\": \"" << formatStr(inputLayout) << "\",\n";
         os << "  \"outputLayout\": \"" << formatStr(outputLayout) << "\",\n";
-        os << "  \"enableZeroCopy\": " << (enableZeroCopy ? "true" : "false") << ",\n";
+        os << "  \"cacheFile\": \"" << cacheFile << "\",\n";
         os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
         os << "  \"cachePipeline\": " << (cachePipeline ? "true" : "false") << ",\n";
         os << "  \"cacheWeights\": " << (cacheWeights ? "true" : "false") << ",\n";
