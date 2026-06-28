@@ -29,9 +29,9 @@ compiled to a fp16 [vknn](https://github.com/katolikov/vknn) `.vxm` for on-devic
 
 ```sh
 pip install huggingface_hub
-python benchmark/fetch_model.py --repo katolikov/yonosplat-vknn --out benchmark/models
+python benchmark/scripts/fetch_model.py --repo katolikov/yonosplat-vknn --out benchmark/models
 # then run + validate on device with the benchmark tool (see vknn/benchmark/USAGE.md)
-python benchmark/run.py run benchmark/yonosplat.json
+python benchmark/run.py run benchmark/configs/yonosplat.json
 ```
 
 On the Samsung Xclipse 960 (Vulkan, fp16) the compiled encoder matches an onnxruntime golden at

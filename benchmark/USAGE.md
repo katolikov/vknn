@@ -7,9 +7,9 @@ per-stage result JSON with timing and (optional) per-operator profiling. The on-
 
 ```sh
 ./build.sh                                 # host vknn_compile (for host-side convert)
-python benchmark/run.py run benchmark/example.json       # auto-builds the device binaries first
-python benchmark/run.py run benchmark/example.json -v    # also print device stdout/stderr + the staged config
-python benchmark/run.py run benchmark/example.json --no-build   # reuse existing build-android/ binaries
+python benchmark/run.py run benchmark/configs/example.json       # auto-builds the device binaries first
+python benchmark/run.py run benchmark/configs/example.json -v    # also print device stdout/stderr + the staged config
+python benchmark/run.py run benchmark/configs/example.json --no-build   # reuse existing build-android/ binaries
 ```
 
 `run` first runs `./build.sh --android` for you (incremental Ninja — a near-no-op when nothing changed;
@@ -77,7 +77,9 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
       "dir": "/data/local/tmp/vxrt/bench",
       "no_weight_cache": true,
       "max_submit_nodes": 500,
-      "cooldown": 22
+      "cooldown": 22,
+      "cache": "encoder8_fp16.cache",
+      "generate_cache": false
     }
   },
   "stages": [
@@ -100,7 +102,9 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
         "dir": "/data/local/tmp/vxrt/bench",
         "no_weight_cache": true,
         "max_submit_nodes": 500,
-        "cooldown": 22
+        "cooldown": 22,
+        "cache": "encoder8_fp16.cache",   // unified per-model cache; default <model>.cache
+        "generate_cache": false           // true -> warm the cache in an untimed load first
       },
 
       "inputs": {                         // by name; or an array ["a.npy", "b.bin"]; omit -> runtime only
@@ -132,8 +136,11 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
 - **`device`** — runtime options: `backend` (vulkan/cpu), `serial` (adb device serial/id; empty = the
   single attached device — **required when several devices are attached**), `precision` (fp16/fp32),
   `dir` (device staging dir), `no_weight_cache`, `max_submit_nodes` (GPU-watchdog chunk size; 0 =
-  single submit), `cooldown` (seconds slept before each run — the device throttles). Each stage may
-  target a different `serial`. Find serials with `adb devices`.
+  single submit), `cooldown` (seconds slept before each run — the device throttles), `cache` (the
+  unified per-model cache file; default `<model>.cache`), `generate_cache` (bool: when `true`, populate
+  the cache in an **untimed throwaway load** first, so the timed load is warm and the cache-build cost
+  is excluded from `timing_ms`). Each stage may target a different `serial`. Find serials with
+  `adb devices`.
 - **`inputs`** — `.npy`/`.bin` per input, by name (object) or positionally (array). Omit for
   runtime-only.
 - **`outputs`** — `save` formats, `golden` map, `metrics` list.
@@ -150,7 +157,8 @@ Each stage writes `results/<result>` on the host:
   "model": "encoder8_fp16.vxm",
   "backend": "VULKAN",
   "timing_ms": {
-    "load": 12743.3,
+    "load": 12743.3,                       // cold load (compile + autotune + write <model>.cache);
+                                           // with "generate_cache": true this is the warm load instead
     "run": 9756.9
   },
 
@@ -189,7 +197,7 @@ Each stage writes `results/<result>` on the host:
 `make_golden.py` runs the model in onnxruntime to produce a golden `.npy` per output and writes a
 matching config:
 ```sh
-python benchmark/make_golden.py model.onnx out/ image=image.npy intrinsics=intr.npy
+python benchmark/scripts/make_golden.py model.onnx out/ image=image.npy intrinsics=intr.npy
 ```
 
 ## 6. Direct on-device use (no driver)

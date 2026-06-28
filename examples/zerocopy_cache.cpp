@@ -12,6 +12,7 @@
 // Shown for a 3-input / 3-output model, but the loops handle any input/output count.
 #include "vknn/logging.h"
 #include "vknn/model.h"
+#include "vknn/session.h" // Session::config() for the resolved cache-file path
 #include <cstdint>
 #include <cstdio>
 #include <fcntl.h>
@@ -144,7 +145,8 @@ int main(int argc, char **argv) {
     {
         freeDmaBuf(b);
     }
-    // ~Model -> ~Session writes/updates the unified cache file (so the next load is warm).
-    printf("done. cache file: %s\n", argc > 2 ? argv[2] : "<model>.cache");
+    // ~Model -> ~Session writes/updates the unified cache file (so the next load is warm). The session
+    // resolved the actual path (the "<model>.cache" default when none was given).
+    printf("done. cache file: %s\n", net.session()->config().cacheFile.c_str());
     return 0;
 }

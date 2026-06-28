@@ -146,16 +146,16 @@ on the CPU is moved exactly once.
   your internal layout, etc.). Default is a no-op.
 
 The Vulkan backend overrides both: `toDevice` uploads and packs NCHW -> NC4HW4
-(or imports a dma-buf for zero-copy), and `toHost` unpacks NC4HW4 -> NCHW back to
+(or imports a caller-provided dma-buf fd), and `toHost` unpacks NC4HW4 -> NCHW back to
 host memory. A backend whose native layout *is* NCHW and that runs on the host
 leaves both at their defaults, as `CpuBackend` does.
 
 ### `finalize()` — flush caches
 
 Called once after all segments are compiled. Use it to persist anything to
-reuse on the next cold start. The Vulkan backend flushes its `VkPipelineCache`,
-the prepacked-weights cache, and the autotune cache to `config.cacheDir` here,
-which turns a cold start into a faster warm start. A backend leaves it
+reuse on the next cold start. The Vulkan backend bundles its `VkPipelineCache`,
+the prepacked-weights cache, and the autotune cache into the unified `config.cacheFile`
+here, which turns a cold start into a faster warm start. A backend leaves it
 empty until it has something worth caching.
 
 ---
@@ -337,7 +337,7 @@ public:
     return seg;
   }
 
-  void finalize() override { /* flush caches to cfg.cacheDir */ }
+  void finalize() override { /* flush caches into cfg.cacheFile */ }
 };
 
 VKNN_REGISTER_BACKEND(BackendKind::kMyBackend, MyBackend);
@@ -392,7 +392,7 @@ backend — JIT or offline-compiled — drops in as a single `.cpp`.
 - [ ] Subclass `vknn::Backend`; implement `kind`, `name`, `available`, `supports` (and `supportsNode` if shape-dependent), `compileSegment`.
 - [ ] Override `toHost` / `toDevice` if your native layout is not host NCHW.
 - [ ] Subclass `vknn::Segment`; do all setup in `compileSegment`, keep `run()` lean; fill `backend`, `nodeIdx`, `boundaryInputs`, `boundaryOutputs`.
-- [ ] Override `finalize()` if you have caches to flush to `config.cacheDir`.
+- [ ] Override `finalize()` if you have caches to bundle into `config.cacheFile`.
 - [ ] `VKNN_REGISTER_BACKEND(BackendKind::kYours, YourBackend);` at file scope.
 - [ ] Add the `.cpp` to the `vknn` CMake target (whole-archive linking does the rest).
 - [ ] Select via `config.backend` / `config.fallback`; verify `available()` and `supports()` partition the graph as expected.

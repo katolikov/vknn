@@ -36,11 +36,11 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `cpuThreads` | int | ≥ 1 | `4` | Worker thread count for the CPU backend (NEON/scalar kernels). |
 | `inputLayout` | string | `"NCHW"`, `"NHWC"` | `"NCHW"` | Layout of the input tensors you supply. The engine converts to its internal layout as needed. Any value other than `"NHWC"` is treated as `NCHW`. |
 | `outputLayout` | string | `"NCHW"`, `"NHWC"` | `"NCHW"` | Layout you want output tensors returned in. Same parsing rule as `inputLayout`. |
-| `enableZeroCopy` | bool | `true` / `false` | `false` | Enable DMA-BUF zero-copy I/O (imports a dma-buf fd into Vulkan via `VkImportMemoryFdInfoKHR`). Requires the platform DMA-BUF heap support. |
-| `cacheDir` | string | filesystem path | `"/data/local/tmp/vxrt/cache"` | Directory holding the pipeline cache, prepacked-weights cache, and autotune cache. |
-| `cachePipeline` | bool | `true` / `false` | `true` | Persist/reuse the `VkPipelineCache` on disk under `cacheDir`. |
-| `cacheWeights` | bool | `true` / `false` | `true` | Persist/reuse the content-keyed prepacked-weights cache under `cacheDir`. |
-| `cacheTuning` | bool | `true` / `false` | `true` | Persist/reuse the autotune cache (conv workgroup sizes) under `cacheDir`. |
+| `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Unified per-model cache file bundling the pipeline-cache blob and the prepacked-weight + autotune blob (container magic `VKNNCAC1`). Empty resolves to `<model>.cache` next to the model. Loading it on a warm start skips shader compilation, conv autotuning, and the Winograd weight transform. |
+| `cacheDir` | string | filesystem path | `"/data/local/tmp/vxrt/cache"` | Fallback location for the unified cache when the session is built from an in-memory graph (no model path to anchor `cacheFile`). |
+| `cachePipeline` | bool | `true` / `false` | `true` | Include the `VkPipelineCache` blob in the unified `cacheFile`. |
+| `cacheWeights` | bool | `true` / `false` | `true` | Include the content-keyed prepacked-weights blob in the unified `cacheFile`. |
+| `cacheTuning` | bool | `true` / `false` | `true` | Include the autotune blob (conv workgroup sizes) in the unified `cacheFile`. |
 | `profile` | bool | `true` / `false` | `false` | Enable the per-op profiler (GPU timestamp queries + CPU timing); the table is available via `session.profiler()`. |
 | `verbosity` | int | `0`, `1`, `≥2` | `1` | Log level. `0` → Warn, `1` → Info, `≥2` → Debug. Applied by `Config::applyLogLevel()`. |
 | `layerDump` | bool | `true` / `false` | `false` | Dump every layer's output tensor to disk for debugging. |
@@ -103,7 +103,7 @@ lists all of them, with non-default values where useful:
   "cpuThreads": 4,
   "inputLayout": "NCHW",
   "outputLayout": "NCHW",
-  "enableZeroCopy": true,
+  "cacheFile": "enc.cache",
   "cacheDir": "/data/local/tmp/vxrt/cache",
   "cachePipeline": true,
   "cacheWeights": true,

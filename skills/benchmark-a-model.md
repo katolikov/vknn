@@ -22,7 +22,7 @@ save as `.npy`/`.raw` (exact) and/or `.png` (image-shaped tensors only). **No `i
 
 Generate goldens + a config from an ONNX:
 ```sh
-python benchmark/make_golden.py model.onnx out/ image=image.npy intrinsics=intr.npy
+python benchmark/scripts/make_golden.py model.onnx out/ image=image.npy intrinsics=intr.npy
 ```
 
 ## 3. Write the config

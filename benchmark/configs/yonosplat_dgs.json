@@ -7,7 +7,8 @@
       "dir": "/data/local/tmp/vxrt/bench",
       "no_weight_cache": false,
       "max_submit_nodes": 500,
-      "cooldown": 0
+      "cooldown": 0,
+      "generate_cache": true
     }
   },
   "stages": [

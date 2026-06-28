@@ -94,10 +94,11 @@ The device is UMA (memory types are `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT
 staging copies**), but the pack/unpack itself is CPU work. Feeding NC4HW4 directly, or doing the
 conversion on the GPU, would remove most of it. It is not optimized.
 
-> Zero-copy I/O (`enableZeroCopy`, `vknn::IonBuffer` over DMA-BUF heaps) removes the
-> *input/output buffer copy*, and is verified bit-identical to the staged path
-> (maxAbsErr 0, both `Mode A` alloc and `Mode B` `wrapFd`). It does **not** remove the
-> layout pack/unpack, which is the dominant host cost above.
+> Caller-owned DMA-BUF I/O (`Tensor::fromDmaBuf` / `Tensor::toDmaBuf`, binding model I/O to
+> a caller-provided dma-buf fd that `vknn::IonBuffer::wrapFd` mmaps) removes the caller-side
+> *I/O buffer / copy*, and is verified bit-identical to the staged path (maxAbsErr 0). It does
+> **not** remove vknn's internal layout pack/unpack (NCHW fp32 ↔ device NC4HW4/fp16), which is
+> the dominant host cost above.
 
 ---
 
@@ -155,7 +156,7 @@ Every on-device number in this repo comes from a **single** unit:
 There is no cross-device, cross-driver, or cross-vendor validation. Key behaviors are
 **driver-specific**: the absence of `VK_KHR_cooperative_matrix`, `subgroupSize = 64`,
 the UMA `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` memory types (no staging), the
-DMA-BUF-heap zero-copy import path (`/dev/ion` is gone; uses
+caller-owned dma-buf import path (`/dev/ion` is gone; fds come from
 `/dev/dma_heap/system`), and the autotuned workgroup sizes are all tuned to **this
 GPU and this driver**. On other hardware the correctness holds (the CPU
 reference is the ground truth and is bit-exact), but the **performance numbers and

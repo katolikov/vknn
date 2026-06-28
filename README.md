@@ -26,7 +26,7 @@ imports an ONNX model with a hand-rolled protobuf parser, lowers it to an NCHW I
 (shape inference, BatchNorm folding, activation/residual fusion, constant folding), partitions the
 graph into maximal same-backend segments, and executes each on a pluggable backend. The primary
 backend is Vulkan (NC4HW4 packed layout, one pre-recorded command buffer per segment, fp16 storage
-with fp32 accumulation, DMA-BUF zero-copy); a scalar + NEON **CPU backend** is the reference path and
+with fp32 accumulation, caller-owned DMA-BUF I/O); a scalar + NEON **CPU backend** is the reference path and
 the automatic fallback for ops the GPU declines. There are no third-party runtime dependencies —
 only Vulkan and the C++ standard library. Every result is checked against an onnxruntime golden.
 
@@ -102,7 +102,7 @@ int main() {
   vknn::Config cfg;
   cfg.backend   = vknn::BackendKind::kVulkan;    // run on the GPU (CPU is the implicit fallback)
   cfg.precision = vknn::Precision::kFp16;        // fp16 storage, fp32 accumulation
-  cfg.tuning    = vknn::TuningLevel::kThorough;  // maximum autotuning (cached to cfg.cacheDir)
+  cfg.tuning    = vknn::TuningLevel::kThorough;  // maximum autotuning (cached in <model>.cache)
   cfg.optLevel  = 3;                             // all graph fusions (the default)
 
   vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx

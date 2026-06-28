@@ -14,7 +14,7 @@ and collect a per-stage result.json with timing and (optional) per-operator prof
 files it pushes, the inputs it uses, the run timing, the pulled result.json, and saves the device logcat
 to results/<stage>.logcat.txt.
 
-Config (sectioned; see benchmark/example.json and USAGE.md):
+Config (sectioned; see benchmark/configs/example.json and USAGE.md):
   { "defaults": { ...shared sections merged into every stage... },
     "stages": [
       { "name": "encoder8",
@@ -390,7 +390,10 @@ def main():
         return
 
     cfg = json.load(open(args.config))
-    base = os.path.dirname(os.path.abspath(args.config))
+    # Model/input/golden paths in a config (and the results/ dir) resolve against the benchmark/ root —
+    # where run.py, models/, and results/ live — so a config under benchmark/configs/ still finds
+    # "models/...". Absolute paths in a config are used as-is.
+    base = os.path.dirname(os.path.abspath(__file__))
     defaults = cfg.get("defaults", {})
     stages = cfg.get("stages") or [cfg]
     log(f"config: {args.config}  ({len(stages)} stage{'s' if len(stages) != 1 else ''})  base={base}")

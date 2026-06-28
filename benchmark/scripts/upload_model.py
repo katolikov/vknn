@@ -4,7 +4,7 @@
 Needs a WRITE token: `hf auth login`, or pass --token, or set HF_TOKEN. One-time publishing step;
 end users only ever run fetch_model.py.
 
-  python benchmark/upload_model.py --repo katolikov/yonosplat-vknn [--private] \
+  python benchmark/scripts/upload_model.py --repo katolikov/yonosplat-vknn [--private] \
       --onnx /tmp/YoNoSplat/onnx/yonosplat_encoder.onnx \
       --weights /tmp/YoNoSplat/onnx/weights.bin \
       --vxm /tmp/encoder8_fp16.vxm \

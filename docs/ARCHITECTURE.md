@@ -207,8 +207,9 @@ This requires the static lib to be linked whole-archive
 - `precision` (`kFp32`/`kFp16`/`kAuto`; default `kFp16`), `power`, `cpuThreads`.
 - `inputLayout` / `outputLayout` (`kNCHW`/`kNHWC`) — what the *user* supplies and
   wants back; the engine converts internally.
-- `enableZeroCopy` (ION / dma-buf path, §6).
-- Cache controls: `cacheDir`, `cachePipeline`, `cacheWeights`, `cacheTuning`.
+- Cache controls: `cacheFile` (the unified per-model cache, §7), `cacheDir`
+  (the graph-only fallback location), `cachePipeline`, `cacheWeights`, `cacheTuning`.
+- Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
 - `tuning` (`kOff`/`kFast`/`kThorough`) — autotuning level.
 
@@ -216,12 +217,15 @@ This requires the static lib to be linked whole-archive
 
 `Session` owns the planned graph, the active backends, the segments, the caches
 (via the backends), and the `RtTensor` pool. `Runtime` is a thin façade
-(`Runtime::load(onnxPath, cfg)` → `Session::createFromOnnx`).
+(`Runtime::load(path, cfg, cacheFile)` → `Session::createFromOnnx`; `cacheFile`
+defaults to `<model>.cache`, see §7).
 
 The build flow is `createFromOnnx` → `importOnnx` → `create(Graph&&, cfg)` →
 `plan()`. `plan()` runs the passes, instantiates backends, builds the pool, assigns
-per-node backends, partitions into segments, compiles them, and finalizes caches
-(all in `session.cpp`). Member **declaration order is load-bearing for teardown**:
+per-node backends, partitions into segments, and compiles them (all in `session.cpp`).
+The unified cache is flushed at teardown via `Session::updateCache()` (called from
+`~Session()`), not at `plan()` time, and only when it actually changed during the
+session. Member **declaration order is load-bearing for teardown**:
 `backends_` is declared first so it is destroyed *last*, after `segments_` and
 `pool_` have released their device buffers — the `VulkanContext` lives inside
 `VulkanBackend`.
@@ -414,29 +418,47 @@ workgroup size per conv signature.
 
 ---
 
-## 6. ION / DMA-BUF zero-copy (`include/vknn/ion.h`, `src/core/ion.cpp`)
+## 6. Caller-owned DMA-BUF I/O (`include/vknn/ion.h`, `src/core/ion.cpp`)
 
-The target device has no `/dev/ion`, so zero-copy uses **DMA-BUF heaps**
-(`/dev/dma_heap/system`) via `DMA_HEAP_IOCTL_ALLOC`, importing the resulting dma-buf
-fd into Vulkan with `VkImportMemoryFdInfoKHR` (handle type `DMA_BUF_BIT_EXT`). Two
-modes are exposed by `vknn::IonBuffer`: **Mode A** allocates a heap buffer, **Mode B**
-(`wrapFd`) wraps an externally provided fd; the import itself is
-`vk::Buffer::importDmaBufFd`. Because the platform is UMA (all memory types are
-`DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) there are no staging copies. Both modes
-are bit-exact against the staged path (`maxAbsErr 0`). Enabled via
-`Config::enableZeroCopy`.
+I/O can be bound directly to caller-provided dma-buf fds, with no vknn-side host I/O
+buffer or copy. vknn never allocates these buffers — the fd comes from the caller's
+camera / gralloc / ION stack (on this device, an allocation from the `/dev/dma_heap/system`
+heap, since `/dev/ion` is absent).
+
+`vknn::IonBuffer` is a thin wrapper over a caller-provided fd:
+`IonBuffer::wrapFd(int fd, size_t bytes, bool takeOwnership = false)` mmaps it for CPU
+access. The high-level API binds model I/O to fds: `Tensor::fromDmaBuf(int fd, shape, name)`
+binds a model **input** to a caller fd, and `Tensor::toDmaBuf(int fd, shape, name)` binds a
+model **output** to a caller fd. `Model::run(const std::vector<Tensor>& inputs, const
+std::vector<Tensor>& outputs = {})` reads each fd-bound input straight from the fd and writes
+each fd-bound output straight into the fd. A bound output's returned `Tensor` carries no host
+copy (its data is empty); unbound outputs come back as host tensors.
+
+The low-level Vulkan import primitive `vk::Buffer::importDmaBufFd`
+(`VkImportMemoryFdInfoKHR`, handle type `DMA_BUF_BIT_EXT`, allowed types queried with
+`vkGetMemoryFdPropertiesKHR`) still exists for advanced / true-GPU use: the GPU reads the
+dma-buf directly. Because the platform is UMA (all memory types are
+`DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) there are no staging copies, and the path is
+bit-exact against the staged path (`maxAbsErr 0`).
 
 ---
 
-## 7. Caches (`config.cacheDir`)
+## 7. Caches (`config.cacheFile`)
 
-Three content/configuration-keyed caches accelerate warm session creation. Session
-creation timings: cold first run + autotune 445 ms; cold no-tune ~152 ms; warm
-all-caches 68 ms (up to 6.5× faster warm).
+One **unified per-model cache file** (container magic `VKNNCAC1`) bundles the
+content/configuration-keyed caches that accelerate warm session creation. `Runtime::load(path,
+cfg, cacheFile)` takes the cache path as its third argument; empty (the default) resolves to
+`<model>.cache` next to the model (e.g. `enc.vxm` → `enc.cache`), exposed as `Config::cacheFile`.
+For a session built from an in-memory graph (no model path), the cache lives under `cacheDir`
+instead. Loading the file on a warm start skips shader compilation, conv autotuning, and the
+Winograd weight transform. Measured on the 8-view YoNoSplat (Xclipse 960): a cold load (~10 s)
+writes a 29 MB cache, a warm load is ~4.8 s, and outputs are bit-identical.
 
-- **Vulkan pipeline cache** — `VkPipelineCache` persisted to
-  `cacheDir/pipeline.bin` (`vk::PipelineCache`, created in `VulkanBackend` when
-  `cachePipeline`). Skips driver shader recompilation.
+The file bundles three blobs; `cachePipeline` / `cacheWeights` / `cacheTuning` select which are
+included:
+
+- **Vulkan pipeline cache** — the `VkPipelineCache` blob (`vk::PipelineCache`, created in
+  `VulkanBackend` when `cachePipeline`). Skips driver shader recompilation.
 - **Prepacked-weights cache** — `WeightCache` (`vk_backend.h`): a content-keyed,
   length-prefixed blob of weights already repacked into `NC4HW4`, keyed by
   op + role + shape. On MobileNetV2 this is 106 entries; warm runs skip the host
@@ -446,8 +468,9 @@ all-caches 68 ms (up to 6.5× faster warm).
   workgroup-size entries for MobileNetV2. Controlled by `cacheTuning` and the
   `tuning` level.
 
-All three are flushed in `Backend::finalize()` (`VulkanBackend::saveCaches`) at the
-end of `Session::plan()`.
+`Session::updateCache()` writes the file, but only when the cache changed during the session —
+an unchanged warm run leaves the file untouched. It is called automatically from `~Session()`
+(the cache is flushed at teardown), and is also public for manual checkpointing.
 
 ---
 
@@ -484,4 +507,4 @@ on the whole-archive link of the static lib:
 | Vulkan backend | `src/backend/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `vk_ops.cpp`) |
 | CPU backend | `src/backend/cpu/` (`cpu_backend.cpp`, `ops_basic.cpp`, `ops_conv.cpp`, `ops_shape.cpp`) |
 | Shaders | `shaders/` (compiled by `glslc`, embedded via `tools/embed_spirv.py`) |
-| Examples | `examples/` (`probe`, `classify`, `profile`, `ion_zerocopy`, `backend_switch`, `op_check`) |
+| Examples | `examples/` (`probe`, `classify`, `profile`, `zerocopy_cache`, `backend_switch`, `op_check`) |

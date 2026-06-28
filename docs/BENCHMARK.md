@@ -37,8 +37,8 @@ whole DFL / box-decode head on the GPU.
 ## End-to-end, per stage
 
 A real inference is more than the GPU run: open the model, build the session, copy the input over,
-run, and copy the result back. Each stage below is on the same device, both Vulkan fp16, warm (caches
-and tuning already built):
+run, and copy the result back. Each stage below is on the same device, both Vulkan fp16, warm (the
+unified per-model `<model>.cache` — pipeline, prepacked weights, and tuning — already built):
 
 | Stage | VKNN ResNet-50 | MNN ResNet-50 | VKNN MobileNetV3 | MNN MobileNetV3 |
 |---|---|---|---|---|
@@ -144,7 +144,11 @@ this driver); the rasterizer that consumes the 6 Gaussian outputs is a separate 
 
 - Set `Config::timing` (the `--timing` flag) for the real submit+GPU time (pack / submit+gpu / unpack). The per-op profiler
   sum is inflated by forced per-op barriers — relative only.
-- `rm -rf` the model's cache dir before timing a fresh build.
+- Warm timings load the unified per-model cache (`<model>.cache`, the pipeline + prepacked-weight +
+  autotune bundle). Delete that file before timing a fresh **cold** build. In `vknn_benchmark` /
+  `benchmark/run.py`, `"cache"` (default `<model>.cache`) sets the cache path and `"generate_cache":
+  true` populates it in an untimed throwaway load first, so the reported `load` is warm and the
+  cache-build cost is excluded from `timing_ms`.
 - VKNN's latency is very consistent (the whole static graph is one pre-recorded command buffer);
   MNN-Vulkan has higher cold-loop variance.
 
