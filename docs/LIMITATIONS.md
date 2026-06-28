@@ -55,7 +55,7 @@ bit-accurate against the fp32 / CPU reference — cosine vs onnxruntime lands in
 YOLOv8n 1.000000), with small absolute error on intermediate activations. The Vulkan fp32 path is
 bit-close (cosine 1.0, maxAbsErr ~1e-5), and the CPU backend is the bit-exact reference.
 
-For accuracy-sensitive callers, set `precision = Precision::kFp32` or fall back to CPU. fp16 is the
+For accuracy-sensitive callers, set `precision = Precision::Fp32` or fall back to CPU. fp16 is the
 default in `vknn::Config` because the accuracy cost is small and the bandwidth saving is real.
 
 ---
@@ -67,11 +67,11 @@ VKNN beats MNN's Vulkan backend on every benchmarked model (often ~4×). Against
 The remaining ResNet edge appears only under a warm device.
 
 - **Winograd F(2,3) via a tiled GEMM** is the default for deep/square 3×3 convs (`Config::winograd =
-  kAuto`, autotuned vs the direct kernel per shape).
+  Auto`, autotuned vs the direct kernel per shape).
 - **No cooperative-matrix / matrix-core path.** `VK_KHR_cooperative_matrix` is **absent on the
   target driver**, so that avenue is closed.
 - **F(4,3) Winograd** is implemented (numerically fine at fp16) but slower here — its 6×6 transforms
-  are register-heavy; available via `setHint(Hint::kWinogradUnit, 4)` for research.
+  are register-heavy; available via `setHint(Hint::WinogradUnit, 4)` for research.
 
 The proven kernels are the tiled-GEMM Winograd 3×3, a direct 3×3, a register-tiled (WTILE=4) 1×1,
 an untiled depthwise, and **split-K** for deep low-parallelism 1×1 convs. Other restructurings that add
@@ -106,7 +106,7 @@ conversion on the GPU, would remove most of it. It is not optimized.
 
 The device advertises the capabilities for it (`shaderInt8 = 1`, 8-bit storage,
 `VK_KHR_shader_integer_dot_product`), and `Config::precision` only exposes
-`kFp32 | kFp16 | kAuto` — there is **no int8 enum value**. There is no quantization
+`Fp32 | Fp16 | Auto` — there is **no int8 enum value**. There is no quantization
 pass, no int8 kernel, and no calibration tooling. int8 inference is a documented
 stretch goal that is **not** built.
 
@@ -132,7 +132,7 @@ pre-activation one. This is correct behavior, but it can be confusing while debu
 
 The importer (hand-rolled, dependency-free protobuf parser in `src/import/onnx/onnx_parser.cpp`) maps
 a **fixed** op set (`opTypeFromOnnx` in `src/core/op.cpp`). Anything not in that table imports as
-`OpType::kUnknown` and will not plan.
+`OpType::Unknown` and will not plan.
 
 The supported set is broad — it covers CNNs, detection, **and** transformer/attention models:
 convolution/pooling, the full elementwise unary/binary families, MatMul (batched N-D), Gemm,

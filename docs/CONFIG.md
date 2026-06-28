@@ -57,12 +57,12 @@ All defaults below are the C++ member initializers in `struct Config`.
 The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 
 ```cpp
-enum class BackendKind  { kVulkan, kCpu };
-enum class Precision    { kFp32, kFp16, kAuto };
-enum class PowerHint    { kNormal, kHigh, kLow };
-enum class TuningLevel  { kOff, kFast, kThorough };
-enum class WinogradMode { kAuto, kOn, kOff };   // kAuto = per-shape autotune (recommended default)
-enum class TensorFormat : uint8_t { kNCHW, kNHWC, kNC4HW4, kUnknown };
+enum class BackendKind  { Vulkan, Cpu };
+enum class Precision    { Fp32, Fp16, Auto };
+enum class PowerHint    { Normal, High, Low };
+enum class TuningLevel  { Off, Fast, Thorough };
+enum class WinogradMode { Auto, On, Off };   // Auto = per-shape autotune (recommended default)
+enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Unknown };
 ```
 
 ### Advanced hints — `Config::setHint`
@@ -72,12 +72,12 @@ production kernels; normal use needs none of these. There are no environment var
 
 ```cpp
 enum class Hint {
-  kWinogradVariant = 0,  // 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused
-  kWinogradUnit    = 1,  // 0 = F(2,3) (default), 4 = F(4,3) (numerically equivalent, slower here)
-  kDirectConv3x3   = 2,  // 0 = autotuned (default), 1 = register-tiled, 2 = LDS input-halo
+  WinogradVariant = 0,  // 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused
+  WinogradUnit    = 1,  // 0 = F(2,3) (default), 4 = F(4,3) (numerically equivalent, slower here)
+  DirectConv3x3   = 2,  // 0 = autotuned (default), 1 = register-tiled, 2 = LDS input-halo
 };
-cfg.setHint(Hint::kWinogradUnit, 4);   // force F(4,3) Winograd
-int v = cfg.hint(Hint::kWinogradUnit); // read back (0 if unset)
+cfg.setHint(Hint::WinogradUnit, 4);   // force F(4,3) Winograd
+int v = cfg.hint(Hint::WinogradUnit); // read back (0 if unset)
 ```
 
 In JSON, hints are an array indexed by the enum value: `"hints": [0, 4, 0]`.
@@ -136,9 +136,9 @@ Config cfg2 = Config::fromJsonString(R"({ "backend": "CPU", "precision": "fp32" 
 
 // Field assignment also works directly:
 Config cfg3;
-cfg3.backend   = BackendKind::kVulkan;
-cfg3.precision = Precision::kFp16;
-cfg3.tuning    = TuningLevel::kThorough;
+cfg3.backend   = BackendKind::Vulkan;
+cfg3.precision = Precision::Fp16;
+cfg3.tuning    = TuningLevel::Thorough;
 
 // Apply the log level implied by verbosity:
 cfg.applyLogLevel();
@@ -162,8 +162,8 @@ lets individual flags override specific fields:
 Config cfg;
 if (!cfgpath.empty()) cfg = Config::fromJsonFile(cfgpath);   // base from JSON
 cfg.backend   = backendFromStr(backend);                      // --backend overrides
-cfg.precision = (precision == "fp32") ? Precision::kFp32      // --precision overrides
-                                       : Precision::kFp16;
+cfg.precision = (precision == "fp32") ? Precision::Fp32      // --precision overrides
+                                       : Precision::Fp16;
 cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());  // --cache overrides
 if (hasflag(argc, argv, "--profile")) cfg.profile = true;     // --profile sets flag
 if (hasflag(argc, argv, "--layer-dump")) {                    // --layer-dump DIR

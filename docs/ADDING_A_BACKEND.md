@@ -77,12 +77,12 @@ public:
 ### `kind()` — `BackendKind`
 
 Returns the enum tag identifying this backend. `BackendKind` is declared in
-`include/vknn/config.h` (the values are `kVulkan` and `kCpu`). This tag is the key
+`include/vknn/config.h` (the values are `Vulkan` and `Cpu`). This tag is the key
 the backend registers under and the value `config.backend` selects. A new backend
 means a new `BackendKind` enumerator there.
 
 ```cpp
-BackendKind kind() const override { return BackendKind::kCpu; }
+BackendKind kind() const override { return BackendKind::Cpu; }
 ```
 
 ### `name()` — human-readable label
@@ -236,7 +236,7 @@ struct BackendRegistrar {
 A backend registers itself with a single line at file scope:
 
 ```cpp
-VKNN_REGISTER_BACKEND(BackendKind::kCpu, CpuBackend);
+VKNN_REGISTER_BACKEND(BackendKind::Cpu, CpuBackend);
 ```
 
 `VKNN_REGISTER_BACKEND(KIND, TYPE)` defines a file-static `BackendRegistrar` whose
@@ -312,7 +312,7 @@ class MyBackend : public Backend {
 public:
   MyBackend() { /* probe device / driver here */ }
 
-  BackendKind kind() const override { return BackendKind::kMyBackend; }  // add to config.h
+  BackendKind kind() const override { return BackendKind::MyBackend; }  // add to config.h
   const char* name() const override { return "MyBackend"; }
   bool available() const override { return /* deps present? */ true; }
 
@@ -340,7 +340,7 @@ public:
   void finalize() override { /* flush caches into cfg.cacheFile */ }
 };
 
-VKNN_REGISTER_BACKEND(BackendKind::kMyBackend, MyBackend);
+VKNN_REGISTER_BACKEND(BackendKind::MyBackend, MyBackend);
 
 }  // namespace
 }  // namespace vknn
@@ -393,7 +393,7 @@ backend — JIT or offline-compiled — drops in as a single `.cpp`.
 - [ ] Override `toHost` / `toDevice` if your native layout is not host NCHW.
 - [ ] Subclass `vknn::Segment`; do all setup in `compileSegment`, keep `run()` lean; fill `backend`, `nodeIdx`, `boundaryInputs`, `boundaryOutputs`.
 - [ ] Override `finalize()` if you have caches to bundle into `config.cacheFile`.
-- [ ] `VKNN_REGISTER_BACKEND(BackendKind::kYours, YourBackend);` at file scope.
+- [ ] `VKNN_REGISTER_BACKEND(BackendKind::Yours, YourBackend);` at file scope.
 - [ ] Add the `.cpp` to the `vknn` CMake target (whole-archive linking does the rest).
 - [ ] Select via `config.backend` / `config.fallback`; verify `available()` and `supports()` partition the graph as expected.
 

@@ -103,12 +103,12 @@ is sound, GEMM quality is the determinant.
 
 Winograd helps deep / square 3×3 (ResNet, DenseNet) but loses on small-channel or spatially-large 3×3,
 so `tuneWino` measures the tiled-GEMM Winograd against the direct kernel **per shape** on scratch buffers
-and caches the winner (like the local-size tune; default `fast` tuning, `Config::winograd` = `kOn`/`kOff`
+and caches the winner (like the local-size tune; default `fast` tuning, `Config::winograd` = `On`/`Off`
 force it). Effect vs direct-only: DenseNet 15.5→13.9 (flips a tie to a win), Inception 16.0→15.5,
 YOLOv8n 25.8→20.0, ResNet-50 12.6→12.1 (and ~10.5 cool). cosine ≥ 0.9995 throughout.
 
 Several alternative GEMM/Winograd variants regress; they are kept as documented negative results
-(`Config::setHint(Hint::kWinogradVariant, …)`): a 2-pass naive matmul (~15 ms, memory-bound on the
+(`Config::setHint(Hint::WinogradVariant, …)`): a 2-pass naive matmul (~15 ms, memory-bound on the
 global V round-trip), that split 4 ways (no help → bandwidth- not occupancy-bound), a fully-fused single
 kernel with V in LDS (~88 ms, the static LDS array collapses occupancy), and a **subgroup-shuffle GEMM**
 that shares operands across the 64-wide wave instead of LDS (~15 ms, +47% — on this driver
@@ -117,7 +117,7 @@ swap doesn't touch the bottleneck). Packed fp16 in the GEMM inner loop is neutra
 not ALU-bound). int8 weight-only on the deep 1×1 has a bandwidth ceiling (~0.2 ms; RDNA-pre-4 gives
 int8 == fp16 compute), so it cannot close ResNet alone.
 
-**F(4×4,3×3)** is also implemented (`setHint(Hint::kWinogradUnit, 4)`): it cuts the transform-domain V/M
+**F(4×4,3×3)** is also implemented (`setHint(Hint::WinogradUnit, 4)`): it cuts the transform-domain V/M
 traffic to 0.56× and the multiplies to 4× (vs F(2,3)'s 2.25×), and it is numerically fine at fp16
 (ResNet cosine 0.999999 — the larger transform coefficients do *not* break half precision here). It is
 **slower** on this GPU (~11.5 vs F(2,3)'s 10.5 ms): the 6×6 transforms hold `d[6][6]`+`t[6][6]` = 72

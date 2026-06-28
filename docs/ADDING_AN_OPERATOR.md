@@ -34,12 +34,12 @@ serialized as an integer):
 
 ```cpp
 enum class OpType {
-  kUnknown = 0,
-  kConv,
-  kClip,
-  kRelu,
-  kLeakyRelu,       // <-- new: y = x>=0 ? x : alpha*x
-  kAdd,
+  Unknown = 0,
+  Conv,
+  Clip,
+  Relu,
+  LeakyRelu,       // <-- new: y = x>=0 ? x : alpha*x
+  Add,
   // ...
 };
 ```
@@ -51,10 +51,10 @@ Add the `OpType` → display-name mapping in `opTypeName()`:
 ```cpp
 const char* opTypeName(OpType t) {
   switch (t) {
-    case OpType::kConv: return "Conv";
-    case OpType::kClip: return "Clip";
-    case OpType::kRelu: return "Relu";
-    case OpType::kLeakyRelu: return "LeakyRelu";   // <-- new
+    case OpType::Conv: return "Conv";
+    case OpType::Clip: return "Clip";
+    case OpType::Relu: return "Relu";
+    case OpType::LeakyRelu: return "LeakyRelu";   // <-- new
     // ...
   }
 }
@@ -66,17 +66,17 @@ ONNX node `op_type`, so it must match the ONNX spec exactly):
 ```cpp
 OpType opTypeFromOnnx(const std::string& s) {
   static const std::unordered_map<std::string, OpType> m = {
-      {"Conv", OpType::kConv},
-      {"Clip", OpType::kClip},
-      {"Relu", OpType::kRelu},
-      {"LeakyRelu", OpType::kLeakyRelu},   // <-- new
+      {"Conv", OpType::Conv},
+      {"Clip", OpType::Clip},
+      {"Relu", OpType::Relu},
+      {"LeakyRelu", OpType::LeakyRelu},   // <-- new
       // ...
   };
   // ...
 }
 ```
 
-Anything missing from this map imports as `OpType::kUnknown`, and the ONNX
+Anything missing from this map imports as `OpType::Unknown`, and the ONNX
 attributes still attach to the `Node` (`LeakyRelu` carries a float `alpha`,
 default `0.01`), retrievable via `node.attr.getf("alpha", 0.01f)`.
 
@@ -102,7 +102,7 @@ class CpuOp {
   virtual void run(const Node& node, ExecContext& ctx) = 0;
   // Which dtypes this op supports (capability/fallback). Default: fp32 + int64.
   virtual bool supportsDType(DType dt) const {
-    return dt == DType::kFloat32 || dt == DType::kInt64;
+    return dt == DType::Float32 || dt == DType::Int64;
   }
 };
 ```
@@ -147,12 +147,12 @@ Register it at namespace scope (bottom of the file, alongside the other
 `VKNN_REGISTER_CPU_OP` lines):
 
 ```cpp
-VKNN_REGISTER_CPU_OP(OpType::kLeakyRelu, LeakyReluCpuOp);
+VKNN_REGISTER_CPU_OP(OpType::LeakyRelu, LeakyReluCpuOp);
 ```
 
 `VKNN_REGISTER_CPU_OP(OPTYPE, CLASS)` expands to a static `CpuOpRegistrar` whose
 constructor calls `CpuOpRegistry::instance().reg(...)`. The CPU
-backend's `supports()` then returns `true` for `kLeakyRelu` (fp32/int64/int32) and the
+backend's `supports()` then returns `true` for `LeakyRelu` (fp32/int64/int32) and the
 session can place the node on CPU.
 
 This is a complete, correct operator. The host target builds and the op runs on
@@ -314,11 +314,11 @@ Register it at namespace scope (bottom of the file, with the other
 `VKNN_REGISTER_VK_OP` lines):
 
 ```cpp
-VKNN_REGISTER_VK_OP(OpType::kLeakyRelu, LeakyReluVulkanOp);
+VKNN_REGISTER_VK_OP(OpType::LeakyRelu, LeakyReluVulkanOp);
 ```
 
-The Vulkan backend's `supports()` then returns `true` for `kLeakyRelu`
-(because `VkOpRegistry::instance().has(kLeakyRelu)` is true), and the session
+The Vulkan backend's `supports()` then returns `true` for `LeakyRelu`
+(because `VkOpRegistry::instance().has(LeakyRelu)` is true), and the session
 places LeakyRelu nodes in Vulkan segments.
 
 ---
@@ -380,7 +380,7 @@ registries:
   bool supports(OpType t, DType dt) const override {
     auto& r = CpuOpRegistry::instance();
     if (!r.has(t)) return false;
-    return dt == DType::kFloat32 || dt == DType::kInt64 || dt == DType::kInt32;
+    return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
   }
   ```
 
@@ -401,7 +401,7 @@ backend whose `supports()` returns true:
 for (size_t bi = 0; bi < backends_.size(); ++bi) {
   if (backends_[bi]->supports(nd.type, dt)) { chosen = (int)bi; break; }
 }
-if (chosen < 0) throw Error(Status::kUnsupported, "no backend supports op ...");
+if (chosen < 0) throw Error(Status::Unsupported, "no backend supports op ...");
 ```
 
 If the chosen backend is not the configured primary (because the primary's
@@ -436,7 +436,7 @@ Vulkan/CPU segments while keeping the output bit-comparable).
 
 ## Checklist
 
-- [ ] `include/vknn/op.h`: add `OpType::kLeakyRelu`.
+- [ ] `include/vknn/op.h`: add `OpType::LeakyRelu`.
 - [ ] `src/core/op.cpp`: add to `opTypeName()` and `opTypeFromOnnx()`.
 - [ ] `src/backend/cpu/ops_basic.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP`.
 - [ ] `shaders/leakyrelu.comp` (+ optional `leakyrelu_fp16.comp`).

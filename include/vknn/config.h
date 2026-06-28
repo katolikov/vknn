@@ -12,9 +12,9 @@ namespace vknn {
     enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2 };
     enum class PowerHint { Normal = 0, High = 1, Low = 2 };
     enum class TuningLevel { Off = 0, Fast = 1, Thorough = 2 };
-    // How the 3x3-conv Winograd F(2,3) kernel is selected. kAuto measures the tiled-GEMM Winograd
-    // against the direct kernel per shape and keeps the faster; kOn forces Winograd on every eligible
-    // 3x3; kOff always uses the direct kernel.
+    // How the 3x3-conv Winograd F(2,3) kernel is selected. Auto measures the tiled-GEMM Winograd
+    // against the direct kernel per shape and keeps the faster; On forces Winograd on every eligible
+    // 3x3; Off always uses the direct kernel.
     enum class WinogradMode { Auto = 0, On = 1, Off = 2 };
 
     // Advanced kernel-selection hints (MNN-style Config::setHint). Default (value 0) selects the
@@ -87,10 +87,10 @@ namespace vknn {
         bool        layerDump    = false;
         std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
 
-        // Tuning. kFast (default) measures a few candidates per shape and caches the winner.
+        // Tuning. Fast (default) measures a few candidates per shape and caches the winner.
         TuningLevel tuning = TuningLevel::Fast;
-        // 3x3 Winograd selection. kAuto picks the faster of tiled-GEMM Winograd vs the direct kernel per
-        // shape. Needs tuning != kOff to measure; with tuning off it stays on the direct kernel.
+        // 3x3 Winograd selection. Auto picks the faster of tiled-GEMM Winograd vs the direct kernel per
+        // shape. Needs tuning != Off to measure; with tuning off it stays on the direct kernel.
         WinogradMode winograd = WinogradMode::Auto;
 
         // Advanced experimental kernel hints (MNN-style). Default selects the production kernels.

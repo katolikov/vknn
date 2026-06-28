@@ -70,7 +70,7 @@ references source under `include/vknn/` and `src/`.
 ```
 
 The canonical IR layout is **NCHW** throughout (`graph.h` header comment, and
-`TensorFormat::kNCHW` is the default in `TensorDesc`). Only the Vulkan backend
+`TensorFormat::NCHW` is the default in `TensorDesc`). Only the Vulkan backend
 re-packs into `NC4HW4` internally; the rest of the engine never sees that layout.
 
 ---
@@ -83,7 +83,7 @@ There are two tensor representations, split by lifetime:
 
 - **`TensorDesc`** — compile-time description living in `Graph::tensors`. Holds the
   logical NCHW `shape` (dynamic dims as `-1`), `dtype`, `format`
-  (`TensorFormat::kNCHW` by default), and the `isInput` / `isOutput` /
+  (`TensorFormat::NCHW` by default), and the `isInput` / `isOutput` /
   `isInitializer` role flags.
 
 - **`RtTensor`** — runtime storage in the `Session` pool, indexed by `TensorId`.
@@ -93,7 +93,7 @@ There are two tensor representations, split by lifetime:
   struct RtTensor {
     TensorId id = kNoTensor;
     Shape shape;
-    DType dtype = DType::kFloat32;
+    DType dtype = DType::Float32;
 
     // host residency (canonical NCHW, fp32 for compute/IO)
     HostBuffer host;
@@ -101,8 +101,8 @@ There are two tensor representations, split by lifetime:
 
     // device residency (managed by a backend)
     std::shared_ptr<DeviceStorage> device;     // null until a backend allocates
-    TensorFormat deviceFormat = TensorFormat::kUnknown;
-    DType        deviceDtype  = DType::kFloat32;
+    TensorFormat deviceFormat = TensorFormat::Unknown;
+    DType        deviceDtype  = DType::Float32;
     bool         deviceValid  = false;
   };
   ```
@@ -111,7 +111,7 @@ There are two tensor representations, split by lifetime:
   vector with `f32()` / `i64()` views). The `device` side is an opaque
   `DeviceStorage` (forward-declared in the core; the Vulkan backend defines it as a
   `std::shared_ptr<vk::Buffer>` in `vk_backend.h`), tagged with its own
-  `deviceFormat` (e.g. `kNC4HW4`) and `deviceDtype` (e.g. fp16). The two `*Valid`
+  `deviceFormat` (e.g. `NC4HW4`) and `deviceDtype` (e.g. fp16). The two `*Valid`
   flags drive the residency-reconciliation logic (§4.3): a tensor is packed,
   unpacked, or copied only when needed.
 
@@ -136,20 +136,20 @@ fusion results from the passes:
 
 ```cpp
 struct Node {
-  OpType type = OpType::kUnknown;
+  OpType type = OpType::Unknown;
   std::string name;
   std::vector<TensorId> inputs, outputs;
   Attributes attr;
-  ActType fusedAct = ActType::kNone;   // set by fuseActivations
-  float   actLo = 0, actHi = 0;        // Clip bounds when fusedAct == kClip
+  ActType fusedAct = ActType::None;   // set by fuseActivations
+  float   actLo = 0, actHi = 0;        // Clip bounds when fusedAct == Clip
 };
 ```
 
-`OpType` enumerates the supported ops: `kConv`, `kClip`, `kRelu`, `kAdd`,
-`kGlobalAvgPool`, `kGemm`, `kReshape`, `kFlatten`, `kSoftmax`, `kBatchNorm`,
-`kIdentity`, plus shape ops `kShape` / `kConstant` / `kGather` / `kUnsqueeze` /
-`kConcat` (the shape ops are CPU-only and are const-folded away on the Vulkan
-path). `ActType` (`kNone`/`kRelu`/`kRelu6`/`kClip`) is kept in sync with
+`OpType` enumerates the supported ops: `Conv`, `Clip`, `Relu`, `Add`,
+`GlobalAvgPool`, `Gemm`, `Reshape`, `Flatten`, `Softmax`, `BatchNorm`,
+`Identity`, plus shape ops `Shape` / `Constant` / `Gather` / `Unsqueeze` /
+`Concat` (the shape ops are CPU-only and are const-folded away on the Vulkan
+path). `ActType` (`None`/`Relu`/`Relu6`/`Clip`) is kept in sync with
 `shaders/common.glsl`. `Attributes` is a typed `name → Attr` map with `geti` /
 `getf` / `getints` / `gets` accessors used by kernels to read pads, strides, etc.
 
@@ -202,16 +202,16 @@ This requires the static lib to be linked whole-archive
 `vknn::Config` is an MNN-inspired struct, loadable from JSON
 (`Config::fromJsonFile` / `fromJsonString` / `toJson`). Key fields:
 
-- `backend` (`kVulkan`/`kCpu`), ordered `fallback` list, `allowCpuFallback`
+- `backend` (`Vulkan`/`Cpu`), ordered `fallback` list, `allowCpuFallback`
   (CPU is the implicit final fallback).
-- `precision` (`kFp32`/`kFp16`/`kAuto`; default `kFp16`), `power`, `cpuThreads`.
-- `inputLayout` / `outputLayout` (`kNCHW`/`kNHWC`) — what the *user* supplies and
+- `precision` (`Fp32`/`Fp16`/`Auto`; default `Fp16`), `power`, `cpuThreads`.
+- `inputLayout` / `outputLayout` (`NCHW`/`NHWC`) — what the *user* supplies and
   wants back; the engine converts internally.
 - Cache controls: `cacheFile` (the unified per-model cache, §7), `cacheDir`
   (the graph-only fallback location), `cachePipeline`, `cacheWeights`, `cacheTuning`.
 - Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
-- `tuning` (`kOff`/`kFast`/`kThorough`) — autotuning level.
+- `tuning` (`Off`/`Fast`/`Thorough`) — autotuning level.
 
 ### 2.5 Session / Runtime (`include/vknn/session.h`, `src/core/session.cpp`)
 
@@ -250,7 +250,7 @@ fills `cpuMs` and sets `fellBack = isFallback`.
 
 ## 3. The `NC4HW4` layout and why
 
-`TensorFormat::kNC4HW4` (`include/vknn/tensor_format.h`) is the Vulkan backend's
+`TensorFormat::NC4HW4` (`include/vknn/tensor_format.h`) is the Vulkan backend's
 internal layout: channels are packed into `vec4` blocks. A logical NCHW tensor with
 `C` channels becomes `ceil(C/4)` channel-blocks of 4, i.e. its packed element count is
 
@@ -294,7 +294,7 @@ Each node is assigned to the **highest-priority backend whose `supports(op, dt)`
 returns true**. If the primary backend declines an op (e.g. the GPU lacks a kernel,
 or `VKNN_DISABLE_VK_OPS` is set), a throttled fallback warning is logged and the
 node falls through to the next backend (ultimately CPU). If *no* backend supports an
-op, planning throws `Status::kUnsupported`.
+op, planning throws `Status::Unsupported`.
 
 The topo-ordered node list is then sliced into **maximal contiguous runs of the same
 backend index** — the segments:
@@ -340,7 +340,7 @@ void run(ExecContext& ctx) override {
     if (rt.hostValid && !rt.deviceValid) {
       VulkanBackend::packToBuffer(buffers_[tid].get(), rt, useFp16_);  // NCHW→NC4HW4
       rt.deviceValid  = true;
-      rt.deviceFormat = TensorFormat::kNC4HW4;
+      rt.deviceFormat = TensorFormat::NC4HW4;
     }
   }
 
@@ -350,7 +350,7 @@ void run(ExecContext& ctx) override {
   for (TensorId tid : boundaryOutputs) {
     ... VulkanBackend::unpackFromBuffer(buffers_[tid].get(), rt, useFp16_);  // NC4HW4→NCHW
     rt.deviceValid  = true;
-    rt.deviceFormat = TensorFormat::kNC4HW4;
+    rt.deviceFormat = TensorFormat::NC4HW4;
   }
   ...
 }
