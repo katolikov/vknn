@@ -8,7 +8,7 @@ layout(std430, binding = 1) readonly  buffer BufB { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer BufC { STORE c[]; };
 layout(push_constant) uniform PC { uint count; int act; float actLo, actHi; } pc;
 void main() {
-  uint i = gl_GlobalInvocationID.x;
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (i >= pc.count) return;
   c[i] = STORE(vx_act(float(a[i]) + float(b[i]), pc.act, pc.actLo, pc.actHi));
 }

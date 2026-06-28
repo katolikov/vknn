@@ -58,6 +58,7 @@ int main(int argc, char **argv) {
     cfg.noFlatOps              = flag(argc, argv, "--no-flat");
     cfg.timing                 = flag(argc, argv, "--timing");
     cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
+    cfg.dumpTensors            = opt(argc, argv, "--dump", "");
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -72,7 +73,7 @@ int main(int argc, char **argv) {
     {
         if (argv[i][0] == '-')
         {
-            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--opt-level") || !strcmp(argv[i], "--cache"))
+            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--opt-level") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump"))
             {
                 ++i; // skip the flag's value
             }

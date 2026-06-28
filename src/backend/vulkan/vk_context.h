@@ -22,9 +22,13 @@ namespace vknn { namespace vk {
         uint32_t subgroupSize            = 0;
         uint32_t maxWorkGroupInvocations = 0;
         uint32_t maxWorkGroupSize[3]     = {0, 0, 0};
-        uint32_t maxSharedMemory         = 0;
-        float    timestampPeriod         = 0.f;
-        bool     timestampSupported      = false;
+        // Max workgroups per dispatch dimension. A 1D dispatch with gx > maxWorkGroupCount[0]
+        // is illegal and silently does nothing on this driver, so large flat ops must split
+        // the overflow into the y dimension (see ComputePipeline::dispatch).
+        uint32_t maxWorkGroupCount[3] = {0, 0, 0};
+        uint32_t maxSharedMemory      = 0;
+        float    timestampPeriod      = 0.f;
+        bool     timestampSupported   = false;
 
         // Feature flags we exploit
         bool shaderFloat16        = false;

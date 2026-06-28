@@ -8,7 +8,7 @@ layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int outer, axis, inner; } pc;
 
 void main() {
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.outer * pc.inner)) return;
   int o = int(gid) / pc.inner, i = int(gid) % pc.inner;
   int base = o * pc.axis * pc.inner + i;

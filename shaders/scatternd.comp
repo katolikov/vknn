@@ -16,7 +16,7 @@ layout(push_constant) uniform PC {
   int  stride[8];
 } pc;
 void main() {
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= pc.total) return;
   int row = int(gid) / pc.sliceSize;
   int slot = int(gid) % pc.sliceSize;

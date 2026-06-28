@@ -16,7 +16,7 @@ void main() {
   int Coutb = (pc.Cout + 3) / 4;
   int W4 = (pc.W + 3) / 4;
   int C8 = (Coutb + 1) / 2;
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(C8 * W4 * pc.H)) return;
   int w4 = int(gid) % W4;
   int oh = (int(gid) / W4) % pc.H;

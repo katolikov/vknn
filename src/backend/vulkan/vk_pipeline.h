@@ -59,6 +59,7 @@ namespace vknn {
             VkPipelineLayout      layout_     = VK_NULL_HANDLE;
             VkPipeline            pipeline_   = VK_NULL_HANDLE;
             uint32_t              numBuffers_ = 0;
+            std::string           name_;
         };
 
     } // namespace vk

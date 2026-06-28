@@ -13,7 +13,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 void main() {
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   int Cb = (pc.C + 3) / 4;
   uint total = uint(pc.N * Cb * pc.OH * pc.OW);
   if (gid >= total) return;

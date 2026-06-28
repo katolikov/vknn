@@ -22,7 +22,7 @@ void main() {
   int Cinb = (pc.Cin + 3) / 4;
   int Coutb = (pc.Cout + 3) / 4;
   int nT = pc.N * pc.nTH * pc.nTW;
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(Coutb * nT)) return;
   int tile = int(gid) % nT;
   int ocb = int(gid) / nT;

@@ -10,7 +10,7 @@ layout(std430, binding = 3) writeonly buffer Dst { float dst[]; };
 layout(push_constant) uniform PC { int Cin, Cout, M, srcStride, dstStride, act; float actLo, actHi; } pc;
 
 void main() {
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.M) * uint(pc.Cout)) return;
   uint m = gid / uint(pc.Cout);
   uint oc = gid % uint(pc.Cout);

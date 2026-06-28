@@ -16,7 +16,7 @@ layout(push_constant) uniform PC { int Cin, Cout, HW, KPARTS, chunk; } pc;
 void main() {
   int Cinb = (pc.Cin + 3) / 4;
   int Coutb = (pc.Cout + 3) / 4;
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.KPARTS * Coutb * pc.HW)) return;
   int pix = int(gid) % pc.HW;
   int ocb = (int(gid) / pc.HW) % Coutb;

@@ -46,7 +46,7 @@ namespace vknn { namespace vk {
 
     // ----------------------------- ComputePipeline -----------------------------
     ComputePipeline::ComputePipeline(VulkanContext &ctx, const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData, VkPipelineCache cache):
-        ctx_(ctx), numBuffers_(numBuffers) {
+        ctx_(ctx), numBuffers_(numBuffers), name_(shaderName) {
         auto it = embeddedShaders().find(shaderName);
         if (it == embeddedShaders().end())
         {
@@ -154,6 +154,17 @@ namespace vknn { namespace vk {
         if (pcBytes > 0)
         {
             vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, pcBytes, pushConst);
+        }
+        // A 1D dispatch whose x group count exceeds the device limit is illegal and is silently
+        // dropped on this driver (producing zeroed output). Spill the overflow into the y dimension;
+        // the flat shaders recover the linear id via gl_GlobalInvocationID.x + y*numGroups.x*wgSize.x,
+        // so this is a no-op (gy stays 1) for every dispatch that already fits.
+        const uint32_t maxX = ctx_.caps().maxWorkGroupCount[0];
+        if (gy == 1 && gz == 1 && maxX > 0 && gx > maxX)
+        {
+            gy = (gx + maxX - 1) / maxX;
+            gx = (gx + gy - 1) / gy; // gx <= maxX, gx*gy >= original group count
+            VKNN_INFO << "dispatch split for " << name_ << ": gx=" << gx << " gy=" << gy << " (max " << maxX << ")";
         }
         vkCmdDispatch(cmd, gx, gy, gz);
     }

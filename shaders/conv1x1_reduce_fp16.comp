@@ -14,7 +14,7 @@ layout(push_constant) uniform PC { int Cout, HW, KPARTS, act; float actLo, actHi
 
 void main() {
   int Coutb = (pc.Cout + 3) / 4;
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(Coutb * pc.HW)) return;
   int pix = int(gid) % pc.HW;
   int ocb = int(gid) / pc.HW;

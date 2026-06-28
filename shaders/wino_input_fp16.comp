@@ -13,7 +13,7 @@ layout(push_constant) uniform PC { int N, C, H, W, OH, OW, nTH, nTW; } pc;
 void main() {
   int Cinb = (pc.C + 3) / 4;
   int nT = pc.N * pc.nTH * pc.nTW;
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(Cinb * nT)) return;
   int tile = int(gid) % nT;
   int icb = int(gid) / nT;

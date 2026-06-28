@@ -9,7 +9,7 @@ layout(std430, binding = 0) readonly  buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { f16vec4 dst[]; };
 layout(push_constant) uniform PC { int N, Cib, Cob, cbOff, HW; } pc;
 void main() {
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.N * pc.Cib * pc.HW)) return;
   int hw = int(gid) % pc.HW;
   int cb = (int(gid) / pc.HW) % pc.Cib;

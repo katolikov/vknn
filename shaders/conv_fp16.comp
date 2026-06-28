@@ -16,7 +16,7 @@ layout(push_constant) uniform PC {
 pc;
 
 void main() {
-  uint gid = gl_GlobalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   int Cinb = (pc.Cin + 3) / 4;
   int Coutb = (pc.Cout + 3) / 4;
   uint total = uint(pc.N * Coutb * pc.OH * pc.OW);
