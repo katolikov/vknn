@@ -24,6 +24,7 @@ namespace vknn {
             bool                                 reg       = false; // register-tiled implicit-im2col general conv (WTILE pixels/thread)
             bool                                 lds       = false; // LDS input-halo 3x3 (8x8 tile/workgroup)
             int64_t                              ldsGroups = 0;
+            bool                                 pwS2      = false; // strided 1x1 (downsample) on the register-tiled kernel
             bool                                 hasRes    = false; // residual Add fused into the epilogue (out = act(conv + residual))
             std::unique_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
@@ -333,6 +334,7 @@ namespace vknn {
                 hasRes             = (node.fusedResidual != kNoTensor); // set by the residual-Add fusion pass (1x1 only)
                 depthwise          = (group == x.c && group == Cout && inCg == 1);
                 pointwise = (!depthwise && group == 1 && KH == 1 && KW == 1 && st[0] == 1 && st[1] == 1 && pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
+                pwS2      = (!depthwise && group == 1 && KH == 1 && KW == 1 && (st[0] > 1 || st[1] > 1) && pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
                 // Winograd F(2,3) via a tiled GEMM is eligible only for deep, square 3x3/s1/p1 group-1
                 // convs in fp16; tuneWino picks it per shape (it loses on small-channel / spatially-large
                 // 3x3) and caches the choice.
@@ -432,6 +434,14 @@ namespace vknn {
                             pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)},
                                                                          env.cache->handle());
                         }
+                    } else if (pwS2)
+                    {
+                        // strided 1x1 (downsample): register-tiled kernel that gathers the input at the
+                        // stride; reuses weights across WTILE output pixels (the general direct kernel does 1).
+                        int64_t HW = y.h * y.w;
+                        total      = x.n * Coutb * ((HW + kTile - 1) / kTile);
+                        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1_s2", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
+                                                                     std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)}, env.cache->handle());
                     } else if (cfgHint(env, Hint::DirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
                     {
                         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
@@ -508,7 +518,7 @@ namespace vknn {
                 if (depthwise)
                 {
                     pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, 64));
-                } else if (pointwise)
+                } else if (pointwise || pwS2)
                 {
                     if (hasRes)
                     {

@@ -1,0 +1,71 @@
+#version 450
+// Strided pointwise 1x1 conv (group=1, stride>1, no pad), NC4HW4, fp16 — the ResNet downsample
+// projection. Same register-tiled scheme as conv1x1 (one thread = one output channel-block for
+// WTILE output pixels, weight vec4 reused across the WTILE pixels, input vec4 reused across the 4
+// output channels), but the input pixel is gathered at the stride (output (oh,ow) reads input
+// (oh*SH, ow*SW)). This reuses weights WTILE/4x better than the general one-pixel-per-thread kernel
+// the strided 1x1 falls back to.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "common.glsl"
+#define WTILE 4
+layout(constant_id = 0) const int HAS_RES = 0; // fused residual add (out = act(conv + res))
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(std430, binding = 4) readonly buffer Res { f16vec4 res[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+}
+pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int IHW = pc.H * pc.W;        // input spatial
+  int OHW = pc.OH * pc.OW;      // output spatial
+  int nTiles = (OHW + WTILE - 1) / WTILE;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * Coutb * nTiles)) return;
+  int tile = int(gid) % nTiles;
+  int ocb = (int(gid) / nTiles) % Coutb;
+  int n = int(gid) / (nTiles * Coutb);
+  int p0 = tile * WTILE;
+
+  vec4 acc[WTILE];
+  vec4 b = vec4(bias[ocb]);
+  for (int p = 0; p < WTILE; ++p) acc[p] = b;
+
+  int wrow = ocb * 4 * Cinb;
+  int sbaseN = n * Cinb * IHW;
+  for (int icb = 0; icb < Cinb; ++icb) {
+    vec4 w0 = vec4(wt[wrow + 0 * Cinb + icb]);
+    vec4 w1 = vec4(wt[wrow + 1 * Cinb + icb]);
+    vec4 w2 = vec4(wt[wrow + 2 * Cinb + icb]);
+    vec4 w3 = vec4(wt[wrow + 3 * Cinb + icb]);
+    int sbase = sbaseN + icb * IHW;
+    for (int p = 0; p < WTILE; ++p) {
+      int opix = min(p0 + p, OHW - 1);
+      int oh = opix / pc.OW, ow = opix % pc.OW;
+      int ipix = (oh * pc.SH) * pc.W + (ow * pc.SW);
+      vec4 inv = vec4(src[sbase + ipix]);
+      acc[p].x += dot(inv, w0);
+      acc[p].y += dot(inv, w1);
+      acc[p].z += dot(inv, w2);
+      acc[p].w += dot(inv, w3);
+    }
+  }
+  int dbase = (n * Coutb + ocb) * OHW;
+  for (int p = 0; p < WTILE; ++p) {
+    int opix = p0 + p;
+    if (opix < OHW) {
+      vec4 v = acc[p];
+      if (HAS_RES != 0) v += vec4(res[dbase + opix]);
+      dst[dbase + opix] = f16vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi), vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+                                  vx_act(v.z, pc.act, pc.actLo, pc.actHi), vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+    }
+  }
+}
