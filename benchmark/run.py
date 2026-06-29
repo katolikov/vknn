@@ -257,7 +257,7 @@ def run_stage(stage, base, idx, where_convert="host"):
         dcfg["cache"] = os.path.basename(dev["cache"])
     if stage.get("generate_cache") or dev.get("generate_cache"):  # untimed warm-up load to populate it
         dcfg["generate_cache"] = True
-    for k in ("winograd", "tuning", "winogradVariant", "winogradUnit", "directConv3x3"):  # conv kernel hints
+    for k in ("winograd", "tuning", "winogradVariant", "winogradUnit", "directConv3x3", "fp32_tensors"):  # conv kernel hints + selective fp32
         v = stage.get(k, dev.get(k))
         if v is not None:
             dcfg[k] = v

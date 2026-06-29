@@ -94,6 +94,8 @@ namespace vknn {
                 return "FusedDwPw";
             case OpType::ConvertLayout:
                 return "ConvertLayout";
+            case OpType::ConvertDtype:
+                return "ConvertDtype";
             default:
                 return "Unknown";
         }

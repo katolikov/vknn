@@ -23,6 +23,11 @@ namespace vknn {
         // Vulkan only: store this tensor as a flat row-major buffer (set by the layout-convert pass for
         // the generic head ops) instead of the default NC4HW4 packing. Ignored by the CPU backend.
         bool gpuFlat = false;
+        // Vulkan only: keep this activation's buffer in fp32 even when the segment runs fp16, so a
+        // precision-critical sub-graph (the geometry tail) does not lose accuracy to fp16 storage. Set by
+        // the markFp32 pass from Config::fp32Tensors at load time (not serialized). The producing op runs
+        // its fp32 kernel variant; a convert_dtype node bridges the fp16/fp32 frontier.
+        bool storeFp32 = false;
     };
 
     /// Host-side raw bytes (initializers, I/O, CPU compute results). Logical layout = NCHW.

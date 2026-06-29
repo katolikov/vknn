@@ -60,6 +60,7 @@ int main(int argc, char **argv) {
     cfg.timing                 = flag(argc, argv, "--timing");
     cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
     cfg.dumpTensors            = opt(argc, argv, "--dump", "");
+    cfg.fp32Tensors            = opt(argc, argv, "--fp32-tensors", "");
     cfg.profile                = flag(argc, argv, "--profile");
     cfg.setHint(Hint::Winograd, winogradFromStr(opt(argc, argv, "--winograd", "auto")));
     cfg.setHint(Hint::Tuning, tuningFromStr(opt(argc, argv, "--tuning", "fast")));

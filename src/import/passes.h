@@ -44,4 +44,8 @@ namespace vknn {
     // without such ops. Run after backend-agnostic passes, before backend planning.
     void insertLayoutConverts(Graph &g);
 
+    // Mark activation tensors named by `substrs` (comma list) as fp32 storage and insert ConvertDtype
+    // nodes at the fp16/fp32 frontier (Config::fp32Tensors). Runs at load, after insertLayoutConverts.
+    void markFp32(Graph &g, const std::string &substrs);
+
 } // namespace vknn

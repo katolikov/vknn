@@ -265,6 +265,7 @@ namespace vknn {
         if (byKind_.count(BackendKind::Vulkan) && !cfg_.noFlatOps)
         {
             insertLayoutConverts(graph_);
+            markFp32(graph_, cfg_.fp32Tensors); // selective fp32 storage on the named geometry-tail tensors
             graph_.topoSort();
         }
 

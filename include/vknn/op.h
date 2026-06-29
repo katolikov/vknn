@@ -61,6 +61,8 @@ namespace vknn {
         FusedDwPw,       // fused depthwise-3x3 + 1x1-project (expanded intermediate stays on-chip)
         // layout conversion nodes (inserted by the layout pass)
         ConvertLayout,
+        // fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by markFp32)
+        ConvertDtype,
     };
 
     // Sub-codes for the Unary/Binary/Reduce families, stored in Node::subOp. The integer values are

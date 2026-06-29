@@ -92,6 +92,12 @@ namespace vknn {
         std::string disableVkOps;          // comma list of op types to force onto CPU
         std::string dumpTensors;           // comma list of tensor names to dump to disk
 
+        // Comma list of tensor-name substrings whose activations are kept in fp32 storage even when the
+        // segment runs fp16 (selective precision for the precision-critical geometry tail). The markFp32
+        // pass marks matching tensors and bridges the fp16/fp32 frontier with convert_dtype nodes; the
+        // marked ops run their fp32 kernel variant. Only affects accuracy/runtime, never op support.
+        std::string fp32Tensors;
+
         // Profiling / debug.
         bool        profile      = false;
         int         verbosity    = 1; // maps to log level

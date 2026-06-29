@@ -58,7 +58,8 @@ namespace vknn {
         const Graph                          *graph   = nullptr;
         const Config                         *config  = nullptr;
         std::function<vk::Buffer *(TensorId)> devBuf; // activation buffer for a tensor id
-        bool                                  useFp16  = false;
+        bool                                  useFp16  = false; // per-node: false for a storeFp32 node so it runs its fp32 kernel
+        bool                                  baseFp16 = false; // segment-wide precision (what a non-storeFp32 tensor is stored as)
         WeightCache                          *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
         vk::CommandRunner                    *runner   = nullptr; // for on-device autotuning benchmarks
         Mode                                  tuning   = Mode::Fast;

@@ -791,7 +791,8 @@ namespace vknn {
             }
             auto actBytes = [&](TensorId tid) -> size_t {
                 int64_t elems = g.tensors[tid].gpuFlat ? numElements(g.tensors[tid].shape) : packedElems(g.tensors[tid].shape);
-                size_t  b     = (size_t) elems * elemSize_;
+                int     es    = g.tensors[tid].storeFp32 ? 4 : elemSize_; // selective-fp32 tensors keep 4-byte storage
+                size_t  b     = (size_t) elems * es;
                 return b == 0 ? (size_t) elemSize_ * 4 : b;
             };
             // Liveness buffer planner. One buffer per tensor keeps ALL activations live at once (~11.5GB on
@@ -813,7 +814,9 @@ namespace vknn {
             }
             for (TensorId tid: acts)
             {
-                bool internal = producedHere.count(tid) && !readBack.count(tid);
+                // storeFp32 tensors get a dedicated buffer (never pooled): the liveness pool aliases by
+                // byte size only, so a 4-byte tensor must not share a slot sized for 2-byte neighbours.
+                bool internal = producedHere.count(tid) && !readBack.count(tid) && !g.tensors[tid].storeFp32;
                 if (internal)
                 {
                     continue; // pooled below
@@ -824,9 +827,9 @@ namespace vknn {
             // [firstPos,lastPos] of each internal tensor within this segment's execution order
             std::map<TensorId, int> firstPos, lastPos;
             auto                    touch = [&](TensorId t, int k) {
-                if (t == kNoTensor || !producedHere.count(t) || readBack.count(t))
+                if (t == kNoTensor || !producedHere.count(t) || readBack.count(t) || g.tensors[t].storeFp32)
                 {
-                    return;
+                    return; // dedicated (storeFp32) and boundary tensors are not pooled
                 }
                 if (!firstPos.count(t))
                 {
@@ -913,6 +916,7 @@ namespace vknn {
             env_.graph    = &g;
             env_.config   = &cfg;
             env_.useFp16  = useFp16_;
+            env_.baseFp16 = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
             // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
             // model, distinct across models) so a shared cacheDir can't return another model's weights.
             {
@@ -951,9 +955,13 @@ namespace vknn {
                 {
                     throw Error(Status::Unsupported, std::string("no Vulkan kernel for ") + opTypeName(g.nodes[ni].type));
                 }
+                // A storeFp32 node (its output kept in fp32) selects its fp32 kernel variant + uploads its
+                // weights fp32; ConvertDtype reads the precision per tensor and ignores this.
+                env_.useFp16 = nodeFp32(g.nodes[ni]) ? false : useFp16_;
                 op->prepare(g.nodes[ni], env_);
                 ops_.push_back(std::move(op));
             }
+            env_.useFp16 = useFp16_;
 
             // 3) timestamp query pool (2 per node). Only when profiling - the extra writes + the implicit
             //    barriers around them aren't free, and we don't want them on the hot path.
@@ -974,6 +982,11 @@ namespace vknn {
             {
                 vkDestroyQueryPool(be_->ctx().device(), queryPool_, nullptr);
             }
+        }
+
+        // A node runs in fp32 (selects its fp32 kernel + 4-byte buffers) when its output is storeFp32.
+        bool nodeFp32(const Node &nd) const {
+            return !nd.outputs.empty() && nd.outputs[0] != kNoTensor && g_.tensors[nd.outputs[0]].storeFp32;
         }
 
         void record() {
@@ -1097,6 +1110,7 @@ namespace vknn {
                 {
                     vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2));
                 }
+                env_.useFp16 = nodeFp32(node) ? false : useFp16_; // match the variant chosen in prepare()
                 ops_[k]->record(cmd_, node, env_);
                 if (queryPool_)
                 {
@@ -1345,7 +1359,7 @@ namespace vknn {
                 rt.deviceFormat   = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 if (rt.dmaBufFd < 0)
                 {
-                    VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_, flat);
+                    VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, flat);
                 }
                 // else: the GPU wrote device-native bytes straight into the caller's dma-buf; caller reads it.
             }
@@ -1371,7 +1385,7 @@ namespace vknn {
                         continue;
                     }
                     RtTensor &rt = ctx.t(tid);
-                    VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_, g_.desc(tid).gpuFlat);
+                    VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, g_.desc(tid).gpuFlat);
                     std::string nm = g_.tensors[tid].name;
                     for (char &c: nm)
                     {
@@ -1398,7 +1412,7 @@ namespace vknn {
                     {
                         continue;
                     }
-                    VulkanBackend::unpackFromBuffer(kv.second.get(), rt, useFp16_, g_.desc(kv.first).gpuFlat);
+                    VulkanBackend::unpackFromBuffer(kv.second.get(), rt, useFp16_ && !g_.tensors[kv.first].storeFp32, g_.desc(kv.first).gpuFlat);
                 }
             }
 
