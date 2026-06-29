@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
 
     Config cfg;
     cfg.backend   = backendFromStr(argval(argc, argv, "--backend", "vulkan"));
-    cfg.precision = strcmp(argval(argc, argv, "--precision", "fp16"), "fp32") == 0 ? Precision::Fp32 : Precision::Fp16;
+    cfg.precision = strcmp(argval(argc, argv, "--precision", "fp16"), "fp32") == 0 ? Precision::High : Precision::Low;
     cfg.profile   = true;
 
     auto sess = Runtime::load(model, cfg);

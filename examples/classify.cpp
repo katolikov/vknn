@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
         cfg = Config::fromJsonFile(cfgpath);
     }
     cfg.backend   = backendFromStr(backend);
-    cfg.precision = (precision == "fp32") ? Precision::Fp32 : Precision::Fp16;
+    cfg.precision = (precision == "fp32") ? Precision::High : Precision::Low;
     cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());
     {
         std::string w = argval(argc, argv, "--winograd", "auto"); // auto|on|off

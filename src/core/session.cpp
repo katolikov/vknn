@@ -265,10 +265,10 @@ namespace vknn {
         if (byKind_.count(BackendKind::Vulkan) && !cfg_.noFlatOps)
         {
             insertLayoutConverts(graph_);
-            // Selective fp32 storage. Precision::Mixed ("normal") uses the built-in geometry-tail preset
+            // Selective fp32 storage. Precision::Normal ("normal") uses the built-in geometry-tail preset
             // when fp32Tensors is empty; an explicit fp32Tensors always wins.
             std::string fp32Marks = cfg_.fp32Tensors;
-            if (fp32Marks.empty() && cfg_.precision == Precision::Mixed)
+            if (fp32Marks.empty() && cfg_.precision == Precision::Normal)
             {
                 fp32Marks = mixedPrecisionFp32Tensors();
             }
@@ -717,8 +717,8 @@ namespace vknn {
         // Zero-copy boundary buffer the caller provides: the segment's device layout for this tensor at
         // the compute precision (fp16 -> 2 bytes/elem). Flat boundaries are row-major NCHW; the rest are
         // NC4HW4 (channels in groups of 4, padded), whose byte size includes the channel padding.
-        int64_t elemSize = (prec == Precision::Fp32) ? 4 : 2;
-        info.deviceDtype = (prec == Precision::Fp32) ? DType::Float32 : DType::Float16;
+        int64_t elemSize = (prec == Precision::High) ? 4 : 2;
+        info.deviceDtype = (prec == Precision::High) ? DType::Float32 : DType::Float16;
         if (g.desc(id).gpuFlat)
         {
             info.deviceBytes  = info.elems * elemSize;

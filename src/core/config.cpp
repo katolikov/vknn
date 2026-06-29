@@ -26,30 +26,30 @@ namespace vknn {
     Precision precisionFromStr(const std::string &s) {
         if (s == "low" || s == "fp16" || s == "FP16")
         {
-            return Precision::Fp16;
+            return Precision::Low;
         }
         if (s == "normal" || s == "mixed")
         {
-            return Precision::Mixed;
+            return Precision::Normal;
         }
         if (s == "high" || s == "fp32" || s == "FP32")
         {
-            return Precision::Fp32;
+            return Precision::High;
         }
         if (s == "auto")
         {
             return Precision::Auto;
         }
-        return Precision::Fp16;
+        return Precision::Low;
     }
     static const char *precStr(Precision p) {
         switch (p)
         {
-            case Precision::Fp16:
+            case Precision::Low:
                 return "low";
-            case Precision::Mixed:
+            case Precision::Normal:
                 return "normal";
-            case Precision::Fp32:
+            case Precision::High:
                 return "high";
             default:
                 return "auto";

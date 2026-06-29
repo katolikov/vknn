@@ -530,7 +530,7 @@ namespace vknn {
 
         bool useFp16(const Config &cfg) const {
             // Mixed ("normal") is fp16 storage too; markFp32 keeps only the selective set in fp32.
-            return vxVulkanFp16Available() && ctx_->caps().shaderFloat16 && (cfg.precision == Precision::Fp16 || cfg.precision == Precision::Auto || cfg.precision == Precision::Mixed);
+            return vxVulkanFp16Available() && ctx_->caps().shaderFloat16 && (cfg.precision == Precision::Low || cfg.precision == Precision::Auto || cfg.precision == Precision::Normal);
         }
 
         std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) override;

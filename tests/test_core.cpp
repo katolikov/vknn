@@ -24,7 +24,7 @@ TEST(DType, HalfRoundTrip) {
 TEST(Config, JsonRoundTrip) {
     Config c;
     c.backend       = BackendKind::Vulkan;
-    c.precision     = Precision::Fp16;
+    c.precision     = Precision::Low;
     c.maxSubmitNodes = 250;
     c.profile       = true;
     c.cacheMode     = CacheMode::Tune;
@@ -32,22 +32,22 @@ TEST(Config, JsonRoundTrip) {
     std::string js = c.toJson();
     Config      d  = Config::fromJsonString(js);
     EXPECT_EQ(d.backend, BackendKind::Vulkan);
-    EXPECT_EQ(d.precision, Precision::Fp16);
+    EXPECT_EQ(d.precision, Precision::Low);
     EXPECT_EQ(d.maxSubmitNodes, 250);
     EXPECT_TRUE(d.profile);
     EXPECT_EQ(d.cacheMode, CacheMode::Tune);
     EXPECT_FALSE(d.cachesWeights());
     EXPECT_TRUE(d.cachesTuning());
-    EXPECT_EQ(precisionFromStr("normal"), Precision::Mixed);
-    EXPECT_EQ(precisionFromStr("high"), Precision::Fp32);
-    EXPECT_EQ(precisionFromStr("low"), Precision::Fp16);
+    EXPECT_EQ(precisionFromStr("normal"), Precision::Normal);
+    EXPECT_EQ(precisionFromStr("high"), Precision::High);
+    EXPECT_EQ(precisionFromStr("low"), Precision::Low);
     EXPECT_EQ(d.hint(Hint::Winograd, 0), (int) Mode::Off);
 }
 
 TEST(Config, ParseExplicit) {
     Config c = Config::fromJsonString(R"({"backend":"CPU","precision":"fp32","fallback":["VULKAN","CPU"],"cacheDir":"/tmp/x"})");
     EXPECT_EQ(c.backend, BackendKind::Cpu);
-    EXPECT_EQ(c.precision, Precision::Fp32);
+    EXPECT_EQ(c.precision, Precision::High);
     EXPECT_EQ(c.cacheDir, "/tmp/x");
     ASSERT_EQ(c.fallback.size(), 2u);
     EXPECT_EQ(c.fallback[0], BackendKind::Vulkan);

@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     Config cfg;
-    cfg.precision = Precision::Fp16;                 // fp16 GPU inference
+    cfg.precision = Precision::Low;                 // fp16 GPU inference
     cfg.cacheFile = std::string(argv[1]) + ".cache"; // reused next load for a warm start
     Model net     = Model::load(argv[1], cfg);
     if (!net)

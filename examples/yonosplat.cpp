@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
     // ---------- 1. encoder: image + intrinsics -> 6 Gaussian outputs (vknn Vulkan) ----------
     Config cfg;
     cfg.backend                = BackendKind::Vulkan;
-    cfg.precision              = Precision::Fp16;
+    cfg.precision              = Precision::Low;
     cfg.cacheMode              = CacheMode::Tune;
     cfg.freeWeightsAfterUpload = true;
     auto sess                  = Runtime::load(enc, cfg);

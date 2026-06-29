@@ -9,13 +9,13 @@
 namespace vknn {
 
     enum class BackendKind { Vulkan = 0, Cpu = 1 };
-    // Quality tiers, set as "low" / "normal" / "high" (fp16 / fp32 aliases kept):
-    //   Fp16  ("low")    fp16 storage + fp32 accumulation everywhere.
-    //   Mixed ("normal") fp16 storage, but a built-in geometry-tail set is kept fp32 (selective fp32).
-    //   Fp32  ("high")   full fp32 storage.
-    enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2, Mixed = 3 };
+    // Quality tiers (string tokens "low" / "normal" / "high"; "fp16" / "fp32" kept as aliases):
+    //   Low    fp16 storage + fp32 accumulation everywhere.
+    //   Normal fp16 storage, but a built-in geometry-tail set is kept fp32 (selective fp32).
+    //   High   full fp32 storage.
+    enum class Precision { High = 0, Low = 1, Auto = 2, Normal = 3 };
 
-    // The default selective-fp32 set used by Precision::Mixed ("normal") when Config::fp32Tensors is empty:
+    // The default selective-fp32 set used by Precision::Normal ("normal") when Config::fp32Tensors is empty:
     // the comma-separated tensor-name substrings of the geometry tail that benefit from fp32 storage
     // without the NaN-fragile camera-pose SVD. A no-op for models without these names (e.g. CNNs).
     const char *mixedPrecisionFp32Tensors();
@@ -64,7 +64,7 @@ namespace vknn {
         std::vector<BackendKind> fallback         = {BackendKind::Cpu};
         bool                     allowCpuFallback = true;
 
-        Precision precision = Precision::Fp16;
+        Precision precision = Precision::Low;
 
         // Caches. The unified per-model cache file bundles the compiled-pipeline blob and the
         // prepacked-weight + autotune blob; loading it skips shader compilation, conv autotuning, and
@@ -105,8 +105,8 @@ namespace vknn {
 
         // Advanced override of the selective-fp32 set: comma list of tensor-name substrings (leading '-'
         // excludes) whose activations are kept in fp32 storage even when the segment runs fp16. Empty +
-        // Precision::Mixed uses the built-in mixedPrecisionFp32Tensors() preset; a non-empty value replaces
-        // it (and also applies under Precision::Fp16). The markFp32 pass marks matching flat tensors and
+        // Precision::Normal uses the built-in mixedPrecisionFp32Tensors() preset; a non-empty value replaces
+        // it (and also applies under Precision::Low). The markFp32 pass marks matching flat tensors and
         // bridges the fp16/fp32 frontier with convert_dtype nodes. Only affects accuracy/runtime.
         std::string fp32Tensors;
 

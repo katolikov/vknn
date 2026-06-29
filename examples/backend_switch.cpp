@@ -26,7 +26,7 @@ static void runWith(const std::string &model, const std::vector<uint8_t> &inData
     Config cfg;
     cfg.backend   = be;
     cfg.fallback  = {BackendKind::Vulkan, BackendKind::Cpu}; // others fall back through these
-    cfg.precision = Precision::Fp16;
+    cfg.precision = Precision::Low;
     printf("\n=== config.backend = %s ===\n", backendName(be));
     auto sess = Runtime::load(model, cfg);
     if (!sess)
