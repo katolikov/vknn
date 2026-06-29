@@ -37,33 +37,33 @@ namespace vknn {
     static const char *precStr(Precision p) {
         return p == Precision::Fp16 ? "fp16" : p == Precision::Auto ? "auto" : "fp32";
     }
-    TuningLevel tuningFromStr(const std::string &s) {
+    Mode tuningFromStr(const std::string &s) {
         if (s == "off")
         {
-            return TuningLevel::Off;
+            return Mode::NoTune;
         }
         if (s == "thorough")
         {
-            return TuningLevel::Thorough;
+            return Mode::Thorough;
         }
-        return TuningLevel::Fast;
+        return Mode::Fast;
     }
-    static const char *tuneStr(TuningLevel t) {
-        return t == TuningLevel::Off ? "off" : t == TuningLevel::Thorough ? "thorough" : "fast";
+    static const char *tuneStr(Mode t) {
+        return t == Mode::NoTune ? "off" : t == Mode::Thorough ? "thorough" : "fast";
     }
-    WinogradMode winogradFromStr(const std::string &s) {
+    Mode winogradFromStr(const std::string &s) {
         if (s == "on")
         {
-            return WinogradMode::On;
+            return Mode::On;
         }
         if (s == "off")
         {
-            return WinogradMode::Off;
+            return Mode::Off;
         }
-        return WinogradMode::Auto;
+        return Mode::Auto;
     }
-    static const char *winoStr(WinogradMode w) {
-        return w == WinogradMode::On ? "on" : w == WinogradMode::Off ? "off" : "auto";
+    static const char *winoStr(Mode w) {
+        return w == Mode::On ? "on" : w == Mode::Off ? "off" : "auto";
     }
 
     Config Config::fromJsonFile(const std::string &path) {
@@ -152,11 +152,23 @@ namespace vknn {
         }
         if (auto *j = v.get("winograd"))
         {
-            c.setHint(Hint::Winograd, (int) winogradFromStr(j->asStr("auto")));
+            c.setHint(Hint::Winograd, winogradFromStr(j->asStr("auto")));
         }
         if (auto *j = v.get("tuning"))
         {
-            c.setHint(Hint::Tuning, (int) tuningFromStr(j->asStr("fast")));
+            c.setHint(Hint::Tuning, tuningFromStr(j->asStr("fast")));
+        }
+        if (auto *j = v.get("winogradVariant"))
+        {
+            c.setHint(Hint::WinogradVariant, (int) j->asNum(0));
+        }
+        if (auto *j = v.get("winogradUnit"))
+        {
+            c.setHint(Hint::WinogradUnit, (int) j->asNum(0));
+        }
+        if (auto *j = v.get("directConv3x3"))
+        {
+            c.setHint(Hint::DirectConv3x3, (int) j->asNum(0));
         }
         return c;
     }
@@ -189,8 +201,11 @@ namespace vknn {
         os << "  \"debugSegments\": " << (debugSegments ? "true" : "false") << ",\n";
         os << "  \"disableVkOps\": \"" << disableVkOps << "\",\n";
         os << "  \"dumpTensors\": \"" << dumpTensors << "\",\n";
-        os << "  \"winograd\": \"" << winoStr((WinogradMode) hint(Hint::Winograd, (int) WinogradMode::Auto)) << "\",\n";
-        os << "  \"tuning\": \"" << tuneStr((TuningLevel) hint(Hint::Tuning, (int) TuningLevel::Fast)) << "\"\n";
+        os << "  \"winograd\": \"" << winoStr((Mode) hint(Hint::Winograd, (int) Mode::Auto)) << "\",\n";
+        os << "  \"tuning\": \"" << tuneStr((Mode) hint(Hint::Tuning, (int) Mode::Fast)) << "\",\n";
+        os << "  \"winogradVariant\": " << hint(Hint::WinogradVariant, 0) << ",\n";
+        os << "  \"winogradUnit\": " << hint(Hint::WinogradUnit, 0) << ",\n";
+        os << "  \"directConv3x3\": " << hint(Hint::DirectConv3x3, 0) << "\n";
         os << "}\n";
         return os.str();
     }

@@ -61,8 +61,8 @@ int main(int argc, char **argv) {
     cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
     cfg.dumpTensors            = opt(argc, argv, "--dump", "");
     cfg.profile                = flag(argc, argv, "--profile");
-    cfg.setHint(Hint::Winograd, (int) winogradFromStr(opt(argc, argv, "--winograd", "auto")));
-    cfg.setHint(Hint::Tuning, (int) tuningFromStr(opt(argc, argv, "--tuning", "fast")));
+    cfg.setHint(Hint::Winograd, winogradFromStr(opt(argc, argv, "--winograd", "auto")));
+    cfg.setHint(Hint::Tuning, tuningFromStr(opt(argc, argv, "--tuning", "fast")));
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)

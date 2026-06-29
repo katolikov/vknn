@@ -10,28 +10,25 @@ namespace vknn {
 
     enum class BackendKind { Vulkan = 0, Cpu = 1 };
     enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2 };
-    enum class TuningLevel { Off = 0, Fast = 1, Thorough = 2 };
-    // How the 3x3-conv Winograd F(2,3) kernel is selected. Auto measures the tiled-GEMM Winograd
-    // against the direct kernel per shape and keeps the faster; On forces Winograd on every eligible
-    // 3x3; Off always uses the direct kernel.
-    enum class WinogradMode { Auto = 0, On = 1, Off = 2 };
-
-    // All conv kernel-selection knobs (MNN-style Config::setHint). Value 0 selects the production default.
-    // Set with setHint(Hint, value), e.g. setHint(Hint::Winograd, (int) WinogradMode::Off).
+    // Which conv kernel knob a Mode value applies to (MNN-style Config::setHint).
     enum class Hint {
-        // 3x3-conv Winograd selection (WinogradMode): 0 = auto (measure per shape), 1 = on, 2 = off.
-        // Forcing on/off skips the per-shape timing, so the kernel choice is deterministic run-to-run.
-        Winograd = 0,
-        // Conv autotune effort (TuningLevel): 0 = off, 1 = fast (default), 2 = thorough.
-        Tuning = 1,
-        // Winograd matmul variant: 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused,
-        // 4 = subgroup-GEMM.
-        WinogradVariant = 2,
-        // Winograd output-tile size: 0 = F(2,3) (default), 4 = force F(4,3) (0.56x V/M traffic, 4x FLOP
-        // saving, but register-heavy 6x6 transforms — usually slower on this GPU).
-        WinogradUnit = 3,
-        // Direct 3x3 kernel: 0 = autotuned (default), 1 = register-tiled (conv_reg), 2 = LDS input-halo.
-        DirectConv3x3 = 4,
+        Winograd        = 0, // 3x3 Winograd selection (Auto / On / Off)
+        Tuning          = 1, // autotune effort (NoTune / Fast / Thorough)
+        WinogradVariant = 2, // Winograd matmul impl (TiledGemm / Fused / FusedSplit / FullyFused / SubgroupGemm)
+        WinogradUnit    = 3, // Winograd output tile (F23 / F43)
+        DirectConv3x3   = 4, // direct 3x3 kernel (DirectAuto / RegisterTiled / LdsHalo)
+    };
+
+    // Every conv kernel-selection value, set uniformly via setHint(Hint, Mode). Each line is the set of
+    // values valid for one Hint; the same underlying int recurs across groups (legal — the Hint picks the
+    // knob, the Mode the value). Forcing Winograd On/Off skips per-shape timing, making the choice
+    // deterministic run-to-run.
+    enum class Mode {
+        Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd
+        NoTune = 0, Fast = 1, Thorough = 2,                                         // Hint::Tuning
+        TiledGemm = 0, Fused = 1, FusedSplit = 2, FullyFused = 3, SubgroupGemm = 4, // Hint::WinogradVariant
+        F23 = 0, F43 = 4,                                                           // Hint::WinogradUnit
+        DirectAuto = 0, RegisterTiled = 1, LdsHalo = 2,                             // Hint::DirectConv3x3
     };
 
     const char *backendName(BackendKind k);
@@ -39,8 +36,8 @@ namespace vknn {
     // Parse the conv autotune knobs from a string. winograd: "auto" (measure per shape), "on" (force
     // Winograd), "off" (force the direct kernel). tuning: "off" / "fast" / "thorough". Forcing winograd
     // on or off makes the 3x3-conv kernel choice deterministic (no per-run timing measurement).
-    WinogradMode winogradFromStr(const std::string &s);
-    TuningLevel  tuningFromStr(const std::string &s);
+    Mode winogradFromStr(const std::string &s); // "auto"/"on"/"off" -> Mode::Auto/On/Off
+    Mode tuningFromStr(const std::string &s);   // "off"/"fast"/"thorough" -> Mode::NoTune/Fast/Thorough
 
     struct Config {
         // Backend selection + ordered fallback list (CPU is always an implicit final fallback).
@@ -100,6 +97,10 @@ namespace vknn {
                 hints.resize((int) h + 1, 0);
             }
             hints[(int) h] = value;
+        }
+        // Typed overload so a caller passes the enum directly: setHint(Hint::Winograd, Mode::Off).
+        void setHint(Hint h, Mode v) {
+            setHint(h, (int) v);
         }
         int hint(Hint h, int dflt = 0) const {
             return (int) h < (int) hints.size() ? hints[(int) h] : dflt;
