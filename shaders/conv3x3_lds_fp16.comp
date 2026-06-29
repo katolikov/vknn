@@ -50,12 +50,12 @@ void main() {
     int wtap0 = wbase + icb * 9;
     for (int ky = 0; ky < 3; ++ky) {
       for (int kx = 0; kx < 3; ++kx) {
-        f16vec4 inv = halo[(ly + ky) * HS + (lx + kx)];
+        vec4 inv = vec4(halo[(ly + ky) * HS + (lx + kx)]); // widen LDS f16 halo before the fp32 dot
         int w0 = wtap0 + ky * 3 + kx;
-        acc.x += float(dot(inv, wt[w0]));
-        acc.y += float(dot(inv, wt[w0 + ocStride]));
-        acc.z += float(dot(inv, wt[w0 + 2 * ocStride]));
-        acc.w += float(dot(inv, wt[w0 + 3 * ocStride]));
+        acc.x += dot(inv, vec4(wt[w0]));
+        acc.y += dot(inv, vec4(wt[w0 + ocStride]));
+        acc.z += dot(inv, vec4(wt[w0 + 2 * ocStride]));
+        acc.w += dot(inv, vec4(wt[w0 + 3 * ocStride]));
       }
     }
     barrier();

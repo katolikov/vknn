@@ -56,7 +56,7 @@ namespace vknn {
                 int64_t chunk  = (Cinb + kparts - 1) / kparts;
                 skPC           = {(int) x.c, (int) Cout, (int) HW, (int) kparts, (int) chunk};
                 skRedPC        = {(int) Cout, (int) HW, (int) kparts, (int) node.fusedAct, node.actLo, node.actHi};
-                partBuf        = std::make_shared<vk::Buffer>(*env.ctx, (size_t) kparts * Coutb * HW * 4 * 2, vk::MemPref::kDeviceOnly);
+                partBuf        = std::make_shared<vk::Buffer>(*env.ctx, (size_t) kparts * Coutb * HW * 4 * 4, vk::MemPref::kDeviceOnly); // fp32 partials (vec4)
                 skGroups       = groups(kparts * Coutb * HW, 64);
                 skRedGroups    = groups(Coutb * HW, 64);
                 skPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_splitk_fp16", 3, sizeof(SplitKPC), std::vector<uint32_t> {}, env.cache->handle());

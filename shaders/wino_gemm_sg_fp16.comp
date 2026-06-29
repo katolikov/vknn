@@ -58,14 +58,15 @@ void main() {
     f16vec4 a1  = unpk(subgroupShuffle(mpk, uint(tIdM + 1 * 8)));
     f16vec4 a2  = unpk(subgroupShuffle(mpk, uint(tIdM + 2 * 8)));
     f16vec4 a3  = unpk(subgroupShuffle(mpk, uint(tIdM + 3 * 8)));
-    f16vec4 b0  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 0)));
-    f16vec4 b1  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 1)));
-    f16vec4 b2  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 2)));
-    f16vec4 b3  = unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 3)));
-    acc0 += vec4(float(dot(a0, b0)), float(dot(a0, b1)), float(dot(a0, b2)), float(dot(a0, b3)));
-    acc1 += vec4(float(dot(a1, b0)), float(dot(a1, b1)), float(dot(a1, b2)), float(dot(a1, b3)));
-    acc2 += vec4(float(dot(a2, b0)), float(dot(a2, b1)), float(dot(a2, b2)), float(dot(a2, b3)));
-    acc3 += vec4(float(dot(a3, b0)), float(dot(a3, b1)), float(dot(a3, b2)), float(dot(a3, b3)));
+    vec4 b0  = vec4(unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 0)))); // widen before the fp32 dot
+    vec4 b1  = vec4(unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 1))));
+    vec4 b2  = vec4(unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 2))));
+    vec4 b3  = vec4(unpk(subgroupShuffle(mpk, uint(32 + tIdN * 4 + 3))));
+    vec4 af0 = vec4(a0), af1 = vec4(a1), af2 = vec4(a2), af3 = vec4(a3);
+    acc0 += vec4(dot(af0, b0), dot(af0, b1), dot(af0, b2), dot(af0, b3));
+    acc1 += vec4(dot(af1, b0), dot(af1, b1), dot(af1, b2), dot(af1, b3));
+    acc2 += vec4(dot(af2, b0), dot(af2, b1), dot(af2, b2), dot(af2, b3));
+    acc3 += vec4(dot(af3, b0), dot(af3, b1), dot(af3, b2), dot(af3, b3));
   }
 
   int ocb = nb0 + tIdN;

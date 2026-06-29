@@ -10,7 +10,7 @@
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
-layout(std430, binding = 2) writeonly buffer Part { f16vec4 part[]; };
+layout(std430, binding = 2) writeonly buffer Part { vec4 part[]; }; // fp32 partials (each is a full Cin-slice sum)
 layout(push_constant) uniform PC { int Cin, Cout, HW, KPARTS, chunk; } pc;
 
 void main() {
@@ -33,5 +33,5 @@ void main() {
     acc.z += dot(inv, vec4(wt[wrow + 2 * Cinb + icb]));
     acc.w += dot(inv, vec4(wt[wrow + 3 * Cinb + icb]));
   }
-  part[(kpart * Coutb + ocb) * pc.HW + pix] = f16vec4(acc);
+  part[(kpart * Coutb + ocb) * pc.HW + pix] = acc;
 }
