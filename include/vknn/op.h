@@ -152,6 +152,9 @@ namespace vknn {
         // Conv only: a residual tensor fused into the epilogue (out = act(conv + residual)); set by the
         // residual-Add fusion pass. kNoTensor when not fused.
         TensorId fusedResidual = kNoTensor;
+        // MatMul only: a rank-1 [N] bias initializer added into the fp32 accumulator before the store
+        // (out[...,n] = matmul + bias[n]); set by the MatMul+bias fusion pass. kNoTensor when not fused.
+        TensorId fusedBias = kNoTensor;
     };
 
 } // namespace vknn

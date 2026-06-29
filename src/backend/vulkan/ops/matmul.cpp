@@ -23,6 +23,7 @@ namespace vknn {
             std::unique_ptr<vk::ComputePipeline> pipe;
             MatMulPC                             pc {};
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
+            std::shared_ptr<vk::Buffer>          biasBuf;     // set when a rank-1 [N] bias is fused in
             bool                                 useTiled = false;
             int                                  numBatch = 1;
             static constexpr int                 kTile    = 128; // must match TM/TN in matmul_tiled.comp
@@ -140,7 +141,18 @@ namespace vknn {
                 useTiled = !aWas1D && !bWas1D && M >= 32 && N >= 32 && K >= 32;
                 numBatch = (M > 0 && N > 0) ? pc.total / (int) (M * N) : 1;
 
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader(useTiled ? "matmul_tiled" : "matmul", env.useFp16), 3, sizeof(MatMulPC), std::vector<uint32_t> {},
+                // A fused Linear bias (rank-1 [N]) is added in the fp32 accumulator by the _bias kernel
+                // variant; upload it flat and bind it as a 4th buffer.
+                const char *base = useTiled ? "matmul_tiled" : "matmul";
+                std::string name = base;
+                uint32_t    nbuf = 3;
+                if (node.fusedBias != kNoTensor)
+                {
+                    biasBuf = uploadInit(env, node.fusedBias, g.desc(node.fusedBias).shape);
+                    name += "_bias";
+                    nbuf = 4;
+                }
+                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulPC), std::vector<uint32_t> {},
                                                              env.cache->handle());
             }
 
@@ -149,6 +161,10 @@ namespace vknn {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
                 std::vector<VkBuffer> bufs {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()};
+                if (biasBuf)
+                {
+                    bufs.push_back(biasBuf->handle());
+                }
                 if (useTiled)
                 {
                     uint32_t gx = (uint32_t) ((pc.N + kTile - 1) / kTile);

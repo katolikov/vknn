@@ -225,8 +225,9 @@ namespace vknn {
             if (nd.type == OpType::MatMul)
             {
                 // Batched N-D matmul on the flat row-major path; the kernel decodes up to kMaxRank=6 out
-                // dims.
-                if (nd.inputs.size() != 2)
+                // dims. Two operands, or three when a rank-1 bias is fused in (the _bias kernel binds it
+                // as a 4th buffer).
+                if (!(nd.inputs.size() == 2 || (nd.inputs.size() == 3 && nd.fusedBias != kNoTensor)))
                 {
                     return false;
                 }

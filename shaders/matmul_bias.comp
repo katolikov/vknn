@@ -1,0 +1,31 @@
+#version 450
+#include "precision.glsl"
+// Flat batched MatMul with a fused rank-1 [N] bias: out[...,n] = sum_k A*B + bias[n], the bias added
+// into the fp32 accumulator so the result is stored once. Mirrors matmul.comp with binding 3 = bias;
+// matmul.cpp selects this variant when a MatMul has a fused bias. One thread per output element.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A  { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B  { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D  { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer Bs { STORE bias[]; };
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK;
+  int outDim[8]; int aStride[8]; int bStride[8];
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), aBase = 0, bBase = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % pc.outDim[k];
+    rem /= pc.outDim[k];
+    aBase += c * pc.aStride[k];
+    bBase += c * pc.bStride[k];
+  }
+  float acc = float(bias[int(gid) % pc.N]); // N is the contiguous last output dim
+  for (int k = 0; k < pc.K; ++k)
+    acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
+  d[gid] = STORE(acc);
+}

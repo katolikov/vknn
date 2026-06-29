@@ -11,7 +11,7 @@
 namespace vknn {
 
     namespace {
-        constexpr uint32_t kMagic = 0x314d5856; // "VXM1"
+        constexpr uint32_t kMagic = 0x324d5856; // "VXM2" (adds Node.fusedBias)
 
         struct Writer {
             FILE                      *f;
@@ -131,6 +131,7 @@ namespace vknn {
             w.f32(n.actHi);
             w.i64(n.subOp);
             w.i64(n.fusedResidual);
+            w.i64(n.fusedBias);
             w.u32((uint32_t) n.attr.map.size());
             for (const auto &kv: n.attr.map)
             {
@@ -198,6 +199,7 @@ namespace vknn {
             n.actHi         = r.f32();
             n.subOp         = (int32_t) r.i64();
             n.fusedResidual = (TensorId) r.i64();
+            n.fusedBias     = (TensorId) r.i64();
             uint32_t na     = r.u32();
             for (uint32_t a = 0; a < na; ++a)
             {

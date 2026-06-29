@@ -83,6 +83,8 @@ namespace vknn {
                 float       *y = cpu::allocOut(Y, out);
                 const float *a = A.host.f32();
                 const float *b = B.host.f32();
+                // A fused Linear bias (rank-1 [N]) added per output column, matching the GPU epilogue.
+                const float *bias = node.fusedBias != kNoTensor ? ctx.t(node.fusedBias).host.f32() : nullptr;
 
                 for (int64_t bi = 0; bi < batchElems; ++bi)
                 {
@@ -107,7 +109,7 @@ namespace vknn {
                             {
                                 acc += am[m * K + k] * bm[k * N + n];
                             }
-                            ym[m * N + n] = acc;
+                            ym[m * N + n] = bias ? acc + bias[n] : acc;
                         }
                     }
                 }
