@@ -31,6 +31,11 @@ namespace vknn {
 
     const char *backendName(BackendKind k);
     BackendKind backendFromStr(const std::string &s);
+    // Parse the conv autotune knobs from a string. winograd: "auto" (measure per shape), "on" (force
+    // Winograd), "off" (force the direct kernel). tuning: "off" / "fast" / "thorough". Forcing winograd
+    // on or off makes the 3x3-conv kernel choice deterministic (no per-run timing measurement).
+    WinogradMode winogradFromStr(const std::string &s);
+    TuningLevel  tuningFromStr(const std::string &s);
 
     struct Config {
         // Backend selection + ordered fallback list (CPU is always an implicit final fallback).

@@ -9,6 +9,8 @@
 //   --no-flat              disable the flat-layout GPU pass
 //   --timing               print pack/submit/unpack timing
 //   --cache DIR            cache directory
+//   --winograd auto|on|off force the 3x3-conv kernel (on/off skip autotuning -> deterministic choice)
+//   --tuning off|fast|thorough  conv autotune effort (off = no per-shape kernel measurement)
 #include "vknn/session.h"
 #include <cstdio>
 #include <cstring>
@@ -43,7 +45,8 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s model outdir [--backend cpu|vulkan] [--precision fp16|fp32] [--no-weight-cache]"
-               " [--opt-level N] [--no-flat] [--timing] [--cache DIR] in0.bin in1.bin ...\n",
+               " [--opt-level N] [--no-flat] [--timing] [--cache DIR] [--winograd auto|on|off]"
+               " [--tuning off|fast|thorough] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
     }
@@ -60,6 +63,8 @@ int main(int argc, char **argv) {
     cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
     cfg.dumpTensors            = opt(argc, argv, "--dump", "");
     cfg.profile                = flag(argc, argv, "--profile");
+    cfg.winograd               = winogradFromStr(opt(argc, argv, "--winograd", "auto"));
+    cfg.tuning                 = tuningFromStr(opt(argc, argv, "--tuning", "fast"));
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -74,7 +79,8 @@ int main(int argc, char **argv) {
     {
         if (argv[i][0] == '-')
         {
-            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--opt-level") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump"))
+            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--opt-level") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
+                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning"))
             {
                 ++i; // skip the flag's value
             }

@@ -44,7 +44,7 @@ namespace vknn {
         }
         return TensorFormat::NCHW;
     }
-    static TuningLevel tuneFromStr(const std::string &s) {
+    TuningLevel tuningFromStr(const std::string &s) {
         if (s == "off")
         {
             return TuningLevel::Off;
@@ -58,7 +58,7 @@ namespace vknn {
     static const char *tuneStr(TuningLevel t) {
         return t == TuningLevel::Off ? "off" : t == TuningLevel::Thorough ? "thorough" : "fast";
     }
-    static WinogradMode winoFromStr(const std::string &s) {
+    WinogradMode winogradFromStr(const std::string &s) {
         if (s == "on")
         {
             return WinogradMode::On;
@@ -152,11 +152,11 @@ namespace vknn {
         S("layerDumpDir", c.layerDumpDir);
         if (auto *j = v.get("tuning"))
         {
-            c.tuning = tuneFromStr(j->asStr("fast"));
+            c.tuning = tuningFromStr(j->asStr("fast"));
         }
         if (auto *j = v.get("winograd"))
         {
-            c.winograd = winoFromStr(j->asStr("auto"));
+            c.winograd = winogradFromStr(j->asStr("auto"));
         }
         B("debugSegments", c.debugSegments);
         S("disableVkOps", c.disableVkOps);
