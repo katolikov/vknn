@@ -30,9 +30,10 @@ namespace vknn {
     // ============================ WeightCache ============================
     // Binary format: [u32 nWeights]{[u32 klen][key][u32 nfloats][floats]} [u32 nTune]{[u32
     // klen][key][i32 val]}
-    void WeightCache::loadBytes(const uint8_t *data, size_t n, bool enable) {
-        enabled_    = enable;
-        size_t off  = 0;
+    void WeightCache::loadBytes(const uint8_t *data, size_t n, bool keepWeights, bool keepTune) {
+        enabled_     = keepWeights;
+        tuneEnabled_ = keepTune;
+        size_t off   = 0;
         auto   rd32 = [&](uint32_t &v) {
             if (off + 4 > n)
             {
@@ -58,10 +59,13 @@ namespace vknn {
                 {
                     break;
                 }
-                std::vector<float> d(nf);
-                std::memcpy(d.data(), data + off, (size_t) nf * 4);
+                if (keepWeights) // else advance past the blob without materializing it (saves RAM)
+                {
+                    std::vector<float> d(nf);
+                    std::memcpy(d.data(), data + off, (size_t) nf * 4);
+                    weights_[k] = std::move(d);
+                }
                 off += (size_t) nf * 4;
-                weights_[k] = std::move(d);
             }
             uint32_t nt = 0;
             if (rd32(nt))
@@ -82,7 +86,10 @@ namespace vknn {
                     }
                     std::memcpy(&val, data + off, 4);
                     off += 4;
-                    tune_[k] = val;
+                    if (keepTune)
+                    {
+                        tune_[k] = val;
+                    }
                 }
             }
         }
@@ -106,13 +113,16 @@ namespace vknn {
             wr32((uint32_t) kv.second.size());
             wrBytes(kv.second.data(), kv.second.size() * 4);
         }
-        wr32((uint32_t) tune_.size());
-        for (auto &kv: tune_)
+        wr32(tuneEnabled_ ? (uint32_t) tune_.size() : 0u);
+        if (tuneEnabled_)
         {
-            wr32((uint32_t) kv.first.size());
-            wrBytes(kv.first.data(), kv.first.size());
-            int32_t v = kv.second;
-            wrBytes(&v, 4);
+            for (auto &kv: tune_)
+            {
+                wr32((uint32_t) kv.first.size());
+                wrBytes(kv.first.data(), kv.first.size());
+                int32_t v = kv.second;
+                wrBytes(&v, 4);
+            }
         }
         return out;
     }
@@ -423,7 +433,6 @@ namespace vknn {
             unifiedLoaded_ = true;
             cacheFile_     = cfg.cacheFile;
             savePipeline_  = cfg.cachePipeline;
-            saveWeights_   = cfg.cacheWeights;
             if (cacheFile_.empty())
             {
                 return;
@@ -474,9 +483,10 @@ namespace vknn {
             if (!wcache_)
             {
                 loadUnified(cfg);
-                wcache_      = std::make_unique<WeightCache>();
-                bool persist = cfg.cacheWeights && !cacheFile_.empty();
-                wcache_->loadBytes(cfg.cacheWeights ? weightInit_.data() : nullptr, cfg.cacheWeights ? weightInit_.size() : 0, persist);
+                wcache_          = std::make_unique<WeightCache>();
+                bool keepWeights = cfg.cacheWeights && !cacheFile_.empty();
+                bool keepTune    = cfg.cacheTuning && !cacheFile_.empty();
+                wcache_->loadBytes(weightInit_.data(), weightInit_.size(), keepWeights, keepTune);
             }
             return wcache_.get();
         }
@@ -488,7 +498,9 @@ namespace vknn {
                 return;
             }
             std::vector<char>    pipe = (cache_ && savePipeline_) ? cache_->getData() : pipeInit_;
-            std::vector<uint8_t> w    = (wcache_ && saveWeights_) ? wcache_->serialize() : weightInit_;
+            // serialize() writes the weights only when cacheWeights retained them and the autotune only
+            // when cacheTuning is set, so this one call covers every combination (e.g. tune-only caching).
+            std::vector<uint8_t> w = wcache_ ? wcache_->serialize() : weightInit_;
             std::vector<uint8_t> out;
             auto                 wr32 = [&](uint32_t v) {
                 const uint8_t *b = (const uint8_t *) &v;
@@ -677,7 +689,7 @@ namespace vknn {
         std::string          cacheFile_;
         std::vector<char>    pipeInit_;
         std::vector<uint8_t> weightInit_, loadedBytes_;
-        bool                 unifiedLoaded_ = false, savePipeline_ = true, saveWeights_ = true;
+        bool                 unifiedLoaded_ = false, savePipeline_ = true;
     };
 
     // ============================ VulkanSegment ============================
@@ -920,6 +932,12 @@ namespace vknn {
                 char buf[20];
                 snprintf(buf, sizeof(buf), "%016llx", (unsigned long long) h);
                 env_.modelTag = buf;
+            }
+            { // per-GPU autotune namespace: vendor/device/driver identify the kernel-timing target.
+                const auto &c = be_->ctx().caps();
+                char        g[40];
+                snprintf(g, sizeof(g), "%04x%04x-%08x", c.vendorID, c.deviceID, c.driverVersion);
+                env_.gpuTag = g;
             }
             env_.devBuf = [this](TensorId t) -> vk::Buffer * {
                 auto it = buffers_.find(t);

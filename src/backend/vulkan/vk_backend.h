@@ -22,9 +22,11 @@ namespace vknn {
     /// length-prefixed blob that the backend bundles into the unified per-model cache file.
     class WeightCache {
       public:
-        // Populate from a serialized blob (the weights section of the unified cache file). `enable`
-        // marks the cache active so prepacked weights are retained for the next save.
-        void                 loadBytes(const uint8_t *data, size_t n, bool enable);
+        // Populate from a serialized blob (the weights section of the unified cache file). keepWeights
+        // retains the (large) prepacked weights for the next save; keepTune retains the (tiny) autotune
+        // table. They are independent so a big model can skip caching weights yet still persist its
+        // autotune, sparing a re-tune on every warm start.
+        void                 loadBytes(const uint8_t *data, size_t n, bool keepWeights, bool keepTune);
         std::vector<uint8_t> serialize() const; // weights + tuning -> blob
         bool                 enabled() const {
             return enabled_;
@@ -41,8 +43,9 @@ namespace vknn {
       private:
         std::map<std::string, std::vector<float>> weights_;
         std::map<std::string, int>                tune_;
-        bool                                      enabled_ = false;
-        mutable bool                              dirty_   = false;
+        bool                                      enabled_     = false; // retain prepacked weights (cacheWeights)
+        bool                                      tuneEnabled_ = false; // persist the autotune table (cacheTuning)
+        mutable bool                              dirty_       = false;
     };
 
     class VulkanBackend;
@@ -63,6 +66,10 @@ namespace vknn {
         // Per-model namespace for the weight cache, so reusing one cacheDir across different models can't
         // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
         std::string modelTag;
+        // Per-GPU namespace for the autotune table. The fastest kernel is GPU/driver-specific, so a cache
+        // tuned on one device must not apply its choices on another; keying the autotune signature by this
+        // tag keeps a separate set of tuned entries per device in the same cache file.
+        std::string gpuTag;
     };
 
     /// One operator on the Vulkan backend. Adding an op: subclass + VKNN_REGISTER_VK_OP.

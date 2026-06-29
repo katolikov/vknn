@@ -10,6 +10,11 @@
 namespace vknn {
     namespace {
 
+        // Winograd is selected over the direct kernel only when it is at least this much faster. A near-tie
+        // keeps the direct kernel so cross-build timing noise can't flip the choice; the two kernels round
+        // fp16 differently, so a flipped choice would change the output bits run-to-run.
+        constexpr double kWinoMargin = 0.97;
+
         // Read an advanced kernel hint from the session Config (see include/vknn/config.h).
         inline int cfgHint(const VkOpEnv &env, Hint h) {
             return env.config ? env.config->hint(h) : 0;
@@ -189,7 +194,7 @@ namespace vknn {
                 }
                 char buf[96];
                 snprintf(buf, sizeof(buf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.SH);
-                std::string sig = buf;
+                std::string sig = env.gpuTag + "/" + buf;
                 if (env.weights)
                 {
                     int cached = env.weights->tuned(sig, 0);
@@ -257,7 +262,7 @@ namespace vknn {
                 int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
                 char    buf[128];
                 snprintf(buf, sizeof(buf), "wino_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
-                std::string sig = buf;
+                std::string sig = env.gpuTag + "/" + buf;
                 if (env.weights)
                 {
                     int c = env.weights->tuned(sig, -1);
@@ -325,11 +330,7 @@ namespace vknn {
                     oPipe.dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
                     vk::computeBarrier(cmd);
                 });
-                // A near-tie deterministically keeps the direct kernel: Winograd is selected only when it is
-                // clearly faster, so a residual ratio wobble at the boundary can't flip the choice (and the
-                // output bits) between builds. Clear Winograd wins (well past the margin) are unaffected.
-                constexpr double kWinoMargin = 0.97; // Winograd must be >=3% faster than the best direct kernel
-                int              choice       = (forceOn || wms < dms * kWinoMargin) ? 1 : 0;
+                int choice = (forceOn || wms < dms * kWinoMargin) ? 1 : 0;
                 VKNN_DEBUG << "tuneWino " << sig << " direct=" << dms << " wino=" << wms << " -> " << choice;
                 if (env.weights)
                 {
