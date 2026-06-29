@@ -10,7 +10,7 @@
 //   {
 //     "model": "encoder8_fp16.vxm",         // .onnx or .vxm (required)
 //     "backend": "vulkan", "precision": "fp16",
-//     "no_weight_cache": true,
+//     "cache_mode": "tune",                 // off | tune (pipeline+autotune) | full (+ prepacked weights)
 //     "cache": "model.cache",               // unified per-model cache file (default "<model>.cache")
 //     "generate_cache": false,              // populate the cache first (untimed), then time a warm load
 //     "max_submit_nodes": 500,              // 0 = single submit
@@ -444,7 +444,7 @@ int main(int argc, char **argv) {
     cfg.backend                = backendFromStr(str("backend", "vulkan"));
     cfg.precision              = str("precision", "fp16") == "fp32" ? Precision::Fp32 : Precision::Fp16;
     cfg.freeWeightsAfterUpload = true;
-    cfg.cacheWeights           = !flag("no_weight_cache", true);
+    cfg.cacheMode              = cacheModeFromStr(str("cache_mode", "tune"));
     cfg.timing                 = flag("timing", false);
     cfg.profile                = flag("profile", false);
     // "winograd": "auto"|"on"|"off" forces the 3x3-conv kernel choice. "on"/"off" skip the per-shape

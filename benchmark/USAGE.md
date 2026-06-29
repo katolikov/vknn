@@ -75,7 +75,7 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
       "serial": "",
       "precision": "fp16",
       "dir": "/data/local/tmp/vxrt/bench",
-      "no_weight_cache": true,
+      "cache_mode": "tune",
       "max_submit_nodes": 500,
       "cooldown": 22,
       "cache": "encoder8_fp16.cache",
@@ -100,7 +100,7 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
         "backend": "vulkan",
         "precision": "fp16",
         "dir": "/data/local/tmp/vxrt/bench",
-        "no_weight_cache": true,
+        "cache_mode": "tune",
         "max_submit_nodes": 500,
         "cooldown": 22,
         "cache": "encoder8_fp16.cache",   // unified per-model cache; default <model>.cache
@@ -135,7 +135,7 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
   `no_fuse_swish`, `fuse_se`, `fuse_dwpw`, `out` (output `.vxm` name).
 - **`device`** — runtime options: `backend` (vulkan/cpu), `serial` (adb device serial/id; empty = the
   single attached device — **required when several devices are attached**), `precision` (fp16/fp32),
-  `dir` (device staging dir), `no_weight_cache`, `max_submit_nodes` (GPU-watchdog chunk size; 0 =
+  `dir` (device staging dir), `cache_mode` (`off`/`tune`/`full`), `max_submit_nodes` (GPU-watchdog chunk size; 0 =
   single submit), `cooldown` (seconds slept before each run — the device throttles), `cache` (the
   unified per-model cache file; default `<model>.cache`), `generate_cache` (bool: when `true`, populate
   the cache in an **untimed throwaway load** first, so the timed load is warm and the cache-build cost

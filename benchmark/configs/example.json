@@ -5,7 +5,7 @@
       "serial": "",
       "precision": "fp16",
       "dir": "/data/local/tmp/vxrt/bench",
-      "no_weight_cache": true,
+      "cache_mode": "tune",
       "max_submit_nodes": 500,
       "cooldown": 22
     }

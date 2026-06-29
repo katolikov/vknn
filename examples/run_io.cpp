@@ -3,7 +3,7 @@
 //   vknn_run_io model outdir [flags] in0.bin in1.bin ...
 // Flags:
 //   --backend cpu|vulkan   (default vulkan)   --precision fp16|fp32 (default fp16)
-//   --no-weight-cache      don't cache prepacked weights in RAM (saves memory for big models)
+//   --cache-mode M         off | tune (pipeline+autotune) | full (+ prepacked weights) (default full)
 //   --keep-weights         keep host weights after upload (default: free them)
 //   --no-flat              disable the flat-layout GPU pass
 //   --timing               print pack/submit/unpack timing
@@ -43,7 +43,7 @@ static const char *opt(int c, char **v, const char *k, const char *d) {
 int main(int argc, char **argv) {
     if (argc < 3)
     {
-        printf("usage: %s model outdir [--backend cpu|vulkan] [--precision fp16|fp32] [--no-weight-cache]"
+        printf("usage: %s model outdir [--backend cpu|vulkan] [--precision fp16|fp32] [--cache-mode off|tune|full]"
                " [--no-flat] [--timing] [--cache DIR] [--winograd auto|on|off]"
                " [--tuning off|fast|thorough] in0.bin in1.bin ...\n",
                argv[0]);
@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
     Config cfg;
     cfg.backend                = backendFromStr(opt(argc, argv, "--backend", "vulkan"));
     cfg.precision              = !strcmp(opt(argc, argv, "--precision", "fp16"), "fp32") ? Precision::Fp32 : Precision::Fp16;
-    cfg.cacheWeights           = !flag(argc, argv, "--no-weight-cache");
+    cfg.cacheMode              = cacheModeFromStr(opt(argc, argv, "--cache-mode", "full"));
     cfg.freeWeightsAfterUpload = !flag(argc, argv, "--keep-weights");
     cfg.noFlatOps              = flag(argc, argv, "--no-flat");
     cfg.timing                 = flag(argc, argv, "--timing");

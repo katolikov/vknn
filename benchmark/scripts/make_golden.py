@@ -51,7 +51,7 @@ cfg = {
     "model": args.model_on_device or os.path.basename(args.model),
     "backend": args.backend,
     "precision": args.precision,
-    "no_weight_cache": True,
+    "cache_mode": "tune",
     "tolerance": args.tol,
     "inputs": in_files,   # keyed by input name
     "outputs": golden,

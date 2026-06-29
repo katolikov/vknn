@@ -432,7 +432,7 @@ namespace vknn {
             }
             unifiedLoaded_ = true;
             cacheFile_     = cfg.cacheFile;
-            savePipeline_  = cfg.cachePipeline;
+            savePipeline_  = cfg.cachesPipeline();
             if (cacheFile_.empty())
             {
                 return;
@@ -475,7 +475,7 @@ namespace vknn {
             if (!cache_)
             {
                 loadUnified(cfg);
-                cache_ = std::make_unique<vk::PipelineCache>(*ctx_, cfg.cachePipeline ? pipeInit_ : std::vector<char> {});
+                cache_ = std::make_unique<vk::PipelineCache>(*ctx_, cfg.cachesPipeline() ? pipeInit_ : std::vector<char> {});
             }
             return cache_.get();
         }
@@ -484,8 +484,8 @@ namespace vknn {
             {
                 loadUnified(cfg);
                 wcache_          = std::make_unique<WeightCache>();
-                bool keepWeights = cfg.cacheWeights && !cacheFile_.empty();
-                bool keepTune    = cfg.cacheTuning && !cacheFile_.empty();
+                bool keepWeights = cfg.cachesWeights() && !cacheFile_.empty();
+                bool keepTune    = cfg.cachesTuning() && !cacheFile_.empty();
                 wcache_->loadBytes(weightInit_.data(), weightInit_.size(), keepWeights, keepTune);
             }
             return wcache_.get();
@@ -498,8 +498,8 @@ namespace vknn {
                 return;
             }
             std::vector<char>    pipe = (cache_ && savePipeline_) ? cache_->getData() : pipeInit_;
-            // serialize() writes the weights only when cacheWeights retained them and the autotune only
-            // when cacheTuning is set, so this one call covers every combination (e.g. tune-only caching).
+            // serialize() writes the weights only when CacheMode::Full retained them and the autotune
+            // only when the mode is Tune or Full, so this one call covers every combination.
             std::vector<uint8_t> w = wcache_ ? wcache_->serialize() : weightInit_;
             std::vector<uint8_t> out;
             auto                 wr32 = [&](uint32_t v) {

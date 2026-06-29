@@ -65,6 +65,20 @@ namespace vknn {
     static const char *winoStr(Mode w) {
         return w == Mode::On ? "on" : w == Mode::Off ? "off" : "auto";
     }
+    CacheMode cacheModeFromStr(const std::string &s) {
+        if (s == "off")
+        {
+            return CacheMode::Off;
+        }
+        if (s == "tune")
+        {
+            return CacheMode::Tune;
+        }
+        return CacheMode::Full;
+    }
+    const char *cacheModeStr(CacheMode m) {
+        return m == CacheMode::Off ? "off" : m == CacheMode::Tune ? "tune" : "full";
+    }
 
     Config Config::fromJsonFile(const std::string &path) {
         std::ifstream f(path);
@@ -127,9 +141,10 @@ namespace vknn {
         I("maxSubmitNodes", c.maxSubmitNodes);
         S("cacheFile", c.cacheFile);
         S("cacheDir", c.cacheDir);
-        B("cachePipeline", c.cachePipeline);
-        B("cacheWeights", c.cacheWeights);
-        B("cacheTuning", c.cacheTuning);
+        if (auto *j = v.get("cacheMode"))
+        {
+            c.cacheMode = cacheModeFromStr(j->asStr("full"));
+        }
         B("freeWeightsAfterUpload", c.freeWeightsAfterUpload);
         B("noFlatOps", c.noFlatOps);
         B("timing", c.timing);
@@ -188,9 +203,7 @@ namespace vknn {
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
         os << "  \"cacheFile\": \"" << cacheFile << "\",\n";
         os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
-        os << "  \"cachePipeline\": " << (cachePipeline ? "true" : "false") << ",\n";
-        os << "  \"cacheWeights\": " << (cacheWeights ? "true" : "false") << ",\n";
-        os << "  \"cacheTuning\": " << (cacheTuning ? "true" : "false") << ",\n";
+        os << "  \"cacheMode\": \"" << cacheModeStr(cacheMode) << "\",\n";
         os << "  \"freeWeightsAfterUpload\": " << (freeWeightsAfterUpload ? "true" : "false") << ",\n";
         os << "  \"noFlatOps\": " << (noFlatOps ? "true" : "false") << ",\n";
         os << "  \"timing\": " << (timing ? "true" : "false") << ",\n";

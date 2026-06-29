@@ -27,6 +27,7 @@ TEST(Config, JsonRoundTrip) {
     c.precision     = Precision::Fp16;
     c.maxSubmitNodes = 250;
     c.profile       = true;
+    c.cacheMode     = CacheMode::Tune;
     c.setHint(Hint::Winograd, (int) Mode::Off);
     std::string js = c.toJson();
     Config      d  = Config::fromJsonString(js);
@@ -34,6 +35,9 @@ TEST(Config, JsonRoundTrip) {
     EXPECT_EQ(d.precision, Precision::Fp16);
     EXPECT_EQ(d.maxSubmitNodes, 250);
     EXPECT_TRUE(d.profile);
+    EXPECT_EQ(d.cacheMode, CacheMode::Tune);
+    EXPECT_FALSE(d.cachesWeights());
+    EXPECT_TRUE(d.cachesTuning());
     EXPECT_EQ(d.hint(Hint::Winograd, 0), (int) Mode::Off);
 }
 

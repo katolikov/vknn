@@ -21,7 +21,7 @@ Config (sectioned; see benchmark/configs/example.json and USAGE.md):
         "model":   { "onnx": "encoder.onnx" },          # or { "vxm": "encoder.vxm" }
         "convert": { "fp16": true, "fuse_se": false, "fuse_dwpw": false, "no_fuse_swish": false },
         "device":  { "backend": "vulkan", "serial": "", "precision": "fp16", "dir": "/data/local/tmp/vxrt/bench",
-                     "no_weight_cache": true, "max_submit_nodes": 500, "cooldown": 22 },  # serial: adb id (multi-device)
+                     "cache_mode": "tune", "max_submit_nodes": 500, "cooldown": 22 },  # serial: adb id (multi-device)
         "inputs":  { "image": "image8.npy", "intrinsics": "intr8.bin" },   # or [...]; omit -> runtime only
         "outputs": { "save": ["npy","png"], "golden": { "means": "means_gold.npy" },
                      "metrics": ["cosine","psnr","snr"] },
@@ -248,7 +248,7 @@ def run_stage(stage, base, idx, where_convert="host"):
 
     out_cfg = stage.get("outputs", {})
     dcfg = {"model": model_name, "backend": dev.get("backend", "vulkan"),
-            "precision": dev.get("precision", "fp16"), "no_weight_cache": dev.get("no_weight_cache", True),
+            "precision": dev.get("precision", "fp16"), "cache_mode": dev.get("cache_mode", "tune"),
             "timing": True, "profile": stage.get("profile", False),
             "tolerance": stage.get("tolerance", 0.999), "result": "result.json", "save_dir": "."}
     if "max_submit_nodes" in dev:
@@ -279,7 +279,7 @@ def run_stage(stage, base, idx, where_convert="host"):
         log("  [input] (none -> zero-filled, runtime-only)")
     if dcfg.get("golden"):
         log(f"  [golden] {', '.join(f'{k}={v}' for k, v in dcfg['golden'].items())}")
-    log(f"  [opts] precision={dcfg['precision']} no_weight_cache={dcfg['no_weight_cache']} "
+    log(f"  [opts] precision={dcfg['precision']} cache_mode={dcfg['cache_mode']} "
         f"profile={dcfg['profile']} max_submit_nodes={dcfg.get('max_submit_nodes', '(default)')} "
         f"tolerance={dcfg['tolerance']}")
 

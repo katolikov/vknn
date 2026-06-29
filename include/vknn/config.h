@@ -10,6 +10,11 @@ namespace vknn {
 
     enum class BackendKind { Vulkan = 0, Cpu = 1 };
     enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2 };
+    // What a warm start reloads from the unified cache file, in increasing order. Off recomputes
+    // everything every load; Tune keeps the cheap, deterministic blobs (compiled pipelines + the
+    // conv autotune table) but recomputes/re-uploads weights; Full also keeps the prepacked-weight
+    // blob for the fastest warm load (and the largest cache file).
+    enum class CacheMode { Off = 0, Tune = 1, Full = 2 };
     // Which conv kernel knob a Mode value applies to (MNN-style Config::setHint).
     enum class Hint {
         Winograd        = 0, // 3x3 Winograd selection (Auto / On / Off)
@@ -38,6 +43,9 @@ namespace vknn {
     // on or off makes the 3x3-conv kernel choice deterministic (no per-run timing measurement).
     Mode winogradFromStr(const std::string &s); // "auto"/"on"/"off" -> Mode::Auto/On/Off
     Mode tuningFromStr(const std::string &s);   // "off"/"fast"/"thorough" -> Mode::NoTune/Fast/Thorough
+    // Cache scope: "off" / "tune" / "full" -> CacheMode::Off/Tune/Full (and back).
+    CacheMode   cacheModeFromStr(const std::string &s);
+    const char *cacheModeStr(CacheMode m);
 
     struct Config {
         // Backend selection + ordered fallback list (CPU is always an implicit final fallback).
@@ -50,14 +58,17 @@ namespace vknn {
         // Caches. The unified per-model cache file bundles the compiled-pipeline blob and the
         // prepacked-weight + autotune blob; loading it skips shader compilation, conv autotuning, and
         // the Winograd weight transform on a warm start. Set via the Runtime::load() cacheFile argument
-        // (empty there -> "<model>.cache" next to the model). cachePipeline/cacheWeights/cacheTuning
-        // select what the file includes. cacheDir is the fallback location for sessions built from an
-        // in-memory graph (no model path).
+        // (empty there -> "<model>.cache" next to the model). cacheMode selects what the file includes
+        // (Off / Tune / Full). cacheDir is the fallback location for sessions built from an in-memory
+        // graph (no model path).
         std::string cacheFile; // unified cache path (resolved by Runtime::load; empty = no file cache)
-        std::string cacheDir      = "/data/local/tmp/vxrt/cache";
-        bool        cachePipeline = true;
-        bool        cacheWeights  = true;
-        bool        cacheTuning   = true;
+        std::string cacheDir  = "/data/local/tmp/vxrt/cache";
+        CacheMode   cacheMode = CacheMode::Full;
+
+        // What the cacheMode retains, as predicates the backend reads directly.
+        bool cachesPipeline() const { return cacheMode != CacheMode::Off; }
+        bool cachesTuning() const { return cacheMode != CacheMode::Off; }
+        bool cachesWeights() const { return cacheMode == CacheMode::Full; }
 
         // Free host weight buffers after they are uploaded to the device / decoded into the pool. run()
         // never reads graph initializers (it uses GPU buffers + the pool), so this is safe and reclaims

@@ -43,8 +43,8 @@ adb shell mkdir -p /data/local/tmp/vxrt/out
 adb shell /data/local/tmp/vxrt/vknn_run_io model.vxm /data/local/tmp/vxrt/out in0.bin in1.bin
 ```
 
-`vknn_run_io` flags: `--backend vulkan|cpu`, `--precision fp16|fp32`, `--no-weight-cache`,
-`--keep-weights`, `--opt-level N`, `--no-flat`, `--timing`.
+`vknn_run_io` flags: `--backend vulkan|cpu`, `--precision fp16|fp32`, `--cache-mode off|tune|full`,
+`--keep-weights`, `--no-flat`, `--timing`, `--winograd auto|on|off`, `--tuning off|fast|thorough`.
 
 ## 3. Run from C++
 

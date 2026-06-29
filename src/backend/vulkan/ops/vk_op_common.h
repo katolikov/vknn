@@ -106,7 +106,7 @@ namespace vknn {
             v = compute();
             // Only retain the prepacked blob when the cache is persistent (a disk path). Without a path the
             // cache would still balloon RAM with every weight (a 965M model: ~3.85GB of prepacked fp32) for
-            // no warm-start benefit — so a one-shot run (cacheWeights=false) computes + uploads + frees.
+            // no warm-start benefit — so a one-shot run (CacheMode below Full) computes + uploads + frees.
             if (env.weights && env.weights->enabled())
             {
                 env.weights->put(key, v);

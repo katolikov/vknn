@@ -208,7 +208,7 @@ This requires the static lib to be linked whole-archive
 - `inputLayout` / `outputLayout` (`NCHW`/`NHWC`) — what the *user* supplies and
   wants back; the engine converts internally.
 - Cache controls: `cacheFile` (the unified per-model cache, §7), `cacheDir`
-  (the graph-only fallback location), `cachePipeline`, `cacheWeights`, `cacheTuning`.
+  (the graph-only fallback location), `cacheMode` (`off`/`tune`/`full`).
 - Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
 - `tuning` (`Off`/`Fast`/`Thorough`) — autotuning level.
@@ -454,18 +454,18 @@ instead. Loading the file on a warm start skips shader compilation, conv autotun
 Winograd weight transform. Measured on the 8-view YoNoSplat (Xclipse 960): a cold load (~10 s)
 writes a 29 MB cache, a warm load is ~4.8 s, and outputs are bit-identical.
 
-The file bundles three blobs; `cachePipeline` / `cacheWeights` / `cacheTuning` select which are
-included:
+The file bundles three blobs; `cacheMode` (`off` / `tune` / `full`) selects which are included.
+`tune` keeps the first and third (cheap, deterministic); `full` adds the second:
 
 - **Vulkan pipeline cache** — the `VkPipelineCache` blob (`vk::PipelineCache`, created in
-  `VulkanBackend` when `cachePipeline`). Skips driver shader recompilation.
+  `VulkanBackend`). Skips driver shader recompilation. Kept by `tune` and `full`.
 - **Prepacked-weights cache** — `WeightCache` (`vk_backend.h`): a content-keyed,
   length-prefixed blob of weights already repacked into `NC4HW4`, keyed by
   op + role + shape. On MobileNetV2 this is 106 entries; warm runs skip the host
-  repacking. Controlled by `cacheWeights`.
+  repacking. Kept only by `full`.
 - **Autotune cache** — stored in the same `WeightCache` as an
   op-signature → chosen `local_size_x` table (`tuned()` / `setTuned()`); 20 conv
-  workgroup-size entries for MobileNetV2. Controlled by `cacheTuning` and the
+  workgroup-size entries for MobileNetV2. Kept by `tune` and `full`, gated by the
   `tuning` level.
 
 `Session::updateCache()` writes the file, but only when the cache changed during the session —

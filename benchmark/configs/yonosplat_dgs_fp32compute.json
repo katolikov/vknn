@@ -5,7 +5,7 @@
       "serial": "",
       "precision": "fp32",
       "dir": "/data/local/tmp/vxrt/yonosplat-vknn",
-      "no_weight_cache": true,
+      "cache_mode": "tune",
       "max_submit_nodes": 500,
       "cooldown": 0
     }

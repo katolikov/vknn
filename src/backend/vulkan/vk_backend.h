@@ -43,8 +43,8 @@ namespace vknn {
       private:
         std::map<std::string, std::vector<float>> weights_;
         std::map<std::string, int>                tune_;
-        bool                                      enabled_     = false; // retain prepacked weights (cacheWeights)
-        bool                                      tuneEnabled_ = false; // persist the autotune table (cacheTuning)
+        bool                                      enabled_     = false; // retain prepacked weights (CacheMode::Full)
+        bool                                      tuneEnabled_ = false; // persist the autotune table (CacheMode::Tune+)
         mutable bool                              dirty_       = false;
     };
 
