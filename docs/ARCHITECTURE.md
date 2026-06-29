@@ -204,14 +204,14 @@ This requires the static lib to be linked whole-archive
 
 - `backend` (`Vulkan`/`Cpu`), ordered `fallback` list, `allowCpuFallback`
   (CPU is the implicit final fallback).
-- `precision` (`Fp32`/`Fp16`/`Auto`; default `Fp16`), `power`, `cpuThreads`.
-- `inputLayout` / `outputLayout` (`NCHW`/`NHWC`) — what the *user* supplies and
-  wants back; the engine converts internally.
+- `precision` (`Fp32`/`Fp16`/`Auto`; default `Fp16`), `maxSubmitNodes`,
+  `freeWeightsAfterUpload`.
 - Cache controls: `cacheFile` (the unified per-model cache, §7), `cacheDir`
   (the graph-only fallback location), `cacheMode` (`off`/`tune`/`full`).
 - Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
-- `tuning` (`Off`/`Fast`/`Thorough`) — autotuning level.
+- Conv kernel knobs via `setHint(Hint, Mode)`: `Hint::Winograd` (`Auto`/`On`/`Off`),
+  `Hint::Tuning` (`NoTune`/`Fast`/`Thorough`), and the experimental variant hints.
 
 ### 2.5 Session / Runtime (`include/vknn/session.h`, `src/core/session.cpp`)
 

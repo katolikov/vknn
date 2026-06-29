@@ -48,7 +48,7 @@ adb shell /data/local/tmp/vxrt/vknn_run_io model.vxm /data/local/tmp/vxrt/out in
 
 ## 3. Run from C++
 
-The simplest form, `vknn::Model::load("model.onnx")`, picks Vulkan-if-available + `Precision::kAuto`
+The simplest form, `vknn::Model::load("model.onnx")`, picks Vulkan-if-available + `Precision::Auto`
 (fp16 on GPU) and reads all shapes/names from the model:
 
 ```cpp
@@ -76,10 +76,9 @@ static std::vector<float> readBin(const char* path) {
 
 int main() {
   vknn::Config cfg;
-  cfg.backend   = vknn::BackendKind::kVulkan;    // run on the GPU (CPU is the implicit fallback)
-  cfg.precision = vknn::Precision::kFp16;        // fp16 storage, fp32 accumulation
-  cfg.tuning    = vknn::TuningLevel::kThorough;  // maximum autotuning (cached to cfg.cacheDir)
-  cfg.optLevel  = 3;                             // all graph fusions (the default)
+  cfg.backend   = vknn::BackendKind::Vulkan;     // run on the GPU (CPU is the implicit fallback)
+  cfg.precision = vknn::Precision::Fp16;         // fp16 storage, fp32 accumulation
+  cfg.setHint(vknn::Hint::Tuning, vknn::Mode::Thorough); // maximum autotuning (cached to the model cache)
 
   vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
   if (!net) { fprintf(stderr, "failed to load model\n"); return 1; }

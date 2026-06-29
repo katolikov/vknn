@@ -32,10 +32,8 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `fallback` | array of string | same tokens as `backend` | `["CPU"]` | Ordered list of backends to try when the primary declines a node. CPU is always an implicit final fallback regardless of this list. Providing the key replaces the whole list. |
 | `allowCpuFallback` | bool | `true` / `false` | `true` | If `false`, nodes that no listed backend accepts are an error instead of silently running on CPU. |
 | `precision` | string | `"fp32"`, `"fp16"`, `"auto"` (also `"FP16"`, `"low"` → fp16) | `"fp16"` | Compute precision for the Vulkan backend. `fp16` = fp16 storage + fp32 accumulation. `fp32` = full precision. `auto` lets the backend choose. |
-| `power` | string | `"normal"`, `"high"`, `"low"` | `"normal"` | Power/performance hint passed to the backend scheduler. |
-| `cpuThreads` | int | ≥ 1 | `4` | Worker thread count for the CPU backend (NEON/scalar kernels). |
-| `inputLayout` | string | `"NCHW"`, `"NHWC"` | `"NCHW"` | Layout of the input tensors you supply. The engine converts to its internal layout as needed. Any value other than `"NHWC"` is treated as `NCHW`. |
-| `outputLayout` | string | `"NCHW"`, `"NHWC"` | `"NCHW"` | Layout you want output tensors returned in. Same parsing rule as `inputLayout`. |
+| `maxSubmitNodes` | int | ≥ 0 | `500` | Split a GPU segment larger than this into chunks of this many nodes, each its own submit, so no single submit trips the GPU watchdog. `0` disables chunking. Only the very large YoNoSplat-class transformer needs it; results are numerically identical. |
+| `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Unified per-model cache file bundling the pipeline-cache blob and the prepacked-weight + autotune blob (container magic `VKNNCAC1`). Empty resolves to `<model>.cache` next to the model. Loading it on a warm start skips shader compilation, conv autotuning, and the Winograd weight transform. |
 | `cacheDir` | string | filesystem path | `"/data/local/tmp/vxrt/cache"` | Fallback location for the unified cache when the session is built from an in-memory graph (no model path to anchor `cacheFile`). |
 | `cacheMode` | string | `"off"`, `"tune"`, `"full"` | `"full"` | What a warm start reloads from `cacheFile`. `off` recomputes everything every load; `tune` keeps the cheap, deterministic blobs (compiled `VkPipelineCache` + the conv autotune table) but re-uploads weights; `full` also keeps the content-keyed prepacked-weights blob for the fastest warm load (and the largest cache file). |
@@ -43,8 +41,9 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `verbosity` | int | `0`, `1`, `≥2` | `1` | Log level. `0` → Warn, `1` → Info, `≥2` → Debug. Applied by `Config::applyLogLevel()`. |
 | `layerDump` | bool | `true` / `false` | `false` | Dump every layer's output tensor to disk for debugging. |
 | `layerDumpDir` | string | filesystem path | `"/data/local/tmp/vxrt/dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
-| `tuning` | string | `"off"`, `"fast"`, `"thorough"` | `"fast"` | Autotuning level for conv workgroup-size search. `off` uses defaults, `fast` does a quick search, `thorough` searches more candidates. |
-| `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection. `auto` measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. `auto` requires `tuning` != `off`. |
+| `tuning` | string | `"off"`, `"fast"`, `"thorough"` | `"fast"` | Autotuning level for conv workgroup-size search (sets `Hint::Tuning`). `off` uses defaults, `fast` does a quick search, `thorough` searches more candidates. |
+| `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection (sets `Hint::Winograd`). `auto` measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. Forcing `on`/`off` skips the per-shape timing, so the kernel choice (and the output bits) is deterministic run-to-run. `auto` requires `tuning` != `off`. |
+| `noFlatOps` | bool | `true` / `false` | `false` | Disable the flat-layout GPU pass (forces NC4HW4 / CPU paths). Diagnostic. |
 | `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
 | `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). |
@@ -55,34 +54,43 @@ All defaults below are the C++ member initializers in `struct Config`.
 The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 
 ```cpp
-enum class BackendKind  { Vulkan, Cpu };
-enum class Precision    { Fp32, Fp16, Auto };
-enum class PowerHint    { Normal, High, Low };
-enum class TuningLevel  { Off, Fast, Thorough };
-enum class WinogradMode { Auto, On, Off };   // Auto = per-shape autotune (recommended default)
+enum class BackendKind { Vulkan, Cpu };
+enum class Precision   { Fp32, Fp16, Auto };
+enum class CacheMode   { Off, Tune, Full };  // Full = also cache prepacked weights (default)
 enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Unknown };
 ```
 
-### Advanced hints — `Config::setHint`
+### Conv kernel knobs — `Config::setHint(Hint, Mode)`
 
-Research and experimental kernel selection goes through an MNN-style hint API. The defaults are the
-production kernels; normal use needs none of these. There are no environment variables.
+Every conv kernel-selection knob goes through one MNN-style hint API: `setHint(Hint, Mode)`. The
+defaults are the production kernels; normal use needs none of these. There are no environment variables.
 
 ```cpp
 enum class Hint {
-  WinogradVariant = 0,  // 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused
-  WinogradUnit    = 1,  // 0 = F(2,3) (default), 4 = F(4,3) (numerically equivalent, slower here)
-  DirectConv3x3   = 2,  // 0 = autotuned (default), 1 = register-tiled, 2 = LDS input-halo
+  Winograd        = 0,  // 3x3 Winograd selection      (Auto / On / Off)
+  Tuning          = 1,  // autotune effort             (NoTune / Fast / Thorough)
+  WinogradVariant = 2,  // Winograd matmul impl         (TiledGemm / Fused / FusedSplit / FullyFused / SubgroupGemm)
+  WinogradUnit    = 3,  // Winograd output tile         (F23 / F43)
+  DirectConv3x3   = 4,  // direct 3x3 kernel            (DirectAuto / RegisterTiled / LdsHalo)
 };
-cfg.setHint(Hint::WinogradUnit, 4);   // force F(4,3) Winograd
-int v = cfg.hint(Hint::WinogradUnit); // read back (0 if unset)
+// One Mode enum holds every value; the Hint picks the knob, the Mode the value.
+enum class Mode {
+  Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd
+  NoTune = 0, Fast = 1, Thorough = 2,                                         // Hint::Tuning
+  TiledGemm = 0, Fused = 1, FusedSplit = 2, FullyFused = 3, SubgroupGemm = 4, // Hint::WinogradVariant
+  F23 = 0, F43 = 4,                                                           // Hint::WinogradUnit
+  DirectAuto = 0, RegisterTiled = 1, LdsHalo = 2,                             // Hint::DirectConv3x3
+};
+cfg.setHint(Hint::Tuning, Mode::Thorough);   // maximum autotuning
+cfg.setHint(Hint::WinogradUnit, Mode::F43);  // force F(4,3) Winograd
+int v = cfg.hint(Hint::WinogradUnit);        // read back (0 if unset)
 ```
 
-In JSON, hints are an array indexed by the enum value: `"hints": [0, 4, 0]`.
+In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "thorough"`); the raw form
+is an array indexed by the `Hint` value, `"hints": [2, 1, 0, 0, 0]` (Winograd, Tuning, WinogradVariant,
+WinogradUnit, DirectConv3x3).
 
-`NC4HW4` is the internal Vulkan packed layout (channels in vec4 blocks) and is
-not a valid `inputLayout`/`outputLayout` value — only `NCHW` and `NHWC` are
-accepted as I/O layouts.
+`NC4HW4` is the internal Vulkan packed layout (channels in vec4 blocks); the engine I/O is `NCHW`.
 
 ---
 
@@ -97,18 +105,25 @@ lists all of them, with non-default values where useful:
   "fallback": ["CPU"],
   "allowCpuFallback": true,
   "precision": "fp16",
-  "power": "high",
-  "cpuThreads": 4,
-  "inputLayout": "NCHW",
-  "outputLayout": "NCHW",
+  "maxSubmitNodes": 500,
   "cacheFile": "enc.cache",
   "cacheDir": "/data/local/tmp/vxrt/cache",
   "cacheMode": "full",
+  "freeWeightsAfterUpload": true,
+  "noFlatOps": false,
+  "timing": false,
   "profile": false,
   "verbosity": 1,
   "layerDump": false,
   "layerDumpDir": "/data/local/tmp/vxrt/dump",
-  "tuning": "fast"
+  "debugSegments": false,
+  "disableVkOps": "",
+  "dumpTensors": "",
+  "winograd": "auto",
+  "tuning": "fast",
+  "winogradVariant": 0,
+  "winogradUnit": 0,
+  "directConv3x3": 0
 }
 ```
 
@@ -134,7 +149,8 @@ Config cfg2 = Config::fromJsonString(R"({ "backend": "CPU", "precision": "fp32" 
 Config cfg3;
 cfg3.backend   = BackendKind::Vulkan;
 cfg3.precision = Precision::Fp16;
-cfg3.tuning    = TuningLevel::Thorough;
+cfg3.cacheMode = CacheMode::Full;
+cfg3.setHint(Hint::Tuning, Mode::Thorough);
 
 // Apply the log level implied by verbosity:
 cfg.applyLogLevel();

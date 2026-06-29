@@ -100,10 +100,9 @@ static std::vector<float> readBin(const char* path) {
 
 int main() {
   vknn::Config cfg;
-  cfg.backend   = vknn::BackendKind::kVulkan;    // run on the GPU (CPU is the implicit fallback)
-  cfg.precision = vknn::Precision::kFp16;        // fp16 storage, fp32 accumulation
-  cfg.tuning    = vknn::TuningLevel::kThorough;  // maximum autotuning (cached in <model>.cache)
-  cfg.optLevel  = 3;                             // all graph fusions (the default)
+  cfg.backend   = vknn::BackendKind::Vulkan;     // run on the GPU (CPU is the implicit fallback)
+  cfg.precision = vknn::Precision::Fp16;         // fp16 storage, fp32 accumulation
+  cfg.setHint(vknn::Hint::Tuning, vknn::Mode::Thorough); // maximum autotuning (cached in <model>.cache)
 
   vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
   if (!net) { fprintf(stderr, "failed to load model\n"); return 1; }
