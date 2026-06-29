@@ -73,11 +73,13 @@ Run an ONNX (or compiled `.vxm`) model on the device:
 ```sh
 adb push build-android/vknn_classify model.onnx input.bin /data/local/tmp/vknn/
 adb shell /data/local/tmp/vknn/vknn_classify --model model.onnx --input input.bin \
-    --backend vulkan --precision fp16 --bench 20
+    --backend vulkan --precision low --bench 20
 ```
 
-`vknn_compile` turns an ONNX model into an optimized `.vxm` (skips parsing/passes at load; optional
-fp16 weights); `vknn_run_io` runs any multi-input/multi-output model. Full flow (compile, run,
+`--precision` is a quality tier: **`low`** (fp16 storage + fp32 accumulation), **`normal`** (fp16, but a
+precision-critical geometry-tail set is kept fp32 — selective fp32, a no-op for models without it), or
+**`high`** (full fp32). `vknn_compile` turns an ONNX model into an optimized `.vxm` (skips parsing/passes
+at load; optional fp16 weights); `vknn_run_io` runs any multi-input/multi-output model. Full flow (compile, run,
 YoNoSplat): [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md).
 
 **Or from C++.** `vknn::Model` reads each input/output name and shape from the model — you supply only

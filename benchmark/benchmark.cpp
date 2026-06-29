@@ -9,7 +9,7 @@
 // model/convert/device/stages config, but it is hand-writable too:
 //   {
 //     "model": "encoder8_fp16.vxm",         // .onnx or .vxm (required)
-//     "backend": "vulkan", "precision": "fp16",
+//     "backend": "vulkan", "precision": "low",  // low | normal (fp16 + selective fp32) | high (fp32)
 //     "cache_mode": "tune",                 // off | tune (pipeline+autotune) | full (+ prepacked weights)
 //     "cache": "model.cache",               // unified per-model cache file (default "<model>.cache")
 //     "generate_cache": false,              // populate the cache first (untimed), then time a warm load
@@ -442,7 +442,7 @@ int main(int argc, char **argv) {
     }
     Config cfg;
     cfg.backend                = backendFromStr(str("backend", "vulkan"));
-    cfg.precision              = str("precision", "fp16") == "fp32" ? Precision::Fp32 : Precision::Fp16;
+    cfg.precision              = precisionFromStr(str("precision", "low"));
     cfg.freeWeightsAfterUpload = true;
     cfg.cacheMode              = cacheModeFromStr(str("cache_mode", "tune"));
     cfg.timing                 = flag("timing", false);

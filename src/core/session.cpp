@@ -265,7 +265,14 @@ namespace vknn {
         if (byKind_.count(BackendKind::Vulkan) && !cfg_.noFlatOps)
         {
             insertLayoutConverts(graph_);
-            markFp32(graph_, cfg_.fp32Tensors); // selective fp32 storage on the named geometry-tail tensors
+            // Selective fp32 storage. Precision::Mixed ("normal") uses the built-in geometry-tail preset
+            // when fp32Tensors is empty; an explicit fp32Tensors always wins.
+            std::string fp32Marks = cfg_.fp32Tensors;
+            if (fp32Marks.empty() && cfg_.precision == Precision::Mixed)
+            {
+                fp32Marks = mixedPrecisionFp32Tensors();
+            }
+            markFp32(graph_, fp32Marks);
             graph_.topoSort();
         }
 

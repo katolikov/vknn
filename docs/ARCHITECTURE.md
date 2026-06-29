@@ -272,10 +272,16 @@ Why pack this way:
 - **Channel-major-in-blocks suits CNN access patterns.** Conv accumulates over
   input channels; grouping channels into blocks of 4 makes the inner loop a tidy
   `vec4` reduction.
-- **fp16 storage, fp32 accumulate.** With `precision = fp16` the packed buffers are
+- **fp16 storage, fp32 accumulate.** With `precision = low` (fp16) the packed buffers are
   16-bit (`shaderFloat16` and 16-bit storage are both supported), but kernels
   accumulate in fp32 to preserve accuracy. On MobileNetV2 this yields cosine
   `0.999965` vs the fp32 path.
+- **Selective fp32 (`precision = normal`).** Tensors whose names match the built-in
+  geometry-tail set (or `Config::fp32Tensors`) keep fp32 *storage* under fp16 compute:
+  `markFp32` (load-time, after the layout pass) sets `TensorDesc::storeFp32`, the producing
+  node selects its fp32 kernel variant via a per-node `env.useFp16`, and `ConvertDtype` nodes
+  bridge the fp16/fp32 frontier. Empty matches are a no-op, so `normal` == `low` for models
+  without the named tensors. `high` is full fp32.
 
 Host data is always plain NCHW fp32; the conversion to/from `NC4HW4` happens only at
 segment boundaries via the `pack` / `unpack` compute shaders (§4.3, §5).

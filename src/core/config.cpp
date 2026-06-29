@@ -23,19 +23,46 @@ namespace vknn {
         }
         return BackendKind::Cpu;
     }
-    static Precision precFromStr(const std::string &s) {
-        if (s == "fp16" || s == "FP16" || s == "low")
+    Precision precisionFromStr(const std::string &s) {
+        if (s == "low" || s == "fp16" || s == "FP16")
         {
             return Precision::Fp16;
+        }
+        if (s == "normal" || s == "mixed")
+        {
+            return Precision::Mixed;
+        }
+        if (s == "high" || s == "fp32" || s == "FP32")
+        {
+            return Precision::Fp32;
         }
         if (s == "auto")
         {
             return Precision::Auto;
         }
-        return Precision::Fp32;
+        return Precision::Fp16;
     }
     static const char *precStr(Precision p) {
-        return p == Precision::Fp16 ? "fp16" : p == Precision::Auto ? "auto" : "fp32";
+        switch (p)
+        {
+            case Precision::Fp16:
+                return "low";
+            case Precision::Mixed:
+                return "normal";
+            case Precision::Fp32:
+                return "high";
+            default:
+                return "auto";
+        }
+    }
+    const char *mixedPrecisionFp32Tensors() {
+        // The geometry tail of a feed-forward-3DGS encoder (build_covariance matmuls, the world/means
+        // einsum transforms, the scale/quaternion adapter chain, the camera feature MLP) lifted to fp32
+        // storage. Excludes the camera-pose SVD (Newton-Schulz), which diverges to NaN in fp32 on marginal
+        // poses. Matches by name substring, so it is a no-op for models without these tensors.
+        return "/enc/MatMul_,/enc/Einsum,/enc/Mul_,/enc/Add_,/enc/Sub_,/enc/Reshape_,/enc/Slice_,"
+               "/enc/Transpose_,/enc/Concat_,/enc/Squeeze,/enc/Split_,/enc/Clip,/enc/Softplus,/enc/Exp_,"
+               "/enc/Neg,/enc/Reciprocal,/enc/ScatterND,/enc/camera_head/res_conv,/enc/camera_head/more_mlps";
     }
     Mode tuningFromStr(const std::string &s) {
         if (s == "off")
@@ -136,7 +163,7 @@ namespace vknn {
         B("allowCpuFallback", c.allowCpuFallback);
         if (auto *j = v.get("precision"))
         {
-            c.precision = precFromStr(j->asStr("fp16"));
+            c.precision = precisionFromStr(j->asStr("fp16"));
         }
         I("maxSubmitNodes", c.maxSubmitNodes);
         S("cacheFile", c.cacheFile);

@@ -38,6 +38,9 @@ TEST(Config, JsonRoundTrip) {
     EXPECT_EQ(d.cacheMode, CacheMode::Tune);
     EXPECT_FALSE(d.cachesWeights());
     EXPECT_TRUE(d.cachesTuning());
+    EXPECT_EQ(precisionFromStr("normal"), Precision::Mixed);
+    EXPECT_EQ(precisionFromStr("high"), Precision::Fp32);
+    EXPECT_EQ(precisionFromStr("low"), Precision::Fp16);
     EXPECT_EQ(d.hint(Hint::Winograd, 0), (int) Mode::Off);
 }
 

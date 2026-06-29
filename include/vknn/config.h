@@ -9,7 +9,16 @@
 namespace vknn {
 
     enum class BackendKind { Vulkan = 0, Cpu = 1 };
-    enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2 };
+    // Quality tiers, set as "low" / "normal" / "high" (fp16 / fp32 aliases kept):
+    //   Fp16  ("low")    fp16 storage + fp32 accumulation everywhere.
+    //   Mixed ("normal") fp16 storage, but a built-in geometry-tail set is kept fp32 (selective fp32).
+    //   Fp32  ("high")   full fp32 storage.
+    enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2, Mixed = 3 };
+
+    // The default selective-fp32 set used by Precision::Mixed ("normal") when Config::fp32Tensors is empty:
+    // the comma-separated tensor-name substrings of the geometry tail that benefit from fp32 storage
+    // without the NaN-fragile camera-pose SVD. A no-op for models without these names (e.g. CNNs).
+    const char *mixedPrecisionFp32Tensors();
     // What a warm start reloads from the unified cache file, in increasing order. Off recomputes
     // everything every load; Tune keeps the cheap, deterministic blobs (compiled pipelines + the
     // conv autotune table) but recomputes/re-uploads weights; Full also keeps the prepacked-weight
@@ -38,6 +47,8 @@ namespace vknn {
 
     const char *backendName(BackendKind k);
     BackendKind backendFromStr(const std::string &s);
+    // Precision tier from a string: "low"/"fp16", "normal"/"mixed", "high"/"fp32", "auto" (unknown -> low).
+    Precision precisionFromStr(const std::string &s);
     // Parse the conv autotune knobs from a string. winograd: "auto" (measure per shape), "on" (force
     // Winograd), "off" (force the direct kernel). tuning: "off" / "fast" / "thorough". Forcing winograd
     // on or off makes the 3x3-conv kernel choice deterministic (no per-run timing measurement).
@@ -92,10 +103,11 @@ namespace vknn {
         std::string disableVkOps;          // comma list of op types to force onto CPU
         std::string dumpTensors;           // comma list of tensor names to dump to disk
 
-        // Comma list of tensor-name substrings whose activations are kept in fp32 storage even when the
-        // segment runs fp16 (selective precision for the precision-critical geometry tail). The markFp32
-        // pass marks matching tensors and bridges the fp16/fp32 frontier with convert_dtype nodes; the
-        // marked ops run their fp32 kernel variant. Only affects accuracy/runtime, never op support.
+        // Advanced override of the selective-fp32 set: comma list of tensor-name substrings (leading '-'
+        // excludes) whose activations are kept in fp32 storage even when the segment runs fp16. Empty +
+        // Precision::Mixed uses the built-in mixedPrecisionFp32Tensors() preset; a non-empty value replaces
+        // it (and also applies under Precision::Fp16). The markFp32 pass marks matching flat tensors and
+        // bridges the fp16/fp32 frontier with convert_dtype nodes. Only affects accuracy/runtime.
         std::string fp32Tensors;
 
         // Profiling / debug.

@@ -3,7 +3,7 @@
     "device": {
       "backend": "vulkan",
       "serial": "",
-      "precision": "fp16",
+      "precision": "low",
       "dir": "/data/local/tmp/vxrt/bench",
       "cache_mode": "tune",
       "max_submit_nodes": 500,

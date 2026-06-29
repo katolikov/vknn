@@ -1,7 +1,7 @@
 {
   "model": "encoder8_fp16.vxm",
   "backend": "vulkan",
-  "precision": "fp16",
+  "precision": "low",
   "cache_mode": "tune",
   "tolerance": 0.999,
   "inputs": {

@@ -73,7 +73,7 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
     "device": {
       "backend": "vulkan",
       "serial": "",
-      "precision": "fp16",
+      "precision": "normal",
       "dir": "/data/local/tmp/vxrt/bench",
       "cache_mode": "tune",
       "max_submit_nodes": 500,
@@ -98,7 +98,7 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
       },
       "device": {
         "backend": "vulkan",
-        "precision": "fp16",
+        "precision": "normal",
         "dir": "/data/local/tmp/vxrt/bench",
         "cache_mode": "tune",
         "max_submit_nodes": 500,
@@ -134,8 +134,10 @@ every stage. A single-stage config may drop `stages` and put the fields at the t
 - **`convert`** — convert-time optimization options (only when `onnx` is given): `fp16`,
   `no_fuse_swish`, `fuse_se`, `fuse_dwpw`, `out` (output `.vxm` name).
 - **`device`** — runtime options: `backend` (vulkan/cpu), `serial` (adb device serial/id; empty = the
-  single attached device — **required when several devices are attached**), `precision` (fp16/fp32),
-  `dir` (device staging dir), `cache_mode` (`off`/`tune`/`full`), `max_submit_nodes` (GPU-watchdog chunk size; 0 =
+  single attached device — **required when several devices are attached**), `precision`
+  (`low`/`normal`/`high`; `normal` = fp16 + selective fp32 on the geometry tail), `fp32_tensors` (advanced:
+  override the selective-fp32 set), `dir` (device staging dir), `cache_mode` (`off`/`tune`/`full`),
+  `max_submit_nodes` (GPU-watchdog chunk size; 0 =
   single submit), `cooldown` (seconds slept before each run — the device throttles), `cache` (the
   unified per-model cache file; default `<model>.cache`), `generate_cache` (bool: when `true`, populate
   the cache in an **untimed throwaway load** first, so the timed load is warm and the cache-build cost

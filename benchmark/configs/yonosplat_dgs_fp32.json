@@ -3,7 +3,7 @@
     "device": {
       "backend": "vulkan",
       "serial": "",
-      "precision": "fp32",
+      "precision": "high",
       "dir": "/data/local/tmp/vxrt/yonosplat-vknn",
       "cache_mode": "tune",
       "max_submit_nodes": 500,

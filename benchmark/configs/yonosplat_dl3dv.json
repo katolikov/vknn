@@ -1,0 +1,50 @@
+{
+  "defaults": {
+    "device": {
+      "backend": "vulkan",
+      "serial": "",
+      "precision": "normal",
+      "dir": "/data/local/tmp/vxrt/bench",
+      "cache_mode": "full",
+      "max_submit_nodes": 500,
+      "cooldown": 14,
+      "generate_cache": true,
+      "cache": "encoder8_dl3dv_fp16.cache"
+    }
+  },
+  "stages": [
+    {
+      "name": "yonosplat_dl3dv_encoder8_validate",
+      "model": {
+        "vxm": "models/encoder8_dl3dv_fp16.vxm"
+      },
+      "inputs": {
+        "image": "models/dl3dv/image.npy",
+        "intrinsics": "models/dl3dv/intrinsics.npy"
+      },
+      "outputs": {
+        "save": [
+          "npy"
+        ],
+        "golden": {
+          "means": "models/dl3dv/means_gold.npy",
+          "covariances": "models/dl3dv/covariances_gold.npy",
+          "harmonics": "models/dl3dv/harmonics_gold.npy",
+          "opacities": "models/dl3dv/opacities_gold.npy",
+          "rotations": "models/dl3dv/rotations_gold.npy",
+          "scales": "models/dl3dv/scales_gold.npy"
+        },
+        "metrics": [
+          "cosine",
+          "psnr",
+          "snr",
+          "relL2",
+          "max"
+        ]
+      },
+      "bench": 3,
+      "tolerance": 0.999,
+      "result": "yonosplat_dl3dv.result.json"
+    }
+  ]
+}

@@ -31,7 +31,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `backend` | string | `"VULKAN"`, `"CPU"` (case-insensitive: `vulkan`/`cpu` also accepted) | `"VULKAN"` | Primary backend the planner prefers for each node. Unrecognized strings fall back to `CPU`. |
 | `fallback` | array of string | same tokens as `backend` | `["CPU"]` | Ordered list of backends to try when the primary declines a node. CPU is always an implicit final fallback regardless of this list. Providing the key replaces the whole list. |
 | `allowCpuFallback` | bool | `true` / `false` | `true` | If `false`, nodes that no listed backend accepts are an error instead of silently running on CPU. |
-| `precision` | string | `"fp32"`, `"fp16"`, `"auto"` (also `"FP16"`, `"low"` → fp16) | `"fp16"` | Compute precision for the Vulkan backend. `fp16` = fp16 storage + fp32 accumulation. `fp32` = full precision. `auto` lets the backend choose. |
+| `precision` | string | `"low"`, `"normal"`, `"high"`, `"auto"` (aliases `"fp16"`→low, `"mixed"`→normal, `"fp32"`→high) | `"low"` | Quality tier for the Vulkan backend. `low` = fp16 storage + fp32 accumulation everywhere. `normal` = fp16, but a built-in geometry-tail set (`mixedPrecisionFp32Tensors()`) is kept fp32 — selective fp32 (a no-op for models without those tensors). `high` = full fp32 storage. `auto` lets the backend choose (fp16 where supported). See `fp32Tensors` to override the `normal` set. |
 | `maxSubmitNodes` | int | ≥ 0 | `500` | Split a GPU segment larger than this into chunks of this many nodes, each its own submit, so no single submit trips the GPU watchdog. `0` disables chunking. Only the very large YoNoSplat-class transformer needs it; results are numerically identical. |
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Unified per-model cache file bundling the pipeline-cache blob and the prepacked-weight + autotune blob (container magic `VKNNCAC1`). Empty resolves to `<model>.cache` next to the model. Loading it on a warm start skips shader compilation, conv autotuning, and the Winograd weight transform. |
@@ -48,6 +48,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
 | `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). |
 | `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
+| `fp32Tensors` | string | e.g. `"/enc/MatMul_,-camera_head"` | `""` | Advanced override of the selective-fp32 set: tensor-name substrings (leading `-` excludes) kept in fp32 storage under fp16 compute. Empty + `precision:"normal"` uses the built-in geometry-tail preset; a non-empty value replaces it (and also applies under `precision:"low"`). |
 
 ### Enum reference
 
@@ -55,7 +56,7 @@ The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 
 ```cpp
 enum class BackendKind { Vulkan, Cpu };
-enum class Precision   { Fp32, Fp16, Auto };
+enum class Precision   { Fp32, Fp16, Auto, Mixed };  // tiers: Fp16="low", Mixed="normal" (selective fp32), Fp32="high"
 enum class CacheMode   { Off, Tune, Full };  // Full = also cache prepacked weights (default)
 enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Unknown };
 ```
@@ -104,7 +105,7 @@ lists all of them, with non-default values where useful:
   "backend": "VULKAN",
   "fallback": ["CPU"],
   "allowCpuFallback": true,
-  "precision": "fp16",
+  "precision": "low",
   "maxSubmitNodes": 500,
   "cacheFile": "enc.cache",
   "cacheDir": "/data/local/tmp/vxrt/cache",
@@ -119,6 +120,7 @@ lists all of them, with non-default values where useful:
   "debugSegments": false,
   "disableVkOps": "",
   "dumpTensors": "",
+  "fp32Tensors": "",
   "winograd": "auto",
   "tuning": "fast",
   "winogradVariant": 0,
