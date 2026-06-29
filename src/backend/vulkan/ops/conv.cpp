@@ -17,6 +17,9 @@ namespace vknn {
 
         struct ConvOp: VulkanOp {
             static constexpr int                 kTile     = 4; // output pixels per thread in the 1x1 kernel (matches shader)
+            // wino_gemm workgroup output tile, in lockstep with shaders/wino_gemm_fp16.comp (MDIM*RM, NDIM).
+            static constexpr int                 kWinoGemmTileM  = 32; // output tiles (M) per workgroup
+            static constexpr int                 kWinoGemmTileNB = 8;  // output channel-blocks (N) per workgroup
             bool                                 depthwise = false;
             bool                                 pointwise = false;
             bool                                 winograd  = false;
@@ -156,10 +159,9 @@ namespace vknn {
                     // 3-pass: input transform -> V, TILED batched GEMM -> M, output transform -> dst.
                     mbuf             = std::make_shared<vk::Buffer>(*env.ctx, (size_t) nPos * nT * Coutb * 4 * el, vk::MemPref::kDeviceOnly);
                     wGemmPC          = {(int) Cin, (int) Cout, (int) nT};
-                    const int TILE_M = 32, TILE_NB = 8; // must match the GEMM shader (MDIM*RM, NDIM)
-                    wGemmGX = groups(nT, TILE_M);       // workgroups over M (tiles)
-                    wGemmGY = groups(Coutb, TILE_NB);   // workgroups over N (ocb)
-                    wGemmGZ = nPos;                     // one GEMM per transform position (16 or 36)
+                    wGemmGX = groups(nT, kWinoGemmTileM);     // workgroups over M (tiles)
+                    wGemmGY = groups(Coutb, kWinoGemmTileNB); // workgroups over N (ocb)
+                    wGemmGZ = nPos;                           // one GEMM per transform position (16 or 36)
                     wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {},
                                                                     env.cache->handle());
                     wGemmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {},
@@ -281,7 +283,7 @@ namespace vknn {
                 vk::ComputePipeline inPipe(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC), {}, env.cache->handle());
                 vk::ComputePipeline gPipe(*env.ctx, "wino_gemm_fp16", 3, sizeof(WinoGemmPC), {}, env.cache->handle());
                 vk::ComputePipeline oPipe(*env.ctx, "wino_out_fp16", 3, sizeof(WinoFusedPC), {}, env.cache->handle());
-                uint32_t            gx = groups(nT, 32), gy = groups(Coutb, 8);
+                uint32_t            gx = groups(nT, kWinoGemmTileM), gy = groups(Coutb, kWinoGemmTileNB);
                 auto                timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
                     VkCommandBuffer cmd = env.runner->allocate();
                     env.runner->begin(cmd);
