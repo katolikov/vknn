@@ -34,7 +34,7 @@ namespace vknn { namespace vk {
         throw Error(Status::RuntimeError, "no compatible memory type");
     }
 
-    Buffer::Buffer(VulkanContext &ctx, size_t bytes, MemPref pref, VkBufferUsageFlags extraUsage): ctx_(ctx), bytes_(bytes) {
+    Buffer::Buffer(VulkanContext &ctx, size_t bytes, MemPref pref, VkBufferUsageFlags extraUsage, bool zeroInit): ctx_(ctx), bytes_(bytes) {
         VkBufferCreateInfo bi {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bi.size        = bytes;
         bi.usage       = kBaseUsage | extraUsage;
@@ -82,6 +82,10 @@ namespace vknn { namespace vk {
         if (ctx_.memProps().memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
         {
             VK_CHECK(vkMapMemory(ctx_.device(), mem_, 0, VK_WHOLE_SIZE, 0, &mapped_));
+            if (zeroInit)
+            {
+                std::memset(mapped_, 0, bytes_);
+            }
         }
     }
 

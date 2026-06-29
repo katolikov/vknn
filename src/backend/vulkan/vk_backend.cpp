@@ -806,7 +806,7 @@ namespace vknn {
                     continue; // pooled below
                 }
                 auto pref     = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
-                buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref);
+                buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref, 0, /*zeroInit=*/true);
             }
             // [firstPos,lastPos] of each internal tensor within this segment's execution order
             std::map<TensorId, int> firstPos, lastPos;
@@ -881,7 +881,7 @@ namespace vknn {
                     freeSlots.pop_back();
                 } else
                 {
-                    s.buf = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kAuto);
+                    s.buf = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
                     s.cap = need;
                 }
                 s.deadAt      = lastPos[tid];

@@ -296,17 +296,28 @@ namespace vknn {
                     vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
                     return ms;
                 };
+                // Min over repeats: the fastest observed time is the least OS-perturbed estimate, so the
+                // direct-vs-Winograd ratio is stable across cold builds instead of flipping on measurement
+                // noise (which would change the selected kernel, and the two round fp16 differently).
+                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                    double m = 1e30;
+                    for (int k = 0; k < 5; ++k)
+                    {
+                        m = std::min(m, timeIt(rec));
+                    }
+                    return m;
+                };
                 double dms = 1e30;
                 for (uint32_t ls: {64u, 128u, 256u})
                 { // compare against the direct kernel's best local size
                     vk::ComputePipeline dPipe(*env.ctx, "conv_fp16", 4, sizeof(ConvPC), {ls}, env.cache->handle());
                     uint32_t            dg = groups(x.n * Coutb * y.h * y.w, ls);
-                    dms                    = std::min(dms, timeIt([&](VkCommandBuffer cmd) {
+                    dms                    = std::min(dms, bestOf([&](VkCommandBuffer cmd) {
                                        dPipe.dispatch(cmd, {sSrc->handle(), sWt->handle(), sBias->handle(), sDst->handle()}, &dpc, sizeof(dpc), dg);
                                        vk::computeBarrier(cmd);
                                                       }));
                 }
-                double wms    = timeIt([&](VkCommandBuffer cmd) {
+                double wms    = bestOf([&](VkCommandBuffer cmd) {
                     inPipe.dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
                     vk::computeBarrier(cmd);
                     gPipe.dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, 16);
@@ -314,7 +325,11 @@ namespace vknn {
                     oPipe.dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
                     vk::computeBarrier(cmd);
                 });
-                int    choice = (forceOn || wms < dms) ? 1 : 0;
+                // A near-tie deterministically keeps the direct kernel: Winograd is selected only when it is
+                // clearly faster, so a residual ratio wobble at the boundary can't flip the choice (and the
+                // output bits) between builds. Clear Winograd wins (well past the margin) are unaffected.
+                constexpr double kWinoMargin = 0.97; // Winograd must be >=3% faster than the best direct kernel
+                int              choice       = (forceOn || wms < dms * kWinoMargin) ? 1 : 0;
                 VKNN_DEBUG << "tuneWino " << sig << " direct=" << dms << " wino=" << wms << " -> " << choice;
                 if (env.weights)
                 {

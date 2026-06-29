@@ -16,7 +16,11 @@ namespace vknn { namespace vk {
     /// mapped, so host()/upload()/download() are plain memcpy.
     class Buffer {
       public:
-        Buffer(VulkanContext &ctx, size_t bytes, MemPref pref = MemPref::kAuto, VkBufferUsageFlags extraUsage = 0);
+        // zeroInit clears host-visible memory on allocation. Set it for activation buffers (the liveness
+        // planner aliases/reuses them, and a kernel that reads a lane its producer never wrote would
+        // otherwise pick up uninitialized device memory); weight buffers are fully overwritten by upload
+        // so they leave it off to skip the memset.
+        Buffer(VulkanContext &ctx, size_t bytes, MemPref pref = MemPref::kAuto, VkBufferUsageFlags extraUsage = 0, bool zeroInit = false);
         ~Buffer();
         Buffer(const Buffer &)            = delete;
         Buffer &operator=(const Buffer &) = delete;
