@@ -36,24 +36,19 @@ namespace vknn {
         {
             return Precision::High;
         }
-        if (s == "auto")
-        {
-            return Precision::Auto;
-        }
         return Precision::Low;
     }
     static const char *precStr(Precision p) {
         switch (p)
         {
-            case Precision::Low:
-                return "low";
             case Precision::Normal:
                 return "normal";
             case Precision::High:
                 return "high";
-            default:
-                return "auto";
+            case Precision::Low:
+                break;
         }
+        return "low";
     }
     const char *mixedPrecisionFp32Tensors() {
         // The geometry tail of a feed-forward-3DGS encoder (build_covariance matmuls, the world/means

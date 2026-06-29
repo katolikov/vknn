@@ -204,7 +204,7 @@ This requires the static lib to be linked whole-archive
 
 - `backend` (`Vulkan`/`Cpu`), ordered `fallback` list, `allowCpuFallback`
   (CPU is the implicit final fallback).
-- `precision` (`Fp32`/`Fp16`/`Auto`; default `Fp16`), `maxSubmitNodes`,
+- `precision` (`Low`/`Normal`/`High` quality tiers; default `Low` = fp16), `maxSubmitNodes`,
   `freeWeightsAfterUpload`.
 - Cache controls: `cacheFile` (the unified per-model cache, §7), `cacheDir`
   (the graph-only fallback location), `cacheMode` (`off`/`tune`/`full`).

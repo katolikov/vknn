@@ -31,7 +31,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `backend` | string | `"VULKAN"`, `"CPU"` (case-insensitive: `vulkan`/`cpu` also accepted) | `"VULKAN"` | Primary backend the planner prefers for each node. Unrecognized strings fall back to `CPU`. |
 | `fallback` | array of string | same tokens as `backend` | `["CPU"]` | Ordered list of backends to try when the primary declines a node. CPU is always an implicit final fallback regardless of this list. Providing the key replaces the whole list. |
 | `allowCpuFallback` | bool | `true` / `false` | `true` | If `false`, nodes that no listed backend accepts are an error instead of silently running on CPU. |
-| `precision` | string | `"low"`, `"normal"`, `"high"`, `"auto"` (aliases `"fp16"`→low, `"mixed"`→normal, `"fp32"`→high) | `"low"` | Quality tier for the Vulkan backend. `low` = fp16 storage + fp32 accumulation everywhere. `normal` = fp16, but a built-in geometry-tail set (`mixedPrecisionFp32Tensors()`) is kept fp32 — selective fp32 (a no-op for models without those tensors). `high` = full fp32 storage. `auto` lets the backend choose (fp16 where supported). See `fp32Tensors` to override the `normal` set. |
+| `precision` | string | `"low"`, `"normal"`, `"high"` (aliases `"fp16"`→low, `"mixed"`→normal, `"fp32"`→high; unknown → low) | `"low"` | Quality tier for the Vulkan backend. `low` = fp16 storage + fp32 accumulation everywhere. `normal` = fp16, but a built-in geometry-tail set (`mixedPrecisionFp32Tensors()`) is kept fp32 — selective fp32 (a no-op for models without those tensors). `high` = full fp32 storage. See `fp32Tensors` to override the `normal` set. |
 | `maxSubmitNodes` | int | ≥ 0 | `500` | Split a GPU segment larger than this into chunks of this many nodes, each its own submit, so no single submit trips the GPU watchdog. `0` disables chunking. Only the very large YoNoSplat-class transformer needs it; results are numerically identical. |
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Unified per-model cache file bundling the pipeline-cache blob and the prepacked-weight + autotune blob (container magic `VKNNCAC1`). Empty resolves to `<model>.cache` next to the model. Loading it on a warm start skips shader compilation, conv autotuning, and the Winograd weight transform. |
@@ -56,7 +56,7 @@ The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 
 ```cpp
 enum class BackendKind { Vulkan, Cpu };
-enum class Precision   { Fp32, Fp16, Auto, Mixed };  // tiers: Fp16="low", Mixed="normal" (selective fp32), Fp32="high"
+enum class Precision   { Low, Normal, High };  // "low" fp16 | "normal" fp16 + selective fp32 | "high" fp32
 enum class CacheMode   { Off, Tune, Full };  // Full = also cache prepacked weights (default)
 enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Unknown };
 ```
@@ -150,7 +150,7 @@ Config cfg2 = Config::fromJsonString(R"({ "backend": "CPU", "precision": "fp32" 
 // Field assignment also works directly:
 Config cfg3;
 cfg3.backend   = BackendKind::Vulkan;
-cfg3.precision = Precision::Fp16;
+cfg3.precision = Precision::Low;
 cfg3.cacheMode = CacheMode::Full;
 cfg3.setHint(Hint::Tuning, Mode::Thorough);
 
@@ -176,8 +176,8 @@ lets individual flags override specific fields:
 Config cfg;
 if (!cfgpath.empty()) cfg = Config::fromJsonFile(cfgpath);   // base from JSON
 cfg.backend   = backendFromStr(backend);                      // --backend overrides
-cfg.precision = (precision == "fp32") ? Precision::Fp32      // --precision overrides
-                                       : Precision::Fp16;
+cfg.precision = (precision == "fp32") ? Precision::High      // --precision overrides
+                                       : Precision::Low;
 cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());  // --cache overrides
 if (hasflag(argc, argv, "--profile")) cfg.profile = true;     // --profile sets flag
 if (hasflag(argc, argv, "--layer-dump")) {                    // --layer-dump DIR

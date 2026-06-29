@@ -55,7 +55,7 @@ bit-accurate against the fp32 / CPU reference — cosine vs onnxruntime lands in
 YOLOv8n 1.000000), with small absolute error on intermediate activations. The Vulkan fp32 path is
 bit-close (cosine 1.0, maxAbsErr ~1e-5), and the CPU backend is the bit-exact reference.
 
-For accuracy-sensitive callers, set `precision = Precision::Fp32` or fall back to CPU. fp16 is the
+For accuracy-sensitive callers, set `precision = Precision::High` or fall back to CPU. fp16 is the
 default in `vknn::Config` because the accuracy cost is small and the bandwidth saving is real.
 
 ---

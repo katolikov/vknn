@@ -108,8 +108,8 @@ namespace vknn {
     class Model {
       public:
         /// Load an ONNX model. Picks the Vulkan backend if available (CPU fallback), and the given
-        /// precision (Auto = fp16 on GPU).
-        static Model load(const std::string &onnxPath, Precision precision = Precision::Auto);
+        /// precision tier (Low = fp16, Normal = fp16 + selective fp32, High = fp32).
+        static Model load(const std::string &onnxPath, Precision precision = Precision::Low);
         /// Advanced: full control via Config.
         static Model load(const std::string &onnxPath, const Config &cfg);
         /// Save the optimized model to a ".vxm" file. A later Model::load() on that path skips ONNX

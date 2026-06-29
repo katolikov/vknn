@@ -5,7 +5,7 @@
 //   --input PATH      raw float32 NCHW input (default input.bin)
 //   --shape N,C,H,W   input shape (default 1,3,224,224)
 //   --backend NAME    vulkan|cpu (default vulkan)
-//   --precision P     fp32|fp16 (default fp16)
+//   --precision P     low|normal|high (default low)
 //   --winograd MODE   auto|on|off  3x3 Winograd selection (default auto = best+fast per-shape pick)
 //   --tuning LEVEL    off|fast|thorough  kernel autotuning (default fast)
 //   --wino-unit N     0=auto (default), 4=force F(4,3) Winograd (research)
@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
     // crop for 299x299 Inception, 640x640 YOLO, and any non-image model.)
     std::string shapeStr  = argval(argc, argv, "--shape", "");
     std::string backend   = argval(argc, argv, "--backend", "vulkan");
-    std::string precision = argval(argc, argv, "--precision", "fp16");
+    std::string precision = argval(argc, argv, "--precision", "low");
     std::string goldpath  = argval(argc, argv, "--golden", "");
     std::string cfgpath   = argval(argc, argv, "--config", "");
 
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
         cfg = Config::fromJsonFile(cfgpath);
     }
     cfg.backend   = backendFromStr(backend);
-    cfg.precision = (precision == "fp32") ? Precision::High : Precision::Low;
+    cfg.precision = precisionFromStr(precision);
     cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());
     {
         std::string w = argval(argc, argv, "--winograd", "auto"); // auto|on|off

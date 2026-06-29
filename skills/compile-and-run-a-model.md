@@ -36,19 +36,19 @@ adb push build-android/vknn_classify build-android/vknn_run_io /data/local/tmp/v
 
 # image classifier: top-5, golden cosine/top-1, --bench, --profile, --layer-dump
 adb shell /data/local/tmp/vxrt/vknn_classify --model model.vxm --input in.bin \
-  --golden gold.bin --backend vulkan --precision fp16 --bench 20
+  --golden gold.bin --backend vulkan --precision low --bench 20
 
 # generic runner: any model; named inputs in, each output dumped to a dir
 adb shell mkdir -p /data/local/tmp/vxrt/out
 adb shell /data/local/tmp/vxrt/vknn_run_io model.vxm /data/local/tmp/vxrt/out in0.bin in1.bin
 ```
 
-`vknn_run_io` flags: `--backend vulkan|cpu`, `--precision fp16|fp32`, `--cache-mode off|tune|full`,
+`vknn_run_io` flags: `--backend vulkan|cpu`, `--precision low|normal|high`, `--cache-mode off|tune|full`,
 `--keep-weights`, `--no-flat`, `--timing`, `--winograd auto|on|off`, `--tuning off|fast|thorough`.
 
 ## 3. Run from C++
 
-The simplest form, `vknn::Model::load("model.onnx")`, picks Vulkan-if-available + `Precision::Auto`
+The simplest form, `vknn::Model::load("model.onnx")`, picks Vulkan-if-available + `Precision::Low`
 (fp16 on GPU) and reads all shapes/names from the model:
 
 ```cpp
@@ -77,7 +77,7 @@ static std::vector<float> readBin(const char* path) {
 int main() {
   vknn::Config cfg;
   cfg.backend   = vknn::BackendKind::Vulkan;     // run on the GPU (CPU is the implicit fallback)
-  cfg.precision = vknn::Precision::Fp16;         // fp16 storage, fp32 accumulation
+  cfg.precision = vknn::Precision::Low;         // fp16 storage, fp32 accumulation
   cfg.setHint(vknn::Hint::Tuning, vknn::Mode::Thorough); // maximum autotuning (cached to the model cache)
 
   vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx

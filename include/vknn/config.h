@@ -13,7 +13,7 @@ namespace vknn {
     //   Low    fp16 storage + fp32 accumulation everywhere.
     //   Normal fp16 storage, but a built-in geometry-tail set is kept fp32 (selective fp32).
     //   High   full fp32 storage.
-    enum class Precision { High = 0, Low = 1, Auto = 2, Normal = 3 };
+    enum class Precision { Low = 0, Normal = 1, High = 2 };
 
     // The default selective-fp32 set used by Precision::Normal ("normal") when Config::fp32Tensors is empty:
     // the comma-separated tensor-name substrings of the geometry tail that benefit from fp32 storage
@@ -47,7 +47,7 @@ namespace vknn {
 
     const char *backendName(BackendKind k);
     BackendKind backendFromStr(const std::string &s);
-    // Precision tier from a string: "low"/"fp16", "normal"/"mixed", "high"/"fp32", "auto" (unknown -> low).
+    // Precision tier from a string: "low"/"fp16", "normal"/"mixed", "high"/"fp32" (unknown -> low).
     Precision precisionFromStr(const std::string &s);
     // Parse the conv autotune knobs from a string. winograd: "auto" (measure per shape), "on" (force
     // Winograd), "off" (force the direct kernel). tuning: "off" / "fast" / "thorough". Forcing winograd
