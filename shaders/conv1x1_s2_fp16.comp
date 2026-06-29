@@ -7,6 +7,7 @@
 // the strided 1x1 falls back to.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #include "common.glsl"
 #define WTILE 4
 layout(constant_id = 0) const int HAS_RES = 0; // fused residual add (out = act(conv + res))

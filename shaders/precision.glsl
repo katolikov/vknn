@@ -10,6 +10,7 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #define STORE float16_t
+#include "store16.glsl"
 #else
 #define STORE float
 #endif

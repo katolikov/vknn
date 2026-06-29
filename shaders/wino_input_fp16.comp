@@ -4,6 +4,7 @@
 // Vbuf layout: [pos(0..15)][icb][tile]  (vec4 = 4 input channels)
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #include "common.glsl"
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };

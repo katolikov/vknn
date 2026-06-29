@@ -8,6 +8,7 @@
 #ifdef NEED_FP16
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #endif
 #ifndef SRC_T
 #define SRC_T float

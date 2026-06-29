@@ -5,6 +5,7 @@
 // all WTILE pixels. Per-pixel output coords are hoisted OUT of the hot loop (no div/mod inside). fp16.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #include "common.glsl"
 #define WTILE 4
 layout(local_size_x = 64) in;

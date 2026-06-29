@@ -53,7 +53,7 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
       OUTPUT ${_spv}
       COMMAND ${GLSLC} -O --target-env=vulkan1.3 -fshader-stage=compute
               ${_comp} -o ${_spv}
-      DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl
+      DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl
       COMMENT "glslc ${_name}.comp -> ${_name}.spv"
       VERBATIM)
     list(APPEND _spv_files ${_spv})
@@ -67,7 +67,7 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
         OUTPUT ${_spv16}
         COMMAND ${GLSLC} -O -DUSE_FP16=1 --target-env=vulkan1.3 -fshader-stage=compute
                 ${_comp} -o ${_spv16}
-        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl
+        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl
         COMMENT "glslc ${_name}.comp -DUSE_FP16 -> ${_name}_fp16.spv"
         VERBATIM)
       list(APPEND _spv_files ${_spv16})
@@ -83,7 +83,7 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
       OUTPUT ${_o}
       COMMAND ${GLSLC} -O --target-env=vulkan1.3 -fshader-stage=compute
               ${extra} -DSRC_T=${srct} -DDST_T=${dstt} ${_bc} -o ${_o}
-      DEPENDS ${_bc}
+      DEPENDS ${_bc} ${VKNN_SHADER_DIR}/store16.glsl
       COMMENT "glslc boundary_convert ${suffix}"
       VERBATIM)
     set(_spv_files ${_spv_files} ${_o} PARENT_SCOPE)

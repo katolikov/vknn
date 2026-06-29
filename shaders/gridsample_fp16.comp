@@ -5,6 +5,7 @@
 // constant). MODE: 0=bilinear 1=nearest. PADMODE: 0=zeros 1=border 2=reflection.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #include "common.glsl"
 layout(constant_id = 0) const int MODE = 0;
 layout(constant_id = 1) const int PADMODE = 0;

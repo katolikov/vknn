@@ -14,6 +14,7 @@
 // owns 4 tiles x 1 ocb (4 acc). M store matches wino_gemm: [p][ocb][tile].
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #extension GL_KHR_shader_subgroup_shuffle : require
 #include "common.glsl"
 layout(local_size_x = 64) in;

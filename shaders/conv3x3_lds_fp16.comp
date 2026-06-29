@@ -6,6 +6,7 @@
 // from L2 instead of ~9x. fp32 accumulation. Uses the existing [Cout][Cinb][3][3][4] weight pack.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #include "common.glsl"
 #define TS 8
 #define HS 10  // TS + 2 (halo)

@@ -6,6 +6,7 @@
 // partial layout: [KPARTS][Coutb][HW] vec4(4 oc).  weight: [Cout][Cinb][4ic] (same as conv1x1).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
 #include "common.glsl"
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
