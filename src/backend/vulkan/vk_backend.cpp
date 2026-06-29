@@ -907,8 +907,8 @@ namespace vknn {
             env_.cache    = be_->pipelineCache(cfg);
             env_.weights  = be_->weightCache(cfg);
             env_.runner   = &be_->runner();
-            env_.tuning   = cfg.tuning;
-            env_.winograd = cfg.winograd;
+            env_.tuning   = (TuningLevel) cfg.hint(Hint::Tuning, (int) TuningLevel::Fast);
+            env_.winograd = (WinogradMode) cfg.hint(Hint::Winograd, (int) WinogradMode::Auto);
             env_.graph    = &g;
             env_.config   = &cfg;
             env_.useFp16  = useFp16_;

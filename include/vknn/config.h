@@ -10,23 +10,28 @@ namespace vknn {
 
     enum class BackendKind { Vulkan = 0, Cpu = 1 };
     enum class Precision { Fp32 = 0, Fp16 = 1, Auto = 2 };
-    enum class PowerHint { Normal = 0, High = 1, Low = 2 };
     enum class TuningLevel { Off = 0, Fast = 1, Thorough = 2 };
     // How the 3x3-conv Winograd F(2,3) kernel is selected. Auto measures the tiled-GEMM Winograd
     // against the direct kernel per shape and keeps the faster; On forces Winograd on every eligible
     // 3x3; Off always uses the direct kernel.
     enum class WinogradMode { Auto = 0, On = 1, Off = 2 };
 
-    // Advanced kernel-selection hints (MNN-style Config::setHint). Default (value 0) selects the
-    // production kernels; non-zero values select experimental variants.
+    // All conv kernel-selection knobs (MNN-style Config::setHint). Value 0 selects the production default.
+    // Set with setHint(Hint, value), e.g. setHint(Hint::Winograd, (int) WinogradMode::Off).
     enum class Hint {
-        // Winograd matmul variant: 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused.
-        WinogradVariant = 0,
+        // 3x3-conv Winograd selection (WinogradMode): 0 = auto (measure per shape), 1 = on, 2 = off.
+        // Forcing on/off skips the per-shape timing, so the kernel choice is deterministic run-to-run.
+        Winograd = 0,
+        // Conv autotune effort (TuningLevel): 0 = off, 1 = fast (default), 2 = thorough.
+        Tuning = 1,
+        // Winograd matmul variant: 0 = tiled-GEMM (default), 1 = fused, 2 = fused-split, 3 = fully-fused,
+        // 4 = subgroup-GEMM.
+        WinogradVariant = 2,
         // Winograd output-tile size: 0 = F(2,3) (default), 4 = force F(4,3) (0.56x V/M traffic, 4x FLOP
         // saving, but register-heavy 6x6 transforms — usually slower on this GPU).
-        WinogradUnit = 1,
+        WinogradUnit = 3,
         // Direct 3x3 kernel: 0 = autotuned (default), 1 = register-tiled (conv_reg), 2 = LDS input-halo.
-        DirectConv3x3 = 2,
+        DirectConv3x3 = 4,
     };
 
     const char *backendName(BackendKind k);
@@ -43,13 +48,7 @@ namespace vknn {
         std::vector<BackendKind> fallback         = {BackendKind::Cpu};
         bool                     allowCpuFallback = true;
 
-        Precision precision  = Precision::Fp16;
-        PowerHint power      = PowerHint::Normal;
-        int       cpuThreads = 4;
-
-        // I/O layout the user supplies / wants back (engine converts internally).
-        TensorFormat inputLayout  = TensorFormat::NCHW;
-        TensorFormat outputLayout = TensorFormat::NCHW;
+        Precision precision = Precision::Fp16;
 
         // Caches. The unified per-model cache file bundles the compiled-pipeline blob and the
         // prepacked-weight + autotune blob; loading it skips shader compilation, conv autotuning, and
@@ -79,7 +78,6 @@ namespace vknn {
         int maxSubmitNodes = 500;
 
         // Optimization / debug.
-        int         optLevel      = 3;     // graph optimization level 0..3 (fusions). 0 = none.
         bool        noFlatOps     = false; // disable the flat-layout GPU pass
         bool        timing        = false; // print pack/submit/unpack + per-stage timing
         bool        debugSegments = false; // trace per-segment + per-CPU-op execution
@@ -92,15 +90,10 @@ namespace vknn {
         bool        layerDump    = false;
         std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
 
-        // Tuning. Fast (default) measures a few candidates per shape and caches the winner.
-        TuningLevel tuning = TuningLevel::Fast;
-        // 3x3 Winograd selection. Auto picks the faster of tiled-GEMM Winograd vs the direct kernel per
-        // shape. Needs tuning != Off to measure; with tuning off it stays on the direct kernel.
-        WinogradMode winograd = WinogradMode::Auto;
-
-        // Advanced experimental kernel hints (MNN-style). Default selects the production kernels.
-        // e.g. cfg.setHint(Hint::WinogradUnit, 4) to force F(4,3).
-        std::vector<int> hints; // indexed by (int)Hint; 0 = default. Use setHint()/hint().
+        // Conv kernel selection + autotune effort, set via setHint(Hint, value) (see the Hint enum):
+        // Hint::Winograd (auto/on/off), Hint::Tuning (off/fast/thorough), plus the experimental variant
+        // hints. Forcing Winograd on/off makes the 3x3-conv choice deterministic.
+        std::vector<int> hints; // indexed by (int)Hint; 0 = production default. Use setHint()/hint().
         void             setHint(Hint h, int value) {
             if ((int) h >= (int) hints.size())
             {

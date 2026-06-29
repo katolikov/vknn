@@ -449,8 +449,8 @@ int main(int argc, char **argv) {
     cfg.profile                = flag("profile", false);
     // "winograd": "auto"|"on"|"off" forces the 3x3-conv kernel choice. "on"/"off" skip the per-shape
     // timing measurement, so the kernel selection (and the output bits) is deterministic across runs.
-    cfg.winograd = winogradFromStr(str("winograd", "auto"));
-    cfg.tuning   = tuningFromStr(str("tuning", "fast"));
+    cfg.setHint(Hint::Winograd, (int) winogradFromStr(str("winograd", "auto")));
+    cfg.setHint(Hint::Tuning, (int) tuningFromStr(str("tuning", "fast")));
     if (auto *j = js.get("max_submit_nodes"))
     {
         cfg.maxSubmitNodes = (int) j->asNum(cfg.maxSubmitNodes);

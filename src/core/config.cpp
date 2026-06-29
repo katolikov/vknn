@@ -37,13 +37,6 @@ namespace vknn {
     static const char *precStr(Precision p) {
         return p == Precision::Fp16 ? "fp16" : p == Precision::Auto ? "auto" : "fp32";
     }
-    static TensorFormat fmtFromStr(const std::string &s) {
-        if (s == "NHWC")
-        {
-            return TensorFormat::NHWC;
-        }
-        return TensorFormat::NCHW;
-    }
     TuningLevel tuningFromStr(const std::string &s) {
         if (s == "off")
         {
@@ -131,50 +124,39 @@ namespace vknn {
         {
             c.precision = precFromStr(j->asStr("fp16"));
         }
-        if (auto *j = v.get("inputLayout"))
-        {
-            c.inputLayout = fmtFromStr(j->asStr("NCHW"));
-        }
-        if (auto *j = v.get("outputLayout"))
-        {
-            c.outputLayout = fmtFromStr(j->asStr("NCHW"));
-        }
-        I("cpuThreads", c.cpuThreads);
         I("maxSubmitNodes", c.maxSubmitNodes);
         S("cacheFile", c.cacheFile);
         S("cacheDir", c.cacheDir);
         B("cachePipeline", c.cachePipeline);
         B("cacheWeights", c.cacheWeights);
         B("cacheTuning", c.cacheTuning);
+        B("freeWeightsAfterUpload", c.freeWeightsAfterUpload);
+        B("noFlatOps", c.noFlatOps);
+        B("timing", c.timing);
         B("profile", c.profile);
         I("verbosity", c.verbosity);
         B("layerDump", c.layerDump);
         S("layerDumpDir", c.layerDumpDir);
-        if (auto *j = v.get("tuning"))
-        {
-            c.tuning = tuningFromStr(j->asStr("fast"));
-        }
-        if (auto *j = v.get("winograd"))
-        {
-            c.winograd = winogradFromStr(j->asStr("auto"));
-        }
         B("debugSegments", c.debugSegments);
         S("disableVkOps", c.disableVkOps);
         S("dumpTensors", c.dumpTensors);
         if (auto *j = v.get("hints"))
-        { // {"hints": [v0, v1, ...]} indexed by (int)Hint
+        { // raw array indexed by (int)Hint; the named keys below override specific entries
             if (j->type == JsonValue::kArray)
             {
-                for (auto &e: j->arr)
+                for (size_t i = 0; i < j->arr.size(); ++i)
                 {
-                    c.hints.push_back((int) e.asNum(0));
+                    c.setHint((Hint) i, (int) j->arr[i].asNum(0));
                 }
             }
         }
-        if (auto *j = v.get("power"))
+        if (auto *j = v.get("winograd"))
         {
-            std::string p = j->asStr("normal");
-            c.power       = p == "high" ? PowerHint::High : p == "low" ? PowerHint::Low : PowerHint::Normal;
+            c.setHint(Hint::Winograd, (int) winogradFromStr(j->asStr("auto")));
+        }
+        if (auto *j = v.get("tuning"))
+        {
+            c.setHint(Hint::Tuning, (int) tuningFromStr(j->asStr("fast")));
         }
         return c;
     }
@@ -191,24 +173,24 @@ namespace vknn {
         os << "],\n";
         os << "  \"allowCpuFallback\": " << (allowCpuFallback ? "true" : "false") << ",\n";
         os << "  \"precision\": \"" << precStr(precision) << "\",\n";
-        os << "  \"power\": \"" << (power == PowerHint::High ? "high" : power == PowerHint::Low ? "low" : "normal") << "\",\n";
-        os << "  \"cpuThreads\": " << cpuThreads << ",\n";
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
-        os << "  \"inputLayout\": \"" << formatStr(inputLayout) << "\",\n";
-        os << "  \"outputLayout\": \"" << formatStr(outputLayout) << "\",\n";
         os << "  \"cacheFile\": \"" << cacheFile << "\",\n";
         os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
         os << "  \"cachePipeline\": " << (cachePipeline ? "true" : "false") << ",\n";
         os << "  \"cacheWeights\": " << (cacheWeights ? "true" : "false") << ",\n";
         os << "  \"cacheTuning\": " << (cacheTuning ? "true" : "false") << ",\n";
+        os << "  \"freeWeightsAfterUpload\": " << (freeWeightsAfterUpload ? "true" : "false") << ",\n";
+        os << "  \"noFlatOps\": " << (noFlatOps ? "true" : "false") << ",\n";
+        os << "  \"timing\": " << (timing ? "true" : "false") << ",\n";
         os << "  \"profile\": " << (profile ? "true" : "false") << ",\n";
         os << "  \"verbosity\": " << verbosity << ",\n";
         os << "  \"layerDump\": " << (layerDump ? "true" : "false") << ",\n";
         os << "  \"layerDumpDir\": \"" << layerDumpDir << "\",\n";
-        os << "  \"timing\": " << (timing ? "true" : "false") << ",\n";
         os << "  \"debugSegments\": " << (debugSegments ? "true" : "false") << ",\n";
-        os << "  \"tuning\": \"" << tuneStr(tuning) << "\",\n";
-        os << "  \"winograd\": \"" << winoStr(winograd) << "\"\n";
+        os << "  \"disableVkOps\": \"" << disableVkOps << "\",\n";
+        os << "  \"dumpTensors\": \"" << dumpTensors << "\",\n";
+        os << "  \"winograd\": \"" << winoStr((WinogradMode) hint(Hint::Winograd, (int) WinogradMode::Auto)) << "\",\n";
+        os << "  \"tuning\": \"" << tuneStr((TuningLevel) hint(Hint::Tuning, (int) TuningLevel::Fast)) << "\"\n";
         os << "}\n";
         return os.str();
     }

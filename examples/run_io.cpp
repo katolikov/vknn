@@ -5,7 +5,6 @@
 //   --backend cpu|vulkan   (default vulkan)   --precision fp16|fp32 (default fp16)
 //   --no-weight-cache      don't cache prepacked weights in RAM (saves memory for big models)
 //   --keep-weights         keep host weights after upload (default: free them)
-//   --opt-level N          graph optimization level 0..3 (default 3)
 //   --no-flat              disable the flat-layout GPU pass
 //   --timing               print pack/submit/unpack timing
 //   --cache DIR            cache directory
@@ -45,7 +44,7 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s model outdir [--backend cpu|vulkan] [--precision fp16|fp32] [--no-weight-cache]"
-               " [--opt-level N] [--no-flat] [--timing] [--cache DIR] [--winograd auto|on|off]"
+               " [--no-flat] [--timing] [--cache DIR] [--winograd auto|on|off]"
                " [--tuning off|fast|thorough] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
@@ -57,14 +56,13 @@ int main(int argc, char **argv) {
     cfg.precision              = !strcmp(opt(argc, argv, "--precision", "fp16"), "fp32") ? Precision::Fp32 : Precision::Fp16;
     cfg.cacheWeights           = !flag(argc, argv, "--no-weight-cache");
     cfg.freeWeightsAfterUpload = !flag(argc, argv, "--keep-weights");
-    cfg.optLevel               = atoi(opt(argc, argv, "--opt-level", "3"));
     cfg.noFlatOps              = flag(argc, argv, "--no-flat");
     cfg.timing                 = flag(argc, argv, "--timing");
     cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
     cfg.dumpTensors            = opt(argc, argv, "--dump", "");
     cfg.profile                = flag(argc, argv, "--profile");
-    cfg.winograd               = winogradFromStr(opt(argc, argv, "--winograd", "auto"));
-    cfg.tuning                 = tuningFromStr(opt(argc, argv, "--tuning", "fast"));
+    cfg.setHint(Hint::Winograd, (int) winogradFromStr(opt(argc, argv, "--winograd", "auto")));
+    cfg.setHint(Hint::Tuning, (int) tuningFromStr(opt(argc, argv, "--tuning", "fast")));
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -79,7 +77,7 @@ int main(int argc, char **argv) {
     {
         if (argv[i][0] == '-')
         {
-            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--opt-level") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
+            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
                 !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning"))
             {
                 ++i; // skip the flag's value

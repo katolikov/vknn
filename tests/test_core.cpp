@@ -23,16 +23,18 @@ TEST(DType, HalfRoundTrip) {
 
 TEST(Config, JsonRoundTrip) {
     Config c;
-    c.backend      = BackendKind::Vulkan;
-    c.precision    = Precision::Fp16;
-    c.cpuThreads   = 8;
-    c.profile      = true;
+    c.backend       = BackendKind::Vulkan;
+    c.precision     = Precision::Fp16;
+    c.maxSubmitNodes = 250;
+    c.profile       = true;
+    c.setHint(Hint::Winograd, (int) WinogradMode::Off);
     std::string js = c.toJson();
     Config      d  = Config::fromJsonString(js);
     EXPECT_EQ(d.backend, BackendKind::Vulkan);
     EXPECT_EQ(d.precision, Precision::Fp16);
-    EXPECT_EQ(d.cpuThreads, 8);
+    EXPECT_EQ(d.maxSubmitNodes, 250);
     EXPECT_TRUE(d.profile);
+    EXPECT_EQ(d.hint(Hint::Winograd, 0), (int) WinogradMode::Off);
 }
 
 TEST(Config, ParseExplicit) {
