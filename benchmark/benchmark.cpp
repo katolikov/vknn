@@ -448,6 +448,7 @@ int main(int argc, char **argv) {
     cfg.timing                 = flag("timing", false);
     cfg.profile                = flag("profile", false);
     cfg.fp32Tensors            = str("fp32_tensors", ""); // selective-fp32: name substrings kept in fp32 storage
+    cfg.dumpTensors            = str("dump_tensors", ""); // debug: dump matching tensors to /data/local/tmp/vxrt/dump
     // "winograd": "auto"|"on"|"off" forces the 3x3-conv kernel choice. "on"/"off" skip the per-shape
     // timing measurement, so the kernel selection (and the output bits) is deterministic across runs.
     cfg.setHint(Hint::Winograd, winogradFromStr(str("winograd", "auto")));
