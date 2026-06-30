@@ -11,7 +11,11 @@ optional GPU kernel. The convention is **one operator per file**. Full writeup:
    serialize). List/scalar attributes are read via the helpers there.
 3. **`src/import/passes.cpp`** — add a shape rule for `kFoo` in `inferShapes` so the planner can size
    buffers. (`readI64Param` reads a param from an attribute *or* an initializer.) The Vulkan path
-   requires concrete shapes at plan time.
+   requires concrete shapes at plan time. The rule must reproduce ONNX's output size for **every**
+   shape-affecting attribute, not just the common ones — a conv-family op reads `auto_pad`,
+   `output_shape`, `output_padding`, `dilations`, and `group`, not only `pads`. Keep geometry that the
+   shape rule and the kernels both need in one helper so they cannot drift (ConvTranspose uses
+   `src/core/conv_geom.h` from `inferShapes` and from both the CPU and Vulkan ops).
 4. **`src/backend/cpu/ops/foo.cpp`** — the CPU oracle (always required; it is the correctness ground
    truth and the fallback).
 5. **`src/backend/vulkan/ops/foo.cpp`** + **`shaders/foo.comp`** — optional GPU kernel, gated by
@@ -89,6 +93,10 @@ node falls back to the CPU oracle at a segment boundary.
 Build host (CPU oracle) and Android (GPU), then check cosine against an onnxruntime golden. For a small
 synthetic op, build a tiny ONNX + golden with `scripts/yonosplat/op_test.py` and run `vknn_run_io
 --backend vulkan` vs `--backend cpu`. A logic bug surfaces in **fp32** where fp16 noise would mask it.
+Cross-check the shape rule against `onnx.shape_inference` and the values against onnxruntime across the
+op's **attribute matrix** (strides, kernels, `auto_pad`, `output_shape`, `output_padding`, dilation,
+group), not a single config — a one-config test passes even when a variant is unhandled. Add a
+self-contained CPU case to `tests/test_ops.cpp` (build a graph, run, assert against a reference).
 
 ```sh
 ./build.sh && ./build-host/vknn_tests        # host: passes

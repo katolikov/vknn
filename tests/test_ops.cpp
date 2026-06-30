@@ -257,6 +257,16 @@ TEST(Ops, ConvTransposeOutputShape) {
     expectNear(out.data, {5, 14, 10, 12, 14, 36, 24, 30, 15, 34, 20, 24, 24, 55, 32, 36});
 }
 
+// --- ConvTranspose with a per-output-channel bias (Cin=1, Cout=2). ORT golden. ---
+TEST(Ops, ConvTransposeBias) {
+    Attributes attr;
+    attr.map["strides"] = ints({2, 2});
+    // weight [1,2,2,2]: channel 0 = [[1,0],[0,1]], channel 1 = [[1,1],[1,1]]; bias [2] = {10, -5}.
+    auto out = runOp(OpType::ConvTranspose, 0, attr, {1, 1, 2, 2}, {1, 2, 3, 4}, {{{1, 2, 2, 2}, {1, 0, 0, 1, 1, 1, 1, 1}}, {{2}, {10, -5}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 2, 4, 4}));
+    expectNear(out.data, {11, 10, 12, 10, 10, 11, 10, 12, 13, 10, 14, 10, 10, 13, 10, 14, -4, -4, -3, -3, -4, -4, -3, -3, -2, -2, -1, -1, -2, -2, -1, -1});
+}
+
 // --- Greater vs a scalar: strict >, ties are 0. ---
 TEST(Ops, GreaterScalar) {
     auto out = runOp(OpType::Greater, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{1}, {3.f}}});
@@ -277,4 +287,12 @@ TEST(Ops, GreaterBroadcastRow) {
     ASSERT_EQ(out.shape, (std::vector<int64_t> {2, 3}));
     // row0 {1,5,0} vs {2,4,1} -> {0,1,0}; row1 {3,4,2} vs {2,4,1} -> {1,0,1}
     EXPECT_EQ(out.data, (std::vector<float> {0, 1, 0, 1, 0, 1}));
+}
+
+// --- Greater with rank-4 broadcasting: [1,2,2,2] vs a per-channel [1,2,1,1] threshold. ---
+TEST(Ops, GreaterBroadcastPerChannel) {
+    auto out = runOp(OpType::Greater, 0, {}, {1, 2, 2, 2}, {1, 2, 3, 4, 5, 6, 7, 8}, {{{1, 2, 1, 1}, {2.5f, 6.5f}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 2, 2, 2}));
+    // ch0 {1,2,3,4} > 2.5 -> {0,0,1,1}; ch1 {5,6,7,8} > 6.5 -> {0,0,1,1}
+    EXPECT_EQ(out.data, (std::vector<float> {0, 0, 1, 1, 0, 0, 1, 1}));
 }

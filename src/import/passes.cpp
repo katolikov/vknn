@@ -1100,6 +1100,8 @@ namespace vknn {
                 // (its shape is still inferred by inferShapes, and it runs at runtime).
                 case OpType::Where:
                 case OpType::Equal:
+                case OpType::Greater:
+                case OpType::GreaterEqual:
                 case OpType::EyeLike: // identity matrix is constant once the (now-known) shape is fixed
                 case OpType::ConstantOfShape: {
                     if (nd.inputs.empty())
