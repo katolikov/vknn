@@ -14,6 +14,8 @@
 //     "cache": "model.cache",               // unified per-model cache file (default "<model>.cache")
 //     "generate_cache": false,              // populate the cache first (untimed), then time a warm load
 //     "max_submit_nodes": 500,              // 0 = single submit
+//     "iters": 1,                           // timed inference iterations -> min/median/avg/max ms (>1)
+//     "warmup": 0,                          // untimed warmup iterations before timing (default 1 if iters>1)
 //     "timing": true,                       // engine prints pack/submit/unpack
 //     "profile": false,                     // per-operator GPU timing in the result json
 //     "inputs": ["image.npy", "intr.raw"],  // .npy (shape from header) or raw .bin/.raw (model shape);
@@ -31,6 +33,7 @@
 #include "core/json.h"
 #include "vknn/dtype.h"
 #include "vknn/session.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -38,6 +41,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -543,15 +547,45 @@ int main(int argc, char **argv) {
         printf("(no inputs given -> zero-filled, runtime-only)\n");
     }
 
+    // Inference timing: `warmup` untimed iterations (kernel/cache warm-up), then `iters` timed ones.
+    // Defaults (iters 1, warmup 0) reproduce a single cold-ish run; iters>1 reports min/median/avg/max.
+    int iters  = js.get("iters") ? std::max(1, (int) js.get("iters")->asNum(1)) : 1;
+    int warmup = js.get("warmup") ? std::max(0, (int) js.get("warmup")->asNum(0)) : (iters > 1 ? 1 : 0);
+
     std::vector<IOTensor> outs;
-    auto                  t1 = Clock::now();
-    if (sess->run(ins, outs) != Status::Ok)
+    for (int w = 0; w < warmup; ++w)
     {
-        fprintf(stderr, "inference failed\n");
-        return 2;
+        if (sess->run(ins, outs) != Status::Ok)
+        {
+            fprintf(stderr, "inference failed\n");
+            return 2;
+        }
     }
-    double runMs = msSince(t1);
-    printf("load %.1f ms   run %.1f ms\n", loadMs, runMs);
+    std::vector<double> runTimes;
+    runTimes.reserve((size_t) iters);
+    for (int it = 0; it < iters; ++it)
+    {
+        auto t1 = Clock::now();
+        if (sess->run(ins, outs) != Status::Ok)
+        {
+            fprintf(stderr, "inference failed\n");
+            return 2;
+        }
+        runTimes.push_back(msSince(t1));
+    }
+    std::sort(runTimes.begin(), runTimes.end());
+    double runMin    = runTimes.front();
+    double runMax    = runTimes.back();
+    double runMedian = runTimes[runTimes.size() / 2];
+    double runAvg    = std::accumulate(runTimes.begin(), runTimes.end(), 0.0) / (double) runTimes.size();
+    double runMs     = runMedian; // representative single number for the result json
+    if (iters > 1)
+    {
+        printf("load %.1f ms   run median %.1f ms  (min %.1f, avg %.1f, max %.1f, %d iters, %d warmup)\n", loadMs, runMedian, runMin, runAvg, runMax, iters, warmup);
+    } else
+    {
+        printf("load %.1f ms   run %.1f ms\n", loadMs, runMs);
+    }
 
     // --- save outputs (npy / raw / png) ---
     std::vector<std::string> saveFmts;
@@ -708,7 +742,7 @@ int main(int argc, char **argv) {
         r << "{\n";
         r << "  \"model\": \"" << sanitize(baseName(model)) << "\",\n";
         r << "  \"backend\": \"" << backendName(cfg.backend) << "\",\n";
-        r << "  \"timing_ms\": { \"load\": " << loadMs << ", \"run\": " << runMs << " },\n";
+        r << "  \"timing_ms\": { \"load\": " << loadMs << ", \"run\": " << runMs << ", \"run_min\": " << runMin << ", \"run_avg\": " << runAvg << ", \"run_max\": " << runMax << ", \"iters\": " << iters << ", \"warmup\": " << warmup << " },\n";
         if (cfg.profile)
         {
             std::map<std::string, double> byType;

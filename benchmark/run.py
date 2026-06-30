@@ -26,6 +26,7 @@ Config (sectioned; see benchmark/configs/example.json and USAGE.md):
         "outputs": { "save": ["npy","png"], "golden": { "means": "means_gold.npy" },
                      "metrics": ["cosine","psnr","snr"] },
         "profile": true, "bench": 3, "tolerance": 0.999, "result": "encoder8.result.json" } ] }
+       # "bench" (alias "iters") = timed inference iterations -> min/median/avg/max ms; "warmup" = untimed runs first
 A single-stage config may omit "stages" and put the stage fields at the top level.
 """
 import argparse, json, os, re, statistics, subprocess, sys, tempfile
@@ -257,6 +258,12 @@ def run_stage(stage, base, idx, where_convert="host"):
         dcfg["cache"] = os.path.basename(dev["cache"])
     if stage.get("generate_cache") or dev.get("generate_cache"):  # untimed warm-up load to populate it
         dcfg["generate_cache"] = True
+    iters = stage.get("iters", stage.get("bench", dev.get("iters")))  # timed iterations (bench is an alias)
+    if iters is not None:
+        dcfg["iters"] = int(iters)
+    warmup = stage.get("warmup", dev.get("warmup"))
+    if warmup is not None:
+        dcfg["warmup"] = int(warmup)
     for k in ("winograd", "tuning", "winogradVariant", "winogradUnit", "directConv3x3", "fp32_tensors"):  # conv kernel hints + selective fp32
         v = stage.get(k, dev.get(k))
         if v is not None:
