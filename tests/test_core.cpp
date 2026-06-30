@@ -1,5 +1,6 @@
-// vknn unit tests (host): dtype/fp16, config JSON, ONNX import, graph passes, CPU ops vs
-// reference, layout packing math. Vulkan correctness is validated on-device (see scripts).
+// vknn unit tests (host): dtype/fp16, config JSON, graph passes, layout packing math, and the
+// ergonomic Session API. Operator correctness lives in test_ops.cpp; Vulkan correctness is
+// validated on-device (see scripts).
 #include "vknn/config.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
@@ -23,11 +24,11 @@ TEST(DType, HalfRoundTrip) {
 
 TEST(Config, JsonRoundTrip) {
     Config c;
-    c.backend       = BackendKind::Vulkan;
-    c.precision     = Precision::Low;
+    c.backend        = BackendKind::Vulkan;
+    c.precision      = Precision::Low;
     c.maxSubmitNodes = 250;
-    c.profile       = true;
-    c.cacheMode     = CacheMode::Tune;
+    c.profile        = true;
+    c.cacheMode      = CacheMode::Tune;
     c.setHint(Hint::Winograd, (int) Mode::Off);
     std::string js = c.toJson();
     Config      d  = Config::fromJsonString(js);
@@ -62,81 +63,6 @@ TEST(Layout, PackMath) {
     EXPECT_EQ(s.n, 1);
     EXPECT_EQ(s.c, 32);
     EXPECT_EQ(s.h, 7);
-}
-
-// Build a tiny graph: Conv 1x1 (identity weight) + Relu, run on CPU, check values.
-TEST(CpuOps, Conv1x1ReluReference) {
-    Graph g;
-    // input [1,2,1,1]
-    TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {1, 2, 1, 1};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
-    g.inputs.push_back(x);
-    // weight [2,2,1,1] = identity*2 ; bias [2] = {-3, 0}
-    TensorDesc wi;
-    wi.name          = "w";
-    wi.shape         = {2, 2, 1, 1};
-    wi.isInitializer = true;
-    TensorId   w     = g.addTensor(wi);
-    HostBuffer wb;
-    wb.resizeElems(4, DType::Float32);
-    wb.f32()[0]       = 2;
-    wb.f32()[1]       = 0;
-    wb.f32()[2]       = 0;
-    wb.f32()[3]       = 2;
-    g.initializers[w] = wb;
-    TensorDesc bi;
-    bi.name          = "b";
-    bi.shape         = {2};
-    bi.isInitializer = true;
-    TensorId   b     = g.addTensor(bi);
-    HostBuffer bb;
-    bb.resizeElems(2, DType::Float32);
-    bb.f32()[0]       = -3;
-    bb.f32()[1]       = 0;
-    g.initializers[b] = bb;
-    TensorDesc yo;
-    yo.name     = "y";
-    yo.isOutput = true;
-    TensorId y  = g.addTensor(yo);
-
-    Node conv;
-    conv.type    = OpType::Conv;
-    conv.name    = "conv";
-    conv.inputs  = {x, w, b};
-    conv.outputs = {y};
-    g.nodes.push_back(conv);
-    Node relu;
-    relu.type = OpType::Relu;
-    relu.name = "relu";
-    // relu reads y -> y2
-    TensorDesc y2o;
-    y2o.name     = "y2";
-    TensorId y2  = g.addTensor(y2o);
-    relu.inputs  = {y};
-    relu.outputs = {y2};
-    g.nodes.push_back(relu);
-    g.outputs = {y2};
-
-    Config cfg;
-    cfg.backend = BackendKind::Cpu;
-    auto sess   = Session::create(std::move(g), cfg);
-    ASSERT_TRUE(sess);
-    IOTensor in;
-    in.name  = "x";
-    in.shape = {1, 2, 1, 1};
-    in.dtype = DType::Float32;
-    in.data.resize(2 * 4);
-    reinterpret_cast<float *>(in.data.data())[0] = 1.0f; // -> 2*1-3 = -1 -> relu 0
-    reinterpret_cast<float *>(in.data.data())[1] = 5.0f; // -> 2*5+0 = 10 -> relu 10
-    std::vector<IOTensor> outs;
-    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
-    ASSERT_FALSE(outs.empty());
-    const float *o = outs[0].f32();
-    EXPECT_NEAR(o[0], 0.0f, 1e-5);
-    EXPECT_NEAR(o[1], 10.0f, 1e-5);
 }
 
 // Humane Tensor API: construct, shape/size accessors, argmax.
@@ -211,149 +137,4 @@ TEST(Api, AutoShapesFromModel) {
     ASSERT_EQ(out.size(), 2u);
     EXPECT_NEAR(out[0], -1.0f, 1e-5);
     EXPECT_NEAR(out[1], 10.0f, 1e-5);
-}
-
-// Unary family: Sigmoid + HardSwish on CPU.
-TEST(CpuOps, UnarySigmoidHardSwish) {
-    for (int sub: {(int) UnaryType::Sigmoid, (int) UnaryType::HardSwish})
-    {
-        Graph      g;
-        TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = {1, 4};
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs.push_back(x);
-        TensorDesc yo;
-        yo.name     = "y";
-        yo.isOutput = true;
-        TensorId y  = g.addTensor(yo);
-        Node     u;
-        u.type    = OpType::Unary;
-        u.name    = "u";
-        u.subOp   = sub;
-        u.inputs  = {x};
-        u.outputs = {y};
-        g.nodes.push_back(u);
-        g.outputs = {y};
-        Config cfg;
-        cfg.backend   = BackendKind::Cpu;
-        auto     sess = Session::create(std::move(g), cfg);
-        IOTensor in;
-        in.name  = "x";
-        in.shape = {1, 4};
-        in.data.resize(4 * 4);
-        float vals[4] = {-2.f, -0.5f, 0.5f, 3.f};
-        for (int i = 0; i < 4; ++i)
-        {
-            reinterpret_cast<float *>(in.data.data())[i] = vals[i];
-        }
-        std::vector<IOTensor> outs;
-        ASSERT_EQ(sess->run({in}, outs), Status::Ok);
-        const float *o = outs[0].f32();
-        for (int i = 0; i < 4; ++i)
-        {
-            float e = sub == (int) UnaryType::Sigmoid ? 1.f / (1.f + std::exp(-vals[i])) : vals[i] * std::min(std::max(vals[i] + 3.f, 0.f), 6.f) / 6.f;
-            EXPECT_NEAR(o[i], e, 1e-5) << "sub=" << sub << " i=" << i;
-        }
-    }
-}
-
-// Binary family: Mul (with broadcast) on CPU.
-TEST(CpuOps, BinaryMul) {
-    Graph      g;
-    TensorDesc ai;
-    ai.name    = "a";
-    ai.shape   = {1, 3};
-    ai.isInput = true;
-    TensorId a = g.addTensor(ai);
-    g.inputs.push_back(a);
-    TensorDesc bi;
-    bi.name          = "b";
-    bi.shape         = {1};
-    bi.isInitializer = true; // broadcast scalar
-    TensorId   b     = g.addTensor(bi);
-    HostBuffer bb;
-    bb.resizeElems(1, DType::Float32);
-    bb.f32()[0]       = 3.f;
-    g.initializers[b] = bb;
-    TensorDesc co;
-    co.name     = "c";
-    co.isOutput = true;
-    TensorId c  = g.addTensor(co);
-    Node     m;
-    m.type    = OpType::Binary;
-    m.name    = "mul";
-    m.subOp   = (int) BinaryType::Mul;
-    m.inputs  = {a, b};
-    m.outputs = {c};
-    g.nodes.push_back(m);
-    g.outputs = {c};
-    Config cfg;
-    cfg.backend   = BackendKind::Cpu;
-    auto     sess = Session::create(std::move(g), cfg);
-    IOTensor in;
-    in.name  = "a";
-    in.shape = {1, 3};
-    in.data.resize(3 * 4);
-    for (int i = 0; i < 3; ++i)
-    {
-        reinterpret_cast<float *>(in.data.data())[i] = (float) (i + 1);
-    }
-    std::vector<IOTensor> outs;
-    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
-    const float *o = outs[0].f32();
-    EXPECT_NEAR(o[0], 3.f, 1e-5);
-    EXPECT_NEAR(o[1], 6.f, 1e-5);
-    EXPECT_NEAR(o[2], 9.f, 1e-5);
-}
-
-// Add with broadcasting (bias-style) on CPU.
-TEST(CpuOps, AddBroadcast) {
-    Graph      g;
-    TensorDesc ai;
-    ai.name    = "a";
-    ai.shape   = {1, 3};
-    ai.isInput = true;
-    TensorId a = g.addTensor(ai);
-    g.inputs.push_back(a);
-    TensorDesc bi;
-    bi.name          = "b";
-    bi.shape         = {1, 3};
-    bi.isInitializer = true;
-    TensorId   b     = g.addTensor(bi);
-    HostBuffer bb;
-    bb.resizeElems(3, DType::Float32);
-    bb.f32()[0]       = 10;
-    bb.f32()[1]       = 20;
-    bb.f32()[2]       = 30;
-    g.initializers[b] = bb;
-    TensorDesc co;
-    co.name     = "c";
-    co.isOutput = true;
-    TensorId c  = g.addTensor(co);
-    Node     add;
-    add.type    = OpType::Add;
-    add.name    = "add";
-    add.inputs  = {a, b};
-    add.outputs = {c};
-    g.nodes.push_back(add);
-    g.outputs = {c};
-    Config cfg;
-    cfg.backend   = BackendKind::Cpu;
-    auto     sess = Session::create(std::move(g), cfg);
-    IOTensor in;
-    in.name  = "a";
-    in.shape = {1, 3};
-    in.data.resize(3 * 4);
-    for (int i = 0; i < 3; ++i)
-    {
-        reinterpret_cast<float *>(in.data.data())[i] = (float) i;
-    }
-    std::vector<IOTensor> outs;
-    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
-    const float *o = outs[0].f32();
-    EXPECT_NEAR(o[0], 10, 1e-5);
-    EXPECT_NEAR(o[1], 21, 1e-5);
-    EXPECT_NEAR(o[2], 32, 1e-5);
 }

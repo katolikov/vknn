@@ -305,7 +305,7 @@ namespace vknn {
             }
             if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual)
             {
-                // flat broadcasting kernels (fixed PC arrays) decode up to kMaxRank=6 output dims.
+                // flat broadcasting kernels (fixed PC arrays) decode up to kMaxRank=8 output dims.
                 return g.desc(nd.outputs[0]).shape.size() <= 8;
             }
             if (nd.type == OpType::ConvTranspose)
