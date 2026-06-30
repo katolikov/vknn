@@ -22,7 +22,7 @@ YOLOv8n detection, and a 965M-parameter transformer encoder (YoNoSplat) plus a f
 ```sh
 ./build.sh                 # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
 ./build.sh --android       # Android arm64-v8a build (Vulkan backend, NDK toolchain)
-./build.sh --clear         # wipe the build dir first (clean build); combines with the others
+./build.sh --clean         # wipe the build dir first (clean build); combines with the others
 ./build.sh --convert       # build only the model compiler (vknn_compile)
 ./build.sh --docs          # build the static documentation site -> docs/site/index.html
 ./build-host/vknn_tests    # run the host unit/integration tests
