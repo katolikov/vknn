@@ -25,10 +25,24 @@ if(ANDROID)
   add_compile_definitions(VKNN_ANDROID=1)
 endif()
 
-# --- find glslc (build-time SPIR-V compilation) ----------------------------
+# --- shader compiler (build-time GLSL -> SPIR-V) ---------------------------
+# Prefer the vendored glslang (third_party/glslang, built host-side by build.sh) so shader compilation
+# is reproducible and independent of a system install; fall back to a system glslc. Both emit the same
+# SPIR-V, including the RoundingModeRTE fp16-store rounding (store16.glsl). glslang needs the include
+# directive enabled up front via -P (a preamble injected after #version); glslc enables it implicitly.
+find_program(GLSLANG NAMES glslang glslangValidator
+  PATHS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glslang/build-host/StandAlone NO_DEFAULT_PATH)
 find_program(GLSLC glslc HINTS /opt/homebrew/bin /usr/local/bin)
-if(NOT GLSLC)
-  message(WARNING "glslc not found; shaders will not be (re)compiled")
+if(GLSLANG)
+  set(SHADERCC ${GLSLANG})
+  set(SHADERCC_PRE -V --target-env vulkan1.3 -S comp "-P#extension GL_GOOGLE_include_directive : require")
+  message(STATUS "VKNN shader compiler: vendored glslang (${GLSLANG})")
+elseif(GLSLC)
+  set(SHADERCC ${GLSLC})
+  set(SHADERCC_PRE -O --target-env=vulkan1.3 -fshader-stage=compute)
+  message(STATUS "VKNN shader compiler: system glslc (${GLSLC})")
+else()
+  message(WARNING "no shader compiler (glslang or glslc) found; shaders will not be (re)compiled")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -40,7 +54,7 @@ file(MAKE_DIRECTORY ${VKNN_SHADER_GEN_DIR})
 
 set(EMBEDDED_SHADERS_CPP ${VKNN_SHADER_GEN_DIR}/vknn_embedded_shaders.cpp)
 set(_spv_files "")
-if(VKNN_ENABLE_VULKAN AND GLSLC)
+if(VKNN_ENABLE_VULKAN AND SHADERCC)
   file(GLOB VKNN_COMP_SHADERS CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.comp)
   foreach(_comp ${VKNN_COMP_SHADERS})
     get_filename_component(_name ${_comp} NAME_WE)
@@ -51,10 +65,9 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
     set(_spv ${VKNN_SHADER_GEN_DIR}/${_name}.spv)
     add_custom_command(
       OUTPUT ${_spv}
-      COMMAND ${GLSLC} -O --target-env=vulkan1.3 -fshader-stage=compute
-              ${_comp} -o ${_spv}
+      COMMAND ${SHADERCC} ${SHADERCC_PRE} -o ${_spv} ${_comp}
       DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl
-      COMMENT "glslc ${_name}.comp -> ${_name}.spv"
+      COMMENT "compile ${_name}.comp -> ${_name}.spv"
       VERBATIM)
     list(APPEND _spv_files ${_spv})
     # A precision-templated shader (one that #includes precision.glsl) also compiles to an fp16
@@ -65,10 +78,9 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
       set(_spv16 ${VKNN_SHADER_GEN_DIR}/${_name}_fp16.spv)
       add_custom_command(
         OUTPUT ${_spv16}
-        COMMAND ${GLSLC} -O -DUSE_FP16=1 --target-env=vulkan1.3 -fshader-stage=compute
-                ${_comp} -o ${_spv16}
+        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DUSE_FP16=1 -o ${_spv16} ${_comp}
         DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl
-        COMMENT "glslc ${_name}.comp -DUSE_FP16 -> ${_name}_fp16.spv"
+        COMMENT "compile ${_name}.comp -DUSE_FP16 -> ${_name}_fp16.spv"
         VERBATIM)
       list(APPEND _spv_files ${_spv16})
     endif()
@@ -81,10 +93,9 @@ if(VKNN_ENABLE_VULKAN AND GLSLC)
     set(_o ${VKNN_SHADER_GEN_DIR}/boundary_convert_${suffix}.spv)
     add_custom_command(
       OUTPUT ${_o}
-      COMMAND ${GLSLC} -O --target-env=vulkan1.3 -fshader-stage=compute
-              ${extra} -DSRC_T=${srct} -DDST_T=${dstt} ${_bc} -o ${_o}
+      COMMAND ${SHADERCC} ${SHADERCC_PRE} ${extra} -DSRC_T=${srct} -DDST_T=${dstt} -o ${_o} ${_bc}
       DEPENDS ${_bc} ${VKNN_SHADER_DIR}/store16.glsl
-      COMMENT "glslc boundary_convert ${suffix}"
+      COMMENT "compile boundary_convert ${suffix}"
       VERBATIM)
     set(_spv_files ${_spv_files} ${_o} PARENT_SCOPE)
   endfunction()

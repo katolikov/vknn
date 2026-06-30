@@ -62,6 +62,19 @@ fi
 
 [[ $clear -eq 1 ]] && { echo ">> clean: removing $build_dir"; rm -rf "$build_dir"; }
 
+# Vendored shader compiler: build glslang (third_party/glslang) for the host once. It is a build-time
+# tool (GLSL -> SPIR-V on this machine, not the device), so it is always built natively even for the
+# Android target; CMake then prefers it over a system glslc. Only the Vulkan (Android) build compiles
+# shaders, so skip it for the CPU-only host build. If the submodule is absent, CMake falls back to glslc.
+glslang_dir="$ROOT/third_party/glslang"
+glslang_bin="$glslang_dir/build-host/StandAlone/glslang"
+if [[ $android -eq 1 && -f "$glslang_dir/CMakeLists.txt" && ! -x "$glslang_bin" ]]; then
+  echo ">> building vendored shader compiler (glslang, host)"
+  cmake -S "$glslang_dir" -B "$glslang_dir/build-host" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DENABLE_OPT=OFF -DGLSLANG_TESTS=OFF -DBUILD_EXTERNAL=OFF >/dev/null
+  cmake --build "$glslang_dir/build-host" -j"$jobs" --target glslang-standalone >/dev/null
+fi
+
 cmake -S . -B "$build_dir" "${config[@]}" >/dev/null
 if [[ $convert_only -eq 1 ]]; then
   echo ">> building model compiler (vknn_compile)"
