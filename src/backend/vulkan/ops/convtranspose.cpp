@@ -2,6 +2,7 @@
 // gather form (see shaders/convtranspose.comp). Weights/bias are constant initializers uploaded
 // flat in prepare(). Gated by supportsNode to 4D input + constant weight; everything else (runtime
 // weight, non-4D) falls back to the CPU oracle. Push-constant block byte-matches the shader.
+#include "core/conv_geom.h"
 #include "vk_op_common.h"
 
 namespace vknn {
@@ -26,9 +27,10 @@ namespace vknn {
                     return v.empty() ? d : v;
                 };
                 auto    strides = ints("strides", {1, 1});
-                auto    pads    = ints("pads", {0, 0, 0, 0});
                 auto    dil     = ints("dilations", {1, 1});
                 int64_t group   = node.attr.geti("group", 1);
+
+                ConvTransposeGeom geom = convTransposeGeom(in[2], in[3], w[2], w[3], node.attr);
 
                 pc.N     = (int) in[0];
                 pc.Cin   = (int) in[1];
@@ -41,8 +43,8 @@ namespace vknn {
                 pc.kW    = (int) w[3];
                 pc.sh    = (int) strides[0];
                 pc.sw    = (int) strides[1];
-                pc.pt    = (int) pads[0];
-                pc.pl    = (int) pads[1];
+                pc.pt    = (int) geom.padH;
+                pc.pl    = (int) geom.padW;
                 pc.dh    = (int) dil[0];
                 pc.dw    = (int) dil[1];
                 pc.outCg = (int) w[1];

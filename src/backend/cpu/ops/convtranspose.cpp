@@ -5,6 +5,7 @@
 // valid input pixel under the stride, accumulates X*W. Equivalent to the usual scatter form but with
 // one write per output, no races. Weight layout is ONNX ConvTranspose: W[Cin, Cout/group, kH, kW].
 #include "backend/cpu/cpu_backend.h"
+#include "core/conv_geom.h"
 
 namespace vknn {
     namespace {
@@ -17,31 +18,22 @@ namespace vknn {
                 const RtTensor *B       = hasBias ? &ctx.t(node.inputs[2]) : nullptr;
                 RtTensor       &Y       = ctx.t(node.outputs[0]);
 
-                NCHW    x    = NCHW::from(X.shape);
-                int64_t inCw = W.shape[0], outCg = W.shape[1], kh = W.shape[2], kw = W.shape[3];
-                (void) inCw;
-                auto ints = [&](const char *k, std::vector<int64_t> d) {
+                NCHW    x     = NCHW::from(X.shape);
+                int64_t outCg = W.shape[1], kh = W.shape[2], kw = W.shape[3];
+                auto    ints = [&](const char *k, std::vector<int64_t> d) {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
                 auto    strides = ints("strides", {1, 1});
-                auto    pads    = ints("pads", {0, 0, 0, 0});
                 auto    dil     = ints("dilations", {1, 1});
-                auto    outpad  = ints("output_padding", {0, 0});
                 int64_t group   = node.attr.geti("group", 1);
                 int64_t sh = strides[0], sw = strides[1];
-                int64_t pt = pads[0], pl = pads[1];
                 int64_t dh = dil[0], dw = dil[1];
                 int64_t outC = outCg * group;
 
-                int64_t     outH = (x.h - 1) * sh - pt - pads[2] + dh * (kh - 1) + 1 + outpad[0];
-                int64_t     outW = (x.w - 1) * sw - pl - pads[3] + dw * (kw - 1) + 1 + outpad[1];
-                const auto &osh  = node.attr.getints("output_shape");
-                if (osh.size() == 2)
-                {
-                    outH = osh[0];
-                    outW = osh[1];
-                }
+                ConvTransposeGeom geom = convTransposeGeom(x.h, x.w, kh, kw, node.attr);
+                int64_t           outH = geom.outH, outW = geom.outW;
+                int64_t           pt = geom.padH, pl = geom.padW;
 
                 float       *y  = cpu::allocOut(Y, {x.n, outC, outH, outW});
                 const float *xd = X.host.f32();

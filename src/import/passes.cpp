@@ -1,5 +1,6 @@
 #include "passes.h"
 #include "backend/cpu/cpu_backend.h"
+#include "core/conv_geom.h"
 #include "vknn/logging.h"
 #include <algorithm>
 #include <cmath>
@@ -134,27 +135,9 @@ namespace vknn {
                     {
                         break;
                     }
-                    int64_t kh = w[2], kw = w[3];
-                    auto    ints = [&](const char *k, std::vector<int64_t> d) {
-                        const auto &v = nd.attr.getints(k);
-                        return v.empty() ? d : v;
-                    };
-                    int64_t group  = nd.attr.geti("group", 1);
-                    int64_t outC   = w[1] * group;
-                    auto    st     = ints("strides", {1, 1});
-                    auto    pad    = ints("pads", {0, 0, 0, 0});
-                    auto    dil    = ints("dilations", {1, 1});
-                    auto    outpad = ints("output_padding", {0, 0});
-                    // ONNX ConvTranspose output size (output_shape attr, if present, overrides this).
-                    const auto &osh = nd.attr.getints("output_shape");
-                    int64_t     oh  = (x.h - 1) * st[0] - pad[0] - pad[2] + dil[0] * (kh - 1) + 1 + outpad[0];
-                    int64_t     ow  = (x.w - 1) * st[1] - pad[1] - pad[3] + dil[1] * (kw - 1) + 1 + outpad[1];
-                    if (osh.size() == 2)
-                    {
-                        oh = osh[0];
-                        ow = osh[1];
-                    }
-                    SH(o) = {x.n, outC, oh, ow};
+                    int64_t           outC = w[1] * nd.attr.geti("group", 1);
+                    ConvTransposeGeom geom = convTransposeGeom(x.h, x.w, w[2], w[3], nd.attr);
+                    SH(o)                  = {x.n, outC, geom.outH, geom.outW};
                     break;
                 }
                 case OpType::Clip:
@@ -1566,8 +1549,12 @@ namespace vknn {
     // inputs, gates the removal strictly to a float input and a float ONNX target so genuine
     // int<->float casts (shape / index paths) are left intact.
     void eliminateFloatCast(Graph &g) {
-        auto onnxToIsFloat = [](int64_t to) { return to == 1 || to == 10 || to == 11; }; // FLOAT/FLOAT16/DOUBLE
-        auto isFloat       = [](DType d) { return d == DType::Float32 || d == DType::Float16; };
+        auto onnxToIsFloat = [](int64_t to) {
+            return to == 1 || to == 10 || to == 11;
+        }; // FLOAT/FLOAT16/DOUBLE
+        auto isFloat = [](DType d) {
+            return d == DType::Float32 || d == DType::Float16;
+        };
         // float-result math ops: their output is float regardless of an int-typed input.
         auto floatResult = [](OpType t) {
             switch (t)
@@ -1908,9 +1895,9 @@ namespace vknn {
             {
                 continue;
             }
-            mm.fusedBias   = biasId;
-            mm.inputs.push_back(biasId); // keep the bias live for DCE / buffer allocation / scheduling
-            mm.outputs[0]  = add.outputs[0]; // MatMul now produces the (biased) Add output, name intact
+            mm.fusedBias = biasId;
+            mm.inputs.push_back(biasId);    // keep the bias live for DCE / buffer allocation / scheduling
+            mm.outputs[0] = add.outputs[0]; // MatMul now produces the (biased) Add output, name intact
             remove.insert((int) i);
             ++fused;
         }
@@ -2584,7 +2571,7 @@ namespace vknn {
         std::vector<std::string> incl, excl;
         for (size_t p = 0, c;; p = c + 1)
         {
-            c = substrs.find(',', p);
+            c             = substrs.find(',', p);
             std::string s = substrs.substr(p, c == std::string::npos ? c : c - p);
             if (!s.empty())
             {

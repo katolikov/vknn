@@ -326,6 +326,35 @@ places LeakyRelu nodes in Vulkan segments.
 
 ---
 
+## Shape inference (ops that change shape)
+
+`LeakyRelu` is pointwise, so its output shape equals its input shape and the
+default rule covers it. An op whose output shape differs from its input — `Conv`,
+`ConvTranspose`, `Reshape`, `Slice`, `Gather`, a broadcasting binary — needs a
+rule in `inferShapes()` (`src/import/passes.cpp`). The Vulkan path sizes its
+buffers at plan time from these shapes, so a missing or wrong rule yields a
+fabricated `{1,1,1,1}` (`NCHW::from({})`) that silently propagates and corrupts
+every downstream consumer (a later `Reshape` element-count mismatch is usually a
+symptom, not the cause).
+
+A shape rule must reproduce ONNX's output size for **every** shape-affecting
+attribute, not just the common ones. `Conv`/`ConvTranspose`/pooling read
+`auto_pad` (`SAME_UPPER` / `SAME_LOWER` / `VALID`) and `ConvTranspose` also reads
+`output_shape` — when present these override the explicit `pads`, and SAME pads
+are clamped to `>= 0`. The geometry an op shares between its shape rule and its
+kernels lives in one helper so the two cannot drift; `ConvTranspose` uses
+`convTransposeGeom()` (`src/core/conv_geom.h`) from `inferShapes` and from both
+the CPU and Vulkan kernels.
+
+Cross-check the rule against the reference: run `onnx.shape_inference` on a model
+with concrete input shapes and diff every live tensor's shape against VKNN's, and
+confirm the CPU op output matches `onnxruntime` (`vknn_run_io --backend cpu`)
+across the attribute matrix (strides, kernels, `auto_pad`, `output_shape`,
+`output_padding`, `dilations`, `group`). A single-config op test passes even when
+an attribute variant is unhandled.
+
+---
+
 ## 4. Self-registration and whole-archive linking
 
 There is no central table of operators to edit. Every `VKNN_REGISTER_CPU_OP`,
@@ -441,6 +470,8 @@ Vulkan/CPU segments while keeping the output bit-comparable).
 
 - [ ] `include/vknn/op.h`: add `OpType::LeakyRelu`.
 - [ ] `src/core/op.cpp`: add to `opTypeName()` and `opTypeFromOnnx()`.
+- [ ] `src/import/passes.cpp`: add an `inferShapes()` rule if the op changes shape
+      (cross-check vs `onnx.shape_inference` over the attribute matrix).
 - [ ] `src/backend/cpu/ops_basic.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP`.
 - [ ] `shaders/leakyrelu.comp` (+ optional `leakyrelu_fp16.comp`).
 - [ ] `src/backend/vulkan/vk_ops.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP`.
