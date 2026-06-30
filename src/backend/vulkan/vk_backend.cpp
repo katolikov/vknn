@@ -303,10 +303,24 @@ namespace vknn {
                 }
                 return true;
             }
-            if (nd.type == OpType::Where || nd.type == OpType::Equal)
+            if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual)
             {
                 // flat broadcasting kernels (fixed PC arrays) decode up to kMaxRank=6 output dims.
                 return g.desc(nd.outputs[0]).shape.size() <= 8;
+            }
+            if (nd.type == OpType::ConvTranspose)
+            {
+                // Flat transposed conv: 4D input + constant weight (uploaded flat). A runtime weight or
+                // non-4D input falls back to the CPU op.
+                if (g.desc(nd.inputs[0]).shape.size() != 4)
+                {
+                    return false;
+                }
+                if (nd.inputs.size() < 2 || !g.isInitializer(nd.inputs[1]))
+                {
+                    return false;
+                }
+                return !(nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]));
             }
             if (nd.type == OpType::Unsqueeze)
             {

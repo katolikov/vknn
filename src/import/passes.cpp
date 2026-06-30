@@ -123,6 +123,40 @@ namespace vknn {
                     SH(o)       = {x.n, outC, oh, ow};
                     break;
                 }
+                case OpType::ConvTranspose: {
+                    if (SH(nd.inputs[0]).empty())
+                    {
+                        break;
+                    }
+                    NCHW         x = NCHW::from(SH(nd.inputs[0]));
+                    const Shape &w = SH(nd.inputs[1]); // [Cin, Cout/group, kH, kW]
+                    if (w.size() < 4)
+                    {
+                        break;
+                    }
+                    int64_t kh = w[2], kw = w[3];
+                    auto    ints = [&](const char *k, std::vector<int64_t> d) {
+                        const auto &v = nd.attr.getints(k);
+                        return v.empty() ? d : v;
+                    };
+                    int64_t group  = nd.attr.geti("group", 1);
+                    int64_t outC   = w[1] * group;
+                    auto    st     = ints("strides", {1, 1});
+                    auto    pad    = ints("pads", {0, 0, 0, 0});
+                    auto    dil    = ints("dilations", {1, 1});
+                    auto    outpad = ints("output_padding", {0, 0});
+                    // ONNX ConvTranspose output size (output_shape attr, if present, overrides this).
+                    const auto &osh = nd.attr.getints("output_shape");
+                    int64_t     oh  = (x.h - 1) * st[0] - pad[0] - pad[2] + dil[0] * (kh - 1) + 1 + outpad[0];
+                    int64_t     ow  = (x.w - 1) * st[1] - pad[1] - pad[3] + dil[1] * (kw - 1) + 1 + outpad[1];
+                    if (osh.size() == 2)
+                    {
+                        oh = osh[0];
+                        ow = osh[1];
+                    }
+                    SH(o) = {x.n, outC, oh, ow};
+                    break;
+                }
                 case OpType::Clip:
                 case OpType::Relu:
                 case OpType::BatchNorm:
@@ -135,7 +169,9 @@ namespace vknn {
                 case OpType::ScatterND: // same shape as data (input[0])
                     SH(o) = SH(nd.inputs[0]);
                     break;
-                case OpType::Equal: {
+                case OpType::Equal:
+                case OpType::Greater:
+                case OpType::GreaterEqual: {
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
                     if (a.empty() && b.empty())
@@ -2280,7 +2316,22 @@ namespace vknn {
             case OpType::MatMul:       // batched N-D matmul runs on the flat row-major path
             case OpType::Where:        // cond?X:Y, broadcasting flat select
             case OpType::Equal:        // A==B, broadcasting flat compare
+            case OpType::Greater:      // A>B,  broadcasting flat compare
+            case OpType::GreaterEqual: // A>=B, broadcasting flat compare
                 return true;
+            case OpType::ConvTranspose: {
+                // Flat row-major transposed conv (one thread per output element, gather form). Needs a
+                // 4D input and constant weight (uploaded flat); anything else falls back to the CPU op.
+                if (sh(n.inputs[0]).size() != 4)
+                {
+                    return false;
+                }
+                if (n.inputs.size() < 2 || !g.isInitializer(n.inputs[1]))
+                {
+                    return false;
+                }
+                return !(n.inputs.size() > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
+            }
             case OpType::Pad: {
                 // Flat row-major pad (constant/edge/reflect). Needs static pads (attr or a constant
                 // input[1]) and rank within the flat limit; a runtime pad value falls back to CPU.

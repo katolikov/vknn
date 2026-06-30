@@ -1,0 +1,49 @@
+#version 450
+#include "precision.glsl"
+// Flat (row-major NCHW) ConvTranspose2D: one thread per output element, gather form. For each output
+// pixel we loop the kernel taps and accumulate the input pixels that map to it under the stride.
+// Weight layout is ONNX ConvTranspose: W[Cin, Cout/group, kH, kW]. Mirrors the CPU oracle exactly.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Xb { STORE xs[]; };
+layout(std430, binding = 1) readonly  buffer Wb { STORE ws[]; };
+layout(std430, binding = 2) readonly  buffer Bb { STORE bs[]; };
+layout(std430, binding = 3) writeonly buffer Yb { STORE ys[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, Cout, H, W, outH, outW, kH, kW;
+  int sh, sw, pt, pl, dh, dw, inCg, outCg, total, hasBias;
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int idx = int(gid);
+  int ox = idx % pc.outW; idx /= pc.outW;
+  int oy = idx % pc.outH; idx /= pc.outH;
+  int oc = idx % pc.Cout; int n = idx / pc.Cout;
+
+  int g       = oc / pc.outCg;   // group index
+  int ocLocal = oc % pc.outCg;   // output channel within the group
+  int icStart = g * pc.inCg;     // first input channel of the group
+
+  float acc = pc.hasBias != 0 ? float(bs[oc]) : 0.0;
+  for (int ky = 0; ky < pc.kH; ++ky) {
+    int ny = oy + pc.pt - ky * pc.dh; // = iy * sh
+    if (ny < 0 || (ny % pc.sh) != 0) continue;
+    int iy = ny / pc.sh;
+    if (iy >= pc.H) continue;
+    for (int kx = 0; kx < pc.kW; ++kx) {
+      int nx = ox + pc.pl - kx * pc.dw; // = ix * sw
+      if (nx < 0 || (nx % pc.sw) != 0) continue;
+      int ix = nx / pc.sw;
+      if (ix >= pc.W) continue;
+      for (int ic = 0; ic < pc.inCg; ++ic) {
+        int gic  = icStart + ic;
+        int xidx = ((n * pc.Cin + gic) * pc.H + iy) * pc.W + ix;
+        int widx = ((gic * pc.outCg + ocLocal) * pc.kH + ky) * pc.kW + kx;
+        acc += float(xs[xidx]) * float(ws[widx]);
+      }
+    }
+  }
+  ys[gid] = STORE(acc);
+}

@@ -16,8 +16,9 @@ namespace vknn {
     /// Operator types. Add a new value here + a name mapping + register kernels.
     enum class OpType {
         Unknown = 0,
-        Conv, // Conv2D (incl. depthwise via group, pointwise 1x1)
-        Clip, // Clip / Relu6
+        Conv,          // Conv2D (incl. depthwise via group, pointwise 1x1)
+        ConvTranspose, // transposed / fractionally-strided conv (deconv upsample)
+        Clip,          // Clip / Relu6
         Relu,
         Add, // elementwise add (residual)
         GlobalAvgPool,
@@ -54,6 +55,8 @@ namespace vknn {
         Split,           // split along an axis into N outputs (CPU)
         Where,           // cond ? X : Y, elementwise with full broadcasting (flat path)
         Equal,           // A == B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        Greater,         // A >  B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        GreaterEqual,    // A >= B -> 1.0/0.0, elementwise with broadcasting (flat path)
         ConstantOfShape, // emit a tensor of the given shape filled with a scalar value
         EyeLike,         // identity-like matrix (ones on a diagonal) matching the input shape
         ScatterND,       // copy data, then scatter update slices at N-D index rows

@@ -8,6 +8,8 @@ namespace vknn {
         {
             case OpType::Conv:
                 return "Conv";
+            case OpType::ConvTranspose:
+                return "ConvTranspose";
             case OpType::Clip:
                 return "Clip";
             case OpType::Relu:
@@ -82,6 +84,10 @@ namespace vknn {
                 return "Where";
             case OpType::Equal:
                 return "Equal";
+            case OpType::Greater:
+                return "Greater";
+            case OpType::GreaterEqual:
+                return "GreaterEqual";
             case OpType::ConstantOfShape:
                 return "ConstantOfShape";
             case OpType::EyeLike:
@@ -146,6 +152,7 @@ namespace vknn {
     OpType opTypeFromOnnx(const std::string &s) {
         static const std::unordered_map<std::string, OpType> m = {
             {"Conv", OpType::Conv},
+            {"ConvTranspose", OpType::ConvTranspose},
             {"Clip", OpType::Clip},
             {"Relu", OpType::Relu},
             {"Add", OpType::Add},
@@ -184,6 +191,9 @@ namespace vknn {
             {"Split", OpType::Split},
             {"Where", OpType::Where},
             {"Equal", OpType::Equal},
+            {"Greater", OpType::Greater},
+            {"GreaterOrEqual", OpType::GreaterEqual},
+            {"GreaterEqual", OpType::GreaterEqual},
             {"ConstantOfShape", OpType::ConstantOfShape},
             {"EyeLike", OpType::EyeLike},
             {"ScatterND", OpType::ScatterND},
