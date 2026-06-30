@@ -3,11 +3,12 @@
 #
 #   ./build.sh                  host build  — CPU backend + IR + ONNX import + tools + tests
 #   ./build.sh --android        Android arm64-v8a build (Vulkan backend, NDK toolchain)
-#   ./build.sh --clear          wipe the build directory first (clean build)
+#   ./build.sh --clear          remove build-host + build-android and stop (clean only, no build)
 #   ./build.sh --convert        build only the model compiler (vknn_compile) for the chosen target
 #   ./build.sh --docs           build the static documentation site (open docs/site/index.html)
 #
-# Flags combine, e.g.  ./build.sh --android --clear   or   ./build.sh --clear --convert
+# --clear alone just cleans and exits. Combined with a build flag it cleans that target's dir first,
+# then builds — e.g.  ./build.sh --android --clear   or   ./build.sh --clear --convert
 # Override the NDK with ANDROID_NDK=..., the API level with ANDROID_API=...
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +25,12 @@ for a in "$@"; do
     *) echo "build.sh: unknown flag '$a' (try --help)" >&2; exit 1 ;;
   esac
 done
+
+if [[ $clear -eq 1 && $android -eq 0 && $convert_only -eq 0 && $docs -eq 0 ]]; then
+  echo ">> clean: removing build-host and build-android"
+  rm -rf build-host build-android
+  exit 0
+fi
 
 # --docs: build the static documentation site into docs/site (entry point: docs/site/index.html).
 # Doxygen is optional/secondary — if installed, also emit the C++ API reference, linked from the site.
