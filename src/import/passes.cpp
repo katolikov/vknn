@@ -2905,6 +2905,14 @@ namespace vknn {
                 continue;
             }
             Shape    run  = g.desc(g.nodes[i].outputs[0]).shape;
+            if (run.empty())
+            {
+                continue; // unresolved/dynamic shape: fusing would bake an empty shape (see runStandardPasses)
+            }
+            if (g.desc(g.nodes[i].outputs[0]).dtype == DType::Int64)
+            {
+                continue; // shape-arithmetic chain (int64), not a float activation stream
+            }
             TensorId prim = pwHeadPrimary(g, g.nodes[i], run);
             if (prim == kNoTensor)
             {
@@ -3076,10 +3084,6 @@ namespace vknn {
         {
             fuseDwPw(g);
         }
-        if (opt.fusePointwiseChains)
-        {
-            fusePointwiseChains(g);
-        }
         // Iterate fold+infer: folding a Shape/Gather/Concat chain turns a dynamic Reshape's shape input
         // into a constant, which lets the next inferShapes resolve that Reshape statically, which in turn
         // exposes more foldable shape ops downstream (YOLO's DFL/box-decode head). Converges in a couple
@@ -3098,6 +3102,16 @@ namespace vknn {
         inferShapes(g, batch); // refresh shapes after fusion/folding
         lowerEinsum(g);        // batched einsums -> MatMul (needs the operand shapes resolved above)
         inferShapes(g, batch); // resolve the inserted Unsqueeze/MatMul/Squeeze
+        // Pointwise-chain fusion runs LAST, after const-fold + shape resolution: the shape-computation
+        // subgraph (Shape/Gather/Neg/Sqrt/... feeding dynamic Reshapes) is now folded to constants, so
+        // fusion only ever sees statically-shaped float activation chains. Fusing earlier would replace a
+        // foldable shape op with a FusedPointwise (opaque to constFold), leaving a dynamic shape
+        // unresolved -> an empty shape propagates and downstream ops crash.
+        if (opt.fusePointwiseChains)
+        {
+            fusePointwiseChains(g);
+            inferShapes(g, batch); // set the FusedPointwise output shapes
+        }
         if (opt.dumpBig)
         {
             for (const Node &n: g.nodes)
