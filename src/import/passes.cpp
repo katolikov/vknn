@@ -2885,6 +2885,10 @@ namespace vknn {
             }
             bool  wantFlat = gpuFlatNode(g, g.nodes[i]);
             Shape run      = g.desc(g.nodes[i].outputs[0]).shape;
+            if (wantFlat && (int) run.size() > kPwMaxRank)
+            {
+                continue; // the flat kernel only stores kPwMaxRank broadcast dims
+            }
 
             std::vector<int64_t>  steps;
             std::vector<float>    params;

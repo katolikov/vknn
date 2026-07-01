@@ -10,6 +10,7 @@
 //     --no-fuse-swish   disable HardSwish/SiLU -> conv-epilogue fusion (default: on)
 //     --fuse-se         fuse the Squeeze-Excite chain (experimental, default: off)
 //     --fuse-dwpw       fuse depthwise-3x3 + 1x1-project (experimental, default: off)
+//     --no-fuse-pointwise  disable pointwise-chain fusion into one kernel (default: on)
 //     --dump-big        log tensors > 50M elements after shape inference (debug)
 #include "import/passes.h"
 #include "vknn/dtype.h"
@@ -36,7 +37,7 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s <model.onnx> <out.vxm> [--fp16] [--no-fuse-swish] [--fuse-se] [--fuse-dwpw] "
-               "[--dump-big]\n",
+               "[--no-fuse-pointwise] [--dump-big]\n",
                argv[0]);
         return 1;
     }
@@ -44,14 +45,15 @@ int main(int argc, char **argv) {
     bool        fp16 = has(argc, argv, "--fp16");
 
     PassOptions opt;
-    opt.fuseSwish         = !has(argc, argv, "--no-fuse-swish");
-    opt.fuseSqueezeExcite = has(argc, argv, "--fuse-se");
-    opt.fuseDwPw          = has(argc, argv, "--fuse-dwpw");
-    opt.dumpBig           = has(argc, argv, "--dump-big");
+    opt.fuseSwish           = !has(argc, argv, "--no-fuse-swish");
+    opt.fuseSqueezeExcite   = has(argc, argv, "--fuse-se");
+    opt.fuseDwPw            = has(argc, argv, "--fuse-dwpw");
+    opt.fusePointwiseChains = !has(argc, argv, "--no-fuse-pointwise");
+    opt.dumpBig             = has(argc, argv, "--dump-big");
 
     printf("[compile] importing %s ...\n", onnx.c_str());
     Graph g = importOnnx(onnx);
-    printf("[compile] %zu nodes, %zu weights. running passes (fuse-swish=%d fuse-se=%d fuse-dwpw=%d)\n", g.nodes.size(), g.initializers.size(), opt.fuseSwish, opt.fuseSqueezeExcite, opt.fuseDwPw);
+    printf("[compile] %zu nodes, %zu weights. running passes (fuse-swish=%d fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d)\n", g.nodes.size(), g.initializers.size(), opt.fuseSwish, opt.fuseSqueezeExcite, opt.fuseDwPw, opt.fusePointwiseChains);
     runStandardPasses(g, opt);
     printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
 

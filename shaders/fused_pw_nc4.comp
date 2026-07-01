@@ -1,0 +1,11 @@
+#version 450
+#include "precision.glsl"
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+layout(local_size_x=256) in;
+layout(std430,binding=0) readonly buffer Prim { STORE prim[]; };
+layout(std430,binding=1) writeonly buffer Dst { STORE dst[]; };
+layout(push_constant) uniform PC { int total; } pc;
+void main(){ uint gid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;
+  if(gid>=uint(pc.total)) return; vec4 v=vec4(prim[gid*4],prim[gid*4+1],prim[gid*4+2],prim[gid*4+3]);
+  vec4 o=pw_apply4(v,int(gid)); dst[gid*4]=STORE(o.x); dst[gid*4+1]=STORE(o.y); dst[gid*4+2]=STORE(o.z); dst[gid*4+3]=STORE(o.w); }
