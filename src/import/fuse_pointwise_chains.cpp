@@ -176,6 +176,13 @@ namespace vknn {
         return kNoTensor;
     }
 
+    // Ops whose kernel can apply a pointwise-chain epilogue at its store (the chain folds into the
+    // producer instead of a standalone node). Grows per rollout phase as each backend kernel gains the
+    // epilogue; the pass only attaches to a producer whose GPU kernel actually reads pw_steps.
+    static bool pwEpilogueCapable(OpType t) {
+        return t == OpType::MatMul || t == OpType::Gemm;
+    }
+
     void fusePointwiseChains(Graph &g) {
         std::vector<int> producer(g.tensors.size(), -1), consumers(g.tensors.size(), 0), nextOf(g.tensors.size(), -1);
         for (size_t i = 0; i < g.nodes.size(); ++i)
@@ -338,7 +345,73 @@ namespace vknn {
             }
             int      tail    = chain.back();
             TensorId tailOut = g.nodes[tail].outputs[0];
-            Node     fn;
+
+            // Epilogue fusion: if the primary comes from a single-consumer producer whose kernel can
+            // carry the chain (pwEpilogueCapable) in the same world, fold the whole chain into that
+            // producer's store instead of emitting a standalone node. Operand step indices are rebased
+            // onto the operands appended to the producer's inputs; the producer now emits the tail output.
+            int prod = (prim >= 0 && prim < (TensorId) producer.size()) ? producer[prim] : -1;
+            // Every appended operand must already be available before the producer. Otherwise the producer
+            // would depend on a tensor produced later in the graph -> topoSort reorders the producer down,
+            // extending its (widely-consumed) output's lifetime so the pool can't reuse buffers -> a
+            // memory blow-up (VK_ERROR_OUT_OF_HOST_MEMORY on large models). Constants/graph inputs are
+            // always available.
+            bool opsReady = true;
+            for (size_t k = 1; k < inputs.size() && opsReady; ++k)
+            {
+                TensorId op = inputs[k];
+                if (op != kNoTensor && !g.isInitializer(op))
+                {
+                    int pop = (op >= 0 && op < (TensorId) producer.size()) ? producer[op] : -1;
+                    if (pop >= prod)
+                    {
+                        opsReady = false;
+                    }
+                }
+            }
+            if (opsReady && prod >= 0 && !removed.count(prod) && consumers[prim] == 1 && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") && g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == prim && gpuFlatNode(g, g.nodes[prod]) == wantFlat)
+            {
+                Node                &P      = g.nodes[prod];
+                int                  opbase = (int) P.inputs.size();
+                std::vector<int64_t> es     = steps;
+                for (size_t k = 1; k < inputs.size(); ++k)
+                {
+                    P.inputs.push_back(inputs[k]);
+                }
+                for (int s = 0; s < (int) es.size() / 4; ++s)
+                {
+                    if (es[s * 4 + 2] >= 1)
+                    {
+                        es[s * 4 + 2] = opbase + ((int) es[s * 4 + 2] - 1); // rebase operand idx into P.inputs
+                    }
+                }
+                {
+                    Attr a;
+                    a.kind                 = Attr::Ints;
+                    a.ints                 = es;
+                    P.attr.map["pw_steps"] = a;
+                }
+                {
+                    Attr a;
+                    a.kind                  = Attr::Floats;
+                    a.floats                = params;
+                    P.attr.map["pw_params"] = a;
+                }
+                {
+                    Attr a;
+                    a.kind                  = Attr::Int;
+                    a.i                     = opbase;
+                    P.attr.map["pw_opbase"] = a;
+                }
+                P.outputs[0] = tailOut; // the producer now yields the chain result
+                for (int cn: chain)
+                {
+                    removed.insert(cn); // the whole chain (head included) folds into the producer
+                }
+                fused++;
+                continue;
+            }
+            Node fn;
             fn.type    = OpType::FusedPointwise;
             fn.name    = g.nodes[chain.front()].name + "#pwchain";
             fn.inputs  = inputs;
