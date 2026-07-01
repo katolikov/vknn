@@ -287,6 +287,14 @@ namespace vknn {
                     {
                         dst[i] = halfToFloat(s[i]);
                     }
+                } else if (t.dataType == 11)
+                { // DOUBLE raw -> narrow to fp32 (8 bytes/elem)
+                    const double *s     = reinterpret_cast<const double *>(t.raw.data());
+                    int64_t       avail = (int64_t) (t.raw.size() / 8);
+                    for (int64_t i = 0; i < elems && i < avail; ++i)
+                    {
+                        dst[i] = (float) s[i];
+                    }
                 } else if (t.dataType == 7)
                 { // INT64 raw
                     const int64_t *s     = reinterpret_cast<const int64_t *>(t.raw.data());
@@ -441,6 +449,14 @@ namespace vknn {
                             for (int64_t i = 0; i < n && i < avail; ++i)
                             {
                                 a.floats.push_back(halfToFloat(s[i]));
+                            }
+                        } else if (tp.dataType == 11)
+                        {
+                            const double *s     = (const double *) tp.raw.data();
+                            int64_t       avail = (int64_t) (tp.raw.size() / 8);
+                            for (int64_t i = 0; i < n && i < avail; ++i)
+                            {
+                                a.floats.push_back((float) s[i]);
                             }
                         } else
                         {
@@ -628,7 +644,8 @@ namespace vknn {
             std::vector<PendingInit>                    inits;
             std::map<std::string, std::vector<uint8_t>> extCache; // external .data files, read once each
             std::vector<Node>                           nodes;
-            std::vector<std::vector<std::string>>       nodeIns, nodeOuts; // raw names, resolved in the SSA pass
+            std::vector<std::vector<std::string>>       nodeIns, nodeOuts;    // raw names, resolved in the SSA pass
+            std::map<std::string, Shape>                valueInfoShapes;      // value_info shape hints, applied to node outputs in the SSA pass
             while (r.tag(f, w))
             {
                 switch (f)
@@ -677,13 +694,9 @@ namespace vknn {
                         Shape       sh;
                         int32_t     el = 1;
                         parseValueInfo(r.sub(), nm, sh, el);
-                        if (!nm.empty())
+                        if (!nm.empty() && !sh.empty())
                         {
-                            TensorId id = g.findOrAdd(nm);
-                            if (g.desc(id).shape.empty())
-                            {
-                                g.desc(id).shape = sh;
-                            }
+                            valueInfoShapes[nm] = sh; // applied to the matching node output in the SSA pass
                         }
                         break;
                     }
@@ -759,7 +772,12 @@ namespace vknn {
                             continue;
                         }
                         TensorDesc d;
-                        d.name      = s;
+                        d.name  = s;
+                        auto vit = valueInfoShapes.find(s);
+                        if (vit != valueInfoShapes.end())
+                        {
+                            d.shape = vit->second; // carry the value_info shape hint onto this node output
+                        }
                         TensorId id = g.addTensor(std::move(d)); // fresh id; tensorByName[s] -> id (last def wins)
                         latest[s]   = id;
                         nodes[i].outputs.push_back(id);
