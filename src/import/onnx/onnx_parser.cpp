@@ -118,6 +118,28 @@ namespace vknn {
             const uint8_t *end_;
         };
 
+        // ONNX TensorProto.DataType wire values, used everywhere a tensor's element type is decoded so no
+        // raw magic number (dtype "11", "10", ...) leaks into the parser.
+        enum class OnnxType : int32_t {
+            Undefined = 0,
+            Float     = 1,
+            Uint8     = 2,
+            Int8      = 3,
+            Uint16    = 4,
+            Int16     = 5,
+            Int32     = 6,
+            Int64     = 7,
+            String    = 8,
+            Bool      = 9,
+            Float16   = 10,
+            Double    = 11,
+            Uint32    = 12,
+            Uint64    = 13,
+        };
+        static constexpr bool isType(int32_t dt, OnnxType t) {
+            return dt == (int32_t) t;
+        }
+
         // ----------------------------- TensorProto -----------------------------
         // fields: 1=dims(int64 repeated/packed), 2=data_type(int32), 4=float_data(packed),
         // 7=int64_data(packed), 8=name(string), 9=raw_data(bytes), 13=external_data
@@ -276,27 +298,27 @@ namespace vknn {
             float *dst = hb.f32();
             if (!t.raw.empty())
             {
-                if (t.dataType == 1)
-                { // FLOAT raw
+                if (isType(t.dataType, OnnxType::Float))
+                {
                     std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t) elems * 4));
-                } else if (t.dataType == 10)
-                { // FLOAT16 raw -> decode to fp32 (2 bytes/elem)
+                } else if (isType(t.dataType, OnnxType::Float16))
+                { // decode to fp32 (2 bytes/elem)
                     const uint16_t *s     = reinterpret_cast<const uint16_t *>(t.raw.data());
                     int64_t         avail = (int64_t) (t.raw.size() / 2);
                     for (int64_t i = 0; i < elems && i < avail; ++i)
                     {
                         dst[i] = halfToFloat(s[i]);
                     }
-                } else if (t.dataType == 11)
-                { // DOUBLE raw -> narrow to fp32 (8 bytes/elem)
+                } else if (isType(t.dataType, OnnxType::Double))
+                { // narrow to fp32 (8 bytes/elem)
                     const double *s     = reinterpret_cast<const double *>(t.raw.data());
                     int64_t       avail = (int64_t) (t.raw.size() / 8);
                     for (int64_t i = 0; i < elems && i < avail; ++i)
                     {
                         dst[i] = (float) s[i];
                     }
-                } else if (t.dataType == 7)
-                { // INT64 raw
+                } else if (isType(t.dataType, OnnxType::Int64))
+                {
                     const int64_t *s     = reinterpret_cast<const int64_t *>(t.raw.data());
                     int64_t        avail = (int64_t) (t.raw.size() / 8);
                     for (int64_t i = 0; i < elems && i < avail; ++i)
@@ -323,7 +345,7 @@ namespace vknn {
         static void fillHostI64(const TensorProto &t, HostBuffer &hb, int64_t elems) {
             hb.resizeElems(elems, DType::Int64);
             int64_t *dst = hb.i64();
-            if (!t.raw.empty() && t.dataType == 7)
+            if (!t.raw.empty() && isType(t.dataType, OnnxType::Int64))
             {
                 std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t) elems * 8));
             } else if (!t.int64Data.empty())
@@ -418,7 +440,7 @@ namespace vknn {
                 {
                     n = std::max<int64_t>(1, (int64_t) std::max(tp.floatData.size(), tp.int64Data.size()));
                 }
-                if (!tp.int64Data.empty() || tp.dataType == 7)
+                if (!tp.int64Data.empty() || isType(tp.dataType, OnnxType::Int64))
                 {
                     a.kind = Attr::Ints;
                     if (!tp.int64Data.empty())
@@ -442,7 +464,7 @@ namespace vknn {
                     {
                         // Decode by the tensor's dtype: FLOAT16 raw is 2 bytes/elem (reading it as fp32 would
                         // over-read 2x and fault); FLOAT raw is 4 bytes/elem. Bounds-checked either way.
-                        if (tp.dataType == 10)
+                        if (isType(tp.dataType, OnnxType::Float16))
                         {
                             const uint16_t *s     = (const uint16_t *) tp.raw.data();
                             int64_t         avail = (int64_t) (tp.raw.size() / 2);
@@ -450,7 +472,7 @@ namespace vknn {
                             {
                                 a.floats.push_back(halfToFloat(s[i]));
                             }
-                        } else if (tp.dataType == 11)
+                        } else if (isType(tp.dataType, OnnxType::Double))
                         {
                             const double *s     = (const double *) tp.raw.data();
                             int64_t       avail = (int64_t) (tp.raw.size() / 8);
@@ -477,22 +499,21 @@ namespace vknn {
         // to Float32; the compute path is fp32/fp16, so integer I/O is carried as its own dtype and converted
         // at the graph boundary.
         static DType dtypeFromElem(int32_t el) {
-            switch (el)
+            switch ((OnnxType) el)
             {
-                case 10:
-                    return DType::Float16; // FLOAT16
-                case 7:
-                    return DType::Int64; // INT64
-                case 6:
-                    return DType::Int32; // INT32
-                case 3:
-                    return DType::Int8; // INT8
-                case 2:
-                case 9:
+                case OnnxType::Float16:
+                    return DType::Float16;
+                case OnnxType::Int64:
+                    return DType::Int64;
+                case OnnxType::Int32:
+                    return DType::Int32;
+                case OnnxType::Int8:
+                    return DType::Int8;
+                case OnnxType::Uint8:
+                case OnnxType::Bool:
                     return DType::UInt8; // UINT8 / BOOL (0/1)
-                case 1:
                 default:
-                    return DType::Float32; // FLOAT (and anything else)
+                    return DType::Float32; // FLOAT / DOUBLE (narrowed) / anything else -> fp32 compute
             }
         }
 
@@ -724,13 +745,13 @@ namespace vknn {
                 }
                 resolveExternal(baseDir, pi.tp, extCache); // pull EXTERNAL weights from the sibling data file
                 HostBuffer hb;
-                if (pi.tp.dataType == 7)
+                if (isType(pi.tp.dataType, OnnxType::Int64))
                 {
                     d.dtype = DType::Int64;
                     fillHostI64(pi.tp, hb, n);
                 } else
                 {
-                    d.dtype = DType::Float32;
+                    d.dtype = DType::Float32; // FLOAT / FLOAT16 / DOUBLE all materialize to fp32 storage
                     fillHostFloat(pi.tp, hb, n);
                 }
                 g.initializers[id] = std::move(hb);
