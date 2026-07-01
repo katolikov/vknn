@@ -3,11 +3,111 @@
 #include "vknn/logging.h"
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <set>
 #include <sys/stat.h>
 
 namespace vknn {
+
+    // ---- non-fp32 I/O boundary conversion -----------------------------------------------------------
+    // The engine computes in fp32 (carrying Int64 for shape/index paths). Model I/O may declare UINT8 /
+    // FLOAT16 / integer dtypes; these helpers convert at the graph boundary so any dtype the ONNX declares
+    // works end-to-end without a fp32-only assumption.
+
+    // Caller bytes (in dtype `src`) -> internal storage: int64 for Int64, fp32 for everything else.
+    static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
+        if (src == DType::Int64)
+        {
+            rt.dtype      = DType::Int64;
+            rt.host.resizeElems(elems, DType::Int64);
+            int64_t avail = std::min<int64_t>(elems, (int64_t) (in.size() / 8));
+            std::memcpy(rt.host.bytes.data(), in.data(), (size_t) avail * 8);
+            return;
+        }
+        rt.dtype = DType::Float32;
+        rt.host.resizeElems(elems, DType::Float32);
+        float *f = rt.host.f32();
+        auto   n = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
+        switch (src)
+        {
+            case DType::Float32: {
+                int64_t c = n(4);
+                std::memcpy(f, in.data(), (size_t) c * 4);
+                break;
+            }
+            case DType::Float16: {
+                const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
+                for (int64_t i = 0, c = n(2); i < c; ++i)
+                    f[i] = halfToFloat(h[i]);
+                break;
+            }
+            case DType::UInt8:
+                for (int64_t i = 0, c = n(1); i < c; ++i)
+                    f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
+                break;
+            case DType::Int8:
+                for (int64_t i = 0, c = n(1); i < c; ++i)
+                    f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
+                break;
+            case DType::Int32:
+                for (int64_t i = 0, c = n(4); i < c; ++i)
+                    f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
+                break;
+            default: {
+                int64_t c = n(4);
+                std::memcpy(f, in.data(), (size_t) c * 4);
+                break;
+            }
+        }
+    }
+
+    // Internal storage (rt.dtype fp32 or int64) -> output bytes in the model's declared dtype `dst`.
+    static void readbackOutput(DType dst, const RtTensor &rt, int64_t elems, IOTensor &io) {
+        io.dtype     = dst;
+        bool srcI64  = rt.dtype == DType::Int64;
+        auto srcF32  = [&](int64_t i) -> float { return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i]; };
+        auto srcI    = [&](int64_t i) -> int64_t { return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i]; };
+        if (dst == DType::Float32 && !srcI64)
+        {
+            io.data = rt.host.bytes; // fast path: fp32 -> fp32
+            return;
+        }
+        io.data.assign((size_t) elems * dtypeSize(dst), 0);
+        switch (dst)
+        {
+            case DType::Float32:
+                for (int64_t i = 0; i < elems; ++i)
+                    reinterpret_cast<float *>(io.data.data())[i] = srcF32(i);
+                break;
+            case DType::Float16:
+                for (int64_t i = 0; i < elems; ++i)
+                    reinterpret_cast<fp16_t *>(io.data.data())[i] = floatToHalf(srcF32(i));
+                break;
+            case DType::UInt8:
+                for (int64_t i = 0; i < elems; ++i)
+                {
+                    int64_t v                                            = srcI(i);
+                    reinterpret_cast<uint8_t *>(io.data.data())[i]       = (uint8_t) (v < 0 ? 0 : (v > 255 ? 255 : v));
+                }
+                break;
+            case DType::Int8:
+                for (int64_t i = 0; i < elems; ++i)
+                    reinterpret_cast<int8_t *>(io.data.data())[i] = (int8_t) srcI(i);
+                break;
+            case DType::Int32:
+                for (int64_t i = 0; i < elems; ++i)
+                    reinterpret_cast<int32_t *>(io.data.data())[i] = (int32_t) srcI(i);
+                break;
+            case DType::Int64:
+                for (int64_t i = 0; i < elems; ++i)
+                    reinterpret_cast<int64_t *>(io.data.data())[i] = srcI(i);
+                break;
+            default:
+                io.data = rt.host.bytes;
+                break;
+        }
+    }
 
     Session::~Session() {
         updateCache(); // flush autotune/pipeline changes to the cache file if any
@@ -585,17 +685,20 @@ namespace vknn {
             }
             RtTensor &rt    = pool_[id];
             rt.shape        = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
-            rt.dtype        = io.dtype;
             rt.dmaBufFd     = io.dmaBufFd;
             rt.dmaBufFormat = io.dmaBufFormat;
             rt.dmaBufDtype  = io.dmaBufDtype;
             if (io.dmaBufFd >= 0)
             {
+                rt.dtype     = io.dtype;
                 rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
             } else
             {
-                rt.host.bytes = io.data;
-                rt.hostValid  = true;
+                // Convert the caller's bytes (in io.dtype) to the internal compute storage: fp32 for every
+                // real/8-bit/32-bit type (the compute path is fp32), int64 for Int64 (shape/index inputs).
+                // A UINT8/FLOAT16 image thus enters as fp32 and the model's own Cast handles the rest.
+                bindInput(io.dtype, io.data, numElements(rt.shape), rt);
+                rt.hostValid = true;
             }
             rt.deviceValid = false;
         }
@@ -682,13 +785,17 @@ namespace vknn {
             IOTensor  io;
             io.name         = graph_.tensors[oid].name;
             io.shape        = rt.shape;
-            io.dtype        = rt.dtype;
             io.dmaBufFd     = rt.dmaBufFd;
             io.dmaBufFormat = rt.dmaBufFormat;
             io.dmaBufDtype  = rt.dmaBufDtype;
             if (rt.dmaBufFd < 0)
             {
-                io.data = rt.host.bytes; // a bound output lives in the caller's fd, not here
+                // Emit the output in the model's DECLARED dtype (e.g. a UINT8 image, FLOAT16 tensor),
+                // converting from the internal fp32/int64 storage. Matches the ONNX output contract.
+                readbackOutput(graph_.tensors[oid].dtype, rt, numElements(rt.shape), io);
+            } else
+            {
+                io.dtype = rt.dtype; // a bound output lives in the caller's fd, not here
             }
             outputs.push_back(std::move(io));
             rt.dmaBufFd     = -1; // reset for the next run

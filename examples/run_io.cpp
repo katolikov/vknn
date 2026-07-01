@@ -15,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 using namespace vknn;
@@ -50,6 +51,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     std::string model = argv[1], outdir = argv[2];
+    ::mkdir(outdir.c_str(), 0755); // create the output dir if missing
 
     Config cfg;
     cfg.backend                = backendFromStr(opt(argc, argv, "--backend", "vulkan"));
@@ -92,10 +94,12 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < infos.size(); ++i)
     {
         IOTensor in;
-        in.name      = infos[i].name;
-        in.shape     = infos[i].shape;
-        in.dtype     = DType::Float32;
-        int64_t need = numElements(in.shape) * 4;
+        in.name = infos[i].name;
+        in.shape = infos[i].shape;
+        // Feed the model's DECLARED input dtype: a UINT8/FLOAT16 .bin is read as native bytes and the
+        // Session converts at the boundary. The Session also accepts fp32 (it converts either way).
+        in.dtype     = infos[i].dtype;
+        int64_t need = numElements(in.shape) * (int64_t) dtypeSize(in.dtype);
         in.data.assign(need, 0);
         if (i < inFiles.size())
         {
@@ -105,7 +109,7 @@ int main(int argc, char **argv) {
                 f.read(reinterpret_cast<char *>(in.data.data()), need);
             }
         }
-        printf("input  '%s'  %s\n", in.name.c_str(), shapeStr(in.shape).c_str());
+        printf("input  '%s'  %s  %s\n", in.name.c_str(), shapeStr(in.shape).c_str(), dtypeStr(in.dtype));
         ins.push_back(std::move(in));
     }
 

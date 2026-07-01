@@ -268,14 +268,15 @@ namespace vknn {
             }
             if (nd.type == OpType::GridSample)
             {
-                // GPU path needs the grid as a raw constant buffer (it can't be NC4HW4-packed); runtime grids
-                // and cubic mode fall back to the CPU op.
-                if (nd.inputs.size() < 2 || !g.isInitializer(nd.inputs[1]))
+                // 4D NC4HW4 data + a flat [N,Hout,Wout,2] grid (constant OR runtime — the layout pass keeps
+                // the grid flat and the op binds it at compute precision). Cubic mode falls back to the CPU op.
+                if (nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
                 {
                     return false;
                 }
-                const Shape &in = g.desc(nd.inputs[0]).shape;
-                if (in.size() != 4)
+                const Shape &in   = g.desc(nd.inputs[0]).shape;
+                const Shape &grid = g.desc(nd.inputs[1]).shape;
+                if (in.size() != 4 || grid.size() != 4 || grid.back() != 2)
                 {
                     return false;
                 }
@@ -328,9 +329,10 @@ namespace vknn {
             }
             if (nd.type == OpType::Cast)
             {
-                // float->float casts are a no-op copy on the unified-precision buffer; int targets stay CPU.
-                DType o = g.desc(nd.outputs[0]).dtype;
-                return o == DType::Float32 || o == DType::Float16;
+                // float->float is a no-op copy; float->int truncates+clamps on the flat path (cast.comp),
+                // carrying the logical integer as compute-precision storage. A cast whose INPUT is an int64
+                // (CPU-only) shape/index tensor stays on the CPU op — the GPU has no int64 buffer to read.
+                return g.desc(nd.inputs[0]).dtype != DType::Int64;
             }
             if (nd.type == OpType::Gather)
             {

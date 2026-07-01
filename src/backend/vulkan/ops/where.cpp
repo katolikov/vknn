@@ -42,7 +42,7 @@ namespace vknn {
                     if (g.isInitializer(t))
                     {
                         std::vector<float> cv = initFloats(g, t); // decodes fp16 (fp16 .vxm); fp32 passthrough
-                        cv.resize(numElements(s));
+                        cv.resize((size_t) std::max<int64_t>(1, numElements(s))); // 0-D scalar: keep its 1 element
                         constBuf[which] = upload(*env.ctx, cv, env.useFp16);
                     }
                 };

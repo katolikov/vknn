@@ -1,8 +1,8 @@
 #version 450
-// GridSample on the GPU (NC4HW4 data + flat fp32 grid). The data path samples whole channel-blocks
-// (a vec4 per output pixel for every channel), so the channel axis is never permuted. The grid is a
-// flat float buffer (2 coords per output pixel), uploaded raw by the op (works when the grid is a
-// constant). MODE: 0=bilinear 1=nearest. PADMODE: 0=zeros 1=border 2=reflection.
+// GridSample on the GPU (NC4HW4 fp16 data + flat fp16 grid). The data path samples whole channel-blocks
+// (a vec4 per output pixel for every channel), so the channel axis is never permuted. The grid is a flat
+// fp16 buffer (2 coords per output pixel) at the segment compute precision — a constant grid is uploaded
+// fp16, a runtime grid is bound directly. MODE: 0=bilinear 1=nearest. PADMODE: 0=zeros 1=border 2=reflection.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
@@ -11,7 +11,7 @@ layout(constant_id = 0) const int MODE = 0;
 layout(constant_id = 1) const int PADMODE = 0;
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { f16vec4 src[]; };
-layout(std430, binding = 1) readonly  buffer Grid { float grid[]; };
+layout(std430, binding = 1) readonly  buffer Grid { float16_t grid[]; };
 layout(std430, binding = 2) writeonly buffer Dst { f16vec4 dst[]; };
 layout(push_constant) uniform PC { int N, C, Hin, Win, OH, OW, align; } pc;
 
@@ -43,8 +43,8 @@ void main() {
   int n = int(i) / (pc.OW * pc.OH * Cb);
   int gi = 2 * (n * pc.OH * pc.OW + oy * pc.OW + ox);
   int a = pc.align == 1 ? 1 : 0, b = 1 - a;
-  float ix = handle(((1.0 + grid[gi + 0]) * float(pc.Win - a) - float(b)) * 0.5, pc.Win);
-  float iy = handle(((1.0 + grid[gi + 1]) * float(pc.Hin - a) - float(b)) * 0.5, pc.Hin);
+  float ix = handle(((1.0 + float(grid[gi + 0])) * float(pc.Win - a) - float(b)) * 0.5, pc.Win);
+  float iy = handle(((1.0 + float(grid[gi + 1])) * float(pc.Hin - a) - float(b)) * 0.5, pc.Hin);
   int sb = (n * Cb + cb) * pc.Hin * pc.Win;
   vec4 v;
   if (MODE == 1) {

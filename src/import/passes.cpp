@@ -2515,29 +2515,33 @@ namespace vknn {
                 continue;
             }
             bool needFlat = g.desc(nd.outputs[0]).gpuFlat; // the format this node operates in
-            for (TensorId &in: nd.inputs)
+            for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
             {
+                TensorId &in = nd.inputs[inIdx];
                 if (in == kNoTensor || g.isInitializer(in))
                 {
                     continue; // constants handled inside flat ops
                 }
-                if (g.desc(in).gpuFlat == needFlat)
+                // GridSample's grid (input 1) is a flat [N,Hout,Wout,2] buffer regardless of the NC4HW4
+                // data path — keep it flat so a runtime grid is not mis-packed as NC4HW4.
+                bool wantFlat = (nd.type == OpType::GridSample && inIdx == 1) ? true : needFlat;
+                if (g.desc(in).gpuFlat == wantFlat)
                 {
                     continue;
                 }
-                auto key = std::make_pair(in, needFlat);
+                auto key = std::make_pair(in, wantFlat);
                 auto it  = cache.find(key);
                 if (it == cache.end())
                 {
                     TensorDesc d    = g.desc(in);
-                    d.name          = g.desc(in).name + (needFlat ? "#flat" : "#nc4") + std::to_string(n);
+                    d.name          = g.desc(in).name + (wantFlat ? "#flat" : "#nc4") + std::to_string(n);
                     d.isInitializer = d.isInput = d.isOutput = false;
-                    d.gpuFlat                                = needFlat;
+                    d.gpuFlat                                = wantFlat;
                     TensorId t2                              = g.addTensor(d);
                     Node     cv;
                     cv.type    = OpType::ConvertLayout;
                     cv.name    = "convert" + std::to_string(n++);
-                    cv.subOp   = needFlat ? 0 : 1; // 0: NC4HW4->flat, 1: flat->NC4HW4
+                    cv.subOp   = wantFlat ? 0 : 1; // 0: NC4HW4->flat, 1: flat->NC4HW4
                     cv.inputs  = {in};
                     cv.outputs = {t2};
                     converts.push_back(cv);

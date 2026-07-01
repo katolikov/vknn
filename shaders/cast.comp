@@ -1,0 +1,17 @@
+#version 450
+#include "precision.glsl"
+#include "common.glsl"
+// Cast to an integer target (UINT8/INT8/INT16/INT32/INT64/BOOL): truncate toward zero, then clamp to
+// the target's representable range. The flat GPU path carries logical integers as compute-precision
+// storage (STORE = fp32 or fp16), so a UINT8 image / INT64 index is a truncated float here; the graph
+// boundary repacks it to the declared output dtype. float->float casts stay a plain buffer copy in the op.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
+layout(push_constant) uniform PC { int total; float lo, hi; } pc;
+
+void main() {
+  uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (g >= uint(pc.total)) return;
+  d[g] = STORE(clamp(trunc(float(s[g])), pc.lo, pc.hi));
+}

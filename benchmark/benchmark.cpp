@@ -211,6 +211,79 @@ namespace {
         return true;
     }
 
+    // Decode an output tensor (in its declared dtype: UINT8 / FLOAT16 / INT* / FLOAT) to fp32 for
+    // metrics / save / png. A non-fp32 output (e.g. a UINT8 image) is 1 or 2 bytes/elem, so reading it
+    // as fp32 would miscount and misread -- decode by dtype instead.
+    std::vector<float> ioToF32(const IOTensor &o) {
+        int64_t elems = numElements(o.shape);
+        if (elems <= 0)
+        {
+            elems = (int64_t) (o.data.size() / std::max<size_t>(1, dtypeSize(o.dtype)));
+        }
+        std::vector<float> f((size_t) std::max<int64_t>(elems, 0), 0.f);
+        const uint8_t     *p = o.data.data();
+        for (int64_t i = 0; i < elems; ++i)
+        {
+            switch (o.dtype)
+            {
+                case DType::Float16:
+                    f[i] = halfToFloat(reinterpret_cast<const fp16_t *>(p)[i]);
+                    break;
+                case DType::UInt8:
+                    f[i] = (float) p[i];
+                    break;
+                case DType::Int8:
+                    f[i] = (float) reinterpret_cast<const int8_t *>(p)[i];
+                    break;
+                case DType::Int32:
+                    f[i] = (float) reinterpret_cast<const int32_t *>(p)[i];
+                    break;
+                case DType::Int64:
+                    f[i] = (float) reinterpret_cast<const int64_t *>(p)[i];
+                    break;
+                default:
+                    f[i] = reinterpret_cast<const float *>(p)[i];
+                    break;
+            }
+        }
+        return f;
+    }
+
+    // Encode fp32 values to a tensor's declared dtype (native bytes) for feeding the model input in its
+    // real dtype (UINT8 image / FLOAT16 / ...). The Session also accepts fp32, but feeding native keeps
+    // the whole path in the model's declared format.
+    std::vector<uint8_t> encodeToDtype(const std::vector<float> &f, DType dt) {
+        int64_t              n = (int64_t) f.size();
+        std::vector<uint8_t> out((size_t) n * dtypeSize(dt), 0);
+        for (int64_t i = 0; i < n; ++i)
+        {
+            switch (dt)
+            {
+                case DType::Float16:
+                    reinterpret_cast<fp16_t *>(out.data())[i] = floatToHalf(f[i]);
+                    break;
+                case DType::UInt8: {
+                    float v                                  = f[i] < 0 ? 0 : (f[i] > 255 ? 255 : f[i]);
+                    reinterpret_cast<uint8_t *>(out.data())[i] = (uint8_t) v;
+                    break;
+                }
+                case DType::Int8:
+                    reinterpret_cast<int8_t *>(out.data())[i] = (int8_t) f[i];
+                    break;
+                case DType::Int32:
+                    reinterpret_cast<int32_t *>(out.data())[i] = (int32_t) f[i];
+                    break;
+                case DType::Int64:
+                    reinterpret_cast<int64_t *>(out.data())[i] = (int64_t) f[i];
+                    break;
+                default:
+                    reinterpret_cast<float *>(out.data())[i] = f[i];
+                    break;
+            }
+        }
+        return out;
+    }
+
     void saveNpy(const std::string &path, const Shape &shape, const float *data, size_t n) {
         std::string sh = "(";
         for (size_t i = 0; i < shape.size(); ++i)
@@ -232,6 +305,49 @@ namespace {
         f.write(reinterpret_cast<char *>(&hl), 2);
         f.write(hdr.data(), (std::streamsize) hdr.size());
         f.write(reinterpret_cast<const char *>(data), (std::streamsize) (n * 4));
+    }
+
+    // numpy dtype descriptor for an output tensor's native dtype (little-endian).
+    const char *npyDescr(DType dt) {
+        switch (dt)
+        {
+            case DType::Float16:
+                return "<f2";
+            case DType::UInt8:
+                return "|u1";
+            case DType::Int8:
+                return "|i1";
+            case DType::Int32:
+                return "<i4";
+            case DType::Int64:
+                return "<i8";
+            default:
+                return "<f4";
+        }
+    }
+
+    // Save an output tensor in its NATIVE dtype (a UINT8 image stays uint8, an fp16 tensor stays fp16).
+    void saveNpyNative(const std::string &path, const Shape &shape, const IOTensor &o) {
+        std::string sh = "(";
+        for (size_t i = 0; i < shape.size(); ++i)
+        {
+            sh += std::to_string(shape[i]) + (shape.size() == 1 ? "," : (i + 1 < shape.size() ? ", " : ""));
+        }
+        sh += ")";
+        std::string hdr = "{'descr': '" + std::string(npyDescr(o.dtype)) + "', 'fortran_order': False, 'shape': " + sh + ", }";
+        while ((10 + hdr.size() + 1) % 64 != 0)
+        {
+            hdr += ' ';
+        }
+        hdr += '\n';
+        std::ofstream f(path, std::ios::binary);
+        f.write("\x93NUMPY", 6);
+        uint8_t ver[2] = {1, 0};
+        f.write(reinterpret_cast<char *>(ver), 2);
+        uint16_t hl = (uint16_t) hdr.size();
+        f.write(reinterpret_cast<char *>(&hl), 2);
+        f.write(hdr.data(), (std::streamsize) hdr.size());
+        f.write(reinterpret_cast<const char *>(o.data.data()), (std::streamsize) o.data.size());
     }
 
     // ---- minimal PNG writer (zlib stored/uncompressed blocks: valid PNG, no deps) ----
@@ -506,8 +622,10 @@ int main(int argc, char **argv) {
         IOTensor t;
         t.name  = infos[i].name;
         t.shape = infos[i].shape;
-        t.dtype = DType::Float32;
-        t.data.assign((size_t) infos[i].elems * 4, 0); // default zeros (runtime-only)
+        // Feed the input in the model's DECLARED dtype (UINT8 image / FLOAT16 / ...). Loaders decode any
+        // file dtype to fp32; encodeToDtype re-encodes to the native dtype so the whole path is native.
+        t.dtype = infos[i].dtype;
+        t.data.assign((size_t) infos[i].elems * (int64_t) dtypeSize(t.dtype), 0); // default zeros (runtime-only)
         if (haveIns)
         {
             std::string p;
@@ -537,8 +655,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "input '%s': %s has %zu elems, model expects %lld\n", infos[i].name.c_str(), p.c_str(), tn.data.size(), (long long) infos[i].elems);
                 return 1;
             }
-            std::memcpy(t.data.data(), tn.data.data(), t.data.size());
-            printf("input  '%s'  %s  <- %s\n", t.name.c_str(), shapeStr(t.shape).c_str(), baseName(p).c_str());
+            t.data = encodeToDtype(tn.data, t.dtype);
+            printf("input  '%s'  %s  %s  <- %s\n", t.name.c_str(), shapeStr(t.shape).c_str(), dtypeStr(t.dtype), baseName(p).c_str());
         }
         ins.push_back(std::move(t));
     }
@@ -612,30 +730,31 @@ int main(int argc, char **argv) {
     {
         for (auto &o: outs)
         {
-            std::string nm  = sanitize(o.name);
-            size_t      cnt = o.data.size() / 4;
+            std::string nm = sanitize(o.name);
+            // Save in the model's NATIVE output dtype (uint8 stays uint8, fp16 stays fp16); png needs fp32.
             if (wantNpy)
             {
                 std::string p = resolve(base, saveDir) + "/" + nm + ".npy";
-                saveNpy(p, o.shape, o.f32(), cnt);
+                saveNpyNative(p, o.shape, o);
                 saved[o.name].push_back(baseName(p));
             }
             if (wantRaw)
             {
                 std::string   p = resolve(base, saveDir) + "/" + nm + ".raw";
                 std::ofstream rf(p, std::ios::binary);
-                rf.write(reinterpret_cast<const char *>(o.f32()), (std::streamsize) (cnt * 4)); // fp32 row-major
+                rf.write(reinterpret_cast<const char *>(o.data.data()), (std::streamsize) o.data.size()); // native row-major
                 saved[o.name].push_back(baseName(p));
             }
             if (wantPng)
             {
-                std::string p = resolve(base, saveDir) + "/" + nm + ".png";
-                if (saveOutputPng(p, o.shape, o.f32()))
+                std::vector<float> f32 = ioToF32(o);
+                std::string        p   = resolve(base, saveDir) + "/" + nm + ".png";
+                if (saveOutputPng(p, o.shape, f32.data()))
                 {
                     saved[o.name].push_back(baseName(p));
                 }
             }
-            printf("output '%s'  %s\n", o.name.c_str(), shapeStr(o.shape).c_str());
+            printf("output '%s'  %s  %s\n", o.name.c_str(), shapeStr(o.shape).c_str(), dtypeStr(o.dtype));
         }
     }
 
@@ -696,8 +815,9 @@ int main(int argc, char **argv) {
                 allOk = false;
                 continue;
             }
-            Metrics m         = compareAll(o->f32(), o->data.size() / 4, g.data.data(), g.data.size());
-            results[kv.first] = m;
+            std::vector<float> of32 = ioToF32(*o);
+            Metrics            m    = compareAll(of32.data(), of32.size(), g.data.data(), g.data.size());
+            results[kv.first]       = m;
             bool ok           = m.sizeOk && m.nan == 0 && m.cosine >= tol;
             allOk             = allOk && ok;
             std::string line  = "  " + kv.first;

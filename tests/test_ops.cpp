@@ -296,3 +296,118 @@ TEST(Ops, GreaterBroadcastPerChannel) {
     // ch0 {1,2,3,4} > 2.5 -> {0,0,1,1}; ch1 {5,6,7,8} > 6.5 -> {0,0,1,1}
     EXPECT_EQ(out.data, (std::vector<float> {0, 0, 1, 1, 0, 0, 1, 1}));
 }
+
+// --- Non-fp32 model I/O: a UINT8 input flows through the fp32 compute path (Cast->Mul) and back out as
+//     UINT8 (Cast truncates toward zero + clamps to [0,255]); the boundary keeps the declared dtypes. ---
+TEST(Ops, DtypeUint8RoundTrip) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 1, 2, 2};
+    xi.isInput = true;
+    xi.dtype   = DType::UInt8;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc si;
+    si.name          = "s";
+    si.shape         = {1};
+    si.isInitializer = true;
+    TensorId   s     = g.addTensor(si);
+    HostBuffer sb;
+    sb.resizeElems(1, DType::Float32);
+    sb.f32()[0]       = 0.5f;
+    g.initializers[s] = sb;
+    TensorDesc t0;
+    t0.name     = "xf";
+    TensorId xf = g.addTensor(t0);
+    Node     c0;
+    c0.type       = OpType::Cast;
+    c0.name       = "castin";
+    c0.inputs     = {x};
+    c0.outputs    = {xf};
+    c0.attr.map["to"].i = 1; // FLOAT
+    g.nodes.push_back(c0);
+    TensorDesc t1;
+    t1.name    = "m";
+    TensorId m = g.addTensor(t1);
+    Node     mul;
+    mul.type    = OpType::Binary;
+    mul.subOp   = (int) BinaryType::Mul;
+    mul.name    = "mul";
+    mul.inputs  = {xf, s};
+    mul.outputs = {m};
+    g.nodes.push_back(mul);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    yo.dtype    = DType::UInt8;
+    TensorId y  = g.addTensor(yo);
+    Node     c1;
+    c1.type             = OpType::Cast;
+    c1.name             = "castout";
+    c1.inputs           = {m};
+    c1.outputs          = {y};
+    c1.attr.map["to"].i = 2; // UINT8
+    g.nodes.push_back(c1);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {1, 1, 2, 2};
+    in.dtype = DType::UInt8;
+    in.data  = {10, 101, 200, 255}; // raw uint8 bytes
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].dtype, DType::UInt8);
+    ASSERT_EQ(outs[0].data.size(), 4u);
+    // 10*.5=5, 101*.5=50.5->50 (trunc), 200*.5=100, 255*.5=127.5->127
+    EXPECT_EQ(outs[0].data, (std::vector<uint8_t> {5, 50, 100, 127}));
+}
+
+// --- Cast float->INT64 truncates toward zero and the output boundary emits int64 bytes. ---
+TEST(Ops, DtypeCastToInt64) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {3};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    yo.dtype    = DType::Int64;
+    TensorId y  = g.addTensor(yo);
+    Node     c;
+    c.type             = OpType::Cast;
+    c.name             = "cast";
+    c.inputs           = {x};
+    c.outputs          = {y};
+    c.attr.map["to"].i = 7; // INT64
+    g.nodes.push_back(c);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {3};
+    in.dtype = DType::Float32;
+    in.data.resize(3 * 4);
+    float vals[3] = {1.9f, -2.1f, 3.5f};
+    std::memcpy(in.data.data(), vals, sizeof(vals));
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].dtype, DType::Int64);
+    ASSERT_EQ(outs[0].data.size(), 3u * 8u);
+    const int64_t *o = reinterpret_cast<const int64_t *>(outs[0].data.data());
+    EXPECT_EQ(o[0], 1);  // 1.9 -> 1
+    EXPECT_EQ(o[1], -2); // -2.1 -> -2 (toward zero)
+    EXPECT_EQ(o[2], 3);  // 3.5 -> 3
+}

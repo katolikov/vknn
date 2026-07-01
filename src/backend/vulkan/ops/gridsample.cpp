@@ -1,6 +1,7 @@
-// GridSample on the GPU (NC4HW4 data, flat constant grid). Gated to a constant grid in supportsNode
-// (the grid's [N,H,W,2] layout can't go through NC4HW4 input packing; a constant is uploaded raw
-// here, like conv weights). Runtime grids fall back to the CPU op.
+// GridSample on the GPU: NC4HW4 data (input 0) sampled by a flat [N,Hout,Wout,2] grid (input 1). The grid
+// is bound at the segment compute precision — a CONSTANT grid is uploaded (fp16/fp32) and a RUNTIME grid
+// (the optical-flow warps) is bound directly from its flat activation buffer via operandBuf. The layout
+// pass keeps the grid flat (it can't be NC4HW4-packed with its channels-last [.,.,.,2] shape).
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
@@ -11,7 +12,7 @@ namespace vknn {
         };
         struct GridSampleOp: VulkanOp {
             std::unique_ptr<vk::ComputePipeline> pipe;
-            std::shared_ptr<vk::Buffer>          gridBuf;
+            std::shared_ptr<vk::Buffer>          gridHold; // holds a constant grid; a runtime grid uses devBuf
             GsPC                                 pc {};
             int64_t                              total = 0;
             void                                 prepare(const Node &node, VkOpEnv &env) override {
@@ -24,19 +25,15 @@ namespace vknn {
                 uint32_t    MODE = (mode == "nearest") ? 1u : 0u;
                 std::string pad  = node.attr.gets("padding_mode", "zeros");
                 uint32_t    PAD  = pad == "border" ? 1u : (pad == "reflection" ? 2u : 0u);
-                // upload the constant grid as a raw fp32 buffer (2 floats per output pixel)
-                std::vector<float> gv = initFloats(g, node.inputs[1]);
-                int64_t            nf = (int64_t) gv.size();
-                gridBuf               = std::make_shared<vk::Buffer>(*env.ctx, std::max<int64_t>(nf * 4, 16), vk::MemPref::kAuto);
-                gridBuf->upload(gv.data(), nf * 4);
-                total = (int64_t) x.n * cBlocks(x.c) * OH * OW;
-                pipe  = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("gridsample", env.useFp16), 3, sizeof(GsPC), std::vector<uint32_t> {MODE, PAD},
-                                                              env.cache->handle());
+                total            = (int64_t) x.n * cBlocks(x.c) * OH * OW;
+                pipe             = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("gridsample", env.useFp16), 3, sizeof(GsPC), std::vector<uint32_t> {MODE, PAD},
+                                                                         env.cache->handle());
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                vk::Buffer *s = env.devBuf(node.inputs[0]);
-                vk::Buffer *d = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {s->handle(), gridBuf->handle(), d->handle()}, &pc, sizeof(pc), groups(total, 64));
+                vk::Buffer *s    = env.devBuf(node.inputs[0]);
+                vk::Buffer *grid = operandBuf(env, node.inputs[1], gridHold); // const upload or runtime buffer
+                vk::Buffer *d    = env.devBuf(node.outputs[0]);
+                pipe->dispatch(cmd, {s->handle(), grid->handle(), d->handle()}, &pc, sizeof(pc), groups(total, 64));
             }
         };
     } // namespace

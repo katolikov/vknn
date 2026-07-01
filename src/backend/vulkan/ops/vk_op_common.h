@@ -122,6 +122,12 @@ namespace vknn {
     inline std::vector<float> initFloats(const Graph &g, TensorId id) {
         const HostBuffer  &hb = g.initializers.at(id);
         int64_t            n  = numElements(g.desc(id).shape);
+        if (n <= 0)
+        {
+            // A 0-D scalar constant has shape [] -> numElements 0, but it holds one element; recover the
+            // count from the raw bytes so the value is read (not dropped).
+            n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4));
+        }
         std::vector<float> out((size_t) std::max<int64_t>(n, 0));
         if (g.desc(id).dtype == DType::Float16)
         {
@@ -150,6 +156,10 @@ namespace vknn {
         const Graph      &g  = *env.graph;
         const HostBuffer &hb = g.initializers.at(id);
         int64_t           n  = numElements(shape);
+        if (n <= 0)
+        {
+            n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4)); // 0-D scalar
+        }
         if (env.useFp16 && g.desc(id).dtype == DType::Float16 && hb.bytes.size() == (size_t) n * 2)
         {
             auto b = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) n, 4) * 2, vk::MemPref::kAuto);
