@@ -655,9 +655,13 @@ namespace vknn {
         }
 
         // ----------------------------- GraphProto -----------------------------
-        // fields: 1=node, 2=name, 5=initializer, 11=input, 12=output, 13=value_info
-        static void parseGraph(Reader r, Graph &g, const std::string &baseDir) {
-            uint32_t f, w;
+        // Builds a Graph from a GraphProto in phases (fields 1=node, 5=initializer, 11=input, 12=output,
+        // 13=value_info): collect() reads the proto (deferring node I/O to raw name lists),
+        // materializeInitializers() fills weight buffers, ssaResolveNodeIO() gives every node output a fresh
+        // TensorId, and dropInitializerInputs() cleans the input list.
+        class GraphBuilder {
+            Graph             &g;
+            const std::string &baseDir;
             struct PendingInit {
                 std::string name;
                 TensorProto tp;
@@ -665,105 +669,123 @@ namespace vknn {
             std::vector<PendingInit>                    inits;
             std::map<std::string, std::vector<uint8_t>> extCache; // external .data files, read once each
             std::vector<Node>                           nodes;
-            std::vector<std::vector<std::string>>       nodeIns, nodeOuts;    // raw names, resolved in the SSA pass
-            std::map<std::string, Shape>                valueInfoShapes;      // value_info shape hints, applied to node outputs in the SSA pass
-            while (r.tag(f, w))
-            {
-                switch (f)
+            std::vector<std::vector<std::string>>       nodeIns, nodeOuts; // raw names, resolved in ssaResolveNodeIO
+            std::map<std::string, Shape>                valueInfoShapes;   // value_info hints -> node outputs
+
+          public:
+            GraphBuilder(Graph &graph, const std::string &dir): g(graph), baseDir(dir) {
+            }
+
+            void build(Reader r) {
+                collect(r);
+                materializeInitializers();
+                ssaResolveNodeIO();
+                g.nodes = std::move(nodes);
+                dropInitializerInputs();
+            }
+
+          private:
+            void collect(Reader r) {
+                uint32_t f, w;
+                while (r.tag(f, w))
                 {
-                    case 1: {
-                        Node                     n;
-                        std::vector<std::string> ni, no;
-                        parseNode(r.sub(), n, ni, no);
-                        nodes.push_back(std::move(n));
-                        nodeIns.push_back(std::move(ni));
-                        nodeOuts.push_back(std::move(no));
-                        break;
-                    }
-                    case 5: {
-                        TensorProto tp = parseTensor(r.sub());
-                        std::string nm = tp.name;
-                        inits.push_back({nm, std::move(tp)});
-                        break;
-                    }
-                    case 11: {
-                        std::string nm;
-                        Shape       sh;
-                        int32_t     el = 1;
-                        parseValueInfo(r.sub(), nm, sh, el);
-                        TensorId id        = g.findOrAdd(nm);
-                        g.desc(id).shape   = sh;
-                        g.desc(id).dtype   = dtypeFromElem(el);
-                        g.desc(id).isInput = true;
-                        g.inputs.push_back(id);
-                        break;
-                    }
-                    case 12: {
-                        std::string nm;
-                        Shape       sh;
-                        int32_t     el = 1;
-                        parseValueInfo(r.sub(), nm, sh, el);
-                        TensorId id         = g.findOrAdd(nm);
-                        g.desc(id).shape    = sh;
-                        g.desc(id).dtype    = dtypeFromElem(el);
-                        g.desc(id).isOutput = true;
-                        g.outputs.push_back(id);
-                        break;
-                    }
-                    case 13: {
-                        std::string nm;
-                        Shape       sh;
-                        int32_t     el = 1;
-                        parseValueInfo(r.sub(), nm, sh, el);
-                        if (!nm.empty() && !sh.empty())
-                        {
-                            valueInfoShapes[nm] = sh; // applied to the matching node output in the SSA pass
+                    switch (f)
+                    {
+                        case 1: {
+                            Node                     n;
+                            std::vector<std::string> ni, no;
+                            parseNode(r.sub(), n, ni, no);
+                            nodes.push_back(std::move(n));
+                            nodeIns.push_back(std::move(ni));
+                            nodeOuts.push_back(std::move(no));
+                            break;
                         }
-                        break;
+                        case 5: {
+                            TensorProto tp = parseTensor(r.sub());
+                            std::string nm = tp.name;
+                            inits.push_back({nm, std::move(tp)});
+                            break;
+                        }
+                        case 11: {
+                            std::string nm;
+                            Shape       sh;
+                            int32_t     el = 1;
+                            parseValueInfo(r.sub(), nm, sh, el);
+                            TensorId id        = g.findOrAdd(nm);
+                            g.desc(id).shape   = sh;
+                            g.desc(id).dtype   = dtypeFromElem(el);
+                            g.desc(id).isInput = true;
+                            g.inputs.push_back(id);
+                            break;
+                        }
+                        case 12: {
+                            std::string nm;
+                            Shape       sh;
+                            int32_t     el = 1;
+                            parseValueInfo(r.sub(), nm, sh, el);
+                            TensorId id         = g.findOrAdd(nm);
+                            g.desc(id).shape    = sh;
+                            g.desc(id).dtype    = dtypeFromElem(el);
+                            g.desc(id).isOutput = true;
+                            g.outputs.push_back(id);
+                            break;
+                        }
+                        case 13: {
+                            std::string nm;
+                            Shape       sh;
+                            int32_t     el = 1;
+                            parseValueInfo(r.sub(), nm, sh, el);
+                            if (!nm.empty() && !sh.empty())
+                            {
+                                valueInfoShapes[nm] = sh; // applied to the matching node output in ssaResolveNodeIO
+                            }
+                            break;
+                        }
+                        default:
+                            r.skip(w);
+                            break;
                     }
-                    default:
-                        r.skip(w);
-                        break;
                 }
             }
 
-            // Materialize initializers.
-            for (auto &pi: inits)
-            {
-                TensorId id     = g.findOrAdd(pi.name);
-                auto    &d      = g.desc(id);
-                d.isInitializer = true;
-                d.shape         = pi.tp.dims;
-                int64_t n       = 1;
-                for (auto x: pi.tp.dims)
+            void materializeInitializers() {
+                for (auto &pi: inits)
                 {
-                    n *= x;
+                    TensorId id     = g.findOrAdd(pi.name);
+                    auto    &d      = g.desc(id);
+                    d.isInitializer = true;
+                    d.shape         = pi.tp.dims;
+                    int64_t n       = 1;
+                    for (auto x: pi.tp.dims)
+                    {
+                        n *= x;
+                    }
+                    if (pi.tp.dims.empty())
+                    {
+                        n = 1;
+                    }
+                    resolveExternal(baseDir, pi.tp, extCache); // pull EXTERNAL weights from the sibling data file
+                    HostBuffer hb;
+                    if (isType(pi.tp.dataType, OnnxType::Int64))
+                    {
+                        d.dtype = DType::Int64;
+                        fillHostI64(pi.tp, hb, n);
+                    } else
+                    {
+                        d.dtype = DType::Float32; // FLOAT / FLOAT16 / DOUBLE all materialize to fp32 storage
+                        fillHostFloat(pi.tp, hb, n);
+                    }
+                    g.initializers[id] = std::move(hb);
                 }
-                if (pi.tp.dims.empty())
-                {
-                    n = 1;
-                }
-                resolveExternal(baseDir, pi.tp, extCache); // pull EXTERNAL weights from the sibling data file
-                HostBuffer hb;
-                if (isType(pi.tp.dataType, OnnxType::Int64))
-                {
-                    d.dtype = DType::Int64;
-                    fillHostI64(pi.tp, hb, n);
-                } else
-                {
-                    d.dtype = DType::Float32; // FLOAT / FLOAT16 / DOUBLE all materialize to fp32 storage
-                    fillHostFloat(pi.tp, hb, n);
-                }
-                g.initializers[id] = std::move(hb);
             }
 
-            // --- SSA-rename node I/O ---
             // ONNX requires unique tensor names, but un-deduped PyTorch traces reuse them (e.g. two Cast
             // nodes both output "Cast_output_0"). Binding by name (findOrAdd) would alias distinct tensors
             // onto ONE TensorId with ONE shape -> wrong static buffer sizes / shape mismatches on the GPU
             // path. Instead: bind each node input to the nearest PRECEDING producer of that name, and give
-            // each node output a FRESH TensorId. Declared graph outputs re-point to their final producer.
-            {
+            // each node output a FRESH TensorId (carrying its value_info shape hint). Declared graph outputs
+            // re-point to their final producer.
+            void ssaResolveNodeIO() {
                 std::unordered_map<std::string, TensorId> latest;
                 for (TensorId id: g.inputs)
                 {
@@ -793,7 +815,7 @@ namespace vknn {
                             continue;
                         }
                         TensorDesc d;
-                        d.name  = s;
+                        d.name   = s;
                         auto vit = valueInfoShapes.find(s);
                         if (vit != valueInfoShapes.end())
                         {
@@ -824,18 +846,23 @@ namespace vknn {
                     }
                 }
             }
-            g.nodes = std::move(nodes);
 
-            // Remove initializer ids from the graph input list (ONNX lists them in both).
-            std::vector<TensorId> realInputs;
-            for (TensorId id: g.inputs)
-            {
-                if (!g.isInitializer(id))
+            // ONNX lists initializers in the graph input list too; drop them.
+            void dropInitializerInputs() {
+                std::vector<TensorId> realInputs;
+                for (TensorId id: g.inputs)
                 {
-                    realInputs.push_back(id);
+                    if (!g.isInitializer(id))
+                    {
+                        realInputs.push_back(id);
+                    }
                 }
+                g.inputs = realInputs;
             }
-            g.inputs = realInputs;
+        };
+
+        static void parseGraph(Reader r, Graph &g, const std::string &baseDir) {
+            GraphBuilder(g, baseDir).build(r);
         }
 
     } // namespace onnx
