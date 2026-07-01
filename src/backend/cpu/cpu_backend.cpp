@@ -123,6 +123,12 @@ namespace vknn {
                 }
                 auto t0 = std::chrono::high_resolution_clock::now();
                 op->run(node, ctx);
+                // A producer may carry a fused pointwise-chain epilogue (attr pw_steps); apply it
+                // in-place after the op runs. FusedPointwise applies its own chain, so skip it here.
+                if (node.type != OpType::FusedPointwise && node.attr.has("pw_steps"))
+                {
+                    applyPwEpilogue(node, ctx);
+                }
                 auto t1 = std::chrono::high_resolution_clock::now();
                 if (ctx.profiler && ctx.profiler->enabled())
                 {

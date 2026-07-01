@@ -514,6 +514,99 @@ TEST(Ops, FusedPwUnaryChannelMul) {
     expectNear(got.data, {5, 5, 10, 10, 15, 15});
 }
 
+// --- A non-pointwise producer (Softmax) carrying an attached pw_steps epilogue (Mul by a
+// per-tensor constant) must have the chain applied in place by the central CPU executor hook,
+// not just by the standalone FusedPointwise op. ---
+TEST(Ops, CpuEpilogueHookOnProducer) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorDesc ci;
+    ci.name          = "c";
+    ci.shape         = {1};
+    ci.isInitializer = true;
+    TensorId  c       = g.addTensor(ci);
+    HostBuffer hb;
+    hb.resizeElems(1, DType::Float32);
+    hb.f32()[0]      = 3.0f;
+    g.initializers[c] = hb;
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node n;
+    n.type    = OpType::Softmax;
+    n.name    = "sm";
+    n.inputs  = {x, c}; // inputs[1]=c is the epilogue operand
+    n.outputs = {y};
+    {
+        Attr a;
+        a.kind                 = Attr::Ints;
+        a.ints                 = {0, (int) BinaryType::Mul, 1, 0}; // Mul by inputs[1]
+        n.attr.map["pw_steps"] = a;
+    }
+    {
+        Attr a;
+        a.kind                  = Attr::Floats;
+        a.floats                = {0, 0};
+        n.attr.map["pw_params"] = a;
+    }
+    {
+        Attr a;
+        a.kind                  = Attr::Int;
+        a.i                     = 1;
+        n.attr.map["pw_opbase"] = a;
+    }
+    {
+        Attr a;
+        a.kind             = Attr::Int;
+        a.i                = -1;
+        n.attr.map["axis"] = a; // softmax axis=-1 (SoftmaxCpu reads attr.geti("axis", -1))
+    }
+    g.nodes   = {n};
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {1, 4};
+    in.dtype = DType::Float32;
+    in.data.resize(4 * 4);
+    float xv[4] = {1, 2, 3, 4};
+    for (int i = 0; i < 4; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = xv[i];
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+
+    // reference: softmax([1,2,3,4]) * 3
+    float e[4], sum = 0;
+    for (int i = 0; i < 4; ++i)
+    {
+        e[i] = std::exp(xv[i] - 4.f);
+        sum += e[i];
+    }
+    std::vector<float> ref(4);
+    for (int i = 0; i < 4; ++i)
+    {
+        ref[i] = e[i] / sum * 3.0f;
+    }
+    const float *o = outs[0].f32();
+    for (int i = 0; i < 4; ++i)
+    {
+        EXPECT_NEAR(o[i], ref[i], 1e-4f) << "i=" << i;
+    }
+}
+
 namespace {
 
     // Chain: y = Clip(Mul(x, s) + b, 0, +inf) -- a Binary(Mul), an Add, then a Clip (ReLU via min=0),
