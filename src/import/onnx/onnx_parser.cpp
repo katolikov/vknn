@@ -12,6 +12,7 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace vknn {
@@ -278,10 +279,19 @@ namespace vknn {
                 if (t.dataType == 1)
                 { // FLOAT raw
                     std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t) elems * 4));
+                } else if (t.dataType == 10)
+                { // FLOAT16 raw -> decode to fp32 (2 bytes/elem)
+                    const uint16_t *s     = reinterpret_cast<const uint16_t *>(t.raw.data());
+                    int64_t         avail = (int64_t) (t.raw.size() / 2);
+                    for (int64_t i = 0; i < elems && i < avail; ++i)
+                    {
+                        dst[i] = halfToFloat(s[i]);
+                    }
                 } else if (t.dataType == 7)
                 { // INT64 raw
-                    const int64_t *s = reinterpret_cast<const int64_t *>(t.raw.data());
-                    for (int64_t i = 0; i < elems; ++i)
+                    const int64_t *s     = reinterpret_cast<const int64_t *>(t.raw.data());
+                    int64_t        avail = (int64_t) (t.raw.size() / 8);
+                    for (int64_t i = 0; i < elems && i < avail; ++i)
                     {
                         dst[i] = (float) s[i];
                     }
@@ -408,8 +418,9 @@ namespace vknn {
                         a.ints = tp.int64Data;
                     } else if (!tp.raw.empty())
                     {
-                        const int64_t *s = (const int64_t *) tp.raw.data();
-                        for (int64_t i = 0; i < n; ++i)
+                        const int64_t *s     = (const int64_t *) tp.raw.data();
+                        int64_t        avail = (int64_t) (tp.raw.size() / 8);
+                        for (int64_t i = 0; i < n && i < avail; ++i)
                         {
                             a.ints.push_back(s[i]);
                         }
@@ -421,15 +432,52 @@ namespace vknn {
                         a.floats = tp.floatData;
                     } else if (!tp.raw.empty())
                     {
-                        const float *s = (const float *) tp.raw.data();
-                        for (int64_t i = 0; i < n; ++i)
+                        // Decode by the tensor's dtype: FLOAT16 raw is 2 bytes/elem (reading it as fp32 would
+                        // over-read 2x and fault); FLOAT raw is 4 bytes/elem. Bounds-checked either way.
+                        if (tp.dataType == 10)
                         {
-                            a.floats.push_back(s[i]);
+                            const uint16_t *s     = (const uint16_t *) tp.raw.data();
+                            int64_t         avail = (int64_t) (tp.raw.size() / 2);
+                            for (int64_t i = 0; i < n && i < avail; ++i)
+                            {
+                                a.floats.push_back(halfToFloat(s[i]));
+                            }
+                        } else
+                        {
+                            const float *s     = (const float *) tp.raw.data();
+                            int64_t      avail = (int64_t) (tp.raw.size() / 4);
+                            for (int64_t i = 0; i < n && i < avail; ++i)
+                            {
+                                a.floats.push_back(s[i]);
+                            }
                         }
                     }
                 }
             }
             node.attr.map[name] = a;
+        }
+
+        // ONNX TensorProto.DataType -> vknn DType. Unmapped/unknown types (complex, string, bf16) fall back
+        // to Float32; the compute path is fp32/fp16, so integer I/O is carried as its own dtype and converted
+        // at the graph boundary.
+        static DType dtypeFromElem(int32_t el) {
+            switch (el)
+            {
+                case 10:
+                    return DType::Float16; // FLOAT16
+                case 7:
+                    return DType::Int64; // INT64
+                case 6:
+                    return DType::Int32; // INT32
+                case 3:
+                    return DType::Int8; // INT8
+                case 2:
+                case 9:
+                    return DType::UInt8; // UINT8 / BOOL (0/1)
+                case 1:
+                default:
+                    return DType::Float32; // FLOAT (and anything else)
+            }
         }
 
         // ----------------------------- ValueInfoProto -----------------------------
@@ -510,10 +558,13 @@ namespace vknn {
         // ----------------------------- NodeProto -----------------------------
         // fields: 1=input(string repeated), 2=output(string repeated), 3=name, 4=op_type, 5=attribute,
         // 7=domain
-        static void parseNode(Reader r, Graph &g, Node &node) {
-            uint32_t                 f, w;
-            std::string              opType;
-            std::vector<std::string> ins, outs;
+        // Returns the raw input/output tensor NAMES (in `ins`/`outs`) instead of resolving them to ids
+        // here; parseGraph resolves them in an SSA pass so a trace that REUSES a tensor name (two nodes
+        // both writing "Cast_output_0" — common in un-deduped PyTorch exports) does not collapse onto one
+        // TensorId. See the SSA-renaming block in parseGraph.
+        static void parseNode(Reader r, Node &node, std::vector<std::string> &ins, std::vector<std::string> &outs) {
+            uint32_t    f, w;
+            std::string opType;
             while (r.tag(f, w))
             {
                 switch (f)
@@ -564,18 +615,6 @@ namespace vknn {
             {
                 VKNN_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
             }
-            for (auto &s: ins)
-            {
-                node.inputs.push_back(s.empty() ? kNoTensor : g.findOrAdd(s));
-            }
-            for (auto &s: outs)
-            {
-                node.outputs.push_back(g.findOrAdd(s));
-            }
-            if (node.name.empty())
-            {
-                node.name = opType + "_" + std::to_string(g.nodes.size());
-            }
         }
 
         // ----------------------------- GraphProto -----------------------------
@@ -589,14 +628,18 @@ namespace vknn {
             std::vector<PendingInit>                    inits;
             std::map<std::string, std::vector<uint8_t>> extCache; // external .data files, read once each
             std::vector<Node>                           nodes;
+            std::vector<std::vector<std::string>>       nodeIns, nodeOuts; // raw names, resolved in the SSA pass
             while (r.tag(f, w))
             {
                 switch (f)
                 {
                     case 1: {
-                        Node n;
-                        parseNode(r.sub(), g, n);
+                        Node                     n;
+                        std::vector<std::string> ni, no;
+                        parseNode(r.sub(), n, ni, no);
                         nodes.push_back(std::move(n));
+                        nodeIns.push_back(std::move(ni));
+                        nodeOuts.push_back(std::move(no));
                         break;
                     }
                     case 5: {
@@ -612,6 +655,7 @@ namespace vknn {
                         parseValueInfo(r.sub(), nm, sh, el);
                         TensorId id        = g.findOrAdd(nm);
                         g.desc(id).shape   = sh;
+                        g.desc(id).dtype   = dtypeFromElem(el);
                         g.desc(id).isInput = true;
                         g.inputs.push_back(id);
                         break;
@@ -623,6 +667,7 @@ namespace vknn {
                         parseValueInfo(r.sub(), nm, sh, el);
                         TensorId id         = g.findOrAdd(nm);
                         g.desc(id).shape    = sh;
+                        g.desc(id).dtype    = dtypeFromElem(el);
                         g.desc(id).isOutput = true;
                         g.outputs.push_back(id);
                         break;
@@ -647,7 +692,6 @@ namespace vknn {
                         break;
                 }
             }
-            g.nodes = std::move(nodes);
 
             // Materialize initializers.
             for (auto &pi: inits)
@@ -678,6 +722,71 @@ namespace vknn {
                 }
                 g.initializers[id] = std::move(hb);
             }
+
+            // --- SSA-rename node I/O ---
+            // ONNX requires unique tensor names, but un-deduped PyTorch traces reuse them (e.g. two Cast
+            // nodes both output "Cast_output_0"). Binding by name (findOrAdd) would alias distinct tensors
+            // onto ONE TensorId with ONE shape -> wrong static buffer sizes / shape mismatches on the GPU
+            // path. Instead: bind each node input to the nearest PRECEDING producer of that name, and give
+            // each node output a FRESH TensorId. Declared graph outputs re-point to their final producer.
+            {
+                std::unordered_map<std::string, TensorId> latest;
+                for (TensorId id: g.inputs)
+                {
+                    latest[g.desc(id).name] = id;
+                }
+                for (auto &pi: inits)
+                {
+                    latest[pi.name] = g.find(pi.name);
+                }
+                for (size_t i = 0; i < nodes.size(); ++i)
+                {
+                    for (const std::string &s: nodeIns[i])
+                    {
+                        if (s.empty())
+                        {
+                            nodes[i].inputs.push_back(kNoTensor);
+                            continue;
+                        }
+                        auto it = latest.find(s);
+                        nodes[i].inputs.push_back(it != latest.end() ? it->second : g.findOrAdd(s));
+                    }
+                    for (const std::string &s: nodeOuts[i])
+                    {
+                        if (s.empty())
+                        {
+                            nodes[i].outputs.push_back(kNoTensor);
+                            continue;
+                        }
+                        TensorDesc d;
+                        d.name      = s;
+                        TensorId id = g.addTensor(std::move(d)); // fresh id; tensorByName[s] -> id (last def wins)
+                        latest[s]   = id;
+                        nodes[i].outputs.push_back(id);
+                    }
+                    if (nodes[i].name.empty())
+                    {
+                        nodes[i].name = std::string(opTypeName(nodes[i].type)) + "_" + std::to_string(i);
+                    }
+                }
+                // A declared output name may have been produced by several nodes; point g.outputs at the
+                // final producer and carry the declared shape/dtype onto it.
+                for (TensorId &oid: g.outputs)
+                {
+                    auto it = latest.find(g.desc(oid).name);
+                    if (it != latest.end() && it->second != oid)
+                    {
+                        Shape declShape             = g.desc(oid).shape;
+                        DType declDtype             = g.desc(oid).dtype;
+                        g.desc(it->second).isOutput = true;
+                        g.desc(it->second).shape    = declShape;
+                        g.desc(it->second).dtype    = declDtype;
+                        oid                         = it->second;
+                    }
+                }
+            }
+            g.nodes = std::move(nodes);
+
             // Remove initializer ids from the graph input list (ONNX lists them in both).
             std::vector<TensorId> realInputs;
             for (TensorId id: g.inputs)
