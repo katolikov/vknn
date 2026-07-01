@@ -19,6 +19,9 @@ namespace vknn {
     void fuseSqueezeExcite(Graph &g);
     // Fuse a depthwise-3x3 conv followed by a 1x1 project conv into one kFusedDwPw kernel.
     void fuseDwPw(Graph &g);
+    // Fuse maximal single-consumer per-element chains into the producer's epilogue, or a standalone
+    // FusedPointwise node. Runs last among fusions. Bit-exact; on by default.
+    void fusePointwiseChains(Graph &g);
     // Fuse Mul(x,HardSigmoid(x))=HardSwish / Mul(x,Sigmoid(x))=SiLU into the conv epilogue or one
     // unary.
     void fuseSwish(Graph &g);
@@ -32,6 +35,7 @@ namespace vknn {
         bool    fuseSwish         = true;  // fold HardSwish/SiLU self-gating into the conv epilogue
         bool    fuseSqueezeExcite = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw          = false; // fuse depthwise-3x3 + 1x1-project (experimental)
+        bool    fusePointwiseChains = true;  // merge pointwise chains into one fused kernel (default on)
         bool    dumpBig           = false; // debug: log tensors > 50M elements after shape inference
     };
 

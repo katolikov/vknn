@@ -54,11 +54,17 @@ namespace vknn {
         ScatterND,       // copy data, then scatter update slices at N-D index rows
         FusedSE,         // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
         FusedDwPw,       // fused depthwise-3x3 + 1x1-project (expanded intermediate stays on-chip)
+        FusedPointwise, // fused per-element chain (standalone); also the epilogue carried by producers
         // layout conversion nodes (inserted by the layout pass)
         ConvertLayout,
         // fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by markFp32)
         ConvertDtype,
     };
+
+    // Fused-pointwise-chain limits (the pass splits chains that would exceed these).
+    constexpr int kPwMaxSteps    = 8;  // steps per fused unit
+    constexpr int kPwMaxOperands = 6;  // extra tensor operands per unit (primary excluded)
+    constexpr int kPwMaxRank     = 4;  // flat broadcast rank stored in the plan (rank>4 => not flat-fused)
 
     const char *opTypeName(OpType t);
     OpType      opTypeFromOnnx(const std::string &s);
