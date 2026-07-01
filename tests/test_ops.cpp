@@ -5,6 +5,7 @@
 // ConvTranspose covers the explicit-pad, auto_pad SAME, and output_shape paths -- SAME and
 // output_shape yield the same output size here but different values, so a regression in either
 // attribute is caught.
+#include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
 #include <cmath>
@@ -511,4 +512,129 @@ TEST(Ops, FusedPwUnaryChannelMul) {
     std::vector<float>   params {0, 0, 0, 0};
     auto                 got = runFusedPw({1, 3, 1, 2}, {0, 0, 0, 0, 0, 0}, {{{1, 3, 1, 1}, {10, 20, 30}}}, steps, params);
     expectNear(got.data, {5, 5, 10, 10, 15, 15});
+}
+
+namespace {
+
+    // Chain: y = Clip(Mul(x, s) + b, 0, +inf) -- a Binary(Mul), an Add, then a Clip (ReLU via min=0),
+    // each single-consumer, all same shape and all GPU-flat (a Binary/Add with a constant operand and
+    // a Clip are both always-flat ops, so the pass's layout-agreement check passes across all three).
+    // fusePointwiseChains should merge all three into one standalone FusedPointwise node.
+    Graph makeChainGraph() {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 1, 2, 2};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        auto k     = [&](const char *nm, std::vector<int64_t> sh, std::vector<float> d) {
+            TensorDesc t;
+            t.name          = nm;
+            t.shape         = sh;
+            t.isInitializer = true;
+            TensorId   id   = g.addTensor(t);
+            HostBuffer hb;
+            hb.resizeElems(d.size(), DType::Float32);
+            for (size_t i = 0; i < d.size(); ++i)
+            {
+                hb.f32()[i] = d[i];
+            }
+            g.initializers[id] = hb;
+            return id;
+        };
+        TensorId   s = k("s", {1, 1, 2, 2}, {2, 2, 2, 2}), b = k("b", {1, 1, 2, 2}, {-5, -5, -5, -5});
+        TensorDesc t0d;
+        t0d.name      = "t0";
+        TensorId   t0 = g.addTensor(t0d);
+        TensorDesc t1d;
+        t1d.name      = "t1";
+        TensorId   t1 = g.addTensor(t1d);
+        TensorDesc yd;
+        yd.name            = "y";
+        TensorId y         = g.addTensor(yd);
+        g.desc(y).isOutput = true;
+        Node m;
+        m.type    = OpType::Binary;
+        m.subOp   = (int) BinaryType::Mul;
+        m.name    = "mul";
+        m.inputs  = {x, s};
+        m.outputs = {t0};
+        Node a;
+        a.type    = OpType::Add;
+        a.name    = "add";
+        a.inputs  = {t0, b};
+        a.outputs = {t1};
+        Node r;
+        r.type            = OpType::Clip;
+        r.name            = "clip";
+        r.inputs          = {t1};
+        r.outputs         = {y};
+        r.attr.map["min"] = [] {
+            Attr a;
+            a.kind = Attr::Float;
+            a.f    = 0.f;
+            return a;
+        }();
+        g.nodes   = {m, a, r};
+        g.outputs = {y};
+        return g;
+    }
+
+    std::vector<float> runGraphCpu(Graph g, const std::vector<float> &xd) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {1, 1, 2, 2};
+        in.dtype = DType::Float32;
+        in.data.resize(xd.size() * 4);
+        for (size_t i = 0; i < xd.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xd[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return {o, o + numElements(outs[0].shape)};
+    }
+
+} // namespace
+
+// --- fusePointwiseChains merges Mul->Add->Clip (single-consumer, same-shape, same GPU layout) into
+// one standalone FusedPointwise node; the fused graph must be bit-exact vs. the unfused one. ---
+TEST(Passes, FusePointwiseBitExact) {
+    std::vector<float> xd {1, 2, 3, 4};
+    auto               unfused = runGraphCpu(makeChainGraph(), xd);
+
+    Graph fg = makeChainGraph();
+    inferShapes(fg, 1);
+    fusePointwiseChains(fg);
+    int fused = 0;
+    for (auto &n: fg.nodes)
+    {
+        if (n.type == OpType::FusedPointwise)
+        {
+            fused++;
+        }
+    }
+    EXPECT_EQ(fused, 1);
+    EXPECT_LE(fg.nodes.size(), 1u);
+
+    auto got = runGraphCpu(std::move(fg), xd);
+    ASSERT_EQ(got.size(), unfused.size());
+    for (size_t i = 0; i < got.size(); ++i)
+    {
+        EXPECT_FLOAT_EQ(got[i], unfused[i]);
+    }
 }
