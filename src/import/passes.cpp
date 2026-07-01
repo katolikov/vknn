@@ -2831,6 +2831,33 @@ namespace vknn {
     // outputs[0] reuses the chain tail's tensor id. Chains shorter than 2 nodes are left alone (nothing
     // to gain by wrapping a single op). Producer-attach (folding a chain into a producer's own epilogue
     // instead of emitting a standalone node) is a separate, later pass.
+    // The chain's primary is the full-size runtime stream the kernel reads element-for-element: a
+    // non-initializer input whose shape equals the chain output. A constant/broadcast input can only be
+    // a step operand (uploaded), never the primary (the GPU op reads the primary from an activation
+    // buffer; a constant has none). Returns kNoTensor when no input qualifies (then this op is not a
+    // fusable chain head).
+    static TensorId pwHeadPrimary(const Graph &g, const Node &n, const Shape &run) {
+        auto usable = [&](TensorId t) {
+            return t != kNoTensor && !g.isInitializer(t) && g.desc(t).shape == run;
+        };
+        if (n.type == OpType::Unary || n.type == OpType::Relu || n.type == OpType::Clip)
+        {
+            return (!n.inputs.empty() && usable(n.inputs[0])) ? n.inputs[0] : kNoTensor;
+        }
+        if ((n.type == OpType::Binary || n.type == OpType::Add) && n.inputs.size() >= 2)
+        {
+            if (usable(n.inputs[0]))
+            {
+                return n.inputs[0];
+            }
+            if (usable(n.inputs[1]))
+            {
+                return n.inputs[1];
+            }
+        }
+        return kNoTensor;
+    }
+
     void fusePointwiseChains(Graph &g) {
         std::vector<int> producer(g.tensors.size(), -1), consumers(g.tensors.size(), 0), nextOf(g.tensors.size(), -1);
         for (size_t i = 0; i < g.nodes.size(); ++i)
@@ -2873,8 +2900,17 @@ namespace vknn {
             {
                 continue;
             }
-            TensorId prim = g.nodes[i].inputs[0];
-            int      pp   = (prim >= 0 && prim < (TensorId) producer.size()) ? producer[prim] : -1;
+            if (g.nodes[i].outputs[0] == kNoTensor)
+            {
+                continue;
+            }
+            Shape    run  = g.desc(g.nodes[i].outputs[0]).shape;
+            TensorId prim = pwHeadPrimary(g, g.nodes[i], run);
+            if (prim == kNoTensor)
+            {
+                continue; // no full-size runtime input to stream through the kernel
+            }
+            int pp = (prim >= 0 && prim < (TensorId) producer.size()) ? producer[prim] : -1;
             if (pp >= 0 && pwEligible(g.nodes[pp]) && single(prim) && !removed.count(pp))
             {
                 continue; // not the chain head: an earlier iteration starting at pp will extend through here
@@ -2883,8 +2919,7 @@ namespace vknn {
             {
                 continue;
             }
-            bool  wantFlat = gpuFlatNode(g, g.nodes[i]);
-            Shape run      = g.desc(g.nodes[i].outputs[0]).shape;
+            bool wantFlat = gpuFlatNode(g, g.nodes[i]);
             if (wantFlat && (int) run.size() > kPwMaxRank)
             {
                 continue; // the flat kernel only stores kPwMaxRank broadcast dims

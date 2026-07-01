@@ -731,3 +731,59 @@ TEST(Passes, FusePointwiseBitExact) {
         EXPECT_FLOAT_EQ(got[i], unfused[i]);
     }
 }
+
+// The chain primary must be the full-size runtime stream, never a constant: a constant has no GPU
+// activation buffer, so a constant primary null-derefs the fused kernel on device. Here the constant
+// is inputs[0] of the Mul (as in yonosplat's Mul(const,x)), so the pass must pick x as the primary.
+TEST(Passes, FusePointwiseRuntimePrimary) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name       = "x";
+    xi.shape      = {1, 2, 2, 2};
+    xi.isInput    = true;
+    TensorId x    = g.addTensor(xi);
+    g.inputs      = {x};
+    auto konst    = [&](const char *nm, float v) {
+        TensorDesc t;
+        t.name          = nm;
+        t.shape         = {1, 2, 2, 2};
+        t.isInitializer = true;
+        TensorId   id   = g.addTensor(t);
+        HostBuffer hb;
+        hb.resizeElems(8, DType::Float32);
+        for (int i = 0; i < 8; ++i)
+        {
+            hb.f32()[i] = v;
+        }
+        g.initializers[id] = hb;
+        return id;
+    };
+    TensorId s  = konst("s", 2.f), b = konst("b", 1.f);
+    TensorId t0 = g.addTensor({.name = "t0"}), y = g.addTensor({.name = "y"});
+    g.desc(y).isOutput = true;
+    Node m;
+    m.type    = OpType::Binary;
+    m.subOp   = (int) BinaryType::Mul;
+    m.name    = "mul";
+    m.inputs  = {s, x}; // constant first
+    m.outputs = {t0};
+    Node a;
+    a.type    = OpType::Add;
+    a.name    = "add";
+    a.inputs  = {t0, b};
+    a.outputs = {y};
+    g.nodes   = {m, a};
+    g.outputs = {y};
+    inferShapes(g, 1);
+    fusePointwiseChains(g);
+    int fused = -1;
+    for (size_t i = 0; i < g.nodes.size(); ++i)
+    {
+        if (g.nodes[i].type == OpType::FusedPointwise)
+        {
+            fused = (int) i;
+        }
+    }
+    ASSERT_GE(fused, 0);
+    EXPECT_FALSE(g.isInitializer(g.nodes[fused].inputs[0])) << "primary must be the runtime tensor, not a constant";
+}
