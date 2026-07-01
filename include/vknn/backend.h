@@ -6,102 +6,11 @@
 // Segments run in order; a tensor crossing a backend boundary is synced there (toHost/toDevice).
 // This yields a single pre-recorded GPU submit for the common case plus a CPU fallback for ops the
 // GPU cannot run, with minimal copying.
+//
+// Umbrella header: each top-level type now lives in its own header (one type per file). This file
+// re-exports them, in dependency order, so `#include "vknn/backend.h"` keeps exposing the same names.
 #pragma once
-#include "vknn/config.h"
-#include "vknn/graph.h"
-#include "vknn/tensor.h"
-#include <functional>
-#include <map>
-#include <memory>
-#include <vector>
-
-namespace vknn {
-
-    class Profiler;
-
-    /// Per-run execution context shared with operators.
-    struct ExecContext {
-        std::vector<RtTensor> *pool     = nullptr; // indexed by TensorId
-        const Graph           *graph    = nullptr;
-        const Config          *config   = nullptr;
-        Profiler              *profiler = nullptr;
-        RtTensor              &t(TensorId id) {
-            return (*pool)[id];
-        }
-    };
-
-    class Segment;
-
-    /// Abstract backend. Subclass + register to add a backend (see docs/ADDING_A_BACKEND.md).
-    class Backend {
-      public:
-        virtual ~Backend()               = default;
-        virtual BackendKind kind() const = 0;
-        virtual const char *name() const = 0;
-        /// Whether the backend is usable on this device (false => skip in selection).
-        virtual bool available() const = 0;
-        /// Apply session Config to the backend before planning (e.g. the debug op-disable list). Default
-        /// no-op. Called once per session create, before supportsNode() is used for assignment.
-        virtual void configure(const Config &cfg) {
-        }
-        /// Capability query used for per-op backend assignment / fallback decisions.
-        virtual bool supports(OpType t, DType dt) const = 0;
-        /// Shape-aware capability query. Defaults to the type-only check; backends override this when
-        /// support depends on the node's attributes/shapes (e.g. Concat axis, broadcast layout).
-        virtual bool supportsNode(const Graph &g, const Node &nd, DType dt) const {
-            return supports(nd.type, dt);
-        }
-
-        /// Ensure tensor `rt` has valid host data (NCHW canonical). Default: assume host already valid.
-        virtual void toHost(RtTensor &rt, ExecContext &ctx) {
-        }
-        /// Ensure tensor `rt` is resident on this backend (e.g. uploaded+packed). Default: no-op.
-        virtual void toDevice(RtTensor &rt, ExecContext &ctx) {
-        }
-
-        /// Compile a contiguous run of nodes (indices into graph.nodes) into a Segment.
-        virtual std::unique_ptr<Segment> compileSegment(const std::vector<int> &nodeIdx, Graph &g, const Config &cfg) = 0;
-
-        /// Called once after all segments are compiled (flush pipeline/weight/tuning caches to disk).
-        virtual void finalize() {
-        }
-    };
-
-    /// An executable run of nodes belonging to one backend.
-    class Segment {
-      public:
-        virtual ~Segment()                 = default;
-        virtual void run(ExecContext &ctx) = 0;
-        Backend     *backend               = nullptr;
-        bool         isFallback            = false; // this CPU segment exists because the primary backend could not
-                                                    // run these ops (drives the fallback warning + profiler tag)
-        std::vector<int> nodeIdx;
-        // tensor ids this segment consumes from outside / produces for outside (boundary set)
-        std::vector<TensorId> boundaryInputs;
-        std::vector<TensorId> boundaryOutputs;
-    };
-
-    // --------------------------- Backend registry ---------------------------
-    class BackendRegistry {
-      public:
-        using Factory = std::function<std::unique_ptr<Backend>()>;
-        static BackendRegistry  &instance();
-        void                     registerBackend(BackendKind k, Factory f);
-        bool                     has(BackendKind k) const;
-        std::unique_ptr<Backend> create(BackendKind k) const;
-
-      private:
-        std::map<BackendKind, Factory> factories_;
-    };
-
-    struct BackendRegistrar {
-        BackendRegistrar(BackendKind k, BackendRegistry::Factory f) {
-            BackendRegistry::instance().registerBackend(k, std::move(f));
-        }
-    };
-#define VKNN_REGISTER_BACKEND(KIND, TYPE)                                                                   \
-    static ::vknn::BackendRegistrar _vx_backend_reg_##TYPE(KIND, []() -> std::unique_ptr<::vknn::Backend> { \
-        return std::unique_ptr<::vknn::Backend>(new TYPE());                                                \
-    })
-
-} // namespace vknn
+#include "vknn/exec_context.h"     // struct ExecContext (+ fwd class Profiler)
+#include "vknn/backend_class.h"    // class Backend (fwd-decls class Segment)
+#include "vknn/segment.h"          // class Segment (fwd-decls class Backend)
+#include "vknn/backend_registry.h" // class BackendRegistry, struct BackendRegistrar, VKNN_REGISTER_BACKEND
