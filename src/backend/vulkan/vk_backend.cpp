@@ -1,10 +1,12 @@
 #include "vk_backend.h"
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <set>
 #include <sys/stat.h>
+#include <unistd.h>
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -226,8 +228,10 @@ namespace vknn {
             {
                 // Batched N-D matmul on the flat row-major path; the kernel decodes up to kMaxRank=6 out
                 // dims. Two operands, or three when a rank-1 bias is fused in (the _bias kernel binds it
-                // as a 4th buffer).
-                if (!(nd.inputs.size() == 2 || (nd.inputs.size() == 3 && nd.fusedBias != kNoTensor)))
+                // as a 4th buffer). Inputs from pw_opbase on are fused pointwise-epilogue operands (bound
+                // after the core buffers), not matmul operands.
+                size_t core = nd.attr.has("pw_steps") ? (size_t) nd.attr.geti("pw_opbase", (int64_t) nd.inputs.size()) : nd.inputs.size();
+                if (!(core == 2 || (core == 3 && nd.fusedBias != kNoTensor)))
                 {
                     return false;
                 }
@@ -554,6 +558,49 @@ namespace vknn {
             saveCaches();
         }
 
+        // One VkPipeline (+ shader module + layout) per distinct kernel configuration, shared by every
+        // node that requests it. Driver pipeline memory and creation time then scale with the number of
+        // DISTINCT kernels in the model, not the node count (a transformer has hundreds of MatMul nodes
+        // but a handful of matmul kernel configs).
+        std::shared_ptr<vk::ComputePipeline> sharedPipeline(const std::string &name, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &spec, VkPipelineCache cache) {
+            std::string key = name;
+            key += '|';
+            key += std::to_string(numBuffers);
+            key += '|';
+            key += std::to_string(pushConstBytes);
+            for (uint32_t s: spec)
+            {
+                key += ',';
+                key += std::to_string(s);
+            }
+            auto it = pipePool_.find(key);
+            if (it != pipePool_.end())
+            {
+                return it->second;
+            }
+            auto p = std::make_shared<vk::ComputePipeline>(*ctx_, name, numBuffers, pushConstBytes, spec, cache);
+            pipePool_[key] = p;
+            return p;
+        }
+
+        // Content-addressed device buffer for small parameter blocks: identical bytes share one
+        // allocation (weak-held, so it frees with its last user at segment teardown).
+        std::shared_ptr<vk::Buffer> uploadPooled(const void *data, size_t bytes) {
+            std::string key(reinterpret_cast<const char *>(data), bytes);
+            auto        it = constPool_.find(key);
+            if (it != constPool_.end())
+            {
+                if (auto b = it->second.lock())
+                {
+                    return b;
+                }
+            }
+            auto b = std::make_shared<vk::Buffer>(*ctx_, bytes, vk::MemPref::kAuto);
+            b->upload(data, bytes);
+            constPool_[key] = b;
+            return b;
+        }
+
         // ---- host NCHW fp32  <->  device NC4HW4 (fp32 path; fp16 device buffers handled here) ----
         static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false) {
             if (flat)
@@ -708,7 +755,18 @@ namespace vknn {
         std::vector<char>    pipeInit_;
         std::vector<uint8_t> weightInit_, loadedBytes_;
         bool                 unifiedLoaded_ = false, savePipeline_ = true;
+
+        std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;  // sharedPipeline()
+        std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_; // uploadPooled()
     };
+
+    std::shared_ptr<vk::ComputePipeline> VkOpEnv::pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData) const {
+        return backend->sharedPipeline(shaderName, numBuffers, pushConstBytes, specData, cache ? cache->handle() : VK_NULL_HANDLE);
+    }
+
+    std::shared_ptr<vk::Buffer> VkOpEnv::uploadPooled(const void *data, size_t bytes) const {
+        return backend->uploadPooled(data, bytes);
+    }
 
     // ============================ VulkanSegment ============================
     class VulkanSegment: public Segment {
@@ -992,6 +1050,27 @@ namespace vknn {
 
             // 4) pre-record the command buffer for the static graph.
             record();
+
+            VKNN_INFO << "vk memory after segment build: live " << (vk::Buffer::liveBytes() >> 20) << " MB / " << vk::Buffer::liveCount() << " buffers (peak " << (vk::Buffer::peakBytes() >> 20) << " MB / "
+                      << vk::Buffer::peakCount() << ", host rss " << hostRssMb() << " MB)";
+        }
+
+        // Process resident-set size in MB (0 where /proc is unavailable). The vk buffer totals only
+        // cover device allocations; on a UMA device the process RSS is what the OOM killer sees.
+        static size_t hostRssMb() {
+#ifdef __linux__
+            if (FILE *f = fopen("/proc/self/statm", "r"))
+            {
+                long pages = 0, rss = 0;
+                if (fscanf(f, "%ld %ld", &pages, &rss) == 2)
+                {
+                    fclose(f);
+                    return (size_t) rss * (size_t) sysconf(_SC_PAGESIZE) >> 20;
+                }
+                fclose(f);
+            }
+#endif
+            return 0;
         }
 
         ~VulkanSegment() override {

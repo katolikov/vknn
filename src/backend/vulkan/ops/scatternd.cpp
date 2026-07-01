@@ -21,8 +21,8 @@ namespace vknn {
         };
 
         struct ScatterNDOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> copyPipe;
-            std::unique_ptr<vk::ComputePipeline> scatterPipe;
+            std::shared_ptr<vk::ComputePipeline> copyPipe;
+            std::shared_ptr<vk::ComputePipeline> scatterPipe;
             std::shared_ptr<vk::Buffer>          idxBuf; // const index uploaded as float; null when index is activation
             std::shared_ptr<vk::Buffer>          holdData;
             std::shared_ptr<vk::Buffer>          holdUpd;
@@ -90,10 +90,9 @@ namespace vknn {
                     idxBuf = upload(*env.ctx, idxf, env.useFp16);
                 }
 
-                copyPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("scatternd_copy", env.useFp16), 2, sizeof(CopyPC), std::vector<uint32_t> {},
-                                                                 env.cache->handle());
+                copyPipe = env.pipeline(shader("scatternd_copy", env.useFp16), 2, sizeof(CopyPC), std::vector<uint32_t> {});
                 scatterPipe =
-                    std::make_unique<vk::ComputePipeline>(*env.ctx, shader("scatternd", env.useFp16), 3, sizeof(ScatterPC), std::vector<uint32_t> {}, env.cache->handle());
+                    env.pipeline(shader("scatternd", env.useFp16), 3, sizeof(ScatterPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

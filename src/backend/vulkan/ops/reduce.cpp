@@ -14,7 +14,7 @@ namespace vknn {
             int reduce[flat::kMaxRank];
         };
         struct ReduceOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             ReducePCFlat                         pc {};
             void                                 prepare(const Node &node, VkOpEnv &env) override {
                 const Graph         &g    = *env.graph;
@@ -47,8 +47,7 @@ namespace vknn {
                     }
                 }
                 pc.total = (int) numElements(g.desc(node.outputs[0]).shape);
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_reduce", env.useFp16), 2, sizeof(ReducePCFlat), std::vector<uint32_t> {},
-                                                             env.cache->handle());
+                pipe = env.pipeline(shader("flat_reduce", env.useFp16), 2, sizeof(ReducePCFlat), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));

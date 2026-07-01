@@ -28,7 +28,7 @@ namespace vknn {
             };
             std::vector<FPC>                                  fpcs_;
             std::vector<int>                                  foutIdx_;
-            std::vector<std::unique_ptr<vk::ComputePipeline>> fpipes_;
+            std::vector<std::shared_ptr<vk::ComputePipeline>> fpipes_;
             std::shared_ptr<vk::Buffer>                       hold0_;
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -64,8 +64,7 @@ namespace vknn {
                         fpcs_.push_back(pc);
                         foutIdx_.push_back((int) k);
                         offset += out[axis];
-                        fpipes_.push_back(std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_gather", env.useFp16), 2, sizeof(FPC), std::vector<uint32_t> {},
-                                                                                env.cache->handle()));
+                        fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 2, sizeof(FPC), std::vector<uint32_t> {}));
                     }
                     return;
                 }

@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
 // Flat batched MatMul: fp16/fp32 storage (STORE) with fp32 accumulation. One thread per output
 // element; per-operand strides handle broadcasting and batching.
 #include "common.glsl"
@@ -25,5 +29,9 @@ void main() {
   float acc = 0.0;
   for (int k = 0; k < pc.K; ++k)
     acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
+#ifdef PW_EPI
+  d[gid] = STORE(pw_apply(float(STORE(acc)), int(gid)));
+#else
   d[gid] = STORE(acc);
+#endif
 }

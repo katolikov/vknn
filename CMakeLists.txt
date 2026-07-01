@@ -84,6 +84,27 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         VERBATIM)
       list(APPEND _spv_files ${_spv16})
     endif()
+    # MatMul carries a fused pointwise-chain epilogue (fusePointwiseChains attaching to a
+    # MatMul/Gemm producer): the curated matmul kernels also emit a PW_EPI variant (+ its fp16
+    # pairing) that pulls in shaders/pw_epilogue.glsl. Not blanket-added to every shader.
+    if(_name MATCHES "^matmul(_tiled)?(_bias)?$")
+      set(_spvEpi ${VKNN_SHADER_GEN_DIR}/${_name}_epi.spv)
+      add_custom_command(
+        OUTPUT ${_spvEpi}
+        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -o ${_spvEpi} ${_comp}
+        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
+        COMMENT "compile ${_name}.comp -DPW_EPI -> ${_name}_epi.spv"
+        VERBATIM)
+      list(APPEND _spv_files ${_spvEpi})
+      set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi_fp16.spv)
+      add_custom_command(
+        OUTPUT ${_spvEpi16}
+        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
+        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
+        COMMENT "compile ${_name}.comp -DPW_EPI -DUSE_FP16 -> ${_name}_epi_fp16.spv"
+        VERBATIM)
+      list(APPEND _spv_files ${_spvEpi16})
+    endif()
   endforeach()
 
   # boundary_convert: one source -> four cross-dtype SPIR-V (declared <-> device-native), selected at

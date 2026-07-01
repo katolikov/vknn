@@ -45,6 +45,13 @@ namespace vknn { namespace vk {
         // if the import path is unsupported; caller falls back to a staged copy.
         static Buffer *importDmaBufFd(VulkanContext &ctx, int fd, size_t bytes, VkBufferUsageFlags extraUsage = 0);
 
+        // Process-wide live/peak accounting over every Buffer allocation (vkAllocateMemory is
+        // one-per-buffer, so `liveCount` also tracks the driver's maxMemoryAllocationCount budget).
+        static size_t liveCount();
+        static size_t liveBytes();
+        static size_t peakCount();
+        static size_t peakBytes();
+
       private:
         Buffer(VulkanContext &ctx): ctx_(ctx) {
         }

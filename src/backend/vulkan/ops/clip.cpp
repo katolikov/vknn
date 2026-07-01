@@ -13,7 +13,7 @@ namespace vknn {
                 int   total;
                 float lo, hi;
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0;
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -42,7 +42,7 @@ namespace vknn {
                     pc.hi = node.attr.getf("max", pc.hi);
                 }
                 pc.total = (int) numElements(g.desc(node.outputs[0]).shape);
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("clip", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("clip", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

@@ -71,6 +71,16 @@ namespace vknn {
         // tuned on one device must not apply its choices on another; keying the autotune signature by this
         // tag keeps a separate set of tuned entries per device in the same cache file.
         std::string gpuTag;
+
+        // Session-shared compute pipeline, keyed by (shader, buffer count, push-constant size, spec
+        // constants). Nodes with the same kernel configuration share one VkPipeline + shader module
+        // instead of each building their own — the driver's per-pipeline host memory and creation time
+        // scale with the number of DISTINCT kernels, not the node count.
+        std::shared_ptr<vk::ComputePipeline> pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData = {}) const;
+
+        // Content-addressed upload for small parameter blocks (e.g. pw_epilogue plans): identical bytes
+        // yield one shared device buffer, so per-node metadata does not multiply vkAllocateMemory count.
+        std::shared_ptr<vk::Buffer> uploadPooled(const void *data, size_t bytes) const;
     };
 
     /// One operator on the Vulkan backend. Adding an op: subclass + VKNN_REGISTER_VK_OP.

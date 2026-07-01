@@ -13,7 +13,7 @@ namespace vknn {
                 int rank, total;
                 int outDim[flat::kMaxRank], aStride[flat::kMaxRank], bStride[flat::kMaxRank];
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          constBuf[2];
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -48,7 +48,7 @@ namespace vknn {
                 };
                 setup(node.inputs[0], 0);
                 setup(node.inputs[1], 1);
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("greater", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("greater", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

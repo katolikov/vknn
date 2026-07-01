@@ -4,6 +4,7 @@
 // Linear weight); an initializer is uploaded flat in prepare(). Mirrors the CPU oracle's
 // broadcast/stride math byte-for-byte.
 #include "flat_ops.h"
+#include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -20,13 +21,18 @@ namespace vknn {
         };
 
         struct MatMulOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             MatMulPC                             pc {};
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
             std::shared_ptr<vk::Buffer>          biasBuf;     // set when a rank-1 [N] bias is fused in
             bool                                 useTiled = false;
             int                                  numBatch = 1;
             static constexpr int                 kTile    = 128; // must match TM/TN in matmul_tiled.comp
+
+            // Set when a pointwise chain (fusePointwiseChains) is attached to this MatMul's store.
+            std::shared_ptr<vk::Buffer>              pwPlanBuf;
+            std::vector<TensorId>                    pwOperands;
+            std::vector<std::shared_ptr<vk::Buffer>> pwHolds;
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g   = *env.graph;
@@ -152,18 +158,48 @@ namespace vknn {
                     name += "_bias";
                     nbuf = 4;
                 }
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulPC), std::vector<uint32_t> {},
-                                                             env.cache->handle());
+
+                // A pointwise chain (fusePointwiseChains) attached to this MatMul runs in the kernel's own
+                // epilogue (shaders/pw_epilogue.glsl), appended at binding nbuf. The plan indexes the flat
+                // row-major output world (MatMul's output is always row-major, never NC4HW4).
+                bool hasEpi = node.attr.has("pw_steps");
+                if (hasEpi)
+                {
+                    name += "_epi";
+                    PwPlanCPU plan {};
+                    int       pwTotal = 0;
+                    buildPwPlan(g, node, /*flat=*/true, out, plan, pwOperands, pwTotal);
+                    pwPlanBuf = uploadPwPlan(env, plan);
+                    pwHolds.assign(pwOperands.size(), nullptr);
+                    nbuf += 1u + (uint32_t) kPwMaxOperands;
+                }
+
+                pipe = env.pipeline(shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
-                std::vector<VkBuffer> bufs {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()};
+                VkBuffer              dstHandle = env.devBuf(node.outputs[0])->handle();
+                std::vector<VkBuffer> bufs {buf(0)->handle(), buf(1)->handle(), dstHandle};
                 if (biasBuf)
                 {
                     bufs.push_back(biasBuf->handle());
+                }
+                if (node.attr.has("pw_steps"))
+                {
+                    bufs.push_back(pwPlanBuf->handle());
+                    for (int k = 0; k < kPwMaxOperands; ++k)
+                    {
+                        if (k < (int) pwOperands.size())
+                        {
+                            bufs.push_back(operandBuf(env, pwOperands[k], pwHolds[k])->handle());
+                        } else
+                        {
+                            bufs.push_back(dstHandle); // dummy binding; unused past pwOperands.size()
+                        }
+                    }
                 }
                 if (useTiled)
                 {

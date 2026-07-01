@@ -31,7 +31,7 @@ namespace vknn {
             struct PC {
                 int rank, total, base, outDim[kMaxRank], inStride[kMaxRank];
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g  = *env.graph;
@@ -74,7 +74,7 @@ namespace vknn {
                         pc.base += (int) (start[k] * inStride[k]);
                     }
                 }
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_gather", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("flat_gather", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
@@ -88,7 +88,7 @@ namespace vknn {
                 float cval;
                 int   outDim[kMaxRank], inDim[kMaxRank], inStride[kMaxRank], padBegin[kMaxRank];
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g        = *env.graph;
@@ -124,7 +124,7 @@ namespace vknn {
                     pc.inStride[k] = (int) inStride[k];
                     pc.padBegin[k] = pads.empty() ? 0 : (int) pads[k];
                 }
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_pad", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("flat_pad", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
@@ -141,7 +141,7 @@ namespace vknn {
                 int inDim[kMaxRank];
                 int inStride[kMaxRank];
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          constBuf; // when the data operand is a constant initializer
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g  = *env.graph;
@@ -164,7 +164,7 @@ namespace vknn {
                 {
                     constBuf = uploadInit(env, node.inputs[0], in);
                 }
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_broadcast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("flat_broadcast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer *src = constBuf ? constBuf.get() : env.devBuf(node.inputs[0]);
@@ -177,7 +177,7 @@ namespace vknn {
             struct PC {
                 int rank, total, base, inDim[kMaxRank], outStride[kMaxRank];
             };
-            std::vector<std::unique_ptr<vk::ComputePipeline>> pipes;
+            std::vector<std::shared_ptr<vk::ComputePipeline>> pipes;
             std::vector<PC>                                   pcs;
             std::vector<int>                                  inIdx;
             std::vector<std::shared_ptr<vk::Buffer>>          holds; // per-input, set when that input is a constant
@@ -212,7 +212,7 @@ namespace vknn {
                     inIdx.push_back((int) e);
                     offset += in[axis];
                     pipes.push_back(
-                        std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_scatter", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle()));
+                        env.pipeline(shader("flat_scatter", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}));
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -235,7 +235,7 @@ namespace vknn {
                 int   act;
                 float actLo, actHi;
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          constBuf[2];
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g    = *env.graph;
@@ -273,7 +273,7 @@ namespace vknn {
                 };
                 setup(node.inputs[0], 0);
                 setup(node.inputs[1], 1);
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_binary", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("flat_binary", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 auto buf = [&](int e) {
@@ -288,7 +288,7 @@ namespace vknn {
             struct PC {
                 int outer, axis, inner;
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 Shape   s    = env.graph->desc(node.inputs[0]).shape;
                 int     rank = (int) s.size();
@@ -307,7 +307,7 @@ namespace vknn {
                     inner *= s[k];
                 }
                 pc = {(int) outer, (int) s[axis], (int) inner};
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_softmax", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("flat_softmax", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 // One workgroup per row (flat_softmax does the LDS reduction across the workgroup).

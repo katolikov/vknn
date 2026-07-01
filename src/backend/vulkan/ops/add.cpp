@@ -13,7 +13,7 @@ namespace vknn {
         };
 
         struct AddOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             AddPC                                pc {};
             flat::Binary                         flatImpl;
             bool                                 flat = false;
@@ -26,7 +26,7 @@ namespace vknn {
                     return;
                 }
                 pc = {(uint32_t) packedElems(env.graph->desc(node.outputs[0]).shape), (int) node.fusedAct, node.actLo, node.actHi};
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("add", env.useFp16), 3, sizeof(AddPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("add", env.useFp16), 3, sizeof(AddPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

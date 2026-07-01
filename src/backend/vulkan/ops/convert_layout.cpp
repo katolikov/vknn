@@ -11,7 +11,7 @@ namespace vknn {
         };
 
         struct ConvertLayoutOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             ConvertPC                            pc {};
             uint32_t                             count = 0;
 
@@ -21,8 +21,7 @@ namespace vknn {
                 pc         = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, dir};
                 int64_t Cb = cBlocks(x.c), HW = x.h * x.w;
                 count = dir == 0 ? (uint32_t) (x.n * x.c * HW) : (uint32_t) (x.n * Cb * HW * 4);
-                pipe  = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("convert_layout", env.useFp16), 2, sizeof(ConvertPC), std::vector<uint32_t> {},
-                                                              env.cache->handle());
+                pipe  = env.pipeline(shader("convert_layout", env.useFp16), 2, sizeof(ConvertPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

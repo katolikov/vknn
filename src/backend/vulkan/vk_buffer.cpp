@@ -1,9 +1,38 @@
 #include "vk_buffer.h"
+#include <atomic>
 #include <unistd.h>
 
 namespace vknn { namespace vk {
 
     static const VkBufferUsageFlags kBaseUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    // Live/peak accounting across every Buffer (each owns one vkAllocateMemory, so liveCount tracks
+    // the driver's maxMemoryAllocationCount budget as well as bytes).
+    static std::atomic<size_t> gLiveCount {0}, gLiveBytes {0}, gPeakCount {0}, gPeakBytes {0};
+    static void                accountAlloc(size_t bytes) {
+        size_t c = ++gLiveCount;
+        size_t b = gLiveBytes += bytes;
+        size_t p = gPeakCount.load();
+        while (c > p && !gPeakCount.compare_exchange_weak(p, c))
+        {
+        }
+        p = gPeakBytes.load();
+        while (b > p && !gPeakBytes.compare_exchange_weak(p, b))
+        {
+        }
+    }
+    size_t Buffer::liveCount() {
+        return gLiveCount.load();
+    }
+    size_t Buffer::liveBytes() {
+        return gLiveBytes.load();
+    }
+    size_t Buffer::peakCount() {
+        return gPeakCount.load();
+    }
+    size_t Buffer::peakBytes() {
+        return gPeakBytes.load();
+    }
 
     uint32_t Buffer::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) {
         const auto &mp = ctx_.memProps();
@@ -76,7 +105,11 @@ namespace vknn { namespace vk {
             dedicated.buffer = buf_;
             ai.pNext         = &dedicated;
         }
-        VK_CHECK(vkAllocateMemory(ctx_.device(), &ai, nullptr, &mem_));
+        VkResult ar = vkAllocateMemory(ctx_.device(), &ai, nullptr, &mem_);
+        if (ar != VK_SUCCESS)
+        {
+            throw Error(Status::RuntimeError, "vkAllocateMemory(" + std::to_string(req.size) + " B) -> " + vkResultStr(ar) + " with live " + std::to_string(gLiveBytes.load() >> 20) + " MB / " + std::to_string(gLiveCount.load()) + " buffers");
+        }
         VK_CHECK(vkBindBufferMemory(ctx_.device(), buf_, mem_, 0));
 
         if (ctx_.memProps().memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
@@ -87,6 +120,7 @@ namespace vknn { namespace vk {
                 std::memset(mapped_, 0, bytes_);
             }
         }
+        accountAlloc(bytes_);
     }
 
     Buffer::~Buffer() {
@@ -101,6 +135,8 @@ namespace vknn { namespace vk {
         if (mem_)
         {
             vkFreeMemory(ctx_.device(), mem_, nullptr);
+            --gLiveCount;
+            gLiveBytes -= bytes_;
         }
     }
 
@@ -200,6 +236,7 @@ namespace vknn { namespace vk {
             {
                 vkMapMemory(ctx.device(), b->mem_, 0, VK_WHOLE_SIZE, 0, &b->mapped_);
             }
+            accountAlloc(b->bytes_);
             return b;
         } catch (const std::exception &e)
         {

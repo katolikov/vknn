@@ -14,7 +14,7 @@ namespace vknn {
             struct PC {
                 int total, outer, axisSize, inner, nIdx;
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          idxBuf; // const index uploaded as float; null when index is activation
             std::shared_ptr<vk::Buffer>          hold0;  // const data operand
 
@@ -72,7 +72,7 @@ namespace vknn {
                 }
 
                 pc = {(int) numElements(out), (int) outer, (int) axisSize, (int) inner, (int) nIdx};
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("gather", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("gather", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

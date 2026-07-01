@@ -12,7 +12,7 @@ namespace vknn {
         };
 
         struct BatchNormOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          scaleBuf, biasBuf;
             BnPC                                 pc {};
 
@@ -47,7 +47,7 @@ namespace vknn {
                     return b;
                 });
                 pc                        = {(int) (x.n * Cb * 4 * x.h * x.w), (int) Cb, (int) (x.h * x.w)};
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("batchnorm", env.useFp16), 4, sizeof(BnPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("batchnorm", env.useFp16), 4, sizeof(BnPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

@@ -12,7 +12,7 @@ namespace vknn {
         };
 
         struct BinaryOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             BinaryPC                             pc {};
             flat::Binary                         flatImpl;
             bool                                 flat = false;
@@ -40,7 +40,7 @@ namespace vknn {
                 }
                 pc = {(int) ((int64_t) y.n * cBlocks(y.c) * HW), HW, node.subOp};
                 pipe =
-                    std::make_unique<vk::ComputePipeline>(*env.ctx, shader("binary", env.useFp16), 3, sizeof(BinaryPC), std::vector<uint32_t> {bcast}, env.cache->handle());
+                    env.pipeline(shader("binary", env.useFp16), 3, sizeof(BinaryPC), std::vector<uint32_t> {bcast});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

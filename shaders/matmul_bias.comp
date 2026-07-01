@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 // Flat batched MatMul with a fused rank-1 [N] bias: out[...,n] = sum_k A*B + bias[n], the bias added
 // into the fp32 accumulator so the result is stored once. Mirrors matmul.comp with binding 3 = bias;
 // matmul.cpp selects this variant when a MatMul has a fused bias. One thread per output element.
@@ -27,5 +31,9 @@ void main() {
   float acc = float(bias[int(gid) % pc.N]); // N is the contiguous last output dim
   for (int k = 0; k < pc.K; ++k)
     acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
+#ifdef PW_EPI
+  d[gid] = STORE(pw_apply(float(STORE(acc)), int(gid)));
+#else
   d[gid] = STORE(acc);
+#endif
 }

@@ -10,7 +10,7 @@ namespace vknn {
             int N, C;
         };
         struct SoftmaxOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             SmPC                                 pc {};
             flat::Softmax                        flatImpl;
             bool                                 flat = false;
@@ -23,7 +23,7 @@ namespace vknn {
                 }
                 NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
                 pc     = {(int) x.n, (int) x.c};
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("softmax", env.useFp16), 2, sizeof(SmPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("softmax", env.useFp16), 2, sizeof(SmPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 if (flat)

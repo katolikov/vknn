@@ -6,7 +6,7 @@ namespace vknn {
     namespace {
 
         struct GemmOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
             FcPC                                 pc {};
             int64_t                              Cout = 0;
@@ -70,7 +70,7 @@ namespace vknn {
                 int srcStride = (int) (g.desc(node.inputs[0]).gpuFlat ? Cin : pad4(Cin));
                 int dstStride = (int) (g.desc(node.outputs[0]).gpuFlat ? CoutL : pad4(CoutL));
                 pc            = {(int) Cin, (int) CoutL, (int) M, srcStride, dstStride, (int) node.fusedAct, node.actLo, node.actHi};
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("fc", env.useFp16), 4, sizeof(FcPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("fc", env.useFp16), 4, sizeof(FcPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

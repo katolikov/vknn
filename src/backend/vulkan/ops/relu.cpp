@@ -6,12 +6,12 @@ namespace vknn {
     namespace {
 
         struct ReluOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             uint32_t                             count = 0;
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 count = (uint32_t) packedElems(env.graph->desc(node.outputs[0]).shape);
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("relu", env.useFp16), 2, sizeof(uint32_t), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("relu", env.useFp16), 2, sizeof(uint32_t), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

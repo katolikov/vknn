@@ -11,7 +11,7 @@ namespace vknn {
             float alpha, beta;
         };
         struct FusedSeOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          w1, b1, w2, b2;
             SePC                                 pc {};
             void                                 prepare(const Node &node, VkOpEnv &env) override {
@@ -50,7 +50,7 @@ namespace vknn {
                     }
                     return v;
                 });
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("fused_se", env.useFp16), 6, sizeof(SePC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("fused_se", env.useFp16), 6, sizeof(SePC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *f = env.devBuf(node.inputs[0]);

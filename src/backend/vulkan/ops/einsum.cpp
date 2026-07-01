@@ -17,7 +17,7 @@ namespace vknn {
         };
 
         struct EinsumOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             EinsumPC                             pc {};
             std::shared_ptr<vk::Buffer>          constBuf[2];
 
@@ -37,8 +37,7 @@ namespace vknn {
                         constBuf[e] = upload(*env.ctx, v, env.useFp16);
                     }
                 }
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("einsum_outer", env.useFp16), 3, sizeof(EinsumPC), std::vector<uint32_t> {},
-                                                             env.cache->handle());
+                pipe = env.pipeline(shader("einsum_outer", env.useFp16), 3, sizeof(EinsumPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

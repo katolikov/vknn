@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
 #include "common.glsl"
 // Register-blocked, LDS-tiled batched GEMM for the standard case
 //   out[batch, m, n] = sum_k A[batch, m, k] * B[batch, k, n]
@@ -89,7 +93,12 @@ void main() {
     for (int j = 0; j < RN; ++j) {
       int n = tileN + tx * RN + j;
       if (n >= N) continue;
-      d[dBase + m * N + n] = STORE(acc[i][j]);
+      int idx = dBase + m * N + n;
+#ifdef PW_EPI
+      d[idx] = STORE(pw_apply(float(STORE(acc[i][j])), idx));
+#else
+      d[idx] = STORE(acc[i][j]);
+#endif
     }
   }
 }

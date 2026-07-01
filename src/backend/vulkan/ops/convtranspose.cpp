@@ -13,7 +13,7 @@ namespace vknn {
                 int N, Cin, Cout, H, W, outH, outW, kH, kW;
                 int sh, sw, pt, pl, dh, dw, inCg, outCg, total, hasBias;
             } pc {};
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -60,7 +60,7 @@ namespace vknn {
                 bv.resize(pc.Cout);
                 bbuf = upload(*env.ctx, bv, env.useFp16);
 
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("convtranspose", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("convtranspose", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

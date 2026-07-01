@@ -6,7 +6,7 @@ namespace vknn {
     namespace {
 
         struct GlobalAvgPoolOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             PoolPC                               pc {};
             int64_t                              total = 0;
 
@@ -14,7 +14,7 @@ namespace vknn {
                 NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
                 pc     = {(int) x.n, (int) x.c, (int) x.h, (int) x.w};
                 total  = x.n * cBlocks(x.c);
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("avgpool", env.useFp16), 2, sizeof(PoolPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("avgpool", env.useFp16), 2, sizeof(PoolPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

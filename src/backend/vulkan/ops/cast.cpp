@@ -16,7 +16,7 @@ namespace vknn {
                 float lo, hi;
             } pc {};
             bool                                 truncate = false;
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input is a constant initializer
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -63,7 +63,7 @@ namespace vknn {
                 }
                 if (truncate)
                 {
-                    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}, env.cache->handle());
+                    pipe = env.pipeline(shader("cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

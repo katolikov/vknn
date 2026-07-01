@@ -34,7 +34,7 @@ namespace vknn {
             int64_t                              ldsGroups = 0;
             bool                                 pwS2      = false; // strided 1x1 (downsample) on the register-tiled kernel
             bool                                 hasRes    = false; // residual Add fused into the epilogue (out = act(conv + residual))
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
             ConvPC                               pc {};
             DwPC                                 dpc {};
@@ -42,7 +42,7 @@ namespace vknn {
             uint32_t                             localSize = 64;
 
             // --- split-K 1x1 (deep, low-parallelism convs): partial pass + reduce pass ---
-            std::unique_ptr<vk::ComputePipeline> skPipe, skRed;
+            std::shared_ptr<vk::ComputePipeline> skPipe, skRed;
             std::shared_ptr<vk::Buffer>          partBuf;
             SplitKPC                             skPC {};
             ReducePC                             skRedPC {};
@@ -59,9 +59,8 @@ namespace vknn {
                 partBuf        = std::make_shared<vk::Buffer>(*env.ctx, (size_t) kparts * Coutb * HW * 4 * 4, vk::MemPref::kDeviceOnly); // fp32 partials (vec4)
                 skGroups       = groups(kparts * Coutb * HW, 64);
                 skRedGroups    = groups(Coutb * HW, 64);
-                skPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_splitk_fp16", 3, sizeof(SplitKPC), std::vector<uint32_t> {}, env.cache->handle());
-                skRed = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv1x1_reduce_fp16", hasRes ? 4 : 3, sizeof(ReducePC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)},
-                                                              env.cache->handle());
+                skPipe = env.pipeline("conv1x1_splitk_fp16", 3, sizeof(SplitKPC), std::vector<uint32_t> {});
+                skRed = env.pipeline("conv1x1_reduce_fp16", hasRes ? 4 : 3, sizeof(ReducePC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
             }
 
             // --- Winograd F(2x2,3x3) state (3x3, stride 1, pad 1, group 1, fp16) ---
@@ -72,7 +71,7 @@ namespace vknn {
             // 4 ways (wino_fused2, bandwidth- not occupancy-bound), a fully-fused kernel keeping V in LDS
             // (wino_full, the static LDS array collapses occupancy), and a subgroup-shuffle GEMM
             // (wino_gemm_sg, shuffle costs more than LDS here).
-            std::unique_ptr<vk::ComputePipeline> wInPipe, wFusedPipe, wFullPipe;
+            std::shared_ptr<vk::ComputePipeline> wInPipe, wFusedPipe, wFullPipe;
             std::shared_ptr<vk::Buffer>          ubuf, vbuf;
             WinoInPC                             wInPC {};
             WinoFusedPC                          wFusedPC {};
@@ -83,7 +82,7 @@ namespace vknn {
             bool                                 winogemm     = false;
             bool                                 gemmSubgroup = false; // subgroup-shuffle GEMM (no LDS); U is [pos][icb][oc]
             int                                  winoUnit     = 2;     // output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic)
-            std::unique_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
+            std::shared_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
             std::shared_ptr<vk::Buffer>          mbuf;
             WinoGemmPC                           wGemmPC {};
             int64_t                              wGemmGX = 0, wGemmGY = 0, wGemmGZ = 0;
@@ -147,7 +146,7 @@ namespace vknn {
                     // Single fused kernel: one workgroup per (tile, ocb-group of 16). No V buffer, no input pass.
                     int64_t ocbGroups = (Coutb + 15) / 16;
                     wFullGroups       = nT * ocbGroups;
-                    wFullPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_full_fp16", 4, sizeof(WinoFusedPC), std::vector<uint32_t> {}, env.cache->handle());
+                    wFullPipe = env.pipeline("wino_full_fp16", 4, sizeof(WinoFusedPC), std::vector<uint32_t> {});
                     return;
                 }
                 int el    = 2; // fp16
@@ -167,20 +166,16 @@ namespace vknn {
                     wGemmGX = groups(nT, kWinoGemmTileM);     // workgroups over M (tiles)
                     wGemmGY = groups(Coutb, kWinoGemmTileNB); // workgroups over N (ocb)
                     wGemmGZ = nPos;                           // one GEMM per transform position (16 or 36)
-                    wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {},
-                                                                    env.cache->handle());
-                    wGemmPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {},
-                                                                      env.cache->handle());
-                    wOutPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC), std::vector<uint32_t> {},
-                                                                     env.cache->handle());
+                    wInPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {});
+                    wGemmPipe = env.pipeline(gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {});
+                    wOutPipe = env.pipeline(U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC), std::vector<uint32_t> {});
                     return;
                 }
                 wino2 = (wvar == 2);
                 // wino2: 4 threads cooperate per (ocb,tile) -> 4x the threads, dispatched 64/workgroup.
                 wFusedGroups = wino2 ? groups(Coutb * nT * 4, 64) : groups(Coutb * nT, 64);
-                wInPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {}, env.cache->handle());
-                wFusedPipe = std::make_unique<vk::ComputePipeline>(*env.ctx, wino2 ? "wino_fused2_fp16" : "wino_fused_fp16", 4, sizeof(WinoFusedPC), std::vector<uint32_t> {},
-                                                                   env.cache->handle());
+                wInPipe = env.pipeline("wino_input_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {});
+                wFusedPipe = env.pipeline(wino2 ? "wino_fused2_fp16" : "wino_fused_fp16", 4, sizeof(WinoFusedPC), std::vector<uint32_t> {});
             }
 
             // Try a few workgroup sizes for this exact shape, keep the fastest, and cache it so later
@@ -215,12 +210,12 @@ namespace vknn {
                     double bestMs = 1e30;
                     for (uint32_t ls: cands)
                     {
-                        vk::ComputePipeline p(*env.ctx, shader("conv", env.useFp16), 4, sizeof(ConvPC), {ls}, env.cache->handle());
-                        VkCommandBuffer     cmd = env.runner->allocate();
+                        auto            p   = env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {ls});
+                        VkCommandBuffer cmd = env.runner->allocate();
                         env.runner->begin(cmd);
                         for (int rep = 0; rep < 8; ++rep)
                         {
-                            p.dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(total, ls));
+                            p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(total, ls));
                         }
                         env.runner->end(cmd);
                         double ms = env.runner->submitAndWait(cmd);
@@ -285,9 +280,9 @@ namespace vknn {
                 WinoInPC            ipc = {(int) x.n, (int) Cin, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
                 WinoGemmPC          gpc = {(int) Cin, (int) Cout, (int) nT};
                 WinoFusedPC         opc = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, act, 0.f, 0.f};
-                vk::ComputePipeline inPipe(*env.ctx, "wino_input_fp16", 2, sizeof(WinoInPC), {}, env.cache->handle());
-                vk::ComputePipeline gPipe(*env.ctx, "wino_gemm_fp16", 3, sizeof(WinoGemmPC), {}, env.cache->handle());
-                vk::ComputePipeline oPipe(*env.ctx, "wino_out_fp16", 3, sizeof(WinoFusedPC), {}, env.cache->handle());
+                auto                inPipe = env.pipeline("wino_input_fp16", 2, sizeof(WinoInPC));
+                auto                gPipe  = env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC));
+                auto                oPipe  = env.pipeline("wino_out_fp16", 3, sizeof(WinoFusedPC));
                 uint32_t            gx = groups(nT, kWinoGemmTileM), gy = groups(Coutb, kWinoGemmTileNB);
                 auto                timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
                     VkCommandBuffer cmd = env.runner->allocate();
@@ -315,19 +310,19 @@ namespace vknn {
                 double dms = 1e30;
                 for (uint32_t ls: {64u, 128u, 256u})
                 { // compare against the direct kernel's best local size
-                    vk::ComputePipeline dPipe(*env.ctx, "conv_fp16", 4, sizeof(ConvPC), {ls}, env.cache->handle());
-                    uint32_t            dg = groups(x.n * Coutb * y.h * y.w, ls);
-                    dms                    = std::min(dms, bestOf([&](VkCommandBuffer cmd) {
-                                       dPipe.dispatch(cmd, {sSrc->handle(), sWt->handle(), sBias->handle(), sDst->handle()}, &dpc, sizeof(dpc), dg);
+                    auto     dPipe = env.pipeline("conv_fp16", 4, sizeof(ConvPC), {ls});
+                    uint32_t dg    = groups(x.n * Coutb * y.h * y.w, ls);
+                    dms            = std::min(dms, bestOf([&](VkCommandBuffer cmd) {
+                                       dPipe->dispatch(cmd, {sSrc->handle(), sWt->handle(), sBias->handle(), sDst->handle()}, &dpc, sizeof(dpc), dg);
                                        vk::computeBarrier(cmd);
                                                       }));
                 }
                 double wms    = bestOf([&](VkCommandBuffer cmd) {
-                    inPipe.dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
+                    inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
                     vk::computeBarrier(cmd);
-                    gPipe.dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, 16);
+                    gPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, 16);
                     vk::computeBarrier(cmd);
-                    oPipe.dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
+                    oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
                     vk::computeBarrier(cmd);
                 });
                 int choice = (forceOn || wms < dms * kWinoMargin) ? 1 : 0;
@@ -409,7 +404,7 @@ namespace vknn {
                     dpc        = {(int) x.n,   (int) x.c,    (int) x.h,    (int) x.w,    (int) y.h,    (int) y.w,           (int) KH, (int) KW,   (int) st[0],
                                   (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) node.fusedAct, 0,        node.actLo, node.actHi};
                     total      = x.n * Cb * y.h * y.w;
-                    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("dwconv", env.useFp16), 4, sizeof(DwPC), std::vector<uint32_t> {}, env.cache->handle());
+                    pipe = env.pipeline(shader("dwconv", env.useFp16), 4, sizeof(DwPC), std::vector<uint32_t> {});
                 } else
                 {
                     int64_t Cinb = cBlocks(x.c);
@@ -449,8 +444,7 @@ namespace vknn {
                         {
                             int64_t nTiles = (HW + kTile - 1) / kTile;
                             total          = x.n * Coutb * nTiles;
-                            pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)},
-                                                                         env.cache->handle());
+                            pipe = env.pipeline(shader("conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
                         }
                     } else if (pwS2)
                     {
@@ -458,8 +452,8 @@ namespace vknn {
                         // stride; reuses weights across WTILE output pixels (the general direct kernel does 1).
                         int64_t HW = y.h * y.w;
                         total      = x.n * Coutb * ((HW + kTile - 1) / kTile);
-                        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv1x1_s2", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
-                                                                     std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)}, env.cache->handle());
+                        pipe = env.pipeline(shader("conv1x1_s2", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
+                                                                     std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
                     } else if (cfgHint(env, Hint::DirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
                     {
                         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
@@ -467,7 +461,7 @@ namespace vknn {
                         lds         = true;
                         int64_t nTX = (y.w + 7) / 8, nTY = (y.h + 7) / 8;
                         ldsGroups = x.n * Coutb * nTY * nTX;
-                        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, "conv3x3_lds_fp16", 4, sizeof(ConvPC), std::vector<uint32_t> {}, env.cache->handle());
+                        pipe = env.pipeline("conv3x3_lds_fp16", 4, sizeof(ConvPC), std::vector<uint32_t> {});
                     } else if (cfgHint(env, Hint::DirectConv3x3) == 1)
                     {
                         // register-tiled implicit-im2col (opt-in). Regresses 3x3 on this GPU: small weight
@@ -475,15 +469,13 @@ namespace vknn {
                         reg        = true;
                         int64_t HW = y.h * y.w;
                         total      = x.n * Coutb * ((HW + kTile - 1) / kTile);
-                        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), std::vector<uint32_t> {},
-                                                                     env.cache->handle());
+                        pipe = env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), std::vector<uint32_t> {});
                     } else
                     {
                         // autotuned 1-pixel-per-thread direct kernel (fastest 3x3 path on the target GPU so far)
                         total     = x.n * Coutb * y.h * y.w;
                         localSize = pickLocalSize(env);
-                        pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("conv", env.useFp16), 4, sizeof(ConvPC), std::vector<uint32_t> {localSize},
-                                                                     env.cache->handle());
+                        pipe = env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), std::vector<uint32_t> {localSize});
                     }
                 }
             }

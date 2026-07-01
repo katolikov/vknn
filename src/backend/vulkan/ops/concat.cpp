@@ -12,7 +12,7 @@ namespace vknn {
         };
 
         struct ConcatOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::vector<ConcatPC>                parts; // one per input
             std::vector<int64_t>                 partGroups;
             flat::Concat                         flatImpl;
@@ -36,7 +36,7 @@ namespace vknn {
                     partGroups.push_back(groups((int64_t) y.n * Cib * HW, 64));
                     cbOff += Cib;
                 }
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("concat", env.useFp16), 2, sizeof(ConcatPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("concat", env.useFp16), 2, sizeof(ConcatPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

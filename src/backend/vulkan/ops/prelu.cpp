@@ -7,7 +7,7 @@ namespace vknn {
             int count, HW, Cb;
         };
         struct PReluOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          slope;
             PReluPC                              pc {};
             void                                 prepare(const Node &node, VkOpEnv &env) override {
@@ -26,7 +26,7 @@ namespace vknn {
                     }
                     return sp;
                 });
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("prelu", env.useFp16), 3, sizeof(PReluPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("prelu", env.useFp16), 3, sizeof(PReluPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *s = env.devBuf(node.inputs[0]);

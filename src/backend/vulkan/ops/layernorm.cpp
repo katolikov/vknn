@@ -17,7 +17,7 @@ namespace vknn {
         };
 
         struct LayerNormOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             LnPC                                 pc {};
             std::shared_ptr<vk::Buffer>          gammaBuf, betaBuf;
 
@@ -62,7 +62,7 @@ namespace vknn {
                     betaBuf = upload(*env.ctx, std::vector<float>((size_t) norm, 0.0f), env.useFp16);
                 }
                 pipe =
-                    std::make_unique<vk::ComputePipeline>(*env.ctx, shader("flat_layernorm", env.useFp16), 4, sizeof(LnPC), std::vector<uint32_t> {}, env.cache->handle());
+                    env.pipeline(shader("flat_layernorm", env.useFp16), 4, sizeof(LnPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

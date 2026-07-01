@@ -11,7 +11,7 @@ namespace vknn {
             float pwLo, pwHi;
         };
         struct FusedDwPwOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          dww, dwb, pww, pwb;
             DwPwPC                               pc {};
             int64_t                              groups_ = 0;
@@ -92,8 +92,7 @@ namespace vknn {
                     }
                     return b;
                 });
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("fused_dwpw", env.useFp16), hasRes ? 7 : 6, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)},
-                                                             env.cache->handle());
+                pipe = env.pipeline(shader("fused_dwpw", env.useFp16), hasRes ? 7 : 6, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer           *exp = env.devBuf(node.inputs[0]);

@@ -10,7 +10,7 @@ namespace vknn {
             int N, C, IH, IW, OH, OW, mode, cm;
         };
         struct ResizeOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             ResizePC                             pc {};
             int64_t                              total = 0;
             void                                 prepare(const Node &node, VkOpEnv &env) override {
@@ -18,7 +18,7 @@ namespace vknn {
                 NCHW y = NCHW::from(env.graph->desc(node.outputs[0]).shape);
                 pc = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, (int) y.h, (int) y.w, vxResizeMode(node.attr.gets("mode", "nearest")), vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"))};
                 total = (int64_t) x.n * cBlocks(x.c) * y.h * y.w;
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("resize", env.useFp16), 2, sizeof(ResizePC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("resize", env.useFp16), 2, sizeof(ResizePC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *s = env.devBuf(node.inputs[0]);

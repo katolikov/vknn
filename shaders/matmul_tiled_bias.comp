@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 #include "common.glsl"
 // Register-blocked, LDS-tiled batched GEMM with a fused rank-1 [N] bias added in fp32 before the
 // store. Mirrors matmul_tiled.comp with binding 3 = bias; matmul.cpp selects this variant when a
@@ -81,7 +85,12 @@ void main() {
     for (int j = 0; j < RN; ++j) {
       int n = tileN + tx * RN + j;
       if (n >= N) continue;
-      d[dBase + m * N + n] = STORE(acc[i][j] + float(bias[n]));
+      int idx = dBase + m * N + n;
+#ifdef PW_EPI
+      d[idx] = STORE(pw_apply(float(STORE(acc[i][j] + float(bias[n]))), idx));
+#else
+      d[idx] = STORE(acc[i][j] + float(bias[n]));
+#endif
     }
   }
 }

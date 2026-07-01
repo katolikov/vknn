@@ -12,7 +12,7 @@ namespace vknn {
         };
 
         struct UnaryOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             UnaryPC                              pc {};
             std::shared_ptr<vk::Buffer>          hold; // when the input is a constant initializer
             void                                 prepare(const Node &node, VkOpEnv &env) override {
@@ -20,7 +20,7 @@ namespace vknn {
                 // flat (B,N,C) buffers are numElements-sized; NC4HW4 buffers are packedElems-sized.
                 uint32_t count = (uint32_t) (od.gpuFlat ? numElements(od.shape) : packedElems(od.shape));
                 pc             = {count, node.subOp, node.actLo, node.actHi};
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("unary", env.useFp16), 2, sizeof(UnaryPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("unary", env.useFp16), 2, sizeof(UnaryPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *s = operandBuf(env, node.inputs[0], hold);

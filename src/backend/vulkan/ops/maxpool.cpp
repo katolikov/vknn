@@ -5,7 +5,7 @@ namespace vknn {
     namespace {
 
         struct MaxPoolOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             MaxPC                                pc {};
             int64_t                              total = 0;
 
@@ -22,7 +22,7 @@ namespace vknn {
                 pc       = {(int) x.n,   (int) x.c,   (int) x.h,   (int) x.w,   (int) y.h,    (int) y.w,
                             (int) ks[0], (int) ks[1], (int) st[0], (int) st[1], (int) pad[0], (int) pad[1]};
                 total    = x.n * cBlocks(x.c) * y.h * y.w;
-                pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("maxpool", env.useFp16), 2, sizeof(MaxPC), std::vector<uint32_t> {}, env.cache->handle());
+                pipe = env.pipeline(shader("maxpool", env.useFp16), 2, sizeof(MaxPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

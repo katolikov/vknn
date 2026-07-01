@@ -11,7 +11,7 @@ namespace vknn {
             int N, C, Hin, Win, OH, OW, align;
         };
         struct GridSampleOp: VulkanOp {
-            std::unique_ptr<vk::ComputePipeline> pipe;
+            std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          gridHold; // holds a constant grid; a runtime grid uses devBuf
             GsPC                                 pc {};
             int64_t                              total = 0;
@@ -26,8 +26,7 @@ namespace vknn {
                 std::string pad  = node.attr.gets("padding_mode", "zeros");
                 uint32_t    PAD  = pad == "border" ? 1u : (pad == "reflection" ? 2u : 0u);
                 total            = (int64_t) x.n * cBlocks(x.c) * OH * OW;
-                pipe             = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("gridsample", env.useFp16), 3, sizeof(GsPC), std::vector<uint32_t> {MODE, PAD},
-                                                                         env.cache->handle());
+                pipe             = env.pipeline(shader("gridsample", env.useFp16), 3, sizeof(GsPC), std::vector<uint32_t> {MODE, PAD});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *s    = env.devBuf(node.inputs[0]);
