@@ -65,4 +65,9 @@ namespace vknn {
         void copyAs(const RtTensor &X, RtTensor &Y, const Shape &shape);
     } // namespace cpu
 
+    // Run a fused-pointwise epilogue chain (pw_steps/pw_params) in place on node.outputs[0], which
+    // must already hold the head/primary result. Shared by the standalone FusedPointwise CPU op and
+    // (a later phase) the executor hook that runs an epilogue carried by a producer node.
+    void applyPwEpilogue(const Node &node, ExecContext &ctx);
+
 } // namespace vknn

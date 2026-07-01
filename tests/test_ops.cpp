@@ -113,6 +113,91 @@ namespace {
         }
     }
 
+    // Build a FusedPointwise graph: primary input "x" + N constant operand tensors, run the
+    // pw_steps/pw_params chain on CPU, return the output values and shape.
+    OpOut runFusedPw(const std::vector<int64_t> &xshape, const std::vector<float> &xdata, const std::vector<Init> &operands, const std::vector<int64_t> &steps, const std::vector<float> &params) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name                 = "x";
+        xi.shape                = xshape;
+        xi.isInput              = true;
+        TensorId              x = g.addTensor(xi);
+        g.inputs.push_back(x);
+        std::vector<TensorId> ids {x};
+        for (size_t k = 0; k < operands.size(); ++k)
+        {
+            TensorDesc d;
+            d.name          = "o" + std::to_string(k);
+            d.shape         = operands[k].shape;
+            d.isInitializer = true;
+            TensorId   id   = g.addTensor(d);
+            HostBuffer hb;
+            hb.resizeElems(operands[k].data.size(), DType::Float32);
+            for (size_t i = 0; i < operands[k].data.size(); ++i)
+            {
+                hb.f32()[i] = operands[k].data[i];
+            }
+            g.initializers[id] = hb;
+            ids.push_back(id);
+        }
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     n;
+        n.type    = OpType::FusedPointwise;
+        n.name    = "pw";
+        n.inputs  = ids;
+        n.outputs = {y};
+        {
+            Attr a;
+            a.kind                 = Attr::Ints;
+            a.ints                 = steps;
+            n.attr.map["pw_steps"] = a;
+        }
+        {
+            Attr a;
+            a.kind                  = Attr::Floats;
+            a.floats                = params;
+            n.attr.map["pw_params"] = a;
+        }
+        {
+            Attr a;
+            a.kind                = Attr::Int;
+            a.i                   = 1;
+            n.attr.map["pw_flat"] = a;
+        }
+        g.nodes.push_back(n);
+        g.outputs = {y};
+
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = xshape;
+        in.dtype = DType::Float32;
+        in.data.resize(xdata.size() * 4);
+        for (size_t i = 0; i < xdata.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xdata[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        EXPECT_FALSE(outs.empty());
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return {std::vector<float>(o, o + numElements(outs[0].shape)), outs[0].shape};
+    }
+
 } // namespace
 
 // --- Conv (1x1, identity*2 weight + bias) feeding Relu: a two-op chain. ---
@@ -410,4 +495,20 @@ TEST(Ops, DtypeCastToInt64) {
     EXPECT_EQ(o[0], 1);  // 1.9 -> 1
     EXPECT_EQ(o[1], -2); // -2.1 -> -2 (toward zero)
     EXPECT_EQ(o[2], 3);  // 3.5 -> 3
+}
+
+// --- FusedPointwise (x*a + b, clipped to [0,10]): same-shape binary steps + a Clip act step. ---
+TEST(Ops, FusedPwMulAddClip) {
+    std::vector<int64_t> steps {0, (int) BinaryType::Mul, 1, 0, 0, (int) BinaryType::Add, 2, 0, 2, (int) ActType::Clip, -1, 0};
+    std::vector<float>   params {0, 0, 0, 0, 0.f, 10.f};
+    auto                 got = runFusedPw({1, 1, 2, 2}, {1, 2, 3, 4}, {{{1, 1, 2, 2}, {2, 2, 2, 2}}, {{1, 1, 2, 2}, {1, 1, 1, 1}}}, steps, params);
+    expectNear(got.data, {3, 5, 7, 9});
+}
+
+// --- FusedPointwise (sigmoid(x) * channel-broadcast scale): a Unary step then a channel-bcast binary step. ---
+TEST(Ops, FusedPwUnaryChannelMul) {
+    std::vector<int64_t> steps {1, (int) UnaryType::Sigmoid, -1, 0, 0, (int) BinaryType::Mul, 1, 1};
+    std::vector<float>   params {0, 0, 0, 0};
+    auto                 got = runFusedPw({1, 3, 1, 2}, {0, 0, 0, 0, 0, 0}, {{{1, 3, 1, 1}, {10, 20, 30}}}, steps, params);
+    expectNear(got.data, {5, 5, 10, 10, 15, 15});
 }

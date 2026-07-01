@@ -26,6 +26,11 @@ namespace vknn {
             auto                              it = map.find(k);
             return it == map.end() ? e : it->second.ints;
         }
+        const std::vector<float> &getfloats(const std::string &k) const {
+            static const std::vector<float> e;
+            auto                            it = map.find(k);
+            return it == map.end() ? e : it->second.floats;
+        }
         std::string gets(const std::string &k, const std::string &d = "") const {
             auto it = map.find(k);
             return it == map.end() ? d : it->second.str;
