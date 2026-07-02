@@ -13,8 +13,9 @@
 #define PW_EPI_BASE 5
 #include "pw_epilogue.glsl"
 #endif
-#define WTILE 4
 layout(constant_id = 0) const int HAS_RES = 0;  // fused residual add (out = act(conv + res))
+layout(constant_id = 1) const int WTILE = 4;    // output pixels per thread (autotuned per shape)
+#define WTILE_MAX 8
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
@@ -39,7 +40,7 @@ void main() {
   int n = int(gid) / (nTiles * Coutb);
   int p0 = tile * WTILE;
 
-  vec4 acc[WTILE];
+  vec4 acc[WTILE_MAX];
   vec4 b = vec4(bias[ocb]);
   for (int p = 0; p < WTILE; ++p) acc[p] = b;
 

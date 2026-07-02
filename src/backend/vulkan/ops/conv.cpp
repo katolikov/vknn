@@ -22,7 +22,8 @@ namespace vknn {
         }
 
         struct ConvOp: VulkanOp {
-            static constexpr int                 kTile     = 4; // output pixels per thread in the 1x1 kernel (matches shader)
+            static constexpr int                 kTile     = 4; // 1x1 threshold math default; the real per-shape tile is wTile
+            uint32_t                             wTile     = 4; // output pixels per thread in the 1x1 kernels (autotuned spec constant)
             // wino_gemm workgroup output tile, in lockstep with shaders/wino_gemm_fp16.comp (MDIM*RM, NDIM).
             static constexpr int                 kWinoGemmTileM  = 32; // output tiles (M) per workgroup
             static constexpr int                 kWinoGemmTileNB = 8;  // output channel-blocks (N) per workgroup
@@ -241,6 +242,66 @@ namespace vknn {
                 return best;
             }
 
+            // Autotune WTILE (output pixels per thread) for the register-tiled 1x1 kernels. Per-output
+            // arithmetic is identical for every tile size — only the thread<->pixel mapping changes — so
+            // the choice never affects output bits, unlike the direct-vs-Winograd choice. Measured on
+            // scratch buffers and cached like the local-size tune.
+            uint32_t pickWTile(VkOpEnv &env, bool s2, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
+                if (env.tuning == Mode::NoTune || !env.runner)
+                {
+                    return 4;
+                }
+                char buf[96];
+                snprintf(buf, sizeof(buf), "c1x1%s_%d_%d_%d_%d_%d", s2 ? "s2" : "", (int) x.c, (int) Cout, (int) y.h, (int) y.w, hasRes ? 1 : 0);
+                std::string sig = env.gpuTag + "/" + buf;
+                if (env.weights)
+                {
+                    int cached = env.weights->tuned(sig, 0);
+                    if (cached > 0)
+                    {
+                        return (uint32_t) cached;
+                    }
+                }
+                int    es       = env.useFp16 ? 2 : 4;
+                size_t srcBytes = (size_t) x.n * cBlocks(x.c) * x.h * x.w * 4 * es;
+                size_t dstBytes = (size_t) y.n * Coutb * y.h * y.w * 4 * es;
+                auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
+                auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
+                uint32_t best   = 4;
+                double   bestMs = 1e30;
+                for (uint32_t wt: {2u, 4u, 8u})
+                {
+                    auto    p     = env.pipeline(shader(s2 ? "conv1x1_s2" : "conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt});
+                    int64_t HW    = y.h * y.w;
+                    int64_t tot   = x.n * Coutb * ((HW + wt - 1) / wt);
+                    VkCommandBuffer cmd = env.runner->allocate();
+                    env.runner->begin(cmd);
+                    std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
+                    if (hasRes)
+                    {
+                        bufs.push_back(sDst->handle()); // timing only: any readable buffer serves as the residual
+                    }
+                    for (int rep = 0; rep < 8; ++rep)
+                    {
+                        p->dispatch(cmd, bufs, &pc, sizeof(pc), groups(tot, 64));
+                    }
+                    env.runner->end(cmd);
+                    double ms = env.runner->submitAndWait(cmd);
+                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
+                    if (ms < bestMs)
+                    {
+                        bestMs = ms;
+                        best   = wt;
+                    }
+                }
+                VKNN_DEBUG << "autotune " << sig << " -> wtile=" << best;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, (int) best);
+                }
+                return best;
+            }
+
             // Autotune the 3x3 conv kernel for THIS shape: 0 = direct, 1 = F(2,3) Winograd, 2 = F(4,3)
             // Winograd. Winograd wins big on deep, square 3x3 but loses on small-channel / spatially-large 3x3,
             // so the choice is measured per-shape on scratch buffers and cached like the local-size tune.
@@ -450,19 +511,21 @@ namespace vknn {
                             prepareSplitK(node, env, x, y, Cout, Coutb);
                         } else
                         {
-                            int64_t nTiles = (HW + kTile - 1) / kTile;
+                            wTile          = pickWTile(env, false, x, y, Cout, Coutb);
+                            int64_t nTiles = (HW + wTile - 1) / wTile;
                             total          = x.n * Coutb * nTiles;
                             pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC),
-                                                std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
+                                                std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile});
                         }
                     } else if (pwS2)
                     {
                         // strided 1x1 (downsample): register-tiled kernel that gathers the input at the
                         // stride; reuses weights across WTILE output pixels (the general direct kernel does 1).
                         int64_t HW = y.h * y.w;
-                        total      = x.n * Coutb * ((HW + kTile - 1) / kTile);
+                        wTile      = pickWTile(env, true, x, y, Cout, Coutb);
+                        total      = x.n * Coutb * ((HW + wTile - 1) / wTile);
                         pipe = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC),
-                                            std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
+                                            std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile});
                     } else if (cfgHint(env, Hint::DirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
                     {
                         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
