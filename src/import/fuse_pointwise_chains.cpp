@@ -274,10 +274,17 @@ namespace vknn {
             {
                 continue;
             }
-            bool wantFlat = gpuFlatNode(g, g.nodes[i]);
-            if (wantFlat && (int) run.size() > kPwMaxRank)
+            // The chain executes every step in ONE world; which world is decided AFTER the chain is
+            // built, from expressibility alone (layout only changes indexing, the math is identical).
+            // Gating steps on the standalone-node layout classifier would cut a chain at every
+            // const-operand/same-shape Binary alternation -- exactly the mixed-broadcast elementwise
+            // tails fusion exists for. NC4HW4 execution needs a rank-4 run and same/channel/scalar
+            // broadcasts; flat execution needs the run within the plan's rank limit.
+            bool nc4Ok  = run.size() == 4;
+            bool flatOk = (int) run.size() <= kPwMaxRank;
+            if (!nc4Ok && !flatOk)
             {
-                continue; // the flat kernel only stores kPwMaxRank broadcast dims
+                continue;
             }
 
             std::vector<int64_t>  steps;
@@ -290,10 +297,6 @@ namespace vknn {
             {
                 Node &nd = g.nodes[cur];
                 if (!pwEligible(nd) || removed.count(cur))
-                {
-                    break;
-                }
-                if (gpuFlatNode(g, nd) != wantFlat)
                 {
                     break;
                 }
@@ -316,9 +319,9 @@ namespace vknn {
                 {
                     break;
                 }
-                if (!wantFlat && bcast == 2)
+                if (bcast == 2 && !flatOk)
                 {
-                    break; // NC4HW4 chain execution broadcasts same-shape or per-channel only
+                    break; // general broadcast is flat-only, and flat can't hold this rank
                 }
                 int oi = -1;
                 if (operand != kNoTensor)
@@ -336,6 +339,10 @@ namespace vknn {
                 }
                 steps.insert(steps.end(), {(int64_t) kind, (int64_t) code, (int64_t) oi, (int64_t) bcast});
                 params.insert(params.end(), {p0, p1});
+                if (bcast == 2)
+                {
+                    nc4Ok = false; // this chain now needs flat execution
+                }
 
                 // A Binary/Add node may itself carry a fused activation epilogue (folded in by
                 // fuseActivations, which runs before this pass and only ever targets Conv/Gemm/Add
@@ -369,8 +376,9 @@ namespace vknn {
             {
                 continue; // nothing to fuse: a lone op gains nothing from the wrapper node
             }
-            int      tail    = chain.back();
-            TensorId tailOut = g.nodes[tail].outputs[0];
+            bool     wantFlat = !nc4Ok; // NC4HW4 when expressible (conv-adjacent graphs live there)
+            int      tail     = chain.back();
+            TensorId tailOut  = g.nodes[tail].outputs[0];
 
             // Epilogue fusion: if the primary comes from a single-consumer producer whose kernel can
             // carry the chain (pwEpilogueCapable) in the same world, fold the whole chain into that
