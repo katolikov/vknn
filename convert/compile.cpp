@@ -7,15 +7,17 @@
 //
 //   vknn_compile <model.onnx> <out.vxm> [flags]
 //     --fp16            store weights as fp16 (default: fp32)
-//     --no-fuse-swish   disable HardSwish/SiLU -> conv-epilogue fusion (default: on)
-//     --fuse-se         fuse the Squeeze-Excite chain (experimental, default: off)
-//     --fuse-dwpw       fuse depthwise-3x3 + 1x1-project (experimental, default: off)
-//     --no-fuse-pointwise  disable pointwise-chain fusion into one kernel (default: on)
+//     -O0..-O3 / --opt N  optimization level (default -O1):
+//                         O0 = no optional fusion (reference), O1 = swish + pointwise chains
+//                         (bit-exact production set), O2/O3 = + experimental SE and dwpw fusions
+//     --[no-]fuse-swish / --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise
+//                       advanced per-fusion overrides applied on top of the level
 //     --dump-big        log tensors > 50M elements after shape inference (debug)
 #include "import/passes.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -36,24 +38,47 @@ static bool has(int c, char **v, const char *flag) {
 int main(int argc, char **argv) {
     if (argc < 3)
     {
-        printf("usage: %s <model.onnx> <out.vxm> [--fp16] [--no-fuse-swish] [--fuse-se] [--fuse-dwpw] "
-               "[--no-fuse-pointwise] [--dump-big]\n",
+        printf("usage: %s <model.onnx> <out.vxm> [--fp16] [-O0..-O3 | --opt N] "
+               "[--[no-]fuse-swish] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--dump-big]\n",
                argv[0]);
         return 1;
     }
     std::string onnx = argv[1], out = argv[2];
     bool        fp16 = has(argc, argv, "--fp16");
 
-    PassOptions opt;
-    opt.fuseSwish           = !has(argc, argv, "--no-fuse-swish");
-    opt.fuseSqueezeExcite   = has(argc, argv, "--fuse-se");
-    opt.fuseDwPw            = has(argc, argv, "--fuse-dwpw");
-    opt.fusePointwiseChains = !has(argc, argv, "--no-fuse-pointwise");
-    opt.dumpBig             = has(argc, argv, "--dump-big");
+    int optLevel = 1;
+    for (int i = 3; i < argc; ++i)
+    {
+        if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] >= '0' && argv[i][2] <= '3' && argv[i][3] == 0)
+        {
+            optLevel = argv[i][2] - '0';
+        } else if (!strcmp(argv[i], "--opt") && i + 1 < argc)
+        {
+            optLevel = atoi(argv[i + 1]);
+        }
+    }
+    PassOptions opt = PassOptions::forOptLevel(optLevel);
+    // per-fusion overrides on top of the level
+    auto over = [&](const char *on, const char *off, bool &v) {
+        if (has(argc, argv, on))
+        {
+            v = true;
+        }
+        if (has(argc, argv, off))
+        {
+            v = false;
+        }
+    };
+    over("--fuse-swish", "--no-fuse-swish", opt.fuseSwish);
+    over("--fuse-se", "--no-fuse-se", opt.fuseSqueezeExcite);
+    over("--fuse-dwpw", "--no-fuse-dwpw", opt.fuseDwPw);
+    over("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
+    opt.dumpBig = has(argc, argv, "--dump-big");
 
     printf("[compile] importing %s ...\n", onnx.c_str());
     Graph g = importOnnx(onnx);
-    printf("[compile] %zu nodes, %zu weights. running passes (fuse-swish=%d fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d)\n", g.nodes.size(), g.initializers.size(), opt.fuseSwish, opt.fuseSqueezeExcite, opt.fuseDwPw, opt.fusePointwiseChains);
+    printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-swish=%d fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d)\n", g.nodes.size(), g.initializers.size(), optLevel, opt.fuseSwish, opt.fuseSqueezeExcite, opt.fuseDwPw,
+           opt.fusePointwiseChains);
     runStandardPasses(g, opt);
     printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
 

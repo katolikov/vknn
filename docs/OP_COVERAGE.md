@@ -60,12 +60,20 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 
 ## Fusions
 
-The graph passes (and `vknn_compile`) apply the following fusions:
+The graph passes (and `vknn_compile`) apply the following fusions. `vknn_compile` groups them
+behind an optimization level (`-O0` = none/reference, `-O1` = the default bit-exact set,
+`-O2`/`-O3` = + the experimental SE and dwpw fusions); the individual `--[no-]fuse-*` flags
+override a single fusion on top of the level:
 
 - **Activation + residual-Add + Relu** folds into the Conv/Gemm epilogue. Enabled by default.
-- **Swish / SiLU** (`x · sigmoid(x)`) folds into the producing Conv. Enabled by default; opt out with `--no-fuse-swish`.
-- **Squeeze-Excite** chain folds to one kernel (`--fuse-se`, experimental).
-- **Depthwise-3×3 + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`--fuse-dwpw`, experimental).
+- **Swish / SiLU** (`x · sigmoid(x)`) folds into the producing Conv. Enabled at `-O1` (default); opt out with `--no-fuse-swish`.
+- **Pointwise chains** (Mul/Add/Sub/Div/Clip/activations/unaries) fold into the producing
+  kernel's epilogue (MatMul, Conv family, Softmax, LayerNorm, Reduce, GridSample, Resize,
+  ConvTranspose, pooling) or into one standalone `FusedPointwise` kernel when no producer can
+  carry them. Bit-exact (each step reproduces the unfused store rounding). Enabled at `-O1`
+  (default); opt out with `--no-fuse-pointwise`.
+- **Squeeze-Excite** chain folds to one kernel (`-O2` or `--fuse-se`, experimental).
+- **Depthwise-3×3 + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`-O2` or `--fuse-dwpw`, experimental).
 - **Einsum lowering** to MatMul/Transpose/Unsqueeze.
 
 ## Adding an operator

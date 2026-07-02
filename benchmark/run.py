@@ -152,12 +152,15 @@ def merge(defaults, stage):
 # ----------------------------------------------------------------- convert
 def convert_flags(conv):
     f = ["--fp16"] if conv.get("fp16", True) else []
+    f.append(f"-O{int(conv.get('opt', 1))}")  # optimization level; per-fusion keys override below
     if conv.get("no_fuse_swish"):
         f.append("--no-fuse-swish")
     if conv.get("fuse_se"):
         f.append("--fuse-se")
     if conv.get("fuse_dwpw"):
         f.append("--fuse-dwpw")
+    if conv.get("no_fuse_pointwise"):
+        f.append("--no-fuse-pointwise")
     return f
 
 
@@ -382,6 +385,7 @@ def main():
     convert_parser.add_argument("out")
     convert_parser.add_argument("--fp16", action="store_true", default=True)
     convert_parser.add_argument("--fp32", dest="fp16", action="store_false")
+    convert_parser.add_argument("-O", "--opt", type=int, default=1, choices=[0, 1, 2, 3], help="optimization level (default 1)")
     convert_parser.add_argument("--fuse-se", action="store_true")
     convert_parser.add_argument("--fuse-dwpw", action="store_true")
     convert_parser.add_argument("--no-fuse-swish", action="store_true")
@@ -395,8 +399,8 @@ def main():
 
     if args.cmd == "convert":
         set_serial(args.serial)
-        convert(args.onnx, args.out, {"fp16": args.fp16, "fuse_se": args.fuse_se, "fuse_dwpw": args.fuse_dwpw,
-                                      "no_fuse_swish": args.no_fuse_swish}, args.on)
+        convert(args.onnx, args.out, {"fp16": args.fp16, "opt": args.opt, "fuse_se": args.fuse_se,
+                                      "fuse_dwpw": args.fuse_dwpw, "no_fuse_swish": args.no_fuse_swish}, args.on)
         log("done.")
         return
 

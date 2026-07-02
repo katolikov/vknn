@@ -41,6 +41,20 @@ namespace vknn {
         bool    fuseDwPw          = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // merge pointwise chains into one fused kernel (default on)
         bool    dumpBig           = false; // debug: log tensors > 50M elements after shape inference
+
+        // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
+        //   O0 = no optional fusion (reference output, one kernel per op)
+        //   O1 = the default production set: swish + pointwise-chain fusion (all bit-exact)
+        //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; can
+        //           regress on some models — measure before shipping a model with them)
+        static PassOptions forOptLevel(int level) {
+            PassOptions o;
+            o.fuseSwish           = level >= 1;
+            o.fusePointwiseChains = level >= 1;
+            o.fuseSqueezeExcite   = level >= 2;
+            o.fuseDwPw            = level >= 2;
+            return o;
+        }
     };
 
     // Run the standard pipeline used before backend planning.
