@@ -3,8 +3,11 @@
 A walkthrough for adding a new ONNX operator to VKNN
 (Vulkan Neural Network). The worked example is **LeakyRelu**
 (`y = x` for `x >= 0`, `y = alpha * x` otherwise), an elementwise unary op with
-one float attribute. The same pattern fits any pointwise op (`Mul`,
-`Sigmoid`, `Tanh`, ...).
+one float attribute. The walkthrough shows the full standalone-op recipe; note that in the
+shipped engine the elementwise families are sub-codes — a unary (`Sigmoid`, `Tanh`,
+`LeakyRelu`, ...) imports as `OpType::Unary` with a `UnaryType` in `Node::subOp`, a binary
+(`Mul`, `Div`, ...) as `OpType::Binary` with a `BinaryType` — so a new pointwise op usually
+extends a family enum + its CPU/GPU switch rather than adding a whole `OpType`.
 
 There are four pieces. Each is independently shippable: under VKNN's
 capability/fallback model a CPU-only op runs on the CPU backend, and the Vulkan
@@ -27,10 +30,11 @@ scope. No edits to any core dispatch code are required.
 `OpType` is the backend-agnostic operator tag carried by every IR `Node`. Add a
 value, then keep the two switch/map tables in `src/core/op.cpp` in sync.
 
-### `include/vknn/op.h`
+### `include/vknn/op_type.h`
 
-Add an enum value to `OpType` (placement is not significant — it is never
-serialized as an integer):
+Append the enum value at the **end** of `OpType` (`op.h` re-exports it). The enum is
+**append-only**: `model_io` serializes it as a raw integer into `.vxm` files, so a value
+inserted mid-enum shifts every later op and silently corrupts existing models:
 
 ```cpp
 enum class OpType {
@@ -38,9 +42,10 @@ enum class OpType {
   Conv,
   Clip,
   Relu,
-  LeakyRelu,       // <-- new: y = x>=0 ? x : alpha*x
   Add,
   // ...
+  ConvertDtype,
+  LeakyRelu,       // <-- new values go at the END: y = x>=0 ? x : alpha*x
 };
 ```
 
@@ -126,8 +131,8 @@ data pointer and `RtTensor::elems()` for the element count. The
 and returns a `float*` (there is also `cpu::allocOutI64` for integer outputs, and
 `cpu::applyAct` to apply a fused activation in place).
 
-Add the implementation to `src/backend/cpu/ops_basic.cpp` (inside the existing
-anonymous `namespace`, next to `ReluCpuOp`):
+Add the implementation as its own file `src/backend/cpu/ops/leakyrelu.cpp` — one operator
+per file; model it on `src/backend/cpu/ops/relu.cpp`:
 
 ```cpp
 struct LeakyReluCpuOp : CpuOp {
@@ -143,8 +148,7 @@ struct LeakyReluCpuOp : CpuOp {
 };
 ```
 
-Register it at namespace scope (bottom of the file, alongside the other
-`VKNN_REGISTER_CPU_OP` lines):
+Register it at the bottom of the same file:
 
 ```cpp
 VKNN_REGISTER_CPU_OP(OpType::LeakyRelu, LeakyReluCpuOp);
@@ -172,9 +176,10 @@ packed buffer and never reasons about the layout.
 
 ### 3a. The shader: `shaders/leakyrelu.comp`
 
-Shaders are GLSL compute, compiled at build time by `glslc`
-(`--target-env=vulkan1.3 -O`) and embedded into the static lib by
-`tools/embed_spirv.py` (exposed as `vknn::embeddedShaders()`). The shader's base
+Shaders are GLSL compute, compiled at build time by the vendored glslang
+(`third_party/glslang`; a system `glslc` is the fallback), targeting `vulkan1.3`, and
+embedded into the static lib by `tools/embed_spirv.py` (exposed as
+`vknn::embeddedShaders()`). The shader's base
 name (here `leakyrelu`) is the key you look up when creating the pipeline.
 
 The push-constant block and binding count must match the C++ side exactly. Model
@@ -205,13 +210,12 @@ void main() {
 here, but include the header for consistency.
 
 **fp16 variant.** VKNN's fp16 device path uses fp16 *storage* with fp32
-*accumulation*, and selects a `_fp16`-suffixed shader at runtime via the `sv()`
-helper (`sv("conv", true)` → `"conv_fp16"`). To run LeakyRelu in the
-fp16 pipeline, add `shaders/leakyrelu_fp16.comp` with `float16_t` storage buffers
-(enable `GL_EXT_shader_16bit_storage` / `GL_EXT_shader_explicit_arithmetic_types_float16`),
-computing in `float`. Without the fp16 variant, register the op for the
-fp32 path only (or guard pipeline creation on `env.useFp16`); a missing `_fp16` shader
-fails pipeline creation.
+*accumulation*, and selects a `_fp16`-suffixed shader at runtime via the `shader()`
+helper in `vk_op_common.h` (`shader("conv", true)` → `"conv_fp16"`). Shaders are
+precision-templated, not duplicated: `#include "precision.glsl"` and declare the storage
+buffers with the `STORE` element type (read `float(x[i])`, write `y[i] = STORE(v)`;
+arithmetic stays fp32). The build compiles each such shader twice, emitting both the
+fp32 and `_fp16` variants from one source.
 
 `glslc` is discovered by CMake (`find_program(GLSLC glslc ...)`). Any `*.comp`
 under `shaders/` is picked up automatically by the `file(GLOB ...)` in
@@ -266,29 +270,30 @@ Key APIs used below:
 - `env.graph->desc(id).shape` — logical NCHW shape of a tensor (use
   `packedElems(shape)` from `vk_backend.h` for the NC4HW4 element count).
 - `env.devBuf(id)` — the `vk::Buffer*` holding the activation for tensor `id`.
-- `vk::ComputePipeline(ctx, shaderName, numBuffers, pushConstBytes, specData,
-  cacheHandle)` — builds the pipeline from an embedded shader.
+- `env.pipeline(shaderName, numBuffers, pushConstBytes, specData)` — returns the
+  session-shared `std::shared_ptr<vk::ComputePipeline>` for an embedded shader; nodes
+  with the same kernel configuration share one pipeline.
 - `pipe->dispatch(cmd, {bufHandles...}, &pc, sizeof(pc), groupsX)` — records bind
   + push-descriptors + push-constants + dispatch.
 
-Add this to `src/backend/vulkan/vk_ops.cpp` (inside the anonymous `namespace`,
-next to `AddVulkanOp`). The push-constant struct must byte-match the shader's
+Add this as its own file `src/backend/vulkan/ops/leakyrelu.cpp` — one operator per
+file; model it on `src/backend/vulkan/ops/relu.cpp`, starting with
+`#include "vk_op_common.h"`. The push-constant struct must byte-match the shader's
 `PC` block:
 
 ```cpp
 struct LeakyReluPC { uint32_t count; float alpha; };
 
 struct LeakyReluVulkanOp : VulkanOp {
-  std::unique_ptr<vk::ComputePipeline> pipe;
+  std::shared_ptr<vk::ComputePipeline> pipe;
   LeakyReluPC pc{};
 
   void prepare(const Node& node, VkOpEnv& env) override {
     pc.count = (uint32_t)packedElems(env.graph->desc(node.outputs[0]).shape);
     pc.alpha = node.attr.getf("alpha", 0.01f);
-    // 2 buffers (x, y); sv() selects the _fp16 variant when env.useFp16.
-    pipe = std::make_unique<vk::ComputePipeline>(
-        *env.ctx, sv("leakyrelu", env.useFp16).c_str(), /*numBuffers=*/2,
-        sizeof(LeakyReluPC), std::vector<uint32_t>{}, env.cache->handle());
+    // 2 buffers (x, y); shader() selects the _fp16 variant when env.useFp16.
+    pipe = env.pipeline(shader("leakyrelu", env.useFp16), /*numBuffers=*/2,
+                        sizeof(LeakyReluPC), std::vector<uint32_t>{});
   }
 
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
@@ -313,8 +318,7 @@ Notes:
   cache so warm starts skip the repack. `LeakyRelu` has no weights, so this is
   not needed.
 
-Register it at namespace scope (bottom of the file, with the other
-`VKNN_REGISTER_VK_OP` lines):
+Register it at the bottom of the same file:
 
 ```cpp
 VKNN_REGISTER_VK_OP(OpType::LeakyRelu, LeakyReluVulkanOp);
@@ -331,11 +335,12 @@ places LeakyRelu nodes in Vulkan segments.
 `LeakyRelu` is pointwise, so its output shape equals its input shape and the
 default rule covers it. An op whose output shape differs from its input — `Conv`,
 `ConvTranspose`, `Reshape`, `Slice`, `Gather`, a broadcasting binary — needs a
-rule in `inferShapes()` (`src/import/passes.cpp`). The Vulkan path sizes its
-buffers at plan time from these shapes, so a missing or wrong rule yields a
-fabricated `{1,1,1,1}` (`NCHW::from({})`) that silently propagates and corrupts
-every downstream consumer (a later `Reshape` element-count mismatch is usually a
-symptom, not the cause).
+rule in `inferShapes()` (`src/import/infer_shapes.cpp`). The Vulkan path sizes its
+buffers at plan time from these shapes. A missing rule leaves the output shape
+empty; an empty shape on a produced tensor means *unresolved* — it is never treated
+as a rank-0 scalar and never fabricated to `{1,1,1,1}` — and it propagates until a
+downstream op cannot plan. A *wrong* rule is worse: a `Shape` node const-folds the
+lie into the model's shape arithmetic.
 
 A shape rule must reproduce ONNX's output size for **every** shape-affecting
 attribute, not just the common ones. `Conv`/`ConvTranspose`/pooling read
@@ -397,11 +402,9 @@ registries:
   ```cpp
   bool supports(OpType t, DType dt) const override {
     if (!available()) return false;
-    // Debug hook: VKNN_DISABLE_VK_OPS="Add,Conv" forces those ops to fall back.
-    if (const char* dis = std::getenv("VKNN_DISABLE_VK_OPS")) {
-      std::string list = dis, name = opTypeName(t);
-      if (list.find(name) != std::string::npos) return false;
-    }
+    // Debug/fallback hook: Config::disableVkOps="Add,Conv" forces those ops to fall back.
+    if (!disabledOps_.empty() && disabledOps_.find(opTypeName(t)) != std::string::npos)
+      return false;
     return VkOpRegistry::instance().has(t);
   }
   ```
@@ -431,10 +434,14 @@ backend whose `supports()` returns true:
 
 ```cpp
 for (size_t bi = 0; bi < backends_.size(); ++bi) {
-  if (backends_[bi]->supports(nd.type, dt)) { chosen = (int)bi; break; }
+  if (backends_[bi]->supportsNode(graph_, nd, dt)) { chosen = (int)bi; break; }
 }
 if (chosen < 0) throw Error(Status::Unsupported, "no backend supports op ...");
 ```
+
+`supportsNode()` defaults to `supports()`; a backend overrides it to gate specific
+ops on shapes or attributes (the Vulkan backend rejects, e.g., a cubic-mode
+GridSample or an unresolved-shape node this way).
 
 If the chosen backend is not the configured primary (because the primary's
 `supports()` said no), the session emits a throttled fallback warning. Contiguous
@@ -454,26 +461,27 @@ Each step is independently shippable:
   extra sync.
 
 The fallback path can be exercised without touching code by forcing the op back
-to CPU at runtime:
+to CPU at runtime (`Config::disableVkOps`):
 
-```sh
-VKNN_DISABLE_VK_OPS="LeakyRelu" ./vknn_classify ...
+```cpp
+cfg.disableVkOps = "LeakyRelu";
 ```
 
 This is the same mechanism that validates the NEON fallback path
-(`VKNN_DISABLE_VK_OPS="Add,GlobalAveragePool"` re-partitions the graph into
+(`cfg.disableVkOps = "Add,GlobalAveragePool"` re-partitions the graph into
 Vulkan/CPU segments while keeping the output bit-comparable).
 
 ---
 
 ## Checklist
 
-- [ ] `include/vknn/op.h`: add `OpType::LeakyRelu`.
+- [ ] `include/vknn/op_type.h`: append `OpType::LeakyRelu` at the END of the enum
+      (append-only — `.vxm` files store the raw integer).
 - [ ] `src/core/op.cpp`: add to `opTypeName()` and `opTypeFromOnnx()`.
-- [ ] `src/import/passes.cpp`: add an `inferShapes()` rule if the op changes shape
+- [ ] `src/import/infer_shapes.cpp`: add an `inferShapes()` rule if the op changes shape
       (cross-check vs `onnx.shape_inference` over the attribute matrix).
-- [ ] `src/backend/cpu/ops_basic.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP`.
-- [ ] `shaders/leakyrelu.comp` (+ optional `leakyrelu_fp16.comp`).
-- [ ] `src/backend/vulkan/vk_ops.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP`.
+- [ ] `src/backend/cpu/ops/leakyrelu.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP` (one op per file).
+- [ ] `shaders/leakyrelu.comp` (`precision.glsl` + `STORE` buffers; the build emits the `_fp16` variant).
+- [ ] `src/backend/vulkan/ops/leakyrelu.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP` (one op per file).
 - [ ] Build and run; diff Vulkan output against the CPU reference (and against
       `scripts/get_golden.py` for an external check).

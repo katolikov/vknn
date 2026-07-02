@@ -23,9 +23,11 @@
 
 **VKNN** (namespace `vknn`) runs neural networks on Android arm64 GPUs through **Vulkan compute**. It
 imports an ONNX model with a hand-rolled protobuf parser, lowers it to an NCHW IR, runs graph passes
-(shape inference, BatchNorm folding, activation/residual fusion, constant folding), partitions the
-graph into maximal same-backend segments, and executes each on a pluggable backend. The primary
-backend is Vulkan (NC4HW4 packed layout, one pre-recorded command buffer per segment, fp16 storage
+(shape inference, BatchNorm folding, activation/residual fusion, pointwise-chain fusion into producer
+epilogues, constant folding, dead-initializer pruning), partitions the graph into maximal same-backend
+segments, and executes each on a pluggable backend. The primary backend is Vulkan (NC4HW4 packed
+layout, pre-recorded command buffers per segment (one, chunked past `Config::maxSubmitNodes` for the
+GPU watchdog), fp16 storage
 with fp32 accumulation, caller-owned DMA-BUF I/O); a scalar + NEON **CPU backend** is the reference path and
 the automatic fallback for ops the GPU declines. There are no third-party runtime dependencies —
 only Vulkan and the C++ standard library. Every result is checked against an onnxruntime golden.
@@ -79,11 +81,12 @@ adb shell /data/local/tmp/vknn/vknn_classify --model model.onnx --input input.bi
 `--precision` is a quality tier: **`low`** (fp16 storage + fp32 accumulation, stores rounded to nearest
 even), **`normal`** (fp16, but a precision-critical geometry-tail set is kept fp32 — selective fp32, a
 no-op for models without it), or **`high`** (full fp32). `vknn_compile` turns an ONNX model into an optimized `.vxm` (skips parsing/passes
-at load; optional fp16 weights); `vknn_run_io` runs any multi-input/multi-output model. Full flow (compile, run,
+at load; optional fp16 weights; `-O0..-O3` select the optimization level); `vknn_run_io` runs any
+multi-input/multi-output model. Full flow (compile, run,
 YoNoSplat): [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md).
 
 **Or from C++.** `vknn::Model` reads each input/output name and shape from the model — you supply only
-the data. Vulkan, fp16, maximum autotuning, all fusions; two inputs → two outputs:
+the data. Vulkan, fp16, maximum autotuning, default fusions; two inputs → two outputs:
 
 ```cpp
 #include "vknn/model.h"
@@ -134,7 +137,7 @@ Everything is configured through `vknn::Config` — the engine reads no environm
 ## Supported operators
 
 A broad ONNX op set: convolution/pooling, the elementwise unary/binary families, MatMul (batched N-D),
-Gemm, LayerNorm, Softmax, Einsum, RoPE, Gather/Scatter, Resize, Pad, GridSample, and the
+Gemm, LayerNorm, Softmax, Einsum, RoPE, Gather/Scatter, Resize, Pad, GridSample, Range, and the
 shape/data-movement ops — enough for CNNs, detection, and transformer/attention models. Per-op
 GPU/CPU coverage: [docs/OP_COVERAGE.md](docs/OP_COVERAGE.md). Adding an op is one new file via the
 self-registration macros: [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md).

@@ -15,11 +15,12 @@ does **not** do.
 ## 1. Static `batch = 1`, resolved at plan time
 
 The engine plans a graph for a **fixed, fully-static shape**. `Session::plan()`
-runs `inferShapes` once at construction; every segment, every Vulkan command buffer,
-and every prepacked weight is specialized to those shapes. The Vulkan backend
-**pre-records one `VkCommandBuffer` per segment** (`Segment` in
-`include/vknn/backend.h`), so there is no mechanism to vary `N`, `H`, or `W` at run
-time.
+runs the import passes' shape inference to a fixed point at construction; every
+segment, every Vulkan command buffer, and every prepacked weight is specialized to
+those shapes. The Vulkan backend **pre-records the segment's `VkCommandBuffer`s**
+(`Segment` in `include/vknn/segment.h`; a segment above `Config::maxSubmitNodes`
+records as multiple chunked submits), so there is no mechanism to vary `N`, `H`, or
+`W` at run time.
 
 Concretely:
 
@@ -63,11 +64,12 @@ default in `vknn::Config` because the accuracy cost is small and the bandwidth s
 ## 4. Conv kernels trail a years-tuned engine on the 3×3-heavy nets
 
 VKNN beats MNN's Vulkan backend on every benchmarked model (often ~4×). Against MNN's
-**OpenCL HEAVY-tuned** best, VKNN is faster on 8 of 9 models and at **parity on the 9th, ResNet-50**.
-The remaining ResNet edge appears only under a warm device.
+**OpenCL HEAVY-tuned** best, VKNN is faster on 8 of 9 models and trails on the 9th,
+**ResNet-50 (~15%)** — MNN's CLBlast-autotuned batched GEMM (fp16 accumulation) wins
+the 3×3-conv bulk there.
 
-- **Winograd F(2,3) via a tiled GEMM** is the default for deep/square 3×3 convs (`Config::winograd =
-  Auto`, autotuned vs the direct kernel per shape).
+- **Winograd F(2,3) via a tiled GEMM** is the default for deep/square 3×3 convs
+  (`setHint(Hint::Winograd, Mode::Auto)`, autotuned vs the direct kernel per shape).
 - **No cooperative-matrix / matrix-core path.** `VK_KHR_cooperative_matrix` is **absent on the
   target driver**, so that avenue is closed.
 - **F(4,3) Winograd** is implemented (numerically fine at fp16) but slower here — its 6×6 transforms
@@ -106,7 +108,8 @@ conversion on the GPU, would remove most of it. It is not optimized.
 
 The device advertises the capabilities for it (`shaderInt8 = 1`, 8-bit storage,
 `VK_KHR_shader_integer_dot_product`), and `Config::precision` only exposes
-`Fp32 | Fp16 | Auto` — there is **no int8 enum value**. There is no quantization
+`Low | Normal | High` (fp16 / fp16 + selective fp32 / fp32) — there is **no int8
+tier**. There is no quantization
 pass, no int8 kernel, and no calibration tooling. int8 inference is a documented
 stretch goal that is **not** built.
 
@@ -116,9 +119,10 @@ stretch goal that is **not** built.
 
 With `layerDump = true`, `Session::run` (`src/core/session.cpp`) writes one `.bin`
 per live, non-initializer pool tensor, named after the **IR tensor name**
-(`/` and `:` rewritten to `_`). Because `fuseActivations` folds **35 Clip/Relu nodes
-into the preceding Conv/Gemm**, the activation's own output tensor is consumed and the
-fused producer writes the post-activation result directly.
+(`/` and `:` rewritten to `_`). Because `fuseActivations` folds Clip/Relu nodes
+into the preceding Conv/Gemm/Add, and `fusePointwiseChains` (default on) folds whole
+pointwise chains into the producing kernel's epilogue, a fused op's intermediate
+tensors are consumed and the producer writes the post-chain result directly.
 
 In practice: a dumped Conv-with-fused-Clip6 tensor corresponds to the
 golden's **post-Clip** name, not a separate pre-activation Conv output. `tools/compare_layers.py`
@@ -136,7 +140,8 @@ a **fixed** op set (`opTypeFromOnnx` in `src/core/op.cpp`). Anything not in that
 
 The supported set is broad — it covers CNNs, detection, **and** transformer/attention models:
 convolution/pooling, the full elementwise unary/binary families, MatMul (batched N-D), Gemm,
-LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, and the shape/data-movement
+LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, generator ops
+(Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement
 ops. The full table with per-op GPU/CPU coverage is in [OP_COVERAGE.md](OP_COVERAGE.md).
 
 **Not** supported: RNN/LSTM/GRU, dynamic control flow (`Loop` / `If` / `Scan`), training ops, sparse
@@ -171,7 +176,7 @@ the zero-copy / capability assumptions do not transfer** and are not retested.
 | Batch / shapes | Static `batch = 1`, resolved at plan time; reshape ⇒ new Session |
 | NPU / accelerator | None; Vulkan + CPU only (pluggable — see ADDING_A_BACKEND.md) |
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
-| Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet/YOLO (3×3 convs); no Winograd/coopmat/tiled GEMM |
+| Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs) |
 | int8 | Not implemented (stretch goal) |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |

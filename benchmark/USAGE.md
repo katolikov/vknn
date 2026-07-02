@@ -40,8 +40,9 @@ benchmark/result/<RUN>/<stage>/
 
 ### `.npy` (recommended)
 NumPy's array format carries **shape and dtype in its header**. Write one with
-`numpy.save("image.npy", arr)`. Reading supports `float32/16/64`, `int64/32/8`, `uint8` (converted
-to fp32 for the engine); arrays must be C-order.
+`numpy.save("image.npy", arr)`. Reading supports `float32/16/64`, `int64/32/8`, `uint8` (decoded,
+then fed in the model input's declared dtype — a uint8 or fp16 input stays native); arrays must be
+C-order.
 
 ### raw `.bin` / `.raw`
 A headerless little-endian **fp32** dump. Because it has no shape, the file must contain exactly the

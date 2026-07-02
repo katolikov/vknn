@@ -36,7 +36,9 @@ the artifacts is a one-time step via `upload_model.py`.
   per-operator profiling.
 - `configs/` — JSON configs (`example.json` two-stage sample, `yonosplat*.json`, …).
 - `scripts/` — helper scripts: `make_golden.py` (golden `.npy` via onnxruntime + a config from an
-  ONNX), `fetch_model.py`, `upload_model.py`.
+  ONNX), `fetch_model.py`, `upload_model.py`, and the pointwise-fusion device gate
+  (`make_pw_probes.py` builds one probe model per producer family; `gate_pw_probes.sh` compiles
+  fused + nofuse, runs both on the device, and byte-compares every output).
 - **[USAGE.md](USAGE.md)** — full how-to: results layout, the `.npy` mechanism, every config field.
 
 ## Commands

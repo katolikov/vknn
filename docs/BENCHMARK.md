@@ -103,8 +103,8 @@ is sound, GEMM quality is the determinant.
 
 Winograd helps deep / square 3×3 (ResNet, DenseNet) but loses on small-channel or spatially-large 3×3,
 so `tuneWino` measures the tiled-GEMM Winograd against the direct kernel **per shape** on scratch buffers
-and caches the winner (like the local-size tune; default `fast` tuning, `Config::winograd` = `On`/`Off`
-force it). Effect vs direct-only: DenseNet 15.5→13.9 (flips a tie to a win), Inception 16.0→15.5,
+and caches the winner (like the local-size tune; default `fast` tuning, `setHint(Hint::Winograd,
+Mode::On/Off)` — the runner's `--winograd on|off` — forces it). Effect vs direct-only: DenseNet 15.5→13.9 (flips a tie to a win), Inception 16.0→15.5,
 YOLOv8n 25.8→20.0, ResNet-50 12.6→12.1 (and ~10.5 cool). cosine ≥ 0.9995 throughout.
 
 Several alternative GEMM/Winograd variants regress; they are kept as documented negative results

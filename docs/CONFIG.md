@@ -44,11 +44,12 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `tuning` | string | `"off"`, `"fast"`, `"thorough"` | `"fast"` | Autotuning level for conv workgroup-size search (sets `Hint::Tuning`). `off` uses defaults, `fast` does a quick search, `thorough` searches more candidates. |
 | `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection (sets `Hint::Winograd`). `auto` measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. Forcing `on`/`off` skips the per-shape timing, so the kernel choice (and the output bits) is deterministic run-to-run. `auto` requires `tuning` != `off`. |
 | `noFlatOps` | bool | `true` / `false` | `false` | Disable the flat-layout GPU pass (forces NC4HW4 / CPU paths). Diagnostic. |
+| `foldGpuIslands` | bool | `true` / `false` | `true` | Merge tiny GPU islands between CPU segments into the CPU side (fewer boundary round-trips). `false` keeps every supported op on the GPU — verification runs use it so the fallback count is meaningful (`vknn_run_io --no-fold-islands`). |
 | `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
 | `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). |
 | `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
-| `fp32Tensors` | string | e.g. `"/enc/MatMul_,-camera_head"` | `""` | Advanced override of the selective-fp32 set: tensor-name substrings (leading `-` excludes) kept in fp32 storage under fp16 compute. Empty + `precision:"normal"` uses the built-in geometry-tail preset; a non-empty value replaces it (and also applies under `precision:"low"`). |
+| `fp32Tensors` | string (C++ only, not serialized to JSON) | e.g. `"/enc/MatMul_,-camera_head"` | `""` | Advanced override of the selective-fp32 set: tensor-name substrings (leading `-` excludes) kept in fp32 storage under fp16 compute. Empty + `precision:"normal"` uses the built-in geometry-tail preset; a non-empty value replaces it (and also applies under `precision:"low"`). |
 
 ### Enum reference
 
@@ -58,7 +59,7 @@ The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 enum class BackendKind { Vulkan, Cpu };
 enum class Precision   { Low, Normal, High };  // "low" fp16 | "normal" fp16 + selective fp32 | "high" fp32
 enum class CacheMode   { Off, Tune, Full };  // Full = also cache prepacked weights (default)
-enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Unknown };
+enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Auto, Unknown };  // Auto: declared-boundary zero-copy sentinel (bytes already device-native)
 ```
 
 ### Conv kernel knobs — `Config::setHint(Hint, Mode)`
@@ -120,7 +121,7 @@ lists all of them, with non-default values where useful:
   "debugSegments": false,
   "disableVkOps": "",
   "dumpTensors": "",
-  "fp32Tensors": "",
+  "foldGpuIslands": true,
   "winograd": "auto",
   "tuning": "fast",
   "winogradVariant": 0,
@@ -161,8 +162,10 @@ cfg.applyLogLevel();
 auto session = Runtime::load("assets/mobilenetv2.onnx", cfg);
 ```
 
-`Runtime::load(onnxPath, cfg)` is a thin façade over
-`Session::createFromOnnx(path, cfg)` and returns a `std::unique_ptr<Session>`.
+`Runtime::load(path, cfg[, cacheFile])` resolves `cfg.cacheFile` (empty →
+`<model>.cache` next to the model), then dispatches on extension: `.vxm` →
+`Session::createFromVxm`, anything else → `Session::createFromOnnx`. It returns
+a `std::unique_ptr<Session>`.
 
 ---
 
@@ -176,8 +179,7 @@ lets individual flags override specific fields:
 Config cfg;
 if (!cfgpath.empty()) cfg = Config::fromJsonFile(cfgpath);   // base from JSON
 cfg.backend   = backendFromStr(backend);                      // --backend overrides
-cfg.precision = (precision == "fp32") ? Precision::High      // --precision overrides
-                                       : Precision::Low;
+cfg.precision = precisionFromStr(precision);                  // --precision overrides (low|normal|high)
 cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());  // --cache overrides
 if (hasflag(argc, argv, "--profile")) cfg.profile = true;     // --profile sets flag
 if (hasflag(argc, argv, "--layer-dump")) {                    // --layer-dump DIR
@@ -192,21 +194,23 @@ The CLI flags and the config fields they touch:
 |---|---|---|
 | `--config PATH` | loads the whole `Config` via `fromJsonFile` | (none) |
 | `--backend NAME` | `backend` (`vulkan`/`cpu`) | `vulkan` |
-| `--precision P` | `precision` (`fp32`/`fp16`) | `fp16` |
+| `--precision P` | `precision` (`low`/`normal`/`high`; `fp16`/`fp32` aliases) | `low` |
 | `--cache DIR` | `cacheDir` | struct default |
 | `--profile` | `profile = true` | off |
 | `--layer-dump DIR` | `layerDump = true`, `layerDumpDir = DIR` | off |
+| `--winograd MODE` | `setHint(Hint::Winograd)` (`auto`/`on`/`off`) | `auto` |
+| `--tuning LEVEL` | `setHint(Hint::Tuning)` (`off`/`fast`/`thorough`) | `fast` |
 
 Flags that are not config fields (model/input handling and benchmarking):
 `--model PATH`, `--input PATH`, `--shape N,C,H,W`, `--golden PATH`,
 `--show-graph`, `--bench N`.
 
 Precedence: `--config` loads first, then the explicit flags overwrite
-whatever the JSON set. `--backend` and `--precision` always assign
-`cfg.backend`/`cfg.precision` (they carry CLI defaults), so a `backend` or
-`precision` value in the JSON file is overridden by the flag defaults unless
-the matching flag is passed. This applies when mixing `--config` with these two
-flags.
+whatever the JSON set. `--backend`, `--precision`, `--winograd`, and `--tuning`
+always assign their field or hint (they carry CLI defaults), so a `backend`,
+`precision`, `winograd`, or `tuning` value in the JSON file is overridden by the
+flag defaults unless the matching flag is passed. This applies when mixing
+`--config` with these flags.
 
 Example invocations:
 

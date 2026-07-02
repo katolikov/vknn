@@ -29,12 +29,14 @@ references source under `include/vknn/` and `src/`.
        │   Graph { tensors[], nodes[], inputs, outputs, initializers }
        ▼
  ┌───────────────────────────────────────────────────────────────────────┐
- │ GRAPH PASSES   src/import/passes.{h,cpp}  — runStandardPasses(g, 1)     │
+ │ GRAPH PASSES   src/import/ (passes.h, one .cpp per pass)                │
+ │   runStandardPasses(g, PassOptions)                                     │
  │   inferShapes        (static batch = 1, fills dynamic dims)             │
  │   foldBatchNorm      (BN → scale/bias folded into Conv)                 │
  │   fuseActivations    (Clip/Relu → Node.fusedAct on Conv/Gemm)          │
- │   constFold          (evaluate shape-path subgraphs)                    │
- │   eliminateDeadNodes                                                    │
+ │   constFold+inferShapes to convergence (shape-path subgraphs)           │
+ │   eliminateDeadNodes, fusePointwiseChains (standalone + producer        │
+ │   epilogues), pruneDeadInitializers                                     │
  │                                                                         │
  │   MobileNetV2: 105 → 65 nodes; 35 Clip/Relu fused; 5 shape nodes folded │
  └───────────────────────────────────────────────────────────────────────┘
@@ -140,17 +142,25 @@ struct Node {
   std::string name;
   std::vector<TensorId> inputs, outputs;
   Attributes attr;
-  ActType fusedAct = ActType::None;   // set by fuseActivations
-  float   actLo = 0, actHi = 0;        // Clip bounds when fusedAct == Clip
+  ActType fusedAct = ActType::None;        // set by fuseActivations
+  float   actLo = 0, actHi = 0;             // Clip bounds when fusedAct == Clip
+  int64_t subOp = 0;                        // Unary/Binary/Reduce sub-code
+  TensorId fusedResidual = kNoTensor;       // residual folded into the epilogue
+  TensorId fusedBias = kNoTensor;           // MatMul bias folded into the epilogue
 };
 ```
 
-`OpType` enumerates the supported ops: `Conv`, `Clip`, `Relu`, `Add`,
-`GlobalAvgPool`, `Gemm`, `Reshape`, `Flatten`, `Softmax`, `BatchNorm`,
-`Identity`, plus shape ops `Shape` / `Constant` / `Gather` / `Unsqueeze` /
-`Concat` (the shape ops are CPU-only and are const-folded away on the Vulkan
-path). `ActType` (`None`/`Relu`/`Relu6`/`Clip`) is kept in sync with
-`shaders/common.glsl`. `Attributes` is a typed `name → Attr` map with `geti` /
+`OpType` (`include/vknn/op_type.h`, append-only — `.vxm` files store the raw
+integer) enumerates the full supported set (~60 ops, per-op coverage in
+[OP_COVERAGE.md](OP_COVERAGE.md)): the conv family (`Conv`, `ConvTranspose`),
+`Gemm`/`MatMul`/`Einsum`, pooling, normalization (`BatchNorm`, `LayerNorm`,
+`Softmax`), the elementwise `Unary`/`Binary` families, data movement
+(`Reshape`, `Transpose`, `Slice`, `Concat`, `Gather`, `ScatterND`, ...), the
+fused ops the passes synthesize (`FusedSE`, `FusedDwPw`, `FusedPointwise`),
+plus shape ops `Shape` / `Constant` / `ConstantOfShape` / `Range` (CPU-only,
+const-folded away on the Vulkan path). `ActType`
+(`None`/`Relu`/`Relu6`/`Clip`/`HardSwish`/`SiLU`) is kept in sync with
+`shaders/common.glsl`; the last two are set by the swish self-gating fusion. `Attributes` is a typed `name → Attr` map with `geti` /
 `getf` / `getints` / `gets` accessors used by kernels to read pads, strides, etc.
 
 ### 2.3 Backend + Segment execution model (`include/vknn/backend.h`)
@@ -216,9 +226,11 @@ This requires the static lib to be linked whole-archive
 ### 2.5 Session / Runtime (`include/vknn/session.h`, `src/core/session.cpp`)
 
 `Session` owns the planned graph, the active backends, the segments, the caches
-(via the backends), and the `RtTensor` pool. `Runtime` is a thin façade
-(`Runtime::load(path, cfg, cacheFile)` → `Session::createFromOnnx`; `cacheFile`
-defaults to `<model>.cache`, see §7).
+(via the backends), and the `RtTensor` pool. `Runtime` is a thin façade:
+`Runtime::load(path, cfg, cacheFile)` dispatches on extension — a `.vxm`
+(pre-optimized offline by `vknn_compile`) loads via `Session::createFromVxm`
+and skips the parser and passes; an `.onnx` goes through
+`Session::createFromOnnx`. `cacheFile` defaults to `<model>.cache`, see §7.
 
 The build flow is `createFromOnnx` → `importOnnx` → `create(Graph&&, cfg)` →
 `plan()`. `plan()` runs the passes, instantiates backends, builds the pool, assigns
@@ -296,11 +308,13 @@ special-casing in the core dispatch loop.
 
 ### 4.1 Backend assignment and partitioning (`session.cpp`)
 
-Each node is assigned to the **highest-priority backend whose `supports(op, dt)`
-returns true**. If the primary backend declines an op (e.g. the GPU lacks a kernel,
-or `VKNN_DISABLE_VK_OPS` is set), a throttled fallback warning is logged and the
-node falls through to the next backend (ultimately CPU). If *no* backend supports an
-op, planning throws `Status::Unsupported`.
+Each node is assigned to the **highest-priority backend whose
+`supportsNode(graph, node, dt)` returns true** (shape-aware; defaults to the
+type-only `supports(op, dt)`). If the primary backend declines an op (e.g. the GPU
+lacks a kernel, or the op is listed in `Config::disableVkOps`), a throttled
+fallback warning is logged and the node falls through to the next backend
+(ultimately CPU). If *no* backend supports an op, planning throws
+`Status::Unsupported`.
 
 The topo-ordered node list is then sliced into **maximal contiguous runs of the same
 backend index** — the segments:
@@ -315,7 +329,7 @@ for (size_t n = 0; n < graph_.nodes.size(); ++n) {
 ```
 
 An all-Vulkan model is one segment. Forcing two ops to CPU
-(`VKNN_DISABLE_VK_OPS="Add,GlobalAveragePool"`) fragments MobileNetV2 into 23
+(`Config::disableVkOps = "Add,GlobalAveragePool"`) fragments MobileNetV2 into 23
 Vulkan/CPU segments, and the output remains cosine `1.000000` because boundaries
 reconcile residency.
 
@@ -410,15 +424,21 @@ propagating `isFallback`.
 
 ## 5. Shaders
 
-Kernels are GLSL compute shaders in `shaders/`: `pack`, `unpack`, `conv`, `dwconv`,
-`avgpool`, `fc`, `add`, each with an `_fp16` variant, plus shared `common.glsl`.
-`glslc` compiles them at build time, and `tools/embed_spirv.py` embeds them into the
-static lib as SPIR-V, reachable through
-`vknn::embeddedShaders()` (`src/backend/vulkan/vk_pipeline.h`), so the runtime ships
-no loose shader files.
+Kernels are GLSL compute shaders in `shaders/` (~100 files): the layout kernels
+(`pack`/`unpack`/`convert_layout`/`boundary_convert`), the conv family (below),
+`matmul`/`matmul_tiled`, the `flat_*` row-major generic ops, softmax/layernorm
+reductions, and the raster kernels — most precision-templated via
+`precision.glsl` so the build emits both the fp32 and `_fp16` variants from one
+source, plus shared `common.glsl`. The vendored glslang compiles them at build
+time, and `tools/embed_spirv.py` embeds them into the static lib as SPIR-V,
+reachable through `vknn::embeddedShaders()` (`src/backend/vulkan/vk_pipeline.h`),
+so the runtime ships no loose shader files.
 
-Conv uses two strategies: a general `group == 1` kernel (covering both 1×1 pointwise
-and 3×3 strided convs) and a specialized depthwise kernel (`dwconv`). The general
+Conv selects among several strategies per shape: the general kernel (with a
+register-blocked variant), the 1×1 pointwise family (`conv1x1`, strided
+`conv1x1_s2`, split-K deep 1×1 — WTILE autotuned per shape), a 3×3 LDS kernel,
+the tiled-GEMM Winograd (`tuneWino` measures it per shape), and a specialized
+depthwise kernel (`dwconv`). The general
 conv exposes its `local_size_x` as a spec constant so the autotuner can pick a
 workgroup size per conv signature.
 
@@ -507,10 +527,10 @@ on the whole-archive link of the static lib:
 | --- | --- |
 | Public headers | `include/vknn/` (`backend.h`, `session.h`, `tensor.h`, `graph.h`, `op.h`, `config.h`, `profiler.h`, `tensor_format.h`, `ion.h`, …) |
 | ONNX import | `src/import/onnx/onnx_parser.cpp` |
-| Graph passes | `src/import/passes.{h,cpp}` |
+| Graph passes | `src/import/` (`passes.h`; one `.cpp` per pass: `run_standard_passes.cpp`, `infer_shapes.cpp`, `const_fold.cpp`, `fuse_pointwise_chains.cpp`, `prune_dead_initializers.cpp`, …) |
 | Session / planning | `src/core/session.cpp` |
 | Core support | `src/core/` (`graph.cpp`, `op.cpp`, `config.cpp`, `profiler.cpp`, `backend_registry.cpp`, `ion.cpp`, `json.h`, `logging.cpp`) |
 | Vulkan backend | `src/backend/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `vk_ops.cpp`) |
-| CPU backend | `src/backend/cpu/` (`cpu_backend.cpp`, `ops_basic.cpp`, `ops_conv.cpp`, `ops_shape.cpp`) |
+| CPU backend | `src/backend/cpu/` (`cpu_backend.cpp`, `ops/` — one file per operator) |
 | Shaders | `shaders/` (compiled by `glslc`, embedded via `tools/embed_spirv.py`) |
 | Examples | `examples/` (`probe`, `classify`, `profile`, `zerocopy_cache`, `backend_switch`, `op_check`) |

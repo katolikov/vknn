@@ -14,6 +14,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Operator | GPU | CPU | Notes |
 |---|---|---|---|
 | Conv (group=1, depthwise, 1×1 pointwise) | ✅ | ✅ | NC4HW4; direct 3×3, split-K deep 1×1, fused activation + residual-Add + Relu in the epilogue |
+| ConvTranspose | ✅ | ✅ | `auto_pad` + `output_shape` handled (shared `src/core/conv_geom.h` geometry) |
 | GlobalAveragePool | ✅ | ✅ | one workgroup / channel-block, LDS tree-reduce |
 | AvgPool / MaxPool | ✅ | ✅ | windowed |
 | BatchNorm | ✅ | ✅ | per-channel affine; usually folded into Conv |
@@ -26,7 +27,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Binary family | ✅ | ✅ | Mul, Sub, Div, Max, Min, Pow, Add — same-shape, channel-broadcast (SE), and general NumPy broadcast on the flat path |
 | Relu / Relu6 / Clip | ✅ | ✅ | standalone, and fused into the producing Conv/Gemm |
 | PRelu | ✅ | ✅ | per-channel slope |
-| Where / Equal | ✅ | ✅ | flat broadcast (fp32 + int64) |
+| Where / Equal / Greater / GreaterEqual | ✅ | ✅ | flat broadcast (fp32 + int64) |
 
 ## Transformer / attention
 
@@ -51,11 +52,11 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | DepthToSpace | ✅ | ✅ | DCR / CRD (pixel-shuffle) |
 | ScatterND | ✅ | ✅ | copy + scatter (runtime float index) |
 | Resize / Upsample | ✅ | ✅ | nearest + bilinear, 4 coord modes |
-| GridSample | ✅* | ✅ | GPU for a constant grid; runtime grid on CPU |
+| GridSample | ✅ | ✅ | constant or runtime grid (optical-flow warps); cubic mode falls back to CPU |
 | Reduce (Mean/Sum/Max/Min/Prod/L2) | ✅ | ✅ | arbitrary axes |
 | Cast | ✅ | ✅ | float ↔ int32/int64 |
 | Pad | ✅ | ✅ | constant / edge / reflect; GPU = flat row-major, static pads |
-| Shape / Constant / ConstantOfShape / EyeLike | const-fold | ✅ | resolved at compile time |
+| Shape / Constant / ConstantOfShape / EyeLike / Range | const-fold | ✅ | resolved at compile time (Range keeps a CPU op for a runtime start/limit/delta) |
 | Identity | — | ✅ | |
 
 ## Fusions
@@ -74,11 +75,13 @@ override a single fusion on top of the level:
   (default); opt out with `--no-fuse-pointwise`.
 - **Squeeze-Excite** chain folds to one kernel (`-O2` or `--fuse-se`, experimental).
 - **Depthwise-3×3 + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`-O2` or `--fuse-dwpw`, experimental).
-- **Einsum lowering** to MatMul/Transpose/Unsqueeze.
+- **Einsum lowering** to MatMul/Squeeze/Unsqueeze.
 
 ## Adding an operator
 
-An operator requires: an enum in `include/vknn/op.h`, an ONNX name in `src/core/op.cpp`, a shape rule
-in `src/import/passes.cpp` `inferShapes`, a CPU oracle in `src/backend/cpu/ops/`, and (when the layout
+An operator requires: an `OpType` value appended at the END of the enum in `include/vknn/op_type.h`
+(append-only — `.vxm` files store the raw integer, so a mid-enum insert corrupts existing models),
+an ONNX name in `src/core/op.cpp`, a shape rule
+in `src/import/infer_shapes.cpp` `inferShapes`, a CPU oracle in `src/backend/cpu/ops/`, and (when the layout
 allows) a Vulkan op + GLSL shader gated by `Backend::supportsNode()`. See
 [ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md) and [../skills/add-an-operator.md](../skills/add-an-operator.md).

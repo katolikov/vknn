@@ -64,7 +64,65 @@ chains; every intermediate fp16-finite.
 6. NC4-world constant chain operands uploaded flat were misordered for C%4≠0 / H·W>1 and OOB-read
    pad lanes (now NC4HW4-packed at upload; scalar splat = broadcast mode 3).
 
+## Re-verification after the Range/import fixes (same day, later session)
+
+New engine work since the table above: ONNX Range op; scalar-Gather `idx_scalar` tagging;
+inferShapes never resolves from unresolved operands (the Binary/Add "scalar-or-unresolved"
+conflation poisoned transformer ranks); Reshape refuses a -1/0 target while its input is
+unresolved; NumPy zero-dim broadcast (a 0 dim propagates, never max'd to 1 — fixes a BinaryCpu
+null-deref on empty folded constants inside constFold); fold+infer loop runs to convergence
+(cap 256, was 8); Range appended to the END of OpType (a mid-enum insert shifts the raw ints
+model_io serializes and corrupts every existing .vxm — caught when the prebuilt 8-view vxm
+decoded ScatterND as EyeLike and OOM'd; the enum is append-only now).
+
+Plus `pruneDeadInitializers`: const-folding materializes every intermediate of a folded chain and
+the unbounded Cast fold copies whole weight tensors; the orphaned payloads serialized into the
+.vxm. On the 8-view export that was 7,045 MB of orphans — a 6.05 GiB vxm for 1.9 GiB of real
+fp16 weights (and the root of the old 3.14 GB / v2 5.39 GB sizes). Now 2.34 GB: 1.80 GiB fp16
+weights + 0.38 GiB live ScatterND meshgrid index.
+
+Every gate re-run on the final ABI + pruning binary:
+
+- Host tests 34/34.
+- Probe matrix **45/45** byte-identical fused vs nofuse, 0 fallbacks.
+- CNN suite **10/10 PASS**, 0 fallbacks, timings at baseline (resnet50 16.1 ms, effnet 4.1,
+  mnv3 2.9, inception 27.7, densenet 17.3).
+- YoNoSplat 8-view (prebuilt 3.1 GB vxm, new runtime): fused==nofuse **6/6 byte-identical**,
+  0 fallbacks, 1 segment, peak 3392 MB — pre-session numbers reproduced exactly.
+- Frame-interp (artifact regenerated from model.json): fused==nofuse **byte-identical** at fp16
+  AND fp32, 0 fallbacks, fp32 GPU==CPU cosine 1.000000 (uv byte-identical). The fp16-vs-ORT
+  img1 SNR is low on this regeneration (Reciprocal/Pow amplification of rounding order on the
+  synthetic constants); the pre-session engine produces identical numbers to the decimal, so it
+  is a property of the artifact, not an engine change.
+
+## YoNoSplat 8-view REGENERATED (real dl3dv weights) + pushed to HF
+
+Export rebuilt from scratch after the reboot wiped /tmp/YoNoSplat:
+`Benchmark_GPU/yonosplat_export/export_real.py` = the surviving perf harness + ckpt load
+(dl3dv_224x224_ctx2to32.ckpt from HF botaoye/YoNoSplat, 0 missing / 0 unexpected) + a
+Newton-Schulz polar orthogonalization for the camera head (the faithful torch.svd substitute;
+the harness's Gram-Schmidt is only valid for random weights) + legacy tracer (`dynamo=False`) +
+the DOUBLE->FLOAT retype (758 casts, the fp64-Einsum ORT failure). Faithfulness gates:
+eager-vs-saved-goldens cos 1.0000000 (all 6), traced-ONNX-in-ORT cos 1.0000000 (all 6).
+
+Device (fp16, 0 fallbacks, 1 segment over 7696 nodes, peak 3394 MB): fused==nofuse
+**8/8 byte-identical**. fp16 GPU vs ORT fp32 goldens:
+
+| output | cosine | PSNR dB | SNR dB | relL2 | min\|d\| | max\|d\| | NaN |
+|---|---|---|---|---|---|---|---|
+| covariances | 0.999989 | 79.4 | 46.0 | 5.0e-3 | 0 | 1.2e-3 | 0 |
+| harmonics | 0.999998 | 76.7 | 55.2 | 1.7e-3 | 0 | 9.4e-2 | 0 |
+| means | 0.999992 | 67.2 | 47.2 | 4.4e-3 | 0 | 3.6e-2 | 0 |
+| opacities | 0.999997 | 68.6 | 51.6 | 2.6e-3 | 0 | 4.4e-3 | 0 |
+| rotations | 0.999996 | 62.7 | 50.7 | 2.9e-3 | 0 | 3.8e-2 | 0 |
+| scales | 0.999998 | 70.0 | 51.5 | 2.7e-3 | 0 | 3.3e-3 | 0 |
+
+Same fp16-floor SNR band (46.0–55.2 dB) as the pre-session verified build. Uploaded to
+huggingface.co/katolikov/yonosplat-vknn: README, yonosplat_encoder.onnx (external-data location
+repointed to weights.bin), weights.bin 3.86 GB, encoder8_fp16.vxm 2.34 GB, dl3dv inputs + 6
+goldens.
+
 ## Open
 
-- yonosplat_v2 (2-view) recompile is 5.39 GB (initializer growth vs the 3.1 GB 8-view build of a
-  different export) — forensics tracked separately; the 8-view vxm remains the device target.
+- yonosplat_v2 (2-view): the import segfault is fixed (three generic bugs above); the compile now
+  converges honestly. Size + device gate results land below when the recompile finishes.

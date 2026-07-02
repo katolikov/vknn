@@ -8,7 +8,8 @@ deeper guides live in [`docs/`](docs/) and [`skills/`](skills/).
 **VKNN** (*Vulkan Neural Network*, namespace `vknn`) is a small, dependency-free C++17 inference
 engine that runs neural networks on Android arm64 GPUs via Vulkan compute. It imports ONNX with a
 hand-rolled protobuf parser, lowers to a backend-agnostic NCHW IR, runs graph passes (shape
-inference, BatchNorm folding, activation/residual fusion, constant folding, dead-node elimination),
+inference, BatchNorm folding, activation/residual fusion, pointwise-chain fusion into producer
+epilogues, constant folding to convergence, dead-node and dead-initializer elimination),
 partitions into maximal same-backend **segments**, and runs each segment on a backend: **Vulkan**
 (NC4HW4 packed layout, one pre-recorded command buffer per static segment, fp16 storage + fp32
 accumulation) or **CPU** (scalar + NEON reference and automatic fallback). It runs image CNNs,
@@ -37,7 +38,7 @@ Host artifacts land in `build-host/`, Android in `build-android/`. Override the 
 include/vknn/          public headers (model, session, config, backend, op, tensor, graph, ...)
 src/core/              session, graph, passes glue, config/JSON, profiler, ion (dma-buf), logging
 src/import/onnx/       dependency-free ONNX protobuf parser
-src/import/passes.*    graph passes (inferShapes, foldBatchNorm, fuseActivations, constFold, ...)
+src/import/            graph passes, ONE PASS PER FILE (infer_shapes, const_fold, fuse_pointwise_chains, ...); run_standard_passes.cpp orders them, passes.h declares them
 src/backend/cpu/ops/  CPU operators — ONE OP PER FILE
 src/backend/vulkan/   Vulkan backend: context/buffers/command/pipeline + ops/ (ONE OP PER FILE)
 shaders/               GLSL compute (.comp) + common.glsl / precision.glsl; compiled by glslc, embedded
@@ -57,8 +58,10 @@ docs/ , skills/        reference docs + focused how-to guides
 > combined files if you find them. Shared helpers (e.g. `flat::Broadcast` in `flat_ops.h`) may be
 > shared across the per-op files.
 
-Adding an op touches: the `OpType` enum (`include/vknn/op.h`), the ONNX-name map
-(`src/core/op.cpp`), a shape rule in `inferShapes` (`src/import/passes.cpp`), a CPU oracle
+Adding an op touches: the `OpType` enum (`include/vknn/op_type.h` — append-only: new values go at
+the END, because `model_io` serializes them as raw integers and a mid-enum insert corrupts every
+existing `.vxm`), the ONNX-name map
+(`src/core/op.cpp`), a shape rule in `inferShapes` (`src/import/infer_shapes.cpp`), a CPU oracle
 (`src/backend/cpu/ops/<op>.cpp`), and optionally a Vulkan op + GLSL shader gated by
 `supportsNode`. The CMake globs use `CONFIGURE_DEPENDS`, so a new file is picked up on the next
 configure (which `./build.sh` runs). Full recipe: [skills/add-an-operator.md](skills/add-an-operator.md)
@@ -108,7 +111,7 @@ committing.
 - **Re-push the `vknn_*` binaries** to the device after **every** Android rebuild — a stale binary on
   the device silently invalidates a change.
 - **Thermal throttling is fast.** Before each benchmark run, `adb shell sleep 12-14` to cool
-  the GPU; never A/B two builds back-to-back. Use `VKNN_TIMING=1` for real submit+GPU time — the
+  the GPU; never A/B two builds back-to-back. Use `--timing` (`Config::timing`) for real submit+GPU time — the
   profiler's per-op sum is inflated by forced per-op barriers. `rm -rf` the model's cache dir before
   timing it.
 - **Validate non-classifier / non-image models with `vknn_run_io`**, not `vknn_classify` (the latter
