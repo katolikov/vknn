@@ -72,9 +72,11 @@ namespace vknn {
         }
         // Iterate fold+infer: folding a Shape/Gather/Concat chain turns a dynamic Reshape's shape input
         // into a constant, which lets the next inferShapes resolve that Reshape statically, which in turn
-        // exposes more foldable shape ops downstream (YOLO's DFL/box-decode head). Converges in a couple
-        // rounds; the loop runs until constFold stops removing nodes.
-        for (int iter = 0; iter < 8; ++iter)
+        // exposes more foldable shape ops downstream (YOLO's DFL/box-decode head). The loop runs until
+        // constFold stops removing nodes; a transformer whose every block reads Shape() of its own
+        // activations resolves roughly one block per round, so the round cap covers deep encoders
+        // (folding removes nodes, so the loop terminates on its own well before the cap).
+        for (int iter = 0; iter < 256; ++iter)
         {
             if (constFold(g) == 0)
             {
