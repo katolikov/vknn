@@ -56,9 +56,17 @@ autotuning, its strongest path here):
 | ResNet-50 | 10.3 ms | 18.3 ms | 10.3 ms | cosine 1.000000 |
 | Inception-v3 | 15.5 ms | 25.6 ms | 19.6 ms | cosine 0.99998 |
 | YOLOv8n (640×640) | 20.0 ms | ~73 ms | 24.5 ms | cosine 1.000000 |
-| YoNoSplat encoder (965M params) | ~13.5 s | cannot convert | cannot convert | 6 outputs, cosine 0.999+ |
+| YoNoSplat encoder (965M params) | 17.0 s | cannot convert | cannot convert | 6 outputs, cosine 0.99999 |
 
 The VKNN figure is the full `run()` wall (it includes the host↔device copies); MNN's is inference-only.
+
+The encoder end-to-end on two GPU generations (fp16, 0 CPU fallbacks, one Vulkan segment over
+7696 nodes, peak 3.4 GB device memory; identical output bits on both):
+
+| device | `.vxm` load (warm) | run (submit+GPU) | vs onnxruntime fp32 goldens |
+|---|---|---|---|
+| benchmark device (table above) | 2.3 s | 17.0 s | cosine 0.99999, SNR 46–55 dB, 0 NaN |
+| newer-generation GPU | 2.0 s | 9.4 s | identical bits |
 Against MNN's absolute best (min over OpenCL-HEAVY, CPU-4-thread, Vulkan), VKNN is faster on **8 of 9**
 models and at **parity on ResNet-50**. Methodology, per-stage timings, and the OpenCL-tuned comparison:
 [docs/BENCHMARK.md](docs/BENCHMARK.md).
