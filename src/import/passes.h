@@ -22,6 +22,10 @@ namespace vknn {
     // Fuse maximal single-consumer per-element chains into the producer's epilogue, or a standalone
     // FusedPointwise node. Runs last among fusions. Bit-exact; on by default.
     void fusePointwiseChains(Graph &g);
+
+    // Lower Reduce(Mean) over the spatial dims of a rank-4 tensor (keepdims) to GlobalAvgPool — the
+    // ResNet classifier-head pattern with a dedicated NC4HW4 kernel. Needs resolved input ranks.
+    void lowerReduceToGap(Graph &g);
     // Fuse Mul(x,HardSigmoid(x))=HardSwish / Mul(x,Sigmoid(x))=SiLU into the conv epilogue or one
     // unary.
     void fuseSwish(Graph &g);

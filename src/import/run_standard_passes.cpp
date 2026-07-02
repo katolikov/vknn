@@ -5,6 +5,8 @@ namespace vknn {
     void runStandardPasses(Graph &g, const PassOptions &opt) {
         int64_t batch = opt.batch;
         inferShapes(g, batch);
+        lowerReduceToGap(g); // needs input ranks; ReduceMean imports as generic Reduce
+        inferShapes(g, batch);
         eliminateIdentity(g);
         foldBatchNorm(g);
         fuseActivations(g);
@@ -37,6 +39,7 @@ namespace vknn {
         fuseMatMulBias(g);     // fold Linear bias-Adds into the MatMul epilogue (Casts now gone)
         eliminateDeadNodes(g);
         inferShapes(g, batch); // refresh shapes after fusion/folding
+        lowerReduceToGap(g);   // a late-resolving rank can expose the spatial-mean form
         lowerEinsum(g);        // batched einsums -> MatMul (needs the operand shapes resolved above)
         inferShapes(g, batch); // resolve the inserted Unsqueeze/MatMul/Squeeze
         // Pointwise-chain fusion runs LAST, after const-fold + shape resolution: the shape-computation

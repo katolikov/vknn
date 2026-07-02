@@ -159,9 +159,10 @@ namespace vknn {
             {"Relu", OpType::Relu},
             {"Add", OpType::Add},
             {"GlobalAveragePool", OpType::GlobalAvgPool},
-            // ReduceMean over the spatial dims (keepdims) is exactly a global average pool; that's how
-            // it shows up in ResNet exports, so we route it to the same kernel.
-            {"ReduceMean", OpType::GlobalAvgPool},
+            // ReduceMean imports as a generic Reduce; lowerReduceToGap recovers the ResNet
+            // classifier-head form (spatial mean of a rank-4 tensor, keepdims) as GlobalAvgPool once
+            // ranks are known — routing every ReduceMean to GAP would corrupt any other reduction.
+            {"ReduceMean", OpType::Reduce},
             {"AveragePool", OpType::AvgPool},
             {"MaxPool", OpType::MaxPool},
             {"Gemm", OpType::Gemm},
