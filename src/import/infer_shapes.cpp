@@ -803,7 +803,7 @@ namespace vknn {
                         break; // indices not resolved yet
                     }
                     int64_t nidx        = is.empty() ? 1 : numElements(is);
-                    bool    scalarIndex = is.empty();
+                    bool    scalarIndex = is.empty() || nd.attr.geti("idx_scalar", 0) != 0;
                     Shape   out;
                     for (int64_t i = 0; i < axis; ++i)
                     {
