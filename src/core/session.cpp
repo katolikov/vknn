@@ -428,7 +428,10 @@ namespace vknn {
         // worse, stresses the boundary path. Run it on the CPU instead. The heavy backbone/head convs are
         // kept on the GPU — they exceed the work threshold, so this never drags real compute off the
         // accelerator.
-        foldTinyGpuIslands();
+        if (cfg_.foldGpuIslands)
+        {
+            foldTinyGpuIslands();
+        }
 
         // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---
         // Only weights a CPU-assigned node reads need a host copy; GPU ops upload from

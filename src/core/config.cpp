@@ -169,6 +169,7 @@ namespace vknn {
         }
         B("freeWeightsAfterUpload", c.freeWeightsAfterUpload);
         B("noFlatOps", c.noFlatOps);
+        B("foldGpuIslands", c.foldGpuIslands);
         B("timing", c.timing);
         B("profile", c.profile);
         I("verbosity", c.verbosity);
@@ -228,6 +229,7 @@ namespace vknn {
         os << "  \"cacheMode\": \"" << cacheModeStr(cacheMode) << "\",\n";
         os << "  \"freeWeightsAfterUpload\": " << (freeWeightsAfterUpload ? "true" : "false") << ",\n";
         os << "  \"noFlatOps\": " << (noFlatOps ? "true" : "false") << ",\n";
+        os << "  \"foldGpuIslands\": " << (foldGpuIslands ? "true" : "false") << ",\n";
         os << "  \"timing\": " << (timing ? "true" : "false") << ",\n";
         os << "  \"profile\": " << (profile ? "true" : "false") << ",\n";
         os << "  \"verbosity\": " << verbosity << ",\n";
