@@ -26,7 +26,7 @@ Two problems make the dump non-trivial to replay:
        * INT64 shape-control leaves (Slice starts/ends/axes/steps, Gather idx, Unsqueeze/Squeeze axes,
          Concat baked dims, Reshape/Expand/Resize/ConstantOfShape targets) get values that make the
          geometry valid; where a leaf value is genuinely free we pick the neutral one.
-       * big FLOAT axis vectors ([1440],[1920],[720],[960],[384],...) are coordinate aranges for the
+       * big FLOAT axis vectors are coordinate aranges for the
          grid-sample warps -> arange(N).
        * remaining FLOAT/FLOAT16 operands (Mul/Add/Sub/Div/Clip/Pow free operands) only affect numeric
          output, not shape -> neutral values (1 for Mul/Div, 0 for Add/Sub, small for the rest).
@@ -116,6 +116,24 @@ def _broadcastable(src, tgt):
     return all(s == t or s == 1 for s, t in zip(rs, rt))
 
 
+def _reshape_valid(tgt, dsh):
+    """True if reshape target `tgt` (with -1/0 semantics) is element-count-compatible with data
+    shape `dsh` (both concrete lists)."""
+    total = int(np.prod(dsh)) if dsh else 1
+    known, minus = 1, 0
+    for k, t in enumerate(tgt):
+        t = int(t)
+        if t == -1:
+            minus += 1
+        elif t == 0:
+            known *= dsh[k] if k < len(dsh) else 1
+        else:
+            known *= t
+    if minus > 1 or known <= 0:
+        return False
+    return (total % known == 0) if minus else (total == known)
+
+
 def _conv_out(ish, wsh, attrs, transpose):
     """NCHW conv / conv-transpose spatial geometry -> output shape (concrete list) or None."""
     if not concrete(ish) or len(ish) < 3:
@@ -197,7 +215,7 @@ class Interp:
 
         if dtn in ("FLOAT", "FLOAT16", "DOUBLE"):
             # big 1-D vectors that feed Mul in a grid-warp block are coordinate aranges. Normalise to
-            # [0,1) so they stay bounded -- an un-normalised 0..1920 ramp multiplied through the deep
+            # [0,1) so they stay bounded -- an un-normalised full-width pixel ramp multiplied through the deep
             # color/warp chain overflows fp16 (-> inf/nan -> zeroed outputs).
             if len(shp) == 1 and shp[0] >= 16:
                 return (np.arange(shp[0], dtype=np.float64) / shp[0]).astype(npdt)
@@ -743,7 +761,7 @@ def _resize_targets(nodes):
     """Intended (Ht, Wt) per Resize node index, when recoverable.
 
     Default (absent here) is a factor-2 downscale. Overrides encode the two known cases:
-      * the input-Y downscales (X = Cast of the 1440x1920 Y input) go to the 720x960 working res;
+      * the full-resolution input downscales go to the half-resolution working res;
       * flow-decoder Resizes with a FLOAT `scales` operand are 2x UPSAMPLES.
     """
     tgt = {}
@@ -787,7 +805,426 @@ def _rewire_resize(interp, nn, new_in, onnx_nodes, resize_target):
     return [new_in[0], "", "", sname]
 
 
-def _fix_shape_control(interp, op, ins, attrs, const_node, set_const, rec_out=None):
+def _chain_to_gather(uo, rec_by_out, const_node, interp, max_hops=4):
+    """Walk value-preserving hops (Cast/Unsqueeze/Squeeze/Identity) from `uo` to a
+    Gather(known-shape-vector, our-index-const); returns (gather_record, vector) or (None, None)."""
+    r = rec_by_out.get(uo)
+    hops = 0
+    while r is not None and r["op"] in ("Cast", "Unsqueeze", "Squeeze", "Identity") and hops < max_hops:
+        uo = r["in"][0]
+        r = rec_by_out.get(uo)
+        hops += 1
+    if r is not None and r["op"] == "Gather" and len(r["in"]) > 1 and r["in"][1] in const_node:
+        vdata = interp.gv(r["in"][0])
+        if vdata is not None:
+            return r, np.atleast_1d(vdata).astype(np.int64)
+    return None, None
+
+
+def _impose_vec(uo, T, rec_by_out, const_node, set_const, interp, log, depth=0):
+    """FAITHFUL mode: make INT64 tensor `uo` evaluate to T at runtime by patching only the leaf
+    Constants we materialised. Inverts the shape-machinery idioms (Concat / Cast / Unsqueeze /
+    Squeeze / Gather-from-shape / scalar Mul-Div-Add-Sub / leading-dims Slice); computed parts whose
+    interpreted value already equals the wanted slice are left untouched. Returns True when the
+    imposition is complete (every leaf reachable and patched/consistent)."""
+    T = np.atleast_1d(np.asarray(T)).astype(np.int64)
+    if depth > 12:
+        log(f"impose: depth cap at {uo}")
+        return False
+    if uo in const_node:
+        dtn, shp = const_node[uo][1], const_node[uo][2]
+        set_const(uo, T.reshape(shp) if shp else np.asarray(T[0]), dtn)
+        return True
+    r = rec_by_out.get(uo)
+    if r is None:
+        cur = interp.gv(uo)
+        ok = cur is not None and np.array_equal(np.atleast_1d(cur).astype(np.int64), T)
+        if not ok:
+            log(f"impose: {uo} unpatchable (input/init), want {T.tolist()}")
+        return ok
+    op, ins = r["op"], r["in"]
+    if op in ("Cast", "Unsqueeze", "Squeeze", "Identity"):
+        return _impose_vec(ins[0], T, rec_by_out, const_node, set_const, interp, log, depth + 1)
+    if op == "Concat":
+        parts = [p for p in ins if p]
+        lens = []
+        for p in parts:
+            v = interp.gv(p)
+            if v is not None:
+                lens.append(np.atleast_1d(v).size)
+            else:
+                s = interp.gs(p)
+                lens.append(s[0] if s is not None and len(s) == 1 else None)
+        if None in lens or sum(lens) != T.size:
+            # a Slice part with patchable bounds can absorb the residual length (the
+            # Concat(Slice(Shape(X))[:k], baked) sizes idiom before its bounds are solved)
+            def adjustable(p):
+                pr = rec_by_out.get(p)
+                return pr is not None and pr["op"] == "Slice" and len(pr["in"]) > 2 and pr["in"][2] in const_node
+            adj = [k for k, p in enumerate(parts) if adjustable(p)]
+            fixed = sum(L for k, L in enumerate(lens) if k not in adj and L is not None)
+            if len(adj) == 1 and all(lens[k] is not None for k in range(len(parts)) if k not in adj) \
+                    and T.size - fixed >= 1:
+                lens[adj[0]] = T.size - fixed
+            else:
+                log(f"impose: Concat {uo} part lengths {lens} vs target {T.tolist()}")
+                return False
+        ok, off = True, 0
+        for p, L in zip(parts, lens):
+            want = T[off:off + L]
+            off += L
+            v = interp.gv(p)
+            if p in const_node:
+                dtn, shp = const_node[p][1], const_node[p][2]
+                set_const(p, want.reshape(shp) if shp else np.asarray(want[0]), dtn)
+            elif v is not None and np.array_equal(np.atleast_1d(v).astype(np.int64), want):
+                continue
+            else:
+                ok = _impose_vec(p, want, rec_by_out, const_node, set_const, interp, log, depth + 1) and ok
+        return ok
+    if op == "Gather":
+        # scalar/vector picked from a known shape vector: choose indices where data == want
+        vdata = interp.gv(ins[0])
+        if vdata is not None and len(ins) > 1 and ins[1] in const_node:
+            flat = np.atleast_1d(vdata).astype(np.int64)
+            idx = []
+            for w in T:
+                hit = np.nonzero(flat == w)[0]
+                if hit.size == 0:
+                    log(f"impose: Gather {uo} wants {w} not present in {flat.tolist()}")
+                    return False
+                idx.append(int(hit[0]))
+            dtn, shp = const_node[ins[1]][1], const_node[ins[1]][2]
+            arr = np.asarray(idx[0]) if not shp else np.asarray(idx, dtype=np.int64).reshape(shp)
+            set_const(ins[1], arr, dtn)
+            return True
+        return _impose_vec(ins[0], T, rec_by_out, const_node, set_const, interp, log, depth + 1) if T.size > 1 else False
+    if op in ("Mul", "Div", "Add", "Sub"):
+        a, b = ins[0], ins[1]
+        va, vb = interp.gv(a), interp.gv(b)
+        # composite Gather-from-shape * scalar-const solve FIRST: Div(Gather(Shape(X)), c) = T has
+        # two unknowns (dim index, divisor); pick the dim s and smallest integer c with s/c == T
+        # (resp. s*c == T for Mul). The single-operand inversions below would otherwise lock the
+        # placeholder Gather value in and derive a poisoned (even zero) scalar.
+        if T.size == 1 and op in ("Mul", "Div"):
+            t = int(T[0])
+            for x, other in ((a, b), (b, a)):
+                if other not in const_node:
+                    continue
+                g, vec = _chain_to_gather(x, rec_by_out, const_node, interp)
+                if g is None:
+                    continue
+                best = None
+                for c in range(1, 65):
+                    if op == "Div":
+                        s = t * c
+                    elif t % c == 0:
+                        s = t // c
+                    else:
+                        continue
+                    hit = np.nonzero(vec == s)[0]
+                    if hit.size:
+                        best = (int(hit[0]), c)
+                        break
+                if best is None:
+                    continue
+                idx, c = best
+                idt, ishp = const_node[g["in"][1]][1], const_node[g["in"][1]][2]
+                set_const(g["in"][1], np.asarray(idx) if not ishp
+                          else np.full(ishp, idx, dtype=np.int64), idt)
+                dtn, shp = const_node[other][1], const_node[other][2]
+                cv = float(c) if dtn in ("FLOAT", "FLOAT16", "DOUBLE") else c
+                set_const(other, np.asarray(cv) if not shp else np.full(shp, cv), dtn)
+                return True
+        for x, other_v, left in ((a, vb, True), (b, va, False)):
+            if other_v is None:
+                continue
+            o = np.atleast_1d(other_v).astype(np.float64)
+            Tf = T.astype(np.float64)
+            if op == "Mul":
+                val = Tf / o
+            elif op == "Add":
+                val = Tf - o
+            elif op == "Div":            # result = A / B
+                val = Tf * o if left else o / Tf
+            else:                        # Sub: result = A - B
+                val = Tf + o if left else o - Tf
+            tgt = x
+            if tgt in const_node:
+                dtn, shp = const_node[tgt][1], const_node[tgt][2]
+                out = val if dtn in ("FLOAT", "FLOAT16", "DOUBLE") else np.round(val)
+                if dtn not in ("FLOAT", "FLOAT16", "DOUBLE") and np.any(out <= 0):
+                    continue  # a zero/negative INT64 shape term poisons every consumer downstream
+                set_const(tgt, out.reshape(shp) if shp else np.asarray(out.ravel()[0]), dtn)
+                return True
+            if _impose_vec(tgt, np.round(val).astype(np.int64), rec_by_out, const_node, set_const,
+                           interp, log, depth + 1):
+                return True
+        log(f"impose: {op} {uo} has no invertible operand")
+        return False
+    if op == "Slice":
+        # leading-dims window: patch OUR bounds to [0:len(T)] on axis 0, then require the data's
+        # leading dims to already equal T (they come from Shape(X); X's shape is not patchable).
+        for pos, val in ((1, np.zeros(1, np.int64)), (2, np.full(1, T.size, np.int64)),
+                         (3, np.zeros(1, np.int64)), (4, np.ones(1, np.int64))):
+            if len(ins) > pos and ins[pos] in const_node:
+                dtn, shp = const_node[ins[pos]][1], const_node[ins[pos]][2]
+                set_const(ins[pos], val.reshape(shp) if shp else np.asarray(val[0]), dtn)
+        vdata = interp.gv(ins[0])
+        if vdata is not None and np.array_equal(np.atleast_1d(vdata).astype(np.int64)[:T.size], T):
+            return True
+        log(f"impose: Slice {uo} leading dims {None if vdata is None else np.atleast_1d(vdata).tolist()} != {T.tolist()}")
+        return False
+    log(f"impose: cannot invert {op} at {uo}")
+    return False
+
+
+_ELEMWISE = {"Mul", "Add", "Sub", "Div", "Where", "Greater", "GreaterOrEqual", "Equal", "Min",
+             "Max", "Pow", "Cast", "Clip", "Reciprocal", "Neg", "Sigmoid", "Sqrt", "Relu",
+             "PRelu", "Identity"}
+
+
+def _bcast_ok(shapes):
+    """True if the concrete shapes are mutually NumPy-broadcastable."""
+    n = max(len(s) for s in shapes)
+    for k in range(1, n + 1):
+        dims = {s[len(s) - k] for s in shapes if len(s) >= k and s[len(s) - k] != 1}
+        if len(dims) > 1:
+            return False
+    return True
+
+
+def _repair_misbindings(new_nodes, onnx_by_name, producers, rec_by_out, interp, log,
+                        max_fixes=40, max_depth=8):
+    """FAITHFUL mode: the trace reuses tensor names, and nearest-preceding binding can wire a
+    consumer to the WRONG producer (e.g. a later warp's GridSample output hijacks an earlier warp's
+    collapsed name). Such mistakes surface as provable broadcast clashes at elementwise ops. For each clash,
+    walk up the operand chains; at every edge whose ORIGINAL name has alternative producers, try
+    the other candidates (nearest first) and keep the rewiring that makes the clash broadcastable
+    (verified by a full interpreter replay). Structure is untouched -- only which producer an edge
+    references changes."""
+    def uidx(u):
+        r = rec_by_out.get(u)
+        return r["idx"] if r is not None else -1
+
+    def find_clash(skip):
+        for r in new_nodes:
+            if id(r) in skip:
+                continue
+            if r["op"] not in ("Mul", "Add", "Sub", "Div", "Where", "Greater", "GreaterOrEqual",
+                               "Equal", "Min", "Max", "Pow"):
+                continue
+            shapes = [interp.gs(u) for u in r["in"] if u]
+            if len(shapes) < 2 or any(not concrete(s) for s in shapes):
+                continue
+            if not _bcast_ok(shapes):
+                return r
+        return None
+
+    def dump_chain(uo, depth=0, lines=None):
+        lines = [] if lines is None else lines
+        r = rec_by_out.get(uo)
+        if r is None:
+            lines.append("  " * depth + f"{uo} (leaf) {interp.gs(uo)}")
+            return lines
+        lines.append("  " * depth + f"{uo} <- {r['op']} {interp.gs(uo)}")
+        if depth < 4:
+            for u in r["in"]:
+                if u:
+                    dump_chain(u, depth + 1, lines)
+        return lines
+
+    def rewire(node, pos, u):
+        node["in"][pos] = u
+        onnx_by_name[node["name"]].input[pos] = u
+
+    def try_fix(clash):
+        seen, queue = set(), [(clash, 0)]
+        while queue:
+            node, depth = queue.pop(0)
+            if id(node) in seen or depth > max_depth:
+                continue
+            seen.add(id(node))
+            for pos, u in enumerate(node["in"]):
+                if not u:
+                    continue
+                orig = node["orig"]["inputs"][pos] if pos < len(node["orig"]["inputs"]) else None
+                cands = [c for c in (producers.get(orig) or []) if c != u and uidx(c) < node["idx"]]
+                for c in reversed(cands[-4:])  :
+                    old = node["in"][pos]
+                    rewire(node, pos, c)
+                    _replay_interp(interp, new_nodes)
+                    shapes = [interp.gs(x) for x in clash["in"] if x]
+                    if all(concrete(s) for s in shapes) and _bcast_ok(shapes):
+                        log(f"rebind: {node['name']} operand {pos} {old} -> {c}")
+                        return True
+                    rewire(node, pos, old)
+                pr = rec_by_out.get(u)
+                if pr is not None and pr["op"] in _ELEMWISE:
+                    queue.append((pr, depth + 1))
+        _replay_interp(interp, new_nodes)
+        return False
+
+    skip = set()
+    for _ in range(max_fixes):
+        _replay_interp(interp, new_nodes)
+        clash = find_clash(skip)
+        if clash is None:
+            return
+        if not try_fix(clash):
+            log(f"rebind: unresolvable clash at {clash['name']} "
+                f"{[interp.gs(u) for u in clash['in'] if u]}")
+            for u in clash["in"]:
+                if u:
+                    for ln in dump_chain(u):
+                        log("rebind:   " + ln)
+            skip.add(id(clash))
+
+
+def _fix_interior_reshape_counts(new_nodes, rec_by_out, const_node, set_const, interp, log):
+    """FAITHFUL mode, last stage: an interior Reshape whose machinery-computed target is
+    count-inconsistent with its (now settled) data gets its free all-1 constant Concat slots scaled
+    to absorb the residual ratio (a space-to-depth factor whose literal dims the dump lost)."""
+    for r in new_nodes:
+        if r["op"] != "Reshape" or len(r["in"]) < 2 or not r["in"][1]:
+            continue
+        dsh = interp.gs(r["in"][0])
+        tgt = interp.gv(r["in"][1])
+        if not concrete(dsh) or tgt is None:
+            continue
+        tgt = np.atleast_1d(tgt).astype(np.int64)
+        if np.any(tgt <= 0) or _reshape_valid(list(tgt), dsh):
+            continue
+        total, have = int(np.prod(dsh)), int(np.prod(tgt))
+        if have == 0 or total % have:
+            continue
+        residual = total // have
+        cr = rec_by_out.get(r["in"][1])
+        if cr is None or cr["op"] != "Concat":
+            continue
+        free = [p for p in cr["in"] if p and p in const_node
+                and interp.gv(p) is not None and np.all(np.atleast_1d(interp.gv(p)) == 1)]
+        if not free:
+            continue
+        # distribute the residual over the free slots: even power split when possible, else all
+        # into the first slot
+        vals = [1] * len(free)
+        k = len(free)
+        root = round(residual ** (1.0 / k))
+        if root ** k == residual:
+            vals = [root] * k
+        else:
+            vals[0] = residual
+        for p, v in zip(free, vals):
+            dtn, shp = const_node[p][1], const_node[p][2]
+            set_const(p, np.full(shp, v, dtype=np.int64) if shp else np.asarray(v), dtn)
+        log(f"count-fix: Reshape {r['name']} residual {residual} -> slots {vals}")
+        _replay_interp(interp, new_nodes)
+
+
+def _faithful_ort_repair(model, log, max_iter=60):
+    """FAITHFUL mode: make the structure-preserving graph loadable by ORT without touching any node
+    or edge. The dump loses interior resolution-ladder values, so a synthesized constant can clash
+    with a real anchor (e.g. an index-ramp initializer) in ORT's static checker. On each
+    ShapeInferenceError, neutralise ONE float Constant/initializer operand of the offending node to
+    a scalar (dtype kept, value = current mean). INT64 shape-control operands are never touched."""
+    import onnxruntime as ort
+    for _ in range(max_iter):
+        try:
+            ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+            return model
+        except Exception as e:
+            msg = str(e)
+            m = re.search(r"Node \(([^)]+)\)", msg)
+            if not m:
+                log(f"ort-repair: unparseable failure: {msg[:200]}")
+                return model
+            node = next((n for n in model.graph.node if n.name == m.group(1)), None)
+            if node is None:
+                log(f"ort-repair: node {m.group(1)} not found")
+                return model
+            fixed = False
+            inits = {i.name: i for i in model.graph.initializer}
+            consts = {n.output[0]: n for n in model.graph.node
+                      if n.op_type == "Constant" and n.output}
+            for opname in node.input:
+                if opname in inits:
+                    t = inits[opname]
+                    if t.data_type not in (TensorProto.FLOAT, TensorProto.FLOAT16, TensorProto.DOUBLE):
+                        continue
+                    arr = numpy_helper.to_array(t)
+                    scal = np.asarray(arr.ravel().mean() if arr.size else 0, dtype=arr.dtype)
+                    inits[opname].CopyFrom(numpy_helper.from_array(scal.reshape(()), name=opname))
+                    log(f"ort-repair: initializer {opname} {list(arr.shape)} -> scalar (node {node.name})")
+                    fixed = True
+                    break
+                if opname in consts:
+                    cn = consts[opname]
+                    val = next((a for a in cn.attribute if a.name == "value"), None)
+                    if val is None or val.t.data_type not in (TensorProto.FLOAT, TensorProto.FLOAT16,
+                                                              TensorProto.DOUBLE):
+                        continue
+                    arr = numpy_helper.to_array(val.t)
+                    scal = np.asarray(arr.ravel().mean() if arr.size else 0, dtype=arr.dtype)
+                    del cn.attribute[:]
+                    cn.attribute.append(helper.make_attribute(
+                        "value", numpy_helper.from_array(scal.reshape(()), name=opname + "_v")))
+                    log(f"ort-repair: constant {opname} {list(arr.shape)} -> scalar (node {node.name})")
+                    fixed = True
+                    break
+            if not fixed:
+                log(f"ort-repair: no neutralisable operand on {node.name} ({node.op_type}): {msg[:160]}")
+                return model
+    return model
+
+
+def _replay_interp(interp, replay_records):
+    """Recompute interpreter values over the emitted records in order (Constant values persist in
+    interp.val, so patched leaves propagate through the machinery)."""
+    for r in replay_records:
+        if r["op"] == "Constant":
+            continue
+        interp.run(r["op"], r["in"], r["out"], r["attrs"])
+
+
+def _faithful_resize(interp, nn, new_in, rec_by_out, const_node, set_const, rec_out, log):
+    """FAITHFUL mode: keep the Resize's dumped operands; back-solve the constants in its sizes /
+    scales chain so the runtime machinery computes a valid, baked-mode-equivalent geometry
+    (recorded output spatial when concrete, else the pyramid factor-2 downscale; float-scales
+    Resizes are 2x upsamples, matching _resize_targets)."""
+    xsh = interp.gs(new_in[0]) if new_in and new_in[0] else None
+    has_sizes = len(new_in) > 3 and new_in[3]
+    has_scales = len(new_in) > 2 and new_in[2]
+    if has_scales and not has_sizes:
+        if new_in[2] not in const_node:
+            log(f"impose: Resize {nn['name']} computed scales left as-is")
+            return "computed-scales"
+        if concrete(xsh) and len(xsh) == 4 and concrete(rec_out) and len(rec_out) == 4 and rec_out[2] > 0:
+            fh, fw = rec_out[2] / xsh[2], rec_out[3] / xsh[3]
+            mode = "recout-scales"
+        else:
+            fh = fw = 2.0  # flow-decoder upsample (see _resize_targets)
+            mode = "default-scales"
+        dtn, shp = const_node[new_in[2]][1], const_node[new_in[2]][2]
+        set_const(new_in[2], np.array([1.0, 1.0, fh, fw]).reshape(shp if shp else (4,)), dtn)
+        return mode
+    if not concrete(xsh) or len(xsh) != 4:
+        log(f"impose: Resize {nn['name']} data shape unknown; leaving chain as-is")
+        return "skipped"
+    if has_sizes:
+        if concrete(rec_out) and len(rec_out) == 4:
+            ht, wt = int(rec_out[2]), int(rec_out[3])
+            mode = "recout-sizes"
+        else:
+            ht, wt = max(1, xsh[2] // 2), max(1, xsh[3] // 2)
+            mode = "default-sizes"
+        T = [xsh[0], xsh[1], ht, wt]
+        _impose_vec(new_in[3], T, rec_by_out, const_node, set_const, interp, log)
+        return mode
+    return "no-operand"
+
+
+def _fix_shape_control(interp, op, ins, attrs, const_node, set_const, rec_out=None, faithful=False):
     """Right before a shape-transforming op runs, patch its Constant shape-control inputs so the
     geometry is self-consistent. Preference order for a Reshape/Expand target:
       1. the node's RECORDED output shape (`rec_out`) when it is concrete and element-count-consistent
@@ -854,6 +1291,25 @@ def _fix_shape_control(interp, op, ins, attrs, const_node, set_const, rec_out=No
         if not concrete(dsh):
             return
         rank = len(dsh)
+        # recorded output dims are a real anchor for OUR placeholder bounds: where a concrete
+        # rec_out dim shrinks the input dim, window that axis to [0:rec_out[i]]. (The full-range
+        # placeholder otherwise silently keeps the dim and poisons downstream broadcasts.)
+        if faithful and rec_out is not None and len(rec_out) == rank and is_ours(1) and is_ours(2):
+            axes = [i for i in range(rank)
+                    if isinstance(rec_out[i], int) and rec_out[i] > 0 and rec_out[i] != dsh[i]]
+            k1 = len(np.atleast_1d(cur(1)))
+            if axes and len(axes) <= k1:
+                pad = k1 - len(axes)                        # spare bound slots -> no-op windows
+                spare = [i for i in range(rank) if i not in axes][:pad]
+                axv = axes + spare
+                set_const(ins[1], np.zeros(k1, np.int64), dt(1))
+                set_const(ins[2], np.array([rec_out[i] if i in axes else dsh[i] for i in axv],
+                                           dtype=np.int64), dt(2))
+                if len(ins) > 3 and is_ours(3):
+                    set_const(ins[3], np.array(axv, dtype=np.int64), dt(3))
+                if len(ins) > 4 and is_ours(4):
+                    set_const(ins[4], np.ones(k1, np.int64), dt(4))
+                return
         # axes (index 3): clamp to valid range so ends/starts apply to real dims
         if len(ins) > 3 and is_ours(3):
             k = len(np.atleast_1d(cur(3)))
@@ -876,6 +1332,18 @@ def main():
     ap.add_argument("--goldens-dir", default=None, help="write ORT golden outputs here (.npy + .bin)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--check", action="store_true", help="run onnxruntime to validate + dump goldens")
+    ap.add_argument("--faithful", action="store_true",
+                    help="structure-preserving rebuild: keep every node and the runtime shape "
+                         "machinery (Shape/Slice/Concat/... chains feeding Resize/Reshape/Expand); "
+                         "instead of rewiring shape-consumer operands, back-solve the leaf Constant "
+                         "VALUES so the machinery computes self-consistent geometry at runtime. "
+                         "No dead-node pruning, no repair/coercion passes.")
+    ap.add_argument("--raw-names", action="store_true",
+                    help="with --faithful: emit nodes under their ORIGINAL dumped tensor names, "
+                         "duplicates included (the trace reuses names, so the file violates SSA "
+                         "exactly like the source export does). onnx.checker and ORT reject such "
+                         "a file -- it exists to exercise a consumer's own SSA-rename/binding, "
+                         "not to run in ORT. Constant values come from the interpreted pass.")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
 
@@ -985,6 +1453,13 @@ def main():
 
     resize_target = _resize_targets(nodes)  # original node idx -> (Ht, Wt) when known
     const_node = {}  # uniq const name -> [onnx_node, dtype_name, recorded_valueattr_shape]
+    rec_by_out = {}  # uniq out name -> emitted node record (faithful-mode back-solve)
+    implog = []      # faithful-mode impose diagnostics
+    faithful_resizes = []       # (nn, mode) -- default-guessed ones get consumer-anchored later
+    faithful_out_reshapes = []  # (nn, declared shape) -- re-imposed after the ladder settles
+
+    def ilog(msg):
+        implog.append(msg)
 
     def set_const(uo, arr, dtn):
         """(Re)assign a materialised Constant's value in-place + refresh interp state."""
@@ -1009,8 +1484,11 @@ def main():
             consumers.setdefault(u, []).append((len(new_nodes), op, pos))
         new_out = [(f"{o}__n{i}" if o else "") for o in nd["outputs"]]
         nn = {"op": op, "name": f"{nd['name']}__n{i}", "in": new_in, "out": new_out,
-              "attrs": attrs, "orig": nd}
+              "attrs": attrs, "orig": nd, "idx": len(new_nodes)}
         new_nodes.append(nn)
+        for uo in new_out:
+            if uo:
+                rec_by_out[uo] = nn
 
         if op == "Constant":
             uo = new_out[0]
@@ -1031,11 +1509,18 @@ def main():
                 onnx_nodes.append(cnode)
                 const_node[uo] = [cnode, dtn, shp]
         elif op == "Resize":
-            new_in = _rewire_resize(interp, nn, new_in, onnx_nodes, resize_target)
+            if args.faithful:
+                ro = rec_shape.get(nd["outputs"][0]) if nd["outputs"] and nd["outputs"][0] else None
+                fmode = _faithful_resize(interp, nn, new_in, rec_by_out, const_node, set_const,
+                                         ro if concrete(ro) else None, ilog)
+                faithful_resizes.append((nn, fmode))
+                _replay_interp(interp, new_nodes)
+            else:
+                new_in = _rewire_resize(interp, nn, new_in, onnx_nodes, resize_target)
             interp.run(op, new_in, new_out, attrs)
             onnx_nodes.append(helper.make_node(op, new_in, new_out, name=nn["name"],
                                                **_clean_attrs(op, attrs)))
-        elif op == "GridSample":
+        elif op == "GridSample" and not args.faithful:
             by_out_now = {o: n for n in onnx_nodes for o in n.output if o}
             flow = _find_grid_flow(interp, new_in[1], by_out_now) if len(new_in) > 1 else None
             new_in = _rewire_gridsample(interp, nn, new_in, onnx_nodes, flow)
@@ -1058,7 +1543,31 @@ def main():
             onnx_nodes.append(helper.make_node(op, new_in, new_out, name=nn["name"], **nd_attrs))
         else:
             rec_out = rec_shape.get(nd["outputs"][0]) if nd["outputs"] and nd["outputs"][0] else None
-            if op == "Reshape":
+            if op == "Reshape" and args.faithful:
+                # keep the dumped wiring; back-solve constants so the runtime target is consistent.
+                dsh0 = interp.gs(new_in[0])
+                is_graph_out = bool(nd["outputs"]) and nd["outputs"][0] in set(graph_out_names)
+                counts_ok = concrete(rec_out) and (
+                    (not concrete(dsh0)) or int(np.prod(rec_out)) == int(np.prod(dsh0)))
+                if len(new_in) > 1 and new_in[1]:
+                    if new_in[1] in const_node:
+                        _fix_shape_control(interp, op, new_in, attrs, const_node, set_const, rec_out, args.faithful)
+                    else:
+                        cur = interp.gv(new_in[1])
+                        cur_valid = (cur is not None and concrete(dsh0) and
+                                     _reshape_valid(list(np.atleast_1d(cur)), dsh0))
+                        # graph outputs must land on the declared contract; interior targets are
+                        # trusted when the machinery already computes a valid reshape.
+                        if counts_ok and (is_graph_out or not cur_valid):
+                            _impose_vec(new_in[1], rec_out, rec_by_out, const_node, set_const,
+                                        interp, ilog)
+                            _replay_interp(interp, new_nodes)
+                        elif not cur_valid:
+                            ilog(f"impose: Reshape {nn['name']} target unverifiable (rec_out "
+                                 f"{rec_out}, data {dsh0})")
+                        if is_graph_out:
+                            faithful_out_reshapes.append((nn, rec_out))
+            elif op == "Reshape":
                 # Reshape targets in this graph are often COMPUTED (Shape/Gather/Concat) vectors that
                 # collapse to wrong values, or materialised constants we synthesised as placeholders.
                 # Recompute a valid target from: (1) the recorded output shape when concrete + count-
@@ -1108,15 +1617,130 @@ def main():
                     interp.shp[tname] = [k]
                     new_in = [new_in[0], tname]
                 else:
-                    _fix_shape_control(interp, op, new_in, attrs, const_node, set_const, rec_out)
+                    _fix_shape_control(interp, op, new_in, attrs, const_node, set_const, rec_out, args.faithful)
             else:
-                _fix_shape_control(interp, op, new_in, attrs, const_node, set_const, rec_out)
+                _fix_shape_control(interp, op, new_in, attrs, const_node, set_const, rec_out, args.faithful)
             interp.run(op, new_in, new_out, attrs)
             onnx_nodes.append(helper.make_node(op, new_in, new_out, name=nn["name"],
                                                **_clean_attrs(op, attrs)))
         for o, uo in zip(nd["outputs"], new_out):
             if o:
                 producers.setdefault(o, []).append(uo)
+
+    if args.faithful:
+        # Second pass, run once the whole trace is interpreted. Order: (1) rebind provably
+        # mis-bound edges (collapsed names wired to the wrong producer); (2) a default-guessed
+        # Resize target is re-solved from its CONSUMER's broadcast anchor -- the machinery-built
+        # grid/ramp operand of the binary op the Resize output feeds fixes the true spatial dims
+        # (the grid chains come later in the trace, so the emission pass could not see them);
+        # (3) graph-output Reshape targets are re-imposed with the settled ladder; (4) interior
+        # pixel-unshuffle Reshape counts absorb lost literal dims; (5) rebind anything the new
+        # shapes exposed.
+        onnx_by_name = {n.name: n for n in onnx_nodes}
+        _repair_misbindings(new_nodes, onnx_by_name, producers, rec_by_out, interp, ilog)
+        cons_of = {}
+        for r in new_nodes:
+            for pos, s in enumerate(r["in"]):
+                if s:
+                    cons_of.setdefault(s, []).append((r, pos))
+
+        def anchor_shape(uo, depth=0):
+            for (r, pos) in cons_of.get(uo, []):
+                if r["op"] in ("Cast", "Identity") and depth < 3:
+                    s = anchor_shape(r["out"][0], depth + 1)
+                    if s:
+                        return s
+                if r["op"] in ("Add", "Sub", "Mul", "Div") and len(r["in"]) > 1:
+                    sib = r["in"][1 - pos]
+                    s = interp.gs(sib) if sib else None
+                    if concrete(s) and len(s) == 4 and s[2] > 1 and s[3] > 1:
+                        return s
+            return None
+
+        for nn, fmode in faithful_resizes:
+            if fmode not in ("default-sizes", "default-scales"):
+                continue
+            S = anchor_shape(nn["out"][0])
+            xsh = interp.gs(nn["in"][0])
+            if S is None or not (concrete(xsh) and len(xsh) == 4):
+                continue
+            if fmode == "default-sizes":
+                _impose_vec(nn["in"][3], [xsh[0], xsh[1], S[2], S[3]], rec_by_out, const_node,
+                            set_const, interp, ilog)
+                ilog(f"anchor: Resize {nn['name']} -> {[xsh[0], xsh[1], S[2], S[3]]}")
+            else:
+                scname = nn["in"][2]
+                if scname in const_node:
+                    dtn, shp = const_node[scname][1], const_node[scname][2]
+                    set_const(scname, np.array([1.0, 1.0, S[2] / xsh[2], S[3] / xsh[3]])
+                              .reshape(shp if shp else (4,)), dtn)
+                    ilog(f"anchor: Resize {nn['name']} scales -> {[1.0, 1.0, S[2]/xsh[2], S[3]/xsh[3]]}")
+            _replay_interp(interp, new_nodes)
+
+        for nn, ro in faithful_out_reshapes:
+            if not concrete(ro):
+                continue
+            dsh0 = interp.gs(nn["in"][0])
+            if not concrete(dsh0) or int(np.prod(ro)) != int(np.prod(dsh0)):
+                # impose anyway: the declared target's leaf back-solve fixes the SHARED constants
+                # (Gather indices, /2 divisors) the interior pixel-unshuffle also uses; the
+                # count-fix stage then absorbs what is left.
+                ilog(f"impose: output Reshape {nn['name']} count-inconsistent for now "
+                     f"(declared {ro}, data {dsh0})")
+            _impose_vec(nn["in"][1], ro, rec_by_out, const_node, set_const, interp, ilog)
+            _replay_interp(interp, new_nodes)
+
+        _fix_interior_reshape_counts(new_nodes, rec_by_out, const_node, set_const, interp, ilog)
+        _repair_misbindings(new_nodes, onnx_by_name, producers, rec_by_out, interp, ilog)
+
+    if args.faithful and args.raw_names:
+        # Emit under the ORIGINAL dumped names, duplicates and all: the source export reuses
+        # tensor names, and the consumer's importer must do its own SSA-rename/binding -- that
+        # binding is part of what the artifact exists to exercise. Constant values are the
+        # interpreted (self-consistent) ones; initializers keep their real shapes.
+        raw_nodes = []
+        for i, nd in enumerate(nodes):
+            op = nd["op_type"]
+            outs = list(nd["outputs"])
+            name = f"{nd['name']}__r{i}"
+            if op == "Constant":
+                uo = f"{outs[0]}__n{i}" if outs and outs[0] else ""
+                val = interp.gv(uo)
+                if val is not None:
+                    raw_nodes.append(helper.make_node(
+                        "Constant", [], outs, name=name,
+                        value=numpy_helper.from_array(np.asarray(val), name=name + "_v")))
+                else:
+                    raw_nodes.append(helper.make_node("Constant", [], outs, name=name,
+                                                      **_scalar_attrs(nd["attributes"])))
+            elif op == "ConstantOfShape":
+                dtn, _ = _const_meta(nd)
+                nd_attrs = {}
+                if dtn:
+                    nd_attrs["value"] = numpy_helper.from_array(np.zeros((1,), dtype=NP_OF[dtn]))
+                raw_nodes.append(helper.make_node(op, list(nd["inputs"]), outs, name=name, **nd_attrs))
+            else:
+                raw_nodes.append(helper.make_node(op, list(nd["inputs"]), outs, name=name,
+                                                  **_clean_attrs(op, nd["attributes"])))
+        raw_inputs = [helper.make_tensor_value_info(it["name"], ELEM[it["dtype"]], it["shape"])
+                      for it in d["inputs"]]
+        raw_outputs = [helper.make_tensor_value_info(ot["name"], ELEM[ot["dtype"]],
+                       ot["shape"] if concrete(ot["shape"]) else None) for ot in d["outputs"]]
+        rgraph = helper.make_graph(raw_nodes, "rebuilt_raw", raw_inputs, raw_outputs, onnx_inits)
+        # the source file carries shape-inferred value_info for intermediates (one entry per NAME,
+        # even though several nodes produce that name) -- reproduce them, they are part of what an
+        # importer must survive.
+        for t in d["tensors"]:
+            if t.get("category") == "value" and concrete(t.get("shape")) and t["dtype"] in ELEM:
+                rgraph.value_info.append(
+                    helper.make_tensor_value_info(t["name"], ELEM[t["dtype"]], t["shape"]))
+        opset = d["model"]["opset_import"].get("ai.onnx", 17)
+        rmodel = helper.make_model(rgraph, opset_imports=[helper.make_opsetid("", int(opset))])
+        rmodel.ir_version = min(d["model"].get("ir_version", 8), 10)
+        onnx.save(rmodel, args.out)
+        print(f"wrote {args.out}: {len(raw_nodes)} RAW-NAME nodes "
+              f"(SSA-violating like the source export; ORT will not run it)")
+        return
 
     out_unique = {}
     for on in graph_out_names:
@@ -1131,7 +1755,8 @@ def main():
     # not broadcast. Where the offending operand is a constant/initializer, neutralise it to a
     # broadcastable scalar of the same dtype (op/dtype/structure preserved). Data-operand clashes are
     # left to the ORT-driven _repair_broadcasts post-pass (which uses a Slice, never a Resize).
-    _broadcast_repair(onnx_nodes, onnx_inits, interp, ELEM_INT_TO_NP)
+    if not args.faithful:
+        _broadcast_repair(onnx_nodes, onnx_inits, interp, ELEM_INT_TO_NP)
 
     # Dead-node elimination: keep only nodes on a backward path from the declared outputs. This removes
     # the grid-builder subgraphs whose GridSample grid was replaced -- and, because those replaced grids
@@ -1140,14 +1765,19 @@ def main():
     # from the outputs and is dropped here. The kept subgraph exercises the full dynamic-shape tail
     # (Shape/Slice/Concat/Reshape/Resize-geometry, GridSample, ConstantOfShape/Where/Expand, the
     # soft-argmax coordinate decode) and fully determines the declared outputs.
-    onnx_nodes = _prune_dead(onnx_nodes, graph_out_names, init_names | input_names)
+    if not args.faithful:
+        onnx_nodes = _prune_dead(onnx_nodes, graph_out_names, init_names | input_names)
     onnx_inits = [ini for ini in onnx_inits if ini.name in _used_names(onnx_nodes)]
 
     onnx_inputs = [helper.make_tensor_value_info(it["name"], ELEM[it["dtype"]], it["shape"])
                    for it in d["inputs"]]
     onnx_outputs = []
     for ot in d["outputs"]:
-        sh = ot["shape"] if concrete(ot["shape"]) else None
+        # faithful mode: declare outputs rank-only dynamic -- the runtime machinery determines the
+        # shape, and ORT-vs-vknn on the SAME graph is the shape oracle (a static declaration the
+        # interior ladder can't guarantee would only block the session).
+        sh = ([None] * len(ot["shape"]) if ot["shape"] else None) if args.faithful \
+            else (ot["shape"] if concrete(ot["shape"]) else None)
         onnx_outputs.append(helper.make_tensor_value_info(ot["name"], ELEM[ot["dtype"]], sh))
 
     graph = helper.make_graph(onnx_nodes, "rebuilt", onnx_inputs, onnx_outputs, onnx_inits)
@@ -1157,8 +1787,8 @@ def main():
 
     # Final output-shape guarantee: using ORT's own (authoritative) shape inference -- not our lighter
     # interpreter -- coerce every declared output whose producer's element count drifted from the
-    # declared shape. The output-formatting tail (pixel-unshuffle to *_partA, coordinate decode to
-    # imgr_uv) depends on a resolution ladder the collapsed dump doesn't preserve, so a branch may
+    # declared shape. The output-formatting tail (pixel-unshuffle and coordinate-decode
+    # branches) depends on a resolution ladder the collapsed dump doesn't preserve, so a branch may
     # arrive at the wrong count/rank. We splice Reshape([1,1,1,-1]) -> Resize(nearest, declared) so the
     # output is exactly the declared shape/dtype; only its resampled content differs (repro contract).
     # Neutralise interior shape ops the collapsed dump left inconsistent -- broken Resizes (a size
@@ -1168,18 +1798,27 @@ def main():
     # by output coercion.
     # Iterate the repairs: each pass lets ORT shape inference resolve further, exposing the next
     # inconsistency (a broken Resize, a bad pixel-unshuffle Reshape, a non-broadcasting Mul).
-    for _ in range(6):
-        model = _repair_resizes(model)
-        model = _repair_broadcasts(model)
-        model = _repair_reshapes(model)
-    # Some tail shapes are data-dependent and invisible to static inference: fix them from RUNTIME
-    # shapes -- run ORT, and on a Reshape/Resize/broadcast failure repair that node from the real
-    # (executed) input shape, then retry. No Resize is introduced (Reshape/Slice only). Runs BEFORE
-    # output coercion so the coercion sees the final (repaired) branch shapes.
-    model = _repair_from_runtime(model, d, rng)
-    model = _coerce_output_shapes(model, {o["name"]: o["shape"] for o in d["outputs"]},
-                                  {o["name"]: ELEM[o["dtype"]] for o in d["outputs"]},
-                                  _make_feeds(d, np.random.default_rng(999)))
+    if args.faithful:
+        model = _faithful_ort_repair(model, ilog)
+    if not args.faithful:
+        for _ in range(6):
+            model = _repair_resizes(model)
+            model = _repair_broadcasts(model)
+            model = _repair_reshapes(model)
+        # Some tail shapes are data-dependent and invisible to static inference: fix them from RUNTIME
+        # shapes -- run ORT, and on a Reshape/Resize/broadcast failure repair that node from the real
+        # (executed) input shape, then retry. No Resize is introduced (Reshape/Slice only). Runs BEFORE
+        # output coercion so the coercion sees the final (repaired) branch shapes.
+        model = _repair_from_runtime(model, d, rng)
+        model = _coerce_output_shapes(model, {o["name"]: o["shape"] for o in d["outputs"]},
+                                      {o["name"]: ELEM[o["dtype"]] for o in d["outputs"]},
+                                      _make_feeds(d, np.random.default_rng(999)))
+    if implog:
+        seen_msgs = set()
+        for m in implog:
+            if m not in seen_msgs:
+                seen_msgs.add(m)
+                print("  [faithful] " + m)
 
     onnx.save(model, args.out)
     print(f"wrote {args.out}: {len(model.graph.node)} nodes, {len(model.graph.initializer)} initializers")
@@ -1725,13 +2364,13 @@ def _coerce_output_shapes(model, out_shapes, out_elems, feeds=None):
         have = int(np.prod(cur)) if concrete(cur) else want
         if have == want:
             # element count already matches -> a single real Reshape to the declared shape (this is
-            # exactly the model's true final reshape, e.g. imgr_uv [1,720,960,2]->[1,1,720,1920]).
+            # exactly the model's true final reshape, e.g. a [1,H,W,2] -> [1,1,H,2W] plane repack).
             extra += [
                 helper.make_node("Constant", [], [oname + "__tgt"], name=oname + "__tgt_c", value=tgt_t),
                 helper.make_node("Reshape", [internal, oname + "__tgt"], [oname], name=oname + "__final_r"),
             ]
         elif want % have == 0:
-            # count drifted by an integer factor (the partA pixel-unshuffle branch arrives at half the
+            # count drifted by an integer factor (a pixel-unshuffle output branch arrives at half the
             # channel count because the exact upstream resolution isn't recoverable). Bridge it with a
             # channel Concat (a real op the model uses) -- flatten, Concat `factor` copies, Reshape.
             factor = want // have
