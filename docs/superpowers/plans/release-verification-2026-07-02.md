@@ -122,10 +122,13 @@ huggingface.co/katolikov/yonosplat-vknn: README, yonosplat_encoder.onnx (externa
 repointed to weights.bin), weights.bin 3.86 GB, encoder8_fp16.vxm 2.34 GB, dl3dv inputs + 6
 goldens.
 
-## Open
+## yonosplat_v2 (2-view): CLOSED
 
-- yonosplat_v2 (2-view): the import segfault is fixed (three generic bugs above); the compile now
-  converges honestly. Size + device gate results land below when the recompile finishes.
+The recompiled vxm is 1.89 GiB (was 5.39 GB - dead-initializer pruning plus the honest-shape
+fixes; 55 fold rounds, 0 oversized tensors, 235 chains fused / 122 epilogues). Device gate:
+0 fallbacks, 1 Vulkan segment over 7623 nodes (a ConstantOfShape above the fold bound got a
+flat-fill GPU kernel), run-to-run deterministic, fused==nofuse 8/8 byte-identical, on both
+test devices (2.5 s submit+gpu on the newer GPU).
 
 ## Second device R3CY905E04M: RoundingModeRTE miscompilation, root-caused and FIXED
 
