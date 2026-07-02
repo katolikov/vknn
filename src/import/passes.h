@@ -33,6 +33,9 @@ namespace vknn {
     void eliminateIdentity(Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
     void eliminateDeadNodes(Graph &g);
+    // Drop initializer payloads no node/output references (folded-chain intermediates, Cast-copied
+    // weights' originals) so they are neither serialized to the .vxm nor uploaded at load.
+    void pruneDeadInitializers(Graph &g);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch             = 1;

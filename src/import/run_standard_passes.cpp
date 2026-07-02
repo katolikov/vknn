@@ -101,6 +101,7 @@ namespace vknn {
             fusePointwiseChains(g);
             inferShapes(g, batch); // set the FusedPointwise output shapes
         }
+        pruneDeadInitializers(g); // after all rewiring: orphaned fold intermediates + Cast-copied weights
         if (opt.dumpBig)
         {
             for (const Node &n: g.nodes)

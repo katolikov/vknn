@@ -1026,6 +1026,22 @@ TEST(Passes, BinaryScalarInitializerBroadcasts) {
     EXPECT_EQ(g.desc(y).shape, (Shape {2, 8}));
 }
 
+// --- pruneDeadInitializers: a folded chain's intermediate constants keep no payload; only the
+// final constant a live node consumes survives (folded meshgrids/Cast-copied weights otherwise
+// serialize gigabytes of orphans into the .vxm). ---
+TEST(Passes, PruneDeadInitializers) {
+    Graph g = makeRangeAddGraph(1.f, 9.f, 2.f, 4); // Range -> r (folds), Add(x, r) stays
+    inferShapes(g, 1);
+    constFold(g);
+    TensorId r = g.nodes[0].inputs[1];
+    ASSERT_TRUE(g.isInitializer(r));
+    EXPECT_EQ(g.initializers.size(), 4u); // start/limit/delta + the folded r
+    // start/limit/delta fed only the folded Range: their payloads are now orphaned
+    pruneDeadInitializers(g);
+    EXPECT_TRUE(g.isInitializer(r)) << "the live folded constant must survive";
+    EXPECT_EQ(g.initializers.size(), 1u) << "orphaned fold inputs must be dropped";
+}
+
 // --- Range: int64 scalars with a negative delta emit an exact int64 vector. ---
 TEST(Passes, RangeConstFoldInt64) {
     Graph g    = makeRangeAddGraph(0.f, 0.f, 1.f, 4); // scalars replaced with int64 below
