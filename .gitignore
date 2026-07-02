@@ -9,7 +9,6 @@ __pycache__/
 .venv/
 docs/api/
 docs/site/
-third_party/googletest/
 # generated/large assets (reproducible via scripts/get_golden.py)
 assets/*.onnx
 assets/*.onnx.data
