@@ -1,0 +1,54 @@
+// Range: arange(start, limit, delta) from three scalar inputs; output is the 1-D vector
+// [start, start+delta, ...) with n = max(ceil((limit-start)/delta), 0) elements. Usually
+// const-folded (index/position vectors must be exact), but registered so a runtime
+// start/limit/delta still works. Emits int64 when every input is int64, else float.
+#include "backend/cpu/cpu_backend.h"
+#include "vknn/op.h"
+#include <cmath>
+
+namespace vknn {
+    namespace {
+
+        struct RangeCpu: CpuOp {
+            void run(const Node &node, ExecContext &ctx) override {
+                const RtTensor &S = ctx.t(node.inputs[0]);
+                const RtTensor &L = ctx.t(node.inputs[1]);
+                const RtTensor &D = ctx.t(node.inputs[2]);
+                RtTensor       &Y = ctx.t(node.outputs[0]);
+
+                auto scalar = [](const RtTensor &t) {
+                    return t.dtype == DType::Int64 ? (double) t.host.i64()[0] : (double) t.host.f32()[0];
+                };
+                double  start = scalar(S), limit = scalar(L), delta = scalar(D);
+                int64_t n = 0;
+                if (delta != 0.0)
+                {
+                    n = std::max<int64_t>((int64_t) std::ceil((limit - start) / delta), 0);
+                }
+
+                bool i64 = S.dtype == DType::Int64 && L.dtype == DType::Int64 && D.dtype == DType::Int64;
+                if (i64)
+                {
+                    int64_t *y = cpu::allocOutI64(Y, {n});
+                    int64_t  s = S.host.i64()[0], d = D.host.i64()[0];
+                    for (int64_t i = 0; i < n; ++i)
+                    {
+                        y[i] = s + i * d;
+                    }
+                } else
+                {
+                    float *y = cpu::allocOut(Y, {n});
+                    for (int64_t i = 0; i < n; ++i)
+                    {
+                        y[i] = (float) (start + (double) i * delta);
+                    }
+                }
+            }
+            bool supportsDType(DType) const override {
+                return true;
+            }
+        };
+
+    } // namespace
+    VKNN_REGISTER_CPU_OP(OpType::Range, RangeCpu);
+} // namespace vknn

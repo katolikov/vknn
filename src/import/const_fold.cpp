@@ -115,6 +115,39 @@ namespace vknn {
                     }
                     return maxElems <= (1 << 16);
                 }
+                // Range folds when start/limit/delta are all constant: its output is an index/position
+                // vector that must stay exact (an int64 range corrupts on the GPU float path), so bake
+                // it like Expand/Tile, with the same int-aware size bound.
+                case OpType::Range: {
+                    if (nd.inputs.size() < 3)
+                    {
+                        return false;
+                    }
+                    double vals[3];
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        TensorId t = nd.inputs[i];
+                        if (t == kNoTensor || !known.count(t))
+                        {
+                            return false;
+                        }
+                        auto it = g.initializers.find(t);
+                        bool i64 = g.desc(t).dtype == DType::Int64;
+                        if (it == g.initializers.end() || it->second.bytes.size() < (i64 ? 8u : 4u))
+                        {
+                            return false;
+                        }
+                        vals[i] = i64 ? (double) it->second.i64()[0] : (double) it->second.f32()[0];
+                    }
+                    if (vals[2] == 0.0)
+                    {
+                        return false;
+                    }
+                    int64_t n     = std::max<int64_t>((int64_t) std::ceil((vals[1] - vals[0]) / vals[2]), 0);
+                    DType   dt    = g.desc(nd.inputs[0]).dtype;
+                    bool    isInt = dt == DType::Int64 || dt == DType::Int32;
+                    return n <= (isInt ? (int64_t(1) << 26) : (int64_t(1) << 18));
+                }
                 // Expand/Tile of all-constant operands fold too (bounded). Required for integer index/shape
                 // tensors such as the RoPE position arange (int64, built via Expand->Add->Reshape->Gather):
                 // on the GPU float path the int64 positions corrupt to zeros and the rotary embedding loses

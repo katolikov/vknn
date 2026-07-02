@@ -787,3 +787,105 @@ TEST(Passes, FusePointwiseRuntimePrimary) {
     ASSERT_GE(fused, 0);
     EXPECT_FALSE(g.isInitializer(g.nodes[fused].inputs[0])) << "primary must be the runtime tensor, not a constant";
 }
+
+namespace {
+
+    // Graph: Range(start, limit, delta) -> r, then Add(x, r) -> y. Scalars are initializers, so
+    // inferShapes resolves r's [n] and constFold bakes the range away before the session runs.
+    Graph makeRangeAddGraph(float start, float limit, float delta, int64_t xlen) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 1, 1, xlen};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        auto scal  = [&](const char *nm, float v) {
+            TensorDesc t;
+            t.name          = nm;
+            t.shape         = {1};
+            t.isInitializer = true;
+            TensorId   id   = g.addTensor(t);
+            HostBuffer hb;
+            hb.resizeElems(1, DType::Float32);
+            hb.f32()[0]        = v;
+            g.initializers[id] = hb;
+            return id;
+        };
+        TensorId s = scal("start", start), l = scal("limit", limit), d = scal("delta", delta);
+        TensorId r = g.addTensor({.name = "r"}), y = g.addTensor({.name = "y"});
+        g.desc(y).isOutput = true;
+        Node rg;
+        rg.type    = OpType::Range;
+        rg.name    = "range";
+        rg.inputs  = {s, l, d};
+        rg.outputs = {r};
+        Node a;
+        a.type    = OpType::Add;
+        a.name    = "add";
+        a.inputs  = {x, r};
+        a.outputs = {y};
+        g.nodes   = {rg, a};
+        g.outputs = {y};
+        return g;
+    }
+
+} // namespace
+
+// --- Range: float scalars fold to a [n] initializer that a downstream Add consumes. ---
+TEST(Passes, RangeConstFoldFloat) {
+    Graph g = makeRangeAddGraph(1.f, 9.f, 2.f, 4); // arange = {1,3,5,7}
+    inferShapes(g, 1);
+    constFold(g);
+    ASSERT_EQ(g.nodes.size(), 1u) << "Range must fold away";
+    EXPECT_EQ(g.nodes[0].type, OpType::Add);
+    TensorId r = g.nodes[0].inputs[1];
+    ASSERT_TRUE(g.isInitializer(r));
+    ASSERT_EQ(g.desc(r).shape, (Shape {4}));
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name                 = "x";
+    in.shape                = {1, 1, 1, 4};
+    in.dtype                = DType::Float32;
+    std::vector<float> xd = {10, 20, 30, 40};
+    in.data.resize(xd.size() * 4);
+    for (size_t i = 0; i < xd.size(); ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = xd[i];
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    const float *o = outs[0].f32();
+    expectNear({o, o + 4}, {11, 23, 35, 47});
+}
+
+// --- Range: int64 scalars with a negative delta emit an exact int64 vector. ---
+TEST(Passes, RangeConstFoldInt64) {
+    Graph g    = makeRangeAddGraph(0.f, 0.f, 1.f, 4); // scalars replaced with int64 below
+    auto  seti = [&](TensorId id, int64_t v) {
+        g.desc(id).dtype = DType::Int64;
+        HostBuffer hb;
+        hb.resizeElems(1, DType::Int64);
+        hb.i64()[0]        = v;
+        g.initializers[id] = hb;
+    };
+    seti(g.nodes[0].inputs[0], 10);
+    seti(g.nodes[0].inputs[1], -3);
+    seti(g.nodes[0].inputs[2], -3); // n = ceil(13/3) = 5
+    TensorId r = g.nodes[0].outputs[0];
+    inferShapes(g, 1);
+    ASSERT_EQ(g.desc(r).shape, (Shape {5}));
+    constFold(g);
+    ASSERT_TRUE(g.isInitializer(r));
+    EXPECT_EQ(g.desc(r).dtype, DType::Int64);
+    const int64_t ref[5] = {10, 7, 4, 1, -2};
+    for (int i = 0; i < 5; ++i)
+    {
+        EXPECT_EQ(g.initializers[r].i64()[i], ref[i]) << "i=" << i;
+    }
+}

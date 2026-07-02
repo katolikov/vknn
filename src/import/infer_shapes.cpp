@@ -208,6 +208,38 @@ namespace vknn {
                     }
                     break;
                 }
+                case OpType::Range: {
+                    // Output is 1-D [ceil((limit-start)/delta)] once all three scalars are constant;
+                    // a runtime start/limit/delta stays unresolved (the CPU op sizes it at run time).
+                    if (nd.inputs.size() < 3)
+                    {
+                        break;
+                    }
+                    double vals[3];
+                    bool   ok = true;
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        TensorId t = nd.inputs[i];
+                        if (t == kNoTensor || !g.isInitializer(t))
+                        {
+                            ok = false;
+                            break;
+                        }
+                        const HostBuffer &hb  = g.initializers[t];
+                        bool              i64 = g.tensors[t].dtype == DType::Int64;
+                        if (hb.bytes.size() < (i64 ? 8u : 4u))
+                        {
+                            ok = false; // never read past the initializer's real payload
+                            break;
+                        }
+                        vals[i] = i64 ? (double) hb.i64()[0] : (double) hb.f32()[0];
+                    }
+                    if (ok && vals[2] != 0.0)
+                    {
+                        SH(o) = {std::max<int64_t>((int64_t) std::ceil((vals[1] - vals[0]) / vals[2]), 0)};
+                    }
+                    break;
+                }
                 case OpType::GridSample: {
                     const Shape &xs = SH(nd.inputs[0]);
                     const Shape &gs = SH(nd.inputs[1]);

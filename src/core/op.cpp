@@ -90,6 +90,8 @@ namespace vknn {
                 return "GreaterEqual";
             case OpType::ConstantOfShape:
                 return "ConstantOfShape";
+            case OpType::Range:
+                return "Range";
             case OpType::EyeLike:
                 return "EyeLike";
             case OpType::ScatterND:
@@ -198,6 +200,7 @@ namespace vknn {
             {"GreaterOrEqual", OpType::GreaterEqual},
             {"GreaterEqual", OpType::GreaterEqual},
             {"ConstantOfShape", OpType::ConstantOfShape},
+            {"Range", OpType::Range},
             {"EyeLike", OpType::EyeLike},
             {"ScatterND", OpType::ScatterND},
         };
