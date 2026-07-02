@@ -58,6 +58,9 @@ namespace vknn {
         }
         // Backend assignment per node (for reporting fallbacks).
         std::vector<BackendKind> nodeBackends() const;
+        // "<OpType> <node name>" for every node NOT running on the requested backend (a release run
+        // on the GPU reports an empty list).
+        std::vector<std::string> fallbackOps() const;
 
         // Per-tensor accessor for layer-dump / debugging (host residency).
         const RtTensor *tensor(const std::string &name) const;

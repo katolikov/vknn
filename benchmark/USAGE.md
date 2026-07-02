@@ -1,56 +1,77 @@
 # Benchmark & validate: npy files + config reference
 
-`run.py` runs one or more **stages** on the device from a single JSON config: convert a model
-(or use a ready `.vxm`), feed inputs, optionally save outputs, compare against goldens, and collect a
-per-stage result JSON with timing and (optional) per-operator profiling. The on-device executor is
-`vknn_benchmark` (built from `benchmark/benchmark.cpp`); `run.py` stages files over `adb` and runs it.
+`run.py` runs one or more **stages** on the device from a single JSON config: convert a model (or
+use a ready `.vxm`), feed inputs, save outputs, compare against goldens, and collect everything under
+`result/<RUN>/<stage>/`. The on-device executor is `vknn_benchmark` (built from
+`benchmark/benchmark.cpp`); `run.py` stages files over `adb` and runs it.
 
 ```sh
-./build.sh                                 # host vknn_compile (for host-side convert)
-python benchmark/run.py run benchmark/configs/example.json       # auto-builds the device binaries first
-python benchmark/run.py run benchmark/configs/example.json -v    # also print device stdout/stderr + the staged config
-python benchmark/run.py run benchmark/configs/example.json --no-build   # reuse existing build-android/ binaries
+./build.sh                                                        # host vknn_compile (host-side convert)
+python benchmark/run.py run benchmark/configs/example.json        # auto-builds the device binaries first
+python benchmark/run.py run benchmark/configs/example.json --run baseline   # name the result dir
+python benchmark/run.py run benchmark/configs/example.json --clean          # wipe the device dir first
+python benchmark/run.py run benchmark/configs/example.json -v               # + device stdout/stderr
+python benchmark/run.py run benchmark/configs/example.json --no-build       # reuse build-android/
 ```
 
-`run` first runs `./build.sh --android` for you (incremental Ninja — a near-no-op when nothing changed;
-`--no-build` skips it), so you never have to build the device binaries by hand before a run.
+Per stage, the host prints:
+- **timing** — `load` ms and `run median/min/avg/max` ms over the timed iterations,
+- **fallbacks** — how many ops did NOT run on the requested backend, and which (a clean release
+  run prints `0`),
+- every file pushed, the validation lines (`cos= ... PASS/FAIL`), and where results were collected.
 
-`run.py` logs each stage as it goes: the device serial/dir, every file pushed (or `MISSING` and skipped —
-the device may already hold a copy), the inputs/goldens the device run will use, the run command and its
-timing, and whether a `result.json` came back. The on-device executor writes its timing **and errors** to
-stderr; `run.py` surfaces that stderr when a run produces no timing, and `-v` prints all of it plus the
-generated config. A run that writes no `result.json` is reported as a failure (exit 3), not a silent pass.
+A missing model / input / golden file **stops the run immediately** — nothing is silently skipped.
+A run that writes no `result.json` is a failure (exit 3), not a silent pass.
 
-Each stage's Android **logcat** is cleared before the run and saved to `results/<stage>.logcat.txt`
-afterwards — that is where the GPU driver, thermal throttling, OOM-killer, and watchdog-reset messages
-land (the executor's own stdout/stderr does not capture them).
+## 1. Results layout
 
-## 1. Input / output files
+Every invocation gets a run directory (`--run NAME`, default = UTC timestamp):
+
+```
+benchmark/result/<RUN>/<stage>/
+  result.json      # timing, fallbacks, per-output metrics, optional per-op profile
+  outputs/         # saved outputs pulled from the device ("save": ["npy", ...])
+  logcat.txt       # the run's Android logcat (GPU driver / thermal / OOM messages land here)
+  <model>.vxm      # with "pull": ["vxm"]
+  <model>.cache    # with "pull": ["cache"] — the unified pipeline/autotune/weight cache
+```
+
+## 2. Input / output files
 
 ### `.npy` (recommended)
-NumPy's array format carries **shape and dtype in its header**, so you never hand-specify them. Write
-one with `numpy.save("image.npy", arr)`. Reading supports `float32`, `float16`, `float64`, `int64`,
-`int32`, `int8`, `uint8` (all converted to fp32 for the engine); arrays must be C-order.
+NumPy's array format carries **shape and dtype in its header**. Write one with
+`numpy.save("image.npy", arr)`. Reading supports `float32/16/64`, `int64/32/8`, `uint8` (converted
+to fp32 for the engine); arrays must be C-order.
 
-### raw `.bin` / `.raw` (alternative)
-A headerless little-endian **fp32** dump (`arr.astype(np.float32).tofile("in.raw")`). Any input whose
-name does not end in `.npy` is read as raw — `.bin`, `.raw`, or any extension. Because it has no shape,
-the file must contain exactly the model input's element count (the shape is taken from the model). Use
-`.npy` unless you already have raw dumps.
+### raw `.bin` / `.raw`
+A headerless little-endian **fp32** dump. Because it has no shape, the file must contain exactly the
+model input's element count (the shape comes from the model).
 
-### Outputs
-With `"save"` set, each output is written next to the model on the device (pull them yourself), and the
-result JSON lists what was written:
-- `"npy"` — fp32 `.npy` (exact); `"raw"` — headerless fp32 `.raw` (always works, exact).
-- `"png"` — written when the tensor looks like an image (`[..,C,H,W]` or `[..,H,W,C]`, C∈{1,3,4});
-  values are min–max normalised to 0–255. Non-image tensors are skipped.
+### Input forms
+```jsonc
+"inputs": { "image": "image.npy" }     // map: model-input name -> file
+"inputs": [ "in0.npy", "in1.bin" ]     // list: files in model-input order
+"inputs": "models/dl3dv"               // DIRECTORY: one input SET, files map by stem name
+"inputs": [ "clip1/", "clip2/" ]       // several directories: one input set each
+```
+A **directory** maps `<stem>.npy|.bin|.raw` to the model input named `<stem>`, and
+`<name>_gold.npy` inside it is that set's golden for the output named `<name>`. With several
+directories every set runs each timed iteration and is validated against its own goldens
+(outputs/metrics are suffixed `_set<i>`).
 
-If a stage has **no `inputs`**, the model is run on zero-filled inputs for a **runtime-only**
+If a stage has **no `inputs`**, the model runs on zero-filled inputs for a **runtime-only**
 measurement: nothing is saved and no goldens are checked.
 
-## 2. Golden comparison metrics
+### Outputs
+With `"save"` set, outputs are written on the device and pulled to `result/<RUN>/<stage>/outputs/`:
+- `"npy"` — native-dtype `.npy` (uint8 stays uint8, fp16 stays fp16); `"raw"` — native bytes.
+- `"png"` — written when the tensor looks like an image (`[..,C,H,W]` or `[..,H,W,C]`, C∈{1,3,4});
+  min–max normalised to 0–255. Non-image tensors are skipped.
 
-`"golden"` maps an output name to a golden `.npy`. `"metrics"` selects which to report (default: all):
+## 3. Golden comparison metrics
+
+`"golden"` maps an output name to a golden `.npy` (directory inputs carry their own, see above).
+`"metrics"` selects which to report (default: all):
 
 | metric | meaning |
 |---|---|
@@ -60,150 +81,76 @@ measurement: nothing is saved and no goldens are checked.
 | `relL2` | relative L2 error `‖a−b‖ / ‖b‖` |
 | `max` | max absolute difference |
 
-A pass needs `cosine ≥ tolerance` and zero NaNs.
+A pass needs `cosine ≥ tolerance` and zero NaNs. A missing or unreadable golden file fails the
+stage immediately.
 
-## 3. Config schema
+## 4. Config schema
 
-A config is a list of `stages` (each fully independent) plus an optional `defaults` block merged into
-every stage. A single-stage config may drop `stages` and put the fields at the top level.
+A config is a list of `stages` (each fully independent) plus an optional `defaults` block merged
+into every stage. A single-stage config may drop `stages` and put the fields at the top level.
 
 ```jsonc
 {
-  "defaults": {
-    "device": {
-      "backend": "vulkan",
-      "serial": "",
-      "precision": "normal",
-      "dir": "/data/local/tmp/vxrt/bench",
-      "cache_mode": "tune",
-      "max_submit_nodes": 500,
-      "cooldown": 22,
-      "cache": "encoder8_fp16.cache",
-      "generate_cache": false
-    }
+  "defaults": {                                // merged into every stage
+    "device": { "serial": "" },
+    "run":    { "precision": "low", "iters": 10, "warmup": 2 }
   },
   "stages": [
     {
-      "name": "encoder8",
+      "name": "resnet50",                      // stage + result-directory name
+      "model": "models/resnet50.onnx",         // .onnx (converted first) or .vxm (as-is)
 
-      "model": {
-        "onnx": "encoder.onnx"            // OR  "vxm": "encoder.vxm"  to skip convert
+      "convert": {                             // only used for an .onnx model
+        "fp16": true,                          // store weights fp16 (default true)
+        "opt": 1,                              // optimization level -O0..-O3 (default 1)
+        "no_fuse_swish": false, "fuse_se": false,
+        "fuse_dwpw": false, "no_fuse_pointwise": false,   // per-fusion overrides
+        "out": "resnet50_fp16.vxm"             // device .vxm name (default: <onnx-stem>.vxm)
       },
-      "convert": {                        // convert-time options (ignored when a vxm is given)
-        "fp16": true,
-        "fuse_se": false,
-        "fuse_dwpw": false,
-        "no_fuse_swish": false,
-        "out": "encoder8_fp16.vxm"
-      },
+
       "device": {
-        "backend": "vulkan",
-        "precision": "normal",
-        "dir": "/data/local/tmp/vxrt/bench",
-        "cache_mode": "tune",
-        "max_submit_nodes": 500,
-        "cooldown": 22,
-        "cache": "encoder8_fp16.cache",   // unified per-model cache; default <model>.cache
-        "generate_cache": false           // true -> warm the cache in an untimed load first
+        "serial": "",                          // adb serial (required with several phones attached)
+        "dir": "/data/local/tmp/vknn/bench",   // device work dir
+        "clean": false,                        // rm -rf the dir before this stage (or --clean)
+        "cooldown": 0                          // seconds to idle before the run (thermal)
       },
 
-      "inputs": {                         // by name; or an array ["a.npy", "b.bin"]; omit -> runtime only
-        "image": "image8.npy",
-        "intrinsics": "intr8.bin"
-      },
-      "outputs": {
-        "save": ["npy", "png"],
-        "golden": {
-          "means": "means_gold.npy",
-          "scales": "scales_gold.npy"
-        },
-        "metrics": ["cosine", "psnr", "snr", "relL2", "max"]
+      "run": {                                 // on-device execution options
+        "backend": "vulkan",                   // vulkan | cpu
+        "precision": "low",                    // low | normal (fp16 + selective fp32) | high (fp32)
+        "cache_mode": "tune",                  // off | tune | full
+        "cache": "model.cache",                // unified cache file (default <model>.cache)
+        "generate_cache": false,               // untimed warm-up load to populate it first
+        "iters": 10,                           // timed iterations -> min/median/avg/max
+        "warmup": 2,                           // untimed warm-up runs (default 1 when iters>1)
+        "profile": false,                      // per-operator GPU timing into result.json
+        "fold_islands": true,                  // false = keep every supported op on the GPU (verification)
+        "max_submit_nodes": 500,               // GPU-watchdog submit chunking (0 = single submit)
+        "winograd": "auto",                    // auto | on | off (deterministic kernel choice)
+        "tuning": "fast",                      // off | fast | thorough (autotune effort)
+        "tolerance": 0.999                     // cosine pass threshold
       },
 
-      "profile": true,                    // per-operator GPU timing in the result JSON
-      "bench": 5,                         // repeat N timed runs (median reported); default 1
-      "tolerance": 0.999,
-      "result": "encoder8.result.json"
+      "inputs":  { "image": "image.npy" },     // see "Input forms" above
+      "golden":  { "prob": "prob_gold.npy" },  // for file inputs; directories carry their own
+      "metrics": ["cosine", "psnr", "snr"],
+      "save":    ["npy"],                      // formats pulled to result/<RUN>/<stage>/outputs/
+      "pull":    ["vxm", "cache"]              // also pull the compiled model / its cache
     }
   ]
 }
 ```
 
-### Sections
-- **`model`** — exactly one of `onnx` (compiled to `.vxm` with `convert` options) or `vxm` (run as-is).
-- **`convert`** — convert-time optimization options (only when `onnx` is given): `fp16`,
-  `no_fuse_swish`, `fuse_se`, `fuse_dwpw`, `out` (output `.vxm` name).
-- **`device`** — runtime options: `backend` (vulkan/cpu), `serial` (adb device serial/id; empty = the
-  single attached device — **required when several devices are attached**), `precision`
-  (`low`/`normal`/`high`; `normal` = fp16 + selective fp32 on the geometry tail), `fp32_tensors` (advanced:
-  override the selective-fp32 set), `dir` (device staging dir), `cache_mode` (`off`/`tune`/`full`),
-  `max_submit_nodes` (GPU-watchdog chunk size; 0 =
-  single submit), `cooldown` (seconds slept before each run — the device throttles), `cache` (the
-  unified per-model cache file; default `<model>.cache`), `generate_cache` (bool: when `true`, populate
-  the cache in an **untimed throwaway load** first, so the timed load is warm and the cache-build cost
-  is excluded from `timing_ms`). Each stage may target a different `serial`. Find serials with
-  `adb devices`.
-- **`inputs`** — `.npy`/`.bin` per input, by name (object) or positionally (array). Omit for
-  runtime-only.
-- **`outputs`** — `save` formats, `golden` map, `metrics` list.
-- **`profile`**, **`bench`**, **`tolerance`**, **`result`** — see above.
+## 5. Standalone convert
 
-> Profiling forces a per-op barrier (no overlap), so it only works for models that finish a single
-> submit under the GPU watchdog. Leave `profile` off for very long runs (e.g. the 8-view encoder).
-
-## 4. Result JSON
-
-Each stage writes `results/<result>` on the host:
-```jsonc
-{
-  "model": "encoder8_fp16.vxm",
-  "backend": "VULKAN",
-  "timing_ms": {
-    "load": 12743.3,                       // cold load (compile + autotune + write <model>.cache);
-                                           // with "generate_cache": true this is the warm load instead
-    "run": 9756.9
-  },
-
-  // the next three keys appear only when "profile" is true
-  "profile": [
-    { "name": "/enc/.../MatMul", "type": "MatMul", "gpu_ms": 1.2, "cpu_ms": 0 }
-    // ... one entry per operator ...
-  ],
-  "profile_by_type_ms": {
-    "MatMul": 1856.5,
-    "Conv": 53.4
-  },
-  "gpu_total_ms": 10.18,
-
-  "outputs": [
-    {
-      "name": "means",
-      "shape": [1, 401408, 3],
-      "saved": ["means.npy"],
-      "metrics": {
-        "cosine": 0.999972,
-        "psnr": 49.1,
-        "snr": 36.0,
-        "relL2": 0.016,
-        "max": 0.29,
-        "nan": 0
-      },
-      "pass": true
-    }
-  ]
-}
-```
-
-## 5. Generating goldens
-
-`make_golden.py` runs the model in onnxruntime to produce a golden `.npy` per output and writes a
-matching config:
 ```sh
-python benchmark/scripts/make_golden.py model.onnx out/ image=image.npy intrinsics=intr.npy
+python benchmark/run.py convert model.onnx model.vxm [-O 0..3] [--fp32] \
+    [--fuse-se] [--fuse-dwpw] [--no-fuse-swish] [--on host|device]
 ```
+`-O` is the optimization level (see `docs/OP_COVERAGE.md` § Fusions); `--on device` runs
+`vknn_compile` on the phone for models too big to convert on the host.
 
-## 6. Direct on-device use (no driver)
+## 6. Making goldens
 
-`vknn_benchmark config.json` runs entirely on the device against device-local paths — `run.py`
-just stages files and writes that flat config. Run `convert` standalone with
-`run.py convert model.onnx model.vxm --fp16 [--fuse-se ...] [--on host|device]`.
+`scripts/make_golden.py` runs an ONNX model with onnxruntime on given inputs and writes
+`<output>_gold.npy` files + a starter config.

@@ -2,34 +2,41 @@
 """Unified VKNN benchmark driver.
 
 One JSON config describes one or more *stages*; each stage runs independently on the device:
-provide either an ONNX model (converted to .vxm with the given optimization options) or a ready
-.vxm (runs as-is), feed .npy or raw .bin inputs (or none, for a runtime-only measurement), optionally
-save outputs as .npy / .png, compare each output against a golden (cosine / PSNR / SNR / relL2 / max),
-and collect a per-stage result.json with timing and (optional) per-operator profiling.
+provide an ONNX model (converted to .vxm with the given optimization level) or a ready .vxm, feed
+.npy / raw .bin inputs (a file map, a file list, or one-or-more input DIRECTORIES), optionally
+compare each output against a golden (cosine / PSNR / SNR / relL2 / max), and collect everything
+under result/<RUN>/<stage>/ — result.json, saved outputs, the device logcat, and (on request) the
+compiled .vxm + its .cache.
 
-  run.py run    CONFIG.json [-v] [--no-build]  # build (./build.sh --android) + run every stage on device
-  run.py convert ONNX OUT.vxm [opts]           # standalone convert (host or device)
+  run.py run     CONFIG.json [--run NAME] [--clean] [-v] [--no-build] [--convert-on host|device]
+  run.py convert ONNX OUT.vxm [-O N] [opts]      # standalone convert (host or device)
 
-`run` first runs ./build.sh --android (incremental; --no-build to skip), then for each stage logs the
-files it pushes, the inputs it uses, the run timing, the pulled result.json, and saves the device logcat
-to results/<stage>.logcat.txt.
+Every stage prints its timing on the host (load + run min/median/avg/max ms) and the ops that fell
+back to the CPU (a release run shows 0). A missing model/input/golden file STOPS the stage loudly.
 
-Config (sectioned; see benchmark/configs/example.json and USAGE.md):
+Config (see benchmark/configs/example.json and USAGE.md):
   { "defaults": { ...shared sections merged into every stage... },
     "stages": [
-      { "name": "encoder8",
-        "model":   { "onnx": "encoder.onnx" },          # or { "vxm": "encoder.vxm" }
-        "convert": { "fp16": true, "fuse_se": false, "fuse_dwpw": false, "no_fuse_swish": false },
-        "device":  { "backend": "vulkan", "serial": "", "precision": "low", "dir": "/data/local/tmp/vxrt/bench",
-                     "cache_mode": "tune", "max_submit_nodes": 500, "cooldown": 22 },  # serial: adb id (multi-device)
-        "inputs":  { "image": "image8.npy", "intrinsics": "intr8.bin" },   # or [...]; omit -> runtime only
-        "outputs": { "save": ["npy","png"], "golden": { "means": "means_gold.npy" },
-                     "metrics": ["cosine","psnr","snr"] },
-        "profile": true, "bench": 3, "tolerance": 0.999, "result": "encoder8.result.json" } ] }
-       # "bench" (alias "iters") = timed inference iterations -> min/median/avg/max ms; "warmup" = untimed runs first
+      { "name": "resnet50",
+        "model": "models/resnet50.onnx",            # .onnx (converted) or .vxm (as-is)
+        "convert": { "fp16": true, "opt": 1 },      # opt level -O0..-O3 + per-fusion overrides
+        "device":  { "serial": "", "dir": "/data/local/tmp/vknn/bench", "clean": false,
+                     "cooldown": 0 },               # cooldown: seconds to idle before the run
+        "run":     { "backend": "vulkan", "precision": "low", "cache_mode": "tune",
+                     "iters": 10, "warmup": 2, "profile": false, "fold_islands": true,
+                     "max_submit_nodes": 500, "winograd": "auto", "tuning": "fast",
+                     "tolerance": 0.999 },
+        "inputs":  { "image": "image.npy" },        # or [files...] (input order)
+                                                    # or "dir" / ["dir1","dir2"]: each dir is one
+                                                    #   input SET; files map to inputs by stem name,
+                                                    #   <name>_gold.npy in the dir is that set's golden
+        "golden":  { "means": "means_gold.npy" },   # for file inputs; dir inputs carry their own
+        "metrics": ["cosine","psnr","snr"],
+        "save":    ["npy"],                         # output formats, pulled to result/<RUN>/<stage>/outputs/
+        "pull":    ["vxm","cache"] } ] }            # also pull the compiled model + cache
 A single-stage config may omit "stages" and put the stage fields at the top level.
 """
-import argparse, json, os, re, statistics, subprocess, sys, tempfile
+import argparse, datetime, json, os, re, statistics, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -81,19 +88,15 @@ def adb(args):
     return sh(["adb"] + (["-s", _SERIAL] if _SERIAL else []) + args)
 
 
-def push(src, dst):
-    """adb-push one host file to the device, logging the transfer (name, size, destination).
-    A missing local file is logged and skipped — the device may already hold a copy from an
-    earlier run. Returns True only on a successful push."""
+def push(src, dst, what="file"):
+    """adb-push one host file, or STOP the run: a missing/failed transfer would otherwise surface as
+    a confusing device-side error (or, worse, a stale copy from an earlier run would be used)."""
     if not os.path.exists(src):
-        log(f"  [push] MISSING {src}  (skipped; device may already have it)")
-        return False
+        sys.exit(f"MISSING {what}: {src}")
     log(f"  [push] {os.path.basename(src)}  {human(os.path.getsize(src))}  -> {dst}")
     r = adb(["push", src, dst])
     if r.returncode != 0:
-        log(f"  [push] FAILED {os.path.basename(src)}: {(r.stderr or r.stdout).strip()}")
-        return False
-    return True
+        sys.exit(f"push FAILED {os.path.basename(src)}: {(r.stderr or r.stdout).strip()}")
 
 
 def dev_exists(path):
@@ -153,31 +156,29 @@ def merge(defaults, stage):
 def convert_flags(conv):
     f = ["--fp16"] if conv.get("fp16", True) else []
     f.append(f"-O{int(conv.get('opt', 1))}")  # optimization level; per-fusion keys override below
-    if conv.get("no_fuse_swish"):
-        f.append("--no-fuse-swish")
-    if conv.get("fuse_se"):
-        f.append("--fuse-se")
-    if conv.get("fuse_dwpw"):
-        f.append("--fuse-dwpw")
-    if conv.get("no_fuse_pointwise"):
-        f.append("--no-fuse-pointwise")
+    for key, flag_ in (("no_fuse_swish", "--no-fuse-swish"), ("fuse_se", "--fuse-se"),
+                       ("fuse_dwpw", "--fuse-dwpw"), ("no_fuse_pointwise", "--no-fuse-pointwise")):
+        if conv.get(key):
+            f.append(flag_)
     return f
 
 
 def convert(onnx, out_vxm, conv, where="host"):
+    if not os.path.exists(onnx):
+        sys.exit(f"MISSING model: {onnx}")
     flags = convert_flags(conv)
     if where == "host" and host_bin("vknn_compile"):
-        log(f"[convert] host: {os.path.basename(onnx)} -> {os.path.basename(out_vxm)}  {' '.join(flags)}")
+        log(f"  [convert] host: {os.path.basename(onnx)} -> {os.path.basename(out_vxm)}  {' '.join(flags)}")
         r = sh([host_bin("vknn_compile"), onnx, out_vxm] + flags)
         if r.returncode != 0:
             sys.exit("convert failed:\n" + r.stdout + r.stderr)
-        log(f"[convert] wrote {out_vxm}  ({human(os.path.getsize(out_vxm))})")
+        log(f"  [convert] wrote {out_vxm}  ({human(os.path.getsize(out_vxm))})")
         return out_vxm
     need_device()
-    ddir = "/data/local/tmp/vxrt/bench"
+    ddir = "/data/local/tmp/vknn/bench"
     adb(["shell", "mkdir", "-p", ddir])
-    log(f"[convert] device: {os.path.basename(onnx)} -> {os.path.basename(out_vxm)}  {' '.join(flags)}")
-    push(onnx, f"{ddir}/_src.onnx")
+    log(f"  [convert] device: {os.path.basename(onnx)} -> {os.path.basename(out_vxm)}  {' '.join(flags)}")
+    push(onnx, f"{ddir}/_src.onnx", "model")
     wb = os.path.join(os.path.dirname(onnx), "weights.bin")
     if os.path.exists(wb):
         push(wb, f"{ddir}/weights.bin")
@@ -190,108 +191,182 @@ def convert(onnx, out_vxm, conv, where="host"):
         log("  [compile] " + r.stderr.strip().replace("\n", "\n  [compile] "))
     if r.returncode != 0:
         sys.exit("device convert failed")
-    log(f"[convert] device wrote {os.path.basename(out_vxm)}")
+    log(f"  [convert] device wrote {os.path.basename(out_vxm)}")
     return None  # already on device under its basename
 
 
-# ----------------------------------------------------------------- per stage
+# ----------------------------------------------------------------- inputs
+def expand_input_dirs(dirs, host):
+    """Each directory is one input SET: <stem>.npy/.bin/.raw maps to the model input named <stem>;
+    <name>_gold.npy is that set's golden for the output named <name>. Returns
+    (sets, goldens, files) where sets/goldens are name->hostpath dicts per dir."""
+    sets, goldens, files = [], [], []
+    for d in dirs:
+        hd = host(d)
+        if not os.path.isdir(hd):
+            sys.exit(f"MISSING input dir: {hd}")
+        ins, gold = {}, {}
+        for fn in sorted(os.listdir(hd)):
+            stem, ext = os.path.splitext(fn)
+            if ext not in (".npy", ".bin", ".raw"):
+                continue
+            p = os.path.join(hd, fn)
+            if stem.endswith("_gold"):
+                gold[stem[:-5]] = p
+            else:
+                ins[stem] = p
+        if not ins:
+            sys.exit(f"input dir has no .npy/.bin/.raw inputs: {hd}")
+        sets.append(ins)
+        goldens.append(gold)
+        files += list(ins.values()) + list(gold.values())
+    return sets, goldens, files
+
+
+# ----------------------------------------------------------------- device output parsing
 def parse(out):
-    # `out` is the device run's stdout+stderr. Prefer benchmark.cpp's end-to-end "run X ms"
-    # (whole-inference wall, what the headline numbers are measured against); fall back to the
-    # engine's per-submit "submit+gpu=" only when no run line is present (it under-counts a model
-    # that is chunked across several submits for the GPU watchdog).
-    run = re.search(r"run ([0-9.]+) ms", out)
-    sg = re.search(r"submit\+gpu=([0-9.]+)ms", out)
-    rows = re.findall(r"^\s+(\S+)\s+(cos=[0-9.\-]+.*?)(PASS|FAIL|SIZE-MISMATCH|NOT-AN-OUTPUT)\s*$", out, re.M)
-    ok = ("ALL OUTPUTS PASS" in out) or ("ALL OUTPUTS PASS" not in out and "FAIL" not in out and "golden" not in out)
-    t = float(run.group(1)) if run else (float(sg.group(1)) if sg else None)
-    return t, rows, ok
+    """Extract (times, fallback_count, ok) from the device run's stdout+stderr."""
+    m = re.search(r"run median ([0-9.]+) ms\s+\(min ([0-9.]+), avg ([0-9.]+), max ([0-9.]+)", out)
+    single = re.search(r"run ([0-9.]+) ms", out)
+    times = None
+    if m:
+        times = {"median": float(m.group(1)), "min": float(m.group(2)),
+                 "avg": float(m.group(3)), "max": float(m.group(4))}
+    elif single:
+        times = {"median": float(single.group(1))}
+    load = re.search(r"load ([0-9.]+) ms", out)
+    fb = re.search(r"fallbacks: (\d+)", out)
+    ok = ("SOME OUTPUTS FAIL" not in out) and ("FAIL" not in out or "ALL OUTPUTS PASS" in out)
+    return times, (float(load.group(1)) if load else None), (int(fb.group(1)) if fb else None), ok
 
 
-def run_stage(stage, base, idx, where_convert="host"):
+# ----------------------------------------------------------------- per stage
+def run_stage(stage, base, idx, run_dir, clean_cli, where_convert="host"):
     name = stage.get("name", f"stage{idx}")
-    model = stage.get("model", {})
     dev = stage.get("device", {})
-    ddir = dev.get("dir", "/data/local/tmp/vxrt/bench")
-    set_serial(dev.get("serial") or dev.get("id") or dev.get("hash"))  # pick this stage's device
+    rc = stage.get("run", {})
+    ddir = dev.get("dir", "/data/local/tmp/vknn/bench")
+    set_serial(dev.get("serial"))
     need_device()
-    adb(["shell", "mkdir", "-p", ddir])
+
+    stage_dir = os.path.join(run_dir, name)
+    os.makedirs(stage_dir, exist_ok=True)
 
     def host(p):
         return p if os.path.isabs(p) else os.path.join(base, p)
 
     log(f"\n==== stage: {name} ====")
     log(f"  [device] serial={_SERIAL or '(single attached)'}  dir={ddir}")
-    # ---- model: convert onnx, or push a ready vxm ----
-    if model.get("vxm"):
-        vxm = host(model["vxm"]); model_name = os.path.basename(vxm)
-        push(vxm, f"{ddir}/{model_name}")
+    if clean_cli or dev.get("clean"):
+        log(f"  [clean] rm -rf {ddir}")
+        adb(["shell", f"rm -rf {ddir}"])
+    adb(["shell", "mkdir", "-p", ddir])
+
+    # ---- model: a .vxm runs as-is, an .onnx is converted first ----
+    model = stage.get("model", "")
+    if isinstance(model, dict):  # legacy {"onnx":..} / {"vxm":..}
+        model = model.get("onnx") or model.get("vxm") or ""
+    if not model:
+        sys.exit(f"stage {name}: missing \"model\"")
+    model_host = host(model)
+    conv = stage.get("convert", {})
+    if model.endswith(".vxm"):
+        if not os.path.exists(model_host):
+            sys.exit(f"MISSING model: {model_host}")
+        model_name = os.path.basename(model_host)
+        push(model_host, f"{ddir}/{model_name}", "model")
+        local_vxm = model_host
         log(f"  [model] {model_name}  (ready vxm, no convert)")
-    elif model.get("onnx"):
-        onnx = host(model["onnx"]); conv = stage.get("convert", {})
-        model_name = conv.get("out") or (os.path.splitext(os.path.basename(onnx))[0] + ".vxm")
-        local = os.path.join(tempfile.gettempdir(), model_name)
-        res = convert(onnx, local, conv, where_convert)
-        if res:  # converted on host -> push
-            push(local, f"{ddir}/{model_name}")
+    else:
+        model_name = conv.get("out") or (os.path.splitext(os.path.basename(model_host))[0] + ".vxm")
+        local_vxm = os.path.join(tempfile.gettempdir(), model_name)
+        if convert(model_host, local_vxm, conv, where_convert):
+            push(local_vxm, f"{ddir}/{model_name}", "model")
         log(f"  [model] {model_name}")
+
+    # ---- inputs: file map / file list / directory set(s) ----
+    inputs = stage.get("inputs")
+    input_sets, golden_sets = None, None
+    dcfg_inputs, dcfg_golden = None, None
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    if isinstance(inputs, list) and inputs and isinstance(inputs[0], str) and os.path.isdir(host(inputs[0])):
+        sets, golds, _ = expand_input_dirs(inputs, host)
+        # device names are set-prefixed: two dirs both holding "input.npy" must not collide
+        input_sets, golden_sets = [], []
+        for i, (s, g) in enumerate(zip(sets, golds)):
+            for m, out in ((s, input_sets), (g, golden_sets)):
+                dm = {}
+                for k, v in m.items():
+                    dn = f"set{i}_{os.path.basename(v)}"
+                    push(v, f"{ddir}/{dn}", "input/golden")
+                    dm[k] = dn
+                out.append(dm)
+            log(f"  [inputs:set{i}] " + ", ".join(f"{k}={os.path.basename(v)}" for k, v in s.items()))
+        if not any(golds):
+            golden_sets = None
+    elif isinstance(inputs, list):
+        for p in inputs:
+            push(host(p), f"{ddir}/{os.path.basename(p)}", "input")
+        dcfg_inputs = [os.path.basename(p) for p in inputs]
+        log("  [inputs] " + ", ".join(dcfg_inputs))
+    elif isinstance(inputs, dict):
+        dcfg_inputs = {}
+        for k, p in inputs.items():
+            push(host(p), f"{ddir}/{os.path.basename(p)}", "input")
+            dcfg_inputs[k] = os.path.basename(p)
+        log("  [inputs] " + ", ".join(f"{k}={v}" for k, v in dcfg_inputs.items()))
     else:
-        sys.exit(f"stage {name}: model needs \"onnx\" or \"vxm\"")
+        log("  [inputs] (none -> zero-filled, runtime-only)")
 
-    # ---- inputs (npy/raw) + goldens ----
-    def push_io(m):
-        if isinstance(m, list):
-            for p in m:
-                push(host(p), f"{ddir}/{os.path.basename(p)}")
-            return [os.path.basename(p) for p in m]
-        dev_m = {}
-        for k, p in (m or {}).items():
-            push(host(p), f"{ddir}/{os.path.basename(p)}")
-            dev_m[k] = os.path.basename(p)
-        return dev_m
+    golden = stage.get("golden") or stage.get("outputs", {}).get("golden")
+    if golden and input_sets is None:
+        dcfg_golden = {}
+        for k, p in golden.items():
+            push(host(p), f"{ddir}/{os.path.basename(p)}", "golden")
+            dcfg_golden[k] = os.path.basename(p)
+        log("  [golden] " + ", ".join(f"{k}={v}" for k, v in dcfg_golden.items()))
 
-    out_cfg = stage.get("outputs", {})
-    dcfg = {"model": model_name, "backend": dev.get("backend", "vulkan"),
-            "precision": dev.get("precision", "low"), "cache_mode": dev.get("cache_mode", "tune"),
-            "timing": True, "profile": stage.get("profile", False),
-            "tolerance": stage.get("tolerance", 0.999), "result": "result.json", "save_dir": "."}
-    if "max_submit_nodes" in dev:
-        dcfg["max_submit_nodes"] = dev["max_submit_nodes"]
-    if dev.get("cache"):  # unified per-model cache file (default on device: <model>.cache)
-        dcfg["cache"] = os.path.basename(dev["cache"])
-    if stage.get("generate_cache") or dev.get("generate_cache"):  # untimed warm-up load to populate it
-        dcfg["generate_cache"] = True
-    iters = stage.get("iters", stage.get("bench", dev.get("iters")))  # timed iterations (bench is an alias)
-    if iters is not None:
-        dcfg["iters"] = int(iters)
-    warmup = stage.get("warmup", dev.get("warmup"))
-    if warmup is not None:
-        dcfg["warmup"] = int(warmup)
-    for k in ("winograd", "tuning", "winogradVariant", "winogradUnit", "directConv3x3", "fp32_tensors"):  # conv kernel hints + selective fp32
-        v = stage.get(k, dev.get(k))
+    # ---- device config ----
+    save = stage.get("save") or stage.get("outputs", {}).get("save") or []
+    dcfg = {"model": model_name,
+            "backend": rc.get("backend", "vulkan"),
+            "precision": rc.get("precision", "low"),
+            "cache_mode": rc.get("cache_mode", "tune"),
+            "timing": True,
+            "profile": rc.get("profile", stage.get("profile", False)),
+            "tolerance": rc.get("tolerance", stage.get("tolerance", 0.999)),
+            "result": "result.json", "save_dir": "."}
+    for k_json, k_cfg in (("iters", "iters"), ("warmup", "warmup"), ("max_submit_nodes", "max_submit_nodes"),
+                          ("winograd", "winograd"), ("tuning", "tuning"), ("fp32_tensors", "fp32_tensors"),
+                          ("winogradVariant", "winogradVariant"), ("winogradUnit", "winogradUnit"),
+                          ("directConv3x3", "directConv3x3"), ("generate_cache", "generate_cache")):
+        v = rc.get(k_json, stage.get(k_json))
         if v is not None:
-            dcfg[k] = v
-    if stage.get("inputs"):
-        dcfg["inputs"] = push_io(stage["inputs"])
-    if out_cfg.get("save"):
-        dcfg["save"] = out_cfg["save"]
-    if out_cfg.get("golden"):
-        dcfg["golden"] = push_io(out_cfg["golden"])
-    if out_cfg.get("metrics"):
-        dcfg["metrics"] = out_cfg["metrics"]
+            dcfg[k_cfg] = v
+    if "iters" not in dcfg and stage.get("bench"):  # legacy alias
+        dcfg["iters"] = int(stage["bench"])
+    if rc.get("fold_islands") is not None:
+        dcfg["fold_islands"] = rc["fold_islands"]
+    if rc.get("cache") or dev.get("cache"):  # unified per-model cache file (default: <model>.cache)
+        dcfg["cache"] = os.path.basename(rc.get("cache") or dev.get("cache"))
+    if input_sets is not None:
+        dcfg["input_sets"] = input_sets
+        if golden_sets:
+            dcfg["golden_sets"] = golden_sets
+    elif dcfg_inputs is not None:
+        dcfg["inputs"] = dcfg_inputs
+    if dcfg_golden:
+        dcfg["golden"] = dcfg_golden
+    if save:
+        dcfg["save"] = save
+    metrics = stage.get("metrics") or stage.get("outputs", {}).get("metrics")
+    if metrics:
+        dcfg["metrics"] = metrics
 
-    # ---- what the device run will actually use ----
-    if dcfg.get("inputs"):
-        items = dcfg["inputs"].items() if isinstance(dcfg["inputs"], dict) else enumerate(dcfg["inputs"])
-        for k, v in items:
-            log(f"  [input] {k} = {v}")
-    else:
-        log("  [input] (none -> zero-filled, runtime-only)")
-    if dcfg.get("golden"):
-        log(f"  [golden] {', '.join(f'{k}={v}' for k, v in dcfg['golden'].items())}")
     log(f"  [opts] precision={dcfg['precision']} cache_mode={dcfg['cache_mode']} "
-        f"profile={dcfg['profile']} max_submit_nodes={dcfg.get('max_submit_nodes', '(default)')} "
-        f"tolerance={dcfg['tolerance']}")
+        f"iters={dcfg.get('iters', 1)} warmup={dcfg.get('warmup', '(auto)')} "
+        f"profile={dcfg['profile']} tolerance={dcfg['tolerance']}")
 
     local_cfg = os.path.join(tempfile.gettempdir(), f".cfg_{name}.json")
     json.dump(dcfg, open(local_cfg, "w"), indent=2)
@@ -299,74 +374,81 @@ def run_stage(stage, base, idx, where_convert="host"):
     push(local_cfg, f"{ddir}/config.json")
     push(android_bin("vknn_benchmark"), f"{ddir}/vknn_benchmark")
     adb(["shell", "chmod", "+x", f"{ddir}/vknn_benchmark"])
-    # drop any stale result so its presence afterwards is a real success signal
-    adb(["shell", f"rm -f {ddir}/result.json"])
+    adb(["shell", f"rm -f {ddir}/result.json"])  # stale-result guard
 
-    # ---- run (bench times) ----
-    n = stage.get("bench", 1)
-    cd = dev.get("cooldown", 22 if n > 1 else 0)
+    # ---- run ----
+    cd = dev.get("cooldown", 0)
+    if cd:
+        log(f"  [cooldown] {cd}s")
+        adb(["shell", "sleep", str(cd)])
     cmd = f"cd {ddir} && ./vknn_benchmark config.json"
-    log(f"  [run] {n}x  cooldown={cd}s  $ {cmd}")
+    log(f"  [run] $ {cmd}")
     adb(["logcat", "-c"])  # start this run's logcat window clean
-    times, ok_all, last = [], True, ""
-    for i in range(n):
-        if cd:
-            adb(["shell", "sleep", str(cd)])
-        r = adb(["shell", cmd])
-        last = r.stdout + r.stderr  # the engine (timing + errors) writes to stderr
-        vlog(_indent(r.stdout, "  [device] "))
-        vlog(_indent(r.stderr, "  [device:err] "))
-        t, _, ok = parse(last)
-        ok_all = ok_all and ok
-        if t:
-            times.append(t)
-        tag = "" if n == 1 else f"run {i+1}/{n}: "
-        if t:
-            log(f"  {tag}run={t:.1f} ms")
-        else:
-            log(f"  {tag}(no timing) -- vknn_benchmark printed no run/submit line; exit={r.returncode}")
-            err = (r.stderr or r.stdout).strip()
-            if err:  # surface the device failure (missing input, load failure, crash, ...)
-                log(_indent(err, "    "))
-    for ln in last.splitlines():
-        if "cos=" in ln or "PASS" in ln or "FAIL" in ln or "no inputs" in ln:
-            log("   " + ln.strip())
-    if len(times) > 1:
-        log(f"  -> min={min(times):.1f} median={statistics.median(times):.1f} max={max(times):.1f} ms")
+    r = adb(["shell", cmd])
+    out = r.stdout + r.stderr
+    vlog(_indent(r.stdout, "  [device] "))
+    vlog(_indent(r.stderr, "  [device:err] "))
+    times, load_ms, fb, ok = parse(out)
 
-    # ---- pull result.json + report saved outputs ----
-    results_dir = os.path.join(base, "results")
-    os.makedirs(results_dir, exist_ok=True)
-    rj = stage.get("result", f"{name}.result.json")
-    rj_local = os.path.join(results_dir, os.path.basename(rj))
+    # ---- host-side report: timing + fallbacks + validation lines ----
+    if load_ms is not None:
+        log(f"  [load] {load_ms:.1f} ms")
+    if times:
+        if "min" in times:
+            log(f"  [run]  median={times['median']:.1f}  min={times['min']:.1f}  "
+                f"avg={times['avg']:.1f}  max={times['max']:.1f} ms")
+        else:
+            log(f"  [run]  {times['median']:.1f} ms")
+    else:
+        log(f"  [run]  NO TIMING — the device run failed (exit={r.returncode}):")
+        log(_indent((r.stderr or r.stdout).strip(), "    "))
+        ok = False
+    if fb is not None:
+        log(f"  [fallbacks] {fb} op(s) off the requested backend" + ("" if fb == 0 else "  <-- NOT a clean release run"))
+        if fb:  # the executor lists each one right after its "fallbacks:" line
+            listing = out[out.find("fallbacks:"):].splitlines()[1:fb + 1]
+            for ln in listing:
+                log("    " + ln.strip())
+    for ln in out.splitlines():
+        if "cos=" in ln or "PASS" in ln or "FAIL" in ln:
+            log("   " + ln.strip())
+
+    # ---- collect: result.json + saved outputs + logcat + (optional) vxm/cache ----
     if dev_exists(f"{ddir}/result.json"):
-        pr = adb(["pull", f"{ddir}/result.json", rj_local])
-        if pr.returncode == 0 and os.path.exists(rj_local):
-            log(f"  [result] results/{os.path.basename(rj)}  ({human(os.path.getsize(rj_local))})")
+        pr = adb(["pull", f"{ddir}/result.json", os.path.join(stage_dir, "result.json")])
+        if pr.returncode == 0:
+            log(f"  [result] {os.path.relpath(os.path.join(stage_dir, 'result.json'), base)}")
         else:
             log(f"  [result] pull FAILED: {(pr.stderr or pr.stdout).strip()}")
-            ok_all = False
+            ok = False
     else:
-        log("  [result] device wrote NO result.json -- the run failed before writing it "
-            "(see the device error above); nothing pulled")
-        ok_all = False
-    if out_cfg.get("save"):
-        for fmt in out_cfg["save"]:
-            ls = adb(["shell", f"ls {ddir}/*.{fmt} 2>/dev/null"]).stdout.split()
-            if ls:  # left on device — pull them yourself
-                log(f"  [saved:{fmt}] " + ", ".join(os.path.basename(x) for x in ls) + f"  (on device in {ddir})")
-
-    # ---- save this run's logcat (the GPU driver / OOM-killer / watchdog reset logs land here, not in
-    #      the executor's stderr) ----
-    lc_path = os.path.join(results_dir, f"{name}.logcat.txt")
+        log("  [result] device wrote NO result.json — the run failed before writing it")
+        ok = False
+    if save:
+        out_dir = os.path.join(stage_dir, "outputs")
+        os.makedirs(out_dir, exist_ok=True)
+        pulled = 0
+        for fmt in save:
+            for f in adb(["shell", f"ls {ddir}/*.{fmt} 2>/dev/null"]).stdout.split():
+                if adb(["pull", f, out_dir]).returncode == 0:
+                    pulled += 1
+        log(f"  [outputs] pulled {pulled} file(s) -> {os.path.relpath(out_dir, base)}/")
+    for what in stage.get("pull", []):
+        src = f"{ddir}/{model_name}" if what == "vxm" else f"{ddir}/{os.path.splitext(model_name)[0]}.cache"
+        if what == "cache" and not dev_exists(src):
+            src = f"{ddir}/{model_name}.cache"
+        if dev_exists(src):
+            adb(["pull", src, stage_dir])
+            log(f"  [pull:{what}] {os.path.basename(src)} -> {os.path.relpath(stage_dir, base)}/")
+        else:
+            log(f"  [pull:{what}] not found on device: {src}")
     lc = adb(["logcat", "-d"])
     if lc.returncode == 0:
+        lc_path = os.path.join(stage_dir, "logcat.txt")
         with open(lc_path, "w") as f:
             f.write(lc.stdout)
-        log(f"  [logcat] results/{name}.logcat.txt  ({human(os.path.getsize(lc_path))})")
-    else:
-        log(f"  [logcat] capture failed: {(lc.stderr or lc.stdout).strip()}")
-    return ok_all
+        log(f"  [logcat] {os.path.relpath(lc_path, base)}  ({human(os.path.getsize(lc_path))})")
+    return ok
 
 
 def main():
@@ -376,6 +458,8 @@ def main():
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("config")
+    run_parser.add_argument("--run", default=None, help="run name (default: UTC timestamp); results land in result/<RUN>/<stage>/")
+    run_parser.add_argument("--clean", action="store_true", help="delete the device run directory before each stage")
     run_parser.add_argument("--convert-on", choices=["host", "device"], default="host")
     run_parser.add_argument("-v", "--verbose", action="store_true", help="print device stdout/stderr and the generated config")
     run_parser.add_argument("--no-build", action="store_true", help="skip the automatic ./build.sh --android")
@@ -405,18 +489,21 @@ def main():
         return
 
     cfg = json.load(open(args.config))
-    # Model/input/golden paths in a config (and the results/ dir) resolve against the benchmark/ root —
-    # where run.py, models/, and results/ live — so a config under benchmark/configs/ still finds
-    # "models/...". Absolute paths in a config are used as-is.
+    # Model/input/golden paths in a config resolve against the benchmark/ root — where run.py,
+    # models/, and result/ live — so a config under benchmark/configs/ still finds "models/...".
+    # Absolute paths in a config are used as-is.
     base = os.path.dirname(os.path.abspath(__file__))
+    run_name = args.run or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    run_dir = os.path.join(base, "result", run_name)
+    os.makedirs(run_dir, exist_ok=True)
     defaults = cfg.get("defaults", {})
     stages = cfg.get("stages") or [cfg]
-    log(f"config: {args.config}  ({len(stages)} stage{'s' if len(stages) != 1 else ''})  base={base}")
+    log(f"config: {args.config}  ({len(stages)} stage{'s' if len(stages) != 1 else ''})  results -> result/{run_name}/")
     if BUILD:
         build_android()
     ok = True
     for i, st in enumerate(stages):
-        ok = run_stage(merge(defaults, st), base, i, args.convert_on) and ok
+        ok = run_stage(merge(defaults, st), base, i, run_dir, args.clean, args.convert_on) and ok
     log("\n=== ALL STAGES PASS ===" if ok else "\n=== SOME STAGES FAILED ===")
     sys.exit(0 if ok else 3)
 

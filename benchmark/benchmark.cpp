@@ -20,6 +20,10 @@
 //     "profile": false,                     // per-operator GPU timing in the result json
 //     "inputs": ["image.npy", "intr.raw"],  // .npy (shape from header) or raw .bin/.raw (model shape);
 //                                           // or { "image": "image.npy" }; OMIT for runtime-only
+//     "input_sets": [ {..}, {..} ],         // several input sets (e.g. one per data directory): each
+//                                           // set runs once after warmup; metrics per set via golden_sets
+//     "golden_sets": [ {..}, {..} ],        // per-set goldens (parallel to input_sets)
+//     "fold_islands": true,                 // false = keep every supported op on the GPU (verification)
 //     "save": ["npy", "raw", "png"],        // output formats to write (optional)
 //     "save_dir": "out",                    // where to write them (default ".")
 //     "golden": { "means": "means_gold.npy" },          // output-name -> golden (optional)
@@ -571,6 +575,7 @@ int main(int argc, char **argv) {
     cfg.dumpTensors            = str("dump_tensors", ""); // debug: dump matching tensors to /data/local/tmp/vxrt/dump
     // "winograd": "auto"|"on"|"off" forces the 3x3-conv kernel choice. "on"/"off" skip the per-shape
     // timing measurement, so the kernel selection (and the output bits) is deterministic across runs.
+    cfg.foldGpuIslands = flag("fold_islands", true);
     cfg.setHint(Hint::Winograd, winogradFromStr(str("winograd", "auto")));
     cfg.setHint(Hint::Tuning, tuningFromStr(str("tuning", "fast")));
     // Experimental conv-kernel hints (ints; see the Hint/Mode enums in config.h).
@@ -613,83 +618,136 @@ int main(int argc, char **argv) {
     double loadMs = msSince(t0);
     auto   infos  = sess->inputInfo();
 
-    // --- inputs: .npy / raw .bin / none (runtime-only) ---
-    const JsonValue      *jin     = js.get("inputs");
-    bool                  haveIns = jin && ((jin->type == JsonValue::kArray && !jin->arr.empty()) || (jin->type == JsonValue::kObject && !jin->obj.empty()));
-    std::vector<IOTensor> ins;
-    for (size_t i = 0; i < infos.size(); ++i)
+    // Ops that are NOT running on the requested backend. A release model reports 0 here.
+    std::vector<std::string> fallbacks = sess->fallbackOps();
+    if (fallbacks.empty())
     {
-        IOTensor t;
-        t.name  = infos[i].name;
-        t.shape = infos[i].shape;
-        // Feed the input in the model's DECLARED dtype (UINT8 image / FLOAT16 / ...). Loaders decode any
-        // file dtype to fp32; encodeToDtype re-encodes to the native dtype so the whole path is native.
-        t.dtype = infos[i].dtype;
-        t.data.assign((size_t) infos[i].elems * (int64_t) dtypeSize(t.dtype), 0); // default zeros (runtime-only)
-        if (haveIns)
+        printf("fallbacks: 0 (every op on %s)\n", backendName(cfg.backend));
+    } else
+    {
+        printf("fallbacks: %zu op(s) NOT on %s:\n", fallbacks.size(), backendName(cfg.backend));
+        for (size_t i = 0; i < fallbacks.size(); ++i)
         {
-            std::string p;
-            if (jin->type == JsonValue::kArray)
+            if (i == 20)
             {
-                if (i < jin->arr.size())
-                {
-                    p = jin->arr[i].asStr("");
-                }
-            } else if (auto *j = jin->get(infos[i].name))
-            { p = j->asStr(""); }
-            if (p.empty())
-            {
-                fprintf(stderr, "no input for '%s'\n", infos[i].name.c_str());
-                return 1;
+                printf("  ... (%zu more)\n", fallbacks.size() - 20);
+                break;
             }
-            Tensor      tn;
-            std::string err;
-            bool        ok = endsWith(p, ".npy") ? loadNpy(resolve(base, p), tn, err) : loadRaw(resolve(base, p), infos[i].elems, tn, err);
-            if (!ok)
-            {
-                fprintf(stderr, "%s\n", err.c_str());
-                return 1;
-            }
-            if ((int64_t) tn.data.size() != infos[i].elems)
-            {
-                fprintf(stderr, "input '%s': %s has %zu elems, model expects %lld\n", infos[i].name.c_str(), p.c_str(), tn.data.size(), (long long) infos[i].elems);
-                return 1;
-            }
-            t.data = encodeToDtype(tn.data, t.dtype);
-            printf("input  '%s'  %s  %s  <- %s\n", t.name.c_str(), shapeStr(t.shape).c_str(), dtypeStr(t.dtype), baseName(p).c_str());
+            printf("  %s\n", fallbacks[i].c_str());
         }
-        ins.push_back(std::move(t));
+    }
+
+    // --- inputs: one set from "inputs", or several from "input_sets" (e.g. one per data dir) ---
+    auto buildInputs = [&](const JsonValue *jin, bool &haveIns, std::vector<IOTensor> &ins) -> int {
+        haveIns = jin && ((jin->type == JsonValue::kArray && !jin->arr.empty()) || (jin->type == JsonValue::kObject && !jin->obj.empty()));
+        for (size_t i = 0; i < infos.size(); ++i)
+        {
+            IOTensor t;
+            t.name  = infos[i].name;
+            t.shape = infos[i].shape;
+            // Feed the input in the model's DECLARED dtype (UINT8 image / FLOAT16 / ...). Loaders decode any
+            // file dtype to fp32; encodeToDtype re-encodes to the native dtype so the whole path is native.
+            t.dtype = infos[i].dtype;
+            t.data.assign((size_t) infos[i].elems * (int64_t) dtypeSize(t.dtype), 0); // default zeros (runtime-only)
+            if (haveIns)
+            {
+                std::string p;
+                if (jin->type == JsonValue::kArray)
+                {
+                    if (i < jin->arr.size())
+                    {
+                        p = jin->arr[i].asStr("");
+                    }
+                } else if (auto *j = jin->get(infos[i].name))
+                { p = j->asStr(""); }
+                if (p.empty())
+                {
+                    fprintf(stderr, "no input for '%s'\n", infos[i].name.c_str());
+                    return 1;
+                }
+                Tensor      tn;
+                std::string err;
+                bool        ok = endsWith(p, ".npy") ? loadNpy(resolve(base, p), tn, err) : loadRaw(resolve(base, p), infos[i].elems, tn, err);
+                if (!ok)
+                {
+                    fprintf(stderr, "%s\n", err.c_str());
+                    return 1;
+                }
+                if ((int64_t) tn.data.size() != infos[i].elems)
+                {
+                    fprintf(stderr, "input '%s': %s has %zu elems, model expects %lld\n", infos[i].name.c_str(), p.c_str(), tn.data.size(), (long long) infos[i].elems);
+                    return 1;
+                }
+                t.data = encodeToDtype(tn.data, t.dtype);
+                printf("input  '%s'  %s  %s  <- %s\n", t.name.c_str(), shapeStr(t.shape).c_str(), dtypeStr(t.dtype), baseName(p).c_str());
+            }
+            ins.push_back(std::move(t));
+        }
+        return 0;
+    };
+
+    std::vector<const JsonValue *> setDefs; // one entry per input set (nullptr = zero-filled runtime-only)
+    if (auto *jsets = js.get("input_sets"); jsets && jsets->type == JsonValue::kArray && !jsets->arr.empty())
+    {
+        for (auto &e: jsets->arr)
+        {
+            setDefs.push_back(&e);
+        }
+    } else
+    {
+        setDefs.push_back(js.get("inputs"));
+    }
+    std::vector<std::vector<IOTensor>> sets(setDefs.size());
+    bool                               haveIns = false;
+    for (size_t si = 0; si < setDefs.size(); ++si)
+    {
+        if (setDefs.size() > 1)
+        {
+            printf("input set %zu:\n", si);
+        }
+        bool h  = false;
+        int  rc = buildInputs(setDefs[si], h, sets[si]);
+        if (rc)
+        {
+            return rc;
+        }
+        haveIns = haveIns || h;
     }
     if (!haveIns)
     {
         printf("(no inputs given -> zero-filled, runtime-only)\n");
     }
 
-    // Inference timing: `warmup` untimed iterations (kernel/cache warm-up), then `iters` timed ones.
-    // Defaults (iters 1, warmup 0) reproduce a single cold-ish run; iters>1 reports min/median/avg/max.
+    // Inference timing: `warmup` untimed iterations (kernel/cache warm-up), then `iters` timed rounds;
+    // each round runs EVERY input set once. Defaults (iters 1, warmup 0) reproduce a single cold-ish
+    // run; iters>1 reports min/median/avg/max over all timed inferences.
     int iters  = js.get("iters") ? std::max(1, (int) js.get("iters")->asNum(1)) : 1;
     int warmup = js.get("warmup") ? std::max(0, (int) js.get("warmup")->asNum(0)) : (iters > 1 ? 1 : 0);
 
-    std::vector<IOTensor> outs;
+    std::vector<std::vector<IOTensor>> outsPerSet(sets.size());
+    std::vector<IOTensor>             &outs = outsPerSet[0];
     for (int w = 0; w < warmup; ++w)
     {
-        if (sess->run(ins, outs) != Status::Ok)
+        if (sess->run(sets[0], outsPerSet[0]) != Status::Ok)
         {
             fprintf(stderr, "inference failed\n");
             return 2;
         }
     }
     std::vector<double> runTimes;
-    runTimes.reserve((size_t) iters);
+    runTimes.reserve((size_t) iters * sets.size());
     for (int it = 0; it < iters; ++it)
     {
-        auto t1 = Clock::now();
-        if (sess->run(ins, outs) != Status::Ok)
+        for (size_t si = 0; si < sets.size(); ++si)
         {
-            fprintf(stderr, "inference failed\n");
-            return 2;
+            auto t1 = Clock::now();
+            if (sess->run(sets[si], outsPerSet[si]) != Status::Ok)
+            {
+                fprintf(stderr, "inference failed (set %zu)\n", si);
+                return 2;
+            }
+            runTimes.push_back(msSince(t1));
         }
-        runTimes.push_back(msSince(t1));
     }
     std::sort(runTimes.begin(), runTimes.end());
     double runMin    = runTimes.front();
@@ -728,22 +786,24 @@ int main(int argc, char **argv) {
     std::map<std::string, std::vector<std::string>> saved;
     if (haveIns && (wantNpy || wantRaw || wantPng))
     {
-        for (auto &o: outs)
+        for (size_t si = 0; si < outsPerSet.size(); ++si)
         {
-            std::string nm = sanitize(o.name);
+        for (auto &o: outsPerSet[si])
+        {
+            std::string nm = sanitize(o.name) + (outsPerSet.size() > 1 ? "_set" + std::to_string(si) : "");
             // Save in the model's NATIVE output dtype (uint8 stays uint8, fp16 stays fp16); png needs fp32.
             if (wantNpy)
             {
                 std::string p = resolve(base, saveDir) + "/" + nm + ".npy";
                 saveNpyNative(p, o.shape, o);
-                saved[o.name].push_back(baseName(p));
+                saved[nm].push_back(baseName(p));
             }
             if (wantRaw)
             {
                 std::string   p = resolve(base, saveDir) + "/" + nm + ".raw";
                 std::ofstream rf(p, std::ios::binary);
                 rf.write(reinterpret_cast<const char *>(o.data.data()), (std::streamsize) o.data.size()); // native row-major
-                saved[o.name].push_back(baseName(p));
+                saved[nm].push_back(baseName(p));
             }
             if (wantPng)
             {
@@ -751,10 +811,11 @@ int main(int argc, char **argv) {
                 std::string        p   = resolve(base, saveDir) + "/" + nm + ".png";
                 if (saveOutputPng(p, o.shape, f32.data()))
                 {
-                    saved[o.name].push_back(baseName(p));
+                    saved[nm].push_back(baseName(p));
                 }
             }
-            printf("output '%s'  %s  %s\n", o.name.c_str(), shapeStr(o.shape).c_str(), dtypeStr(o.dtype));
+            printf("output '%s'  %s  %s\n", nm.c_str(), shapeStr(o.shape).c_str(), dtypeStr(o.dtype));
+        }
         }
     }
 
@@ -788,13 +849,29 @@ int main(int argc, char **argv) {
 
     std::map<std::string, Metrics> results;
     bool                           allOk = true;
+    // per-set goldens: golden_sets[i] applies to input set i; a single "golden" applies to set 0.
+    std::vector<const JsonValue *> goldDefs(sets.size(), nullptr);
+    if (auto *jgs = js.get("golden_sets"); jgs && jgs->type == JsonValue::kArray)
+    {
+        for (size_t si = 0; si < sets.size() && si < jgs->arr.size(); ++si)
+        {
+            goldDefs[si] = &jgs->arr[si];
+        }
+    } else
+    {
+        goldDefs[0] = jgold;
+    }
+    for (size_t si = 0; si < sets.size(); ++si)
+    {
+        jgold = goldDefs[si];
+        std::vector<IOTensor> &souts = outsPerSet[si];
     if (haveIns && jgold && jgold->type == JsonValue::kObject && !jgold->obj.empty())
     {
-        printf("\nvalidation vs golden (tolerance cos >= %.4f):\n", tol);
+        printf("\nvalidation vs golden%s (tolerance cos >= %.4f):\n", sets.size() > 1 ? (" [set " + std::to_string(si) + "]").c_str() : "", tol);
         for (auto &kv: jgold->obj)
         {
             IOTensor *o = nullptr;
-            for (auto &t: outs)
+            for (auto &t: souts)
             {
                 if (t.name == kv.first)
                 {
@@ -811,13 +888,12 @@ int main(int argc, char **argv) {
             std::string err;
             if (!loadNpy(resolve(base, kv.second.asStr("")), g, err))
             {
-                fprintf(stderr, "%s\n", err.c_str());
-                allOk = false;
-                continue;
+                fprintf(stderr, "missing/unreadable golden: %s\n", err.c_str());
+                return 4; // a broken golden must stop the stage, not silently skip the check
             }
             std::vector<float> of32 = ioToF32(*o);
             Metrics            m    = compareAll(of32.data(), of32.size(), g.data.data(), g.data.size());
-            results[kv.first]       = m;
+            results[kv.first + (sets.size() > 1 ? "_set" + std::to_string(si) : "")] = m;
             bool ok           = m.sizeOk && m.nan == 0 && m.cosine >= tol;
             allOk             = allOk && ok;
             std::string line  = "  " + kv.first;
@@ -853,6 +929,7 @@ int main(int argc, char **argv) {
         }
         printf("%s\n", allOk ? "ALL OUTPUTS PASS" : "SOME OUTPUTS FAIL");
     }
+    }
 
     // --- result json: timing + (optional) per-op profile + per-output metrics ---
     std::string resPath = str("result", "");
@@ -862,6 +939,12 @@ int main(int argc, char **argv) {
         r << "{\n";
         r << "  \"model\": \"" << sanitize(baseName(model)) << "\",\n";
         r << "  \"backend\": \"" << backendName(cfg.backend) << "\",\n";
+        r << "  \"fallbacks\": [";
+        for (size_t i = 0; i < fallbacks.size(); ++i)
+        {
+            r << (i ? ", " : "") << "\"" << sanitize(fallbacks[i]) << "\"";
+        }
+        r << "],\n";
         r << "  \"timing_ms\": { \"load\": " << loadMs << ", \"run\": " << runMs << ", \"run_min\": " << runMin << ", \"run_avg\": " << runAvg << ", \"run_max\": " << runMax << ", \"iters\": " << iters << ", \"warmup\": " << warmup << " },\n";
         if (cfg.profile)
         {
@@ -887,31 +970,36 @@ int main(int argc, char **argv) {
         }
         r << "  \"outputs\": [";
         bool first = true;
-        for (auto &o: outs)
+        for (size_t si = 0; si < outsPerSet.size(); ++si)
         {
-            r << (first ? "\n    " : ",\n    ") << "{ \"name\": \"" << sanitize(o.name) << "\", \"shape\": [";
+        for (auto &o: outsPerSet[si])
+        {
+            std::string rn = sanitize(o.name) + (outsPerSet.size() > 1 ? "_set" + std::to_string(si) : "");
+            r << (first ? "\n    " : ",\n    ") << "{ \"name\": \"" << rn << "\", \"shape\": [";
             for (size_t k = 0; k < o.shape.size(); ++k)
             {
                 r << (k ? ", " : "") << o.shape[k];
             }
             r << "]";
-            if (saved.count(o.name))
+            if (saved.count(rn))
             {
                 r << ", \"saved\": [";
-                for (size_t k = 0; k < saved[o.name].size(); ++k)
+                for (size_t k = 0; k < saved[rn].size(); ++k)
                 {
-                    r << (k ? ", " : "") << "\"" << saved[o.name][k] << "\"";
+                    r << (k ? ", " : "") << "\"" << saved[rn][k] << "\"";
                 }
                 r << "]";
             }
-            if (results.count(o.name))
+            std::string rk = o.name + (outsPerSet.size() > 1 ? "_set" + std::to_string(si) : "");
+            if (results.count(rk))
             {
-                const Metrics &m = results[o.name];
+                const Metrics &m = results[rk];
                 r << ", \"metrics\": { \"cosine\": " << m.cosine << ", \"psnr\": " << m.psnr << ", \"snr\": " << m.snr << ", \"relL2\": " << m.relL2 << ", \"max\": " << m.maxAbs << ", \"nan\": " << m.nan << " }";
                 r << ", \"pass\": " << ((m.sizeOk && m.nan == 0 && m.cosine >= tol) ? "true" : "false");
             }
             r << " }";
             first = false;
+        }
         }
         r << "\n  ]\n}\n";
         printf("wrote result json -> %s\n", resPath.c_str());

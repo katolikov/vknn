@@ -1,42 +1,44 @@
 {
   "defaults": {
     "device": {
-      "backend": "vulkan",
       "serial": "",
+      "dir": "/data/local/tmp/vknn/bench"
+    },
+    "run": {
+      "backend": "vulkan",
       "precision": "low",
-      "dir": "/data/local/tmp/vxrt/bench",
       "cache_mode": "tune",
-      "max_submit_nodes": 500,
-      "cooldown": 22
+      "iters": 10,
+      "warmup": 2,
+      "tolerance": 0.999
     }
   },
   "stages": [
     {
-      "name": "encoder8_validate",
-      "model": { "onnx": "/tmp/YoNoSplat/onnx/yonosplat_encoder.onnx" },
-      "convert": { "fp16": true, "out": "encoder8_fp16.vxm" },
-      "inputs": { "image": "/tmp/yono_val/image8.npy", "intrinsics": "/tmp/yono_val/intr8.npy" },
-      "outputs": {
-        "save": ["npy"],
-        "golden": {
-          "means": "/tmp/yono_val/means_gold.npy",
-          "covariances": "/tmp/yono_val/covariances_gold.npy",
-          "harmonics": "/tmp/yono_val/harmonics_gold.npy",
-          "opacities": "/tmp/yono_val/opacities_gold.npy",
-          "rotations": "/tmp/yono_val/rotations_gold.npy",
-          "scales": "/tmp/yono_val/scales_gold.npy"
-        },
-        "metrics": ["cosine", "psnr", "snr", "relL2", "max"]
-      },
-      "bench": 3,
-      "tolerance": 0.999,
-      "result": "encoder8.result.json"
+      "name": "encoder8_dl3dv",
+      "model": "models/encoder8_dl3dv_fp16.vxm",
+      "inputs": [
+        "models/dl3dv"
+      ],
+      "metrics": [
+        "cosine",
+        "psnr",
+        "snr"
+      ],
+      "save": [
+        "npy"
+      ],
+      "pull": [
+        "cache"
+      ]
     },
     {
       "name": "encoder8_runtime_only",
-      "model": { "vxm": "/tmp/encoder8_fp16.vxm" },
-      "bench": 5,
-      "result": "encoder8_runtime.result.json"
+      "model": "models/encoder8_dl3dv_fp16.vxm",
+      "run": {
+        "iters": 5,
+        "warmup": 1
+      }
     }
   ]
 }

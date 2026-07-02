@@ -23,4 +23,5 @@ assets/*.vxm
 
 # benchmark driver outputs
 benchmark/results/
+benchmark/result/
 benchmark/*.result.json

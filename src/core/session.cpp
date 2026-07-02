@@ -640,6 +640,19 @@ namespace vknn {
         return v;
     }
 
+    std::vector<std::string> Session::fallbackOps() const {
+        std::vector<std::string> v;
+        for (size_t n = 0; n < nodeBackendIdx_.size() && n < graph_.nodes.size(); ++n)
+        {
+            int bi = nodeBackendIdx_[n];
+            if (bi >= 0 && backends_[bi]->kind() != cfg_.backend)
+            {
+                v.push_back(std::string(opTypeName(graph_.nodes[n].type)) + " " + graph_.nodes[n].name);
+            }
+        }
+        return v;
+    }
+
     const RtTensor *Session::tensor(const std::string &name) const {
         TensorId id = graph_.find(name);
         if (id == kNoTensor)

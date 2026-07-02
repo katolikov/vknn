@@ -1,40 +1,46 @@
 {
   "defaults": {
     "device": {
-      "backend": "vulkan",
       "serial": "",
-      "precision": "high",
-      "dir": "/data/local/tmp/vxrt/yonosplat-vknn",
-      "cache_mode": "tune",
-      "max_submit_nodes": 500,
-      "cooldown": 0
+      "dir": "/data/local/tmp/vknn/bench"
     }
   },
   "stages": [
     {
-      "name": "yonosplat_dgs_validate_fp32",
-      "model": {
-        "vxm": "models/encoder8_fp32.vxm"
-      },
+      "name": "yonosplat_dgs_fp32",
+      "model": "models/encoder8_fp16.vxm",
       "inputs": {
         "image": "models/image.npy",
         "intrinsics": "models/intrinsics.npy"
       },
-      "outputs": {
-        "save": ["npy"],
-        "golden": {
-          "means": "models/means_gold.npy",
-          "covariances": "models/covariances_gold.npy",
-          "harmonics": "models/harmonics_gold.npy",
-          "opacities": "models/opacities_gold.npy",
-          "rotations": "models/rotations_gold.npy",
-          "scales": "models/scales_gold.npy"
-        },
-        "metrics": ["cosine", "psnr", "snr", "relL2", "max"]
+      "golden": {
+        "means": "models/means_gold.npy",
+        "covariances": "models/covariances_gold.npy",
+        "harmonics": "models/harmonics_gold.npy",
+        "opacities": "models/opacities_gold.npy",
+        "rotations": "models/rotations_gold.npy",
+        "scales": "models/scales_gold.npy"
       },
-      "bench": 1,
-      "tolerance": 0.999,
-      "result": "yonosplat_dgs_fp32.result.json"
+      "metrics": [
+        "cosine",
+        "psnr",
+        "snr",
+        "relL2",
+        "max"
+      ],
+      "save": [
+        "npy"
+      ],
+      "run": {
+        "backend": "vulkan",
+        "precision": "high",
+        "cache_mode": "full",
+        "generate_cache": true,
+        "max_submit_nodes": 500,
+        "tolerance": 0.999,
+        "iters": 3,
+        "warmup": 1
+      }
     }
   ]
 }
