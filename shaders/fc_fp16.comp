@@ -1,4 +1,5 @@
 #version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
 // Fully-connected / Gemm, fp16. Input is NC4HW4 with H=W=1 (so the packed buffer is just the
 // channel vector). f16vec4 loads over the contraction, fp32 accumulate.
 #extension GL_EXT_shader_16bit_storage : require
@@ -35,7 +36,7 @@ void main() {
   float v = vx_act(r, pc.act, pc.actLo, pc.actHi);
 #ifdef PW_EPI
   int di = int(m * uint(pc.dstStride) + oc);
-  v = (plan.worldFlat != 0) ? pw_apply(float(float16_t(v)), di) : pw_apply_nc4(float(float16_t(v)), di);
+  v = (plan.worldFlat != 0) ? pw_apply(float(TO_STORE(v)), di) : pw_apply_nc4(float(TO_STORE(v)), di);
 #endif
-  dst[m * uint(pc.dstStride) + oc] = float16_t(v);
+  dst[m * uint(pc.dstStride) + oc] = TO_STORE(v);
 }

@@ -13,4 +13,5 @@
 #include "store16.glsl"
 #else
 #define STORE float
+#define TO_STORE(x) float(x)
 #endif

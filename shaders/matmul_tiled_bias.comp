@@ -1,4 +1,5 @@
 #version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
 #include "precision.glsl"
 #ifdef PW_EPI
 #define PW_EPI_BASE 4
@@ -87,9 +88,9 @@ void main() {
       if (n >= N) continue;
       int idx = dBase + m * N + n;
 #ifdef PW_EPI
-      d[idx] = STORE(pw_apply(float(STORE(acc[i][j] + float(bias[n]))), idx));
+      d[idx] = TO_STORE(pw_apply(float(TO_STORE(acc[i][j] + float(bias[n]))), idx));
 #else
-      d[idx] = STORE(acc[i][j] + float(bias[n]));
+      d[idx] = TO_STORE(acc[i][j] + float(bias[n]));
 #endif
     }
   }

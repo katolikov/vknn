@@ -7,6 +7,11 @@
 #ifndef STORE
 #define STORE float
 #endif
+// Storage-rounding conversion. Templated kernels get it from precision.glsl/store16.glsl;
+// pure-fp32 kernels fall back to the identity here.
+#ifndef TO_STORE
+#define TO_STORE(x) STORE(x)
+#endif
 #ifndef PW_EPI_MAXSTEPS
 #define PW_EPI_MAXSTEPS 8
 #endif
@@ -41,7 +46,7 @@ float pw_apply(float acc, int outIdx){
       acc=vx_binary(acc, pwLoad(slot,oi), code); }
     else if(kind==1) acc=vx_unary(acc,code,plan.p0[s],plan.p1[s]);
     else             acc=vx_act(acc,code,plan.p0[s],plan.p1[s]);
-    acc=float(STORE(acc)); }
+    acc=float(TO_STORE(acc)); }
   return acc; }
 // Scalar NC4HW4 store: packedIdx = ((n*Cb+cb)*HW + hw)*4 + lane. Operands are NC4HW4-packed
 // (runtime activations natively; constants packed at upload), so bc==0 (same shape) loads at
@@ -52,7 +57,7 @@ float pw_apply_nc4(float acc, int packedIdx){ int HW=plan.outDim[0]; int lane=pa
       acc=vx_binary(acc, pwLoad(slot,oi), code); }
     else if(kind==1) acc=vx_unary(acc,code,plan.p0[s],plan.p1[s]);
     else             acc=vx_act(acc,code,plan.p0[s],plan.p1[s]);
-    acc=float(STORE(acc)); }
+    acc=float(TO_STORE(acc)); }
   return acc; }
 vec4 pw_apply4(vec4 acc, int vecIdx){ int HW=plan.outDim[0];
   for(int s=0;s<plan.numSteps;++s){ int kind=plan.step[s*4],code=plan.step[s*4+1],slot=plan.step[s*4+2],bc=plan.step[s*4+3];
@@ -60,6 +65,6 @@ vec4 pw_apply4(vec4 acc, int vecIdx){ int HW=plan.outDim[0];
       acc=vec4(vx_binary(acc.x,b.x,code),vx_binary(acc.y,b.y,code),vx_binary(acc.z,b.z,code),vx_binary(acc.w,b.w,code)); }
     else if(kind==1) acc=vec4(vx_unary(acc.x,code,plan.p0[s],plan.p1[s]),vx_unary(acc.y,code,plan.p0[s],plan.p1[s]),vx_unary(acc.z,code,plan.p0[s],plan.p1[s]),vx_unary(acc.w,code,plan.p0[s],plan.p1[s]));
     else             acc=vec4(vx_act(acc.x,code,plan.p0[s],plan.p1[s]),vx_act(acc.y,code,plan.p0[s],plan.p1[s]),vx_act(acc.z,code,plan.p0[s],plan.p1[s]),vx_act(acc.w,code,plan.p0[s],plan.p1[s]));
-    acc=vec4(float(STORE(acc.x)),float(STORE(acc.y)),float(STORE(acc.z)),float(STORE(acc.w))); }
+    acc=vec4(float(TO_STORE(acc.x)),float(TO_STORE(acc.y)),float(TO_STORE(acc.z)),float(TO_STORE(acc.w))); }
   return acc; }
 #endif
