@@ -56,3 +56,39 @@ but **OOMs host memory** on yonosplat (aborts at ~3000 allocs / 3536 MB while st
 4000 / 4803 MB). Root cause = host-side memory, not device/count; needs Vulkan memory profiling +
 pipeline/allocation-sharing across same-config matmul nodes before it can ship. Code + full diagnosis
 preserved on the WIP branch and in memory `pw-fusion-correctness-guards`.
+
+---
+
+# Producer-epilogue rollout (branch `fuse-pointwise-epilogue`, 2026-07-02)
+
+The epilogue now folds a chain into ANY capable producer's kernel: MatMul (naive+tiled, ±bias),
+Conv (direct/dwconv/conv1x1/conv1x1_s2/conv3x3_lds/conv_reg/split-K reduce/all Winograd output
+stages/fused_dwpw), Softmax (NC4 + flat), LayerNorm, Reduce, GridSample, Resize, ConvTranspose,
+AvgPool/MaxPool/GlobalAvgPool. Gemm keeps standalone chains (its rank-2 output is never
+NC4-expressible; the fc kernel wiring exists but cannot be reached).
+
+## Root cause of the deferred matmul-epilogue OOM
+
+NOT host memory pressure per se: `supportsNode(MatMul)` counted the appended epilogue operands
+against its 2/3-input gate, silently pushing every epilogue matmul to the CPU. yonosplat fragmented
+into ~47 Vulkan segments whose duplicated boundary buffers exhausted host memory
+(VK_ERROR_OUT_OF_HOST_MEMORY). With `pwCoreInputs()` bounding every positional input read the model
+runs as 1 segment, peak 3392 MB / 3628 buffers, and the earlier probe "bit-exact" results are now
+real (they had silently validated the CPU hook, not the GPU kernel).
+
+Supporting fixes shipped with the rollout: session-shared pipeline pool (driver pipeline memory
+scales with distinct kernels, not node count), content-deduped plan SSBOs, NC4HW4-packed constant
+operands (flat uploads were misordered for C%4!=0 / H*W>1), scalar broadcast mode 3, cross-world
+attach (const-operand chains fold into NC4 producers), ReduceMean import fix (generic Reduce +
+lowerReduceToGap), Config::foldGpuIslands for verification runs.
+
+## Device gate — Xclipse 940, fused vs `--no-fuse-pointwise`, `cmp` byte-identical
+
+| Gate | fp32 | fp16 |
+|---|---|---|
+| 22 per-family probes (incl. winograd-on, split-K, dead lanes, no-bias/no-beta/axes-attr) | 22/22 | 22/22 + winograd |
+| resnet50 (direct + winograd), efficientnet_b0, mobilenetv3, yolov8n | — | byte-identical, 0 fallbacks |
+| yonosplat 8-view (matmul epilogues, prior compile) | — | 6/6 outputs byte-identical, 0 fallbacks, 1 segment, submit+gpu ~17.0 s |
+
+2-view yonosplat_v2 recompile: 235 chains fused, 122 attached into producer epilogues (device run
+pending the model-verification pass; the compiled .vxm is 5.39 GB — size forensics tracked there).
