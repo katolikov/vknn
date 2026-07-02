@@ -126,3 +126,18 @@ goldens.
 
 - yonosplat_v2 (2-view): the import segfault is fixed (three generic bugs above); the compile now
   converges honestly. Size + device gate results land below when the recompile finishes.
+
+## Device R3CY905E04M (SM-S942B, Xclipse 960, SPAL 25.2.39 / Vulkan 1.4.304): NOT a valid verification target
+
+The unit executes large-footprint GPU workloads nondeterministically: the byte-identical 8-view
+vxm + inputs + flags that run byte-stably on the 940 produce different output bytes on EVERY run
+(fp16 AND fp32-compute, with per-op barriers, single submit, fusion off, tuning off, post-reboot).
+Golden metrics there (SNR 16–23 dB) are corruption noise, not precision. Everything software was
+eliminated: every kernel class the model uses is GPU==CPU exact on this device in isolation
+(model shapes, odd-M edge tiles, >65535-workgroup splits, both precisions, 12 sustained
+back-to-back runs stable); per-op type disables (ScatterND/GridSample/Einsum/Reduce/LayerNorm/
+Expand/DepthToSpace/Cast) all still race; all 10 CNNs are bit-exact at the same SNR floor as the
+940. Corruption correlates with total footprint (~3.4 GB live) and run depth (backbone + camera
+outputs stable, gaussian tail corrupt), and the unit repeatedly drops off USB under sustained
+load — consistent with a driver defect under memory pressure or unit-level hardware instability,
+not an engine bug. Fast + healthy runs: 8-view fp16 10.2 s / load 12.2 s (vs 17.0 s on the 940).
