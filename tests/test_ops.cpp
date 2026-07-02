@@ -864,6 +864,168 @@ TEST(Passes, RangeConstFoldFloat) {
     expectNear({o, o + 4}, {11, 23, 35, 47});
 }
 
+// --- Zero-element constants broadcast per NumPy: a 0 dim propagates (0 x 1 -> 0), it is not
+// max'ed into 1. Regression: constFold ran BinaryCpu on an empty folded constant (arange(0)),
+// the max-based broadcast fabricated n=1 and read element 0 of a null buffer (SIGSEGV). ---
+TEST(Passes, ConstFoldEmptyRangeBinary) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    auto scal  = [&](const char *nm, float v) {
+        TensorDesc t;
+        t.name          = nm;
+        t.shape         = {1};
+        t.isInitializer = true;
+        TensorId   id   = g.addTensor(t);
+        HostBuffer hb;
+        hb.resizeElems(1, DType::Float32);
+        hb.f32()[0]        = v;
+        g.initializers[id] = hb;
+        return id;
+    };
+    TensorId s = scal("start", 0.f), l = scal("limit", 0.f), d = scal("delta", 1.f), two = scal("two", 2.f);
+    TensorId r = g.addTensor({.name = "r"}), m = g.addTensor({.name = "m"});
+    TensorId y = g.addTensor({.name = "y"});
+    g.desc(y).isOutput = true;
+    Node rg;
+    rg.type    = OpType::Range; // folds to an EMPTY [0] constant
+    rg.name    = "range";
+    rg.inputs  = {s, l, d};
+    rg.outputs = {r};
+    Node mul;
+    mul.type    = OpType::Binary;
+    mul.subOp   = (int) BinaryType::Mul;
+    mul.name    = "mul"; // Mul(empty, scalar) must fold to an empty [0], not read past a null buffer
+    mul.inputs  = {r, two};
+    mul.outputs = {m};
+    Node add;
+    add.type    = OpType::Add;
+    add.name    = "add"; // keeps m alive; never folds (x is runtime)
+    add.inputs  = {x, m};
+    add.outputs = {y};
+    g.nodes     = {rg, mul, add};
+    g.outputs   = {y};
+    inferShapes(g, 1);
+    EXPECT_EQ(g.desc(r).shape, (Shape {0}));
+    constFold(g);
+    ASSERT_TRUE(g.isInitializer(m));
+    EXPECT_EQ(g.desc(m).shape, (Shape {0}));
+    EXPECT_TRUE(g.initializers[m].bytes.empty());
+}
+
+// --- inferShapes: an UNRESOLVED operand (empty shape on a produced tensor) must leave the
+// output unresolved -- only a true rank-0 initializer scalar may adopt the other operand's shape.
+// Regression: Add(unresolved MatMul, bias initializer) resolved to the bias's own shape, poisoning
+// every downstream rank in transformer imports (yonosplat_v2 attention blocks). ---
+TEST(Passes, BinaryUnresolvedOperandStaysUnresolved) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    TensorDesc si;
+    si.name     = "s"; // runtime reshape target: keeps the Reshape output unresolved
+    si.shape    = {3};
+    si.isInput  = true;
+    si.dtype    = DType::Int64;
+    TensorId sh = g.addTensor(si);
+    g.inputs    = {x, sh};
+
+    TensorDesc bd;
+    bd.name          = "bias";
+    bd.shape         = {16};
+    bd.isInitializer = true;
+    TensorId   b     = g.addTensor(bd);
+    HostBuffer hb;
+    hb.resizeElems(16, DType::Float32);
+    g.initializers[b] = hb;
+
+    TensorId r = g.addTensor({.name = "r"}), y0 = g.addTensor({.name = "y0"});
+    TensorId y1 = g.addTensor({.name = "y1"}), y2 = g.addTensor({.name = "y2"});
+    Node     rs;
+    rs.type    = OpType::Reshape;
+    rs.name    = "reshape";
+    rs.inputs  = {x, sh};
+    rs.outputs = {r};
+    Node add;
+    add.type    = OpType::Add;
+    add.name    = "add";
+    add.inputs  = {r, b};
+    add.outputs = {y0};
+    Node gt;
+    gt.type    = OpType::Greater;
+    gt.name    = "gt";
+    gt.inputs  = {r, b};
+    gt.outputs = {y1};
+    Node wh;
+    wh.type    = OpType::Where;
+    wh.name    = "where";
+    wh.inputs  = {y1, r, b};
+    wh.outputs = {y2};
+
+    TensorDesc fd;
+    fd.name          = "flat"; // const [-1] target: needs the (unresolved) input's element count
+    fd.shape         = {1};
+    fd.isInitializer = true;
+    fd.dtype         = DType::Int64;
+    TensorId   f     = g.addTensor(fd);
+    HostBuffer fb;
+    fb.resizeElems(1, DType::Int64);
+    fb.i64()[0]       = -1;
+    g.initializers[f] = fb;
+    TensorId y3       = g.addTensor({.name = "y3"});
+    Node     rs2;
+    rs2.type    = OpType::Reshape;
+    rs2.name    = "reshape_flat";
+    rs2.inputs  = {r, f};
+    rs2.outputs = {y3};
+    g.nodes     = {rs, add, gt, wh, rs2};
+    g.outputs   = {y0, y1, y2, y3};
+
+    inferShapes(g, 1);
+    EXPECT_TRUE(g.desc(r).shape.empty()) << "runtime reshape target must stay unresolved";
+    EXPECT_TRUE(g.desc(y0).shape.empty()) << "Add with an unresolved operand must stay unresolved";
+    EXPECT_TRUE(g.desc(y1).shape.empty()) << "Greater with an unresolved operand must stay unresolved";
+    EXPECT_TRUE(g.desc(y2).shape.empty()) << "Where with an unresolved operand must stay unresolved";
+    EXPECT_TRUE(g.desc(y3).shape.empty()) << "Reshape[-1] of an unresolved input must not fabricate [0]";
+}
+
+// --- inferShapes: a true rank-0 scalar initializer operand still adopts the other shape. ---
+TEST(Passes, BinaryScalarInitializerBroadcasts) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorDesc sd;
+    sd.name          = "k"; // rank-0 scalar constant (empty shape, 1 payload element)
+    sd.isInitializer = true;
+    TensorId   k     = g.addTensor(sd);
+    HostBuffer hb;
+    hb.resizeElems(1, DType::Float32);
+    hb.f32()[0]        = 2.f;
+    g.initializers[k]  = hb;
+    TensorId y         = g.addTensor({.name = "y"});
+    g.desc(y).isOutput = true;
+    Node m;
+    m.type    = OpType::Binary;
+    m.subOp   = (int) BinaryType::Mul;
+    m.name    = "mul";
+    m.inputs  = {x, k};
+    m.outputs = {y};
+    g.nodes   = {m};
+    g.outputs = {y};
+    inferShapes(g, 1);
+    EXPECT_EQ(g.desc(y).shape, (Shape {2, 8}));
+}
+
 // --- Range: int64 scalars with a negative delta emit an exact int64 vector. ---
 TEST(Passes, RangeConstFoldInt64) {
     Graph g    = makeRangeAddGraph(0.f, 0.f, 1.f, 4); // scalars replaced with int64 below

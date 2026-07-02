@@ -86,8 +86,13 @@ namespace vknn {
                 case OpType::Equal:
                 case OpType::Greater:
                 case OpType::GreaterEqual: {
+                    // Same empty-shape discrimination as Binary/Add: scalar only if initializer.
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
+                    if ((a.empty() && !g.isInitializer(nd.inputs[0])) || (b.empty() && !g.isInitializer(nd.inputs[1])))
+                    {
+                        break; // unresolved operand
+                    }
                     if (a.empty() && b.empty())
                     {
                         break;
@@ -105,7 +110,8 @@ namespace vknn {
                     };
                     for (size_t i = 0; i < rank; ++i)
                     {
-                        out[i] = std::max(dimOf(a, i), dimOf(b, i));
+                        int64_t da = dimOf(a, i), db = dimOf(b, i);
+                        out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
                     SH(o) = out;
                     break;
@@ -148,6 +154,20 @@ namespace vknn {
                 }
                 case OpType::Where: {
                     // Broadcast cond (in[0]), X (in[1]), Y (in[2]); output dims = elementwise-max.
+                    // An empty-shaped non-initializer input is unresolved, not a scalar: refuse.
+                    bool unresolved = false;
+                    for (TensorId t: nd.inputs)
+                    {
+                        if (t != kNoTensor && SH(t).empty() && !g.isInitializer(t))
+                        {
+                            unresolved = true;
+                            break;
+                        }
+                    }
+                    if (unresolved)
+                    {
+                        break;
+                    }
                     size_t rank = 0;
                     for (TensorId t: nd.inputs)
                     {
@@ -167,7 +187,8 @@ namespace vknn {
                         size_t       off = rank - s.size();
                         for (size_t i = 0; i < s.size(); ++i)
                         {
-                            out[off + i] = std::max(out[off + i], s[i]);
+                            // a 0 dim broadcasts to 0 (NumPy), never to 1
+                            out[off + i] = (s[i] == 0 || out[off + i] == 0) ? 0 : std::max(out[off + i], s[i]);
                         }
                     }
                     SH(o) = out;
@@ -527,15 +548,22 @@ namespace vknn {
                 case OpType::Add: {
                     // NumPy broadcasting: per-dim max over right-aligned shapes. Required for outer-product
                     // ops ([..,3,1]*[..,1,3]->[..,3,3] in the per-pixel ray math) and trailing broadcasts
-                    // ([2,224,224,1]*[3]->[2,224,224,3]).
+                    // ([2,224,224,1]*[3]->[2,224,224,3]). An empty shape is a rank-0 scalar only on an
+                    // initializer; on a produced tensor it means "not resolved yet" and the output must
+                    // stay unresolved (adopting the constant operand's shape here poisons every rank
+                    // downstream of a transformer's MatMul-bias Adds).
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
+                    if ((a.empty() && !g.isInitializer(nd.inputs[0])) || (b.empty() && !g.isInitializer(nd.inputs[1])))
+                    {
+                        break; // unresolved operand
+                    }
                     if (a.empty() && b.empty())
                     {
                         break;
                     }
                     if (a.empty() || b.empty())
-                    { // one is a rank-0 scalar (or unresolved): use the other
+                    { // one is a rank-0 scalar constant: use the other
                         SH(o) = a.empty() ? b : a;
                         break;
                     }
@@ -547,7 +575,8 @@ namespace vknn {
                     };
                     for (size_t i = 0; i < rank; ++i)
                     {
-                        out[i] = std::max(dimOf(a, i), dimOf(b, i));
+                        int64_t da = dimOf(a, i), db = dimOf(b, i);
+                        out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
                     SH(o) = out;
                     break;
@@ -620,7 +649,8 @@ namespace vknn {
                     Shape out;
                     for (int64_t i = 0; i < batchRank; ++i)
                     {
-                        out.push_back(std::max(dimOf(a, aBatch, i), dimOf(b, bBatch, i)));
+                        int64_t da = dimOf(a, aBatch, i), db = dimOf(b, bBatch, i);
+                        out.push_back((da == 0 || db == 0) ? 0 : std::max(da, db)); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
                     if (!aWas1D)
                     {
@@ -698,6 +728,26 @@ namespace vknn {
                     {
                         VKNN_WARN << "Reshape target '" << g.tensors[sid].name << "' declares " << rank << " dims but holds " << avail << " values; clamping (desc/payload mismatch upstream)";
                         rank = avail;
+                    }
+                    // A -1 (deduce) or 0 (copy) target dim needs the data input's shape. While that
+                    // input is unresolved, numElements({}) = 0 would fabricate a zero dim here — and a
+                    // downstream Shape-of-this then const-folds the lie into the shape arithmetic.
+                    // Leave unresolved; a later pass resolves it once the input shape lands.
+                    if (in.empty())
+                    {
+                        bool needsIn = false;
+                        for (int64_t i = 0; i < rank; ++i)
+                        {
+                            if (hb.i64()[i] <= 0)
+                            {
+                                needsIn = true;
+                                break;
+                            }
+                        }
+                        if (needsIn)
+                        {
+                            break;
+                        }
                     }
                     Shape   out(rank);
                     int64_t known = 1, infer = -1;

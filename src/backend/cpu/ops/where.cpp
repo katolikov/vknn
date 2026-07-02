@@ -28,7 +28,8 @@ namespace vknn {
                 };
                 for (size_t i = 0; i < rank; ++i)
                 {
-                    out[i] = std::max(dimOf(sc, i), std::max(dimOf(sx, i), dimOf(sy, i)));
+                    int64_t dc = dimOf(sc, i), dx = dimOf(sx, i), dy = dimOf(sy, i);
+                    out[i]     = (dc == 0 || dx == 0 || dy == 0) ? 0 : std::max(dc, std::max(dx, dy)); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
                 int64_t              n = numElements(out);
                 std::vector<int64_t> oc(rank), ox(rank), oy(rank);
