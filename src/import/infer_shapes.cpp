@@ -184,6 +184,8 @@ namespace vknn {
                         {
                             r = (int64_t) (hb.bytes.size() / 8);
                         }
+                        // never read past the initializer's real payload, whatever the desc claims
+                        r = std::min<int64_t>(r, (int64_t) (hb.bytes.size() / (g.tensors[sid].dtype == DType::Int64 ? 8 : 4)));
                         if (r < 0 || r > 16)
                         {
                             break; // a shape vector has at most a handful of dims
@@ -285,12 +287,27 @@ namespace vknn {
                 case OpType::Transpose: {
                     const Shape &a    = SH(nd.inputs[0]);
                     const auto  &perm = nd.attr.getints("perm");
-                    Shape        out(a.size());
+                    if (!perm.empty() && perm.size() != a.size())
+                    {
+                        VKNN_WARN << "Transpose '" << nd.name << "': perm rank " << perm.size() << " != input rank " << a.size() << " (shape " << shapeStr(a) << "); leaving unresolved";
+                        break; // indexing a mismatched perm would read past the shape vector
+                    }
+                    Shape out(a.size());
                     for (size_t i = 0; i < a.size(); ++i)
                     {
-                        out[i] = perm.empty() ? a[a.size() - 1 - i] : a[perm[i]];
+                        int64_t src = perm.empty() ? (int64_t) (a.size() - 1 - i) : perm[i];
+                        if (src < 0 || src >= (int64_t) a.size())
+                        {
+                            VKNN_WARN << "Transpose '" << nd.name << "': perm[" << i << "]=" << src << " out of range for rank " << a.size();
+                            out.clear();
+                            break;
+                        }
+                        out[i] = a[src];
                     }
-                    SH(o) = out;
+                    if (!out.empty())
+                    {
+                        SH(o) = out;
+                    }
                     break;
                 }
                 case OpType::Reduce: {
@@ -643,6 +660,12 @@ namespace vknn {
                     if (rank <= 0)
                     {
                         rank = (int64_t) (hb.bytes.size() / 8);
+                    }
+                    int64_t avail = (int64_t) (hb.bytes.size() / 8);
+                    if (rank > avail)
+                    {
+                        VKNN_WARN << "Reshape target '" << g.tensors[sid].name << "' declares " << rank << " dims but holds " << avail << " values; clamping (desc/payload mismatch upstream)";
+                        rank = avail;
                     }
                     Shape   out(rank);
                     int64_t known = 1, infer = -1;
