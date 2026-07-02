@@ -41,7 +41,7 @@ namespace vknn {
 
                 // Scalar index (rank-0, or the importer's [1]-of-1 form) removes the axis; otherwise the
                 // indices' own shape is spliced in at `axis`.
-                bool  scalarIndex = I.shape.empty() || (I.shape.size() == 1 && I.shape[0] == 1 && nidx == 1);
+                bool  scalarIndex = I.shape.empty(); // only a true rank-0 index removes the axis (rank-1 [1] keeps it)
                 Shape outShape;
                 for (int64_t i = 0; i < axis; ++i)
                 {

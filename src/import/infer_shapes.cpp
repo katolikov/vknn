@@ -754,9 +754,10 @@ namespace vknn {
                     break;
                 }
                 case OpType::Gather: {
-                    // ONNX Gather: out = data.shape[:axis] + indices.shape + data.shape[axis+1:]. A scalar
-                    // index (rank-0, stored here as [1] with one element) removes the axis. Mirrors GatherCpu
-                    // exactly so the inferred plan-time shape matches the runtime result (axis-aware).
+                    // ONNX Gather: out = data.shape[:axis] + indices.shape + data.shape[axis+1:]. Only a
+                    // true rank-0 scalar index (empty shape — the importer preserves 0-D dims) removes the
+                    // axis; a rank-1 [1] index KEEPS it as size 1 (treating [1] as scalar collapsed the rank
+                    // and mis-broadcast everything downstream). Mirrors GatherCpu exactly.
                     const Shape &d = SH(nd.inputs[0]);
                     if (d.empty())
                     {
@@ -779,7 +780,7 @@ namespace vknn {
                         break; // indices not resolved yet
                     }
                     int64_t nidx        = is.empty() ? 1 : numElements(is);
-                    bool    scalarIndex = is.empty() || (is.size() == 1 && is[0] == 1 && nidx == 1);
+                    bool    scalarIndex = is.empty();
                     Shape   out;
                     for (int64_t i = 0; i < axis; ++i)
                     {
