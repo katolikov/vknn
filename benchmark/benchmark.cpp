@@ -519,7 +519,9 @@ namespace {
             lo       = std::min(lo, y);
             hi       = std::max(hi, y);
         }
-        m.cosine    = dot / (std::sqrt(sa) * std::sqrt(sb) + 1e-12);
+        // Identical tensors are a perfect match even when the signal is all-zero (dot = 0 would
+        // otherwise read as cosine 0 and fail a byte-identical output).
+        m.cosine    = (m.sizeOk && err == 0 && m.nan == 0) ? 1.0 : dot / (std::sqrt(sa) * std::sqrt(sb) + 1e-12);
         m.relL2     = std::sqrt(err) / (std::sqrt(sb) + 1e-12);
         double mse  = err / std::max<size_t>(1, n);
         double peak = hi - lo;
