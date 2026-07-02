@@ -24,7 +24,8 @@ namespace vknn {
             case OpType::Equal:        // A==B, broadcasting flat compare
             case OpType::Greater:      // A>B,  broadcasting flat compare
             case OpType::GreaterEqual: // A>=B, broadcasting flat compare
-            case OpType::Range:        // 1-D arange, flat fill
+            case OpType::Range:           // 1-D arange, flat fill
+            case OpType::ConstantOfShape: // scalar fill, flat
                 return true;
             case OpType::ConvTranspose: {
                 // Flat row-major transposed conv (one thread per output element, gather form). Needs a

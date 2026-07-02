@@ -270,6 +270,17 @@ namespace vknn {
                 const Shape &w1 = g.desc(nd.inputs[1]).shape;
                 return f.size() == 4 && f[1] <= 1024 && !w1.empty() && w1[0] <= 256;
             }
+            if (nd.type == OpType::ConstantOfShape)
+            {
+                // The plan-time output size is the fill count; integer-valued fills (int64 index
+                // tensors) stay on the exact CPU op, as does an unresolved output size.
+                if (g.desc(nd.outputs[0]).shape.empty() || g.desc(nd.outputs[0]).dtype != DType::Float32)
+                {
+                    return false;
+                }
+                auto it = nd.attr.map.find("value");
+                return it == nd.attr.map.end() || it->second.kind != Attr::Ints;
+            }
             if (nd.type == OpType::Range)
             {
                 // The static plan fixes the output size; the scalar values may still be runtime
