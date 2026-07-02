@@ -52,11 +52,12 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | DepthToSpace | ✅ | ✅ | DCR / CRD (pixel-shuffle) |
 | ScatterND | ✅ | ✅ | copy + scatter (runtime float index) |
 | Resize / Upsample | ✅ | ✅ | nearest + bilinear, 4 coord modes |
-| GridSample | ✅ | ✅ | constant or runtime grid (optical-flow warps); cubic mode falls back to CPU |
+| GridSample | ✅ | ✅ | bilinear/nearest/cubic; constant or runtime grid (optical-flow warps); under fp16 the grid coordinates are fp16-stored, which bounds sampling accuracy near discontinuities |
 | Reduce (Mean/Sum/Max/Min/Prod/L2) | ✅ | ✅ | arbitrary axes |
 | Cast | ✅ | ✅ | float ↔ int32/int64 |
 | Pad | ✅ | ✅ | constant / edge / reflect; GPU = flat row-major, static pads |
-| Shape / Constant / ConstantOfShape / EyeLike / Range | const-fold | ✅ | resolved at compile time (Range keeps a CPU op for a runtime start/limit/delta) |
+| Shape / Constant / ConstantOfShape / EyeLike | const-fold | ✅ | resolved at compile time |
+| Range | ✅ | ✅ | small constant ranges const-fold; a float Range whose size resolves at plan time runs on the GPU (start/delta may be runtime scalars); int64 or unresolved-size ranges use the CPU op, which sizes at run time |
 | Identity | — | ✅ | |
 
 ## Fusions

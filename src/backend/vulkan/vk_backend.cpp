@@ -270,10 +270,33 @@ namespace vknn {
                 const Shape &w1 = g.desc(nd.inputs[1]).shape;
                 return f.size() == 4 && f[1] <= 1024 && !w1.empty() && w1[0] <= 256;
             }
+            if (nd.type == OpType::Range)
+            {
+                // The static plan fixes the output size; the scalar values may still be runtime
+                // (read from their buffers at dispatch). int64 ranges (index vectors) const-fold or
+                // stay on the exact CPU op, as does a Range whose size cannot resolve at plan time.
+                if (nd.inputs.size() < 3 || g.desc(nd.outputs[0]).shape.empty())
+                {
+                    return false;
+                }
+                if (g.desc(nd.outputs[0]).dtype != DType::Float32)
+                {
+                    return false;
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    // fp16 covers the scalars a --fp16 compile retyped; the upload decodes them.
+                    if (nd.inputs[k] == kNoTensor || (g.desc(nd.inputs[k]).dtype != DType::Float32 && g.desc(nd.inputs[k]).dtype != DType::Float16))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
             if (nd.type == OpType::GridSample)
             {
                 // 4D NC4HW4 data + a flat [N,Hout,Wout,2] grid (constant OR runtime — the layout pass keeps
-                // the grid flat and the op binds it at compute precision). Cubic mode falls back to the CPU op.
+                // the grid flat and the op binds it at compute precision).
                 if (nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
                 {
                     return false;
@@ -285,7 +308,7 @@ namespace vknn {
                     return false;
                 }
                 std::string m = nd.attr.gets("mode", "bilinear");
-                return m == "bilinear" || m == "linear" || m == "nearest";
+                return m == "bilinear" || m == "linear" || m == "nearest" || m == "cubic" || m == "bicubic";
             }
             if (nd.type == OpType::Resize)
             {

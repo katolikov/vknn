@@ -864,6 +864,49 @@ TEST(Passes, RangeConstFoldFloat) {
     expectNear({o, o + 4}, {11, 23, 35, 47});
 }
 
+// --- GridSample mode=cubic vs onnxruntime goldens (opset 20, alpha=-0.75 cubic convolution),
+// all six padding_mode x align_corners combinations on a 4x4 ramp and a fixed random grid. ---
+TEST(Ops, GridSampleCubicVsOrt) {
+    std::vector<float> xd(16);
+    for (int i = 0; i < 16; ++i)
+    {
+        xd[i] = (float) i;
+    }
+    const std::vector<float> grid = {
+        -8.4738344e-01f, 5.5983758e-01f, -1.2318152e-01f, 4.4693041e-01f, 9.5597899e-01f, 7.6991796e-02f,
+        2.2408962e-03f, -8.5589772e-01f, -4.6312201e-01f, -2.3502111e-04f, 3.5845995e-01f, 6.0747802e-01f,
+        -2.3811775e-01f, -8.6812729e-01f, -4.2370880e-01f, 8.1918705e-01f, -5.7322931e-01f, -9.5752060e-02f};
+    struct Case {
+        const char        *pad;
+        int                align;
+        std::vector<float> gold;
+    };
+    const std::vector<Case> cases = {
+        {"zeros", 0, {9.943107f, 12.197111f, 5.780506f, 0.826377f, 6.945103f, 15.411776f, 0.40153f, 12.044308f, 6.271687f}},
+        {"zeros", 1, {11.665485f, 10.5366f, 9.707059f, 2.310742f, 6.870825f, 13.14908f, 1.900998f, 13.508641f, 6.448456f}},
+        {"border", 0, {10.709298f, 11.25916f, 9.583391f, 1.108617f, 6.476125f, 13.414345f, 0.621387f, 12.8671f, 5.673596f}},
+        {"border", 1, {9.906149f, 10.29533f, 9.303031f, 2.161082f, 6.733497f, 12.085019f, 1.787719f, 11.976208f, 6.102964f}},
+        {"reflection", 0, {10.68639f, 11.25916f, 9.658238f, 1.002547f, 6.476125f, 13.414345f, 0.4935f, 12.916595f, 5.673596f}},
+        {"reflection", 1, {10.032711f, 10.367593f, 9.346231f, 1.762658f, 6.710605f, 12.384731f, 1.405842f, 12.396446f, 6.040795f}},
+    };
+    for (const auto &c: cases)
+    {
+        Attributes attr;
+        attr.map["mode"]         = str("cubic");
+        attr.map["padding_mode"] = str(c.pad);
+        Attr al;
+        al.kind                   = Attr::Int;
+        al.i                      = c.align;
+        attr.map["align_corners"] = al;
+        auto out                  = runOp(OpType::GridSample, 0, attr, {1, 1, 4, 4}, xd, {{{1, 3, 3, 2}, grid}});
+        ASSERT_EQ(out.shape, (Shape {1, 1, 3, 3})) << c.pad << " a" << c.align;
+        for (size_t i = 0; i < c.gold.size(); ++i)
+        {
+            EXPECT_NEAR(out.data[i], c.gold[i], 2e-4f) << c.pad << " a" << c.align << " i=" << i;
+        }
+    }
+}
+
 // --- Zero-element constants broadcast per NumPy: a 0 dim propagates (0 x 1 -> 0), it is not
 // max'ed into 1. Regression: constFold ran BinaryCpu on an empty folded constant (arange(0)),
 // the max-based broadcast fabricated n=1 and read element 0 of a null buffer (SIGSEGV). ---
@@ -995,7 +1038,64 @@ TEST(Passes, BinaryUnresolvedOperandStaysUnresolved) {
     EXPECT_TRUE(g.desc(y3).shape.empty()) << "Reshape[-1] of an unresolved input must not fabricate [0]";
 }
 
-// --- inferShapes: a true rank-0 scalar initializer operand still adopts the other shape. ---
+// --- inferShapes: Slice must not resolve while any present bound/axes/steps param is still
+// runtime — copying the input shape fabricates an unsliced dim that a downstream Shape() fold
+// freezes (the RoPE half-slice: [.,64] resolved full, corrected to [.,32] a round later). ---
+TEST(Passes, SliceRuntimeBoundsStayUnresolved) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 16, 64};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    TensorDesc si;
+    si.name     = "bound"; // runtime scalar bound (e.g. head_dim/2 computed from Shape() arith)
+    si.shape    = {1};
+    si.dtype    = DType::Int64;
+    si.isInput  = true;
+    TensorId bd = g.addTensor(si);
+    g.inputs    = {x, bd};
+    auto vec    = [&](const char *nm, std::vector<int64_t> v) {
+        TensorDesc t;
+        t.name          = nm;
+        t.shape         = {(int64_t) v.size()};
+        t.dtype         = DType::Int64;
+        t.isInitializer = true;
+        TensorId   id   = g.addTensor(t);
+        HostBuffer hb;
+        hb.resizeElems(v.size(), DType::Int64);
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            hb.i64()[i] = v[i];
+        }
+        g.initializers[id] = hb;
+        return id;
+    };
+    TensorId ax = vec("axes", {2}), sp = vec("steps", {1});
+    // Both bounds flow through a Reshape with a runtime target, so their descs stay empty —
+    // the shape-computed start/end pattern (head_dim/2 from Shape() arithmetic).
+    TensorId e0 = g.addTensor({.name = "e0"}), e1 = g.addTensor({.name = "e1"});
+    Node     r0;
+    r0.type    = OpType::Reshape;
+    r0.name    = "r0";
+    r0.inputs  = {bd, bd};
+    r0.outputs = {e0};
+    Node r1;
+    r1.type    = OpType::Reshape;
+    r1.name    = "r1";
+    r1.inputs  = {bd, bd};
+    r1.outputs = {e1};
+    TensorId y = g.addTensor({.name = "y"});
+    Node     sl;
+    sl.type    = OpType::Slice;
+    sl.name    = "slice";
+    sl.inputs  = {x, e0, e1, ax, sp}; // starts AND ends still unresolved
+    sl.outputs = {y};
+    g.nodes    = {r0, r1, sl};
+    g.outputs  = {y};
+    inferShapes(g, 1);
+    EXPECT_TRUE(g.desc(y).shape.empty()) << "Slice with runtime bounds must stay unresolved, not copy the input shape";
+}
 TEST(Passes, BinaryScalarInitializerBroadcasts) {
     Graph      g;
     TensorDesc xi;

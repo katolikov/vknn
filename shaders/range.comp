@@ -1,0 +1,16 @@
+#version 450
+#include "precision.glsl"
+// Flat Range: y[i] = start + i * delta, one thread per element. start/delta are single-element
+// buffers (constant scalars uploaded by the op, or runtime activations); the element count is
+// fixed by the plan-time output shape.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) readonly  buffer D { STORE d[]; };
+layout(std430, binding = 2) writeonly buffer Y { STORE y[]; };
+layout(push_constant) uniform PC { int total; } pc;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (i >= uint(pc.total)) return;
+  y[i] = STORE(float(s[0]) + float(i) * float(d[0]));
+}

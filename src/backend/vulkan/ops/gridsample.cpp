@@ -24,7 +24,7 @@ namespace vknn {
                 int          OH = (int) gs[1], OW = (int) gs[2];
                 pc               = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, OH, OW, (int) node.attr.geti("align_corners", 0)};
                 std::string mode = node.attr.gets("mode", "bilinear");
-                uint32_t    MODE = (mode == "nearest") ? 1u : 0u;
+                uint32_t    MODE = (mode == "nearest") ? 1u : (mode == "cubic" || mode == "bicubic") ? 2u : 0u;
                 std::string pad  = node.attr.gets("padding_mode", "zeros");
                 uint32_t    PAD  = pad == "border" ? 1u : (pad == "reflection" ? 2u : 0u);
                 total            = (int64_t) x.n * cBlocks(x.c) * OH * OW;

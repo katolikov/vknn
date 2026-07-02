@@ -2,7 +2,7 @@
 // GridSample on the GPU (NC4HW4 data + flat fp32 grid). The data path samples whole channel-blocks
 // (a vec4 per output pixel for every channel), so the channel axis is never permuted. The grid is a
 // flat float buffer (2 coords per output pixel), uploaded raw by the op (works when the grid is a
-// constant). MODE: 0=bilinear 1=nearest. PADMODE: 0=zeros 1=border 2=reflection.
+// constant). MODE: 0=bilinear 1=nearest 2=cubic. PADMODE: 0=zeros 1=border 2=reflection.
 #include "common.glsl"
 #ifdef PW_EPI
 #define PW_EPI_BASE 3
@@ -28,10 +28,25 @@ float handle(float c, int S) {
   return c;
 }
 // fetch a channel-block vec4 at (px,py) with padding behaviour; returns vec4(0) for zeros-OOB.
+// Reflection reflects each tap (cubic taps reach +-2 px past the mapped coordinate, where a clamp
+// diverges from the reflected pixel; for linear/nearest the two agree).
 vec4 fetchBlk(int sb, int px, int py, int Cb) {
   if (PADMODE == 0) { if (px < 0 || px >= pc.Win || py < 0 || py >= pc.Hin) return vec4(0.0); }
+  else if (PADMODE == 2) {
+    px = clamp(int(round(reflectc(float(px), pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(pc.Win - 1) : float(pc.Win) - 0.5))), 0, pc.Win - 1);
+    py = clamp(int(round(reflectc(float(py), pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(pc.Hin - 1) : float(pc.Hin) - 0.5))), 0, pc.Hin - 1);
+  }
   else { px = clamp(px, 0, pc.Win - 1); py = clamp(py, 0, pc.Hin - 1); }
   return vec4(src[sb + py * pc.Win + px]);
+}
+// Cubic convolution weights (alpha = -0.75): taps at floor-1..floor+2 per axis.
+void cubicW(float t, out float w[4]) {
+  const float A = -0.75;
+  float t1 = 1.0 + t, t2 = 2.0 - t;
+  w[0] = A * t1 * t1 * t1 - 5.0 * A * t1 * t1 + 8.0 * A * t1 - 4.0 * A;
+  w[1] = (A + 2.0) * t * t * t - (A + 3.0) * t * t + 1.0;
+  w[2] = (A + 2.0) * (1.0 - t) * (1.0 - t) * (1.0 - t) - (A + 3.0) * (1.0 - t) * (1.0 - t) + 1.0;
+  w[3] = A * t2 * t2 * t2 - 5.0 * A * t2 * t2 + 8.0 * A * t2 - 4.0 * A;
 }
 
 void main() {
@@ -51,6 +66,15 @@ void main() {
   if (MODE == 1) {
     int rx = int(floor(ix + 0.5)), ry = int(floor(iy + 0.5));
     v = fetchBlk(sb, rx, ry, Cb);
+  } else if (MODE == 2) {
+    int x0 = int(floor(ix)), y0 = int(floor(iy));
+    float wx[4], wy[4];
+    cubicW(ix - float(x0), wx);
+    cubicW(iy - float(y0), wy);
+    v = vec4(0.0);
+    for (int j = 0; j < 4; ++j)
+      for (int i2 = 0; i2 < 4; ++i2)
+        v += wy[j] * wx[i2] * fetchBlk(sb, x0 - 1 + i2, y0 - 1 + j, Cb);
   } else {
     int x0 = int(floor(ix)), y0 = int(floor(iy));
     float wx = ix - float(x0), wy = iy - float(y0);

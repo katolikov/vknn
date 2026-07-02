@@ -17,7 +17,15 @@ namespace vknn {
                 RtTensor       &Y = ctx.t(node.outputs[0]);
 
                 auto scalar = [](const RtTensor &t) {
-                    return t.dtype == DType::Int64 ? (double) t.host.i64()[0] : (double) t.host.f32()[0];
+                    if (t.dtype == DType::Int64)
+                    {
+                        return (double) t.host.i64()[0];
+                    }
+                    if (t.dtype == DType::Float16)
+                    {
+                        return (double) halfToFloat(reinterpret_cast<const fp16_t *>(t.host.bytes.data())[0]);
+                    }
+                    return (double) t.host.f32()[0];
                 };
                 double  start = scalar(S), limit = scalar(L), delta = scalar(D);
                 int64_t n = 0;
