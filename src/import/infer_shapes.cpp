@@ -461,9 +461,18 @@ namespace vknn {
                         return ps.empty() ? -1 : numElements(ps);
                     };
                     int64_t want = std::max(declLen(1), declLen(2)); // intended number of (start,end) pairs
+                    if (want < 0 || declLen(3) < 0 || declLen(4) < 0)
+                    {
+                        break; // a param tensor's own shape is unresolved -> defer (out=input would
+                               // fabricate an unsliced dim that a downstream Shape() fold freezes)
+                    }
                     if (want > 0 && ((int64_t) starts.size() < want || (int64_t) ends.size() < want))
                     {
                         break; // a slice bound is still runtime -> defer rather than fabricate a wrong dim
+                    }
+                    if ((declLen(3) > 0 && (int64_t) axes.size() < declLen(3)) || (declLen(4) > 0 && (int64_t) steps.size() < declLen(4)))
+                    {
+                        break; // axes/steps exist as tensors but are still runtime -> defer
                     }
                     Shape out = a;
                     // Bound a dim only when BOTH its start and end are known; never index a param past its
