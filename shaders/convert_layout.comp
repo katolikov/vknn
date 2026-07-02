@@ -2,32 +2,46 @@
 #include "precision.glsl"
 // NC4HW4 <-> flat row-major conversion. STORE element type (fp16/fp32) comes from precision.glsl.
 // dir==0: NC4HW4 -> flat row-major; dir==1: flat row-major -> NC4HW4.
+//
+// One thread per NC4 lane-quad (N*Cb*H*W threads): the NC4 side moves as one STORE4 (a single
+// 64/128-bit access), the flat side as 4 scalars that are coalesced ACROSS threads (adjacent
+// threads touch adjacent w for each lane). Bindings 0/1 are the scalar views of src/dst and 2/3
+// the STORE4 views of the SAME buffers; each direction uses the scalar view on the flat side and
+// the vec4 view on the NC4 side.
 #include "common.glsl"
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
-layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 0) readonly  buffer S  { STORE  s[];  };
+layout(std430, binding = 1) writeonly buffer D  { STORE  d[];  };
+layout(std430, binding = 2) readonly  buffer S4 { STORE4 s4[]; };
+layout(std430, binding = 3) writeonly buffer D4 { STORE4 d4[]; };
 layout(push_constant) uniform PC { int N, C, H, W, dir; } pc;
 
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   int Cb = (pc.C + 3) / 4;
   int HW = pc.H * pc.W;
+  if (gid >= uint(pc.N * Cb * HW)) return;
+  int w  = int(gid) % pc.W;
+  int h  = (int(gid) / pc.W) % pc.H;
+  int cb = (int(gid) / HW) % Cb;
+  int n  = int(gid) / (HW * Cb);
+  int c0 = cb * 4;
+  int flatBase = ((n * pc.C + c0) * pc.H + h) * pc.W + w;
   if (pc.dir == 0) {
-    if (gid >= uint(pc.N * pc.C * HW)) return;
-    int w = int(gid) % pc.W;
-    int h = (int(gid) / pc.W) % pc.H;
-    int c = (int(gid) / HW) % pc.C;
-    int n = int(gid) / (pc.C * HW);
-    int cb = c / 4, l = c % 4;
-    d[gid] = s[(((n * Cb + cb) * pc.H + h) * pc.W + w) * 4 + l];
+    STORE4 v = s4[gid];
+    for (int l = 0; l < 4 && c0 + l < pc.C; ++l) {
+      d[flatBase + l * HW] = v[l];
+    }
   } else {
-    if (gid >= uint(pc.N * Cb * HW * 4)) return;
-    int l = int(gid) % 4;
-    int w = (int(gid) / 4) % pc.W;
-    int h = (int(gid) / (4 * pc.W)) % pc.H;
-    int cb = (int(gid) / (4 * HW)) % Cb;
-    int n = int(gid) / (4 * HW * Cb);
-    int c = cb * 4 + l;
-    d[gid] = (c < pc.C) ? s[((n * pc.C + c) * pc.H + h) * pc.W + w] : STORE(0.0);
+    STORE4 v = STORE4(0.0);
+    for (int l = 0; l < 4 && c0 + l < pc.C; ++l) {
+      v[l] = s[flatBase + l * HW];
+    }
+    d4[gid] = v;
   }
 }

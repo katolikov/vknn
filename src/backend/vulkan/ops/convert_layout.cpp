@@ -20,14 +20,15 @@ namespace vknn {
                 int  dir   = node.subOp; // 0: NC4HW4->flat, 1: flat->NC4HW4
                 pc         = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, dir};
                 int64_t Cb = cBlocks(x.c), HW = x.h * x.w;
-                count = dir == 0 ? (uint32_t) (x.n * x.c * HW) : (uint32_t) (x.n * Cb * HW * 4);
-                pipe  = env.pipeline(shader("convert_layout", env.useFp16), 2, sizeof(ConvertPC), std::vector<uint32_t> {});
+                count = (uint32_t) (x.n * Cb * HW); // one thread per NC4 lane-quad, both directions
+                pipe  = env.pipeline(shader("convert_layout", env.useFp16), 4, sizeof(ConvertPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // bindings 0/1 = scalar views, 2/3 = vec4 views of the same src/dst buffers
                 vk::Buffer *s = env.devBuf(node.inputs[0]);
                 vk::Buffer *d = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {s->handle(), d->handle()}, &pc, sizeof(pc), groups(count, 256));
+                pipe->dispatch(cmd, {s->handle(), d->handle(), s->handle(), d->handle()}, &pc, sizeof(pc), groups(count, 256));
             }
         };
 
