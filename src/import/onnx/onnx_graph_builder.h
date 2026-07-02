@@ -43,6 +43,22 @@ namespace vknn {
             }
 
           private:
+            // A declared shape is only trusted when fully static. dim_param (symbolic) dims parse
+            // to -1; storing them as a desc would read as "resolved" and poison downstream
+            // inference (a Reshape 0-copy of a -1, a Slice clamp against -1 -> 0, then a Shape()
+            // fold freezes the lie). Graph inputs keep -1 dims: runStandardPasses substitutes the
+            // static batch there.
+            static bool fullyStatic(const Shape &sh) {
+                for (int64_t d: sh)
+                {
+                    if (d < 0)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             void collect(Reader r) {
                 uint32_t f, w;
                 while (r.tag(f, w))
@@ -81,8 +97,11 @@ namespace vknn {
                             Shape       sh;
                             int32_t     el = 1;
                             NodeParser::parseValueInfo(r.sub(), nm, sh, el);
-                            TensorId id         = g.findOrAdd(nm);
-                            g.desc(id).shape    = sh;
+                            TensorId id = g.findOrAdd(nm);
+                            if (fullyStatic(sh))
+                            {
+                                g.desc(id).shape = sh;
+                            }
                             g.desc(id).dtype    = dtypeFromElem(el);
                             g.desc(id).isOutput = true;
                             g.outputs.push_back(id);
@@ -175,7 +194,7 @@ namespace vknn {
                         TensorDesc d;
                         d.name   = s;
                         auto vit = valueInfoShapes.find(s);
-                        if (vit != valueInfoShapes.end())
+                        if (vit != valueInfoShapes.end() && fullyStatic(vit->second))
                         {
                             d.shape = vit->second; // carry the value_info shape hint onto this node output
                         }
@@ -198,9 +217,12 @@ namespace vknn {
                         Shape declShape             = g.desc(oid).shape;
                         DType declDtype             = g.desc(oid).dtype;
                         g.desc(it->second).isOutput = true;
-                        g.desc(it->second).shape    = declShape;
-                        g.desc(it->second).dtype    = declDtype;
-                        oid                         = it->second;
+                        if (fullyStatic(declShape))
+                        {
+                            g.desc(it->second).shape = declShape;
+                        }
+                        g.desc(it->second).dtype = declDtype;
+                        oid                      = it->second;
                     }
                 }
             }
