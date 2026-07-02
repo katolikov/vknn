@@ -6,6 +6,8 @@
 namespace vknn {
 
     /// Operator types. Add a new value here + a name mapping + register kernels.
+    /// APPEND-ONLY: model_io serializes these as raw integers, so a value inserted
+    /// mid-enum shifts every later op and silently corrupts existing .vxm files.
     enum class OpType {
         Unknown = 0,
         Conv,          // Conv2D (incl. depthwise via group, pointwise 1x1)
@@ -50,7 +52,6 @@ namespace vknn {
         Greater,         // A >  B -> 1.0/0.0, elementwise with broadcasting (flat path)
         GreaterEqual,    // A >= B -> 1.0/0.0, elementwise with broadcasting (flat path)
         ConstantOfShape, // emit a tensor of the given shape filled with a scalar value
-        Range,           // arange(start, limit, delta) — scalar inputs, 1-D output
         EyeLike,         // identity-like matrix (ones on a diagonal) matching the input shape
         ScatterND,       // copy data, then scatter update slices at N-D index rows
         FusedSE,         // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
@@ -60,6 +61,7 @@ namespace vknn {
         ConvertLayout,
         // fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by markFp32)
         ConvertDtype,
+        Range, // arange(start, limit, delta) -- scalar inputs, 1-D output
     };
 
     // Fused-pointwise-chain limits (the pass splits chains that would exceed these).
