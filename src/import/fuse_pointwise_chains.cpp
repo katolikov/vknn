@@ -87,15 +87,18 @@ namespace vknn {
                 bcast   = bcastOf(g.desc(b).shape);
                 return true;
             }
-            if (b == chainVal && commutative)
+            if (b == chainVal)
             {
+                // chain value on the right: commutative ops encode as a normal step; the rest
+                // (Sub/Div/Pow, e.g. the (1-alpha)*x blend idiom) as a REVERSED step (kind 3,
+                // operand OP chain).
                 operand = a;
                 code    = codeIn;
-                kind    = 0;
+                kind    = commutative ? 0 : 3;
                 bcast   = bcastOf(g.desc(a).shape);
                 return true;
             }
-            return false; // non-commutative with chainVal as inputs[1] -> not fusable at this position
+            return false;
         };
         switch (n.type)
         {

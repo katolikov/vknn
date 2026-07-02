@@ -63,7 +63,7 @@ namespace vknn {
                 plan.step[s * 4 + 3] = bc;
                 plan.p0[s]           = pr[s * 2];
                 plan.p1[s]           = pr[s * 2 + 1];
-                if (kind == 0)
+                if (kind == 0 || kind == 3)
                 {
                     TensorId opd            = node.inputs[oi];
                     plan.step[s * 4 + 2]    = slotOf(opd);
@@ -102,7 +102,7 @@ namespace vknn {
                 plan.step[s * 4 + 3] = bc;
                 plan.p0[s]           = pr[s * 2];
                 plan.p1[s]           = pr[s * 2 + 1];
-                plan.step[s * 4 + 2] = (kind == 0) ? slotOf(node.inputs[oi]) : 0;
+                plan.step[s * 4 + 2] = (kind == 0 || kind == 3) ? slotOf(node.inputs[oi]) : 0;
             }
         }
     }

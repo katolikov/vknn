@@ -21,7 +21,7 @@
 layout(std430, binding = PW_EPI_BASE) readonly buffer PwPlan {
   int numSteps, rank, worldFlat, pad;
   int outDim[PW_EPI_MAXRANK];
-  int step[PW_EPI_MAXSTEPS*4];               // kind,code,opSlot,bcast per step
+  int step[PW_EPI_MAXSTEPS*4];               // kind(0 bin,1 unary,2 act,3 reversed bin),code,opSlot,bcast
   int stride[PW_EPI_MAXSTEPS*PW_EPI_MAXRANK]; // flat operand strides
   float p0[PW_EPI_MAXSTEPS]; float p1[PW_EPI_MAXSTEPS];
 } plan;
@@ -42,8 +42,8 @@ vec4 pwLoad4(int slot,int idx){ if(slot==1)return vec4(pwop1.d[idx*4],pwop1.d[id
   return vec4(pwop6.d[idx*4],pwop6.d[idx*4+1],pwop6.d[idx*4+2],pwop6.d[idx*4+3]); }
 float pw_apply(float acc, int outIdx){
   for(int s=0;s<plan.numSteps;++s){ int kind=plan.step[s*4],code=plan.step[s*4+1],slot=plan.step[s*4+2];
-    if(kind==0){ int rem=outIdx,oi=0; for(int k=plan.rank-1;k>=0;--k){ int c=rem%plan.outDim[k]; rem/=plan.outDim[k]; oi+=c*plan.stride[s*PW_EPI_MAXRANK+k]; }
-      acc=vx_binary(acc, pwLoad(slot,oi), code); }
+    if(kind==0||kind==3){ int rem=outIdx,oi=0; for(int k=plan.rank-1;k>=0;--k){ int c=rem%plan.outDim[k]; rem/=plan.outDim[k]; oi+=c*plan.stride[s*PW_EPI_MAXRANK+k]; }
+      float b=pwLoad(slot,oi); acc=(kind==3)?vx_binary(b,acc,code):vx_binary(acc,b,code); }
     else if(kind==1) acc=vx_unary(acc,code,plan.p0[s],plan.p1[s]);
     else             acc=vx_act(acc,code,plan.p0[s],plan.p1[s]);
     acc=float(TO_STORE(acc)); }
@@ -53,16 +53,17 @@ float pw_apply(float acc, int outIdx){
 // packedIdx and bc==1 (per-channel [N,C,1,1]) at the store's channel-block lane.
 float pw_apply_nc4(float acc, int packedIdx){ int HW=plan.outDim[0]; int lane=packedIdx&3, vecIdx=packedIdx>>2;
   for(int s=0;s<plan.numSteps;++s){ int kind=plan.step[s*4],code=plan.step[s*4+1],slot=plan.step[s*4+2],bc=plan.step[s*4+3];
-    if(kind==0){ int oi=(bc==3)?0:(bc==1)?(vecIdx/HW)*4+lane:packedIdx;
-      acc=vx_binary(acc, pwLoad(slot,oi), code); }
+    if(kind==0||kind==3){ int oi=(bc==3)?0:(bc==1)?(vecIdx/HW)*4+lane:packedIdx;
+      float b=pwLoad(slot,oi); acc=(kind==3)?vx_binary(b,acc,code):vx_binary(acc,b,code); }
     else if(kind==1) acc=vx_unary(acc,code,plan.p0[s],plan.p1[s]);
     else             acc=vx_act(acc,code,plan.p0[s],plan.p1[s]);
     acc=float(TO_STORE(acc)); }
   return acc; }
 vec4 pw_apply4(vec4 acc, int vecIdx){ int HW=plan.outDim[0];
   for(int s=0;s<plan.numSteps;++s){ int kind=plan.step[s*4],code=plan.step[s*4+1],slot=plan.step[s*4+2],bc=plan.step[s*4+3];
-    if(kind==0){ vec4 b=(bc==3)?vec4(pwLoad(slot,0)):pwLoad4(slot,(bc==1)?vecIdx/HW:vecIdx);
-      acc=vec4(vx_binary(acc.x,b.x,code),vx_binary(acc.y,b.y,code),vx_binary(acc.z,b.z,code),vx_binary(acc.w,b.w,code)); }
+    if(kind==0||kind==3){ vec4 b=(bc==3)?vec4(pwLoad(slot,0)):pwLoad4(slot,(bc==1)?vecIdx/HW:vecIdx);
+      acc=(kind==3)?vec4(vx_binary(b.x,acc.x,code),vx_binary(b.y,acc.y,code),vx_binary(b.z,acc.z,code),vx_binary(b.w,acc.w,code))
+                   :vec4(vx_binary(acc.x,b.x,code),vx_binary(acc.y,b.y,code),vx_binary(acc.z,b.z,code),vx_binary(acc.w,b.w,code)); }
     else if(kind==1) acc=vec4(vx_unary(acc.x,code,plan.p0[s],plan.p1[s]),vx_unary(acc.y,code,plan.p0[s],plan.p1[s]),vx_unary(acc.z,code,plan.p0[s],plan.p1[s]),vx_unary(acc.w,code,plan.p0[s],plan.p1[s]));
     else             acc=vec4(vx_act(acc.x,code,plan.p0[s],plan.p1[s]),vx_act(acc.y,code,plan.p0[s],plan.p1[s]),vx_act(acc.z,code,plan.p0[s],plan.p1[s]),vx_act(acc.w,code,plan.p0[s],plan.p1[s]));
     acc=vec4(float(TO_STORE(acc.x)),float(TO_STORE(acc.y)),float(TO_STORE(acc.z)),float(TO_STORE(acc.w))); }

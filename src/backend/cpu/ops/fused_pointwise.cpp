@@ -137,7 +137,7 @@ namespace vknn {
                 int   oi   = (int) st[s * 4 + 2];
                 float p0   = pr[s * 2 + 0];
                 float p1   = pr[s * 2 + 1];
-                if (kind == 0)
+                if (kind == 0 || kind == 3)
                 {
                     const RtTensor &O  = ctx.t(node.inputs[oi]);
                     auto            ob = broadcastStrides(O.shape);
@@ -151,7 +151,8 @@ namespace vknn {
                         }
                         io += ((lin / stride) % out[d]) * ob[d];
                     }
-                    acc = pwBinary(acc, O.host.f32()[io], code);
+                    float b = O.host.f32()[io];
+                    acc     = kind == 3 ? pwBinary(b, acc, code) : pwBinary(acc, b, code);
                 }
                 else if (kind == 1)
                 {

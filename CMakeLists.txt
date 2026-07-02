@@ -56,6 +56,8 @@ set(EMBEDDED_SHADERS_CPP ${VKNN_SHADER_GEN_DIR}/vknn_embedded_shaders.cpp)
 set(_spv_files "")
 if(VKNN_ENABLE_VULKAN AND SHADERCC)
   file(GLOB VKNN_COMP_SHADERS CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.comp)
+  # every .spv depends on every include: a .glsl edit must recompile all kernels that may pull it in
+  file(GLOB VKNN_GLSL_INCLUDES CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.glsl)
   foreach(_comp ${VKNN_COMP_SHADERS})
     get_filename_component(_name ${_comp} NAME_WE)
     # boundary_convert is built below as four cross-dtype variants, not the fp32/fp16 pair.
@@ -66,7 +68,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     add_custom_command(
       OUTPUT ${_spv}
       COMMAND ${SHADERCC} ${SHADERCC_PRE} -o ${_spv} ${_comp}
-      DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl
+      DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
       COMMENT "compile ${_name}.comp -> ${_name}.spv"
       VERBATIM)
     list(APPEND _spv_files ${_spv})
@@ -79,7 +81,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
       add_custom_command(
         OUTPUT ${_spv16}
         COMMAND ${SHADERCC} ${SHADERCC_PRE} -DUSE_FP16=1 -o ${_spv16} ${_comp}
-        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl
+        DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
         COMMENT "compile ${_name}.comp -DUSE_FP16 -> ${_name}_fp16.spv"
         VERBATIM)
       list(APPEND _spv_files ${_spv16})
@@ -102,7 +104,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
       add_custom_command(
         OUTPUT ${_spvEpi}
         COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -o ${_spvEpi} ${_comp}
-        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
+        DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
         COMMENT "compile ${_name}.comp -DPW_EPI -> ${_name}_epi.spv"
         VERBATIM)
       list(APPEND _spv_files ${_spvEpi})
@@ -111,7 +113,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         add_custom_command(
           OUTPUT ${_spvEpi16}
           COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
-          DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
           COMMENT "compile ${_name}.comp -DPW_EPI -DUSE_FP16 -> ${_name}_epi_fp16.spv"
           VERBATIM)
         list(APPEND _spv_files ${_spvEpi16})
@@ -123,7 +125,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         add_custom_command(
           OUTPUT ${_spvEpi16}
           COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -o ${_spvEpi16} ${_comp}
-          DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
           COMMENT "compile ${_name}.comp -DPW_EPI -> ${CMAKE_MATCH_1}_epi_fp16.spv"
           VERBATIM)
         list(APPEND _spv_files ${_spvEpi16})
