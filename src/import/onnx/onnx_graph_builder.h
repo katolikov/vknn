@@ -8,6 +8,7 @@
 #include "onnx_tensor_parser.h"
 #include "onnx_types.h"
 #include "vknn/graph.h"
+#include "vknn/logging.h"
 #include "vknn/op.h"
 #include <map>
 #include <string>
@@ -162,7 +163,37 @@ namespace vknn {
             // path. Instead: bind each node input to the nearest PRECEDING producer of that name, and give
             // each node output a FRESH TensorId (carrying its value_info shape hint). Declared graph outputs
             // re-point to their final producer.
+            //
+            // value_info hints are keyed by NAME, so a hint is attributable only when the name has exactly
+            // ONE producer. On a reused name the hint belongs to (at most) one of the instances; stamping
+            // it on all of them fabricates descs -- shape inference then builds on the lie (mis-sized
+            // buffers, backend-support gates flipping to CPU, wrong output shapes).
             void ssaResolveNodeIO() {
+                std::unordered_map<std::string, int> producerCount;
+                for (const auto &outs: nodeOuts)
+                {
+                    for (const std::string &s: outs)
+                    {
+                        if (!s.empty())
+                        {
+                            ++producerCount[s];
+                        }
+                    }
+                }
+                size_t reused = 0;
+                for (const auto &kv: producerCount)
+                {
+                    if (kv.second > 1)
+                    {
+                        ++reused;
+                    }
+                }
+                if (reused > 0)
+                {
+                    VKNN_WARN << "ONNX graph is not SSA: " << reused << " tensor name(s) have multiple producers "
+                              << "(un-deduped trace export). Inputs bind to the nearest preceding producer; "
+                              << "value_info shape hints for reused names are ignored.";
+                }
                 std::unordered_map<std::string, TensorId> latest;
                 for (TensorId id: g.inputs)
                 {
@@ -194,7 +225,7 @@ namespace vknn {
                         TensorDesc d;
                         d.name   = s;
                         auto vit = valueInfoShapes.find(s);
-                        if (vit != valueInfoShapes.end() && fullyStatic(vit->second))
+                        if (vit != valueInfoShapes.end() && fullyStatic(vit->second) && producerCount[s] == 1)
                         {
                             d.shape = vit->second; // carry the value_info shape hint onto this node output
                         }
