@@ -127,17 +127,21 @@ goldens.
 - yonosplat_v2 (2-view): the import segfault is fixed (three generic bugs above); the compile now
   converges honestly. Size + device gate results land below when the recompile finishes.
 
-## Device R3CY905E04M (SM-S942B, Xclipse 960, SPAL 25.2.39 / Vulkan 1.4.304): NOT a valid verification target
+## Second device R3CY905E04M: RoundingModeRTE miscompilation, root-caused and FIXED
 
-The unit executes large-footprint GPU workloads nondeterministically: the byte-identical 8-view
-vxm + inputs + flags that run byte-stably on the 940 produce different output bytes on EVERY run
-(fp16 AND fp32-compute, with per-op barriers, single submit, fusion off, tuning off, post-reboot).
-Golden metrics there (SNR 16–23 dB) are corruption noise, not precision. Everything software was
-eliminated: every kernel class the model uses is GPU==CPU exact on this device in isolation
-(model shapes, odd-M edge tiles, >65535-workgroup splits, both precisions, 12 sustained
-back-to-back runs stable); per-op type disables (ScatterND/GridSample/Einsum/Reduce/LayerNorm/
-Expand/DepthToSpace/Cast) all still race; all 10 CNNs are bit-exact at the same SNR floor as the
-940. Corruption correlates with total footprint (~3.4 GB live) and run depth (backbone + camera
-outputs stable, gaussian tail corrupt), and the unit repeatedly drops off USB under sustained
-load — consistent with a driver defect under memory pressure or unit-level hardware instability,
-not an engine bug. Fast + healthy runs: 8-view fp16 10.2 s / load 12.2 s (vs 17.0 s on the 940).
+The device (a newer driver generation than R5CWB2KWVJY) executed the 8-view encoder
+nondeterministically — different output bytes every run at BOTH precisions, surviving per-op
+barriers, single submit, fusion off, tuning off, and a reboot — with occasional kernel-level
+crashes/reboots under load. Golden metrics there (SNR 16–23 dB) were corruption noise. The
+localization ledger: every kernel class is GPU==CPU exact on this device in isolation (model
+shapes, odd-M edge tiles, >65535-workgroup dispatch splits, both precisions, 12 sustained
+back-to-back runs); per-op-type CPU disables all still raced; all 10 CNNs bit-exact at the same
+SNR floor as the other device. A per-shader-group bisect of the RoundingModeRTE execution mode
+landed it: **the driver miscompiles the GEMM kernels when they carry the float-controls
+execution mode.** The same driver also rounds `float16_t(x)` AND `packHalf2x16` toward zero, so
+the fix is an integer-math round-to-nearest-even store (`TO_STORE`/`vknnRte16`, shaders/
+store16.glsl) in the GEMM family, execution mode retained everywhere else. Verified: on the
+older driver all outputs byte-match the execution-mode build (the conversion is bit-exact RTE);
+on this device the encoder is now deterministic at the full RTE band — SNR 46.0–55.2 dB,
+digit-identical to the other device's table. Timing here: 8-view fp16 10.2 s run / 12.2 s load
+(vs 17.0 s / 12.2 s).
