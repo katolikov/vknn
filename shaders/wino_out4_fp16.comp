@@ -9,6 +9,11 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer M { f16vec4 mbuf[]; };
 layout(std430, binding = 1) readonly buffer Bs { f16vec4 bias[]; };
@@ -49,6 +54,11 @@ void main() {
 #define ACT(v)                                                                                    \
   f16vec4(vx_act((v).x, pc.act, pc.actLo, pc.actHi), vx_act((v).y, pc.act, pc.actLo, pc.actHi),   \
           vx_act((v).z, pc.act, pc.actLo, pc.actHi), vx_act((v).w, pc.act, pc.actLo, pc.actHi))
+#ifdef PW_EPI
+#define PW_ST(v, idx) dst[idx] = f16vec4(pw_apply4(vec4(ACT(v)), idx))
+#else
+#define PW_ST(v, idx) dst[idx] = ACT(v)
+#endif
   for (int i = 0; i < 4; ++i) {
     if (oy + i >= pc.OH) continue;
     int row = obase + (oy + i) * pc.OW;
@@ -56,10 +66,11 @@ void main() {
     vec4 y1 = t[i][1] - t[i][2] + 2.0 * t[i][3] - 2.0 * t[i][4] + b;
     vec4 y2 = t[i][1] + t[i][2] + 4.0 * t[i][3] + 4.0 * t[i][4] + b;
     vec4 y3 = t[i][1] - t[i][2] + 8.0 * t[i][3] - 8.0 * t[i][4] + t[i][5] + b;
-    if (ox + 0 < pc.OW) dst[row + ox + 0] = ACT(y0);
-    if (ox + 1 < pc.OW) dst[row + ox + 1] = ACT(y1);
-    if (ox + 2 < pc.OW) dst[row + ox + 2] = ACT(y2);
-    if (ox + 3 < pc.OW) dst[row + ox + 3] = ACT(y3);
+    if (ox + 0 < pc.OW) PW_ST(y0, row + ox + 0);
+    if (ox + 1 < pc.OW) PW_ST(y1, row + ox + 1);
+    if (ox + 2 < pc.OW) PW_ST(y2, row + ox + 2);
+    if (ox + 3 < pc.OW) PW_ST(y3, row + ox + 3);
   }
 #undef ACT
+#undef PW_ST
 }

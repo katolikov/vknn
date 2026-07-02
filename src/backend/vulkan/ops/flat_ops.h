@@ -5,6 +5,7 @@
 // one of these and dispatch to it when their tensors are flat; Transpose/Slice are flat-only.
 #pragma once
 #include "import/passes.h" // readI64Param
+#include "pw_plan.h"
 #include "vk_op_common.h"
 
 namespace vknn {
@@ -289,6 +290,7 @@ namespace vknn {
                 int outer, axis, inner;
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
+            PwEpi                                epi;
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 Shape   s    = env.graph->desc(node.inputs[0]).shape;
                 int     rank = (int) s.size();
@@ -307,11 +309,15 @@ namespace vknn {
                     inner *= s[k];
                 }
                 pc = {(int) outer, (int) s[axis], (int) inner};
-                pipe = env.pipeline(shader("flat_softmax", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
+                epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
+                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 // One workgroup per row (flat_softmax does the LDS reduction across the workgroup).
-                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), (uint32_t) ((int64_t) pc.outer * pc.inner));
+                VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
+                std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst};
+                epi.append(bufs, node, env, dst);
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t) ((int64_t) pc.outer * pc.inner));
             }
         };
 

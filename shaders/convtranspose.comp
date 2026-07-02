@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 // Flat (row-major NCHW) ConvTranspose2D: one thread per output element, gather form. For each output
 // pixel we loop the kernel taps and accumulate the input pixels that map to it under the stride.
 // Weight layout is ONNX ConvTranspose: W[Cin, Cout/group, kH, kW]. Mirrors the CPU oracle exactly.
@@ -45,5 +49,8 @@ void main() {
       }
     }
   }
+#ifdef PW_EPI
+  acc = pw_apply(float(STORE(acc)), int(gid));
+#endif
   ys[gid] = STORE(acc);
 }

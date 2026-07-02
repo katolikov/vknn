@@ -7,6 +7,11 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 #define WTILE 4
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
@@ -70,10 +75,15 @@ void main() {
   int dbase = (n * Coutb + ocb) * HW;
   for (int p = 0; p < WTILE; ++p) {
     int pix = p0 + p;
-    if (pix < HW)
-      dst[dbase + pix] = f16vec4(vx_act(acc[p].x, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].y, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].z, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].w, pc.act, pc.actLo, pc.actHi));
+    if (pix < HW) {
+      vec4 v = vec4(vx_act(acc[p].x, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].y, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].z, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+      v = pw_apply4(vec4(f16vec4(v)), dbase + pix);
+#endif
+      dst[dbase + pix] = f16vec4(v);
+    }
   }
 }

@@ -1,6 +1,7 @@
 // Fused depthwise-3x3 + 1x1-project on the GPU. One workgroup per output pixel; depthwise output
 // staged in LDS (computed once), then projected. Gated by supportsNode to large-spatial fp16
 // blocks.
+#include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
@@ -13,6 +14,7 @@ namespace vknn {
         struct FusedDwPwOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          dww, dwb, pww, pwb;
+            PwEpi                                epi;
             DwPwPC                               pc {};
             int64_t                              groups_ = 0;
             bool                                 hasRes  = false;
@@ -92,7 +94,11 @@ namespace vknn {
                     }
                     return b;
                 });
-                pipe = env.pipeline(shader("fused_dwpw", env.useFp16), hasRes ? 7 : 6, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
+                epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
+                // With the epilogue attached the plan/operands bind after slot 6, so the layout always
+                // includes the Res binding (dummy-bound when there is no fused residual).
+                uint32_t nbuf = epi.active ? 7 + epi.extraBufs() : (hasRes ? 7u : 6u);
+                pipe = env.pipeline(shader((std::string("fused_dwpw") + epi.suffix()).c_str(), env.useFp16), nbuf, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer           *exp = env.devBuf(node.inputs[0]);
@@ -101,7 +107,11 @@ namespace vknn {
                 if (hasRes)
                 {
                     b.push_back(env.devBuf(node.fusedResidual)->handle());
+                } else if (epi.active)
+                {
+                    b.push_back(dst->handle()); // epilogue buffers bind after slot 6: fill the unused Res slot
                 }
+                epi.append(b, node, env, dst->handle());
                 pipe->dispatch(cmd, b, &pc, sizeof(pc), (uint32_t) groups_);
             }
         };

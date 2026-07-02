@@ -36,7 +36,7 @@ namespace vknn {
                 {
                     return false;
                 }
-                return !(n.inputs.size() > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
+                return !(pwCoreInputs(n) > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
             }
             case OpType::Pad: {
                 // Flat row-major pad (constant/edge/reflect). Needs static pads (attr or a constant

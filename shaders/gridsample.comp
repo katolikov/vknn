@@ -4,6 +4,10 @@
 // flat float buffer (2 coords per output pixel), uploaded raw by the op (works when the grid is a
 // constant). MODE: 0=bilinear 1=nearest. PADMODE: 0=zeros 1=border 2=reflection.
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
 layout(constant_id = 0) const int MODE = 0;
 layout(constant_id = 1) const int PADMODE = 0;
 layout(local_size_x = 64) in;
@@ -54,5 +58,8 @@ void main() {
     vec4 v10 = fetchBlk(sb, x0, y0 + 1, Cb), v11 = fetchBlk(sb, x0 + 1, y0 + 1, Cb);
     v = (1.0 - wy) * ((1.0 - wx) * v00 + wx * v01) + wy * ((1.0 - wx) * v10 + wx * v11);
   }
+#ifdef PW_EPI
+  v = pw_apply4(v, (n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox);
+#endif
   dst[(n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox] = vec4(v);
 }

@@ -31,4 +31,16 @@ namespace vknn {
         TensorId fusedBias = kNoTensor;
     };
 
+    /// The node's own operand count. fusePointwiseChains appends its chain-operand tensors to
+    /// node.inputs (from index pw_opbase on) so liveness/DCE/scheduling see them; any positional read
+    /// of optional inputs (bias, scales, axes, ...) must bound the search by this, not inputs.size().
+    inline size_t pwCoreInputs(const Node &n) {
+        if (!n.attr.has("pw_steps"))
+        {
+            return n.inputs.size();
+        }
+        int64_t base = n.attr.geti("pw_opbase", (int64_t) n.inputs.size());
+        return (size_t) (base < 0 ? 0 : base);
+    }
+
 } // namespace vknn

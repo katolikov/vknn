@@ -2,6 +2,10 @@
 // Depthwise Conv2D (group == channels), NC4HW4. One thread = one channel-block at (oy,ox).
 // weight layout: [Cb][KH][KW][4]   bias: [Cb*4]
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { float src[]; };
 layout(std430, binding = 1) readonly  buffer Wt  { float wt[]; };
@@ -37,6 +41,11 @@ void main() {
     }
   }
   int didx = ((((n * Cb + cb) * pc.OH + oy) * pc.OW + ox) * 4);
-  for (int l = 0; l < 4; ++l)
-    dst[didx + l] = vx_act(acc[l], pc.act, pc.actLo, pc.actHi);
+  for (int l = 0; l < 4; ++l) {
+    float v = vx_act(acc[l], pc.act, pc.actLo, pc.actHi);
+#ifdef PW_EPI
+    v = pw_apply_nc4(v, didx + l);
+#endif
+    dst[didx + l] = v;
+  }
 }

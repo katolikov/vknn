@@ -5,6 +5,7 @@
 // buffers in prepare(). Output shape == input shape. supportsNode gates to
 // scale/bias-as-initializers.
 #include "flat_ops.h"
+#include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
@@ -20,6 +21,7 @@ namespace vknn {
             std::shared_ptr<vk::ComputePipeline> pipe;
             LnPC                                 pc {};
             std::shared_ptr<vk::Buffer>          gammaBuf, betaBuf;
+            PwEpi                                epi;
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g    = *env.graph;
@@ -44,7 +46,7 @@ namespace vknn {
                     norm = 1;
                 }
                 int64_t outer   = numElements(s) / norm;
-                bool    hasBeta = node.inputs.size() > 2 && node.inputs[2] != kNoTensor && g.isInitializer(node.inputs[2]);
+                bool    hasBeta = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor && g.isInitializer(node.inputs[2]);
                 pc              = {(int) outer, (int) norm, hasBeta ? 1 : 0, node.attr.getf("epsilon", 1e-5f)};
 
                 // gamma (Scale) is a 1-D [norm] initializer; upload it flat.
@@ -61,14 +63,16 @@ namespace vknn {
                 {
                     betaBuf = upload(*env.ctx, std::vector<float>((size_t) norm, 0.0f), env.useFp16);
                 }
-                pipe =
-                    env.pipeline(shader("flat_layernorm", env.useFp16), 4, sizeof(LnPC), std::vector<uint32_t> {});
+                epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
+                pipe = env.pipeline(shader((std::string("flat_layernorm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(LnPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 // One workgroup per row (flat_layernorm does the LDS reduction across the workgroup).
-                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), gammaBuf->handle(), betaBuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc),
-                               (uint32_t) pc.outer);
+                VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
+                std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), gammaBuf->handle(), betaBuf->handle(), dst};
+                epi.append(bufs, node, env, dst);
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t) pc.outer);
             }
         };
 

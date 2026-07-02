@@ -4,6 +4,11 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { f16vec4 dst[]; };
@@ -27,5 +32,8 @@ void main() {
       m = max(m, vec4(src[((n * Cb + cb) * pc.H + iy) * pc.W + ix]));
     }
   }
+#ifdef PW_EPI
+  m = pw_apply4(vec4(f16vec4(m)), ((n * Cb + cb) * pc.OH + oy) * pc.OW + ox);
+#endif
   dst[((n * Cb + cb) * pc.OH + oy) * pc.OW + ox] = f16vec4(m);
 }

@@ -8,6 +8,11 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 #define TS 8
 #define HS 10  // TS + 2 (halo)
 layout(local_size_x = 64) in;
@@ -63,9 +68,13 @@ void main() {
   }
   if (ox < pc.OW && oy < pc.OH) {
     int d = (n * Coutb + ocb) * pc.OH * pc.OW + oy * pc.OW + ox;
-    dst[d] = f16vec4(vx_act(acc.x, pc.act, pc.actLo, pc.actHi),
-                     vx_act(acc.y, pc.act, pc.actLo, pc.actHi),
-                     vx_act(acc.z, pc.act, pc.actLo, pc.actHi),
-                     vx_act(acc.w, pc.act, pc.actLo, pc.actHi));
+    vec4 v = vec4(vx_act(acc.x, pc.act, pc.actLo, pc.actHi),
+                  vx_act(acc.y, pc.act, pc.actLo, pc.actHi),
+                  vx_act(acc.z, pc.act, pc.actLo, pc.actHi),
+                  vx_act(acc.w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+    v = pw_apply4(vec4(f16vec4(v)), d);
+#endif
+    dst[d] = f16vec4(v);
   }
 }

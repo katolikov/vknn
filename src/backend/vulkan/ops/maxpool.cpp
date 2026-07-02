@@ -1,4 +1,5 @@
 // MaxPool2D on the GPU (NC4HW4).
+#include "pw_plan.h"
 #include "vk_op_common.h"
 
 namespace vknn {
@@ -7,6 +8,7 @@ namespace vknn {
         struct MaxPoolOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             MaxPC                                pc {};
+            PwEpi                                epi;
             int64_t                              total = 0;
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -22,13 +24,16 @@ namespace vknn {
                 pc       = {(int) x.n,   (int) x.c,   (int) x.h,   (int) x.w,   (int) y.h,    (int) y.w,
                             (int) ks[0], (int) ks[1], (int) st[0], (int) st[1], (int) pad[0], (int) pad[1]};
                 total    = x.n * cBlocks(x.c) * y.h * y.w;
-                pipe = env.pipeline(shader("maxpool", env.useFp16), 2, sizeof(MaxPC), std::vector<uint32_t> {});
+                epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
+                pipe = env.pipeline(shader((std::string("maxpool") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(MaxPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                vk::Buffer *src = env.devBuf(node.inputs[0]);
-                vk::Buffer *dst = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), groups(total, 64));
+                vk::Buffer           *src  = env.devBuf(node.inputs[0]);
+                vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
+                std::vector<VkBuffer> bufs = {src->handle(), dst->handle()};
+                epi.append(bufs, node, env, dst->handle());
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
             }
         };
 

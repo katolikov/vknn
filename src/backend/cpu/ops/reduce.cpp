@@ -14,7 +14,7 @@ namespace vknn {
                 RtTensor            &Y    = ctx.t(node.outputs[0]);
                 int                  rank = (int) X.shape.size();
                 std::vector<int64_t> axes = node.attr.getints("axes");
-                if (axes.empty() && node.inputs.size() > 1 && node.inputs[1] != kNoTensor)
+                if (axes.empty() && pwCoreInputs(node) > 1 && node.inputs[1] != kNoTensor)
                 {
                     const RtTensor &A = ctx.t(node.inputs[1]);
                     axes.assign(A.host.i64(), A.host.i64() + A.elems());

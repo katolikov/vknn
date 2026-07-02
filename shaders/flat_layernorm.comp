@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 #include "common.glsl"
 // LayerNormalization, one workgroup per row. The threads cooperatively reduce sum and sum-of-squares
 // of the row's `norm` elements through LDS (fp32), so a wide row (norm = 1024 in the encoder) is
@@ -45,6 +49,9 @@ void main() {
   for (int j = int(t); j < pc.norm; j += WG) {
     float y = (float(s[base + j]) - mean) * inv * float(gamma[j]);
     if (pc.hasBeta != 0) y += float(beta[j]);
+#ifdef PW_EPI
+    y = pw_apply(float(STORE(y)), base + j);
+#endif
     d[base + j] = STORE(y);
   }
 }

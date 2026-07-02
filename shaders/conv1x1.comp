@@ -2,6 +2,10 @@
 // Pointwise 1x1 conv (group=1, stride=1, no pad), NC4HW4, fp32. Register-tiled like the fp16
 // variant: each thread does WTILE output pixels for one output channel-block, reusing weights.
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 5
+#include "pw_epilogue.glsl"
+#endif
 #define WTILE 4
 layout(constant_id = 0) const int HAS_RES = 0;  // fused residual add (out = act(conv + res))
 layout(local_size_x = 64) in;
@@ -53,10 +57,14 @@ void main() {
     if (pix < HW) {
       vec4 v = acc[p];
       if (HAS_RES != 0) v += res[dbase + pix];
-      dst[dbase + pix] = vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi),
-                              vx_act(v.y, pc.act, pc.actLo, pc.actHi),
-                              vx_act(v.z, pc.act, pc.actLo, pc.actHi),
-                              vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+      v = vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi),
+               vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+               vx_act(v.z, pc.act, pc.actLo, pc.actHi),
+               vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+      v = pw_apply4(v, dbase + pix);
+#endif
+      dst[dbase + pix] = v;
     }
   }
 }

@@ -428,7 +428,7 @@ namespace vknn {
                     {
                         // ONNX Resize inputs: X, roi, scales, sizes (some optional/empty). Prefer sizes if given.
                         auto getInit = [&](int idx, std::vector<float> &f, std::vector<int64_t> &i64) {
-                            if (idx >= (int) nd.inputs.size() || nd.inputs[idx] == kNoTensor)
+                            if (idx >= (int) pwCoreInputs(nd) || nd.inputs[idx] == kNoTensor)
                             {
                                 return false;
                             }

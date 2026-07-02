@@ -222,7 +222,7 @@ namespace vknn {
                 {
                     return false;
                 }
-                return !(nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]));
+                return !(pwCoreInputs(nd) > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]));
             }
             if (nd.type == OpType::MatMul)
             {
@@ -302,7 +302,7 @@ namespace vknn {
                 {
                     return false;
                 }
-                if (nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
+                if (pwCoreInputs(nd) > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
                 {
                     return false;
                 }
@@ -325,7 +325,7 @@ namespace vknn {
                 {
                     return false;
                 }
-                return !(nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]));
+                return !(pwCoreInputs(nd) > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]));
             }
             if (nd.type == OpType::Unsqueeze)
             {

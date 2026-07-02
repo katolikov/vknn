@@ -84,10 +84,20 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         VERBATIM)
       list(APPEND _spv_files ${_spv16})
     endif()
-    # MatMul carries a fused pointwise-chain epilogue (fusePointwiseChains attaching to a
-    # MatMul/Gemm producer): the curated matmul kernels also emit a PW_EPI variant (+ its fp16
-    # pairing) that pulls in shaders/pw_epilogue.glsl. Not blanket-added to every shader.
-    if(_name MATCHES "^matmul(_tiled)?(_bias)?$")
+    # Producer kernels that can carry a fused pointwise-chain epilogue (fusePointwiseChains
+    # attaching a chain to its producer) also emit PW_EPI variants that pull in
+    # shaders/pw_epilogue.glsl. Curated per rolled-out family — not blanket-added to every shader:
+    #   plain/templated <stem>.comp      -> <stem>_epi.spv (+ <stem>_epi_fp16.spv when templated)
+    #   hand-written    <stem>_fp16.comp -> <stem>_epi_fp16.spv
+    set(_epi_stems
+        matmul matmul_bias matmul_tiled matmul_tiled_bias fc
+        flat_softmax flat_layernorm flat_reduce softmax
+        gridsample resize convtranspose
+        avgpool avgpool2d maxpool
+        conv conv_reg conv1x1 conv1x1_s2 conv3x3_lds conv1x1_reduce dwconv fused_dwpw
+        wino_out wino_out4 wino_full wino_fused wino_fused2)
+    list(FIND _epi_stems ${_name} _epiPlain)
+    if(_epiPlain GREATER -1)
       set(_spvEpi ${VKNN_SHADER_GEN_DIR}/${_name}_epi.spv)
       add_custom_command(
         OUTPUT ${_spvEpi}
@@ -96,14 +106,28 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         COMMENT "compile ${_name}.comp -DPW_EPI -> ${_name}_epi.spv"
         VERBATIM)
       list(APPEND _spv_files ${_spvEpi})
-      set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi_fp16.spv)
-      add_custom_command(
-        OUTPUT ${_spvEpi16}
-        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
-        DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
-        COMMENT "compile ${_name}.comp -DPW_EPI -DUSE_FP16 -> ${_name}_epi_fp16.spv"
-        VERBATIM)
-      list(APPEND _spv_files ${_spvEpi16})
+      if(_src MATCHES "precision.glsl")
+        set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi_fp16.spv)
+        add_custom_command(
+          OUTPUT ${_spvEpi16}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
+          DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
+          COMMENT "compile ${_name}.comp -DPW_EPI -DUSE_FP16 -> ${_name}_epi_fp16.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvEpi16})
+      endif()
+    elseif(_name MATCHES "^(.+)_fp16$")
+      list(FIND _epi_stems ${CMAKE_MATCH_1} _epiHand)
+      if(_epiHand GREATER -1)
+        set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${CMAKE_MATCH_1}_epi_fp16.spv)
+        add_custom_command(
+          OUTPUT ${_spvEpi16}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -o ${_spvEpi16} ${_comp}
+          DEPENDS ${_comp} ${VKNN_SHADER_DIR}/common.glsl ${VKNN_SHADER_DIR}/precision.glsl ${VKNN_SHADER_DIR}/store16.glsl ${VKNN_SHADER_DIR}/pw_epilogue.glsl
+          COMMENT "compile ${_name}.comp -DPW_EPI -> ${CMAKE_MATCH_1}_epi_fp16.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvEpi16})
+      endif()
     endif()
   endforeach()
 

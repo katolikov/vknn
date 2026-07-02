@@ -30,9 +30,7 @@ namespace vknn {
             static constexpr int                 kTile    = 128; // must match TM/TN in matmul_tiled.comp
 
             // Set when a pointwise chain (fusePointwiseChains) is attached to this MatMul's store.
-            std::shared_ptr<vk::Buffer>              pwPlanBuf;
-            std::vector<TensorId>                    pwOperands;
-            std::vector<std::shared_ptr<vk::Buffer>> pwHolds;
+            PwEpi epi;
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g   = *env.graph;
@@ -162,17 +160,9 @@ namespace vknn {
                 // A pointwise chain (fusePointwiseChains) attached to this MatMul runs in the kernel's own
                 // epilogue (shaders/pw_epilogue.glsl), appended at binding nbuf. The plan indexes the flat
                 // row-major output world (MatMul's output is always row-major, never NC4HW4).
-                bool hasEpi = node.attr.has("pw_steps");
-                if (hasEpi)
-                {
-                    name += "_epi";
-                    PwPlanCPU plan {};
-                    int       pwTotal = 0;
-                    buildPwPlan(g, node, /*flat=*/true, out, plan, pwOperands, pwTotal);
-                    pwPlanBuf = uploadPwPlan(env, plan);
-                    pwHolds.assign(pwOperands.size(), nullptr);
-                    nbuf += 1u + (uint32_t) kPwMaxOperands;
-                }
+                epi.prepare(node, env, /*flat=*/true, out);
+                name += epi.suffix();
+                nbuf += epi.extraBufs();
 
                 pipe = env.pipeline(shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulPC), std::vector<uint32_t> {});
             }
@@ -187,20 +177,7 @@ namespace vknn {
                 {
                     bufs.push_back(biasBuf->handle());
                 }
-                if (node.attr.has("pw_steps"))
-                {
-                    bufs.push_back(pwPlanBuf->handle());
-                    for (int k = 0; k < kPwMaxOperands; ++k)
-                    {
-                        if (k < (int) pwOperands.size())
-                        {
-                            bufs.push_back(operandBuf(env, pwOperands[k], pwHolds[k])->handle());
-                        } else
-                        {
-                            bufs.push_back(dstHandle); // dummy binding; unused past pwOperands.size()
-                        }
-                    }
-                }
+                epi.append(bufs, node, env, dstHandle);
                 if (useTiled)
                 {
                     uint32_t gx = (uint32_t) ((pc.N + kTile - 1) / kTile);

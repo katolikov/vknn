@@ -13,7 +13,7 @@ namespace vknn {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X       = ctx.t(node.inputs[0]);
                 const RtTensor &G       = ctx.t(node.inputs[1]);
-                bool            hasBeta = node.inputs.size() > 2 && node.inputs[2] != kNoTensor;
+                bool            hasBeta = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor;
                 const float    *beta    = hasBeta ? ctx.t(node.inputs[2]).host.f32() : nullptr;
 
                 RtTensor    &Y     = ctx.t(node.outputs[0]);

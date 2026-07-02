@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 // GlobalAveragePool, NC4HW4, fp16/fp32 storage + fp32 accumulation. One workgroup per (n, channel-block);
 // its 256 threads cooperatively reduce over H*W, then tree-reduce the partial sums in shared memory.
 #include "common.glsl"
@@ -33,6 +37,12 @@ void main() {
   if (t == 0u) {
     vec4 r = partial[0] / float(hw);
     int didx = (n * Cb + cb) * 4;
-    for (int l = 0; l < 4; ++l) dst[didx + l] = STORE(r[l]);
+    for (int l = 0; l < 4; ++l) {
+      float v = r[l];
+#ifdef PW_EPI
+      v = pw_apply_nc4(float(STORE(v)), didx + l);
+#endif
+      dst[didx + l] = STORE(v);
+    }
   }
 }

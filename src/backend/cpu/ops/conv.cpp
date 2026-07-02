@@ -10,7 +10,7 @@ namespace vknn {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X       = ctx.t(node.inputs[0]);
                 const RtTensor &W       = ctx.t(node.inputs[1]);
-                const bool      hasBias = node.inputs.size() > 2 && node.inputs[2] != kNoTensor && node.inputs[2] != node.fusedResidual;
+                const bool      hasBias = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor && node.inputs[2] != node.fusedResidual;
                 const RtTensor *B       = hasBias ? &ctx.t(node.inputs[2]) : nullptr;
                 RtTensor       &Y       = ctx.t(node.outputs[0]);
 

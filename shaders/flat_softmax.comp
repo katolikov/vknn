@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 #include "common.glsl"
 // Softmax over one axis. One workgroup per row (the `axis` elements at stride `inner`); the threads
 // cooperatively reduce max + sum through LDS, so a wide attention row (axis up to a few thousand) is
@@ -45,6 +49,11 @@ void main() {
   float rsum = 1.0 / red[0];
   barrier();
 
-  for (int a = int(t); a < pc.axis; a += WG)
-    d[base + a * pc.inner] = STORE(exp(float(s[base + a * pc.inner]) - m) * rsum);
+  for (int a = int(t); a < pc.axis; a += WG) {
+    float v = exp(float(s[base + a * pc.inner]) - m) * rsum;
+#ifdef PW_EPI
+    v = pw_apply(float(STORE(v)), base + a * pc.inner);
+#endif
+    d[base + a * pc.inner] = STORE(v);
+  }
 }

@@ -9,6 +9,11 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 5
+#include "pw_epilogue.glsl"
+#endif
 #define WTILE 4
 layout(constant_id = 0) const int HAS_RES = 0; // fused residual add (out = act(conv + res))
 layout(local_size_x = 64) in;
@@ -65,8 +70,12 @@ void main() {
     if (opix < OHW) {
       vec4 v = acc[p];
       if (HAS_RES != 0) v += vec4(res[dbase + opix]);
-      dst[dbase + opix] = f16vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi), vx_act(v.y, pc.act, pc.actLo, pc.actHi),
-                                  vx_act(v.z, pc.act, pc.actLo, pc.actHi), vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+      v = vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi), vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+               vx_act(v.z, pc.act, pc.actLo, pc.actHi), vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+      v = pw_apply4(vec4(f16vec4(v)), dbase + opix);
+#endif
+      dst[dbase + opix] = f16vec4(v);
     }
   }
 }

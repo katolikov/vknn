@@ -4,6 +4,10 @@
 // im2col, no patch buffer, no LDS). A weight vec4 is loaded once per (icb,ky,kx) and reused across
 // all WTILE pixels. Per-pixel output coords are hoisted OUT of the hot loop (no div/mod inside). fp16.
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 #define WTILE 4
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
@@ -67,10 +71,15 @@ void main() {
   int dbase = (n * Coutb + ocb) * HW;
   for (int p = 0; p < WTILE; ++p) {
     int pix = p0 + p;
-    if (pix < HW)
-      dst[dbase + pix] = vec4(vx_act(acc[p].x, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].y, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].z, pc.act, pc.actLo, pc.actHi),
-                                 vx_act(acc[p].w, pc.act, pc.actLo, pc.actHi));
+    if (pix < HW) {
+      vec4 v = vec4(vx_act(acc[p].x, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].y, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].z, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+      v = pw_apply4(v, dbase + pix);
+#endif
+      dst[dbase + pix] = v;
+    }
   }
 }

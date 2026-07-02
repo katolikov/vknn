@@ -15,6 +15,11 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer U { f16vec4 ubuf[]; };
 layout(std430, binding = 1) readonly buffer Src { f16vec4 src[]; };
@@ -140,7 +145,10 @@ void main() {
     y += c1 - c2 - c3;
 
   int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
-  dst[obase + oy * pc.OW + ox] =
-      f16vec4(vx_act(y.x, pc.act, pc.actLo, pc.actHi), vx_act(y.y, pc.act, pc.actLo, pc.actHi),
-              vx_act(y.z, pc.act, pc.actLo, pc.actHi), vx_act(y.w, pc.act, pc.actLo, pc.actHi));
+  vec4 pv = vec4(f16vec4(vx_act(y.x, pc.act, pc.actLo, pc.actHi), vx_act(y.y, pc.act, pc.actLo, pc.actHi),
+                         vx_act(y.z, pc.act, pc.actLo, pc.actHi), vx_act(y.w, pc.act, pc.actLo, pc.actHi)));
+#ifdef PW_EPI
+  pv = pw_apply4(pv, obase + oy * pc.OW + ox);
+#endif
+  dst[obase + oy * pc.OW + ox] = f16vec4(pv);
 }

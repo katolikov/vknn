@@ -1,6 +1,10 @@
 #version 450
 // Resize (spatial) over NC4HW4 (fp16). nearest + bilinear; coord modes match the CPU oracle.
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
@@ -41,5 +45,8 @@ void main() {
     vec4 c = vec4(src[sb + iy1 * pc.IW + cx0]), d = vec4(src[sb + iy1 * pc.IW + ix1]);
     v = a * (1.0 - wy) * (1.0 - wx) + b * (1.0 - wy) * wx + c * wy * (1.0 - wx) + d * wy * wx;
   }
+#ifdef PW_EPI
+  v = pw_apply4(v, (n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox);
+#endif
   dst[(n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox] = vec4(v);
 }

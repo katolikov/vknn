@@ -2,6 +2,10 @@
 // Fully-connected / Gemm classifier. Input is NC4HW4 with H=W=1 (flat==channel).
 // weight prepacked row-major [Cout][Cin]; bias [Cout]; output [Cout] (== NCHW [1,Cout]).
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { float src[]; };
 layout(std430, binding = 1) readonly  buffer Wt  { float wt[]; };
@@ -18,5 +22,10 @@ void main() {
   uint wbase = oc * uint(pc.Cin);
   uint sbase = m * uint(pc.srcStride);
   for (int ic = 0; ic < pc.Cin; ++ic) acc += wt[wbase + uint(ic)] * src[sbase + uint(ic)];
-  dst[m * uint(pc.dstStride) + oc] = vx_act(acc, pc.act, pc.actLo, pc.actHi);
+  float v = vx_act(acc, pc.act, pc.actLo, pc.actHi);
+#ifdef PW_EPI
+  int di = int(m * uint(pc.dstStride) + oc);
+  v = (plan.worldFlat != 0) ? pw_apply(float(STORE(v)), di) : pw_apply_nc4(float(STORE(v)), di);
+#endif
+  dst[m * uint(pc.dstStride) + oc] = v;
 }

@@ -2,6 +2,10 @@
 // Channel-axis Softmax over NC4HW4 (fp16), HW==1 (classifier/attention logits [N,C]). One workgroup
 // per image: max-reduce over channels, exp, sum-reduce, divide. Standard max-subtract for stability.
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
@@ -35,6 +39,9 @@ void main() {
     vec4 v = vec4(src[n * Cb + cb]);
     vec4 o = vec4(0.0);
     for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) o[l] = exp(v[l] - mx) / sum;
+#ifdef PW_EPI
+    o = pw_apply4(o, n * Cb + cb);
+#endif
     dst[n * Cb + cb] = vec4(o);
   }
 }

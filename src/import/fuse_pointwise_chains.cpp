@@ -67,6 +67,10 @@ namespace vknn {
             {
                 return 0;
             }
+            if (numElements(s) <= 1)
+            {
+                return 3; // scalar splat (the only rank-independent broadcast NC4 execution supports)
+            }
             if (s.size() == 4 && run.size() == 4 && s[0] == run[0] && s[1] == run[1] && s[2] == 1 && s[3] == 1)
             {
                 return 1;
@@ -177,10 +181,28 @@ namespace vknn {
     }
 
     // Ops whose kernel can apply a pointwise-chain epilogue at its store (the chain folds into the
-    // producer instead of a standalone node). Grows per rollout phase as each backend kernel gains the
-    // epilogue; the pass only attaches to a producer whose GPU kernel actually reads pw_steps.
+    // producer instead of a standalone node). Every listed type's GPU kernel family carries an _epi
+    // variant reading pw_steps; anything else keeps the standalone FusedPointwise node.
     static bool pwEpilogueCapable(OpType t) {
-        return t == OpType::MatMul || t == OpType::Gemm;
+        switch (t)
+        {
+            case OpType::MatMul:
+            case OpType::Gemm:
+            case OpType::Conv:
+            case OpType::ConvTranspose:
+            case OpType::FusedDwPw:
+            case OpType::Softmax:
+            case OpType::LayerNorm:
+            case OpType::Reduce:
+            case OpType::GridSample:
+            case OpType::Resize:
+            case OpType::MaxPool:
+            case OpType::AvgPool:
+            case OpType::GlobalAvgPool:
+                return true;
+            default:
+                return false;
+        }
     }
 
     void fusePointwiseChains(Graph &g) {
@@ -218,7 +240,7 @@ namespace vknn {
         };
 
         std::set<int> removed;
-        int           fused = 0;
+        int           fused = 0, attached = 0;
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             if (removed.count((int) i) || !pwEligible(g.nodes[i]) || g.nodes[i].inputs.empty())
@@ -294,6 +316,10 @@ namespace vknn {
                 {
                     break;
                 }
+                if (!wantFlat && bcast == 2)
+                {
+                    break; // NC4HW4 chain execution broadcasts same-shape or per-channel only
+                }
                 int oi = -1;
                 if (operand != kNoTensor)
                 {
@@ -356,6 +382,30 @@ namespace vknn {
             // extending its (widely-consumed) output's lifetime so the pool can't reuse buffers -> a
             // memory blow-up (VK_ERROR_OUT_OF_HOST_MEMORY on large models). Constants/graph inputs are
             // always available.
+            // World compatibility: the producer's kernel executes the steps in ITS layout world, which
+            // may differ from the world the chain nodes would have picked standalone (a const-operand
+            // Binary prefers flat; a conv producer is NC4). Cross-world folding is exact — layout only
+            // changes indexing — provided the steps are expressible there: NC4 execution needs a rank-4
+            // run and same/channel/scalar broadcasts; flat execution needs the run within the plan's
+            // rank limit. Operand layouts follow automatically: constants are packed for the producer's
+            // world at upload, and insertLayoutConverts converts runtime operands to the consuming
+            // node's world like any other input.
+            bool prodFlat = prod >= 0 && gpuFlatNode(g, g.nodes[prod]);
+            bool worldOk  = prod >= 0;
+            if (prodFlat)
+            {
+                worldOk = (int) run.size() <= kPwMaxRank;
+            } else
+            {
+                worldOk = run.size() == 4;
+                for (int s = 0; worldOk && s < (int) steps.size() / 4; ++s)
+                {
+                    if (steps[s * 4 + 3] == 2)
+                    {
+                        worldOk = false; // general-flat broadcast is not NC4-expressible
+                    }
+                }
+            }
             bool opsReady = true;
             for (size_t k = 1; k < inputs.size() && opsReady; ++k)
             {
@@ -369,7 +419,7 @@ namespace vknn {
                     }
                 }
             }
-            if (opsReady && prod >= 0 && !removed.count(prod) && consumers[prim] == 1 && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") && g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == prim && gpuFlatNode(g, g.nodes[prod]) == wantFlat)
+            if (opsReady && worldOk && prod >= 0 && !removed.count(prod) && consumers[prim] == 1 && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") && g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == prim)
             {
                 Node                &P      = g.nodes[prod];
                 int                  opbase = (int) P.inputs.size();
@@ -409,6 +459,7 @@ namespace vknn {
                     removed.insert(cn); // the whole chain (head included) folds into the producer
                 }
                 fused++;
+                attached++;
                 continue;
             }
             Node fn;
@@ -452,7 +503,7 @@ namespace vknn {
                 }
             }
             g.nodes = std::move(kept);
-            VKNN_INFO << "fusePointwiseChains: fused " << fused << " chain(s)";
+            VKNN_INFO << "fusePointwiseChains: fused " << fused << " chain(s), " << attached << " into producer epilogues";
         }
     }
 

@@ -42,7 +42,7 @@ namespace vknn {
                 {
                     if (k < (int) operands.size())
                     {
-                        bufs.push_back(operandBuf(env, operands[k], holds[k])->handle());
+                        bufs.push_back(pwOperandBuf(env, operands[k], holds[k], flat)->handle());
                     } else
                     {
                         bufs.push_back(dst->handle());

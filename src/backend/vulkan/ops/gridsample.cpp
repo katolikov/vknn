@@ -2,6 +2,7 @@
 // is bound at the segment compute precision — a CONSTANT grid is uploaded (fp16/fp32) and a RUNTIME grid
 // (the optical-flow warps) is bound directly from its flat activation buffer via operandBuf. The layout
 // pass keeps the grid flat (it can't be NC4HW4-packed with its channels-last [.,.,.,2] shape).
+#include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
@@ -13,6 +14,7 @@ namespace vknn {
         struct GridSampleOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          gridHold; // holds a constant grid; a runtime grid uses devBuf
+            PwEpi                                epi;
             GsPC                                 pc {};
             int64_t                              total = 0;
             void                                 prepare(const Node &node, VkOpEnv &env) override {
@@ -26,13 +28,16 @@ namespace vknn {
                 std::string pad  = node.attr.gets("padding_mode", "zeros");
                 uint32_t    PAD  = pad == "border" ? 1u : (pad == "reflection" ? 2u : 0u);
                 total            = (int64_t) x.n * cBlocks(x.c) * OH * OW;
-                pipe             = env.pipeline(shader("gridsample", env.useFp16), 3, sizeof(GsPC), std::vector<uint32_t> {MODE, PAD});
+                epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
+                pipe = env.pipeline(shader((std::string("gridsample") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(GsPC), std::vector<uint32_t> {MODE, PAD});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                vk::Buffer *s    = env.devBuf(node.inputs[0]);
-                vk::Buffer *grid = operandBuf(env, node.inputs[1], gridHold); // const upload or runtime buffer
-                vk::Buffer *d    = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {s->handle(), grid->handle(), d->handle()}, &pc, sizeof(pc), groups(total, 64));
+                vk::Buffer           *s    = env.devBuf(node.inputs[0]);
+                vk::Buffer           *grid = operandBuf(env, node.inputs[1], gridHold); // const upload or runtime buffer
+                vk::Buffer           *d    = env.devBuf(node.outputs[0]);
+                std::vector<VkBuffer> bufs = {s->handle(), grid->handle(), d->handle()};
+                epi.append(bufs, node, env, d->handle());
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
             }
         };
     } // namespace

@@ -4,13 +4,15 @@ namespace vknn {
 
     // Read an int64 list parameter from either a node attribute (older opsets) or an initializer input
     // (opset 10+/13+ moved Slice/Pad/Reduce params to inputs). Returns empty if neither is present.
+    // Bounded by pwCoreInputs: a fused pointwise-chain operand appended past pw_opbase must never be
+    // misread as a positional parameter (e.g. Reduce axes when the original node kept axes as attr).
     std::vector<int64_t> readI64Param(const Graph &g, const Node &nd, const char *attrName, int inputIdx) {
         const auto &av = nd.attr.getints(attrName);
         if (!av.empty())
         {
             return av;
         }
-        if (inputIdx >= 0 && inputIdx < (int) nd.inputs.size() && nd.inputs[inputIdx] != kNoTensor)
+        if (inputIdx >= 0 && inputIdx < (int) pwCoreInputs(nd) && nd.inputs[inputIdx] != kNoTensor)
         {
             auto it = g.initializers.find(nd.inputs[inputIdx]);
             if (it != g.initializers.end())

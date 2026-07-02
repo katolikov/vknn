@@ -1,6 +1,10 @@
 #version 450
 // MaxPool2D over NC4HW4 (fp32). One thread per (n, channel-block, oy, ox).
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
@@ -24,5 +28,8 @@ void main() {
       m = max(m, src[((n * Cb + cb) * pc.H + iy) * pc.W + ix]);
     }
   }
+#ifdef PW_EPI
+  m = pw_apply4(m, ((n * Cb + cb) * pc.OH + oy) * pc.OW + ox);
+#endif
   dst[((n * Cb + cb) * pc.OH + oy) * pc.OW + ox] = m;
 }

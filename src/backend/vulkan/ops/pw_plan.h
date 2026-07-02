@@ -4,7 +4,6 @@
 // (1..K, deduped via slotOf) so the same plan format serves both the standalone FusedPointwise op
 // (operands at inputs[1..]) and a producer's fused epilogue (operands appended at inputs[opbase..]).
 #pragma once
-#include "flat_ops.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -74,7 +73,11 @@ namespace vknn {
                     {
                         ps[rank - 1 - k] = os[(int) os.size() - 1 - k];
                     }
-                    auto ss = flat::rowStrides(ps);
+                    std::vector<int64_t> ss(rank, 1);
+                    for (int k = rank - 2; k >= 0; --k)
+                    {
+                        ss[k] = ss[k + 1] * ps[k + 1];
+                    }
                     for (int k = 0; k < rank; ++k)
                     {
                         plan.stride[s * kPwMaxRank + k] = (ps[k] == 1) ? 0 : (int) ss[k];
@@ -109,5 +112,93 @@ namespace vknn {
     inline std::shared_ptr<vk::Buffer> uploadPwPlan(VkOpEnv &env, const PwPlanCPU &plan) {
         return env.uploadPooled(&plan, sizeof(plan));
     }
+
+    // Resolve a chain operand to a device buffer. A runtime activation already lives in the chain's
+    // world; a CONSTANT operand uploads flat for a flat-world chain, but must be NC4HW4-packed for
+    // an NC4 chain — the kernel indexes operands with packed indices, and packing also materializes
+    // the padded dead lanes a whole-block load touches (a flat upload would be misordered for
+    // C % 4 != 0 or H*W > 1, and read out of bounds on the pad lanes).
+    inline vk::Buffer *pwOperandBuf(VkOpEnv &env, TensorId t, std::shared_ptr<vk::Buffer> &hold, bool flatWorld) {
+        const Graph &g = *env.graph;
+        if (!g.isInitializer(t))
+        {
+            return env.devBuf(t);
+        }
+        if (!hold)
+        {
+            if (flatWorld)
+            {
+                hold = uploadInit(env, t, g.desc(t).shape);
+            } else if (numElements(g.desc(t).shape) <= 1)
+            {
+                // scalar splat (bcast mode 3): the kernel reads element 0 only
+                std::vector<float> v = initFloats(g, t);
+                hold                 = upload(*env.ctx, std::vector<float>(4, v.empty() ? 0.f : v[0]), env.useFp16);
+            } else
+            {
+                std::vector<float> v  = initFloats(g, t);
+                NCHW               s  = NCHW::from(g.desc(t).shape);
+                int64_t            Cb = cBlocks(s.c), HW = s.h * s.w;
+                std::vector<float> p((size_t) (s.n * Cb * 4 * HW), 0.f);
+                for (int64_t n = 0; n < s.n; ++n)
+                {
+                    for (int64_t c = 0; c < s.c; ++c)
+                    {
+                        for (int64_t hw = 0; hw < HW; ++hw)
+                        {
+                            p[(size_t) ((((n * Cb + c / 4) * HW) + hw) * 4 + (c & 3))] = v[(size_t) ((n * s.c + c) * HW + hw)];
+                        }
+                    }
+                }
+                hold = upload(*env.ctx, p, env.useFp16);
+            }
+        }
+        return hold.get();
+    }
+
+    // Wires a node's attached pointwise chain (pw_steps) into the op's own kernel. Usage:
+    //   prepare():  epi.prepare(node, env, flat, outShape);
+    //               pipe = env.pipeline(shader((base + epi.suffix()).c_str(), fp16), nbuf + epi.extraBufs(), ...);
+    //   record():   epi.append(bufs, node, env, dstHandle);   // after the kernel's own buffers
+    // The _epi shader variant executes the chain at its store via shaders/pw_epilogue.glsl; the plan
+    // SSBO + operand buffers bind at PW_EPI_BASE = the kernel's own buffer count.
+    struct PwEpi {
+        std::shared_ptr<vk::Buffer>              plan;
+        std::vector<TensorId>                    operands;
+        std::vector<std::shared_ptr<vk::Buffer>> holds;
+        bool                                     active = false;
+        bool                                     flatWorld = true;
+
+        void prepare(const Node &node, VkOpEnv &env, bool flat, const Shape &out) {
+            active = node.attr.has("pw_steps");
+            if (!active)
+            {
+                return;
+            }
+            flatWorld = flat;
+            PwPlanCPU p {};
+            int       total = 0;
+            buildPwPlan(*env.graph, node, flat, out, p, operands, total);
+            plan = uploadPwPlan(env, p);
+            holds.assign(operands.size(), nullptr);
+        }
+        const char *suffix() const {
+            return active ? "_epi" : "";
+        }
+        uint32_t extraBufs() const {
+            return active ? 1u + (uint32_t) kPwMaxOperands : 0u;
+        }
+        void append(std::vector<VkBuffer> &bufs, const Node &node, VkOpEnv &env, VkBuffer dummy) {
+            if (!active)
+            {
+                return;
+            }
+            bufs.push_back(plan->handle());
+            for (int k = 0; k < kPwMaxOperands; ++k)
+            {
+                bufs.push_back(k < (int) operands.size() ? pwOperandBuf(env, operands[k], holds[k], flatWorld)->handle() : dummy);
+            }
+        }
+    };
 
 } // namespace vknn

@@ -1,5 +1,6 @@
 // Gemm / fully-connected classifier. The pooled input is NC4HW4 with H=W=1, so the packed
 // buffer is just the channel vector. Weights are stored row-major [Cout][Cin].
+#include "pw_plan.h"
 #include "vk_op_common.h"
 
 namespace vknn {
@@ -8,6 +9,7 @@ namespace vknn {
         struct GemmOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
+            PwEpi                                epi;
             FcPC                                 pc {};
             int64_t                              Cout = 0;
 
@@ -40,14 +42,14 @@ namespace vknn {
                     return wp;
                 });
                 std::vector<float> bv;
-                if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor)
+                if (pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor)
                 {
                     bv = initFloats(g, node.inputs[2]);
                 }
                 const float *bsrc = bv.data();
                 bbuf              = uploadCached(env, node.name + "#b", [&] {
                     std::vector<float> bias(CoutL, 0.f);
-                    if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor)
+                    if (pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor)
                     {
                         for (int64_t i = 0; i < CoutL; ++i)
                         {
@@ -70,13 +72,16 @@ namespace vknn {
                 int srcStride = (int) (g.desc(node.inputs[0]).gpuFlat ? Cin : pad4(Cin));
                 int dstStride = (int) (g.desc(node.outputs[0]).gpuFlat ? CoutL : pad4(CoutL));
                 pc            = {(int) Cin, (int) CoutL, (int) M, srcStride, dstStride, (int) node.fusedAct, node.actLo, node.actHi};
-                pipe = env.pipeline(shader("fc", env.useFp16), 4, sizeof(FcPC), std::vector<uint32_t> {});
+                epi.prepare(node, env, g.desc(node.outputs[0]).gpuFlat, g.desc(node.outputs[0]).shape);
+                pipe = env.pipeline(shader((std::string("fc") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(FcPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                vk::Buffer *src = env.devBuf(node.inputs[0]);
-                vk::Buffer *dst = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()}, &pc, sizeof(pc), groups(Cout * pc.M, 64));
+                vk::Buffer           *src  = env.devBuf(node.inputs[0]);
+                vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
+                std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
+                epi.append(bufs, node, env, dst->handle());
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(Cout * pc.M, 64));
             }
         };
 

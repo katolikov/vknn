@@ -3,6 +3,7 @@
 // flat in prepare(). Gated by supportsNode to 4D input + constant weight; everything else (runtime
 // weight, non-4D) falls back to the CPU oracle. Push-constant block byte-matches the shader.
 #include "core/conv_geom.h"
+#include "pw_plan.h"
 #include "vk_op_common.h"
 
 namespace vknn {
@@ -15,6 +16,7 @@ namespace vknn {
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
+            PwEpi                                epi;
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g   = *env.graph;
@@ -54,17 +56,21 @@ namespace vknn {
                 std::vector<float> wv = initFloats(g, node.inputs[1]);
                 wbuf                  = upload(*env.ctx, wv, env.useFp16);
 
-                const bool hasBias    = node.inputs.size() > 2 && node.inputs[2] != kNoTensor && g.isInitializer(node.inputs[2]);
+                const bool hasBias    = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor && g.isInitializer(node.inputs[2]);
                 pc.hasBias            = hasBias ? 1 : 0;
                 std::vector<float> bv = hasBias ? initFloats(g, node.inputs[2]) : std::vector<float>(pc.Cout, 0.f);
                 bv.resize(pc.Cout);
                 bbuf = upload(*env.ctx, bv, env.useFp16);
 
-                pipe = env.pipeline(shader("convtranspose", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {});
+                epi.prepare(node, env, /*flat=*/true, out);
+                pipe = env.pipeline(shader((std::string("convtranspose") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), wbuf->handle(), bbuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
+                std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), wbuf->handle(), bbuf->handle(), dst};
+                epi.append(bufs, node, env, dst);
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
             }
         };
 

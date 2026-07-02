@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 // Flat row-major reduce.
 #include "common.glsl"
 layout(local_size_x = 256) in;
@@ -46,5 +50,8 @@ void main() {
   }
   if (pc.op == 0 && rcount > 0) acc /= float(rcount);
   else if (pc.op == 5) acc = sqrt(acc);
+#ifdef PW_EPI
+  acc = pw_apply(float(STORE(acc)), int(gid));
+#endif
   d[gid] = STORE(acc);
 }
