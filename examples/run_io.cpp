@@ -60,6 +60,9 @@ int main(int argc, char **argv) {
     cfg.freeWeightsAfterUpload = !flag(argc, argv, "--keep-weights");
     cfg.noFlatOps              = flag(argc, argv, "--no-flat");
     cfg.foldGpuIslands         = !flag(argc, argv, "--no-fold-islands");
+    cfg.layerDump              = flag(argc, argv, "--layer-dump");
+    cfg.debugSegments          = flag(argc, argv, "--debug-segments");
+    cfg.layerDumpDir           = opt(argc, argv, "--layer-dump-dir", cfg.layerDumpDir.c_str());
     cfg.timing                 = flag(argc, argv, "--timing");
     cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
     cfg.dumpTensors            = opt(argc, argv, "--dump", "");
@@ -82,7 +85,7 @@ int main(int argc, char **argv) {
         if (argv[i][0] == '-')
         {
             if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
-                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning"))
+                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--cache-mode") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir"))
             {
                 ++i; // skip the flag's value
             }
@@ -105,10 +108,12 @@ int main(int argc, char **argv) {
         if (i < inFiles.size())
         {
             std::ifstream f(inFiles[i], std::ios::binary);
-            if (f)
+            if (!f)
             {
-                f.read(reinterpret_cast<char *>(in.data.data()), need);
+                fprintf(stderr, "cannot open input file '%s' for '%s'\n", inFiles[i].c_str(), in.name.c_str());
+                return 1; // silently feeding zeros would fake a successful run on wrong data
             }
+            f.read(reinterpret_cast<char *>(in.data.data()), need);
         }
         printf("input  '%s'  %s  %s\n", in.name.c_str(), shapeStr(in.shape).c_str(), dtypeStr(in.dtype));
         ins.push_back(std::move(in));
