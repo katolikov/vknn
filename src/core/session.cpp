@@ -621,6 +621,25 @@ namespace vknn {
             // KEEP the remaining (small) constants: some ops read their initializers while recording the
             // command buffer, which the zero-copy path re-records, so those initializers must stay
             // resolvable. Keeping them costs little (KB-scale shapes/biases/tables).
+            // A fused pointwise-chain epilogue uploads its operands (inputs[pw_opbase..]) lazily while
+            // RECORDING, not at prepare — e.g. a PRelu slope folded into a Conv. Those initializers must
+            // stay resolvable, so keep any tensor used as an epilogue operand anywhere.
+            std::set<TensorId> keepAtRecord;
+            for (const auto &nd: graph_.nodes)
+            {
+                if (!nd.attr.has("pw_steps"))
+                {
+                    continue;
+                }
+                int opbase = (int) nd.attr.geti("pw_opbase", (int64_t) nd.inputs.size());
+                for (int k = opbase; k < (int) nd.inputs.size(); ++k)
+                {
+                    if (nd.inputs[k] != kNoTensor)
+                    {
+                        keepAtRecord.insert(nd.inputs[k]);
+                    }
+                }
+            }
             std::set<TensorId> freeable;
             for (const auto &nd: graph_.nodes)
             {
@@ -628,7 +647,7 @@ namespace vknn {
                 {
                     for (TensorId in: nd.inputs)
                     {
-                        if (in != kNoTensor && graph_.isInitializer(in))
+                        if (in != kNoTensor && graph_.isInitializer(in) && !keepAtRecord.count(in))
                         {
                             freeable.insert(in);
                         }
