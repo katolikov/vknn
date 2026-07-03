@@ -1167,3 +1167,47 @@ TEST(Passes, RangeConstFoldInt64) {
         EXPECT_EQ(g.initializers[r].i64()[i], ref[i]) << "i=" << i;
     }
 }
+
+// A graph output declared FLOAT16 but produced (after Identity elimination) by a node whose inferred
+// dtype is Float32 must keep FLOAT16 through runStandardPasses. Otherwise inferShapes overwrites the
+// value_info dtype and the output-rewiring passes repoint the output to an fp32-default tensor, so the
+// session readback emits fp32 bytes for a declared-fp16 (or uint8) output. Regression guard.
+TEST(Passes, PreservesDeclaredOutputDtype) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    xi.dtype   = DType::Float32;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc td;
+    td.name    = "t";
+    td.shape   = {1, 8};
+    td.dtype   = DType::Float32;
+    TensorId t = g.addTensor(td);
+    TensorDesc yd;
+    yd.name     = "y";
+    yd.shape    = {1, 8};
+    yd.isOutput = true;
+    yd.dtype    = DType::Float16; // ONNX value_info declares the output FLOAT16
+    TensorId y  = g.addTensor(yd);
+    Node     relu;
+    relu.type    = OpType::Relu;
+    relu.name    = "relu";
+    relu.inputs  = {x};
+    relu.outputs = {t};
+    Node ident;
+    ident.type    = OpType::Identity;
+    ident.name    = "id";
+    ident.inputs  = {t};
+    ident.outputs = {y};
+    g.nodes.push_back(relu);
+    g.nodes.push_back(ident);
+    g.outputs = {y};
+
+    runStandardPasses(g);
+    ASSERT_EQ(g.outputs.size(), 1u);
+    ASSERT_NE(g.outputs[0], kNoTensor);
+    EXPECT_EQ(g.desc(g.outputs[0]).dtype, DType::Float16);
+}

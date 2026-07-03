@@ -50,6 +50,21 @@ namespace vknn {
 
     void runStandardPasses(Graph &g, const PassOptions &opt) {
         int64_t batch = opt.batch;
+        // Snapshot each graph output's ONNX-declared dtype (from value_info, set by the builder) BEFORE
+        // any pass runs. Two things would otherwise drop it: inferShapes overwrites a declared FLOAT16
+        // output with the fp32 dtype of its internal producer, and fusion/elimination passes repoint
+        // g.outputs[i] to a producer tensor that defaults to Float32. Either way the session's readback
+        // then emits fp32 bytes for a FLOAT16/UINT8-declared output. Restored after all passes (below);
+        // optimization preserves output semantics, so the declared dtype is authoritative. Indexed by
+        // output slot -- passes rewire the value of g.outputs[i], never its count or order.
+        std::vector<DType> declaredOutDtype(g.outputs.size(), DType::Float32);
+        for (size_t i = 0; i < g.outputs.size(); ++i)
+        {
+            if (g.outputs[i] != kNoTensor)
+            {
+                declaredOutDtype[i] = g.desc(g.outputs[i]).dtype;
+            }
+        }
         markScalarGatherIndices(g); // before const-fold erases the Constant nodes' original ranks
         inferShapes(g, batch);
         lowerReduceToGap(g); // needs input ranks; ReduceMean imports as generic Reduce
@@ -102,6 +117,14 @@ namespace vknn {
             inferShapes(g, batch); // set the FusedPointwise output shapes
         }
         pruneDeadInitializers(g); // after all rewiring: orphaned fold intermediates + Cast-copied weights
+        // Restore the declared output dtypes dropped by the output-rewiring passes above (see snapshot).
+        for (size_t i = 0; i < g.outputs.size(); ++i)
+        {
+            if (g.outputs[i] != kNoTensor)
+            {
+                g.desc(g.outputs[i]).dtype = declaredOutDtype[i];
+            }
+        }
         if (opt.dumpBig)
         {
             for (const Node &n: g.nodes)
