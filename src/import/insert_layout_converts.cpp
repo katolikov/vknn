@@ -273,6 +273,35 @@ namespace vknn {
                 in = it->second;
             }
         }
+        // Graph outputs have no consumer to trigger a convert, so a conv/pool output stays NC4HW4 and the
+        // host readback pays an expensive scalar NC4HW4->NCHW gather (per-element, strided, fp16->fp32).
+        // Emit each NC4HW4 graph output in flat NCHW via a ConvertLayout: the GPU does the vectorized layout
+        // gather and the host readback becomes a bulk copy. Lossless same-dtype reorder, so byte-identical.
+        for (size_t oi = 0; oi < g.outputs.size(); ++oi)
+        {
+            TensorId out = g.outputs[oi];
+            if (out == kNoTensor || g.isInitializer(out) || g.desc(out).gpuFlat)
+            {
+                continue;
+            }
+            TensorDesc d    = g.desc(out); // carries the model's output name, declared dtype, shape, storeFp32
+            d.isInitializer = d.isInput = false;
+            d.isOutput      = true;
+            d.gpuFlat       = true;
+            // The flat convert output KEEPS the model's declared output name (callers look up outputs by
+            // name); the pre-convert tensor becomes an internal boundary and is renamed to stay unique.
+            g.desc(out).name += "#nc4";
+            g.desc(out).isOutput = false;
+            TensorId t2 = g.addTensor(d);
+            Node     cv;
+            cv.type    = OpType::ConvertLayout;
+            cv.name    = "convertout" + std::to_string(n++);
+            cv.subOp   = 0; // NC4HW4 -> flat
+            cv.inputs  = {out};
+            cv.outputs = {t2};
+            converts.push_back(std::move(cv));
+            g.outputs[oi] = t2;
+        }
         if (!converts.empty())
         {
             for (auto &c: converts)
