@@ -776,6 +776,49 @@ namespace vknn {
             rt.hostValid = true;
         }
 
+        // Download a FLAT (NCHW row-major) graph output straight into the model's declared output dtype,
+        // skipping the fp16->fp32->declared double-convert that unpackFromBuffer (always fp32) followed by
+        // readbackOutput would do. Only valid for terminal graph outputs: inter-segment boundaries are
+        // re-uploaded by packToBuffer, which reads rt.host as fp32, so they keep the fp32 unpack. rt.dtype
+        // is set to what rt.host now holds so readbackOutput takes its dst==rt.dtype memcpy fast path.
+        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared) {
+            int64_t n = numElements(rt.shape);
+            if (deviceFp16 && declared == DType::Float16)
+            { // fp16 device -> fp16 output: straight copy, no conversion
+                rt.host.resizeElems(n, DType::Float16);
+                std::memcpy(rt.host.bytes.data(), buf->host(), (size_t) n * 2);
+                rt.dtype = DType::Float16;
+            } else if (!deviceFp16 && declared == DType::Float32)
+            { // fp32 device -> fp32 output: straight copy
+                rt.host.resizeElems(n, DType::Float32);
+                std::memcpy(rt.host.bytes.data(), buf->host(), (size_t) n * 4);
+                rt.dtype = DType::Float32;
+            } else if (declared == DType::Float16)
+            { // fp32 device -> fp16 output
+                rt.host.resizeElems(n, DType::Float16);
+                fp16_t      *d = reinterpret_cast<fp16_t *>(rt.host.bytes.data());
+                const float *s = reinterpret_cast<const float *>(buf->host());
+                for (int64_t i = 0; i < n; ++i)
+                {
+                    d[i] = floatToHalf(s[i]);
+                }
+                rt.dtype = DType::Float16;
+            } else
+            { // integer / other declared dtype: decode to fp32, readbackOutput does the final convert
+                rt.host.resizeElems(n, DType::Float32);
+                float *d = rt.host.f32();
+                if (deviceFp16)
+                {
+                    halfToFloatBulk(reinterpret_cast<const fp16_t *>(buf->host()), d, n);
+                } else
+                {
+                    std::memcpy(d, buf->host(), (size_t) n * 4);
+                }
+                rt.dtype = DType::Float32;
+            }
+            rt.hostValid = true;
+        }
+
       private:
         std::unique_ptr<vk::VulkanContext> ctx_;
         std::unique_ptr<vk::CommandRunner> runner_;
@@ -1471,6 +1514,7 @@ namespace vknn {
             auto t2 = now();
 
             // download boundary outputs to host.
+            std::set<TensorId> graphOut(g_.outputs.begin(), g_.outputs.end());
             for (TensorId tid: boundaryOutputs)
             {
                 auto bit = buffers_.find(tid);
@@ -1489,7 +1533,14 @@ namespace vknn {
                 rt.deviceFormat   = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 if (rt.dmaBufFd < 0)
                 {
-                    VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, flat);
+                    bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
+                    if (flat && graphOut.count(tid))
+                    { // terminal graph output: convert straight to the declared dtype (skip fp32 round trip)
+                        VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype);
+                    } else
+                    {
+                        VulkanBackend::unpackFromBuffer(bit->second.get(), rt, deviceFp16, flat);
+                    }
                 }
                 // else: the GPU wrote device-native bytes straight into the caller's dma-buf; caller reads it.
             }

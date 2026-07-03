@@ -68,9 +68,9 @@ namespace vknn {
         bool srcI64  = rt.dtype == DType::Int64;
         auto srcF32  = [&](int64_t i) -> float { return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i]; };
         auto srcI    = [&](int64_t i) -> int64_t { return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i]; };
-        if (dst == DType::Float32 && !srcI64)
+        if (dst == rt.dtype)
         {
-            io.data = rt.host.bytes; // fast path: fp32 -> fp32
+            io.data = rt.host.bytes; // fast path: source already in the declared dtype (fp32/fp16/uint8/...)
             return;
         }
         io.data.assign((size_t) elems * dtypeSize(dst), 0);
