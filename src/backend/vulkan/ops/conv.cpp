@@ -302,6 +302,67 @@ namespace vknn {
                 return best;
             }
 
+            // Autotune output-channel register tiling (OCB) for the general direct conv: race the
+            // 1-pixel/thread direct kernel against conv_reg computing OCB channel-blocks per thread (each
+            // input vec4 reused across 4*OCB output-channel dots). Returns the OCB block factor, 0 = direct.
+            // Per-output arithmetic is identical for every OCB (only the thread<->channel mapping changes),
+            // so the choice never affects output bits (no anti-noise margin needed, unlike Winograd) and a
+            // cache-off re-tune stays deterministic. Measured on scratch buffers + cached like pickWTile.
+            int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
+                if (env.tuning == Mode::NoTune || !env.runner)
+                {
+                    return 0;
+                }
+                char buf[112];
+                snprintf(buf, sizeof(buf), "convocb_%d_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
+                std::string sig = env.gpuTag + "/" + buf;
+                if (env.weights)
+                {
+                    int cached = env.weights->tuned(sig, -1);
+                    if (cached >= 0)
+                    {
+                        return cached;
+                    }
+                }
+                int    es       = env.useFp16 ? 2 : 4;
+                size_t srcBytes = (size_t) pc.N * cBlocks(pc.Cin) * pc.H * pc.W * 4 * es;
+                size_t dstBytes = (size_t) pc.N * Coutb * pc.OH * pc.OW * 4 * es;
+                auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
+                auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
+                int64_t HW      = y.h * y.w;
+                auto    timeIt  = [&](std::shared_ptr<vk::ComputePipeline> p, int64_t tot, uint32_t ls) {
+                    VkCommandBuffer cmd = env.runner->allocate();
+                    env.runner->begin(cmd);
+                    for (int rep = 0; rep < 8; ++rep)
+                    {
+                        p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(tot, ls));
+                    }
+                    env.runner->end(cmd);
+                    double ms = env.runner->submitAndWait(cmd);
+                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
+                    return ms;
+                };
+                int    best   = 0;
+                double bestMs = timeIt(env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
+                std::vector<uint32_t> cands = (env.tuning == Mode::Thorough) ? std::vector<uint32_t> {2, 3} : std::vector<uint32_t> {2};
+                for (uint32_t ocb: cands)
+                {
+                    int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
+                    double  ms        = timeIt(env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), {ocb}), x.n * ocbGroups * ((HW + kTile - 1) / kTile), 64);
+                    if (ms < bestMs)
+                    {
+                        bestMs = ms;
+                        best   = (int) ocb;
+                    }
+                }
+                VKNN_DEBUG << "autotune " << sig << " -> ocb=" << best;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, best);
+                }
+                return best;
+            }
+
             // Autotune the 3x3 conv kernel for THIS shape: 0 = direct, 1 = F(2,3) Winograd, 2 = F(4,3)
             // Winograd. Winograd wins big on deep, square 3x3 but loses on small-channel / spatially-large 3x3,
             // so the choice is measured per-shape on scratch buffers and cached like the local-size tune.
@@ -558,9 +619,18 @@ namespace vknn {
                         int64_t HW = y.h * y.w;
                         total      = x.n * Coutb * ((HW + kTile - 1) / kTile);
                         pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {});
+                    } else if (int ocb = (env.useFp16 ? pickOcb(env, x, y, Cout, Coutb) : 0))
+                    {
+                        // register-tiled conv computing OCB output channel-blocks per thread (autotuned; won
+                        // over the direct kernel for this shape). Byte-identical to the direct kernel.
+                        reg               = true;
+                        int64_t HW        = y.h * y.w;
+                        int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
+                        total             = x.n * ocbGroups * ((HW + kTile - 1) / kTile);
+                        pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) ocb});
                     } else
                     {
-                        // autotuned 1-pixel-per-thread direct kernel (fastest 3x3 path on the target GPU so far)
+                        // autotuned 1-pixel-per-thread direct kernel (the fallback when OCB tiling didn't win)
                         total     = x.n * Coutb * y.h * y.w;
                         localSize = pickLocalSize(env);
                         pipe = env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {localSize});
