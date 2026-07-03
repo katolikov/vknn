@@ -41,8 +41,11 @@ vec4 pwLoad4(int slot,int idx){ if(slot==1)return vec4(pwop1.d[idx*4],pwop1.d[id
   if(slot==5)return vec4(pwop5.d[idx*4],pwop5.d[idx*4+1],pwop5.d[idx*4+2],pwop5.d[idx*4+3]);
   return vec4(pwop6.d[idx*4],pwop6.d[idx*4+1],pwop6.d[idx*4+2],pwop6.d[idx*4+3]); }
 float pw_apply(float acc, int outIdx){
-  for(int s=0;s<plan.numSteps;++s){ int kind=plan.step[s*4],code=plan.step[s*4+1],slot=plan.step[s*4+2];
-    if(kind==0||kind==3){ int rem=outIdx,oi=0; for(int k=plan.rank-1;k>=0;--k){ int c=rem%plan.outDim[k]; rem/=plan.outDim[k]; oi+=c*plan.stride[s*PW_EPI_MAXRANK+k]; }
+  for(int s=0;s<plan.numSteps;++s){ int kind=plan.step[s*4],code=plan.step[s*4+1],slot=plan.step[s*4+2],bc=plan.step[s*4+3];
+    if(kind==0||kind==3){
+      // A same-shape operand (bc==0) reads at outIdx; only a real broadcast needs the per-axis strided
+      // decomposition (integer div/mod per element), so skip that loop for the common full-size operand.
+      int oi=outIdx; if(bc!=0){ int rem=outIdx; oi=0; for(int k=plan.rank-1;k>=0;--k){ int c=rem%plan.outDim[k]; rem/=plan.outDim[k]; oi+=c*plan.stride[s*PW_EPI_MAXRANK+k]; } }
       float b=pwLoad(slot,oi); acc=(kind==3)?vx_binary(b,acc,code):vx_binary(acc,b,code); }
     else if(kind==1) acc=vx_unary(acc,code,plan.p0[s],plan.p1[s]);
     else             acc=vx_act(acc,code,plan.p0[s],plan.p1[s]);

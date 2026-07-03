@@ -235,6 +235,7 @@ namespace vknn {
                 int   rank, total, op, outDim[kMaxRank], aStride[kMaxRank], bStride[kMaxRank];
                 int   act;
                 float actLo, actHi;
+                int   bothFull; // both operands same shape as output => index == gid (skip the stride loop)
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          constBuf[2];
@@ -274,7 +275,8 @@ namespace vknn {
                 };
                 setup(node.inputs[0], 0);
                 setup(node.inputs[1], 1);
-                pipe = env.pipeline(shader("flat_binary", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
+                pc.bothFull = (g.desc(node.inputs[0]).shape == out && g.desc(node.inputs[1]).shape == out) ? 1 : 0;
+                pipe        = env.pipeline(shader("flat_binary", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 auto buf = [&](int e) {
