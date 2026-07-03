@@ -29,10 +29,23 @@ void main() {
     base += c * pc.inStride[k];
   }
 
-  int rcount = 1;
-  for (int k = 0; k < pc.rank; ++k) if (pc.reduce[k] != 0) rcount *= pc.inDim[k];
+  int rcount = 1, nRed = 0, singleStride = 0;
+  for (int k = 0; k < pc.rank; ++k) if (pc.reduce[k] != 0) { rcount *= pc.inDim[k]; nRed++; singleStride = pc.inStride[k]; }
 
   float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
+  // Fast path for a single reduced axis (the common global-min/max/sum-over-one-axis case): the reduced
+  // element offset is base + r*stride, so the per-element multi-dim index recompute below is unneeded.
+  // Same iteration order as the general path, so byte-identical for every op.
+  if (nRed == 1) {
+    for (int r = 0; r < rcount; ++r) {
+      float v = float(s[base + r * singleStride]);
+      if (pc.op == 2) acc = max(acc, v);
+      else if (pc.op == 3) acc = min(acc, v);
+      else if (pc.op == 4) acc *= v;
+      else if (pc.op == 5) acc += v * v;
+      else acc += v;
+    }
+  } else
   for (int r = 0; r < rcount; ++r) {
     int rr = r, off = base;
     for (int k = pc.rank - 1; k >= 0; --k) {
