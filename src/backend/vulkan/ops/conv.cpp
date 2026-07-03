@@ -321,7 +321,20 @@ namespace vknn {
                     return forceOn ? 1 : 0;
                 }
                 int64_t Cinb = cBlocks(Cin), Coutb = cBlocks(Cout);
-                int64_t nTH = (y.h + 1) / 2, nTW = (y.w + 1) / 2, nT = x.n * nTH * nTW;
+                // Pick the Winograd output-tile edge (2=F(2,3), 4=F(4,3)) DETERMINISTICALLY from the shape,
+                // NOT by timing: two candidate times within measurement noise flip the choice run-to-run, and
+                // F(2,3)/F(4,3) round fp16 differently, so a timing-raced tile breaks bit-exactness (identical
+                // per run and across cache rebuilds). Research cost model C(n) = 2i(n+k-1) + io(n+k-1) +
+                // n(n+k-1)(2n+k-1), k=3, normalized per output tile (n*n): F(4,3)'s 4x FLOP / 0.56x V-M-traffic
+                // saving wins on deep channels, F(2,3)'s smaller transform wins on shallow. Only the (stable)
+                // Winograd-vs-direct decision is left to timing.
+                auto winoCostPerOut = [&](int n) {
+                    double i = (double) Cin, o = (double) Cout, e = n + 2; // n + k - 1, k = 3
+                    return (2.0 * i * e + i * o * e + (double) n * e * (2.0 * n + 2.0)) / (double) (n * n);
+                };
+                int     U_ = (winoCostPerOut(4) < winoCostPerOut(2)) ? 4 : 2;
+                int     nPos = (U_ + 2) * (U_ + 2);
+                int64_t nTH = (y.h + U_ - 1) / U_, nTW = (y.w + U_ - 1) / U_, nT = x.n * nTH * nTW;
                 char    buf[128];
                 snprintf(buf, sizeof(buf), "wino_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
                 std::string sig = env.gpuTag + "/" + buf;
@@ -337,9 +350,9 @@ namespace vknn {
                     return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
                 };
                 auto                sSrc  = mk((size_t) x.n * Cinb * x.h * x.w * 8);
-                auto                sU    = mk((size_t) 16 * Cout * Cinb * 8);
-                auto                sV    = mk((size_t) 16 * Cinb * nT * 8);
-                auto                sM    = mk((size_t) 16 * nT * Coutb * 8);
+                auto                sU    = mk((size_t) nPos * Cout * Cinb * 8);
+                auto                sV    = mk((size_t) nPos * Cinb * nT * 8);
+                auto                sM    = mk((size_t) nPos * nT * Coutb * 8);
                 auto                sBias = mk((size_t) Coutb * 8);
                 auto                sWt   = mk((size_t) Cout * Cinb * 9 * 8);
                 auto                sDst  = mk((size_t) x.n * Coutb * y.h * y.w * 8);
@@ -347,9 +360,9 @@ namespace vknn {
                 WinoInPC            ipc = {(int) x.n, (int) Cin, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
                 WinoGemmPC          gpc = {(int) Cin, (int) Cout, (int) nT};
                 WinoFusedPC         opc = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, act, 0.f, 0.f};
-                auto                inPipe = env.pipeline("wino_input_fp16", 2, sizeof(WinoInPC));
+                auto                inPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC));
                 auto                gPipe  = env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC));
-                auto                oPipe  = env.pipeline("wino_out_fp16", 3, sizeof(WinoFusedPC));
+                auto                oPipe  = env.pipeline(U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC));
                 uint32_t            gx = groups(nT, kWinoGemmTileM), gy = groups(Coutb, kWinoGemmTileNB);
                 auto                timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
                     VkCommandBuffer cmd = env.runner->allocate();
@@ -387,13 +400,16 @@ namespace vknn {
                 double wms    = bestOf([&](VkCommandBuffer cmd) {
                     inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
                     vk::computeBarrier(cmd);
-                    gPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, 16);
+                    gPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
                     vk::computeBarrier(cmd);
                     oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
                     vk::computeBarrier(cmd);
                 });
-                int choice = (forceOn || wms < dms * kWinoMargin) ? 1 : 0;
-                VKNN_DEBUG << "tuneWino " << sig << " direct=" << dms << " wino=" << wms << " -> " << choice;
+                // Only the cost-model-chosen tile is timed against direct. This decision is stable (Winograd
+                // and direct are far enough apart that min-of-5 does not flip it), so the result is bit-exact.
+                int winoChoice = (U_ == 2) ? 1 : 2;
+                int choice     = (forceOn || wms < dms * kWinoMargin) ? winoChoice : 0;
+                VKNN_DEBUG << "tuneWino " << sig << " U=" << U_ << " direct=" << dms << " wino=" << wms << " -> " << choice;
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, choice);
