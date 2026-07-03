@@ -10,6 +10,7 @@
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+#include "import/passes.h" // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
@@ -977,12 +978,14 @@ namespace vknn {
                 auto pref     = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
                 buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref, 0, /*zeroInit=*/true);
             }
-            // Geometry-as-metadata: a pure-copy Reshape/Squeeze/Unsqueeze copies its input verbatim (the
-            // layout pass guarantees input and output share layout + byte size, else it inserts a convert),
-            // so alias the output onto the input's buffer and skip the copy dispatch (record() checks
-            // src==dst). Restricted to an internal (poolable) output so readback/boundary tensors keep their
-            // own buffer; the root input's liveness is extended to the output's consumers because the
-            // liveness scan resolves aliases below.
+            // Geometry-as-metadata: a pure-copy op copies its input verbatim, so alias the output onto the
+            // input's buffer and skip the copy dispatch (record() checks src==dst). A Reshape/Squeeze/Unsqueeze
+            // qualifies whenever input and output share layout + byte size (the layout pass guarantees this,
+            // else it inserts a convert). A full-range unit-step Slice (start=0, step=1 on every axis) is the
+            // same thing — an x[:] no-op that survives import; the byte-size guard below proves same shape, so
+            // start=0 + step=1 makes it a verbatim copy. Restricted to an internal (poolable) output so
+            // readback/boundary tensors keep their own buffer; the root input's liveness is extended to the
+            // output's consumers because the liveness scan resolves aliases below.
             std::map<TensorId, TensorId> aliasRoot;
             auto                         resolveAlias = [&](TensorId t) {
                 for (int hop = 0; hop < 64 && aliasRoot.count(t); ++hop)
@@ -991,10 +994,37 @@ namespace vknn {
                 }
                 return t;
             };
+            auto isIdentitySlice = [&](const Node &nd) {
+                if (nd.type != OpType::Slice)
+                {
+                    return false;
+                }
+                auto starts = readI64Param(g, nd, "starts", 1);
+                if (starts.empty())
+                {
+                    return false; // params must be visible (static) to prove the slice is a no-op
+                }
+                for (int64_t s: starts)
+                {
+                    if (s != 0)
+                    {
+                        return false;
+                    }
+                }
+                for (int64_t s: readI64Param(g, nd, "steps", 4))
+                {
+                    if (s != 1)
+                    {
+                        return false; // a non-unit or negative step reorders elements, not a copy
+                    }
+                }
+                return true;
+            };
             for (int ni: idx)
             {
-                const Node &nd = g.nodes[ni];
-                if ((nd.type != OpType::Reshape && nd.type != OpType::Squeeze && nd.type != OpType::Unsqueeze) || nd.inputs.empty() || nd.outputs.empty())
+                const Node &nd       = g.nodes[ni];
+                bool        pureCopy = nd.type == OpType::Reshape || nd.type == OpType::Squeeze || nd.type == OpType::Unsqueeze || isIdentitySlice(nd);
+                if (!pureCopy || nd.inputs.empty() || nd.outputs.empty())
                 {
                     continue;
                 }
@@ -1103,6 +1133,82 @@ namespace vknn {
                 {
                     buffers_[kv.first] = it->second;
                 }
+            }
+
+            // Flat-geometry view-eligibility diagnostic (opt-in: --debug-segments). Classifies each flat
+            // Slice/Concat/Transpose as offset-view eligible (its output is one contiguous sub-range of the
+            // input), strided (needs a gather), or a Concat disjoint write. Emits greppable [rc-diag] lines
+            // that per-node profile ms attributes against. Read-only; no behaviour change.
+            if (cfg_.debugSegments)
+            {
+                auto shp = [](const Shape &s) {
+                    std::string o = "[";
+                    for (size_t i = 0; i < s.size(); ++i)
+                    {
+                        o += (i ? "," : "") + std::to_string(s[i]);
+                    }
+                    return o + "]";
+                };
+                int slV = 0, slS = 0, co = 0, trI = 0, trS = 0;
+                for (int ni: idx)
+                {
+                    const Node &nd = g.nodes[ni];
+                    if (nd.outputs.empty() || nd.outputs[0] == kNoTensor || !g.desc(nd.outputs[0]).gpuFlat)
+                    {
+                        continue;
+                    }
+                    if (nd.type == OpType::Slice)
+                    {
+                        Shape in = g.desc(nd.inputs[0]).shape, out = g.desc(nd.outputs[0]).shape;
+                        int   r  = (int) in.size();
+                        auto  steps    = readI64Param(g, nd, "steps", 4);
+                        bool  unitStep = true;
+                        for (auto s: steps)
+                        {
+                            if (s != 1)
+                            {
+                                unitStep = false;
+                            }
+                        }
+                        int slicedAx = -1, nSliced = 0;
+                        for (int ax = 0; ax < r && ax < (int) out.size(); ++ax)
+                        {
+                            if (out[ax] != in[ax])
+                            {
+                                slicedAx = ax;
+                                nSliced++;
+                            }
+                        }
+                        bool contig = unitStep && nSliced <= 1 && slicedAx >= 0;
+                        for (int k = 0; k < slicedAx; ++k)
+                        {
+                            if (in[k] != 1)
+                            {
+                                contig = false; // an outer dim >1 makes the slice several disjoint chunks
+                            }
+                        }
+                        (contig ? slV : slS)++;
+                        VKNN_INFO << "[rc-diag] Slice " << (contig ? "VIEW " : "strd ") << nd.name << " in" << shp(in) << "->out" << shp(out) << " ax=" << slicedAx << " step1=" << unitStep << " " << actBytes(nd.outputs[0]) << "B";
+                    } else if (nd.type == OpType::Concat)
+                    {
+                        co++;
+                        VKNN_INFO << "[rc-diag] Concat " << nd.name << " axis=" << nd.attr.geti("axis", 1) << " nin=" << nd.inputs.size() << " " << actBytes(nd.outputs[0]) << "B";
+                    } else if (nd.type == OpType::Transpose)
+                    {
+                        const auto &perm  = nd.attr.getints("perm");
+                        bool        ident = true;
+                        for (size_t k = 0; k < perm.size(); ++k)
+                        {
+                            if (perm[k] != (int64_t) k)
+                            {
+                                ident = false; // a real permutation needs strided reads (Stage B)
+                            }
+                        }
+                        (ident ? trI : trS)++;
+                        VKNN_INFO << "[rc-diag] Transpose " << (ident ? "VIEW " : "strd ") << nd.name << " " << actBytes(nd.outputs[0]) << "B";
+                    }
+                }
+                VKNN_INFO << "[rc-diag] SUMMARY Slice: " << slV << " view / " << slS << " strided | Concat: " << co << " | Transpose: " << trI << " ident / " << trS << " strided";
             }
 
             // 2) build env + ops; prepare uploads weights.
