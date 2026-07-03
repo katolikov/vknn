@@ -2,7 +2,13 @@
 #include "precision.glsl"
 // Flat row-major gather: out[i] = in[base + sum_k outCoord_k * inStride_k]. Drives Transpose
 // (inStride = permuted input strides) and Slice (base = start offset, inStride = step*inputStride).
+// A fused pointwise chain (fusePointwiseChains folding a Transpose/Slice's consumers into its store)
+// is applied at the store in the _epi variant — one dispatch, and the intermediate never materializes.
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
@@ -17,5 +23,9 @@ void main() {
     rem /= pc.outDim[k];
     inIdx += c * pc.inStride[k];
   }
+#ifdef PW_EPI
+  d[gid] = STORE(pw_apply(float(s[inIdx]), int(gid)));
+#else
   d[gid] = s[inIdx];
+#endif
 }

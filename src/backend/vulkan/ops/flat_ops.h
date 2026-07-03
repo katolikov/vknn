@@ -34,6 +34,7 @@ namespace vknn {
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
+            PwEpi                                epi;   // a pointwise chain folded into the gather's store
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g  = *env.graph;
                 Shape        in = g.desc(node.inputs[0]).shape, out = g.desc(node.outputs[0]).shape;
@@ -75,10 +76,14 @@ namespace vknn {
                         pc.base += (int) (start[k] * inStride[k]);
                     }
                 }
-                pipe = env.pipeline(shader("flat_gather", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
+                epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
+                pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
-                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
+                std::vector<VkBuffer> bufs = {operandBuf(env, node.inputs[0], hold0)->handle(), dst->handle()};
+                epi.append(bufs, node, env, dst->handle());
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
             }
         };
 

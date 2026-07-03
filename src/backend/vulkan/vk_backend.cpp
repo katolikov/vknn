@@ -1022,8 +1022,10 @@ namespace vknn {
             };
             for (int ni: idx)
             {
-                const Node &nd       = g.nodes[ni];
-                bool        pureCopy = nd.type == OpType::Reshape || nd.type == OpType::Squeeze || nd.type == OpType::Unsqueeze || isIdentitySlice(nd);
+                const Node &nd = g.nodes[ni];
+                // A geometry op carrying a fused pointwise epilogue (pw_steps) is NOT a pure copy — its
+                // kernel must run to apply the chain, so it can't be aliased/skipped.
+                bool pureCopy = !nd.attr.has("pw_steps") && (nd.type == OpType::Reshape || nd.type == OpType::Squeeze || nd.type == OpType::Unsqueeze || isIdentitySlice(nd));
                 if (!pureCopy || nd.inputs.empty() || nd.outputs.empty())
                 {
                     continue;

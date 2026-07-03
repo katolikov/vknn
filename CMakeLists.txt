@@ -93,7 +93,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     #   hand-written    <stem>_fp16.comp -> <stem>_epi_fp16.spv
     set(_epi_stems
         matmul matmul_bias matmul_tiled matmul_tiled_bias fc
-        flat_softmax flat_layernorm flat_reduce softmax
+        flat_softmax flat_layernorm flat_reduce softmax flat_gather
         gridsample resize convtranspose
         avgpool avgpool2d maxpool
         conv conv_reg conv1x1 conv1x1_s2 conv3x3_lds conv1x1_reduce dwconv fused_dwpw

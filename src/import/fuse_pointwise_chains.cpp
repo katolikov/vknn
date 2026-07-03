@@ -202,6 +202,8 @@ namespace vknn {
             case OpType::MaxPool:
             case OpType::AvgPool:
             case OpType::GlobalAvgPool:
+            case OpType::Transpose: // flat_gather _epi: fold consumers into the Transpose/Slice store,
+            case OpType::Slice:     // dropping their dispatch AND the materialized gather output
                 return true;
             default:
                 return false;
