@@ -184,30 +184,56 @@ namespace vknn {
     }
 
 
-    void insertLayoutConverts(Graph &g) {
-        // Mark each tensor's GPU format from its producer (flat if produced by a flat op), then for every
-        // node input whose format differs from what the consumer needs, splice in a ConvertLayout node.
-        auto agnostic = [](const Node &n) {
-            // metadata reshape / no-op copy: keeps the producer's layout (input and output bytes
-            // identical).
+    // --- Global layout assignment (NC4HW4 vs flat) ------------------------------------------------------
+    // Every GPU tensor runs in one layout. A FIXED op has a kernel in only one layout; a FLEXIBLE op is
+    // bit-exact in either (layout is an index remap over the same math + fp16 rounding), so the assignment
+    // is free to pick its layout to minimise total NC4HW4<->flat converts. AGNOSTIC reshape/cast pass their
+    // input's layout through. The assignment is a deterministic pure function of the graph — required for
+    // run-to-run bit-exactness.
+    namespace {
+        enum class LKind { FixedFlat, FixedNC4, Flexible, Agnostic };
+
+        bool layoutAgnostic(const Node &n) {
+            // metadata reshape / no-op copy: input and output bytes are identical, so it keeps its layout.
             return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast;
-        };
-        // Mark each tensor's GPU format in topo order. Reshape/Flatten are layout-agnostic: a flat
-        // reshape is a plain row-major copy (valid for ANY shape), while the NC4HW4 byte-copy is only
-        // valid when the channel count is unchanged (else the vec4 interleave shifts). So a reshape is
-        // flat if its input is flat OR it changes the channel count; otherwise it stays NC4HW4.
+        }
+
+        LKind opLayoutKind(const Graph &g, const Node &n) {
+            if (layoutAgnostic(n))
+            {
+                return LKind::Agnostic;
+            }
+            // FLEXIBLE candidates (pointwise ops the flat classifier rejects from NC4 only for lack of a
+            // native NC4 kernel — e.g. const-operand Binary/Add — but which run bit-exactly through the
+            // NC4 fused-pointwise kernel) are unpinned in a later stage. For now every op follows the
+            // per-op classifier, so the assignment reproduces the previous per-op marking exactly.
+            return gpuFlatNode(g, n) ? LKind::FixedFlat : LKind::FixedNC4;
+        }
+    } // namespace
+
+    // Assign every tensor's gpuFlat flag (see the notes above). Runs at load, before the converts are
+    // spliced in below.
+    static void globalLayoutAssign(Graph &g) {
+        // 1) seed fixed + agnostic layouts in topo order (producers precede consumers). A flat reshape is a
+        //    plain row-major copy (valid for any shape); the NC4HW4 byte-copy is only valid when the channel
+        //    count is unchanged (else the vec4 interleave shifts) — so an agnostic op is flat if its input
+        //    is flat OR it changes the channel count.
         for (auto &nd: g.nodes)
         {
-            bool f;
-            if (agnostic(nd) && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
+            LKind k = opLayoutKind(g, nd);
+            bool  f;
+            if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
             {
                 bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
                 int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
                 int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
                 f              = inFlat || cin != cout;
+            } else if (k == LKind::FixedNC4)
+            {
+                f = false;
             } else
             {
-                f = gpuFlatNode(g, nd);
+                f = gpuFlatNode(g, nd); // FixedFlat, or an agnostic op with no usable input
             }
             for (TensorId o: nd.outputs)
             {
@@ -217,10 +243,10 @@ namespace vknn {
                 }
             }
         }
-        // NC4HW4 can only represent rank <= 4 (NCHW::from collapses rank>4 to (1,1,1,1)). Any tensor with
-        // rank > 4 MUST be a flat row-major buffer — including graph inputs with no producer (the
-        // YoNoSplat image input is [1,2,3,224,224]; left NC4HW4 it would be mis-packed and corrupt the
-        // whole encoder).
+        // 2) (byte-weighted propagation for FLEXIBLE ops lands here in the next stage.)
+        // 3) NC4HW4 can only represent rank <= 4 (NCHW::from collapses rank>4 to (1,1,1,1)). Any tensor with
+        //    rank > 4 MUST be a flat row-major buffer — including graph inputs with no producer (a multi-view
+        //    image input [1,2,3,224,224], left NC4HW4, would be mis-packed and corrupt the graph).
         for (auto &t: g.tensors)
         {
             if (t.shape.size() > 4)
@@ -228,6 +254,12 @@ namespace vknn {
                 t.gpuFlat = true;
             }
         }
+    }
+
+    void insertLayoutConverts(Graph &g) {
+        // Assign every tensor a layout (minimising converts), then for every node input whose layout differs
+        // from what the consumer needs, splice in a ConvertLayout node.
+        globalLayoutAssign(g);
         std::map<std::pair<TensorId, bool>, TensorId> cache; // (tensor, needFlat) -> converted tensor
         std::vector<Node>                             converts;
         int                                           n = 0;
