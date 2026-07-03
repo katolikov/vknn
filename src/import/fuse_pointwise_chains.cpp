@@ -151,11 +151,11 @@ namespace vknn {
     }
 
     // Merge a maximal single-consumer per-element chain (Binary/Add/Unary/Relu/Clip, same output shape,
-    // same GPU layout, no fp32-forced intermediate) into one standalone FusedPointwise node: inputs[0]
-    // is the chain's primary (head) input, inputs[1..] are the extra step operands in encounter order,
-    // outputs[0] reuses the chain tail's tensor id. Chains shorter than 2 nodes are left alone (nothing
-    // to gain by wrapping a single op). Producer-attach (folding a chain into a producer's own epilogue
-    // instead of emitting a standalone node) is a separate, later pass.
+    // same GPU layout, no fp32-forced intermediate) into either a producer's own store epilogue or a
+    // standalone FusedPointwise node: inputs[0] is the chain's primary (head) input, inputs[1..] are the
+    // extra step operands in encounter order, outputs[0] reuses the chain tail's tensor id. A chain of a
+    // single op folds into an epilogue-capable producer (that removes a whole dispatch + intermediate
+    // round-trip) but is NOT wrapped in a standalone node (a lone op gains nothing from the wrapper).
     // The chain's primary is the full-size runtime stream the kernel reads element-for-element: a
     // non-initializer input whose shape equals the chain output. A constant/broadcast input can only be
     // a step operand (uploaded), never the primary (the GPU op reads the primary from an activation
@@ -375,10 +375,6 @@ namespace vknn {
                 chainVal = outT;
                 cur      = nxt;
             }
-            if (chain.size() < 2)
-            {
-                continue; // nothing to fuse: a lone op gains nothing from the wrapper node
-            }
             bool     wantFlat = !nc4Ok; // NC4HW4 when expressible (conv-adjacent graphs live there)
             int      tail     = chain.back();
             TensorId tailOut  = g.nodes[tail].outputs[0];
@@ -471,6 +467,13 @@ namespace vknn {
                 }
                 fused++;
                 attached++;
+                continue;
+            }
+            // Standalone node: worthwhile only for a chain of >=2 ops (wrapping a lone op in a
+            // FusedPointwise node saves nothing). A single trailing op that did not fold into a producer
+            // epilogue above stays as its own kernel.
+            if (chain.size() < 2)
+            {
                 continue;
             }
             Node fn;
