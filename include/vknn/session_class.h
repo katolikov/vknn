@@ -84,6 +84,8 @@ namespace vknn {
         std::vector<RtTensor>                 pool_;
         bool                                  planned_        = false;
         bool                                  graphOptimized_ = false; // graph came from .vxm (passes already applied)
+        bool                                  ioGpuConvert_   = false; // whole graph on one GPU backend: 8-bit image
+                                                                       // graph-inputs upload raw + convert on the GPU
     };
 
 } // namespace vknn

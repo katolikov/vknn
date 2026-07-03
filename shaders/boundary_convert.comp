@@ -3,12 +3,17 @@
 // boundary buffer. One thread per DESTINATION element: decode its (n,c,h,w) from the destination
 // layout, then read the source element from the source layout (or write 0 for an NC4HW4 padding lane),
 // converting dtype on the way. Layouts are push-constant codes (0=NCHW, 1=NHWC, 2=NC4HW4); the dtype of
-// each side is a compile variant (SRC_T/DST_T) — four SPIR-V: f32_f32, f32_f16, f16_f32, f16_f16.
+// each side is a compile variant (SRC_T/DST_T): the fp32/fp16 pairs plus uint8 source/destination
+// variants (8-bit storage) for image I/O. A uint8 destination truncates+clamps to [0,255] (INT_DST_U8).
 // Index math matches VulkanBackend::packToBuffer / unpackFromBuffer.
 #ifdef NEED_FP16
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
+#endif
+#ifdef NEED_INT8
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #endif
 #ifndef SRC_T
 #define SRC_T float
@@ -57,5 +62,11 @@ void main() {
     n = t;
   }
   if (c >= pc.C) { d[i] = DST_T(0); return; } // NC4HW4 padding channel
+#if defined(INT_DST_U8)
+  // Integer destination: truncate toward zero then clamp to [0,255], matching the host
+  // readbackOutput contract ((int64_t)value, then clamp). Plain DST_T() would leave out-of-range UB.
+  d[i] = DST_T(clamp(int(float(s[encode(pc.srcFmt, n, c, h, w)])), 0, 255));
+#else
   d[i] = DST_T(s[encode(pc.srcFmt, n, c, h, w)]);
+#endif
 }

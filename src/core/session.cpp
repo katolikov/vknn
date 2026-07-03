@@ -591,6 +591,23 @@ namespace vknn {
             }
             segments_.push_back(std::move(seg));
         }
+        // GPU-side image I/O conversion is safe only when the WHOLE graph runs on a single non-CPU backend:
+        // a CPU segment consuming a graph input needs the fp32 host copy that bindInput would otherwise
+        // produce. When enabled, 8-bit image graph-inputs are uploaded raw and converted on the GPU (see the
+        // boundary_convert staging path in the Vulkan backend), skipping the host uint8->fp32->fp16 pack.
+        ioGpuConvert_ = cfg_.backend != BackendKind::Cpu;
+        for (const auto &seg: segments_)
+        {
+            if (seg->backend && seg->backend->kind() == BackendKind::Cpu)
+            {
+                ioGpuConvert_ = false;
+                break;
+            }
+        }
+        for (const auto &seg: segments_)
+        {
+            seg->ioGpuConvert = ioGpuConvert_;
+        }
         // The pipeline/weight/tuning caches are flushed once at teardown (Session::updateCache, from the
         // destructor), not here, so any autotune/pipeline results land in the unified cache file.
 
@@ -712,6 +729,15 @@ namespace vknn {
             {
                 rt.dtype     = io.dtype;
                 rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
+            } else if (ioGpuConvert_ && (io.dtype == DType::UInt8 || io.dtype == DType::Int8))
+            {
+                // Whole-graph GPU run: keep the caller's raw 8-bit bytes (rt.dtype stays the declared 8-bit
+                // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16 + NC4HW4
+                // gather — skipping the host uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit
+                // rt.dtype, memcpys the raw NCHW bytes into a staging buffer, and dispatches boundary_convert.
+                rt.dtype      = io.dtype;
+                rt.host.bytes = io.data;
+                rt.hostValid  = true;
             } else
             {
                 // Convert the caller's bytes (in io.dtype) to the internal compute storage: fp32 for every

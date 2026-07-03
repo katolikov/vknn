@@ -218,9 +218,13 @@ namespace vknn { namespace vk {
         VkPhysicalDevice16BitStorageFeatures s16 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
         s16.storageBuffer16BitAccess = caps_.storage16bit;
         f16i8.pNext                  = &s16;
+        // 8-bit storage: enables uint8 SSBOs for the boundary_convert image-I/O variants (u8 <-> device fp16).
+        VkPhysicalDevice8BitStorageFeatures s8 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
+        s8.storageBuffer8BitAccess = caps_.storage8bit;
+        s16.pNext                  = &s8;
         VkPhysicalDeviceTimelineSemaphoreFeatures tsem {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
         tsem.timelineSemaphore = caps_.timelineSemaphore;
-        s16.pNext              = &tsem;
+        s8.pNext               = &tsem;
 
         VkDeviceCreateInfo dci {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.pNext                   = &f16i8;

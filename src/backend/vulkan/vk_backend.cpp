@@ -852,6 +852,7 @@ namespace vknn {
             nodeIdx   = idx;
             useFp16_  = be_->useFp16(cfg);
             elemSize_ = useFp16_ ? 2 : 4;
+            graphInputs_.insert(g.inputs.begin(), g.inputs.end());
 
             // 1) allocate device buffers for all activation tensors (non-initializers).
             std::set<TensorId> acts;
@@ -1458,6 +1459,52 @@ namespace vknn {
                 {
                     rebind(tid, false);
                 }
+                // Default-path GPU image conversion: for each 8-bit graph input NOT bound to a dma-buf this
+                // run (and not already handled by the dma-buf rebind), stand up a persistent staging buffer
+                // and a boundary_convert(staging[declared] -> boundary[device-native]) so the raw caller
+                // bytes are converted on the GPU. The staging buffer's stable identity keeps this a one-time
+                // re-record. Skipped when a dma-buf fd is present (zero-copy wins) or the graph is not
+                // whole-GPU (ioGpuConvert off -> host packToBuffer path).
+                if (ioGpuConvert)
+                {
+                    for (TensorId tid: boundaryInputs)
+                    {
+                        if (!graphInputs_.count(tid) || buffers_.find(tid) == buffers_.end())
+                        {
+                            continue;
+                        }
+                        RtTensor &rt = ctx.t(tid);
+                        if (rt.dmaBufFd >= 0 || convert_.count(tid))
+                        {
+                            continue; // zero-copy dma-buf (direct or its own convert) takes precedence
+                        }
+                        if (rt.dtype != DType::UInt8 && rt.dtype != DType::Int8)
+                        {
+                            continue; // only the raw 8-bit image inputs the session stashed as declared dtype
+                        }
+                        bool         flat    = g_.desc(tid).gpuFlat;
+                        TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+                        DType        devDt   = (useFp16_ && !g_.tensors[tid].storeFp32) ? DType::Float16 : DType::Float32;
+                        TensorFormat declFmt = TensorFormat::NCHW; // caller image layout
+                        DType        declDt  = rt.dtype;
+                        NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
+                        auto        &st      = stagingIn_[tid];
+                        size_t       need    = (size_t) (formatElems(declFmt, x) * dtypeSize(declDt));
+                        if (!st || st->bytes() != need)
+                        {
+                            st = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kAuto);
+                        }
+                        ConvertBinding cb;
+                        cb.imported   = st;
+                        cb.isInput    = true;
+                        cb.shape      = x;
+                        cb.declFmt    = declFmt;
+                        cb.declDtype  = declDt;
+                        cb.devFmt     = devFmt;
+                        cb.devDtype   = devDt;
+                        convert_[tid] = cb;
+                    }
+                }
                 if (!sameConvert(convert_, recordedConvert_))
                 {
                     reRecord = true;
@@ -1492,9 +1539,18 @@ namespace vknn {
                     rt.device = std::make_shared<DeviceStorage>();
                 }
                 rt.device->buffer = bit->second;
+                auto sit = stagingIn_.find(tid);
                 if (rt.dmaBufFd >= 0)
                 {
                     // zero-copy: the GPU reads the caller's dma-buf directly (device-native bytes); no pack.
+                    rt.deviceValid  = true;
+                    rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+                } else if (sit != stagingIn_.end() && convert_.count(tid))
+                {
+                    // GPU image convert: raw memcpy the caller's declared bytes into the staging buffer; the
+                    // recorded boundary_convert dispatch turns them into the device-native boundary. No host
+                    // uint8->fp32->fp16 pack. The convert writes bit->second (the boundary), read by the ops.
+                    std::memcpy(sit->second->host(), rt.host.bytes.data(), std::min(sit->second->bytes(), rt.host.bytes.size()));
                     rt.deviceValid  = true;
                     rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 } else if (rt.hostValid && !alreadyHere)
@@ -1670,6 +1726,11 @@ namespace vknn {
         };
         std::map<TensorId, ConvertBinding> convert_, recordedConvert_;
         std::unique_ptr<BoundaryConvert>   conv_;
+        // Default-path (non-dma-buf) GPU image I/O: a persistent host-visible staging buffer per 8-bit graph
+        // input. The caller's raw bytes are memcpy'd in each run and a recorded boundary_convert turns them
+        // into the device-native boundary — no host uint8->fp32->fp16 pack. Allocated once, stable identity.
+        std::map<TensorId, std::shared_ptr<vk::Buffer>> stagingIn_;
+        std::set<TensorId>                              graphInputs_; // g_.inputs, for the staging-input gate
         static bool                        sameConvert(const std::map<TensorId, ConvertBinding> &a, const std::map<TensorId, ConvertBinding> &b) {
             if (a.size() != b.size())
             {

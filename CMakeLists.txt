@@ -133,23 +133,31 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     endif()
   endforeach()
 
-  # boundary_convert: one source -> four cross-dtype SPIR-V (declared <-> device-native), selected at
-  # runtime by (srcDtype, dstDtype). The fp16 variants enable the 16-bit storage extensions.
+  # boundary_convert: one source -> cross-dtype SPIR-V (declared <-> device-native), selected at
+  # runtime by (srcDtype, dstDtype). fp16 variants enable the 16-bit storage extensions; uint8 variants
+  # enable 8-bit storage. Trailing args are extra -D flags for that variant.
   set(_bc ${VKNN_SHADER_DIR}/boundary_convert.comp)
-  function(bc_variant suffix srct dstt extra)
+  function(bc_variant suffix srct dstt)
     set(_o ${VKNN_SHADER_GEN_DIR}/boundary_convert_${suffix}.spv)
     add_custom_command(
       OUTPUT ${_o}
-      COMMAND ${SHADERCC} ${SHADERCC_PRE} ${extra} -DSRC_T=${srct} -DDST_T=${dstt} -o ${_o} ${_bc}
+      COMMAND ${SHADERCC} ${SHADERCC_PRE} ${ARGN} -DSRC_T=${srct} -DDST_T=${dstt} -o ${_o} ${_bc}
       DEPENDS ${_bc} ${VKNN_SHADER_DIR}/store16.glsl
       COMMENT "compile boundary_convert ${suffix}"
       VERBATIM)
     set(_spv_files ${_spv_files} ${_o} PARENT_SCOPE)
   endfunction()
-  bc_variant(f32_f32 float      float      "")
+  bc_variant(f32_f32 float      float)
   bc_variant(f32_f16 float      float16_t  -DNEED_FP16=1)
   bc_variant(f16_f32 float16_t  float      -DNEED_FP16=1)
   bc_variant(f16_f16 float16_t  float16_t  -DNEED_FP16=1)
+  # uint8 image I/O (8-bit storage). Source uint8 -> fp16/fp32 device (exact for 0..255); device
+  # fp16/fp32/uint8 -> uint8 output truncates+clamps to [0,255] (INT_DST_U8).
+  bc_variant(u8_f16  uint8_t    float16_t  -DNEED_FP16=1 -DNEED_INT8=1)
+  bc_variant(u8_f32  uint8_t    float      -DNEED_INT8=1)
+  bc_variant(f16_u8  float16_t  uint8_t    -DNEED_FP16=1 -DNEED_INT8=1 -DINT_DST_U8=1)
+  bc_variant(f32_u8  float      uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
+  bc_variant(u8_u8   uint8_t    uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
 
   add_custom_command(
     OUTPUT ${EMBEDDED_SHADERS_CPP}

@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
         if (argv[i][0] == '-')
         {
             if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
-                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--cache-mode") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--disable-vk-ops"))
+                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--cache-mode") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat"))
             {
                 ++i; // skip the flag's value
             }
@@ -121,12 +121,20 @@ int main(int argc, char **argv) {
         ins.push_back(std::move(in));
     }
 
+    // --repeat N re-runs the same inputs N times (default 1). The first run pays one-time costs (command
+    // buffer record, pipeline build, first-run autotune); later runs show steady-state I/O timing.
+    int                   repeat = atoi(opt(argc, argv, "--repeat", "1"));
     std::vector<IOTensor> outs;
-    Status                st = sess->run(ins, outs);
-    if (st != Status::Ok)
+    Status                st = Status::Ok;
+    for (int r = 0; r < (repeat < 1 ? 1 : repeat); ++r)
     {
-        fprintf(stderr, "run failed (status %d)\n", (int) st);
-        return 2;
+        outs.clear();
+        st = sess->run(ins, outs);
+        if (st != Status::Ok)
+        {
+            fprintf(stderr, "run failed (status %d)\n", (int) st);
+            return 2;
+        }
     }
     for (auto &o: outs)
     {
