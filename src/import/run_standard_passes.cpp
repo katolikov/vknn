@@ -106,6 +106,8 @@ namespace vknn {
         lowerReduceToGap(g);   // a late-resolving rank can expose the spatial-mean form
         lowerEinsum(g);        // batched einsums -> MatMul (needs the operand shapes resolved above)
         inferShapes(g, batch); // resolve the inserted Unsqueeze/MatMul/Squeeze
+        subpixelConvTranspose(g); // ConvTranspose -> Conv + DepthToSpace; runs on fully-resolved dims, before
+        inferShapes(g, batch);    // the pointwise fusion so trailing pointwise ops can still fold onto the Conv
         // Pointwise-chain fusion runs LAST, after const-fold + shape resolution: the shape-computation
         // subgraph (Shape/Gather/Neg/Sqrt/... feeding dynamic Reshapes) is now folded to constants, so
         // fusion only ever sees statically-shaped float activation chains. Fusing earlier would replace a

@@ -26,6 +26,10 @@ namespace vknn {
     // Lower Reduce(Mean) over the spatial dims of a rank-4 tensor (keepdims) to GlobalAvgPool — the
     // ResNet classifier-head pattern with a dedicated NC4HW4 kernel. Needs resolved input ranks.
     void lowerReduceToGap(Graph &g);
+    // Rewrite ConvTranspose (stride s, kernel k%s==0) as a stride-1 Conv (Cout*s*s channels) +
+    // DepthToSpace(s), replacing the memory-bound gather deconv with a tiled conv. Weight rearrange is
+    // exact; device output stays at the fp16 floor. Needs resolved input spatial dims.
+    void subpixelConvTranspose(Graph &g);
     // Fuse Mul(x,HardSigmoid(x))=HardSwish / Mul(x,Sigmoid(x))=SiLU into the conv epilogue or one
     // unary.
     void fuseSwish(Graph &g);
