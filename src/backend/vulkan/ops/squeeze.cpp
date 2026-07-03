@@ -15,6 +15,10 @@ namespace vknn {
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *src = operandBuf(env, node.inputs[0], hold0);
                 vk::Buffer *dst = env.devBuf(node.outputs[0]);
+                if (src->handle() == dst->handle())
+                {
+                    return; // output aliases the input buffer (geometry-as-metadata): no copy needed
+                }
                 // Squeeze preserves element count and layout, so src/dst are equal-sized: copy the whole
                 // buffer. Capping by packedElems(output) is wrong here because NCHW::from collapses rank>4 to
                 // (1,1,1,1) -> 4, truncating a rank-5 flat squeeze (e.g. [1,2,N,1,1,1]->[1,2,N,1,1]) to 4 elems.

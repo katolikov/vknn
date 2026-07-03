@@ -13,6 +13,10 @@ namespace vknn {
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer  *src = operandBuf(env, node.inputs[0], hold0);
                 vk::Buffer  *dst = env.devBuf(node.outputs[0]);
+                if (src->handle() == dst->handle())
+                {
+                    return; // output aliases the input buffer (geometry-as-metadata): no copy needed
+                }
                 VkBufferCopy c {0, 0, std::min(src->bytes(), dst->bytes())};
                 vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
             }

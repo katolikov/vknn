@@ -977,9 +977,46 @@ namespace vknn {
                 auto pref     = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
                 buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref, 0, /*zeroInit=*/true);
             }
+            // Geometry-as-metadata: a pure-copy Reshape/Squeeze/Unsqueeze copies its input verbatim (the
+            // layout pass guarantees input and output share layout + byte size, else it inserts a convert),
+            // so alias the output onto the input's buffer and skip the copy dispatch (record() checks
+            // src==dst). Restricted to an internal (poolable) output so readback/boundary tensors keep their
+            // own buffer; the root input's liveness is extended to the output's consumers because the
+            // liveness scan resolves aliases below.
+            std::map<TensorId, TensorId> aliasRoot;
+            auto                         resolveAlias = [&](TensorId t) {
+                for (int hop = 0; hop < 64 && aliasRoot.count(t); ++hop)
+                {
+                    t = aliasRoot[t];
+                }
+                return t;
+            };
+            for (int ni: idx)
+            {
+                const Node &nd = g.nodes[ni];
+                if ((nd.type != OpType::Reshape && nd.type != OpType::Squeeze && nd.type != OpType::Unsqueeze) || nd.inputs.empty() || nd.outputs.empty())
+                {
+                    continue;
+                }
+                TensorId in = nd.inputs[0], out = nd.outputs[0];
+                if (in == kNoTensor || out == kNoTensor || g.isInitializer(in))
+                {
+                    continue;
+                }
+                if (!producedHere.count(out) || readBack.count(out) || g.tensors[out].storeFp32 || g.tensors[in].storeFp32)
+                {
+                    continue; // output must be internal; skip fp32-pinned tensors
+                }
+                if (actBytes(in) != actBytes(out) || g.tensors[in].gpuFlat != g.tensors[out].gpuFlat)
+                {
+                    continue; // only a byte-for-byte, same-layout reshape can share the buffer
+                }
+                aliasRoot[out] = resolveAlias(in);
+            }
             // [firstPos,lastPos] of each internal tensor within this segment's execution order
             std::map<TensorId, int> firstPos, lastPos;
             auto                    touch = [&](TensorId t, int k) {
+                t = resolveAlias(t); // an aliased tensor lives in its root's buffer; extend the root's span
                 if (t == kNoTensor || !producedHere.count(t) || readBack.count(t) || g.tensors[t].storeFp32)
                 {
                     return; // dedicated (storeFp32) and boundary tensors are not pooled
@@ -1056,6 +1093,16 @@ namespace vknn {
                 s.deadAt      = lastPos[tid];
                 buffers_[tid] = s.buf;
                 busy.push_back(s);
+            }
+            // Point each aliased pure-copy output at its root's buffer (the root is dedicated- or pool-
+            // allocated above); record() then skips the copy since src and dst resolve to the same buffer.
+            for (auto &kv: aliasRoot)
+            {
+                auto it = buffers_.find(resolveAlias(kv.second));
+                if (it != buffers_.end())
+                {
+                    buffers_[kv.first] = it->second;
+                }
             }
 
             // 2) build env + ops; prepare uploads weights.
