@@ -63,16 +63,20 @@ namespace vknn {
     }
 
     // Internal storage (rt.dtype fp32 or int64) -> output bytes in the model's declared dtype `dst`.
-    static void readbackOutput(DType dst, const RtTensor &rt, int64_t elems, IOTensor &io) {
-        io.dtype     = dst;
-        bool srcI64  = rt.dtype == DType::Int64;
-        auto srcF32  = [&](int64_t i) -> float { return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i]; };
-        auto srcI    = [&](int64_t i) -> int64_t { return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i]; };
+    static void readbackOutput(DType dst, RtTensor &rt, int64_t elems, IOTensor &io) {
+        io.dtype = dst;
         if (dst == rt.dtype)
         {
-            io.data = rt.host.bytes; // fast path: source already in the declared dtype (fp32/fp16/uint8/...)
+            // fast path: rt.host already holds the declared dtype (fp32/fp16/uint8/...). MOVE it into the
+            // output instead of copying — rt.host is refilled from the device buffer on the next run before
+            // it is read again, so donating its storage here avoids a full-tensor copy of every output.
+            io.data      = std::move(rt.host.bytes);
+            rt.hostValid = false;
             return;
         }
+        bool srcI64 = rt.dtype == DType::Int64;
+        auto srcF32 = [&](int64_t i) -> float { return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i]; };
+        auto srcI   = [&](int64_t i) -> int64_t { return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i]; };
         io.data.assign((size_t) elems * dtypeSize(dst), 0);
         switch (dst)
         {
