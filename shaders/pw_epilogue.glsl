@@ -40,6 +40,36 @@ vec4 pwLoad4(int slot,int idx){ if(slot==1)return vec4(pwop1.d[idx*4],pwop1.d[id
   if(slot==4)return vec4(pwop4.d[idx*4],pwop4.d[idx*4+1],pwop4.d[idx*4+2],pwop4.d[idx*4+3]);
   if(slot==5)return vec4(pwop5.d[idx*4],pwop5.d[idx*4+1],pwop5.d[idx*4+2],pwop5.d[idx*4+3]);
   return vec4(pwop6.d[idx*4],pwop6.d[idx*4+1],pwop6.d[idx*4+2],pwop6.d[idx*4+3]); }
+#ifdef PW_SPEC
+// Spec-constant specialization of the flat interpreter: the chain STRUCTURE (step count + each step's
+// kind/code/opSlot/bcast) arrives as specialization constants, so the driver's SPIR-V->ISA compiler
+// constant-folds the kind branch, DCEs the unused vx_* opcode-switch arms, folds pwLoad's slot chain
+// to a single buffer, and unrolls to straight-line ISA at pipeline-creation time. Numeric params
+// (p0/p1/stride/outDim/rank) stay in the plan SSBO. Identical vx_binary/vx_unary/vx_act + per-step
+// TO_STORE => byte-identical to the generic interpreter below. Compiled only for fused_pw_flat_spec.
+layout(constant_id = 0)  const int SP_NS = 0;
+layout(constant_id = 1)  const int SP_K0 = 0; layout(constant_id = 2)  const int SP_C0 = 0; layout(constant_id = 3)  const int SP_L0 = 0; layout(constant_id = 4)  const int SP_D0 = 0;
+layout(constant_id = 5)  const int SP_K1 = 0; layout(constant_id = 6)  const int SP_C1 = 0; layout(constant_id = 7)  const int SP_L1 = 0; layout(constant_id = 8)  const int SP_D1 = 0;
+layout(constant_id = 9)  const int SP_K2 = 0; layout(constant_id = 10) const int SP_C2 = 0; layout(constant_id = 11) const int SP_L2 = 0; layout(constant_id = 12) const int SP_D2 = 0;
+layout(constant_id = 13) const int SP_K3 = 0; layout(constant_id = 14) const int SP_C3 = 0; layout(constant_id = 15) const int SP_L3 = 0; layout(constant_id = 16) const int SP_D3 = 0;
+layout(constant_id = 17) const int SP_K4 = 0; layout(constant_id = 18) const int SP_C4 = 0; layout(constant_id = 19) const int SP_L4 = 0; layout(constant_id = 20) const int SP_D4 = 0;
+layout(constant_id = 21) const int SP_K5 = 0; layout(constant_id = 22) const int SP_C5 = 0; layout(constant_id = 23) const int SP_L5 = 0; layout(constant_id = 24) const int SP_D5 = 0;
+layout(constant_id = 25) const int SP_K6 = 0; layout(constant_id = 26) const int SP_C6 = 0; layout(constant_id = 27) const int SP_L6 = 0; layout(constant_id = 28) const int SP_D6 = 0;
+layout(constant_id = 29) const int SP_K7 = 0; layout(constant_id = 30) const int SP_C7 = 0; layout(constant_id = 31) const int SP_L7 = 0; layout(constant_id = 32) const int SP_D7 = 0;
+float pw_apply(float acc, int outIdx){
+#define PW_FSTEP(s,K,C,L,D) if (SP_NS > (s)) { \
+    if ((K)==0||(K)==3) { int oi=outIdx; if ((D)!=0) { int rem=outIdx; oi=0; for(int k=plan.rank-1;k>=0;--k){ int c=rem%plan.outDim[k]; rem/=plan.outDim[k]; oi+=c*plan.stride[(s)*PW_EPI_MAXRANK+k]; } } \
+      float bb=pwLoad((L),oi); acc=((K)==3)?vx_binary(bb,acc,(C)):vx_binary(acc,bb,(C)); } \
+    else if ((K)==1) acc=vx_unary(acc,(C),plan.p0[(s)],plan.p1[(s)]); \
+    else acc=vx_act(acc,(C),plan.p0[(s)],plan.p1[(s)]); \
+    acc=float(TO_STORE(acc)); }
+  PW_FSTEP(0,SP_K0,SP_C0,SP_L0,SP_D0) PW_FSTEP(1,SP_K1,SP_C1,SP_L1,SP_D1)
+  PW_FSTEP(2,SP_K2,SP_C2,SP_L2,SP_D2) PW_FSTEP(3,SP_K3,SP_C3,SP_L3,SP_D3)
+  PW_FSTEP(4,SP_K4,SP_C4,SP_L4,SP_D4) PW_FSTEP(5,SP_K5,SP_C5,SP_L5,SP_D5)
+  PW_FSTEP(6,SP_K6,SP_C6,SP_L6,SP_D6) PW_FSTEP(7,SP_K7,SP_C7,SP_L7,SP_D7)
+#undef PW_FSTEP
+  return acc; }
+#else
 float pw_apply(float acc, int outIdx){
   for(int s=0;s<plan.numSteps;++s){ int kind=plan.step[s*4],code=plan.step[s*4+1],slot=plan.step[s*4+2],bc=plan.step[s*4+3];
     if(kind==0||kind==3){
@@ -51,6 +81,7 @@ float pw_apply(float acc, int outIdx){
     else             acc=vx_act(acc,code,plan.p0[s],plan.p1[s]);
     acc=float(TO_STORE(acc)); }
   return acc; }
+#endif
 // Scalar NC4HW4 store: packedIdx = ((n*Cb+cb)*HW + hw)*4 + lane. Operands are NC4HW4-packed
 // (runtime activations natively; constants packed at upload), so bc==0 (same shape) loads at
 // packedIdx and bc==1 (per-channel [N,C,1,1]) at the store's channel-block lane.

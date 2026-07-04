@@ -131,6 +131,32 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         list(APPEND _spv_files ${_spvEpi16})
       endif()
     endif()
+
+    # Standalone flat FusedPointwise also emits a PW_SPEC variant: the chain structure is baked into
+    # specialization constants so the driver monomorphizes the interpreter loop (shaders/pw_epilogue.glsl
+    # #ifdef PW_SPEC). Selected at runtime per Config::specializePointwise; byte-identical to the interpreter.
+    set(_spec_stems fused_pw_flat)
+    list(FIND _spec_stems ${_name} _specIdx)
+    if(_specIdx GREATER -1)
+      set(_spvSpec ${VKNN_SHADER_GEN_DIR}/${_name}_spec.spv)
+      add_custom_command(
+        OUTPUT ${_spvSpec}
+        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_SPEC=1 -o ${_spvSpec} ${_comp}
+        DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+        COMMENT "compile ${_name}.comp -DPW_SPEC -> ${_name}_spec.spv"
+        VERBATIM)
+      list(APPEND _spv_files ${_spvSpec})
+      if(_src MATCHES "precision.glsl")
+        set(_spvSpec16 ${VKNN_SHADER_GEN_DIR}/${_name}_spec_fp16.spv)
+        add_custom_command(
+          OUTPUT ${_spvSpec16}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_SPEC=1 -DUSE_FP16=1 -o ${_spvSpec16} ${_comp}
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+          COMMENT "compile ${_name}.comp -DPW_SPEC -DUSE_FP16 -> ${_name}_spec_fp16.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvSpec16})
+      endif()
+    endif()
   endforeach()
 
   # boundary_convert: one source -> cross-dtype SPIR-V (declared <-> device-native), selected at

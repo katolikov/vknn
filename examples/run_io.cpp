@@ -59,6 +59,7 @@ int main(int argc, char **argv) {
     cfg.cacheMode              = cacheModeFromStr(opt(argc, argv, "--cache-mode", "full"));
     cfg.freeWeightsAfterUpload = !flag(argc, argv, "--keep-weights");
     cfg.noFlatOps              = flag(argc, argv, "--no-flat");
+    cfg.specializePointwise    = !flag(argc, argv, "--no-pw-spec");
     cfg.foldGpuIslands         = !flag(argc, argv, "--no-fold-islands");
     cfg.layerDump              = flag(argc, argv, "--layer-dump");
     cfg.debugSegments          = flag(argc, argv, "--debug-segments");
