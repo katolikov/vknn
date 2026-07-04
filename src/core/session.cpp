@@ -341,7 +341,7 @@ namespace vknn {
                 VKNN_DEBUG << "backend " << backendName(k) << " not registered";
                 continue;
             }
-            auto b = reg.create(k);
+            auto b = reg.create(k, cfg_);
             if (!b || !b->available())
             {
                 VKNN_WARN << "backend " << backendName(k) << " unavailable; skipping";

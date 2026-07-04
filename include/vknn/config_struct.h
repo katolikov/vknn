@@ -5,6 +5,7 @@
 #include "vknn/cache_mode.h"
 #include "vknn/hint.h"
 #include "vknn/precision.h"
+#include "vknn/priority.h"
 #include <string>
 #include <vector>
 
@@ -17,6 +18,12 @@ namespace vknn {
         bool                     allowCpuFallback = true;
 
         Precision precision = Precision::Low;
+
+        // GPU queue scheduling priority (Vulkan backend). Normal is the driver default and reproduces
+        // the default device-creation path exactly; Low/High request the matching queue global-priority
+        // tier (VK_KHR/EXT_global_priority). Scheduling only — never changes numerical output; inert on a
+        // device without a global-priority extension.
+        Priority priority = Priority::Normal;
 
         // Caches. The unified per-model cache file bundles the compiled-pipeline blob and the
         // prepacked-weight + autotune blob; loading it skips shader compilation, conv autotuning, and

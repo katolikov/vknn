@@ -13,13 +13,13 @@ namespace vknn {
     bool BackendRegistry::has(BackendKind k) const {
         return factories_.count(k) > 0;
     }
-    std::unique_ptr<Backend> BackendRegistry::create(BackendKind k) const {
+    std::unique_ptr<Backend> BackendRegistry::create(BackendKind k, const Config &cfg) const {
         auto it = factories_.find(k);
         if (it == factories_.end())
         {
             return nullptr;
         }
-        return it->second();
+        return it->second(cfg);
     }
 
 } // namespace vknn

@@ -11,11 +11,12 @@ namespace vknn { namespace vk {
            << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB"
            << " tsPeriod=" << timestampPeriod << "ns\n"
            << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
-           << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle;
+           << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
+           << "  globalPriority=" << globalPriority;
         return os.str();
     }
 
-    VulkanContext::VulkanContext() {
+    VulkanContext::VulkanContext(Priority priority): priority_(priority) {
         try
         {
             createInstance();
@@ -148,6 +149,7 @@ namespace vknn { namespace vk {
         caps_.externalMemoryAhb    = caps_.has("VK_ANDROID_external_memory_android_hardware_buffer");
         caps_.memoryBudget         = caps_.has("VK_EXT_memory_budget");
         caps_.cooperativeMatrix    = caps_.has("VK_KHR_cooperative_matrix");
+        caps_.globalPriority       = caps_.has("VK_KHR_global_priority") || caps_.has("VK_EXT_global_priority");
 
         vkGetPhysicalDeviceMemoryProperties(phys_, &memProps_);
     }
@@ -211,6 +213,51 @@ namespace vknn { namespace vk {
         addExt("VK_KHR_8bit_storage");
         addExt("VK_KHR_shader_integer_dot_product");
 
+        // Queue scheduling priority (Config::priority). Priority::Normal leaves everything below exactly
+        // as the default path; Low/High request the matching queue global-priority tier. Capability-gated,
+        // so a device without VK_KHR/EXT_global_priority is an inert no-op. Scheduling only, never output.
+        //   Largest allowed tier not exceeding the requested one (the driver reports the allowed set per
+        //   family; the tier enum is monotonic LOW<MEDIUM<HIGH<REALTIME).
+        auto clampGlobalPriority = [&](VkQueueGlobalPriorityKHR want) -> VkQueueGlobalPriorityKHR {
+            uint32_t qn2 = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties2(phys_, &qn2, nullptr);
+            std::vector<VkQueueFamilyGlobalPriorityPropertiesKHR> gp(qn2);
+            std::vector<VkQueueFamilyProperties2>                 qf(qn2);
+            for (uint32_t i = 0; i < qn2; ++i)
+            {
+                gp[i]       = VkQueueFamilyGlobalPriorityPropertiesKHR {VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR};
+                qf[i]       = VkQueueFamilyProperties2 {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2};
+                qf[i].pNext = &gp[i];
+            }
+            vkGetPhysicalDeviceQueueFamilyProperties2(phys_, &qn2, qf.data());
+            if (queueFamily_ >= qn2 || gp[queueFamily_].priorityCount == 0)
+            {
+                return want; // family reports no set; request as-is (the create-time ladder handles refusal)
+            }
+            const auto              &al = gp[queueFamily_];
+            VkQueueGlobalPriorityKHR best {};
+            bool                     haveBest = false;
+            for (uint32_t k = 0; k < al.priorityCount; ++k)
+            {
+                VkQueueGlobalPriorityKHR t = al.priorities[k];
+                if (t <= want && (!haveBest || t > best))
+                {
+                    best     = t;
+                    haveBest = true;
+                }
+            }
+            return haveBest ? best : want;
+        };
+
+        VkDeviceQueueGlobalPriorityCreateInfoKHR gpci {VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR};
+        const bool                               useGlobalPriority = caps_.globalPriority && priority_ != Priority::Normal;
+        if (useGlobalPriority)
+        {
+            gpci.globalPriority = clampGlobalPriority(priority_ == Priority::High ? VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR : VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR);
+            qci.pNext           = &gpci;
+            addExt(caps_.has("VK_KHR_global_priority") ? "VK_KHR_global_priority" : "VK_EXT_global_priority");
+        }
+
         // Feature chain to enable.
         VkPhysicalDeviceShaderFloat16Int8Features f16i8 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
         f16i8.shaderFloat16 = caps_.shaderFloat16;
@@ -232,8 +279,35 @@ namespace vknn { namespace vk {
         dci.pQueueCreateInfos       = &qci;
         dci.enabledExtensionCount   = (uint32_t) enabledDeviceExts_.size();
         dci.ppEnabledExtensionNames = enabledDeviceExts_.data();
-        VK_CHECK(vkCreateDevice(phys_, &dci, nullptr, &device_));
+
+        VkResult r = vkCreateDevice(phys_, &dci, nullptr, &device_);
+        // A driver may gate HIGH/REALTIME behind a privilege and return VK_ERROR_NOT_PERMITTED_KHR. Step
+        // the requested tier down (High->Medium->Low), then drop the priority request entirely, so the
+        // hint degrades to the default path rather than failing device creation. (The target Xclipse
+        // drivers permit every tier for an ordinary process, so this ladder is a portability safety net.)
+        while (r == VK_ERROR_NOT_PERMITTED_KHR && qci.pNext)
+        {
+            if (gpci.globalPriority == VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR)
+            {
+                gpci.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
+            }
+            else if (gpci.globalPriority == VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR)
+            {
+                gpci.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR;
+            }
+            else
+            {
+                qci.pNext = nullptr;
+            }
+            VKNN_WARN << "global-priority tier refused; retrying at a lower tier";
+            r = vkCreateDevice(phys_, &dci, nullptr, &device_);
+        }
+        VK_CHECK(r);
         vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
+        if (priority_ != Priority::Normal)
+        {
+            VKNN_INFO << "Queue priority " << (priority_ == Priority::High ? "high" : "low") << ": globalPriority=" << (useGlobalPriority ? 1 : 0);
+        }
 
         if (caps_.pushDescriptor)
         {

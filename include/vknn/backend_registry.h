@@ -11,11 +11,13 @@ namespace vknn {
     // --------------------------- Backend registry ---------------------------
     class BackendRegistry {
       public:
-        using Factory = std::function<std::unique_ptr<Backend>()>;
+        // The session Config is passed to the factory so a backend can honor creation-time settings
+        // (e.g. the Vulkan queue priority, applied at device/queue creation before configure() runs).
+        using Factory = std::function<std::unique_ptr<Backend>(const Config &)>;
         static BackendRegistry  &instance();
         void                     registerBackend(BackendKind k, Factory f);
         bool                     has(BackendKind k) const;
-        std::unique_ptr<Backend> create(BackendKind k) const;
+        std::unique_ptr<Backend> create(BackendKind k, const Config &cfg) const;
 
       private:
         std::map<BackendKind, Factory> factories_;
@@ -26,9 +28,9 @@ namespace vknn {
             BackendRegistry::instance().registerBackend(k, std::move(f));
         }
     };
-#define VKNN_REGISTER_BACKEND(KIND, TYPE)                                                                   \
-    static ::vknn::BackendRegistrar _vx_backend_reg_##TYPE(KIND, []() -> std::unique_ptr<::vknn::Backend> { \
-        return std::unique_ptr<::vknn::Backend>(new TYPE());                                                \
+#define VKNN_REGISTER_BACKEND(KIND, TYPE)                                                                                            \
+    static ::vknn::BackendRegistrar _vx_backend_reg_##TYPE(KIND, [](const ::vknn::Config &cfg) -> std::unique_ptr<::vknn::Backend> { \
+        return std::unique_ptr<::vknn::Backend>(new TYPE(cfg));                                                                      \
     })
 
 } // namespace vknn

@@ -154,8 +154,10 @@ namespace vknn {
     // ============================ VulkanBackend ============================
     class VulkanBackend: public Backend {
       public:
-        VulkanBackend() {
-            ctx_ = std::make_unique<vk::VulkanContext>();
+        // The queue priority is applied at device/queue creation, so it must be known here (before
+        // configure() runs) - the backend factory passes the session Config for exactly this.
+        explicit VulkanBackend(const Config &cfg = {}) {
+            ctx_ = std::make_unique<vk::VulkanContext>(cfg.priority);
             if (ctx_->initialized())
             {
                 runner_ = std::make_unique<vk::CommandRunner>(*ctx_);

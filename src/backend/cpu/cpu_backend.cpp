@@ -151,6 +151,10 @@ namespace vknn {
     // --------------------------- CpuBackend ---------------------------
     class CpuBackend: public Backend {
       public:
+        // Config is unused by the CPU backend (no creation-time device settings) but accepted to match
+        // the backend factory signature.
+        explicit CpuBackend(const Config & = {}) {
+        }
         BackendKind kind() const override {
             return BackendKind::Cpu;
         }

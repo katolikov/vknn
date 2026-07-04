@@ -50,6 +50,29 @@ namespace vknn {
         }
         return "low";
     }
+    Priority priorityFromStr(const std::string &s) {
+        if (s == "low")
+        {
+            return Priority::Low;
+        }
+        if (s == "high")
+        {
+            return Priority::High;
+        }
+        return Priority::Normal;
+    }
+    static const char *priorityStr(Priority p) {
+        switch (p)
+        {
+            case Priority::Low:
+                return "low";
+            case Priority::High:
+                return "high";
+            case Priority::Normal:
+                break;
+        }
+        return "normal";
+    }
     const char *mixedPrecisionFp32Tensors() {
         // The geometry tail of a feed-forward-3DGS encoder (build_covariance matmuls, the world/means
         // einsum transforms, the scale/quaternion adapter chain, the camera feature MLP) lifted to fp32
@@ -160,6 +183,10 @@ namespace vknn {
         {
             c.precision = precisionFromStr(j->asStr("fp16"));
         }
+        if (auto *j = v.get("priority"))
+        {
+            c.priority = priorityFromStr(j->asStr("normal"));
+        }
         I("maxSubmitNodes", c.maxSubmitNodes);
         I("maxSubmitBindings", c.maxSubmitBindings);
         S("cacheFile", c.cacheFile);
@@ -224,6 +251,7 @@ namespace vknn {
         os << "],\n";
         os << "  \"allowCpuFallback\": " << (allowCpuFallback ? "true" : "false") << ",\n";
         os << "  \"precision\": \"" << precStr(precision) << "\",\n";
+        os << "  \"priority\": \"" << priorityStr(priority) << "\",\n";
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
         os << "  \"maxSubmitBindings\": " << maxSubmitBindings << ",\n";
         os << "  \"cacheFile\": \"" << cacheFile << "\",\n";

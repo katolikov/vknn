@@ -1,6 +1,7 @@
 // Vulkan instance/device context and capability discovery.
 #pragma once
 #include "vk_common.h"
+#include "vknn/priority.h"
 #include <set>
 #include <string>
 #include <vector>
@@ -46,6 +47,8 @@ namespace vknn { namespace vk {
         bool memoryBudget         = false;
         bool subgroupArithmetic   = false;
         bool subgroupShuffle      = false;
+        // VK_KHR/EXT_global_priority: the queue scheduling-priority tier the Config::priority knob drives.
+        bool globalPriority       = false;
 
         std::set<std::string> deviceExtensions;
         bool                  has(const std::string &ext) const {
@@ -58,7 +61,9 @@ namespace vknn { namespace vk {
     /// Owns the VkInstance/VkDevice/queue and exposes caps. One per process is typical.
     class VulkanContext {
       public:
-        VulkanContext();
+        // priority selects the queue global-priority tier requested at device creation.
+        // Priority::Normal reproduces the default creation path exactly.
+        explicit VulkanContext(Priority priority = Priority::Normal);
         ~VulkanContext();
         VulkanContext(const VulkanContext &)            = delete;
         VulkanContext &operator=(const VulkanContext &) = delete;
@@ -107,6 +112,7 @@ namespace vknn { namespace vk {
         VkPhysicalDeviceMemoryProperties memProps_ {};
         VulkanCaps                       caps_;
         std::vector<const char *>        enabledDeviceExts_;
+        Priority                         priority_ = Priority::Normal;
     };
 
 }} // namespace vknn::vk
