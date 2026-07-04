@@ -50,7 +50,6 @@ namespace vknn {
 
         // Optimization / debug.
         bool        noFlatOps     = false; // disable the flat-layout GPU pass
-        bool        specializePointwise = true; // monomorphize each flat FusedPointwise chain via spec constants (driver folds the interpreter loop/branches to straight-line ISA); byte-identical, off keeps the generic SSBO interpreter
         bool        foldGpuIslands = true; // fold tiny CPU-bounded GPU node islands to CPU (perf); off keeps every supported op on the GPU (verification)
         bool        timing        = false; // print pack/submit/unpack + per-stage timing
         bool        debugSegments = false; // trace per-segment + per-CPU-op execution
