@@ -9,6 +9,8 @@
 namespace vknn {
     // Provided by the build-time-generated translation unit (tools/embed_spirv.py).
     const std::map<std::string, std::vector<uint32_t>> &embeddedShaders();
+    // md5 hex of all embedded SPIR-V kernels — the model cache's kernel-version guard.
+    const char *embeddedShadersHash();
 
     namespace vk {
 

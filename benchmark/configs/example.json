@@ -7,7 +7,6 @@
     "run": {
       "backend": "vulkan",
       "precision": "low",
-      "cache_mode": "tune",
       "iters": 10,
       "warmup": 2,
       "tolerance": 0.999

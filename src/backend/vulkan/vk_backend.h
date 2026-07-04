@@ -4,6 +4,7 @@
 #include "vk_command.h"
 #include "vk_context.h"
 #include "vk_pipeline.h"
+#include "core/cache_codec.h"
 #include "vknn/backend.h"
 #include <functional>
 #include <map>
@@ -18,17 +19,24 @@ namespace vknn {
     };
 
     /// In-memory cache of prepacked weights (keyed by op+role+shape) and autotuned workgroup sizes.
-    /// Skips the host repacking + per-shape autotune on warm session creation. Serializes to a simple
-    /// length-prefixed blob that the backend bundles into the unified per-model cache file.
+    /// Skips the host repacking + per-shape autotune on warm session creation. It maps to/from one
+    /// CacheVariant of the multi-variant model cache (see cache_codec.h).
     class WeightCache {
       public:
-        // Populate from a serialized blob (the weights section of the unified cache file). keepWeights
-        // retains the (large) prepacked weights for the next save; keepTune retains the (tiny) autotune
-        // table. They are independent so a big model can skip caching weights yet still persist its
-        // autotune, sparing a re-tune on every warm start.
-        void                 loadBytes(const uint8_t *data, size_t n, bool keepWeights, bool keepTune);
-        std::vector<uint8_t> serialize() const; // weights + tuning -> blob
-        bool                 enabled() const {
+        // Clear and set whether prepacked weights are retained for saving. `enabled` is true when a
+        // persistent cache file is in use; without a file, weights are uploaded and freed (never
+        // retained) to avoid ballooning RAM (a 965M model would hold ~3.85GB of prepacked fp32).
+        void reset(bool enabled) {
+            weights_.clear();
+            tune_.clear();
+            enabled_ = enabled;
+            dirty_   = false;
+        }
+        // Populate from a cached variant (warm start), then retain for the next save.
+        void loadFrom(const CacheVariant &v);
+        // Copy the retained weights + autotune table into a variant for serialization.
+        void writeInto(CacheVariant &v) const;
+        bool enabled() const {
             return enabled_;
         }
         bool dirty() const {
@@ -43,9 +51,8 @@ namespace vknn {
       private:
         std::map<std::string, std::vector<float>> weights_;
         std::map<std::string, int>                tune_;
-        bool                                      enabled_     = false; // retain prepacked weights (CacheMode::Full)
-        bool                                      tuneEnabled_ = false; // persist the autotune table (CacheMode::Tune+)
-        mutable bool                              dirty_       = false;
+        bool                                      enabled_ = false; // retain prepacked weights for saving
+        mutable bool                              dirty_   = false;
     };
 
     class VulkanBackend;
@@ -62,7 +69,7 @@ namespace vknn {
         bool                                  baseFp16 = false; // segment-wide precision (what a non-storeFp32 tensor is stored as)
         WeightCache                          *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
         vk::CommandRunner                    *runner   = nullptr; // for on-device autotuning benchmarks
-        Mode                                  tuning   = Mode::Fast;
+        Tuning                                tuning   = Tuning::Fast;
         Mode                                  winograd = Mode::Auto;
         // Per-model namespace for the weight cache, so reusing one cacheDir across different models can't
         // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").

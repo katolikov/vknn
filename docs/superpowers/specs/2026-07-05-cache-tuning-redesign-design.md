@@ -65,10 +65,9 @@ already runs at **load** (`op->prepare()` from `compileSegment`), not in `run()`
 
 ### 3. Cache format (MessagePack) + validation + multi-variant
 
-Vendored lib: **`ludocode/mpack`** (single `mpack.c`/`mpack.h`, lean, first-class `bin` blobs) as a
-`third_party/mpack` submodule; `msgpack/msgpack-c` is the batteries-included alternative — final pick
-confirmed at spec review. Wrapped behind a small `vk_cache_codec.{h,cpp}` so the rest of the backend
-sees typed structs, not the msgpack API.
+Vendored lib: **official `msgpack/msgpack-c`** (C API `msgpack.h`; `msgpack_packer` /
+`msgpack_unpacker`) as a `third_party/msgpack-c` submodule. Wrapped behind a small
+`vk_cache_codec.{h,cpp}` so the rest of the backend sees typed structs, not the msgpack API.
 
 Document schema (logical):
 
@@ -119,12 +118,13 @@ the "md5sum of all kernels": any `.comp`/`.glsl` change alters the embedded SPIR
 
 ### 5. `--no-flat` / `--no-fold-islands` → hints
 
-Add `Hint::FlatOps` and `Hint::FoldIslands` (`Mode::On`/`Off`, default `On` = fastest), matching the
-existing `Winograd` hint pattern. The hints are the single source of truth: the `Config::noFlatOps` and
-`Config::foldGpuIslands` bools are removed, and the (few) read sites switch to
-`cfg.hint(Hint::FlatOps, (int) Mode::On) == (int) Mode::On` (same for `FoldIslands`). `run_io` keeps
-`--no-flat` / `--no-fold-islands` as advanced flags that set the hints to `Off`. Defaults unchanged
-(flat on, fold on), so default behavior is the fastest path. Debug flags (`disableVkOps`,
+Add `Hint::FlatLayout` (the flat row-major GPU layout pass that keeps generic head ops on the GPU) and
+`Hint::GpuIslandFold` (fold tiny GPU op-islands onto the CPU), both `Mode::On`/`Off`, default `On` =
+fastest, matching the existing `Winograd` hint pattern. The hints are the single source of truth: the
+`Config::noFlatOps` and `Config::foldGpuIslands` bools are removed, and the (few) read sites switch to
+`cfg.hint(Hint::FlatLayout, (int) Mode::On) == (int) Mode::On` (same for `GpuIslandFold`). `run_io`
+keeps `--no-flat` / `--no-fold-islands` as advanced flags that set the hints to `Off`. Defaults
+unchanged (flat on, fold on), so default behavior is the fastest path. Debug flags (`disableVkOps`,
 `dumpTensors`, `layerDump`, ...) are untouched. The variant key reads these two from the hints.
 
 ### 6. Load/run split
@@ -177,7 +177,7 @@ msgpack. No manual migration or version-straddling reader. `format` starts at 2 
 
 - add `include/vknn/tuning.h`; remove `include/vknn/cache_mode.h`
 - `include/vknn/config_struct.h`: drop `cacheMode`, `noFlatOps`, `foldGpuIslands`; add `tuning`,
-  `noCache`; `hint.h`: drop `Hint::Tuning`, add `Hint::FlatOps`, `Hint::FoldIslands`
+  `noCache`; `hint.h`: drop `Hint::Tuning`, add `Hint::FlatLayout`, `Hint::GpuIslandFold`
 - `src/core/config.cpp`: parse/serialize `tuning`; ignore-with-warn legacy `cacheMode`
 - `src/backend/vulkan/vk_cache_codec.{h,cpp}` (new); rework cache read/write + variant lookup in
   `vk_backend.cpp`; `WeightCache` serialize/load move to the codec

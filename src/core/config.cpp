@@ -82,19 +82,19 @@ namespace vknn {
                "/enc/Transpose_,/enc/Concat_,/enc/Squeeze,/enc/Split_,/enc/Clip,/enc/Softplus,/enc/Exp_,"
                "/enc/Neg,/enc/Reciprocal,/enc/ScatterND,/enc/camera_head/res_conv,/enc/camera_head/more_mlps";
     }
-    Mode tuningFromStr(const std::string &s) {
-        if (s == "off")
+    Tuning tuningFromStr(const std::string &s) {
+        if (s == "none" || s == "off") // "off" = legacy alias for the former --tuning knob
         {
-            return Mode::NoTune;
+            return Tuning::None;
         }
-        if (s == "thorough")
+        if (s == "heavy" || s == "thorough") // "thorough" = legacy alias
         {
-            return Mode::Thorough;
+            return Tuning::Heavy;
         }
-        return Mode::Fast;
+        return Tuning::Fast;
     }
-    static const char *tuneStr(Mode t) {
-        return t == Mode::NoTune ? "off" : t == Mode::Thorough ? "thorough" : "fast";
+    static const char *tuningStr(Tuning t) {
+        return t == Tuning::None ? "none" : t == Tuning::Heavy ? "heavy" : "fast";
     }
     Mode winogradFromStr(const std::string &s) {
         if (s == "on")
@@ -109,20 +109,6 @@ namespace vknn {
     }
     static const char *winoStr(Mode w) {
         return w == Mode::On ? "on" : w == Mode::Off ? "off" : "auto";
-    }
-    CacheMode cacheModeFromStr(const std::string &s) {
-        if (s == "off")
-        {
-            return CacheMode::Off;
-        }
-        if (s == "tune")
-        {
-            return CacheMode::Tune;
-        }
-        return CacheMode::Full;
-    }
-    const char *cacheModeStr(CacheMode m) {
-        return m == CacheMode::Off ? "off" : m == CacheMode::Tune ? "tune" : "full";
     }
 
     Config Config::fromJsonFile(const std::string &path) {
@@ -191,13 +177,34 @@ namespace vknn {
         I("maxSubmitBindings", c.maxSubmitBindings);
         S("cacheFile", c.cacheFile);
         S("cacheDir", c.cacheDir);
-        if (auto *j = v.get("cacheMode"))
+        B("noCache", c.noCache);
+        if (v.get("cacheMode"))
         {
-            c.cacheMode = cacheModeFromStr(j->asStr("full"));
+            VKNN_WARN << "config key 'cacheMode' is obsolete and ignored (caching is always on now; use 'tuning' for autotune effort)";
+        }
+        if (auto *j = v.get("tuning"))
+        {
+            c.tuning = tuningFromStr(j->asStr("fast"));
         }
         B("freeWeightsAfterUpload", c.freeWeightsAfterUpload);
-        B("noFlatOps", c.noFlatOps);
-        B("foldGpuIslands", c.foldGpuIslands);
+        // Flat-layout pass + GPU-island folding are hints now (default On). Accept the new keys and the
+        // legacy noFlatOps / foldGpuIslands booleans.
+        if (auto *j = v.get("flatLayout"))
+        {
+            c.setHint(Hint::FlatLayout, j->asBool(true) ? (int) Mode::On : (int) Mode::Off);
+        }
+        if (auto *j = v.get("noFlatOps"))
+        {
+            c.setHint(Hint::FlatLayout, j->asBool(false) ? (int) Mode::Off : (int) Mode::On);
+        }
+        if (auto *j = v.get("gpuIslandFold"))
+        {
+            c.setHint(Hint::GpuIslandFold, j->asBool(true) ? (int) Mode::On : (int) Mode::Off);
+        }
+        if (auto *j = v.get("foldGpuIslands"))
+        {
+            c.setHint(Hint::GpuIslandFold, j->asBool(true) ? (int) Mode::On : (int) Mode::Off);
+        }
         B("timing", c.timing);
         B("profile", c.profile);
         I("verbosity", c.verbosity);
@@ -219,10 +226,6 @@ namespace vknn {
         if (auto *j = v.get("winograd"))
         {
             c.setHint(Hint::Winograd, winogradFromStr(j->asStr("auto")));
-        }
-        if (auto *j = v.get("tuning"))
-        {
-            c.setHint(Hint::Tuning, tuningFromStr(j->asStr("fast")));
         }
         if (auto *j = v.get("winogradVariant"))
         {
@@ -256,10 +259,11 @@ namespace vknn {
         os << "  \"maxSubmitBindings\": " << maxSubmitBindings << ",\n";
         os << "  \"cacheFile\": \"" << cacheFile << "\",\n";
         os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
-        os << "  \"cacheMode\": \"" << cacheModeStr(cacheMode) << "\",\n";
+        os << "  \"noCache\": " << (noCache ? "true" : "false") << ",\n";
+        os << "  \"tuning\": \"" << tuningStr(tuning) << "\",\n";
         os << "  \"freeWeightsAfterUpload\": " << (freeWeightsAfterUpload ? "true" : "false") << ",\n";
-        os << "  \"noFlatOps\": " << (noFlatOps ? "true" : "false") << ",\n";
-        os << "  \"foldGpuIslands\": " << (foldGpuIslands ? "true" : "false") << ",\n";
+        os << "  \"flatLayout\": " << (flatLayout() ? "true" : "false") << ",\n";
+        os << "  \"gpuIslandFold\": " << (gpuIslandFold() ? "true" : "false") << ",\n";
         os << "  \"timing\": " << (timing ? "true" : "false") << ",\n";
         os << "  \"profile\": " << (profile ? "true" : "false") << ",\n";
         os << "  \"verbosity\": " << verbosity << ",\n";
@@ -269,7 +273,6 @@ namespace vknn {
         os << "  \"disableVkOps\": \"" << disableVkOps << "\",\n";
         os << "  \"dumpTensors\": \"" << dumpTensors << "\",\n";
         os << "  \"winograd\": \"" << winoStr((Mode) hint(Hint::Winograd, (int) Mode::Auto)) << "\",\n";
-        os << "  \"tuning\": \"" << tuneStr((Mode) hint(Hint::Tuning, (int) Mode::Fast)) << "\",\n";
         os << "  \"winogradVariant\": " << hint(Hint::WinogradVariant, 0) << ",\n";
         os << "  \"winogradUnit\": " << hint(Hint::WinogradUnit, 0) << ",\n";
         os << "  \"directConv3x3\": " << hint(Hint::DirectConv3x3, 0) << "\n";

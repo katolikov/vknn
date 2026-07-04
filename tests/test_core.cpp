@@ -28,17 +28,18 @@ TEST(Config, JsonRoundTrip) {
     c.precision      = Precision::Low;
     c.maxSubmitNodes = 250;
     c.profile        = true;
-    c.cacheMode      = CacheMode::Tune;
+    c.tuning         = Tuning::Heavy;
     c.setHint(Hint::Winograd, (int) Mode::Off);
+    c.setHint(Hint::FlatLayout, (int) Mode::Off); // exercise a non-default flat/fold hint
     std::string js = c.toJson();
     Config      d  = Config::fromJsonString(js);
     EXPECT_EQ(d.backend, BackendKind::Vulkan);
     EXPECT_EQ(d.precision, Precision::Low);
     EXPECT_EQ(d.maxSubmitNodes, 250);
     EXPECT_TRUE(d.profile);
-    EXPECT_EQ(d.cacheMode, CacheMode::Tune);
-    EXPECT_FALSE(d.cachesWeights());
-    EXPECT_TRUE(d.cachesTuning());
+    EXPECT_EQ(d.tuning, Tuning::Heavy);
+    EXPECT_FALSE(d.flatLayout());   // --no-flat round-trips through the hint
+    EXPECT_TRUE(d.gpuIslandFold()); // default stays on
     EXPECT_EQ(precisionFromStr("normal"), Precision::Normal);
     EXPECT_EQ(precisionFromStr("high"), Precision::High);
     EXPECT_EQ(precisionFromStr("low"), Precision::Low);

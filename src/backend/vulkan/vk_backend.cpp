@@ -31,103 +31,24 @@ namespace vknn {
     }
 
     // ============================ WeightCache ============================
-    // Binary format: [u32 nWeights]{[u32 klen][key][u32 nfloats][floats]} [u32 nTune]{[u32
-    // klen][key][i32 val]}
-    void WeightCache::loadBytes(const uint8_t *data, size_t n, bool keepWeights, bool keepTune) {
-        enabled_     = keepWeights;
-        tuneEnabled_ = keepTune;
-        size_t off   = 0;
-        auto   rd32 = [&](uint32_t &v) {
-            if (off + 4 > n)
-            {
-                return false;
-            }
-            std::memcpy(&v, data + off, 4);
-            off += 4;
-            return true;
-        };
-        uint32_t nw = 0;
-        if (rd32(nw))
+    void WeightCache::loadFrom(const CacheVariant &v) {
+        weights_ = v.weights;
+        tune_.clear();
+        for (const auto &kv: v.tune)
         {
-            for (uint32_t i = 0; i < nw; ++i)
-            {
-                uint32_t kl = 0, nf = 0;
-                if (!rd32(kl) || off + kl > n)
-                {
-                    break;
-                }
-                std::string k((const char *) data + off, kl);
-                off += kl;
-                if (!rd32(nf) || off + (size_t) nf * 4 > n)
-                {
-                    break;
-                }
-                if (keepWeights) // else advance past the blob without materializing it (saves RAM)
-                {
-                    std::vector<float> d(nf);
-                    std::memcpy(d.data(), data + off, (size_t) nf * 4);
-                    weights_[k] = std::move(d);
-                }
-                off += (size_t) nf * 4;
-            }
-            uint32_t nt = 0;
-            if (rd32(nt))
-            {
-                for (uint32_t i = 0; i < nt; ++i)
-                {
-                    uint32_t kl  = 0;
-                    int32_t  val = 0;
-                    if (!rd32(kl) || off + kl > n)
-                    {
-                        break;
-                    }
-                    std::string k((const char *) data + off, kl);
-                    off += kl;
-                    if (off + 4 > n)
-                    {
-                        break;
-                    }
-                    std::memcpy(&val, data + off, 4);
-                    off += 4;
-                    if (keepTune)
-                    {
-                        tune_[k] = val;
-                    }
-                }
-            }
+            tune_[kv.first] = (int) kv.second;
         }
+        enabled_ = true;
+        dirty_   = false;
         VKNN_INFO << "WeightCache: loaded " << weights_.size() << " prepacked weights, " << tune_.size() << " tuning entries";
     }
-    std::vector<uint8_t> WeightCache::serialize() const {
-        std::vector<uint8_t> out;
-        auto                 wr32 = [&](uint32_t v) {
-            const uint8_t *p = (const uint8_t *) &v;
-            out.insert(out.end(), p, p + 4);
-        };
-        auto wrBytes = [&](const void *p, size_t bytes) {
-            const uint8_t *b = (const uint8_t *) p;
-            out.insert(out.end(), b, b + bytes);
-        };
-        wr32((uint32_t) weights_.size());
-        for (auto &kv: weights_)
+    void WeightCache::writeInto(CacheVariant &v) const {
+        v.weights = weights_;
+        v.tune.clear();
+        for (const auto &kv: tune_)
         {
-            wr32((uint32_t) kv.first.size());
-            wrBytes(kv.first.data(), kv.first.size());
-            wr32((uint32_t) kv.second.size());
-            wrBytes(kv.second.data(), kv.second.size() * 4);
+            v.tune[kv.first] = (int32_t) kv.second;
         }
-        wr32(tuneEnabled_ ? (uint32_t) tune_.size() : 0u);
-        if (tuneEnabled_)
-        {
-            for (auto &kv: tune_)
-            {
-                wr32((uint32_t) kv.first.size());
-                wrBytes(kv.first.data(), kv.first.size());
-                int32_t v = kv.second;
-                wrBytes(&v, 4);
-            }
-        }
-        return out;
     }
     bool WeightCache::get(const std::string &key, std::vector<float> &out) const {
         auto it = weights_.find(key);
@@ -480,96 +401,116 @@ namespace vknn {
         vk::CommandRunner &runner() {
             return *runner_;
         }
-        // Read cfg.cacheFile once and split it into the pipeline + weight sections. Empty cacheFile
-        // (e.g. a session built from an in-memory graph) leaves both sections empty -> caches stay
-        // in-memory only and saveCaches() is a no-op.
-        void loadUnified(const Config &cfg) {
-            if (unifiedLoaded_)
+        // The cache-affecting configuration that keys a cache variant (see cache_codec.h). Two configs
+        // with an equal key produce identical compiled artifacts and share a variant.
+        static CacheVariant variantKey(const Config &cfg) {
+            CacheVariant k;
+            k.precision       = cfg.precision == Precision::High ? "high" : cfg.precision == Precision::Normal ? "normal" : "low";
+            k.flatLayout      = cfg.flatLayout();
+            k.gpuIslandFold   = cfg.gpuIslandFold();
+            k.fp32Tensors     = cfg.fp32Tensors;
+            k.winograd        = cfg.hint(Hint::Winograd, (int) Mode::Auto);
+            k.winogradVariant = cfg.hint(Hint::WinogradVariant, 0);
+            k.winogradUnit    = cfg.hint(Hint::WinogradUnit, 0);
+            k.directConv3x3   = cfg.hint(Hint::DirectConv3x3, 0);
+            return k;
+        }
+        // Load + validate the model cache once, selecting the variant for this config. Caching is
+        // always-on: a valid file's matching variant primes the pipeline + weight caches for a warm
+        // start; a missing/invalid file (or a config with no cached variant yet) starts empty and this
+        // variant is built at load and appended on save. Whole-file guards: format + kernel hash
+        // (embedded SPIR-V) + device (vendor/device/driver + pipeline-cache UUID) + model hash. An
+        // in-memory graph (empty cacheFile) or cfg.noCache stays memory-only.
+        void loadCache(const Config &cfg, const std::string &modelHash) {
+            if (cacheLoaded_)
             {
                 return;
             }
-            unifiedLoaded_ = true;
-            cacheFile_     = cfg.cacheFile;
-            savePipeline_  = cfg.cachesPipeline();
-            if (cacheFile_.empty())
+            cacheLoaded_ = true;
+            noCache_     = cfg.noCache;
+            cacheFile_   = cfg.cacheFile;
+            curKey_      = variantKey(cfg);
+
+            const auto &caps        = ctx_->caps();
+            cacheDoc_               = CacheDoc {};
+            cacheDoc_.format        = kCacheFormat;
+            cacheDoc_.kernelHash    = embeddedShadersHash();
+            cacheDoc_.vendorId      = caps.vendorID;
+            cacheDoc_.deviceId      = caps.deviceID;
+            cacheDoc_.driverVersion = caps.driverVersion;
+            cacheDoc_.pipelineCacheUUID.assign(caps.pipelineCacheUUID, caps.pipelineCacheUUID + sizeof(caps.pipelineCacheUUID));
+            cacheDoc_.model = modelHash;
+
+            std::vector<char>   pipeInit;
+            const CacheVariant *matched = nullptr;
+            if (!noCache_ && !cacheFile_.empty())
             {
-                return;
-            }
-            std::ifstream f(cacheFile_, std::ios::binary);
-            if (!f)
-            {
-                return;
-            }
-            loadedBytes_.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-            const uint8_t *p = loadedBytes_.data();
-            size_t         n = loadedBytes_.size();
-            if (n < 8 || std::memcmp(p, "VKNNCAC1", 8) != 0)
-            {
-                return; // absent / unrecognized -> regenerate
-            }
-            size_t off  = 8;
-            auto   rd32 = [&](uint32_t &v) {
-                if (off + 4 > n)
+                std::ifstream f(cacheFile_, std::ios::binary);
+                if (f)
                 {
-                    return false;
+                    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                    CacheDoc             loaded;
+                    if (cacheDecode(bytes.data(), bytes.size(), loaded) && loaded.format == cacheDoc_.format &&
+                        loaded.kernelHash == cacheDoc_.kernelHash && loaded.vendorId == cacheDoc_.vendorId &&
+                        loaded.deviceId == cacheDoc_.deviceId && loaded.driverVersion == cacheDoc_.driverVersion &&
+                        loaded.pipelineCacheUUID == cacheDoc_.pipelineCacheUUID && loaded.model == cacheDoc_.model)
+                    {
+                        cacheDoc_    = std::move(loaded); // keep every cached variant
+                        loadedBytes_ = std::move(bytes);
+                        matched      = cacheDoc_.findVariant(curKey_);
+                        if (matched)
+                        {
+                            pipeInit.assign(matched->pipeline.begin(), matched->pipeline.end());
+                        }
+                    } else
+                    {
+                        VKNN_INFO << "cache " << cacheFile_ << " does not match this device/model/kernels -> recompiling";
+                    }
                 }
-                std::memcpy(&v, p + off, 4);
-                off += 4;
-                return true;
-            };
-            uint32_t pl = 0;
-            if (rd32(pl) && off + pl <= n)
+            }
+            cache_  = std::make_unique<vk::PipelineCache>(*ctx_, pipeInit);
+            wcache_ = std::make_unique<WeightCache>();
+            if (matched)
             {
-                pipeInit_.assign((const char *) p + off, (const char *) p + off + pl);
-                off += pl;
-                uint32_t wl = 0;
-                if (rd32(wl) && off + wl <= n)
-                {
-                    weightInit_.assign(p + off, p + off + wl);
-                }
+                wcache_->loadFrom(*matched);
+            } else
+            {
+                wcache_->reset(!noCache_ && !cacheFile_.empty());
             }
         }
-        vk::PipelineCache *pipelineCache(const Config &cfg) {
-            if (!cache_)
-            {
-                loadUnified(cfg);
-                cache_ = std::make_unique<vk::PipelineCache>(*ctx_, cfg.cachesPipeline() ? pipeInit_ : std::vector<char> {});
-            }
+        vk::PipelineCache *pipelineCache() {
             return cache_.get();
         }
-        WeightCache *weightCache(const Config &cfg) {
-            if (!wcache_)
-            {
-                loadUnified(cfg);
-                wcache_          = std::make_unique<WeightCache>();
-                bool keepWeights = cfg.cachesWeights() && !cacheFile_.empty();
-                bool keepTune    = cfg.cachesTuning() && !cacheFile_.empty();
-                wcache_->loadBytes(weightInit_.data(), weightInit_.size(), keepWeights, keepTune);
-            }
+        WeightCache *weightCache() {
             return wcache_.get();
         }
-        // Write the unified cache file, but only when the serialized cache differs from what was loaded
-        // (so an unchanged warm session leaves the file untouched). Called from Session::updateCache().
+        // Update this config's variant in the loaded document and rewrite the cache file, but only when
+        // the serialized bytes changed (an unchanged warm session leaves the file untouched). Called from
+        // Session::updateCache() at teardown.
         void saveCaches() {
-            if (cacheFile_.empty())
+            if (noCache_ || cacheFile_.empty() || !cache_ || !wcache_)
             {
                 return;
             }
-            std::vector<char>    pipe = (cache_ && savePipeline_) ? cache_->getData() : pipeInit_;
-            // serialize() writes the weights only when CacheMode::Full retained them and the autotune
-            // only when the mode is Tune or Full, so this one call covers every combination.
-            std::vector<uint8_t> w = wcache_ ? wcache_->serialize() : weightInit_;
-            std::vector<uint8_t> out;
-            auto                 wr32 = [&](uint32_t v) {
-                const uint8_t *b = (const uint8_t *) &v;
-                out.insert(out.end(), b, b + 4);
-            };
-            const char magic[8] = {'V', 'K', 'N', 'N', 'C', 'A', 'C', '1'};
-            out.insert(out.end(), magic, magic + 8);
-            wr32((uint32_t) pipe.size());
-            out.insert(out.end(), pipe.begin(), pipe.end());
-            wr32((uint32_t) w.size());
-            out.insert(out.end(), w.begin(), w.end());
+            CacheVariant      v    = curKey_;
+            std::vector<char> pipe = cache_->getData();
+            v.pipeline.assign(pipe.begin(), pipe.end());
+            wcache_->writeInto(v);
+            bool replaced = false;
+            for (auto &e: cacheDoc_.variants)
+            {
+                if (e.sameKey(v))
+                {
+                    e        = std::move(v);
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced)
+            {
+                cacheDoc_.variants.push_back(std::move(v));
+            }
+            std::vector<uint8_t> out = cacheEncode(cacheDoc_);
             if (out == loadedBytes_)
             {
                 return; // unchanged
@@ -582,7 +523,7 @@ namespace vknn {
             }
             f.write((const char *) out.data(), (std::streamsize) out.size());
             loadedBytes_ = out;
-            VKNN_INFO << "Saved cache (" << out.size() << " bytes: pipeline " << pipe.size() << " + weights " << w.size() << ") -> " << cacheFile_;
+            VKNN_INFO << "Saved cache (" << out.size() << " bytes, " << cacheDoc_.variants.size() << " variant(s)) -> " << cacheFile_;
         }
 
         bool useFp16(const Config &cfg) const {
@@ -828,13 +769,17 @@ namespace vknn {
         std::unique_ptr<vk::PipelineCache> cache_;
         std::unique_ptr<WeightCache>       wcache_;
         std::string                        disabledOps_; // Config::disableVkOps (debug op-fallback list)
-        // Unified per-model cache file (cfg.cacheFile): one file bundling the pipeline + weight/tuning
-        // blobs, read once and split into pipeInit_/weightInit_, rewritten by saveCaches() only when the
-        // serialized cache differs from what was loaded.
+        // Multi-variant per-model cache file (cfg.cacheFile). loadCache() reads + validates it into
+        // cacheDoc_ and selects the variant matching curKey_; saveCaches() updates that variant and
+        // rewrites the file only when the serialized bytes (loadedBytes_) change. cacheLoaded_ makes
+        // loadCache idempotent across this model's segments: one VulkanBackend serves exactly one model
+        // (one Session), so the single loaded document + curKey_ stay valid for its whole lifetime.
         std::string          cacheFile_;
-        std::vector<char>    pipeInit_;
-        std::vector<uint8_t> weightInit_, loadedBytes_;
-        bool                 unifiedLoaded_ = false, savePipeline_ = true;
+        CacheDoc             cacheDoc_;
+        CacheVariant         curKey_;
+        std::vector<uint8_t> loadedBytes_;
+        bool                 cacheLoaded_ = false;
+        bool                 noCache_     = false;
 
         std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;  // sharedPipeline()
         std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_; // uploadPooled()
@@ -1218,10 +1163,8 @@ namespace vknn {
             // 2) build env + ops; prepare uploads weights.
             env_.backend  = be_;
             env_.ctx      = &be_->ctx();
-            env_.cache    = be_->pipelineCache(cfg);
-            env_.weights  = be_->weightCache(cfg);
             env_.runner   = &be_->runner();
-            env_.tuning   = (Mode) cfg.hint(Hint::Tuning, (int) Mode::Fast);
+            env_.tuning   = cfg.tuning;
             env_.winograd = (Mode) cfg.hint(Hint::Winograd, (int) Mode::Auto);
             env_.graph    = &g;
             env_.config   = &cfg;
@@ -1254,7 +1197,12 @@ namespace vknn {
                 snprintf(g, sizeof(g), "%04x%04x-%08x", c.vendorID, c.deviceID, c.driverVersion);
                 env_.gpuTag = g;
             }
-            env_.devBuf = [this](TensorId t) -> vk::Buffer * {
+            // Load + validate the model cache now that the model hash is known, then hand the primed
+            // pipeline + weight caches to the env. loadCache is idempotent across this model's segments.
+            be_->loadCache(cfg, env_.modelTag);
+            env_.cache   = be_->pipelineCache();
+            env_.weights = be_->weightCache();
+            env_.devBuf  = [this](TensorId t) -> vk::Buffer * {
                 auto it = buffers_.find(t);
                 return it == buffers_.end() ? nullptr : it->second.get();
             };

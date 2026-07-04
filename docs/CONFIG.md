@@ -34,17 +34,17 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `precision` | string | `"low"`, `"normal"`, `"high"` (aliases `"fp16"`→low, `"mixed"`→normal, `"fp32"`→high; unknown → low) | `"low"` | Quality tier for the Vulkan backend. `low` = fp16 storage + fp32 accumulation everywhere. `normal` = fp16, but a built-in geometry-tail set (`mixedPrecisionFp32Tensors()`) is kept fp32 — selective fp32 (a no-op for models without those tensors). `high` = full fp32 storage. Under `low`/`normal` every fp16 narrowing store rounds to nearest even (the `RoundingModeRTE` SPIR-V execution mode), so per-store error is unbiased and does not accumulate a directional drift across depth. See `fp32Tensors` to override the `normal` set. |
 | `maxSubmitNodes` | int | ≥ 0 | `500` | Split a GPU segment larger than this into chunks of this many nodes, each its own submit, so no single submit trips the GPU watchdog. `0` disables chunking. Only the very large YoNoSplat-class transformer needs it; results are numerically identical. |
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
-| `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Unified per-model cache file bundling the pipeline-cache blob and the prepacked-weight + autotune blob (container magic `VKNNCAC1`). Empty resolves to `<model>.cache` next to the model. Loading it on a warm start skips shader compilation, conv autotuning, and the Winograd weight transform. |
-| `cacheDir` | string | filesystem path | `"/data/local/tmp/vxrt/cache"` | Fallback location for the unified cache when the session is built from an in-memory graph (no model path to anchor `cacheFile`). |
-| `cacheMode` | string | `"off"`, `"tune"`, `"full"` | `"full"` | What a warm start reloads from `cacheFile`. `off` recomputes everything every load; `tune` keeps the cheap, deterministic blobs (compiled `VkPipelineCache` + the conv autotune table) but re-uploads weights; `full` also keeps the content-keyed prepacked-weights blob for the fastest warm load (and the largest cache file). |
+| `priority` | string | `"low"`, `"normal"`, `"high"` | `"normal"` | GPU queue scheduling priority (Vulkan `VK_KHR/EXT_global_priority`). `normal` reproduces the default device-creation path; `low`/`high` request the matching queue tier. Scheduling only — never changes numerical output; an inert no-op on a device without a global-priority extension. |
+| `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Per-model MessagePack cache holding the compiled pipelines, prepacked/Winograd weights, and conv autotune table. Empty resolves to `<model>.cache` next to the model. Caching is always on: a warm start reloads it (skipping shader compilation, weight prepacking, and autotuning), and it auto-heals when stale. See [Caching](#caching). |
+| `cacheDir` | string | filesystem path | `"/data/local/tmp/vxrt/cache"` | Fallback location for the cache when the session is built from an in-memory graph (no model path to anchor `cacheFile`). |
+| `noCache` | bool | `true` / `false` | `false` | Debug: skip all cache read/write, recompiling + re-tuning on every load (for cold-compile measurement). |
 | `profile` | bool | `true` / `false` | `false` | Enable the per-op profiler (GPU timestamp queries + CPU timing); the table is available via `session.profiler()`. |
 | `verbosity` | int | `0`, `1`, `≥2` | `1` | Log level. `0` → Warn, `1` → Info, `≥2` → Debug. Applied by `Config::applyLogLevel()`. |
 | `layerDump` | bool | `true` / `false` | `false` | Dump every layer's output tensor to disk for debugging. |
 | `layerDumpDir` | string | filesystem path | `"/data/local/tmp/vxrt/dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
-| `tuning` | string | `"off"`, `"fast"`, `"thorough"` | `"fast"` | Autotuning level for conv workgroup-size search (sets `Hint::Tuning`). `off` uses defaults, `fast` does a quick search, `thorough` searches more candidates. |
-| `winograd` | string | `"auto"`, `"on"`, `"off"` | `"auto"` | 3×3 Winograd F(2,3) selection (sets `Hint::Winograd`). `auto` measures the tiled-GEMM Winograd against the direct kernel per shape and keeps the faster; `on` forces it; `off` always uses the direct kernel. Forcing `on`/`off` skips the per-shape timing, so the kernel choice (and the output bits) is deterministic run-to-run. `auto` requires `tuning` != `off`. |
-| `noFlatOps` | bool | `true` / `false` | `false` | Disable the flat-layout GPU pass (forces NC4HW4 / CPU paths). Diagnostic. |
-| `foldGpuIslands` | bool | `true` / `false` | `true` | Merge tiny GPU islands between CPU segments into the CPU side (fewer boundary round-trips). `false` keeps every supported op on the GPU — verification runs use it so the fallback count is meaningful (`vknn_run_io --no-fold-islands`). |
+| `tuning` | string | `"none"`, `"fast"`, `"heavy"` (aliases `"off"`→none, `"thorough"`→heavy) | `"fast"` | Load-time conv autotune effort. `none` uses the default kernel (no per-shape measurement), `fast` does a quick candidate sweep, `heavy` an exhaustive one. Effort only — never changes numerical output beyond kernel-selection fp rounding (outputs stay cos ≈ 1.0, same argmax); the chosen kernels are cached and reused on a warm start. |
+| `flatLayout` | bool | `true` / `false` | `true` | Flat row-major GPU layout pass that keeps generic head ops (Transpose/Slice/Concat/Binary/Softmax) on the GPU. On by default (fastest). `false` (CLI `--no-flat`) forces NC4HW4 / CPU paths — advanced. Backed by `Hint::FlatLayout`. |
+| `gpuIslandFold` | bool | `true` / `false` | `true` | Fold tiny GPU op-islands between CPU segments onto the CPU (fewer boundary round-trips). On by default (fastest). `false` (CLI `--no-fold-islands`) keeps every supported op on the GPU — verification runs use it so the fallback count is meaningful. Backed by `Hint::GpuIslandFold`. |
 | `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
 | `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). |
@@ -58,7 +58,8 @@ The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 ```cpp
 enum class BackendKind { Vulkan, Cpu };
 enum class Precision   { Low, Normal, High };  // "low" fp16 | "normal" fp16 + selective fp32 | "high" fp32
-enum class CacheMode   { Off, Tune, Full };  // Full = also cache prepacked weights (default)
+enum class Priority    { Low, Normal, High };  // GPU queue global-priority tier (scheduling only)
+enum class Tuning      { None, Fast, Heavy };  // load-time conv autotune effort
 enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Auto, Unknown };  // Auto: declared-boundary zero-copy sentinel (bytes already device-native)
 ```
 
@@ -70,29 +71,52 @@ defaults are the production kernels; normal use needs none of these. There are n
 ```cpp
 enum class Hint {
   Winograd        = 0,  // 3x3 Winograd selection      (Auto / On / Off)
-  Tuning          = 1,  // autotune effort             (NoTune / Fast / Thorough)
-  WinogradVariant = 2,  // Winograd matmul impl         (TiledGemm / Fused / FusedSplit / FullyFused / SubgroupGemm)
-  WinogradUnit    = 3,  // Winograd output tile         (F23 / F43)
-  DirectConv3x3   = 4,  // direct 3x3 kernel            (DirectAuto / RegisterTiled / LdsHalo)
+  WinogradVariant = 1,  // Winograd matmul impl         (TiledGemm / Fused / FusedSplit / FullyFused / SubgroupGemm)
+  WinogradUnit    = 2,  // Winograd output tile         (F23 / F43)
+  DirectConv3x3   = 3,  // direct 3x3 kernel            (DirectAuto / RegisterTiled / LdsHalo)
+  FlatLayout      = 4,  // flat-layout GPU pass         (On / Off, default On)
+  GpuIslandFold   = 5,  // fold tiny GPU islands to CPU (On / Off, default On)
 };
-// One Mode enum holds every value; the Hint picks the knob, the Mode the value.
+// One Mode enum holds every value; the Hint picks the knob, the Mode the value. (Autotune effort is
+// a top-level Config::tuning field, not a Hint.)
 enum class Mode {
-  Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd
-  NoTune = 0, Fast = 1, Thorough = 2,                                         // Hint::Tuning
+  Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd, FlatLayout, GpuIslandFold
   TiledGemm = 0, Fused = 1, FusedSplit = 2, FullyFused = 3, SubgroupGemm = 4, // Hint::WinogradVariant
   F23 = 0, F43 = 4,                                                           // Hint::WinogradUnit
   DirectAuto = 0, RegisterTiled = 1, LdsHalo = 2,                             // Hint::DirectConv3x3
 };
-cfg.setHint(Hint::Tuning, Mode::Thorough);   // maximum autotuning
-cfg.setHint(Hint::WinogradUnit, Mode::F43);  // force F(4,3) Winograd
-int v = cfg.hint(Hint::WinogradUnit);        // read back (0 if unset)
+cfg.tuning = Tuning::Heavy;                   // maximum autotuning (a Config field, not a hint)
+cfg.setHint(Hint::WinogradUnit, Mode::F43);   // force F(4,3) Winograd
+int v = cfg.hint(Hint::WinogradUnit);         // read back (0 if unset)
 ```
 
-In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "thorough"`); the raw form
-is an array indexed by the `Hint` value, `"hints": [2, 1, 0, 0, 0]` (Winograd, Tuning, WinogradVariant,
-WinogradUnit, DirectConv3x3).
+In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "heavy"`, `"flatLayout": false`);
+the raw hint form is an array indexed by the `Hint` value, `"hints": [2, 0, 0, 0, 2, 1]` (Winograd,
+WinogradVariant, WinogradUnit, DirectConv3x3, FlatLayout, GpuIslandFold).
 
 `NC4HW4` is the internal Vulkan packed layout (channels in vec4 blocks); the engine I/O is `NCHW`.
+
+---
+
+## Caching
+
+Warm starts load a per-model cache (`cacheFile`, default `<model>.cache`) so a second run skips shader
+compilation, conv autotuning, and weight prepacking. Caching is always on — it is not a user knob.
+
+- **Format** — MessagePack (compact, self-describing binary; inspect with any msgpack tool, e.g.
+  `python3 -c "import msgpack; print(msgpack.unpackb(open('m.cache','rb').read(), strict_map_key=False, raw=True).keys())"`).
+- **Self-validating** — the file records a format version, an md5 of all embedded SPIR-V kernels, the
+  device (vendor/device/driver + pipeline-cache UUID), and a model hash. If any differ (a driver update,
+  a shader change, a different GPU, a different model) the whole file is discarded and recomputed — there
+  is nothing to invalidate by hand.
+- **Multi-variant** — one file holds an independent entry per cache-affecting configuration (`precision`,
+  `flatLayout`, `gpuIslandFold`, `fp32Tensors`, and the conv-kernel hints). Switching precision back and
+  forth reuses each variant instead of recompiling; a new configuration appends a new variant.
+- **`tuning`** sets only the load-time autotune effort for entries not yet measured; the chosen kernels
+  are stored in the variant and reused. To re-tune at a higher effort, delete the cache (or use `noCache`).
+- **`noCache`** (CLI `--no-cache`) skips all cache I/O for cold-compile measurement.
+
+`run()` performs no compilation or tuning — every one-time cost is paid at load.
 
 ---
 
@@ -107,12 +131,16 @@ lists all of them, with non-default values where useful:
   "fallback": ["CPU"],
   "allowCpuFallback": true,
   "precision": "low",
+  "priority": "normal",
   "maxSubmitNodes": 500,
+  "maxSubmitBindings": 1024,
   "cacheFile": "enc.cache",
   "cacheDir": "/data/local/tmp/vxrt/cache",
-  "cacheMode": "full",
+  "noCache": false,
+  "tuning": "fast",
   "freeWeightsAfterUpload": true,
-  "noFlatOps": false,
+  "flatLayout": true,
+  "gpuIslandFold": true,
   "timing": false,
   "profile": false,
   "verbosity": 1,
@@ -121,9 +149,7 @@ lists all of them, with non-default values where useful:
   "debugSegments": false,
   "disableVkOps": "",
   "dumpTensors": "",
-  "foldGpuIslands": true,
   "winograd": "auto",
-  "tuning": "fast",
   "winogradVariant": 0,
   "winogradUnit": 0,
   "directConv3x3": 0
@@ -152,8 +178,7 @@ Config cfg2 = Config::fromJsonString(R"({ "backend": "CPU", "precision": "fp32" 
 Config cfg3;
 cfg3.backend   = BackendKind::Vulkan;
 cfg3.precision = Precision::Low;
-cfg3.cacheMode = CacheMode::Full;
-cfg3.setHint(Hint::Tuning, Mode::Thorough);
+cfg3.tuning    = Tuning::Heavy;
 
 // Apply the log level implied by verbosity:
 cfg.applyLogLevel();
@@ -199,7 +224,7 @@ The CLI flags and the config fields they touch:
 | `--profile` | `profile = true` | off |
 | `--layer-dump DIR` | `layerDump = true`, `layerDumpDir = DIR` | off |
 | `--winograd MODE` | `setHint(Hint::Winograd)` (`auto`/`on`/`off`) | `auto` |
-| `--tuning LEVEL` | `setHint(Hint::Tuning)` (`off`/`fast`/`thorough`) | `fast` |
+| `--tuning LEVEL` | `tuning` (`none`/`fast`/`heavy`) | `fast` |
 
 Flags that are not config fields (model/input handling and benchmarking):
 `--model PATH`, `--input PATH`, `--shape N,C,H,W`, `--golden PATH`,

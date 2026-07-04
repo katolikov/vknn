@@ -73,7 +73,6 @@ int main(int argc, char **argv) {
     Config cfg;
     cfg.backend                = BackendKind::Vulkan;
     cfg.precision              = Precision::Low;
-    cfg.cacheMode              = CacheMode::Tune;
     cfg.freeWeightsAfterUpload = true;
     auto sess                  = Runtime::load(enc, cfg);
     if (!sess)

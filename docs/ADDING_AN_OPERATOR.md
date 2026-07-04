@@ -258,7 +258,7 @@ struct VkOpEnv {
   bool useFp16;
   WeightCache* weights;                          // prepacked-weight + tuning cache (may be null)
   vk::CommandRunner* runner;                      // for on-device autotuning benchmarks
-  Mode tuning;                                    // Hint::Tuning value (NoTune/Fast/Thorough)
+  Tuning tuning;                                  // Config::tuning effort (None/Fast/Heavy)
   Mode winograd;                                  // Hint::Winograd value (Auto/On/Off)
   std::string modelTag;                           // per-model weight-cache namespace
   std::string gpuTag;                             // per-GPU autotune namespace (kernel choice is device-specific)

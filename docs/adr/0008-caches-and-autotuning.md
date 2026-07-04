@@ -1,6 +1,10 @@
 # ADR-0008: Disk caches (pipeline / weights / autotune) for fast warm sessions
 
 ## Status
+Superseded by [ADR-0009](0009-cache-tuning-redesign.md) (2026-07-05). The three caches described here
+still exist; ADR-0009 replaces the hand-rolled `VKNNCAC1` container with a self-validating, multi-variant
+MessagePack file and collapses the `cache-mode` + `tuning` knobs into one `tuning` (none/fast/heavy).
+
 Accepted (2026-06-24)
 
 ## Context

@@ -18,6 +18,7 @@ namespace vknn { namespace vk {
         uint32_t    driverVersion = 0;
         uint32_t    vendorID = 0, deviceID = 0;
         uint32_t    driverID = 0;
+        uint8_t     pipelineCacheUUID[16] = {}; // device+driver pipeline-cache identity (cache guard)
 
         // Compute limits
         uint32_t subgroupSize            = 0;

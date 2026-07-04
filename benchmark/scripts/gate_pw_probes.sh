@@ -44,7 +44,7 @@ if [ "$phase" = "run" ] || [ "$phase" = "all" ]; then
       pflag="high"; [ "$prec" = "16" ] && pflag="low"
       wflag="off"
       # extra wino run handled below
-      r=$(adb shell "cd $DEV && rm -rf o_${p}_f$prec o_${p}_n$prec; ../vknn_run_io ${p}_f$prec.vxm o_${p}_f$prec --backend vulkan --precision $pflag --cache-mode off --no-fold-islands --winograd $wflag --tuning off --cache . $ins > l_${p}_f$prec.log 2>&1; ../vknn_run_io ${p}_n$prec.vxm o_${p}_n$prec --backend vulkan --precision $pflag --cache-mode off --no-fold-islands --winograd $wflag --tuning off --cache . $ins > l_${p}_n$prec.log 2>&1; nf=\$(ls o_${p}_f$prec 2>/dev/null | wc -l); ok=1; [ \$nf -lt 1 ] && ok=0; for f in \$(ls o_${p}_f$prec 2>/dev/null); do cmp o_${p}_f$prec/\$f o_${p}_n$prec/\$f > /dev/null 2>&1 || ok=0; done; [ \$ok = 1 ] && echo CMP_OK || echo CMP_DIFF; grep -ci 'falling back' l_${p}_f$prec.log")
+      r=$(adb shell "cd $DEV && rm -rf o_${p}_f$prec o_${p}_n$prec; ../vknn_run_io ${p}_f$prec.vxm o_${p}_f$prec --backend vulkan --precision $pflag --no-cache --no-fold-islands --winograd $wflag --tuning none --cache . $ins > l_${p}_f$prec.log 2>&1; ../vknn_run_io ${p}_n$prec.vxm o_${p}_n$prec --backend vulkan --precision $pflag --no-cache --no-fold-islands --winograd $wflag --tuning none --cache . $ins > l_${p}_n$prec.log 2>&1; nf=\$(ls o_${p}_f$prec 2>/dev/null | wc -l); ok=1; [ \$nf -lt 1 ] && ok=0; for f in \$(ls o_${p}_f$prec 2>/dev/null); do cmp o_${p}_f$prec/\$f o_${p}_n$prec/\$f > /dev/null 2>&1 || ok=0; done; [ \$ok = 1 ] && echo CMP_OK || echo CMP_DIFF; grep -ci 'falling back' l_${p}_f$prec.log")
       ok=$(echo "$r" | grep -c CMP_OK); fb=$(echo "$r" | tail -1)
       if [ "$ok" = "1" ] && [ "$fb" = "0" ]; then
         echo "PASS $p fp$prec"; PASS=$((PASS+1))
@@ -54,7 +54,7 @@ if [ "$phase" = "run" ] || [ "$phase" = "all" ]; then
     done
   done
   # Winograd path: p_conv3x3w fp16 with --winograd on
-  r=$(adb shell "cd $DEV && rm -rf o_w_f o_w_n; ../vknn_run_io p_conv3x3w_f16.vxm o_w_f --backend vulkan --precision low --cache-mode off --no-fold-islands --winograd on --tuning off --cache . p_conv3x3w_in.bin > l_w_f.log 2>&1; ../vknn_run_io p_conv3x3w_n16.vxm o_w_n --backend vulkan --precision low --cache-mode off --no-fold-islands --winograd on --tuning off --cache . p_conv3x3w_in.bin > l_w_n.log 2>&1; nf=\$(ls o_w_f 2>/dev/null | wc -l); ok=1; [ \$nf -lt 1 ] && ok=0; for f in \$(ls o_w_f 2>/dev/null); do cmp o_w_f/\$f o_w_n/\$f > /dev/null 2>&1 || ok=0; done; [ \$ok = 1 ] && echo CMP_OK || echo CMP_DIFF; grep -ci 'falling back' l_w_f.log")
+  r=$(adb shell "cd $DEV && rm -rf o_w_f o_w_n; ../vknn_run_io p_conv3x3w_f16.vxm o_w_f --backend vulkan --precision low --no-cache --no-fold-islands --winograd on --tuning none --cache . p_conv3x3w_in.bin > l_w_f.log 2>&1; ../vknn_run_io p_conv3x3w_n16.vxm o_w_n --backend vulkan --precision low --no-cache --no-fold-islands --winograd on --tuning none --cache . p_conv3x3w_in.bin > l_w_n.log 2>&1; nf=\$(ls o_w_f 2>/dev/null | wc -l); ok=1; [ \$nf -lt 1 ] && ok=0; for f in \$(ls o_w_f 2>/dev/null); do cmp o_w_f/\$f o_w_n/\$f > /dev/null 2>&1 || ok=0; done; [ \$ok = 1 ] && echo CMP_OK || echo CMP_DIFF; grep -ci 'falling back' l_w_f.log")
   ok=$(echo "$r" | grep -c CMP_OK); fb=$(echo "$r" | tail -1)
   if [ "$ok" = "1" ] && [ "$fb" = "0" ]; then echo "PASS p_conv3x3w fp16 winograd-on"; PASS=$((PASS+1)); else echo "FAIL p_conv3x3w fp16 winograd-on ($r)"; FAIL=$((FAIL+1)); fi
   echo "== $PASS passed, $FAIL failed =="

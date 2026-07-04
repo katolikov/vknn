@@ -106,6 +106,7 @@ namespace vknn { namespace vk {
         caps_.driverID                = driver.driverID;
         caps_.driverName              = driver.driverName;
         caps_.driverInfo              = driver.driverInfo;
+        std::memcpy(caps_.pipelineCacheUUID, p.pipelineCacheUUID, sizeof(caps_.pipelineCacheUUID));
         caps_.subgroupSize            = subgroup.subgroupSize;
         caps_.subgroupArithmetic      = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
         caps_.subgroupShuffle         = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;

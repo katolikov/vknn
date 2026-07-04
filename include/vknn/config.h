@@ -8,6 +8,6 @@
 
 #include "vknn/backend_kind.h"    // BackendKind + backendName/backendFromStr
 #include "vknn/precision.h"       // Precision + mixedPrecisionFp32Tensors/precisionFromStr
-#include "vknn/cache_mode.h"      // CacheMode + cacheModeFromStr/cacheModeStr
-#include "vknn/hint.h"            // Hint + Mode + winogradFromStr/tuningFromStr
+#include "vknn/tuning.h"          // Tuning + tuningFromStr
+#include "vknn/hint.h"            // Hint + Mode + winogradFromStr
 #include "vknn/config_struct.h"   // Config (depends on all of the above)

@@ -81,8 +81,8 @@ int main(int argc, char **argv) {
     {
         std::string w = argval(argc, argv, "--winograd", "auto"); // auto|on|off
         cfg.setHint(Hint::Winograd, winogradFromStr(w));
-        std::string t = argval(argc, argv, "--tuning", "fast"); // off|fast|thorough
-        cfg.setHint(Hint::Tuning, tuningFromStr(t));
+        std::string t = argval(argc, argv, "--tuning", "fast"); // none|fast|heavy
+        cfg.tuning     = tuningFromStr(t);
         // Advanced hints: force Winograd unit / variant for research.
         int wu = atoi(argval(argc, argv, "--wino-unit", "0")); // 0=auto, 4=force F(4,3)
         if (wu)

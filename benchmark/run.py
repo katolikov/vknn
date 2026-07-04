@@ -22,7 +22,7 @@ Config (see benchmark/configs/example.json and USAGE.md):
         "convert": { "fp16": true, "opt": 1 },      # opt level -O0..-O3 + per-fusion overrides
         "device":  { "serial": "", "dir": "/data/local/tmp/vknn/bench", "clean": false,
                      "cooldown": 0 },               # cooldown: seconds to idle before the run
-        "run":     { "backend": "vulkan", "precision": "low", "cache_mode": "tune",
+        "run":     { "backend": "vulkan", "precision": "low",
                      "iters": 10, "warmup": 2, "profile": false, "fold_islands": true,
                      "max_submit_nodes": 500, "winograd": "auto", "tuning": "fast",
                      "tolerance": 0.999 },
@@ -332,7 +332,6 @@ def run_stage(stage, base, idx, run_dir, clean_cli, where_convert="host"):
     dcfg = {"model": model_name,
             "backend": rc.get("backend", "vulkan"),
             "precision": rc.get("precision", "low"),
-            "cache_mode": rc.get("cache_mode", "tune"),
             "timing": True,
             "profile": rc.get("profile", stage.get("profile", False)),
             "tolerance": rc.get("tolerance", stage.get("tolerance", 0.999)),
@@ -364,7 +363,7 @@ def run_stage(stage, base, idx, run_dir, clean_cli, where_convert="host"):
     if metrics:
         dcfg["metrics"] = metrics
 
-    log(f"  [opts] precision={dcfg['precision']} cache_mode={dcfg['cache_mode']} "
+    log(f"  [opts] precision={dcfg['precision']} "
         f"iters={dcfg.get('iters', 1)} warmup={dcfg.get('warmup', '(auto)')} "
         f"profile={dcfg['profile']} tolerance={dcfg['tolerance']}")
 

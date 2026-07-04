@@ -119,7 +119,6 @@ into every stage. A single-stage config may drop `stages` and put the fields at 
       "run": {                                 // on-device execution options
         "backend": "vulkan",                   // vulkan | cpu
         "precision": "low",                    // low | normal (fp16 + selective fp32) | high (fp32)
-        "cache_mode": "tune",                  // off | tune | full
         "cache": "model.cache",                // unified cache file (default <model>.cache)
         "generate_cache": false,               // untimed warm-up load to populate it first
         "iters": 10,                           // timed iterations -> min/median/avg/max
@@ -128,7 +127,7 @@ into every stage. A single-stage config may drop `stages` and put the fields at 
         "fold_islands": true,                  // false = keep every supported op on the GPU (verification)
         "max_submit_nodes": 500,               // GPU-watchdog submit chunking (0 = single submit)
         "winograd": "auto",                    // auto | on | off (deterministic kernel choice)
-        "tuning": "fast",                      // off | fast | thorough (autotune effort)
+        "tuning": "fast",                      // none | fast | heavy (autotune effort)
         "tolerance": 0.999                     // cosine pass threshold
       },
 

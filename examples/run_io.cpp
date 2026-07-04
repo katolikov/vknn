@@ -4,13 +4,14 @@
 // Flags:
 //   --backend cpu|vulkan   (default vulkan)   --precision low|normal|high (default low; normal = fp16 + selective fp32)
 //   --priority low|normal|high  GPU queue scheduling priority (default normal; Vulkan queue global priority)
-//   --cache-mode M         off | tune (pipeline+autotune) | full (+ prepacked weights) (default full)
+//   --tuning none|fast|heavy    load-time conv autotune effort (none = no per-shape measurement) (default fast)
 //   --keep-weights         keep host weights after upload (default: free them)
-//   --no-flat              disable the flat-layout GPU pass
+//   --no-flat              disable the flat-layout GPU pass (advanced)
+//   --no-fold-islands      keep tiny GPU op-islands on the GPU instead of folding to CPU (advanced)
+//   --no-cache             skip cache read/write (cold compile every load)
 //   --timing               print pack/submit/unpack timing
 //   --cache DIR            cache directory
 //   --winograd auto|on|off force the 3x3-conv kernel (on/off skip autotuning -> deterministic choice)
-//   --tuning off|fast|thorough  conv autotune effort (off = no per-shape kernel measurement)
 #include "vknn/session.h"
 #include <cstdio>
 #include <cstring>
@@ -46,8 +47,8 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
-               " [--cache-mode off|tune|full] [--no-flat] [--no-fold-islands] [--timing] [--cache DIR] [--winograd auto|on|off]"
-               " [--tuning off|fast|thorough] [--max-submit-nodes N] in0.bin in1.bin ...\n",
+               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--timing] [--cache DIR]"
+               " [--winograd auto|on|off] [--max-submit-nodes N] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
     }
@@ -58,10 +59,17 @@ int main(int argc, char **argv) {
     cfg.backend                = backendFromStr(opt(argc, argv, "--backend", "vulkan"));
     cfg.precision              = precisionFromStr(opt(argc, argv, "--precision", "low"));
     cfg.priority               = priorityFromStr(opt(argc, argv, "--priority", "normal"));
-    cfg.cacheMode              = cacheModeFromStr(opt(argc, argv, "--cache-mode", "full"));
+    cfg.tuning                 = tuningFromStr(opt(argc, argv, "--tuning", "fast"));
+    cfg.noCache                = flag(argc, argv, "--no-cache");
     cfg.freeWeightsAfterUpload = !flag(argc, argv, "--keep-weights");
-    cfg.noFlatOps              = flag(argc, argv, "--no-flat");
-    cfg.foldGpuIslands         = !flag(argc, argv, "--no-fold-islands");
+    if (flag(argc, argv, "--no-flat"))
+    {
+        cfg.setHint(Hint::FlatLayout, (int) Mode::Off);
+    }
+    if (flag(argc, argv, "--no-fold-islands"))
+    {
+        cfg.setHint(Hint::GpuIslandFold, (int) Mode::Off);
+    }
     cfg.layerDump              = flag(argc, argv, "--layer-dump");
     cfg.debugSegments          = flag(argc, argv, "--debug-segments");
     cfg.layerDumpDir           = opt(argc, argv, "--layer-dump-dir", cfg.layerDumpDir.c_str());
@@ -71,7 +79,6 @@ int main(int argc, char **argv) {
     cfg.fp32Tensors            = opt(argc, argv, "--fp32-tensors", "");
     cfg.profile                = flag(argc, argv, "--profile");
     cfg.setHint(Hint::Winograd, winogradFromStr(opt(argc, argv, "--winograd", "auto")));
-    cfg.setHint(Hint::Tuning, tuningFromStr(opt(argc, argv, "--tuning", "fast")));
     cfg.maxSubmitNodes    = atoi(opt(argc, argv, "--max-submit-nodes", std::to_string(cfg.maxSubmitNodes).c_str()));
     cfg.maxSubmitBindings = atoi(opt(argc, argv, "--max-submit-bindings", std::to_string(cfg.maxSubmitBindings).c_str()));
     cfg.disableVkOps      = opt(argc, argv, "--disable-vk-ops", "");
@@ -90,7 +97,7 @@ int main(int argc, char **argv) {
         if (argv[i][0] == '-')
         {
             if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
-                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--cache-mode") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat"))
+                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat"))
             {
                 ++i; // skip the flag's value
             }

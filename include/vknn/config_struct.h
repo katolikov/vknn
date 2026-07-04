@@ -2,10 +2,10 @@
 // Every field is documented in docs/CONFIG.md.
 #pragma once
 #include "vknn/backend_kind.h"
-#include "vknn/cache_mode.h"
 #include "vknn/hint.h"
 #include "vknn/precision.h"
 #include "vknn/priority.h"
+#include "vknn/tuning.h"
 #include <string>
 #include <vector>
 
@@ -25,20 +25,20 @@ namespace vknn {
         // device without a global-priority extension.
         Priority priority = Priority::Normal;
 
-        // Caches. The unified per-model cache file bundles the compiled-pipeline blob and the
-        // prepacked-weight + autotune blob; loading it skips shader compilation, conv autotuning, and
-        // the Winograd weight transform on a warm start. Set via the Runtime::load() cacheFile argument
-        // (empty there -> "<model>.cache" next to the model). cacheMode selects what the file includes
-        // (Off / Tune / Full). cacheDir is the fallback location for sessions built from an in-memory
-        // graph (no model path).
+        // Caches. Warm-start artifacts (compiled pipelines, prepacked/Winograd weights, the conv autotune
+        // table) are always saved to and reloaded from a per-model cache file, so a warm load skips shader
+        // compilation, weight prepacking, and autotuning. The file is self-validated (kernel hash + device
+        // + model) and multi-variant (one entry per cache-affecting config), so it auto-heals on a
+        // device/driver/model/code change. Set the path via Runtime::load()'s cacheFile argument (empty
+        // there -> "<model>.cache" next to the model); cacheDir is the fallback for a session built from an
+        // in-memory graph (no model path).
         std::string cacheFile; // unified cache path (resolved by Runtime::load; empty = no file cache)
         std::string cacheDir  = "/data/local/tmp/vxrt/cache";
-        CacheMode   cacheMode = CacheMode::Full;
+        bool        noCache   = false; // debug: skip all cache read/write (cold compile every load)
 
-        // What the cacheMode retains, as predicates the backend reads directly.
-        bool cachesPipeline() const { return cacheMode != CacheMode::Off; }
-        bool cachesTuning() const { return cacheMode != CacheMode::Off; }
-        bool cachesWeights() const { return cacheMode == CacheMode::Full; }
+        // Load-time conv-kernel autotune effort (None / Fast / Heavy). Effort only — never changes
+        // numerical output; the chosen kernels are cached and reused on a warm start.
+        Tuning tuning = Tuning::Fast;
 
         // Free host weight buffers after they are uploaded to the device / decoded into the pool. run()
         // never reads graph initializers (it uses GPU buffers + the pool), so this is safe and reclaims
@@ -67,9 +67,7 @@ namespace vknn {
         // approach it; a plain-op graph binds far too few to ever split on this).
         int maxSubmitBindings = 1024;
 
-        // Optimization / debug.
-        bool        noFlatOps     = false; // disable the flat-layout GPU pass
-        bool        foldGpuIslands = true; // fold tiny CPU-bounded GPU node islands to CPU (perf); off keeps every supported op on the GPU (verification)
+        // Debug.
         bool        timing        = false; // print pack/submit/unpack + per-stage timing
         bool        debugSegments = false; // trace per-segment + per-CPU-op execution
         std::string disableVkOps;          // comma list of op types to force onto CPU
@@ -88,9 +86,9 @@ namespace vknn {
         bool        layerDump    = false;
         std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
 
-        // Conv kernel selection + autotune effort, set via setHint(Hint, value) (see the Hint enum):
-        // Hint::Winograd (auto/on/off), Hint::Tuning (off/fast/thorough), plus the experimental variant
-        // hints. Forcing Winograd on/off makes the 3x3-conv choice deterministic.
+        // Conv kernel selection + GPU-pass knobs, set via setHint(Hint, value) (see the Hint enum):
+        // Hint::Winograd (auto/on/off), the experimental Winograd variant hints, and FlatLayout /
+        // GpuIslandFold (on/off). Forcing Winograd on/off makes the 3x3-conv choice deterministic.
         std::vector<int> hints; // indexed by (int)Hint; 0 = production default. Use setHint()/hint().
         void             setHint(Hint h, int value) {
             if ((int) h >= (int) hints.size())
@@ -105,6 +103,14 @@ namespace vknn {
         }
         int hint(Hint h, int dflt = 0) const {
             return (int) h < (int) hints.size() ? hints[(int) h] : dflt;
+        }
+        // The flat-layout GPU pass and tiny-GPU-island folding are On by default (the fastest path) and
+        // controlled through the hint mechanism; --no-flat / --no-fold-islands set them Off.
+        bool flatLayout() const {
+            return hint(Hint::FlatLayout, (int) Mode::On) != (int) Mode::Off;
+        }
+        bool gpuIslandFold() const {
+            return hint(Hint::GpuIslandFold, (int) Mode::On) != (int) Mode::Off;
         }
 
         static Config fromJsonFile(const std::string &path);

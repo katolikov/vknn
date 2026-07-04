@@ -168,11 +168,22 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     COMMENT "Embedding SPIR-V blobs -> vknn_embedded_shaders.cpp"
     VERBATIM)
 else()
-  # Stub embedded shader registry for host / no-glslc builds.
+  # Stub embedded shader registry for host / no-glslc builds. embeddedShadersHash() is the cache's
+  # kernel-version guard; with no compiled kernels it is a fixed placeholder.
   file(WRITE ${EMBEDDED_SHADERS_CPP}
     "#include <cstdint>\n#include <cstddef>\n#include <map>\n#include <string>\n#include <vector>\n"
-    "namespace vknn { const std::map<std::string,std::vector<uint32_t>>& embeddedShaders(){ static std::map<std::string,std::vector<uint32_t>> m; return m; } }\n")
+    "namespace vknn { const std::map<std::string,std::vector<uint32_t>>& embeddedShaders(){ static std::map<std::string,std::vector<uint32_t>> m; return m; }\n"
+    "const char* embeddedShadersHash(){ return \"no-embedded-shaders\"; } }\n")
 endif()
+
+# ---------------------------------------------------------------------------
+# MessagePack (msgpack-c, C API) — serializes the warm-start model cache.
+# ---------------------------------------------------------------------------
+set(MSGPACK_ENABLE_SHARED   OFF CACHE BOOL "" FORCE)
+set(MSGPACK_ENABLE_STATIC   ON  CACHE BOOL "" FORCE)
+set(MSGPACK_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+set(MSGPACK_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/msgpack-c EXCLUDE_FROM_ALL)
 
 # ---------------------------------------------------------------------------
 # Core library sources (host + android)
@@ -196,6 +207,7 @@ target_include_directories(vknn PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_compile_features(vknn PUBLIC cxx_std_17)
+target_link_libraries(vknn PRIVATE msgpack-c) # cache (de)serialization
 
 if(VKNN_ENABLE_VULKAN)
   target_compile_definitions(vknn PUBLIC VKNN_ENABLE_VULKAN=1)

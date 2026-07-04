@@ -216,12 +216,12 @@ This requires the static lib to be linked whole-archive
   (CPU is the implicit final fallback).
 - `precision` (`Low`/`Normal`/`High` quality tiers; default `Low` = fp16), `maxSubmitNodes`,
   `freeWeightsAfterUpload`.
-- Cache controls: `cacheFile` (the unified per-model cache, §7), `cacheDir`
-  (the graph-only fallback location), `cacheMode` (`off`/`tune`/`full`).
+- Cache controls: `cacheFile` (the per-model cache, §7), `cacheDir` (the graph-only fallback location),
+  `noCache` (skip caching), and `tuning` (`None`/`Fast`/`Heavy` autotune effort).
 - Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
-- Conv kernel knobs via `setHint(Hint, Mode)`: `Hint::Winograd` (`Auto`/`On`/`Off`),
-  `Hint::Tuning` (`NoTune`/`Fast`/`Thorough`), and the experimental variant hints.
+- Conv kernel + GPU-pass knobs via `setHint(Hint, Mode)`: `Hint::Winograd` (`Auto`/`On`/`Off`),
+  `Hint::FlatLayout` / `Hint::GpuIslandFold` (`On`/`Off`), and the experimental variant hints.
 
 ### 2.5 Session / Runtime (`include/vknn/session.h`, `src/core/session.cpp`)
 
@@ -471,28 +471,26 @@ bit-exact against the staged path (`maxAbsErr 0`).
 
 ## 7. Caches (`config.cacheFile`)
 
-One **unified per-model cache file** (container magic `VKNNCAC1`) bundles the
-content/configuration-keyed caches that accelerate warm session creation. `Runtime::load(path,
-cfg, cacheFile)` takes the cache path as its third argument; empty (the default) resolves to
-`<model>.cache` next to the model (e.g. `enc.vxm` → `enc.cache`), exposed as `Config::cacheFile`.
-For a session built from an in-memory graph (no model path), the cache lives under `cacheDir`
-instead. Loading the file on a warm start skips shader compilation, conv autotuning, and the
-Winograd weight transform. Measured on the 8-view YoNoSplat (Xclipse 960): a cold load (~10 s)
-writes a 29 MB cache, a warm load is ~4.8 s, and outputs are bit-identical.
+One **self-validating, multi-variant MessagePack cache file** accelerates warm session creation
+(ADR-0009; codec in `src/core/cache_codec.{h,cpp}`). `Runtime::load(path, cfg, cacheFile)` takes the
+cache path as its third argument; empty (the default) resolves to `<model>.cache` next to the model
+(e.g. `enc.vxm` → `enc.cache`), exposed as `Config::cacheFile`. For a session built from an in-memory
+graph (no model path), the cache lives under `cacheDir` instead. Loading the file on a warm start skips
+shader compilation, conv autotuning, and the Winograd weight transform; caching is always on
+(`Config::noCache` disables it for cold-compile measurement).
 
-The file bundles three blobs; `cacheMode` (`off` / `tune` / `full`) selects which are included.
-`tune` keeps the first and third (cheap, deterministic); `full` adds the second:
+The document is guarded as a whole by a format version, a **kernel hash** (md5 of all embedded SPIR-V,
+`embeddedShadersHash()`), the device (vendor/device/driver + pipeline-cache UUID), and a model hash — any
+mismatch discards and recomputes it. It holds one **variant** per cache-affecting configuration
+(precision, `flatLayout`, `gpuIslandFold`, `fp32Tensors`, conv-kernel hints); a matching variant is
+reused and a new configuration appends one. Each variant bundles three blobs:
 
 - **Vulkan pipeline cache** — the `VkPipelineCache` blob (`vk::PipelineCache`, created in
-  `VulkanBackend`). Skips driver shader recompilation. Kept by `tune` and `full`.
-- **Prepacked-weights cache** — `WeightCache` (`vk_backend.h`): a content-keyed,
-  length-prefixed blob of weights already repacked into `NC4HW4`, keyed by
-  op + role + shape. On MobileNetV2 this is 106 entries; warm runs skip the host
-  repacking. Kept only by `full`.
-- **Autotune cache** — stored in the same `WeightCache` as an
-  op-signature → chosen `local_size_x` table (`tuned()` / `setTuned()`); 20 conv
-  workgroup-size entries for MobileNetV2. Kept by `tune` and `full`, gated by the
-  `tuning` level.
+  `VulkanBackend`). Skips driver shader recompilation.
+- **Prepacked-weights cache** — `WeightCache` (`vk_backend.h`): the weights already repacked into
+  `NC4HW4`, keyed by op + role + shape (106 entries on MobileNetV2); warm runs skip the host repacking.
+- **Autotune cache** — in the same `WeightCache`, an op-signature → chosen `local_size_x` table
+  (`tuned()` / `setTuned()`); measured for entries not yet present, gated by the `tuning` effort.
 
 `Session::updateCache()` writes the file, but only when the cache changed during the session —
 an unchanged warm run leaves the file untouched. It is called automatically from `~Session()`

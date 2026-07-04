@@ -190,7 +190,7 @@ namespace vknn {
             // run on dedicated scratch buffers, never the real activation buffers, or they race and
             // corrupt the data path.
             uint32_t pickLocalSize(VkOpEnv &env) {
-                if (env.tuning == Mode::NoTune)
+                if (env.tuning == Tuning::None)
                 {
                     return 64;
                 }
@@ -206,14 +206,14 @@ namespace vknn {
                     }
                 }
                 uint32_t best = 64;
-                if (env.tuning != Mode::NoTune && env.runner)
+                if (env.tuning != Tuning::None && env.runner)
                 {
                     int    es       = env.useFp16 ? 2 : 4;
                     size_t srcBytes = (size_t) pc.N * cBlocks(pc.Cin) * pc.H * pc.W * 4 * es;
                     size_t dstBytes = (size_t) pc.N * cBlocks(pc.Cout) * pc.OH * pc.OW * 4 * es;
                     auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
                     auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
-                    std::vector<uint32_t> cands = (env.tuning == Mode::Thorough) ? std::vector<uint32_t> {32, 64, 128, 256} : std::vector<uint32_t> {64, 128, 256};
+                    std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {32, 64, 128, 256} : std::vector<uint32_t> {64, 128, 256};
                     double bestMs = 1e30;
                     for (uint32_t ls: cands)
                     {
@@ -247,7 +247,7 @@ namespace vknn {
             // the choice never affects output bits, unlike the direct-vs-Winograd choice. Measured on
             // scratch buffers and cached like the local-size tune.
             uint32_t pickWTile(VkOpEnv &env, bool s2, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
-                if (env.tuning == Mode::NoTune || !env.runner)
+                if (env.tuning == Tuning::None || !env.runner)
                 {
                     return 4;
                 }
@@ -309,7 +309,7 @@ namespace vknn {
             // so the choice never affects output bits (no anti-noise margin needed, unlike Winograd) and a
             // cache-off re-tune stays deterministic. Measured on scratch buffers + cached like pickWTile.
             int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
-                if (env.tuning == Mode::NoTune || !env.runner)
+                if (env.tuning == Tuning::None || !env.runner)
                 {
                     return 0;
                 }
@@ -344,7 +344,7 @@ namespace vknn {
                 };
                 int    best   = 0;
                 double bestMs = timeIt(env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
-                std::vector<uint32_t> cands = (env.tuning == Mode::Thorough) ? std::vector<uint32_t> {2, 3} : std::vector<uint32_t> {2};
+                std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {2, 3} : std::vector<uint32_t> {2};
                 for (uint32_t ocb: cands)
                 {
                     int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
@@ -377,7 +377,7 @@ namespace vknn {
                     return 2; // force F(4,3) (numerically fine but register-heavy transforms)
                 }
                 bool forceOn = (env.winograd == Mode::On);
-                if (env.tuning == Mode::NoTune || !env.runner)
+                if (env.tuning == Tuning::None || !env.runner)
                 {
                     return forceOn ? 1 : 0;
                 }

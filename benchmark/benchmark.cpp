@@ -10,7 +10,6 @@
 //   {
 //     "model": "encoder8_fp16.vxm",         // .onnx or .vxm (required)
 //     "backend": "vulkan", "precision": "low",  // low | normal (fp16 + selective fp32) | high (fp32)
-//     "cache_mode": "tune",                 // off | tune (pipeline+autotune) | full (+ prepacked weights)
 //     "cache": "model.cache",               // unified per-model cache file (default "<model>.cache")
 //     "generate_cache": false,              // populate the cache first (untimed), then time a warm load
 //     "max_submit_nodes": 500,              // 0 = single submit
@@ -570,16 +569,18 @@ int main(int argc, char **argv) {
     cfg.backend                = backendFromStr(str("backend", "vulkan"));
     cfg.precision              = precisionFromStr(str("precision", "low"));
     cfg.freeWeightsAfterUpload = true;
-    cfg.cacheMode              = cacheModeFromStr(str("cache_mode", "tune"));
     cfg.timing                 = flag("timing", false);
     cfg.profile                = flag("profile", false);
     cfg.fp32Tensors            = str("fp32_tensors", ""); // selective-fp32: name substrings kept in fp32 storage
     cfg.dumpTensors            = str("dump_tensors", ""); // debug: dump matching tensors to /data/local/tmp/vxrt/dump
     // "winograd": "auto"|"on"|"off" forces the 3x3-conv kernel choice. "on"/"off" skip the per-shape
     // timing measurement, so the kernel selection (and the output bits) is deterministic across runs.
-    cfg.foldGpuIslands = flag("fold_islands", true);
+    if (!flag("fold_islands", true))
+    {
+        cfg.setHint(Hint::GpuIslandFold, (int) Mode::Off);
+    }
     cfg.setHint(Hint::Winograd, winogradFromStr(str("winograd", "auto")));
-    cfg.setHint(Hint::Tuning, tuningFromStr(str("tuning", "fast")));
+    cfg.tuning = tuningFromStr(str("tuning", "fast"));
     // Experimental conv-kernel hints (ints; see the Hint/Mode enums in config.h).
     for (auto kv: {std::pair<const char *, Hint> {"winogradVariant", Hint::WinogradVariant}, {"winogradUnit", Hint::WinogradUnit}, {"directConv3x3", Hint::DirectConv3x3}})
     {

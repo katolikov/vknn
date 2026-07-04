@@ -8,7 +8,6 @@
     "run": {
       "backend": "vulkan",
       "precision": "normal",
-      "cache_mode": "full",
       "generate_cache": true,
       "max_submit_nodes": 500,
       "tolerance": 0.999

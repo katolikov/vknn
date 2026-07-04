@@ -2,7 +2,6 @@
   "model": "encoder8_fp16.vxm",
   "backend": "vulkan",
   "precision": "low",
-  "cache_mode": "tune",
   "tolerance": 0.999,
   "inputs": {
     "image": "image.npy",

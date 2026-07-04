@@ -366,7 +366,7 @@ namespace vknn {
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
         //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
         //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).
-        if (byKind_.count(BackendKind::Vulkan) && !cfg_.noFlatOps)
+        if (byKind_.count(BackendKind::Vulkan) && cfg_.flatLayout())
         {
             insertLayoutConverts(graph_);
             // Selective fp32 storage. Precision::Normal ("normal") uses the built-in geometry-tail preset
@@ -432,7 +432,7 @@ namespace vknn {
         // worse, stresses the boundary path. Run it on the CPU instead. The heavy backbone/head convs are
         // kept on the GPU — they exceed the work threshold, so this never drags real compute off the
         // accelerator.
-        if (cfg_.foldGpuIslands)
+        if (cfg_.gpuIslandFold())
         {
             foldTinyGpuIslands();
         }

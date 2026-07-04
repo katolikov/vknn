@@ -6,3 +6,7 @@
 	path = third_party/googletest
 	url = https://github.com/google/googletest.git
 	ignore = dirty
+[submodule "third_party/msgpack-c"]
+	path = third_party/msgpack-c
+	url = https://github.com/msgpack/msgpack-c.git
+	branch = c_master
