@@ -29,15 +29,12 @@ namespace vknn {
                 holds.assign(operands.size(), nullptr);
 
                 planBuf = uploadPwPlan(env, plan);
-                // Spec-constant specialization (flat, multi-step only): bake the chain structure (numSteps
-                // + each step's kind/code/opSlot/bcast) into specialization constants so the driver folds
-                // the interpreter loop/branches to straight-line ISA (shaders/pw_epilogue.glsl #ifdef
-                // PW_SPEC). The pipeline pool spec-keys these, so chains with the same structure share one
-                // pipeline. Byte-identical to the generic interpreter; the numeric plan (p0/p1/stride) stays
-                // in the SSBO. Restricted to numSteps>=2: a single-step chain the interpreter runs in one
-                // tight loop iteration gains nothing from the unrolled body and pays a small overhead
-                // (measured net-negative on the 1-step-Add-heavy CNN residual tails).
-                bool                  useSpec = flat && plan.numSteps >= 2 && env.config && env.config->specializePointwise;
+                // Spec-constant specialization (flat only): bake the chain structure (numSteps + each
+                // step's kind/code/opSlot/bcast) into specialization constants so the driver folds the
+                // interpreter loop/branches to straight-line ISA (shaders/pw_epilogue.glsl #ifdef PW_SPEC).
+                // The pipeline pool spec-keys these, so chains with the same structure share one pipeline.
+                // Byte-identical to the generic interpreter; the numeric plan (p0/p1/stride) stays in the SSBO.
+                bool                  useSpec = flat && env.config && env.config->specializePointwise;
                 std::vector<uint32_t> spec;
                 if (useSpec)
                 {
