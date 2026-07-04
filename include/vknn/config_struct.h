@@ -48,6 +48,18 @@ namespace vknn {
         // chunk quicker, never slower). Only the very large YoNoSplat-class transformer needs it.
         int maxSubmitNodes = 500;
 
+        // Also split a GPU segment's command buffer once the push-descriptor writes it has recorded
+        // reach this many, independent of the node count above. Each dispatch pushes one storage-buffer
+        // descriptor per bound buffer; a fused pointwise/epilogue dispatch binds ~9-11 (plan SSBO + up to
+        // kPwMaxOperands operands) versus ~2-4 for a plain op. A newer-driver device caps the descriptors
+        // one command buffer may hold, and silently corrupts the recording past it, so a long run of
+        // binding-dense fused dispatches must break into more submits than the node count alone implies
+        // (a plain-op graph of the same node count binds far fewer and never trips it). The submit fence
+        // between chunks is a full barrier, so results stay numerically identical. 0 disables this cap.
+        // The default keeps a ~2x margin under the observed corruption point (binding-dense chains only
+        // approach it; a plain-op graph binds far too few to ever split on this).
+        int maxSubmitBindings = 1024;
+
         // Optimization / debug.
         bool        noFlatOps     = false; // disable the flat-layout GPU pass
         bool        foldGpuIslands = true; // fold tiny CPU-bounded GPU node islands to CPU (perf); off keeps every supported op on the GPU (verification)

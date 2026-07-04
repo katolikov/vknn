@@ -161,6 +161,7 @@ namespace vknn {
             c.precision = precisionFromStr(j->asStr("fp16"));
         }
         I("maxSubmitNodes", c.maxSubmitNodes);
+        I("maxSubmitBindings", c.maxSubmitBindings);
         S("cacheFile", c.cacheFile);
         S("cacheDir", c.cacheDir);
         if (auto *j = v.get("cacheMode"))
@@ -224,6 +225,7 @@ namespace vknn {
         os << "  \"allowCpuFallback\": " << (allowCpuFallback ? "true" : "false") << ",\n";
         os << "  \"precision\": \"" << precStr(precision) << "\",\n";
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
+        os << "  \"maxSubmitBindings\": " << maxSubmitBindings << ",\n";
         os << "  \"cacheFile\": \"" << cacheFile << "\",\n";
         os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
         os << "  \"cacheMode\": \"" << cacheModeStr(cacheMode) << "\",\n";

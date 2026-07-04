@@ -1380,6 +1380,19 @@ namespace vknn {
                 return it == buffers_.end() ? nullptr : it->second.get();
             };
             bool copySinceBarrier = false;
+            // Push-descriptor writes a node records = one per bound storage buffer. A fused
+            // pointwise/epilogue kernel always binds the plan SSBO plus the fixed kPwMaxOperands operand
+            // slots on top of its own inputs/outputs; a plain op binds just those. Accumulated per
+            // command buffer, this drives the maxSubmitBindings split below.
+            auto bindEstimate = [&](const Node &nd) -> int {
+                int b = (int) nd.inputs.size() + (int) nd.outputs.size();
+                if (nd.type == OpType::FusedPointwise || nd.attr.has("pw_steps"))
+                {
+                    b += 1 + kPwMaxOperands;
+                }
+                return b;
+            };
+            int nodesSinceSplit = 0, bindsSinceSplit = 0;
             for (size_t k = 0; k < nodeIdx.size(); ++k)
             {
                 const Node &node        = g_.nodes[nodeIdx[k]];
@@ -1467,13 +1480,18 @@ namespace vknn {
                 {
                     copySinceBarrier = true;
                 }
-                // Split the segment into multiple command buffers so no single submit runs long
-                // enough to trip the GPU watchdog (a ~20s single submit on this driver gets reset
-                // silently, zeroing the unexecuted tail). The submit fence between chunks is a full
-                // barrier, so buffer reuse stays correct across the boundary. Config::maxSubmitNodes
-                // controls the chunk size (0 disables). Only when not profiling.
-                const int chunkNodes = cfg_.maxSubmitNodes;
-                if (!queryPool_ && chunkNodes > 0 && (k + 1) % chunkNodes == 0 && k + 1 < nodeIdx.size())
+                // Split the segment into multiple command buffers so no single submit (a) runs long
+                // enough to trip the GPU watchdog (a ~20s submit on this driver gets reset silently,
+                // zeroing the unexecuted tail) or (b) records more push-descriptor writes than the
+                // driver holds (maxSubmitBindings; a newer driver corrupts the recording past its cap).
+                // The submit fence between chunks is a full barrier, so buffer reuse stays correct across
+                // the boundary. Only when not profiling.
+                nodesSinceSplit++;
+                bindsSinceSplit += bindEstimate(node);
+                const int chunkNodes = cfg_.maxSubmitNodes, chunkBinds = cfg_.maxSubmitBindings;
+                const bool splitNodes = chunkNodes > 0 && nodesSinceSplit >= chunkNodes;
+                const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
+                if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
                 {
                     be_->runner().end(cmd_);
                     cmds_.push_back(cmd_);
@@ -1482,6 +1500,8 @@ namespace vknn {
                     writtenBufs.clear();
                     readBufs.clear();
                     copySinceBarrier = false;
+                    nodesSinceSplit  = 0;
+                    bindsSinceSplit  = 0;
                 }
             }
             // Final barrier so the segment outputs are complete + visible before the host reads them.

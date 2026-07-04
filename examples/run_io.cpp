@@ -70,8 +70,9 @@ int main(int argc, char **argv) {
     cfg.profile                = flag(argc, argv, "--profile");
     cfg.setHint(Hint::Winograd, winogradFromStr(opt(argc, argv, "--winograd", "auto")));
     cfg.setHint(Hint::Tuning, tuningFromStr(opt(argc, argv, "--tuning", "fast")));
-    cfg.maxSubmitNodes = atoi(opt(argc, argv, "--max-submit-nodes", std::to_string(cfg.maxSubmitNodes).c_str()));
-    cfg.disableVkOps   = opt(argc, argv, "--disable-vk-ops", "");
+    cfg.maxSubmitNodes    = atoi(opt(argc, argv, "--max-submit-nodes", std::to_string(cfg.maxSubmitNodes).c_str()));
+    cfg.maxSubmitBindings = atoi(opt(argc, argv, "--max-submit-bindings", std::to_string(cfg.maxSubmitBindings).c_str()));
+    cfg.disableVkOps      = opt(argc, argv, "--disable-vk-ops", "");
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -87,7 +88,7 @@ int main(int argc, char **argv) {
         if (argv[i][0] == '-')
         {
             if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
-                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--cache-mode") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat"))
+                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--cache-mode") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat"))
             {
                 ++i; // skip the flag's value
             }
