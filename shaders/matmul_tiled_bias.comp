@@ -88,7 +88,7 @@ void main() {
       if (n >= N) continue;
       int idx = dBase + m * N + n;
 #ifdef PW_EPI
-      d[idx] = TO_STORE(pw_apply(float(TO_STORE(acc[i][j] + float(bias[n]))), idx));
+      d[idx] = TO_STORE(pw_apply(acc[i][j] + float(bias[n]), idx));
 #else
       d[idx] = TO_STORE(acc[i][j] + float(bias[n]));
 #endif

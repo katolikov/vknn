@@ -31,7 +31,7 @@ void main() {
   for (int k = 0; k < pc.K; ++k)
     acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
 #ifdef PW_EPI
-  d[gid] = TO_STORE(pw_apply(float(TO_STORE(acc)), int(gid)));
+  d[gid] = TO_STORE(pw_apply(acc, int(gid)));
 #else
   d[gid] = TO_STORE(acc);
 #endif

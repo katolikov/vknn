@@ -33,7 +33,7 @@ void main() {
     }
   }
 #ifdef PW_EPI
-  m = pw_apply4(vec4(f16vec4(m)), ((n * Cb + cb) * pc.OH + oy) * pc.OW + ox);
+  m = pw_apply4(m, ((n * Cb + cb) * pc.OH + oy) * pc.OW + ox);
 #endif
   dst[((n * Cb + cb) * pc.OH + oy) * pc.OW + ox] = f16vec4(m);
 }

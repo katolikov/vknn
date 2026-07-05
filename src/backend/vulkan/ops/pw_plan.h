@@ -16,9 +16,11 @@
 
 namespace vknn {
 
-    // Byte-identical to the std430 PwPlan block in shaders/pw_epilogue.glsl.
+    // Byte-identical to the std430 PwPlan block in shaders/pw_epilogue.glsl. `flags` bit 0
+    // (pw_relax attr) selects the fp32-chained discipline: steps run unrounded and the unit rounds
+    // once per stored stream instead of per step.
     struct PwPlanCPU {
-        int32_t numSteps, rank, worldFlat, numOuts;
+        int32_t numSteps, rank, worldFlat, numOuts, flags;
         int32_t outDim[kPwMaxRank];
         int32_t step[kPwMaxSteps * 8]; // kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc
         int32_t stride[kPwMaxSteps * kPwMaxRank];
@@ -26,7 +28,7 @@ namespace vknn {
         float   p1[kPwMaxSteps];
         int32_t outStep[kPwMaxOuts];
     };
-    static_assert(sizeof(PwPlanCPU) == 944, "PwPlanCPU must match the std430 PwPlan block");
+    static_assert(sizeof(PwPlanCPU) == 948, "PwPlanCPU must match the std430 PwPlan block");
 
     // Is `ref` a tensor-operand reference (kPwRefOp0 - i)?
     inline bool pwRefIsOperand(int ref) {
@@ -45,6 +47,7 @@ namespace vknn {
         plan               = PwPlanCPU {};
         plan.numSteps      = nSteps;
         plan.worldFlat     = flat ? 1 : 0;
+        plan.flags         = node.attr.geti("pw_relax", 0) != 0 ? 1 : 0;
         operands.clear();
         auto slotOf = [&](TensorId t) -> int {
             for (size_t i = 0; i < operands.size(); ++i)

@@ -63,7 +63,7 @@ void main() {
     v = (1.0 - wy) * ((1.0 - wx) * v00 + wx * v01) + wy * ((1.0 - wx) * v10 + wx * v11);
   }
 #ifdef PW_EPI
-  v = pw_apply4(vec4(f16vec4(v)), (n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox);
+  v = pw_apply4(v, (n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox);
 #endif
   dst[(n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox] = f16vec4(v);
 }

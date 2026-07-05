@@ -12,8 +12,8 @@
 //                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
 //     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise / --[no-]lower-conv
 //     --strict-fuse     rounded fusion steps everywhere: fused == unfused byte-identical (the byte
-//                       gate); the default fast mode uses the kernels' native swish/residual/bias
-//                       epilogues, which are faster but not byte-equal to the unfused graph
+//                       gate); the default fast mode fp32-chains each fused unit and rounds once
+//                       per stored stream — faster, and at least as accurate as the unfused graph
 //     --dump-big        log tensors > 50M elements after shape inference (debug)
 #include "import/passes.h"
 #include "vknn/dtype.h"

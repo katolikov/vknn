@@ -112,7 +112,6 @@ void main() {
     v = vec4(oc0 + 0 < pc.Cout ? v.x : 0.0, oc0 + 1 < pc.Cout ? v.y : 0.0,
              oc0 + 2 < pc.Cout ? v.z : 0.0, oc0 + 3 < pc.Cout ? v.w : 0.0);
     int di = ((n * Coutb + ocb) * pc.OH + oy) * pc.OW + ox;
-    v = vec4(float(TO_STORE(v.x)), float(TO_STORE(v.y)), float(TO_STORE(v.z)), float(TO_STORE(v.w)));
 #ifdef PW_EPI
     v = pw_apply4(v, di);
 #endif

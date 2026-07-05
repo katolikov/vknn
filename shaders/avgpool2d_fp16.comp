@@ -40,7 +40,7 @@ void main() {
   float denom = (pc.countIncludePad != 0) ? float(pc.KH * pc.KW) : float(max(cnt, 1));
   vec4 v = acc / denom;
 #ifdef PW_EPI
-  v = pw_apply4(vec4(f16vec4(v)), ((n * Cb + cb) * pc.OH + oy) * pc.OW + ox);
+  v = pw_apply4(v, ((n * Cb + cb) * pc.OH + oy) * pc.OW + ox);
 #endif
   dst[((n * Cb + cb) * pc.OH + oy) * pc.OW + ox] = f16vec4(v);
 }

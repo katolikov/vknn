@@ -64,7 +64,7 @@ void main() {
   if (pc.op == 0 && rcount > 0) acc /= float(rcount);
   else if (pc.op == 5) acc = sqrt(acc);
 #ifdef PW_EPI
-  acc = pw_apply(float(STORE(acc)), int(gid));
+  acc = pw_apply(acc, int(gid));
 #endif
   d[gid] = STORE(acc);
 }

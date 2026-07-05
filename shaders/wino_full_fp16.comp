@@ -145,8 +145,8 @@ void main() {
     y += c1 - c2 - c3;
 
   int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
-  vec4 pv = vec4(f16vec4(vx_act(y.x, pc.act, pc.actLo, pc.actHi), vx_act(y.y, pc.act, pc.actLo, pc.actHi),
-                         vx_act(y.z, pc.act, pc.actLo, pc.actHi), vx_act(y.w, pc.act, pc.actLo, pc.actHi)));
+  vec4 pv = vec4(vx_act(y.x, pc.act, pc.actLo, pc.actHi), vx_act(y.y, pc.act, pc.actLo, pc.actHi),
+                 vx_act(y.z, pc.act, pc.actLo, pc.actHi), vx_act(y.w, pc.act, pc.actLo, pc.actHi));
 #ifdef PW_EPI
   pv = pw_apply4(pv, obase + oy * pc.OW + ox);
 #endif

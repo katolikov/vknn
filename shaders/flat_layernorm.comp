@@ -50,7 +50,7 @@ void main() {
     float y = (float(s[base + j]) - mean) * inv * float(gamma[j]);
     if (pc.hasBeta != 0) y += float(beta[j]);
 #ifdef PW_EPI
-    y = pw_apply(float(STORE(y)), base + j);
+    y = pw_apply(y, base + j);
 #endif
     d[base + j] = STORE(y);
   }

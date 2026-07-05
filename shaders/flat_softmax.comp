@@ -52,7 +52,7 @@ void main() {
   for (int a = int(t); a < pc.axis; a += WG) {
     float v = exp(float(s[base + a * pc.inner]) - m) * rsum;
 #ifdef PW_EPI
-    v = pw_apply(float(STORE(v)), base + a * pc.inner);
+    v = pw_apply(v, base + a * pc.inner);
 #endif
     d[base + a * pc.inner] = STORE(v);
   }

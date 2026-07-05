@@ -50,7 +50,7 @@ void main() {
     }
   }
 #ifdef PW_EPI
-  acc = pw_apply(float(STORE(acc)), int(gid));
+  acc = pw_apply(acc, int(gid));
 #endif
   ys[gid] = STORE(acc);
 }

@@ -44,7 +44,7 @@ void main() {
     vec4 o = vec4(0.0);
     for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) o[l] = exp(v[l] - mx) / sum;
 #ifdef PW_EPI
-    o = pw_apply4(vec4(f16vec4(o)), n * Cb + cb);
+    o = pw_apply4(o, n * Cb + cb);
 #endif
     dst[n * Cb + cb] = f16vec4(o);
   }

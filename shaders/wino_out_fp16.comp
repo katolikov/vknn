@@ -51,10 +51,10 @@ void main() {
 #define WRITE(yy, ROW, COL)                                                                       \
   if ((oy + ROW) < pc.OH && (ox + COL) < pc.OW) {                                                 \
     int pwi = obase + (oy + ROW) * pc.OW + (ox + COL);                                            \
-    vec4 pv = vec4(f16vec4(vx_act(yy.x, pc.act, pc.actLo, pc.actHi),                              \
-                           vx_act(yy.y, pc.act, pc.actLo, pc.actHi),                              \
-                           vx_act(yy.z, pc.act, pc.actLo, pc.actHi),                              \
-                           vx_act(yy.w, pc.act, pc.actLo, pc.actHi)));                            \
+    vec4 pv = vec4(vx_act(yy.x, pc.act, pc.actLo, pc.actHi),                                      \
+                   vx_act(yy.y, pc.act, pc.actLo, pc.actHi),                                      \
+                   vx_act(yy.z, pc.act, pc.actLo, pc.actHi),                                      \
+                   vx_act(yy.w, pc.act, pc.actLo, pc.actHi));                                     \
     dst[pwi] = f16vec4(pw_apply4(pv, pwi));                                                       \
   }
 #else

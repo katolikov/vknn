@@ -233,7 +233,12 @@ target_link_libraries(vknn PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  foreach(ex probe classify profile zerocopy_cache zerocopy_simple predict_cache backend_switch op_check image_bench predict run_io yonosplat microbench)
+  set(_vknn_examples probe classify profile zerocopy_cache zerocopy_simple predict_cache backend_switch op_check image_bench predict run_io yonosplat)
+  if(VKNN_ENABLE_VULKAN)
+    # microbench drives Vulkan kernels directly (includes vk_context.h), so it needs the backend.
+    list(APPEND _vknn_examples microbench)
+  endif()
+  foreach(ex ${_vknn_examples})
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       add_executable(vknn_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       # whole-archive so self-registering backend/operators (static initializers in the

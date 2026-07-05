@@ -26,7 +26,7 @@ void main() {
   float v = vx_act(acc, pc.act, pc.actLo, pc.actHi);
 #ifdef PW_EPI
   int di = int(m * uint(pc.dstStride) + oc);
-  v = (plan.worldFlat != 0) ? pw_apply(float(TO_STORE(v)), di) : pw_apply_nc4(float(TO_STORE(v)), di);
+  v = (plan.worldFlat != 0) ? pw_apply(v, di) : pw_apply_nc4(v, di);
 #endif
   dst[m * uint(pc.dstStride) + oc] = v;
 }

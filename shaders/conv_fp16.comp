@@ -58,7 +58,7 @@ void main() {
                 vx_act(acc.z, pc.act, pc.actLo, pc.actHi),
                 vx_act(acc.w, pc.act, pc.actLo, pc.actHi));
 #ifdef PW_EPI
-  v = pw_apply4(vec4(f16vec4(v)), d);
+  v = pw_apply4(v, d);
 #endif
   dst[d] = f16vec4(v);
 }

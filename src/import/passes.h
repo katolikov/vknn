@@ -30,8 +30,9 @@ namespace vknn {
     // emit it as one fused unit — a producer epilogue or a standalone FusedPointwise node, with
     // extra output streams for values consumed outside the region. Subsumes activation, residual-
     // add, swish-diamond, and matmul-bias folding. Runs last; on by default. In the default fast
-    // mode the swish/residual/bias patterns emit the kernels' native fp32-accumulator epilogues
-    // (old-main speed; bytes differ from unfused there); strict=true keeps every step rounded, so
+    // mode units are fp32-chained (pw_relax): steps run unrounded in fp32 registers and the unit
+    // rounds once per stored stream — faster than per-step rounding and at least as accurate as
+    // the unfused fp16 graph by construction. strict=true keeps every step rounded, so
     // fused == unfused is byte-identical — the byte gate compiles with --strict-fuse.
     void fusePointwiseChains(Graph &g, bool strictFuse);
 
@@ -62,8 +63,8 @@ namespace vknn {
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
         bool    strictFuse          = false; // rounded steps everywhere: fused == unfused byte-identical
-                                             // (the byte-gate mode; default fast mode uses the kernels'
-                                             // native fp32-accumulator swish/residual/bias epilogues)
+                                             // (the byte-gate mode; default fast mode fp32-chains each
+                                             // unit and rounds once per stored stream)
         bool    lowerConv           = false; // non-Winograd KxK Conv -> ConvGemm (experimental: the
                                              // v1 64x64x16 kernel loses to the direct conv on
                                              // classifier-CNN shapes — opt in per model, measure)

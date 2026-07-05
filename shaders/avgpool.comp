@@ -40,7 +40,7 @@ void main() {
     for (int l = 0; l < 4; ++l) {
       float v = r[l];
 #ifdef PW_EPI
-      v = pw_apply_nc4(float(STORE(v)), didx + l);
+      v = pw_apply_nc4(v, didx + l);
 #endif
       dst[didx + l] = STORE(v);
     }

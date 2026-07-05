@@ -539,7 +539,7 @@ namespace vknn {
                     int64_t  dst = rg != regOf.end() ? (int64_t) rg->second : (int64_t) kPwRefNone;
                     // Fast mode folds a swish diamond into ONE step: [unary Sigmoid/HardSigmoid X]
                     // followed by [Mul(X, acc)] becomes [unary SiLU/HardSwish X] — one expression,
-                    // one rounding, matching the retired fuseSwish's cost. Bytes intentionally
+                    // one VM step, matching the retired fuseSwish's cost. Bytes intentionally
                     // differ from the two rounded steps; --strict-fuse keeps those.
                     if (!strict && kind == kPwKindBinary && code == (int64_t) BinaryType::Mul && u.steps.size() >= 8 && nd.fusedAct == ActType::None)
                     {
@@ -640,9 +640,13 @@ namespace vknn {
     /// standalone unit is emitted at the LAST member's slot, so every operand is produced before it;
     /// external consumers of exported values are re-ordered by the load-time topoSort when needed.
     ///
-    /// Bit-exact: the unit's entry value is the producer's already-rounded store (or the primary
-    /// stream) and every step result passes TO_STORE (shaders/pw_epilogue.glsl), reproducing each
-    /// fp16 store of the unfused graph bit for bit, in the same order.
+    /// Rounding discipline (strictFuse): in strict mode the unit's entry value is rounded to the
+    /// byte the producer would store and every step result passes TO_STORE
+    /// (shaders/pw_epilogue.glsl), reproducing each fp16 store of the unfused graph bit for bit, in
+    /// the same order. In the default fast mode the unit carries the pw_relax attr: the entry stays
+    /// the producer's raw fp32 accumulator, steps chain unrounded in fp32 registers, and the unit
+    /// rounds ONCE per stored stream (main store + each export) — strictly fewer roundings than the
+    /// unfused graph, so per-chain accuracy is >= the unfused fp16 build by construction.
     ///
     /// Precondition: shapes inferred and const-folding done (this runs LAST among the standard
     /// passes). Postcondition: fully-merged members are erased; the producer (or the anchor slot's
@@ -957,71 +961,6 @@ namespace vknn {
                         continue;
                     }
                 }
-                // Fast-mode native epilogues: match the retired passes' fp32-accumulator forms
-                // for their exact patterns — a swish on the producer's own activation, a residual
-                // Add on the 1x1 conv's native residual read, a bias-Add on the MatMul kernel's
-                // bias input. One expression, one store, old-main speed; bytes intentionally differ
-                // from the unfused graph there. --strict-fuse keeps the rounded steps (and the
-                // absolute byte gate) instead.
-                if (!strictFuse && unit.exports.empty() && !entryExported)
-                {
-                    Node   &P      = g.nodes[prod];
-                    int     nSteps = (int) unit.steps.size() / 8;
-                    auto    stepAt = [&](int st, int f) { return unit.steps[(size_t) st * 8 + f]; };
-                    auto    finish = [&]() {
-                        P.outputs[0] = unit.mainOut;
-                        for (int m: members)
-                        {
-                            removed.insert(m);
-                        }
-                        fused++;
-                        attached++;
-                        rebuild();
-                    };
-                    bool swishStep = nSteps == 1 && unit.operands.empty() && stepAt(0, 0) == kPwKindUnary && stepAt(0, 2) == kPwRefEntry && (stepAt(0, 1) == (int64_t) UnaryType::SiLU || stepAt(0, 1) == (int64_t) UnaryType::HardSwish);
-                    if (swishStep && (P.type == OpType::Conv || P.type == OpType::Gemm) && P.fusedAct == ActType::None)
-                    {
-                        P.fusedAct = stepAt(0, 1) == (int64_t) UnaryType::SiLU ? ActType::SiLU : ActType::HardSwish;
-                        finish();
-                        continue;
-                    }
-                    bool addStep = nSteps >= 1 && unit.operands.size() == 1 && stepAt(0, 0) == kPwKindBinary && stepAt(0, 1) == (int64_t) BinaryType::Add && stepAt(0, 6) == 0 && ((stepAt(0, 2) == kPwRefEntry && stepAt(0, 3) <= kPwRefOp0) || (stepAt(0, 3) == kPwRefEntry && stepAt(0, 2) <= kPwRefOp0));
-                    bool tailAct = nSteps == 2 && stepAt(1, 0) == kPwKindAct && stepAt(1, 2) == kPwRefAcc && (stepAt(1, 1) == (int64_t) ActType::Relu || stepAt(1, 1) == (int64_t) ActType::Relu6 || stepAt(1, 1) == (int64_t) ActType::Clip);
-                    if (addStep && (nSteps == 1 || tailAct) && !g.isInitializer(unit.operands[0]) && P.type == OpType::Conv && P.fusedResidual == kNoTensor && P.fusedAct == ActType::None)
-                    {
-                        auto ints = [&](const char *k, std::vector<int64_t> d) {
-                            const auto &v = P.attr.getints(k);
-                            return v.empty() ? d : v;
-                        };
-                        auto kk = ints("kernel_shape", {1, 1}), st = ints("strides", {1, 1}), pd = ints("pads", {0, 0, 0, 0});
-                        bool conv1x1 = P.attr.geti("group", 1) == 1 && kk[0] == 1 && kk[1] == 1 && st[0] == 1 && st[1] == 1 && !pd[0] && !pd[1] && !pd[2] && !pd[3];
-                        if (conv1x1)
-                        {
-                            P.fusedResidual = unit.operands[0];
-                            P.inputs.push_back(unit.operands[0]); // keep it live for DCE/allocation/scheduling
-                            if (nSteps == 2)
-                            {
-                                P.fusedAct = (ActType) stepAt(1, 1);
-                                P.actLo    = unit.params[2];
-                                P.actHi    = unit.params[3];
-                            }
-                            finish();
-                            continue;
-                        }
-                    }
-                    if (addStep && nSteps == 1 && g.isInitializer(unit.operands[0]) && P.type == OpType::MatMul && P.fusedBias == kNoTensor)
-                    {
-                        const Shape &os = g.desc(unit.mainOut).shape;
-                        const Shape &bs = g.desc(unit.operands[0]).shape;
-                        if (!os.empty() && !bs.empty() && bs.back() == os.back() && numElements(bs) == os.back())
-                        {
-                            P.fusedBias = unit.operands[0];
-                            P.inputs.push_back(unit.operands[0]); // keep the bias live
-                            finish();
-                            continue;
-                        }
-                    }
-                }
                 Node                &P      = g.nodes[prod];
                 int                  opbase = (int) P.inputs.size();
                 std::vector<int64_t> es     = unit.steps;
@@ -1057,6 +996,13 @@ namespace vknn {
                     a.kind                  = Attr::Int;
                     a.i                     = opbase;
                     P.attr.map["pw_opbase"] = a;
+                }
+                if (!strictFuse)
+                {
+                    Attr a;
+                    a.kind                 = Attr::Int;
+                    a.i                    = 1;
+                    P.attr.map["pw_relax"] = a;
                 }
                 P.outputs.assign(1, unit.mainOut);
                 std::vector<int64_t> outs = unit.outSteps;
@@ -1130,6 +1076,13 @@ namespace vknn {
                 a.kind                = Attr::Int;
                 a.i                   = unit.nc4Ok ? 0 : 1; // NC4HW4 when expressible (conv-adjacent graphs live there)
                 fn.attr.map["pw_flat"] = a;
+            }
+            if (!strictFuse)
+            {
+                Attr a;
+                a.kind                  = Attr::Int;
+                a.i                     = 1;
+                fn.attr.map["pw_relax"] = a;
             }
             int anchor = members.back();
             for (int m: members)
