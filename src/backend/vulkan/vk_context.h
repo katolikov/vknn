@@ -52,7 +52,8 @@ namespace vknn { namespace vk {
         bool globalPriority       = false;
 
         std::set<std::string> deviceExtensions;
-        bool                  has(const std::string &ext) const {
+        /// True when the device advertises `ext` (queried once at startup).
+        bool has(const std::string &ext) const noexcept {
             return deviceExtensions.count(ext) > 0;
         }
 
@@ -69,29 +70,31 @@ namespace vknn { namespace vk {
         VulkanContext(const VulkanContext &)            = delete;
         VulkanContext &operator=(const VulkanContext &) = delete;
 
-        bool initialized() const {
+        /// True once a device was successfully created; on failure the constructor leaves this false
+        /// rather than throwing, so callers gate on it before using the context.
+        bool initialized() const noexcept {
             return device_ != VK_NULL_HANDLE;
         }
-        const VulkanCaps &caps() const {
+        const VulkanCaps &caps() const noexcept {
             return caps_;
         }
 
-        VkInstance instance() const {
+        VkInstance instance() const noexcept {
             return instance_;
         }
-        VkPhysicalDevice physicalDevice() const {
+        VkPhysicalDevice physicalDevice() const noexcept {
             return phys_;
         }
-        VkDevice device() const {
+        VkDevice device() const noexcept {
             return device_;
         }
-        VkQueue computeQueue() const {
+        VkQueue computeQueue() const noexcept {
             return queue_;
         }
-        uint32_t computeQueueFamily() const {
+        uint32_t computeQueueFamily() const noexcept {
             return queueFamily_;
         }
-        const VkPhysicalDeviceMemoryProperties &memProps() const {
+        const VkPhysicalDeviceMemoryProperties &memProps() const noexcept {
             return memProps_;
         }
 
