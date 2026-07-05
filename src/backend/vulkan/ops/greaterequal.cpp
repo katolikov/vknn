@@ -28,7 +28,7 @@ namespace vknn {
                 }
                 auto setup = [&](TensorId t, int which) {
                     Shape                s = g.desc(t).shape;
-                    std::vector<int64_t> ps(rank, 1); // left-pad to out rank
+                    std::vector<int64_t> ps(rank, 1); // right-align this operand's shape into the output rank (leading dims padded to 1)
                     for (int k = 0; k < (int) s.size(); ++k)
                     {
                         ps[rank - (int) s.size() + k] = s[k];
@@ -37,6 +37,8 @@ namespace vknn {
                     int *dst = (which == 0 ? pc.aStride : pc.bStride);
                     for (int k = 0; k < rank; ++k)
                     {
+                        // Broadcast convention shared with flat::Binary: a size-1 dim gets stride 0 so the
+                        // shader reads the same element for every output coordinate along that axis.
                         dst[k] = ps[k] == 1 ? 0 : (int) st[k];
                     }
                     if (g.isInitializer(t))

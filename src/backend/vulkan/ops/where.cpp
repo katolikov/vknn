@@ -56,7 +56,9 @@ namespace vknn {
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), buf(2)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                // where_select.comp is local_size_x=256 with one invocation per output element, so the
+                // 1D grid is ceil(total/256) — the shared flat element-parallel dispatch size.
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), buf(2)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
             }
         };
 

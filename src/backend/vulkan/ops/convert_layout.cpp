@@ -21,7 +21,9 @@ namespace vknn {
                 pc         = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, dir};
                 int64_t Cb = cBlocks(x.c), HW = x.h * x.w;
                 count = (uint32_t) (x.n * Cb * HW); // one thread per NC4 lane-quad, both directions
-                pipe  = env.pipeline(shader("convert_layout", env.useFp16), 4, sizeof(ConvertPC), std::vector<uint32_t> {});
+                // Binding count is 4: bindings 0/1 (scalar) and 2/3 (vec4) alias the same src/dst
+                // buffers, so each direction reads scalars on the flat side and one STORE4 on the NC4 side.
+                pipe = env.pipeline(shader("convert_layout", env.useFp16), 4, sizeof(ConvertPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

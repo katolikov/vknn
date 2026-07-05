@@ -44,7 +44,7 @@ namespace vknn {
                         axis += rank;
                     }
                     auto    inStride = flat::rowStrides(in);
-                    int64_t offset   = 0;
+                    int64_t offset   = 0; // running start of this output along the split axis, in axis elements
                     for (size_t k = 0; k < node.outputs.size(); ++k)
                     {
                         if (node.outputs[k] == kNoTensor)
@@ -55,6 +55,9 @@ namespace vknn {
                         FPC   pc {};
                         pc.rank  = rank;
                         pc.total = (int) numElements(out);
+                        // Each output is a contiguous slice of the input along the split axis. flat_gather reads
+                        // in[base + sum_d outCoord_d * inStride_d]; base skips this output's axis offset (offset
+                        // rows of the axis stride), and the input strides carry every other axis through unchanged.
                         pc.base  = (int) (offset * inStride[axis]);
                         for (int d = 0; d < rank; ++d)
                         {
@@ -63,16 +66,19 @@ namespace vknn {
                         }
                         fpcs_.push_back(pc);
                         foutIdx_.push_back((int) k);
-                        offset += out[axis];
+                        offset += out[axis]; // next output starts where this one ends
                         fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 2, sizeof(FPC), std::vector<uint32_t> {}));
                     }
                     return;
                 }
                 // NC4HW4 channel split
                 x_          = NCHW::from(g.desc(node.inputs[0]).shape);
-                elem_       = env.useFp16 ? 2 : 4;
-                cbTotal_    = cBlocks(x_.c);
+                elem_       = env.useFp16 ? 2 : 4; // bytes per stored element (fp16 half vs fp32 float)
+                cbTotal_    = cBlocks(x_.c);       // input's channel-block count (the source row pitch)
                 hw_         = x_.h * x_.w;
+                // Each output owns a contiguous run of channel-blocks. blk is the input's first block index
+                // for the current output; because every split channel count is a multiple of four here, a
+                // block is never shared, so each output is a whole-block copy with no channel remainder.
                 int64_t blk = 0;
                 for (size_t k = 0; k < node.outputs.size(); ++k)
                 {
@@ -81,7 +87,7 @@ namespace vknn {
                         continue;
                     }
                     int64_t ck  = NCHW::from(g.desc(node.outputs[k]).shape).c;
-                    int64_t cbk = cBlocks(ck);
+                    int64_t cbk = cBlocks(ck); // channel-blocks this output takes
                     parts_.push_back({(int) k, blk, cbk});
                     blk += cbk;
                 }
@@ -93,10 +99,16 @@ namespace vknn {
                     vk::Buffer *src = operandBuf(env, node.inputs[0], hold0_);
                     for (size_t i = 0; i < fpcs_.size(); ++i)
                     {
-                        fpipes_[i]->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[foutIdx_[i]])->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, 256));
+                        // One flat_gather invocation per output element (local_size_x = kFlatLocalSize),
+                        // gathering the slice for this output straight out of the shared input buffer.
+                        fpipes_[i]->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[foutIdx_[i]])->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, flat::kFlatLocalSize));
                     }
                     return;
                 }
+                // NC4HW4 buffer bytes are laid out as [n][channelBlock][h*w][kNC4Block] * elem_. One
+                // vkCmdCopyBuffer per batch lifts this output's block range out of the input: batches are
+                // interleaved in the source (stride cbTotal_ blocks) but packed contiguously in the compact
+                // destination (stride p.cbk blocks), so the copies cannot be coalesced across n.
                 vk::Buffer *src = env.devBuf(node.inputs[0]);
                 for (const Part &p: parts_)
                 {
@@ -104,9 +116,10 @@ namespace vknn {
                     for (int64_t n = 0; n < x_.n; ++n)
                     {
                         VkBufferCopy c {};
-                        c.srcOffset = (VkDeviceSize) ((n * cbTotal_ + p.blockOff) * hw_ * 4 * elem_);
-                        c.dstOffset = (VkDeviceSize) ((n * p.cbk) * hw_ * 4 * elem_);
-                        c.size      = (VkDeviceSize) (p.cbk * hw_ * 4 * elem_);
+                        // Skip n full input batches plus p.blockOff blocks to this output's first block.
+                        c.srcOffset = (VkDeviceSize) ((n * cbTotal_ + p.blockOff) * hw_ * kNC4Block * elem_);
+                        c.dstOffset = (VkDeviceSize) ((n * p.cbk) * hw_ * kNC4Block * elem_);
+                        c.size      = (VkDeviceSize) (p.cbk * hw_ * kNC4Block * elem_);
                         vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
                     }
                 }

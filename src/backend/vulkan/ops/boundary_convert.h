@@ -21,6 +21,8 @@ namespace vknn {
         void record(VkCommandBuffer cmd, vk::VulkanContext &ctx, vk::PipelineCache *cache, vk::Buffer *src, vk::Buffer *dst, const NCHW &shape, TensorFormat srcFmt, DType srcDt, TensorFormat dstFmt, DType dstDt);
 
       private:
+        // Lazily built pipelines, keyed only by the (src,dst) dtype pair. The layout pair is not part of
+        // the key: it is a push constant, so one pipeline per dtype pair serves every layout combination.
         std::map<std::pair<DType, DType>, std::unique_ptr<vk::ComputePipeline>> pipes_;
     };
 

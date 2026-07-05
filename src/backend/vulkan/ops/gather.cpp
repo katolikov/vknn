@@ -11,6 +11,11 @@ namespace vknn {
     namespace {
 
         struct GatherOp: VulkanOp {
+            // Field order/types mirror gather.comp's push_constant block. The data tensor is
+            // flattened around `axis` into [outer, axisSize, inner]: outer = product of dims before
+            // axis, axisSize = the gathered dim, inner = product of dims after axis. The kernel maps
+            // each of `total` output elements to (o, i, in) and reads data[o*axisSize*inner +
+            // idx[i]*inner + in], so this decomposition is all it needs to index either operand.
             struct PC {
                 int total, outer, axisSize, inner, nIdx;
             } pc {};
@@ -24,6 +29,8 @@ namespace vknn {
                 Shape        out  = g.desc(node.outputs[0]).shape;
                 int          rank = (int) d.size();
                 int          axis = (int) node.attr.geti("axis", 0);
+                // Normalize the ONNX axis: negative counts from the back, then clamp into
+                // [0, rank-1] so a malformed/out-of-range attribute can never index outside `d`.
                 if (axis < 0)
                 {
                     axis += rank;
@@ -49,6 +56,8 @@ namespace vknn {
                 }
 
                 TensorId iid  = node.inputs[1];
+                // A scalar index has a rank-0 shape (numElements == 1); the max() keeps nIdx >= 1
+                // so the empty-shape scalar case still allocates and dispatches one index lane.
                 int64_t  nIdx = std::max<int64_t>(numElements(g.desc(iid).shape), 1);
                 if (g.isInitializer(iid))
                 { // const index -> upload as float (decode int64/fp16 as needed)
@@ -76,7 +85,11 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // Const index uses the float buffer uploaded in prepare(); a runtime index reads its
+                // device buffer directly. Either way the kernel treats index[] as float (see header).
                 vk::Buffer *idx = idxBuf ? idxBuf.get() : env.devBuf(node.inputs[1]);
+                // 256 = the shader's local_size_x; groups() rounds pc.total (one thread per output
+                // element) up to whole workgroups. Buffer order matches gather.comp: data, index, out.
                 pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), idx->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
             }
         };

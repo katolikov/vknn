@@ -7,6 +7,9 @@ namespace vknn {
     namespace {
 
         struct GemmOp: VulkanOp {
+            // Threads per workgroup, byte-matched to fc.comp's `layout(local_size_x = 64)`.
+            static constexpr uint32_t kLocalSize = 64;
+
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
             PwEpi                                epi;
@@ -30,6 +33,9 @@ namespace vknn {
                 Cout                    = CoutL;
                 std::vector<float> wv   = initFloats(g, node.inputs[1]);
                 const float       *wsrc = wv.data();
+                // Prepack weights into the row-major [Cout][Cin] the fc shader indexes as wt[oc*Cin+ic].
+                // transB=1: the source is already [Cout][Cin], copy straight through. transB=0 (the ONNX
+                // default): the source is [Cin][Cout], so transpose by reading wsrc[ic*Cout+oc].
                 wbuf                    = uploadCached(env, node.name + "#w", [&] {
                     std::vector<float> wp((size_t) CoutL * Cin);
                     for (int64_t oc = 0; oc < CoutL; ++oc)
@@ -47,6 +53,9 @@ namespace vknn {
                     bv = initFloats(g, node.inputs[2]);
                 }
                 const float *bsrc = bv.data();
+                // The fc shader always seeds its accumulator with bias[oc], so materialize a full-length
+                // bias buffer even when Gemm has no C input: default to zeros, filled only when present.
+                // bsrc is dereferenced solely inside the same has-bias guard, so an empty bv is safe here.
                 bbuf              = uploadCached(env, node.name + "#b", [&] {
                     std::vector<float> bias(CoutL, 0.f);
                     if (pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor)
@@ -81,7 +90,10 @@ namespace vknn {
                 vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
                 epi.append(bufs, node, env, dst->handle());
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(Cout * pc.M, 64));
+                // One thread per output element: Cout channels * M rows, ceil-divided into 64-wide
+                // workgroups. The shader linearizes gid across a 2D grid, so an overflowing X count folds
+                // into Y — no per-op 65535-limit handling needed here.
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(Cout * pc.M, kLocalSize));
             }
         };
 

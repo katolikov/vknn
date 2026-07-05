@@ -17,6 +17,10 @@ namespace vknn {
                 {
                     return; // output aliases the input buffer (geometry-as-metadata): no copy needed
                 }
+                // Unsqueeze preserves the element count and (per the layout pass) the layout, so src/dst are
+                // equal-sized: copy the whole buffer by byte count. Do NOT size the copy from
+                // packedElems(output): that returns the NC4HW4 padded count (cBlocks(C)*4*H*W), which differs
+                // from the flat row-major buffer's numElements size on this path and would copy the wrong span.
                 VkBufferCopy c {0, 0, std::min(src->bytes(), dst->bytes())};
                 vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
             }

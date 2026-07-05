@@ -63,10 +63,16 @@ namespace vknn {
                 plan.step[s * 4 + 3] = bc;
                 plan.p0[s]           = pr[s * 2];
                 plan.p1[s]           = pr[s * 2 + 1];
+                // Only binary (kind 0) and reversed-binary (kind 3) steps read a second operand
+                // tensor and thus claim an operand slot + broadcast strides; unary (1) and
+                // activation (2) steps operate on the running chain value alone (slot stays 0).
                 if (kind == 0 || kind == 3)
                 {
                     TensorId opd            = node.inputs[oi];
                     plan.step[s * 4 + 2]    = slotOf(opd);
+                    // Right-align the operand shape into `rank` dims (ps), build its row-major
+                    // strides (ss), then emit a NumPy-style broadcast stride per dim: a size-1
+                    // dim gets stride 0 so the kernel repeats element 0 along that axis.
                     Shape                os = g.desc(opd).shape;
                     std::vector<int64_t> ps(rank, 1);
                     for (int k = 0; k < (int) os.size() && k < rank; ++k)
@@ -89,6 +95,10 @@ namespace vknn {
             }
         } else
         {
+            // NC4HW4 world: the kernel indexes packed channel blocks, so the plan carries only the
+            // spatial extent (rank 1, outDim[0] = H*W). `total` is the thread count: one thread per
+            // (n, channel-block, hw) triple = n * ceil(c/4) * H*W, each thread handling the 4 packed
+            // channel lanes as a vec4. Blocks for c not a multiple of 4 (padded lanes) are included.
             NCHW y         = NCHW::from(out);
             int  HW        = (int) (y.h * y.w);
             plan.rank      = 1;

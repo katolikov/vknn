@@ -1,9 +1,9 @@
-// LayerNormalization on the GPU via the FLAT (row-major) path. One thread per OUTER row (outer =
-// product of dims before `axis`); each walks its normalized block (norm = product of dims from
-// `axis` to the end) computing mean then variance, then writes (x-mean)/sqrt(var+eps)*gamma + beta.
-// gamma (Scale) and beta (B, optional) are 1-D [norm] initializers, uploaded as flat constant
-// buffers in prepare(). Output shape == input shape. supportsNode gates to
-// scale/bias-as-initializers.
+// LayerNormalization on the GPU via the FLAT (row-major) path. One WORKGROUP per OUTER row (outer =
+// product of dims before `axis`); the workgroup's threads cooperatively LDS-reduce the row's
+// normalized block (norm = product of dims from `axis` to the end) to mean and variance, then write
+// (x-mean)/sqrt(var+eps)*gamma + beta. gamma (Scale) and beta (B, optional) are 1-D [norm]
+// initializers, uploaded as flat constant buffers in prepare(). Output shape == input shape.
+// supportsNode gates to scale/bias-as-initializers.
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
@@ -27,7 +27,10 @@ namespace vknn {
                 const Graph &g    = *env.graph;
                 Shape        s    = g.desc(node.inputs[0]).shape;
                 int          rank = (int) s.size();
-                int64_t      axis = node.attr.geti("axis", -1);
+                // ONNX axis defaults to -1 and may be negative (counted from the end). Wrap once, then
+                // floor at 0 so a still-negative or out-of-range axis normalizes over the whole tensor
+                // rather than indexing s[] out of bounds below.
+                int64_t axis = node.attr.geti("axis", -1);
                 if (axis < 0)
                 {
                     axis += rank;
@@ -36,6 +39,8 @@ namespace vknn {
                 {
                     axis = 0;
                 }
+                // norm = product of dims from axis to the end (the block each row normalizes over);
+                // outer = every dim before axis, i.e. the number of independent rows.
                 int64_t norm = 1;
                 for (int k = (int) axis; k < rank; ++k)
                 {
@@ -64,14 +69,19 @@ namespace vknn {
                     betaBuf = upload(*env.ctx, std::vector<float>((size_t) norm, 0.0f), env.useFp16);
                 }
                 epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
+                // 4 fixed bindings (input, gamma, beta, output) plus any extra buffers the fused
+                // pointwise epilogue binds after them; suffix() picks the matching PW_EPI shader variant.
                 pipe = env.pipeline(shader((std::string("flat_layernorm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(LnPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                // One workgroup per row (flat_layernorm does the LDS reduction across the workgroup).
+                // Bind order must match the shader: input, gamma, beta, output, then epilogue buffers.
                 VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), gammaBuf->handle(), betaBuf->handle(), dst};
                 epi.append(bufs, node, env, dst);
+                // Group count = outer (one workgroup per row; flat_layernorm reduces across the
+                // workgroup via LDS). dispatch() spills an outer that exceeds the per-dim group limit
+                // into the y dimension, which the shader unfolds back to a linear row index.
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t) pc.outer);
             }
         };

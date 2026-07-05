@@ -9,6 +9,8 @@ namespace vknn {
     namespace {
 
         struct ClipOp: VulkanOp {
+            // Field order/types mirror clip.comp's push_constant block { int total; float lo, hi; }.
+            // total is the flat element count of the output (one lane per element on the row-major path).
             struct PC {
                 int   total;
                 float lo, hi;
@@ -46,6 +48,8 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // operandBuf (not devBuf) so a constant-initializer input[0] uploads flat into hold0 on
+                // first use instead of null-crashing. One flat 1D grid of 256-lane workgroups spans total.
                 pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
             }
         };

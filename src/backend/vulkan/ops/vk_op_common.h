@@ -16,6 +16,9 @@ namespace vknn {
         float actLo, actHi;
     };
     struct DwPC {
+        // pad0 is a reserved slot present in dwconv.comp's push_constant block too: it pads the int run
+        // up to a 16-byte multiple so the trailing actLo/actHi floats land at the byte offset the shader
+        // reads them from. Keep it in lockstep with the shader.
         int   N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act, pad0;
         float actLo, actHi;
     };
@@ -51,6 +54,8 @@ namespace vknn {
         int Cin, Cout, nT;
     };
     struct WinoOutPC {
+        // pad0: same role as in DwPC — a reserved int mirrored in the winograd-output shader that pads the
+        // int run to a 16-byte multiple so actLo/actHi sit at the offset the shader expects.
         int   N, Cout, OH, OW, nTH, nTW, act, pad0;
         float actLo, actHi;
     };

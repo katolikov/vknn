@@ -29,10 +29,17 @@ namespace vknn {
                 holds.assign(operands.size(), nullptr);
 
                 planBuf = uploadPwPlan(env, plan);
+                // Buffer count = 2 (primary input + output) + 1 (plan SSBO) + kPwMaxOperands operand
+                // slots. The shaders (fused_pw_flat/nc4.comp) statically declare all kPwMaxOperands
+                // operand bindings via pw_epilogue.glsl, so the descriptor set must always size for the
+                // full count even when the plan uses fewer. Push constant is a single int (the element
+                // count `total`), matching the shaders' `PC { int total; }`.
                 pipe = env.pipeline(shader(flat ? "fused_pw_flat" : "fused_pw_nc4", env.useFp16), 2 + 1 + kPwMaxOperands, sizeof(int), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // Binding order matches the shaders: 0 = primary input, 1 = output, 2 = plan SSBO
+                // (PW_EPI_BASE), then the kPwMaxOperands step-operand slots (PW_EPI_BASE+1..+K).
                 vk::Buffer           *dst = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs;
                 bufs.push_back(env.devBuf(node.inputs[0])->handle());
@@ -45,9 +52,14 @@ namespace vknn {
                         bufs.push_back(pwOperandBuf(env, operands[k], holds[k], flat)->handle());
                     } else
                     {
+                        // The shader declares all kPwMaxOperands operand bindings statically, so every
+                        // slot must point at a live buffer. Unused slots bind `dst` as a harmless
+                        // placeholder: the plan never references these slots, so the kernel never reads
+                        // them.
                         bufs.push_back(dst->handle());
                     }
                 }
+                // One int push constant: the element count guarding the 1D grid (local_size_x=256).
                 int pc = total;
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 256));
             }

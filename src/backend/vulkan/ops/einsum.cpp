@@ -11,6 +11,9 @@
 namespace vknn {
     namespace {
 
+        // Mirrors einsum_outer.comp's push_constant block. total is the flat output element count
+        // (I*J) that bounds the 1D grid; I and J are the operand lengths the shader uses to decode a
+        // flat output index gid into its (row, col) pair as a[gid / J] * b[gid % J].
         struct EinsumPC {
             uint32_t total;
             int      I, J;
@@ -23,9 +26,14 @@ namespace vknn {
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g = *env.graph;
+                // The outer product treats each operand as a flat vector, so its element count is the
+                // full shape product regardless of rank; the I*J product is the output size.
                 int64_t      I = numElements(g.desc(node.inputs[0]).shape);
                 int64_t      J = numElements(g.desc(node.inputs[1]).shape);
                 pc             = {(uint32_t) (I * J), (int) I, (int) J};
+                // Either operand may be a constant initializer (e.g. a RoPE frequency table). Pack it
+                // flat into a device buffer here, matching the fp16/fp32 mode; activation operands are
+                // instead bound from env.devBuf at record time. resize(n) pins the blob to n elements.
                 for (int e = 0; e < 2; ++e)
                 {
                     TensorId t = node.inputs[e];
@@ -41,9 +49,12 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // Bind the prepacked constant buffer when the operand was an initializer; otherwise the
+                // operand is an activation resolved from its device buffer.
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
+                // One flat 1D grid of total output lanes; 256 matches einsum_outer.comp's local_size_x.
                 pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
             }
         };

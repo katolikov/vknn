@@ -9,7 +9,14 @@
 namespace vknn {
     namespace {
 
+        // 1D workgroup width; matches `layout(local_size_x = 256)` in shaders/range.comp. The dispatch
+        // group count is derived from this exact value so the launched thread grid covers every output
+        // element (one thread per element) with no gap or overshoot.
+        constexpr uint32_t kRangeLocalSize = 256;
+
         struct RangeVk: VulkanOp {
+            // Mirrors range.comp's push_constant block. `total` is the flat (logical) output element
+            // count; the plan fixes it, so the kernel never needs the ONNX `limit` operand at runtime.
             struct PC {
                 int total;
             } pc {};
@@ -22,9 +29,15 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // ONNX Range inputs are (start, limit, delta). Only start and delta feed the kernel:
+                // the plan-time output size already encodes the element count, so `limit` (inputs[1]) is
+                // unused here. operandBuf() resolves each scalar to a device buffer — an activation keeps
+                // its own buffer, a constant uploads flat into the *Hold shared_ptr on first use.
                 vk::Buffer *s = operandBuf(env, node.inputs[0], startHold);
                 vk::Buffer *d = operandBuf(env, node.inputs[2], deltaHold);
-                pipe->dispatch(cmd, {s->handle(), d->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                // Bind order {start, delta, output} matches range.comp bindings 0/1/2; groups() rounds
+                // pc.total up to whole workgroups of kRangeLocalSize.
+                pipe->dispatch(cmd, {s->handle(), d->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kRangeLocalSize));
             }
         };
 

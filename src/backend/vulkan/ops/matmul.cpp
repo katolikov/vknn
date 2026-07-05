@@ -180,11 +180,15 @@ namespace vknn {
                 epi.append(bufs, node, env, dstHandle);
                 if (useTiled)
                 {
+                    // Tiled GEMM contract: one workgroup per kTile x kTile output tile, dispatched as
+                    // (ceil(N/kTile), ceil(M/kTile), numBatch). x/y cover the N/M matrix dims, z indexes the
+                    // flattened batch dims (see matmul_tiled.comp).
                     uint32_t gx = (uint32_t) ((pc.N + kTile - 1) / kTile);
                     uint32_t gy = (uint32_t) ((pc.M + kTile - 1) / kTile);
                     pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gx, gy, (uint32_t) numBatch);
                 } else
                 {
+                    // Naive kernel: one thread per output element over a flat 1-D grid of pc.total lanes.
                     pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
                 }
             }

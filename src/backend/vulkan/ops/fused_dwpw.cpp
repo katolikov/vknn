@@ -33,14 +33,23 @@ namespace vknn {
                 };
                 auto st = a("strides", {1, 1}), pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
                 hasRes                    = (node.fusedResidual != kNoTensor);
+                // Field order/types mirror fused_dwpw.comp's push_constant block: spatial/kernel geometry
+                // (N,E,H,W,Cout,OH,OW,KH,KW), then stride/pad/dilation (SH,SW,PT,PL,DH,DWd), then the fused
+                // depthwise + pointwise activation codes and clamp range. subOp carries the depthwise act.
                 pc                        = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,   (int) Cout,   (int) y.h,    (int) y.w,
                                              (int) KH,     (int) KW,         (int) st[0],         (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0],
                                              (int) dil[1], (int) node.subOp, (int) node.fusedAct, node.actLo,  node.actHi};
+                // One workgroup per output pixel (see file header): the grid is flattened to N*OH*OW so the
+                // shader staging the shared depthwise result in LDS is indexed by a single 1D dispatch id.
                 groups_                   = (int64_t) x.n * y.h * y.w;
                 std::vector<float> dwsrcv = initFloats(g, node.inputs[1]);
                 std::vector<float> pwsrcv = initFloats(g, node.inputs[3]);
                 const float       *dwsrc  = dwsrcv.data();
                 const float       *pwsrc  = pwsrcv.data();
+                // Depthwise weights repacked to NC4HW4: source [E,1,KH,KW] -> [Eb][KH][KW][4], where each of
+                // the Eb=cBlocks(E) channel blocks holds 4 channels in the vec4 lane l = c%4 (block cb = c/4).
+                // This matches the packed layout the shader reads the expanded activations in, so a lane's
+                // depthwise weight aligns with its channel. Trailing lanes of the last block stay zero-filled.
                 dww                       = uploadCached(env, node.name + "#dww", [&] { // [Eb][KH][KW][4]
                     std::vector<float> wp(Eb * KH * KW * 4, 0.f);
                     for (int64_t c = 0; c < E; ++c)
@@ -56,6 +65,10 @@ namespace vknn {
                     }
                     return wp;
                 });
+                // Pointwise (1x1 project) weights repacked to [Cout][Eb][4]: source [Cout,E,1,1] with the
+                // *input* channel E as the contraction axis, so E is what gets vec4-packed (block icb = ic/4,
+                // lane l = ic%4) to align with the depthwise result's NC4HW4 lanes; Cout stays flat since it
+                // is the output axis. Trailing lanes of the last input block stay zero so they add nothing.
                 pww                       = uploadCached(env, node.name + "#pww", [&] { // [Cout][Eb][4]
                     std::vector<float> wp((size_t) Cout * Eb * 4, 0.f);
                     for (int64_t oc = 0; oc < Cout; ++oc)
@@ -68,6 +81,8 @@ namespace vknn {
                     }
                     return wp;
                 });
+                // Biases are padded to the NC4HW4 block width (Eb*4 / Coutb*4) so a full-block buffer is
+                // always bound; a missing bias input leaves the buffer zero-filled (adds nothing).
                 dwb                       = uploadCached(env, node.name + "#dwb", [&] {
                     std::vector<float> b(Eb * 4, 0.f);
                     if (node.inputs[2] != kNoTensor)

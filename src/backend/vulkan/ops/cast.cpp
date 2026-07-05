@@ -53,16 +53,22 @@ namespace vknn {
                     case 7:
                     case 12:
                     case 13:
+                        // INT32/INT64/UINT32/UINT64: truncate only. These ranges exceed the
+                        // exactly-representable integer span of the compute float, so clamping to the
+                        // true dtype bounds would be meaningless; the clamp is widened to the fp32 finite
+                        // max (~3.4e38) purely to fence off inf/NaN, and trunc() alone drops the fraction.
                         truncate = true;
                         pc.lo    = -3.4e38f;
                         pc.hi    = 3.4e38f;
-                        break; // INT32/INT64/UINT32/UINT64: truncate only
+                        break;
                     default:
                         truncate = false;
                         break; // FLOAT/FLOAT16/DOUBLE -> copy
                 }
                 if (truncate)
                 {
+                    // 2 SSBO bindings (src, dst); the empty spec-constant vector leaves cast.comp
+                    // unspecialized (local_size_x is fixed at 256 in the shader, matching groups() below).
                     pipe = env.pipeline(shader("cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
                 }
             }
@@ -71,6 +77,9 @@ namespace vknn {
                 vk::Buffer *dst = env.devBuf(node.outputs[0]);
                 if (!truncate)
                 {
+                    // Same-precision cast is a raw byte copy. min() clamps the region to the smaller
+                    // buffer so a src/dst allocation-size mismatch (e.g. differing NC4HW4 channel padding)
+                    // can never over-read or over-write.
                     VkBufferCopy c {0, 0, std::min(src->bytes(), dst->bytes())};
                     vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
                     return;

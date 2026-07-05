@@ -8,7 +8,15 @@
 namespace vknn {
     namespace {
 
+        // 1D workgroup width; matches `layout(local_size_x = 256)` in shaders/constant_of_shape.comp.
+        // The dispatch group count is derived from this exact value so the launched thread grid covers
+        // every output element with no gap or overshoot.
+        constexpr uint32_t kConstantOfShapeLocalSize = 256;
+
         struct ConstantOfShapeVk: VulkanOp {
+            // Mirrors constant_of_shape.comp's push_constant block. `count` is the flat (logical)
+            // output element count; `value` stays fp32 even under fp16 storage because the shader casts
+            // it once via STORE(pc.value) at write time.
             struct PC {
                 uint32_t count;
                 float    value;
@@ -16,6 +24,8 @@ namespace vknn {
             std::shared_ptr<vk::ComputePipeline> pipe;
 
             void prepare(const Node &node, VkOpEnv &env) override {
+                // The shader writes a plain linear buffer (d[i]), so the count is the logical element
+                // product, not an NC4HW4 packed count. Missing/empty `value` attr defaults to 0.
                 pc.count = (uint32_t) numElements(env.graph->desc(node.outputs[0]).shape);
                 auto it  = node.attr.map.find("value");
                 pc.value = (it != node.attr.map.end() && !it->second.floats.empty()) ? it->second.floats[0] : 0.f;
@@ -23,7 +33,7 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                pipe->dispatch(cmd, {env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.count, 256));
+                pipe->dispatch(cmd, {env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.count, kConstantOfShapeLocalSize));
             }
         };
 

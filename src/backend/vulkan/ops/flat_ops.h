@@ -18,6 +18,10 @@ namespace vknn {
     namespace flat {
 
         constexpr int               kMaxRank = 8; // up to rank-7 geometry tensors ([1,2,50176,1,1,3,3]) run on the flat path
+        // 1D dispatch local size for the element-parallel flat shaders (gather/pad/broadcast/scatter/binary):
+        // one invocation per output element, so the group count is ceil(total/256). Matches local_size_x=256
+        // in each of those .comp files; flat_softmax dispatches one workgroup per row instead and does not use it.
+        constexpr uint32_t          kFlatLocalSize = 256;
         inline std::vector<int64_t> rowStrides(const Shape &s) {
             std::vector<int64_t> st(s.size(), 1);
             for (int k = (int) s.size() - 2; k >= 0; --k)
@@ -83,7 +87,7 @@ namespace vknn {
                 vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {operandBuf(env, node.inputs[0], hold0)->handle(), dst->handle()};
                 epi.append(bufs, node, env, dst->handle());
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
             }
         };
 
@@ -133,7 +137,7 @@ namespace vknn {
                 pipe = env.pipeline(shader("flat_pad", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
-                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
             }
         };
 
@@ -174,7 +178,7 @@ namespace vknn {
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer *src = constBuf ? constBuf.get() : env.devBuf(node.inputs[0]);
-                pipe->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
             }
         };
 
@@ -229,7 +233,7 @@ namespace vknn {
                 }
                 for (size_t i = 0; i < pcs.size(); ++i)
                 {
-                    pipes[i]->dispatch(cmd, {operandBuf(env, node.inputs[inIdx[i]], holds[i])->handle(), dst->handle()}, &pcs[i], sizeof(PC), groups(pcs[i].total, 256));
+                    pipes[i]->dispatch(cmd, {operandBuf(env, node.inputs[inIdx[i]], holds[i])->handle(), dst->handle()}, &pcs[i], sizeof(PC), groups(pcs[i].total, kFlatLocalSize));
                 }
             }
         };
@@ -287,7 +291,7 @@ namespace vknn {
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
             }
         };
 
