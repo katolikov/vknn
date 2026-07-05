@@ -820,6 +820,25 @@ namespace vknn {
                 prod     = (u.entry >= 0 && u.entry < (TensorId) producer.size()) ? producer[u.entry] : -1;
                 entryExp = false;
                 bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") && g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
+                // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >= 32) has no
+                // register headroom for the VM at its 64-outputs-per-thread store loop — an attached
+                // unit collapses the GEMM's occupancy and costs far more than a standalone dispatch.
+                // Such units run standalone; small matmuls (the 1-thread-per-output kernel) still
+                // host epilogues.
+                if (ok && g.nodes[prod].type == OpType::MatMul)
+                {
+                    const Node  &P  = g.nodes[prod];
+                    const Shape &as = g.desc(P.inputs[0]).shape;
+                    const Shape &bs = g.desc(P.inputs[1]).shape;
+                    if (as.size() >= 2 && bs.size() >= 2)
+                    {
+                        int64_t M = as[as.size() - 2], K = as[as.size() - 1], N = bs[bs.size() - 1];
+                        if (M >= 32 && N >= 32 && K >= 32)
+                        {
+                            ok = false;
+                        }
+                    }
+                }
                 // every appended operand must already be available before the producer, otherwise
                 // the load-time topoSort sinks the producer and its widely-consumed output's
                 // lifetime blows up the buffer pool (VK_ERROR_OUT_OF_HOST_MEMORY on large models)
@@ -920,6 +939,36 @@ namespace vknn {
             {
                 visited[seed] = 1; // not encodable at all: leave the seed unfused
                 continue;
+            }
+
+            // Fast mode: a lone initializer-bias Add on a MatMul folds onto the kernel's native
+            // bias input — matmul[_tiled]_bias adds it in the fp32 accumulator with one store
+            // rounding, the fp32-chained semantics at zero VM cost. The register-tiled GEMM cannot
+            // host a VM unit (canHostUnit refuses it), so without this fold every transformer-layer
+            // bias would run as its own dispatch.
+            if (!strictFuse && unit.exports.empty() && members.size() == 1 && unit.operands.size() == 1 && unit.steps.size() == 8)
+            {
+                int  prod    = (unit.entry >= 0 && unit.entry < (TensorId) producer.size()) ? producer[unit.entry] : -1;
+                bool addStep = unit.steps[0] == kPwKindBinary && unit.steps[1] == (int64_t) BinaryType::Add && ((unit.steps[2] == kPwRefEntry && unit.steps[3] <= kPwRefOp0) || (unit.steps[3] == kPwRefEntry && unit.steps[2] <= kPwRefOp0));
+                if (addStep && prod >= 0 && !removed.count(prod) && g.isInitializer(unit.operands[0]))
+                {
+                    Node &P        = g.nodes[prod];
+                    bool  soleUse  = consumerCount[unit.entry] == 1 && !(unit.entry < (TensorId) isGraphOut.size() && isGraphOut[unit.entry]);
+                    bool  hostable = P.type == OpType::MatMul && P.fusedBias == kNoTensor && !P.attr.has("pw_steps") && P.outputs.size() == 1 && P.outputs[0] == unit.entry && soleUse;
+                    const Shape &os = g.desc(unit.mainOut).shape;
+                    const Shape &bs = g.desc(unit.operands[0]).shape;
+                    if (hostable && !os.empty() && !bs.empty() && bs.back() == os.back() && numElements(bs) == os.back())
+                    {
+                        P.fusedBias = unit.operands[0];
+                        P.inputs.push_back(unit.operands[0]); // keep the bias live for DCE/allocation
+                        P.outputs[0] = unit.mainOut;
+                        removed.insert(members[0]);
+                        fused++;
+                        attached++;
+                        rebuild();
+                        continue;
+                    }
+                }
             }
 
             if (hostProd >= 0)
