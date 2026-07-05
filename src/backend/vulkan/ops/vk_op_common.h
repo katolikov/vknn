@@ -66,6 +66,30 @@ namespace vknn {
     struct WinoGemmPC {
         int Cin, Cout, nT;
     };
+    // Implicit-GEMM conv (conv_gemm.comp); shared by the ConvGemm op and Conv's raced gemm path.
+    struct ConvGemmPC {
+        int   C, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW;
+        int   act, hasBias;
+        float actLo, actHi;
+    };
+    // Split-K partial pass (conv_gemm_ksplit.comp) + reduce pass (conv_gemm_kreduce.comp).
+    struct ConvGemmKsPC {
+        int C, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW;
+        int S, chunkK;
+    };
+    struct ConvGemmKrPC {
+        int   N, Cout, M, S, act, hasBias;
+        float actLo, actHi;
+    };
+
+    // conv_gemm.comp tile geometry: TN/TK are fixed in the shader; the M tile is specialization
+    // constant 0 (16/32/64 — bit-neutral, it only remaps threads to outputs). The heuristic picks a
+    // narrow tile for small-M shapes so the M axis still spreads across workgroups; Tuning::Fast/
+    // Heavy race the variants per shape instead (see conv_gemm.cpp / conv.cpp).
+    constexpr int kConvGemmTileN = 64, kConvGemmTileK = 16;
+    inline int convGemmTileM(int64_t M) {
+        return M < 24 ? 16 : (M < 48 ? 32 : 64);
+    }
 
     // attribute ints with a fallback
     inline std::vector<int64_t> attrInts(const Node &n, const char *k, std::vector<int64_t> dflt) {

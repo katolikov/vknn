@@ -4,7 +4,8 @@
 namespace vknn {
 
     /// Lower each eligible Conv to a ConvGemm node — one implicit-GEMM kernel over the receptive
-    /// field — with the weights repacked to row-major [K][Cout] (K = Cin*KH*KW, k = (ic*KH+ky)*KW+kx)
+    /// field — with the weights repacked to row-major [K][Cout] (K = Cin*KH*KW, k = (ky*KW+kx)*Cin+ic,
+    /// channel-fastest so the kernel's A panel gathers whole NC4HW4 channel blocks per k quad)
     /// as a new initializer. The repack is a pure permutation (no arithmetic), so it is exact for
     /// fp32 and fp16 weights alike; the runtime kernel's fp32 K reduction runs in a fixed chunked
     /// order, making the result fp16-floor equivalent to the direct Conv kernel (the accumulation
@@ -64,15 +65,17 @@ namespace vknn {
             {
                 continue; // tuneWino owns this shape
             }
-            // The kernel tiles OH*OW on the dispatch Y axis (64 pixels per group) and batch on Z,
-            // neither of which the runtime's 1-D split can rescue past the device group-count limit;
-            // an oversized spatial output keeps the plain Conv (its kernels split on X).
-            if ((os[2] * os[3] + 63) / 64 > 65535 || os[0] > 65535)
+            // The kernel tiles OH*OW on the dispatch Y axis (a specialization-constant tile, 16
+            // pixels per group at the narrowest) and batch on Z, neither of which the runtime's 1-D
+            // split can rescue past the device group-count limit; an oversized spatial output keeps
+            // the plain Conv (its kernels split on X). The guard uses the narrowest tile so every
+            // runtime tile choice fits.
+            if ((os[2] * os[3] + 15) / 16 > 65535 || os[0] > 65535)
             {
                 continue;
             }
 
-            // Repack W[oc][ic][ky][kx] -> Wt[(ic*KH+ky)*KW+kx][oc]: a byte-level permutation, exact
+            // Repack W[oc][ic][ky][kx] -> Wt[(ky*KW+kx)*Cin+ic][oc]: a byte-level permutation, exact
             // for any element dtype. wd's reference dies at the addTensor below (Graph::tensors may
             // reallocate), so everything it feeds is captured first.
             const HostBuffer &src = g.initializers.at(wId);
@@ -91,9 +94,13 @@ namespace vknn {
             uint8_t       *dp = wt.bytes.data();
             for (int64_t oc = 0; oc < Cout; ++oc)
             {
-                for (int64_t k = 0; k < K; ++k)
+                for (int64_t ic = 0; ic < Cin; ++ic)
                 {
-                    std::memcpy(dp + ((size_t) (k * Cout + oc)) * es, sp + ((size_t) (oc * K + k)) * es, es);
+                    for (int64_t t = 0; t < KH * KW; ++t) // t = ky*KW + kx: the source tap index
+                    {
+                        int64_t k = t * Cin + ic;
+                        std::memcpy(dp + ((size_t) (k * Cout + oc)) * es, sp + ((size_t) ((oc * Cin + ic) * KH * KW + t)) * es, es);
+                    }
                 }
             }
             g.initializers[wtId] = std::move(wt);

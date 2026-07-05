@@ -1,0 +1,132 @@
+#version 450
+#define VKNN_NO_RTE 1 // GEMM-family kernel: no float-controls execution mode (miscompiled on some drivers)
+#include "precision.glsl"
+#include "common.glsl"
+// Split-K partial pass of the implicit-GEMM convolution (conv_gemm.comp with the K reduction split
+// into S chunks). A tiny-M / huge-K shape (e.g. a 7x7 head: M = 49, K = 4608) has too few M/N tiles
+// to fill the GPU, so dispatch Z carries N * S and each z sums its k chunk
+// [s*chunkK, min(s*chunkK + chunkK, K)) into an fp32 partial; conv_gemm_kreduce sums the S partials
+// and finishes (bias, activation, rounding, epilogue). chunkK is a multiple of TK so the in-chunk
+// TK stepping matches conv_gemm's; the chunked fp32 order makes the result fp16-floor equivalent
+// to the single-pass kernel, not byte-identical, so this variant is only selected by the timing
+// race (Tuning::Fast/Heavy), never as the default.
+// k order, panels, and tiles match conv_gemm.comp: k = (ky*KW + kx)*C + ic (channel-fastest), TM is
+// specialization constant 0, TN = 64, TK = 16.
+// Partial layout: part[((n*S + s)*Coutb + ocb)*M + m], vec4 = one output channel block.
+// Dispatch: (ceil(Cout/TN), ceil(OH*OW/TM), N*S).
+
+layout(constant_id = 0) const int TM = 64;
+#define TM_MAX 64
+#define TN 64
+#define TK 16
+#define TILE 16        // threads per dim (16x16 = 256)
+#define RM (TM / TILE) // output pixels per thread: 1, 2, or 4
+#define RN (TN / TILE) // 4 output channels per thread = one NC4 block
+
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+
+layout(local_size_x = TILE, local_size_y = TILE) in;
+layout(std430, binding = 0) readonly buffer Src { STORE4 s[]; };  // NC4HW4 activations, one channel block per element
+layout(std430, binding = 1) readonly buffer Wt { STORE w[]; };   // [K][Cout] repacked weights
+layout(std430, binding = 2) writeonly buffer Part { vec4 part[]; }; // fp32 chunk partials
+layout(push_constant) uniform PC {
+  int C, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_;
+  int S, chunkK;
+} pc;
+
+shared STORE As[TK][TM_MAX];
+shared STORE Ws[TK][TN];
+
+void main() {
+  int M = pc.OH * pc.OW;
+  int K = pc.C * pc.KH * pc.KW;
+  int Cinb = (pc.C + 3) / 4, Coutb = (pc.Cout + 3) / 4;
+  int z = int(gl_WorkGroupID.z);
+  int sIdx = z % pc.S, n = z / pc.S;
+  int tileM = int(gl_WorkGroupID.y) * TM;
+  int tileN = int(gl_WorkGroupID.x) * TN;
+  int tx = int(gl_LocalInvocationID.x);
+  int ty = int(gl_LocalInvocationID.y);
+  int tid = ty * TILE + tx;
+
+  float acc[TM_MAX / TILE][RN];
+  for (int i = 0; i < RM; ++i)
+    for (int j = 0; j < RN; ++j)
+      acc[i][j] = 0.0;
+
+  int kStart = sIdx * pc.chunkK;
+  int kEnd = min(kStart + pc.chunkK, K);
+  for (int k0 = kStart; k0 < kEnd; k0 += TK) {
+    // A panel: one k quad per iteration; identical gather to conv_gemm.comp.
+    for (int q = tid; q < TM * (TK / 4); q += TILE * TILE) {
+      int m = q >> 2;
+      int k = (q & 3) << 2;
+      int gm = tileM + m, gk = k0 + k;
+      int ic = (gk < K) ? gk % pc.C : 0;
+      if (gm < M && gk + 3 < kEnd && (ic & 3) == 0 && ic + 3 < pc.C) {
+        int p = gk / pc.C;
+        int ky = p / pc.KW, kx = p - ky * pc.KW;
+        int oy = gm / pc.OW, ox = gm - oy * pc.OW;
+        int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+        int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+        vec4 v = vec4(0.0);
+        if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W)
+          v = vec4(s[((n * Cinb + (ic >> 2)) * pc.H + iy) * pc.W + ix]);
+        As[k + 0][m] = STORE(v.x);
+        As[k + 1][m] = STORE(v.y);
+        As[k + 2][m] = STORE(v.z);
+        As[k + 3][m] = STORE(v.w);
+      } else {
+        for (int j = 0; j < 4; ++j) {
+          int gkj = gk + j;
+          float v = 0.0;
+          if (gm < M && gkj < kEnd) {
+            int icj = gkj % pc.C, pj = gkj / pc.C;
+            int ky = pj / pc.KW, kx = pj - ky * pc.KW;
+            int oy = gm / pc.OW, ox = gm - oy * pc.OW;
+            int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+            int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+            if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W) {
+              STORE4 blk = s[((n * Cinb + (icj >> 2)) * pc.H + iy) * pc.W + ix];
+              v = float(blk[icj & 3]);
+            }
+          }
+          As[k + j][m] = STORE(v);
+        }
+      }
+    }
+    // W panel: contiguous [K][Cout] rows, clamped to this chunk.
+    for (int t = 0; t < (TK * TN) / (TILE * TILE); ++t) {
+      int idx = tid + t * (TILE * TILE);
+      int k = idx / TN, c = idx % TN;
+      int gk = k0 + k, gc = tileN + c;
+      Ws[k][c] = (gk < kEnd && gc < pc.Cout) ? w[gk * pc.Cout + gc] : STORE(0.0);
+    }
+    barrier();
+    for (int kk = 0; kk < TK; ++kk) {
+      float av[TM_MAX / TILE], wv[RN];
+      for (int i = 0; i < RM; ++i)
+        av[i] = float(As[kk][ty * RM + i]);
+      for (int j = 0; j < RN; ++j)
+        wv[j] = float(Ws[kk][tx * RN + j]);
+      for (int i = 0; i < RM; ++i)
+        for (int j = 0; j < RN; ++j)
+          acc[i][j] += av[i] * wv[j];
+    }
+    barrier();
+  }
+
+  // Store the chunk partial. Pad output lanes (oc >= Cout) accumulate only zero W-panel entries,
+  // so their partials are 0; the reduce pass zeroes them again at the final store.
+  int oc0 = tileN + tx * RN;
+  int ocb = oc0 >> 2;
+  for (int i = 0; i < RM; ++i) {
+    int m = tileM + ty * RM + i;
+    if (m >= M || ocb >= Coutb) continue;
+    part[((n * pc.S + sIdx) * Coutb + ocb) * M + m] = vec4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+  }
+}

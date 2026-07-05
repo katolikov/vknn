@@ -99,7 +99,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         flat_softmax flat_layernorm flat_reduce softmax flat_gather flat_scatter
         gridsample resize convtranspose
         avgpool avgpool2d maxpool concat
-        conv conv_gemm conv_reg conv1x1 conv1x1_s2 conv3x3_lds conv1x1_reduce dwconv fused_dwpw
+        conv conv_gemm conv_gemm_kreduce conv_reg conv1x1 conv1x1_s2 conv3x3_lds conv1x1_reduce dwconv fused_dwpw
         wino_out wino_out4 wino_full wino_fused wino_fused2)
     # The standalone pointwise-VM shaders take the same two disciplines as bare "_rx" variants.
     set(_rx_standalone fused_pw_flat fused_pw_nc4)

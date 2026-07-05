@@ -6,25 +6,39 @@
 #include "pw_epilogue.glsl"
 #endif
 #include "common.glsl"
-// Implicit-GEMM convolution (lowerConv): out[m, oc] = sum_k patch(m, k) * Wt[k, oc] with
-// m = oy*OW + ox over one image, k = (ic*KH + ky)*KW + kx over the receptive field, and the
-// weights repacked to row-major [K][Cout] at convert time. The patch element is gathered from the
-// NC4HW4 input on the fly (no im2col buffer); both panels stage through LDS in storage precision
-// so each global element is read once per tile, unlike the direct kernel's per-thread streaming.
+// Implicit-GEMM convolution: out[m, oc] = sum_k patch(m, k) * Wt[k, oc] with m = oy*OW + ox over one
+// image and k = (ky*KW + kx)*C + ic over the receptive field. k is channel-fastest, so a 4-aligned
+// k quad is one aligned NC4HW4 channel block of a single tap whenever it does not straddle a block
+// boundary — the A panel then gathers whole blocks in one transaction instead of 4 scalar loads
+// with 4 separate index decodes. The weights arrive repacked to row-major [K][Cout] in the same k
+// order (lowerConv at convert time, or ConvOp's plan-time repack). The patch is gathered from the
+// NC4HW4 input on the fly (no im2col buffer); both panels stage through LDS in storage precision so
+// each global element is read once per tile, unlike the direct kernel's per-thread streaming.
 // The K reduction runs in fp32 registers in a fixed chunked order (deterministic; the order differs
 // from the direct kernel's, so the output is fp16-floor equivalent to Conv, not byte-identical).
 // Dispatch: (ceil(Cout/TN), ceil(OH*OW/TM), N). Output is NC4HW4; each thread's RN=4 channels are
 // one aligned channel block.
 
-#define TM 64
+// M tile edge as a specialization constant: 16, 32, or 64 output pixels per workgroup (RM = TM/16
+// pixels per thread). A small-M shape picks a narrow tile so the M axis still spreads across
+// workgroups. TM is bit-neutral: it only remaps threads to outputs, never the per-output K order.
+layout(constant_id = 0) const int TM = 64;
+#define TM_MAX 64      // shared storage is sized for the widest variant (4 KB total; no occupancy cost)
 #define TN 64
 #define TK 16
 #define TILE 16        // threads per dim (16x16 = 256)
-#define RM (TM / TILE) // 4 output pixels per thread
+#define RM (TM / TILE) // output pixels per thread: 1, 2, or 4
 #define RN (TN / TILE) // 4 output channels per thread = one NC4 block
 
+// Whole-channel-block element type of the NC4HW4 source (the A panel's vectorized load unit).
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+
 layout(local_size_x = TILE, local_size_y = TILE) in;
-layout(std430, binding = 0) readonly buffer Src { STORE s[]; };  // NC4HW4 activations
+layout(std430, binding = 0) readonly buffer Src { STORE4 s[]; };  // NC4HW4 activations, one channel block per element
 layout(std430, binding = 1) readonly buffer Wt { STORE w[]; };   // [K][Cout] repacked weights
 layout(std430, binding = 2) readonly buffer Bs { STORE bias[]; };
 layout(std430, binding = 3) writeonly buffer Dst { STORE d[]; }; // NC4HW4
@@ -34,7 +48,7 @@ layout(push_constant) uniform PC {
   float actLo, actHi;
 } pc;
 
-shared STORE As[TK][TM]; // transposed (k-major): the inner loop reads As[kk][m] across threads
+shared STORE As[TK][TM_MAX]; // transposed (k-major): the inner loop reads As[kk][m] across threads
 shared STORE Ws[TK][TN];
 
 void main() {
@@ -48,28 +62,54 @@ void main() {
   int ty = int(gl_LocalInvocationID.y);
   int tid = ty * TILE + tx;
 
-  float acc[RM][RN];
+  float acc[TM_MAX / TILE][RN];
   for (int i = 0; i < RM; ++i)
     for (int j = 0; j < RN; ++j)
       acc[i][j] = 0.0;
 
   for (int k0 = 0; k0 < K; k0 += TK) {
     // A panel: gather TM patch rows for this K chunk from the NC4HW4 input (implicit im2col).
-    for (int t = 0; t < (TM * TK) / (TILE * TILE); ++t) {
-      int idx = tid + t * (TILE * TILE); // laid out as m*TK + k
-      int m = idx / TK, k = idx % TK;
+    // Each iteration owns one k quad (4 consecutive k) of one row m; TM * TK/4 quads cover the
+    // panel. k0 is TK-aligned, so every quad is 4-aligned in k.
+    for (int q = tid; q < TM * (TK / 4); q += TILE * TILE) {
+      int m = q >> 2;
+      int k = (q & 3) << 2;
       int gm = tileM + m, gk = k0 + k;
-      float v = 0.0;
-      if (gm < M && gk < K) {
-        int ic = gk / (pc.KH * pc.KW), r = gk % (pc.KH * pc.KW);
-        int ky = r / pc.KW, kx = r % pc.KW;
-        int oy = gm / pc.OW, ox = gm % pc.OW;
+      int ic = (gk < K) ? gk % pc.C : 0;
+      // Fast path: quad fully in range, all 4 k in one tap's aligned channel block. One block load
+      // (or one zero splat for a padded pixel) replaces 4 scalar decodes + loads.
+      if (gm < M && gk + 3 < K && (ic & 3) == 0 && ic + 3 < pc.C) {
+        int p = gk / pc.C;
+        int ky = p / pc.KW, kx = p - ky * pc.KW;
+        int oy = gm / pc.OW, ox = gm - oy * pc.OW;
         int iy = oy * pc.SH - pc.PT + ky * pc.DH;
         int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+        vec4 v = vec4(0.0);
         if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W)
-          v = float(s[((((n * Cinb + (ic >> 2)) * pc.H + iy) * pc.W + ix) << 2) + (ic & 3)]);
+          v = vec4(s[((n * Cinb + (ic >> 2)) * pc.H + iy) * pc.W + ix]);
+        As[k + 0][m] = STORE(v.x);
+        As[k + 1][m] = STORE(v.y);
+        As[k + 2][m] = STORE(v.z);
+        As[k + 3][m] = STORE(v.w);
+      } else {
+        // Edge quad (K tail, or a quad straddling a channel block when C % 4 != 0): per-element decode.
+        for (int j = 0; j < 4; ++j) {
+          int gkj = gk + j;
+          float v = 0.0;
+          if (gm < M && gkj < K) {
+            int icj = gkj % pc.C, pj = gkj / pc.C;
+            int ky = pj / pc.KW, kx = pj - ky * pc.KW;
+            int oy = gm / pc.OW, ox = gm - oy * pc.OW;
+            int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+            int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+            if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W) {
+              STORE4 blk = s[((n * Cinb + (icj >> 2)) * pc.H + iy) * pc.W + ix];
+              v = float(blk[icj & 3]);
+            }
+          }
+          As[k + j][m] = STORE(v);
+        }
       }
-      As[k][m] = STORE(v);
     }
     // W panel: contiguous [K][Cout] rows.
     for (int t = 0; t < (TK * TN) / (TILE * TILE); ++t) {
@@ -80,7 +120,7 @@ void main() {
     }
     barrier();
     for (int kk = 0; kk < TK; ++kk) {
-      float av[RM], wv[RN];
+      float av[TM_MAX / TILE], wv[RN];
       for (int i = 0; i < RM; ++i)
         av[i] = float(As[kk][ty * RM + i]);
       for (int j = 0; j < RN; ++j)

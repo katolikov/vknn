@@ -1,0 +1,56 @@
+#version 450
+#define VKNN_NO_RTE 1 // GEMM-family finish pass: rounds through TO_STORE exactly like conv_gemm.comp
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
+#include "common.glsl"
+// Split-K reduce for conv_gemm_ksplit: sums the S fp32 chunk partials per (n, output channel
+// block, pixel), then finishes exactly like conv_gemm.comp's store — bias, activation, pad-lane
+// zeroing, storage rounding, and the fused pointwise epilogue on the rounded value.
+// Partial layout: part[((n*S + s)*Coutb + ocb)*M + m], vec4 = one output channel block.
+// Dispatch: 1D over N * Coutb * M threads.
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Part { vec4 part[]; }; // fp32 chunk partials
+layout(std430, binding = 1) readonly buffer Bs { STORE bias[]; };
+layout(std430, binding = 2) writeonly buffer Dst { STORE d[]; }; // NC4HW4
+layout(push_constant) uniform PC {
+  int N, Cout, M, S, act, hasBias;
+  float actLo, actHi;
+} pc;
+
+void main() {
+  int Coutb = (pc.Cout + 3) / 4;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * Coutb * pc.M)) return;
+  int m = int(gid) % pc.M;
+  int ocb = (int(gid) / pc.M) % Coutb;
+  int n = int(gid) / (pc.M * Coutb);
+
+  vec4 acc = vec4(0.0);
+  for (int s = 0; s < pc.S; ++s)
+    acc += part[((n * pc.S + s) * Coutb + ocb) * pc.M + m];
+
+  int oc0 = ocb * 4;
+  vec4 b4 = vec4(0.0);
+  if (pc.hasBias != 0) {
+    b4 = vec4(oc0 + 0 < pc.Cout ? float(bias[oc0 + 0]) : 0.0, oc0 + 1 < pc.Cout ? float(bias[oc0 + 1]) : 0.0,
+              oc0 + 2 < pc.Cout ? float(bias[oc0 + 2]) : 0.0, oc0 + 3 < pc.Cout ? float(bias[oc0 + 3]) : 0.0);
+  }
+  vec4 v = acc + b4;
+  v = vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi), vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+           vx_act(v.z, pc.act, pc.actLo, pc.actHi), vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+  v = vec4(oc0 + 0 < pc.Cout ? v.x : 0.0, oc0 + 1 < pc.Cout ? v.y : 0.0,
+           oc0 + 2 < pc.Cout ? v.z : 0.0, oc0 + 3 < pc.Cout ? v.w : 0.0);
+  int di = (n * Coutb + ocb) * pc.M + m; // == ((n*Coutb + ocb)*OH + oy)*OW + ox
+  v = vec4(float(TO_STORE(v.x)), float(TO_STORE(v.y)), float(TO_STORE(v.z)), float(TO_STORE(v.w)));
+#ifdef PW_EPI
+  v = pw_apply4(v, di);
+#endif
+  d[(di << 2) + 0] = TO_STORE(v.x);
+  d[(di << 2) + 1] = TO_STORE(v.y);
+  d[(di << 2) + 2] = TO_STORE(v.z);
+  d[(di << 2) + 3] = TO_STORE(v.w);
+}
