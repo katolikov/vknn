@@ -4,16 +4,19 @@
 
 namespace vknn {
 
-    // How much load-time conv-kernel autotuning to do (string tokens "none" / "fast" / "heavy"):
-    //   None  no per-shape measurement — the default kernel is used (fastest load, no tuning).
-    //   Fast  a quick candidate sweep per conv shape (the production default).
-    //   Heavy an exhaustive sweep (best kernel, slowest load).
-    // Autotuning happens once at load; the chosen kernels are stored in the model cache and reused on a
-    // warm start, so run() never tunes. This is effort only — it never changes numerical output.
-    enum class Tuning { None = 0, Fast = 1, Heavy = 2 };
+    /// How much load-time conv-kernel autotuning to do. Autotuning happens once at load; the chosen
+    /// kernels are stored in the model cache and reused on a warm start, so run() never tunes. This is
+    /// effort only — it never changes numerical output.
+    enum class Tuning {
+        None  = 0, ///< No per-shape measurement — the default kernel is used (fastest load, no tuning).
+        Fast  = 1, ///< A quick candidate sweep per conv shape (the production default).
+        Heavy = 2, ///< An exhaustive sweep (best kernel, slowest load).
+    };
 
-    // Tuning tier from a string: "none"/"fast"/"heavy" (unknown -> fast). Legacy aliases from the former
-    // --tuning knob are accepted: "off" -> None, "thorough" -> Heavy.
+    /// Parse a Tuning tier from its string token: "none" / "fast" / "heavy". Legacy aliases from the
+    /// former --tuning knob are accepted: "off" -> None, "thorough" -> Heavy.
+    /// @param s Tier token; any unrecognized value maps to Fast.
+    /// @returns The matching Tuning tier.
     Tuning tuningFromStr(const std::string &s);
 
 } // namespace vknn

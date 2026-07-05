@@ -10,32 +10,37 @@
 
 namespace vknn {
 
-    /// Runtime tensor: may be resident on host and/or device. Tracks validity + the
-    /// device layout/dtype so cross-backend handoff can convert correctly.
+    /// Runtime tensor: the live tensor during a run. May be resident on host and/or device
+    /// simultaneously; the two residencies carry independent validity flags. The device-side
+    /// layout and dtype are tracked separately from the host side so a cross-backend handoff can
+    /// convert correctly rather than assuming both copies share a format.
     struct RtTensor {
-        TensorId id = kNoTensor;
-        Shape    shape;
-        DType    dtype = DType::Float32;
+        TensorId id = kNoTensor; ///< Graph-unique tensor id, or kNoTensor when unbound.
+        Shape    shape;          ///< Logical dimensions in NCHW order.
+        DType    dtype = DType::Float32; ///< Element type of the host residency (canonical NCHW).
 
         // ---- host residency (canonical NCHW, fp32 for compute/IO) ----
-        HostBuffer host;
-        bool       hostValid = false;
+        HostBuffer host;              ///< Host-side elements in canonical NCHW layout.
+        bool       hostValid = false; ///< True when `host` holds the current values.
 
         // ---- device residency (managed by a backend) ----
-        std::shared_ptr<DeviceStorage> device; // null until a backend allocates it
-        TensorFormat                   deviceFormat = TensorFormat::Unknown;
-        DType                          deviceDtype  = DType::Float32;
-        bool                           deviceValid  = false;
-        // Zero-copy boundary: caller dma-buf fd to use directly as this tensor's GPU buffer (-1 = none).
+        std::shared_ptr<DeviceStorage> device; ///< Backend-owned device storage; null until a backend allocates it.
+        TensorFormat                   deviceFormat = TensorFormat::Unknown; ///< Layout of the device copy (the Vulkan backend packs to NC4HW4).
+        DType                          deviceDtype  = DType::Float32;        ///< Element type of the device copy.
+        bool                           deviceValid  = false;                ///< True when `device` holds the current values.
+        /// Zero-copy boundary: caller dma-buf fd to use directly as this tensor's GPU buffer, or -1 for none.
         int dmaBufFd = -1;
-        // The layout + dtype the caller declares the dma-buf holds. Matching the device-native boundary
-        // binds the fd directly; otherwise the GPU converts between the fd and the boundary buffer.
+        /// Layout the caller declares the dma-buf holds. Matching the device-native boundary binds the
+        /// fd directly; otherwise the GPU converts between the fd and the boundary buffer.
         TensorFormat dmaBufFormat = TensorFormat::NCHW;
-        DType        dmaBufDtype  = DType::Float32;
+        /// Element type the caller declares the dma-buf holds (paired with `dmaBufFormat`).
+        DType dmaBufDtype = DType::Float32;
 
+        /// @returns The number of logical elements implied by `shape` (0 for an empty shape).
         int64_t elems() const {
             return numElements(shape);
         }
+        /// Allocate `host` for `elems()` elements of `dtype` and mark the host residency valid.
         void allocHost() {
             host.resizeElems(elems(), dtype);
             hostValid = true;

@@ -5,11 +5,16 @@
 
 namespace vknn {
 
-    // A shape interpreted as NCHW. Ranks above 4 fold their leading dims into N (the last three dims are
-    // C, H, W), so a multi-view input like [1,8,3,224,224] becomes N=8, C=3, H=224, W=224 and N*C*H*W
-    // stays equal to the element count.
+    /// A shape interpreted as NCHW. Ranks above 4 fold their leading dims into N (the last three dims
+    /// are C, H, W), so a multi-view input like [1,8,3,224,224] becomes N=8, C=3, H=224, W=224 and
+    /// N*C*H*W stays equal to the element count.
     struct NCHW {
         int64_t     n = 1, c = 1, h = 1, w = 1;
+        /// Interpret a logical shape as NCHW, folding rank>4 into N and right-aligning C, H, W.
+        /// Lower ranks map dims left-to-right (rank 3 -> N,C,H with W=1; rank 2 -> N,C; rank 1 -> C),
+        /// leaving the missing trailing dims at their default of 1.
+        /// @param s Logical tensor shape.
+        /// @returns The NCHW view of `s`.
         static NCHW from(const Shape &s) {
             NCHW r;
             if (s.size() >= 4)
@@ -41,20 +46,30 @@ namespace vknn {
             { r.c = s[0]; }
             return r;
         }
-        int64_t elems() const {
+        /// Dense (unpadded) element count N*C*H*W of this shape.
+        int64_t elems() const noexcept {
             return n * c * h * w;
         }
     };
 
-    // Number of channel blocks of 4 (for NC4HW4).
+    /// Channel-block width of the NC4HW4 boundary layout: channels are packed in groups of four.
+    inline constexpr int64_t kNC4Block = 4;
+
+    /// Number of channel blocks (of kNC4Block channels each) needed to hold `c` channels in NC4HW4,
+    /// rounding up so a partial final block is counted.
+    /// @param c Logical channel count.
+    /// @returns ceil(c / kNC4Block).
     inline int64_t cBlocks(int64_t c) {
-        return (c + 3) / 4;
+        return (c + 3) / kNC4Block;
     }
 
-    // Stored element count for a logical NCHW shape in a boundary layout. NCHW and NHWC are dense
-    // (N*C*H*W); NC4HW4 pads channels to a multiple of 4. (Auto/Unknown have no own count.)
+    /// Stored element count for a logical NCHW shape in a boundary layout. NCHW and NHWC are dense
+    /// (N*C*H*W); NC4HW4 pads channels up to a multiple of kNC4Block. (Auto/Unknown have no own count.)
+    /// @param fmt Boundary layout the tensor is stored in.
+    /// @param x   Logical NCHW shape.
+    /// @returns The number of elements physically stored for `x` under `fmt`.
     inline int64_t formatElems(TensorFormat fmt, const NCHW &x) {
-        return fmt == TensorFormat::NC4HW4 ? x.n * cBlocks(x.c) * 4 * x.h * x.w : x.elems();
+        return fmt == TensorFormat::NC4HW4 ? x.n * cBlocks(x.c) * kNC4Block * x.h * x.w : x.elems();
     }
 
 } // namespace vknn

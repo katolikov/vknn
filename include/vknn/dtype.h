@@ -6,16 +6,19 @@
 
 namespace vknn {
 
+    /// Element type of a tensor. The underlying uint8_t values are stable and serialized into the
+    /// compiled-model cache, so existing enumerators keep their numeric value; new types append.
     enum class DType : uint8_t {
-        Float32 = 0,
-        Float16 = 1,
-        Int32   = 2,
-        Int8    = 3,
-        UInt8   = 4,
-        Int64   = 5,
+        Float32 = 0, ///< 32-bit IEEE-754 single precision.
+        Float16 = 1, ///< 16-bit IEEE-754 half precision (see halfToFloat()/floatToHalf()).
+        Int32   = 2, ///< 32-bit signed integer.
+        Int8    = 3, ///< 8-bit signed integer.
+        UInt8   = 4, ///< 8-bit unsigned integer (e.g. image graph-inputs).
+        Int64   = 5, ///< 64-bit signed integer (shape/index tensors).
     };
 
-    inline size_t dtypeSize(DType d) {
+    /// Size in bytes of one element of type `d`; 0 for an unrecognized value.
+    inline size_t dtypeSize(DType d) noexcept {
         switch (d)
         {
             case DType::Float32:
@@ -34,7 +37,9 @@ namespace vknn {
         return 0;
     }
 
-    inline const char *dtypeStr(DType d) {
+    /// Short lowercase mnemonic for `d` (e.g. "f32", "i8"); "?" for an unrecognized value.
+    /// The returned pointer is a string literal and remains valid for the program lifetime.
+    inline const char *dtypeStr(DType d) noexcept {
         switch (d)
         {
             case DType::Float32:
@@ -55,9 +60,14 @@ namespace vknn {
 
     // ---- Minimal IEEE-754 half <-> float conversion (host-side; no hardware dep) ----
     // Used for packing weights / comparing fp16 outputs on the host.
+
+    /// Storage type of a half-precision value: the raw 16-bit IEEE-754 bit pattern, not an arithmetic
+    /// type. Convert with halfToFloat()/floatToHalf() before doing math.
     using fp16_t = uint16_t;
 
-    inline float halfToFloat(fp16_t h) {
+    /// Widen a half-precision bit pattern to float. Handles subnormals, and preserves inf/NaN. Exact:
+    /// every fp16 value is representable in fp32.
+    inline float halfToFloat(fp16_t h) noexcept {
         uint32_t sign = (uint32_t) (h & 0x8000) << 16;
         uint32_t exp  = (h >> 10) & 0x1F;
         uint32_t mant = h & 0x3FF;
@@ -97,7 +107,9 @@ namespace vknn {
 // to the scalar path on other targets / the tail.
 #if defined(__aarch64__)
 #include <arm_neon.h>
-    inline void halfToFloatBulk(const fp16_t *src, float *dst, int64_t n) {
+    /// Widen `n` contiguous half-precision values from `src` into `dst`. Equivalent to calling
+    /// halfToFloat() per element; `src` and `dst` must not overlap.
+    inline void halfToFloatBulk(const fp16_t *src, float *dst, int64_t n) noexcept {
         int64_t i = 0;
         for (; i + 4 <= n; i += 4)
         {
@@ -110,7 +122,7 @@ namespace vknn {
         }
     }
 #else
-    inline void halfToFloatBulk(const fp16_t *src, float *dst, int64_t n) {
+    inline void halfToFloatBulk(const fp16_t *src, float *dst, int64_t n) noexcept {
         for (int64_t i = 0; i < n; ++i)
         {
             dst[i] = halfToFloat(src[i]);
@@ -118,7 +130,9 @@ namespace vknn {
     }
 #endif
 
-    inline fp16_t floatToHalf(float v) {
+    /// Narrow a float to a half-precision bit pattern, rounding the mantissa to nearest-even. Values
+    /// beyond the fp16 range saturate to inf; subnormals underflow to zero; inf/NaN are preserved.
+    inline fp16_t floatToHalf(float v) noexcept {
         uint32_t f;
         std::memcpy(&f, &v, 4);
         uint32_t sign = (f >> 16) & 0x8000;

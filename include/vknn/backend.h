@@ -7,8 +7,8 @@
 // This yields a single pre-recorded GPU submit for the common case plus a CPU fallback for ops the
 // GPU cannot run, with minimal copying.
 //
-// Umbrella header: each top-level type now lives in its own header (one type per file). This file
-// re-exports them, in dependency order, so `#include "vknn/backend.h"` keeps exposing the same names.
+// Umbrella header: each top-level type lives in its own header (one type per file). This file
+// re-exports them, in dependency order, so `#include "vknn/backend.h"` exposes the full set of names.
 #pragma once
 #include "vknn/exec_context.h"     // struct ExecContext (+ fwd class Profiler)
 #include "vknn/backend_class.h"    // class Backend (fwd-decls class Segment)

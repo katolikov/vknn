@@ -3,8 +3,8 @@
 //
 // Umbrella header: the config types now live one-per-file. Include this to pull them all in.
 #pragma once
-#include "vknn/common.h"
-#include "vknn/tensor_format.h"
+#include "vknn/common.h"          // Status/Error + Shape helpers
+#include "vknn/tensor_format.h"   // TensorFormat + NCHW helpers
 
 #include "vknn/backend_kind.h"    // BackendKind + backendName/backendFromStr
 #include "vknn/precision.h"       // Precision + mixedPrecisionFp32Tensors/precisionFromStr

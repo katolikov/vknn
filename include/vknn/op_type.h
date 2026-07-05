@@ -64,12 +64,22 @@ namespace vknn {
         Range, // arange(start, limit, delta) -- scalar inputs, 1-D output
     };
 
-    // Fused-pointwise-chain limits (the pass splits chains that would exceed these).
-    constexpr int kPwMaxSteps    = 8;  // steps per fused unit
-    constexpr int kPwMaxOperands = 6;  // extra tensor operands per unit (primary excluded)
-    constexpr int kPwMaxRank     = 4;  // flat broadcast rank stored in the plan (rank>4 => not flat-fused)
+    /// Fused-pointwise-chain limits. The fusion pass splits any chain that would exceed one of
+    /// these; the shader plan layout (pw_plan.h) is sized from the same constants, so they are a
+    /// shared contract between the importer and the kernel and cannot be changed independently.
+    constexpr int kPwMaxSteps    = 8;  ///< Elementwise steps per fused unit.
+    constexpr int kPwMaxOperands = 6;  ///< Extra tensor operands per unit (the primary input is excluded).
+    constexpr int kPwMaxRank     = 4;  ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
 
+    /// Stable ONNX-style spelling of an OpType (e.g. OpType::GlobalAvgPool -> "GlobalAveragePool").
+    /// @returns A static, null-terminated string owned by the library; never null. An unrecognized
+    ///          value maps to "Unknown".
     const char *opTypeName(OpType t);
+    /// Map an ONNX operator type name to its OpType. Several ONNX ops collapse onto one OpType
+    /// (e.g. every Reduce* variant -> OpType::Reduce; the Unary/Binary elementwise families -> a
+    /// single OpType with the specific op recovered separately).
+    /// @param s ONNX op_type string (case-sensitive).
+    /// @returns The matching OpType, or OpType::Unknown when `s` names no supported operator.
     OpType      opTypeFromOnnx(const std::string &s);
 
 } // namespace vknn

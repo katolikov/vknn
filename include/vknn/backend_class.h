@@ -12,10 +12,16 @@ namespace vknn {
     class Segment;
 
     /// Abstract backend. Subclass + register to add a backend (see docs/ADDING_A_BACKEND.md).
+    ///
+    /// One instance is constructed per session by the registered factory. Lifecycle: configure()
+    /// once, then supportsNode() drives per-op assignment, compileSegment() lowers each assigned run
+    /// of nodes into a Segment, and finalize() flushes caches after all segments are compiled.
     class Backend {
       public:
         virtual ~Backend()               = default;
+        /// Stable identity of this backend, used as the key for registration and assignment.
         virtual BackendKind kind() const = 0;
+        /// Human-readable backend name for logs, the profiler, and fallback diagnostics.
         virtual const char *name() const = 0;
         /// Whether the backend is usable on this device (false => skip in selection).
         virtual bool available() const = 0;

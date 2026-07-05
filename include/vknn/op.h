@@ -2,8 +2,8 @@
 #pragma once
 #include "vknn/common.h"
 
-// Umbrella header: the op-graph types now live one-per-file. Included in dependency order so a type
-// used by another comes first. Every #include "vknn/op.h" keeps exposing the same names as before.
+// Umbrella header for the op-graph types (one type per included header). The includes are ordered by
+// dependency so a type is defined before another that uses it.
 #include "vknn/tensor_id.h"  // TensorId, kNoTensor
 #include "vknn/act_type.h"   // ActType
 #include "vknn/op_type.h"    // OpType, opTypeName, opTypeFromOnnx

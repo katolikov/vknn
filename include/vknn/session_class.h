@@ -47,28 +47,32 @@ namespace vknn {
         /// Returns empty on error. The shape is whatever the model declares (see inputInfo()).
         std::vector<float> infer(const std::vector<float> &input);
 
-        const Graph &graph() const {
+        /// The optimized graph this session runs (nodes, tensors, and their descriptors).
+        const Graph &graph() const noexcept {
             return graph_;
         }
-        const Config &config() const {
+        /// The configuration this session was built with.
+        const Config &config() const noexcept {
             return cfg_;
         }
-        Profiler &profiler() {
+        /// Per-op timing sink, populated when profiling is enabled in the Config.
+        Profiler &profiler() noexcept {
             return profiler_;
         }
-        // Backend assignment per node (for reporting fallbacks).
+        /// Backend assignment per node, in node order (for reporting fallbacks).
         std::vector<BackendKind> nodeBackends() const;
-        // "<OpType> <node name>" for every node NOT running on the requested backend (a release run
-        // on the GPU reports an empty list).
+        /// "<OpType> <node name>" for every node NOT running on the requested backend. A release run
+        /// entirely on the GPU reports an empty list.
         std::vector<std::string> fallbackOps() const;
 
-        // Per-tensor accessor for layer-dump / debugging (host residency).
+        /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
+        /// The returned data is host-resident.
         const RtTensor *tensor(const std::string &name) const;
 
       private:
         Session() = default;
-        void plan();               // assign backends, partition into segments, compile
-        void foldTinyGpuIslands(); // reassign small CPU-bounded GPU runs to CPU (avoid round trips)
+        void plan();               ///< Assign backends, partition into segments, and compile.
+        void foldTinyGpuIslands(); ///< Reassign small CPU-bounded GPU runs to CPU (avoid round trips).
         void reconcileInputs(Segment &seg);
 
         Graph    graph_;
