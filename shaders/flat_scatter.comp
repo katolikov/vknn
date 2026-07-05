@@ -1,8 +1,13 @@
 #version 450
 #include "precision.glsl"
 // Flat row-major scatter: out[base + sum_k inCoord_k * outStride_k] = in[i]. Drives Concat — each
-// input is scattered into the output at its axis offset (base = offset * outStride[axis]).
+// input is scattered into the output at its axis offset (base = offset * outStride[axis]). The
+// PW_EPI variant applies a fused pointwise unit at each store, indexed in output space.
 #include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
@@ -17,5 +22,9 @@ void main() {
     rem /= pc.inDim[k];
     outIdx += c * pc.outStride[k];
   }
+#ifdef PW_EPI
+  d[outIdx] = STORE(pw_apply(float(s[gid]), outIdx));
+#else
   d[outIdx] = s[gid];
+#endif
 }

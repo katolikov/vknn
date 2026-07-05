@@ -191,6 +191,7 @@ namespace vknn {
             std::vector<PC>                                   pcs;
             std::vector<int>                                  inIdx;
             std::vector<std::shared_ptr<vk::Buffer>>          holds; // per-input, set when that input is a constant
+            PwEpi                                             epi;   // fused unit applied at each part's stores
             void                                              prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g    = *env.graph;
                 Shape        out  = g.desc(node.outputs[0]).shape;
@@ -200,9 +201,12 @@ namespace vknn {
                 {
                     axis += rank;
                 }
+                epi.prepare(node, env, true, out);
                 auto    outStride = rowStrides(out);
                 int64_t offset    = 0;
-                for (size_t e = 0; e < node.inputs.size(); ++e)
+                // Inputs from pwCoreInputs on are the fused unit's operands, not concatenated parts.
+                size_t  nIn = (size_t) pwCoreInputs(node);
+                for (size_t e = 0; e < nIn && e < node.inputs.size(); ++e)
                 {
                     if (node.inputs[e] == kNoTensor)
                     {
@@ -222,7 +226,7 @@ namespace vknn {
                     inIdx.push_back((int) e);
                     offset += in[axis];
                     pipes.push_back(
-                        env.pipeline(shader("flat_scatter", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {}));
+                        env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {}));
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -233,7 +237,9 @@ namespace vknn {
                 }
                 for (size_t i = 0; i < pcs.size(); ++i)
                 {
-                    pipes[i]->dispatch(cmd, {operandBuf(env, node.inputs[inIdx[i]], holds[i])->handle(), dst->handle()}, &pcs[i], sizeof(PC), groups(pcs[i].total, kFlatLocalSize));
+                    std::vector<VkBuffer> bufs {operandBuf(env, node.inputs[inIdx[i]], holds[i])->handle(), dst->handle()};
+                    epi.append(bufs, node, env, dst->handle());
+                    pipes[i]->dispatch(cmd, bufs, &pcs[i], sizeof(PC), groups(pcs[i].total, kFlatLocalSize));
                 }
             }
         };

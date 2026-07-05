@@ -1,10 +1,17 @@
 #version 450
 // Channel-axis Concat over NC4HW4 (fp16). One dispatch per input copies its [N][Cib][HW] blocks
 // into the output at channel-block offset cbOff. Requires each input's channel count % 4 == 0.
+// The PW_EPI variant applies a fused pointwise unit at each store, indexed in output space, so a
+// unit attached to the Concat (e.g. a lowered BatchNorm + activation) costs no extra dispatch.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { f16vec4 dst[]; };
@@ -15,5 +22,10 @@ void main() {
   int hw = int(gid) % pc.HW;
   int cb = (int(gid) / pc.HW) % pc.Cib;
   int n = int(gid) / (pc.HW * pc.Cib);
-  dst[((n * pc.Cob) + pc.cbOff + cb) * pc.HW + hw] = src[((n * pc.Cib) + cb) * pc.HW + hw];
+  int di = ((n * pc.Cob) + pc.cbOff + cb) * pc.HW + hw;
+#ifdef PW_EPI
+  dst[di] = f16vec4(pw_apply4(vec4(src[((n * pc.Cib) + cb) * pc.HW + hw]), di));
+#else
+  dst[di] = src[((n * pc.Cib) + cb) * pc.HW + hw];
+#endif
 }

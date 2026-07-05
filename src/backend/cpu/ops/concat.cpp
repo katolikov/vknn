@@ -23,10 +23,12 @@ namespace vknn {
                 {
                     axis += rank;
                 }
-                // Output shape = first input's shape with the axis dimension summed over all inputs.
+                // Inputs from pwCoreInputs on are fused-epilogue operands, not concatenated parts.
+                std::vector<TensorId> parts(node.inputs.begin(), node.inputs.begin() + (long) pwCoreInputs(node));
+                // Output shape = first input's shape with the axis dimension summed over all parts.
                 Shape   out   = first.shape;
                 int64_t total = 0;
-                for (TensorId in: node.inputs)
+                for (TensorId in: parts)
                 {
                     total += ctx.t(in).shape[axis];
                 }
@@ -55,7 +57,7 @@ namespace vknn {
                     // `off` is the running write position along the axis within each output block; it
                     // advances by every input's block length so inputs sit side by side, not overlapped.
                     int64_t  outBlock = blockElems(out), off = 0;
-                    for (TensorId in: node.inputs)
+                    for (TensorId in: parts)
                     {
                         const RtTensor &T  = ctx.t(in);
                         int64_t         bk = blockElems(T.shape);
@@ -70,7 +72,7 @@ namespace vknn {
                     // Float path: identical block interleave as the int64 branch above, 4-byte elements.
                     float  *y        = cpu::allocOut(Y, out);
                     int64_t outBlock = blockElems(out), off = 0;
-                    for (TensorId in: node.inputs)
+                    for (TensorId in: parts)
                     {
                         const RtTensor &T  = ctx.t(in);
                         int64_t         bk = blockElems(T.shape);

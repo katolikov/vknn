@@ -1,7 +1,11 @@
 // Channel-axis Concat on the GPU (NC4HW4). Each input is copied into the output at its channel-
 // block offset. Only valid when every input's channel count is a multiple of 4 (block alignment);
-// the backend's supportsNode() enforces that, otherwise it falls back to the CPU concat.
+// the backend's supportsNode() enforces that, otherwise it falls back to the CPU concat. A fused
+// pointwise unit (pw_steps) applies at each part's stores, indexed in output space, so a unit
+// attached to the Concat (e.g. a lowered BatchNorm + activation) costs no extra dispatch. Inputs
+// from pwCoreInputs on are the unit's operands, not concatenated parts.
 #include "flat_ops.h"
+#include "pw_plan.h"
 #include "vk_op_common.h"
 
 namespace vknn {
@@ -16,8 +20,9 @@ namespace vknn {
 
         struct ConcatOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
-            std::vector<ConcatPC>                parts; // one per input
+            std::vector<ConcatPC>                parts; // one per concatenated input
             std::vector<int64_t>                 partGroups;
+            PwEpi                                epi;
             flat::Concat                         flatImpl;
             bool                                 flat = false;
 
@@ -28,12 +33,15 @@ namespace vknn {
                     flatImpl.prepare(node, env);
                     return;
                 }
-                NCHW y   = NCHW::from(env.graph->desc(node.outputs[0]).shape);
-                int  Cob = (int) cBlocks(y.c), HW = (int) (y.h * y.w);
-                int  cbOff = 0;
-                for (TensorId in: node.inputs)
+                Shape out = env.graph->desc(node.outputs[0]).shape;
+                epi.prepare(node, env, false, out);
+                NCHW   y     = NCHW::from(out);
+                int    Cob   = (int) cBlocks(y.c), HW = (int) (y.h * y.w);
+                int    cbOff = 0;
+                size_t nIn   = (size_t) pwCoreInputs(node);
+                for (size_t e = 0; e < nIn && e < node.inputs.size(); ++e)
                 {
-                    NCHW xi  = NCHW::from(env.graph->desc(in).shape);
+                    NCHW xi  = NCHW::from(env.graph->desc(node.inputs[e]).shape);
                     int  Cib = (int) cBlocks(xi.c);
                     parts.push_back({(int) y.n, Cib, Cob, cbOff, HW});
                     // One invocation per [n][cb][hw] vec4; 64 matches the shader's local_size_x.
@@ -41,7 +49,7 @@ namespace vknn {
                     // Advance the output channel-block cursor so the next input lands after this one.
                     cbOff += Cib;
                 }
-                pipe = env.pipeline(shader("concat", env.useFp16), 2, sizeof(ConcatPC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader((std::string("concat") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ConcatPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -52,10 +60,12 @@ namespace vknn {
                 }
                 vk::Buffer *dst = env.devBuf(node.outputs[0]);
                 // Each input writes a disjoint channel-block range of the output, so no barriers between them.
-                for (size_t i = 0; i < node.inputs.size(); ++i)
+                for (size_t i = 0; i < parts.size(); ++i)
                 {
-                    vk::Buffer *src = env.devBuf(node.inputs[i]);
-                    pipe->dispatch(cmd, {src->handle(), dst->handle()}, &parts[i], sizeof(ConcatPC), (uint32_t) partGroups[i]);
+                    vk::Buffer           *src = env.devBuf(node.inputs[i]);
+                    std::vector<VkBuffer> bufs {src->handle(), dst->handle()};
+                    epi.append(bufs, node, env, dst->handle());
+                    pipe->dispatch(cmd, bufs, &parts[i], sizeof(ConcatPC), (uint32_t) partGroups[i]);
                 }
             }
         };

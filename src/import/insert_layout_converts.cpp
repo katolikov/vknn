@@ -138,9 +138,12 @@ namespace vknn {
                 {
                     return true;
                 }
-                for (TensorId in: n.inputs)
+                // Only the concatenated parts decide the layout: inputs from pwCoreInputs on are
+                // fused-epilogue operands (broadcast scales etc.), not parts.
+                size_t parts = (size_t) pwCoreInputs(n);
+                for (size_t e = 0; e < parts && e < n.inputs.size(); ++e)
                 {
-                    if (sh(in).size() != 4 || sh(in)[1] % 4 != 0)
+                    if (sh(n.inputs[e]).size() != 4 || sh(n.inputs[e])[1] % 4 != 0)
                     {
                         return true;
                     }

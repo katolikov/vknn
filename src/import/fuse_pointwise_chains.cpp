@@ -145,6 +145,7 @@ namespace vknn {
             case OpType::GlobalAvgPool:
             case OpType::Transpose: // flat_gather _epi: fold consumers into the Transpose/Slice store,
             case OpType::Slice:     // dropping their dispatch AND the materialized gather output
+            case OpType::Concat:    // per-part stores apply the unit in output space (concat/flat_scatter _epi)
                 return true;
             default:
                 return false;
