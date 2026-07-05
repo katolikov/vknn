@@ -63,6 +63,9 @@ namespace vknn {
                             break;
                         }
                         case 8: {
+                            // `ints` is a packed repeated field: exporters may emit it length-delimited
+                            // (wire type 2 = one blob of back-to-back varints) or, for a single element,
+                            // as a bare varint. Handle both so an attribute with one int is not dropped.
                             if (w == 2)
                             {
                                 Reader s = r.sub();
@@ -89,7 +92,10 @@ namespace vknn {
                 }
                 if (hasTp)
                 {
-                    // store as a float-ints attribute when it's a small shape/scalar constant
+                    // A tensor-valued attribute (Constant.value, ConstantOfShape, etc.) is flattened into
+                    // the same numeric attribute storage as inline floats/ints: int64 tensors -> `ints`,
+                    // every other numeric dtype -> `floats`. `n` is the element count the decode loops
+                    // read, derived from dims (or the payload length for a rank-0 scalar with empty dims).
                     a.kind    = Attr::Floats;
                     a.shape   = tp.dims; // keep dims so a Constant node emits its true shape (e.g. anchor grids)
                     int64_t n = 1;
@@ -160,6 +166,8 @@ namespace vknn {
             // field 1 = name, field 2 = type(TypeProto); TypeProto field1=tensor_type;
             // Tensor field1=elem_type(int32), field2=shape(TensorShapeProto);
             // TensorShapeProto field1=dim(repeated Dimension); Dimension field1=dim_value(int64).
+            // A symbolic dimension (Dimension.dim_param, field 2) has no static extent and is recorded
+            // as -1, so downstream shape inference treats it as the unknown/dynamic axis.
             static void parseValueInfo(Reader r, std::string &name, Shape &shape, int32_t &elem) {
                 uint32_t f, w;
                 while (r.tag(f, w))
@@ -264,6 +272,10 @@ namespace vknn {
                             break;
                     }
                 }
+                // Collapse the ONNX op name into a coarse OpType plus, for the multiplexed families
+                // (Unary/Binary/Reduce), a `subOp` selecting the concrete variant. Activation ops carry
+                // their curve parameters in attributes, applied here with the ONNX-specified defaults so
+                // an exporter that omits them still lowers to the correct activation.
                 node.type = opTypeFromOnnx(opType);
                 if (node.type == OpType::Unary)
                 {

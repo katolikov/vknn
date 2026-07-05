@@ -2,7 +2,17 @@
 
 namespace vknn {
 
+    /// Fold a trailing Relu / Clip into the compute op that produces its input, recording the clamp on
+    /// the producer's `fusedAct` epilogue so the activation runs in the fp32 accumulator and the tensor
+    /// is stored once — removing the activation's whole-tensor read + write and one fp16 requantization.
+    /// Eligible only when the activation follows a Conv, Gemm, or Add that has no epilogue yet and whose
+    /// output feeds nothing but this activation (checked against every node input AND the graph outputs,
+    /// so a fused-away tensor can never still be consumed). Clip maps to Relu6 when its bounds are the
+    /// [0, 6] default, otherwise to a general Clip carrying `actLo`/`actHi`; Relu maps to Relu.
+    /// Postcondition: each fused activation node is dropped and its consumers are rewired to read the
+    /// producer's output directly, leaving the graph semantically identical.
     void fuseActivations(Graph &g) {
+        // producer[t] = index of the node that writes tensor t, or -1 for graph inputs / initializers.
         std::vector<int> producer(g.tensors.size(), -1);
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
@@ -37,7 +47,9 @@ namespace vknn {
             {
                 continue;
             }
-            // producer output must feed only this activation
+            // Fusing rewrites the producer's output in place, so it is safe only when that tensor feeds
+            // nothing but this activation: count every node input that reads it, plus a use as a graph
+            // output (which must keep observing the pre-activation value), and require exactly one.
             int consumers = 0;
             for (auto &nn: g.nodes)
             {
@@ -66,7 +78,10 @@ namespace vknn {
                 prod.fusedAct = ActType::Relu;
             } else
             {
-                float lo = 0, hi = 6; // default relu6
+                // Clip bounds default to [0, 6] (Relu6) when neither is supplied. min/max arrive either
+                // as initializer inputs (ONNX opset >= 11) or as attributes (older opsets); attributes
+                // are applied last so an explicit attribute wins over an absent/initializer default.
+                float lo = 0, hi = 6;
                 if (act.inputs.size() > 1 && act.inputs[1] != kNoTensor && g.isInitializer(act.inputs[1]))
                 {
                     lo = g.initializers[act.inputs[1]].f32()[0];

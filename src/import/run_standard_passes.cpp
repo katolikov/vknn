@@ -48,6 +48,16 @@ namespace vknn {
         }
     }
 
+    // Runs the full import-time optimization pipeline in place, rewriting `g` from the raw imported ONNX
+    // graph into the lowered, fused, statically-shaped form that gets serialized to the .vxm the runtime
+    // executes. The pass ORDER here is load-bearing and is the pipeline's central invariant: shape-producing
+    // metadata is captured before the passes that erase it (scalar-Gather tags before const-fold, declared
+    // output dtypes before the output-rewiring passes), shapes are re-inferred after every stage that can
+    // change a rank, and the fold+infer fixpoint runs before the lowering/fusion passes so those passes only
+    // ever see constant-resolved, statically-shaped chains. Pointwise-chain fusion runs LAST for the same
+    // reason (it is opaque to constFold). Every stage is behavior-preserving w.r.t. output semantics, so the
+    // pre-snapshotted declared output dtypes are restored at the end as authoritative. `opt` gates the
+    // optional fusions and carries the batch size used for shape inference.
     void runStandardPasses(Graph &g, const PassOptions &opt) {
         int64_t batch = opt.batch;
         // Snapshot each graph output's ONNX-declared dtype (from value_info, set by the builder) BEFORE

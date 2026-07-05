@@ -67,7 +67,11 @@ namespace vknn {
             VKNN_INFO << "markFp32: no tensor matched fp32Tensors=\"" << substrs << "\"";
             return;
         }
-        std::map<std::pair<TensorId, bool>, TensorId> cache; // (tensor, wantFp32) -> converted tensor
+        // (source tensor, wantFp32) -> already-converted tensor, so one frontier tensor consumed at a
+        // given precision by several nodes is converted once and the result shared.
+        std::map<std::pair<TensorId, bool>, TensorId> cache;
+        // New ConvertDtype nodes are buffered rather than appended in-place: mutating g.nodes while the
+        // range-for below iterates it would invalidate that loop. They are spliced in after the walk.
         std::vector<Node>                             converts;
         int                                           n = 0;
         for (auto &nd: g.nodes)
@@ -110,6 +114,8 @@ namespace vknn {
         }
         if (!converts.empty())
         {
+            // The converts are appended at the tail (out of dependency order), then topoSort restores a
+            // valid execution order so each ConvertDtype runs before the node that reads its output.
             for (auto &c: converts)
             {
                 g.nodes.push_back(std::move(c));

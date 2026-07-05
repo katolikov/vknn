@@ -2,10 +2,20 @@
 
 namespace vknn {
 
-    // Lower the two batched-matmul Einsum equations to Unsqueeze + MatMul (+ Squeeze) so they run on
-    // the validated flat MatMul GPU kernel instead of the CPU einsum. The remaining "i,j->ij" outer
-    // product keeps its own GPU kernel. Run after shapes are resolved (the einsum operand shapes must
-    // be known).
+    /// Lower the two batched-matmul Einsum equations to Unsqueeze + MatMul (+ Squeeze) so they run on
+    /// the validated flat MatMul GPU kernel instead of the CPU einsum. The remaining "i,j->ij" outer
+    /// product keeps its own GPU kernel.
+    ///
+    /// Handles exactly two equations (others are left as Einsum nodes):
+    ///   - "...ab,...b->...a": matrix-times-vector, expressed as Squeeze(MatMul(A, Unsqueeze(x,-1)),-1).
+    ///   - "bij,bnjk->bnik": batched matmul with A broadcast over the n axis, as MatMul(Unsqueeze(A,1), B).
+    ///
+    /// Precondition: shapes are resolved (each replaced Einsum's operand shapes must be known; a node
+    /// with an empty operand shape is skipped and left as-is). Postcondition: every lowered Einsum is
+    /// replaced by its equivalent op chain and the graph is re-topo-sorted.
+    ///
+    /// Rewrites are staged in `added`/`remove` and applied in one rebuild at the end rather than mutated
+    /// in place, so the loop can index g.nodes by position without the node vector shifting underneath it.
     void lowerEinsum(Graph &g) {
         auto axesAttr = [](std::vector<int64_t> ax) {
             Attr a;
@@ -31,8 +41,10 @@ namespace vknn {
                 }
             }
             TensorId A = n.inputs[0], B = n.inputs[1], out = n.outputs[0];
-            // Copy shapes/descs/names by value up front: g.addTensor() below reallocates g.tensors, which
-            // would dangle any reference held into it.
+            // Each branch builds new TensorDescs as by-value copies of existing ones (g.desc(...)) before
+            // calling g.addTensor(): addTensor reallocates g.tensors, so a live reference into it would
+            // dangle. The copies also carry over dtype/format while clearing the input/output/initializer
+            // flags, since the intermediates are internal edges.
             if (eq == "...ab,...b->...a")
             {
                 // y[...,a] = sum_b A[...,a,b]*x[...,b]  ==  Squeeze(MatMul(A, Unsqueeze(x,-1)), -1)
@@ -110,6 +122,9 @@ namespace vknn {
         }
         if (!added.empty())
         {
+            // Rebuild g.nodes: keep every original node whose index is not in `remove` (the lowered
+            // Einsums), then append the replacement chains. The appended nodes may sit before their
+            // consumers, so topoSort() below restores a valid execution order.
             std::set<int>     rm(remove.begin(), remove.end());
             std::vector<Node> kept;
             for (size_t i = 0; i < g.nodes.size(); ++i)

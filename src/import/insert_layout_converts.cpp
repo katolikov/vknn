@@ -256,6 +256,19 @@ namespace vknn {
         }
     }
 
+    /// Splice ConvertLayout nodes onto the graph wherever a tensor is read in a layout (NC4HW4 vs flat
+    /// row-major) different from the one it was produced in. First globalLayoutAssign() stamps every
+    /// tensor's gpuFlat flag to minimise the total number of converts; then for each node input whose
+    /// producer layout differs from what the consumer operates in, an already-converted copy is reused
+    /// from `cache` or a fresh ConvertLayout is emitted. Graph outputs left in NC4HW4 also get a trailing
+    /// flat convert so the host readback is a bulk copy rather than a per-element strided gather.
+    ///
+    /// Precondition: shapes are inferred and pointwise fusion has run (FusedPointwise carries its pw_flat
+    /// layout); runs at load, before markFp32. Postcondition: adjacent producer/consumer layouts agree, so
+    /// the runtime never mixes layouts across an edge. ConvertLayout is a lossless same-dtype reorder, so
+    /// the compiled result is byte-identical to the pre-pass math; the assignment is a pure function of the
+    /// graph, keeping the compiled .vxm bit-exact run to run. New nodes are appended and the graph is
+    /// re-topo-sorted so each convert precedes its consumer.
     void insertLayoutConverts(Graph &g) {
         // Assign every tensor a layout (minimising converts), then for every node input whose layout differs
         // from what the consumer needs, splice in a ConvertLayout node.

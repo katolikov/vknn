@@ -81,8 +81,11 @@ namespace vknn {
                 continue;
             }
             mm.fusedBias = biasId;
-            mm.inputs.push_back(biasId);    // keep the bias live for DCE / buffer allocation / scheduling
-            mm.outputs[0] = add.outputs[0]; // MatMul now produces the (biased) Add output, name intact
+            mm.inputs.push_back(biasId); // keep the bias live for DCE / buffer allocation / scheduling
+            // The MatMul output feeds only this Add (guaranteed by the consumers==1 check above), so the
+            // MatMul can simply adopt the Add's output tensor id — no downstream consumer needs rewiring,
+            // and the Add's original output name (a graph output or a named intermediate) is preserved.
+            mm.outputs[0] = add.outputs[0];
             remove.insert((int) i);
             ++fused;
         }

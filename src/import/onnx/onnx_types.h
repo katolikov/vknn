@@ -26,6 +26,9 @@ namespace vknn {
             Uint32    = 12,
             Uint64    = 13,
         };
+        // Compare a raw wire data_type field against a named OnnxType so call sites read as an intent
+        // (isType(dt, OnnxType::Int64)) rather than a bare integer compare; the cast is on the enum,
+        // keeping the parser's field value untouched.
         inline constexpr bool isType(int32_t dt, OnnxType t) {
             return dt == (int32_t) t;
         }

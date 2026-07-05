@@ -2,6 +2,21 @@
 
 namespace vknn {
 
+    /// Evaluate every node whose inputs are all known constants on the CPU and replace it with an
+    /// initializer holding the result, then drop the node from the graph. Nodes are visited in
+    /// topological program order so a folded output feeds the constant set for later nodes in the
+    /// same pass. Precondition: inferShapes has run, so shapes referenced by the classifier below
+    /// are populated. Postcondition: every folded node is removed from g.nodes, its outputs are
+    /// initializers with concrete shape/dtype, and the runtime never needs a backend for it.
+    ///
+    /// This exists to collapse the shape/index arithmetic that detection and transformer graphs
+    /// build dynamically (Shape/Gather/Range/Expand feeding scalar Binary, Where/Equal selects,
+    /// RoPE position vectors) into exact CPU-computed constants. Integer index/shape tensors in
+    /// particular MUST fold: the GPU stores activations as float, where an int64 value reinterpreted
+    /// as float corrupts, so those tensors are folded even when large while float outputs keep a
+    /// small size bound to avoid baking a big all-const buffer into the model.
+    ///
+    /// @return the number of nodes folded and removed.
     int constFold(Graph &g) {
         std::set<TensorId> known;
         for (auto &kv: g.initializers)

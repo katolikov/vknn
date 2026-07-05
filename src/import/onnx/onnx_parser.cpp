@@ -14,13 +14,19 @@
 namespace vknn {
     namespace onnx {
 
+        /// Materialize the model's single GraphProto into @p g via GraphBuilder.
+        /// @p r is a Reader already scoped to the length-delimited GraphProto region (see Reader::sub);
+        /// @p baseDir is the model's directory, used to resolve external_data file paths.
         static void parseGraph(Reader r, Graph &g, const std::string &baseDir) {
             GraphBuilder(g, baseDir).build(r);
         }
 
     } // namespace onnx
 
-    // Public entry point.
+    /// Public entry point: read the ONNX ModelProto at @p path and return the built, topologically
+    /// sorted Graph the runtime consumes.
+    /// @throws Error(IoError) if the file cannot be opened, and Error(InvalidArgument) if the model
+    /// contains no GraphProto.
     Graph importOnnx(const std::string &path) {
         std::ifstream f(path, std::ios::binary);
         if (!f)
@@ -32,7 +38,9 @@ namespace vknn {
         size_t      slash   = path.find_last_of("/\\");
         std::string baseDir = slash == std::string::npos ? std::string() : path.substr(0, slash);
         Graph       g;
-        // ModelProto: field 7 = graph (GraphProto). Skip everything else.
+        // Scan the top-level ModelProto: field 7 is the graph (GraphProto), a length-delimited region
+        // (wire type 2). Every other field (ir_version, opset_import, metadata, ...) is skipped by wire
+        // type. A conformant model has exactly one graph; parse it in place and leave the rest untouched.
         onnx::Reader r(buf.data(), buf.size());
         uint32_t     fld, wire;
         bool         foundGraph = false;
@@ -51,6 +59,8 @@ namespace vknn {
         {
             throw Error(Status::InvalidArgument, "no GraphProto in ONNX model");
         }
+        // ONNX does not require nodes to be stored in execution order; order them so every node follows
+        // its producers before the graph reaches the optimization passes and the runtime.
         g.topoSort();
         VKNN_INFO << "Imported ONNX: " << g.nodes.size() << " nodes, " << g.initializers.size() << " initializers, " << g.inputs.size() << " inputs, "
                   << g.outputs.size() << " outputs";

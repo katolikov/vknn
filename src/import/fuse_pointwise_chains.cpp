@@ -210,6 +210,20 @@ namespace vknn {
         }
     }
 
+    /// Greedily merge each maximal single-consumer per-element chain (Binary/Add/Unary/Relu/Clip
+    /// sharing the head's output shape and GPU layout, no fp32-forced intermediate) into one of two
+    /// forms: folded into an epilogue-capable producer's store (pwEpilogueCapable) when the chain's
+    /// primary is that producer's sole output, otherwise a standalone FusedPointwise node (only worth
+    /// it for >= 2 ops). Chains are grown from their head — the first eligible op whose primary is not
+    /// itself a fusable single-consumer producer — so each op is visited once and every chain is built
+    /// exactly one way; visitation order is load-bearing. The chain's world (NC4HW4 vs flat) is chosen
+    /// after the chain is built, from step expressibility alone, since layout only changes indexing.
+    /// Precondition: inferShapes, insertLayoutConverts, and fuseActivations have run (this reads final
+    /// shapes/layouts and re-encodes any producer fusedAct epilogue as a step so it is not dropped).
+    /// Postcondition: every fully-merged node is erased from g.nodes; the surviving head (or producer)
+    /// yields the chain tail's tensor id, carries the pw_steps/pw_params encoding, and — for standalone
+    /// nodes — pw_flat selecting the world. Bit-exact: a chain is never merged across a tensor forced to
+    /// fp32 storage, which would round an intermediate that must stay fp32.
     void fusePointwiseChains(Graph &g) {
         std::vector<int> producer(g.tensors.size(), -1), consumers(g.tensors.size(), 0), nextOf(g.tensors.size(), -1);
         for (size_t i = 0; i < g.nodes.size(); ++i)

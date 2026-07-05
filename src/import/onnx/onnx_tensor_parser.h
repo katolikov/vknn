@@ -16,6 +16,11 @@
 namespace vknn {
     namespace onnx {
 
+        // Decodes a single ONNX TensorProto (field numbers per onnx_types.h) and, on demand, resolves
+        // its external-data reference and materializes its payload into a HostBuffer. A repeated numeric
+        // field arrives either length-delimited (wire type `w == 2`, protobuf's packed encoding: all
+        // values concatenated inside one sub-message) or as one value per tag; every such field below
+        // branches on `w` to handle both, since exporters differ on which they emit.
         class TensorProtoParser {
           public:
             static TensorProto parse(Reader r) {
@@ -25,7 +30,7 @@ namespace vknn {
                 {
                     switch (f)
                     {
-                        case 1: // dims
+                        case 1: // dims: packed sub-message of varints, or a single varint
                             if (w == 2)
                             {
                                 Reader s = r.sub();
@@ -151,7 +156,12 @@ namespace vknn {
                 t.raw.assign(file.begin() + off, file.begin() + off + len);
             }
 
-            // Materialize a TensorProto into a float32 HostBuffer (raw_data or typed data).
+            // Materialize a TensorProto into a float32 HostBuffer, decoding whichever payload the proto
+            // carries: raw_data (FLOAT copied verbatim; FLOAT16 / DOUBLE / INT64 converted per element)
+            // or the typed float_data / int64_data arrays. `elems` is the element count implied by the
+            // tensor's shape; every copy is clamped to what the payload actually holds (`min` / `i <
+            // avail`), so a truncated or shape-mismatched proto leaves the tail zero rather than reading
+            // out of bounds.
             static void fillHostFloat(const TensorProto &t, HostBuffer &hb, int64_t elems) {
                 hb.resizeElems(elems, DType::Float32);
                 float *dst = hb.f32();
@@ -200,7 +210,10 @@ namespace vknn {
                 }
             }
 
-            // Materialize as int64 (for shape tensors).
+            // Materialize as int64 (shape / index tensors that must stay exact). Only the two lossless
+            // int64 sources are honored: raw_data of dtype INT64, or the typed int64_data array; any
+            // other dtype leaves the buffer zero-filled. Copies are clamped to the payload the same way
+            // as fillHostFloat.
             static void fillHostI64(const TensorProto &t, HostBuffer &hb, int64_t elems) {
                 hb.resizeElems(elems, DType::Int64);
                 int64_t *dst = hb.i64();

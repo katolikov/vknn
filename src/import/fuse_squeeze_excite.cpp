@@ -4,9 +4,18 @@ namespace vknn {
 
     void fuseSqueezeExcite(Graph &g) {
         // Collapse the Squeeze-Excite scale chain GlobalAvgPool -> Conv1x1(+relu) -> Conv1x1 ->
-        // HardSigmoid into ONE kFusedSE node that emits the channel scale. The following
+        // HardSigmoid into ONE FusedSE node that emits the channel scale. The following
         // channel-broadcast Mul (scale * feature) is left intact. MobileNetV3 has ~11 of these tiny
         // multi-dispatch chains.
+        //
+        // Precondition for fusing a chain: both Conv1x1 outputs are single-consumer (see `single`),
+        // so folding them into one node cannot orphan a live tensor; conv1 carries a Relu epilogue and
+        // conv2 does not. The match anchors on HardSigmoid and walks producers upward.
+        // Postcondition: conv1 and conv2 are removed, HardSigmoid's node slot becomes the FusedSE node
+        // (preserving its output TensorId so the downstream Mul still reads it), and the GlobalAvgPool
+        // is left in place. The graph stays a valid producer/consumer DAG.
+        // Index every tensor by its producing node and its consumer count in one O(nodes*edges) pass,
+        // so the upward producer walk and the single-consumer test below are both O(1) lookups.
         std::vector<int> producer(g.tensors.size(), -1);
         std::vector<int> consumers(g.tensors.size(), 0);
         for (size_t i = 0; i < g.nodes.size(); ++i)
@@ -79,6 +88,8 @@ namespace vknn {
             remove.insert(p2);
             fused++;
         }
+        // Compact the node list only when at least one chain matched, skipping the O(n) rebuild for the
+        // common case of a graph with no SE blocks.
         if (fused)
         {
             std::vector<Node> kept;

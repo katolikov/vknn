@@ -23,11 +23,14 @@ namespace vknn {
             {
                 continue;
             }
+            // ONNX carries the reduction axes either as an attribute or as input 1 (opset 18+).
             std::vector<int64_t> axes = readI64Param(g, n, "axes", 1);
             if (axes.size() != 2)
             {
                 continue;
             }
+            // Normalize negatives against the rank-4 tensor, then require exactly the spatial dims:
+            // {H, W} == {2, 3} of NCHW. Only then is the mean a GlobalAveragePool over each channel.
             int64_t a0 = axes[0] < 0 ? axes[0] + 4 : axes[0];
             int64_t a1 = axes[1] < 0 ? axes[1] + 4 : axes[1];
             if (std::min(a0, a1) != 2 || std::max(a0, a1) != 3)

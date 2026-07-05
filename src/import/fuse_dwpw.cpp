@@ -38,8 +38,18 @@ namespace vknn {
     void fuseDwPw(Graph &g) {
         // Fuse depthwise-3x3 conv (D) -> 1x1 project conv (P) into one kFusedDwPw node, so the expanded
         // intermediate (D's output, the block's largest activation) never hits global memory and a
-        // dispatch+barrier is removed. Only when D's output feeds ONLY P, D's activation is a plain
-        // ActType (Relu/Relu6/Clip/None), and P is a stride-1 pad-0 group-1 pointwise conv.
+        // dispatch+barrier is removed. Only when D's output feeds ONLY P, D's activation is a
+        // parameterless ActType (None/Relu/Relu6 -- Clip and the fancier acts are rejected below), and
+        // P is a stride-1 pad-0 group-1 pointwise conv.
+        //
+        // Structure: build producer/consumer index maps over the current node list, then walk nodes
+        // once, replacing each matching P in place with the fused node and marking its D for deletion;
+        // a final compaction drops the marked D nodes. The index maps and `remove` set both key on the
+        // ORIGINAL node indices, so no map is rebuilt mid-walk.
+        //
+        // Postcondition: for every fused pair, D is gone and P is the FusedDwPw node carrying both
+        // convs' weights/biases, D's activation in subOp and P's in fusedAct; P's output tensor id and
+        // any fusedResidual edge are unchanged, so downstream consumers need no rewiring.
         std::vector<int> producer(g.tensors.size(), -1);
         std::vector<int> consumers(g.tensors.size(), 0);
         for (size_t i = 0; i < g.nodes.size(); ++i)

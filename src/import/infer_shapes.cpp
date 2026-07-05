@@ -2,6 +2,22 @@
 
 namespace vknn {
 
+    /// Forward shape (and, where it differs, dtype) inference over the whole graph.
+    ///
+    /// First resolves every dynamic (negative) input dim to the concrete `batch`, then walks the nodes
+    /// in graph (topological producer-before-consumer) order and fills each output's `Shape` from its
+    /// resolved inputs using the ONNX per-op rules. Node visitation order is load-bearing: a producer's
+    /// shape must land before a consumer reads it.
+    ///
+    /// Central invariant — an EMPTY shape means "not resolved yet", never a rank-0 scalar, EXCEPT on an
+    /// initializer (a constant genuinely may be rank-0). Every case therefore refuses to compute from an
+    /// empty non-initializer operand and leaves the output empty rather than fabricating a dim. This
+    /// matters because a fabricated (or stale) shape can be frozen by a downstream Shape()/const-fold and
+    /// then poison every rank below it. The pass is idempotent and designed to be re-run: bounds that are
+    /// still runtime on this pass (e.g. a Reshape/Slice/Expand target that const-folds only later) leave
+    /// their output unresolved and resolve on a subsequent call once the operand lands.
+    ///
+    /// Ops not listed (the `default` arm) are shape-path ops whose outputs are produced by constFold.
     void inferShapes(Graph &g, int64_t batch) {
         // Resolve dynamic dims on inputs to `batch`.
         for (TensorId in: g.inputs)

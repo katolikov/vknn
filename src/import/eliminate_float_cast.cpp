@@ -38,6 +38,10 @@ namespace vknn {
                     return false;
             }
         };
+        // Parallel per-tensor dtype lattice: dt[id] is meaningful only where known[id] is set. The
+        // Float32 fill is an inert placeholder for not-yet-inferred tensors — every read below is
+        // guarded by known[], so a tensor whose dtype is never resolved is treated as unknown, not
+        // float, and its consumer casts are left in place.
         std::vector<DType> dt(g.tensors.size(), DType::Float32);
         std::vector<char>  known(g.tensors.size(), 0);
         auto               setk = [&](TensorId id, DType d) {
@@ -71,6 +75,9 @@ namespace vknn {
                 out = DType::Int64;
             } else if (nd.type == OpType::Cast)
             {
+                // A Cast pins its output to the target's float-ness. Int64 here is a representative
+                // "some integer type" marker, not a width claim: the removal test below only asks
+                // isFloat(), so any non-float dtype is interchangeable.
                 out = onnxToIsFloat(nd.attr.geti("to", 1)) ? DType::Float32 : DType::Int64;
             } else if (nd.type == OpType::Equal)
             {

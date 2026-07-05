@@ -2,10 +2,24 @@
 
 namespace vknn {
 
+    /// Fold a residual `out = Add(conv(x), residual)` into the producing Conv's epilogue, so the conv
+    /// kernel adds the skip connection while its result is still in the fp32 accumulator and stores the
+    /// sum once — eliminating the Add's whole-tensor read + write and one fp16 requantization. The Add
+    /// may sit on either operand of the sum; the conv-fed side becomes the epilogue's base and the other
+    /// side is recorded as `fusedResidual`.
+    ///
+    /// Eligible only when the Add's conv operand is a 1x1 stride-1 pad-0 group-1 Conv with no residual
+    /// already fused (the conv1x1 / split-K kernels are the ones that run a residual epilogue), and that
+    /// conv's output feeds nothing but this Add — verified against every node input AND the graph outputs,
+    /// so a fused-away tensor can never still be consumed elsewhere. Any activation already folded onto the
+    /// Add is carried onto the conv only when the conv has no epilogue activation of its own.
+    ///
+    /// Postcondition: each fused Add is dropped and its consumers are rewired to read the conv's output
+    /// directly, leaving the graph semantically identical. The residual tensor is appended to the conv's
+    /// input list so DCE, buffer allocation, and scheduling keep it live even though it is consumed through
+    /// the `fusedResidual` edge rather than a normal operand.
     void fuseResidualAdd(Graph &g) {
-        // Fuse  out = Add(pointwise_conv(x), residual)  into the conv's epilogue, so the conv writes
-        // conv+residual directly (saves the Add's full read+write). Only for 1x1 stride-1 pad-0 group-1
-        // convs (the ones our conv1x1/split-K kernels run and support a residual on).
+        // producer[t] = index of the node that writes tensor t, or -1 for graph inputs / initializers.
         std::vector<int> producer(g.tensors.size(), -1);
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {

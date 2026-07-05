@@ -3,16 +3,25 @@
 
 namespace vknn {
 
-    // Rewrite a ConvTranspose (stride s, kernel k with k % s == 0) as a regular stride-1 Conv producing
-    // Cout*s*s channels followed by DepthToSpace(s, CRD). ConvTranspose is a true convolution with a
-    // stride-expanded, spatially-flipped kernel; grouping its output pixels by their s*s sub-pixel phase
-    // turns it into that Conv + pixel-shuffle. The gather deconv kernel is memory-bound (one thread per
-    // output pixel, scattered reads, no reuse); the Conv path tiles and reuses its input window.
-    //
-    // Weight rearrangement (verified exact in fp64): output sub-pixel (a,b) of channel oc reads the deconv
-    // taps ky = ay + s*(Cy - ty), kx = ax + s*(Cx - tx), where ay = (a+padH) % s, Cy = floor((a+padH)/s)
-    // (likewise ax/Cx), and ty/tx are the Conv's spatial taps. Only the same products are summed, so the
-    // device result stays at the fp16 floor (the accumulation order shifts, exactly as Winograd does).
+    /// Rewrite a ConvTranspose (stride s, kernel k with k % s == 0) as a regular stride-1 Conv producing
+    /// Cout*s*s channels followed by DepthToSpace(s, CRD). ConvTranspose is a true convolution with a
+    /// stride-expanded, spatially-flipped kernel; grouping its output pixels by their s*s sub-pixel phase
+    /// turns it into that Conv + pixel-shuffle. The gather deconv kernel is memory-bound (one thread per
+    /// output pixel, scattered reads, no reuse); the Conv path tiles and reuses its input window.
+    ///
+    /// Eligible only for a group-1, dilation-1, square-stride>=2 ConvTranspose whose weight is an fp32
+    /// initializer and whose padded output extents are stride-multiples that fit the clean sub-pixel form
+    /// (every other shape keeps the deconv kernel). A fused residual disqualifies it: the residual carries
+    /// the full output shape and cannot ride the coarse Conv.
+    ///
+    /// Weight rearrangement (verified exact in fp64): output sub-pixel (a,b) of channel oc reads the deconv
+    /// taps ky = ay + s*(Cy - ty), kx = ax + s*(Cx - tx), where ay = (a+padH) % s, Cy = floor((a+padH)/s)
+    /// (likewise ax/Cx), and ty/tx are the Conv's spatial taps. Only the same products are summed, so the
+    /// device result stays at the fp16 floor (the accumulation order shifts, exactly as Winograd does).
+    ///
+    /// Postcondition: each converted ConvTranspose node is replaced in place by its Conv; the matching
+    /// DepthToSpace is appended and inherits the original output tensor id, so consumers are unchanged.
+    /// A single topoSort after the loop reorders the appended shuffles ahead of their consumers.
     void subpixelConvTranspose(Graph &g) {
         int               converted = 0;
         std::vector<Node> appended;

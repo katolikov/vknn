@@ -1,4 +1,11 @@
-// graph optimization passes (backend-agnostic, operate on NCHW IR).
+// Graph optimization/lowering passes over the NCHW IR. Their combined output is the serialized .vxm
+// the runtime executes, so any change to a pass's logic changes every compiled model.
+//
+// This header is an unordered index of pass entry points, not their run order. Pass ordering and the
+// interleaved inferShapes/constFold rounds are load-bearing and defined in one place --
+// runStandardPasses (run_standard_passes.cpp) for the backend-agnostic set, then insertLayoutConverts
+// and markFp32 at load once the backend is chosen. Most passes are pure IR-to-IR rewrites; the two
+// layout/dtype passes at the bottom are Vulkan-backend-oriented and run after backend selection.
 #pragma once
 #include "vknn/graph.h"
 

@@ -60,6 +60,12 @@ namespace vknn {
                 return true;
             }
 
+            // Reads the GraphProto, dispatching on its protobuf field number: 1 = node (deferred to raw
+            // name lists here; I/O is bound in ssaResolveNodeIO), 5 = initializer (deferred to inits;
+            // weights are filled in materializeInitializers), 11 = graph input, 12 = graph output,
+            // 13 = value_info (a shape hint, applied to its node output in ssaResolveNodeIO). Any other
+            // field is skipped. Inputs/outputs are registered by name (findOrAdd); a symbolic output
+            // shape is dropped (fullyStatic), an input keeps its -1 dims for the later batch substitution.
             void collect(Reader r) {
                 uint32_t f, w;
                 while (r.tag(f, w))
@@ -126,6 +132,12 @@ namespace vknn {
                 }
             }
 
+            // Turns each initializer collected by collect() into a graph tensor with a host weight buffer.
+            // Runs before ssaResolveNodeIO so initializer names resolve to real ids when node inputs bind.
+            // External initializers (data held in a sibling file) are pulled in first via resolveExternal.
+            // Storage dtype is narrowed to two host representations: Int64 stays Int64; every float variant
+            // (FLOAT / FLOAT16 / DOUBLE) materializes to fp32. A scalar initializer has empty dims, so its
+            // element count is forced to 1.
             void materializeInitializers() {
                 for (auto &pi: inits)
                 {

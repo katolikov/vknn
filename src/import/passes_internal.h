@@ -24,7 +24,17 @@ namespace vknn {
     void rewireTensor(Graph &g, TensorId from, TensorId to);
 
     // Passes used internally by runStandardPasses but not part of the public passes.h umbrella.
+
+    // Lower the two batched-matmul Einsum equations ("...ab,...b->...a", "bij,bnjk->bnik") to
+    // Unsqueeze + MatMul (+ Squeeze) so they run on the flat MatMul GPU kernel; other equations are
+    // left as Einsum. Needs resolved operand shapes (defined in lower_einsum.cpp).
     void lowerEinsum(Graph &g);
+    // Drop Cast nodes converting float->float (a same-size buffer copy), rewiring consumers to the
+    // cast input; a forward dtype pass gates removal to a float source so int<->float casts survive.
+    // Graph outputs are never renamed (defined in eliminate_float_cast.cpp).
     void eliminateFloatCast(Graph &g);
+    // Fuse Add(MatMul(A,W), bias) into the MatMul epilogue when the MatMul output feeds only this Add
+    // and the other operand is a rank-1 [N] initializer matching the output's last dim (defined in
+    // fuse_matmul_bias.cpp).
     void fuseMatMulBias(Graph &g);
 }
