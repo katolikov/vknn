@@ -106,6 +106,8 @@ namespace vknn {
                 return "ConvertLayout";
             case OpType::ConvertDtype:
                 return "ConvertDtype";
+            case OpType::ConvGemm:
+                return "ConvGemm";
             default:
                 return "Unknown";
         }

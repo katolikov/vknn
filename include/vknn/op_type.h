@@ -61,7 +61,8 @@ namespace vknn {
         ConvertLayout,
         // fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by markFp32)
         ConvertDtype,
-        Range, // arange(start, limit, delta) -- scalar inputs, 1-D output
+        Range,    // arange(start, limit, delta) -- scalar inputs, 1-D output
+        ConvGemm, // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

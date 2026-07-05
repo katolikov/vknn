@@ -40,6 +40,12 @@ namespace vknn {
     // DepthToSpace(s), replacing the memory-bound gather deconv with a tiled conv. Weight rearrange is
     // exact; device output stays at the fp16 floor. Needs resolved input spatial dims.
     void subpixelConvTranspose(Graph &g);
+    // Lower each non-Winograd, non-1x1 KxK Conv (group 1, constant weight, static shapes) to a
+    // ConvGemm node with the weights repacked [K][Cout] — one LDS-tiled implicit-GEMM kernel instead
+    // of the streaming direct conv. Deterministic; fp16-floor equivalent to Conv (the accumulation
+    // order shifts, as Winograd's does). Needs resolved shapes; runs before pointwise fusion so
+    // trailing units fold onto the ConvGemm.
+    void lowerConv(Graph &g);
     // Remove Identity nodes, rewiring consumers to the input.
     void eliminateIdentity(Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
@@ -53,16 +59,19 @@ namespace vknn {
         bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
+        bool    lowerConv           = true;  // non-Winograd KxK Conv -> implicit-GEMM ConvGemm (default on)
         bool    dumpBig             = false; // debug: log tensors > 50M elements after shape inference
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
-        //   O1 = the default production set: the general pointwise fusion (bit-exact)
+        //   O1 = the default production set: the general pointwise fusion (bit-exact) + the
+        //        ConvGemm lowering (fp16-floor equivalent)
         //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; can
         //           regress on some models — measure before shipping a model with them)
         static PassOptions forOptLevel(int level) {
             PassOptions o;
             o.fusePointwiseChains = level >= 1;
+            o.lowerConv           = level >= 1;
             o.fuseSqueezeExcite   = level >= 2;
             o.fuseDwPw            = level >= 2;
             return o;

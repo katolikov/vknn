@@ -133,6 +133,7 @@ namespace vknn {
             case OpType::MatMul:
             case OpType::Gemm:
             case OpType::Conv:
+            case OpType::ConvGemm:
             case OpType::ConvTranspose:
             case OpType::FusedDwPw:
             case OpType::Softmax:
