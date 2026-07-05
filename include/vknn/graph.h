@@ -55,7 +55,7 @@ namespace vknn {
         /// Reorder `nodes` so every node follows its tensor producers (stable: nodes already in
         /// dependency order keep their relative positions). @throws Error if the graph contains a cycle.
         void topoSort();
-        /// A human-readable, multi-line listing of the tensors and nodes, for debugging/logging.
+        /// A readable, multi-line listing of the tensors and nodes, for debugging/logging.
         std::string dump() const;
     };
 

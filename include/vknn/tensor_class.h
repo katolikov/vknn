@@ -66,7 +66,7 @@ namespace vknn {
         const std::vector<int64_t> &shape() const noexcept {
             return shape_;
         }
-        /// Human-readable shape rendering, e.g. "[1, 3, 224, 224]".
+        /// Readable shape rendering, e.g. "[1, 3, 224, 224]".
         std::string shapeString() const;
         /// Number of dimensions in shape().
         int rank() const noexcept {

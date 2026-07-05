@@ -2,7 +2,7 @@
 
 namespace vknn {
 
-    // Right-shift turning a byte count into mebibytes for the human-readable diagnostic.
+    // Right-shift turning a byte count into mebibytes for the readable diagnostic.
     constexpr unsigned kBytesToMiBShift = 20;
 
     /// Drop initializer payloads no live tensor references.

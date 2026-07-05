@@ -21,7 +21,7 @@ namespace vknn {
         virtual ~Backend()               = default;
         /// Stable identity of this backend, used as the key for registration and assignment.
         virtual BackendKind kind() const = 0;
-        /// Human-readable backend name for logs, the profiler, and fallback diagnostics.
+        /// Readable backend name for logs, the profiler, and fallback diagnostics.
         virtual const char *name() const = 0;
         /// Whether the backend is usable on this device (false => skip in selection).
         virtual bool available() const = 0;

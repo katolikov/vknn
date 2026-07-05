@@ -66,7 +66,7 @@ TEST(Layout, PackMath) {
     EXPECT_EQ(s.h, 7);
 }
 
-// Humane Tensor API: construct, shape/size accessors, argmax.
+// Ergonomic Tensor API: construct, shape/size accessors, argmax.
 TEST(Api, TensorHelpers) {
     Tensor t({1.f, 5.f, 2.f, 9.f, 3.f, 0.f}, {1, 6});
     EXPECT_EQ(t.rank(), 2);

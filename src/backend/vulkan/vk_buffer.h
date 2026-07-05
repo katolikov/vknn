@@ -93,7 +93,7 @@ namespace vknn { namespace vk {
         /// if none qualifies, `avoid` is dropped and the search repeats. Throws if nothing matches.
         uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid = 0) const;
         bool     isHostVisible(uint32_t typeIdx) const noexcept;
-        /// Human-readable context for an allocation failure, enriched with the heap budget/usage when
+        /// Readable context for an allocation failure, enriched with the heap budget/usage when
         /// VK_EXT_memory_budget is available so an OOM is actionable rather than opaque.
         std::string allocFailureDetail(VkDeviceSize size, uint32_t typeIdx) const;
         /// Add this allocation to the process-wide live/peak totals (called once, last, on success).

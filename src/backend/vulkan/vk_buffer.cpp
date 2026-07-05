@@ -15,7 +15,7 @@ namespace vknn { namespace vk {
         // narrows the allowed set.
         constexpr uint32_t kAnyMemoryType = 0xffffffffu;
 
-        // Right-shift turning a byte count into mebibytes for human-readable diagnostics.
+        // Right-shift turning a byte count into mebibytes for readable diagnostics.
         constexpr unsigned kBytesToMiBShift = 20;
 
         // Process-wide allocation accounting. vkAllocateMemory is one-per-Buffer, so the live count

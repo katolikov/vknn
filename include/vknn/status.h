@@ -15,7 +15,7 @@ namespace vknn {
         IoError,         ///< A filesystem or stream read/write failed.
     };
 
-    /// Human-readable spelling of a Status enumerator, matching the enumerator name (e.g. "DeviceLost").
+    /// Readable spelling of a Status enumerator, matching the enumerator name (e.g. "DeviceLost").
     /// @param s Status to name.
     /// @returns A static string literal owned by the program; never null. Unrecognized values yield "?".
     inline const char *statusStr(Status s) noexcept {
