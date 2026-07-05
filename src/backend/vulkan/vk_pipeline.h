@@ -17,15 +17,24 @@ namespace vknn {
         /// Serializable VkPipelineCache keyed by device+driver. Speeds warm session creation. Built from
         /// the pipeline section of the unified per-model cache file; getData() returns the bytes the
         /// backend writes back.
+        ///
+        /// Owns one VkPipelineCache (RAII); not copyable or movable.
         class PipelineCache {
           public:
+            /// @param initialData Serialized cache bytes from a prior session, or empty for a cold cache.
+            ///                    The driver validates them against its own UUID and ignores a mismatch.
             explicit PipelineCache(VulkanContext &ctx, const std::vector<char> &initialData = {});
             ~PipelineCache();
-            VkPipelineCache handle() const {
+            PipelineCache(const PipelineCache &)            = delete;
+            PipelineCache &operator=(const PipelineCache &) = delete;
+            PipelineCache(PipelineCache &&)                 = delete;
+            PipelineCache &operator=(PipelineCache &&)      = delete;
+
+            VkPipelineCache handle() const noexcept {
                 return cache_;
             }
-            std::vector<char> getData() const; // serialize the current cache (for the unified file)
-            size_t            diskBytes() const {
+            std::vector<char> getData() const; ///< Serialize the current cache for the unified model file.
+            size_t            diskBytes() const noexcept {
                 return diskBytes_;
             }
 
@@ -37,25 +46,41 @@ namespace vknn {
 
         /// A compute pipeline bound to N storage buffers (via push descriptors) with a
         /// push-constant block and optional specialization constants.
+        ///
+        /// Owns its shader module, descriptor-set layout, pipeline layout, and pipeline (RAII); not
+        /// copyable or movable.
         class ComputePipeline {
           public:
+            /// @param shaderName     Key into the embedded SPIR-V table (see embeddedShaders()).
+            /// @param numBuffers     Storage buffers bound at descriptor bindings 0..numBuffers-1.
+            /// @param pushConstBytes Size of the push-constant block (0 for none).
+            /// @param specData       Specialization constants, one uint32 at ids 0..N-1.
+            /// @param cache          Pipeline cache to accelerate creation, or VK_NULL_HANDLE.
+            /// @throws Error if the shader is unknown or a Vulkan object cannot be created.
             ComputePipeline(VulkanContext &ctx, const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData = {}, VkPipelineCache cache = VK_NULL_HANDLE);
             ~ComputePipeline();
+            ComputePipeline(const ComputePipeline &)            = delete;
+            ComputePipeline &operator=(const ComputePipeline &) = delete;
+            ComputePipeline(ComputePipeline &&)                 = delete;
+            ComputePipeline &operator=(ComputePipeline &&)      = delete;
 
-            VkPipeline pipeline() const {
+            VkPipeline pipeline() const noexcept {
                 return pipeline_;
             }
-            VkPipelineLayout layout() const {
+            VkPipelineLayout layout() const noexcept {
                 return layout_;
             }
-            uint32_t numBuffers() const {
+            uint32_t numBuffers() const noexcept {
                 return numBuffers_;
             }
 
-            // Records bind + push-descriptors + push-constants + dispatch into `cmd`.
+            /// Record bind + push-descriptors + push-constants + dispatch into `cmd`. A 1D dispatch whose
+            /// group count exceeds the device limit is spilled into the y dimension (see the .cpp).
             void dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer> &buffers, const void *pushConst, uint32_t pcBytes, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1);
 
           private:
+            void destroy() noexcept; ///< Release every owned handle; safe from the destructor and a failing constructor.
+
             VulkanContext        &ctx_;
             VkShaderModule        module_     = VK_NULL_HANDLE;
             VkDescriptorSetLayout setLayout_  = VK_NULL_HANDLE;

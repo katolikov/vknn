@@ -24,10 +24,16 @@ namespace vknn { namespace vk {
         vkCmdPipelineBarrier(cmd, s, s, 0, 1, &b, 0, nullptr, 0, nullptr);
     }
 
+    /// Owns a command pool and a submission fence for the compute queue (RAII); not copyable or movable.
+    /// All submissions here are synchronous (submit + wait on the fence).
     class CommandRunner {
       public:
         explicit CommandRunner(VulkanContext &ctx);
         ~CommandRunner();
+        CommandRunner(const CommandRunner &)            = delete;
+        CommandRunner &operator=(const CommandRunner &) = delete;
+        CommandRunner(CommandRunner &&)                 = delete;
+        CommandRunner &operator=(CommandRunner &&)      = delete;
 
         /// Record `fn` into a transient primary command buffer, submit, and wait.
         void oneShot(const std::function<void(VkCommandBuffer)> &fn);
@@ -36,10 +42,10 @@ namespace vknn { namespace vk {
         VkCommandBuffer allocate();
         void            begin(VkCommandBuffer cmd);
         void            end(VkCommandBuffer cmd);
-        /// Submit a pre-recorded buffer and wait on a fence. Returns wall time in ms.
+        /// Submit a pre-recorded buffer and wait on the fence. @returns wall time in ms.
         double submitAndWait(VkCommandBuffer cmd);
 
-        VkCommandPool pool() const {
+        VkCommandPool pool() const noexcept {
             return pool_;
         }
 

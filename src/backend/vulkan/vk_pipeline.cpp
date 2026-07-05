@@ -4,6 +4,15 @@
 
 namespace vknn { namespace vk {
 
+    namespace {
+        // Every kernel exposes a single compute entry point named "main" (glslang default).
+        constexpr const char *kEntryPoint = "main";
+        // All bindings are storage buffers in the compute stage (the engine binds no images/samplers here).
+        constexpr VkDescriptorType     kBindingType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        // The bits enum (not VkShaderStageFlags) so it also assigns to VkPipelineShaderStageCreateInfo::stage.
+        constexpr VkShaderStageFlagBits kComputeStage = VK_SHADER_STAGE_COMPUTE_BIT;
+    } // namespace
+
     // ----------------------------- PipelineCache -----------------------------
     PipelineCache::PipelineCache(VulkanContext &ctx, const std::vector<char> &initialData): ctx_(ctx) {
         diskBytes_ = initialData.size();
@@ -18,10 +27,19 @@ namespace vknn { namespace vk {
     }
 
     std::vector<char> PipelineCache::getData() const {
+        // Two-call idiom: query the size, then read. A driver may legally report a smaller size on the
+        // second call, so the buffer is shrunk to what was actually written.
         size_t sz = 0;
-        vkGetPipelineCacheData(ctx_.device(), cache_, &sz, nullptr);
+        if (vkGetPipelineCacheData(ctx_.device(), cache_, &sz, nullptr) != VK_SUCCESS || sz == 0)
+        {
+            return {};
+        }
         std::vector<char> data(sz);
-        vkGetPipelineCacheData(ctx_.device(), cache_, &sz, data.data());
+        if (vkGetPipelineCacheData(ctx_.device(), cache_, &sz, data.data()) != VK_SUCCESS)
+        {
+            return {};
+        }
+        data.resize(sz);
         return data;
     }
 
@@ -35,94 +53,113 @@ namespace vknn { namespace vk {
     // ----------------------------- ComputePipeline -----------------------------
     ComputePipeline::ComputePipeline(VulkanContext &ctx, const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData, VkPipelineCache cache):
         ctx_(ctx), numBuffers_(numBuffers), name_(shaderName) {
-        auto it = embeddedShaders().find(shaderName);
-        if (it == embeddedShaders().end())
+        // A throwing constructor does not run the destructor, so reclaim any handle already created
+        // before letting the exception propagate.
+        try
         {
-            throw Error(Status::NotFound, "shader not found: " + shaderName);
-        }
-        const auto &spv = it->second;
+            auto it = embeddedShaders().find(shaderName);
+            if (it == embeddedShaders().end())
+            {
+                throw Error(Status::NotFound, "shader not found: " + shaderName);
+            }
+            const auto &spv = it->second;
 
-        VkShaderModuleCreateInfo smci {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        smci.codeSize = spv.size() * sizeof(uint32_t);
-        smci.pCode    = spv.data();
-        VK_CHECK(vkCreateShaderModule(ctx_.device(), &smci, nullptr, &module_));
+            VkShaderModuleCreateInfo smci {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            smci.codeSize = spv.size() * sizeof(uint32_t);
+            smci.pCode    = spv.data();
+            VK_CHECK(vkCreateShaderModule(ctx_.device(), &smci, nullptr, &module_));
 
-        std::vector<VkDescriptorSetLayoutBinding> binds(numBuffers);
-        for (uint32_t i = 0; i < numBuffers; ++i)
+            std::vector<VkDescriptorSetLayoutBinding> binds(numBuffers);
+            for (uint32_t i = 0; i < numBuffers; ++i)
+            {
+                binds[i].binding         = i;
+                binds[i].descriptorType  = kBindingType;
+                binds[i].descriptorCount = 1;
+                binds[i].stageFlags      = kComputeStage;
+            }
+            VkDescriptorSetLayoutCreateInfo slci {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            slci.bindingCount = numBuffers;
+            slci.pBindings    = binds.data();
+            // Push descriptors bind buffers inline at dispatch time (no descriptor pool/sets to manage),
+            // which is why dispatch() can take raw VkBuffers. Requires VK_KHR_push_descriptor.
+            const bool usePush = ctx_.caps().pushDescriptor && ctx_.cmdPushDescriptorSet;
+            if (usePush)
+            {
+                slci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+            }
+            VK_CHECK(vkCreateDescriptorSetLayout(ctx_.device(), &slci, nullptr, &setLayout_));
+
+            VkPushConstantRange pcr {};
+            pcr.stageFlags = kComputeStage;
+            pcr.offset     = 0;
+            pcr.size       = pushConstBytes;
+            VkPipelineLayoutCreateInfo plci {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            plci.setLayoutCount = 1;
+            plci.pSetLayouts    = &setLayout_;
+            if (pushConstBytes > 0)
+            {
+                plci.pushConstantRangeCount = 1;
+                plci.pPushConstantRanges    = &pcr;
+            }
+            VK_CHECK(vkCreatePipelineLayout(ctx_.device(), &plci, nullptr, &layout_));
+
+            // Specialization constants: consecutive uint32 at ids 0..N-1.
+            std::vector<VkSpecializationMapEntry> specEntries(specData.size());
+            for (size_t i = 0; i < specData.size(); ++i)
+            {
+                specEntries[i] = {(uint32_t) i, (uint32_t) (i * sizeof(uint32_t)), sizeof(uint32_t)};
+            }
+            VkSpecializationInfo specInfo {};
+            specInfo.mapEntryCount = (uint32_t) specEntries.size();
+            specInfo.pMapEntries   = specEntries.data();
+            specInfo.dataSize      = specData.size() * sizeof(uint32_t);
+            specInfo.pData         = specData.data();
+
+            VkPipelineShaderStageCreateInfo stage {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+            stage.stage  = kComputeStage;
+            stage.module = module_;
+            stage.pName  = kEntryPoint;
+            if (!specData.empty())
+            {
+                stage.pSpecializationInfo = &specInfo;
+            }
+
+            VkComputePipelineCreateInfo cpci {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            cpci.stage  = stage;
+            cpci.layout = layout_;
+            VK_CHECK(vkCreateComputePipelines(ctx_.device(), cache, 1, &cpci, nullptr, &pipeline_));
+        } catch (...)
         {
-            binds[i].binding         = i;
-            binds[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            binds[i].descriptorCount = 1;
-            binds[i].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+            destroy();
+            throw;
         }
-        VkDescriptorSetLayoutCreateInfo slci {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        slci.bindingCount = numBuffers;
-        slci.pBindings    = binds.data();
-        bool usePush      = ctx_.caps().pushDescriptor && ctx_.cmdPushDescriptorSet;
-        if (usePush)
-        {
-            slci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-        }
-        VK_CHECK(vkCreateDescriptorSetLayout(ctx_.device(), &slci, nullptr, &setLayout_));
+    }
 
-        VkPushConstantRange pcr {};
-        pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        pcr.offset     = 0;
-        pcr.size       = pushConstBytes;
-        VkPipelineLayoutCreateInfo plci {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        plci.setLayoutCount = 1;
-        plci.pSetLayouts    = &setLayout_;
-        if (pushConstBytes > 0)
+    void ComputePipeline::destroy() noexcept {
+        if (pipeline_ != VK_NULL_HANDLE)
         {
-            plci.pushConstantRangeCount = 1;
-            plci.pPushConstantRanges    = &pcr;
+            vkDestroyPipeline(ctx_.device(), pipeline_, nullptr);
+            pipeline_ = VK_NULL_HANDLE;
         }
-        VK_CHECK(vkCreatePipelineLayout(ctx_.device(), &plci, nullptr, &layout_));
-
-        // Specialization constants: consecutive uint32 at ids 0..N-1.
-        std::vector<VkSpecializationMapEntry> specEntries(specData.size());
-        for (size_t i = 0; i < specData.size(); ++i)
+        if (layout_ != VK_NULL_HANDLE)
         {
-            specEntries[i] = {(uint32_t) i, (uint32_t) (i * sizeof(uint32_t)), sizeof(uint32_t)};
+            vkDestroyPipelineLayout(ctx_.device(), layout_, nullptr);
+            layout_ = VK_NULL_HANDLE;
         }
-        VkSpecializationInfo specInfo {};
-        specInfo.mapEntryCount = (uint32_t) specEntries.size();
-        specInfo.pMapEntries   = specEntries.data();
-        specInfo.dataSize      = specData.size() * sizeof(uint32_t);
-        specInfo.pData         = specData.data();
-
-        VkPipelineShaderStageCreateInfo stage {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-        stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
-        stage.module = module_;
-        stage.pName  = "main";
-        if (!specData.empty())
+        if (setLayout_ != VK_NULL_HANDLE)
         {
-            stage.pSpecializationInfo = &specInfo;
+            vkDestroyDescriptorSetLayout(ctx_.device(), setLayout_, nullptr);
+            setLayout_ = VK_NULL_HANDLE;
         }
-
-        VkComputePipelineCreateInfo cpci {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        cpci.stage  = stage;
-        cpci.layout = layout_;
-        VK_CHECK(vkCreateComputePipelines(ctx_.device(), cache, 1, &cpci, nullptr, &pipeline_));
+        if (module_ != VK_NULL_HANDLE)
+        {
+            vkDestroyShaderModule(ctx_.device(), module_, nullptr);
+            module_ = VK_NULL_HANDLE;
+        }
     }
 
     ComputePipeline::~ComputePipeline() {
-        if (pipeline_)
-        {
-            vkDestroyPipeline(ctx_.device(), pipeline_, nullptr);
-        }
-        if (layout_)
-        {
-            vkDestroyPipelineLayout(ctx_.device(), layout_, nullptr);
-        }
-        if (setLayout_)
-        {
-            vkDestroyDescriptorSetLayout(ctx_.device(), setLayout_, nullptr);
-        }
-        if (module_)
-        {
-            vkDestroyShaderModule(ctx_.device(), module_, nullptr);
-        }
+        destroy();
     }
 
     void ComputePipeline::dispatch(VkCommandBuffer cmd, const std::vector<VkBuffer> &buffers, const void *pushConst, uint32_t pcBytes, uint32_t gx, uint32_t gy, uint32_t gz) {
@@ -135,13 +172,13 @@ namespace vknn { namespace vk {
             writes[i]                 = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
             writes[i].dstBinding      = (uint32_t) i;
             writes[i].descriptorCount = 1;
-            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].descriptorType  = kBindingType;
             writes[i].pBufferInfo     = &infos[i];
         }
         ctx_.cmdPushDescriptorSet(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, (uint32_t) writes.size(), writes.data());
         if (pcBytes > 0)
         {
-            vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, pcBytes, pushConst);
+            vkCmdPushConstants(cmd, layout_, kComputeStage, 0, pcBytes, pushConst);
         }
         // A 1D dispatch whose x group count exceeds the device limit is illegal and is silently
         // dropped on this driver (producing zeroed output). Spill the overflow into the y dimension;

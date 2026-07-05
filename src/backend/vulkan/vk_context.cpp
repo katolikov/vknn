@@ -312,11 +312,11 @@ namespace vknn { namespace vk {
 
         if (caps_.pushDescriptor)
         {
-            cmdPushDescriptorSet = (PFN_vkCmdPushDescriptorSetKHR) vkGetDeviceProcAddr(device_, "vkCmdPushDescriptorSetKHR");
+            cmdPushDescriptorSet = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(vkGetDeviceProcAddr(device_, "vkCmdPushDescriptorSetKHR"));
         }
         if (caps_.externalMemoryFd)
         {
-            getMemoryFd = (PFN_vkGetMemoryFdKHR) vkGetDeviceProcAddr(device_, "vkGetMemoryFdKHR");
+            getMemoryFd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device_, "vkGetMemoryFdKHR"));
         }
     }
 

@@ -3,13 +3,26 @@
 
 namespace vknn { namespace vk {
 
+    namespace {
+        // Fence wait with no deadline: the compute submissions here are always awaited to completion,
+        // and a genuinely hung GPU surfaces as a driver-side device-lost rather than a client timeout.
+        constexpr uint64_t kFenceWaitForever = UINT64_MAX;
+    } // namespace
+
     CommandRunner::CommandRunner(VulkanContext &ctx): ctx_(ctx) {
         VkCommandPoolCreateInfo pci {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pci.queueFamilyIndex = ctx_.computeQueueFamily();
         VK_CHECK(vkCreateCommandPool(ctx_.device(), &pci, nullptr, &pool_));
         VkFenceCreateInfo fci {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        VK_CHECK(vkCreateFence(ctx_.device(), &fci, nullptr, &fence_));
+        VkResult          fr = vkCreateFence(ctx_.device(), &fci, nullptr, &fence_);
+        if (fr != VK_SUCCESS)
+        {
+            // The pool is already created; a throwing constructor never runs the destructor, so free it.
+            vkDestroyCommandPool(ctx_.device(), pool_, nullptr);
+            pool_ = VK_NULL_HANDLE;
+            throw Error(Status::RuntimeError, std::string("vkCreateFence -> ") + vkResultStr(fr));
+        }
     }
 
     CommandRunner::~CommandRunner() {
@@ -48,7 +61,7 @@ namespace vknn { namespace vk {
         si.pCommandBuffers    = &cmd;
         auto t0               = std::chrono::high_resolution_clock::now();
         VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), 1, &si, fence_));
-        VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, UINT64_MAX));
+        VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, kFenceWaitForever));
         auto t1 = std::chrono::high_resolution_clock::now();
         return std::chrono::duration<double, std::milli>(t1 - t0).count();
     }

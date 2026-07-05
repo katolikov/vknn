@@ -7,20 +7,23 @@
 
 namespace vknn { namespace vk {
 
+    /// Owns a 2D RGBA16F storage image, its device memory, and its view (RAII); not copyable or movable.
     class Image {
       public:
         Image(VulkanContext &ctx, int width, int height);
         ~Image();
         Image(const Image &)            = delete;
         Image &operator=(const Image &) = delete;
+        Image(Image &&)                 = delete;
+        Image &operator=(Image &&)      = delete;
 
-        VkImageView view() const {
+        VkImageView view() const noexcept {
             return view_;
         }
-        int width() const {
+        int width() const noexcept {
             return w_;
         }
-        int height() const {
+        int height() const noexcept {
             return h_;
         }
 
@@ -34,6 +37,8 @@ namespace vknn { namespace vk {
         static bool supported(VulkanContext &ctx);
 
       private:
+        void destroy() noexcept; ///< Release view/image/memory; safe from the destructor and a failing constructor.
+
         VulkanContext &ctx_;
         int            w_, h_;
         VkImage        img_  = VK_NULL_HANDLE;

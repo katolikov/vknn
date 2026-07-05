@@ -32,6 +32,18 @@ namespace vknn { namespace vk {
                 return "VK_ERROR_INCOMPATIBLE_DRIVER";
             case VK_ERROR_MEMORY_MAP_FAILED:
                 return "VK_ERROR_MEMORY_MAP_FAILED";
+            case VK_ERROR_TOO_MANY_OBJECTS:
+                return "VK_ERROR_TOO_MANY_OBJECTS"; // hit maxMemoryAllocationCount
+            case VK_ERROR_FORMAT_NOT_SUPPORTED:
+                return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+            case VK_ERROR_FRAGMENTED_POOL:
+                return "VK_ERROR_FRAGMENTED_POOL";
+            case VK_ERROR_OUT_OF_POOL_MEMORY:
+                return "VK_ERROR_OUT_OF_POOL_MEMORY";
+            case VK_ERROR_INVALID_EXTERNAL_HANDLE:
+                return "VK_ERROR_INVALID_EXTERNAL_HANDLE"; // bad dma-buf fd on import
+            case VK_ERROR_NOT_PERMITTED_KHR:
+                return "VK_ERROR_NOT_PERMITTED_KHR"; // global-priority tier refused
             default:
                 return "VK_ERROR_<other>";
         }
