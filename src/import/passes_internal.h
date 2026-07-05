@@ -16,6 +16,10 @@ namespace vknn {
     // on the flat row-major GPU path (defined in insert_layout_converts.cpp).
     bool gpuFlatNode(const Graph &g, const Node &n);
 
+    // The Config::fp32Tensors include/exclude substring matcher, shared by markFp32 (load) and the
+    // fusion pass's compile-time fp32 prediction (defined in mark_fp32.cpp).
+    bool fp32NameMatch(const std::string &name, const std::string &substrs);
+
     // Redirect every reference to tensor `from` so it points at `to`: node inputs, the fused-residual
     // edge (which is not in the inputs list on every op), and graph outputs. Fusion passes that delete a
     // node and fold its output into a producer must use this; rewiring only node.inputs leaves a stale

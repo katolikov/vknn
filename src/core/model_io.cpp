@@ -13,9 +13,10 @@ namespace vknn {
     namespace {
         // Format version guard, stored as the first word of every .vxm. A load whose leading word
         // does not match is rejected: the on-disk layout is field-order- and width-sensitive, so
-        // bumping this is the only safe way to evolve the schema. The "2" revision carries
-        // Node.fusedBias; older files fail the check rather than mis-parse.
-        constexpr uint32_t kMagic = 0x324d5856; // "VXM2"
+        // bumping this is the only safe way to evolve the schema. The "3" revision widens the
+        // pw_steps encoding from 4-int chain records to 8-int register-DAG records (+pw_outs);
+        // older files fail the check rather than mis-parse their fused nodes.
+        constexpr uint32_t kMagic = 0x334d5856; // "VXM3"
 
         // Raw fixed-width serialization: every pod()/vec() writes host-endian bytes with no framing.
         // The Reader must consume fields in the exact same order the Writer emits them.

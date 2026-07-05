@@ -13,14 +13,16 @@ namespace vknn {
             /// Resolve one parameter list (`starts`/`ends`/`axes`/`steps`) from whichever opset form
             /// carries it: the attribute `attr` (opset < 10) takes precedence, else the int64
             /// initializer at inputs[`idx`] (opset 10+). Returns empty when neither is provided,
-            /// which the caller treats as the ONNX default (all axes / unit step).
+            /// which the caller treats as the ONNX default (all axes / unit step). Reads are bounded
+            /// by pwCoreInputs: inputs appended past it are fused-unit operands, and misreading one
+            /// as `steps` would silently stride the slice by a float's bit pattern.
             static std::vector<int64_t> rd(const Node &n, ExecContext &ctx, const char *attr, int idx) {
                 const auto &a = n.attr.getints(attr);
                 if (!a.empty())
                 {
                     return a;
                 }
-                if (idx < (int) n.inputs.size() && n.inputs[idx] != kNoTensor)
+                if (idx < (int) pwCoreInputs(n) && n.inputs[idx] != kNoTensor)
                 {
                     const RtTensor &t = ctx.t(n.inputs[idx]);
                     return std::vector<int64_t>(t.host.i64(), t.host.i64() + t.elems());

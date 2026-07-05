@@ -64,20 +64,29 @@ namespace vknn {
             {
                 continue; // tuneWino owns this shape
             }
+            // The kernel tiles OH*OW on the dispatch Y axis (64 pixels per group) and batch on Z,
+            // neither of which the runtime's 1-D split can rescue past the device group-count limit;
+            // an oversized spatial output keeps the plain Conv (its kernels split on X).
+            if ((os[2] * os[3] + 63) / 64 > 65535 || os[0] > 65535)
+            {
+                continue;
+            }
 
             // Repack W[oc][ic][ky][kx] -> Wt[(ic*KH+ky)*KW+kx][oc]: a byte-level permutation, exact
-            // for any element dtype.
+            // for any element dtype. wd's reference dies at the addTensor below (Graph::tensors may
+            // reallocate), so everything it feeds is captured first.
             const HostBuffer &src = g.initializers.at(wId);
-            size_t            es  = dtypeSize(wd.dtype);
+            DType             wdt = wd.dtype;
+            size_t            es  = dtypeSize(wdt);
             int64_t           K   = Cin * KH * KW;
             TensorDesc        td;
             td.name          = g.desc(wId).name + "#gemmw";
             td.shape         = {K, Cout};
-            td.dtype         = wd.dtype;
+            td.dtype         = wdt;
             td.isInitializer = true;
             TensorId   wtId  = g.addTensor(td);
             HostBuffer wt;
-            wt.resizeElems(K * Cout, wd.dtype);
+            wt.resizeElems(K * Cout, wdt);
             const uint8_t *sp = src.bytes.data();
             uint8_t       *dp = wt.bytes.data();
             for (int64_t oc = 0; oc < Cout; ++oc)

@@ -207,6 +207,11 @@ namespace vknn {
                 }
                 return outElems * std::max<int64_t>(k, 1);
             }
+            if (nd.type == OpType::ConvGemm && nd.inputs.size() > 1)
+            {
+                const Shape &w = graph_.desc(nd.inputs[1]).shape; // repacked [K, Cout]: dim 0 IS Cin*KH*KW
+                return outElems * std::max<int64_t>(w.empty() ? 1 : w[0], 1);
+            }
             return outElems;
         };
         const int64_t kKeepOnGpu = 2'000'000; // work below this isn't worth a CPU<->GPU round trip
@@ -645,7 +650,7 @@ namespace vknn {
             std::set<TensorId> freeable;
             for (const auto &nd: graph_.nodes)
             {
-                if (nd.type == OpType::Conv || nd.type == OpType::MatMul || nd.type == OpType::Gemm)
+                if (nd.type == OpType::Conv || nd.type == OpType::MatMul || nd.type == OpType::Gemm || nd.type == OpType::ConvGemm)
                 {
                     for (TensorId in: nd.inputs)
                     {

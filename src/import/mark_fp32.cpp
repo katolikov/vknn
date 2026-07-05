@@ -2,19 +2,15 @@
 
 namespace vknn {
 
-    // Selective fp32: mark every activation tensor whose name contains one of the comma-separated
-    // substrings (Config::fp32Tensors) so its buffer stays fp32 under fp16 compute, then bridge the
-    // fp16/fp32 frontier with ConvertDtype nodes — for each node, any activation input whose storage
-    // dtype differs from the node's (its output[0]) gets a convert, exactly mirroring insertLayoutConverts.
-    // Initializers are skipped: ops upload them at the node's precision (env.useFp16). Runs at load, after
-    // insertLayoutConverts, so it operates on the final flat names.
-    void markFp32(Graph &g, const std::string &substrs) {
-        if (substrs.empty())
+    // The Config::fp32Tensors matcher: a comma list of substrings; a leading '-' marks an EXCLUDE
+    // (a name with an excluded substring is never marked even if it matches an include), so a
+    // fragile sub-region can be carved out. Shared with the fusion pass's compile-time prediction
+    // (pwTensorIsFp32) — the two MUST agree or a fused unit can span a tensor markFp32 pins.
+    bool fp32NameMatch(const std::string &nm, const std::string &substrs) {
+        if (nm.empty() || substrs.empty())
         {
-            return;
+            return false;
         }
-        // Comma list of substrings; a leading '-' marks an EXCLUDE (a name with an excluded substring is
-        // never marked even if it matches an include), so a fragile sub-region can be carved out.
         std::vector<std::string> incl, excl;
         for (size_t p = 0, c;; p = c + 1)
         {
@@ -29,26 +25,36 @@ namespace vknn {
                 break;
             }
         }
-        auto matches = [&](const std::string &nm) {
-            if (nm.empty())
+        for (const auto &s: excl)
+        {
+            if (nm.find(s) != std::string::npos)
             {
                 return false;
             }
-            for (const auto &s: excl)
+        }
+        for (const auto &s: incl)
+        {
+            if (nm.find(s) != std::string::npos)
             {
-                if (nm.find(s) != std::string::npos)
-                {
-                    return false;
-                }
+                return true;
             }
-            for (const auto &s: incl)
-            {
-                if (nm.find(s) != std::string::npos)
-                {
-                    return true;
-                }
-            }
-            return false;
+        }
+        return false;
+    }
+
+    // Selective fp32: mark every activation tensor whose name contains one of the comma-separated
+    // substrings (Config::fp32Tensors) so its buffer stays fp32 under fp16 compute, then bridge the
+    // fp16/fp32 frontier with ConvertDtype nodes — for each node, any activation input whose storage
+    // dtype differs from the node's (its output[0]) gets a convert, exactly mirroring insertLayoutConverts.
+    // Initializers are skipped: ops upload them at the node's precision (env.useFp16). Runs at load, after
+    // insertLayoutConverts, so it operates on the final flat names.
+    void markFp32(Graph &g, const std::string &substrs) {
+        if (substrs.empty())
+        {
+            return;
+        }
+        auto matches = [&](const std::string &nm) {
+            return fp32NameMatch(nm, substrs);
         };
         // Only flat tensors are eligible: the flat transformer/geometry kernels all #include precision.glsl
         // so an fp32 SPIR-V variant exists, whereas the NC4HW4 conv family (conv/wino/dwconv/fc/pool) is
@@ -66,6 +72,26 @@ namespace vknn {
         {
             VKNN_INFO << "markFp32: no tensor matched fp32Tensors=\"" << substrs << "\"";
             return;
+        }
+        // A kernel writes every output in ONE storage precision (its outputs[0]'s), so all outputs
+        // of a multi-output node must share a mark — a fused unit's exported stream (pw_outs) pinned
+        // differently from the main output would be written half-empty (fp16 stores into an fp32
+        // buffer) or overrun (the reverse). Align to outputs[0]; consumers needing the other
+        // precision get their ConvertDtype from the frontier walk below.
+        for (auto &nd: g.nodes)
+        {
+            if (nd.outputs.size() < 2 || nd.outputs[0] == kNoTensor)
+            {
+                continue;
+            }
+            bool nodeFp32 = g.desc(nd.outputs[0]).storeFp32;
+            for (size_t k = 1; k < nd.outputs.size(); ++k)
+            {
+                if (nd.outputs[k] != kNoTensor)
+                {
+                    g.desc(nd.outputs[k]).storeFp32 = nodeFp32;
+                }
+            }
         }
         // (source tensor, wantFp32) -> already-converted tensor, so one frontier tensor consumed at a
         // given precision by several nodes is converted once and the result shared.

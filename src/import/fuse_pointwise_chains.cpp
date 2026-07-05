@@ -6,8 +6,8 @@ namespace vknn {
     // Is this tensor forced to fp32 storage by the selective-fp32 preset (Precision::Normal), or
     // already marked storeFp32 by an earlier pass run? A fused kernel stores its whole unit in one
     // dtype, so fusing across such a tensor would round an intermediate that must stay fp32 to fp16 —
-    // breaking bit-exactness. Matches by name substring (mixedPrecisionFp32Tensors()), the same rule
-    // markFp32 applies at load; a no-op for models without those names (e.g. CNNs).
+    // breaking bit-exactness. Uses fp32NameMatch — the exact include/exclude rule markFp32 applies
+    // at load; a no-op for models without those names (e.g. CNNs).
     static bool pwTensorIsFp32(const Graph &g, TensorId t) {
         if (t == kNoTensor)
         {
@@ -18,27 +18,7 @@ namespace vknn {
             return true;
         }
         static const std::string marks = mixedPrecisionFp32Tensors();
-        const std::string       &nm    = g.desc(t).name;
-        if (nm.empty() || marks.empty())
-        {
-            return false;
-        }
-        size_t start = 0;
-        while (start < marks.size())
-        {
-            size_t      comma = marks.find(',', start);
-            std::string sub   = marks.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-            if (!sub.empty() && nm.find(sub) != std::string::npos)
-            {
-                return true;
-            }
-            if (comma == std::string::npos)
-            {
-                break;
-            }
-            start = comma + 1;
-        }
-        return false;
+        return fp32NameMatch(g.desc(t).name, marks);
     }
 
     static bool pwFloatDtype(DType d) {

@@ -36,9 +36,12 @@ namespace vknn {
                 auto k = a("kernel_shape", {1, 1}), st = a("strides", {1, 1});
                 auto p = a("pads", {0, 0, 0, 0}), dl = a("dilations", {1, 1});
 
+                // Bias presence bounds by pwCoreInputs: inputs appended past it are fused-unit
+                // operands, and reading one as the bias would double-apply it.
+                bool hasBias = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor;
                 pc = {(int) x.c,  (int) x.h,  (int) x.w,  (int) y.c,  (int) y.h,  (int) y.w,
                       (int) k[0], (int) k[1], (int) st[0], (int) st[1], (int) p[0], (int) p[1],
-                      (int) dl[0], (int) dl[1], (int) node.fusedAct, node.inputs.size() > 2 && node.inputs[2] != kNoTensor ? 1 : 0,
+                      (int) dl[0], (int) dl[1], (int) node.fusedAct, hasBias ? 1 : 0,
                       node.actLo, node.actHi};
 
                 wt = uploadInit(env, node.inputs[1], g.desc(node.inputs[1]).shape);
