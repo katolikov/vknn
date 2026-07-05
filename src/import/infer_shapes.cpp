@@ -308,11 +308,16 @@ namespace vknn {
                     }
                     NCHW         x  = NCHW::from(SH(nd.inputs[0])); // expanded input [N,E,H,W]
                     const Shape &pw = SH(nd.inputs[3]);             // project weights [Cout,E,1,1]
+                    const Shape &dw = SH(nd.inputs[1]);             // depthwise weights [E,1,KH,KW]
                     auto         a  = [&](const char *k, std::vector<int64_t> d) {
                         const auto &v = nd.attr.getints(k);
                         return v.empty() ? d : v;
                     };
-                    auto    k = a("kernel_shape", {3, 3}), st = a("strides", {1, 1});
+                    // Kernel size from the depthwise weight shape: the kernel_shape attr is
+                    // optional in ONNX and the runtime kernel reads the weight dims too — a {3,3}
+                    // fallback mis-sizes every 5x5 pair whose conv omitted the attr.
+                    auto    k   = dw.size() == 4 ? std::vector<int64_t> {dw[2], dw[3]} : a("kernel_shape", {3, 3});
+                    auto    st  = a("strides", {1, 1});
                     auto    pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
                     int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (k[0] - 1) + 1)) / st[0] + 1;
                     int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (k[1] - 1) + 1)) / st[1] + 1;
