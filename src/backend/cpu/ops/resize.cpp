@@ -1,6 +1,7 @@
 // Resize / Upsample (spatial), NCHW reference. nearest + linear(bilinear); coordinate transform
 // modes half_pixel / align_corners / asymmetric / pytorch_half_pixel. Output shape from
-// inferShapes.
+// inferShapes. Only the H and W axes are resampled; N and C pass through unchanged, so each
+// (n, c) plane is resized independently against the source (x.h * x.w) plane.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -8,10 +9,14 @@
 
 namespace vknn {
 
-    // mode codes shared with the shader
+    // mode codes shared with the shader: 0 = nearest, 1 = linear/bilinear. Any unrecognized
+    // interpolation-mode string falls back to nearest.
     int vxResizeMode(const std::string &s) {
         return s == "linear" || s == "bilinear" ? 1 : 0;
     }
+    // Coordinate-transformation-mode code shared with the shader: 0 = half_pixel (the ONNX
+    // default and the fallback for any unrecognized string), 1 = align_corners, 2 = asymmetric,
+    // 3 = pytorch_half_pixel. srcCoord() dispatches on this code.
     int vxResizeCoord(const std::string &s) {
         if (s == "align_corners")
         {
@@ -27,20 +32,30 @@ namespace vknn {
         }
         return 0; // half_pixel
     }
+    // Map an output pixel index `d` (along one spatial axis of length `outS`) back to a fractional
+    // source coordinate in the input axis of length `inS`, per the ONNX Resize coordinate-transform
+    // formulas. `scale = outS / inS` is the resize ratio for the modes expressed in terms of it.
+    // Nearest-neighbor rounds this value; bilinear splits it into floor + fractional weight.
     static float srcCoord(int d, int outS, int inS, int coordMode) {
         float scale = (float) outS / (float) inS;
         if (coordMode == 1)
         {
+            // align_corners: endpoints coincide, so d maps linearly over [0, inS-1]. A degenerate
+            // outS==1 has no interval to span and collapses to 0 (avoids the /(outS-1) divide-by-zero).
             return outS > 1 ? (float) d * (inS - 1) / (outS - 1) : 0.f; // align_corners
         }
         if (coordMode == 2)
         {
-            return (float) d / scale; // asymmetric
+            return (float) d / scale; // asymmetric: pixel corners align at the origin, no half-pixel shift
         }
         if (coordMode == 3)
         {
+            // pytorch_half_pixel: same half-pixel formula as mode 0, but a single-pixel output axis
+            // (outS==1) maps to 0 rather than -0.5.
             return outS > 1 ? ((float) d + 0.5f) / scale - 0.5f : 0.f; // pytorch_half_pixel
         }
+        // half_pixel (ONNX default): sample at each output pixel's center, converted to the input's
+        // pixel-center coordinate system, so the +0.5 / -0.5 shifts bracket the /scale rescale.
         return ((float) d + 0.5f) / scale - 0.5f; // half_pixel
     }
 
@@ -59,6 +74,8 @@ namespace vknn {
                 auto            clampi    = [](int v, int lo, int hi) {
                     return v < lo ? lo : (v > hi ? hi : v);
                 };
+                // Walk N and C outermost; xc / yc point at the start of the current source and
+                // destination H*W planes (row-major, so element (row, col) sits at row*width + col).
                 for (int64_t n = 0; n < x.n; ++n)
                 {
                     for (int64_t c = 0; c < x.c; ++c)
@@ -74,6 +91,8 @@ namespace vknn {
                                 float v;
                                 if (mode == 0)
                                 { // nearest (round_prefer_floor)
+                                    // round_prefer_floor: floor, then bump up only when strictly past
+                                    // the midpoint, so an exact .5 rounds down (toward the floor).
                                     int iy = (int) std::floor(fy);
                                     if (fy - iy > 0.5f)
                                     {
@@ -84,17 +103,27 @@ namespace vknn {
                                     {
                                         ix++;
                                     }
+                                    // Clamp to the valid input range so half_pixel's negative edge
+                                    // coordinates (and the align_corners tail) read the border pixel.
                                     iy = clampi(iy, 0, (int) x.h - 1);
                                     ix = clampi(ix, 0, (int) x.w - 1);
                                     v  = xc[iy * x.w + ix];
                                 } else
                                 { // bilinear
+                                    // Floor gives the top-left neighbor (iy0, ix0); wy/wx are the
+                                    // fractional distances into the 2x2 cell toward the bottom-right.
                                     int   iy0 = (int) std::floor(fy), ix0 = (int) std::floor(fx);
                                     float wy = fy - iy0, wx = fx - ix0;
+                                    // Clamp all four corner indices independently so out-of-range
+                                    // samples (edges) fold onto the nearest in-bounds pixel while the
+                                    // interpolation weights below stay unchanged.
                                     int   iy1 = clampi(iy0 + 1, 0, (int) x.h - 1), ix1 = clampi(ix0 + 1, 0, (int) x.w - 1);
                                     int   cy0 = clampi(iy0, 0, (int) x.h - 1), cx0 = clampi(ix0, 0, (int) x.w - 1);
+                                    // Four corners: a=top-left, b=top-right, cc=bottom-left, d=bottom-right.
                                     float a = xc[cy0 * x.w + cx0], b = xc[cy0 * x.w + ix1];
                                     float cc = xc[iy1 * x.w + cx0], d = xc[iy1 * x.w + ix1];
+                                    // Bilinear blend: the four bilinear weights ((1-wy)/(wy) x (1-wx)/(wx))
+                                    // sum to 1; this fixed left-to-right summation order is observable in fp32.
                                     v = a * (1 - wy) * (1 - wx) + b * (1 - wy) * wx + cc * wy * (1 - wx) + d * wy * wx;
                                 }
                                 yc[oy * OW + ox] = v;

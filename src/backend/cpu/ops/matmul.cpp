@@ -54,6 +54,9 @@ namespace vknn {
                 }
 
                 // Per-batch-dim element strides into A's and B's matrix stacks (0 on a broadcast dim).
+                // sA/sB seed at one full matrix (M*K, K*N elements) and accumulate the trailing batch
+                // dims' extents as the loop walks right to left, so aBatchStride[i] is the element step
+                // between successive matrices along batch axis i.
                 std::vector<int64_t> aBatchStride(batchRank, 0), bBatchStride(batchRank, 0);
                 int64_t              sA = M * K, sB = K * N;
                 for (int64_t i = batchRank - 1; i >= 0; --i)
@@ -100,6 +103,9 @@ namespace vknn {
                     const float *am = a + aBase;
                     const float *bm = b + bBase;
                     float       *ym = y + bi * M * N;
+                    // Row-major single-matrix product: A[m,k] is am[m*K+k], B[k,n] is bm[k*N+n], and the
+                    // result Y[m,n] is ym[m*N+n]. acc sums over k in ascending order in fp32; that
+                    // accumulation order is the observable reference the host byte-compare validates.
                     for (int64_t m = 0; m < M; ++m)
                     {
                         for (int64_t n = 0; n < N; ++n)

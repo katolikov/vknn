@@ -14,7 +14,10 @@ namespace vknn {
                     axis += rank;
                 }
                 int64_t nout = (int64_t) node.outputs.size();
-                // outer = product of dims before axis; inner = product after axis
+                // Collapse the input to a 3-D view [outer, X.shape[axis], inner] by folding every
+                // dim before the split axis into `outer` and every dim after it into `inner`. The
+                // split then partitions only the middle (axis) dimension; outer and inner are shared
+                // by all outputs, so a copy is a contiguous run of `inner` elements per (outer, axis).
                 int64_t outer = 1, inner = 1;
                 for (int i = 0; i < axis; ++i)
                 {
@@ -24,19 +27,27 @@ namespace vknn {
                 {
                     inner *= X.shape[i];
                 }
+                // Split copies raw elements, so only the element WIDTH matters: int64 outputs are moved
+                // through the i64 view, everything else (fp32 and any type aliased to it) through f32.
                 bool    i64 = X.dtype == DType::Int64;
-                int64_t off = 0; // running offset along axis
+                int64_t off = 0; // running start of output k along the split axis; += seg after each output
                 for (int64_t k = 0; k < nout; ++k)
                 {
+                    // A kNoTensor output slot has no destination tensor; skip it before `off` advances,
+                    // so it consumes no span of the split axis (unused parts must have segment size 0).
                     if (node.outputs[k] == kNoTensor)
                     {
                         continue;
                     }
                     RtTensor &Y   = ctx.t(node.outputs[k]);
                     Shape     os  = ctx.graph->desc(node.outputs[k]).shape;
-                    int64_t   seg = os[axis];
+                    int64_t   seg = os[axis]; // this output's extent along the split axis (its share of the split)
                     float    *yf  = i64 ? nullptr : cpu::allocOut(Y, os);
                     int64_t  *yi  = i64 ? cpu::allocOutI64(Y, os) : nullptr;
+                    // For each outer slab `o` and each position `s` within this output's segment, copy
+                    // the contiguous `inner`-length row. Source axis index is `off + s` (this output's
+                    // slice of the input axis), so the input is strided by its full X.shape[axis]; the
+                    // output is dense, strided by its own `seg`. Row-major flat offsets = coord * inner.
                     for (int64_t o = 0; o < outer; ++o)
                     {
                         for (int64_t s = 0; s < seg; ++s)

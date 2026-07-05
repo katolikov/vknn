@@ -43,7 +43,9 @@ namespace vknn {
                 }
 
                 const int64_t *idx = I.host.i64();
-                bool           i64 = D.dtype == DType::Int64;
+                // updates and output share data's dtype; only element size (8 vs 4 bytes) and buffer
+                // typing differ between the two branches, so the index arithmetic below is identical.
+                bool i64 = D.dtype == DType::Int64;
 
                 if (i64)
                 {
@@ -52,6 +54,8 @@ namespace vknn {
                     const int64_t *u = U.host.i64();
                     for (int64_t r = 0; r < rows; ++r)
                     {
+                        // Resolve one q-tuple index row to a flat element offset into data. Each
+                        // component ix<0 wraps by +ds[c] (ONNX per-dim negative indexing).
                         int64_t off = 0;
                         for (int c = 0; c < q; ++c)
                         {
@@ -71,6 +75,8 @@ namespace vknn {
                     const float *u = U.host.f32();
                     for (int64_t r = 0; r < rows; ++r)
                     {
+                        // Resolve one q-tuple index row to a flat element offset into data. Each
+                        // component ix<0 wraps by +ds[c] (ONNX per-dim negative indexing).
                         int64_t off = 0;
                         for (int c = 0; c < q; ++c)
                         {

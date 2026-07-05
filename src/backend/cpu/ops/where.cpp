@@ -22,6 +22,8 @@ namespace vknn {
                 const Shape    &sc = C.shape, &sx = X.shape, &sy = Yv.shape;
                 size_t          rank = std::max(sc.size(), std::max(sx.size(), sy.size()));
                 Shape           out(rank, 1);
+                // Right-align the shorter operand: NumPy broadcasting matches axes from the trailing
+                // end, so a shape shorter than `rank` reads as an implicit leading run of size-1 dims.
                 auto            dimOf = [&](const Shape &s, size_t i) -> int64_t {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
@@ -32,6 +34,10 @@ namespace vknn {
                     out[i]     = (dc == 0 || dx == 0 || dy == 0) ? 0 : std::max(dc, std::max(dx, dy)); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
                 int64_t              n = numElements(out);
+                // Per-axis input strides in row-major (C-contiguous) order, built right to left. A
+                // broadcast axis (input dim 1, output dim > 1) gets stride 0 so every output index
+                // along it re-reads the single source element; a non-broadcast axis carries the
+                // running product of the trailing input dims. sC/sX/sY accumulate that product.
                 std::vector<int64_t> oc(rank), ox(rank), oy(rank);
                 int64_t              sC = 1, sX = 1, sY = 1;
                 for (int i = (int) rank - 1; i >= 0; --i)
@@ -47,7 +53,10 @@ namespace vknn {
                 auto condTrue = [](const RtTensor &T, int64_t i) -> bool {
                     return T.dtype == DType::Int64 ? T.host.i64()[i] != 0 : T.host.f32()[i] != 0.0f;
                 };
-                // broadcast-index helper: maps a linear output index to (cond, X, Y) source offsets.
+                // Broadcast-index helper: decodes a flat row-major output index `lin` back into its
+                // per-axis coordinate `id` (the output stride along axis d is the product of the
+                // trailing output dims), then projects `id` through the zero-collapsing strides
+                // oc/ox/oy to yield each operand's source offset under broadcasting.
                 auto offsets = [&](int64_t lin, int64_t &ic, int64_t &ix, int64_t &iy) {
                     ic = ix = iy = 0;
                     for (size_t d = 0; d < rank; ++d)

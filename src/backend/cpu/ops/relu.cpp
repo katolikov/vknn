@@ -1,4 +1,9 @@
-// ReLU.
+// ReLU: elementwise y = max(x, 0), fp32. The output mirrors the input's shape exactly (no
+// broadcasting, no axis), so this is a straight flat walk over all elements.
+//
+// The rectifier is expressed as `x > 0 ? x : 0` rather than a true max: because `NaN > 0` is
+// false, a NaN input falls through to 0, whereas std::max(NaN, 0) would propagate the NaN. The
+// -0.0 input case also yields +0 here (`-0.0 > 0` is false).
 #include "backend/cpu/cpu_backend.h"
 
 namespace vknn {
@@ -13,6 +18,8 @@ namespace vknn {
                 const float    *x = X.host.f32();
                 for (int64_t i = 0; i < n; ++i)
                 {
+                    // Positive values pass through unchanged; everything else (including NaN, which
+                    // fails the comparison) becomes 0. See header for the NaN/-0.0 rationale.
                     y[i] = x[i] > 0 ? x[i] : 0;
                 }
             }

@@ -1,4 +1,6 @@
-// PRelu: y = x>0 ? x : slope*x, slope per-channel (or scalar). slope is initializer input[1].
+// PRelu: y = x>0 ? x : slope*x, applied elementwise. The slope is input[1], a per-channel vector
+// (one value per C) or a single scalar broadcast to every element; ONNX supplies it as an
+// initializer. Unlike leaky ReLU the negative-side slope is learned, not fixed.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 
@@ -15,6 +17,10 @@ namespace vknn {
                 const float    *xd     = X.host.f32();
                 const float    *s      = S.host.f32();
                 int64_t         nslope = S.elems();
+                // Walk the input in flat row-major (NCHW-contiguous) order. Each element's channel is
+                // c = (i / (H*W)) % C, since consecutive H*W elements share a channel and channels repeat
+                // once per N. A single-element slope is the scalar case (broadcast to all channels);
+                // otherwise the per-channel slope is indexed by c. Positive inputs pass through unscaled.
                 for (int64_t i = 0; i < n; ++i)
                 {
                     int64_t c  = (i / hw) % x.c;

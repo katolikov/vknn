@@ -19,12 +19,13 @@ namespace vknn {
                     const RtTensor &A = ctx.t(node.inputs[1]);
                     axes.assign(A.host.i64(), A.host.i64() + A.elems());
                 }
+                // `drop[k]` marks axis k for removal; the surviving axes keep their original order.
                 std::vector<bool> drop(rank, false);
                 if (axes.empty())
                 {
                     for (int k = 0; k < rank; ++k)
                     {
-                        drop[k] = (X.shape[k] == 1); // remove every size-1 dim
+                        drop[k] = (X.shape[k] == 1); // no axes given: remove every size-1 dim
                     }
                 } else
                 {
@@ -32,8 +33,11 @@ namespace vknn {
                     {
                         if (ax < 0)
                         {
-                            ax += rank;
+                            ax += rank; // ONNX allows negative axes, counted from the end
                         }
+                        // Out-of-range axes are silently skipped rather than clamped, so a stale index
+                        // never marks an unintended dim; a listed axis whose size is not 1 is still
+                        // dropped here (ONNX leaves that case to the shape checker, not this kernel).
                         if (ax >= 0 && ax < rank)
                         {
                             drop[ax] = true;
@@ -50,8 +54,9 @@ namespace vknn {
                 }
                 if (out.empty())
                 {
-                    out.push_back(1); // scalar -> [1]
+                    out.push_back(1); // every dim dropped (rank-0 result): represent the scalar as [1]
                 }
+                // Element count is unchanged, so this is a byte copy of X's data under the new shape.
                 cpu::copyAs(X, Y, out);
             }
             bool supportsDType(DType) const override {

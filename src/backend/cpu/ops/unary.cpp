@@ -7,6 +7,13 @@
 namespace vknn {
     namespace {
 
+        /// Evaluate one elementwise unary activation in fp32.
+        /// @param x  Input value.
+        /// @param op UnaryType sub-code (Node::subOp).
+        /// @param a  First parameter (Node::actLo): LeakyRelu/Elu alpha, HardSigmoid alpha. Ignored by
+        ///           parameter-free ops.
+        /// @param b  Second parameter (Node::actHi): HardSigmoid beta. Ignored by every other op.
+        /// @returns  op(x). Invalid (and any unlisted code) passes x through unchanged.
         static float unary(float x, UnaryType op, float a, float b) {
             switch (op)
             {
@@ -17,11 +24,12 @@ namespace vknn {
                 case UnaryType::HardSwish:
                     return x * std::min(std::max(x + 3.f, 0.f), 6.f) / 6.f;
                 case UnaryType::HardSigmoid:
+                    // clamp(alpha*x + beta, 0, 1); alpha in a, beta in b (ONNX defaults 0.2, 0.5).
                     return std::min(std::max(a * x + b, 0.f), 1.f);
                 case UnaryType::LeakyRelu:
-                    return x > 0 ? x : a * x;
+                    return x > 0 ? x : a * x; // negative slope alpha in a
                 case UnaryType::Elu:
-                    return x > 0 ? x : a * (std::exp(x) - 1.f);
+                    return x > 0 ? x : a * (std::exp(x) - 1.f); // saturation scale alpha in a
                 case UnaryType::Abs:
                     return std::fabs(x);
                 case UnaryType::Neg:
@@ -49,6 +57,8 @@ namespace vknn {
                 case UnaryType::Reciprocal:
                     return 1.f / x;
                 case UnaryType::Softplus:
+                    // log(1 + exp(x)), evaluated as max(x,0) + log1p(exp(-|x|)) so the exp never
+                    // overflows for large positive x and stays accurate for large negative x.
                     return std::max(x, 0.f) + std::log1p(std::exp(-std::fabs(x)));
                 case UnaryType::Invalid:
                     break;
@@ -57,6 +67,8 @@ namespace vknn {
         }
 
         struct UnaryCpu: CpuOp {
+            // Apply the selected activation independently to each fp32 element; output keeps the input
+            // shape. subOp selects the op and actLo/actHi carry its parameters (see unary()).
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X = ctx.t(node.inputs[0]);
                 RtTensor       &Y = ctx.t(node.outputs[0]);
