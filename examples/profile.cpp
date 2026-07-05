@@ -1,6 +1,16 @@
 // vknn_profile - run a model with profiling: per-op timing table + JSON + Chrome trace.
 //
-// Flags: --model PATH --input PATH --backend NAME --precision P --trace PATH --json PATH
+// Runs the model twice (a warmup pass that fills kernel/weight caches, then a profiled pass) and
+// emits the profiler's per-op timing table to stdout, the records as JSON, and a chrome://tracing
+// file. Assumes a single fp32 NCHW input named "input" of shape 1x3x224x224.
+//
+// Flags:
+//   --model PATH      ONNX model to load (default assets/mobilenetv2.onnx)
+//   --input PATH      raw float32 NCHW input blob; missing or short -> zero-filled (default assets/input.bin)
+//   --backend NAME    vulkan|cpu (default vulkan)
+//   --precision P     low|normal|high (default low)
+//   --trace PATH      chrome://tracing output (default /data/local/tmp/vxrt/trace.json)
+//   --json PATH       per-op records JSON output (default /data/local/tmp/vxrt/profile.json)
 #include "vknn/session.h"
 #include <cstdio>
 #include <cstring>
@@ -8,7 +18,8 @@
 #include <string>
 
 using namespace vknn;
-static const char *argval(int c, char **v, const char *k, const char *d) {
+// Return the argument following flag `k` in argv, or default `d` if the flag is absent.
+static const char *argval(int c, char **v, const char *k, const char *d) noexcept {
     for (int i = 1; i < c - 1; ++i)
     {
         if (!strcmp(v[i], k))
@@ -18,6 +29,7 @@ static const char *argval(int c, char **v, const char *k, const char *d) {
     }
     return d;
 }
+// Read `p` wholesale into a byte vector; returns an empty vector if the file cannot be opened.
 static std::vector<uint8_t> readFile(const std::string &p) {
     std::ifstream f(p, std::ios::binary);
     return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()) : std::vector<uint8_t>();
@@ -45,6 +57,7 @@ int main(int argc, char **argv) {
     in.shape = {1, 3, 224, 224};
     in.dtype = DType::Float32;
     in.data  = readFile(inpath);
+    // Fall back to a zero-filled input when the file is missing or too short (4 bytes per fp32 element).
     if (in.data.size() < numElements(in.shape) * 4)
     {
         in.data.assign(numElements(in.shape) * 4, 0);

@@ -1,5 +1,12 @@
 // vknn_predict - high-level Model API: load a model, run it, read the result with no tensor wiring.
-//   vknn_predict model.onnx input.bin
+//
+// Usage:  vknn_predict <model.onnx|model.vxm> [input.bin] [out.vxm]
+//   model      ONNX graph to load (or a .vxm produced by an earlier save() for a faster reload).
+//   input.bin  Optional raw little-endian fp32 blob for the first input; missing or short -> zeros.
+//   out.vxm    Optional path to save the optimized model for subsequent fast reloads.
+//
+// Prints the model's declared inputs/outputs, then the first output's shape, argmax (top-1 class),
+// and max value.
 #include "vknn/model.h"
 #include <cstdio>
 #include <fstream>
@@ -40,6 +47,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    // The vector-in overload runs the single-input model and returns its first output tensor.
     vknn::Tensor out = net.run(input);
     printf("result: shape=%s  top1=%lld  max=%.4f\n", out.shapeString().c_str(), (long long) out.argmax(), out.max());
 

@@ -116,6 +116,11 @@ namespace {
 
     // Build a FusedPointwise graph: primary input "x" + N constant operand tensors, run the
     // pw_steps/pw_params chain on CPU, return the output values and shape.
+    //
+    // `steps` is 4 ints per step [kind, code, operandIndex, unused] and `params` is 2 floats per step
+    // [p0, p1] (see src/backend/cpu/ops/fused_pointwise.cpp). kind: 0 = binary with the chain value on
+    // the left (operand = inputs[operandIndex]), 3 = binary reversed, 1 = unary activation, 2 = fused
+    // activation; for kinds 1/2 operandIndex is unused and p0/p1 carry the params.
     OpOut runFusedPw(const std::vector<int64_t> &xshape, const std::vector<float> &xdata, const std::vector<Init> &operands, const std::vector<int64_t> &steps, const std::vector<float> &params) {
         Graph      g;
         TensorDesc xi;

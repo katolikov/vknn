@@ -29,6 +29,7 @@
 
 using namespace vknn;
 
+// Slurp an entire file into a byte buffer; returns an empty vector if the path cannot be opened.
 static std::vector<uint8_t> readFile(const std::string &p) {
     std::ifstream f(p, std::ios::binary);
     if (!f)
@@ -37,7 +38,8 @@ static std::vector<uint8_t> readFile(const std::string &p) {
     }
     return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
-static const char *argval(int argc, char **argv, const char *key, const char *def) {
+// Return the argument following `key` in argv, or `def` if the flag is absent (--key VALUE form).
+static const char *argval(int argc, char **argv, const char *key, const char *def) noexcept {
     for (int i = 1; i < argc - 1; ++i)
     {
         if (!strcmp(argv[i], key))
@@ -47,7 +49,8 @@ static const char *argval(int argc, char **argv, const char *key, const char *de
     }
     return def;
 }
-static bool hasflag(int argc, char **argv, const char *key) {
+// Return true if the bare flag `key` appears anywhere in argv (valueless --flag form).
+static bool hasflag(int argc, char **argv, const char *key) noexcept {
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], key))
@@ -185,11 +188,13 @@ int main(int argc, char **argv) {
     {
         idx[i] = (int) i;
     }
-    std::partial_sort(idx.begin(), idx.begin() + std::min<int64_t>(5, n), idx.end(), [&](int a, int b) {
+    // Number of highest-scoring classes to select and print.
+    constexpr int64_t kTopK = 5;
+    std::partial_sort(idx.begin(), idx.begin() + std::min<int64_t>(kTopK, n), idx.end(), [&](int a, int b) {
         return y[a] > y[b];
     });
     printf("top-5:\n");
-    for (int k = 0; k < std::min<int64_t>(5, n); ++k)
+    for (int k = 0; k < std::min<int64_t>(kTopK, n); ++k)
     {
         printf("  #%d  class %4d  score %.5f\n", k + 1, idx[k], y[idx[k]]);
     }

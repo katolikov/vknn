@@ -46,19 +46,21 @@ static std::vector<uint32_t> loadSpv(const std::string &path) {
     return v;
 }
 
-static inline uint16_t f2h(float x) {
+// float -> IEEE fp16 bit pattern (via the native __fp16 rounding).
+static inline uint16_t f2h(float x) noexcept {
     __fp16 h = (__fp16) x;
     uint16_t o;
     std::memcpy(&o, &h, 2);
     return o;
 }
-static inline float h2f(uint16_t x) {
+// IEEE fp16 bit pattern -> float.
+static inline float h2f(uint16_t x) noexcept {
     __fp16 h;
     std::memcpy(&h, &x, 2);
     return (float) h;
 }
 // deterministic bounded pseudo-random in [-0.5,0.5] from an index (no RNG, reproducible across devices)
-static inline float synth(uint32_t i) {
+static inline float synth(uint32_t i) noexcept {
     uint32_t h = i * 2654435761u + 1013904223u;
     h ^= h >> 15;
     return (float) (h & 0xffff) / 65535.0f - 0.5f;
@@ -107,10 +109,14 @@ int main(int argc, char **argv) {
               r.verify))
             continue;
 
+        // Channel-block geometry: NC4HW4 packs channels in groups of 4, so Cin/Cout round up to whole
+        // vec4 blocks. OCB output channels per thread => OCB/4 blocks per group; Cout blocks round up to
+        // a whole number of OCB groups and the padded channel count zero-fills the tail lanes.
         int Cinb = (r.Cin + 3) / 4, Coutb = (r.Cout + 3) / 4;
         int OCB4 = r.OCB / 4;
         int ocGroups = (Coutb + OCB4 - 1) / OCB4;
         int padCoutb = ocGroups * OCB4, padCout = padCoutb * 4;
+        // Standard conv output-extent formula (dilated kernel, padding, stride).
         int OH = (r.H + 2 * r.PT - ((r.KH - 1) * r.DH + 1)) / r.SH + 1;
         int OW = (r.W + 2 * r.PL - ((r.KW - 1) * r.DW + 1)) / r.SW + 1;
 
@@ -143,6 +149,8 @@ int main(int argc, char **argv) {
             for (int l = 0; l < 4; ++l)
                 hbias[ocb * 4 + l] = f2h(synth((uint32_t)(ocb * 4 + l + 999)));
 
+        // Byte sizes: fp16 halfs are 2 bytes each, an f16vec4 is 8 bytes. dst is host-readable for the
+        // optional CPU-reference verify.
         Buffer src(ctx, srcHalfs * 2, MemPref::kAuto);
         Buffer wt(ctx, wtVecs * 8, MemPref::kAuto);
         Buffer bias(ctx, biasVecs * 8, MemPref::kAuto);
@@ -280,6 +288,8 @@ int main(int argc, char **argv) {
         std::vector<uint64_t> ts(2 * total, 0);
         MBCHK(vkGetQueryPoolResults(ctx.device(), qpool, 0, (uint32_t)(2 * total), ts.size() * 8,
                                     ts.data(), 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
+        // Convert each dispatch's timestamp delta (ticks * period ns) to ms, skipping the warmup
+        // iterations. Report min (least-perturbed run) and the sorted-middle median.
         std::vector<double> ms;
         for (int k = r.warmup; k < total; ++k)
             ms.push_back((double) (ts[2 * k + 1] - ts[2 * k]) * period / 1e6);

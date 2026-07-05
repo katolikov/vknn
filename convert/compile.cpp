@@ -24,7 +24,10 @@
 
 using namespace vknn;
 
-static bool has(int c, char **v, const char *flag) {
+/// True iff \p flag appears among the argument vector. The scan starts at index 3 so the program name
+/// (argv[0]) and the two required positional args (argv[1]=model.onnx, argv[2]=out.vxm) are never
+/// mistaken for flags.
+static bool has(int c, char **v, const char *flag) noexcept {
     for (int i = 3; i < c; ++i)
     {
         if (!strcmp(v[i], flag))

@@ -1,4 +1,15 @@
-// vknn_op_check - GPU elementwise add vs CPU reference, exercising the pipeline cache.
+// vknn_op_check - smoke test that dispatches the GPU elementwise `add` kernel over 1M floats,
+// compares the result against a CPU reference, and exercises the persistent pipeline cache.
+//
+// Usage: vknn_op_check [cache-dir]
+//   cache-dir  Directory holding pipeline.bin (the serialized VkPipelineCache); created if absent.
+//              Defaults to /data/local/tmp/vxrt/cache. The cache is loaded before building the
+//              pipeline and written back afterwards, so a second run reuses the driver's compiled
+//              pipeline blob.
+//
+// Prints one line with the max absolute error and the on-disk cache size, and exits 0 (PASS) when
+// the error is below 1e-4. Exit codes: 0 pass, 1 no Vulkan device, 2 built without Vulkan,
+// 3 numeric mismatch.
 #include "vknn/logging.h"
 #include <cmath>
 #include <cstdio>
@@ -25,6 +36,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Seed the PipelineCache from the previous run's blob (empty on the first run).
     std::string       cachePath = cacheDir + "/pipeline.bin";
     std::vector<char> cacheInit;
     if (std::ifstream cf {cachePath, std::ios::binary})
@@ -46,8 +58,10 @@ int main(int argc, char **argv) {
     ba.upload(a.data(), N * 4);
     bb.upload(b.data(), N * 4);
 
-    uint32_t count  = N;
-    uint32_t groups = (N + 255) / 256;
+    // add.comp declares local_size_x = 256; one workgroup covers 256 elements.
+    constexpr uint32_t kWorkgroupSize = 256;
+    uint32_t           count          = N;
+    uint32_t           groups         = (N + kWorkgroupSize - 1) / kWorkgroupSize;
     runner.oneShot([&](VkCommandBuffer cmd) {
         add.dispatch(cmd, {ba.handle(), bb.handle(), bc.handle()}, &count, sizeof(count), groups);
     });
@@ -60,6 +74,7 @@ int main(int argc, char **argv) {
         maxErr = std::max(maxErr, (double) std::fabs(c[i] - (a[i] + b[i])));
     }
 
+    // Persist the (now-populated) pipeline cache so the next run skips shader compilation.
     if (std::ofstream of {cachePath, std::ios::binary | std::ios::trunc})
     {
         auto data = cache.getData();

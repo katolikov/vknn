@@ -158,6 +158,8 @@ namespace {
             n = 0;
         }
         out.data.resize((size_t) std::max<int64_t>(n, 0));
+        // descr is a numpy dtype string like "<f4": [0] byte-order ('<'/'>'/'|'), [1] kind
+        // ('f' float / 'i' signed / 'u' unsigned), [2] byte width digit. Defaults cover a bare "f".
         char              tc    = descr.size() >= 2 ? descr[1] : 'f';
         int               bytes = descr.size() >= 3 ? descr[2] - '0' : 4;
         std::vector<char> raw((size_t) n * (size_t) bytes);
@@ -295,6 +297,8 @@ namespace {
         }
         sh += ")";
         std::string hdr = "{'descr': '<f4', 'fortran_order': False, 'shape': " + sh + ", }";
+        // NPY v1.0 spec: the 10-byte preamble (6 magic + 2 version + 2 header-length) plus the header
+        // dict plus a trailing '\n' must total a multiple of 64 bytes; pad the dict with spaces.
         while ((10 + hdr.size() + 1) % 64 != 0)
         {
             hdr += ' ';
@@ -338,6 +342,7 @@ namespace {
         }
         sh += ")";
         std::string hdr = "{'descr': '" + std::string(npyDescr(o.dtype)) + "', 'fortran_order': False, 'shape': " + sh + ", }";
+        // Pad the header dict so the 10-byte preamble + dict + '\n' is a multiple of 64 (NPY v1.0 spec).
         while ((10 + hdr.size() + 1) % 64 != 0)
         {
             hdr += ' ';

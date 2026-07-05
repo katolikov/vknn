@@ -27,8 +27,11 @@
 #endif
 
 using namespace vknn;
+// Spherical-harmonics band-0 (DC) basis factor 1/(2*sqrt(pi)); converts the encoder's degree-0
+// harmonic coefficient to a base RGB color via color = C0*sh + 0.5.
 static const float C0 = 0.28209479177387814f;
 
+// Reads an entire file into a byte vector; returns an empty vector if the file cannot be opened.
 static std::vector<uint8_t> readFile(const std::string &p) {
     std::ifstream f(p, std::ios::binary | std::ios::ate);
     if (!f)
@@ -41,7 +44,8 @@ static std::vector<uint8_t> readFile(const std::string &p) {
     f.read(reinterpret_cast<char *>(v.data()), n);
     return v;
 }
-static const char *opt(int c, char **v, const char *k, const char *d) {
+// Returns the argument following the flag k on the command line, or the default d if k is absent.
+static const char *opt(int c, char **v, const char *k, const char *d) noexcept {
     for (int i = 1; i < c - 1; ++i)
     {
         if (!strcmp(v[i], k))
@@ -204,18 +208,24 @@ int main(int argc, char **argv) {
     ppc.r1[3] = tp[1];
     ppc.r2[3] = tp[2];
 
+    // 16x16-pixel screen tiles. Each sort key packs the tile index in its high bits and a
+    // depth-derived value in the low DB bits, so a single ascending sort groups splats by tile and
+    // orders them front-to-back within each tile.
     int ntx = (W + 15) / 16, nty = (H + 15) / 16, nTiles = ntx * nty;
     int tileBits = 1;
     while ((1 << tileBits) < nTiles)
     {
         ++tileBits;
     }
-    int     DB  = 32 - tileBits;
+    int     DB  = 32 - tileBits; // key bits left for the depth field
+    // Sort-buffer capacity: next power of two >= max(N*8, 65536); a splat may be duplicated across
+    // the tiles it overlaps, and the bitonic sort requires a power-of-two element count.
     int64_t CAP = 1;
     while (CAP < (int64_t) N * 8 || CAP < (1 << 16))
     {
         CAP <<= 1;
     }
+    // Normalizes depth in [NEAR, 256) to [0, 1) before it is quantized into the key's low bits.
     float               invRange = 1.0f / (256.0f - NEAR);
     vk::Buffer          cntB(ctx, 4), keyB(ctx, CAP * 4), valB(ctx, CAP * 4), rgB(ctx, (size_t) nTiles * 2 * 4);
     vk::Buffer          imB(ctx, (size_t) H * W * 3 * 4, vk::MemPref::kReadback);
@@ -255,6 +265,8 @@ int main(int argc, char **argv) {
     vk::computeBarrier(cmd);
     dup.dispatch(cmd, {gdB.handle(), cntB.handle(), keyB.handle(), valB.handle()}, &dpc, sizeof(dpc), (uint32_t) ((N + 63) / 64));
     vk::computeBarrier(cmd);
+    // Bitonic sort of the (key, value) arrays: each (k, j) pair is one compare-exchange stage,
+    // dispatched separately so the compute barrier orders the stages.
     for (uint32_t k = 2; k <= (uint32_t) CAP; k <<= 1)
     {
         for (uint32_t j = k >> 1; j > 0; j >>= 1)

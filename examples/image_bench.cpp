@@ -1,7 +1,13 @@
-// vknn_image_bench - compares VkImage vs SSBO for a 1x1 conv on a given GPU.
-// Runs the same 1x1 conv two ways on representative shapes: (a) the SSBO c-tiled kernel,
-// (b) an image-backed c8w4 kernel reading via imageLoad (texture cache). Verifies both against a
-// CPU reference and reports timing. Usage: vknn_image_bench [Cin Cout H W] [iters]
+// vknn_image_bench - compares VkImage against SSBO storage for a 1x1 conv on a given GPU.
+// Runs the same 1x1 conv three ways on one shape: (a) the SSBO c-tiled kernel, (b) an image-backed
+// c8w4 kernel reading via storage-image imageLoad, and (c) a sampler2D/texelFetch kernel that goes
+// through the true read-only texture cache (as MNN does). Each variant is verified against a CPU
+// reference (cosine similarity) and timed as ms/iter; the image paths run only when RGBA16F storage
+// images are supported. The relative speedups isolate whether the texture cache beats plain SSBO reads.
+//
+// Usage: vknn_image_bench [Cin Cout H W] [iters]
+// The four shape arguments are all-or-nothing: pass all of Cin/Cout/H/W together or none (defaults
+// 256/256/14/14); iters defaults to 200 and is read only when a fifth argument is present.
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
 #include <cstdio>
@@ -245,7 +251,7 @@ int main(int argc, char **argv) {
             vk::computeBarrier(cmd);
         }
         runner.end(cmd);
-        runner.submitAndWait(cmd);
+        runner.submitAndWait(cmd); // warm submit primes caches/clocks; the second, timed run is the measurement
         imgMs = runner.submitAndWait(cmd) / iters;
         vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &cmd);
 
@@ -338,7 +344,7 @@ int main(int argc, char **argv) {
             vk::computeBarrier(tc);
         }
         runner.end(tc);
-        runner.submitAndWait(tc);
+        runner.submitAndWait(tc); // warm submit; the second, timed run is the measurement
         double texMs = runner.submitAndWait(tc) / iters;
         vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &tc);
         std::vector<fp16_t> tt((size_t) W * Coutb * H * 4);

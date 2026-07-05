@@ -7,6 +7,7 @@
 
 using namespace vknn;
 
+// Reads the whole file at `p` into a byte vector; returns empty on open failure or an empty file.
 static std::vector<uint8_t> readFile(const std::string &p) {
     std::ifstream f(p, std::ios::binary);
     return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()) : std::vector<uint8_t>();
@@ -37,6 +38,8 @@ TEST(Integration, MobileNetV2_CPU_vs_Golden) {
     const float *g = reinterpret_cast<const float *>(gold.data());
     int64_t      n = numElements(outs[0].shape);
     ASSERT_EQ(n, (int64_t) (gold.size() / 4));
+    // Compare against the golden output by cosine similarity and by top-1 argmax index.
+    // dot / na / nb accumulate the numerator and the two squared norms; vTop / gTop track argmax.
     double dot = 0, na = 0, nb = 0;
     int    vTop = 0, gTop = 0;
     for (int64_t i = 0; i < n; ++i)
@@ -53,7 +56,9 @@ TEST(Integration, MobileNetV2_CPU_vs_Golden) {
             gTop = (int) i;
         }
     }
-    double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
+    // Small epsilon guards against a zero denominator when either output is all-zero.
+    constexpr double kNormEps = 1e-12;
+    double           cos      = dot / (std::sqrt(na) * std::sqrt(nb) + kNormEps);
     EXPECT_EQ(vTop, gTop) << "top-1 mismatch";
     EXPECT_GE(cos, 0.999) << "cosine too low: " << cos;
 }

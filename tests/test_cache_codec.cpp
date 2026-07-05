@@ -22,6 +22,8 @@ static CacheVariant makeVariant(const std::string &prec, bool flat) {
     return v;
 }
 
+// A fully-populated document survives encode -> decode byte-for-byte, and findVariant resolves a
+// variant by its cache-affecting key alone (precision here) while rejecting an unmatched key.
 TEST(CacheCodec, RoundTrip) {
     CacheDoc doc;
     doc.format            = kCacheFormat;
@@ -67,6 +69,8 @@ TEST(CacheCodec, RoundTrip) {
     EXPECT_EQ(got.findVariant(miss), nullptr);
 }
 
+// Input that is not a well-formed MessagePack top-level map is rejected: a legacy "VKNNCAC1" container,
+// null/empty input, and a truncated map all return false rather than yielding a partial document.
 TEST(CacheCodec, RejectsLegacyAndGarbage) {
     CacheDoc got;
     // A legacy "VKNNCAC1..." container is not valid MessagePack top-level map -> rejected.
@@ -78,6 +82,8 @@ TEST(CacheCodec, RejectsLegacyAndGarbage) {
     EXPECT_FALSE(cacheDecode(truncated, sizeof(truncated), got));
 }
 
+// A document carrying zero variants round-trips: the variants array decodes empty and the scalar
+// guard fields are still preserved.
 TEST(CacheCodec, EmptyVariants) {
     CacheDoc doc;
     doc.format     = kCacheFormat;

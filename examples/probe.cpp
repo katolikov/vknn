@@ -1,4 +1,18 @@
-// vknn_probe - enumerate the device's Vulkan compute capabilities.
+/**
+ * @file probe.cpp
+ * @brief `vknn_probe` — enumerate the device's Vulkan compute capabilities.
+ *
+ * Standalone diagnostic tool. Brings up a @ref vknn::vk::VulkanContext and
+ * prints, to stdout, the physical-device identity, driver, API version, the
+ * compute limits and feature flags that VKNN's kernels depend on (subgroup
+ * width, shared-memory size, fp16/int8 storage and arithmetic, external-memory
+ * interop, ...), and the full memory-type / memory-heap table.
+ *
+ * Takes no arguments. Exit status:
+ *   - 0 : probe completed and all capabilities were printed.
+ *   - 1 : Vulkan context failed to initialize (no usable compute device).
+ *   - 2 : binary was built without Vulkan support (`VKNN_ENABLE_VULKAN` unset).
+ */
 #include "vknn/logging.h"
 #include <cstdio>
 #if defined(VKNN_ENABLE_VULKAN)
@@ -31,6 +45,9 @@ int main() {
     printf("  int8DotProduct=%d cooperativeMatrix=%d\n", c.int8DotProduct, c.cooperativeMatrix);
     printf("  timelineSemaphore=%d pushDescriptor=%d dedicatedAllocation=%d\n", c.timelineSemaphore, c.pushDescriptor, c.dedicatedAllocation);
     printf("  externalMemoryFd=%d dmaBuf=%d ahb=%d memoryBudget=%d\n", c.externalMemoryFd, c.externalMemoryDmaBuf, c.externalMemoryAhb, c.memoryBudget);
+    // Memory-type table: each type indexes a heap and carries the property
+    // flags (device-local, host-visible, ...) that decide where allocations
+    // land and whether the host can map them.
     printf("---- memory types ----\n");
     const auto &mp = ctx.memProps();
     for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)

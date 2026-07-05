@@ -44,6 +44,8 @@ static UserBuf allocDmaBuf(size_t bytes) {
         uint32_t fd_flags;
         uint64_t heap_flags;
     } d {};
+    // DMA_HEAP_IOCTL_ALLOC, i.e. _IOWR('H', 0, alloc_data): direction READ|WRITE (3) at bit 30,
+    // payload size at bit 16, type 'H' at bit 8, request number 0.
     constexpr unsigned long kIoctlAlloc = (3UL << 30) | (sizeof(alloc_data) << 16) | ('H' << 8) | 0x0;
     int                     h           = ::open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
     if (h < 0)

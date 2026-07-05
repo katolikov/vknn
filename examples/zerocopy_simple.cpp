@@ -29,7 +29,7 @@ struct Buf {
     void  *map = nullptr;
     size_t len = 0;
 };
-static Buf allocDmaBuf(size_t bytes) {
+static Buf allocDmaBuf(size_t bytes) noexcept {
     Buf b;
     b.len = bytes;
     struct {

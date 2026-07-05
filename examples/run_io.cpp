@@ -12,6 +12,15 @@
 //   --timing               print pack/submit/unpack timing
 //   --cache DIR            cache directory
 //   --winograd auto|on|off force the 3x3-conv kernel (on/off skip autotuning -> deterministic choice)
+//   --max-submit-nodes N   split the GPU command buffer every N nodes (watchdog/TDR mitigation)
+//   --max-submit-bindings N  split the command buffer once it accumulates N descriptor bindings
+//   --repeat N             re-run the same inputs N times; only the last run's outputs are written
+//   --profile              print the per-op GPU profile table and the GPU total
+//   --dump NAMES           dump the named intermediate tensors (comma-separated) as fp32
+//   --fp32-tensors NAMES   force the named tensors to fp32 compute (comma-separated)
+//   --disable-vk-ops NAMES force the named ops onto the CPU backend (comma-separated)
+//   --layer-dump           dump every layer's output    --layer-dump-dir DIR  where to write them
+//   --debug-segments       print the segment (CPU/GPU island) partition
 #include "vknn/session.h"
 #include <cstdio>
 #include <cstring>
@@ -22,7 +31,9 @@
 
 using namespace vknn;
 
-static bool flag(int c, char **v, const char *k) {
+// True if the boolean flag `k` appears anywhere in argv. Scanning starts at index 3 so the
+// program name, model, and outdir positional args are never mistaken for flags.
+static bool flag(int c, char **v, const char *k) noexcept {
     for (int i = 3; i < c; ++i)
     {
         if (!strcmp(v[i], k))
@@ -32,7 +43,9 @@ static bool flag(int c, char **v, const char *k) {
     }
     return false;
 }
-static const char *opt(int c, char **v, const char *k, const char *d) {
+// The value following the option `k` (e.g. "--cache DIR"), or the default `d` if `k` is absent.
+// Stops one short of the last arg so a trailing bare option name cannot read past argv.
+static const char *opt(int c, char **v, const char *k, const char *d) noexcept {
     for (int i = 3; i < c - 1; ++i)
     {
         if (!strcmp(v[i], k))

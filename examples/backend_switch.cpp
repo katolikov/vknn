@@ -1,4 +1,11 @@
-// vknn_backend_switch - select the backend via config (VULKAN | CPU) with no other change.
+// vknn_backend_switch - run the same model twice, once per backend, changing only Config::backend.
+//
+// Shows that backend selection is a single config field: the Vulkan and CPU runs are identical apart
+// from cfg.backend. For each run it prints the per-node backend routing (a histogram over
+// Session::nodeBackends() — ops the preferred backend cannot run fall through cfg.fallback to the CPU)
+// and the top-1 class, so the two backends can be compared side by side.
+//
+//   vknn_backend_switch [--model model.onnx] [--input input.bin]
 #include "vknn/session.h"
 #include <algorithm>
 #include <cstdio>
@@ -7,11 +14,13 @@
 #include <map>
 
 using namespace vknn;
+/// Read an entire file into a byte vector; returns an empty vector if the file cannot be opened.
 static std::vector<uint8_t> readFile(const std::string &p) {
     std::ifstream f(p, std::ios::binary);
     return f ? std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()) : std::vector<uint8_t>();
 }
-static const char *argval(int c, char **v, const char *k, const char *d) {
+/// Return the argument following flag `k` on the command line, or default `d` when the flag is absent.
+static const char *argval(int c, char **v, const char *k, const char *d) noexcept {
     for (int i = 1; i < c - 1; ++i)
     {
         if (!strcmp(v[i], k))
@@ -34,6 +43,7 @@ static void runWith(const std::string &model, const std::vector<uint8_t> &inData
         printf("  load failed\n");
         return;
     }
+    // Single fp32 NCHW image input matching the default 224x224 classifier; raw bytes come from inData.
     IOTensor in;
     in.name  = "input";
     in.shape = {1, 3, 224, 224};
@@ -57,6 +67,7 @@ static void runWith(const std::string &model, const std::vector<uint8_t> &inData
         printf(" %s=%d", backendName(kv.first), kv.second);
     }
     printf("\n");
+    // top-1 = argmax over the output logits/scores.
     const float *y = outs[0].f32();
     int64_t      n = numElements(outs[0].shape), top = 0;
     for (int64_t i = 1; i < n; ++i)
