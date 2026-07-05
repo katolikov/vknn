@@ -324,6 +324,24 @@ namespace vknn {
                     SH(o)      = {x.n, pw.empty() ? x.c : pw[0], oh, ow};
                     break;
                 }
+                case OpType::ConvGemm: {
+                    if (SH(nd.inputs[0]).empty())
+                    {
+                        break;
+                    }
+                    NCHW         x  = NCHW::from(SH(nd.inputs[0]));
+                    const Shape &wt = SH(nd.inputs[1]); // repacked [K, Cout]
+                    auto         a  = [&](const char *k, std::vector<int64_t> d) {
+                        const auto &v = nd.attr.getints(k);
+                        return v.empty() ? d : v;
+                    };
+                    auto    k = a("kernel_shape", {1, 1}), st = a("strides", {1, 1});
+                    auto    pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
+                    int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (k[0] - 1) + 1)) / st[0] + 1;
+                    int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (k[1] - 1) + 1)) / st[1] + 1;
+                    SH(o)      = {x.n, wt.size() == 2 ? wt[1] : x.c, oh, ow};
+                    break;
+                }
                 case OpType::Split: {
                     const Shape &a = SH(nd.inputs[0]);
                     if (a.empty())
@@ -721,10 +739,13 @@ namespace vknn {
                         {
                             axis += (int64_t) s.size();
                         }
-                        int64_t sum = 0;
-                        for (TensorId in: nd.inputs)
+                        // Sum the axis over the concatenated parts only: inputs from pwCoreInputs
+                        // on are fused-epilogue operands, and this case re-runs after fusion.
+                        int64_t sum   = 0;
+                        int64_t parts = pwCoreInputs(nd);
+                        for (int64_t e = 0; e < parts && e < (int64_t) nd.inputs.size(); ++e)
                         {
-                            const Shape &si = SH(in);
+                            const Shape &si = SH(nd.inputs[e]);
                             if (si.empty())
                             {
                                 sum = -1;
