@@ -33,6 +33,7 @@ namespace vknn {
             bool                                 splitk    = false;
             bool                                 reg       = false; // register-tiled implicit-im2col general conv (WTILE pixels/thread)
             bool                                 lds       = false; // LDS input-halo 3x3 (8x8 tile/workgroup)
+            bool                                 gemm      = false; // implicit-GEMM kernel (conv_gemm.comp) won the plan-time race
             int64_t                              ldsGroups = 0;
             bool                                 pwS2      = false; // strided 1x1 (downsample) on the register-tiled kernel
             bool                                 hasRes    = false; // residual Add fused into the epilogue (out = act(conv + residual))
@@ -46,6 +47,11 @@ namespace vknn {
             // Attached pointwise-chain epilogue (fusePointwiseChains); applies at whichever
             // variant's final store runs (direct/dw/1x1/lds/reg, split-K reduce, Winograd output).
             PwEpi epi;
+
+            // --- implicit-GEMM path (conv_gemm.comp) for the general dense KxK branch ---
+            std::shared_ptr<vk::Buffer> gwbuf; // weights repacked [K][Cout], k = (ky*KW+kx)*Cin+ic
+            ConvGemmPC                  gpc {};
+            uint32_t                    ggx = 0, ggy = 0, ggz = 0;
 
             // --- split-K 1x1 (deep, low-parallelism convs): partial pass + reduce pass ---
             std::shared_ptr<vk::ComputePipeline> skPipe, skRed;
@@ -368,6 +374,105 @@ namespace vknn {
                 return best;
             }
 
+            // Race the implicit-GEMM kernel (conv_gemm.comp, at its heuristic M tile) against the
+            // best direct configuration for this shape: 0 = direct, else the winning M tile. This is
+            // how ConvGemm serves a shape without the opt-in convert-time lowering. The two kernels
+            // reduce K in different orders (fp16-floor equivalent, not byte-identical), so the race
+            // runs only under Tuning::Fast/Heavy — Tuning::None keeps the legacy direct kernels —
+            // with the same anti-noise margin as Winograd, and the winner persists in the tune cache
+            // so warm runs are stable. `dchoice` is the direct race's winner (0 = plain direct,
+            // else conv_reg's OCB), so the gemm kernel is timed against the configuration that
+            // would actually run.
+            int tuneConvGemm(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, int64_t KH, int64_t KW, int dchoice) {
+                if (env.tuning == Tuning::None || !env.runner || hasRes)
+                {
+                    return 0;
+                }
+                int64_t M = y.h * y.w, K = x.c * KH * KW;
+                int     tm = convGemmTileM(M);
+                // The gemm kernel tiles M on dispatch Y and batch on Z; neither survives the device
+                // group-count limit (the runtime 1-D split only rescues X).
+                if ((M + tm - 1) / tm > 65535 || (Cout + kConvGemmTileN - 1) / kConvGemmTileN > 65535 || x.n > 65535)
+                {
+                    return 0;
+                }
+                char buf[128];
+                snprintf(buf, sizeof(buf), "cgemm_direct_%d_%d_%d_%d_%d%d%d", pc.Cin, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
+                std::string sig = env.gpuTag + "/" + buf;
+                if (env.weights)
+                {
+                    int cached = env.weights->tuned(sig, -1);
+                    if (cached >= 0)
+                    {
+                        return cached;
+                    }
+                }
+                int  es = env.useFp16 ? 2 : 4;
+                auto mk = [&](size_t bytes) {
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                };
+                auto sSrc = mk((size_t) x.n * cBlocks(x.c) * x.h * x.w * 4 * es);
+                auto sDst = mk((size_t) x.n * Coutb * y.h * y.w * 4 * es);
+                auto sWt  = mk((size_t) K * Cout * es); // timing only: the gemm repack happens after a win
+                auto timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                    VkCommandBuffer cmd = env.runner->allocate();
+                    env.runner->begin(cmd);
+                    for (int r = 0; r < 8; ++r)
+                    {
+                        rec(cmd);
+                    }
+                    env.runner->end(cmd);
+                    double ms = env.runner->submitAndWait(cmd);
+                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
+                    return ms;
+                };
+                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                    double m = 1e30;
+                    for (int k = 0; k < 5; ++k)
+                    {
+                        m = std::min(m, timeIt(rec));
+                    }
+                    return m;
+                };
+                double dms = 1e30;
+                if (dchoice > 0)
+                { // the direct race already picked conv_reg at this OCB
+                    int64_t HW = y.h * y.w, ocbGroups = (Coutb + dchoice - 1) / dchoice;
+                    auto    p  = env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), {(uint32_t) dchoice});
+                    int64_t tot = x.n * ocbGroups * ((HW + kTile - 1) / kTile);
+                    dms         = bestOf([&](VkCommandBuffer cmd) {
+                        p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(tot, 64));
+                        vk::computeBarrier(cmd);
+                    });
+                } else
+                {
+                    for (uint32_t ls: {64u, 128u, 256u})
+                    {
+                        auto     p  = env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {ls});
+                        uint32_t dg = groups(x.n * Coutb * y.h * y.w, ls);
+                        dms         = std::min(dms, bestOf([&](VkCommandBuffer cmd) {
+                                          p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), dg);
+                                          vk::computeBarrier(cmd);
+                                      }));
+                    }
+                }
+                ConvGemmPC tgpc = {pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, pc.act, 1, pc.actLo, pc.actHi};
+                auto       gp   = env.pipeline(shader("conv_gemm", env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm});
+                uint32_t   ggxT = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
+                uint32_t   ggyT = (uint32_t) ((M + tm - 1) / tm);
+                double     gms  = bestOf([&](VkCommandBuffer cmd) {
+                    gp->dispatch(cmd, {sSrc->handle(), sWt->handle(), bbuf->handle(), sDst->handle()}, &tgpc, sizeof(tgpc), ggxT, ggyT, (uint32_t) x.n);
+                    vk::computeBarrier(cmd);
+                });
+                int choice = (gms < dms * kWinoMargin) ? tm : 0;
+                VKNN_DEBUG << "tuneConvGemm " << sig << " direct=" << dms << " gemm=" << gms << " -> " << choice;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, choice);
+                }
+                return choice;
+            }
+
             // Autotune the 3x3 conv kernel for THIS shape: 0 = direct, 1 = F(2,3) Winograd, 2 = F(4,3)
             // Winograd. Winograd wins big on deep, square 3x3 but loses on small-channel / spatially-large 3x3,
             // so the choice is measured per-shape on scratch buffers and cached like the local-size tune.
@@ -624,21 +729,58 @@ namespace vknn {
                         int64_t HW = y.h * y.w;
                         total      = x.n * Coutb * ((HW + kTile - 1) / kTile);
                         pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {});
-                    } else if (int ocb = (env.useFp16 ? pickOcb(env, x, y, Cout, Coutb) : 0))
-                    {
-                        // register-tiled conv computing OCB output channel-blocks per thread (autotuned; won
-                        // over the direct kernel for this shape). Byte-identical to the direct kernel.
-                        reg               = true;
-                        int64_t HW        = y.h * y.w;
-                        int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
-                        total             = x.n * ocbGroups * ((HW + kTile - 1) / kTile);
-                        pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) ocb});
                     } else
                     {
-                        // autotuned 1-pixel-per-thread direct kernel (the fallback when OCB tiling didn't win)
-                        total     = x.n * Coutb * y.h * y.w;
-                        localSize = pickLocalSize(env);
-                        pipe = env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {localSize});
+                        // DirectAuto: the bit-exact direct race picks the baseline (1-pixel direct vs
+                        // conv_reg OCB tiling), then the implicit-GEMM race (fp16-floor, Fast/Heavy
+                        // only) may take the shape from that baseline.
+                        int ocb = env.useFp16 ? pickOcb(env, x, y, Cout, Coutb) : 0;
+                        int gtm = (env.useFp16 && group == 1 && KH * KW > 1) ? tuneConvGemm(node, env, x, y, Cout, Coutb, KH, KW, ocb) : 0;
+                        if (gtm > 0)
+                        {
+                            // implicit-GEMM kernel at the raced M tile; binds Src/Wt/Bs/Dst exactly like
+                            // the ConvGemm op, with the same epilogue plumbing as the direct path. The
+                            // zero-padded bbuf keeps the unconditional bias add the direct kernel does.
+                            gemm  = true;
+                            gpc   = {pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, pc.act, 1, pc.actLo, pc.actHi};
+                            gwbuf = uploadCached(env, node.name + "#gemmw", [&] {
+                                // [Cout,Cin,KH,KW] -> [K][Cout], k = (ky*KW+kx)*Cin+ic (the kernel's
+                                // channel-fastest k order; matches lowerConv's convert-time repack).
+                                std::vector<float> wp((size_t) x.c * KH * KW * Cout, 0.f);
+                                for (int64_t oc = 0; oc < Cout; ++oc)
+                                {
+                                    for (int64_t ic = 0; ic < x.c; ++ic)
+                                    {
+                                        for (int64_t t = 0; t < KH * KW; ++t)
+                                        {
+                                            wp[(size_t) ((t * x.c + ic) * Cout + oc)] = wsrc[(oc * x.c + ic) * KH * KW + t];
+                                        }
+                                    }
+                                }
+                                return wp;
+                            });
+                            wbuf.reset(); // the NC4HW4 pack only served the race timing
+                            int64_t M = y.h * y.w;
+                            ggx       = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
+                            ggy       = (uint32_t) ((M + gtm - 1) / gtm);
+                            ggz       = (uint32_t) x.n;
+                            pipe = env.pipeline(shader((std::string("conv_gemm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), std::vector<uint32_t> {(uint32_t) gtm});
+                        } else if (ocb > 0)
+                        {
+                            // register-tiled conv computing OCB output channel-blocks per thread (autotuned; won
+                            // over the direct kernel for this shape). Byte-identical to the direct kernel.
+                            reg               = true;
+                            int64_t HW        = y.h * y.w;
+                            int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
+                            total             = x.n * ocbGroups * ((HW + kTile - 1) / kTile);
+                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) ocb});
+                        } else
+                        {
+                            // autotuned 1-pixel-per-thread direct kernel (the fallback when OCB tiling didn't win)
+                            total     = x.n * Coutb * y.h * y.w;
+                            localSize = pickLocalSize(env);
+                            pipe = env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {localSize});
+                        }
                     }
                 }
             }
@@ -695,6 +837,14 @@ namespace vknn {
                     }
                     epi.append(rb, node, env, dst->handle());
                     skRed->dispatch(cmd, rb, &skRedPC, sizeof(skRedPC), (uint32_t) skRedGroups);
+                    return;
+                }
+                if (gemm)
+                {
+                    // implicit-GEMM winner: Src/Wt/Bs/Dst (the ConvGemm op's binding set) + epilogue.
+                    std::vector<VkBuffer> gb = {src->handle(), gwbuf->handle(), bbuf->handle(), dst->handle()};
+                    epi.append(gb, node, env, dst->handle());
+                    pipe->dispatch(cmd, gb, &gpc, sizeof(gpc), ggx, ggy, ggz);
                     return;
                 }
                 std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
