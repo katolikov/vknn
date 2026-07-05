@@ -59,19 +59,20 @@ namespace vknn {
         bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
-        bool    lowerConv           = true;  // non-Winograd KxK Conv -> implicit-GEMM ConvGemm (default on)
+        bool    lowerConv           = false; // non-Winograd KxK Conv -> ConvGemm (experimental: the
+                                             // v1 64x64x16 kernel loses to the direct conv on
+                                             // classifier-CNN shapes — opt in per model, measure)
         bool    dumpBig             = false; // debug: log tensors > 50M elements after shape inference
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
-        //   O1 = the default production set: the general pointwise fusion (bit-exact) + the
-        //        ConvGemm lowering (fp16-floor equivalent)
+        //   O1 = the default production set: the general pointwise fusion (bit-exact)
         //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; can
-        //           regress on some models — measure before shipping a model with them)
+        //           regress on some models — measure before shipping a model with them).
+        //   ConvGemm lowering stays opt-in (--lower-conv) at every level until its kernel is tuned.
         static PassOptions forOptLevel(int level) {
             PassOptions o;
             o.fusePointwiseChains = level >= 1;
-            o.lowerConv           = level >= 1;
             o.fuseSqueezeExcite   = level >= 2;
             o.fuseDwPw            = level >= 2;
             return o;

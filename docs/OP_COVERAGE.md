@@ -84,7 +84,9 @@ flags override a single pass on top of the level:
 - **Conv → ConvGemm lowering** — a non-Winograd K×K Conv (strided, dilated, 5×5/7×7, 1×7/7×1,
   shallow 3×3) lowers to one LDS-tiled implicit-GEMM kernel with weights repacked `[K][Cout]` at
   convert time. Deterministic and fp16-floor equivalent to Conv (the fp32 accumulation order
-  shifts, exactly as Winograd's does). Enabled at `-O1` (default); opt out with `--no-lower-conv`.
+  shifts, exactly as Winograd's does). Experimental and off by default — the current 64×64×16
+  kernel loses to the direct conv on classifier-CNN shapes (small output areas starve its pixel
+  tiles); opt in with `--lower-conv` and measure per model.
 - **Squeeze-Excite** chain folds to one kernel (`-O2` or `--fuse-se`, experimental).
 - **Depthwise + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`-O2`
   or `--fuse-dwpw`, experimental; pairs wider than the kernel's 1024-channel LDS budget stay

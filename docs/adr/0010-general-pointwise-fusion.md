@@ -44,16 +44,17 @@ matching one shape of subgraph with its own metadata (`fusedAct`, `fusedResidual
 4. **BatchNorm lowering.** A BatchNorm that `foldBatchNorm` cannot absorb lowers unconditionally to
    a per-channel Mul+Add (host-folded fp32 scale/shift), which the region fusion then merges —
    DenseNet-121 drops from 309 to 185 nodes with every BN+ReLU tail folded into a Concat store.
-5. **ConvGemm lowering (fp16-floor, not byte).** `lowerConv` (default on, `--no-lower-conv` to opt
-   out) rewrites each non-Winograd, non-1x1, group-1 KxK Conv into a `ConvGemm` node: weights
+5. **ConvGemm lowering (fp16-floor, not byte).** `lowerConv` (experimental, opt in with
+   `--lower-conv`: the v1 kernel loses to the direct conv on classifier-CNN shapes, whose small
+   output areas starve its 64-pixel tiles) rewrites each non-Winograd, non-1x1, group-1 KxK Conv into a `ConvGemm` node: weights
    repacked `[K][Cout]` at convert time (a pure permutation), one LDS-tiled implicit-GEMM kernel
    (64x64x16 tiles, fp32 accumulation in a fixed chunked order, explicit vknnRte16 stores). Like
    Winograd and `subpixelConvTranspose`, the accumulation order shifts: the gate for this rewrite is
    fp16-floor equivalence to plain Conv plus run-to-run byte determinism, not a byte compare.
 
 ## Consequences
-- `-O1` is exactly: the general pointwise fusion (byte-exact) + the ConvGemm lowering (fp16-floor).
-  `PassOptions::fuseSwish` and `--[no-]fuse-swish` are gone.
+- `-O1` is exactly: the general pointwise fusion (byte-exact). ConvGemm lowering is opt-in until
+  its kernel is tuned. `PassOptions::fuseSwish` and `--[no-]fuse-swish` are gone.
 - The fused==unfused byte gate covers the entire default fusion surface on both devices, and the
   stand-in model suite (diamonds, register meshes with Where/Greater, PRelu with NC4 pad lanes,
   >8-step chains, pre-activation BN, flat MatMul units with exports, dw+residual blocks) pins each
