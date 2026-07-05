@@ -130,7 +130,7 @@ namespace vknn {
         // unresolved -> an empty shape propagates and downstream ops crash.
         if (opt.fusePointwiseChains)
         {
-            fusePointwiseChains(g);
+            fusePointwiseChains(g, opt.strictFuse);
             inferShapes(g, batch); // set the FusedPointwise output shapes
         }
         pruneDeadInitializers(g); // after all rewiring: orphaned fold intermediates + Cast-copied weights

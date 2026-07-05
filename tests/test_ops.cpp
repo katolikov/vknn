@@ -851,7 +851,7 @@ TEST(Passes, FusePointwiseBitExact) {
 
     Graph fg = makeChainGraph();
     inferShapes(fg, 1);
-    fusePointwiseChains(fg);
+    fusePointwiseChains(fg, true);
     int fused = 0;
     for (auto &n: fg.nodes)
     {
@@ -914,7 +914,7 @@ TEST(Passes, FusePointwiseRuntimePrimary) {
     g.nodes   = {m, a};
     g.outputs = {y};
     inferShapes(g, 1);
-    fusePointwiseChains(g);
+    fusePointwiseChains(g, true);
     int fused = -1;
     for (size_t i = 0; i < g.nodes.size(); ++i)
     {

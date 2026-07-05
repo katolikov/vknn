@@ -33,14 +33,18 @@ matching one shape of subgraph with its own metadata (`fusedAct`, `fusedResidual
    and 4 extra output streams (`pw_outs`) that export fanned-out intermediates, each stored
    TO_STORE-rounded. Regions are kept convex; budget overruns split a region into its largest
    fitting prefix.
-3. **Byte-exactness is the gate, per step.** The unit's entry value is the producer's
-   already-rounded store and every step result passes TO_STORE, reproducing each fp16 store of the
-   unfused graph bit for bit in the same order. The only inline exception is a lone Relu — or a Clip
-   whose bounds round-trip fp16 exactly — folded onto a Conv/Gemm `fusedAct`, which is byte-safe
-   because a monotone clamp with representable bounds commutes with RTE rounding. Consequence:
-   models whose old builds used the fp32-accumulator epilogues shift at the fp16 ulp level, and
-   `fused == unfused` (`--no-fuse-pointwise`) is now byte-identical for everything the pass does.
-   The runtime keeps reading `fusedResidual`/`fusedBias` for `.vxm` files compiled by older builds.
+3. **Byte-exactness on demand, speed by default.** In `--strict-fuse` mode the unit's entry value
+   is the producer's already-rounded store and every step result passes the shared vknnRte16
+   rounding, reproducing each fp16 store of the unfused graph bit for bit — `fused == unfused`
+   (`--no-fuse-pointwise`) is byte-identical for everything the pass does, which is the byte-gate
+   compile mode. The default fast mode emits the kernels' native fp32-accumulator epilogues for
+   exactly the retired passes' patterns — a swish diamond becomes the producer's `fusedAct` (or one
+   SiLU/HardSwish step), a 1x1-conv residual Add uses `fusedResidual`, a MatMul bias-Add uses
+   `fusedBias` — restoring old-main speed there (measured: mobilenetv3 2.9→2.2 ms, yolov8n
+   16.2→13.7 ms on the 960); those three forms are intentionally not byte-equal to the unfused
+   graph, exactly as before this redesign. A lone Relu — or a Clip whose bounds round-trip fp16
+   exactly — folds onto `fusedAct` in both modes (a monotone clamp with representable bounds
+   commutes with RTE rounding).
 4. **BatchNorm lowering.** A BatchNorm that `foldBatchNorm` cannot absorb lowers unconditionally to
    a per-channel Mul+Add (host-folded fp32 scale/shift), which the region fusion then merges —
    DenseNet-121 drops from 309 to 185 nodes with every BN+ReLU tail folded into a Concat store.

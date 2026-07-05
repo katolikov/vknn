@@ -198,9 +198,10 @@ namespace vknn {
             const std::vector<int>             &producer;
             const std::vector<int>             &consumerCount;
             const std::vector<char>            &isGraphOut;
+            bool                                strict;
 
-            PwPlanner(const Graph &g_, const Shape &run_, const std::vector<int> &prod, const std::vector<int> &cc, const std::vector<char> &go)
-                : g(g_), run(run_), producer(prod), consumerCount(cc), isGraphOut(go) {}
+            PwPlanner(const Graph &g_, const Shape &run_, const std::vector<int> &prod, const std::vector<int> &cc, const std::vector<char> &go, bool strict_)
+                : g(g_), run(run_), producer(prod), consumerCount(cc), isGraphOut(go), strict(strict_) {}
 
             // The member's data inputs (excluding Clip bound inputs, which encode as params).
             static std::vector<TensorId> dataInputs(const Node &n) {
@@ -536,6 +537,32 @@ namespace vknn {
                     TensorId val = nd.outputs[0];
                     auto     rg  = regOf.find(val);
                     int64_t  dst = rg != regOf.end() ? (int64_t) rg->second : (int64_t) kPwRefNone;
+                    // Fast mode folds a swish diamond into ONE step: [unary Sigmoid/HardSigmoid X]
+                    // followed by [Mul(X, acc)] becomes [unary SiLU/HardSwish X] — one expression,
+                    // one rounding, matching the retired fuseSwish's cost. Bytes intentionally
+                    // differ from the two rounded steps; --strict-fuse keeps those.
+                    if (!strict && kind == kPwKindBinary && code == (int64_t) BinaryType::Mul && u.steps.size() >= 8 && nd.fusedAct == ActType::None)
+                    {
+                        size_t  ps     = u.steps.size() - 8;
+                        int64_t pKind  = u.steps[ps], pCode = u.steps[ps + 1], pSrcA = u.steps[ps + 2], pDst = u.steps[ps + 5];
+                        bool    sig    = pKind == kPwKindUnary && pCode == (int64_t) UnaryType::Sigmoid;
+                        bool    hsig   = pKind == kPwKindUnary && pCode == (int64_t) UnaryType::HardSigmoid && u.params[u.params.size() - 2] == 1.0f / 6.0f && u.params.back() == 0.5f;
+                        // the gate value must feed ONLY this Mul (accumulator-carried, no register,
+                        // no export) and the Mul's other source must be the gated value itself
+                        bool    gateOk = (sig || hsig) && pDst == kPwRefNone && accVal != kNoTensor && consumerCount[accVal] == 1;
+                        bool    diamond = gateOk && ((sA == pSrcA && sB == kPwRefAcc) || (sB == pSrcA && sA == kPwRefAcc));
+                        if (diamond)
+                        {
+                            int64_t pBc = u.steps[ps + 6], pBsrc = u.steps[ps + 7];
+                            u.steps.resize(ps);
+                            u.params.resize(u.params.size() - 2);
+                            u.steps.insert(u.steps.end(), {kPwKindUnary, (int64_t) (sig ? UnaryType::SiLU : UnaryType::HardSwish), pSrcA, kPwRefNone, kPwRefNone, dst, pBc, pBsrc});
+                            u.params.insert(u.params.end(), {0, 0});
+                            emittedStepOf[val] = (int64_t) u.steps.size() / 8 - 1;
+                            accVal             = val;
+                            continue;
+                        }
+                    }
                     u.steps.insert(u.steps.end(), {kind, code, sA, sB, sC, nd.fusedAct == ActType::None ? dst : (int64_t) kPwRefNone, bc, bsrc});
                     u.params.insert(u.params.end(), {p0, p1});
                     // a fused activation folded onto the member (fuseActivations targets Add) is an
@@ -621,7 +648,7 @@ namespace vknn {
     /// passes). Postcondition: fully-merged members are erased; the producer (or the anchor slot's
     /// FusedPointwise node) yields the unit's main output and carries pw_steps/pw_params/pw_outs —
     /// plus pw_flat on standalone nodes for the load-time layout classifier.
-    void fusePointwiseChains(Graph &g) {
+    void fusePointwiseChains(Graph &g, bool strictFuse) {
         std::vector<int>  producer, consumerCount;
         std::vector<char> isGraphOut;
         auto              rebuild = [&]() {
@@ -842,7 +869,7 @@ namespace vknn {
             // ---- emit the largest fitting prefix; the rest re-enters the pool. Each prefix is
             // planned once per entry candidate: the first attachable plan wins, else the first
             // encodable one runs standalone. ----
-            PwPlanner planner(g, run, producer, consumerCount, isGraphOut);
+            PwPlanner planner(g, run, producer, consumerCount, isGraphOut, strictFuse);
             PwUnit    unit;
             int       hostProd      = -1;
             bool      entryExported = false;
@@ -928,6 +955,71 @@ namespace vknn {
                         attached++;
                         rebuild();
                         continue;
+                    }
+                }
+                // Fast-mode native epilogues: match the retired passes' fp32-accumulator forms
+                // for their exact patterns — a swish on the producer's own activation, a residual
+                // Add on the 1x1 conv's native residual read, a bias-Add on the MatMul kernel's
+                // bias input. One expression, one store, old-main speed; bytes intentionally differ
+                // from the unfused graph there. --strict-fuse keeps the rounded steps (and the
+                // absolute byte gate) instead.
+                if (!strictFuse && unit.exports.empty() && !entryExported)
+                {
+                    Node   &P      = g.nodes[prod];
+                    int     nSteps = (int) unit.steps.size() / 8;
+                    auto    stepAt = [&](int st, int f) { return unit.steps[(size_t) st * 8 + f]; };
+                    auto    finish = [&]() {
+                        P.outputs[0] = unit.mainOut;
+                        for (int m: members)
+                        {
+                            removed.insert(m);
+                        }
+                        fused++;
+                        attached++;
+                        rebuild();
+                    };
+                    bool swishStep = nSteps == 1 && unit.operands.empty() && stepAt(0, 0) == kPwKindUnary && stepAt(0, 2) == kPwRefEntry && (stepAt(0, 1) == (int64_t) UnaryType::SiLU || stepAt(0, 1) == (int64_t) UnaryType::HardSwish);
+                    if (swishStep && (P.type == OpType::Conv || P.type == OpType::Gemm) && P.fusedAct == ActType::None)
+                    {
+                        P.fusedAct = stepAt(0, 1) == (int64_t) UnaryType::SiLU ? ActType::SiLU : ActType::HardSwish;
+                        finish();
+                        continue;
+                    }
+                    bool addStep = nSteps >= 1 && unit.operands.size() == 1 && stepAt(0, 0) == kPwKindBinary && stepAt(0, 1) == (int64_t) BinaryType::Add && stepAt(0, 6) == 0 && ((stepAt(0, 2) == kPwRefEntry && stepAt(0, 3) <= kPwRefOp0) || (stepAt(0, 3) == kPwRefEntry && stepAt(0, 2) <= kPwRefOp0));
+                    bool tailAct = nSteps == 2 && stepAt(1, 0) == kPwKindAct && stepAt(1, 2) == kPwRefAcc && (stepAt(1, 1) == (int64_t) ActType::Relu || stepAt(1, 1) == (int64_t) ActType::Relu6 || stepAt(1, 1) == (int64_t) ActType::Clip);
+                    if (addStep && (nSteps == 1 || tailAct) && !g.isInitializer(unit.operands[0]) && P.type == OpType::Conv && P.fusedResidual == kNoTensor && P.fusedAct == ActType::None)
+                    {
+                        auto ints = [&](const char *k, std::vector<int64_t> d) {
+                            const auto &v = P.attr.getints(k);
+                            return v.empty() ? d : v;
+                        };
+                        auto kk = ints("kernel_shape", {1, 1}), st = ints("strides", {1, 1}), pd = ints("pads", {0, 0, 0, 0});
+                        bool conv1x1 = P.attr.geti("group", 1) == 1 && kk[0] == 1 && kk[1] == 1 && st[0] == 1 && st[1] == 1 && !pd[0] && !pd[1] && !pd[2] && !pd[3];
+                        if (conv1x1)
+                        {
+                            P.fusedResidual = unit.operands[0];
+                            P.inputs.push_back(unit.operands[0]); // keep it live for DCE/allocation/scheduling
+                            if (nSteps == 2)
+                            {
+                                P.fusedAct = (ActType) stepAt(1, 1);
+                                P.actLo    = unit.params[2];
+                                P.actHi    = unit.params[3];
+                            }
+                            finish();
+                            continue;
+                        }
+                    }
+                    if (addStep && nSteps == 1 && g.isInitializer(unit.operands[0]) && P.type == OpType::MatMul && P.fusedBias == kNoTensor)
+                    {
+                        const Shape &os = g.desc(unit.mainOut).shape;
+                        const Shape &bs = g.desc(unit.operands[0]).shape;
+                        if (!os.empty() && !bs.empty() && bs.back() == os.back() && numElements(bs) == os.back())
+                        {
+                            P.fusedBias = unit.operands[0];
+                            P.inputs.push_back(unit.operands[0]); // keep the bias live
+                            finish();
+                            continue;
+                        }
                     }
                 }
                 Node                &P      = g.nodes[prod];

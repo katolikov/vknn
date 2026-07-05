@@ -11,7 +11,9 @@
 //                         O0 = no optional fusion (reference), O1 = the general pointwise
 //                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
 //     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise / --[no-]lower-conv
-//                       advanced per-pass overrides applied on top of the level
+//     --strict-fuse     rounded fusion steps everywhere: fused == unfused byte-identical (the byte
+//                       gate); the default fast mode uses the kernels' native swish/residual/bias
+//                       epilogues, which are faster but not byte-equal to the unfused graph
 //     --dump-big        log tensors > 50M elements after shape inference (debug)
 #include "import/passes.h"
 #include "vknn/dtype.h"
@@ -42,7 +44,7 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s <model.onnx> <out.vxm> [--fp16] [-O0..-O3 | --opt N] "
-               "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]lower-conv] [--dump-big]\n",
+               "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--dump-big]\n",
                argv[0]);
         return 1;
     }
@@ -75,6 +77,7 @@ int main(int argc, char **argv) {
     over("--fuse-se", "--no-fuse-se", opt.fuseSqueezeExcite);
     over("--fuse-dwpw", "--no-fuse-dwpw", opt.fuseDwPw);
     over("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
+    over("--strict-fuse", "--no-strict-fuse", opt.strictFuse);
     over("--lower-conv", "--no-lower-conv", opt.lowerConv);
     opt.dumpBig = has(argc, argv, "--dump-big");
 

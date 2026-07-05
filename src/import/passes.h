@@ -29,9 +29,11 @@ namespace vknn {
     // The general fusion: grow each maximal same-shape per-element region (fanout included) and
     // emit it as one fused unit — a producer epilogue or a standalone FusedPointwise node, with
     // extra output streams for values consumed outside the region. Subsumes activation, residual-
-    // add, swish-diamond, and matmul-bias folding. Runs last. Bit-exact (fused == unfused,
-    // byte-identical); on by default.
-    void fusePointwiseChains(Graph &g);
+    // add, swish-diamond, and matmul-bias folding. Runs last; on by default. In the default fast
+    // mode the swish/residual/bias patterns emit the kernels' native fp32-accumulator epilogues
+    // (old-main speed; bytes differ from unfused there); strict=true keeps every step rounded, so
+    // fused == unfused is byte-identical — the byte gate compiles with --strict-fuse.
+    void fusePointwiseChains(Graph &g, bool strictFuse);
 
     // Lower Reduce(Mean) over the spatial dims of a rank-4 tensor (keepdims) to GlobalAvgPool — the
     // ResNet classifier-head pattern with a dedicated NC4HW4 kernel. Needs resolved input ranks.
@@ -59,6 +61,9 @@ namespace vknn {
         bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
+        bool    strictFuse          = false; // rounded steps everywhere: fused == unfused byte-identical
+                                             // (the byte-gate mode; default fast mode uses the kernels'
+                                             // native fp32-accumulator swish/residual/bias epilogues)
         bool    lowerConv           = false; // non-Winograd KxK Conv -> ConvGemm (experimental: the
                                              // v1 64x64x16 kernel loses to the direct conv on
                                              // classifier-CNN shapes — opt in per model, measure)

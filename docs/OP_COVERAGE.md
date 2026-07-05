@@ -75,9 +75,10 @@ flags override a single pass on top of the level:
   Internal fanout rides the unit's registers; values consumed outside the region export as extra
   output streams. Residual Adds, swish diamonds (`x · sigmoid(x)`), MatMul bias-Adds, and lone
   activations are all cases of this pass; a lone Relu (or a Clip with fp16-representable bounds)
-  after a Conv/Gemm folds onto the kernel's own `fusedAct` instead. Bit-exact: fused == unfused is
-  byte-identical (each step reproduces the unfused store rounding). Enabled at `-O1` (default);
-  opt out with `--no-fuse-pointwise`.
+  after a Conv/Gemm folds onto the kernel's own `fusedAct` instead. By default the swish/residual/
+  bias patterns use the kernels' fast fp32-accumulator epilogues (old-main speed; not byte-equal to
+  unfused); `--strict-fuse` keeps every step rounded, making fused == unfused byte-identical — the
+  byte-verification mode. Enabled at `-O1` (default); opt out with `--no-fuse-pointwise`.
 - **BatchNorm lowering** — a BatchNorm the conv fold cannot absorb (pre-activation BN, BN after
   Concat) lowers unconditionally to a per-channel Mul+Add with host-folded scale/shift, which the
   pointwise fusion then merges into the neighboring kernels.
