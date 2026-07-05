@@ -30,10 +30,11 @@ namespace vknn {
     // emit it as one fused unit — a producer epilogue or a standalone FusedPointwise node, with
     // extra output streams for values consumed outside the region. Subsumes activation, residual-
     // add, swish-diamond, and matmul-bias folding. Runs last; on by default. In the default fast
-    // mode units are fp32-chained (pw_relax): steps run unrounded in fp32 registers and the unit
-    // rounds once per stored stream — faster than per-step rounding and at least as accurate as
-    // the unfused fp16 graph by construction. strict=true keeps every step rounded, so
-    // fused == unfused is byte-identical — the byte gate compiles with --strict-fuse.
+    // mode units are fp32-chained (pw_relax): the entry rounds to the producer's store byte, the
+    // steps run unrounded in fp32 registers, and the unit rounds once per stored stream — faster
+    // than per-step rounding and at least as accurate as the unfused fp16 graph on every chain.
+    // strict=true keeps every step rounded, so fused == unfused is byte-identical — the byte gate
+    // compiles with --strict-fuse.
     void fusePointwiseChains(Graph &g, bool strictFuse);
 
     // Lower Reduce(Mean) over the spatial dims of a rank-4 tensor (keepdims) to GlobalAvgPool — the

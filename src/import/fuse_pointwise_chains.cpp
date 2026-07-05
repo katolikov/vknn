@@ -643,10 +643,11 @@ namespace vknn {
     /// Rounding discipline (strictFuse): in strict mode the unit's entry value is rounded to the
     /// byte the producer would store and every step result passes TO_STORE
     /// (shaders/pw_epilogue.glsl), reproducing each fp16 store of the unfused graph bit for bit, in
-    /// the same order. In the default fast mode the unit carries the pw_relax attr: the entry stays
-    /// the producer's raw fp32 accumulator, steps chain unrounded in fp32 registers, and the unit
-    /// rounds ONCE per stored stream (main store + each export) — strictly fewer roundings than the
-    /// unfused graph, so per-chain accuracy is >= the unfused fp16 build by construction.
+    /// the same order. In the default fast mode the unit carries the pw_relax attr: the entry still
+    /// rounds to the producer's store byte (inter-unit tensors stay on the unfused trajectory), but
+    /// the steps chain unrounded in fp32 registers and the unit rounds ONCE per stored stream —
+    /// fewer roundings than the unfused graph on every multi-step chain, and byte-identical to it
+    /// for single-step units and chains ending in a monotone activation.
     ///
     /// Precondition: shapes inferred and const-folding done (this runs LAST among the standard
     /// passes). Postcondition: fully-merged members are erased; the producer (or the anchor slot's

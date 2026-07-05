@@ -88,9 +88,11 @@ vec4 pwToStore4(vec4 v){ return vec4(float(TO_STORE(v.x)),float(TO_STORE(v.y)),f
 //     producer would store) and every compute step's result rounds through TO_STORE, so each fused
 //     step reproduces, bit for bit, the fp16 store the unfused graph would make (a load passes the
 //     already-rounded storage value through unrounded).
-//   fp32-chained (flags bit 0 set): entry and steps stay unrounded fp32; the returned value and each
-//     exported stream round ONCE through the integer-exact PW_ROUND — strictly fewer roundings than
-//     the unfused graph, so per-chain accuracy is >= the unfused fp16 build by construction.
+//   fp32-chained (flags bit 0 set): the entry still rounds to the producer's store byte (keeping
+//     every inter-unit tensor on the unfused graph's trajectory), but the steps chain unrounded in
+//     fp32 registers and the unit rounds ONCE per stored stream through the integer-exact PW_ROUND.
+//     Fewer roundings than the unfused graph on every multi-step chain, and byte-identical to it
+//     for single-step units and chains ending in a monotone activation (rounding commutes there).
 float pw_apply_st(float entryRaw, int outIdx){
   float entry=float(TO_STORE(entryRaw));
   float acc=entry; float r0=0.,r1=0.,r2=0.,r3=0.;
@@ -118,9 +120,10 @@ float pw_apply_st(float entryRaw, int outIdx){
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut(o,outIdx,acc); }
   }
   return acc; }
-float pw_apply_rx(float entry, int outIdx){
+float pw_apply_rx(float entryRaw, int outIdx){
+  float entry=float(TO_STORE(entryRaw));
   float acc=entry; float r0=0.,r1=0.,r2=0.,r3=0.;
-  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOut(o,outIdx,PW_ROUND(entry)); }
+  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOut(o,outIdx,entry); }
   for(int s=0;s<plan.numSteps;++s){
     int kind=plan.step[s*8],code=plan.step[s*8+1],a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
     int dst=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
@@ -177,9 +180,10 @@ float pw_apply_nc4_st(float entryRaw, int packedIdx){ int lane=packedIdx&3, vecI
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut(o,packedIdx,acc); }
   }
   return acc; }
-float pw_apply_nc4_rx(float entry, int packedIdx){ int lane=packedIdx&3, vecIdx=packedIdx>>2;
+float pw_apply_nc4_rx(float entryRaw, int packedIdx){ int lane=packedIdx&3, vecIdx=packedIdx>>2;
+  float entry=float(TO_STORE(entryRaw));
   float acc=entry; float r0=0.,r1=0.,r2=0.,r3=0.;
-  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOut(o,packedIdx,PW_ROUND(entry)); }
+  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOut(o,packedIdx,entry); }
   for(int s=0;s<plan.numSteps;++s){
     int kind=plan.step[s*8],code=plan.step[s*8+1],a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
     int dst=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
@@ -231,9 +235,10 @@ vec4 pw_apply4_st(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut4(o,vecIdx,acc); }
   }
   return acc; }
-vec4 pw_apply4_rx(vec4 entry, int vecIdx){ int HW=plan.outDim[0];
+vec4 pw_apply4_rx(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
+  vec4 entry=pwToStore4(entryRaw);
   vec4 acc=entry; vec4 r0=vec4(0.),r1=vec4(0.),r2=vec4(0.),r3=vec4(0.);
-  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOut4(o,vecIdx,pwRound4(entry)); }
+  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOut4(o,vecIdx,entry); }
   for(int s=0;s<plan.numSteps;++s){
     int kind=plan.step[s*8],code=plan.step[s*8+1],a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
     int dst=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
