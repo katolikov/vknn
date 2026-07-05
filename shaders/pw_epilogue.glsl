@@ -12,6 +12,15 @@
 #ifndef TO_STORE
 #define TO_STORE(x) STORE(x)
 #endif
+// Per-step rounding. Pinned to the integer-exact vknnRte16 whenever fp16 storage is in play
+// (VX_STORE16_GLSL): a unit's step must round identically to the standalone elementwise kernel it
+// replaces, regardless of the HOST kernel's rounding mode — drivers whose RoundingModeRTE breaks
+// ties away from even would otherwise split fused and unfused bytes on exact-tie values.
+#ifdef VX_STORE16_GLSL
+#define PW_ROUND(x) float(vknnRte16(x))
+#else
+#define PW_ROUND(x) float(TO_STORE(x))
+#endif
 #ifndef PW_EPI_MAXSTEPS
 #define PW_EPI_MAXSTEPS 16
 #endif
@@ -86,10 +95,10 @@ float pw_apply(float entry, int outIdx){
     if(c<=PW_REF_OP0)      vc=pwLoad(PW_REF_OP0-c,pwFlatIdx(s,bsrc==3?bc:0,outIdx));
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
-    if(kind==0)      acc=float(TO_STORE(vx_binary(va,vb,code)));
-    else if(kind==1) acc=float(TO_STORE(vx_unary(va,code,plan.p0[s],plan.p1[s])));
-    else if(kind==2) acc=float(TO_STORE(vx_act(va,code,plan.p0[s],plan.p1[s])));
-    else if(kind==3) acc=float(TO_STORE(va!=0.?vb:vc));
+    if(kind==0)      acc=PW_ROUND(vx_binary(va,vb,code));
+    else if(kind==1) acc=PW_ROUND(vx_unary(va,code,plan.p0[s],plan.p1[s]));
+    else if(kind==2) acc=PW_ROUND(vx_act(va,code,plan.p0[s],plan.p1[s]));
+    else if(kind==3) acc=PW_ROUND(va!=0.?vb:vc);
     else             acc=va;
     if(dst==0)r0=acc; else if(dst==1)r1=acc; else if(dst==2)r2=acc; else if(dst==3)r3=acc;
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut(o,outIdx,acc); }
@@ -116,17 +125,17 @@ float pw_apply_nc4(float entry, int packedIdx){ int lane=packedIdx&3, vecIdx=pac
     if(c<=PW_REF_OP0)      vc=pwLoad(PW_REF_OP0-c,pwNc4Idx(bsrc==3?bc:0,packedIdx,lane,vecIdx));
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
-    if(kind==0)      acc=float(TO_STORE(vx_binary(va,vb,code)));
-    else if(kind==1) acc=float(TO_STORE(vx_unary(va,code,plan.p0[s],plan.p1[s])));
-    else if(kind==2) acc=float(TO_STORE(vx_act(va,code,plan.p0[s],plan.p1[s])));
-    else if(kind==3) acc=float(TO_STORE(va!=0.?vb:vc));
+    if(kind==0)      acc=PW_ROUND(vx_binary(va,vb,code));
+    else if(kind==1) acc=PW_ROUND(vx_unary(va,code,plan.p0[s],plan.p1[s]));
+    else if(kind==2) acc=PW_ROUND(vx_act(va,code,plan.p0[s],plan.p1[s]));
+    else if(kind==3) acc=PW_ROUND(va!=0.?vb:vc);
     else             acc=va;
     if(dst==0)r0=acc; else if(dst==1)r1=acc; else if(dst==2)r2=acc; else if(dst==3)r3=acc;
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut(o,packedIdx,acc); }
   }
   return acc; }
 vec4 pwBin4(vec4 a,vec4 b,int code){ return vec4(vx_binary(a.x,b.x,code),vx_binary(a.y,b.y,code),vx_binary(a.z,b.z,code),vx_binary(a.w,b.w,code)); }
-vec4 pwRound4(vec4 v){ return vec4(float(TO_STORE(v.x)),float(TO_STORE(v.y)),float(TO_STORE(v.z)),float(TO_STORE(v.w))); }
+vec4 pwRound4(vec4 v){ return vec4(PW_ROUND(v.x),PW_ROUND(v.y),PW_ROUND(v.z),PW_ROUND(v.w)); }
 vec4 pw_apply4(vec4 entry, int vecIdx){ int HW=plan.outDim[0];
   vec4 acc=entry; vec4 r0=vec4(0.),r1=vec4(0.),r2=vec4(0.),r3=vec4(0.);
   for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOut4(o,vecIdx,entry); }

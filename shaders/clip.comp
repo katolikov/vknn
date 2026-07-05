@@ -1,4 +1,5 @@
 #version 450
+#define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
 #include "precision.glsl"
 // Clip/clamp each element to [lo, hi]. fp16/fp32 storage (STORE), clamp computed in float.
 #include "common.glsl"
@@ -10,5 +11,5 @@ layout(push_constant) uniform PC { int total; float lo, hi; } pc;
 void main() {
   uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (g >= uint(pc.total)) return;
-  d[g] = STORE(clamp(float(s[g]), pc.lo, pc.hi));
+  d[g] = TO_STORE(clamp(float(s[g]), pc.lo, pc.hi));
 }

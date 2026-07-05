@@ -1,4 +1,5 @@
 #version 450
+#define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
 #include "precision.glsl"
 // Flat broadcasting binary.
 #include "common.glsl"
@@ -26,5 +27,5 @@ void main() {
       bi += c * pc.bStride[k];
     }
   }
-  d[gid] = STORE(vx_act(vx_binary(float(a[ai]), float(b[bi]), pc.op), pc.act, pc.actLo, pc.actHi));
+  d[gid] = TO_STORE(vx_act(vx_binary(float(a[ai]), float(b[bi]), pc.op), pc.act, pc.actLo, pc.actHi));
 }

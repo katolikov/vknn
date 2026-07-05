@@ -8,19 +8,13 @@
 // every 16-bit-result conversion in this shader round to nearest even, at no runtime cost.
 #ifndef VX_STORE16_GLSL
 #define VX_STORE16_GLSL
-#ifndef VKNN_NO_RTE
-#extension GL_EXT_spirv_intrinsics : require
-// RoundingModeRTE execution mode (4462) for 16-bit results; requires the RoundingModeRTE capability
-// (4467) and the SPV_KHR_float_controls extension.
-spirv_execution_mode(capabilities = [4467], extensions = ["SPV_KHR_float_controls"], 4462, 16);
-#define TO_STORE(x) float16_t(x)
-#else
-// Explicit round-to-nearest-even conversion for kernels that must not carry the float-controls
-// execution mode: some drivers miscompile kernels under RoundingModeRTE (nondeterministic
-// output, faults under load), and both float16_t(x) and packHalf2x16 round toward zero there.
-// The integer-math conversion below produces the same bits as a correct RTE FConvert.
+// The integer-math vknnRte16 below is defined for EVERY fp16 kernel (not just VKNN_NO_RTE ones):
+// the fused-pointwise VM rounds each step with it so a step's bytes never depend on which host
+// kernel runs the unit — some drivers' RoundingModeRTE breaks round-to-nearest ties differently
+// from IEEE ties-to-even, and a fused unit must round exactly like the standalone elementwise
+// kernels it replaces (which also store through it).
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
-uint vknnF32ToF16RteBits(float x) {
+uint vknnF32ToF16RteBits(float x) {  // same bits as a correct IEEE RTE FConvert
   uint f = floatBitsToUint(x);
   uint s = (f >> 16) & 0x8000u;
   uint e = (f >> 23) & 0xFFu;
@@ -46,6 +40,16 @@ uint vknnF32ToF16RteBits(float x) {
 float16_t vknnRte16(float v) {
   return uint16BitsToFloat16(uint16_t(vknnF32ToF16RteBits(v)));
 }
+#ifndef VKNN_NO_RTE
+#extension GL_EXT_spirv_intrinsics : require
+// RoundingModeRTE execution mode (4462) for 16-bit results; requires the RoundingModeRTE capability
+// (4467) and the SPV_KHR_float_controls extension.
+spirv_execution_mode(capabilities = [4467], extensions = ["SPV_KHR_float_controls"], 4462, 16);
+#define TO_STORE(x) float16_t(x)
+#else
+// Kernels that must not carry the float-controls execution mode (some drivers miscompile them:
+// nondeterministic output, faults under load; and both float16_t(x) and packHalf2x16 round toward
+// zero there) convert explicitly instead.
 #define TO_STORE(x) vknnRte16(float(x))
 #endif
 #endif  // VX_STORE16_GLSL

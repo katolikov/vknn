@@ -2,6 +2,7 @@
 // PRelu over NC4HW4 (fp16). slope is per-channel, packed [Cb][4]; element i belongs to block (i/HW)%Cb.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
 #include "store16.glsl"
 #include "common.glsl"
 layout(local_size_x = 256) in;
@@ -15,5 +16,6 @@ void main() {
   int cb = (int(i) / pc.HW) % pc.Cb;
   vec4 s = vec4(slope[cb]);
   vec4 x = vec4(src[i]);
-  dst[i] = f16vec4(mix(s * x, x, greaterThan(x, vec4(0.0))));
+  vec4 r = mix(s * x, x, greaterThan(x, vec4(0.0)));
+  dst[i] = f16vec4(TO_STORE(r.x), TO_STORE(r.y), TO_STORE(r.z), TO_STORE(r.w));
 }

@@ -1,4 +1,5 @@
 #version 450
+#define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
 #include "precision.glsl"
 // Elementwise add over NC4HW4 fp16 buffers, with optional fused activation.
 #include "common.glsl"
@@ -10,5 +11,5 @@ layout(push_constant) uniform PC { uint count; int act; float actLo, actHi; } pc
 void main() {
   uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (i >= pc.count) return;
-  c[i] = STORE(vx_act(float(a[i]) + float(b[i]), pc.act, pc.actLo, pc.actHi));
+  c[i] = TO_STORE(vx_act(float(a[i]) + float(b[i]), pc.act, pc.actLo, pc.actHi));
 }
