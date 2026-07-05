@@ -323,24 +323,34 @@ namespace vknn {
                 return best;
             }
 
-            // Autotune output-channel register tiling (OCB) for the general direct conv: race the
-            // 1-pixel/thread direct kernel against conv_reg computing OCB channel-blocks per thread (each
-            // input vec4 reused across 4*OCB output-channel dots). Returns the OCB block factor, 0 = direct.
-            // Per-output arithmetic is identical for every OCB (only the thread<->channel mapping changes),
-            // so the choice never affects output bits (no anti-noise margin needed, unlike Winograd) and a
-            // cache-off re-tune stays deterministic. Measured on scratch buffers + cached like pickWTile.
-            int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
+            // Autotune the general direct conv's bit-exact kernel set: race the 1-pixel/thread direct
+            // kernel against conv_reg computing OCB channel-blocks per thread (each input vec4 reused
+            // across 4*OCB output-channel dots) and — when `lds3x3` marks the shape eligible (3x3, s1,
+            // p1, d1, >=14x14 output, fp16) — the LDS input-halo kernel. Returns 0 = direct, the OCB
+            // block factor, or kChoiceLds3x3. Per-output arithmetic is identical for every candidate
+            // (only the thread<->output mapping and the input staging change), so the choice never
+            // affects output bits (no anti-noise margin needed, unlike Winograd) and a cache-off
+            // re-tune stays deterministic. Measured on scratch buffers + cached like pickWTile.
+            static constexpr int kChoiceLds3x3 = 9; // pickOcb result: the LDS input-halo 3x3 kernel won
+            int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, bool lds3x3) {
                 if (env.tuning == Tuning::None || !env.runner)
                 {
                     return 0;
                 }
+                // The LDS-halo kernel decodes a flat gl_WorkGroupID.x with no split spill, so its
+                // group count must fit the device X limit outright.
+                int64_t ldsG = x.n * Coutb * ((y.h + 7) / 8) * ((y.w + 7) / 8);
+                lds3x3       = lds3x3 && ldsG <= (int64_t) env.ctx->caps().maxWorkGroupCount[0];
                 char buf[112];
                 snprintf(buf, sizeof(buf), "convocb_%d_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
                 std::string sig = env.gpuTag + "/" + buf;
                 if (env.weights)
                 {
                     int cached = env.weights->tuned(sig, -1);
-                    if (cached >= 0)
+                    // The sig omits pads/dilations (the direct and OCB kernels are pad/dilation-
+                    // agnostic), but choice kChoiceLds3x3 is only valid for the gated 3x3/s1/p1/d1
+                    // shape — an ineligible node with the same sig fields must re-race without it.
+                    if (cached >= 0 && (cached != kChoiceLds3x3 || lds3x3))
                     {
                         return cached;
                     }
@@ -376,6 +386,18 @@ namespace vknn {
                         best   = (int) ocb;
                     }
                 }
+                // The LDS input-halo 3x3 joins the same bit-exact race when eligible: its
+                // accumulation is value-identical to the direct kernel (fp32 accumulate, icb/ky/kx
+                // tap order, pad taps add +0.0), so the swap needs no anti-noise margin either.
+                if (lds3x3)
+                {
+                    double ms = timeIt(env.pipeline("conv3x3_lds_fp16", 4, sizeof(ConvPC)), ldsG * 64, 64);
+                    if (ms < bestMs)
+                    {
+                        bestMs = ms;
+                        best   = kChoiceLds3x3;
+                    }
+                }
                 VKNN_DEBUG << "autotune " << sig << " -> ocb=" << best;
                 if (env.weights)
                 {
@@ -391,8 +413,8 @@ namespace vknn {
             // runs only under Tuning::Fast/Heavy — Tuning::None keeps the legacy direct kernels —
             // with the same anti-noise margin as Winograd, and the winner persists in the tune cache
             // so warm runs are stable. `dchoice` is the direct race's winner (0 = plain direct,
-            // else conv_reg's OCB), so the gemm kernel is timed against the configuration that
-            // would actually run.
+            // conv_reg's OCB, or kChoiceLds3x3), so the gemm kernel is timed against the
+            // configuration that would actually run.
             int tuneConvGemm(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, int64_t KH, int64_t KW, int dchoice) {
                 if (env.tuning == Tuning::None || !env.runner || hasRes)
                 {
@@ -445,7 +467,15 @@ namespace vknn {
                     return m;
                 };
                 double dms = 1e30;
-                if (dchoice > 0)
+                if (dchoice == kChoiceLds3x3)
+                { // the direct race already picked the LDS input-halo 3x3 kernel
+                    int64_t g = x.n * Coutb * ((y.h + 7) / 8) * ((y.w + 7) / 8);
+                    auto    p = env.pipeline("conv3x3_lds_fp16", 4, sizeof(ConvPC));
+                    dms       = bestOf([&](VkCommandBuffer cmd) {
+                        p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), (uint32_t) g);
+                        vk::computeBarrier(cmd);
+                    });
+                } else if (dchoice > 0)
                 { // the direct race already picked conv_reg at this OCB
                     int64_t HW = y.h * y.w, ocbGroups = (Coutb + dchoice - 1) / dchoice;
                     auto    p  = env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), {(uint32_t) dchoice});
@@ -771,11 +801,13 @@ namespace vknn {
                         pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {});
                     } else
                     {
-                        // DirectAuto: the bit-exact direct race picks the baseline (1-pixel direct vs
-                        // conv_reg OCB tiling), then the implicit-GEMM race (fp16-floor, Fast/Heavy
-                        // only) may take the shape from that baseline.
-                        int ocb = env.useFp16 ? pickOcb(env, x, y, Cout, Coutb) : 0;
-                        int gtm = (env.useFp16 && group == 1 && KH * KW > 1) ? tuneConvGemm(node, env, x, y, Cout, Coutb, KH, KW, ocb) : 0;
+                        // DirectAuto: the bit-exact direct race picks the baseline (1-pixel direct,
+                        // conv_reg OCB tiling, or the LDS-halo 3x3 when eligible), then the
+                        // implicit-GEMM race (fp16-floor, Fast/Heavy only) may take the shape from
+                        // that baseline.
+                        bool lds3x3 = env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14;
+                        int  ocb    = env.useFp16 ? pickOcb(env, x, y, Cout, Coutb, lds3x3) : 0;
+                        int  gtm    = (env.useFp16 && group == 1 && KH * KW > 1) ? tuneConvGemm(node, env, x, y, Cout, Coutb, KH, KW, ocb) : 0;
                         if (gtm > 0)
                         {
                             // implicit-GEMM kernel at the raced M tile; binds Src/Wt/Bs/Dst exactly like
@@ -805,6 +837,13 @@ namespace vknn {
                             ggy       = (uint32_t) ((M + gtm - 1) / gtm);
                             ggz       = (uint32_t) x.n;
                             pipe = env.pipeline(shader((std::string("conv_gemm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), std::vector<uint32_t> {(uint32_t) gtm});
+                        } else if (ocb == kChoiceLds3x3)
+                        {
+                            // LDS input-halo 3x3 (autotuned; won the bit-exact direct race for this shape).
+                            lds         = true;
+                            int64_t nTX = (y.w + 7) / 8, nTY = (y.h + 7) / 8;
+                            ldsGroups = x.n * Coutb * nTY * nTX;
+                            pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {});
                         } else if (ocb > 0)
                         {
                             // register-tiled conv computing OCB output channel-blocks per thread (autotuned; won
