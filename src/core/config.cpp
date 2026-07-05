@@ -123,6 +123,9 @@ namespace vknn {
         return fromJsonString(ss.str());
     }
 
+    /// Overlays the keys present in @p json onto a default-constructed Config; any key not present
+    /// leaves its field at the default (the S/B/I helpers only assign when the key exists). A JSON
+    /// value that is not an object yields the all-defaults Config.
     Config Config::fromJsonString(const std::string &json) {
         Config    c;
         JsonValue v = JsonParser::parse(json);
@@ -187,8 +190,9 @@ namespace vknn {
             c.tuning = tuningFromStr(j->asStr("fast"));
         }
         B("freeWeightsAfterUpload", c.freeWeightsAfterUpload);
-        // Flat-layout pass + GPU-island folding are hints now (default On). Accept the new keys and the
-        // legacy noFlatOps / foldGpuIslands booleans.
+        // Flat-layout pass + GPU-island folding are hints now (default On). Accept the new keys
+        // (flatLayout / gpuIslandFold) and the legacy booleans. noFlatOps is the negation of
+        // flatLayout: noFlatOps=true disables the pass (FlatLayout Off).
         if (auto *j = v.get("flatLayout"))
         {
             c.setHint(Hint::FlatLayout, j->asBool(true) ? (int) Mode::On : (int) Mode::Off);
@@ -242,6 +246,9 @@ namespace vknn {
         return c;
     }
 
+    /// Serializes the effective config as JSON parseable by fromJsonString (round-trips). Emits the
+    /// resolved hint-derived values (flatLayout(), the Winograd/conv hints) rather than the raw hints
+    /// vector, and only the keys fromJsonString reads back.
     std::string Config::toJson() const {
         std::ostringstream os;
         os << "{\n";

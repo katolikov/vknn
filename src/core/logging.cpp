@@ -77,13 +77,17 @@ namespace vknn {
         {
             return;
         }
+        // Per-key throttle: the first `throttleAfter` messages sharing `key` print normally; the
+        // (throttleAfter + 1)-th prints once more carrying the "suppressed" note built below; any
+        // beyond that return here and never reach the sinks. The count persists for the process
+        // lifetime, so a key is throttled permanently once it crosses the threshold.
         if (throttleAfter > 0 && !key.empty())
         {
             int &c = g_counts[key];
             ++c;
             if (c == throttleAfter + 1)
             {
-                // emit one final "suppressing" note then go silent
+                // The one final print; the suffix is appended below.
             } else if (c > throttleAfter + 1)
             { return; }
         }

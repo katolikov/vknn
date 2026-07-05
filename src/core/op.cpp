@@ -187,6 +187,7 @@ namespace vknn {
             {"Unsqueeze", OpType::Unsqueeze},
             {"PRelu", OpType::PRelu},
             {"Resize", OpType::Resize},
+            // Upsample is the pre-opset-10 name Resize superseded; both lower to the same OpType.
             {"Upsample", OpType::Resize},
             {"GridSample", OpType::GridSample},
             {"Transpose", OpType::Transpose},
@@ -197,6 +198,7 @@ namespace vknn {
             {"Where", OpType::Where},
             {"Equal", OpType::Equal},
             {"Greater", OpType::Greater},
+            // GreaterOrEqual is the canonical ONNX spelling; GreaterEqual is accepted as an alias.
             {"GreaterOrEqual", OpType::GreaterEqual},
             {"GreaterEqual", OpType::GreaterEqual},
             {"ConstantOfShape", OpType::ConstantOfShape},
@@ -209,6 +211,9 @@ namespace vknn {
         {
             return it->second;
         }
+        // Fallbacks for the collapsed families: every Reduce* variant (except ReduceMean, which is
+        // in the table above so it can reach the GAP recovery) and then the Unary/Binary elementwise
+        // families, whose specific op is recovered separately via unaryFromOnnx/binaryFromOnnx.
         if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd" || s == "ReduceL2")
         {
             return OpType::Reduce;

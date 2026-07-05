@@ -7,6 +7,7 @@
 
 namespace vknn {
 
+    // Join extents with 'x' (e.g. "1x3x224x224"). An empty shape is a rank-0 tensor, rendered "scalar".
     static std::string shapeJoin(const std::vector<int64_t> &s) {
         std::string r;
         for (size_t i = 0; i < s.size(); ++i)
@@ -114,6 +115,7 @@ namespace vknn {
         return sess_ ? toInfos(sess_->outputInfo()) : std::vector<TensorInfo> {};
     }
 
+    // Product of the extents. An empty shape reports 0 (unknown/unshaped), not the empty product 1.
     static int64_t elemCount(const Shape &s) {
         int64_t n = 1;
         for (int64_t d: s)
@@ -176,6 +178,8 @@ namespace vknn {
                 result.emplace_back(std::vector<float> {}, o.shape, o.name); // delivered to the caller's fd
             } else
             {
+                // Element count comes from the shape; when the engine returns no shape, derive it from
+                // the raw byte length of the result buffer instead.
                 int64_t      n = o.shape.empty() ? (int64_t) (o.data.size() / sizeof(float)) : elemCount(o.shape);
                 const float *f = o.f32();
                 result.emplace_back(std::vector<float>(f, f + n), o.shape, o.name);

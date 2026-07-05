@@ -24,6 +24,8 @@ namespace vknn {
 
     TensorId Graph::addTensor(TensorDesc d) {
         TensorId id = (TensorId) tensors.size();
+        // Only named tensors join the name index; anonymous intermediates are reachable solely by id,
+        // so find()/findOrAdd() never resolve to them.
         if (!d.name.empty())
         {
             tensorByName[d.name] = id;
@@ -33,10 +35,13 @@ namespace vknn {
     }
 
     void Graph::topoSort() {
-        // Kahn's algorithm over tensor producers/consumers.
+        // Kahn's algorithm over the producer/consumer edges implied by shared tensor ids. Seeding the
+        // queue in node-index order and appending successors in that same order makes the result stable:
+        // a node list already in dependency order is returned unchanged.
         const size_t     n = nodes.size();
         std::vector<int> indeg(n, 0);
-        // producer map: tensor id -> node index
+        // Producer of each tensor: tensor id -> node index. If two nodes write the same tensor the
+        // later one wins, so dependency edges point at the most recent producer.
         std::unordered_map<int, int> producer;
         for (size_t i = 0; i < n; ++i)
         {
@@ -52,6 +57,10 @@ namespace vknn {
         std::vector<std::vector<int>> succ(n);
         for (size_t i = 0; i < n; ++i)
         {
+            // Collect distinct predecessors first: a node reading several tensors from the same
+            // producer must count that edge once, or its indegree could never drain to zero and the
+            // node would be misreported as part of a cycle. The self-edge guard drops the case where a
+            // node reads a tensor it also writes (in-place), which would otherwise deadlock the sort.
             std::unordered_set<int> preds;
             for (TensorId in: nodes[i].inputs)
             {
@@ -90,6 +99,8 @@ namespace vknn {
                 }
             }
         }
+        // Any node never enqueued still has a nonzero indegree, meaning its producers form a cycle it
+        // depends on; Kahn's algorithm emits fewer than n nodes exactly in that case.
         if (ordered.size() != n)
         {
             throw Error(Status::InvalidArgument, "graph has a cycle");

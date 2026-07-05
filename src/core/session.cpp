@@ -16,6 +16,8 @@ namespace vknn {
     // works end-to-end without a fp32-only assumption.
 
     // Caller bytes (in dtype `src`) -> internal storage: int64 for Int64, fp32 for everything else.
+    // Storage is always sized for `elems`; a short caller buffer is tolerated, not rejected — every
+    // branch fills only min(elems, in.size()/bytesPer) elements and leaves the tail untouched.
     static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
         if (src == DType::Int64)
         {

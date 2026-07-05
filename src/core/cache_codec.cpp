@@ -27,6 +27,9 @@ namespace vknn {
         msgpack_packer pk;
         msgpack_packer_init(&pk, &sb, msgpack_sbuffer_write);
 
+        // The map header declares its entry count up front, so this literal must equal the number of
+        // key/value pairs packed below; a mismatch produces a malformed stream. Decode is name-keyed
+        // (mapGet), so field order here is not load-bearing, but the count is.
         msgpack_pack_map(&pk, 8);
         packKey(&pk, "format");
         msgpack_pack_uint32(&pk, doc.format);
@@ -46,6 +49,8 @@ namespace vknn {
         msgpack_pack_array(&pk, doc.variants.size());
         for (const auto &v: doc.variants)
         {
+            // Per-variant map: the count must match the key/value pairs packed below (the 8 key fields
+            // plus pipeline, weights, tune). Adding a field means bumping this literal in lockstep.
             msgpack_pack_map(&pk, 11);
             packKey(&pk, "precision");
             packStr(&pk, v.precision);
@@ -69,6 +74,8 @@ namespace vknn {
             msgpack_pack_map(&pk, v.weights.size());
             for (const auto &kv: v.weights)
             {
+                // Each float vector is stored as its raw little-endian bytes; the decoder relies on the
+                // blob length being a whole multiple of sizeof(float) to reconstruct the vector.
                 packStr(&pk, kv.first);
                 packBin(&pk, kv.second.data(), kv.second.size() * sizeof(float));
             }
@@ -116,6 +123,8 @@ namespace vknn {
         const msgpack_object *o = mapGet(m, key);
         return (o && o->type == MSGPACK_OBJECT_POSITIVE_INTEGER) ? (uint32_t) o->via.u64 : 0u;
     }
+    // msgpack stores a non-negative int32 as a POSITIVE_INTEGER and only negative values as
+    // NEGATIVE_INTEGER, so both object types must be accepted to round-trip a signed field.
     static int32_t asI32(const msgpack_object &o) {
         if (o.type == MSGPACK_OBJECT_POSITIVE_INTEGER)
         {
@@ -179,6 +188,8 @@ namespace vknn {
                     continue;
                 }
                 CacheVariant v;
+                // The bool defaults mirror CacheVariant's struct defaults so a variant written by an
+                // older codec that lacked these keys decodes to the same key() and stays interchangeable.
                 v.precision       = getStr(vo, "precision");
                 v.flatLayout      = getBool(vo, "flatLayout", true);
                 v.gpuIslandFold   = getBool(vo, "gpuIslandFold", true);

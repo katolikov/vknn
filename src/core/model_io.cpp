@@ -11,8 +11,14 @@
 namespace vknn {
 
     namespace {
-        constexpr uint32_t kMagic = 0x324d5856; // "VXM2" (adds Node.fusedBias)
+        // Format version guard, stored as the first word of every .vxm. A load whose leading word
+        // does not match is rejected: the on-disk layout is field-order- and width-sensitive, so
+        // bumping this is the only safe way to evolve the schema. The "2" revision carries
+        // Node.fusedBias; older files fail the check rather than mis-parse.
+        constexpr uint32_t kMagic = 0x324d5856; // "VXM2"
 
+        // Raw fixed-width serialization: every pod()/vec() writes host-endian bytes with no framing.
+        // The Reader must consume fields in the exact same order the Writer emits them.
         struct Writer {
             FILE                      *f;
             template <typename T> void pod(const T &v) {
@@ -44,6 +50,9 @@ namespace vknn {
         };
         struct Reader {
             FILE                   *f;
+            // Sticky short-read flag. Once any fread returns fewer elements than requested it latches
+            // false and every later read is skipped, so a truncated file yields zero/default-filled
+            // fields instead of reading past EOF; callers gate on this after the whole graph is read.
             bool                    ok = true;
             template <typename T> T pod() {
                 T v {};
@@ -116,6 +125,7 @@ namespace vknn {
             w.vec(t.shape);
             w.u32((uint32_t) t.dtype);
             w.u32((uint32_t) t.format);
+            // Pack the three tensor roles into one word: bit0 input, bit1 output, bit2 initializer.
             w.u32((t.isInput ? 1u : 0) | (t.isOutput ? 2u : 0) | (t.isInitializer ? 4u : 0));
         }
         // nodes
@@ -129,6 +139,9 @@ namespace vknn {
             w.u32((uint32_t) n.fusedAct);
             w.f32(n.actLo);
             w.f32(n.actHi);
+            // subOp (int32) and the fused-tensor ids (TensorId == int32, kNoTensor when unset) are
+            // stored as i64 so the on-disk width is independent of the in-memory type; the load path
+            // narrows them back.
             w.i64(n.subOp);
             w.i64(n.fusedResidual);
             w.i64(n.fusedBias);
@@ -180,6 +193,8 @@ namespace vknn {
             t.isInput       = flags & 1;
             t.isOutput      = flags & 2;
             t.isInitializer = flags & 4;
+            // tensorByName is a derived index, not serialized: rebuild it from tensor position as
+            // tensors are read. Unnamed tensors are addressed only by id and stay out of the map.
             if (!t.name.empty())
             {
                 g.tensorByName[t.name] = (TensorId) i;

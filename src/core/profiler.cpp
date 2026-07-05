@@ -19,6 +19,7 @@ namespace vknn {
         double s = 0;
         for (auto &r: records_)
         {
+            // A negative gpuMs marks a record with no GPU measurement (e.g. a CPU fallback); skip it.
             if (r.gpuMs >= 0)
             {
                 s += r.gpuMs;
@@ -28,6 +29,9 @@ namespace vknn {
     }
 
     void Profiler::printTable() const {
+        // Width of the horizontal rule bracketing the per-node table; spans the fixed-width columns
+        // of the header/row format strings below.
+        constexpr int kTableRuleWidth = 86;
         if (records_.empty())
         {
             printf("(profiler: no records)\n");
@@ -35,7 +39,7 @@ namespace vknn {
         }
         // Aggregate per op type for the summary, but print per-node too.
         printf("\n%-28s %-10s %-7s %10s %10s  %s\n", "op (node)", "backend", "type", "cpu(ms)", "gpu(ms)", "dispatch");
-        printf("%s\n", std::string(86, '-').c_str());
+        printf("%s\n", std::string(kTableRuleWidth, '-').c_str());
         double                                           tcpu = 0, tgpu = 0;
         std::map<std::string, std::pair<double, double>> byType;
         for (const auto &r: records_)
@@ -60,10 +64,12 @@ namespace vknn {
             a.first += r.cpuMs;
             a.second += (r.gpuMs >= 0 ? r.gpuMs : 0);
         }
-        printf("%s\n", std::string(86, '-').c_str());
+        printf("%s\n", std::string(kTableRuleWidth, '-').c_str());
         printf("%-28s %-10s %-7s %10.3f %10.3f\n", "TOTAL", "", "", tcpu, tgpu);
         printf("\nPer op-type (cpu ms / gpu ms):\n");
+        // byType is keyed on op-type name; copy to a vector so the summary can be reordered by cost.
         std::vector<std::pair<std::string, std::pair<double, double>>> v(byType.begin(), byType.end());
+        // Sort descending by aggregate GPU time (pair::second.second) so the hottest op types lead.
         std::sort(v.begin(), v.end(), [](auto &a, auto &b) {
             return a.second.second > b.second.second;
         });
@@ -101,7 +107,8 @@ namespace vknn {
         bool   first = true;
         for (const auto &r: records_)
         {
-            double dur = (r.gpuMs >= 0 ? r.gpuMs : r.cpuMs) * 1000.0; // us
+            // Event duration is the GPU time when measured, else CPU wall time; convert ms to us.
+            double dur = (r.gpuMs >= 0 ? r.gpuMs : r.cpuMs) * 1000.0;
             if (!first)
             {
                 f << ",";

@@ -4,6 +4,8 @@
 namespace vknn {
 
     BackendRegistry &BackendRegistry::instance() {
+        // Function-local static: constructed on first call (thread-safe under C++11+) so the map is
+        // ready before any static-initialization-time BackendRegistrar reaches registerBackend().
         static BackendRegistry r;
         return r;
     }
@@ -17,6 +19,8 @@ namespace vknn {
         auto it = factories_.find(k);
         if (it == factories_.end())
         {
+            // Unregistered kind (the backend translation unit was not linked in): the caller
+            // distinguishes this from a factory that itself returns nullptr on a construction failure.
             return nullptr;
         }
         return it->second(cfg);

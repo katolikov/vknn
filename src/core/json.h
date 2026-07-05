@@ -1,4 +1,9 @@
-// minimal dependency-free JSON parser (objects/arrays/strings/numbers/bool/null).
+// Minimal dependency-free JSON parser (objects/arrays/strings/numbers/bool/null).
+//
+// Permissive by design: it parses the trusted config and model-metadata JSON the engine emits, so it
+// skips validation rather than reporting errors. Commas are treated as whitespace (see ws()), missing
+// ':' or closing brackets are tolerated, and malformed input yields best-effort values instead of an
+// error. std::stod in number() is the only operation that can throw.
 #pragma once
 #include "vknn/common.h"
 #include <map>
@@ -8,6 +13,9 @@
 
 namespace vknn {
 
+    // A parsed JSON node. `type` selects which payload field is meaningful; the others hold their
+    // default. Numbers are always stored as double (no integer variant), and object keys are ordered
+    // by std::map, not by source order.
     struct JsonValue {
         enum Type { kNull, kBool, kNumber, kString, kArray, kObject } type = kNull;
         bool                             b                                 = false;
@@ -19,6 +27,8 @@ namespace vknn {
         bool isObject() const {
             return type == kObject;
         }
+        // Look up a child by key; returns nullptr on a non-object or a missing key, so callers can
+        // chain get()->as*() with a default for absent fields.
         const JsonValue *get(const std::string &k) const {
             if (type != kObject)
             {
@@ -27,6 +37,7 @@ namespace vknn {
             auto it = obj.find(k);
             return it == obj.end() ? nullptr : &it->second;
         }
+        // as*() accessors return the fallback `d` on any type mismatch, never coercing across types.
         double asNum(double d = 0) const {
             return type == kNumber ? num : d;
         }
@@ -53,6 +64,9 @@ namespace vknn {
         const std::string &s_;
         size_t             i_ = 0;
 
+        // Skips whitespace AND commas, so object()/array() never handle separators explicitly: every
+        // element boundary is just more skippable whitespace. Also makes trailing/leading commas
+        // harmless.
         void ws() {
             while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r' || s_[i_] == ','))
             {
@@ -90,10 +104,11 @@ namespace vknn {
             }
             if (c == 'n')
             {
-                i_ += 4;
+                i_ += 4; // consume "null" unchecked; v stays kNull by default
                 JsonValue v;
                 return v;
             }
+            // Any other leading character is assumed to begin a number.
             JsonValue v;
             v.type = JsonValue::kNumber;
             v.num  = number();
@@ -138,6 +153,8 @@ namespace vknn {
             }
             return v;
         }
+        // Parses a double-quoted string, decoding the common backslash escapes. \uXXXX is NOT decoded:
+        // an unrecognized escape (default case) emits the character after the backslash verbatim.
         std::string str() {
             std::string out;
             if (peek() != '"')

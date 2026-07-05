@@ -19,6 +19,11 @@ namespace vknn {
     // One cache variant: the compiled artifacts for one distinct cache-affecting configuration. Two
     // variants with an equal key() are interchangeable; the backend keeps one variant per config it has
     // built and appends new ones on demand.
+    //
+    // The codec is name-keyed (each field maps to a MessagePack key equal to its member name), so the
+    // member names below are the on-disk contract, not their declaration order: reordering these members
+    // is harmless, but renaming one or changing its wire type breaks older files. Adding a key-guard
+    // field also requires extending sameKey() so the new dimension actually distinguishes variants.
     struct CacheVariant {
         // The cache-affecting configuration (the variant key).
         std::string precision;             // "low" / "normal" / "high"
@@ -43,7 +48,9 @@ namespace vknn {
     };
 
     // The whole cache file. The top-level fields (format, kernelHash, device, model) guard every variant;
-    // a mismatch of any invalidates the whole file.
+    // a mismatch of any invalidates the whole file. cacheDecode only reconstructs this layout — it does
+    // not compare these guards against the running engine, so the call site checks them and recomputes on
+    // any mismatch (see kCacheFormat).
     struct CacheDoc {
         uint32_t             format        = kCacheFormat;
         std::string          kernelHash;    // md5 of all embedded SPIR-V (embeddedShadersHash())
