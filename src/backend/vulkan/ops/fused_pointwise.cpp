@@ -8,6 +8,7 @@
 #include "vknn/op.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 
 namespace vknn {
     namespace {
@@ -29,6 +30,25 @@ namespace vknn {
                 holds.assign(operands.size(), nullptr);
 
                 planBuf = uploadPwPlan(env, plan);
+                // Chains of up to 8 steps compile a monomorphized pipeline: 25 spec words
+                // {NS, K[0..7] = (kind << 16) | (code & 0xffff), p0[0..7] bits, p1[0..7] bits} bind
+                // constant_id 0..24 in the shader, which unrolls the step loop and folds the kind
+                // dispatch and params at pipeline creation. Units with identical steps share one
+                // pipeline (the session pool keys on the spec words). Longer chains — and an empty
+                // spec vector — leave the shader's NS = 0 default in place, selecting the runtime
+                // plan-SSBO interpreter.
+                std::vector<uint32_t> spec;
+                if (plan.numSteps >= 1 && plan.numSteps <= 8)
+                {
+                    spec.assign(25, 0u);
+                    spec[0] = (uint32_t) plan.numSteps;
+                    for (int s = 0; s < plan.numSteps; ++s)
+                    {
+                        spec[1 + s] = ((uint32_t) plan.step[s * 8] << 16) | ((uint32_t) plan.step[s * 8 + 1] & 0xffffu);
+                        std::memcpy(&spec[9 + s], &plan.p0[s], sizeof(uint32_t));
+                        std::memcpy(&spec[17 + s], &plan.p1[s], sizeof(uint32_t));
+                    }
+                }
                 // Buffer count = 2 (primary input + output) + 1 (plan SSBO) + kPwMaxOperands operand
                 // slots + kPwMaxOuts extra output streams. The shaders (fused_pw_flat/nc4.comp)
                 // statically declare every slot via pw_epilogue.glsl, so the descriptor set must
@@ -42,7 +62,7 @@ namespace vknn {
                 {
                     base += "_rx";
                 }
-                pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int), spec);
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
