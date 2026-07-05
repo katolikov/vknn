@@ -1538,9 +1538,9 @@ namespace vknn {
                             bool      stale = !imp.buf || imp.bytes != needB || (id != 0 ? imp.id != id : imp.fd != fd);
                             if (stale)
                             {
-                                vk::Buffer *b = vk::Buffer::importDmaBufFd(be_->ctx(), fd, needB);
-                                imp           = {id, fd, needB, b ? std::shared_ptr<vk::Buffer>(b) : nullptr};
-                                if (!b)
+                                std::unique_ptr<vk::Buffer> b = vk::Buffer::importDmaBufFd(be_->ctx(), fd, needB);
+                                imp                           = {id, fd, needB, std::shared_ptr<vk::Buffer>(std::move(b))};
+                                if (!imp.buf)
                                 {
                                     // No dma-buf import on this device: zero-copy can't be honored. The
                                     // pooled buffer holds no caller data, so the result for this input is
