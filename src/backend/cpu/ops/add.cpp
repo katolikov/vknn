@@ -147,6 +147,7 @@ namespace vknn {
                     }
                     y[lin] = a[ia] + b[ib];
                 }
+                cpu::applyAct(y, n, node.fusedAct, node.actLo, node.actHi); // a broadcast Add carries fusedAct too
             }
         };
 
