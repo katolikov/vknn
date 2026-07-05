@@ -225,6 +225,7 @@ namespace vknn {
         std::vector<std::shared_ptr<vk::Buffer>> holds;
         bool                                     active    = false;
         bool                                     flatWorld = true;
+        bool                                     relax     = false;
 
         void prepare(const Node &node, VkOpEnv &env, bool flat, const Shape &out) {
             active = node.attr.has("pw_steps");
@@ -233,14 +234,17 @@ namespace vknn {
                 return;
             }
             flatWorld = flat;
+            relax     = node.attr.geti("pw_relax", 0) != 0;
             PwPlanCPU p {};
             int       total = 0;
             buildPwPlan(*env.graph, node, flat, out, p, operands, total);
             plan = uploadPwPlan(env, p);
             holds.assign(operands.size(), nullptr);
         }
+        // The rounding discipline is compiled into the SPIR-V (see shaders/pw_epilogue.glsl):
+        // "_epi" carries the strict per-step-rounded appliers, "_epi_rx" the fp32-chained ones.
         const char *suffix() const {
-            return active ? "_epi" : "";
+            return !active ? "" : relax ? "_epi_rx" : "_epi";
         }
         uint32_t extraBufs() const {
             return active ? 1u + (uint32_t) kPwMaxOperands + (uint32_t) kPwMaxOuts : 0u;

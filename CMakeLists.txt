@@ -88,9 +88,12 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     endif()
     # Producer kernels that can carry a fused pointwise-chain epilogue (fusePointwiseChains
     # attaching a chain to its producer) also emit PW_EPI variants that pull in
-    # shaders/pw_epilogue.glsl. Curated per rolled-out family — not blanket-added to every shader:
-    #   plain/templated <stem>.comp      -> <stem>_epi.spv (+ <stem>_epi_fp16.spv when templated)
-    #   hand-written    <stem>_fp16.comp -> <stem>_epi_fp16.spv
+    # shaders/pw_epilogue.glsl. Curated per rolled-out family — not blanket-added to every shader.
+    # Each PW_EPI build comes in two rounding disciplines selected at compile time (a runtime
+    # branch would carry both bodies in every kernel): the strict per-step-rounded "_epi" and the
+    # fp32-chained "_epi_rx" (-DPW_RELAX, for units carrying the pw_relax attr):
+    #   plain/templated <stem>.comp      -> <stem>_epi[_rx].spv (+ <stem>_epi[_rx]_fp16.spv when templated)
+    #   hand-written    <stem>_fp16.comp -> <stem>_epi[_rx]_fp16.spv
     set(_epi_stems
         matmul matmul_bias matmul_tiled matmul_tiled_bias fc
         flat_softmax flat_layernorm flat_reduce softmax flat_gather flat_scatter
@@ -98,37 +101,73 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         avgpool avgpool2d maxpool concat
         conv conv_gemm conv_reg conv1x1 conv1x1_s2 conv3x3_lds conv1x1_reduce dwconv fused_dwpw
         wino_out wino_out4 wino_full wino_fused wino_fused2)
+    # The standalone pointwise-VM shaders take the same two disciplines as bare "_rx" variants.
+    set(_rx_standalone fused_pw_flat fused_pw_nc4)
     list(FIND _epi_stems ${_name} _epiPlain)
+    list(FIND _rx_standalone ${_name} _rxAlone)
     if(_epiPlain GREATER -1)
-      set(_spvEpi ${VKNN_SHADER_GEN_DIR}/${_name}_epi.spv)
-      add_custom_command(
-        OUTPUT ${_spvEpi}
-        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -o ${_spvEpi} ${_comp}
-        DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
-        COMMENT "compile ${_name}.comp -DPW_EPI -> ${_name}_epi.spv"
-        VERBATIM)
-      list(APPEND _spv_files ${_spvEpi})
-      if(_src MATCHES "precision.glsl")
-        set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi_fp16.spv)
+      foreach(_relax "" "_rx")
+        set(_relaxFlag "")
+        if(_relax STREQUAL "_rx")
+          set(_relaxFlag "-DPW_RELAX=1")
+        endif()
+        set(_spvEpi ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_relax}.spv)
         add_custom_command(
-          OUTPUT ${_spvEpi16}
-          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
+          OUTPUT ${_spvEpi}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -o ${_spvEpi} ${_comp}
           DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
-          COMMENT "compile ${_name}.comp -DPW_EPI -DUSE_FP16 -> ${_name}_epi_fp16.spv"
+          COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -> ${_name}_epi${_relax}.spv"
           VERBATIM)
-        list(APPEND _spv_files ${_spvEpi16})
+        list(APPEND _spv_files ${_spvEpi})
+        if(_src MATCHES "precision.glsl")
+          set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_relax}_fp16.spv)
+          add_custom_command(
+            OUTPUT ${_spvEpi16}
+            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
+            DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+            COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -DUSE_FP16 -> ${_name}_epi${_relax}_fp16.spv"
+            VERBATIM)
+          list(APPEND _spv_files ${_spvEpi16})
+        endif()
+      endforeach()
+    elseif(_rxAlone GREATER -1)
+      # fused_pw_* compile the strict discipline as the base name (rule above); add the _rx twin
+      # and its fp16 form.
+      set(_spvRx ${VKNN_SHADER_GEN_DIR}/${_name}_rx.spv)
+      add_custom_command(
+        OUTPUT ${_spvRx}
+        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_RELAX=1 -o ${_spvRx} ${_comp}
+        DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+        COMMENT "compile ${_name}.comp -DPW_RELAX -> ${_name}_rx.spv"
+        VERBATIM)
+      list(APPEND _spv_files ${_spvRx})
+      if(_src MATCHES "precision.glsl")
+        set(_spvRx16 ${VKNN_SHADER_GEN_DIR}/${_name}_rx_fp16.spv)
+        add_custom_command(
+          OUTPUT ${_spvRx16}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_RELAX=1 -DUSE_FP16=1 -o ${_spvRx16} ${_comp}
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+          COMMENT "compile ${_name}.comp -DPW_RELAX -DUSE_FP16 -> ${_name}_rx_fp16.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvRx16})
       endif()
     elseif(_name MATCHES "^(.+)_fp16$")
       list(FIND _epi_stems ${CMAKE_MATCH_1} _epiHand)
       if(_epiHand GREATER -1)
-        set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${CMAKE_MATCH_1}_epi_fp16.spv)
-        add_custom_command(
-          OUTPUT ${_spvEpi16}
-          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 -o ${_spvEpi16} ${_comp}
-          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
-          COMMENT "compile ${_name}.comp -DPW_EPI -> ${CMAKE_MATCH_1}_epi_fp16.spv"
-          VERBATIM)
-        list(APPEND _spv_files ${_spvEpi16})
+        foreach(_relax "" "_rx")
+          set(_relaxFlag "")
+          if(_relax STREQUAL "_rx")
+            set(_relaxFlag "-DPW_RELAX=1")
+          endif()
+          set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${CMAKE_MATCH_1}_epi${_relax}_fp16.spv)
+          add_custom_command(
+            OUTPUT ${_spvEpi16}
+            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -o ${_spvEpi16} ${_comp}
+            DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+            COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -> ${CMAKE_MATCH_1}_epi${_relax}_fp16.spv"
+            VERBATIM)
+          list(APPEND _spv_files ${_spvEpi16})
+        endforeach()
       endif()
     endif()
   endforeach()

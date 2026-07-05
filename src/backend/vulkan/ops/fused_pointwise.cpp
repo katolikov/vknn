@@ -34,7 +34,15 @@ namespace vknn {
                 // statically declare every slot via pw_epilogue.glsl, so the descriptor set must
                 // always size for the full count even when the plan uses fewer. Push constant is a
                 // single int (the element count `total`), matching the shaders' `PC { int total; }`.
-                pipe = env.pipeline(shader(flat ? "fused_pw_flat" : "fused_pw_nc4", env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int), std::vector<uint32_t> {});
+                // The rounding discipline is compiled in: "_rx" = fp32-chained (pw_relax units),
+                // base name = strict per-step-rounded.
+                bool        relax = node.attr.geti("pw_relax", 0) != 0;
+                std::string base  = flat ? "fused_pw_flat" : "fused_pw_nc4";
+                if (relax)
+                {
+                    base += "_rx";
+                }
+                pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
