@@ -33,12 +33,13 @@ references source under `include/vknn/` and `src/`.
  │   runStandardPasses(g, PassOptions)                                     │
  │   inferShapes        (static batch = 1, fills dynamic dims)             │
  │   foldBatchNorm      (BN → scale/bias folded into Conv)                 │
- │   fuseActivations    (Clip/Relu → Node.fusedAct on Conv/Gemm)          │
+ │   lowerBatchNorm     (remaining BN → per-channel Mul+Add)               │
  │   constFold+inferShapes to convergence (shape-path subgraphs)           │
- │   eliminateDeadNodes, fusePointwiseChains (standalone + producer        │
- │   epilogues), pruneDeadInitializers                                     │
+ │   subpixelConvTranspose, lowerConv (KxK Conv → ConvGemm)                │
+ │   eliminateDeadNodes, fusePointwiseChains (the general region fusion:   │
+ │   producer epilogues + standalone units), pruneDeadInitializers         │
  │                                                                         │
- │   MobileNetV2: 105 → 65 nodes; 35 Clip/Relu fused; 5 shape nodes folded │
+ │   MobileNetV2: 105 → 55 nodes at -O1                                    │
  └───────────────────────────────────────────────────────────────────────┘
        │   optimized Graph, then Graph::topoSort()
        ▼
@@ -142,11 +143,11 @@ struct Node {
   std::string name;
   std::vector<TensorId> inputs, outputs;
   Attributes attr;
-  ActType fusedAct = ActType::None;        // set by fuseActivations
+  ActType fusedAct = ActType::None;        // set by the pointwise fusion's inline-act path
   float   actLo = 0, actHi = 0;             // Clip bounds when fusedAct == Clip
   int64_t subOp = 0;                        // Unary/Binary/Reduce sub-code
-  TensorId fusedResidual = kNoTensor;       // residual folded into the epilogue
-  TensorId fusedBias = kNoTensor;           // MatMul bias folded into the epilogue
+  TensorId fusedResidual = kNoTensor;       // residual epilogue (runtime keeps support for older .vxm)
+  TensorId fusedBias = kNoTensor;           // MatMul bias epilogue (runtime keeps support for older .vxm)
 };
 ```
 

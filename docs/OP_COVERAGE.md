@@ -60,23 +60,37 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Range | ✅ | ✅ | small constant ranges const-fold; a float Range whose size resolves at plan time runs on the GPU (start/delta may be runtime scalars); int64 or unresolved-size ranges use the CPU op, which sizes at run time |
 | Identity | — | ✅ | |
 
-## Fusions
+## Fusions and lowerings
 
-The graph passes (and `vknn_compile`) apply the following fusions. `vknn_compile` groups them
-behind an optimization level (`-O0` = none/reference, `-O1` = the default bit-exact set,
-`-O2`/`-O3` = + the experimental SE and dwpw fusions); the individual `--[no-]fuse-*` flags
-override a single fusion on top of the level:
+The graph passes (and `vknn_compile`) apply the rewrites below. `vknn_compile` groups them behind
+an optimization level (`-O0` = none/reference, `-O1` = the default production set, `-O2`/`-O3` =
++ the experimental SE and dwpw fusions); the individual `--[no-]fuse-*` / `--[no-]lower-conv`
+flags override a single pass on top of the level:
 
-- **Activation + residual-Add + Relu** folds into the Conv/Gemm epilogue. Enabled by default.
-- **Swish / SiLU** (`x · sigmoid(x)`) folds into the producing Conv. Enabled at `-O1` (default); opt out with `--no-fuse-swish`.
-- **Pointwise chains** (Mul/Add/Sub/Div/Clip/activations/unaries) fold into the producing
-  kernel's epilogue (MatMul, Conv family, Softmax, LayerNorm, Reduce, GridSample, Resize,
-  ConvTranspose, pooling) or into one standalone `FusedPointwise` kernel when no producer can
-  carry them. Bit-exact (each step reproduces the unfused store rounding). Enabled at `-O1`
-  (default); opt out with `--no-fuse-pointwise`.
+- **General pointwise fusion** — the one fusion pass. It grows each maximal same-shape
+  per-element region (Binary/Add/Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Equal, fanout
+  included) and emits it as a single fused unit: folded into the producing kernel's store epilogue
+  (MatMul, Gemm, Conv family, ConvGemm, Softmax, LayerNorm, Reduce, GridSample, Resize,
+  ConvTranspose, pooling, Transpose/Slice, Concat) or one standalone `FusedPointwise` kernel.
+  Internal fanout rides the unit's registers; values consumed outside the region export as extra
+  output streams. Residual Adds, swish diamonds (`x · sigmoid(x)`), MatMul bias-Adds, and lone
+  activations are all cases of this pass; a lone Relu (or a Clip with fp16-representable bounds)
+  after a Conv/Gemm folds onto the kernel's own `fusedAct` instead. Bit-exact: fused == unfused is
+  byte-identical (each step reproduces the unfused store rounding). Enabled at `-O1` (default);
+  opt out with `--no-fuse-pointwise`.
+- **BatchNorm lowering** — a BatchNorm the conv fold cannot absorb (pre-activation BN, BN after
+  Concat) lowers unconditionally to a per-channel Mul+Add with host-folded scale/shift, which the
+  pointwise fusion then merges into the neighboring kernels.
+- **Conv → ConvGemm lowering** — a non-Winograd K×K Conv (strided, dilated, 5×5/7×7, 1×7/7×1,
+  shallow 3×3) lowers to one LDS-tiled implicit-GEMM kernel with weights repacked `[K][Cout]` at
+  convert time. Deterministic and fp16-floor equivalent to Conv (the fp32 accumulation order
+  shifts, exactly as Winograd's does). Enabled at `-O1` (default); opt out with `--no-lower-conv`.
 - **Squeeze-Excite** chain folds to one kernel (`-O2` or `--fuse-se`, experimental).
-- **Depthwise-3×3 + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`-O2` or `--fuse-dwpw`, experimental).
-- **Einsum lowering** to MatMul/Squeeze/Unsqueeze.
+- **Depthwise + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`-O2`
+  or `--fuse-dwpw`, experimental; pairs wider than the kernel's 1024-channel LDS budget stay
+  separate convs).
+- **Einsum lowering** to MatMul/Squeeze/Unsqueeze; **ConvTranspose → Conv + DepthToSpace**
+  (subpixel rewrite).
 
 ## Adding an operator
 
