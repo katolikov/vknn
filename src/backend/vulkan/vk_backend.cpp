@@ -73,6 +73,11 @@ namespace vknn {
     }
 
     // ============================ VulkanBackend ============================
+    /// The Vulkan backend orchestrator. Owns the device context + command runner, the op registry gate
+    /// (supports/supportsNode decide which nodes run on the GPU vs fall back to the CPU op), the shared
+    /// pipeline and content-addressed constant pools, and the multi-variant model cache. One instance
+    /// serves exactly one model (one Session): the loaded cache document and selected variant key stay
+    /// valid for its whole lifetime. Per-node execution and buffer planning live in VulkanSegment.
     class VulkanBackend: public Backend {
       public:
         // The queue priority is applied at device/queue creation, so it must be known here (before
@@ -478,10 +483,10 @@ namespace vknn {
                 wcache_->reset(!noCache_ && !cacheFile_.empty());
             }
         }
-        vk::PipelineCache *pipelineCache() {
+        vk::PipelineCache *pipelineCache() noexcept {
             return cache_.get();
         }
-        WeightCache *weightCache() {
+        WeightCache *weightCache() noexcept {
             return wcache_.get();
         }
         // Update this config's variant in the loaded document and rewrite the cache file, but only when
@@ -580,6 +585,12 @@ namespace vknn {
         }
 
         // ---- host NCHW fp32  <->  device NC4HW4 (fp32 path; fp16 device buffers handled here) ----
+        // NC4HW4 groups channels into blocks of four laid out as [N, Cblock, H, W, 4]: the four channels
+        // of a block are the innermost contiguous axis, so one (n,cb,h,w) location owns a 4-lane vector at
+        // `base = (((n*Cb + cb)*H + h)*W + w) * 4` and lane l holds logical channel c = cb*4 + l. A channel
+        // count not divisible by four pads the final block's unused lanes with zero on pack, and those
+        // padding lanes are dropped on unpack. The flat path skips all of this: a gpuFlat tensor stores
+        // plain NCHW row-major, matching host layout byte-for-byte (fp16 conversion aside).
         static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false) {
             if (flat)
             { // host NCHW row-major == the flat device buffer; straight copy (+ fp16 convert)
@@ -658,6 +669,9 @@ namespace vknn {
                 }
             }
         }
+        // Inverse of packToBuffer: gather each logical channel c back out of NC4HW4 by its block cb = c/4
+        // and lane l = c%4, so the source index is `sidx = (((n*Cb + cb)*H + h)*W + w) * 4 + l`. Always
+        // produces fp32 host data (rt.dtype set to Float32); readbackOutput does any final dtype convert.
         static void unpackFromBuffer(vk::Buffer *buf, RtTensor &rt, bool fp16, bool flat = false) {
             if (flat)
             { // flat device buffer == host NCHW row-major; straight copy (+ fp16 convert)
@@ -794,6 +808,13 @@ namespace vknn {
     }
 
     // ============================ VulkanSegment ============================
+    /// A pre-recorded, statically-planned run of one contiguous GPU node range. The constructor does all
+    /// the up-front work: allocate device activation buffers with a greedy liveness pool (internal tensors
+    /// share buffers once their last use has passed; boundary/readback tensors get dedicated buffers),
+    /// alias pure-copy outputs onto their input's buffer, prepare() every op (which prepacks + uploads
+    /// weights), and pre-record the command buffer(s) with precise buffer-level barriers. run() then only
+    /// (re)binds zero-copy dma-buf / staging boundaries, packs inputs, submits, and unpacks outputs — the
+    /// static dispatch stream is reused across runs and re-recorded only when a boundary buffer changes.
     class VulkanSegment: public Segment {
       public:
         VulkanSegment(const std::vector<int> &idx, Graph &g, const Config &cfg, VulkanBackend *be): be_(be), g_(g), cfg_(cfg) {
@@ -1049,6 +1070,9 @@ namespace vknn {
                         ++i;
                     }
                 }
+                // Best-fit: reuse the smallest freed slot that still fits, so a large freed buffer is kept
+                // available for a later large tensor instead of being spent (and grown) on a small one. A
+                // reused slot keeps its existing (larger-or-equal) capacity; only a miss allocates anew.
                 size_t need = actBytes(tid);
                 int    best = -1;
                 for (size_t i = 0; i < freeSlots.size(); ++i)
