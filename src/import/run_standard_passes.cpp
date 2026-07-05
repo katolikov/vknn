@@ -82,11 +82,12 @@ namespace vknn {
         eliminateIdentity(g);
         foldBatchNorm(g);
         lowerBatchNorm(g); // whatever foldBatchNorm left becomes a fusable per-channel Mul+Add
-        fuseActivations(g);
-        fuseResidualAdd(g);
-        if (opt.fuseSwish)
+        // The experimental block-kernel fusions match on conv.fusedAct, so their prerequisite
+        // activation fold runs only with them; the general pointwise fusion below owns activation
+        // folding otherwise (and re-encodes any fusedAct these passes set as a unit step).
+        if (opt.fuseSqueezeExcite || opt.fuseDwPw)
         {
-            fuseSwish(g); // HardSwish/SiLU into conv epilogue (default on)
+            fuseActivations(g);
         }
         if (opt.fuseSqueezeExcite)
         {
@@ -111,7 +112,6 @@ namespace vknn {
             inferShapes(g, batch);
         }
         eliminateFloatCast(g); // drop float->float casts left by transformer import (post-fold)
-        fuseMatMulBias(g);     // fold Linear bias-Adds into the MatMul epilogue (Casts now gone)
         eliminateDeadNodes(g);
         inferShapes(g, batch); // refresh shapes after fusion/folding
         lowerReduceToGap(g);   // a late-resolving rank can expose the spatial-mean form

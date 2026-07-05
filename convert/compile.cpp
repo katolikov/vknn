@@ -8,9 +8,9 @@
 //   vknn_compile <model.onnx> <out.vxm> [flags]
 //     --fp16            store weights as fp16 (default: fp32)
 //     -O0..-O3 / --opt N  optimization level (default -O1):
-//                         O0 = no optional fusion (reference), O1 = swish + pointwise chains
-//                         (bit-exact production set), O2/O3 = + experimental SE and dwpw fusions
-//     --[no-]fuse-swish / --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise
+//                         O0 = no optional fusion (reference), O1 = the general pointwise
+//                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
+//     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise
 //                       advanced per-fusion overrides applied on top of the level
 //     --dump-big        log tensors > 50M elements after shape inference (debug)
 #include "import/passes.h"
@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s <model.onnx> <out.vxm> [--fp16] [-O0..-O3 | --opt N] "
-               "[--[no-]fuse-swish] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--dump-big]\n",
+               "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--dump-big]\n",
                argv[0]);
         return 1;
     }
@@ -72,7 +72,6 @@ int main(int argc, char **argv) {
             v = false;
         }
     };
-    over("--fuse-swish", "--no-fuse-swish", opt.fuseSwish);
     over("--fuse-se", "--no-fuse-se", opt.fuseSqueezeExcite);
     over("--fuse-dwpw", "--no-fuse-dwpw", opt.fuseDwPw);
     over("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
@@ -80,7 +79,7 @@ int main(int argc, char **argv) {
 
     printf("[compile] importing %s ...\n", onnx.c_str());
     Graph g = importOnnx(onnx);
-    printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-swish=%d fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d)\n", g.nodes.size(), g.initializers.size(), optLevel, opt.fuseSwish, opt.fuseSqueezeExcite, opt.fuseDwPw,
+    printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d)\n", g.nodes.size(), g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw,
            opt.fusePointwiseChains);
     runStandardPasses(g, opt);
     printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());

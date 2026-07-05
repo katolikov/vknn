@@ -18,16 +18,19 @@ namespace vknn {
     int constFold(Graph &g);
     // Fold BatchNormalization that follows a Conv into the conv weights/bias.
     void foldBatchNorm(Graph &g);
-    // Fuse Clip(relu6)/Relu following Conv/Gemm into the producer's fused activation.
+    // Fold Clip(relu6)/Relu following Conv/Gemm/Add onto the producer's fusedAct. Runs only as the
+    // prerequisite of the experimental SE/DwPw fusions, whose matchers read fusedAct; the general
+    // pointwise fusion owns activation folding otherwise.
     void fuseActivations(Graph &g);
-    // Fuse a residual Add(conv, x) into the (1x1) conv's epilogue: out = act(conv + x).
-    void fuseResidualAdd(Graph &g);
     // Fuse a Squeeze-Excite scale chain (GAP->FC->relu->FC->hardsigmoid) into one kFusedSE node.
     void fuseSqueezeExcite(Graph &g);
     // Fuse a depthwise-3x3 conv followed by a 1x1 project conv into one kFusedDwPw kernel.
     void fuseDwPw(Graph &g);
-    // Fuse maximal single-consumer per-element chains into the producer's epilogue, or a standalone
-    // FusedPointwise node. Runs last among fusions. Bit-exact; on by default.
+    // The general fusion: grow each maximal same-shape per-element region (fanout included) and
+    // emit it as one fused unit — a producer epilogue or a standalone FusedPointwise node, with
+    // extra output streams for values consumed outside the region. Subsumes activation, residual-
+    // add, swish-diamond, and matmul-bias folding. Runs last. Bit-exact (fused == unfused,
+    // byte-identical); on by default.
     void fusePointwiseChains(Graph &g);
 
     // Lower Reduce(Mean) over the spatial dims of a rank-4 tensor (keepdims) to GlobalAvgPool — the
@@ -37,9 +40,6 @@ namespace vknn {
     // DepthToSpace(s), replacing the memory-bound gather deconv with a tiled conv. Weight rearrange is
     // exact; device output stays at the fp16 floor. Needs resolved input spatial dims.
     void subpixelConvTranspose(Graph &g);
-    // Fuse Mul(x,HardSigmoid(x))=HardSwish / Mul(x,Sigmoid(x))=SiLU into the conv epilogue or one
-    // unary.
-    void fuseSwish(Graph &g);
     // Remove Identity nodes, rewiring consumers to the input.
     void eliminateIdentity(Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
@@ -49,21 +49,19 @@ namespace vknn {
     void pruneDeadInitializers(Graph &g);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
-        int64_t batch             = 1;
-        bool    fuseSwish         = true;  // fold HardSwish/SiLU self-gating into the conv epilogue
-        bool    fuseSqueezeExcite = false; // fuse the SE squeeze->FC->scale chain (experimental)
-        bool    fuseDwPw          = false; // fuse depthwise-3x3 + 1x1-project (experimental)
-        bool    fusePointwiseChains = true;  // merge pointwise chains into one fused kernel (default on)
-        bool    dumpBig           = false; // debug: log tensors > 50M elements after shape inference
+        int64_t batch               = 1;
+        bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
+        bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
+        bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
+        bool    dumpBig             = false; // debug: log tensors > 50M elements after shape inference
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
-        //   O1 = the default production set: swish + pointwise-chain fusion (all bit-exact)
+        //   O1 = the default production set: the general pointwise fusion (bit-exact)
         //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; can
         //           regress on some models — measure before shipping a model with them)
         static PassOptions forOptLevel(int level) {
             PassOptions o;
-            o.fuseSwish           = level >= 1;
             o.fusePointwiseChains = level >= 1;
             o.fuseSqueezeExcite   = level >= 2;
             o.fuseDwPw            = level >= 2;

@@ -911,6 +911,43 @@ namespace vknn {
             if (hostProd >= 0)
             {
                 int prod = hostProd;
+                // Inline-activation fast path: a lone Relu — or Clip whose bounds round-trip fp16
+                // exactly — after a Conv/Gemm folds onto the kernel's own fusedAct epilogue instead
+                // of a pw unit (no plan SSBO, no extra bindings). Byte-safe: a monotone clamp with
+                // exactly-representable bounds commutes with RTE rounding, so act applied in the
+                // fp32 accumulator stores the same bytes the unfused act-of-rounded-value would.
+                if (members.size() == 1 && unit.operands.empty() && unit.exports.empty() && !entryExported)
+                {
+                    Node       &P  = g.nodes[prod];
+                    const Node &mn = g.nodes[members[0]];
+                    bool hostable  = (P.type == OpType::Conv || P.type == OpType::Gemm) && P.fusedAct == ActType::None && P.fusedResidual == kNoTensor;
+                    auto rep       = [](float v) { return v == halfToFloat(floatToHalf(v)); };
+                    ActType act    = ActType::None;
+                    float   lo = 0, hi = 0;
+                    if (hostable && mn.type == OpType::Relu)
+                    {
+                        act = ActType::Relu;
+                    } else if (hostable && mn.type == OpType::Clip)
+                    {
+                        pwClipBounds(g, mn, lo, hi);
+                        if (rep(lo) && rep(hi))
+                        {
+                            act = (lo == 0.f && hi == 6.f) ? ActType::Relu6 : ActType::Clip;
+                        }
+                    }
+                    if (act != ActType::None)
+                    {
+                        P.fusedAct   = act;
+                        P.actLo      = lo;
+                        P.actHi      = hi;
+                        P.outputs[0] = unit.mainOut; // consumers already read the act's tensor id
+                        removed.insert(members[0]);
+                        fused++;
+                        attached++;
+                        rebuild();
+                        continue;
+                    }
+                }
                 Node                &P      = g.nodes[prod];
                 int                  opbase = (int) P.inputs.size();
                 std::vector<int64_t> es     = unit.steps;
