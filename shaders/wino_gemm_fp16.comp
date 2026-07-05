@@ -9,16 +9,27 @@
 //   C = M[p]  : [M=nT][N=Coutb]     vec4 over 4 output channels  (consumed by wino_out)
 //
 // One workgroup (64 threads = 8x8) computes a TILE_M x (TILE_NB output-channel-blocks) output tile
-// for one position. Each thread owns RM tiles x 1 ocb (4 vec4 accumulators). A/B K-chunks are
+// for one position. Each thread owns RM tiles x 1 ocb (RM vec4 accumulators). A/B K-chunks are
 // staged in shared memory so every thread reuses them.
+//
+// Specialization constants (raced per shape by tuneWino under Tuning::Fast/Heavy):
+//   RM (id 0)    = 4 or 8 tiles per thread. Bit-neutral — it only remaps threads to outputs; the
+//                  per-output K order is unchanged. 8 doubles the A reuse per B load at higher
+//                  register pressure; which wins is shape/driver-dependent, so it is measured.
+//   ACC16 (id 1) = 1 accumulates f16vec4 with fp16 dots (saves the widening ALU; LDS traffic is
+//                  unchanged). This changes the numerics (per-K-chunk fp16 rounding), so it is only
+//                  ever selected by the timing race, never by default: fp16-floor mode only.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
 
+layout(constant_id = 0) const int RM = 4;    // tiles per thread (M micro-tile): 4 or 8
+layout(constant_id = 1) const int ACC16 = 0; // 1 = fp16 accumulation (race-selected only)
+
 #define MDIM 8      // threads in M
 #define NDIM 8      // threads in N   (MDIM*NDIM = 64)
-#define RM 4        // tiles per thread (M micro-tile); 8 costs too much register pressure
+#define RM_MAX 8
 #define KWG 16      // input channel-blocks (K) staged per chunk
 #define TILE_M (MDIM * RM)   // output tiles (M) per workgroup
 #define TILE_NB NDIM         // output channel-blocks (N) per workgroup
@@ -29,8 +40,8 @@ layout(std430, binding = 1) readonly buffer U { f16vec4 ubuf[]; };
 layout(std430, binding = 2) writeonly buffer M { f16vec4 mbuf[]; };
 layout(push_constant) uniform PC { int Cin, Cout, nT; } pc;
 
-shared f16vec4 sA[KWG][TILE_M];      // V tile  [k][m]
-shared f16vec4 sB[KWG][TILE_NB * 4]; // U tile  [k][oc]
+shared f16vec4 sA[KWG][MDIM * RM_MAX]; // V tile [k][m], sized for the widest variant (8 KB)
+shared f16vec4 sB[KWG][TILE_NB * 4];   // U tile [k][oc] (4 KB)
 
 void main() {
   int Cinb = (pc.Cin + 3) / 4;
@@ -46,8 +57,12 @@ void main() {
   int vBaseP = p * Cinb * pc.nT;        // vbuf[(p*Cinb + k)*nT + m]
   int uBaseP = p * pc.Cout * Cinb;      // ubuf[(p*Cout + oc)*Cinb + k]
 
-  vec4 acc[RM];
-  for (int r = 0; r < RM; ++r) acc[r] = vec4(0.0);
+  vec4 acc[RM_MAX];
+  f16vec4 hacc[RM_MAX];
+  for (int r = 0; r < RM; ++r) {
+    acc[r] = vec4(0.0);
+    hacc[r] = f16vec4(0.0);
+  }
 
   for (int k0 = 0; k0 < Cinb; k0 += KWG) {
     // ---- cooperative load of A (V) [KWG][TILE_M] and B (U) [KWG][TILE_NB*4] ----
@@ -64,21 +79,34 @@ void main() {
     barrier();
 
     // ---- register-blocked multiply: RM tiles x (1 ocb = 4 oc) per thread ----
-    // Operands stay f16vec4 in LDS (half the LDS traffic, the GEMM's bottleneck), but the 4-way dot
-    // widens to fp32 in-register so the contraction accumulates in full precision — matching the fp32
-    // CPU oracle. An fp16 dot(f16vec4,f16vec4) reduces in fp16 (the OpDot result is 16-bit) and injects
-    // a per-K-chunk rounding that inflates conv max-abs error; the widen is register-only (LDS traffic
-    // unchanged), and this GEMM is LDS/bandwidth-bound so the extra fp32 madds hide.
+    // Default (ACC16 == 0): operands stay f16vec4 in LDS (half the LDS traffic, the GEMM's
+    // bottleneck), but the 4-way dot widens to fp32 in-register so the contraction accumulates in
+    // full precision — matching the fp32 CPU oracle. An fp16 dot(f16vec4,f16vec4) reduces in fp16
+    // (the OpDot result is 16-bit) and injects a per-K-chunk rounding that inflates conv max-abs
+    // error; the widen is register-only (LDS traffic unchanged), and this GEMM is LDS/bandwidth-
+    // bound so the extra fp32 madds hide. ACC16 == 1 keeps the whole contraction in fp16 (the
+    // race-only variant above).
     int kmax = min(KWG, Cinb - k0);
     int ocb = tIdN;            // this thread's output channel-block within the tile
     for (int kk = 0; kk < kmax; ++kk) {
-      vec4 b0 = vec4(sB[kk][ocb * 4 + 0]);
-      vec4 b1 = vec4(sB[kk][ocb * 4 + 1]);
-      vec4 b2 = vec4(sB[kk][ocb * 4 + 2]);
-      vec4 b3 = vec4(sB[kk][ocb * 4 + 3]);
-      for (int r = 0; r < RM; ++r) {
-        vec4 a = vec4(sA[kk][tIdM + r * MDIM]);
-        acc[r] += vec4(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+      if (ACC16 != 0) {
+        f16vec4 b0 = sB[kk][ocb * 4 + 0];
+        f16vec4 b1 = sB[kk][ocb * 4 + 1];
+        f16vec4 b2 = sB[kk][ocb * 4 + 2];
+        f16vec4 b3 = sB[kk][ocb * 4 + 3];
+        for (int r = 0; r < RM; ++r) {
+          f16vec4 a = sA[kk][tIdM + r * MDIM];
+          hacc[r] += f16vec4(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+        }
+      } else {
+        vec4 b0 = vec4(sB[kk][ocb * 4 + 0]);
+        vec4 b1 = vec4(sB[kk][ocb * 4 + 1]);
+        vec4 b2 = vec4(sB[kk][ocb * 4 + 2]);
+        vec4 b3 = vec4(sB[kk][ocb * 4 + 3]);
+        for (int r = 0; r < RM; ++r) {
+          vec4 a = vec4(sA[kk][tIdM + r * MDIM]);
+          acc[r] += vec4(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+        }
       }
     }
     barrier();
@@ -92,6 +120,6 @@ void main() {
     int cBase = (p * Coutb + ocb) * pc.nT;
     int m = m0 + tIdM;
     for (int r = 0; r < RM; ++r)
-      if (m + r * MDIM < pc.nT) mbuf[cBase + (m + r * MDIM)] = f16vec4(acc[r]);
+      if (m + r * MDIM < pc.nT) mbuf[cBase + (m + r * MDIM)] = (ACC16 != 0) ? hacc[r] : f16vec4(acc[r]);
   }
 }

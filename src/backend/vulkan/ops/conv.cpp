@@ -24,9 +24,18 @@ namespace vknn {
         struct ConvOp: VulkanOp {
             static constexpr int                 kTile     = 4; // 1x1 threshold math default; the real per-shape tile is wTile
             uint32_t                             wTile     = 4; // output pixels per thread in the 1x1 kernels (autotuned spec constant)
-            // wino_gemm workgroup output tile, in lockstep with shaders/wino_gemm_fp16.comp (MDIM*RM, NDIM).
-            static constexpr int                 kWinoGemmTileM  = 32; // output tiles (M) per workgroup
+            // wino_gemm workgroup output tile, in lockstep with shaders/wino_gemm_fp16.comp: N is
+            // NDIM=8 channel-blocks; M is MDIM=8 threads x the RM spec constant (4 or 8, raced by
+            // tuneWino), so the real dispatch and the timing dispatch derive the tile from one
+            // helper and cannot diverge. The subgroup variant (wino_gemm_sg) keeps its fixed
+            // 32-tile geometry.
             static constexpr int                 kWinoGemmTileNB = 8;  // output channel-blocks (N) per workgroup
+            static constexpr int                 kWinoSgTileM    = 32; // wino_gemm_sg's fixed M tile
+            static int winoGemmTileM(int rm) {
+                return 8 * rm; // MDIM * RM
+            }
+            int                                  winoRm    = 4; // wino_gemm tiles per thread (spec constant 0)
+            int                                  winoAcc16 = 0; // wino_gemm fp16 accumulation (spec constant 1; race-selected only)
             bool                                 depthwise = false;
             bool                                 pointwise = false;
             bool                                 winograd  = false;
@@ -181,11 +190,12 @@ namespace vknn {
                     // channel-block), fp16; sizing = nPos * nT * Coutb vec4s * el bytes/element.
                     mbuf             = std::make_shared<vk::Buffer>(*env.ctx, (size_t) nPos * nT * Coutb * 4 * el, vk::MemPref::kDeviceOnly);
                     wGemmPC          = {(int) Cin, (int) Cout, (int) nT};
-                    wGemmGX = groups(nT, kWinoGemmTileM);     // workgroups over M (tiles)
-                    wGemmGY = groups(Coutb, kWinoGemmTileNB); // workgroups over N (ocb)
-                    wGemmGZ = nPos;                           // one GEMM per transform position (16 or 36)
+                    wGemmGX = groups(nT, gemmSubgroup ? kWinoSgTileM : winoGemmTileM(winoRm)); // workgroups over M (tiles)
+                    wGemmGY = groups(Coutb, kWinoGemmTileNB);                                  // workgroups over N (ocb)
+                    wGemmGZ = nPos;                                                            // one GEMM per transform position (16 or 36)
                     wInPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {});
-                    wGemmPipe = env.pipeline(gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {});
+                    wGemmPipe = env.pipeline(gemmSubgroup ? "wino_gemm_sg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC),
+                                             gemmSubgroup ? std::vector<uint32_t> {} : std::vector<uint32_t> {(uint32_t) winoRm, (uint32_t) winoAcc16});
                     wOutPipe = env.pipeline((std::string(U_ == 2 ? "wino_out" : "wino_out4") + epi.suffix() + "_fp16").c_str(), 3 + epi.extraBufs(), sizeof(WinoFusedPC), std::vector<uint32_t> {});
                     return;
                 }
@@ -473,10 +483,12 @@ namespace vknn {
                 return choice;
             }
 
-            // Autotune the 3x3 conv kernel for THIS shape: 0 = direct, 1 = F(2,3) Winograd, 2 = F(4,3)
-            // Winograd. Winograd wins big on deep, square 3x3 but loses on small-channel / spatially-large 3x3,
-            // so the choice is measured per-shape on scratch buffers and cached like the local-size tune.
-            // F(4,3) (0.56x the V/M traffic, 4x FLOP saving) is only considered when fp16-safe (allowF4).
+            // Autotune the 3x3 conv kernel for THIS shape. Returns 0 = direct, else a Winograd
+            // bitfield: bits 0-1 = F-unit (1 = F(2,3), 2 = F(4,3)), bit 2 = wino_gemm RM 8 (else 4),
+            // bit 3 = wino_gemm fp16 accumulation. Winograd wins big on deep, square 3x3 but loses on
+            // small-channel / spatially-large 3x3, so the choice is measured per-shape on scratch
+            // buffers and cached like the local-size tune. F(4,3) (0.56x the V/M traffic, 4x FLOP
+            // saving) is only considered when fp16-safe (allowF4).
             int tuneWino(VkOpEnv &env, NCHW x, NCHW y, int64_t Cin, int64_t Cout, int act) {
                 if (env.winograd == Mode::Off)
                 {
@@ -506,8 +518,10 @@ namespace vknn {
                 int     U_ = (winoCostPerOut(4) < winoCostPerOut(2)) ? 4 : 2;
                 int     nPos = (U_ + 2) * (U_ + 2);
                 int64_t nTH = (y.h + U_ - 1) / U_, nTW = (y.w + U_ - 1) / U_, nT = x.n * nTH * nTW;
+                // "wino2": the value is now the bitfield above (unit + RM + ACC16); a fresh sig name
+                // keeps stale entries from the plain-unit encoding from decoding as variant bits.
                 char    buf[128];
-                snprintf(buf, sizeof(buf), "wino_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
+                snprintf(buf, sizeof(buf), "wino2_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
                 std::string sig = env.gpuTag + "/" + buf;
                 if (env.weights)
                 {
@@ -532,9 +546,8 @@ namespace vknn {
                 WinoGemmPC          gpc = {(int) Cin, (int) Cout, (int) nT};
                 WinoFusedPC         opc = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, act, 0.f, 0.f};
                 auto                inPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC));
-                auto                gPipe  = env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC));
                 auto                oPipe  = env.pipeline(U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC));
-                uint32_t            gx = groups(nT, kWinoGemmTileM), gy = groups(Coutb, kWinoGemmTileNB);
+                uint32_t            gy     = groups(Coutb, kWinoGemmTileNB);
                 auto                timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
                     VkCommandBuffer cmd = env.runner->allocate();
                     env.runner->begin(cmd);
@@ -568,19 +581,44 @@ namespace vknn {
                                        vk::computeBarrier(cmd);
                                                       }));
                 }
-                double wms    = bestOf([&](VkCommandBuffer cmd) {
-                    inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
-                    vk::computeBarrier(cmd);
-                    gPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
-                    vk::computeBarrier(cmd);
-                    oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
-                    vk::computeBarrier(cmd);
-                });
-                // Only the cost-model-chosen tile is timed against direct. This decision is stable (Winograd
-                // and direct are far enough apart that min-of-5 does not flip it), so the result is bit-exact.
-                int winoChoice = (U_ == 2) ? 1 : 2;
-                int choice     = (forceOn || wms < dms * kWinoMargin) ? winoChoice : 0;
-                VKNN_DEBUG << "tuneWino " << sig << " U=" << U_ << " direct=" << dms << " wino=" << wms << " -> " << choice;
+                // Race the {RM, ACC16} wino_gemm variants inside the wino timing (the whole 3-pass
+                // chain per variant, so occupancy interactions with the transforms are captured).
+                // RM is bit-neutral (it only remaps threads to outputs); ACC16 changes the numerics
+                // (fp16-floor legal), so it can only ever be picked by this Fast/Heavy race — the
+                // Tuning::None default stays {RM=4, ACC16=0}.
+                double wms = 1e30;
+                int    bestRm = 4, bestAcc = 0;
+                for (int rm: {4, 8})
+                {
+                    for (int a16: {0, 1})
+                    {
+                        auto     gPipe = env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {(uint32_t) rm, (uint32_t) a16});
+                        uint32_t gx    = groups(nT, winoGemmTileM(rm));
+                        double   ms    = bestOf([&](VkCommandBuffer cmd) {
+                            inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
+                            vk::computeBarrier(cmd);
+                            gPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
+                            vk::computeBarrier(cmd);
+                            oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
+                            vk::computeBarrier(cmd);
+                        });
+                        if (ms < wms)
+                        {
+                            wms     = ms;
+                            bestRm  = rm;
+                            bestAcc = a16;
+                        }
+                    }
+                }
+                // Only the cost-model-chosen tile is timed against direct (a timing-raced F-unit would
+                // flip on noise, and the units round fp16 differently). With a persisted tune cache the
+                // wino-vs-direct choice is measured once and reused, so the anti-noise margin would only
+                // cost wins near the tie — drop it to 1.0 there; a cache-less run re-races every load
+                // and keeps kWinoMargin (a noise-flipped choice would change output bits run-to-run).
+                double margin     = (env.weights && env.weights->enabled()) ? 1.0 : kWinoMargin;
+                int    winoChoice = ((U_ == 2) ? 1 : 2) | (bestRm == 8 ? 4 : 0) | (bestAcc != 0 ? 8 : 0);
+                int    choice     = (forceOn || wms < dms * margin) ? winoChoice : 0;
+                VKNN_DEBUG << "tuneWino " << sig << " U=" << U_ << " rm=" << bestRm << " acc16=" << bestAcc << " direct=" << dms << " wino=" << wms << " -> " << choice;
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, choice);
@@ -608,7 +646,9 @@ namespace vknn {
                 bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && x.c >= 32 && Cout >= 32);
                 int wchoice = winoShape ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
                 winograd    = (wchoice > 0);
-                winoUnit    = (wchoice == 2) ? 4 : 2;
+                winoUnit    = ((wchoice & 3) == 2) ? 4 : 2;
+                winoRm      = (wchoice & 4) != 0 ? 8 : 4;
+                winoAcc16   = (wchoice & 8) != 0 ? 1 : 0;
 
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
