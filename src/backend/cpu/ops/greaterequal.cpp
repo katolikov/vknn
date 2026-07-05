@@ -9,7 +9,12 @@
 namespace vknn {
     namespace {
 
+        /// CPU reference for ONNX GreaterOrEqual: elementwise `A >= B` with NumPy broadcasting,
+        /// emitting the canonical fp32 mask (1.0 for true, 0.0 for false).
         struct GreaterEqualCpu: CpuOp {
+            /// Int32 is accepted but shares the fp32 read path below (only Int64 is read as integer),
+            /// so its values must round-trip exactly through double — true for the shape/index
+            /// magnitudes these comparisons carry.
             bool supportsDType(DType dt) const override {
                 return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
             }
@@ -18,8 +23,12 @@ namespace vknn {
                 const RtTensor &B  = ctx.t(node.inputs[1]);
                 RtTensor       &Y  = ctx.t(node.outputs[0]);
                 const Shape    &sa = A.shape, &sb = B.shape;
+                // Broadcasting aligns shapes at the trailing axis, so the result rank is the larger of
+                // the two and the shorter operand is treated as if left-padded with size-1 axes.
                 size_t          rank = std::max(sa.size(), sb.size());
                 Shape           out(rank, 1);
+                // Size of axis `i` (in the common `rank`-axis frame) for shape `s`: axes ahead of `s`'s
+                // first real axis are the implicit leading 1s that padding introduces.
                 auto            dimOf = [&](const Shape &s, size_t i) -> int64_t {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
@@ -30,6 +39,10 @@ namespace vknn {
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
                 int64_t              n = numElements(out);
+                // Per-operand broadcast strides in the common frame, built by a right-to-left
+                // row-major scan: sA/sB accumulate each operand's own row-major stride, while a size-1
+                // (broadcast) axis is pinned to stride 0 so every output index along it rereads the
+                // single source element.
                 std::vector<int64_t> oa(rank), ob(rank);
                 int64_t              sA = 1, sB = 1;
                 for (int i = (int) rank - 1; i >= 0; --i)
@@ -39,15 +52,22 @@ namespace vknn {
                     sA *= dimOf(sa, i);
                     sB *= dimOf(sb, i);
                 }
+                // Read element `i` widened to double: only Int64 goes through the integer view; every
+                // other accepted dtype (Float32, Int32) is read as fp32 so the operands compare on a
+                // single ordered scale.
                 auto val = [](const RtTensor &T, int64_t i) -> double {
                     return T.dtype == DType::Int64 ? (double) T.host.i64()[i] : (double) T.host.f32()[i];
                 };
                 float *y = cpu::allocOut(Y, out); // canonical fp32 output (1.0 / 0.0)
+                // Walk the output in row-major order, decoding each linear index `lin` into its
+                // per-axis coordinate and mapping that coordinate back into each operand through the
+                // broadcast strides (a 0 stride collapses a broadcast axis onto element 0).
                 for (int64_t lin = 0; lin < n; ++lin)
                 {
                     int64_t ia = 0, ib = 0;
                     for (size_t d = 0; d < rank; ++d)
                     {
+                        // Row-major stride of output axis `d` = product of all trailing axis sizes.
                         int64_t stride = 1;
                         for (size_t e = d + 1; e < rank; ++e)
                         {

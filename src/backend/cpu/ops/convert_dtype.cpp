@@ -1,15 +1,25 @@
-// ConvertDtype on the CPU backend: host tensors are always fp32, so the fp16<->fp32 storage convert
-// (a Vulkan-only concern) is an identity copy here. Present so a graph with selective-fp32 markers
-// still runs on / falls back to CPU.
+// ConvertDtype on the CPU backend: the fp16<->fp32 storage convert is a Vulkan-only concern, so on
+// the host (all-fp32) it is an identity copy. Present so a graph carrying selective-fp32 markers
+// still runs on / falls back to CPU. See ConvertDtypeCpu below for the details.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 
 namespace vknn {
     namespace {
+        /// CPU reference kernel for ConvertDtype: a shape- and value-preserving element copy.
+        ///
+        /// The importer's fp32 pass (mark_fp32.cpp) inserts a ConvertDtype at every fp16/fp32 storage
+        /// frontier so downstream nodes read their input at the storage precision they expect. That
+        /// convert only matters to the GPU backend, where fp16 and fp32 are distinct buffer layouts.
+        /// On the host every activation is fp32, so both sides of the frontier share one representation
+        /// and the convert degenerates to an identity copy — output shape equals input shape and each
+        /// value is carried through unchanged.
         struct ConvertDtypeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X = ctx.t(node.inputs[0]);
                 RtTensor       &Y = ctx.t(node.outputs[0]);
+                // Y takes X's shape verbatim (ConvertDtype never reshapes), then receives a straight
+                // element-for-element copy over the flat fp32 buffer.
                 float          *y = cpu::allocOut(Y, X.shape);
                 const float    *x = X.host.f32();
                 int64_t         n = X.elems();
@@ -18,6 +28,8 @@ namespace vknn {
                     y[i] = x[i];
                 }
             }
+            /// Accept every dtype, widening CpuOp's fp32+int64 default: a value-preserving copy is
+            /// correct for any element type, and this op must run wherever the fp32 pass placed it.
             bool supportsDType(DType) const override {
                 return true;
             }

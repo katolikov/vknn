@@ -12,7 +12,9 @@ namespace vknn {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &S = ctx.t(node.inputs[0]);
                 RtTensor       &Y = ctx.t(node.outputs[0]);
-                // The shape operand is an int64 vector; derive the output shape from it.
+                // The shape operand is a 1-D vector whose `elems()` entries are the output extents,
+                // one per output dimension. ONNX specifies it as int64, but a runtime float shape is
+                // tolerated by truncating each entry to an integer extent.
                 int64_t r = S.elems();
                 Shape   out;
                 if (S.dtype == DType::Int64)
@@ -32,14 +34,21 @@ namespace vknn {
                 }
                 if (out.empty())
                 {
-                    out = {1}; // scalar fill
+                    // An empty shape vector denotes a rank-0 (scalar) output in ONNX; represent it as
+                    // a single-element 1-D tensor so the fill loop still writes exactly one value.
+                    out = {1};
                 }
 
+                // ONNX supplies the fill via a one-element `value` tensor whose element type also
+                // dictates the output dtype. The importer records an integer `value` as an Ints
+                // attribute and a float `value` as Floats, so the attribute kind is the dtype switch:
+                // Ints -> int64 output, anything else (including a missing attribute) -> float output.
                 auto    it     = node.attr.map.find("value");
                 bool    intVal = it != node.attr.map.end() && it->second.kind == Attr::Ints;
                 int64_t n      = numElements(out);
                 if (intVal)
                 {
+                    // The fill is the tensor's single element; an empty list defaults to 0 per ONNX.
                     int64_t  v = it->second.ints.empty() ? 0 : it->second.ints[0];
                     int64_t *y = cpu::allocOutI64(Y, out);
                     for (int64_t i = 0; i < n; ++i)
@@ -48,6 +57,8 @@ namespace vknn {
                     }
                 } else
                 {
+                    // Absent `value`, or a float `value` tensor: fill with its single element, or the
+                    // ONNX default 0.0 when the attribute is missing or carries no element.
                     float  v = (it != node.attr.map.end() && !it->second.floats.empty()) ? it->second.floats[0] : 0.f;
                     float *y = cpu::allocOut(Y, out);
                     for (int64_t i = 0; i < n; ++i)

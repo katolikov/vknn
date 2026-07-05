@@ -4,6 +4,10 @@
 namespace vknn {
     namespace {
 
+        /// ONNX Constant: a source node with no inputs whose single output is a compile-time literal
+        /// carried in the `value` attribute. The reference just materializes that attribute into the
+        /// output tensor; the import path has already flattened the tensor's elements into `ints`
+        /// (int64 list) or `floats` (float32 list) and stashed its dims in `value.shape`.
         struct ConstantCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
                 RtTensor &Y  = ctx.t(node.outputs[0]);
@@ -36,9 +40,14 @@ namespace vknn {
                     }
                 } else
                 {
+                    // No usable `value` attribute (absent, or a kind this reference does not carry):
+                    // emit an empty int64 tensor of shape [0] so downstream shape inference stays
+                    // well-defined rather than reading an unsized output.
                     cpu::allocOutI64(Y, {0});
                 }
             }
+            // The output dtype is fixed by the stored attribute's kind (int64 for Ints, fp32 for
+            // Floats), not chosen by the caller, so every requested dtype is trivially accepted.
             bool supportsDType(DType) const override {
                 return true;
             }

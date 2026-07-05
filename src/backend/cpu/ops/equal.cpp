@@ -10,7 +10,8 @@ namespace vknn {
     namespace {
 
         struct EqualCpu: CpuOp {
-            // Accept fp32 + int64 (shape tensors) like the rest of the broadcasting elementwise ops.
+            // Accept fp32 plus the integer dtypes (int64/int32 shape tensors) like the rest of the
+            // broadcasting elementwise ops.
             bool supportsDType(DType dt) const override {
                 return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
             }
@@ -31,6 +32,10 @@ namespace vknn {
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
                 int64_t              n = numElements(out);
+                // Per-axis element strides into each operand, built right-to-left (row-major).
+                // A size-1 axis gets stride 0 so every output index along that axis re-reads the
+                // single source element -- the standard broadcast trick. sA/sB accumulate the true
+                // packed stride using the operand's own (unbroadcast) extent via dimOf.
                 std::vector<int64_t> oa(rank), ob(rank);
                 int64_t              sA = 1, sB = 1;
                 for (int i = (int) rank - 1; i >= 0; --i)
@@ -47,6 +52,10 @@ namespace vknn {
                 float *y = cpu::allocOut(Y, out); // canonical fp32 output (1.0 / 0.0)
                 for (int64_t lin = 0; lin < n; ++lin)
                 {
+                    // Unravel the row-major linear output index into per-axis coordinates, then map
+                    // each coordinate through the broadcast strides oa/ob to reach the source
+                    // elements. `stride` is the trailing product of output extents for axis d, so
+                    // (lin / stride) % out[d] recovers that axis's index.
                     int64_t ia = 0, ib = 0;
                     for (size_t d = 0; d < rank; ++d)
                     {

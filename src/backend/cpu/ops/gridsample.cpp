@@ -8,11 +8,16 @@
 namespace vknn {
     namespace {
 
+        /// Reflect a continuous coordinate back into [lo, hi] with the ONNX `reflection` padding rule:
+        /// the axis bounces off each edge, so a coordinate d past an edge lands d inside it, folding
+        /// with period 2*(hi-lo). Degenerate axes (hi <= lo) collapse to lo.
         static double reflectCoord(double x, double lo, double hi) {
             if (hi <= lo)
             {
                 return lo;
             }
+            // Fold into one period [0, 2*rng); the second half of the period mirrors the first,
+            // giving the bounce back toward lo.
             double rng = hi - lo, t = std::fmod(x - lo, 2 * rng);
             if (t < 0)
             {
@@ -37,11 +42,16 @@ namespace vknn {
                 bool            cubic   = (mode == "cubic" || mode == "bicubic");
                 std::string     pad     = node.attr.gets("padding_mode", "zeros");
                 int             align   = (int) node.attr.geti("align_corners", 0);
+                // Denormalization selectors for `unnorm` below. align_corners=1 maps grid [-1,1] onto
+                // pixel centers [0, S-1] (a=1, b=0); align_corners=0 maps onto [-0.5, S-0.5], i.e. the
+                // outer edges of the border pixels (a=0, b=1).
                 int             a = align ? 1 : 0, b = 1 - a;
 
                 float       *y      = cpu::allocOut(Y, {x.n, x.c, (int64_t) Hout, (int64_t) Wout});
                 const float *xd     = X.host.f32();
                 const float *gd     = G.host.f32();
+                // Grid value g in [-1, 1] -> input coordinate. Expands to (g+1)/2*(S-1) when
+                // align_corners (a=1,b=0) and ((g+1)*S - 1)/2 otherwise (a=0,b=1).
                 auto         unnorm = [&](double g, int S) {
                     return ((1.0 + g) * (S - a) - b) * 0.5;
                 };
@@ -81,6 +91,8 @@ namespace vknn {
                             double  iy = handle(unnorm(gd[gi + 1], (int) x.h), (int) x.h);
                             if (nearest)
                             {
+                                // Round half up (floor(x+0.5)), the ONNX nearest convention: exact .5
+                                // ties resolve toward +inf rather than to-even.
                                 int rx = (int) std::floor(ix + 0.5), ry = (int) std::floor(iy + 0.5);
                                 for (int64_t c = 0; c < x.c; ++c)
                                 {
@@ -117,6 +129,8 @@ namespace vknn {
                                 }
                             } else
                             {
+                                // Bilinear (default): the four integer neighbors of (ix,iy) with
+                                // fractional weights, interpolated along x then blended along y.
                                 int    x0 = (int) std::floor(ix), y0 = (int) std::floor(iy);
                                 double wx = ix - x0, wy = iy - y0;
                                 for (int64_t c = 0; c < x.c; ++c)

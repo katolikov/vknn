@@ -19,6 +19,8 @@ namespace vknn {
                 RtTensor       &Y       = ctx.t(node.outputs[0]);
 
                 NCHW    x     = NCHW::from(X.shape);
+                // ONNX weight layout is W[Cin, Cout/group, kH, kW]: dim 1 is output channels PER
+                // GROUP (not total Cout), so outC below is recovered as outCg * group.
                 int64_t outCg = W.shape[1], kh = W.shape[2], kw = W.shape[3];
                 auto    ints = [&](const char *k, std::vector<int64_t> d) {
                     const auto &v = node.attr.getints(k);
@@ -31,6 +33,9 @@ namespace vknn {
                 int64_t dh = dil[0], dw = dil[1];
                 int64_t outC = outCg * group;
 
+                // geom resolves auto_pad / output_shape into the final output extent plus the BEGIN
+                // pads (pt, pl); the gather loop uses only the begin pads to place the input window,
+                // as the end pads affect nothing but outH/outW (already folded in here).
                 ConvTransposeGeom geom = convTransposeGeom(x.h, x.w, kh, kw, node.attr);
                 int64_t           outH = geom.outH, outW = geom.outW;
                 int64_t           pt = geom.padH, pl = geom.padW;
@@ -40,6 +45,9 @@ namespace vknn {
                 const float *wd = W.host.f32();
                 const float *bd = B ? B->host.f32() : nullptr;
 
+                // Grouped ConvTranspose: the Cin channels split into `group` contiguous bands of inCg,
+                // and each band produces its own band of outCg output channels. Output channel oc thus
+                // reads only the input channels [icStart, icStart+inCg) belonging to the same group.
                 int64_t inCg = x.c / group; // input channels per group
                 for (int64_t n = 0; n < x.n; ++n)
                 {
@@ -54,6 +62,11 @@ namespace vknn {
                             for (int64_t ox = 0; ox < outW; ++ox)
                             {
                                 float acc = bias;
+                                // Invert the scatter relation oy = iy*sh - pt + ky*dh for each tap ky:
+                                // the input row that could have written oy through tap ky satisfies
+                                // ny := oy + pt - ky*dh == iy*sh. ny must be a non-negative multiple of
+                                // the stride, else this output falls in a fractional-stride "hole" that
+                                // no input row reaches through this tap, and the tap contributes nothing.
                                 for (int64_t ky = 0; ky < kh; ++ky)
                                 {
                                     int64_t ny = oy + pt - ky * dh; // = iy * sh
@@ -62,10 +75,12 @@ namespace vknn {
                                         continue;
                                     }
                                     int64_t iy = ny / sh;
-                                    if (iy >= x.h)
+                                    if (iy >= x.h) // input row exists only up to x.h-1
                                     {
                                         continue;
                                     }
+                                    // Same inversion along the width axis: nx == ix*sw must land on a
+                                    // stride multiple and inside [0, x.w) for the tap to hit input col ix.
                                     for (int64_t kx = 0; kx < kw; ++kx)
                                     {
                                         int64_t nx = ox + pl - kx * dw; // = ix * sw
@@ -80,6 +95,8 @@ namespace vknn {
                                         }
                                         for (int64_t ic = 0; ic < inCg; ++ic)
                                         {
+                                            // Row-major NCHW address of X[n, gic, iy, ix] and of the
+                                            // weight W[gic, ocLocal, ky, kx] (Cin-major per ONNX layout).
                                             int64_t      gic = icStart + ic;
                                             const float *xch = xd + ((n * x.c + gic) * x.h + iy) * x.w + ix;
                                             const float *wv  = wd + ((gic * outCg + ocLocal) * kh + ky) * kw + kx;

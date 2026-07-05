@@ -27,6 +27,10 @@ namespace vknn {
                 auto indexAt = [&](int64_t k) -> int64_t {
                     return I.dtype == DType::Int64 ? I.host.i64()[k] : (int64_t) I.host.f32()[k];
                 };
+                // Collapse `data` into a 3-way [outer, axisSize, inner] view around `axis`: `outer` is
+                // the product of the dims before `axis`, `inner` the product of the dims after it (both
+                // contiguous in row-major order). Gather then walks `outer` blocks, selecting `nidx`
+                // rows of `inner` contiguous elements each, so the whole op reduces to flat row copies.
                 int64_t axisSize = (rank > 0) ? D.shape[axis] : 1;
                 int64_t outer    = 1;
                 for (int64_t i = 0; i < axis; ++i)
@@ -63,6 +67,10 @@ namespace vknn {
                     outShape = {1};
                 }
 
+                // Copy each gathered row into the output. Source row (o, src) starts at flat offset
+                // (o*axisSize + src)*inner; the k-th output row of block `o` at (o*nidx + k)*inner, since
+                // the output replaces `axisSize` with `nidx` along the collapsed axis. A negative index
+                // wraps by adding `axisSize`, matching ONNX's Python-style indexing.
                 auto copy = [&](auto *y, const auto *d) {
                     for (int64_t o = 0; o < outer; ++o)
                     {

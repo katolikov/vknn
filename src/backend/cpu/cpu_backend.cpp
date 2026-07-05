@@ -30,16 +30,21 @@ namespace vknn {
             rt.deviceValid = false;
             return rt.host.i64();
         }
+        /// Apply a fused activation to the `n` contiguous elements at `p` in place. `lo`/`hi` are the
+        /// clamp bounds and are read only by ActType::Clip; the other cases carry their bounds in the
+        /// formula. Unrecognized activations (default) leave the buffer untouched (identity).
         void applyAct(float *p, int64_t n, ActType act, float lo, float hi) {
             switch (act)
             {
                 case ActType::Relu:
+                    // max(x, 0).
                     for (int64_t i = 0; i < n; ++i)
                     {
                         p[i] = p[i] > 0 ? p[i] : 0;
                     }
                     break;
                 case ActType::Relu6:
+                    // clamp(x, 0, 6): ReLU with a hard ceiling of 6, common in mobile CNNs.
                     for (int64_t i = 0; i < n; ++i)
                     {
                         float v = p[i];
@@ -47,6 +52,7 @@ namespace vknn {
                     }
                     break;
                 case ActType::Clip:
+                    // clamp(x, lo, hi) using the runtime-supplied bounds (ONNX Clip min/max).
                     for (int64_t i = 0; i < n; ++i)
                     {
                         float v = p[i];
@@ -54,6 +60,8 @@ namespace vknn {
                     }
                     break;
                 case ActType::HardSwish:
+                    // x * relu6(x + 3) / 6, the piecewise-linear approximation of SiLU used by
+                    // HardSwish. relu6 is spelled here as min(max(x+3, 0), 6).
                     for (int64_t i = 0; i < n; ++i)
                     {
                         float v = p[i];
@@ -61,6 +69,7 @@ namespace vknn {
                     }
                     break;
                 case ActType::SiLU:
+                    // x * sigmoid(x) = x / (1 + exp(-x)), a.k.a. Swish.
                     for (int64_t i = 0; i < n; ++i)
                     {
                         p[i] = p[i] / (1.f + std::exp(-p[i]));
@@ -76,11 +85,17 @@ namespace vknn {
             Y.host.resizeElems(numElements(shape), X.dtype);
             Y.hostValid   = true;
             Y.deviceValid = false;
+            // Pure metadata reshapes preserve element count, so the two byte spans are equal in size;
+            // the min() guards against a caller passing a mismatched `shape` by copying only the
+            // overlap rather than reading or writing past either buffer.
             std::memcpy(Y.host.bytes.data(), X.host.bytes.data(), std::min(Y.host.bytes.size(), X.host.bytes.size()));
         }
     } // namespace cpu
 
     // --------------------------- CpuSegment ---------------------------
+    /// A contiguous run of graph nodes executed on the CPU reference path. Construction eagerly
+    /// instantiates one CpuOp per node (parallel to `nodeIdx`), so run() is a straight-line dispatch
+    /// with no per-node lookup.
     class CpuSegment: public Segment {
       public:
         CpuSegment(const std::vector<int> &idx, Graph &g): g_(g) {
@@ -170,6 +185,9 @@ namespace vknn {
             {
                 return false;
             }
+            // A registered kernel exists; the CPU reference path additionally requires the tensor to
+            // be one of the dtypes the kernels operate on (fp32 activations, int64/int32 index/shape
+            // tensors). Other dtypes fall through to no CPU support.
             return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
         }
         std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &) override {
