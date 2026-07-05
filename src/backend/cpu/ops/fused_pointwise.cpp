@@ -9,7 +9,8 @@
 namespace vknn {
     namespace {
 
-        /// Apply one binary step `a OP b`, where `op` is a BinaryType wire code.
+        /// Apply one binary step `a OP b`, where `op` is a BinaryType wire code or one of the
+        /// pw-step-only kPwBin* codes (comparisons and PRelu, which fuse through this space).
         /// The `default`/fall-through returns `a + b`: Add is encoded as BinaryType::Add (6) by the
         /// fuser (binaryFromOnnx() never yields it), so it lands here rather than in an explicit case.
         float pwBinary(float a, float b, int op) {
@@ -29,6 +30,22 @@ namespace vknn {
                     return std::pow(a, b);
                 default:
                     break;
+            }
+            if (op == kPwBinGreater)
+            {
+                return a > b ? 1.f : 0.f;
+            }
+            if (op == kPwBinGreaterEqual)
+            {
+                return a >= b ? 1.f : 0.f;
+            }
+            if (op == kPwBinEqual)
+            {
+                return a == b ? 1.f : 0.f;
+            }
+            if (op == kPwBinPRelu)
+            {
+                return a > 0.f ? a : b * a;
             }
             return a + b;
         }

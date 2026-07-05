@@ -181,9 +181,17 @@ namespace vknn {
                 hold                 = upload(*env.ctx, std::vector<float>(4, v.empty() ? 0.f : v[0]), env.useFp16);
             } else
             {
-                std::vector<float> v  = initFloats(g, t);
-                NCHW               s  = NCHW::from(g.desc(t).shape);
-                int64_t            Cb = cBlocks(s.c), HW = s.h * s.w;
+                std::vector<float> v = initFloats(g, t);
+                // Right-align a rank<4 constant into NCHW before packing: a [C,1,1] (or [1,C,1,1])
+                // channel operand broadcasts by right-alignment, so its packed layout must match
+                // the [1,C,1,1] interpretation the kernel's channel-block indexing assumes.
+                Shape sh = g.desc(t).shape;
+                while (sh.size() < 4)
+                {
+                    sh.insert(sh.begin(), 1);
+                }
+                NCHW    s  = NCHW::from(sh);
+                int64_t Cb = cBlocks(s.c), HW = s.h * s.w;
                 std::vector<float> p((size_t) (s.n * Cb * 4 * HW), 0.f);
                 for (int64_t n = 0; n < s.n; ++n)
                 {

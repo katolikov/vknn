@@ -29,6 +29,11 @@ namespace vknn {
     // Unsqueeze + MatMul (+ Squeeze) so they run on the flat MatMul GPU kernel; other equations are
     // left as Einsum. Needs resolved operand shapes (defined in lower_einsum.cpp).
     void lowerEinsum(Graph &g);
+    // Lower every inference-mode BatchNorm that foldBatchNorm left standing (pre-activation BN, BN
+    // after Concat, BN on a shared Conv output) to a per-channel Mul+Add pair with host-folded
+    // [1,C,1..] fp32 scale/shift initializers, so the pointwise fusion pass can fold it. Runs
+    // unconditionally after foldBatchNorm (defined in lower_batchnorm.cpp).
+    void lowerBatchNorm(Graph &g);
     // Drop Cast nodes converting float->float (a same-size buffer copy), rewiring consumers to the
     // cast input; a forward dtype pass gates removal to a float source so int<->float casts survive.
     // Graph outputs are never renamed (defined in eliminate_float_cast.cpp).

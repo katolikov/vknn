@@ -93,6 +93,14 @@ namespace vknn {
     constexpr int kPwKindSelect = 3; ///< srcA != 0 ? srcB : srcC (the Where/mask-blend form).
     constexpr int kPwKindLoad   = 4; ///< pass srcA through (an operand load into the accumulator).
 
+    /// Binary codes private to pw steps. They extend the BinaryType wire-code space (Mul..Add =
+    /// 0..6) inside a kPwKindBinary step only — binaryFromOnnx() never yields them and the Binary
+    /// op kernels never see them; the comparison/PRelu ops fuse through these instead of a subOp.
+    constexpr int kPwBinGreater      = 7;  ///< srcA >  srcB -> 1.0/0.0
+    constexpr int kPwBinGreaterEqual = 8;  ///< srcA >= srcB -> 1.0/0.0
+    constexpr int kPwBinEqual        = 9;  ///< srcA == srcB -> 1.0/0.0
+    constexpr int kPwBinPRelu        = 10; ///< srcA > 0 ? srcA : srcB * srcA (slope on srcB)
+
     /// Stable ONNX-style spelling of an OpType (e.g. OpType::GlobalAvgPool -> "GlobalAveragePool").
     /// @returns A static, null-terminated string owned by the library; never null. An unrecognized
     ///          value maps to "Unknown".

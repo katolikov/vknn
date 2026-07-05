@@ -81,6 +81,7 @@ namespace vknn {
         inferShapes(g, batch);
         eliminateIdentity(g);
         foldBatchNorm(g);
+        lowerBatchNorm(g); // whatever foldBatchNorm left becomes a fusable per-channel Mul+Add
         fuseActivations(g);
         fuseResidualAdd(g);
         if (opt.fuseSwish)
