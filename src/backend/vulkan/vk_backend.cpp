@@ -1355,14 +1355,15 @@ namespace vknn {
             };
             bool copySinceBarrier = false;
             // Push-descriptor writes a node records = one per bound storage buffer. A fused
-            // pointwise/epilogue kernel always binds the plan SSBO plus the fixed kPwMaxOperands operand
-            // slots on top of its own inputs/outputs; a plain op binds just those. Accumulated per
-            // command buffer, this drives the maxSubmitBindings split below.
+            // pointwise/epilogue kernel always binds the plan SSBO plus the fixed kPwMaxOperands
+            // operand slots and kPwMaxOuts extra output streams on top of its own inputs/outputs; a
+            // plain op binds just those. Accumulated per command buffer, this drives the
+            // maxSubmitBindings split below.
             auto bindEstimate = [&](const Node &nd) -> int {
                 int b = (int) nd.inputs.size() + (int) nd.outputs.size();
                 if (nd.type == OpType::FusedPointwise || nd.attr.has("pw_steps"))
                 {
-                    b += 1 + kPwMaxOperands;
+                    b += 1 + kPwMaxOperands + kPwMaxOuts;
                 }
                 return b;
             };

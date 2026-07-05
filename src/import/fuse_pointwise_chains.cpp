@@ -327,7 +327,7 @@ namespace vknn {
                 {
                     break; // fp32-intermediate guard
                 }
-                if ((int) steps.size() / 4 >= kPwMaxSteps)
+                if ((int) steps.size() / 8 >= kPwMaxSteps)
                 {
                     break;
                 }
@@ -356,7 +356,19 @@ namespace vknn {
                     inputs.push_back(operand);
                     oi = (int) inputs.size() - 1;
                 }
-                steps.insert(steps.end(), {(int64_t) kind, (int64_t) code, (int64_t) oi, (int64_t) bcast});
+                // Encode as a v2 step record (kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc).
+                // A linear chain flows through the accumulator: pwEncodeStep's REVERSED form (chain
+                // value on the RHS of a non-commutative binary) becomes a plain binary with the
+                // operand on srcA; bcastSrc marks which source the broadcast geometry applies to.
+                int64_t opRef = (oi >= 0) ? (int64_t) (kPwRefOp0 - oi) : (int64_t) kPwRefNone;
+                if (kind == 0 || kind == 3)
+                {
+                    bool rev = (kind == 3);
+                    steps.insert(steps.end(), {0, (int64_t) code, rev ? opRef : (int64_t) kPwRefAcc, rev ? (int64_t) kPwRefAcc : opRef, (int64_t) kPwRefNone, (int64_t) kPwRefNone, (int64_t) bcast, rev ? 1 : 2});
+                } else
+                {
+                    steps.insert(steps.end(), {(int64_t) kind, (int64_t) code, (int64_t) kPwRefAcc, (int64_t) kPwRefNone, (int64_t) kPwRefNone, (int64_t) kPwRefNone, 0, 0});
+                }
                 params.insert(params.end(), {p0, p1});
                 if (bcast == 2)
                 {
@@ -369,11 +381,11 @@ namespace vknn {
                 // step here or it would be silently dropped when the node is replaced.
                 if (nd.fusedAct != ActType::None)
                 {
-                    if ((int) steps.size() / 4 >= kPwMaxSteps)
+                    if ((int) steps.size() / 8 >= kPwMaxSteps)
                     {
                         break; // no room for the epilogue step: leave this node unfused (chain ends before it)
                     }
-                    steps.insert(steps.end(), {2, (int64_t) nd.fusedAct, -1, 0});
+                    steps.insert(steps.end(), {(int64_t) kPwKindAct, (int64_t) nd.fusedAct, (int64_t) kPwRefAcc, (int64_t) kPwRefNone, (int64_t) kPwRefNone, (int64_t) kPwRefNone, 0, 0});
                     params.insert(params.end(), {nd.actLo, nd.actHi});
                 }
                 chain.push_back(cur);
@@ -421,9 +433,9 @@ namespace vknn {
             } else
             {
                 worldOk = run.size() == 4;
-                for (int s = 0; worldOk && s < (int) steps.size() / 4; ++s)
+                for (int s = 0; worldOk && s < (int) steps.size() / 8; ++s)
                 {
-                    if (steps[s * 4 + 3] == 2)
+                    if (steps[s * 8 + 6] == 2)
                     {
                         worldOk = false; // general-flat broadcast is not NC4-expressible
                     }
@@ -451,11 +463,17 @@ namespace vknn {
                 {
                     P.inputs.push_back(inputs[k]);
                 }
-                for (int s = 0; s < (int) es.size() / 4; ++s)
+                // Rebase operand references from the chain's own input list (operands at 1..) onto
+                // the producer's input list (operands appended at opbase..).
+                for (int s = 0; s < (int) es.size() / 8; ++s)
                 {
-                    if (es[s * 4 + 2] >= 1)
+                    for (int f = 2; f <= 4; ++f)
                     {
-                        es[s * 4 + 2] = opbase + ((int) es[s * 4 + 2] - 1); // rebase operand idx into P.inputs
+                        int64_t ref = es[s * 8 + f];
+                        if (ref <= kPwRefOp0)
+                        {
+                            es[s * 8 + f] = kPwRefOp0 - (opbase + (int) (kPwRefOp0 - ref) - 1);
+                        }
                     }
                 }
                 {

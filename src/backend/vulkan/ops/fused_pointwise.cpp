@@ -30,16 +30,19 @@ namespace vknn {
 
                 planBuf = uploadPwPlan(env, plan);
                 // Buffer count = 2 (primary input + output) + 1 (plan SSBO) + kPwMaxOperands operand
-                // slots. The shaders (fused_pw_flat/nc4.comp) statically declare all kPwMaxOperands
-                // operand bindings via pw_epilogue.glsl, so the descriptor set must always size for the
-                // full count even when the plan uses fewer. Push constant is a single int (the element
-                // count `total`), matching the shaders' `PC { int total; }`.
-                pipe = env.pipeline(shader(flat ? "fused_pw_flat" : "fused_pw_nc4", env.useFp16), 2 + 1 + kPwMaxOperands, sizeof(int), std::vector<uint32_t> {});
+                // slots + kPwMaxOuts extra output streams. The shaders (fused_pw_flat/nc4.comp)
+                // statically declare every slot via pw_epilogue.glsl, so the descriptor set must
+                // always size for the full count even when the plan uses fewer. Push constant is a
+                // single int (the element count `total`), matching the shaders' `PC { int total; }`.
+                pipe = env.pipeline(shader(flat ? "fused_pw_flat" : "fused_pw_nc4", env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 // Binding order matches the shaders: 0 = primary input, 1 = output, 2 = plan SSBO
-                // (PW_EPI_BASE), then the kPwMaxOperands step-operand slots (PW_EPI_BASE+1..+K).
+                // (PW_EPI_BASE), the kPwMaxOperands step-operand slots (PW_EPI_BASE+1..), then the
+                // kPwMaxOuts extra output streams (PW_EPI_BASE+1+kPwMaxOperands..). Unused slots bind
+                // `dst` as a harmless placeholder: the plan never references them, so the kernel
+                // never reads (or writes) them.
                 vk::Buffer           *dst = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs;
                 bufs.push_back(env.devBuf(node.inputs[0])->handle());
@@ -47,17 +50,12 @@ namespace vknn {
                 bufs.push_back(planBuf->handle());
                 for (int k = 0; k < kPwMaxOperands; ++k)
                 {
-                    if (k < (int) operands.size())
-                    {
-                        bufs.push_back(pwOperandBuf(env, operands[k], holds[k], flat)->handle());
-                    } else
-                    {
-                        // The shader declares all kPwMaxOperands operand bindings statically, so every
-                        // slot must point at a live buffer. Unused slots bind `dst` as a harmless
-                        // placeholder: the plan never references these slots, so the kernel never reads
-                        // them.
-                        bufs.push_back(dst->handle());
-                    }
+                    bufs.push_back(k < (int) operands.size() ? pwOperandBuf(env, operands[k], holds[k], flat)->handle() : dst->handle());
+                }
+                for (int o = 0; o < kPwMaxOuts; ++o)
+                {
+                    bool live = 1 + o < (int) node.outputs.size() && node.outputs[1 + o] != kNoTensor;
+                    bufs.push_back(live ? env.devBuf(node.outputs[1 + o])->handle() : dst->handle());
                 }
                 // One int push constant: the element count guarding the 1D grid (local_size_x=256).
                 int pc = total;

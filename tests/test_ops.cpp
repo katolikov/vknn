@@ -115,12 +115,12 @@ namespace {
     }
 
     // Build a FusedPointwise graph: primary input "x" + N constant operand tensors, run the
-    // pw_steps/pw_params chain on CPU, return the output values and shape.
+    // pw_steps/pw_params unit on CPU, return the output values and shape.
     //
-    // `steps` is 4 ints per step [kind, code, operandIndex, unused] and `params` is 2 floats per step
-    // [p0, p1] (see src/backend/cpu/ops/fused_pointwise.cpp). kind: 0 = binary with the chain value on
-    // the left (operand = inputs[operandIndex]), 3 = binary reversed, 1 = unary activation, 2 = fused
-    // activation; for kinds 1/2 operandIndex is unused and p0/p1 carry the params.
+    // `steps` is 8 ints per step [kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc] and `params`
+    // is 2 floats per step [p0, p1] (see src/backend/cpu/ops/fused_pointwise.cpp). Sources reference
+    // the accumulator (kPwRefAcc), the entry value (kPwRefEntry), a register (kPwRefReg0 - r), or an
+    // operand tensor (kPwRefOp0 - i, i indexing node.inputs where the primary sits at 0).
     OpOut runFusedPw(const std::vector<int64_t> &xshape, const std::vector<float> &xdata, const std::vector<Init> &operands, const std::vector<int64_t> &steps, const std::vector<float> &params) {
         Graph      g;
         TensorDesc xi;
@@ -505,7 +505,9 @@ TEST(Ops, DtypeCastToInt64) {
 
 // --- FusedPointwise (x*a + b, clipped to [0,10]): same-shape binary steps + a Clip act step. ---
 TEST(Ops, FusedPwMulAddClip) {
-    std::vector<int64_t> steps {0, (int) BinaryType::Mul, 1, 0, 0, (int) BinaryType::Add, 2, 0, 2, (int) ActType::Clip, -1, 0};
+    std::vector<int64_t> steps {kPwKindBinary, (int) BinaryType::Mul, kPwRefAcc, kPwRefOp0 - 1, kPwRefNone, kPwRefNone, 0, 2,
+                                kPwKindBinary, (int) BinaryType::Add, kPwRefAcc, kPwRefOp0 - 2, kPwRefNone, kPwRefNone, 0, 2,
+                                kPwKindAct,    (int) ActType::Clip,   kPwRefAcc, kPwRefNone,    kPwRefNone, kPwRefNone, 0, 0};
     std::vector<float>   params {0, 0, 0, 0, 0.f, 10.f};
     auto                 got = runFusedPw({1, 1, 2, 2}, {1, 2, 3, 4}, {{{1, 1, 2, 2}, {2, 2, 2, 2}}, {{1, 1, 2, 2}, {1, 1, 1, 1}}}, steps, params);
     expectNear(got.data, {3, 5, 7, 9});
@@ -513,10 +515,141 @@ TEST(Ops, FusedPwMulAddClip) {
 
 // --- FusedPointwise (sigmoid(x) * channel-broadcast scale): a Unary step then a channel-bcast binary step. ---
 TEST(Ops, FusedPwUnaryChannelMul) {
-    std::vector<int64_t> steps {1, (int) UnaryType::Sigmoid, -1, 0, 0, (int) BinaryType::Mul, 1, 1};
+    std::vector<int64_t> steps {kPwKindUnary,  (int) UnaryType::Sigmoid, kPwRefAcc, kPwRefNone,    kPwRefNone, kPwRefNone, 0, 0,
+                                kPwKindBinary, (int) BinaryType::Mul,    kPwRefAcc, kPwRefOp0 - 1, kPwRefNone, kPwRefNone, 1, 2};
     std::vector<float>   params {0, 0, 0, 0};
     auto                 got = runFusedPw({1, 3, 1, 2}, {0, 0, 0, 0, 0, 0}, {{{1, 3, 1, 1}, {10, 20, 30}}}, steps, params);
     expectNear(got.data, {5, 5, 10, 10, 15, 15});
+}
+
+// --- FusedPointwise diamond (x * sigmoid(x), the SiLU shape): the entry value feeds two steps,
+// so the unit re-reads kPwRefEntry after the accumulator moved past it. ---
+TEST(Ops, FusedPwEntryDiamond) {
+    std::vector<int64_t> steps {kPwKindUnary,  (int) UnaryType::Sigmoid, kPwRefEntry, kPwRefNone, kPwRefNone, kPwRefNone, 0, 0,
+                                kPwKindBinary, (int) BinaryType::Mul,    kPwRefEntry, kPwRefAcc,  kPwRefNone, kPwRefNone, 0, 0};
+    std::vector<float>   params {0, 0, 0, 0};
+    auto                 got = runFusedPw({1, 4}, {-1, 0, 1, 2}, {}, steps, params);
+    std::vector<float>   ref;
+    for (float x: {-1.f, 0.f, 1.f, 2.f})
+    {
+        ref.push_back(x / (1.f + std::exp(-x)));
+    }
+    expectNear(got.data, ref);
+}
+
+// --- FusedPointwise register reuse: r0 = x + a is consumed by a later step after the accumulator
+// was overwritten by an unrelated one. y = (x * b) + (x + a). ---
+TEST(Ops, FusedPwRegister) {
+    std::vector<int64_t> steps {kPwKindBinary, (int) BinaryType::Add, kPwRefEntry, kPwRefOp0 - 1, kPwRefNone, 0,          0, 2,
+                                kPwKindBinary, (int) BinaryType::Mul, kPwRefEntry, kPwRefOp0 - 2, kPwRefNone, kPwRefNone, 0, 2,
+                                kPwKindBinary, (int) BinaryType::Add, kPwRefAcc,   kPwRefReg0,    kPwRefNone, kPwRefNone, 0, 0};
+    std::vector<float>   params {0, 0, 0, 0, 0, 0};
+    auto                 got = runFusedPw({1, 3}, {1, 2, 3}, {{{1, 3}, {10, 10, 10}}, {{1, 3}, {2, 2, 2}}}, steps, params);
+    expectNear(got.data, {13, 16, 19}); // x*2 + (x+10)
+}
+
+// --- FusedPointwise select (the Where shape): mask ? a : x with a tensor condition. ---
+TEST(Ops, FusedPwSelect) {
+    std::vector<int64_t> steps {kPwKindSelect, 0, kPwRefOp0 - 1, kPwRefOp0 - 2, kPwRefEntry, kPwRefNone, 0, 1};
+    std::vector<float>   params {0, 0};
+    auto                 got = runFusedPw({1, 4}, {1, 2, 3, 4}, {{{1, 4}, {1, 0, 1, 0}}, {{1, 4}, {-9, -9, -9, -9}}}, steps, params);
+    expectNear(got.data, {-9, 2, -9, 4});
+}
+
+// --- FusedPointwise load step: replace the accumulator with an operand mid-unit, keeping the
+// entry reachable. y = c - x via load(c) then Sub(acc, entry). ---
+TEST(Ops, FusedPwLoad) {
+    std::vector<int64_t> steps {kPwKindLoad,   0,                     kPwRefOp0 - 1, kPwRefNone,  kPwRefNone, kPwRefNone, 0, 1,
+                                kPwKindBinary, (int) BinaryType::Sub, kPwRefAcc,     kPwRefEntry, kPwRefNone, kPwRefNone, 0, 0};
+    std::vector<float>   params {0, 0, 0, 0};
+    auto                 got = runFusedPw({1, 3}, {1, 2, 3}, {{{1, 3}, {10, 10, 10}}}, steps, params);
+    expectNear(got.data, {9, 8, 7});
+}
+
+// --- FusedPointwise multi-output (pw_outs): a fanned-out intermediate step value is exported as
+// a second graph output while the unit continues to the final result. y = (x+c)^2, z = x+c. ---
+TEST(Ops, FusedPwMultiOutput) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorDesc ci;
+    ci.name          = "c";
+    ci.shape         = {1, 4};
+    ci.isInitializer = true;
+    TensorId   c     = g.addTensor(ci);
+    HostBuffer hb;
+    hb.resizeElems(4, DType::Float32);
+    for (int i = 0; i < 4; ++i)
+    {
+        hb.f32()[i] = 10.f;
+    }
+    g.initializers[c] = hb;
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    TensorDesc zo;
+    zo.name     = "z";
+    zo.isOutput = true;
+    TensorId z  = g.addTensor(zo);
+    Node     n;
+    n.type    = OpType::FusedPointwise;
+    n.name    = "pw";
+    n.inputs  = {x, c};
+    n.outputs = {y, z};
+    {
+        Attr a;
+        a.kind                 = Attr::Ints;
+        a.ints                 = {kPwKindBinary, (int) BinaryType::Add, kPwRefAcc, kPwRefOp0 - 1, kPwRefNone, kPwRefNone, 0, 2,
+                                  kPwKindBinary, (int) BinaryType::Mul, kPwRefAcc, kPwRefAcc,     kPwRefNone, kPwRefNone, 0, 0};
+        n.attr.map["pw_steps"] = a;
+    }
+    {
+        Attr a;
+        a.kind                  = Attr::Floats;
+        a.floats                = {0, 0, 0, 0};
+        n.attr.map["pw_params"] = a;
+    }
+    {
+        Attr a;
+        a.kind                = Attr::Ints;
+        a.ints                = {0}; // z stores step 0 (x+c)
+        n.attr.map["pw_outs"] = a;
+    }
+    {
+        Attr a;
+        a.kind                = Attr::Int;
+        a.i                   = 1;
+        n.attr.map["pw_flat"] = a;
+    }
+    g.nodes   = {n};
+    g.outputs = {y, z};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {1, 4};
+    in.dtype = DType::Float32;
+    in.data.resize(4 * 4);
+    float xv[4] = {1, 2, 3, 4};
+    std::memcpy(in.data.data(), xv, sizeof(xv));
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs.size(), 2u);
+    const float *yv = reinterpret_cast<const float *>(outs[0].data.data());
+    const float *zv = reinterpret_cast<const float *>(outs[1].data.data());
+    for (int i = 0; i < 4; ++i)
+    {
+        EXPECT_NEAR(zv[i], xv[i] + 10.f, 1e-5f) << "z i=" << i;
+        EXPECT_NEAR(yv[i], (xv[i] + 10.f) * (xv[i] + 10.f), 1e-4f) << "y i=" << i;
+    }
 }
 
 // --- A non-pointwise producer (Softmax) carrying an attached pw_steps epilogue (Mul by a
@@ -551,7 +684,8 @@ TEST(Ops, CpuEpilogueHookOnProducer) {
     {
         Attr a;
         a.kind                 = Attr::Ints;
-        a.ints                 = {0, (int) BinaryType::Mul, 1, 0}; // Mul by inputs[1]
+        // Mul by inputs[1] (a scalar constant, bcast mode 3 on srcB)
+        a.ints                 = {kPwKindBinary, (int) BinaryType::Mul, kPwRefAcc, kPwRefOp0 - 1, kPwRefNone, kPwRefNone, 3, 2};
         n.attr.map["pw_steps"] = a;
     }
     {

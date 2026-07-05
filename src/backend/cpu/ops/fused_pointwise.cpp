@@ -112,29 +112,34 @@ namespace vknn {
 
     } // namespace
 
-    // Apply pw_steps/pw_params in place on node.outputs[0] (already holds the head/primary
-    // result). Step operands (node.inputs[1..]) broadcast against the output shape per bcastMode:
-    // 0=same-shape, 1=channel[N,C,1,1], 2=general (all handled by the same NumPy-style stride
-    // computation from the operand's own shape, so this reference reads no per-mode fast path).
+    // Apply pw_steps/pw_params/pw_outs in place on node.outputs[0] (already holds the entry /
+    // primary result) and fill any extra output streams (node.outputs[1..]).
     //
-    // Encoding (produced by the pointwise-chain fuser, src/import/fuse_pointwise_chains.cpp): pw_steps
-    // is 4 ints per step [kind, code, operandIndex, unused] and pw_params is 2 floats per step
-    // [p0, p1]. `kind` selects the step family:
-    //   0 = binary, chain value on the LEFT:  acc = pwBinary(acc, operand, code)
-    //   3 = binary REVERSED (chain value was on the RHS of a non-commutative op such as Sub/Div/Pow):
-    //       acc = pwBinary(operand, acc, code)
-    //   1 = unary activation:   acc = pwUnary(acc, code, p0, p1)
-    //   2 = fused activation:   acc = pwAct(acc, code, p0, p1)
-    // For kinds 0/3 `operandIndex` indexes node.inputs; for 1/2 it is 0 and p0/p1 carry any params.
+    // Encoding (produced by the pointwise fuser, src/import/fuse_pointwise_chains.cpp): pw_steps is
+    // 8 ints per step [kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc] and pw_params is 2 floats
+    // per step [p0, p1]. Sources reference the accumulator (kPwRefAcc), the entry value
+    // (kPwRefEntry), a register (kPwRefReg0 - r), or a tensor operand (kPwRefOp0 - i, i indexing
+    // node.inputs). `kind` selects the step family:
+    //   kPwKindBinary: acc = pwBinary(srcA, srcB, code)
+    //   kPwKindUnary:  acc = pwUnary(srcA, code, p0, p1)
+    //   kPwKindAct:    acc = pwAct(srcA, code, p0, p1)
+    //   kPwKindSelect: acc = srcA != 0 ? srcB : srcC
+    //   kPwKindLoad:   acc = srcA
+    // A dst >= 0 additionally copies the step result to that register. Every tensor operand
+    // broadcasts against the output shape by the same NumPy-style stride computation regardless of
+    // the bcast/bcastSrc fields (those drive the GPU kernels' fast paths; this reference reads no
+    // per-mode special case). pw_outs lists, per extra output stream, the step whose value it
+    // stores (kPwRefEntry stores the entry value itself).
     void applyPwEpilogue(const Node &node, ExecContext &ctx) {
-        RtTensor       &Y    = ctx.t(node.outputs[0]);
-        const Shape    &out  = Y.shape;
-        int64_t         n    = numElements(out);
-        float           *y   = Y.host.f32();
-        size_t           rank = out.size();
-        const auto      &st  = node.attr.getints("pw_steps");
-        const auto      &pr  = node.attr.getfloats("pw_params");
-        int              nSteps = (int) (st.size() / 4);
+        RtTensor    &Y      = ctx.t(node.outputs[0]);
+        const Shape &out    = Y.shape;
+        int64_t      n      = numElements(out);
+        float       *y      = Y.host.f32();
+        size_t       rank   = out.size();
+        const auto  &st     = node.attr.getints("pw_steps");
+        const auto  &pr     = node.attr.getfloats("pw_params");
+        const auto  &po     = node.attr.getints("pw_outs");
+        int          nSteps = (int) (st.size() / 8);
 
         // NumPy-style broadcast strides for an operand of shape `s` against the rank-`rank` output.
         // `s` is right-aligned to the output axes (leading axes it lacks, off = rank - s.size(), are
@@ -142,8 +147,8 @@ namespace vknn {
         // the same operand element, while other axes get the operand's own row-major stride.
         auto broadcastStrides = [&](const Shape &s) {
             std::vector<int64_t> ob(rank, 0);
-            int64_t               stride = 1;
-            size_t                 off    = rank - s.size();
+            int64_t              stride = 1;
+            size_t               off    = rank - s.size();
             for (int i = (int) rank - 1; i >= 0; --i)
             {
                 int64_t d = (i < (int) off) ? 1 : s[i - off];
@@ -152,46 +157,119 @@ namespace vknn {
             }
             return ob;
         };
+        // Row-major strides of the output itself, for decomposing a flat index into coordinates.
+        std::vector<int64_t> ostride(rank, 1);
+        for (int i = (int) rank - 2; i >= 0; --i)
+        {
+            ostride[i] = ostride[i + 1] * out[i + 1];
+        }
+
+        // Hoist per-source operand pointers and broadcast strides out of the element loop; a
+        // non-operand source keeps a null pointer and resolves from acc/entry/registers instead.
+        struct SrcRef {
+            int                  ref = kPwRefNone;
+            const float         *p   = nullptr;
+            std::vector<int64_t> ob;
+        };
+        std::vector<SrcRef> src((size_t) nSteps * 3);
+        for (int s = 0; s < nSteps; ++s)
+        {
+            for (int f = 0; f < 3; ++f)
+            {
+                SrcRef &r = src[(size_t) s * 3 + f];
+                r.ref     = (int) st[s * 8 + 2 + f];
+                if (r.ref <= kPwRefOp0)
+                {
+                    const RtTensor &O = ctx.t(node.inputs[kPwRefOp0 - r.ref]);
+                    r.p               = O.host.f32();
+                    r.ob              = broadcastStrides(O.shape);
+                }
+            }
+        }
+
+        // Extra output streams share the unit's output shape (the fuser only exports same-shape
+        // step values); allocate them here since the producing op only writes outputs[0].
+        int    numOuts = std::min((int) po.size(), (int) kPwMaxOuts);
+        float *outPtr[kPwMaxOuts] = {};
+        int    outStep[kPwMaxOuts] = {};
+        for (int o = 0; o < numOuts; ++o)
+        {
+            outPtr[o]  = cpu::allocOut(ctx.t(node.outputs[1 + o]), out);
+            outStep[o] = (int) po[o];
+        }
 
         for (int64_t lin = 0; lin < n; ++lin)
         {
-            float acc = y[lin];
-            for (int s = 0; s < nSteps; ++s)
+            float entry = y[lin];
+            float acc   = entry;
+            float reg[kPwMaxRegs] = {};
+            for (int o = 0; o < numOuts; ++o)
             {
-                int   kind = (int) st[s * 4 + 0];
-                int   code = (int) st[s * 4 + 1];
-                int   oi   = (int) st[s * 4 + 2];
-                float p0   = pr[s * 2 + 0];
-                float p1   = pr[s * 2 + 1];
-                if (kind == 0 || kind == 3)
+                if (outStep[o] == kPwRefEntry)
                 {
-                    const RtTensor &O  = ctx.t(node.inputs[oi]);
-                    auto            ob = broadcastStrides(O.shape);
-                    // Decompose the flat output index `lin` into its per-axis coordinates and
-                    // reassemble the operand offset from the broadcast strides. For output axis d the
-                    // coordinate is (lin / prod(out[d+1..])) % out[d]; multiplying by ob[d] (which is 0
-                    // on a broadcast axis) accumulates the operand's read position.
+                    outPtr[o][lin] = entry;
+                }
+            }
+            auto value = [&](const SrcRef &r) -> float {
+                if (r.p)
+                {
+                    // Decompose the flat output index into per-axis coordinates and reassemble the
+                    // operand offset from the broadcast strides (0 on a broadcast axis).
                     int64_t io = 0;
                     for (size_t d = 0; d < rank; ++d)
                     {
-                        int64_t stride = 1;
-                        for (size_t e = d + 1; e < rank; ++e)
-                        {
-                            stride *= out[e];
-                        }
-                        io += ((lin / stride) % out[d]) * ob[d];
+                        io += ((lin / ostride[d]) % out[d]) * r.ob[d];
                     }
-                    // kind 3 is the reversed (operand-on-left) form for non-commutative binaries.
-                    float b = O.host.f32()[io];
-                    acc     = kind == 3 ? pwBinary(b, acc, code) : pwBinary(acc, b, code);
+                    return r.p[io];
                 }
-                else if (kind == 1)
+                if (r.ref == kPwRefAcc)
                 {
-                    acc = pwUnary(acc, code, p0, p1);
+                    return acc;
                 }
-                else if (kind == 2)
+                if (r.ref == kPwRefEntry)
                 {
-                    acc = pwAct(acc, code, p0, p1);
+                    return entry;
+                }
+                if (r.ref <= kPwRefReg0 && r.ref > kPwRefReg0 - kPwMaxRegs)
+                {
+                    return reg[kPwRefReg0 - r.ref];
+                }
+                return 0.f;
+            };
+            for (int s = 0; s < nSteps; ++s)
+            {
+                int   kind = (int) st[s * 8 + 0];
+                int   code = (int) st[s * 8 + 1];
+                int   dst  = (int) st[s * 8 + 5];
+                float p0   = pr[s * 2 + 0];
+                float p1   = pr[s * 2 + 1];
+                float va   = value(src[(size_t) s * 3 + 0]);
+                if (kind == kPwKindBinary)
+                {
+                    acc = pwBinary(va, value(src[(size_t) s * 3 + 1]), code);
+                } else if (kind == kPwKindUnary)
+                {
+                    acc = pwUnary(va, code, p0, p1);
+                } else if (kind == kPwKindAct)
+                {
+                    acc = pwAct(va, code, p0, p1);
+                } else if (kind == kPwKindSelect)
+                {
+                    acc = va != 0.f ? value(src[(size_t) s * 3 + 1]) : value(src[(size_t) s * 3 + 2]);
+                } else
+                {
+                    acc = va; // kPwKindLoad
+                }
+                if (dst >= 0 && dst < kPwMaxRegs)
+                {
+                    reg[dst] = acc;
+                }
+                for (int o = 0; o < numOuts; ++o)
+                {
+                    if (outStep[o] == s)
+                    {
+                        outPtr[o][lin] = acc;
+                    }
                 }
             }
             y[lin] = acc;

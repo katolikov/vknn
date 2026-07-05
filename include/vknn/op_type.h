@@ -64,12 +64,34 @@ namespace vknn {
         Range, // arange(start, limit, delta) -- scalar inputs, 1-D output
     };
 
-    /// Fused-pointwise-chain limits. The fusion pass splits any chain that would exceed one of
-    /// these; the shader plan layout (pw_plan.h) is sized from the same constants, so they are a
-    /// shared contract between the importer and the kernel and cannot be changed independently.
-    constexpr int kPwMaxSteps    = 8;  ///< Elementwise steps per fused unit.
+    /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;
+    /// the shader plan layout (pw_plan.h) is sized from the same constants, so they are a shared
+    /// contract between the importer and the kernel and cannot be changed independently.
+    constexpr int kPwMaxSteps    = 16; ///< Elementwise steps per fused unit.
     constexpr int kPwMaxOperands = 6;  ///< Extra tensor operands per unit (the primary input is excluded).
     constexpr int kPwMaxRank     = 4;  ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
+    constexpr int kPwMaxRegs     = 4;  ///< Named registers for step values reused by later steps.
+    constexpr int kPwMaxOuts     = 4;  ///< Extra output streams (fanout values exported from the unit).
+
+    /// pw_steps value references (the srcA/srcB/srcC/dst fields of a step). A source names the
+    /// accumulator, the entry value, a register, or a tensor operand; a dst is kPwRefNone or a
+    /// register encoded the same way (every step's result always lands in the accumulator, a
+    /// register dst additionally keeps a copy for later steps).
+    constexpr int kPwRefAcc   = -1; ///< The running value (previous step's result; entry value before step 0).
+    constexpr int kPwRefEntry = -2; ///< The unit's entry value (producer result / primary stream element).
+    constexpr int kPwRefNone  = -3; ///< Unused source slot / no register destination.
+    constexpr int kPwRefReg0  = -4; ///< Register r: encoded as kPwRefReg0 - r (r in [0, kPwMaxRegs)).
+    constexpr int kPwRefOp0   = -8; ///< Operand i: encoded as kPwRefOp0 - i. In a node's pw_steps
+                                    ///< attr i indexes node.inputs; in the device plan i is the
+                                    ///< dense physical operand slot (see buildPwPlan).
+
+    /// pw_steps step kinds (the first field of a step's 8-int record: kind, code, srcA, srcB,
+    /// srcC, dst, bcast, bcastSrc).
+    constexpr int kPwKindBinary = 0; ///< srcA OP srcB, OP from the BinaryType wire code.
+    constexpr int kPwKindUnary  = 1; ///< unary(srcA), code from the UnaryType wire code.
+    constexpr int kPwKindAct    = 2; ///< activation(srcA), code from the ActType wire code.
+    constexpr int kPwKindSelect = 3; ///< srcA != 0 ? srcB : srcC (the Where/mask-blend form).
+    constexpr int kPwKindLoad   = 4; ///< pass srcA through (an operand load into the accumulator).
 
     /// Stable ONNX-style spelling of an OpType (e.g. OpType::GlobalAvgPool -> "GlobalAveragePool").
     /// @returns A static, null-terminated string owned by the library; never null. An unrecognized
