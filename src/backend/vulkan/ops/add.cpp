@@ -19,12 +19,16 @@ namespace vknn {
             bool                                 flat = false;
 
             void prepare(const Node &node, VkOpEnv &env) override {
+                // A flat (non-NC4HW4) layout routes to the shared Binary flat kernel; otherwise both
+                // operands share this op's packed layout and add elementwise over the buffer.
                 if (opIsFlat(node, env))
                 {
                     flat = true;
                     flatImpl.prepare(node, env);
                     return;
                 }
+                // Field order/types mirror add.comp's push_constant block. count is the NC4HW4 packed
+                // element count, so one flat 1D grid covers every packed lane of the output buffer.
                 pc = {(uint32_t) packedElems(env.graph->desc(node.outputs[0]).shape), (int) node.fusedAct, node.actLo, node.actHi};
                 pipe = env.pipeline(shader("add", env.useFp16), 3, sizeof(AddPC), std::vector<uint32_t> {});
             }

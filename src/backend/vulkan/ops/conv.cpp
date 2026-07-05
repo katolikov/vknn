@@ -157,6 +157,9 @@ namespace vknn {
                     return;
                 }
                 int el    = 2; // fp16
+                // Transformed-input V: one vec4 (4 packed channels, the NC4HW4 lane count) per
+                // (transform position, input channel-block, tile), stored fp16. Sizing = nPos * Cinb * nT
+                // vec4s * el bytes/element.
                 vbuf      = std::make_shared<vk::Buffer>(*env.ctx, (size_t) nPos * Cinb * nT * 4 * el, vk::MemPref::kDeviceOnly);
                 wInPC     = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
                 wInGroups = groups(Cinb * nT, 64);
@@ -168,6 +171,8 @@ namespace vknn {
                 if (winogemm)
                 {
                     // 3-pass: input transform -> V, TILED batched GEMM -> M, output transform -> dst.
+                    // M: one vec4 (4 packed output channels) per (transform position, tile, output
+                    // channel-block), fp16; sizing = nPos * nT * Coutb vec4s * el bytes/element.
                     mbuf             = std::make_shared<vk::Buffer>(*env.ctx, (size_t) nPos * nT * Coutb * 4 * el, vk::MemPref::kDeviceOnly);
                     wGemmPC          = {(int) Cin, (int) Cout, (int) nT};
                     wGemmGX = groups(nT, kWinoGemmTileM);     // workgroups over M (tiles)

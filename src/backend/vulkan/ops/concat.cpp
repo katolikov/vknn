@@ -7,6 +7,9 @@
 namespace vknn {
     namespace {
 
+        // Mirror of the concat shader's push_constant block. Cib/Cob are input/output channel-block
+        // counts (channels/4 in NC4HW4), cbOff is this input's starting channel block in the output,
+        // and HW is the flattened spatial extent. One invocation copies one [n][cb][hw] vec4 element.
         struct ConcatPC {
             int N, Cib, Cob, cbOff, HW;
         };
@@ -33,7 +36,9 @@ namespace vknn {
                     NCHW xi  = NCHW::from(env.graph->desc(in).shape);
                     int  Cib = (int) cBlocks(xi.c);
                     parts.push_back({(int) y.n, Cib, Cob, cbOff, HW});
+                    // One invocation per [n][cb][hw] vec4; 64 matches the shader's local_size_x.
                     partGroups.push_back(groups((int64_t) y.n * Cib * HW, 64));
+                    // Advance the output channel-block cursor so the next input lands after this one.
                     cbOff += Cib;
                 }
                 pipe = env.pipeline(shader("concat", env.useFp16), 2, sizeof(ConcatPC), std::vector<uint32_t> {});

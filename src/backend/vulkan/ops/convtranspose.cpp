@@ -56,6 +56,9 @@ namespace vknn {
                 std::vector<float> wv = initFloats(g, node.inputs[1]);
                 wbuf                  = upload(*env.ctx, wv, env.useFp16);
 
+                // Bias binding (binding 2) is unconditional in the descriptor set, so a Cout-length
+                // buffer must exist even when the node has no bias: absent-bias uploads zeros. The
+                // resize guarantees exactly Cout entries (pc.hasBias gates the shader read of bs[oc]).
                 const bool hasBias    = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor && g.isInitializer(node.inputs[2]);
                 pc.hasBias            = hasBias ? 1 : 0;
                 std::vector<float> bv = hasBias ? initFloats(g, node.inputs[2]) : std::vector<float>(pc.Cout, 0.f);

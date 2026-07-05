@@ -20,12 +20,18 @@ namespace vknn {
                 {
                     b = 1;
                 }
+                // Output channels shrink by b^2 while each spatial dim grows by b, so total element
+                // count is preserved; the shader reads mode to pick the DCR vs CRD channel unpacking.
                 int C2 = (int) x.c / (b * b), OH = (int) x.h * b, OW = (int) x.w * b;
                 int mode = node.attr.gets("mode", "DCR") == "CRD" ? 1 : 0;
+                // total (thread count) is computed in int64 to avoid overflowing the N*C2*OH*OW
+                // product before it is narrowed into the int push-constant field.
                 pc       = {(int) ((int64_t) x.n * C2 * OH * OW), (int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
                 pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // 256 = the shader's local_size_x; groups() rounds pc.total (one thread per output
+                // element) up to whole workgroups.
                 pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
             }
         };
