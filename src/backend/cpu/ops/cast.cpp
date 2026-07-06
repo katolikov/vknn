@@ -59,11 +59,6 @@ namespace vknn {
                     }
                 }
             }
-            // Cast bridges dtypes, so it accepts any input dtype; run() dispatches on the concrete
-            // input/target kind rather than on a single supported type.
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
     } // namespace
     VKNN_REGISTER_CPU_OP(OpType::Cast, CastCpu);

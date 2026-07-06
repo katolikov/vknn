@@ -12,12 +12,6 @@ namespace vknn {
         /// CPU reference for ONNX GreaterOrEqual: elementwise `A >= B` with NumPy broadcasting,
         /// emitting the canonical fp32 mask (1.0 for true, 0.0 for false).
         struct GreaterEqualCpu: CpuOp {
-            /// Int32 is accepted but shares the fp32 read path below (only Int64 is read as integer),
-            /// so its values must round-trip exactly through double — true for the shape/index
-            /// magnitudes these comparisons carry.
-            bool supportsDType(DType dt) const override {
-                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
-            }
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &A  = ctx.t(node.inputs[0]);
                 const RtTensor &B  = ctx.t(node.inputs[1]);

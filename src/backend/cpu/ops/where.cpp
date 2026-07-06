@@ -11,9 +11,6 @@ namespace vknn {
     namespace {
 
         struct WhereCpu: CpuOp {
-            bool supportsDType(DType dt) const override {
-                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
-            }
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &C   = ctx.t(node.inputs[0]);
                 const RtTensor &X   = ctx.t(node.inputs[1]);

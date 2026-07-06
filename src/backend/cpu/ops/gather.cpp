@@ -97,9 +97,6 @@ namespace vknn {
                     copy(y, D.host.f32());
                 }
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
 
     } // namespace

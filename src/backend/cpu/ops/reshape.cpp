@@ -51,9 +51,6 @@ namespace vknn {
                 // Reshape moves no data: copy `X` verbatim under the resolved shape, preserving dtype.
                 cpu::copyAs(X, Y, out);
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
 
     } // namespace

@@ -29,9 +29,6 @@ namespace vknn {
                 }
                 cpu::copyAs(X, Y, {d0, d1});
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
 
     } // namespace

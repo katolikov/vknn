@@ -28,11 +28,6 @@ namespace vknn {
                     y[i] = x[i];
                 }
             }
-            /// Accept every dtype, widening CpuOp's fp32+int64 default: a value-preserving copy is
-            /// correct for any element type, and this op must run wherever the fp32 pass placed it.
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
     } // namespace
     VKNN_REGISTER_CPU_OP(OpType::ConvertDtype, ConvertDtypeCpu);

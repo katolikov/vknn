@@ -10,11 +10,6 @@ namespace vknn {
     namespace {
 
         struct EqualCpu: CpuOp {
-            // Accept fp32 plus the integer dtypes (int64/int32 shape tensors) like the rest of the
-            // broadcasting elementwise ops.
-            bool supportsDType(DType dt) const override {
-                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
-            }
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &A  = ctx.t(node.inputs[0]);
                 const RtTensor &B  = ctx.t(node.inputs[1]);

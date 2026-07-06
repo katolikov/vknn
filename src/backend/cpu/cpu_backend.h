@@ -22,12 +22,6 @@ namespace vknn {
       public:
         virtual ~CpuOp()                                     = default;
         virtual void run(const Node &node, ExecContext &ctx) = 0;
-        /// Report whether this op can execute for tensor dtype `dt`, gating capability/fallback
-        /// selection. The default admits fp32 (the canonical compute type) and int64 (shape/index
-        /// tensors); ops that widen or restrict that set override this.
-        virtual bool supportsDType(DType dt) const {
-            return dt == DType::Float32 || dt == DType::Int64;
-        }
     };
 
     using CpuOpFactory = std::function<std::unique_ptr<CpuOp>()>;

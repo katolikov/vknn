@@ -74,9 +74,6 @@ namespace vknn {
                     off += seg;
                 }
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
     } // namespace
     VKNN_REGISTER_CPU_OP(OpType::Split, SplitCpu);

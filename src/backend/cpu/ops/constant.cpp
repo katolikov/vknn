@@ -46,11 +46,6 @@ namespace vknn {
                     cpu::allocOutI64(Y, {0});
                 }
             }
-            // The output dtype is fixed by the stored attribute's kind (int64 for Ints, fp32 for
-            // Floats), not chosen by the caller, so every requested dtype is trivially accepted.
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
 
     } // namespace

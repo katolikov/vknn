@@ -39,9 +39,6 @@ namespace vknn {
                 // under the new shape; the kernel is dtype-agnostic.
                 cpu::copyAs(X, Y, out);
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
 
     } // namespace

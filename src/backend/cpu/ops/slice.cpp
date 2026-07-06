@@ -102,9 +102,6 @@ namespace vknn {
                     }
                 }
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
     } // namespace
     VKNN_REGISTER_CPU_OP(OpType::Slice, SliceCpu);
