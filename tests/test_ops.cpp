@@ -291,6 +291,17 @@ TEST(Ops, UnarySigmoidHardSwish) {
     }
 }
 
+// --- Unary Round: nearest integer with ties to even (ONNX Round == GLSL roundEven), so the CPU
+// oracle and the GPU agree bitwise on exact halves. -0.5 rounds to negative zero. ---
+TEST(Ops, UnaryRoundHalfToEven) {
+    EXPECT_EQ(unaryFromOnnx("Round"), UnaryType::Round);
+    std::vector<float> vals {-2.5f, -1.5f, -0.5f, 0.5f, 1.5f, 2.5f, -1.4f, 1.4f, -2.6f, 2.6f};
+    auto               out = runOp(OpType::Unary, (int) UnaryType::Round, {}, {1, 10}, vals, {});
+    expectNear(out.data, {-2, -2, 0, 0, 2, 2, -1, 1, -3, 3}, 0.f);
+    ASSERT_EQ(out.data.size(), 10u);
+    EXPECT_TRUE(std::signbit(out.data[2])); // -0.5 -> -0.0, matching roundEven's zero sign
+}
+
 // --- Binary Mul with a broadcast scalar. ---
 TEST(Ops, BinaryMulBroadcast) {
     auto out = runOp(OpType::Binary, (int) BinaryType::Mul, {}, {1, 3}, {1, 2, 3}, {{{1}, {3.f}}});
@@ -680,6 +691,14 @@ TEST(Ops, FusedPwUnaryChannelMul) {
     std::vector<float>   params {0, 0, 0, 0};
     auto                 got = runFusedPw({1, 3, 1, 2}, {0, 0, 0, 0, 0, 0}, {{{1, 3, 1, 1}, {10, 20, 30}}}, steps, params);
     expectNear(got.data, {5, 5, 10, 10, 15, 15});
+}
+
+// --- FusedPointwise unary Round step: the pw-VM ties-to-even path matches the standalone op. ---
+TEST(Ops, FusedPwUnaryRound) {
+    std::vector<int64_t> steps {kPwKindUnary, (int) UnaryType::Round, kPwRefAcc, kPwRefNone, kPwRefNone, kPwRefNone, 0, 0};
+    std::vector<float>   params {0, 0};
+    auto                 got = runFusedPw({1, 4}, {-1.5f, -0.5f, 0.5f, 2.5f}, {}, steps, params);
+    expectNear(got.data, {-2, 0, 0, 2}, 0.f);
 }
 
 // --- FusedPointwise diamond (x * sigmoid(x), the SiLU shape): the entry value feeds two steps,

@@ -60,6 +60,10 @@ namespace vknn {
                     // log(1 + exp(x)), evaluated as max(x,0) + log1p(exp(-|x|)) so the exp never
                     // overflows for large positive x and stays accurate for large negative x.
                     return std::max(x, 0.f) + std::log1p(std::exp(-std::fabs(x)));
+                case UnaryType::Round:
+                    // Nearest integer, ties to even (the FE_TONEAREST default); agrees bitwise with
+                    // GLSL roundEven, including the sign of a zero result (-0.5 -> -0.0).
+                    return std::nearbyint(x);
                 case UnaryType::Invalid:
                     break;
             }

@@ -30,6 +30,7 @@ namespace vknn {
         Sin         = 17, ///< Sine (ONNX "Sin").
         Reciprocal  = 18, ///< Multiplicative inverse (ONNX "Reciprocal").
         Softplus    = 19, ///< Smooth ReLU log(1 + exp(x)) (ONNX "Softplus"); building block for GELU, RoPE, and similar transformer activations.
+        Round       = 20, ///< Nearest integer, ties to even (ONNX "Round"); matches GLSL roundEven bitwise, including the sign of a zero result.
     };
 
     /// Map an ONNX op-type name to its UnaryType.

@@ -107,6 +107,10 @@ namespace vknn {
                     // Numerically-stable log(1 + exp(x)): factoring out exp(max(x,0)) leaves the
                     // exponent argument always <= 0, so exp() never overflows for large positive x.
                     return std::max(x, 0.f) + std::log1p(std::exp(-std::fabs(x)));
+                case UnaryType::Round:
+                    // Nearest integer, ties to even (the FE_TONEAREST default); agrees bitwise with
+                    // GLSL roundEven, including the sign of a zero result (-0.5 -> -0.0).
+                    return std::nearbyint(x);
                 case UnaryType::Invalid:
                     break;
             }

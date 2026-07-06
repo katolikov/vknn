@@ -119,7 +119,7 @@ namespace vknn {
 
     UnaryType unaryFromOnnx(const std::string &s) {
         using U = UnaryType;
-        static const std::unordered_map<std::string, UnaryType> m = {{"Sigmoid", U::Sigmoid}, {"Tanh", U::Tanh}, {"HardSwish", U::HardSwish}, {"HardSigmoid", U::HardSigmoid}, {"LeakyRelu", U::LeakyRelu}, {"Elu", U::Elu}, {"Abs", U::Abs}, {"Neg", U::Neg}, {"Exp", U::Exp}, {"Log", U::Log}, {"Sqrt", U::Sqrt}, {"Floor", U::Floor}, {"Ceil", U::Ceil}, {"Erf", U::Erf}, {"Cos", U::Cos}, {"Sin", U::Sin}, {"Reciprocal", U::Reciprocal}, {"Softplus", U::Softplus}};
+        static const std::unordered_map<std::string, UnaryType> m = {{"Sigmoid", U::Sigmoid}, {"Tanh", U::Tanh}, {"HardSwish", U::HardSwish}, {"HardSigmoid", U::HardSigmoid}, {"LeakyRelu", U::LeakyRelu}, {"Elu", U::Elu}, {"Abs", U::Abs}, {"Neg", U::Neg}, {"Exp", U::Exp}, {"Log", U::Log}, {"Sqrt", U::Sqrt}, {"Floor", U::Floor}, {"Ceil", U::Ceil}, {"Erf", U::Erf}, {"Cos", U::Cos}, {"Sin", U::Sin}, {"Reciprocal", U::Reciprocal}, {"Softplus", U::Softplus}, {"Round", U::Round}};
         auto it = m.find(s);
         return it == m.end() ? U::Invalid : it->second;
     }
