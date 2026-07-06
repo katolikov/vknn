@@ -481,6 +481,70 @@ TEST(Ops, PadGeometryFollowsRuntimeShape) {
     expectNear({outs[0].f32(), outs[0].f32() + 8}, {0, 1, 2, 0, 0, 3, 4, 0}, 1e-6f);
 }
 
+// --- Resize with a caller-bound runtime shape that differs from the compiled desc: the output H/W
+// derive from the runtime input shape times the scales parameter, not the static desc. ---
+TEST(Ops, ResizeGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 1, 2, 2};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc sd;
+    sd.name          = "scales";
+    sd.shape         = {4};
+    sd.isInitializer = true;
+    TensorId   s     = g.addTensor(sd);
+    HostBuffer hb;
+    hb.resizeElems(4, DType::Float32);
+    hb.f32()[0] = 1.f;
+    hb.f32()[1] = 1.f;
+    hb.f32()[2] = 2.f;
+    hb.f32()[3] = 2.f;
+    g.initializers[s] = hb;
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type             = OpType::Resize;
+    n.name             = "rs";
+    n.inputs           = {x, kNoTensor, s}; // X, roi (absent), scales
+    n.outputs          = {y};
+    n.attr.map["mode"] = str("nearest");
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // static desc for y: [1,1,4,4]
+    ASSERT_TRUE(sess);
+
+    // Bind 9 values as [1,1,3,3]: the 2x-scaled runtime output is [1,1,6,6].
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {1, 1, 3, 3};
+    in.dtype = DType::Float32;
+    in.data.resize(9 * sizeof(float));
+    for (int i = 0; i < 9; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) (i + 1);
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {1, 1, 6, 6}));
+    std::vector<float> want;
+    for (int r: {0, 0, 1, 1, 2, 2})
+    {
+        for (int c: {0, 0, 1, 1, 2, 2})
+        {
+            want.push_back((float) (r * 3 + c + 1));
+        }
+    }
+    expectNear({outs[0].f32(), outs[0].f32() + 36}, want, 1e-6f);
+}
+
 // --- MatMul A[2,3] @ B[3,2] (B constant). ---
 TEST(Ops, MatMul) {
     auto out = runOp(OpType::MatMul, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{3, 2}, {1, 0, 0, 1, 1, 1}}});

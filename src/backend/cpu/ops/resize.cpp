@@ -1,7 +1,10 @@
 // Resize / Upsample (spatial), NCHW reference. nearest + linear(bilinear); coordinate transform
-// modes half_pixel / align_corners / asymmetric / pytorch_half_pixel. Output shape from
-// inferShapes. Only the H and W axes are resampled; N and C pass through unchanged, so each
-// (n, c) plane is resized independently against the source (x.h * x.w) plane.
+// modes half_pixel / align_corners / asymmetric / pytorch_half_pixel. The output H/W derive from
+// the RUNTIME input shape plus the `sizes` (input[3], preferred) or `scales` (input[2]) parameter,
+// mirroring the Resize arm of inferShapes; the pre-opset-10 Upsample form carries neither input
+// and falls back to the static graph desc. Only the H and W axes are resampled; N and C pass
+// through unchanged, so each (n, c) plane is resized independently against the source (x.h * x.w)
+// plane.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -62,11 +65,44 @@ namespace vknn {
     namespace {
         struct ResizeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X  = ctx.t(node.inputs[0]);
-                RtTensor       &Y  = ctx.t(node.outputs[0]);
-                Shape           os = ctx.graph->desc(node.outputs[0]).shape;
-                NCHW            x  = NCHW::from(X.shape);
-                int             OH = (int) os[2], OW = (int) os[3];
+                const RtTensor &X = ctx.t(node.inputs[0]);
+                RtTensor       &Y = ctx.t(node.outputs[0]);
+                NCHW            x = NCHW::from(X.shape);
+                // ONNX Resize inputs: X, roi, scales, sizes (roi unused here; scales/sizes optional
+                // but one of the two is present). `sizes` gives the output dims directly; `scales`
+                // multiplies the runtime input dims (truncating, as inferShapes does). Both are read
+                // for the H/W axes only — N and C pass through the kernel unchanged.
+                auto            param = [&](int idx) -> const RtTensor * {
+                    return idx < (int) pwCoreInputs(node) && node.inputs[idx] != kNoTensor ? &ctx.t(node.inputs[idx]) : nullptr;
+                };
+                int64_t         OH = 0, OW = 0;
+                if (X.shape.size() == 4)
+                {
+                    if (const RtTensor *sz = param(3); sz && sz->elems() == 4)
+                    {
+                        OH = sz->dtype == DType::Int64 ? sz->host.i64()[2] : (int64_t) sz->host.f32()[2];
+                        OW = sz->dtype == DType::Int64 ? sz->host.i64()[3] : (int64_t) sz->host.f32()[3];
+                    } else if (const RtTensor *sc = param(2); sc && sc->elems() == 4 && sc->dtype != DType::Int64)
+                    {
+                        OH = (int64_t) (x.h * sc->host.f32()[2]);
+                        OW = (int64_t) (x.w * sc->host.f32()[3]);
+                    }
+                }
+                Shape os;
+                if (OH > 0 && OW > 0)
+                {
+                    os = {x.n, x.c, OH, OW};
+                } else
+                {
+                    // Upsample form (no scales/sizes input): the graph desc carries the output shape.
+                    os = ctx.graph->desc(node.outputs[0]).shape;
+                    if (os.size() != 4)
+                    {
+                        throw Error(Status::Unsupported, "Resize '" + node.name + "': no sizes/scales input and a rank-" + std::to_string(os.size()) + " output desc (expects the spatial NCHW form)");
+                    }
+                    OH = os[2];
+                    OW = os[3];
+                }
                 int             mode      = vxResizeMode(node.attr.gets("mode", "nearest"));
                 int             coordMode = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
                 float          *y         = cpu::allocOut(Y, os);
