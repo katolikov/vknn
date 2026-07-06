@@ -90,31 +90,8 @@ int main(int argc, char **argv) {
 
     if (fp16)
     {
-        int64_t before = 0, after = 0, conv = 0, kept = 0;
-        for (auto &kv: g.initializers)
-        {
-            TensorDesc &d = g.tensors[kv.first];
-            before += (int64_t) kv.second.bytes.size();
-            if (d.dtype != DType::Float32)
-            { // int64 shape tensors, etc. — leave as-is
-                after += (int64_t) kv.second.bytes.size();
-                ++kept;
-                continue;
-            }
-            int64_t              n   = numElements(d.shape);
-            const float         *src = kv.second.f32();
-            std::vector<uint8_t> half((size_t) n * 2);
-            fp16_t              *h = reinterpret_cast<fp16_t *>(half.data());
-            for (int64_t i = 0; i < n; ++i)
-            {
-                h[i] = floatToHalf(src[i]);
-            }
-            kv.second.bytes = std::move(half);
-            d.dtype         = DType::Float16;
-            after += (int64_t) kv.second.bytes.size();
-            ++conv;
-        }
-        printf("[compile] fp16: converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", (long long) conv, (long long) kept, before / 1e6, after / 1e6);
+        Fp16ConvertStats st = convertInitializersFp16(g);
+        printf("[compile] fp16: converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
     }
 
     if (!saveGraphBin(g, out))

@@ -97,6 +97,16 @@ namespace vknn {
 
     // Run the standard pipeline used before backend planning.
     void runStandardPasses(Graph &g, const PassOptions &opt = {});
+
+    // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
+    struct Fp16ConvertStats {
+        int64_t converted = 0, kept = 0, bytesBefore = 0, bytesAfter = 0;
+    };
+    // Convert every Float32 initializer payload to Float16 in place (vknn_compile --fp16), stamping
+    // the tensor descs. Non-fp32 payloads (int64 shape tensors, ...) stay untouched. Runs after the
+    // standard passes, immediately before saveGraphBin.
+    Fp16ConvertStats convertInitializersFp16(Graph &g);
+
     // Read an int64 list param from a node attribute or an initializer input (Slice/Pad/Reduce style).
     std::vector<int64_t> readI64Param(const Graph &g, const Node &nd, const char *attrName, int inputIdx);
     // Insert ConvertLayout nodes + mark tensors gpuFlat so the generic head ops run on the Vulkan
