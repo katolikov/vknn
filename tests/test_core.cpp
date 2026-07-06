@@ -5,6 +5,7 @@
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
 #include "vknn/model.h"
+#include "vknn/op_type.h"
 #include "vknn/session.h"
 #include "vknn/tensor_format.h"
 #include <cmath>
@@ -53,6 +54,31 @@ TEST(Config, ParseExplicit) {
     EXPECT_EQ(c.cacheDir, "/tmp/x");
     ASSERT_EQ(c.fallback.size(), 2u);
     EXPECT_EQ(c.fallback[0], BackendKind::Vulkan);
+}
+
+TEST(Config, ListContainsWholeNameMatch) {
+    // disableVkOps entries match whole op-type names: "Conv" leaves ConvTranspose/ConvGemm/
+    // ConvertLayout enabled even though Conv is a prefix of all three.
+    EXPECT_TRUE(Config::listContains("Conv", opTypeName(OpType::Conv)));
+    EXPECT_FALSE(Config::listContains("Conv", opTypeName(OpType::ConvTranspose)));
+    EXPECT_FALSE(Config::listContains("Conv", opTypeName(OpType::ConvGemm)));
+    EXPECT_FALSE(Config::listContains("Conv", opTypeName(OpType::ConvertLayout)));
+
+    // Multi-entry list disables exactly the named ops; entries are trimmed of whitespace.
+    const std::string list = " Conv , MatMul ";
+    EXPECT_TRUE(Config::listContains(list, opTypeName(OpType::Conv)));
+    EXPECT_TRUE(Config::listContains(list, opTypeName(OpType::MatMul)));
+    EXPECT_FALSE(Config::listContains(list, opTypeName(OpType::ConvTranspose)));
+    EXPECT_FALSE(Config::listContains(list, opTypeName(OpType::Gemm)));
+    EXPECT_FALSE(Config::listContains(list, opTypeName(OpType::Add)));
+
+    // Reverse containment: an entry never disables an op whose name is its substring.
+    EXPECT_TRUE(Config::listContains("PRelu", opTypeName(OpType::PRelu)));
+    EXPECT_FALSE(Config::listContains("PRelu", opTypeName(OpType::Relu)));
+
+    // Empty list / empty entries match nothing.
+    EXPECT_FALSE(Config::listContains("", "Conv"));
+    EXPECT_FALSE(Config::listContains(",,", "Conv"));
 }
 
 TEST(Layout, PackMath) {

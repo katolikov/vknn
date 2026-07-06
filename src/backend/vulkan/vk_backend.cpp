@@ -107,8 +107,9 @@ namespace vknn {
                 return false;
             }
             // Debug/fallback hook: Config::disableVkOps="Add,Conv" forces those ops to fall back
-            // to the CPU path.
-            if (!disabledOps_.empty() && disabledOps_.find(opTypeName(t)) != std::string::npos)
+            // to the CPU path. Entries match whole op-type names ("Conv" leaves ConvTranspose,
+            // ConvGemm and ConvertLayout on the GPU).
+            if (!disabledOps_.empty() && Config::listContains(disabledOps_, opTypeName(t)))
             {
                 return false;
             }

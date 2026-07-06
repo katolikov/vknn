@@ -47,7 +47,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `gpuIslandFold` | bool | `true` / `false` | `true` | Fold tiny GPU op-islands between CPU segments onto the CPU (fewer boundary round-trips). On by default (fastest). `false` (CLI `--no-fold-islands`) keeps every supported op on the GPU — verification runs use it so the fallback count is meaningful. Backed by `Hint::GpuIslandFold`. |
 | `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
-| `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). |
+| `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). Entries match whole op-type names: `"Conv"` does not disable `ConvTranspose`. |
 | `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
 | `fp32Tensors` | string (C++ only, not serialized to JSON) | e.g. `"/enc/MatMul_,-camera_head"` | `""` | Advanced override of the selective-fp32 set: tensor-name substrings (leading `-` excludes) kept in fp32 storage under fp16 compute. Empty + `precision:"normal"` uses the built-in geometry-tail preset; a non-empty value replaces it (and also applies under `precision:"low"`). |
 

@@ -1,6 +1,7 @@
 #include "vknn/config.h"
 #include "json.h"
 #include "vknn/logging.h"
+#include <cctype>
 #include <fstream>
 #include <sstream>
 
@@ -285,6 +286,39 @@ namespace vknn {
         os << "  \"directConv3x3\": " << hint(Hint::DirectConv3x3, 0) << "\n";
         os << "}\n";
         return os.str();
+    }
+
+    bool Config::listContains(const std::string &list, std::string_view name) {
+        if (name.empty())
+        {
+            return false;
+        }
+        size_t pos = 0;
+        while (pos <= list.size())
+        {
+            size_t comma = list.find(',', pos);
+            size_t end   = comma == std::string::npos ? list.size() : comma;
+            size_t b     = pos;
+            size_t e     = end;
+            while (b < e && std::isspace((unsigned char) list[b]))
+            {
+                ++b;
+            }
+            while (e > b && std::isspace((unsigned char) list[e - 1]))
+            {
+                --e;
+            }
+            if (e - b == name.size() && list.compare(b, e - b, name.data(), name.size()) == 0)
+            {
+                return true;
+            }
+            if (comma == std::string::npos)
+            {
+                break;
+            }
+            pos = comma + 1;
+        }
+        return false;
     }
 
     void Config::applyLogLevel() const {

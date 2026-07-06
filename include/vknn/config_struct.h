@@ -7,6 +7,7 @@
 #include "vknn/priority.h"
 #include "vknn/tuning.h"
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace vknn {
@@ -122,6 +123,11 @@ namespace vknn {
         static Config fromJsonString(const std::string &json);
         std::string   toJson() const;
         void          applyLogLevel() const;
+
+        /// True when comma-separated @p list contains @p name as a whole entry. Entries are trimmed
+        /// of surrounding whitespace and compared exactly, so "Conv" matches only Conv — never
+        /// ConvTranspose/ConvGemm/ConvertLayout. Matcher for op-name lists such as disableVkOps.
+        static bool listContains(const std::string &list, std::string_view name);
     };
 
 } // namespace vknn
