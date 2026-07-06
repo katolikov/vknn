@@ -350,10 +350,27 @@ namespace vknn {
         // padding lanes are dropped on unpack. The flat path skips all of this: a gpuFlat tensor stores
         // plain NCHW row-major, matching host layout byte-for-byte (fp16 conversion aside).
         static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false) {
+            // An int64 boundary input (a shape/index tensor produced by a CPU op, e.g. the Cast-from-int64
+            // shape path) has int64 host bytes. The device carries it as compute-precision float, so decode
+            // the int64 lanes into a scratch fp32 vector once and pack from that; the magnitudes are small
+            // (shape/index values), so the fp32 round-trip is exact. A fp32 host tensor packs directly.
+            std::vector<float> i64Scratch;
+            const float       *hostSrc = rt.host.f32();
+            if (rt.dtype == DType::Int64)
+            {
+                int64_t        n  = numElements(rt.shape);
+                const int64_t *xi = rt.host.i64();
+                i64Scratch.resize((size_t) std::max<int64_t>(n, 0));
+                for (int64_t i = 0; i < n; ++i)
+                {
+                    i64Scratch[(size_t) i] = (float) xi[i];
+                }
+                hostSrc = i64Scratch.data();
+            }
             if (flat)
             { // host NCHW row-major == the flat device buffer; straight copy (+ fp16 convert)
                 int64_t      n   = numElements(rt.shape);
-                const float *src = rt.host.f32();
+                const float *src = hostSrc;
                 if (fp16)
                 {
                     fp16_t *dst = reinterpret_cast<fp16_t *>(buf->host());
@@ -369,7 +386,7 @@ namespace vknn {
             }
             NCHW         x   = NCHW::from(rt.shape);
             int64_t      Cb  = cBlocks(x.c);
-            const float *src = rt.host.f32();
+            const float *src = hostSrc;
             if (fp16)
             {
                 fp16_t *dst = reinterpret_cast<fp16_t *>(buf->host());

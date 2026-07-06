@@ -278,13 +278,22 @@ namespace vknn {
         if (nd.type == OpType::Cast)
         {
             // float->float is a no-op copy; float->int truncates+clamps on the flat path (cast.comp),
-            // carrying the logical integer as compute-precision storage. A cast whose INPUT is an int64
-            // (CPU-only) shape/index tensor stays on the CPU op — the GPU has no int64 buffer to read.
+            // carrying the logical integer as compute-precision storage. An int64 INPUT (a shape/index
+            // tensor) is decoded to compute-precision float when it is packed to the device (packToBuffer),
+            // so cast.comp reads it like any other operand. This covers int64 -> float/int32/int64 (the
+            // shape-arithmetic targets), whose magnitudes are small enough to be exact in the compute float.
+            // A cast to a narrow integer target (int8/uint8/int16/bool) from int64 keeps the CPU op, where
+            // the wider integer range and saturation are exact.
             if (g.desc(nd.inputs[0]).dtype != DType::Int64)
             {
                 return true;
             }
-            return refuse(whyNot, "Cast: int64 input");
+            int64_t to = nd.attr.geti("to", 1); // ONNX TensorProto dtype
+            if (to == 1 || to == 10 || to == 11 || to == 6 || to == 7)
+            {
+                return true; // FLOAT/FLOAT16/DOUBLE, INT32, INT64
+            }
+            return refuse(whyNot, "Cast: int64 input to a narrow integer target");
         }
         if (nd.type == OpType::Gather)
         {

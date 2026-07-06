@@ -74,10 +74,13 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     gsattr.map["mode"] = strAttr("cubic");
     addNode(g, OpType::GridSample, "gridsample_cubic", {c1, grid}, {gs}, gsattr);
 
-    // cast whose input is an int64 shape/index tensor: CPU (no int64 GPU buffers)
-    TensorId idx  = tensor(g, "idx", {4}, DType::Int64);
-    TensorId cast = tensor(g, "cast_out", {4});
-    addNode(g, OpType::Cast, "cast_i64", {idx}, {cast});
+    // cast whose input is an int64 shape/index tensor to float: GPU (the int64 lanes decode to
+    // compute-precision float at the pack boundary; `to`=1 is FLOAT).
+    TensorId   idx = tensor(g, "idx", {4}, DType::Int64);
+    TensorId   cast = tensor(g, "cast_out", {4});
+    Attributes castattr;
+    castattr.map["to"] = intAttr(1);
+    addNode(g, OpType::Cast, "cast_i64", {idx}, {cast}, castattr);
 
     // TopK: CPU-only kernel
     TensorId tv = tensor(g, "topk_vals", {1, 8, 8, 4});
@@ -108,8 +111,8 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     EXPECT_TRUE(rows[2].reason.empty());
 
     EXPECT_EQ(rows[3].node, "cast_i64");
-    EXPECT_EQ(rows[3].backend, "cpu");
-    EXPECT_EQ(rows[3].reason, "Cast: int64 input");
+    EXPECT_EQ(rows[3].backend, "vulkan");
+    EXPECT_TRUE(rows[3].reason.empty());
 
     EXPECT_EQ(rows[4].node, "topk");
     EXPECT_EQ(rows[4].backend, "cpu");
@@ -122,6 +125,34 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     EXPECT_EQ(rows[6].node, "dropout_kept");
     EXPECT_EQ(rows[6].backend, "none");
     EXPECT_EQ(rows[6].reason, "no kernel in any backend");
+}
+
+TEST(SupportReport, CastFromInt64TargetGate) {
+    // An int64 input Cast runs on the GPU for the shape-arithmetic targets (FLOAT/FLOAT16/DOUBLE,
+    // INT32, INT64): the int64 lanes decode to compute-precision float at the pack boundary, so
+    // cast.comp reads them like any float operand. A narrow integer target (INT8 here) keeps the CPU
+    // op, where the wider int range and saturation are exact. `to` is the ONNX TensorProto dtype.
+    auto castNode = [&](Graph &g, const char *name, int64_t to, DType inDt) {
+        TensorId   in  = tensor(g, std::string(name) + "_in", {4}, inDt);
+        TensorId   out = tensor(g, std::string(name) + "_out", {4});
+        Attributes a;
+        a.map["to"] = intAttr(to);
+        addNode(g, OpType::Cast, name, {in}, {out}, a);
+    };
+    Graph g;
+    castNode(g, "cast_i64_to_float", 1, DType::Int64); // FLOAT  -> GPU
+    castNode(g, "cast_i64_to_int32", 6, DType::Int64); // INT32  -> GPU
+    castNode(g, "cast_i64_to_int64", 7, DType::Int64); // INT64  -> GPU
+    castNode(g, "cast_i64_to_int8", 3, DType::Int64);  // INT8   -> CPU (narrow target)
+
+    std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), 4u);
+    EXPECT_EQ(rows[0].backend, "vulkan");
+    EXPECT_TRUE(rows[0].reason.empty());
+    EXPECT_EQ(rows[1].backend, "vulkan");
+    EXPECT_EQ(rows[2].backend, "vulkan");
+    EXPECT_EQ(rows[3].backend, "cpu");
+    EXPECT_EQ(rows[3].reason, "Cast: int64 input to a narrow integer target");
 }
 
 TEST(SupportReport, QuantizeDequantizeRunOnGpuWithConstScale) {

@@ -10,7 +10,7 @@ namespace vknn { namespace vk {
         os << deviceName << " | " << driverName << " (" << driverInfo << ")"
            << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B"
            << " tsPeriod=" << timestampPeriod << "ns\n"
-           << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
+           << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " int64=" << shaderInt64 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
            << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
            << "  globalPriority=" << globalPriority;
         return os.str();
@@ -139,6 +139,7 @@ namespace vknn { namespace vk {
 
         caps_.shaderFloat16     = f16i8.shaderFloat16;
         caps_.shaderInt8        = f16i8.shaderInt8;
+        caps_.shaderInt64       = feats2.features.shaderInt64;
         caps_.storage16bit      = s16.storageBuffer16BitAccess;
         caps_.storage8bit       = s8.storageBuffer8BitAccess;
         caps_.int8DotProduct    = dot.shaderIntegerDotProduct;

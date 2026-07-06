@@ -38,6 +38,10 @@ namespace vknn { namespace vk {
         // Feature flags we exploit
         bool shaderFloat16        = false;
         bool shaderInt8           = false;
+        // Core VkPhysicalDeviceFeatures::shaderInt64 — 64-bit ints in shader code. The Cast-from-int64
+        // path does not require it (int64 shape/index tensors decode to compute-precision float at the
+        // pack boundary, exact for their small magnitudes), so this is reported for diagnostics only.
+        bool shaderInt64          = false;
         bool storage16bit         = false;
         bool storage8bit          = false;
         bool int8DotProduct       = false;
