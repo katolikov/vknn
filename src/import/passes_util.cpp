@@ -41,14 +41,13 @@ namespace vknn {
                     int64_t n = (int64_t) hb.bytes.size() / 8;
                     return std::vector<int64_t>(hb.i64(), hb.i64() + n);
                 }
-                // Fallback: a float-typed initializer, decoded over the 4-byte float stride and
-                // truncated element-wise to int64.
-                int64_t              n = (int64_t) hb.bytes.size() / 4;
-                std::vector<int64_t> out;
-                const float         *f = hb.f32();
-                for (int64_t i = 0; i < n; ++i)
+                // Fallback: a float-typed initializer, decoded to fp32 through initFloats (which
+                // honors an fp16 payload from an fp16 .vxm) and truncated element-wise to int64.
+                std::vector<float>   f = initFloats(g, nd.inputs[inputIdx]);
+                std::vector<int64_t> out(f.size());
+                for (size_t i = 0; i < f.size(); ++i)
                 {
-                    out.push_back((int64_t) f[i]);
+                    out[i] = (int64_t) f[i];
                 }
                 return out;
             }

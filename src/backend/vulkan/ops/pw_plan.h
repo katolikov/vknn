@@ -174,6 +174,13 @@ namespace vknn {
         }
         if (!hold)
         {
+            // A pw operand always carries at least one element; an empty payload means the .vxm is
+            // broken (a compiler that dropped rank-0 scalars). Refuse it — the splat/pack below
+            // would otherwise upload silent zeros or an undefined buffer.
+            if (g.initializers.at(t).bytes.empty())
+            {
+                throw Error(Status::RuntimeError, "pw operand initializer tensor " + std::to_string(t) + " has an empty payload; recompile the .vxm");
+            }
             if (flatWorld)
             {
                 hold = uploadInit(env, t, g.desc(t).shape);

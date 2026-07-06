@@ -210,6 +210,14 @@ namespace vknn {
                 if (r.ref <= kPwRefOp0)
                 {
                     const RtTensor &O = ctx.t(node.inputs[kPwRefOp0 - r.ref]);
+                    // The pool holds every pw operand as valid fp32 (the session decodes fp16
+                    // initializers at load; activations are fp32 by construction). Anything else
+                    // here is a wrong-payload bug upstream — fail loudly rather than read
+                    // reinterpreted or missing bytes as values.
+                    if (!O.hostValid || O.dtype != DType::Float32 || O.host.bytes.size() < 4)
+                    {
+                        throw Error(Status::RuntimeError, "FusedPointwise operand tensor " + std::to_string(node.inputs[kPwRefOp0 - r.ref]) + " (" + node.name + ") has no fp32 host payload");
+                    }
                     r.p               = O.host.f32();
                     r.ob              = broadcastStrides(O.shape);
                 }

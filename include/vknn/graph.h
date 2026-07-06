@@ -2,6 +2,7 @@
 #pragma once
 #include "vknn/op.h"
 #include "vknn/tensor.h"
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
@@ -58,6 +59,42 @@ namespace vknn {
         /// A readable, multi-line listing of the tensors and nodes, for debugging/logging.
         std::string dump() const;
     };
+
+    /// Decode initializer `id`'s payload to fp32, honoring the stored dtype: a Float16 payload (an
+    /// fp16 .vxm from vknn_compile) converts per element, a Float32 payload copies through. This is
+    /// the one decode path for host-side payload reads — the session's CPU pool load and the Vulkan
+    /// ops' weight prepacking both go through it, so a reader never reinterprets fp16 bytes as fp32.
+    ///
+    /// The element count comes from the tensor shape; a rank-0 scalar (shape [], numElements() 0)
+    /// recovers its single element from the payload size instead, so the value is read, not dropped.
+    /// @param g  Graph owning the initializer.
+    /// @param id Initializer tensor id. Precondition: `g.isInitializer(id)`.
+    /// @returns The payload as fp32 elements.
+    inline std::vector<float> initFloats(const Graph &g, TensorId id) {
+        const HostBuffer &hb = g.initializers.at(id);
+        int64_t           n  = numElements(g.desc(id).shape);
+        if (n <= 0)
+        {
+            n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4));
+        }
+        std::vector<float> out((size_t) std::max<int64_t>(n, 0));
+        if (g.desc(id).dtype == DType::Float16)
+        {
+            const fp16_t *h = reinterpret_cast<const fp16_t *>(hb.bytes.data());
+            for (int64_t i = 0; i < n; ++i)
+            {
+                out[i] = halfToFloat(h[i]);
+            }
+        } else
+        {
+            const float *f = hb.f32();
+            for (int64_t i = 0; i < n; ++i)
+            {
+                out[i] = f[i];
+            }
+        }
+        return out;
+    }
 
     /// Import an ONNX model file into the backend-agnostic IR (canonical NCHW).
     Graph importOnnx(const std::string &path);
