@@ -105,7 +105,7 @@ namespace vknn {
                     }
                     if (tp.dims.empty())
                     {
-                        n = std::max<int64_t>(1, (int64_t) std::max(tp.floatData.size(), tp.int64Data.size()));
+                        n = std::max<int64_t>(1, (int64_t) std::max({tp.floatData.size(), tp.int32Data.size(), tp.int64Data.size()}));
                     }
                     if (!tp.int64Data.empty() || isType(tp.dataType, OnnxType::Int64))
                     {
@@ -124,39 +124,12 @@ namespace vknn {
                         }
                     } else
                     {
-                        if (!tp.floatData.empty())
-                        {
-                            a.floats = tp.floatData;
-                        } else if (!tp.raw.empty())
-                        {
-                            // Decode by the tensor's dtype: FLOAT16 raw is 2 bytes/elem (reading it as fp32 would
-                            // over-read 2x and fault); FLOAT raw is 4 bytes/elem. Bounds-checked either way.
-                            if (isType(tp.dataType, OnnxType::Float16))
-                            {
-                                const uint16_t *s     = (const uint16_t *) tp.raw.data();
-                                int64_t         avail = (int64_t) (tp.raw.size() / 2);
-                                for (int64_t i = 0; i < n && i < avail; ++i)
-                                {
-                                    a.floats.push_back(halfToFloat(s[i]));
-                                }
-                            } else if (isType(tp.dataType, OnnxType::Double))
-                            {
-                                const double *s     = (const double *) tp.raw.data();
-                                int64_t       avail = (int64_t) (tp.raw.size() / 8);
-                                for (int64_t i = 0; i < n && i < avail; ++i)
-                                {
-                                    a.floats.push_back((float) s[i]);
-                                }
-                            } else
-                            {
-                                const float *s     = (const float *) tp.raw.data();
-                                int64_t      avail = (int64_t) (tp.raw.size() / 4);
-                                for (int64_t i = 0; i < n && i < avail; ++i)
-                                {
-                                    a.floats.push_back(s[i]);
-                                }
-                            }
-                        }
+                        // Every non-int64 payload decodes through the same materializer as graph
+                        // initializers (fp32 widening by dtype from raw_data or the typed
+                        // float_data / int32_data arrays; truncated payloads leave a zero tail).
+                        HostBuffer hb;
+                        TensorProtoParser::fillHostFloat(tp, hb, n);
+                        a.floats.assign(hb.f32(), hb.f32() + n);
                     }
                 }
                 node.attr.map[name] = a;

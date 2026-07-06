@@ -1,5 +1,6 @@
 // Reads a TensorProto off the wire and materializes it into a HostBuffer (raw_data / typed data /
-// external data), decoding FLOAT / FLOAT16 / DOUBLE / INT64 to the fp32 or int64 compute storage.
+// external data), decoding FLOAT / FLOAT16 / DOUBLE / INT64 / INT32 / INT8 / UINT8 / BOOL to the
+// fp32 or int64 compute storage.
 #pragma once
 #include "onnx_reader.h"
 #include "onnx_types.h"
@@ -63,6 +64,21 @@ namespace vknn {
                                 float    fv;
                                 std::memcpy(&fv, &b, 4);
                                 t.floatData.push_back(fv);
+                            }
+                            break;
+                        case 5: // int32_data (packed or single): typed payload for INT32 and every
+                                // narrower type. A negative int32 arrives as a 64-bit sign-extended
+                                // varint; truncating the decoded u64 to int32 recovers its value.
+                            if (w == 2)
+                            {
+                                Reader s = r.sub();
+                                while (!s.eof())
+                                {
+                                    t.int32Data.push_back((int32_t) s.varint());
+                                }
+                            } else
+                            {
+                                t.int32Data.push_back((int32_t) r.varint());
                             }
                             break;
                         case 7: // int64_data
@@ -157,11 +173,11 @@ namespace vknn {
             }
 
             // Materialize a TensorProto into a float32 HostBuffer, decoding whichever payload the proto
-            // carries: raw_data (FLOAT copied verbatim; FLOAT16 / DOUBLE / INT64 converted per element)
-            // or the typed float_data / int64_data arrays. `elems` is the element count implied by the
-            // tensor's shape; every copy is clamped to what the payload actually holds (`min` / `i <
-            // avail`), so a truncated or shape-mismatched proto leaves the tail zero rather than reading
-            // out of bounds.
+            // carries: raw_data (FLOAT copied verbatim; FLOAT16 / DOUBLE / INT64 / INT32 / INT8 / UINT8
+            // / BOOL converted per element) or the typed float_data / int64_data / int32_data arrays.
+            // `elems` is the element count implied by the tensor's shape; every copy is clamped to what
+            // the payload actually holds (`min` / `i < avail`), so a truncated or shape-mismatched proto
+            // leaves the tail zero rather than reading out of bounds.
             static void fillHostFloat(const TensorProto &t, HostBuffer &hb, int64_t elems) {
                 hb.resizeElems(elems, DType::Float32);
                 float *dst = hb.f32();
@@ -194,6 +210,38 @@ namespace vknn {
                         {
                             dst[i] = (float) s[i];
                         }
+                    } else if (isType(t.dataType, OnnxType::Int32))
+                    { // widen to fp32 (4 bytes/elem)
+                        const int32_t *s     = reinterpret_cast<const int32_t *>(t.raw.data());
+                        int64_t        avail = (int64_t) (t.raw.size() / 4);
+                        for (int64_t i = 0; i < elems && i < avail; ++i)
+                        {
+                            dst[i] = (float) s[i];
+                        }
+                    } else if (isType(t.dataType, OnnxType::Int8))
+                    { // widen to fp32 (1 byte/elem, signed)
+                        const int8_t *s     = reinterpret_cast<const int8_t *>(t.raw.data());
+                        int64_t       avail = (int64_t) t.raw.size();
+                        for (int64_t i = 0; i < elems && i < avail; ++i)
+                        {
+                            dst[i] = (float) s[i];
+                        }
+                    } else if (isType(t.dataType, OnnxType::Uint8))
+                    { // widen to fp32 (1 byte/elem, unsigned)
+                        const uint8_t *s     = t.raw.data();
+                        int64_t        avail = (int64_t) t.raw.size();
+                        for (int64_t i = 0; i < elems && i < avail; ++i)
+                        {
+                            dst[i] = (float) s[i];
+                        }
+                    } else if (isType(t.dataType, OnnxType::Bool))
+                    { // one byte per element, normalized to exactly 0/1
+                        const uint8_t *s     = t.raw.data();
+                        int64_t        avail = (int64_t) t.raw.size();
+                        for (int64_t i = 0; i < elems && i < avail; ++i)
+                        {
+                            dst[i] = s[i] ? 1.0f : 0.0f;
+                        }
                     }
                 } else if (!t.floatData.empty())
                 {
@@ -206,6 +254,18 @@ namespace vknn {
                     for (int64_t i = 0; i < elems && i < (int64_t) t.int64Data.size(); ++i)
                     {
                         dst[i] = (float) t.int64Data[i];
+                    }
+                } else if (!t.int32Data.empty())
+                {
+                    // int32_data carries INT32 and every narrower type: FLOAT16 rides as raw bit
+                    // patterns (decoded through halfToFloat), BOOL normalizes to exactly 0/1, and
+                    // the integer types widen numerically.
+                    const bool f16 = isType(t.dataType, OnnxType::Float16);
+                    const bool bl  = isType(t.dataType, OnnxType::Bool);
+                    for (int64_t i = 0; i < elems && i < (int64_t) t.int32Data.size(); ++i)
+                    {
+                        int32_t v = t.int32Data[i];
+                        dst[i]    = f16 ? halfToFloat((uint16_t) v) : bl ? (v ? 1.0f : 0.0f) : (float) v;
                     }
                 }
             }
