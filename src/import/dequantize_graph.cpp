@@ -5,12 +5,13 @@ namespace vknn {
     namespace {
 
         // Initializer payload widened to double. Integer payloads (int8/uint8/int32/bool) arrive
-        // from the importer already widened into fp32 host storage (fillHostFloat), so Float32 and
-        // Float16 cover every tensor a quantized graph feeds this pass.
-        // @returns False for any other stored dtype; the caller leaves the node in place.
+        // from the importer already widened into fp32 host storage (fillHostFloat), which initFloats
+        // decodes correctly for any non-fp16 dtype; a Float16 payload is the fp16 .vxm form. The
+        // stored dtype is thus a label, not a storage width -- Int8/UInt8 flag a quantized tensor
+        // (see quantRange) while still reading through the fp32 path.
+        // @returns False only for Int64 payloads (8-byte storage initFloats cannot widen).
         bool initAsDouble(const Graph &g, TensorId id, std::vector<double> &out) {
-            DType dt = g.desc(id).dtype;
-            if (dt != DType::Float32 && dt != DType::Float16)
+            if (g.desc(id).dtype == DType::Int64)
             {
                 return false;
             }
@@ -210,11 +211,103 @@ namespace vknn {
             return (int) remove.size();
         }
 
+        // Integer range a QuantizeLinear saturates into, taken from the zero_point tensor's stored
+        // dtype (Int8 -> [-128,127], UInt8 -> [0,255]). ONNX defaults an absent zero_point to uint8,
+        // so kNoTensor takes the uint8 range. Any other dtype (a scale/zp built as plain fp32, an
+        // int32-biased DequantizeLinear) is not an 8-bit quantize grid and yields no range.
+        // @returns True when `zp` names an 8-bit quantize type; then qmin/qmax hold its range.
+        bool quantRange(const Graph &g, TensorId zp, double &qmin, double &qmax) {
+            DType dt = zp == kNoTensor ? DType::UInt8 : g.desc(zp).dtype;
+            if (dt == DType::Int8)
+            {
+                qmin = -128.0;
+                qmax = 127.0;
+                return true;
+            }
+            if (dt == DType::UInt8)
+            {
+                qmin = 0.0;
+                qmax = 255.0;
+                return true;
+            }
+            return false;
+        }
+
+        // Registers a scalar Float32 initializer holding `v` and returns its id. Used for the Clip
+        // bounds inserted in place of a collapsed quantize round-trip.
+        TensorId addScalarFloatInit(Graph &g, const std::string &name, float v) {
+            TensorDesc d;
+            d.name          = name;
+            d.shape         = {}; // rank-0 scalar; initFloats recovers the single element from the payload size
+            d.isInitializer = true;
+            TensorId   id   = g.addTensor(std::move(d));
+            HostBuffer hb;
+            hb.resizeElems(1, DType::Float32);
+            hb.f32()[0]     = v;
+            g.initializers[id] = std::move(hb);
+            return id;
+        }
+
+        // Builds the saturation clamp a collapsed quantize hop leaves behind: a Clip(x, lo, hi) with
+        // constant per-tensor bounds lo=(qmin-zp)*scale, hi=(qmax-zp)*scale, where qmin/qmax come from
+        // the quantize dtype (quantRange). Dropping the round-trip drops only the 8-bit rounding; the
+        // saturation is real and must survive, because ORT's QDQ quantizer folds a preceding ReLU into
+        // the range (zp set so lo becomes 0) -- collapsing to raw float without the clamp silently
+        // deletes that ReLU. Clip with constant bounds is pointwise-fusable and GPU-eligible; when the
+        // bounds do not bind it is a harmless identity, so it is inserted for every activation hop.
+        // The new node is appended to `added` (not `g.nodes`, which the caller iterates).
+        // @returns The Clip output tensor id, or kNoTensor when the hop cannot take a per-tensor clamp
+        //          (per-axis scale, or a non-8-bit dtype); the caller then leaves the sandwich intact.
+        TensorId insertQuantClamp(Graph &g, TensorId scale, TensorId zp, TensorId x, std::vector<Node> &added) {
+            double qmin, qmax;
+            if (!quantRange(g, zp, qmin, qmax))
+            {
+                return kNoTensor;
+            }
+            std::vector<double> sv, zv;
+            if (!initAsDouble(g, scale, sv) || sv.empty())
+            {
+                return kNoTensor;
+            }
+            if (sv.size() > 1)
+            {
+                return kNoTensor; // per-axis activation quant: a scalar Clip cannot carry per-channel bounds
+            }
+            double zpv = 0.0;
+            if (zp != kNoTensor && (!initAsDouble(g, zp, zv) || zv.empty()))
+            {
+                return kNoTensor;
+            }
+            if (!zv.empty())
+            {
+                zpv = zv[0];
+            }
+            float    lo = (float) ((qmin - zpv) * sv[0]);
+            float    hi = (float) ((qmax - zpv) * sv[0]);
+            // Name off the clamped tensor id (not just its name, which may be empty on an anonymous
+            // intermediate) so clamps on distinct hops never collide.
+            std::string base = g.desc(x).name + "_qclamp" + std::to_string((long long) x);
+            TensorId loId = addScalarFloatInit(g, base + "_lo", lo);
+            TensorId hiId = addScalarFloatInit(g, base + "_hi", hi);
+            TensorDesc yd;
+            yd.name       = base;
+            TensorId y    = g.addTensor(std::move(yd));
+            Node clip;
+            clip.type    = OpType::Clip;
+            clip.name    = base;
+            clip.inputs  = {x, loId, hiId};
+            clip.outputs = {y};
+            added.push_back(std::move(clip));
+            return y;
+        }
+
         // Removes each QuantizeLinear->DequantizeLinear activation sandwich whose scale/zero_point
         // match (same ids or equal payloads; per-axis pairs must also agree on the axis attribute):
-        // the DequantizeLinear's consumers rewire to the QuantizeLinear's float input and both
-        // nodes drop. This is the fake-quant removal inherent to dequantized execution -- the
-        // rounding the sandwich would inject onto the 8-bit grid is deliberately not reproduced. A
+        // the DequantizeLinear's consumers rewire past both nodes to a Clip on the QuantizeLinear's
+        // float input, and both nodes drop. Dropping the round-trip drops only the 8-bit rounding; the
+        // inserted Clip preserves the quantize dtype's saturation range (see insertQuantClamp -- the
+        // range is where ORT hides a fused ReLU). A hop that cannot take a per-tensor clamp (per-axis
+        // scale, or a non-8-bit quantize dtype) is left intact for a later lowering stage. A
         // QuantizeLinear still consumed after the rewiring (another non-matching consumer, a graph
         // output) survives.
         // @returns The number of sandwiches collapsed.
@@ -232,6 +325,8 @@ namespace vknn {
             }
             std::set<size_t> remove;
             int              collapsed = 0;
+            std::vector<Node> added;               // Clip nodes to append after the iteration
+            std::map<size_t, TensorId> clampOf;    // Q producer index -> its shared clamp output (fan-out reuse)
             for (size_t i = 0; i < g.nodes.size(); ++i)
             {
                 const Node &dq = g.nodes[i];
@@ -264,9 +359,32 @@ namespace vknn {
                 {
                     continue;
                 }
-                rewireTensor(g, dq.outputs[0], q.inputs[0]);
+                // Rewire past the sandwich to a saturation clamp on the Q float input, not the raw
+                // input: dropping the round-trip drops the rounding, never the clamp (see
+                // insertQuantClamp). One Q feeding several DQs shares a single clamp. A hop that
+                // cannot take a per-tensor clamp is left standing for a later lowering stage.
+                TensorId clamped;
+                auto     ci = clampOf.find(it->second);
+                if (ci != clampOf.end())
+                {
+                    clamped = ci->second;
+                } else
+                {
+                    clamped = insertQuantClamp(g, q.inputs[1], qz, q.inputs[0], added);
+                    if (clamped == kNoTensor)
+                    {
+                        VKNN_WARN << "QuantizeLinear " << q.name << " sandwich kept: per-axis or non-8-bit activation quant has no per-tensor clamp";
+                        continue;
+                    }
+                    clampOf[it->second] = clamped;
+                }
+                rewireTensor(g, dq.outputs[0], clamped);
                 remove.insert(i);
                 ++collapsed;
+            }
+            for (Node &c: added)
+            {
+                g.nodes.push_back(std::move(c));
             }
             // Sweep the QuantizeLinears the rewiring left dead (their q/dq consumers are gone).
             for (size_t i = 0; i < g.nodes.size(); ++i)
@@ -287,6 +405,13 @@ namespace vknn {
                 }
             }
             compact(g, remove);
+            // The inserted Clips were appended at the tail, after the consumers the rewiring points at
+            // them; restore producer-before-consumer order so the next inferShapes visits each Clip
+            // before its readers.
+            if (!added.empty())
+            {
+                g.topoSort();
+            }
             return collapsed;
         }
 

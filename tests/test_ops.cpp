@@ -2945,6 +2945,15 @@ namespace {
         return id;
     }
 
+    // Registers a quantize zero_point initializer: fp32 host storage (as the importer widens int8/
+    // uint8 payloads) but a descriptor labeled Int8/UInt8, so the dequantize pass can recover the
+    // quantize dtype's saturation range from it -- exactly what the ONNX importer produces.
+    TensorId addZeroPointInit(Graph &g, const char *name, const Shape &shape, const std::vector<float> &v, DType quantDt) {
+        TensorId id      = addFloatInit(g, name, shape, v);
+        g.desc(id).dtype = quantDt;
+        return id;
+    }
+
     // DequantizeLinear(w, s, zp?) -> wd feeding Add(x, wd) -> y, over an input x of `shape`.
     // `axis` adds the per-axis attribute when `withAxis` is set. Returns the DQ output id via *wd.
     Graph dequantWeightGraph(const Shape &shape, const std::vector<float> &wq, const Shape &sshape, const std::vector<float> &scale, const std::vector<float> &zp, bool withAxis, int64_t axis, TensorId *wdOut) {
@@ -2990,8 +2999,9 @@ namespace {
 
     // x -> Relu -> QuantizeLinear(s, zp) -> DequantizeLinear(s2, zp2) -> Mul(k) -> y. `shared`
     // reuses the Q node's scale/zp ids on the DQ; otherwise the DQ gets its own initializers
-    // holding `dqScale`/`dqZp` (value matching is then what decides the collapse).
-    Graph qdqSandwichGraph(bool shared, float qScale, float qZp, float dqScale, float dqZp, bool dqHasZp = true) {
+    // holding `dqScale`/`dqZp` (value matching is then what decides the collapse). `quantDt` labels
+    // the zero_point dtype (Int8/UInt8), the range the collapse's inserted saturation Clip uses.
+    Graph qdqSandwichGraph(bool shared, float qScale, float qZp, float dqScale, float dqZp, bool dqHasZp = true, DType quantDt = DType::Int8) {
         Graph      g;
         TensorDesc xi;
         xi.name    = "x";
@@ -3004,9 +3014,9 @@ namespace {
         TensorId d  = addUnshaped(g, "d");
         TensorId y  = addUnshaped(g, "y");
         TensorId s1 = addFloatInit(g, "s1", {}, {qScale});
-        TensorId z1 = addFloatInit(g, "z1", {}, {qZp});
+        TensorId z1 = addZeroPointInit(g, "z1", {}, {qZp}, quantDt);
         TensorId s2 = shared ? s1 : addFloatInit(g, "s2", {}, {dqScale});
-        TensorId z2 = shared ? z1 : (dqHasZp ? addFloatInit(g, "z2", {}, {dqZp}) : kNoTensor);
+        TensorId z2 = shared ? z1 : (dqHasZp ? addZeroPointInit(g, "z2", {}, {dqZp}, quantDt) : kNoTensor);
         TensorId k  = addFloatInit(g, "k", {1}, {2.f});
         g.desc(y).isOutput = true;
         g.outputs          = {y};
@@ -3157,15 +3167,22 @@ TEST(Passes, DequantizeLinearUint8NonzeroZeroPoint) {
 }
 
 TEST(Passes, QdqSandwichCollapsesByteEqual) {
+    // int8 zp=3, scale=0.05 -> the inserted clamp is [-6.55, 6.2]. The post-ReLU values below all
+    // land inside it, so the Clip is a genuine no-op and byte-equality with the plain float graph
+    // (which has no clamp) still holds -- the point of this test.
     Graph g = qdqSandwichGraph(/*shared=*/true, 0.05f, 3.f, 0.05f, 3.f);
     dequantizeGraph(g);
-    ASSERT_EQ(g.nodes.size(), 2u);
+    ASSERT_EQ(g.nodes.size(), 3u);
     EXPECT_EQ(g.nodes[0].type, OpType::Relu);
-    EXPECT_EQ(g.nodes[1].type, OpType::Binary);
-    EXPECT_EQ(g.nodes[1].inputs[0], g.nodes[0].outputs[0]) << "the Mul must read the Relu output directly";
+    EXPECT_EQ(g.nodes[1].type, OpType::Clip) << "the collapse leaves a saturation Clip in place of the round-trip";
+    EXPECT_EQ(g.nodes[2].type, OpType::Binary);
+    EXPECT_EQ(g.nodes[1].inputs[0], g.nodes[0].outputs[0]) << "the Clip must read the Relu output directly";
+    EXPECT_EQ(g.nodes[2].inputs[0], g.nodes[1].outputs[0]) << "the Mul must read the Clip output";
+    EXPECT_EQ(countQdq(g), 0);
 
-    // The collapsed graph runs byte-identically to the same graph built without the sandwich.
-    std::vector<float> xd {-3.5f, -1.f, -0.25f, 0.f, 0.6f, 1.5f, 2.5f, 7.f};
+    // The collapsed graph runs byte-identically to the same graph built with an explicit in-range
+    // Clip. Every post-ReLU value is within [-6.55, 6.2], so the clamp does not bind.
+    std::vector<float> xd {-3.5f, -1.f, -0.25f, 0.f, 0.6f, 1.5f, 2.5f, 6.f};
     Graph              plain;
     {
         TensorDesc xi;
@@ -3175,7 +3192,10 @@ TEST(Passes, QdqSandwichCollapsesByteEqual) {
         TensorId x = plain.addTensor(xi);
         plain.inputs = {x};
         TensorId r   = addUnshaped(plain, "r");
+        TensorId c   = addUnshaped(plain, "c");
         TensorId y   = addUnshaped(plain, "y");
+        TensorId lo  = addFloatInit(plain, "lo", {}, {(-128.f - 3.f) * 0.05f}); // (qmin - zp) * scale
+        TensorId hi  = addFloatInit(plain, "hi", {}, {(127.f - 3.f) * 0.05f});  // (qmax - zp) * scale
         TensorId k   = addFloatInit(plain, "k", {1}, {2.f});
         plain.desc(y).isOutput = true;
         plain.outputs          = {y};
@@ -3184,29 +3204,86 @@ TEST(Passes, QdqSandwichCollapsesByteEqual) {
         relu.name    = "relu";
         relu.inputs  = {x};
         relu.outputs = {r};
+        Node clip;
+        clip.type    = OpType::Clip;
+        clip.name    = "clip";
+        clip.inputs  = {r, lo, hi};
+        clip.outputs = {c};
         Node mul;
         mul.type    = OpType::Binary;
         mul.subOp   = (int) BinaryType::Mul;
         mul.name    = "mul";
-        mul.inputs  = {r, k};
+        mul.inputs  = {c, k};
         mul.outputs = {y};
-        plain.nodes = {relu, mul};
+        plain.nodes = {relu, clip, mul};
     }
     std::vector<float> got = runQdqGraph(std::move(g), xd);
     std::vector<float> ref = runQdqGraph(std::move(plain), xd);
     ASSERT_EQ(got.size(), ref.size());
     ASSERT_FALSE(got.empty());
-    EXPECT_EQ(memcmp(got.data(), ref.data(), got.size() * 4), 0) << "collapsed QDQ must be byte-equal to the float graph";
+    EXPECT_EQ(memcmp(got.data(), ref.data(), got.size() * 4), 0) << "collapsed QDQ must be byte-equal to the float+clamp graph";
+}
+
+TEST(Passes, QdqSandwichPreservesClamp) {
+    // uint8 zp=0, scale=0.05 -> clamp [0, 12.75]: the lower bound is a ReLU. ORT's QDQ quantizer
+    // folds a preceding activation into this range, so collapsing the sandwich to raw float would
+    // silently drop the clamp; the inserted Clip recovers it. Negative inputs must come back as 0.
+    Graph g = qdqSandwichGraph(/*shared=*/true, 0.05f, 0.f, 0.05f, 0.f, /*dqHasZp=*/true, DType::UInt8);
+    // Drop the Relu so the clamp is the only lower bound under test (rewire the Q to read x directly).
+    ASSERT_EQ(g.nodes[0].type, OpType::Relu);
+    TensorId reluIn  = g.nodes[0].inputs[0];
+    TensorId reluOut = g.nodes[0].outputs[0];
+    g.nodes[1].inputs[0] = reluIn; // Q now reads x
+    g.nodes.erase(g.nodes.begin());
+    (void) reluOut;
+    dequantizeGraph(g);
+    EXPECT_EQ(countQdq(g), 0);
+
+    std::vector<float> xd {-3.5f, -1.f, -0.25f, 0.f, 0.6f, 1.5f, 20.f, 7.f};
+    std::vector<float> got = runQdqGraph(std::move(g), xd);
+    ASSERT_EQ(got.size(), 8u);
+    // Mul(k=2) of clamp(x, 0, 12.75): negatives -> 0, 20 saturates to 12.75, mid values pass.
+    const float expect[8] = {0.f, 0.f, 0.f, 0.f, 1.2f, 3.f, 25.5f, 14.f};
+    for (int i = 0; i < 8; ++i)
+    {
+        EXPECT_NEAR(got[i], expect[i], 1e-4f) << "i=" << i << " (clamp must recover the ReLU and saturate the top)";
+    }
+}
+
+TEST(Passes, QdqSandwichInt8ClampSaturates) {
+    // int8 zp=-40, scale=0.1 -> clamp [(-128+40)*0.1, (127+40)*0.1] = [-8.8, 16.7]. A per-tensor
+    // int8 saturating case: values past either bound clamp, in-range values pass.
+    Graph g = qdqSandwichGraph(/*shared=*/true, 0.1f, -40.f, 0.1f, -40.f, /*dqHasZp=*/true, DType::Int8);
+    ASSERT_EQ(g.nodes[0].type, OpType::Relu);
+    TensorId reluIn = g.nodes[0].inputs[0];
+    g.nodes[1].inputs[0] = reluIn; // Q reads x directly, no ReLU floor
+    g.nodes.erase(g.nodes.begin());
+    dequantizeGraph(g);
+    EXPECT_EQ(countQdq(g), 0);
+
+    std::vector<float> xd {-20.f, -8.8f, -2.f, 0.f, 5.f, 16.7f, 30.f, 16.699f};
+    std::vector<float> got = runQdqGraph(std::move(g), xd);
+    ASSERT_EQ(got.size(), 8u);
+    // Mul(k=2) of clamp(x, -8.8, 16.7).
+    const float expect[8] = {-17.6f, -17.6f, -4.f, 0.f, 10.f, 33.4f, 33.4f, 33.398f};
+    for (int i = 0; i < 8; ++i)
+    {
+        EXPECT_NEAR(got[i], expect[i], 1e-3f) << "i=" << i << " (int8 clamp must saturate both bounds)";
+    }
 }
 
 TEST(Passes, QdqSandwichValueMatchCollapses) {
     // Distinct scale ids with equal payloads; the Q carries an explicit zero point of 0 and the DQ
-    // none (absent matches an all-zero payload).
+    // none (absent matches an all-zero payload). The collapse leaves Relu -> Clip -> Mul.
     Graph g = qdqSandwichGraph(/*shared=*/false, 0.05f, 0.f, 0.05f, 0.f, /*dqHasZp=*/false);
     dequantizeGraph(g);
     EXPECT_EQ(countQdq(g), 0);
-    ASSERT_EQ(g.nodes.size(), 2u);
-    EXPECT_EQ(g.nodes[1].inputs[0], g.nodes[0].outputs[0]);
+    ASSERT_EQ(g.nodes.size(), 3u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Relu);
+    EXPECT_EQ(g.nodes[1].type, OpType::Clip);
+    EXPECT_EQ(g.nodes[2].type, OpType::Binary);
+    EXPECT_EQ(g.nodes[1].inputs[0], g.nodes[0].outputs[0]) << "Clip reads the Relu output";
+    EXPECT_EQ(g.nodes[2].inputs[0], g.nodes[1].outputs[0]) << "Mul reads the Clip output";
 }
 
 TEST(Passes, QdqMismatchedSandwichKept) {
