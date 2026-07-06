@@ -1,6 +1,7 @@
 // MaxPool2D on the GPU. Runs in the NC4HW4 world: one thread per (n, channel-block, out-y, out-x)
 // takes the max over its pooling window as a vec4, so the four packed channels of a block reduce
 // together in lockstep (see shaders/maxpool.comp).
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 
@@ -22,9 +23,10 @@ namespace vknn {
                 };
                 auto ks  = ints("kernel_shape", {1, 1});
                 auto st  = ints("strides", {1, 1});
-                // ONNX pads is [top, left, bottom, right]; only the top/left origin offsets (pad[0],
-                // pad[1]) reach the shader, which reads the trailing pad implicitly by clamping to H/W.
-                auto pad = ints("pads", {0, 0, 0, 0});
+                // Shared pool geometry (core/conv_geom.h): resolves auto_pad. Only the top/left origin
+                // offsets (pad[0], pad[1]) reach the shader, which reads the trailing pad implicitly by
+                // clamping to H/W; the end pads are already folded into the output extent (y).
+                auto pad = poolGeom(x.h, x.w, node.attr).pads();
                 // Field order/types mirror maxpool.comp's push_constant block (N, C, H, W, OH, OW,
                 // KH, KW, SH, SW, PT, PL). C is the true channel count; the shader derives the block
                 // count as ceil(C/4) itself.

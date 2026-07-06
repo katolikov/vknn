@@ -67,6 +67,17 @@ namespace vknn {
         return convGeomEx(inH, inW, kh, kw, st[0], st[1], dil[0], dil[1], pads, attr.gets("auto_pad", "NOTSET"));
     }
 
+    /// Pool geometry from the node attributes (kernel_shape / strides / pads / auto_pad). Dilation
+    /// is fixed at 1: the pool kernels do not dilate, so the extent math matches what they compute.
+    inline ConvGeom poolGeom(int64_t inH, int64_t inW, const Attributes &attr) {
+        auto ints = [&](const char *k, std::vector<int64_t> d) {
+            const auto &v = attr.getints(k);
+            return v.empty() ? d : v;
+        };
+        auto ks = ints("kernel_shape", {1, 1}), st = ints("strides", {1, 1}), pads = ints("pads", {0, 0, 0, 0});
+        return convGeomEx(inH, inW, ks[0], ks[1], st[0], st[1], 1, 1, pads, attr.gets("auto_pad", "NOTSET"));
+    }
+
     /// Resolved 2D ConvTranspose output geometry. padH/padW are the BEGIN pads only: the gather
     /// kernels offset the input window by the begin pad, while the end pad affects only the output
     /// extent (already folded into outH/outW).

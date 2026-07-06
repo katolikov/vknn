@@ -631,17 +631,9 @@ namespace vknn {
                     {
                         break;
                     }
-                    NCHW x    = NCHW::from(SH(nd.inputs[0]));
-                    auto ints = [&](const char *k, std::vector<int64_t> d) {
-                        const auto &v = nd.attr.getints(k);
-                        return v.empty() ? d : v;
-                    };
-                    auto    ks  = ints("kernel_shape", {1, 1});
-                    auto    st  = ints("strides", {1, 1});
-                    auto    pad = ints("pads", {0, 0, 0, 0});
-                    int64_t oh  = (x.h + pad[0] + pad[2] - ks[0]) / st[0] + 1;
-                    int64_t ow  = (x.w + pad[1] + pad[3] - ks[1]) / st[1] + 1;
-                    SH(o)       = {x.n, x.c, oh, ow};
+                    NCHW     x  = NCHW::from(SH(nd.inputs[0]));
+                    ConvGeom cg = poolGeom(x.h, x.w, nd.attr); // resolves auto_pad
+                    SH(o)       = {x.n, x.c, cg.outH, cg.outW};
                     break;
                 }
                 case OpType::Gemm: {

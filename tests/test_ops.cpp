@@ -344,6 +344,42 @@ TEST(Ops, ConvAutoPadValid) {
     expectNear(out.data, {63, 72, 81, 108, 117, 126, 153, 162, 171});
 }
 
+// --- MaxPool auto_pad SAME_UPPER, 2x2 stride 2 over 5x5 input 1..25: out = ceil(5/2) = 3,
+// total_pad = (3-1)*2 + 2 - 5 = 1 at the end, so the last row/col windows are half-size
+// (out[0][2] = max(5,10) = 10, out[2][2] = max(25) = 25). ---
+TEST(Ops, MaxPoolAutoPadSameUpper) {
+    Attributes attr;
+    attr.map["auto_pad"]     = str("SAME_UPPER");
+    attr.map["kernel_shape"] = ints({2, 2});
+    attr.map["strides"]      = ints({2, 2});
+    std::vector<float> in(25);
+    for (int i = 0; i < 25; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::MaxPool, 0, attr, {1, 1, 5, 5}, in, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 3, 3}));
+    expectNear(out.data, {7, 9, 10, 17, 19, 20, 22, 24, 25});
+}
+
+// --- AveragePool auto_pad SAME_LOWER, 2x2 stride 2 over 5x5 input 1..25: the odd pad unit is at
+// the begin, window origins {-1,1,3}; the default count_include_pad=0 divides by the in-bounds
+// count only (out[0][0] = avg{1} = 1, out[1][0] = avg{6,11} = 8.5, out[1][1] = avg{7,8,12,13} = 10). ---
+TEST(Ops, AvgPoolAutoPadSameLower) {
+    Attributes attr;
+    attr.map["auto_pad"]     = str("SAME_LOWER");
+    attr.map["kernel_shape"] = ints({2, 2});
+    attr.map["strides"]      = ints({2, 2});
+    std::vector<float> in(25);
+    for (int i = 0; i < 25; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::AvgPool, 0, attr, {1, 1, 5, 5}, in, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 3, 3}));
+    expectNear(out.data, {1.f, 2.5f, 4.5f, 8.5f, 10.f, 12.f, 18.5f, 20.f, 22.f});
+}
+
 // --- Unary family: Sigmoid + HardSwish. ---
 TEST(Ops, UnarySigmoidHardSwish) {
     float vals[4] = {-2.f, -0.5f, 0.5f, 3.f};
