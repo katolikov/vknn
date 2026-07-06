@@ -82,11 +82,14 @@ namespace vknn {
                 // as initializer inputs (ONNX opset >= 11) or as attributes (older opsets); attributes
                 // are applied last so an explicit attribute wins over an absent/initializer default.
                 float lo = 0, hi = 6;
-                if (act.inputs.size() > 1 && act.inputs[1] != kNoTensor && g.isInitializer(act.inputs[1]))
+                // A bound is a scalar initializer; read element [0] only when the payload actually
+                // holds it, so a rank-0 tensor that resolved to an empty buffer keeps the default
+                // rather than dereferencing a null host pointer.
+                if (act.inputs.size() > 1 && act.inputs[1] != kNoTensor && g.isInitializer(act.inputs[1]) && !g.initializers[act.inputs[1]].bytes.empty())
                 {
                     lo = g.initializers[act.inputs[1]].f32()[0];
                 }
-                if (act.inputs.size() > 2 && act.inputs[2] != kNoTensor && g.isInitializer(act.inputs[2]))
+                if (act.inputs.size() > 2 && act.inputs[2] != kNoTensor && g.isInitializer(act.inputs[2]) && !g.initializers[act.inputs[2]].bytes.empty())
                 {
                     hi = g.initializers[act.inputs[2]].f32()[0];
                 }

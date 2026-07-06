@@ -34,7 +34,7 @@ namespace vknn {
                         int64_t da = dimOf(sa, i), db = dimOf(sb, i);
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
-                    int64_t  n   = numElements(out);
+                    int64_t  n   = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                     int64_t *y   = cpu::allocOutI64(Y, out);
                     // Read either operand as int64: a float operand (mixed-dtype shape arithmetic) is
                     // truncated toward zero, since this path only sees integral index/bound values.
@@ -79,7 +79,7 @@ namespace vknn {
 
                 if (sa == sb)
                 { // residual add: same shape, vectorizable
-                    int64_t      n = A.elems();
+                    int64_t      n = cpu::elemCount(sa); // a rank-0 scalar result carries its one element
                     float       *y = cpu::allocOut(Y, sa);
                     const float *a = A.host.f32();
                     const float *b = B.host.f32();
@@ -115,7 +115,7 @@ namespace vknn {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = numElements(out);
+                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 float               *y = cpu::allocOut(Y, out);
                 const float         *a = A.host.f32();
                 const float         *b = B.host.f32();

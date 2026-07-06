@@ -31,9 +31,11 @@ namespace vknn {
     static bool pwClipBounds(const Graph &g, const Node &n, float &lo, float &hi) {
         lo = -3.4e38f;
         hi = 3.4e38f;
+        // A bound must be a constant scalar with a materialized payload to encode as a step; a runtime
+        // tensor or an empty (unresolved rank-0) buffer is not fusable, so refuse rather than index [0].
         if (n.inputs.size() > 1 && n.inputs[1] != kNoTensor)
         {
-            if (!g.isInitializer(n.inputs[1]))
+            if (!g.isInitializer(n.inputs[1]) || g.initializers.at(n.inputs[1]).bytes.empty())
             {
                 return false;
             }
@@ -41,7 +43,7 @@ namespace vknn {
         }
         if (n.inputs.size() > 2 && n.inputs[2] != kNoTensor)
         {
-            if (!g.isInitializer(n.inputs[2]))
+            if (!g.isInitializer(n.inputs[2]) || g.initializers.at(n.inputs[2]).bytes.empty())
             {
                 return false;
             }

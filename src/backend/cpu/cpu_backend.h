@@ -67,6 +67,13 @@ namespace vknn {
 
     // ---- helpers shared by CPU ops ----
     namespace cpu {
+        /// Element count for a CPU buffer, treating a rank-0 (empty-shape) tensor as its one scalar
+        /// element. numElements() returns 0 for an empty shape, so an op that sized or iterated a
+        /// scalar by numElements() alone would produce a zero-length (null-data) buffer whose read
+        /// null-derefs; this is the one count CPU ops allocate and loop over so a scalar keeps its value.
+        inline int64_t elemCount(const Shape &shape) {
+            return shape.empty() ? 1 : numElements(shape);
+        }
         /// Size `rt`'s host buffer to `shape`, mark its host copy valid, and hand back a typed
         /// fp32 pointer to element 0. The op writes its result straight through this pointer.
         float *allocOut(RtTensor &rt, const Shape &shape);
