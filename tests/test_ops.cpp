@@ -383,6 +383,60 @@ TEST(Ops, ReduceGeometryFollowsRuntimeShape) {
     }
 }
 
+// --- Split with a caller-bound runtime shape that differs from the compiled desc: segment sizes
+// derive from the runtime axis extent (equal split, no `split` param), not the static desc. ---
+TEST(Ops, SplitGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 6};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc ad, bd;
+    ad.name     = "a";
+    ad.isOutput = true;
+    bd.name     = "b";
+    bd.isOutput = true;
+    TensorId a = g.addTensor(ad), b = g.addTensor(bd);
+    Node     n;
+    n.type             = OpType::Split;
+    n.name             = "sp";
+    n.inputs           = {x};
+    n.outputs          = {a, b};
+    n.attr.map["axis"] = [] { Attr t; t.kind = Attr::Int; t.i = 1; return t; }();
+    g.nodes.push_back(n);
+    g.outputs = {a, b};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // static descs: [2,3] each
+    ASSERT_TRUE(sess);
+
+    // Bind 16 values as [2,8]: each half of the runtime axis has extent 4.
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {2, 8};
+    in.dtype = DType::Float32;
+    in.data.resize(16 * sizeof(float));
+    for (int i = 0; i < 16; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) i;
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs.size(), 2u);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {2, 4}));
+    ASSERT_EQ(outs[1].shape, (std::vector<int64_t> {2, 4}));
+    const float *oa = outs[0].f32(), *ob = outs[1].f32();
+    const float  ea[8] = {0, 1, 2, 3, 8, 9, 10, 11}, eb[8] = {4, 5, 6, 7, 12, 13, 14, 15};
+    for (int i = 0; i < 8; ++i)
+    {
+        EXPECT_FLOAT_EQ(oa[i], ea[i]) << "a[" << i << "]";
+        EXPECT_FLOAT_EQ(ob[i], eb[i]) << "b[" << i << "]";
+    }
+}
+
 // --- MatMul A[2,3] @ B[3,2] (B constant). ---
 TEST(Ops, MatMul) {
     auto out = runOp(OpType::MatMul, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{3, 2}, {1, 0, 0, 1, 1, 1}}});
