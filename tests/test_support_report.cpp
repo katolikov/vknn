@@ -124,25 +124,42 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     EXPECT_EQ(rows[6].reason, "no kernel in any backend");
 }
 
-TEST(SupportReport, QuantizeDequantizeRunOnCpuBoundaryKernel) {
+TEST(SupportReport, QuantizeDequantizeRunOnGpuWithConstScale) {
     // Quantize/DequantizeLinear are the graph-boundary quant hops the import-time dequantize pass
-    // keeps as nodes; they have a CPU kernel but no Vulkan one, so the survey assigns them the CPU
-    // backend and declines the GPU with the registry-auto reason -- never a claimed Vulkan path.
+    // keeps as nodes (a genuine int-graph-boundary dequant, e.g. a quantized embedding-table lookup).
+    // With a constant scale/zero_point (uploaded flat in prepare) the flat GPU kernel runs them; the
+    // survey assigns the Vulkan backend and no refusal reason.
     Graph    g;
     TensorId x  = tensor(g, "x", {1, 8, 8, 8});
     TensorId xs = initializer(g, "x_s", {1});
+    TensorId zp = initializer(g, "x_zp", {1});
     TensorId q  = tensor(g, "q_out", {1, 8, 8, 8}, DType::UInt8);
-    addNode(g, OpType::QuantizeLinear, "quant", {x, xs}, {q});
+    addNode(g, OpType::QuantizeLinear, "quant", {x, xs, zp}, {q});
     TensorId dq = tensor(g, "dq_out", {1, 8, 8, 8});
-    addNode(g, OpType::DequantizeLinear, "dequant", {q, xs}, {dq});
+    addNode(g, OpType::DequantizeLinear, "dequant", {q, xs, zp}, {dq});
 
     std::vector<NodeSupport> rows = vkSupportSurvey(g);
     ASSERT_EQ(rows.size(), 2u);
     for (const NodeSupport &row: rows)
     {
-        EXPECT_EQ(row.backend, "cpu") << row.node;
-        EXPECT_EQ(row.reason, "no vulkan kernel registered") << row.node;
+        EXPECT_EQ(row.backend, "vulkan") << row.node;
+        EXPECT_TRUE(row.reason.empty()) << row.node;
     }
+}
+
+TEST(SupportReport, DequantizeLinearRuntimeScaleFallsBackToCpu) {
+    // A runtime (non-initializer) scale has no constant to bake in prepare, so the gate declines the
+    // GPU and the exact CPU op runs the dequant. The refusal reason is stable and op-named.
+    Graph    g;
+    TensorId x  = tensor(g, "x", {1, 8, 8, 8}, DType::UInt8);
+    TensorId xs = tensor(g, "x_s_runtime", {1}); // runtime tensor, not an initializer
+    TensorId dq = tensor(g, "dq_out", {1, 8, 8, 8});
+    addNode(g, OpType::DequantizeLinear, "dequant_runtime_scale", {x, xs}, {dq});
+
+    std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].backend, "cpu");
+    EXPECT_EQ(rows[0].reason, "DequantizeLinear: runtime scale input");
 }
 
 TEST(SupportReport, FusedQLinearOpsReportNoKernel) {

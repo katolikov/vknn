@@ -36,10 +36,10 @@ namespace vknn {
             // Erased/lowered at import; a survivor has no kernel in either backend.
             case OpType::Dropout:
             case OpType::InstanceNorm:
-            // ONNX quantized family: recognized at import for precise reporting; execution goes
-            // through the import-time dequantize lowering, never a direct kernel.
-            case OpType::QuantizeLinear:
-            case OpType::DequantizeLinear:
+            // ONNX quantized family that still has no direct kernel: recognized at import for precise
+            // reporting; execution goes through the import-time dequantize lowering. (Quantize/
+            // DequantizeLinear DO have flat kernels — the graph-boundary dequant a genuine int input
+            // needs — so they fall to the default `return true` and vkNodeGate below.)
             case OpType::DynamicQuantizeLinear:
             case OpType::QLinearConv:
             case OpType::QLinearMatMul:
@@ -389,6 +389,25 @@ namespace vknn {
                 {
                     return refuse(whyNot, "Clip: runtime min/max input");
                 }
+            }
+            return true;
+        }
+        if (nd.type == OpType::QuantizeLinear || nd.type == OpType::DequantizeLinear)
+        {
+            // Flat affine dequant/quant: scale (input[1]) and any zero_point (input[2]) must be
+            // constant initializers (uploaded flat in prepare); a runtime scale/zp falls back to the
+            // exact CPU op. The flat kernel decodes the per-axis stride within the rank-8 bound.
+            if (nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor || !g.isInitializer(nd.inputs[1]))
+            {
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": runtime scale input");
+            }
+            if (nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
+            {
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": runtime zero_point input");
+            }
+            if (g.desc(nd.outputs[0]).shape.size() > 8)
+            {
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": output rank > 8");
             }
             return true;
         }

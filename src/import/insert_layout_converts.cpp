@@ -26,8 +26,10 @@ namespace vknn {
             case OpType::GreaterEqual: // A>=B, broadcasting flat compare
             case OpType::Less:         // A<B,  broadcasting flat compare
             case OpType::LessEqual:    // A<=B, broadcasting flat compare
-            case OpType::Range:           // 1-D arange, flat fill
-            case OpType::ConstantOfShape: // scalar fill, flat
+            case OpType::Range:              // 1-D arange, flat fill
+            case OpType::ConstantOfShape:    // scalar fill, flat
+            case OpType::QuantizeLinear:     // affine quant, flat row-major (embedding tables are 2-D)
+            case OpType::DequantizeLinear:   // affine dequant, flat row-major
                 return true;
             case OpType::ConvTranspose: {
                 // Flat row-major transposed conv (one thread per output element, gather form). Needs a

@@ -1,0 +1,25 @@
+#version 450
+#define VKNN_NO_RTE 1 // integer-affine store; round via vknnRte16 to match the elementwise-store convention
+#include "precision.glsl"
+// DequantizeLinear on the flat row-major buffer: y = (x - zero_point) * scale. The data input x is
+// an integer tensor carried as integer-valued fp32 (the importer widens int8/uint8/int32 payloads to
+// fp32); the output is real-valued fp32. Per-tensor (sCount == 1, one scale/zp spanning the tensor)
+// and per-axis (sCount > 1, a channel selected by the flat index / inner stride) both apply; an
+// absent zero_point defaults to 0. Compute is fp32; STORE is fp16 in the _fp16 variant.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer X { STORE x[]; };
+layout(std430, binding = 1) readonly  buffer S { float scale[]; };  // scale + zero_point stay fp32
+layout(std430, binding = 2) readonly  buffer Z { float zp[]; };
+layout(std430, binding = 3) writeonly buffer Y { STORE y[]; };
+// total: flat element count. sCount: scale element count (1 == per-tensor). zCount: zero_point element
+// count (0 == absent). inner: per-axis stride (elements between channel steps; total for per-tensor).
+layout(push_constant) uniform PC { int total, sCount, zCount, inner; } pc;
+
+void main() {
+  uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (g >= uint(pc.total)) return;
+  int c = pc.sCount == 1 ? 0 : (int(g) / pc.inner) % pc.sCount;
+  float z = pc.zCount == 0 ? 0.0 : zp[pc.zCount == 1 ? 0 : c];
+  y[g] = TO_STORE((float(x[g]) - z) * scale[c]);
+}
