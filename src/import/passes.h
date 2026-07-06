@@ -13,6 +13,11 @@ namespace vknn {
 
     // Resolve dynamic batch to `batch` and infer concrete shapes for all tensors possible.
     void inferShapes(Graph &g, int64_t batch = 1);
+    // Normalize 1-D Convs (rank-3 constant weight, 1-spatial-dim attributes) to the canonical 2-D
+    // geometry every conv consumer indexes: weight [M,C/g,k] -> [M,C/g,k,1], strides/dilations/
+    // kernel_shape/pads extended with the W dim's identity values. Activation ranks are unchanged.
+    // Runs before the first inferShapes so conv shape inference only ever sees 2-D geometry.
+    void normalizeConv1d(Graph &g);
     // Constant-fold ops whose inputs are all known constants (shape arithmetic, scalar Binary, etc.)
     // into initializers (requires inferShapes first). Returns the number of nodes folded.
     int constFold(Graph &g);

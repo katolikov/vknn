@@ -56,9 +56,25 @@ namespace vknn {
                     {
                         break;
                     }
-                    int64_t  outC = w[0], kh = w[2], kw = w[3];
-                    ConvGeom cg   = convGeom(x.h, x.w, kh, kw, nd.attr); // resolves auto_pad
-                    SH(o)         = {x.n, outC, cg.outH, cg.outW};
+                    int64_t     outC = w[0], kh = w[2], kw = w[3];
+                    const auto &st   = nd.attr.getints("strides");
+                    const auto &pad  = nd.attr.getints("pads");
+                    const auto &dil  = nd.attr.getints("dilations");
+                    if ((!st.empty() && st.size() < 2) || (!pad.empty() && pad.size() < 4) ||
+                        (!dil.empty() && dil.size() < 2))
+                    {
+                        break; // 1-spatial-dim attributes: normalizeConv1d has not run (runtime weight)
+                    }
+                    ConvGeom cg = convGeom(x.h, x.w, kh, kw, nd.attr); // resolves auto_pad
+                    // A rank-3 input is a normalized 1-D conv (NCHW::from maps [N,C,L] to h=L, w=1,
+                    // and the weight's kW extent is 1, so outW == 1); the output keeps rank 3.
+                    if (SH(nd.inputs[0]).size() == 3 && cg.outW == 1)
+                    {
+                        SH(o) = {x.n, outC, cg.outH};
+                    } else
+                    {
+                        SH(o) = {x.n, outC, cg.outH, cg.outW};
+                    }
                     break;
                 }
                 case OpType::ConvTranspose: {

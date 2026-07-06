@@ -425,6 +425,242 @@ TEST(Ops, GlobalAveragePool) {
     expectNear(out.data, {2.5f}, 1e-5f);
 }
 
+// --- 1-D Conv (rank-3 input/weight, 1-length strides, 2-length pads): normalized at import to the
+// canonical 2-D geometry (kH=k, kW=1) with rank-3 output. Values from onnxruntime. ---
+TEST(Ops, Conv1dNormalizedGeometry) {
+    Attributes attr;
+    attr.map["pads"]    = ints({1, 1});
+    attr.map["strides"] = ints({2});
+    std::vector<float> x(16);
+    for (int i = 0; i < 16; ++i)
+    {
+        x[i] = (float) i;
+    }
+    auto out = runOp(OpType::Conv, 0, attr, {1, 2, 8}, x,
+                     {{{3, 2, 3}, {1, 0, -1, 2, 1, 0, 0, 1, 0, 1, 1, 1, -1, 2, -1, 0, 0, 3}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 3, 4}));
+    expectNear(out.data, {7, 26, 32, 38, 17, 32, 40, 48, 26, 33, 39, 45}, 1e-4f);
+}
+
+// --- Reduce with a caller-bound runtime shape that differs from the compiled desc. CPU ops derive
+// geometry from runtime shapes (the dynamic-shape contract); Reduce must size its accumulator bins
+// and output from the bound shape, or a divergent shape indexes past the desc-sized accumulator. ---
+TEST(Ops, ReduceGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 3, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type             = OpType::Reduce;
+    n.subOp            = (int32_t) ReduceType::Mean;
+    n.name             = "rm";
+    n.inputs           = {x};
+    n.outputs          = {y};
+    n.attr.map["axes"] = ints({-1});
+    {
+        Attr a;
+        a.kind                 = Attr::Int;
+        a.i                    = 0;
+        n.attr.map["keepdims"] = a;
+    }
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // static desc for y: [2,3]
+    ASSERT_TRUE(sess);
+
+    // Bind the same 24 values as [4,3,2]: the reduced (last) axis extent becomes 2.
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {4, 3, 2};
+    in.dtype = DType::Float32;
+    in.data.resize(24 * sizeof(float));
+    for (int i = 0; i < 24; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) i;
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {4, 3}));
+    const float *o = outs[0].f32();
+    for (int i = 0; i < 12; ++i)
+    {
+        EXPECT_FLOAT_EQ(o[i], 2.f * i + 0.5f) << "bin " << i; // mean of {2i, 2i+1}
+    }
+}
+
+// --- Split with a caller-bound runtime shape that differs from the compiled desc: segment sizes
+// derive from the runtime axis extent (equal split, no `split` param), not the static desc. ---
+TEST(Ops, SplitGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 6};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc ad, bd;
+    ad.name     = "a";
+    ad.isOutput = true;
+    bd.name     = "b";
+    bd.isOutput = true;
+    TensorId a = g.addTensor(ad), b = g.addTensor(bd);
+    Node     n;
+    n.type             = OpType::Split;
+    n.name             = "sp";
+    n.inputs           = {x};
+    n.outputs          = {a, b};
+    n.attr.map["axis"] = [] { Attr t; t.kind = Attr::Int; t.i = 1; return t; }();
+    g.nodes.push_back(n);
+    g.outputs = {a, b};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // static descs: [2,3] each
+    ASSERT_TRUE(sess);
+
+    // Bind 16 values as [2,8]: each half of the runtime axis has extent 4.
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {2, 8};
+    in.dtype = DType::Float32;
+    in.data.resize(16 * sizeof(float));
+    for (int i = 0; i < 16; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) i;
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs.size(), 2u);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {2, 4}));
+    ASSERT_EQ(outs[1].shape, (std::vector<int64_t> {2, 4}));
+    const float *oa = outs[0].f32(), *ob = outs[1].f32();
+    const float  ea[8] = {0, 1, 2, 3, 8, 9, 10, 11}, eb[8] = {4, 5, 6, 7, 12, 13, 14, 15};
+    for (int i = 0; i < 8; ++i)
+    {
+        EXPECT_FLOAT_EQ(oa[i], ea[i]) << "a[" << i << "]";
+        EXPECT_FLOAT_EQ(ob[i], eb[i]) << "b[" << i << "]";
+    }
+}
+
+// --- Pad under an unresolved input desc (the session adopts the caller-bound runtime shape): the
+// output shape derives from the runtime input shape plus the pads parameter, not the static desc. ---
+TEST(Ops, PadGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {}; // unresolved: the caller-bound runtime shape is authoritative
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type             = OpType::Pad;
+    n.name             = "pd";
+    n.inputs           = {x};
+    n.outputs          = {y};
+    n.attr.map["pads"] = ints({0, 1, 0, 1}); // one column of zeros on each side of the last axis
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // y stays unresolved with x
+    ASSERT_TRUE(sess);
+
+    // Bind 4 values as [2,2]: the padded runtime output is [2,4].
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {2, 2};
+    in.dtype = DType::Float32;
+    in.data.resize(4 * sizeof(float));
+    for (int i = 0; i < 4; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) (i + 1);
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {2, 4}));
+    expectNear({outs[0].f32(), outs[0].f32() + 8}, {0, 1, 2, 0, 0, 3, 4, 0}, 1e-6f);
+}
+
+// --- Resize under an unresolved input desc (the session adopts the caller-bound runtime shape):
+// the output H/W derive from the runtime input shape times the scales parameter, not the static
+// desc. ---
+TEST(Ops, ResizeGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {}; // unresolved: the caller-bound runtime shape is authoritative
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc sd;
+    sd.name          = "scales";
+    sd.shape         = {4};
+    sd.isInitializer = true;
+    TensorId   s     = g.addTensor(sd);
+    HostBuffer hb;
+    hb.resizeElems(4, DType::Float32);
+    hb.f32()[0] = 1.f;
+    hb.f32()[1] = 1.f;
+    hb.f32()[2] = 2.f;
+    hb.f32()[3] = 2.f;
+    g.initializers[s] = hb;
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type             = OpType::Resize;
+    n.name             = "rs";
+    n.inputs           = {x, kNoTensor, s}; // X, roi (absent), scales
+    n.outputs          = {y};
+    n.attr.map["mode"] = str("nearest");
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // y stays unresolved with x
+    ASSERT_TRUE(sess);
+
+    // Bind 9 values as [1,1,3,3]: the 2x-scaled runtime output is [1,1,6,6].
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {1, 1, 3, 3};
+    in.dtype = DType::Float32;
+    in.data.resize(9 * sizeof(float));
+    for (int i = 0; i < 9; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) (i + 1);
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {1, 1, 6, 6}));
+    std::vector<float> want;
+    for (int r: {0, 0, 1, 1, 2, 2})
+    {
+        for (int c: {0, 0, 1, 1, 2, 2})
+        {
+            want.push_back((float) (r * 3 + c + 1));
+        }
+    }
+    expectNear({outs[0].f32(), outs[0].f32() + 36}, want, 1e-6f);
+}
+
 // --- MatMul A[2,3] @ B[3,2] (B constant). ---
 TEST(Ops, MatMul) {
     auto out = runOp(OpType::MatMul, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{3, 2}, {1, 0, 0, 1, 1, 1}}});
