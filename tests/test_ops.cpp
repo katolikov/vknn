@@ -437,6 +437,50 @@ TEST(Ops, SplitGeometryFollowsRuntimeShape) {
     }
 }
 
+// --- Pad with a caller-bound runtime shape that differs from the compiled desc: the output shape
+// derives from the runtime input shape plus the pads parameter, not the static desc. ---
+TEST(Ops, PadGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type             = OpType::Pad;
+    n.name             = "pd";
+    n.inputs           = {x};
+    n.outputs          = {y};
+    n.attr.map["pads"] = ints({0, 1, 0, 1}); // one column of zeros on each side of the last axis
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // static desc for y: [1,6]
+    ASSERT_TRUE(sess);
+
+    // Bind 4 values as [2,2]: the padded runtime output is [2,4].
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {2, 2};
+    in.dtype = DType::Float32;
+    in.data.resize(4 * sizeof(float));
+    for (int i = 0; i < 4; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) (i + 1);
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {2, 4}));
+    expectNear({outs[0].f32(), outs[0].f32() + 8}, {0, 1, 2, 0, 0, 3, 4, 0}, 1e-6f);
+}
+
 // --- MatMul A[2,3] @ B[3,2] (B constant). ---
 TEST(Ops, MatMul) {
     auto out = runOp(OpType::MatMul, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{3, 2}, {1, 0, 0, 1, 1, 1}}});
