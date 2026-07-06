@@ -56,17 +56,9 @@ namespace vknn {
                     {
                         break;
                     }
-                    int64_t outC = w[0], kh = w[2], kw = w[3];
-                    auto    ints = [&](const char *k, std::vector<int64_t> d) {
-                        const auto &v = nd.attr.getints(k);
-                        return v.empty() ? d : v;
-                    };
-                    auto    st  = ints("strides", {1, 1});
-                    auto    pad = ints("pads", {0, 0, 0, 0});
-                    auto    dil = ints("dilations", {1, 1});
-                    int64_t oh  = (x.h + pad[0] + pad[2] - (dil[0] * (kh - 1) + 1)) / st[0] + 1;
-                    int64_t ow  = (x.w + pad[1] + pad[3] - (dil[1] * (kw - 1) + 1)) / st[1] + 1;
-                    SH(o)       = {x.n, outC, oh, ow};
+                    int64_t  outC = w[0], kh = w[2], kw = w[3];
+                    ConvGeom cg   = convGeom(x.h, x.w, kh, kw, nd.attr); // resolves auto_pad
+                    SH(o)         = {x.n, outC, cg.outH, cg.outW};
                     break;
                 }
                 case OpType::ConvTranspose: {
@@ -316,12 +308,9 @@ namespace vknn {
                     // Kernel size from the depthwise weight shape: the kernel_shape attr is
                     // optional in ONNX and the runtime kernel reads the weight dims too — a {3,3}
                     // fallback mis-sizes every 5x5 pair whose conv omitted the attr.
-                    auto    k   = dw.size() == 4 ? std::vector<int64_t> {dw[2], dw[3]} : a("kernel_shape", {3, 3});
-                    auto    st  = a("strides", {1, 1});
-                    auto    pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
-                    int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (k[0] - 1) + 1)) / st[0] + 1;
-                    int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (k[1] - 1) + 1)) / st[1] + 1;
-                    SH(o)      = {x.n, pw.empty() ? x.c : pw[0], oh, ow};
+                    auto     k  = dw.size() == 4 ? std::vector<int64_t> {dw[2], dw[3]} : a("kernel_shape", {3, 3});
+                    ConvGeom cg = convGeom(x.h, x.w, k[0], k[1], nd.attr); // attrs come from the depthwise Conv, auto_pad included
+                    SH(o)       = {x.n, pw.empty() ? x.c : pw[0], cg.outH, cg.outW};
                     break;
                 }
                 case OpType::ConvGemm: {
@@ -335,11 +324,9 @@ namespace vknn {
                         const auto &v = nd.attr.getints(k);
                         return v.empty() ? d : v;
                     };
-                    auto    k = a("kernel_shape", {1, 1}), st = a("strides", {1, 1});
-                    auto    pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
-                    int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (k[0] - 1) + 1)) / st[0] + 1;
-                    int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (k[1] - 1) + 1)) / st[1] + 1;
-                    SH(o)      = {x.n, wt.size() == 2 ? wt[1] : x.c, oh, ow};
+                    auto     k  = a("kernel_shape", {1, 1});
+                    ConvGeom cg = convGeom(x.h, x.w, k[0], k[1], nd.attr);
+                    SH(o)       = {x.n, wt.size() == 2 ? wt[1] : x.c, cg.outH, cg.outW};
                     break;
                 }
                 case OpType::Split: {

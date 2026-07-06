@@ -11,6 +11,7 @@
 // (conv_gemm_ksplit fp32 partials + conv_gemm_kreduce finish); split-K changes the summation
 // order, so it is only ever selected by the race, never by default. Winners persist in the tune
 // cache so warm runs are stable.
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -165,7 +166,9 @@ namespace vknn {
                     return v.empty() ? d : v;
                 };
                 auto k = a("kernel_shape", {1, 1}), st = a("strides", {1, 1});
-                auto p = a("pads", {0, 0, 0, 0}), dl = a("dilations", {1, 1});
+                auto dl = a("dilations", {1, 1});
+                // Shared forward geometry (core/conv_geom.h): resolves auto_pad into begin/end pads.
+                auto p = convGeom(x.h, x.w, k[0], k[1], node.attr).pads();
 
                 // Bias presence bounds by pwCoreInputs: inputs appended past it are fused-unit
                 // operands, and reading one as the bias would double-apply it.

@@ -5,6 +5,68 @@
 
 namespace vknn {
 
+    /// Resolved forward Conv/pool geometry: begin/end pads per spatial axis plus the output extent.
+    /// pads() re-serializes to the ONNX order [top, left, bottom, right].
+    struct ConvGeom {
+        int64_t outH, outW;
+        int64_t padT, padL; // begin pads (top, left): the input-window origin offset
+        int64_t padB, padR; // end pads (bottom, right): folded into outH/outW only
+        std::vector<int64_t> pads() const {
+            return {padT, padL, padB, padR};
+        }
+    };
+
+    /// Forward Conv/pool geometry from explicit parameters, honoring ONNX auto_pad. The single
+    /// source of truth for every consumer (shape inference, the CPU ops, the Vulkan prepares):
+    /// nothing bakes resolved pads into the graph, so a re-run on a new input shape re-resolves.
+    ///   NOTSET       pads as given; out = floor((in + begin + end - span)/stride) + 1 with
+    ///                span = (k-1)*dilation + 1 (the pool arms pass dilation 1).
+    ///   SAME_UPPER / out = ceil(in/stride); total = max(0, (out-1)*stride + span - in) (the ORT
+    ///   SAME_LOWER   clamp), split begin/end with the odd unit at the end for SAME_UPPER and at
+    ///                the begin for SAME_LOWER.
+    ///   VALID        zero pads (an accompanying pads attr is ignored, per the ONNX spec).
+    inline ConvGeom convGeomEx(int64_t inH, int64_t inW, int64_t kh, int64_t kw, int64_t sh, int64_t sw, int64_t dh, int64_t dw, const std::vector<int64_t> &pads, const std::string &autoPad) {
+        int64_t  spanH = dh * (kh - 1) + 1, spanW = dw * (kw - 1) + 1;
+        ConvGeom g {};
+        if (autoPad == "SAME_UPPER" || autoPad == "SAME_LOWER")
+        {
+            g.outH        = (inH + sh - 1) / sh;
+            g.outW        = (inW + sw - 1) / sw;
+            int64_t totH  = (g.outH - 1) * sh + spanH - inH;
+            int64_t totW  = (g.outW - 1) * sw + spanW - inW;
+            totH          = totH < 0 ? 0 : totH;
+            totW          = totW < 0 ? 0 : totW;
+            const bool up = (autoPad == "SAME_UPPER"); // begin gets the smaller half
+            g.padT        = up ? totH / 2 : totH - totH / 2;
+            g.padL        = up ? totW / 2 : totW - totW / 2;
+            g.padB        = totH - g.padT;
+            g.padR        = totW - g.padL;
+        } else
+        {
+            if (autoPad != "VALID") // NOTSET (or absent): the explicit pads attr
+            {
+                g.padT = pads[0];
+                g.padL = pads[1];
+                g.padB = pads[2];
+                g.padR = pads[3];
+            }
+            g.outH = (inH + g.padT + g.padB - spanH) / sh + 1;
+            g.outW = (inW + g.padL + g.padR - spanW) / sw + 1;
+        }
+        return g;
+    }
+
+    /// Forward-Conv geometry from the node attributes (strides / dilations / pads / auto_pad);
+    /// the kernel extent comes from the caller (the ONNX weight shape [M, C/g, kH, kW]).
+    inline ConvGeom convGeom(int64_t inH, int64_t inW, int64_t kh, int64_t kw, const Attributes &attr) {
+        auto ints = [&](const char *k, std::vector<int64_t> d) {
+            const auto &v = attr.getints(k);
+            return v.empty() ? d : v;
+        };
+        auto st = ints("strides", {1, 1}), pads = ints("pads", {0, 0, 0, 0}), dil = ints("dilations", {1, 1});
+        return convGeomEx(inH, inW, kh, kw, st[0], st[1], dil[0], dil[1], pads, attr.gets("auto_pad", "NOTSET"));
+    }
+
     /// Resolved 2D ConvTranspose output geometry. padH/padW are the BEGIN pads only: the gather
     /// kernels offset the input window by the begin pad, while the end pad affects only the output
     /// extent (already folded into outH/outW).
