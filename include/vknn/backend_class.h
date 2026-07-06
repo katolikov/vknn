@@ -5,6 +5,7 @@
 #include "vknn/graph.h"
 #include "vknn/tensor.h"
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace vknn {
@@ -33,8 +34,18 @@ namespace vknn {
         virtual bool supports(OpType t, DType dt) const = 0;
         /// Shape-aware capability query. Defaults to the type-only check; backends override this when
         /// support depends on the node's attributes/shapes (e.g. Concat axis, broadcast layout).
-        virtual bool supportsNode(const Graph &g, const Node &nd, DType dt) const {
-            return supports(nd.type, dt);
+        /// On refusal, fills `*whyNot` (when non-null) with a short stable reason for the fallback
+        /// diagnostics and the support report; a null `whyNot` costs nothing.
+        virtual bool supportsNode(const Graph &g, const Node &nd, DType dt, std::string *whyNot = nullptr) const {
+            if (supports(nd.type, dt))
+            {
+                return true;
+            }
+            if (whyNot)
+            {
+                *whyNot = std::string("no ") + name() + " kernel registered";
+            }
+            return false;
         }
 
         /// Ensure tensor `rt` has valid host data (NCHW canonical). Default: assume host already valid.
