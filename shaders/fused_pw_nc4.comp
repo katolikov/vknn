@@ -1,4 +1,9 @@
 #version 450
+// VKNN_NO_RTE keeps the float-controls RTE execution mode out of this module: the driver compiles
+// float arithmetic differently under it, splitting this VM's bytes from the standalone elementwise
+// kernels (which are all VKNN_NO_RTE) on erf-class step chains. Stores stay exact — every stored
+// value is already PW_ROUND-rounded.
+#define VKNN_NO_RTE 1
 #include "precision.glsl"
 #define PW_EPI_BASE 2
 #include "pw_epilogue.glsl"
