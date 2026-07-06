@@ -388,6 +388,136 @@ TEST(Ops, GreaterBroadcastPerChannel) {
     EXPECT_EQ(out.data, (std::vector<float> {0, 0, 1, 1, 0, 0, 1, 1}));
 }
 
+// --- ConvertLayout on the CPU backend: NC4HW4 is a device-only storage format and every host
+//     residency is canonical NCHW, so both directions are value- and shape-preserving copies. A
+//     flat->NC4HW4 -> NC4HW4->flat pair must return the input exactly, including the odd channel
+//     counts (1, 3, 5) whose device form carries zero-filled pad lanes. ---
+TEST(Ops, ConvertLayoutRoundTripIdentity) {
+    for (int64_t C: {1, 3, 4, 5, 8})
+    {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, C, 2, 3};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+        TensorDesc ti;
+        ti.name    = "t";
+        TensorId t = g.addTensor(ti);
+        Node     toNc4;
+        toNc4.type    = OpType::ConvertLayout;
+        toNc4.name    = "to_nc4";
+        toNc4.subOp   = 1; // flat -> NC4HW4
+        toNc4.inputs  = {x};
+        toNc4.outputs = {t};
+        g.nodes.push_back(toNc4);
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     toFlat;
+        toFlat.type    = OpType::ConvertLayout;
+        toFlat.name    = "to_flat";
+        toFlat.subOp   = 0; // NC4HW4 -> flat
+        toFlat.inputs  = {t};
+        toFlat.outputs = {y};
+        g.nodes.push_back(toFlat);
+        g.outputs = {y};
+
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        ASSERT_TRUE(sess) << "C=" << C;
+        std::vector<float> vals(1 * C * 2 * 3);
+        for (size_t i = 0; i < vals.size(); ++i)
+        {
+            vals[i] = (float) i * 1.25f - 3.f;
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {1, C, 2, 3};
+        in.dtype = DType::Float32;
+        in.data.resize(vals.size() * 4);
+        std::memcpy(in.data.data(), vals.data(), in.data.size());
+        std::vector<IOTensor> outs;
+        ASSERT_EQ(sess->run({in}, outs), Status::Ok) << "C=" << C;
+        ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {1, C, 2, 3})) << "C=" << C;
+        const float *o = outs[0].f32();
+        for (size_t i = 0; i < vals.size(); ++i)
+        {
+            EXPECT_EQ(o[i], vals[i]) << "C=" << C << " i=" << i; // identity copy: exact, not near
+        }
+    }
+}
+
+// --- A single ConvertLayout in either direction is a pass-through on the host: same shape, same
+//     values (the physical repack happens at the backend boundary, never in this kernel). ---
+TEST(Ops, ConvertLayoutPassThroughBothDirections) {
+    const std::vector<float> vals {2, -1, 0.5f, 7, -3.25f, 4, 9, -8, 1.5f, 6};
+    for (int dir: {0, 1})
+    {
+        auto out = runOp(OpType::ConvertLayout, dir, {}, {1, 5, 1, 2}, vals, {});
+        ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 5, 1, 2})) << "dir=" << dir;
+        EXPECT_EQ(out.data, vals) << "dir=" << dir;
+    }
+}
+
+// --- A CPU consumer downstream of ConvertLayout reads canonical NCHW: with C=5 (odd, pad lanes on
+//     the device side) the per-channel means stay per-channel. A kernel that physically packed the
+//     host buffer would scatter channels into pad lanes and shift every mean. ---
+TEST(Ops, ConvertLayoutConsumerReadsNchw) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 5, 1, 2};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc ti;
+    ti.name    = "t";
+    TensorId t = g.addTensor(ti);
+    Node     cv;
+    cv.type    = OpType::ConvertLayout;
+    cv.name    = "cv";
+    cv.subOp   = 1; // flat -> NC4HW4
+    cv.inputs  = {x};
+    cv.outputs = {t};
+    g.nodes.push_back(cv);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     gap;
+    gap.type    = OpType::GlobalAvgPool;
+    gap.name    = "gap";
+    gap.inputs  = {t};
+    gap.outputs = {y};
+    g.nodes.push_back(gap);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    // channel c holds {10c, 10c+2} -> mean 10c+1
+    std::vector<float> vals {0, 2, 10, 12, 20, 22, 30, 32, 40, 42};
+    IOTensor           in;
+    in.name  = "x";
+    in.shape = {1, 5, 1, 2};
+    in.dtype = DType::Float32;
+    in.data.resize(vals.size() * 4);
+    std::memcpy(in.data.data(), vals.data(), in.data.size());
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {1, 5, 1, 1}));
+    const float *o = outs[0].f32();
+    for (int c = 0; c < 5; ++c)
+    {
+        EXPECT_FLOAT_EQ(o[c], 10.f * c + 1.f) << "c=" << c;
+    }
+}
+
 // --- Non-fp32 model I/O: a UINT8 input flows through the fp32 compute path (Cast->Mul) and back out as
 //     UINT8 (Cast truncates toward zero + clamps to [0,255]); the boundary keeps the declared dtypes. ---
 TEST(Ops, DtypeUint8RoundTrip) {
