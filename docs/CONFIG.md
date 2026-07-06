@@ -50,6 +50,24 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). Entries match whole op-type names: `"Conv"` does not disable `ConvTranspose`. |
 | `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
 | `fp32Tensors` | string (C++ only, not serialized to JSON) | e.g. `"/enc/MatMul_,-camera_head"` | `""` | Advanced override of the selective-fp32 set: tensor-name substrings (leading `-` excludes) kept in fp32 storage under fp16 compute. Empty + `precision:"normal"` uses the built-in geometry-tail preset; a non-empty value replaces it (and also applies under `precision:"low"`). |
+| `inputShapes` | `map<string, Shape>` (C++ only, not serialized to JSON) | input tensor name → full concrete shape, e.g. `{{"pixel_values",{1,3,224,224}}}` | `{}` (empty) | Declared concrete shapes for graph inputs on the **ONNX-load path** (`createFromOnnx` / `Model::load` from `.onnx`), keyed by input name. Each listed input has its dynamic (negative) dims resolved from the declared shape; an input absent here falls back to `batch = 1` on its leading axis, and a dynamic **non-batch** axis with no declaration is a hard error (never a silent `1x1` plan). Empty = the fixed-shape / batch-only path (byte-identical to before). **Ignored for a `.vxm` session** — a `.vxm` already has its shapes baked at compile time; set them there with `vknn_compile --shape` / `--bucket` (see below). |
+
+### Declared input shapes and plan buckets (`vknn_compile`)
+
+Dynamic-shape models declare their shapes at compile time; a fixed-shape model needs
+none of these and compiles byte-identically to before.
+
+| `vknn_compile` flag | Meaning |
+|---------------------|---------|
+| `--batch N` | Leading-axis (batch) fallback for a dynamic batch dim. Default `1`. |
+| `--shape NAME=D0xD1x...` (repeatable) | Declare one graph input's full concrete shape, resolving every dynamic axis of that input, e.g. `--shape pixel_values=1x3x224x224`. Populates the same map as `Config::inputShapes`. |
+| `--bucket "NAME=D0x...;NAME2=..."` (repeatable) | Declare **one plan bucket** per occurrence: the model is compiled once per bucket over a fresh import, and the buckets share one content-deduped initializer pool in a multi-bucket `.vxm`. `--batch` / `--shape` are the shared fallback under every bucket. With no `--bucket`, exactly one bucket is written (a legacy single-graph `.vxm`, byte-identical to before). `--bucket` requires an ONNX input. |
+
+A multi-bucket `.vxm` loads all its buckets; `Session::run()` selects the bucket by the
+bound input shapes and rejects an unmatched shape with `Status::InvalidArgument`. An
+ONNX-loaded session can add a bucket at run time with `Session::prepareShapes(shapes)`
+(a `.vxm` session returns `Status::Unsupported`). See
+[LIMITATIONS.md §1](LIMITATIONS.md) for the full contract.
 
 ### Enum reference
 

@@ -12,25 +12,44 @@ does **not** do.
 
 ---
 
-## 1. Static `batch = 1`, resolved at plan time
+## 1. Shapes are resolved at plan time; dynamic shapes need declared buckets
 
 The engine plans a graph for a **fixed, fully-static shape**. `Session::plan()`
 runs the import passes' shape inference to a fixed point at construction; every
 segment, every Vulkan command buffer, and every prepacked weight is specialized to
 those shapes. The Vulkan backend **pre-records the segment's `VkCommandBuffer`s**
 (`Segment` in `include/vknn/segment.h`; a segment above `Config::maxSubmitNodes`
-records as multiple chunked submits), so there is no mechanism to vary `N`, `H`, or
-`W` at run time.
+records as multiple chunked submits), so a single plan cannot vary `N`, `H`, or `W`
+at run time. A shape that was not planned has no plan — the engine never re-plans
+implicitly inside `run()`.
 
-Concretely:
+Dynamic shapes are supported by declaring the shapes ahead of time as **plan
+buckets**: each bucket is a full pass-and-plan product for one input-shape set, and
+`run()` selects the bucket by the bound input shapes (an exact-match map lookup; an
+unmatched shape is `Status::InvalidArgument` listing the available buckets). Buckets
+share the backends, caches, pipeline pool, and device weight pool, so a second bucket
+reuses tuning and uploaded weights.
 
-- `batch = 1` only. Dynamic batch, dynamic spatial dims, and symbolic dimensions
-  are not supported. A model with an unresolved dim will not plan.
-- Changing input size requires **building a new `Session`** (and paying cold-start cost,
-  see below).
-- This is a deliberate trade: static planning is what makes the pre-recorded
-  command buffer + push-descriptor + prepacked-weight design possible. It is a hard
-  constraint callers must design around.
+- **Compile-time buckets:** `vknn_compile --bucket "NAME=D0xD1x...;NAME2=..."`
+  (repeatable) compiles the model once per bucket into one multi-bucket `.vxm` (see
+  [CONFIG.md](CONFIG.md)). A `.vxm` session dispatches among its stored buckets and
+  cannot add more at run time.
+- **Runtime buckets (ONNX-loaded sessions only):** `Session::prepareShapes(shapes)`
+  re-runs the passes and plan from the retained pristine graph to add a bucket
+  explicitly. It never happens implicitly on `run()`. A `.vxm` session returns
+  `Status::Unsupported`.
+- **Declaring a symbolic axis:** a dynamic **batch** axis falls back to `batch = 1`
+  (or `--batch N`). A dynamic **non-batch** axis (spatial / feature) with no declared
+  shape is a **hard error** naming the input and axis, rather than the old silent
+  `1x1` plan — declare it with `--shape NAME=D0xD1x...`, `--bucket`, or
+  `Config::inputShapes`.
+
+The **fixed-shape path is unchanged and zero-cost**: a model with no dynamic axes (or
+only a dynamic batch) plans exactly **one** bucket, its `.vxm` bytes are byte-identical
+to before this feature, and `run()` takes a fast path that builds no shape key and adds
+no allocation, pipeline creation, or re-record. Static planning is what makes the
+pre-recorded command buffer + push-descriptor + prepacked-weight design possible; a
+bucket is a second such plan, not a per-run reshape.
 
 ---
 
@@ -199,7 +218,7 @@ the zero-copy / capability assumptions do not transfer** and are not retested.
 
 | Area | Status |
 |------|--------|
-| Batch / shapes | Static `batch = 1`, resolved at plan time; reshape ⇒ new Session |
+| Batch / shapes | Resolved at plan time. Dynamic shapes supported via **declared plan buckets** (`--bucket` at compile, `Session::prepareShapes()` at run on ONNX sessions); fixed-shape path unchanged and zero-cost (one bucket). A dynamic non-batch axis with no declared shape is a hard error, not a silent `1x1` plan |
 | NPU / accelerator | None; Vulkan + CPU only (pluggable — see ADDING_A_BACKEND.md) |
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
