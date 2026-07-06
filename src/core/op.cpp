@@ -213,10 +213,11 @@ namespace vknn {
         {
             return it->second;
         }
-        // Fallbacks for the collapsed families: every Reduce* variant (except ReduceMean, which is
-        // in the table above so it can reach the GAP recovery) and then the Unary/Binary elementwise
-        // families, whose specific op is recovered separately via unaryFromOnnx/binaryFromOnnx.
-        if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd" || s == "ReduceL2")
+        // Fallbacks for the collapsed families: the Reduce* variants (name recognition lives in
+        // reduceFromOnnx; ReduceMean also sits in the table above so it can reach the GAP recovery)
+        // and then the Unary/Binary elementwise families, whose specific op is recovered separately
+        // via unaryFromOnnx/binaryFromOnnx.
+        if (reduceFromOnnx(s) != ReduceType::Invalid)
         {
             return OpType::Reduce;
         }

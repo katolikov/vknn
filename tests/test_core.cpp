@@ -6,6 +6,7 @@
 #include "vknn/graph.h"
 #include "vknn/model.h"
 #include "vknn/op_type.h"
+#include "vknn/reduce_type.h"
 #include "vknn/session.h"
 #include "vknn/tensor_format.h"
 #include <cmath>
@@ -79,6 +80,19 @@ TEST(Config, ListContainsWholeNameMatch) {
     // Empty list / empty entries match nothing.
     EXPECT_FALSE(Config::listContains("", "Conv"));
     EXPECT_FALSE(Config::listContains(",,", "Conv"));
+}
+
+TEST(OpTypes, ReduceNamesSingleSource) {
+    // reduceFromOnnx is the single source of reduce-family name recognition: opTypeFromOnnx
+    // classifies a name as OpType::Reduce exactly when reduceFromOnnx recognizes it. Candidates
+    // cover every current member plus unsupported Reduce* spellings and non-reduce names.
+    for (const char *name: {"ReduceMean", "ReduceSum", "ReduceMax", "ReduceMin", "ReduceProd",
+                            "ReduceL2", "ReduceL1", "ReduceLogSum", "ReduceLogSumExp",
+                            "ReduceSumSquare", "Reduce", "Conv"})
+    {
+        const bool isReduce = reduceFromOnnx(name) != ReduceType::Invalid;
+        EXPECT_EQ(opTypeFromOnnx(name) == OpType::Reduce, isReduce) << "name=" << name;
+    }
 }
 
 TEST(Layout, PackMath) {
