@@ -52,10 +52,43 @@ set(VKNN_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set(VKNN_SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${VKNN_SHADER_GEN_DIR})
 
+# Every .comp directly under shaders/ — tracked or not — is compiled, embedded, and counted in
+# embeddedShadersHash(), so a stray scratch file invalidates every device model cache. Warn at
+# configure time; scratch/bench kernels belong in shaders/experimental/ (see its README.md).
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR} ls-files --others --exclude-standard -- shaders
+    OUTPUT_VARIABLE _untracked_shader_files
+    RESULT_VARIABLE _git_ls_result
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(_git_ls_result EQUAL 0 AND _untracked_shader_files)
+    string(REPLACE "\n" ";" _untracked_shader_files "${_untracked_shader_files}")
+    set(_stray_comps "")
+    foreach(_f IN LISTS _untracked_shader_files)
+      if(_f MATCHES "^shaders/[^/]+\\.comp$")
+        list(APPEND _stray_comps ${_f})
+      endif()
+    endforeach()
+    if(_stray_comps)
+      list(JOIN _stray_comps ", " _stray_comps)
+      message(WARNING
+        "untracked .comp directly under shaders/: ${_stray_comps} — these are embedded into the "
+        "engine and change embeddedShadersHash(), invalidating every device model cache. Move "
+        "scratch kernels to shaders/experimental/.")
+    endif()
+  endif()
+endif()
+
 set(EMBEDDED_SHADERS_CPP ${VKNN_SHADER_GEN_DIR}/vknn_embedded_shaders.cpp)
 set(_spv_files "")
 if(VKNN_ENABLE_VULKAN AND SHADERCC)
   file(GLOB VKNN_COMP_SHADERS CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.comp)
+  # shaders/experimental/ holds scratch and bench kernels: never compiled, embedded, or counted in
+  # embeddedShadersHash(). The glob above is non-recursive; the filter keeps the exclusion explicit
+  # should the glob ever become recursive.
+  list(FILTER VKNN_COMP_SHADERS EXCLUDE REGEX "/experimental/")
   # every .spv depends on every include: a .glsl edit must recompile all kernels that may pull it in
   file(GLOB VKNN_GLSL_INCLUDES CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.glsl)
   foreach(_comp ${VKNN_COMP_SHADERS})
