@@ -5,7 +5,9 @@
 #include "vknn/hint.h"
 #include "vknn/precision.h"
 #include "vknn/priority.h"
+#include "vknn/shape.h"
 #include "vknn/tuning.h"
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -25,6 +27,15 @@ namespace vknn {
         /// tier (VK_KHR/EXT_global_priority). Scheduling only — never changes numerical output; inert on a
         /// device without a global-priority extension.
         Priority priority = Priority::Normal;
+
+        /// Declared concrete shapes for graph inputs on the ONNX-load path (createFromOnnx), keyed by
+        /// input tensor name. An input listed here has its dynamic (negative) dims resolved from the
+        /// declared shape; an input absent here falls back to `batch` (=1) on its leading axis and a
+        /// dynamic non-batch axis is a hard error rather than a silent 1x1 plan (see inferShapes). The
+        /// batch-only default (empty map) compiles a fixed-shape model byte-identically. Consumed only
+        /// when building a Session directly from ONNX; a .vxm already has its shapes baked at compile
+        /// time (set them there via vknn_compile --shape / --batch).
+        std::map<std::string, Shape> inputShapes;
 
         /// Caches. Warm-start artifacts (compiled pipelines, prepacked/Winograd weights, the conv autotune
         /// table) are always saved to and reloaded from a per-model cache file, so a warm load skips shader

@@ -4,10 +4,16 @@ namespace vknn {
 
     /// Forward shape (and, where it differs, dtype) inference over the whole graph.
     ///
-    /// First resolves every dynamic (negative) input dim to the concrete `batch`, then walks the nodes
-    /// in graph (topological producer-before-consumer) order and fills each output's `Shape` from its
-    /// resolved inputs using the ONNX per-op rules. Node visitation order is load-bearing: a producer's
-    /// shape must land before a consumer reads it.
+    /// First resolves every dynamic (negative) input dim (from `declared` when the input has a declared
+    /// shape, else the leading batch axis to `batch`), then walks the nodes in graph (topological
+    /// producer-before-consumer) order and fills each output's `Shape` from its resolved inputs using
+    /// the ONNX per-op rules. Node visitation order is load-bearing: a producer's shape must land before
+    /// a consumer reads it.
+    ///
+    /// A dynamic non-batch axis with no declaration is a hard error rather than a silent substitution to
+    /// `batch`: freezing a real spatial/feature axis to 1 compiles the model to a 1x1 plan whose output
+    /// is quietly wrong (the vit_b16_q8 0.32-cosine bug). Only the leading axis (the batch dim) falls
+    /// back to `batch`, matching the documented dynamic-batch contract.
     ///
     /// Central invariant — an EMPTY shape means "not resolved yet", never a rank-0 scalar, EXCEPT on an
     /// initializer (a constant genuinely may be rank-0). Every case therefore refuses to compute from an
@@ -18,16 +24,45 @@ namespace vknn {
     /// their output unresolved and resolve on a subsequent call once the operand lands.
     ///
     /// Ops not listed (the `default` arm) are shape-path ops whose outputs are produced by constFold.
-    void inferShapes(Graph &g, int64_t batch) {
-        // Resolve dynamic dims on inputs to `batch`.
+    void inferShapes(Graph &g, int64_t batch, const std::map<std::string, Shape> *declared) {
+        // Resolve each input's dynamic (negative) dims. A dim resolved on an earlier call is already
+        // positive and is skipped, so this is idempotent across the pipeline's repeated inferShapes runs.
         for (TensorId in: g.inputs)
         {
-            auto &s = g.desc(in).shape;
-            for (auto &d: s)
+            const TensorDesc &d0        = g.desc(in);
+            auto             &s         = g.desc(in).shape;
+            const Shape      *decl      = nullptr;
+            if (declared)
             {
-                if (d < 0)
+                auto it = declared->find(d0.name);
+                if (it != declared->end())
                 {
-                    d = batch;
+                    decl = &it->second;
+                    if (decl->size() != s.size())
+                    {
+                        throw Error(Status::InvalidArgument, "declared shape for input '" + d0.name + "' has rank " + std::to_string(decl->size()) + " but the model declares rank " + std::to_string(s.size()));
+                    }
+                }
+            }
+            for (size_t ax = 0; ax < s.size(); ++ax)
+            {
+                if (s[ax] >= 0)
+                {
+                    continue; // already resolved (or statically known)
+                }
+                if (decl)
+                {
+                    if ((*decl)[ax] < 0)
+                    {
+                        throw Error(Status::InvalidArgument, "declared shape for input '" + d0.name + "' leaves axis " + std::to_string(ax) + " dynamic (" + std::to_string((*decl)[ax]) + "); declare a concrete extent");
+                    }
+                    s[ax] = (*decl)[ax];
+                } else if (ax == 0)
+                {
+                    s[ax] = batch; // leading axis = batch, the documented dynamic-batch fallback
+                } else
+                {
+                    throw Error(Status::InvalidArgument, "input '" + d0.name + "' has a dynamic non-batch axis " + std::to_string(ax) + " with no declared shape; pass --shape " + d0.name + "=D0xD1x... (or Config::inputShapes) so it does not silently compile to a 1x1 plan");
                 }
             }
         }

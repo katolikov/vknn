@@ -319,11 +319,16 @@ namespace vknn {
     }
 
     void Session::plan() {
-        // --- graph optimization passes (NCHW IR, static batch=1) ---
-        // Skipped when the graph came from a .vxm (passes already applied at save time).
+        // --- graph optimization passes (NCHW IR; batch=1 fallback + any Config::inputShapes) ---
+        // Skipped when the graph came from a .vxm (passes already applied at save time). The default
+        // fusion set is used (the compiler tool sets fusion options explicitly); the ONNX-load path only
+        // needs the caller's declared input shapes threaded in so a dynamic-spatial model resolves
+        // instead of silently freezing to a 1x1 plan.
         if (!graphOptimized_)
         {
-            runStandardPasses(graph_); // defaults; the compiler tool sets fusion options explicitly
+            PassOptions opt;
+            opt.inputShapes = cfg_.inputShapes;
+            runStandardPasses(graph_, opt);
         }
         graph_.topoSort();
 

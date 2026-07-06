@@ -8,11 +8,21 @@
 // layout/dtype passes at the bottom are Vulkan-backend-oriented and run after backend selection.
 #pragma once
 #include "vknn/graph.h"
+#include <map>
+#include <string>
 
 namespace vknn {
 
-    // Resolve dynamic batch to `batch` and infer concrete shapes for all tensors possible.
-    void inferShapes(Graph &g, int64_t batch = 1);
+    // Resolve each graph input's dynamic (negative) dims, then infer concrete shapes for all tensors
+    // possible. A dim is resolved from `declared` (keyed by input tensor name) when that input has a
+    // declared shape; otherwise the leading (batch) axis falls back to `batch` and any OTHER dynamic
+    // axis with no declaration is a hard error (@throws Error{InvalidArgument}) naming the input and
+    // axis -- substituting `batch` into a dynamic spatial/feature axis silently compiles the model to
+    // a 1x1 plan, which is the class of bug this refuses. `declared` may be null (no declarations, the
+    // batch-only path). A declared entry's rank must match the input's rank and its dims must be
+    // non-negative. The pass is idempotent: a dim resolved on an earlier call is already positive and
+    // is left untouched (the declaration lookup and the error fire only while a dim is still dynamic).
+    void inferShapes(Graph &g, int64_t batch = 1, const std::map<std::string, Shape> *declared = nullptr);
     // Normalize 1-D Convs (rank-3 constant weight, 1-spatial-dim attributes) to the canonical 2-D
     // geometry every conv consumer indexes: weight [M,C/g,k] -> [M,C/g,k,1], strides/dilations/
     // kernel_shape/pads extended with the W dim's identity values. Activation ranks are unchanged.
@@ -76,6 +86,11 @@ namespace vknn {
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch               = 1;
+        // Declared concrete shapes for graph inputs, keyed by input tensor name. An input listed here
+        // has its dynamic (negative) dims resolved from its declared shape; an input absent here falls
+        // back to `batch` on its leading axis and errors on any other dynamic axis (see inferShapes).
+        // Empty = the batch-only path, so existing callers that set only `batch` are unchanged.
+        std::map<std::string, Shape> inputShapes;
         bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)

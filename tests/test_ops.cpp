@@ -1552,6 +1552,144 @@ TEST(Passes, FusePointwiseBitExact) {
 
 namespace {
 
+    // A graph with a fully-symbolic input [-1,-1,-1,-1] feeding a 3x3 Conv (16 out-channels, pad 1,
+    // stride 1). Shape inference must resolve the input before it can propagate an output shape, so
+    // this exercises exactly the declared-shape / batch-fallback / hard-error paths. The named input
+    // is "pixel_values" to mirror the vit case (all four axes dynamic).
+    Graph makeDynamicInputConvGraph() {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "pixel_values";
+        xi.shape   = {-1, -1, -1, -1};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+
+        TensorDesc wi;
+        wi.name          = "w";
+        wi.shape         = {16, 3, 3, 3};
+        wi.isInitializer = true;
+        TensorId   w     = g.addTensor(wi);
+        HostBuffer hb;
+        hb.resizeElems(16 * 3 * 3 * 3, DType::Float32);
+        for (size_t i = 0; i < 16 * 3 * 3 * 3; ++i)
+        {
+            hb.f32()[i] = 0.f;
+        }
+        g.initializers[w] = hb;
+
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+
+        Node n;
+        n.type                     = OpType::Conv;
+        n.name                     = "conv";
+        n.inputs                   = {x, w};
+        n.outputs                  = {y};
+        n.attr.map["strides"]      = ints({1, 1});
+        n.attr.map["pads"]         = ints({1, 1, 1, 1});
+        n.attr.map["dilations"]    = ints({1, 1});
+        n.attr.map["kernel_shape"] = ints({3, 3});
+        g.nodes.push_back(n);
+        g.outputs = {y};
+        return g;
+    }
+
+} // namespace
+
+// --- Declared input shapes: a symbolic leading (batch) axis still falls back to `batch` (=1) with no
+// declaration, so a dynamic-batch model resolves exactly as before. Here only axis 0 is dynamic. ---
+TEST(Passes, InferShapesBatchFallback) {
+    Graph g;
+    // input [-1,3,8,8]: only the batch axis is dynamic (the resnet18 "data [N,3,224,224]" case).
+    TensorDesc xi;
+    xi.name    = "data";
+    xi.shape   = {-1, 3, 8, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+
+    TensorDesc wi;
+    wi.name          = "w";
+    wi.shape         = {16, 3, 3, 3};
+    wi.isInitializer = true;
+    TensorId   w     = g.addTensor(wi);
+    HostBuffer hb;
+    hb.resizeElems(16 * 3 * 3 * 3, DType::Float32);
+    g.initializers[w] = hb;
+
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type                     = OpType::Conv;
+    n.name                     = "conv";
+    n.inputs                   = {x, w};
+    n.outputs                  = {y};
+    n.attr.map["strides"]      = ints({1, 1});
+    n.attr.map["pads"]         = ints({1, 1, 1, 1});
+    n.attr.map["dilations"]    = ints({1, 1});
+    n.attr.map["kernel_shape"] = ints({3, 3});
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    inferShapes(g, 1); // no declared map: batch axis -> 1, no error (no other dynamic axis)
+    EXPECT_EQ(g.desc(x).shape, (Shape {1, 3, 8, 8}));
+    EXPECT_EQ(g.desc(y).shape, (Shape {1, 16, 8, 8}));
+}
+
+// --- A declared spatial shape flows through inferShapes to the output: pixel_values 1x3x224x224 with
+// pad-1 3x3 stride-1 conv -> y [1,16,224,224]. Without the declaration this input is all -1. ---
+TEST(Passes, InferShapesDeclaredSpatial) {
+    Graph                        g = makeDynamicInputConvGraph();
+    std::map<std::string, Shape> declared;
+    declared["pixel_values"] = {1, 3, 224, 224};
+    inferShapes(g, 1, &declared);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {1, 3, 224, 224}));
+    EXPECT_EQ(g.desc(g.outputs[0]).shape, (Shape {1, 16, 224, 224}));
+}
+
+// --- An UNDECLARED dynamic non-batch axis is a hard error (Status::InvalidArgument), never a silent
+// substitution to 1 (the vit_b16_q8 0.32-cosine bug: spatial axes froze to a 1x1 plan). The message
+// names the input and the offending axis. ---
+TEST(Passes, InferShapesUndeclaredDynamicAxisErrors) {
+    Graph g = makeDynamicInputConvGraph(); // pixel_values [-1,-1,-1,-1], no declaration
+    bool  threw = false;
+    try
+    {
+        inferShapes(g, 1); // axis 0 -> batch, but axes 1..3 are dynamic non-batch with no declaration
+    } catch (const Error &e)
+    {
+        threw = true;
+        EXPECT_EQ(e.status(), Status::InvalidArgument);
+        EXPECT_NE(std::string(e.what()).find("pixel_values"), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(threw) << "undeclared dynamic non-batch axis must hard-error, not silently become 1";
+}
+
+// --- A declared shape whose rank disagrees with the input's rank is a hard error: it cannot resolve
+// the input's dynamic dims and would silently mis-shape the plan. ---
+TEST(Passes, InferShapesDeclaredRankMismatchErrors) {
+    Graph                        g = makeDynamicInputConvGraph(); // rank-4 input
+    std::map<std::string, Shape> declared;
+    declared["pixel_values"] = {1, 3, 224}; // rank 3 != 4
+    bool threw               = false;
+    try
+    {
+        inferShapes(g, 1, &declared);
+    } catch (const Error &e)
+    {
+        threw = true;
+        EXPECT_EQ(e.status(), Status::InvalidArgument);
+    }
+    EXPECT_TRUE(threw) << "declared shape of the wrong rank must hard-error";
+}
+
+namespace {
+
     // MatMul(x [n,n], W const [n,n]) -> t0, Mul(t0, c const [n,n]) -> y. The Mul is a one-step
     // pointwise chain whose producer is the MatMul.
     Graph makeMatMulMulGraph(int64_t n) {

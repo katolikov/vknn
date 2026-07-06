@@ -7,6 +7,10 @@
 //
 //   vknn_compile <model.onnx|model.vxm> <out.vxm> [flags]
 //     --fp16            store weights as fp16 (default: fp32)
+//     --batch N         resolve a dynamic LEADING (batch) axis to N (default 1)
+//     --shape NAME=D0xD1x...  declare a graph input's full concrete shape (repeatable), resolving
+//                       every dynamic axis of that input, e.g. --shape pixel_values=1x3x224x224. An
+//                       undeclared dynamic non-batch axis is a hard error (never a silent 1x1 plan).
 //     -O0..-O3 / --opt N  optimization level (default -O1):
 //                         O0 = no optional fusion (reference), O1 = the general pointwise
 //                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
@@ -50,6 +54,48 @@ static bool has(int c, char **v, const char *flag) noexcept {
         }
     }
     return false;
+}
+
+/// Parse a `--shape NAME=D0xD1x...` value (e.g. "pixel_values=1x3x224x224") into the input name and
+/// its concrete dims. Dims are 'x'-separated non-negative integers. Returns false (and leaves *name /
+/// *shape unspecified) on a malformed spec: no '=', an empty name, an empty/garbage dim, or a negative
+/// dim -- a declared shape must be fully concrete.
+static bool parseShapeSpec(const char *spec, std::string *name, Shape *shape) {
+    const char *eq = strchr(spec, '=');
+    if (!eq || eq == spec)
+    {
+        return false;
+    }
+    name->assign(spec, eq);
+    shape->clear();
+    const char *p = eq + 1;
+    if (*p == 0)
+    {
+        return false;
+    }
+    while (*p)
+    {
+        char *end = nullptr;
+        long  v   = strtol(p, &end, 10);
+        if (end == p || v < 0)
+        {
+            return false; // no digits, or a negative/dynamic dim
+        }
+        shape->push_back((int64_t) v);
+        p = end;
+        if (*p == 'x' || *p == 'X')
+        {
+            ++p;
+            if (*p == 0)
+            {
+                return false; // trailing separator
+            }
+        } else if (*p != 0)
+        {
+            return false; // unexpected char between dims
+        }
+    }
+    return true;
 }
 
 /// JSON string escaping for the support report (quotes, backslashes, control characters).
@@ -119,7 +165,7 @@ static bool writeSupportReport(const Graph &g, const std::string &modelPath, con
 int main(int argc, char **argv) {
     if (argc < 3)
     {
-        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [-O0..-O3 | --opt N] "
+        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--shape NAME=D0xD1x...] [-O0..-O3 | --opt N] "
                "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n",
                argv[0]);
         return 1;
@@ -162,6 +208,28 @@ int main(int argc, char **argv) {
     over("--dequantize", "--no-dequantize", opt.dequantize);
     opt.dumpBig = has(argc, argv, "--dump-big");
 
+    // Resolve dynamic input dims. --batch N sets the fallback substituted into a dynamic LEADING
+    // (batch) axis; --shape NAME=D0xD1x... (repeatable) declares an input's full concrete shape and
+    // resolves EVERY dynamic axis of that input. An undeclared dynamic non-batch axis is a hard error
+    // in the passes (inferShapes), never a silent 1x1 plan.
+    for (int i = 3; i < argc; ++i)
+    {
+        if (!strcmp(argv[i], "--batch") && i + 1 < argc)
+        {
+            opt.batch = atoll(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--shape") && i + 1 < argc)
+        {
+            std::string name;
+            Shape       shape;
+            if (!parseShapeSpec(argv[i + 1], &name, &shape))
+            {
+                printf("[compile] bad --shape '%s' (expected NAME=D0xD1x..., non-negative dims)\n", argv[i + 1]);
+                return 1;
+            }
+            opt.inputShapes[name] = shape;
+        }
+    }
+
     Graph      g;
     const bool vxmInput = onnx.size() > 4 && onnx.compare(onnx.size() - 4, 4, ".vxm") == 0;
     if (vxmInput)
@@ -176,10 +244,19 @@ int main(int argc, char **argv) {
     } else
     {
         printf("[compile] importing %s ...\n", onnx.c_str());
-        g = importOnnx(onnx);
-        printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d lower-conv=%d)\n", g.nodes.size(), g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw,
-               opt.fusePointwiseChains, opt.lowerConv);
-        runStandardPasses(g, opt);
+        try
+        {
+            g = importOnnx(onnx);
+            printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d lower-conv=%d)\n", g.nodes.size(), g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw,
+                   opt.fusePointwiseChains, opt.lowerConv);
+            runStandardPasses(g, opt);
+        } catch (const Error &e)
+        {
+            // A dynamic non-batch input axis with no --shape declaration lands here (as does any other
+            // import/pass failure). Report it and exit nonzero instead of aborting on the exception.
+            printf("[compile] %s\n", e.what());
+            return 2;
+        }
         printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
     }
 
