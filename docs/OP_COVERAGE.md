@@ -63,6 +63,28 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Dropout | eliminated | eliminated | inference-mode identity (training_mode absent or constant false, mask output absent or unconsumed) removed at import, consumers rewired to the producer; a consumed mask or a non-constant training_mode is unsupported |
 | InstanceNormalization | lowered | lowered | decomposed at import into spatial ReduceMean + Sub/Mul/Add/Sqrt/Div and a per-channel scale/bias Mul+Add, so it runs wherever those ops run (no dedicated kernel); needs fp32-initializer scale/B of length C and input rank ≥ 3, else the node stays opaque and unsupported |
 
+## Quantization
+
+A quantized ONNX checkpoint runs **dequantized to float** via the import-time dequantize pass
+(`src/import/dequantize_graph.cpp`, default on; `--no-dequantize` disables). The pass drops the
+8-bit rounding but **preserves the saturation clamp** each quant hop encodes (so a ReLU folded into
+an activation quant range survives) — results match an int-exact runtime closely but not
+bit-exactly. Only static QDQ / QLinear quantization is lowered; the dynamic-quantization ops have no
+float lowering.
+
+| Operator | GPU | CPU | Notes |
+|---|---|---|---|
+| DequantizeLinear | lowered / ✅ | ✅ | over an initializer, folds the weight to fp32 `(W_q − zp)·scale` (per-tensor + per-axis); over an already-float edge inside a collapsed sandwich, drops; a genuine int-graph-boundary DQ stays as the CPU kernel |
+| QuantizeLinear | lowered / ✅ | ✅ | an activation Q→DQ sandwich collapses to a `Clip` over the quant range `[(qmin−zp)·scale, (qmax−zp)·scale]`; a graph-boundary Q runs on the CPU kernel (`saturate(round_half_even(x/scale) + zp)`) |
+| QLinearConv | lowered | — | → Conv + `Clip` to the output quant range; weights fold fp32, int32 bias rescales by `x_s·w_s` |
+| QLinearMatMul | lowered | — | → MatMul + output-range `Clip` |
+| QGemm | lowered | — | → Gemm + output-range `Clip` (com.microsoft) |
+| QLinearAdd | lowered | — | → Add + output-range `Clip`; a quantized-initializer operand dequantizes with its own scale/zp (com.microsoft) |
+| QLinearGlobalAveragePool | lowered | — | → GlobalAveragePool + output-range `Clip` (com.microsoft) |
+| DynamicQuantizeLinear | — | — | recognized and named at the boundary; no float lowering yet (unsupported) |
+| MatMulInteger | — | — | recognized; no float lowering yet (unsupported) |
+| ConvInteger | — | — | recognized; no float lowering yet (unsupported) |
+
 ## Fusions and lowerings
 
 The graph passes (and `vknn_compile`) apply the rewrites below. `vknn_compile` groups them behind

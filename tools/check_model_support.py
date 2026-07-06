@@ -22,10 +22,13 @@ Verdict classes:
                            (incl. custom domains and control-flow subgraph ops), an op
                            with no kernel in either backend, or an unusable dtype.
 
-Quantized models (QDQ / QLinear / dynamic quantization) get a dedicated blocker class:
+Quantized models (QDQ / QLinear / dynamic quantization) get a dedicated op class:
 the importer recognizes the family (incl. the com.microsoft members, matched by name),
-and support arrives via the import-time dequantize pass — pending in this tree, so a
-model carrying these ops still reports NOT SUPPORTED, with the precise reason.
+and the QDQ and QLinear members run dequantized to float via the import-time pass,
+saturation clamps preserved; --no-dequantize disables. The regex mode below cannot run
+that pass, so it flags every quantized op — use --engine-report for the authoritative
+post-pass verdict, which lowers the decomposable ops and only reports the members with
+no float lowering yet (dynamic-quantization ops) as blockers.
 
 Tensor checks: graph input/output dtypes against the engine's I/O surface
 (fp32/fp16 native, uint8 via the declared-format boundary, integer tensors for
@@ -73,8 +76,9 @@ _INTERNAL_NAMES = {"FusedSE", "FusedDwPw", "FusedPointwise", "ConvGemm", "Conver
                    "ConvertDtype", "Unknown", "Unary", "Binary", "Reduce"}
 
 # The ONNX quantized operator family (mirrors opTypeIsQuantized in src/core/op.cpp). The importer
-# recognizes each as its own OpType, but no kernel exists: support arrives via the import-time
-# dequantize pass, which rewrites them to float ops. QGemm/QLinearAdd/QLinearGlobalAveragePool are
+# recognizes each as its own OpType, but no kernel executes them directly: the QDQ and QLinear
+# members run dequantized to float via the import-time pass (saturation clamps preserved), while the
+# dynamic-quantization members have no float lowering yet. QGemm/QLinearAdd/QLinearGlobalAveragePool are
 # com.microsoft-domain ops the importer matches by name (the wire parser drops NodeProto.domain),
 # so the custom-domain blocker does not apply to them.
 _QUANTIZED_ONNX = {"QuantizeLinear", "DequantizeLinear", "DynamicQuantizeLinear", "QLinearConv",
@@ -374,8 +378,10 @@ def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=Non
             continue
         if node.op_type in _QUANTIZED_ONNX:
             rep.blocker("quantized op",
-                        "op %s — quantized operator: runs via the import-time dequantize pass "
-                        "(pending in this tree); no kernel executes it directly" % node.op_type,
+                        "op %s — quantized operator: runs dequantized to float via the import-time "
+                        "pass, saturation clamps preserved; --no-dequantize disables. Regex mode "
+                        "cannot run the pass — use --engine-report for the post-pass verdict"
+                        % node.op_type,
                         label)
             continue
         ty = name_to_type.get(node.op_type)

@@ -104,14 +104,40 @@ conversion on the GPU, would remove most of it. It is not optimized.
 
 ---
 
-## 6. int8 is a stretch goal — not implemented
+## 6. Quantized models run dequantized to float — not int-exact
 
-The device advertises the capabilities for it (`shaderInt8 = 1`, 8-bit storage,
-`VK_KHR_shader_integer_dot_product`), and `Config::precision` only exposes
-`Low | Normal | High` (fp16 / fp16 + selective fp32 / fp32) — there is **no int8
-tier**. There is no quantization
-pass, no int8 kernel, and no calibration tooling. int8 inference is a documented
-stretch goal that is **not** built.
+There is no int8 compute tier: the device advertises the capabilities for it
+(`shaderInt8 = 1`, 8-bit storage, `VK_KHR_shader_integer_dot_product`) and
+`Config::precision` only exposes `Low | Normal | High` (fp16 / fp16 + selective
+fp32 / fp32), but no kernel computes in int8. Instead, a quantized checkpoint runs
+through the **import-time dequantize pass** (`src/import/dequantize_graph.cpp`,
+default on; `PassOptions::dequantize` / `--no-dequantize` disables it):
+
+- DequantizeLinear over an initializer folds the weight to fp32 (`(W_q − zp) · scale`,
+  per-tensor and per-axis).
+- The fused QLinear family (QLinearConv / QLinearMatMul / QGemm / QLinearAdd /
+  QLinearGlobalAveragePool) lowers to its plain float op plus a `Clip` to the op's own
+  output quant range.
+- A QuantizeLinear→DequantizeLinear activation sandwich collapses to a `Clip` over the
+  quant range, not to a raw passthrough.
+
+**Dequantized execution drops the 8-bit rounding but preserves the saturation clamp.**
+Collapsing a quantize round-trip is *not* an identity: `QuantizeLinear` composed with
+`DequantizeLinear` (ignoring rounding) equals `clamp(x, (qmin − zp)·scale,
+(qmax − zp)·scale)`, and ORT's QDQ quantizer folds a preceding ReLU into that range
+(lower bound 0). Dropping the round-trip to raw float would silently delete that ReLU
+and let activations explode, so the pass always keeps the clamp as a `Clip` with
+constant bounds (pointwise-fusable, GPU-eligible) and only drops the grid snap. Results
+are therefore **close to but not bit-identical** with an int-exact runtime — the residual
+is the interior per-tensor requantization that a float chain does not re-apply
+(mobilenetv2_int8 cosine ≈ 0.96, resnet50_int8 ≈ 0.998 vs the ORT int-exact goldens,
+argmax matching).
+
+Only static QDQ / QLinear quantization is lowered. The **dynamic-quantization** ops
+(`DynamicQuantizeLinear`, `MatMulInteger`, `ConvInteger`) are recognized and named at
+the boundary but have no float lowering yet, so models built on them (e.g. the
+transformer `*_q8` checkpoints) still report NOT SUPPORTED. There is no calibration
+tooling.
 
 ---
 
@@ -178,7 +204,7 @@ the zero-copy / capability assumptions do not transfer** and are not retested.
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs) |
-| int8 | Not implemented (stretch goal) |
+| Quantized models | Static QDQ / QLinear run dequantized to float (clamps preserved, rounding dropped — not int-exact); dynamic-quant ops (DynamicQuantizeLinear / MatMulInteger / ConvInteger) unsupported; no int8 compute tier |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |
 | ONNX ops | See OP_COVERAGE.md |
 | Devices tested | One (Android arm64-v8a, AMD RDNA-class mobile GPU) |
