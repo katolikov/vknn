@@ -4,8 +4,34 @@
 // the fp16 payloads at load (initFloats / the session's CPU pool load).
 #include "import/passes.h"
 #include "vknn/dtype.h"
+#include <cmath>
 
 namespace vknn {
+
+    // Largest finite fp16 magnitude. A finite fp32 value beyond this range narrows to +/-inf, and an
+    // fp32 +/-inf stays +/-inf. Either way an fp16 inf is an operand hazard: the attention-mask idiom
+    // (1 - mask) * -3.4028235e38 multiplies the non-pad 0 by that constant, and 0 * -inf is NaN, which
+    // poisons the softmax and the whole output. Clamping the constant to the finite extreme keeps
+    // 0 * -65504 = 0, while a -65504 additive bias still drives exp() to 0 for pad tokens.
+    static constexpr float kFp16MaxFinite = 65504.0f;
+
+    // Saturate an out-of-fp16-range or infinite input to +/-kFp16MaxFinite so the conversion produces
+    // a finite fp16 value. NaN passes through unchanged.
+    static inline float clampToFp16Range(float v) {
+        if (std::isnan(v))
+        {
+            return v;
+        }
+        if (v > kFp16MaxFinite)
+        {
+            return kFp16MaxFinite;
+        }
+        if (v < -kFp16MaxFinite)
+        {
+            return -kFp16MaxFinite;
+        }
+        return v;
+    }
 
     Fp16ConvertStats convertInitializersFp16(Graph &g) {
         Fp16ConvertStats st;
@@ -29,7 +55,7 @@ namespace vknn {
             fp16_t              *h = reinterpret_cast<fp16_t *>(half.data());
             for (int64_t i = 0; i < n; ++i)
             {
-                h[i] = floatToHalf(src[i]);
+                h[i] = floatToHalf(clampToFp16Range(src[i]));
             }
             kv.second.bytes = std::move(half);
             d.dtype         = DType::Float16;
