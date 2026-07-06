@@ -32,12 +32,26 @@ Usage:
   tools/check_model_support.py model.onnx
   tools/check_model_support.py model.onnx --json report.json
   tools/check_model_support.py model.onnx --repo /path/to/vknn
+  tools/check_model_support.py model.onnx --engine-report report.json
+
+Engine-emitted mode (--engine-report): the node/backend analysis comes from the
+engine itself instead of the regex-derived gates above. Generate the JSON with
+
+  build-host/vknn_compile model.onnx /tmp/m.vxm --support-report report.json
+
+which evaluates vkSupportSurvey — the exact gate code VulkanBackend::supportsNode
+runs — over the post-pass graph, so tool and engine cannot drift. The report's
+per-node rows become the fallback list verbatim (backend "none" rows become
+blockers); the tensor/dtype checks still come from the ONNX file. Without the
+flag, the regex derivation above is the no-binary fallback.
 
 Exit code: 0 = supported (with or without CPU fallbacks), 1 = not supported,
 2 = bad invocation / unreadable model. Requires: onnx (pip install onnx).
 
 Sibling tool: scan_unsupported_ops.py emits an implementation brief (shapes +
-attributes per missing op) for the unsupported bucket this tool reports.
+attributes per missing op) for the unsupported bucket this tool reports. It
+imports _INTERNAL_NAMES and CPU_FALLBACK_GATES from this file, so the gate
+definitions here are the single source of truth between the two tools.
 """
 import argparse
 import json
@@ -48,7 +62,8 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Names accepted by op.cpp that never appear in an ONNX export (VKNN-internal
-# fusion/layout pseudo-ops, family selectors, the placeholder).
+# fusion/layout pseudo-ops, family selectors, the placeholder). Canonical definition —
+# scan_unsupported_ops.py imports this set rather than keeping its own copy.
 _INTERNAL_NAMES = {"FusedSE", "FusedDwPw", "FusedPointwise", "ConvGemm", "ConvertLayout",
                    "ConvertDtype", "Unknown", "Unary", "Binary", "Reduce"}
 
@@ -166,8 +181,9 @@ def _gate_pad(node, attrs, index):
 
 def _gate_gridsample(node, attrs, index):
     mode = attrs.get("mode", "bilinear")
-    if mode not in ("bilinear", "linear", "nearest"):
-        return "GridSample mode=%r (GPU kernel does bilinear/linear/nearest)" % mode
+    # Mirrors vkNodeGate: the GPU kernel bakes the mode as a spec constant and covers cubic too.
+    if mode not in ("bilinear", "linear", "nearest", "cubic", "bicubic"):
+        return "GridSample mode=%r (GPU kernel does bilinear/linear/nearest/cubic/bicubic)" % mode
     return None
 
 
@@ -495,26 +511,50 @@ def main():
     ap.add_argument("model")
     ap.add_argument("--repo", default=REPO_ROOT, help="VKNN repo root (default: this tree)")
     ap.add_argument("--json", help="also write the full report as JSON")
+    ap.add_argument("--engine-report", metavar="JSON",
+                    help="per-node assignment from `vknn_compile --support-report`; replaces the "
+                         "regex-derived node/gate analysis with the engine's own answer")
     args = ap.parse_args()
-
-    name_to_type = parse_op_map(os.path.join(args.repo, "src", "core", "op.cpp"))
-    vk_ops = parse_registry(os.path.join(args.repo, "src", "backend", "vulkan", "ops"),
-                            "VKNN_REGISTER_VK_OP")
-    cpu_ops = parse_registry(os.path.join(args.repo, "src", "backend", "cpu", "ops"),
-                             "VKNN_REGISTER_CPU_OP")
-    if not vk_ops or not cpu_ops:
-        sys.stderr.write("warning: backend registries not found under %s; kernel checks degrade\n"
-                         % args.repo)
 
     model = load_model(args.model)
     rep = Report()
     rep.stats["opset"] = {imp.domain or "ai.onnx": imp.version for imp in model.opset_import}
     rep.stats["node_count"] = len(model.graph.node)
     scan_tensors(model, args.model, rep)
-    scan_nodes(model.graph, "main", name_to_type, vk_ops, cpu_ops, rep)
+
+    if args.engine_report:
+        # Engine truth: the report rows are the post-pass node assignment computed by the same
+        # gate code supportsNode runs; no regex derivation is involved.
+        try:
+            with open(args.engine_report) as f:
+                engine = json.load(f)
+        except (OSError, ValueError) as e:
+            sys.exit("error: cannot read engine report %s: %s" % (args.engine_report, e))
+        for n in engine.get("nodes", []):
+            label = "%s '%s' (engine)" % (n.get("op", "?"), n.get("name") or "unnamed")
+            if n.get("backend") == "none":
+                rep.blocker("no kernel", "op %s — %s" % (n.get("op", "?"),
+                                                         n.get("reason", "no kernel")), label)
+            elif n.get("backend") != "vulkan":
+                rep.fallbacks.append({"op_type": n.get("op", "?"), "node": label,
+                                      "reason": n.get("reason", "")})
+        rep.stats["node_source"] = "engine-report:%s" % os.path.abspath(args.engine_report)
+        rep.stats["engine_node_count"] = (engine.get("summary") or {}).get("total")
+    else:
+        name_to_type = parse_op_map(os.path.join(args.repo, "src", "core", "op.cpp"))
+        vk_ops = parse_registry(os.path.join(args.repo, "src", "backend", "vulkan", "ops"),
+                                "VKNN_REGISTER_VK_OP")
+        cpu_ops = parse_registry(os.path.join(args.repo, "src", "backend", "cpu", "ops"),
+                                 "VKNN_REGISTER_CPU_OP")
+        if not vk_ops or not cpu_ops:
+            sys.stderr.write("warning: backend registries not found under %s; kernel checks degrade\n"
+                             % args.repo)
+        scan_nodes(model.graph, "main", name_to_type, vk_ops, cpu_ops, rep)
 
     supported = not rep.blockers
     print("== VKNN support report: %s ==" % os.path.basename(args.model))
+    if args.engine_report:
+        print("(node assignment: engine-emitted, %s)" % args.engine_report)
     ini = rep.stats.get("initializers", {})
     print("opset %s | %d node(s) | %d initializer(s), %.1f MB weights"
           % (rep.stats["opset"], rep.stats["node_count"], ini.get("count", 0),

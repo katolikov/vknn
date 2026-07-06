@@ -33,10 +33,10 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SRC = os.path.join(REPO_ROOT, "src", "core", "op.cpp")
 
-# Op names that op.cpp accepts but that never appear in an ONNX export (they are
-# VKNN-internal fusion/layout pseudo-ops or the placeholder). Excluding them from
-# the "supported" set is harmless for scanning and keeps the report honest.
-_INTERNAL_NAMES = {"FusedSE", "FusedDwPw", "ConvertLayout", "Unknown", "Unary", "Binary"}
+# The internal-name set and the GPU-fallback gates are shared with check_model_support.py — one
+# source of truth between the two tools (each previously kept a copy that drifted).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from check_model_support import _INTERNAL_NAMES, CPU_FALLBACK_GATES  # noqa: E402
 
 
 def supported_op_names(src_path):
@@ -157,55 +157,14 @@ def io_details(names, index):
 
 
 # ---------------------------------------------------------------------------
-# Attribute-level gates: op types VKNN *recognizes* but whose specific attribute
-# variant has no GPU kernel, so the node falls back to the (correct) CPU op. The
-# model still runs, but these are the prime targets for "implement a GPU path".
+# GPU-fallback gates: op types VKNN *recognizes* but whose specific variant has
+# no GPU kernel, so the node falls back to the (correct) CPU op. The model still
+# runs, but these are the prime targets for "implement a GPU path".
 #
-# Only attribute-checkable gates from vk_backend.cpp::supportsNode are encoded
-# here -- they need nothing but the node's own attributes, so they're reliable
-# from a raw ONNX file. The many shape/initializer/layout-dependent gates in
-# supportsNode (MatMul rank, DepthToSpace divisibility, Resize channel/batch,
-# const-initializer requirements, ...) are intentionally NOT replicated: they
-# depend on post-pass internal state and would produce false positives.
-_FLOAT_DTYPES = {"FLOAT", "FLOAT16", "DOUBLE", "BFLOAT16"}
-
-
-def _pad_fallback(attrs):
-    mode = attrs.get("mode", "constant")
-    if mode not in ("constant", "edge", "reflect"):
-        return "Pad mode=%r has no GPU kernel (GPU does only constant/edge/reflect)" % mode
-    return None
-
-
-def _gridsample_fallback(attrs):
-    mode = attrs.get("mode", "bilinear")
-    if mode not in ("bilinear", "linear", "nearest"):
-        return ("GridSample mode=%r has no GPU kernel (GPU does only "
-                "bilinear/linear/nearest; e.g. cubic falls back)" % mode)
-    return None
-
-
-def _cast_fallback(attrs):
-    to = attrs.get("to")
-    to_name = dtype_name(to) if isinstance(to, int) else str(to)
-    if to_name not in _FLOAT_DTYPES:
-        return ("Cast to=%s is a non-float target (GPU path is float->float only)" % to_name)
-    return None
-
-
-def _einsum_fallback(attrs):
-    eq = "".join(c for c in attrs.get("equation", "") if c not in " \t")
-    if eq != "i,j->ij":
-        return ("Einsum equation=%r has no GPU kernel (only 'i,j->ij' outer product)" % eq)
-    return None
-
-
-GPU_FALLBACK_RULES = {
-    "Pad": _pad_fallback,
-    "GridSample": _gridsample_fallback,
-    "Cast": _cast_fallback,
-    "Einsum": _einsum_fallback,
-}
+# The gate functions are CPU_FALLBACK_GATES imported from check_model_support.py:
+# the attribute/shape-checkable subset of vk_backend.cpp::supportsNode. Deeper
+# gates depend on post-pass internal state and are intentionally not replicated —
+# they would produce false positives from a raw ONNX file.
 
 
 def scan_graph(graph, supported, path, unsupported, fallbacks):
@@ -228,8 +187,8 @@ def scan_graph(graph, supported, path, unsupported, fallbacks):
         if node.op_type not in supported or not in_default_domain:
             unsupported.append(record)
         else:
-            rule = GPU_FALLBACK_RULES.get(node.op_type)
-            reason = rule(attrs) if rule else None
+            rule = CPU_FALLBACK_GATES.get(node.op_type)
+            reason = rule(node, attrs, index) if rule else None
             if reason:
                 record["reason"] = reason
                 fallbacks.append(record)
