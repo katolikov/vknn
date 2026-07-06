@@ -144,37 +144,9 @@ namespace vknn {
         return upload(*env.ctx, v, env.useFp16);
     }
 
-    // Read an initializer as fp32, decoding from fp16 if it was stored fp16 (an fp16 .vxm from
-    // vknn_compile). Ops prepack/transpose weights in fp32, then upload() re-encodes to fp16 for the
-    // GPU (fp16->fp32->fp16 is exact). Use this instead of `g.initializers.at(id).f32()` so a model
-    // loaded from an fp16 .vxm works unchanged; for an fp32 source it's a plain copy.
-    inline std::vector<float> initFloats(const Graph &g, TensorId id) {
-        const HostBuffer  &hb = g.initializers.at(id);
-        int64_t            n  = numElements(g.desc(id).shape);
-        if (n <= 0)
-        {
-            // A 0-D scalar constant has shape [] -> numElements 0, but it holds one element; recover the
-            // count from the raw bytes so the value is read (not dropped).
-            n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4));
-        }
-        std::vector<float> out((size_t) std::max<int64_t>(n, 0));
-        if (g.desc(id).dtype == DType::Float16)
-        {
-            const fp16_t *h = reinterpret_cast<const fp16_t *>(hb.bytes.data());
-            for (int64_t i = 0; i < n; ++i)
-            {
-                out[i] = halfToFloat(h[i]);
-            }
-        } else
-        {
-            const float *f = hb.f32();
-            for (int64_t i = 0; i < n; ++i)
-            {
-                out[i] = f[i];
-            }
-        }
-        return out;
-    }
+    // Initializer payloads decode to fp32 through initFloats (vknn/graph.h) — the shared decode
+    // path for host-side payload reads. Ops prepack/transpose weights in fp32, then upload()
+    // re-encodes to fp16 for the GPU (fp16->fp32->fp16 is exact).
 
     // Upload an initializer uploaded FLAT (no transpose/prepack) to a device buffer with at most one
     // element conversion. When the stored dtype already matches the compute precision the raw bytes are

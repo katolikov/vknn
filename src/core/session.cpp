@@ -446,9 +446,18 @@ namespace vknn {
 
         // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---
         // Only weights a CPU-assigned node reads need a host copy; GPU ops upload from
-        // graph_.initializers.
+        // graph_.initializers. Every CPU op reads pool payloads through host.f32()/i64() with no
+        // per-site dtype handling, so this load is the one place the stored dtype is honored: a
+        // Float16 payload decodes to fp32 here (via initFloats, which also recovers a rank-0
+        // scalar's element from the payload size), and any other dtype copies through as-is.
         {
             std::set<TensorId> cpuNeeded;
+            auto               need = [&](TensorId t) {
+                if (t != kNoTensor && graph_.isInitializer(t))
+                {
+                    cpuNeeded.insert(t);
+                }
+            };
             for (size_t n = 0; n < graph_.nodes.size(); ++n)
             {
                 bool isCpu = nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Cpu;
@@ -458,38 +467,30 @@ namespace vknn {
                 }
                 for (TensorId in: graph_.nodes[n].inputs)
                 {
-                    if (in != kNoTensor && graph_.isInitializer(in))
-                    {
-                        cpuNeeded.insert(in);
-                    }
+                    need(in);
                 }
+                // Fusion edges reference tensors outside node.inputs; a legacy .vxm may point them
+                // at an initializer, which the op reads from the pool like any other operand.
+                need(graph_.nodes[n].fusedResidual);
+                need(graph_.nodes[n].fusedBias);
             }
             for (TensorId id: graph_.outputs)
             {
-                if (id != kNoTensor && graph_.isInitializer(id))
-                {
-                    cpuNeeded.insert(id);
-                }
+                need(id);
             }
             for (TensorId id: cpuNeeded)
             {
-                RtTensor         &rt  = pool_[id];
-                const HostBuffer &src = graph_.initializers[id];
-                rt.shape              = graph_.tensors[id].shape;
+                RtTensor &rt = pool_[id];
+                rt.shape     = graph_.tensors[id].shape;
                 if (graph_.tensors[id].dtype == DType::Float16)
                 {
-                    int64_t       nel = numElements(rt.shape);
-                    const fp16_t *h   = reinterpret_cast<const fp16_t *>(src.bytes.data());
-                    rt.host.bytes.resize((size_t) nel * 4);
-                    float *f = rt.host.f32();
-                    for (int64_t i = 0; i < nel; ++i)
-                    {
-                        f[i] = halfToFloat(h[i]);
-                    }
+                    std::vector<float> f = initFloats(graph_, id);
+                    rt.host.bytes.resize(f.size() * 4);
+                    std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);
                     rt.dtype = DType::Float32;
                 } else
                 {
-                    rt.host  = src;
+                    rt.host  = graph_.initializers[id];
                     rt.dtype = graph_.tensors[id].dtype;
                 }
                 rt.hostValid = true;
