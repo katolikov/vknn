@@ -124,10 +124,10 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     EXPECT_EQ(rows[6].reason, "no kernel in any backend");
 }
 
-TEST(SupportReport, QuantizedOpsReportNoKernel) {
-    // The quantized ONNX family is recognized at import (own OpTypes) but has no kernel in either
-    // backend: a node the dequantize lowering leaves behind reports backend "none", exactly like
-    // an Unknown op — never a claimed Vulkan assignment.
+TEST(SupportReport, QuantizeDequantizeRunOnCpuBoundaryKernel) {
+    // Quantize/DequantizeLinear are the graph-boundary quant hops the import-time dequantize pass
+    // keeps as nodes; they have a CPU kernel but no Vulkan one, so the survey assigns them the CPU
+    // backend and declines the GPU with the registry-auto reason -- never a claimed Vulkan path.
     Graph    g;
     TensorId x  = tensor(g, "x", {1, 8, 8, 8});
     TensorId xs = initializer(g, "x_s", {1});
@@ -138,6 +138,28 @@ TEST(SupportReport, QuantizedOpsReportNoKernel) {
 
     std::vector<NodeSupport> rows = vkSupportSurvey(g);
     ASSERT_EQ(rows.size(), 2u);
+    for (const NodeSupport &row: rows)
+    {
+        EXPECT_EQ(row.backend, "cpu") << row.node;
+        EXPECT_EQ(row.reason, "no vulkan kernel registered") << row.node;
+    }
+}
+
+TEST(SupportReport, FusedQLinearOpsReportNoKernel) {
+    // The fused QLinear-family ops (QLinearConv/QLinearMatMul/QGemm/QLinearAdd/
+    // QLinearGlobalAveragePool) are recognized at import but have no kernel in either backend: the
+    // dequantize pass lowers them to plain float ops, so any survivor reports backend "none",
+    // exactly like an Unknown op -- never a claimed Vulkan assignment.
+    Graph    g;
+    TensorId x = tensor(g, "x", {1, 8, 8, 8});
+    TensorId w = initializer(g, "w", {8, 8, 1, 1});
+    for (OpType t: {OpType::QLinearConv, OpType::QLinearMatMul, OpType::QGemm, OpType::QLinearAdd, OpType::QLinearGlobalAveragePool})
+    {
+        TensorId y = tensor(g, std::string("y_") + opTypeName(t), {1, 8, 8, 8});
+        addNode(g, t, std::string("q_") + opTypeName(t), {x, w}, {y});
+    }
+    std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), 5u);
     for (const NodeSupport &row: rows)
     {
         EXPECT_EQ(row.backend, "none") << row.node;

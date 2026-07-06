@@ -303,6 +303,23 @@ namespace vknn {
                     SH(o) = SH(nd.inputs[0]);
                     break;
                 }
+                case OpType::DequantizeLinear:
+                    // y = (x - zp) * scale: same shape as x, real-valued fp32 output.
+                    SH(o)           = SH(nd.inputs[0]);
+                    g.desc(o).dtype = DType::Float32;
+                    break;
+                case OpType::QuantizeLinear: {
+                    // Same shape as x; the output is the integer quant type, read from the zero_point
+                    // input's dtype (ONNX defaults an absent zero_point to uint8).
+                    SH(o)     = SH(nd.inputs[0]);
+                    DType out = DType::UInt8;
+                    if (nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor)
+                    {
+                        out = g.desc(nd.inputs[2]).dtype;
+                    }
+                    g.desc(o).dtype = out;
+                    break;
+                }
                 case OpType::FusedSE: {
                     if (SH(nd.inputs[0]).empty())
                     {
