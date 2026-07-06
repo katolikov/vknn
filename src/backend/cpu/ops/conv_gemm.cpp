@@ -1,6 +1,7 @@
 // ConvGemm reference: the Conv lowered by lowerConv, with weights repacked [K][Cout]
-// (K = Cin*KH*KW, k = (ic*KH + ky)*KW + kx). Plain fp32 convolution loops indexed through the
-// repacked layout; the executor's epilogue hook applies any attached pointwise unit afterwards.
+// (K = Cin*KH*KW, k = (ky*KW + kx)*Cin + ic, channel-fastest — the same order lowerConv packs and
+// the GPU kernel gathers). Plain fp32 convolution loops indexed through the repacked layout; the
+// executor's epilogue hook applies any attached pointwise unit afterwards.
 #include "backend/cpu/cpu_backend.h"
 #include "core/conv_geom.h"
 
@@ -60,7 +61,7 @@ namespace vknn {
                                             {
                                                 continue;
                                             }
-                                            int64_t k = (ic * KH + ky) * KW + kx;
+                                            int64_t k = (ky * KW + kx) * C + ic; // lowerConv's channel-fastest pack order
                                             acc += x[((n * C + ic) * H + iy) * W + ix] * w[k * Cout + oc];
                                         }
                                     }

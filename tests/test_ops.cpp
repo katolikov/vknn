@@ -1455,6 +1455,103 @@ TEST(Passes, PreservesDeclaredOutputDtype) {
     EXPECT_EQ(g.desc(g.outputs[0]).dtype, DType::Float16);
 }
 
+namespace {
+
+    // Single-Conv graph over a 1x2x6x6 input: weight [2,2,3,3] with a fixed non-uniform pattern.
+    // `attr` selects the padding form (auto_pad vs explicit pads) under test.
+    Graph convPadGraph(const Attributes &attr) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 2, 6, 6};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorDesc wi;
+        wi.name          = "w";
+        wi.shape         = {2, 2, 3, 3};
+        wi.isInitializer = true;
+        TensorId   w     = g.addTensor(wi);
+        HostBuffer wb;
+        wb.resizeElems(36, DType::Float32);
+        for (int i = 0; i < 36; ++i)
+        {
+            wb.f32()[i] = (float) (i % 5) - 2.f;
+        }
+        g.initializers[w] = wb;
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     c;
+        c.type    = OpType::Conv;
+        c.name    = "conv";
+        c.inputs  = {x, w};
+        c.outputs = {y};
+        c.attr    = attr;
+        g.nodes.push_back(c);
+        g.outputs = {y};
+        return g;
+    }
+
+    // Runs an already-passed graph on the CPU backend with input x = i * 0.25 - 4.
+    std::vector<float> runConvPadGraph(Graph g) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {1, 2, 6, 6};
+        in.dtype = DType::Float32;
+        in.data.resize(72 * 4);
+        for (int i = 0; i < 72; ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = (float) i * 0.25f - 4.f;
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+} // namespace
+
+// --- lowerConv x auto_pad parity: a SAME_UPPER conv is skipped by lowerConv (stays Conv, resolved
+// through convGeom), while the same conv with the explicit resolved pads {1,1,1,1} lowers to
+// ConvGemm; both paths must produce identical values. ---
+TEST(Passes, LowerConvSkipsAutoPadAndMatchesExplicit) {
+    Attributes same;
+    same.map["auto_pad"] = str("SAME_UPPER");
+    Attributes expl;
+    expl.map["pads"] = ints({1, 1, 1, 1}); // the resolved SAME_UPPER pads for 3x3/s1
+    PassOptions opt;
+    opt.lowerConv = true;
+
+    Graph gs = convPadGraph(same);
+    runStandardPasses(gs, opt);
+    ASSERT_EQ(gs.nodes.size(), 1u);
+    EXPECT_EQ(gs.nodes[0].type, OpType::Conv) << "lowerConv must skip auto_pad convs";
+
+    Graph ge = convPadGraph(expl);
+    runStandardPasses(ge, opt);
+    ASSERT_EQ(ge.nodes.size(), 1u);
+    EXPECT_EQ(ge.nodes[0].type, OpType::ConvGemm) << "explicit-pad twin must lower";
+
+    std::vector<float> outSame = runConvPadGraph(std::move(gs));
+    std::vector<float> outExpl = runConvPadGraph(std::move(ge));
+    ASSERT_EQ(outSame.size(), (size_t) (2 * 6 * 6));
+    expectNear(outSame, outExpl, 0.f); // identical fp32 loop order: bit-equal
+}
+
 // --- fuseDwPw x auto_pad: the fused node inherits the depthwise conv's attrs, auto_pad included,
 // so the fused and unfused paths must resolve the SAME_UPPER pads identically. ---
 TEST(Passes, FuseDwPwAutoPadSameUpper) {
