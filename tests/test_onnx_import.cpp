@@ -249,8 +249,8 @@ TEST(OnnxAttr, ConstantUint8Int32DataPayload) {
 // --- NodeProto (parseNode) ----------------------------------------------------------------------
 
 namespace {
-    // NodeProto: field 1 = input (repeated string), field 4 = op_type.
-    std::vector<uint8_t> nodeProto(const char *opType, const std::vector<std::string> &inputs) {
+    // NodeProto: field 1 = input (repeated string), field 4 = op_type, field 7 = domain.
+    std::vector<uint8_t> nodeProto(const char *opType, const std::vector<std::string> &inputs, const char *domain = nullptr) {
         std::vector<uint8_t> msg;
         for (const std::string &in: inputs)
         {
@@ -258,6 +258,11 @@ namespace {
         }
         std::string t(opType);
         putLenField(msg, 4, std::vector<uint8_t>(t.begin(), t.end()));
+        if (domain)
+        {
+            std::string d(domain);
+            putLenField(msg, 7, std::vector<uint8_t>(d.begin(), d.end()));
+        }
         return msg;
     }
 } // namespace
@@ -285,4 +290,54 @@ TEST(OnnxNode, UpsampleAttrFormKeepsInputs) {
     EXPECT_EQ(node.type, OpType::Resize);
     ASSERT_EQ(ins.size(), 1u);
     EXPECT_EQ(ins[0], "x");
+}
+
+// --- ONNX quantized operator family --------------------------------------------------------------
+
+TEST(OnnxOpMap, QuantizedFamilyRoundTrips) {
+    // Each quantized op maps to its own OpType and spells back to the ONNX name.
+    const std::pair<const char *, OpType> want[] = {
+        {"QuantizeLinear", OpType::QuantizeLinear},
+        {"DequantizeLinear", OpType::DequantizeLinear},
+        {"DynamicQuantizeLinear", OpType::DynamicQuantizeLinear},
+        {"QLinearConv", OpType::QLinearConv},
+        {"QLinearMatMul", OpType::QLinearMatMul},
+        {"QLinearAdd", OpType::QLinearAdd},
+        {"QLinearGlobalAveragePool", OpType::QLinearGlobalAveragePool},
+        {"MatMulInteger", OpType::MatMulInteger},
+        {"ConvInteger", OpType::ConvInteger},
+        {"QGemm", OpType::QGemm},
+    };
+    for (const auto &[name, type]: want)
+    {
+        EXPECT_EQ(opTypeFromOnnx(name), type) << name;
+        EXPECT_STREQ(opTypeName(type), name);
+        EXPECT_TRUE(opTypeIsQuantized(type)) << name;
+    }
+    EXPECT_FALSE(opTypeIsQuantized(OpType::Conv));
+    EXPECT_FALSE(opTypeIsQuantized(OpType::Unknown));
+}
+
+TEST(OnnxNode, QLinearConvImportsAsItsOpType) {
+    // The full 9-input QLinearConv form parses to its own OpType with the input list intact
+    // (no Unknown, so the unrecognized-op WARN does not fire for quantized checkpoints).
+    std::vector<uint8_t>     msg = nodeProto("QLinearConv", {"x", "x_s", "x_zp", "w", "w_s", "w_zp", "y_s", "y_zp", "b"});
+    Node                     node;
+    std::vector<std::string> ins, outs;
+    NodeParser::parseNode(Reader(msg.data(), msg.size()), node, ins, outs);
+    EXPECT_EQ(node.type, OpType::QLinearConv);
+    ASSERT_EQ(ins.size(), 9u);
+    EXPECT_EQ(ins[0], "x");
+    EXPECT_EQ(ins[8], "b");
+}
+
+TEST(OnnxNode, MicrosoftDomainQGemmMatchesByName) {
+    // The wire parser drops NodeProto.domain (field 7), so the com.microsoft members of the
+    // family (QGemm, QLinearAdd, QLinearGlobalAveragePool) resolve through name matching alone.
+    std::vector<uint8_t>     msg = nodeProto("QGemm", {"a", "a_s", "a_zp", "b", "b_s", "b_zp"}, "com.microsoft");
+    Node                     node;
+    std::vector<std::string> ins, outs;
+    NodeParser::parseNode(Reader(msg.data(), msg.size()), node, ins, outs);
+    EXPECT_EQ(node.type, OpType::QGemm);
+    ASSERT_EQ(ins.size(), 6u);
 }

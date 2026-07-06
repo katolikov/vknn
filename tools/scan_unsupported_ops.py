@@ -33,10 +33,11 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SRC = os.path.join(REPO_ROOT, "src", "core", "op.cpp")
 
-# The internal-name set and the GPU-fallback gates are shared with check_model_support.py — one
-# source of truth between the two tools (each previously kept a copy that drifted).
+# The internal-name set, the quantized-family set and the GPU-fallback gates are shared with
+# check_model_support.py — one source of truth between the two tools (each previously kept a
+# copy that drifted).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_model_support import _INTERNAL_NAMES, CPU_FALLBACK_GATES  # noqa: E402
+from check_model_support import _INTERNAL_NAMES, _QUANTIZED_ONNX, CPU_FALLBACK_GATES  # noqa: E402
 
 
 def supported_op_names(src_path):
@@ -184,7 +185,10 @@ def scan_graph(graph, supported, path, unsupported, fallbacks):
             "outputs": io_details(node.output, index),
             "attributes": attrs,
         }
-        if node.op_type not in supported or not in_default_domain:
+        # The quantized family is recognized by the importer (so it appears in `supported`) but
+        # has no kernel: it runs only once the import-time dequantize pass lands, so it stays in
+        # the unsupported bucket regardless of domain.
+        if node.op_type in _QUANTIZED_ONNX or node.op_type not in supported or not in_default_domain:
             unsupported.append(record)
         else:
             rule = CPU_FALLBACK_GATES.get(node.op_type)

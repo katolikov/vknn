@@ -118,8 +118,47 @@ namespace vknn {
                 return "TopK";
             case OpType::InstanceNorm:
                 return "InstanceNormalization";
+            case OpType::QuantizeLinear:
+                return "QuantizeLinear";
+            case OpType::DequantizeLinear:
+                return "DequantizeLinear";
+            case OpType::DynamicQuantizeLinear:
+                return "DynamicQuantizeLinear";
+            case OpType::QLinearConv:
+                return "QLinearConv";
+            case OpType::QLinearMatMul:
+                return "QLinearMatMul";
+            case OpType::QLinearAdd:
+                return "QLinearAdd";
+            case OpType::QLinearGlobalAveragePool:
+                return "QLinearGlobalAveragePool";
+            case OpType::MatMulInteger:
+                return "MatMulInteger";
+            case OpType::ConvInteger:
+                return "ConvInteger";
+            case OpType::QGemm:
+                return "QGemm";
             default:
                 return "Unknown";
+        }
+    }
+
+    bool opTypeIsQuantized(OpType t) {
+        switch (t)
+        {
+            case OpType::QuantizeLinear:
+            case OpType::DequantizeLinear:
+            case OpType::DynamicQuantizeLinear:
+            case OpType::QLinearConv:
+            case OpType::QLinearMatMul:
+            case OpType::QLinearAdd:
+            case OpType::QLinearGlobalAveragePool:
+            case OpType::MatMulInteger:
+            case OpType::ConvInteger:
+            case OpType::QGemm:
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -226,6 +265,21 @@ namespace vknn {
             {"TopK", OpType::TopK},
             // Lowered at import to per-channel normalize ops (lowerInstanceNorm); no kernel exists.
             {"InstanceNormalization", OpType::InstanceNorm},
+            // ONNX quantized operator family: recognized so quantized checkpoints are named
+            // precisely (never "unknown ONNX op"); the import-time dequantize lowering is the
+            // execution path — no kernel exists for any of them. QGemm, QLinearAdd and
+            // QLinearGlobalAveragePool live in the com.microsoft domain, but the wire parser
+            // drops NodeProto.domain, so name matching here covers them too.
+            {"QuantizeLinear", OpType::QuantizeLinear},
+            {"DequantizeLinear", OpType::DequantizeLinear},
+            {"DynamicQuantizeLinear", OpType::DynamicQuantizeLinear},
+            {"QLinearConv", OpType::QLinearConv},
+            {"QLinearMatMul", OpType::QLinearMatMul},
+            {"QLinearAdd", OpType::QLinearAdd},
+            {"QLinearGlobalAveragePool", OpType::QLinearGlobalAveragePool},
+            {"MatMulInteger", OpType::MatMulInteger},
+            {"ConvInteger", OpType::ConvInteger},
+            {"QGemm", OpType::QGemm},
         };
         auto it = m.find(s);
         if (it != m.end())

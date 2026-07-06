@@ -282,6 +282,12 @@ namespace vknn {
                 if (node.type == OpType::Unknown)
                 {
                     VKNN_WARN << "unknown ONNX op '" << opType << "' (node " << node.name << ")";
+                } else if (opTypeIsQuantized(node.type))
+                {
+                    // Quantized ops import as their own OpType but have no kernel; only the
+                    // import-time dequantize lowering makes a graph that carries them runnable.
+                    VKNN_WARN << "quantized ONNX op '" << opType << "' (node " << node.name
+                              << ") - runs only via the dequantize lowering";
                 }
             }
         };

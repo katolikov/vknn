@@ -22,6 +22,11 @@ Verdict classes:
                            (incl. custom domains and control-flow subgraph ops), an op
                            with no kernel in either backend, or an unusable dtype.
 
+Quantized models (QDQ / QLinear / dynamic quantization) get a dedicated blocker class:
+the importer recognizes the family (incl. the com.microsoft members, matched by name),
+and support arrives via the import-time dequantize pass — pending in this tree, so a
+model carrying these ops still reports NOT SUPPORTED, with the precise reason.
+
 Tensor checks: graph input/output dtypes against the engine's I/O surface
 (fp32/fp16 native, uint8 via the declared-format boundary, integer tensors for
 shape/index logic), initializer dtypes (DOUBLE narrows to fp32 at import),
@@ -66,6 +71,15 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # scan_unsupported_ops.py imports this set rather than keeping its own copy.
 _INTERNAL_NAMES = {"FusedSE", "FusedDwPw", "FusedPointwise", "ConvGemm", "ConvertLayout",
                    "ConvertDtype", "Unknown", "Unary", "Binary", "Reduce"}
+
+# The ONNX quantized operator family (mirrors opTypeIsQuantized in src/core/op.cpp). The importer
+# recognizes each as its own OpType, but no kernel exists: support arrives via the import-time
+# dequantize pass, which rewrites them to float ops. QGemm/QLinearAdd/QLinearGlobalAveragePool are
+# com.microsoft-domain ops the importer matches by name (the wire parser drops NodeProto.domain),
+# so the custom-domain blocker does not apply to them.
+_QUANTIZED_ONNX = {"QuantizeLinear", "DequantizeLinear", "DynamicQuantizeLinear", "QLinearConv",
+                   "QLinearMatMul", "QLinearAdd", "QLinearGlobalAveragePool", "MatMulInteger",
+                   "ConvInteger", "QGemm"}
 
 # ONNX dtype numbers (TensorProto.DataType) the engine handles, by role.
 _NATIVE_IO = {"FLOAT", "FLOAT16", "UINT8"}       # graph I/O incl. the declared-format boundary
@@ -353,10 +367,16 @@ def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=Non
     for i, node in enumerate(graph.node):
         label = "%s '%s' (%s#%d)" % (node.op_type, node.name or "unnamed", path, i)
         attrs = attr_map(node)
-        if node.domain not in ("", "ai.onnx"):
+        if node.domain not in ("", "ai.onnx") and node.op_type not in _QUANTIZED_ONNX:
             rep.blocker("custom domain",
                         "op %s from domain %r — only the default ONNX domain is implemented"
                         % (node.op_type, node.domain), label)
+            continue
+        if node.op_type in _QUANTIZED_ONNX:
+            rep.blocker("quantized op",
+                        "op %s — quantized operator: runs via the import-time dequantize pass "
+                        "(pending in this tree); no kernel executes it directly" % node.op_type,
+                        label)
             continue
         ty = name_to_type.get(node.op_type)
         if ty is None:

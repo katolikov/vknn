@@ -124,6 +124,27 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     EXPECT_EQ(rows[6].reason, "no kernel in any backend");
 }
 
+TEST(SupportReport, QuantizedOpsReportNoKernel) {
+    // The quantized ONNX family is recognized at import (own OpTypes) but has no kernel in either
+    // backend: a node the dequantize lowering leaves behind reports backend "none", exactly like
+    // an Unknown op — never a claimed Vulkan assignment.
+    Graph    g;
+    TensorId x  = tensor(g, "x", {1, 8, 8, 8});
+    TensorId xs = initializer(g, "x_s", {1});
+    TensorId q  = tensor(g, "q_out", {1, 8, 8, 8}, DType::UInt8);
+    addNode(g, OpType::QuantizeLinear, "quant", {x, xs}, {q});
+    TensorId dq = tensor(g, "dq_out", {1, 8, 8, 8});
+    addNode(g, OpType::DequantizeLinear, "dequant", {q, xs}, {dq});
+
+    std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), 2u);
+    for (const NodeSupport &row: rows)
+    {
+        EXPECT_EQ(row.backend, "none") << row.node;
+        EXPECT_EQ(row.reason, "no kernel in any backend") << row.node;
+    }
+}
+
 TEST(SupportReport, GateReasonIsNullSafeAndStable) {
     Graph g;
     // A runtime-bounded Clip refuses with a stable reason string; a null whyNot is legal.

@@ -36,6 +36,18 @@ namespace vknn {
             // Erased/lowered at import; a survivor has no kernel in either backend.
             case OpType::Dropout:
             case OpType::InstanceNorm:
+            // ONNX quantized family: recognized at import for precise reporting; execution goes
+            // through the import-time dequantize lowering, never a direct kernel.
+            case OpType::QuantizeLinear:
+            case OpType::DequantizeLinear:
+            case OpType::DynamicQuantizeLinear:
+            case OpType::QLinearConv:
+            case OpType::QLinearMatMul:
+            case OpType::QLinearAdd:
+            case OpType::QLinearGlobalAveragePool:
+            case OpType::MatMulInteger:
+            case OpType::ConvInteger:
+            case OpType::QGemm:
                 return false;
             default:
                 return true;
