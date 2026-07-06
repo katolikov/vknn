@@ -2911,3 +2911,323 @@ TEST(Passes, InstanceNormRuntimeScaleStaysOpaque) {
     }
     EXPECT_EQ(kept, 1);
 }
+
+// --- dequantizeGraph: QDQ-format quantized checkpoints collapse to plain float graphs at import.
+// A DequantizeLinear over all-initializer inputs folds to an fp32 initializer computed in double
+// as (x - zero_point) * scale, per-tensor or per-axis (axis attribute); a QuantizeLinear ->
+// DequantizeLinear activation sandwich with matching scale/zero_point drops, consumers rewired to
+// the float producer (dequantized execution skips the sandwich's re-rounding by definition).
+// Residual activation q/dq nodes (mismatched sandwiches, boundary q/dq) stay in place. ---
+namespace {
+
+    // Registers a named tensor with no shape (an activation whose shape inference has not run).
+    TensorId addUnshaped(Graph &g, const char *name) {
+        TensorDesc d;
+        d.name = name;
+        return g.addTensor(d);
+    }
+
+    // Registers a Float32 initializer holding `v` (integer payloads arrive widened to fp32 by the
+    // importer, so quantized-value tensors are built the same way here).
+    TensorId addFloatInit(Graph &g, const char *name, const Shape &shape, const std::vector<float> &v) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = shape;
+        d.isInitializer = true;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems((int64_t) v.size(), DType::Float32);
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            hb.f32()[i] = v[i];
+        }
+        g.initializers[id] = hb;
+        return id;
+    }
+
+    // DequantizeLinear(w, s, zp?) -> wd feeding Add(x, wd) -> y, over an input x of `shape`.
+    // `axis` adds the per-axis attribute when `withAxis` is set. Returns the DQ output id via *wd.
+    Graph dequantWeightGraph(const Shape &shape, const std::vector<float> &wq, const Shape &sshape, const std::vector<float> &scale, const std::vector<float> &zp, bool withAxis, int64_t axis, TensorId *wdOut) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = shape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId w = addFloatInit(g, "w", shape, wq);
+        TensorId s = addFloatInit(g, "s", sshape, scale);
+        TensorId z = zp.empty() ? kNoTensor : addFloatInit(g, "z", sshape, zp);
+        TensorId wd = addUnshaped(g, "wd");
+        TensorId y  = addUnshaped(g, "y");
+        g.desc(y).isOutput = true;
+        g.outputs          = {y};
+        Node dq;
+        dq.type    = OpType::DequantizeLinear;
+        dq.name    = "dq";
+        dq.inputs  = z == kNoTensor ? std::vector<TensorId> {w, s} : std::vector<TensorId> {w, s, z};
+        dq.outputs = {wd};
+        if (withAxis)
+        {
+            Attr a;
+            a.kind              = Attr::Int;
+            a.i                 = axis;
+            dq.attr.map["axis"] = a;
+        }
+        Node add;
+        add.type    = OpType::Binary;
+        add.subOp   = (int) BinaryType::Add;
+        add.name    = "add";
+        add.inputs  = {x, wd};
+        add.outputs = {y};
+        g.nodes = {dq, add};
+        if (wdOut)
+        {
+            *wdOut = wd;
+        }
+        return g;
+    }
+
+    // x -> Relu -> QuantizeLinear(s, zp) -> DequantizeLinear(s2, zp2) -> Mul(k) -> y. `shared`
+    // reuses the Q node's scale/zp ids on the DQ; otherwise the DQ gets its own initializers
+    // holding `dqScale`/`dqZp` (value matching is then what decides the collapse).
+    Graph qdqSandwichGraph(bool shared, float qScale, float qZp, float dqScale, float dqZp, bool dqHasZp = true) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 8};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId r  = addUnshaped(g, "r");
+        TensorId q  = addUnshaped(g, "q");
+        TensorId d  = addUnshaped(g, "d");
+        TensorId y  = addUnshaped(g, "y");
+        TensorId s1 = addFloatInit(g, "s1", {}, {qScale});
+        TensorId z1 = addFloatInit(g, "z1", {}, {qZp});
+        TensorId s2 = shared ? s1 : addFloatInit(g, "s2", {}, {dqScale});
+        TensorId z2 = shared ? z1 : (dqHasZp ? addFloatInit(g, "z2", {}, {dqZp}) : kNoTensor);
+        TensorId k  = addFloatInit(g, "k", {1}, {2.f});
+        g.desc(y).isOutput = true;
+        g.outputs          = {y};
+        Node relu;
+        relu.type    = OpType::Relu;
+        relu.name    = "relu";
+        relu.inputs  = {x};
+        relu.outputs = {r};
+        Node qn;
+        qn.type    = OpType::QuantizeLinear;
+        qn.name    = "q";
+        qn.inputs  = {r, s1, z1};
+        qn.outputs = {q};
+        Node dn;
+        dn.type    = OpType::DequantizeLinear;
+        dn.name    = "dq";
+        dn.inputs  = z2 == kNoTensor ? std::vector<TensorId> {q, s2} : std::vector<TensorId> {q, s2, z2};
+        dn.outputs = {d};
+        Node mul;
+        mul.type    = OpType::Binary;
+        mul.subOp   = (int) BinaryType::Mul;
+        mul.name    = "mul";
+        mul.inputs  = {d, k};
+        mul.outputs = {y};
+        g.nodes = {relu, qn, dn, mul};
+        return g;
+    }
+
+    // Runs a [1,8]-input graph on the CPU backend and returns the fp32 output values.
+    std::vector<float> runQdqGraph(Graph g, const std::vector<float> &xd) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {1, 8};
+        in.dtype = DType::Float32;
+        in.data.resize(xd.size() * 4);
+        for (size_t i = 0; i < xd.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xd[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+    // Number of QuantizeLinear/DequantizeLinear nodes left in the graph.
+    int countQdq(const Graph &g) {
+        int n = 0;
+        for (const Node &nd: g.nodes)
+        {
+            n += nd.type == OpType::QuantizeLinear || nd.type == OpType::DequantizeLinear;
+        }
+        return n;
+    }
+
+} // namespace
+
+TEST(Passes, DequantizeLinearPerTensorFoldsExact) {
+    std::vector<float> wq {-128.f, -1.f, 0.f, 1.f, 100.f, 127.f}; // int8 values, widened
+    TensorId           wd = kNoTensor;
+    Graph              g  = dequantWeightGraph({2, 3}, wq, {}, {0.0123f}, {-5.f}, false, 0, &wd);
+    dequantizeGraph(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Binary);
+    ASSERT_TRUE(g.isInitializer(wd));
+    EXPECT_EQ(g.desc(wd).dtype, DType::Float32);
+    EXPECT_EQ(g.desc(wd).shape, (Shape {2, 3}));
+    const float *f = g.initializers.at(wd).f32();
+    for (size_t i = 0; i < wq.size(); ++i)
+    {
+        EXPECT_EQ(f[i], (float) (((double) wq[i] - (double) -5.f) * (double) 0.0123f)) << "i=" << i;
+    }
+    dequantizeGraph(g); // idempotent: the folded graph is a fixpoint
+    ASSERT_EQ(g.nodes.size(), 1u);
+}
+
+TEST(Passes, DequantizeLinearPerAxisFoldsExact) {
+    // Conv-weight form: [8,4,3,3] with axis=0 scales/zero-points of length 8.
+    const Shape        shape {8, 4, 3, 3};
+    std::vector<float> wq(8 * 4 * 3 * 3);
+    for (size_t i = 0; i < wq.size(); ++i)
+    {
+        wq[i] = (float) ((int) ((i * 7) % 256) - 128);
+    }
+    std::vector<float> scale(8), zp(8);
+    for (int c = 0; c < 8; ++c)
+    {
+        scale[c] = 0.001f * (float) (c + 1);
+        zp[c]    = (float) (c % 5 - 2);
+    }
+    TensorId wd = kNoTensor;
+    Graph    g  = dequantWeightGraph(shape, wq, {8}, scale, zp, true, 0, &wd);
+    dequantizeGraph(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    ASSERT_TRUE(g.isInitializer(wd));
+    EXPECT_EQ(g.desc(wd).shape, shape);
+    const float *f = g.initializers.at(wd).f32();
+    for (size_t i = 0; i < wq.size(); ++i)
+    {
+        size_t c = i / 36; // inner stride = 4*3*3 / ... = C/g*Kh*Kw = 36
+        ASSERT_EQ(f[i], (float) (((double) wq[i] - (double) zp[c]) * (double) scale[c])) << "i=" << i;
+    }
+}
+
+TEST(Passes, DequantizeLinearNegativeAxisInnerStride) {
+    // axis=-1 on a [2,6] tensor: normalizes to axis 1, channel stride 1.
+    std::vector<float> wq {0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, 9.f, 10.f, 11.f};
+    std::vector<float> scale {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    std::vector<float> zp {0.f, -1.f, 1.f, -2.f, 2.f, 3.f};
+    TensorId           wd = kNoTensor;
+    Graph              g  = dequantWeightGraph({2, 6}, wq, {6}, scale, zp, true, -1, &wd);
+    dequantizeGraph(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    ASSERT_TRUE(g.isInitializer(wd));
+    const float *f = g.initializers.at(wd).f32();
+    for (size_t i = 0; i < wq.size(); ++i)
+    {
+        size_t c = i % 6;
+        EXPECT_EQ(f[i], (float) (((double) wq[i] - (double) zp[c]) * (double) scale[c])) << "i=" << i;
+    }
+}
+
+TEST(Passes, DequantizeLinearUint8NonzeroZeroPoint) {
+    // uint8 values with the asymmetric zero point 128; scale as a length-1 1-D tensor.
+    std::vector<float> wq {0.f, 1.f, 127.f, 128.f, 200.f, 255.f};
+    TensorId           wd = kNoTensor;
+    Graph              g  = dequantWeightGraph({6}, wq, {1}, {0.5f}, {128.f}, false, 0, &wd);
+    dequantizeGraph(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    ASSERT_TRUE(g.isInitializer(wd));
+    const float *f = g.initializers.at(wd).f32();
+    for (size_t i = 0; i < wq.size(); ++i)
+    {
+        EXPECT_EQ(f[i], (float) (((double) wq[i] - 128.0) * (double) 0.5f)) << "i=" << i;
+    }
+}
+
+TEST(Passes, QdqSandwichCollapsesByteEqual) {
+    Graph g = qdqSandwichGraph(/*shared=*/true, 0.05f, 3.f, 0.05f, 3.f);
+    dequantizeGraph(g);
+    ASSERT_EQ(g.nodes.size(), 2u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Relu);
+    EXPECT_EQ(g.nodes[1].type, OpType::Binary);
+    EXPECT_EQ(g.nodes[1].inputs[0], g.nodes[0].outputs[0]) << "the Mul must read the Relu output directly";
+
+    // The collapsed graph runs byte-identically to the same graph built without the sandwich.
+    std::vector<float> xd {-3.5f, -1.f, -0.25f, 0.f, 0.6f, 1.5f, 2.5f, 7.f};
+    Graph              plain;
+    {
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 8};
+        xi.isInput = true;
+        TensorId x = plain.addTensor(xi);
+        plain.inputs = {x};
+        TensorId r   = addUnshaped(plain, "r");
+        TensorId y   = addUnshaped(plain, "y");
+        TensorId k   = addFloatInit(plain, "k", {1}, {2.f});
+        plain.desc(y).isOutput = true;
+        plain.outputs          = {y};
+        Node relu;
+        relu.type    = OpType::Relu;
+        relu.name    = "relu";
+        relu.inputs  = {x};
+        relu.outputs = {r};
+        Node mul;
+        mul.type    = OpType::Binary;
+        mul.subOp   = (int) BinaryType::Mul;
+        mul.name    = "mul";
+        mul.inputs  = {r, k};
+        mul.outputs = {y};
+        plain.nodes = {relu, mul};
+    }
+    std::vector<float> got = runQdqGraph(std::move(g), xd);
+    std::vector<float> ref = runQdqGraph(std::move(plain), xd);
+    ASSERT_EQ(got.size(), ref.size());
+    ASSERT_FALSE(got.empty());
+    EXPECT_EQ(memcmp(got.data(), ref.data(), got.size() * 4), 0) << "collapsed QDQ must be byte-equal to the float graph";
+}
+
+TEST(Passes, QdqSandwichValueMatchCollapses) {
+    // Distinct scale ids with equal payloads; the Q carries an explicit zero point of 0 and the DQ
+    // none (absent matches an all-zero payload).
+    Graph g = qdqSandwichGraph(/*shared=*/false, 0.05f, 0.f, 0.05f, 0.f, /*dqHasZp=*/false);
+    dequantizeGraph(g);
+    EXPECT_EQ(countQdq(g), 0);
+    ASSERT_EQ(g.nodes.size(), 2u);
+    EXPECT_EQ(g.nodes[1].inputs[0], g.nodes[0].outputs[0]);
+}
+
+TEST(Passes, QdqMismatchedSandwichKept) {
+    // A requant edge (different scales) is not a removable sandwich; both nodes stay for a later
+    // lowering stage, and a second run changes nothing.
+    Graph g = qdqSandwichGraph(/*shared=*/false, 0.05f, 3.f, 0.07f, 3.f);
+    dequantizeGraph(g);
+    EXPECT_EQ(countQdq(g), 2);
+    ASSERT_EQ(g.nodes.size(), 4u);
+    dequantizeGraph(g);
+    EXPECT_EQ(countQdq(g), 2);
+}
+
+TEST(Passes, NoDequantizeKeepsQuantizedNodes) {
+    Graph       off = qdqSandwichGraph(true, 0.05f, 3.f, 0.05f, 3.f);
+    PassOptions opt;
+    opt.dequantize = false;
+    runStandardPasses(off, opt);
+    EXPECT_EQ(countQdq(off), 2) << "--no-dequantize keeps the quantized ops";
+
+    Graph on = qdqSandwichGraph(true, 0.05f, 3.f, 0.05f, 3.f);
+    runStandardPasses(on, {});
+    EXPECT_EQ(countQdq(on), 0) << "the default pipeline collapses the sandwich";
+}

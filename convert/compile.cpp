@@ -11,6 +11,9 @@
 //                         O0 = no optional fusion (reference), O1 = the general pointwise
 //                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
 //     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise / --[no-]lower-conv
+//     --no-dequantize   keep QuantizeLinear/DequantizeLinear ops instead of folding DQ weights and
+//                       collapsing matching QDQ sandwiches (default: quantized checkpoints compile
+//                       to plain float graphs and run dequantized)
 //     --strict-fuse     rounded fusion steps everywhere: fused == unfused byte-identical (the byte
 //                       gate); the default fast mode fp32-chains each fused unit and rounds once
 //                       per stored stream — faster, and at least as accurate as the unfused graph
@@ -117,7 +120,7 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [-O0..-O3 | --opt N] "
-               "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--support-report <out.json>] [--dump-big]\n",
+               "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n",
                argv[0]);
         return 1;
     }
@@ -156,6 +159,7 @@ int main(int argc, char **argv) {
     over("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
     over("--strict-fuse", "--no-strict-fuse", opt.strictFuse);
     over("--lower-conv", "--no-lower-conv", opt.lowerConv);
+    over("--dequantize", "--no-dequantize", opt.dequantize);
     opt.dumpBig = has(argc, argv, "--dump-big");
 
     Graph      g;

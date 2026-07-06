@@ -55,6 +55,13 @@ namespace vknn {
     // order shifts, as Winograd's does). Needs resolved shapes; runs before pointwise fusion so
     // trailing units fold onto the ConvGemm.
     void lowerConv(Graph &g);
+    // Collapse ONNX quantized graphs (QDQ form) to plain float. DequantizeLinear over
+    // all-initializer inputs folds to an fp32 initializer ((x - zero_point) * scale in double,
+    // per-tensor or per-axis via the axis attribute), and a QuantizeLinear->DequantizeLinear
+    // activation sandwich with matching scale/zero_point drops, consumers rewired to the float
+    // producer. Residual activation q/dq nodes (mismatched sandwiches, graph-boundary q/dq) stay
+    // in place; no kernel exists for them, so they surface through the support report. Idempotent.
+    void dequantizeGraph(Graph &g);
     // Remove Identity nodes, rewiring consumers to the input.
     void eliminateIdentity(Graph &g);
     // Remove inference-mode Dropout nodes (training_mode absent or a constant false, mask output
@@ -78,6 +85,10 @@ namespace vknn {
         bool    lowerConv           = false; // non-Winograd KxK Conv -> ConvGemm (experimental: the
                                              // v1 64x64x16 kernel loses to the direct conv on
                                              // classifier-CNN shapes — opt in per model, measure)
+        bool    dequantize          = true;  // fold DequantizeLinear weights + collapse matching
+                                             // QDQ sandwiches so quantized checkpoints run as
+                                             // float graphs (--no-dequantize keeps the quantized
+                                             // ops; they have no kernel and fail planning)
         bool    dumpBig             = false; // debug: log tensors > 50M elements after shape inference
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.

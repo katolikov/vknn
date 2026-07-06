@@ -80,6 +80,12 @@ namespace vknn {
                                     // (inference-mode) form is an identity and is rewired past here
         normalizeConv1d(g);         // before shape inference: conv arms assume 2-D weight/attr geometry
         inferShapes(g, batch);
+        if (opt.dequantize)
+        {
+            dequantizeGraph(g); // QDQ checkpoints collapse to the float graph before any lowering
+                                // pass sees them; the next inferShapes resolves the shapes the
+                                // kernel-less q/dq nodes left unresolved
+        }
         lowerReduceToGap(g); // needs input ranks; ReduceMean imports as generic Reduce
         inferShapes(g, batch);
         eliminateIdentity(g);
