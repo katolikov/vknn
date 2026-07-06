@@ -82,6 +82,21 @@ namespace vknn {
             } else if (nd.type == OpType::Equal)
             {
                 out = DType::Int32; // boolean result, not float
+            } else if (nd.type == OpType::TopK)
+            {
+                // Per-output dtypes: values (output 0) carry the data input's dtype; indices
+                // (output 1) are int64, so a Cast-to-float of the indices is a genuine int->float
+                // cast and must be kept.
+                if (nd.outputs.size() > 1)
+                {
+                    setk(nd.outputs[1], DType::Int64);
+                }
+                TensorId pin = nd.inputs.empty() ? kNoTensor : nd.inputs[0];
+                if (pin != kNoTensor && pin < (TensorId) known.size() && known[pin])
+                {
+                    setk(nd.outputs[0], dt[pin]);
+                }
+                continue;
             } else if (floatResult(nd.type))
             {
                 out = DType::Float32;

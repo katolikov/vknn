@@ -378,6 +378,53 @@ namespace vknn {
                     }
                     break;
                 }
+                case OpType::TopK: {
+                    // Both outputs (values, indices) share the input shape with the axis dim replaced
+                    // by k. k is the `k` attribute (opset < 10) or the const int64 input[1] (opset 10+);
+                    // a runtime k leaves the outputs unresolved. Indices are int64 regardless of the
+                    // data dtype — the session readback keys off this for a graph-output index tensor.
+                    const Shape &a = SH(nd.inputs[0]);
+                    if (a.empty())
+                    {
+                        break;
+                    }
+                    int64_t rank = (int64_t) a.size();
+                    int64_t axis = nd.attr.geti("axis", -1);
+                    if (axis < 0)
+                    {
+                        axis += rank;
+                    }
+                    if (axis < 0 || axis >= rank)
+                    {
+                        break;
+                    }
+                    int64_t k = -1;
+                    if (nd.attr.has("k"))
+                    {
+                        k = nd.attr.geti("k", -1);
+                    } else
+                    {
+                        std::vector<int64_t> kv = readI64Param(g, nd, "k", 1);
+                        if (!kv.empty())
+                        {
+                            k = kv[0];
+                        }
+                    }
+                    if (k < 0)
+                    {
+                        break; // k const-folds later; resolved on a subsequent pass
+                    }
+                    Shape out = a;
+                    out[axis] = std::min(k, a[axis]); // an oversized k saturates at the axis length
+                    SH(o)     = out;
+                    g.desc(o).dtype = g.desc(nd.inputs[0]).dtype;
+                    if (nd.outputs.size() > 1 && nd.outputs[1] != kNoTensor)
+                    {
+                        SH(nd.outputs[1])           = out;
+                        g.desc(nd.outputs[1]).dtype = DType::Int64;
+                    }
+                    break;
+                }
                 case OpType::Transpose: {
                     const Shape &a    = SH(nd.inputs[0]);
                     const auto  &perm = nd.attr.getints("perm");

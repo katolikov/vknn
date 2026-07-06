@@ -67,6 +67,7 @@ namespace vknn {
         LessEqual, // A <= B -> 1.0/0.0, elementwise with broadcasting (flat path)
         Dropout,   // identity in inference mode; eliminated at import (eliminateDropout) -- a kept
                    // training-mode / consumed-mask Dropout has no kernel and is unsupported
+        TopK,      // k largest/smallest along an axis -> (values, int64 indices); const k (CPU)
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

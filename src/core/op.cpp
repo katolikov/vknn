@@ -114,6 +114,8 @@ namespace vknn {
                 return "LessEqual";
             case OpType::Dropout:
                 return "Dropout";
+            case OpType::TopK:
+                return "TopK";
             default:
                 return "Unknown";
         }
@@ -219,6 +221,7 @@ namespace vknn {
             {"ScatterND", OpType::ScatterND},
             // Inference-mode Dropout is an identity on data; eliminateDropout removes it at import.
             {"Dropout", OpType::Dropout},
+            {"TopK", OpType::TopK},
         };
         auto it = m.find(s);
         if (it != m.end())

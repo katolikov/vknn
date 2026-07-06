@@ -429,6 +429,165 @@ TEST(Ops, LessBroadcastPerChannel) {
     EXPECT_EQ(out.data, (std::vector<float> {1, 1, 0, 0, 1, 1, 0, 0}));
 }
 
+namespace {
+    struct TopKOut {
+        std::vector<float>   values;
+        std::vector<int64_t> indices;
+        Shape                shape;  // shared by both outputs
+        DType                iDtype; // declared dtype of the indices output
+    };
+
+    // Build a two-output TopK graph: float input "x", k as a const int64 initializer input (opset
+    // 10+ form) or the `k` attribute (opset <10 form) when kAsAttr is set. Runs on CPU and returns
+    // both outputs.
+    TopKOut runTopK(const Shape &xshape, const std::vector<float> &xdata, int64_t k, int64_t axis, int64_t largest, int64_t sorted, bool kAsAttr = false) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        Node n;
+        n.type   = OpType::TopK;
+        n.name   = "topk";
+        n.inputs = {x};
+        if (kAsAttr)
+        {
+            Attr a;
+            a.kind         = Attr::Int;
+            a.i            = k;
+            n.attr.map["k"] = a;
+        } else
+        {
+            TensorDesc kd;
+            kd.name          = "k";
+            kd.shape         = {1};
+            kd.isInitializer = true;
+            kd.dtype         = DType::Int64;
+            TensorId   kid   = g.addTensor(kd);
+            HostBuffer hb;
+            hb.resizeElems(1, DType::Int64);
+            hb.i64()[0]        = k;
+            g.initializers[kid] = hb;
+            n.inputs.push_back(kid);
+        }
+        auto seti = [&](const char *name, int64_t v) {
+            Attr a;
+            a.kind           = Attr::Int;
+            a.i              = v;
+            n.attr.map[name] = a;
+        };
+        seti("axis", axis);
+        seti("largest", largest);
+        seti("sorted", sorted);
+        TensorDesc vo;
+        vo.name     = "v";
+        vo.isOutput = true;
+        TensorId v  = g.addTensor(vo);
+        TensorDesc ixd;
+        ixd.name     = "i";
+        ixd.isOutput = true;
+        ixd.dtype    = DType::Int64; // ONNX declares the indices output int64 (graph-output value_info)
+        TensorId ix  = g.addTensor(ixd);
+        n.outputs   = {v, ix};
+        g.nodes     = {n};
+        g.outputs   = {v, ix};
+
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = xshape;
+        in.dtype = DType::Float32;
+        in.data.resize(xdata.size() * 4);
+        std::memcpy(in.data.data(), xdata.data(), xdata.size() * 4);
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.size() != 2)
+        {
+            return {};
+        }
+        TopKOut       r;
+        r.shape          = outs[0].shape;
+        r.iDtype         = outs[1].dtype;
+        const float   *vp    = reinterpret_cast<const float *>(outs[0].data.data());
+        const int64_t *ip    = reinterpret_cast<const int64_t *>(outs[1].data.data());
+        int64_t        elems = numElements(outs[0].shape);
+        r.values.assign(vp, vp + elems);
+        r.indices.assign(ip, ip + elems);
+        return r;
+    }
+} // namespace
+
+// --- TopK defaults (axis=-1, largest=1, sorted=1): per-row top-2 of a [2,4] input, values
+//     descending, indices int64. ---
+TEST(Ops, TopKLargestLastAxis) {
+    auto r = runTopK({2, 4}, {1, 3, 2, 4, 7, 5, 8, 6}, 2, -1, 1, 1);
+    ASSERT_EQ(r.shape, (Shape {2, 2}));
+    EXPECT_EQ(r.iDtype, DType::Int64);
+    EXPECT_EQ(r.values, (std::vector<float> {4, 3, 8, 7}));
+    EXPECT_EQ(r.indices, (std::vector<int64_t> {3, 1, 2, 0}));
+}
+
+// --- TopK largest=0: the k smallest, ascending. ---
+TEST(Ops, TopKSmallest) {
+    auto r = runTopK({1, 4}, {3, 1, 4, 2}, 2, -1, 0, 1);
+    ASSERT_EQ(r.shape, (Shape {1, 2}));
+    EXPECT_EQ(r.values, (std::vector<float> {1, 2}));
+    EXPECT_EQ(r.indices, (std::vector<int64_t> {1, 3}));
+}
+
+// --- TopK on a non-default axis: axis=0 selects down the columns of a [3,2]. ---
+TEST(Ops, TopKAxis0) {
+    // col0 {5,2,4} -> top2 {5,4} at rows {0,2}; col1 {1,6,3} -> {6,3} at rows {1,2}
+    auto r = runTopK({3, 2}, {5, 1, 2, 6, 4, 3}, 2, 0, 1, 1);
+    ASSERT_EQ(r.shape, (Shape {2, 2}));
+    EXPECT_EQ(r.values, (std::vector<float> {5, 6, 4, 3}));
+    EXPECT_EQ(r.indices, (std::vector<int64_t> {0, 1, 2, 2}));
+}
+
+// --- TopK tie ordering: equal values keep ascending source indices (ONNX), for both directions. ---
+TEST(Ops, TopKTiesAscendingIndices) {
+    auto lg = runTopK({1, 5}, {2, 7, 7, 7, 1}, 3, -1, 1, 1);
+    EXPECT_EQ(lg.values, (std::vector<float> {7, 7, 7}));
+    EXPECT_EQ(lg.indices, (std::vector<int64_t> {1, 2, 3}));
+    auto sm = runTopK({1, 5}, {3, 1, 1, 1, 5}, 2, -1, 0, 1);
+    EXPECT_EQ(sm.values, (std::vector<float> {1, 1}));
+    EXPECT_EQ(sm.indices, (std::vector<int64_t> {1, 2}));
+}
+
+// --- TopK sorted=0: element order is unspecified by ONNX; the kernel emits the same sorted order
+//     as sorted=1 (a valid instance, and deterministic run to run). ---
+TEST(Ops, TopKUnsortedIsDeterministic) {
+    auto r = runTopK({1, 4}, {1, 3, 2, 4}, 2, -1, 1, 0);
+    ASSERT_EQ(r.shape, (Shape {1, 2}));
+    EXPECT_EQ(r.values, (std::vector<float> {4, 3}));
+    EXPECT_EQ(r.indices, (std::vector<int64_t> {3, 1}));
+}
+
+// --- TopK with k as the opset-9 attribute (no second input). ---
+TEST(Ops, TopKKAttr) {
+    auto r = runTopK({1, 4}, {1, 3, 2, 4}, 2, -1, 1, 1, /*kAsAttr=*/true);
+    ASSERT_EQ(r.shape, (Shape {1, 2}));
+    EXPECT_EQ(r.values, (std::vector<float> {4, 3}));
+    EXPECT_EQ(r.indices, (std::vector<int64_t> {3, 1}));
+}
+
+// --- TopK with k past the axis length clamps to the axis length (shape rule and kernel agree). ---
+TEST(Ops, TopKClampsOversizedK) {
+    auto r = runTopK({1, 3}, {2, 3, 1}, 9, -1, 1, 1);
+    ASSERT_EQ(r.shape, (Shape {1, 3}));
+    EXPECT_EQ(r.values, (std::vector<float> {3, 2, 1}));
+    EXPECT_EQ(r.indices, (std::vector<int64_t> {1, 0, 2}));
+}
+
 // --- ConvertLayout on the CPU backend: NC4HW4 is a device-only storage format and every host
 //     residency is canonical NCHW, so both directions are value- and shape-preserving copies. A
 //     flat->NC4HW4 -> NC4HW4->flat pair must return the input exactly, including the odd channel
@@ -1540,6 +1699,50 @@ TEST(Passes, LessConstFoldInt64) {
         EXPECT_EQ(g.initializers[y0].f32()[i], refLt[i]) << "i=" << i;
         EXPECT_EQ(g.initializers[y1].f32()[i], refLe[i]) << "i=" << i;
     }
+}
+
+// --- TopK shape rule: both outputs get the input shape with the axis dim replaced by k (the const
+// int64 input[1]), the values output carries the data dtype, and the indices output is Int64 — the
+// declared dtype the session readback emits for a graph-output index tensor. ---
+TEST(Passes, TopKInferShapes) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 3, 5};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorDesc kd;
+    kd.name          = "k";
+    kd.shape         = {1};
+    kd.isInitializer = true;
+    kd.dtype         = DType::Int64;
+    TensorId   kid   = g.addTensor(kd);
+    HostBuffer hb;
+    hb.resizeElems(1, DType::Int64);
+    hb.i64()[0]         = 2;
+    g.initializers[kid] = hb;
+    TensorId v          = g.addTensor({.name = "v"});
+    TensorId ix         = g.addTensor({.name = "i"});
+    Node     n;
+    n.type    = OpType::TopK;
+    n.name    = "topk";
+    n.inputs  = {x, kid};
+    n.outputs = {v, ix};
+    {
+        Attr a;
+        a.kind            = Attr::Int;
+        a.i               = 1;
+        n.attr.map["axis"] = a;
+    }
+    g.nodes   = {n};
+    g.outputs = {v, ix};
+
+    inferShapes(g, 1);
+    EXPECT_EQ(g.desc(v).shape, (Shape {2, 2, 5}));
+    EXPECT_EQ(g.desc(ix).shape, (Shape {2, 2, 5}));
+    EXPECT_EQ(g.desc(v).dtype, DType::Float32);
+    EXPECT_EQ(g.desc(ix).dtype, DType::Int64);
 }
 
 // A graph output declared FLOAT16 but produced (after Identity elimination) by a node whose inferred
