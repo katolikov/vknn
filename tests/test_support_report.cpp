@@ -60,7 +60,10 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     TensorId c0 = tensor(g, "conv_out", {1, 8, 8, 8});
     addNode(g, OpType::Conv, "conv_dense", {x, w0}, {c0});
 
-    // grouped (non-depthwise) conv: CPU with the grouped-conv gate reason
+    // grouped (non-depthwise) conv surveyed WITHOUT the lowering pass (vkSupportSurvey gates the raw
+    // graph): a surviving general grouped Conv means lowerGroupedConv could not fire, so the gate
+    // routes it to the group-aware CPU op. In a real compile the constant-weight case here is lowered
+    // to group-1 Convs + Concat (all GPU) before the survey.
     TensorId w1 = initializer(g, "w1", {8, 2, 3, 3});
     TensorId c1 = tensor(g, "gconv_out", {1, 8, 8, 8});
     Attributes gattr;
@@ -106,7 +109,7 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
 
     EXPECT_EQ(rows[1].node, "conv_grouped");
     EXPECT_EQ(rows[1].backend, "cpu");
-    EXPECT_EQ(rows[1].reason, "Conv: grouped conv is GPU-supported only as pure depthwise");
+    EXPECT_EQ(rows[1].reason, "Conv: unlowered grouped conv (runtime weight or unresolved shapes)");
 
     EXPECT_EQ(rows[2].node, "gridsample_cubic");
     EXPECT_EQ(rows[2].backend, "vulkan");

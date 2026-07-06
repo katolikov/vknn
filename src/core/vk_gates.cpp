@@ -448,10 +448,13 @@ namespace vknn {
             }
             return refuse(whyNot, std::string(opTypeName(nd.type)) + ": input count != 2");
         }
-        // Conv: the GPU kernels cover group == 1 and pure depthwise (group == Cin == Cout).
-        // Partial groups (1 < group < Cin) and depthwise with a channel multiplier
-        // (group == Cin, Cout != Cin) would mis-index the dense [Cout][Cinb][KH][KW][4] weight
-        // pack — those fall back to the group-aware CPU op.
+        // Conv: the GPU kernels cover group == 1 (dense) and pure depthwise (group == Cin == Cout).
+        // A general grouped conv (1 < group < Cin, e.g. ResNeXt cardinality, and the channel-multiplier
+        // depthwise group == Cin/Cout != Cin) runs on the GPU too, but by import-time lowering into
+        // `group` group-1 Convs over per-group channel slices joined by a Concat (lowerGroupedConv) —
+        // not a dedicated grouped kernel. So a grouped Conv only reaches this gate when lowering could
+        // not fire (a runtime/non-constant weight, or unresolved shapes), and it falls back to the
+        // group-aware CPU op.
         if (nd.type == OpType::Conv && nd.inputs.size() >= 2)
         {
             int64_t group = nd.attr.geti("group", 1);
@@ -461,9 +464,9 @@ namespace vknn {
                 const Shape &ws = g.desc(nd.inputs[1]).shape;
                 if (xs.size() == 4 && ws.size() == 4 && group == xs[1] && ws[0] == xs[1])
                 {
-                    return true;
+                    return true; // pure depthwise (group == Cin == Cout): native dwconv kernel
                 }
-                return refuse(whyNot, "Conv: grouped conv is GPU-supported only as pure depthwise");
+                return refuse(whyNot, "Conv: unlowered grouped conv (runtime weight or unresolved shapes)");
             }
             return true;
         }

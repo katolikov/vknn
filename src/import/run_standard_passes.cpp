@@ -133,6 +133,8 @@ namespace vknn {
         inferShapes(g, batch, declared); // resolve the inserted Unsqueeze/MatMul/Squeeze
         subpixelConvTranspose(g); // ConvTranspose -> Conv + DepthToSpace; runs on fully-resolved dims, before
         inferShapes(g, batch, declared);    // the pointwise fusion so trailing pointwise ops can still fold onto the Conv
+        lowerGroupedConv(g); // general grouped Conv (1 < group < Cin) -> group-1 Convs + Concat, on resolved shapes
+        inferShapes(g, batch, declared); // shape the inserted Slice/Conv/Concat parts
         if (opt.lowerConv)
         {
             lowerConv(g); // non-Winograd KxK Conv -> ConvGemm, on resolved shapes, before pointwise fusion

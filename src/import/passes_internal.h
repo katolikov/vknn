@@ -47,4 +47,10 @@ namespace vknn {
     // cast input; a forward dtype pass gates removal to a float source so int<->float casts survive.
     // Graph outputs are never renamed (defined in eliminate_float_cast.cpp).
     void eliminateFloatCast(Graph &g);
+    // Lower a general grouped Conv (1 < group < Cin, incl. the channel-multiplier depthwise
+    // group == Cin/Cout != Cin) into `group` independent group-1 Convs over per-group channel slices
+    // joined by a Concat, so each part runs on the proven dense Conv GPU kernel. Needs a resolved
+    // rank-4 input, a constant rank-4 weight, and channels that partition evenly by group; anything
+    // else is left as a grouped Conv for the group-aware CPU op (defined in lower_grouped_conv.cpp).
+    void lowerGroupedConv(Graph &g);
 }

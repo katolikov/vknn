@@ -345,6 +345,74 @@ TEST(Ops, ConvAutoPadValid) {
     expectNear(out.data, {63, 72, 81, 108, 117, 126, 153, 162, 171});
 }
 
+// --- Grouped Conv (1 < group < Cin), 1x1: group=2, Cin=4, Cout=4 -> 2 in / 2 out channels per
+// group. Output channel oc in group g = oc/2 reads only input channels [2g, 2g+2). Run through the
+// full Session pipeline: lowerGroupedConv rewrites it to two group-1 Convs over channel slices joined
+// by a Concat, so this exercises the lowering AND that the lowered graph reproduces grouped semantics
+// bit-for-bit (the GPU parity path decomposes the same way). ---
+TEST(Ops, GroupedConv1x1) {
+    Attr grp;
+    grp.kind = Attr::Int;
+    grp.i    = 2;
+    Attributes attr;
+    attr.map["group"] = grp;
+    // Input [1,4,1,2]: two spatial positions, channels 0..3.
+    // ch0 = {1, 2}, ch1 = {3, 4}, ch2 = {5, 6}, ch3 = {7, 8}
+    std::vector<float> in = {1, 2, 3, 4, 5, 6, 7, 8};
+    // Weight [4,2,1,1] (Cout=4, inCg=2). oc0=[1,0] oc1=[0,1] (group0 over ch0,ch1);
+    // oc2=[1,1] oc3=[2,0] (group1 over ch2,ch3).
+    std::vector<float> w = {1, 0, 0, 1, 1, 1, 2, 0};
+    auto out = runOp(OpType::Conv, 0, attr, {1, 4, 1, 2}, in, {{{4, 2, 1, 1}, w}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 4, 1, 2}));
+    // oc0 = ch0            = {1, 2}
+    // oc1 = ch1            = {3, 4}
+    // oc2 = ch2 + ch3      = {12, 14}
+    // oc3 = 2*ch2          = {10, 12}
+    expectNear(out.data, {1, 2, 3, 4, 12, 14, 10, 12});
+}
+
+// --- Grouped Conv with a per-group input count that is NOT a multiple of 4: group=2, Cin=6, Cout=2
+// -> 3 in-channels per group. The GPU parity lowering slices channels [0,3) and [3,6); the second
+// slice starts mid-vec4 (the NC4 edge), which the Slice+Conv decomposition handles cleanly. ---
+TEST(Ops, GroupedConvNonMultipleOf4) {
+    Attr grp;
+    grp.kind = Attr::Int;
+    grp.i    = 2;
+    Attributes attr;
+    attr.map["group"] = grp;
+    // Input [1,6,1,1]: one spatial position, channels 0..5 = {1,2,3,4,5,6}.
+    std::vector<float> in = {1, 2, 3, 4, 5, 6};
+    // Weight [2,3,1,1]: oc0 sums group0 (ch0,1,2) with {1,1,1}; oc1 sums group1 (ch3,4,5) with {1,1,1}.
+    std::vector<float> w = {1, 1, 1, 1, 1, 1};
+    auto out = runOp(OpType::Conv, 0, attr, {1, 6, 1, 1}, in, {{{2, 3, 1, 1}, w}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 2, 1, 1}));
+    // oc0 = ch0+ch1+ch2 = 6 ; oc1 = ch3+ch4+ch5 = 15
+    expectNear(out.data, {6, 15});
+}
+
+// --- Grouped 3x3 Conv (spatial + grouping): group=2, Cin=2, Cout=2, 3x3 SAME, per-group depthwise-
+// like (1 in / 1 out channel per group), a box filter per channel. Verifies the lowered group-1
+// Convs carry the strides/pads/dilations attributes through to each part. ---
+TEST(Ops, GroupedConv3x3) {
+    Attr grp;
+    grp.kind = Attr::Int;
+    grp.i    = 2;
+    Attributes attr;
+    attr.map["group"]    = grp;
+    attr.map["pads"]     = ints({1, 1, 1, 1});
+    attr.map["kernel_shape"] = ints({3, 3});
+    // Input [1,2,2,2]: ch0 = 1..4, ch1 = 10,20,30,40.
+    std::vector<float> in = {1, 2, 3, 4, 10, 20, 30, 40};
+    // Weight [2,1,3,3]: both output channels are an all-ones 3x3 box over their own group's 1 channel.
+    std::vector<float> w(2 * 1 * 3 * 3, 1.f);
+    auto out = runOp(OpType::Conv, 0, attr, {1, 2, 2, 2}, in, {{{2, 1, 3, 3}, w}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 2, 2, 2}));
+    // Each output is the sum over the 3x3 neighbourhood (SAME pad) of its own channel.
+    // ch0 sums: [1+2+3+4]=10 at every position (all four pixels fall in every window here).
+    // ch1 sums: [10+20+30+40]=100 likewise.
+    expectNear(out.data, {10, 10, 10, 10, 100, 100, 100, 100});
+}
+
 // --- MaxPool auto_pad SAME_UPPER, 2x2 stride 2 over 5x5 input 1..25: out = ceil(5/2) = 3,
 // total_pad = (3-1)*2 + 2 - 5 = 1 at the end, so the last row/col windows are half-size
 // (out[0][2] = max(5,10) = 10, out[2][2] = max(25) = 25). ---
@@ -2346,6 +2414,102 @@ TEST(Passes, PreservesDeclaredOutputDtype) {
     ASSERT_EQ(g.outputs.size(), 1u);
     ASSERT_NE(g.outputs[0], kNoTensor);
     EXPECT_EQ(g.desc(g.outputs[0]).dtype, DType::Float16);
+}
+
+// --- lowerGroupedConv: a general grouped Conv (1 < group < Cin) with a constant weight is rewritten
+// to `group` group-1 Convs over per-group channel slices, joined by a Concat. Verifies the structure
+// (no grouped Conv survives; group parts + slices + one concat appear) so the GPU parity path runs on
+// the dense Conv kernel. A grouped Conv with a runtime (non-initializer) weight is left untouched for
+// the CPU op. ---
+TEST(Passes, LowerGroupedConvStructure) {
+    auto build = [](bool constWeight) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 8, 4, 4}; // Cin=8
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+        TensorDesc wi;
+        wi.name          = "w";
+        wi.shape         = {8, 2, 3, 3}; // group=4 -> inCg=2, outCg=2
+        wi.dtype         = DType::Float32;
+        wi.isInitializer = constWeight;
+        TensorId w       = g.addTensor(wi);
+        if (constWeight)
+        {
+            HostBuffer wb;
+            wb.resizeElems(8 * 2 * 3 * 3, DType::Float32);
+            g.initializers[w] = wb;
+        }
+        TensorDesc yd;
+        yd.name     = "y";
+        yd.shape    = {1, 8, 4, 4};
+        yd.isOutput = true;
+        TensorId   y = g.addTensor(yd);
+        Node       c;
+        c.type    = OpType::Conv;
+        c.name    = "gconv";
+        c.inputs  = {x, w};
+        c.outputs = {y};
+        Attr grp;
+        grp.kind          = Attr::Int;
+        grp.i             = 4;
+        c.attr.map["group"]        = grp;
+        Attr ks;
+        ks.kind           = Attr::Ints;
+        ks.ints           = {3, 3};
+        c.attr.map["kernel_shape"] = ks;
+        Attr pd;
+        pd.kind           = Attr::Ints;
+        pd.ints           = {1, 1, 1, 1};
+        c.attr.map["pads"]         = pd;
+        g.nodes.push_back(c);
+        g.outputs = {y};
+        return g;
+    };
+
+    // constant weight -> lowered
+    {
+        Graph g = build(true);
+        runStandardPasses(g);
+        int convs = 0, slices = 0, concats = 0, grouped = 0;
+        for (const Node &n: g.nodes)
+        {
+            if (n.type == OpType::Conv)
+            {
+                convs++;
+                if (n.attr.geti("group", 1) > 1)
+                {
+                    grouped++;
+                }
+            } else if (n.type == OpType::Slice)
+            {
+                slices++;
+            } else if (n.type == OpType::Concat)
+            {
+                concats++;
+            }
+        }
+        EXPECT_EQ(grouped, 0);  // no grouped Conv survives
+        EXPECT_EQ(convs, 4);    // one group-1 Conv per group
+        EXPECT_EQ(slices, 4);   // one channel Slice per group
+        EXPECT_EQ(concats, 1);  // parts rejoined once
+    }
+    // runtime weight -> untouched (stays a grouped Conv for the CPU op)
+    {
+        Graph g = build(false);
+        runStandardPasses(g);
+        int grouped = 0;
+        for (const Node &n: g.nodes)
+        {
+            if (n.type == OpType::Conv && n.attr.geti("group", 1) > 1)
+            {
+                grouped++;
+            }
+        }
+        EXPECT_EQ(grouped, 1);
+    }
 }
 
 // --- Dropout: inference-mode Dropout is an identity on its data input. eliminateDropout removes a
