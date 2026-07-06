@@ -15,12 +15,21 @@
 // cases. Dispatch: (ceil(N/TN), ceil(M/TM), numBatch). Each workgroup computes a TMxTN output tile;
 // each thread computes an RMxRN micro-tile from registers, looping over K in TK-wide LDS panels.
 
-#define TM 128
-#define TN 128
-#define TK 16
+// Tile geometry as specialization constants (matmul.cpp races the src/core/matmul_tile.h
+// candidates per shape under Tuning::Fast/Heavy; the defaults are the Tuning::None geometry).
+// Every {TM,TN,TK} is bit-neutral: the per-output fp32 K accumulation stays one ascending-k
+// chain — the tiles only remap threads to outputs and move the barriers.
+layout(constant_id = 0) const int TM = 128; // workgroup output rows
+layout(constant_id = 1) const int TN = 128; // workgroup output cols
+layout(constant_id = 2) const int TK = 16;  // K panel depth
+#define TM_MAX 128     // shared/register arrays are sized for the widest variant (see conv_gemm.comp)
+#define TN_MAX 128
+#define TK_MAX 16
 #define TILE 16        // threads per dim (16x16 = 256)
-#define RM (TM / TILE) // 8 output rows per thread
-#define RN (TN / TILE) // 8 output cols per thread
+#define RM (TM / TILE) // output rows per thread (8 at the default tile)
+#define RN (TN / TILE) // output cols per thread
+#define RM_MAX (TM_MAX / TILE)
+#define RN_MAX (TN_MAX / TILE)
 
 layout(local_size_x = TILE, local_size_y = TILE) in;
 layout(std430, binding = 0) readonly buffer A { STORE a[]; };
@@ -33,8 +42,8 @@ layout(push_constant) uniform PC {
 
 // LDS holds the staged panels in storage precision (fp16 when half) to halve LDS traffic, the GEMM's
 // bottleneck; the math is still fp32 (each load is widened with float()).
-shared STORE As[TK][TM]; // transposed (k-major) so the inner loop reads As[kk][m] across threads
-shared STORE Bs[TK][TN];
+shared STORE As[TK_MAX][TM_MAX]; // transposed (k-major) so the inner loop reads As[kk][m] across threads
+shared STORE Bs[TK_MAX][TN_MAX];
 
 void main() {
   int M = pc.M, N = pc.N, K = pc.K;
@@ -55,7 +64,7 @@ void main() {
   int ty  = int(gl_LocalInvocationID.y);
   int tid = ty * TILE + tx;
 
-  float acc[RM][RN];
+  float acc[RM_MAX][RN_MAX];
   for (int i = 0; i < RM; ++i)
     for (int j = 0; j < RN; ++j)
       acc[i][j] = 0.0;
@@ -76,7 +85,7 @@ void main() {
     }
     barrier();
     for (int kk = 0; kk < TK; ++kk) {
-      float av[RM], bv[RN];
+      float av[RM_MAX], bv[RN_MAX];
       for (int i = 0; i < RM; ++i)
         av[i] = float(As[kk][ty * RM + i]);
       for (int j = 0; j < RN; ++j)

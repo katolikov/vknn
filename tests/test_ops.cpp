@@ -5,6 +5,7 @@
 // ConvTranspose covers the explicit-pad, auto_pad SAME, and output_shape paths -- SAME and
 // output_shape yield the same output size here but different values, so a regression in either
 // attribute is caught.
+#include "core/matmul_tile.h"
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
@@ -868,6 +869,86 @@ TEST(Passes, FusePointwiseBitExact) {
     for (size_t i = 0; i < got.size(); ++i)
     {
         EXPECT_FLOAT_EQ(got[i], unfused[i]);
+    }
+}
+
+namespace {
+
+    // MatMul(x [n,n], W const [n,n]) -> t0, Mul(t0, c const [n,n]) -> y. The Mul is a one-step
+    // pointwise chain whose producer is the MatMul.
+    Graph makeMatMulMulGraph(int64_t n) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {n, n};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        auto konst = [&](const char *nm) {
+            TensorDesc t;
+            t.name          = nm;
+            t.shape         = {n, n};
+            t.isInitializer = true;
+            TensorId   id   = g.addTensor(t);
+            HostBuffer hb;
+            hb.resizeElems((size_t) (n * n), DType::Float32);
+            for (int64_t i = 0; i < n * n; ++i)
+            {
+                hb.f32()[i] = 1.f;
+            }
+            g.initializers[id] = hb;
+            return id;
+        };
+        TensorId w  = konst("w"), c = konst("c");
+        TensorId t0 = g.addTensor({.name = "t0"}), y = g.addTensor({.name = "y"});
+        g.desc(y).isOutput = true;
+        Node mm;
+        mm.type    = OpType::MatMul;
+        mm.name    = "mm";
+        mm.inputs  = {x, w};
+        mm.outputs = {t0};
+        Node ml;
+        ml.type    = OpType::Binary;
+        ml.subOp   = (int) BinaryType::Mul;
+        ml.name    = "mul";
+        ml.inputs  = {t0, c};
+        ml.outputs = {y};
+        g.nodes    = {mm, ml};
+        g.outputs  = {y};
+        return g;
+    }
+
+} // namespace
+
+// --- The pass attaches a chain to the naive MatMul kernel's epilogue but refuses the register-
+// tiled one (M,N,K all >= kTiledMatMulMin — the same shared constant matmul.cpp selects the
+// tiled kernel by): the register-blocked GEMM has no headroom for the VM at its store loop. ---
+TEST(Passes, FusePointwiseMatMulTiledRefusal) {
+    {
+        Graph g = makeMatMulMulGraph(kTiledMatMulMin); // at the threshold: tiled kernel, refuse
+        inferShapes(g, 1);
+        fusePointwiseChains(g, true);
+        for (const auto &nd: g.nodes)
+        {
+            if (nd.type == OpType::MatMul)
+            {
+                EXPECT_FALSE(nd.attr.has("pw_steps")) << "tiled-shaped MatMul must not host a pw unit";
+            }
+        }
+    }
+    {
+        Graph g = makeMatMulMulGraph(kTiledMatMulMin / 2); // below: naive kernel hosts the unit
+        inferShapes(g, 1);
+        fusePointwiseChains(g, true);
+        bool hosted = false;
+        for (const auto &nd: g.nodes)
+        {
+            if (nd.type == OpType::MatMul)
+            {
+                hosted = nd.attr.has("pw_steps");
+            }
+        }
+        EXPECT_TRUE(hosted) << "small MatMul should host the pointwise epilogue";
     }
 }
 
