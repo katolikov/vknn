@@ -263,8 +263,48 @@ class Report:
         self.blockers.append({"kind": kind, "detail": detail, "nodes": [node] if node else []})
 
 
+def _scalar_const(graph, name):
+    """First element of initializer or Constant-node output `name` as a float, or None."""
+    from onnx import numpy_helper
+    try:
+        for init in graph.initializer:
+            if init.name == name:
+                arr = numpy_helper.to_array(init)
+                return float(arr.reshape(-1)[0]) if arr.size else None
+        for n in graph.node:
+            if n.op_type == "Constant" and name in n.output:
+                for a in n.attribute:
+                    if a.name == "value":
+                        arr = numpy_helper.to_array(a.t)
+                        return float(arr.reshape(-1)[0]) if arr.size else None
+    except Exception:
+        return None
+    return None
+
+
+def _dropout_reason(node, graph, consumed):
+    """Blocker reason for a Dropout the importer cannot erase, or None when it erases.
+
+    Mirrors src/import/eliminate_dropout.cpp: inference-mode Dropout (training_mode input absent
+    or a constant false, mask output absent or unconsumed) is removed at import with consumers
+    rewired to the producer; anything else keeps the node, which has no kernel in either backend.
+    """
+    if len(node.output) > 1 and node.output[1] and node.output[1] in consumed:
+        return ("op Dropout — mask output is consumed (import erases only the identity form; "
+                "the mask is never fabricated)")
+    if len(node.input) > 2 and node.input[2]:
+        val = _scalar_const(graph, node.input[2])
+        if val is None:
+            return ("op Dropout — training_mode is not a constant "
+                    "(import erases only the provably inference-mode form)")
+        if val != 0:
+            return "op Dropout — training_mode is constant true (training-mode Dropout has no kernel)"
+    return None
+
+
 def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=None):
     index = build_value_index(graph, parent_index)
+    consumed = {i for n in graph.node for i in n.input if i} | {o.name for o in graph.output}
     for i, node in enumerate(graph.node):
         label = "%s '%s' (%s#%d)" % (node.op_type, node.name or "unnamed", path, i)
         attrs = attr_map(node)
@@ -282,6 +322,11 @@ def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=Non
             # Erased at import: Constant materializes as an initializer, Identity is eliminated,
             # and Shape of a compile-time-static tensor const-folds (VKNN compiles fixed shapes).
             pass
+        elif node.op_type == "Dropout":
+            # Erased at import when inference-mode (see _dropout_reason); otherwise kernel-less.
+            reason = _dropout_reason(node, graph, consumed)
+            if reason:
+                rep.blocker("no kernel", reason, label)
         else:
             has_vk = ty in vk_ops
             has_cpu = ty in cpu_ops

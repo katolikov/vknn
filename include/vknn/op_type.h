@@ -65,6 +65,8 @@ namespace vknn {
         ConvGemm,  // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
         Less,      // A <  B -> 1.0/0.0, elementwise with broadcasting (flat path)
         LessEqual, // A <= B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        Dropout,   // identity in inference mode; eliminated at import (eliminateDropout) -- a kept
+                   // training-mode / consumed-mask Dropout has no kernel and is unsupported
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

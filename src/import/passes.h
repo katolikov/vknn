@@ -52,6 +52,10 @@ namespace vknn {
     void lowerConv(Graph &g);
     // Remove Identity nodes, rewiring consumers to the input.
     void eliminateIdentity(Graph &g);
+    // Remove inference-mode Dropout nodes (training_mode absent or a constant false, mask output
+    // absent or unconsumed), rewiring consumers to the input. A Dropout that is not provably
+    // inference-mode, or whose mask is consumed, stays in place and is unsupported downstream.
+    void eliminateDropout(Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
     void eliminateDeadNodes(Graph &g);
     // Drop initializer payloads no node/output references (folded-chain intermediates, Cast-copied

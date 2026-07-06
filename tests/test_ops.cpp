@@ -1585,3 +1585,301 @@ TEST(Passes, PreservesDeclaredOutputDtype) {
     ASSERT_NE(g.outputs[0], kNoTensor);
     EXPECT_EQ(g.desc(g.outputs[0]).dtype, DType::Float16);
 }
+
+// --- Dropout: inference-mode Dropout is an identity on its data input. eliminateDropout removes a
+// Dropout whose training_mode input is absent or a constant false and whose mask output is absent
+// or unconsumed, rewiring consumers to the producer. A Dropout with a consumed mask or a
+// non-constant/true training_mode survives untouched (the pass never fabricates a mask; the node
+// then fails backend planning as unsupported). ---
+namespace {
+
+    // Registers a float activation tensor named `name`.
+    TensorId addAct(Graph &g, const char *name) {
+        TensorDesc d;
+        d.name  = name;
+        d.shape = {1, 8};
+        return g.addTensor(d);
+    }
+
+    // Registers a rank-0 scalar initializer of dtype `dt` holding `v` (BOOL imports as UInt8 0/1).
+    TensorId addScalarInit(Graph &g, const char *name, DType dt, double v) {
+        TensorDesc d;
+        d.name          = name;
+        d.isInitializer = true;
+        d.dtype         = dt;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems(1, dt);
+        switch (dt)
+        {
+            case DType::Float32:
+                hb.f32()[0] = (float) v;
+                break;
+            case DType::Int64:
+                hb.i64()[0] = (int64_t) v;
+                break;
+            default:
+                hb.bytes[0] = (uint8_t) v;
+                break;
+        }
+        g.initializers[id] = hb;
+        return id;
+    }
+
+} // namespace
+
+TEST(Passes, DropoutInferenceModeEliminated) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorId r     = addAct(g, "r");
+    TensorId d     = addAct(g, "d");
+    TensorId m     = addAct(g, "m"); // mask requested but never consumed
+    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    TensorId tm    = addScalarInit(g, "tm", DType::UInt8, 0); // constant-false training_mode
+    TensorId k     = addScalarInit(g, "k", DType::Float32, 2.0);
+    TensorId y     = addAct(g, "y");
+    g.desc(y).isOutput = true;
+    g.outputs          = {y};
+    Node relu;
+    relu.type    = OpType::Relu;
+    relu.name    = "relu";
+    relu.inputs  = {x};
+    relu.outputs = {r};
+    Node dp;
+    dp.type    = OpType::Dropout;
+    dp.name    = "dp";
+    dp.inputs  = {r, ratio, tm};
+    dp.outputs = {d, m};
+    Node mul;
+    mul.type    = OpType::Binary;
+    mul.subOp   = (int) BinaryType::Mul;
+    mul.name    = "mul";
+    mul.inputs  = {d, k};
+    mul.outputs = {y};
+    g.nodes = {relu, dp, mul};
+
+    eliminateDropout(g);
+    ASSERT_EQ(g.nodes.size(), 2u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Relu);
+    EXPECT_EQ(g.nodes[1].type, OpType::Binary);
+    EXPECT_EQ(g.nodes[1].inputs[0], r) << "the Mul must read the Relu output directly";
+}
+
+TEST(Passes, DropoutGraphOutputRewired) {
+    // Opset-7 form: data input and output only, the output is a graph output.
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorId r = addAct(g, "r");
+    TensorId d = addAct(g, "d");
+    g.desc(d).isOutput = true;
+    g.outputs          = {d};
+    Node relu;
+    relu.type    = OpType::Relu;
+    relu.name    = "relu";
+    relu.inputs  = {x};
+    relu.outputs = {r};
+    Node dp;
+    dp.type    = OpType::Dropout;
+    dp.name    = "dp";
+    dp.inputs  = {r};
+    dp.outputs = {d};
+    g.nodes = {relu, dp};
+
+    eliminateDropout(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Relu);
+    ASSERT_EQ(g.outputs.size(), 1u);
+    EXPECT_EQ(g.outputs[0], r) << "the graph output must be rewired to the Relu output";
+}
+
+TEST(Passes, DropoutConsumedMaskKept) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorId d = addAct(g, "d");
+    TensorId m = addAct(g, "m");
+    TensorId k = addScalarInit(g, "k", DType::Float32, 2.0);
+    TensorId y = addAct(g, "y");
+    g.desc(d).isOutput = true;
+    g.desc(y).isOutput = true;
+    g.outputs          = {d, y};
+    Node dp;
+    dp.type    = OpType::Dropout;
+    dp.name    = "dp";
+    dp.inputs  = {x};
+    dp.outputs = {d, m};
+    Node mul; // consumes the mask: the Dropout must not be eliminated (no fabricated mask)
+    mul.type    = OpType::Binary;
+    mul.subOp   = (int) BinaryType::Mul;
+    mul.name    = "mul";
+    mul.inputs  = {m, k};
+    mul.outputs = {y};
+    g.nodes = {dp, mul};
+
+    eliminateDropout(g);
+    ASSERT_EQ(g.nodes.size(), 2u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Dropout);
+}
+
+TEST(Passes, DropoutTrainingModeConstTrueKept) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorId d     = addAct(g, "d");
+    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    TensorId tm    = addScalarInit(g, "tm", DType::UInt8, 1); // constant-true training_mode
+    g.desc(d).isOutput = true;
+    g.outputs          = {d};
+    Node dp;
+    dp.type    = OpType::Dropout;
+    dp.name    = "dp";
+    dp.inputs  = {x, ratio, tm};
+    dp.outputs = {d};
+    g.nodes = {dp};
+
+    eliminateDropout(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Dropout);
+}
+
+TEST(Passes, DropoutTrainingModeRuntimeKept) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    TensorDesc ti; // training_mode fed at run time: not provably false
+    ti.name     = "tm";
+    ti.isInput  = true;
+    ti.dtype    = DType::UInt8;
+    TensorId tm = g.addTensor(ti);
+    g.inputs    = {x, tm};
+    TensorId d     = addAct(g, "d");
+    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    g.desc(d).isOutput = true;
+    g.outputs          = {d};
+    Node dp;
+    dp.type    = OpType::Dropout;
+    dp.name    = "dp";
+    dp.inputs  = {x, ratio, tm};
+    dp.outputs = {d};
+    g.nodes = {dp};
+
+    eliminateDropout(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Dropout);
+}
+
+TEST(Passes, DropoutConstantNodeTrainingModeFalse) {
+    // training_mode produced by a not-yet-folded Constant node (the pass runs before constFold).
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorId tm    = addAct(g, "tm");
+    TensorId d     = addAct(g, "d");
+    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    g.desc(d).isOutput = true;
+    g.outputs          = {d};
+    Node cn;
+    cn.type    = OpType::Constant;
+    cn.name    = "tm_const";
+    cn.outputs = {tm};
+    Attr v;
+    v.kind = Attr::Ints;
+    v.ints = {0};
+    cn.attr.map["value"] = v;
+    Node dp;
+    dp.type    = OpType::Dropout;
+    dp.name    = "dp";
+    dp.inputs  = {x, ratio, tm};
+    dp.outputs = {d};
+    g.nodes = {cn, dp};
+
+    eliminateDropout(g);
+    ASSERT_EQ(g.nodes.size(), 1u);
+    EXPECT_EQ(g.nodes[0].type, OpType::Constant) << "only the Dropout is removed; DCE owns the dead Constant";
+    ASSERT_EQ(g.outputs.size(), 1u);
+    EXPECT_EQ(g.outputs[0], x);
+}
+
+TEST(Passes, DropoutRunStandardPassesRewires) {
+    EXPECT_EQ(opTypeFromOnnx("Dropout"), OpType::Dropout);
+    // x -> MatMul(w) -> Dropout -> Softmax -> y imports to MatMul -> Softmax directly connected.
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 8};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    TensorDesc wd;
+    wd.name          = "w";
+    wd.shape         = {8, 8};
+    wd.isInitializer = true;
+    TensorId   w     = g.addTensor(wd);
+    HostBuffer hb;
+    hb.resizeElems(64, DType::Float32);
+    g.initializers[w] = hb;
+    TensorId t        = addAct(g, "t");
+    TensorId d        = addAct(g, "d");
+    TensorId y        = addAct(g, "y");
+    g.desc(y).isOutput = true;
+    g.outputs          = {y};
+    Node mm;
+    mm.type    = OpType::MatMul;
+    mm.name    = "mm";
+    mm.inputs  = {x, w};
+    mm.outputs = {t};
+    Node dp;
+    dp.type    = OpType::Dropout;
+    dp.name    = "dp";
+    dp.inputs  = {t};
+    dp.outputs = {d};
+    Node sm;
+    sm.type    = OpType::Softmax;
+    sm.name    = "sm";
+    sm.inputs  = {d};
+    sm.outputs = {y};
+    g.nodes = {mm, dp, sm};
+
+    runStandardPasses(g);
+    const Node *matmul = nullptr, *softmax = nullptr;
+    for (const Node &n: g.nodes)
+    {
+        EXPECT_NE(n.type, OpType::Dropout);
+        if (n.type == OpType::MatMul)
+        {
+            matmul = &n;
+        }
+        if (n.type == OpType::Softmax)
+        {
+            softmax = &n;
+        }
+    }
+    ASSERT_NE(matmul, nullptr);
+    ASSERT_NE(softmax, nullptr);
+    EXPECT_EQ(softmax->inputs[0], matmul->outputs[0]) << "Softmax must read the MatMul output directly";
+}

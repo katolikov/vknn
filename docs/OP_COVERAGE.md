@@ -59,6 +59,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Shape / Constant / ConstantOfShape / EyeLike | const-fold | ✅ | resolved at compile time |
 | Range | ✅ | ✅ | small constant ranges const-fold; a float Range whose size resolves at plan time runs on the GPU (start/delta may be runtime scalars); int64 or unresolved-size ranges use the CPU op, which sizes at run time |
 | Identity | — | ✅ | |
+| Dropout | eliminated | eliminated | inference-mode identity (training_mode absent or constant false, mask output absent or unconsumed) removed at import, consumers rewired to the producer; a consumed mask or a non-constant training_mode is unsupported |
 
 ## Fusions and lowerings
 

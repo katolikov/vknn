@@ -76,6 +76,8 @@ namespace vknn {
             }
         }
         markScalarGatherIndices(g); // before const-fold erases the Constant nodes' original ranks
+        eliminateDropout(g);        // before shape inference: Dropout has no shape rule -- the eliminable
+                                    // (inference-mode) form is an identity and is rewired past here
         inferShapes(g, batch);
         lowerReduceToGap(g); // needs input ranks; ReduceMean imports as generic Reduce
         inferShapes(g, batch);
