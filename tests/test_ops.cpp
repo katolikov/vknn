@@ -3166,6 +3166,58 @@ TEST(Passes, DequantizeLinearUint8NonzeroZeroPoint) {
     }
 }
 
+// A boundary DequantizeLinear that survives to the CPU kernel at run time (its input is a graph
+// activation, not an all-initializer chain the pass would fold) with a rank-0 SCALAR scale and
+// zero_point. A rank-0 shape has zero numElements, so counting the scale by elems() would make the
+// per-tensor channel index compute (i / inner) % 0 -- a divide-by-zero. The kernel must treat a
+// rank-0 scalar as one channel (the per-tensor form).
+TEST(Ops, DequantizeLinearRank0ScalarScaleRuns) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 3};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorId   s = addFloatInit(g, "s", {}, {0.5f}); // rank-0 scalar scale
+    TensorId   z = addFloatInit(g, "z", {}, {3.0f}); // rank-0 scalar zero_point
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.shape    = {2, 3};
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type    = OpType::DequantizeLinear;
+    n.name    = "dq";
+    n.inputs  = {x, s, z};
+    n.outputs = {y};
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {2, 3};
+    in.dtype = DType::Float32;
+    in.data.resize(6 * sizeof(float));
+    const float xv[6] = {0.f, 1.f, 3.f, 5.f, 7.f, 255.f}; // integer-valued quantized inputs
+    for (int i = 0; i < 6; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = xv[i];
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs.size(), 1u);
+    const float *o = outs[0].f32();
+    for (int i = 0; i < 6; ++i)
+    {
+        EXPECT_FLOAT_EQ(o[i], (xv[i] - 3.0f) * 0.5f) << "i=" << i; // per-tensor (x - zp) * scale
+    }
+}
+
 TEST(Passes, QdqSandwichCollapsesByteEqual) {
     // int8 zp=3, scale=0.05 -> the inserted clamp is [-6.55, 6.2]. The post-ReLU values below all
     // land inside it, so the Clip is a genuine no-op and byte-equality with the plain float graph

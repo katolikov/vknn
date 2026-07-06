@@ -20,11 +20,11 @@ namespace vknn {
                 const RtTensor &X = ctx.t(node.inputs[0]);
                 const RtTensor &S = ctx.t(node.inputs[1]);
                 RtTensor       &Y = ctx.t(node.outputs[0]);
-                int64_t         n = X.elems();
+                int64_t         n = cpu::elemCount(X.shape);
                 float          *y = cpu::allocOut(Y, X.shape);
                 const float    *x = X.host.f32();
                 const float    *s = S.host.f32();
-                int64_t         sCount = S.elems();
+                int64_t         sCount = cpu::elemCount(S.shape); // rank-0 scalar counts as 1 (per-tensor)
                 // zero_point is optional; an absent input leaves the default of 0.
                 const float    *z      = nullptr;
                 int64_t         zCount = 0;
@@ -32,7 +32,7 @@ namespace vknn {
                 {
                     const RtTensor &Z = ctx.t(node.inputs[2]);
                     z      = Z.host.f32();
-                    zCount = Z.elems();
+                    zCount = cpu::elemCount(Z.shape);
                 }
                 // Per-axis stride: elements between consecutive channel steps. inner==n for the
                 // per-tensor form (a single scale spans the whole tensor), so the channel index below
