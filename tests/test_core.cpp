@@ -80,6 +80,56 @@ TEST(Api, TensorHelpers) {
     EXPECT_EQ(flat.shapeString(), "3");
 }
 
+// Session::run validates a caller-provided IOTensor shape against the planned buffers: buffer
+// sizes, push constants, and dispatch geometry are frozen at plan() time, so a shape whose packed
+// footprint differs from the plan is rejected instead of overrunning the boundary buffer at pack
+// time. An empty caller shape adopts the planned shape; the planned shape itself runs.
+TEST(Api, RunRejectsMismatchedInputShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 2, 2, 2};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type    = OpType::Relu;
+    n.name    = "relu";
+    n.inputs  = {x};
+    n.outputs = {y};
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+
+    auto makeIn = [](const Shape &shape) {
+        IOTensor in;
+        in.name  = "x";
+        in.shape = shape;
+        in.dtype = DType::Float32;
+        in.data.assign((size_t) numElements(shape) * 4, 0);
+        return in;
+    };
+    std::vector<IOTensor> outs;
+    // Larger spatial footprint than the planned [1,2,2,2] buffer: rejected, not adopted.
+    EXPECT_EQ(sess->run({makeIn({1, 2, 4, 4})}, outs), Status::InvalidArgument);
+    // A leading-dim (batch) mismatch is rejected the same way.
+    EXPECT_EQ(sess->run({makeIn({2, 2, 2, 2})}, outs), Status::InvalidArgument);
+    // The planned shape runs.
+    EXPECT_EQ(sess->run({makeIn({1, 2, 2, 2})}, outs), Status::Ok);
+    // An empty caller shape adopts the planned shape.
+    IOTensor noShape = makeIn({1, 2, 2, 2});
+    noShape.shape.clear();
+    EXPECT_EQ(sess->run({noShape}, outs), Status::Ok);
+}
+
 // Ergonomic API: infer()/inputInfo() — caller passes only data, metadata comes from the model.
 TEST(Api, AutoShapesFromModel) {
     // input[1,2,1,1] -> Conv 1x1 (weight 2*I, bias {-3,0}) -> y

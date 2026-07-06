@@ -709,6 +709,30 @@ namespace vknn {
         return &pool_[id];
     }
 
+    // Buffer sizes, push constants, and dispatch geometry are frozen from the graph shapes at
+    // plan() time, so a caller shape whose packed footprint differs from the plan would overrun
+    // (or misread) the mapped boundary buffer at pack time. Every run() input shape passes through
+    // this single check; an empty caller shape adopts the planned shape and always passes. An
+    // unresolved planned shape (element count <= 0) accepts any caller shape, mirroring the
+    // fully-dynamic escape in the vector<float> overload.
+    Status Session::validateInputShape(TensorId id, const Shape &got) const {
+        const TensorDesc &d = graph_.tensors[id];
+        if (got.empty() || got == d.shape || numElements(d.shape) <= 0)
+        {
+            return Status::Ok;
+        }
+        // Stored footprint under the tensor's planned packing: flat tensors store dense row-major
+        // elements, everything else packs NC4HW4 (channels padded to blocks of four). The element
+        // size is the same for both shapes, so equal stored element counts mean equal byte counts.
+        TensorFormat fmt = d.gpuFlat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+        if (formatElems(fmt, NCHW::from(got)) != formatElems(fmt, NCHW::from(d.shape)))
+        {
+            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not fit the planned shape " << shapeStr(d.shape);
+            return Status::InvalidArgument;
+        }
+        return Status::Ok;
+    }
+
     Status Session::run(const std::vector<IOTensor> &inputs, std::vector<IOTensor> &outputs) {
         const bool tm  = cfg_.timing;
         auto       now = [] {
@@ -746,7 +770,11 @@ namespace vknn {
                     return Status::InvalidArgument;
                 }
             }
-            RtTensor &rt    = pool_[id];
+            RtTensor &rt = pool_[id];
+            if (Status vs = validateInputShape(id, io.shape); vs != Status::Ok)
+            {
+                return vs;
+            }
             rt.shape        = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
             rt.dmaBufFd     = io.dmaBufFd;
             rt.dmaBufFormat = io.dmaBufFormat;

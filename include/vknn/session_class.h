@@ -74,6 +74,9 @@ namespace vknn {
         void plan();               ///< Assign backends, partition into segments, and compile.
         void foldTinyGpuIslands(); ///< Reassign small CPU-bounded GPU runs to CPU (avoid round trips).
         void reconcileInputs(Segment &seg);
+        /// Checks a caller-provided input shape against the plan-frozen buffers; the single point
+        /// every run() input shape passes through.
+        Status validateInputShape(TensorId id, const Shape &got) const;
 
         Graph    graph_;
         Config   cfg_;
