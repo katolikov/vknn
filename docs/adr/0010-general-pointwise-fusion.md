@@ -1,7 +1,8 @@
 # ADR-0010: One general pointwise-region fusion; ConvGemm lowering
 
 ## Status
-Accepted (2026-07-05).
+Accepted (2026-07-05). The fast-mode rounding design in §3 (native special-case epilogues,
+per-step rounding elsewhere) is superseded by ADR-0011's fp32-chained units.
 
 ## Context
 Fusion had grown into seven hand-pattern passes (`fuseActivations`, `fuseResidualAdd`, `fuseSwish`,
