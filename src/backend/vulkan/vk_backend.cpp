@@ -1669,8 +1669,9 @@ namespace vknn {
     };
 
     std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) {
-        auto s     = std::make_unique<VulkanSegment>(idx, g, cfg, this);
-        s->backend = this;
+        auto s           = std::make_unique<VulkanSegment>(idx, g, cfg, this);
+        s->backend       = this;
+        s->compiledGraph = &g;
         return s;
     }
 

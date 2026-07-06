@@ -226,6 +226,34 @@ TEST(PlanBuckets, BucketsAreIndependentAcrossInterleavedRuns) {
     EXPECT_EQ(c, a);
 }
 
+// Every compiled segment must reference its bucket's LIVE graph object, in every bucket, however the
+// buckets were built. A segment captures a `Graph &` at compile time and dereferences it at run time
+// (the Vulkan boundary-residency path reads tensor descriptors through it); if the graph object
+// relocates after the segment is compiled — a PlanBucket move as buildBucket returns by value, or a
+// buckets_ reallocation as a second bucket is appended — that reference dangles and run() reads freed
+// memory (the mid-graph CPU-island segfault at a Vulkan<->CPU boundary). This pins the graph's address
+// stability directly: it fails if PlanBucket::graph is ever held by value again.
+TEST(PlanBuckets, SegmentGraphReferencesStayLiveAcrossBucketMoves) {
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+
+    // Single bucket built via buildBucket-returns-by-value: the returned PlanBucket is moved into
+    // buckets_, relocating its graph. The segment's captured reference must still point at it.
+    auto s = Session::create(makeDynamicBatchConvRelu(4, 4, 3, 3), cfg);
+    ASSERT_TRUE(s);
+    EXPECT_TRUE(s->segmentGraphsLive()) << "segment graph dangles after buildBucket move";
+
+    // Append a second bucket, forcing the buckets_ vector to grow and relocate bucket 0. Bucket 0's
+    // already-compiled segment must not be left pointing at the old (moved-from) graph address.
+    ASSERT_EQ(s->prepareShapes({{"data", {2, 4, 3, 3}}}), Status::Ok);
+    ASSERT_EQ(s->bucketCount(), 2u);
+    EXPECT_TRUE(s->segmentGraphsLive()) << "segment graph dangles after buckets_ reallocation";
+
+    // Bucket 0 still runs correctly through the relocated graph (dereferencing the reference is safe).
+    std::vector<float> x = ramp(1 * 4 * 3 * 3);
+    EXPECT_EQ(runShape(*s, {1, 4, 3, 3}, x), reference(x));
+}
+
 // A multi-bucket .vxm (two graphs resolved at two batch sizes, sharing one weight pool) loads every
 // stored bucket and dispatches each input shape to its own plan. A .vxm session cannot add buckets at
 // runtime, so prepareShapes() is refused; an unknown shape is InvalidArgument.
@@ -250,6 +278,9 @@ TEST(PlanBuckets, MultiBucketVxmLoadsAndDispatches) {
     std::remove(path.c_str());
     ASSERT_TRUE(s);
     EXPECT_EQ(s->bucketCount(), 2u);
+    // Loading N buckets push_backs them in a loop, reallocating buckets_ as it grows; each earlier
+    // bucket's segments must still reference their (relocated) live graph.
+    EXPECT_TRUE(s->segmentGraphsLive());
 
     std::vector<float> x1 = ramp(1 * 4 * 3 * 3);
     std::vector<float> x2 = ramp(2 * 4 * 3 * 3);

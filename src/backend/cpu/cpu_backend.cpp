@@ -191,8 +191,9 @@ namespace vknn {
             return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
         }
         std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &) override {
-            auto s     = std::make_unique<CpuSegment>(idx, g);
-            s->backend = this;
+            auto s           = std::make_unique<CpuSegment>(idx, g);
+            s->backend       = this;
+            s->compiledGraph = &g;
             return s;
         }
     };

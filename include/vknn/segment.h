@@ -20,6 +20,10 @@ namespace vknn {
 
         /// Backend that compiled and owns this segment. Non-owning; the backend outlives the segment.
         Backend *backend = nullptr;
+        /// The graph this segment was compiled against, recorded so the segment's captured `Graph &`
+        /// can be checked against the session's live bucket graph (they must be the same object: the
+        /// graph's address is stable for the session's lifetime). Set by the backend's compileSegment().
+        const Graph *compiledGraph = nullptr;
         /// True when this is a CPU fallback segment that exists because the primary backend cannot run
         /// these ops. Drives the fallback warning and the profiler tag.
         bool isFallback = false;

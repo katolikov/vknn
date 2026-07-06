@@ -36,7 +36,12 @@ namespace vknn {
     /// them (autotune sigs and weight-cache keys are shape-safe).
     struct PlanBucket {
         std::string                           key;             ///< Canonical input-shape key (see Session::shapeKey).
-        Graph                                 graph;           ///< This bucket's optimized graph. Segments reference it; never moved after compile.
+        /// This bucket's optimized graph, held by pointer so its address is stable: the compiled
+        /// segments capture a `Graph &` into it, and that reference must stay valid across every
+        /// PlanBucket move (buildBucket returns by value) and every buckets_ vector reallocation
+        /// (a multi-bucket .vxm or prepareShapes appends buckets). A by-value Graph member would
+        /// relocate on those moves and dangle the segments' reference — the boundary-residency crash.
+        std::unique_ptr<Graph>                graph;
         std::vector<int>                      nodeBackendIdx;  ///< Backend index (into Session::backends_) per node.
         std::vector<std::unique_ptr<Segment>> segments;        ///< Compiled segments, run in order.
         std::vector<RtTensor>                 pool;            ///< Runtime tensor pool for this bucket, indexed by TensorId.
@@ -99,7 +104,7 @@ namespace vknn {
         /// The optimized graph the default (first) bucket runs (nodes, tensors, and their
         /// descriptors). A multi-bucket session has one such graph per shape; this returns bucket 0's.
         const Graph &graph() const noexcept {
-            return buckets_.front().graph;
+            return *buckets_.front().graph;
         }
         /// The configuration this session was built with.
         const Config &config() const noexcept {
@@ -124,6 +129,25 @@ namespace vknn {
         /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
         /// The returned data is host-resident.
         const RtTensor *tensor(const std::string &name) const;
+
+        /// True when every compiled segment, in every bucket, references its bucket's live graph
+        /// object (Segment::compiledGraph == &bucket.graph). A segment captures a `Graph &` at compile
+        /// time and dereferences it at run time (the Vulkan boundary path reads tensor descriptors
+        /// through it), so a stale reference is a use-after-free. Guards the address-stability
+        /// invariant against a PlanBucket move or a buckets_ reallocation relocating the graph.
+        bool segmentGraphsLive() const noexcept {
+            for (const PlanBucket &b: buckets_)
+            {
+                for (const std::unique_ptr<Segment> &s: b.segments)
+                {
+                    if (s && s->compiledGraph != b.graph.get())
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
 
       private:
         Session() = default;
