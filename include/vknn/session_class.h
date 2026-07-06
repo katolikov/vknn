@@ -14,6 +14,15 @@
 
 namespace vknn {
 
+    /// One plan-time fallback: a node the requested backend refused, with the engine's reason
+    /// (filled by Backend::supportsNode, or by the tiny-GPU-island fold). Empty node names come
+    /// from unnamed source nodes; `op` is the ONNX-style spelling (opTypeName).
+    struct FallbackReason {
+        std::string node;   ///< Node name (may be empty for unnamed nodes).
+        std::string op;     ///< Op spelling, e.g. "Conv".
+        std::string reason; ///< Why the node does not run on the requested backend.
+    };
+
     /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.
     class Session {
       public:
@@ -64,6 +73,12 @@ namespace vknn {
         /// "<OpType> <node name>" for every node NOT running on the requested backend. A release run
         /// entirely on the GPU reports an empty list.
         std::vector<std::string> fallbackOps() const;
+        /// Why each fallback in fallbackOps() happened, recorded once at plan() time: the requested
+        /// backend's supportsNode refusal reason, or the tiny-GPU-island fold. Empty when the whole
+        /// model runs on the requested backend.
+        const std::vector<FallbackReason> &fallbackReasons() const noexcept {
+            return fallbackReasons_;
+        }
 
         /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
         /// The returned data is host-resident.
@@ -86,6 +101,7 @@ namespace vknn {
         std::vector<std::unique_ptr<Backend>> backends_; // active, in priority order
         std::map<BackendKind, Backend *>      byKind_;
         std::vector<int>                      nodeBackendIdx_; // backend index per node
+        std::vector<FallbackReason>           fallbackReasons_; // plan-time refusals of the requested backend
         std::vector<std::unique_ptr<Segment>> segments_;
         std::vector<RtTensor>                 pool_;
         bool                                  planned_        = false;

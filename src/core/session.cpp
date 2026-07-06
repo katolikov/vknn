@@ -308,6 +308,10 @@ namespace vknn {
                 for (int ni: runNodes[r])
                 {
                     nodeBackendIdx_[ni] = cpuIdx;
+                    if (backends_[cpuIdx]->kind() != cfg_.backend)
+                    {
+                        fallbackReasons_.push_back({graph_.nodes[ni].name, opTypeName(graph_.nodes[ni].type), "tiny GPU island folded to CPU (round-trip cost exceeds the work)"});
+                    }
                 }
                 changed = true; // restart: the fold may have merged neighbours into a new island
             }
@@ -424,11 +428,17 @@ namespace vknn {
                 throw Error(Status::Unsupported, std::string("no backend supports op ") + opTypeName(nd.type) + " (" + nd.name + ")");
             }
             nodeBackendIdx_[n] = chosen;
-            // warn if the primary backend couldn't take it
-            if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend) && !byKind_[cfg_.backend]->supportsNode(graph_, nd, dt))
+            // warn if the primary backend couldn't take it; keep the refusal reason for
+            // fallbackReasons() (the support report and fallback diagnostics)
+            if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend))
             {
-                VKNN_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2) << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by " << backendName(cfg_.backend) << " backend -> falling back to "
-                                                                                      << backends_[chosen]->name() << ". Perf note: this op does not run on the requested backend.";
+                std::string why;
+                if (!byKind_[cfg_.backend]->supportsNode(graph_, nd, dt, &why))
+                {
+                    fallbackReasons_.push_back({nd.name, opTypeName(nd.type), why});
+                    VKNN_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2) << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by " << backendName(cfg_.backend) << " backend -> falling back to "
+                                                                                          << backends_[chosen]->name() << " (" << why << "). Perf note: this op does not run on the requested backend.";
+                }
             }
         }
 
