@@ -29,6 +29,9 @@ namespace vknn { namespace vk {
         // the overflow into the y dimension (see ComputePipeline::dispatch).
         uint32_t maxWorkGroupCount[3] = {0, 0, 0};
         uint32_t maxSharedMemory      = 0;
+        // Largest push-constant block the device accepts; the Vulkan-guaranteed floor is 128 B
+        // and some kernel PC blocks exceed it, so ComputePipeline validates against this cap.
+        uint32_t maxPushConstantsSize = 0;
         float    timestampPeriod      = 0.f;
         bool     timestampSupported   = false;
 

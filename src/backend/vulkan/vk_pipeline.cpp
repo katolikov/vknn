@@ -89,6 +89,14 @@ namespace vknn { namespace vk {
             }
             VK_CHECK(vkCreateDescriptorSetLayout(ctx_.device(), &slci, nullptr, &setLayout_));
 
+            // Several kernel PC blocks exceed the 128-byte Vulkan-guaranteed minimum; a range
+            // above the device cap is invalid at layout creation, so it is rejected here with
+            // the shader named rather than left to a driver error (or silence) later.
+            if (pushConstBytes > ctx_.caps().maxPushConstantsSize)
+            {
+                VKNN_ERROR << "shader " << shaderName << " needs " << pushConstBytes << " B of push constants but the device caps at " << ctx_.caps().maxPushConstantsSize << " B";
+                throw Error(Status::Unsupported, "push-constant block of shader " + shaderName + " (" + std::to_string(pushConstBytes) + " B) exceeds device maxPushConstantsSize (" + std::to_string(ctx_.caps().maxPushConstantsSize) + " B)");
+            }
             VkPushConstantRange pcr {};
             pcr.stageFlags = kComputeStage;
             pcr.offset     = 0;

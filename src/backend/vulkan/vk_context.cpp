@@ -8,7 +8,7 @@ namespace vknn { namespace vk {
     std::string VulkanCaps::summary() const {
         std::ostringstream os;
         os << deviceName << " | " << driverName << " (" << driverInfo << ")"
-           << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB"
+           << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B"
            << " tsPeriod=" << timestampPeriod << "ns\n"
            << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
            << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
@@ -118,6 +118,7 @@ namespace vknn { namespace vk {
         caps_.maxWorkGroupCount[1]    = p.limits.maxComputeWorkGroupCount[1];
         caps_.maxWorkGroupCount[2]    = p.limits.maxComputeWorkGroupCount[2];
         caps_.maxSharedMemory         = p.limits.maxComputeSharedMemorySize;
+        caps_.maxPushConstantsSize    = p.limits.maxPushConstantsSize;
         caps_.timestampPeriod         = p.limits.timestampPeriod;
         caps_.timestampSupported      = p.limits.timestampComputeAndGraphics;
 
