@@ -4,6 +4,7 @@
 #include "vk_command.h"
 #include "vk_context.h"
 #include "vk_pipeline.h"
+#include "vk_weight_pool.h"
 #include "core/cache_codec.h"
 #include "vknn/backend.h"
 #include <functional>
@@ -88,6 +89,13 @@ namespace vknn {
         // Content-addressed upload for small parameter blocks (e.g. pw_epilogue plans): identical bytes
         // yield one shared device buffer, so per-node metadata does not multiply vkAllocateMemory count.
         std::shared_ptr<vk::Buffer> uploadPooled(const void *data, size_t bytes) const;
+
+        // Backend-level device-weight pool. Uploaded weight/bias/transformed-weight buffers are shared
+        // across plan buckets keyed by (weight-cache key, precision): the first op instance to acquire a
+        // key runs `make` (host-cache consult + prepack + upload); later instances — including a second
+        // shape bucket's re-prepare — get the same device buffer instead of a duplicate upload. Weakly
+        // held, so a fixed-shape model's single instance keeps today's allocation count exactly.
+        std::shared_ptr<vk::Buffer> acquireWeight(const std::string &key, bool fp16, std::function<std::shared_ptr<vk::Buffer>()> make) const;
     };
 
     /// One operator on the Vulkan backend. Adding an op: subclass + VKNN_REGISTER_VK_OP.

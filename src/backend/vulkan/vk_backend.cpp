@@ -333,6 +333,15 @@ namespace vknn {
             return b;
         }
 
+        // Device-weight pool: one uploaded copy of a weight/bias/transformed-weight buffer shared by
+        // every op instance (and every plan bucket) that references the same weight-cache key at the same
+        // precision. `make` runs on a miss (host-cache consult + prepack + upload); a hit returns the
+        // shared buffer with no upload. Weakly held (frees with its last user), so a single-bucket model
+        // keeps today's allocation count. See vk_weight_pool.h.
+        std::shared_ptr<vk::Buffer> acquireWeight(const std::string &key, bool fp16, const std::function<std::shared_ptr<vk::Buffer>()> &make) {
+            return weightPool_.acquire(key, fp16, make);
+        }
+
         // ---- host NCHW fp32  <->  device NC4HW4 (fp32 path; fp16 device buffers handled here) ----
         // NC4HW4 groups channels into blocks of four laid out as [N, Cblock, H, W, 4]: the four channels
         // of a block are the innermost contiguous axis, so one (n,cb,h,w) location owns a 4-lane vector at
@@ -544,8 +553,9 @@ namespace vknn {
         bool                 cacheLoaded_ = false;
         bool                 noCache_     = false;
 
-        std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;  // sharedPipeline()
-        std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_; // uploadPooled()
+        std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;   // sharedPipeline()
+        std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_;  // uploadPooled()
+        DeviceWeightPool<vk::Buffer>                                weightPool_; // acquireWeight() — shared across plan buckets
     };
 
     std::shared_ptr<vk::ComputePipeline> VkOpEnv::pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData) const {
@@ -554,6 +564,10 @@ namespace vknn {
 
     std::shared_ptr<vk::Buffer> VkOpEnv::uploadPooled(const void *data, size_t bytes) const {
         return backend->uploadPooled(data, bytes);
+    }
+
+    std::shared_ptr<vk::Buffer> VkOpEnv::acquireWeight(const std::string &key, bool fp16, std::function<std::shared_ptr<vk::Buffer>()> make) const {
+        return backend->acquireWeight(key, fp16, make);
     }
 
     // ============================ VulkanSegment ============================

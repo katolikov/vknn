@@ -125,23 +125,31 @@ namespace vknn {
         return b;
     }
 
-    // Same as upload(), but reuse the prepacked blob from the weight cache on warm starts.
-    // `compute` only runs on a cache miss.
+    // Upload a prepacked weight/bias/transformed-weight blob, reusing (1) the device buffer across op
+    // instances and plan buckets via the backend weight pool, and (2) the prepacked host blob from the
+    // weight cache on warm starts. `compute` runs only when neither is available.
+    //
+    // The device pool is keyed by (weight-cache key, precision); a hit returns the shared device buffer
+    // with no host lookup and no upload — this is what lets N shape buckets share ONE uploaded copy of
+    // each weight. A miss falls through to today's path (host-cache consult, prepack, upload), so a
+    // single-bucket model uploads exactly the same buffer it did before the pool existed.
     template <typename Fn> inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv &env, const std::string &rawKey, Fn compute) {
-        std::string        key = env.modelTag.empty() ? rawKey : env.modelTag + "/" + rawKey;
-        std::vector<float> v;
-        if (!(env.weights && env.weights->get(key, v)))
-        {
-            v = compute();
-            // Only retain the prepacked blob when the cache is persistent (a disk path). Without a path the
-            // cache would still balloon RAM with every weight (a 965M model: ~3.85GB of prepacked fp32) for
-            // no warm-start benefit — so a pathless run (WeightCache::enabled() false) computes + uploads + frees.
-            if (env.weights && env.weights->enabled())
+        std::string key = env.modelTag.empty() ? rawKey : env.modelTag + "/" + rawKey;
+        return env.acquireWeight(key, env.useFp16, [&] {
+            std::vector<float> v;
+            if (!(env.weights && env.weights->get(key, v)))
             {
-                env.weights->put(key, v);
+                v = compute();
+                // Only retain the prepacked blob when the cache is persistent (a disk path). Without a path the
+                // cache would still balloon RAM with every weight (a 965M model: ~3.85GB of prepacked fp32) for
+                // no warm-start benefit — so a pathless run (WeightCache::enabled() false) computes + uploads + frees.
+                if (env.weights && env.weights->enabled())
+                {
+                    env.weights->put(key, v);
+                }
             }
-        }
-        return upload(*env.ctx, v, env.useFp16);
+            return upload(*env.ctx, v, env.useFp16);
+        });
     }
 
     // Initializer payloads decode to fp32 through initFloats (vknn/graph.h) — the shared decode
