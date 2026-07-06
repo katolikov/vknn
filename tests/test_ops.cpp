@@ -3787,3 +3787,364 @@ TEST(Ops, QLinearAddChainDecomposed) {
     auto clamp = [&](float v) { return v < lo ? lo : (v > hi ? hi : v); };
     expectNear(y, {clamp(15.f), clamp(150.f), clamp(-150.f)});
 }
+
+// --- C.4 dynamic-quant cluster lowering. --------------------------------------------------------
+// A DynamicQuantizeLinear feeding a MatMulInteger/ConvInteger (then Cast + a scale Mul, and an
+// optional separate bias Add) is the shape an ONNX dynamic-quantization export emits. The pass
+// lowers the whole cluster to a float MatMul/Conv reading the DynamicQuantizeLinear's unquantized
+// float input and a folded fp32 weight W_f=(w_q-w_zp)*w_s -- NO output clamp, because MatMulInteger
+// and ConvInteger emit full-range int32 with no output quant range to saturate. These tests build
+// the cluster by hand, run the folded graph on the CPU backend, and compare against a plain fp32
+// MatMul/Conv on the same folded weights (the float function the dynamic-quant graph approximates).
+namespace {
+
+    // Builds a dynamic-quant MatMul cluster over a float "x" input of shape [M,K]:
+    //   DynamicQuantizeLinear(x) -> x_q, x_s, x_zp
+    //   Mul(x_s, w_s[init]) -> comb_s
+    //   MatMulInteger(x_q, w_q[init KxN], x_zp, w_zp[init]) -> y_i32
+    //   Cast(y_i32 -> float) -> y_cast
+    //   Mul(y_cast, comb_s) -> y_scaled  (graph output, or the bias Add's operand when withBias)
+    //   [withBias] Add(y_scaled, bias[init 1xN]) -> y
+    // `ws` is the weight scale (length 1 per-tensor, or N per-column); `wzp` the weight zero point
+    // (int8 payload widened to fp32, Int8-labeled), empty for none. Returns the assembled graph.
+    Graph dynQuantMatMulGraph(const Shape &xshape, int64_t N, const std::vector<float> &wq,
+                              const std::vector<float> &ws, const std::vector<float> &wzp,
+                              bool withBias, const std::vector<float> &bias) {
+        Graph      g;
+        int64_t    K = xshape.back();
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId xq   = addUnshaped(g, "x_q");
+        TensorId xs   = addUnshaped(g, "x_s");
+        TensorId xzp  = addUnshaped(g, "x_zp");
+        TensorId wI   = addFloatInit(g, "w", {K, N}, wq);
+        TensorId wsI  = addFloatInit(g, "ws", ws.size() == 1 ? Shape {} : Shape {N}, ws);
+        TensorId wzpI = wzp.empty() ? kNoTensor : addZeroPointInit(g, "wzp", {}, wzp, DType::Int8);
+        TensorId combS = addUnshaped(g, "comb_s");
+        TensorId yi    = addUnshaped(g, "y_i32");
+        TensorId ycast = addUnshaped(g, "y_cast");
+        TensorId yscl  = addUnshaped(g, "y_scaled");
+        Node dql;
+        dql.type    = OpType::DynamicQuantizeLinear;
+        dql.name    = "dql";
+        dql.inputs  = {x};
+        dql.outputs = {xq, xs, xzp};
+        Node scMul;
+        scMul.type    = OpType::Binary;
+        scMul.subOp   = (int) BinaryType::Mul;
+        scMul.name    = "scales_mul";
+        scMul.inputs  = {xs, wsI};
+        scMul.outputs = {combS};
+        Node mmi;
+        mmi.type    = OpType::MatMulInteger;
+        mmi.name    = "mmi";
+        mmi.inputs  = wzpI == kNoTensor ? std::vector<TensorId> {xq, wI, xzp} : std::vector<TensorId> {xq, wI, xzp, wzpI};
+        mmi.outputs = {yi};
+        Node cast;
+        cast.type    = OpType::Cast;
+        cast.name    = "cast";
+        cast.inputs  = {yi};
+        cast.outputs = {ycast};
+        {
+            Attr a;
+            a.kind             = Attr::Int;
+            a.i                = 1; // to=FLOAT
+            cast.attr.map["to"] = a;
+        }
+        Node outMul;
+        outMul.type    = OpType::Binary;
+        outMul.subOp   = (int) BinaryType::Mul;
+        outMul.name    = "out_scale_mul";
+        outMul.inputs  = {ycast, combS};
+        outMul.outputs = {yscl};
+        g.nodes = {dql, scMul, mmi, cast, outMul};
+        TensorId out = yscl;
+        if (withBias)
+        {
+            TensorId bI = addFloatInit(g, "bias", {1, N}, bias);
+            TensorId yb = addUnshaped(g, "y");
+            Node     add;
+            add.type    = OpType::Binary;
+            add.subOp   = (int) BinaryType::Add;
+            add.name    = "bias_add";
+            add.inputs  = {yscl, bI};
+            add.outputs = {yb};
+            g.nodes.push_back(add);
+            out = yb;
+        }
+        g.desc(out).isOutput = true;
+        g.outputs            = {out};
+        return g;
+    }
+
+    // Runs an [M,K]-input graph on the CPU backend and returns the fp32 output values.
+    std::vector<float> runFloatGraph(Graph g, const char *inName, const Shape &xshape, const std::vector<float> &xd) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = inName;
+        in.shape = xshape;
+        in.dtype = DType::Float32;
+        in.data.resize(xd.size() * 4);
+        for (size_t i = 0; i < xd.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xd[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+    // The float reference the dynamic-quant MatMul cluster approximates: y = x @ ((w_q - w_zp) * w_s)
+    // (+ bias), all in double. w_s is scalar or per-column of length N.
+    std::vector<float> refMatMul(const Shape &xshape, int64_t N, const std::vector<float> &xd,
+                                 const std::vector<float> &wq, const std::vector<float> &ws,
+                                 const std::vector<float> &wzp, const std::vector<float> &bias) {
+        int64_t            M = xshape[0], K = xshape[1];
+        double             zp = wzp.empty() ? 0.0 : (double) wzp[0];
+        std::vector<float> out((size_t) (M * N));
+        for (int64_t m = 0; m < M; ++m)
+        {
+            for (int64_t n = 0; n < N; ++n)
+            {
+                double acc = 0.0;
+                double s   = ws.size() == 1 ? ws[0] : ws[(size_t) n];
+                for (int64_t k = 0; k < K; ++k)
+                {
+                    double wf = ((double) wq[(size_t) (k * N + n)] - zp) * s;
+                    acc += (double) xd[(size_t) (m * K + k)] * wf;
+                }
+                if (!bias.empty())
+                {
+                    acc += (double) bias[(size_t) n];
+                }
+                out[(size_t) (m * N + n)] = (float) acc;
+            }
+        }
+        return out;
+    }
+
+    // Counts DynamicQuantizeLinear / MatMulInteger / ConvInteger nodes left in the graph.
+    int countDynQuant(const Graph &g) {
+        int n = 0;
+        for (const Node &nd: g.nodes)
+        {
+            n += nd.type == OpType::DynamicQuantizeLinear || nd.type == OpType::MatMulInteger || nd.type == OpType::ConvInteger;
+        }
+        return n;
+    }
+
+} // namespace
+
+TEST(Passes, DynamicQuantMatMulClusterLowersToFloatMatMul) {
+    // K=3, N=2 per-tensor weight scale, zp=0. The cluster collapses to MatMul(x, W_f) with no clamp.
+    const Shape        xshape {2, 3};
+    std::vector<float> wq {1, -2, 3, 4, -5, 6}; // [K=3, N=2] row-major int8 values
+    std::vector<float> ws {0.5f};
+    Graph              g = dynQuantMatMulGraph(xshape, 2, wq, ws, {}, false, {});
+    dequantizeGraph(g);
+    EXPECT_EQ(countDynQuant(g), 0) << "the whole cluster lowers -- no residual dynamic-quant nodes";
+    int matmuls = 0;
+    for (const Node &n: g.nodes)
+    {
+        matmuls += n.type == OpType::MatMul;
+        EXPECT_NE(n.type, OpType::Clip) << "dynamic-quant lowering inserts no output clamp";
+    }
+    EXPECT_EQ(matmuls, 1);
+    std::vector<float> xd {1, 2, 3, -1, -2, -3};
+    auto               y = runFloatGraph(std::move(g), "x", xshape, xd);
+    expectNear(y, refMatMul(xshape, 2, xd, wq, ws, {}, {}));
+}
+
+TEST(Passes, DynamicQuantMatMulPerColumnScaleAndZeroPoint) {
+    // Per-column weight scale (length N) and a nonzero weight zero_point -- W_f=(w_q-wzp)*w_s[col].
+    const Shape        xshape {1, 4};
+    int64_t            N = 3;
+    std::vector<float> wq {10, 20, 30, 11, 21, 31, 12, 22, 32, 13, 23, 33}; // [K=4, N=3]
+    std::vector<float> ws {0.1f, 0.2f, 0.05f};
+    std::vector<float> wzp {7};
+    Graph              g = dynQuantMatMulGraph(xshape, N, wq, ws, wzp, false, {});
+    dequantizeGraph(g);
+    EXPECT_EQ(countDynQuant(g), 0);
+    std::vector<float> xd {2, -1, 0.5f, 3};
+    auto               y = runFloatGraph(std::move(g), "x", xshape, xd);
+    expectNear(y, refMatMul(xshape, N, xd, wq, ws, wzp, {}));
+}
+
+TEST(Passes, DynamicQuantMatMulWithBiasAddSurvives) {
+    // A separate downstream bias Add reads the lowered MatMul output unchanged.
+    const Shape        xshape {2, 2};
+    int64_t            N = 2;
+    std::vector<float> wq {2, -1, 1, 3}; // [K=2, N=2]
+    std::vector<float> ws {0.25f};
+    std::vector<float> bias {0.5f, -1.5f};
+    Graph              g = dynQuantMatMulGraph(xshape, N, wq, ws, {}, true, bias);
+    dequantizeGraph(g);
+    EXPECT_EQ(countDynQuant(g), 0);
+    int adds = 0, matmuls = 0;
+    for (const Node &n: g.nodes)
+    {
+        adds += n.type == OpType::Binary && n.subOp == (int) BinaryType::Add;
+        matmuls += n.type == OpType::MatMul;
+    }
+    EXPECT_EQ(matmuls, 1);
+    EXPECT_EQ(adds, 1) << "the bias Add is preserved";
+    std::vector<float> xd {1, 2, -1, 0.5f};
+    auto               y = runFloatGraph(std::move(g), "x", xshape, xd);
+    expectNear(y, refMatMul(xshape, N, xd, wq, ws, {}, bias));
+}
+
+namespace {
+
+    // Builds a dynamic-quant ConvInteger cluster over a float "x" NCHW input:
+    //   DynamicQuantizeLinear(x) -> x_q, x_s, x_zp
+    //   Mul(x_s, w_s[init]) -> comb_s
+    //   ConvInteger(x_q, w_q[init O,C,kh,kw], x_zp, w_zp[init]) -> y_i32
+    //   Cast(y_i32 -> float) -> Mul(comb_s) -> y   (graph output)
+    // w_s is scalar (per-tensor) or per-output-channel of length O. Conv attrs come from `convAttr`.
+    Graph dynQuantConvGraph(const Shape &xshape, const Shape &wshape, const std::vector<float> &wq,
+                            const std::vector<float> &ws, const std::vector<float> &wzp, const Attributes &convAttr) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        int64_t  O    = wshape[0];
+        TensorId xq   = addUnshaped(g, "x_q");
+        TensorId xs   = addUnshaped(g, "x_s");
+        TensorId xzp  = addUnshaped(g, "x_zp");
+        TensorId wI   = addFloatInit(g, "w", wshape, wq);
+        TensorId wsI  = addFloatInit(g, "ws", ws.size() == 1 ? Shape {} : Shape {O}, ws);
+        TensorId wzpI = wzp.empty() ? kNoTensor : addZeroPointInit(g, "wzp", {}, wzp, DType::UInt8);
+        TensorId combS = addUnshaped(g, "comb_s");
+        TensorId yi    = addUnshaped(g, "y_i32");
+        TensorId ycast = addUnshaped(g, "y_cast");
+        TensorId y     = addUnshaped(g, "y");
+        Node dql;
+        dql.type    = OpType::DynamicQuantizeLinear;
+        dql.name    = "dql";
+        dql.inputs  = {x};
+        dql.outputs = {xq, xs, xzp};
+        Node scMul;
+        scMul.type    = OpType::Binary;
+        scMul.subOp   = (int) BinaryType::Mul;
+        scMul.name    = "scales_mul";
+        scMul.inputs  = {xs, wsI};
+        scMul.outputs = {combS};
+        Node ci;
+        ci.type    = OpType::ConvInteger;
+        ci.name    = "ci";
+        ci.inputs  = wzpI == kNoTensor ? std::vector<TensorId> {xq, wI, xzp} : std::vector<TensorId> {xq, wI, xzp, wzpI};
+        ci.outputs = {yi};
+        ci.attr    = convAttr;
+        Node cast;
+        cast.type    = OpType::Cast;
+        cast.name    = "cast";
+        cast.inputs  = {yi};
+        cast.outputs = {ycast};
+        {
+            Attr a;
+            a.kind              = Attr::Int;
+            a.i                 = 1;
+            cast.attr.map["to"] = a;
+        }
+        Node outMul;
+        outMul.type    = OpType::Binary;
+        outMul.subOp   = (int) BinaryType::Mul;
+        outMul.name    = "out_scale_mul";
+        outMul.inputs  = {ycast, combS};
+        outMul.outputs = {y};
+        g.nodes            = {dql, scMul, ci, cast, outMul};
+        g.desc(y).isOutput = true;
+        g.outputs          = {y};
+        return g;
+    }
+
+} // namespace
+
+TEST(Passes, DynamicQuantConvClusterLowersToFloatConv) {
+    // 1x1x3x3 input, one 1x1x2x2 filter (O=1,C=1), stride 1, no pad, per-tensor scale, uint8 wzp.
+    // The cluster collapses to Conv(x, W_f) with no clamp; compare against a hand-computed 2x2 output.
+    Attributes attr;
+    {
+        Attr ks;
+        ks.kind = Attr::Ints;
+        ks.ints = {2, 2};
+        attr.map["kernel_shape"] = ks;
+        Attr st;
+        st.kind = Attr::Ints;
+        st.ints = {1, 1};
+        attr.map["strides"] = st;
+        Attr gp;
+        gp.kind          = Attr::Int;
+        gp.i             = 1;
+        attr.map["group"] = gp;
+    }
+    std::vector<float> wq {2, 0, 1, 3}; // [O=1,C=1,2,2]
+    std::vector<float> ws {0.5f};
+    std::vector<float> wzp {1};
+    Graph              g = dynQuantConvGraph({1, 1, 3, 3}, {1, 1, 2, 2}, wq, ws, wzp, attr);
+    dequantizeGraph(g);
+    EXPECT_EQ(countDynQuant(g), 0) << "the ConvInteger cluster lowers fully";
+    int convs = 0;
+    for (const Node &n: g.nodes)
+    {
+        convs += n.type == OpType::Conv;
+        EXPECT_NE(n.type, OpType::Clip) << "dynamic-quant lowering inserts no output clamp";
+    }
+    EXPECT_EQ(convs, 1);
+    // x = 3x3 grid 1..9. W_f = (wq - 1) * 0.5 = [[0.5,-0.5],[0,1]].
+    std::vector<float> xd {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    auto               y = runFloatGraph(std::move(g), "x", {1, 1, 3, 3}, xd);
+    // Reference 2x2 valid conv with W_f over each 2x2 window: out = 0.5*a - 0.5*b + 0*c + 1*d.
+    auto win = [&](int r, int c) {
+        double a = xd[r * 3 + c], b = xd[r * 3 + c + 1], cc = xd[(r + 1) * 3 + c], d = xd[(r + 1) * 3 + c + 1];
+        return (float) (0.5 * a - 0.5 * b + 0.0 * cc + 1.0 * d);
+    };
+    expectNear(y, {win(0, 0), win(0, 1), win(1, 0), win(1, 1)});
+}
+
+TEST(Passes, DynamicQuantBareMatMulIntegerNotLowered) {
+    // A MatMulInteger whose activation operand is NOT a DynamicQuantizeLinear output (here a plain
+    // int8 graph input) does not match the cluster and is left standing for the support report.
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "xq";
+    xi.shape   = {2, 3};
+    xi.dtype   = DType::Int8;
+    xi.isInput = true;
+    TensorId xq = g.addTensor(xi);
+    g.inputs    = {xq};
+    TensorId wI = addFloatInit(g, "w", {3, 2}, {1, 2, 3, 4, 5, 6});
+    g.desc(wI).dtype = DType::Int8;
+    TensorId y  = addUnshaped(g, "y");
+    g.desc(y).isOutput = true;
+    g.desc(y).dtype    = DType::Int32;
+    g.outputs          = {y};
+    Node mmi;
+    mmi.type    = OpType::MatMulInteger;
+    mmi.name    = "mmi";
+    mmi.inputs  = {xq, wI};
+    mmi.outputs = {y};
+    g.nodes     = {mmi};
+    dequantizeGraph(g);
+    EXPECT_EQ(countDynQuant(g), 1) << "a bare MatMulInteger with an escaping int32 output is not lowered";
+    EXPECT_EQ(g.nodes[0].type, OpType::MatMulInteger);
+}

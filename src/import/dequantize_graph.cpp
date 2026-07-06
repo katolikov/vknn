@@ -819,6 +819,232 @@ namespace vknn {
             return resolved;
         }
 
+        // The consumers of tensor `t`: (node index, input position) for each surviving read.
+        // `removed` holds node indices already marked for deletion in this run.
+        std::vector<std::pair<size_t, size_t>> consumersOf(const Graph &g, const std::set<size_t> &removed, TensorId t) {
+            std::vector<std::pair<size_t, size_t>> out;
+            if (t == kNoTensor)
+            {
+                return out;
+            }
+            for (size_t i = 0; i < g.nodes.size(); ++i)
+            {
+                if (removed.count(i))
+                {
+                    continue;
+                }
+                const Node &n = g.nodes[i];
+                for (size_t k = 0; k < n.inputs.size(); ++k)
+                {
+                    if (n.inputs[k] == t)
+                    {
+                        out.emplace_back(i, k);
+                    }
+                }
+            }
+            return out;
+        }
+
+        // The lone surviving consumer node of tensor `t`, or SIZE_MAX when `t` has zero or several
+        // consumers (a cluster tail we only lower when the chain is linear). A graph output counts as
+        // an extra consumer and forces the multi-consumer bail.
+        size_t soleConsumer(const Graph &g, const std::set<size_t> &removed, TensorId t) {
+            auto c = consumersOf(g, removed, t);
+            std::set<size_t> nodes;
+            for (auto &p: c)
+            {
+                nodes.insert(p.first);
+            }
+            for (TensorId go: g.outputs)
+            {
+                if (go == t)
+                {
+                    return (size_t) -1;
+                }
+            }
+            return nodes.size() == 1 ? *nodes.begin() : (size_t) -1;
+        }
+
+        // Lowers the dynamic-quant integer-matmul/-conv clusters an ONNX dynamic-quantization export
+        // emits (DynamicQuantizeLinear feeding MatMulInteger/ConvInteger). The canonical cluster, seen
+        // identically across dynamic-quant BERT/GPT/ViT exports, is:
+        //
+        //   DynamicQuantizeLinear(x_f) -> x_q, x_s(scalar), x_zp(scalar)
+        //   Mul(x_s, w_s[init]) -> comb_s                 (the "*_quant_scales_mul")
+        //   MatMulInteger(x_q, w_q[init], x_zp, w_zp[init]) -> y_i32     (ConvInteger for a conv)
+        //   Cast(y_i32 -> float)
+        //   Mul(y_cast, comb_s) -> y_scaled               (the "*_quant_output_scale_mul")
+        //   [a later, separate Add folds a float bias -- not part of the cluster]
+        //
+        // which lowers to  MatMul(x_f, W_f)  (Conv for ConvInteger) with the weight folded to fp32
+        // W_f = (w_q - w_zp) * w_s (per-column for MatMul, per-output-channel for Conv) and x_f flowing
+        // in UNQUANTIZED. The DynamicQuantizeLinear, both Muls, and the Cast all vanish; the cluster's
+        // final scaled output id becomes the float op's output, so the downstream bias Add and every
+        // other consumer read the real float without change.
+        //
+        // NO output clamp is inserted (unlike the QLinear/QDQ paths). MatMulInteger and ConvInteger emit
+        // the FULL-RANGE int32 accumulation -- they carry no output scale/zero_point, so there is no
+        // 8-bit saturation range to preserve. Dynamic-quant execution differs from this float lowering
+        // only by the activation rounding DynamicQuantizeLinear would apply (deliberately not
+        // reproduced, exactly as for a QDQ activation sandwich); no fused nonlinearity hides in a clamp
+        // here, so dropping the round-trip drops only the rounding.
+        //
+        // Only a cluster whose every edge matches the pattern (x_q from a DynamicQuantizeLinear, w_q an
+        // initializer, a single Cast-to-float consumer, a single Mul consumer whose other operand is the
+        // scales-Mul of x_s and an initializer w_s) is lowered; anything unrecognized (a bare
+        // MatMulInteger whose int32 output escapes to some other consumer, a non-initializer weight, a
+        // missing scale arm) is left standing and surfaces unsupported at planning. @returns the number
+        // of clusters lowered.
+        int lowerDynamicQuantClusters(Graph &g) {
+            std::map<TensorId, size_t> producer;
+            for (size_t i = 0; i < g.nodes.size(); ++i)
+            {
+                for (TensorId o: g.nodes[i].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producer[o] = i;
+                    }
+                }
+            }
+            std::set<size_t> remove;
+            int              count = 0;
+            for (size_t i = 0; i < g.nodes.size(); ++i)
+            {
+                Node &intOp = g.nodes[i];
+                if (remove.count(i))
+                {
+                    continue;
+                }
+                bool isConv = intOp.type == OpType::ConvInteger;
+                if (intOp.type != OpType::MatMulInteger && !isConv)
+                {
+                    continue;
+                }
+                if (intOp.inputs.size() < 2 || intOp.outputs.empty() || intOp.outputs[0] == kNoTensor)
+                {
+                    continue;
+                }
+                const char *opName = opTypeName(intOp.type);
+                // The activation operand must come from a DynamicQuantizeLinear; x_f is its float input,
+                // fed to the float op directly. w_q must be an initializer.
+                TensorId xq = intOp.inputs[0];
+                auto     dqlIt = producer.find(xq);
+                if (dqlIt == producer.end() || remove.count(dqlIt->second) || g.nodes[dqlIt->second].type != OpType::DynamicQuantizeLinear)
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: activation operand is not a DynamicQuantizeLinear output";
+                    continue;
+                }
+                const Node &dql = g.nodes[dqlIt->second];
+                if (dql.inputs.empty() || dql.inputs[0] == kNoTensor || dql.outputs.size() < 2)
+                {
+                    continue;
+                }
+                TensorId xf   = dql.inputs[0];       // the unquantized float activation
+                TensorId xScl = dql.outputs[1];      // x_scale (the scales-Mul reads this)
+                TensorId wq   = intOp.inputs[1];
+                TensorId wzp  = intOp.inputs.size() > 3 ? intOp.inputs[3] : kNoTensor;
+                if (!g.isInitializer(wq))
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: weight operand is not an initializer";
+                    continue;
+                }
+                // The int32 output must flow through exactly Cast(->float) -> Mul(comb_s).
+                size_t castIdx = soleConsumer(g, remove, intOp.outputs[0]);
+                if (castIdx == (size_t) -1 || g.nodes[castIdx].type != OpType::Cast || g.nodes[castIdx].outputs.empty())
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: int32 output is not consumed by a single Cast";
+                    continue;
+                }
+                const Node &cast = g.nodes[castIdx];
+                size_t      mulIdx = soleConsumer(g, remove, cast.outputs[0]);
+                if (mulIdx == (size_t) -1 || g.nodes[mulIdx].type != OpType::Binary || g.nodes[mulIdx].subOp != (int) BinaryType::Mul || g.nodes[mulIdx].inputs.size() != 2 || g.nodes[mulIdx].outputs.empty())
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: cast output is not consumed by a single scale Mul";
+                    continue;
+                }
+                const Node &outMul = g.nodes[mulIdx];
+                // The Mul's other operand is the scales-Mul (x_s * w_s). Identify it and recover w_s.
+                TensorId combS = outMul.inputs[0] == cast.outputs[0] ? outMul.inputs[1] : outMul.inputs[0];
+                auto     scMulIt = producer.find(combS);
+                if (scMulIt == producer.end())
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: output scale operand has no producer";
+                    continue;
+                }
+                const Node &scMul = g.nodes[scMulIt->second];
+                if (scMul.type != OpType::Binary || scMul.subOp != (int) BinaryType::Mul || scMul.inputs.size() != 2)
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: output scale is not a Mul(x_scale, w_scale)";
+                    continue;
+                }
+                // One operand of the scales-Mul is the DequantizeLinear activation scale x_s; the other
+                // is the weight scale initializer w_s.
+                TensorId ws = kNoTensor;
+                if (scMul.inputs[0] == xScl)
+                {
+                    ws = scMul.inputs[1];
+                } else if (scMul.inputs[1] == xScl)
+                {
+                    ws = scMul.inputs[0];
+                }
+                if (ws == kNoTensor || !g.isInitializer(ws))
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: weight scale is not an initializer combined with the activation scale";
+                    continue;
+                }
+                // Fold W_f = (w_q - w_zp) * w_s. MatMul weight is per-column (axis 1); Conv weight is
+                // per-output-channel (axis 0). foldDequantInit handles scalar (per-tensor) w_s too.
+                int64_t  wAxis = isConv ? 0 : 1;
+                TensorId wf    = foldDequantInit(g, wq, ws, wzp, wAxis, intOp.name + "_Wf");
+                if (wf == kNoTensor)
+                {
+                    VKNN_WARN << opName << " " << intOp.name << " kept: weight dequant fold failed";
+                    continue;
+                }
+                // Replace the integer op in place with the float op, keeping its attributes (Conv
+                // geometry). Its output is the cluster's final scaled tensor, so consumers (the bias Add)
+                // read it unchanged. The DequantizeLinear, both Muls, and the Cast drop; the DQL survives
+                // if another integer op in the same fan-out still reads it (query/key/value share one).
+                Node fn;
+                fn.name    = intOp.name;
+                fn.type    = isConv ? OpType::Conv : OpType::MatMul;
+                fn.inputs  = {xf, wf};
+                fn.attr    = convGemmAttrs(intOp);
+                fn.outputs = {outMul.outputs[0]};
+                remove.insert(castIdx);
+                remove.insert(mulIdx);
+                remove.insert(scMulIt->second);
+                intOp = std::move(fn);
+                ++count;
+            }
+            if (count == 0)
+            {
+                return 0;
+            }
+            // Sweep each DynamicQuantizeLinear the lowering left with no surviving consumer (its
+            // quantized/scale/zp outputs are all dead once every integer op that read it is rewritten).
+            for (size_t i = 0; i < g.nodes.size(); ++i)
+            {
+                const Node &n = g.nodes[i];
+                if (remove.count(i) || n.type != OpType::DynamicQuantizeLinear)
+                {
+                    continue;
+                }
+                bool consumed = false;
+                for (TensorId o: n.outputs)
+                {
+                    consumed = consumed || (o != kNoTensor && tensorConsumed(g, remove, o));
+                }
+                if (!consumed)
+                {
+                    remove.insert(i);
+                }
+            }
+            compact(g, remove);
+            return count;
+        }
+
     } // namespace
 
     // Collapses ONNX quantized graphs to plain float graphs, in both ONNX quant forms:
@@ -830,6 +1056,10 @@ namespace vknn {
     //     weights/biases folded to fp32; the boundary quantize/dequantize nodes around the float core
     //     drop, leaving only a genuine int-graph-boundary DequantizeLinear as an explicit kernel node
     //     (decomposeQLinearOps / resolveBoundaryQuant).
+    //   Dynamic-quant form (DynamicQuantizeLinear feeding MatMulInteger/ConvInteger, then Cast + Mul):
+    //     the whole cluster lowers to a float MatMul/Conv with the weight folded to fp32 and the
+    //     activation flowing in unquantized -- NO output clamp, since the integer ops emit full-range
+    //     int32 with no output quant range to saturate (lowerDynamicQuantClusters).
     // Every drop preserves the saturation clamp, never just the rounding -- that clamp is where ORT's
     // QDQ quantizer hides a fused ReLU, so collapsing to raw float without it silently deletes the
     // nonlinearity (see insertQuantClamp / the C2b rule). Any residual q/dq or QLinear node the rules
@@ -847,11 +1077,12 @@ namespace vknn {
         std::set<TensorId> floatValued; // activation edges the QLinear decomposition made real-float
         int                decomposed = decomposeQLinearOps(g, floatValued);
         int                boundary   = decomposed ? resolveBoundaryQuant(g, floatValued) : 0;
-        int                folded     = foldWeightDequant(g);
-        int                collapsed  = collapseQdqSandwiches(g);
-        if (decomposed || boundary || folded || collapsed)
+        int                dynClusters = lowerDynamicQuantClusters(g);
+        int                folded      = foldWeightDequant(g);
+        int                collapsed   = collapseQdqSandwiches(g);
+        if (decomposed || boundary || dynClusters || folded || collapsed)
         {
-            VKNN_INFO << "dequantizeGraph: decomposed " << decomposed << " QLinear op(s), resolved " << boundary << " boundary q/dq, folded " << folded << " weight dequant(s), collapsed " << collapsed << " q/dq sandwich(es)";
+            VKNN_INFO << "dequantizeGraph: decomposed " << decomposed << " QLinear op(s), resolved " << boundary << " boundary q/dq, lowered " << dynClusters << " dynamic-quant cluster(s), folded " << folded << " weight dequant(s), collapsed " << collapsed << " q/dq sandwich(es)";
         }
         int residual = 0;
         for (const Node &n: g.nodes)
@@ -861,6 +1092,15 @@ namespace vknn {
         if (residual)
         {
             VKNN_WARN << "dequantizeGraph: " << residual << " activation quantize/dequantize node(s) remain (graph-boundary q/dq run on the CPU kernel; interior q/dq without a kernel fail at planning)";
+        }
+        int dynResidual = 0;
+        for (const Node &n: g.nodes)
+        {
+            dynResidual += n.type == OpType::DynamicQuantizeLinear || n.type == OpType::MatMulInteger || n.type == OpType::ConvInteger;
+        }
+        if (dynResidual)
+        {
+            VKNN_WARN << "dequantizeGraph: " << dynResidual << " dynamic-quant node(s) remain (a cluster that did not match the DynamicQuantizeLinear->MatMulInteger/ConvInteger->Cast->Mul shape); no backend kernel decodes them, so they fail at planning";
         }
     }
 
