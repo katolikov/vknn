@@ -245,3 +245,44 @@ TEST(OnnxAttr, ConstantUint8Int32DataPayload) {
         EXPECT_EQ(a.floats[i], (float) v[i]) << "i=" << i;
     }
 }
+
+// --- NodeProto (parseNode) ----------------------------------------------------------------------
+
+namespace {
+    // NodeProto: field 1 = input (repeated string), field 4 = op_type.
+    std::vector<uint8_t> nodeProto(const char *opType, const std::vector<std::string> &inputs) {
+        std::vector<uint8_t> msg;
+        for (const std::string &in: inputs)
+        {
+            putLenField(msg, 1, std::vector<uint8_t>(in.begin(), in.end()));
+        }
+        std::string t(opType);
+        putLenField(msg, 4, std::vector<uint8_t>(t.begin(), t.end()));
+        return msg;
+    }
+} // namespace
+
+TEST(OnnxNode, UpsampleScalesNormalizedToResizeSlot) {
+    // Opset-9 Upsample(X, scales) imports as Resize with the absent-roi slot inserted, so scales
+    // sits at input 2 where the Resize shape rule and kernels read it.
+    std::vector<uint8_t>     msg = nodeProto("Upsample", {"x", "s"});
+    Node                     node;
+    std::vector<std::string> ins, outs;
+    NodeParser::parseNode(Reader(msg.data(), msg.size()), node, ins, outs);
+    EXPECT_EQ(node.type, OpType::Resize);
+    ASSERT_EQ(ins.size(), 3u);
+    EXPECT_EQ(ins[0], "x");
+    EXPECT_EQ(ins[1], "") << "roi placeholder (resolves to kNoTensor)";
+    EXPECT_EQ(ins[2], "s");
+}
+
+TEST(OnnxNode, UpsampleAttrFormKeepsInputs) {
+    // Opset-7 Upsample carries scales as an attribute and has one input: nothing is inserted.
+    std::vector<uint8_t>     msg = nodeProto("Upsample", {"x"});
+    Node                     node;
+    std::vector<std::string> ins, outs;
+    NodeParser::parseNode(Reader(msg.data(), msg.size()), node, ins, outs);
+    EXPECT_EQ(node.type, OpType::Resize);
+    ASSERT_EQ(ins.size(), 1u);
+    EXPECT_EQ(ins[0], "x");
+}

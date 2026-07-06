@@ -61,6 +61,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Identity | — | ✅ | |
 | TopK | — | ✅ | k largest/smallest along an axis; values + int64 indices, ties break to the lower index; k = const int64 input (or the opset-9 `k` attribute) |
 | Dropout | eliminated | eliminated | inference-mode identity (training_mode absent or constant false, mask output absent or unconsumed) removed at import, consumers rewired to the producer; a consumed mask or a non-constant training_mode is unsupported |
+| InstanceNormalization | lowered | lowered | decomposed at import into spatial ReduceMean + Sub/Mul/Add/Sqrt/Div and a per-channel scale/bias Mul+Add, so it runs wherever those ops run (no dedicated kernel); needs fp32-initializer scale/B of length C and input rank ≥ 3, else the node stays opaque and unsupported |
 
 ## Fusions and lowerings
 
@@ -84,6 +85,12 @@ flags override a single pass on top of the level:
 - **BatchNorm lowering** — a BatchNorm the conv fold cannot absorb (pre-activation BN, BN after
   Concat) lowers unconditionally to a per-channel Mul+Add with host-folded scale/shift, which the
   pointwise fusion then merges into the neighboring kernels.
+- **InstanceNorm lowering** — InstanceNormalization decomposes unconditionally into spatial
+  ReduceMean (rank-4 recovers as GlobalAveragePool), centered Sub, squared-diff Mul, epsilon Add,
+  Sqrt, Div and a per-channel scale/bias Mul+Add ([1,C,1,..] initializers, the BatchNorm-lowering
+  broadcast class); the pointwise fusion then merges the elementwise tail. scale/B must be fp32
+  initializers of length C and the input rank ≥ 3 ([N,C,spatial...]); anything else keeps the
+  opaque op, which no backend implements.
 - **Conv → ConvGemm lowering** — a non-Winograd K×K Conv (strided, dilated, 5×5/7×7, 1×7/7×1,
   shallow 3×3) lowers to one LDS-tiled implicit-GEMM kernel with weights repacked `[K][Cout]` at
   convert time. Deterministic and fp16-floor equivalent to Conv (the fp32 accumulation order

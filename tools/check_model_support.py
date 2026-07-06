@@ -282,6 +282,35 @@ def _scalar_const(graph, name):
     return None
 
 
+def _constant_names(graph):
+    """Names holding compile-time constants: initializers plus Constant-node outputs."""
+    names = {i.name for i in graph.initializer}
+    for n in graph.node:
+        if n.op_type == "Constant":
+            names.update(o for o in n.output if o)
+    return names
+
+
+def _instancenorm_reason(node, graph, index):
+    """Blocker reason for an InstanceNormalization the importer cannot lower, or None.
+
+    Mirrors src/import/lower_instancenorm.cpp: a node whose scale/B are compile-time constants
+    and whose input is rank >= 3 lowers to spatial ReduceMean + Sub/Mul/Add/Sqrt/Div at import;
+    anything else keeps the opaque op, which has no kernel in either backend.
+    """
+    consts = _constant_names(graph)
+    for role, name in (("scale", node.input[1] if len(node.input) > 1 else ""),
+                       ("B", node.input[2] if len(node.input) > 2 else "")):
+        if not name or name not in consts:
+            return ("op InstanceNormalization — %s is not a compile-time constant "
+                    "(import lowers only the constant-parameter form)" % role)
+    shape = (index.get(node.input[0]) or {}).get("shape")
+    if shape is not None and len(shape) < 3:
+        return ("op InstanceNormalization — input rank %d (import lowers only rank >= 3, "
+                "[N,C,spatial...])" % len(shape))
+    return None
+
+
 def _dropout_reason(node, graph, consumed):
     """Blocker reason for a Dropout the importer cannot erase, or None when it erases.
 
@@ -325,6 +354,12 @@ def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=Non
         elif node.op_type == "Dropout":
             # Erased at import when inference-mode (see _dropout_reason); otherwise kernel-less.
             reason = _dropout_reason(node, graph, consumed)
+            if reason:
+                rep.blocker("no kernel", reason, label)
+        elif node.op_type == "InstanceNormalization":
+            # Lowered at import to per-channel normalize ops (see _instancenorm_reason);
+            # otherwise kernel-less.
+            reason = _instancenorm_reason(node, graph, index)
             if reason:
                 rep.blocker("no kernel", reason, label)
         else:

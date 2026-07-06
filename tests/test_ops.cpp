@@ -2708,3 +2708,206 @@ TEST(Passes, FuseDwPwAutoPadSameUpper) {
     ASSERT_EQ(outFused.size(), (size_t) 50);
     expectNear(outFused, outUnfused, 0.f); // identical fp32 loop order: bit-equal
 }
+
+// --- InstanceNormalization: imported as OpType::InstanceNorm, then lowerInstanceNorm decomposes it
+// into existing ops (spatial ReduceMean, Sub, Mul, Add-eps, Sqrt, Div, per-channel Mul/Add) so the
+// normalization runs on ops both backends already implement — there is no InstanceNorm kernel. A
+// node whose scale/B are not fp32 initializers stays opaque and fails planning as unsupported. ---
+namespace {
+
+    // Single-InstanceNormalization graph: input x of `xshape`, 1-D [C] fp32 scale/B initializers,
+    // `epsilon` attribute. `scaleIsInput` swaps the scale initializer for a runtime graph input.
+    Graph instanceNormGraph(const std::vector<int64_t> &xshape, const std::vector<float> &scale, const std::vector<float> &bias, float eps, bool scaleIsInput = false) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        auto addInit = [&](const char *name, const std::vector<float> &v) {
+            TensorDesc d;
+            d.name          = name;
+            d.shape         = {(int64_t) v.size()};
+            d.isInitializer = true;
+            TensorId   id   = g.addTensor(d);
+            HostBuffer hb;
+            hb.resizeElems(v.size(), DType::Float32);
+            for (size_t i = 0; i < v.size(); ++i)
+            {
+                hb.f32()[i] = v[i];
+            }
+            g.initializers[id] = hb;
+            return id;
+        };
+        TensorId sc;
+        if (scaleIsInput)
+        {
+            TensorDesc d;
+            d.name    = "scale";
+            d.shape   = {(int64_t) scale.size()};
+            d.isInput = true;
+            sc        = g.addTensor(d);
+            g.inputs.push_back(sc);
+        } else
+        {
+            sc = addInit("scale", scale);
+        }
+        TensorId   bi = addInit("bias", bias);
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     n;
+        n.type    = OpType::InstanceNorm;
+        n.name    = "inorm";
+        n.inputs  = {x, sc, bi};
+        n.outputs = {y};
+        Attr e;
+        e.kind                = Attr::Float;
+        e.f                   = eps;
+        n.attr.map["epsilon"] = e;
+        g.nodes.push_back(n);
+        g.outputs = {y};
+        return g;
+    }
+
+    // Reference in double: per (n, c) over the trailing spatial dims,
+    // y = scale[c] * (x - mean) / sqrt(var + eps) + bias[c] with the population (biased) variance.
+    std::vector<float> instanceNormRef(const std::vector<int64_t> &xshape, const std::vector<float> &x, const std::vector<float> &scale, const std::vector<float> &bias, double eps) {
+        int64_t N = xshape[0], C = xshape[1], S = 1;
+        for (size_t d = 2; d < xshape.size(); ++d)
+        {
+            S *= xshape[d];
+        }
+        std::vector<float> y(x.size());
+        for (int64_t n = 0; n < N; ++n)
+        {
+            for (int64_t c = 0; c < C; ++c)
+            {
+                const float *xs = x.data() + (n * C + c) * S;
+                double       m = 0, v = 0;
+                for (int64_t i = 0; i < S; ++i)
+                {
+                    m += xs[i];
+                }
+                m /= (double) S;
+                for (int64_t i = 0; i < S; ++i)
+                {
+                    v += (xs[i] - m) * (xs[i] - m);
+                }
+                v /= (double) S;
+                double inv = 1.0 / std::sqrt(v + eps);
+                float *ys  = y.data() + (n * C + c) * S;
+                for (int64_t i = 0; i < S; ++i)
+                {
+                    ys[i] = (float) ((double) scale[c] * (xs[i] - m) * inv + (double) bias[c]);
+                }
+            }
+        }
+        return y;
+    }
+
+    // Runs an InstanceNorm graph on the CPU backend (Session::plan applies the standard passes).
+    std::vector<float> runInstanceNorm(Graph g, const std::vector<int64_t> &xshape, const std::vector<float> &xdata) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = xshape;
+        in.dtype = DType::Float32;
+        in.data.resize(xdata.size() * 4);
+        for (size_t i = 0; i < xdata.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xdata[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+    // Deterministic pseudo-random fill in [-2, 2).
+    std::vector<float> pseudoRandom(size_t n) {
+        std::vector<float> v(n);
+        uint32_t           s = 0x9e3779b9u;
+        for (size_t i = 0; i < n; ++i)
+        {
+            s    = s * 1664525u + 1013904223u;
+            v[i] = (float) (s >> 8) / (float) (1u << 24) * 4.f - 2.f;
+        }
+        return v;
+    }
+
+} // namespace
+
+TEST(Ops, InstanceNormNchwMatchesReference) {
+    std::vector<int64_t> xshape {2, 3, 8, 8};
+    std::vector<float>   x     = pseudoRandom(2 * 3 * 8 * 8);
+    std::vector<float>   scale {0.5f, 1.5f, -2.0f};
+    std::vector<float>   bias {0.1f, -0.3f, 0.7f};
+    std::vector<float>   got = runInstanceNorm(instanceNormGraph(xshape, scale, bias, 1e-5f), xshape, x);
+    expectNear(got, instanceNormRef(xshape, x, scale, bias, 1e-5), 1e-5f);
+}
+
+TEST(Ops, InstanceNormRank3NormalizesOverL) {
+    // [N,C,L] (whisper-class): the mean/variance reduce over L only. The non-default epsilon
+    // separates the attribute-read path from the 1e-5 fallback.
+    std::vector<int64_t> xshape {2, 4, 16};
+    std::vector<float>   x     = pseudoRandom(2 * 4 * 16);
+    std::vector<float>   scale {1.0f, 0.25f, -1.5f, 3.0f};
+    std::vector<float>   bias {0.0f, 0.5f, -0.25f, 1.0f};
+    std::vector<float>   got = runInstanceNorm(instanceNormGraph(xshape, scale, bias, 1e-3f), xshape, x);
+    expectNear(got, instanceNormRef(xshape, x, scale, bias, 1e-3), 1e-5f);
+}
+
+TEST(Passes, InstanceNormLoweredToPerChannelOps) {
+    EXPECT_EQ(opTypeFromOnnx("InstanceNormalization"), OpType::InstanceNorm);
+    Graph       g = instanceNormGraph({1, 3, 8, 8}, {1.f, 2.f, 3.f}, {0.f, 1.f, -1.f}, 1e-5f);
+    TensorId    y = g.outputs[0];
+    PassOptions opt;
+    opt.fusePointwiseChains = false; // keep the decomposition visible for the structure check
+    runStandardPasses(g, opt);
+    int gap = 0, sub = 0, mul = 0, div = 0, sqrt = 0, add = 0;
+    for (const Node &n: g.nodes)
+    {
+        EXPECT_NE(n.type, OpType::InstanceNorm) << "the pass must lower every eligible node";
+        gap += n.type == OpType::GlobalAvgPool;
+        add += n.type == OpType::Add;
+        sub += n.type == OpType::Binary && (BinaryType) n.subOp == BinaryType::Sub;
+        mul += n.type == OpType::Binary && (BinaryType) n.subOp == BinaryType::Mul;
+        div += n.type == OpType::Binary && (BinaryType) n.subOp == BinaryType::Div;
+        sqrt += n.type == OpType::Unary && (UnaryType) n.subOp == UnaryType::Sqrt;
+    }
+    EXPECT_EQ(gap, 2) << "both rank-4 spatial ReduceMeans must recover as GlobalAvgPool";
+    EXPECT_EQ(sub, 1);
+    EXPECT_EQ(mul, 2) << "squared-diff Mul + per-channel scale Mul";
+    EXPECT_EQ(div, 1);
+    EXPECT_EQ(sqrt, 1);
+    EXPECT_EQ(add, 2) << "epsilon Add + per-channel bias Add";
+    ASSERT_EQ(g.outputs.size(), 1u);
+    EXPECT_EQ(g.outputs[0], y) << "consumers keep reading the InstanceNormalization output tensor";
+}
+
+TEST(Passes, InstanceNormRuntimeScaleStaysOpaque) {
+    // A runtime (non-initializer) scale cannot be reshaped at import: the node keeps its opaque op
+    // (planning then rejects it as unsupported — the pass never fabricates parameters).
+    Graph g = instanceNormGraph({1, 3, 8, 8}, {1.f, 1.f, 1.f}, {0.f, 0.f, 0.f}, 1e-5f, /*scaleIsInput=*/true);
+    runStandardPasses(g);
+    int kept = 0;
+    for (const Node &n: g.nodes)
+    {
+        kept += n.type == OpType::InstanceNorm;
+    }
+    EXPECT_EQ(kept, 1);
+}

@@ -116,6 +116,8 @@ namespace vknn {
                 return "Dropout";
             case OpType::TopK:
                 return "TopK";
+            case OpType::InstanceNorm:
+                return "InstanceNormalization";
             default:
                 return "Unknown";
         }
@@ -222,6 +224,8 @@ namespace vknn {
             // Inference-mode Dropout is an identity on data; eliminateDropout removes it at import.
             {"Dropout", OpType::Dropout},
             {"TopK", OpType::TopK},
+            // Lowered at import to per-channel normalize ops (lowerInstanceNorm); no kernel exists.
+            {"InstanceNormalization", OpType::InstanceNorm},
         };
         auto it = m.find(s);
         if (it != m.end())

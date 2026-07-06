@@ -68,6 +68,8 @@ namespace vknn {
         Dropout,   // identity in inference mode; eliminated at import (eliminateDropout) -- a kept
                    // training-mode / consumed-mask Dropout has no kernel and is unsupported
         TopK,      // k largest/smallest along an axis -> (values, int64 indices); const k (CPU)
+        InstanceNorm, // InstanceNormalization: per-channel normalize over the spatial dims; lowered
+                      // at import to Reduce/Sub/Mul/Add/Sqrt/Div (lowerInstanceNorm) -- no kernel
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

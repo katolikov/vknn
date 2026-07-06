@@ -96,6 +96,7 @@ namespace vknn {
                 case OpType::Clip:
                 case OpType::Relu:
                 case OpType::BatchNorm:
+                case OpType::InstanceNorm: // normalize over the spatial dims: same shape as input
                 case OpType::Identity:
                 case OpType::Unary:
                 case OpType::Softmax:

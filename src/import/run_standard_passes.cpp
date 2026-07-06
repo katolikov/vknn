@@ -116,8 +116,10 @@ namespace vknn {
         }
         eliminateFloatCast(g); // drop float->float casts left by transformer import (post-fold)
         eliminateDeadNodes(g);
-        inferShapes(g, batch); // refresh shapes after fusion/folding
-        lowerReduceToGap(g);   // a late-resolving rank can expose the spatial-mean form
+        inferShapes(g, batch);  // refresh shapes after fusion/folding
+        lowerInstanceNorm(g);   // needs the fixpoint-resolved input shapes; the emitted spatial
+                                // ReduceMeans recover as GlobalAvgPool in the pass below
+        lowerReduceToGap(g);    // a late-resolving rank can expose the spatial-mean form
         lowerEinsum(g);        // batched einsums -> MatMul (needs the operand shapes resolved above)
         inferShapes(g, batch); // resolve the inserted Unsqueeze/MatMul/Squeeze
         subpixelConvTranspose(g); // ConvTranspose -> Conv + DepthToSpace; runs on fully-resolved dims, before

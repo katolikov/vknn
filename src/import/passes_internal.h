@@ -38,6 +38,11 @@ namespace vknn {
     // [1,C,1..] fp32 scale/shift initializers, so the pointwise fusion pass can fold it. Runs
     // unconditionally after foldBatchNorm (defined in lower_batchnorm.cpp).
     void lowerBatchNorm(Graph &g);
+    // Lower every InstanceNormalization with fp32-initializer scale/B and a resolved rank>=3 input
+    // to spatial ReduceMean + Sub/Mul/Add/Sqrt/Div ops (no InstanceNorm kernel exists); an
+    // ineligible node keeps its opaque op with a WARN. Needs resolved input shapes, so it runs
+    // after the const-fold/infer fixpoint (defined in lower_instancenorm.cpp).
+    void lowerInstanceNorm(Graph &g);
     // Drop Cast nodes converting float->float (a same-size buffer copy), rewiring consumers to the
     // cast input; a forward dtype pass gates removal to a float source so int<->float casts survive.
     // Graph outputs are never renamed (defined in eliminate_float_cast.cpp).

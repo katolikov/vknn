@@ -245,6 +245,14 @@ namespace vknn {
                             break;
                     }
                 }
+                // Opset-9/10 Upsample carries `scales` at input 1, but its OpType::Resize consumers
+                // (the shape rule and both kernels) index the Resize convention X, roi, scales,
+                // sizes. Insert the absent-roi slot so scales lands at input 2 and every consumer
+                // reads one layout; an empty name resolves to kNoTensor in the graph builder.
+                if (opType == "Upsample" && ins.size() == 2)
+                {
+                    ins.insert(ins.begin() + 1, std::string());
+                }
                 // Collapse the ONNX op name into a coarse OpType plus, for the multiplexed families
                 // (Unary/Binary/Reduce), a `subOp` selecting the concrete variant. Activation ops carry
                 // their curve parameters in attributes, applied here with the ONNX-specified defaults so
