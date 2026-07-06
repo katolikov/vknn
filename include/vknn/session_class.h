@@ -23,6 +23,27 @@ namespace vknn {
         std::string reason; ///< Why the node does not run on the requested backend.
     };
 
+    /// One compiled plan for a single input-shape set. A Session holds one PlanBucket per declared
+    /// shape; run() selects the matching bucket by exact input-shape match and dispatches its
+    /// pre-recorded segments. A fixed-shape model has exactly one bucket, so the whole per-shape
+    /// machinery collapses to a single map lookup on the hot path.
+    ///
+    /// Everything shape-dependent lives here: this bucket's optimized graph (its own tensor descs +
+    /// folded shape constants), the per-node backend assignment, the compiled segments (which hold a
+    /// reference to `graph` for their pre-recorded buffer/dispatch geometry), the runtime tensor pool
+    /// sized to `graph`, and the boundary IO descriptions. The backends, caches, pipeline pool, and
+    /// device weight pool are shared across buckets on the owning Session — a second bucket reuses
+    /// them (autotune sigs and weight-cache keys are shape-safe).
+    struct PlanBucket {
+        std::string                           key;             ///< Canonical input-shape key (see Session::shapeKey).
+        Graph                                 graph;           ///< This bucket's optimized graph. Segments reference it; never moved after compile.
+        std::vector<int>                      nodeBackendIdx;  ///< Backend index (into Session::backends_) per node.
+        std::vector<std::unique_ptr<Segment>> segments;        ///< Compiled segments, run in order.
+        std::vector<RtTensor>                 pool;            ///< Runtime tensor pool for this bucket, indexed by TensorId.
+        std::vector<FallbackReason>           fallbackReasons; ///< Requested-backend refusals recorded while planning this bucket.
+        bool                                  ioGpuConvert = false; ///< Whole graph on one GPU backend: 8-bit inputs upload raw + convert on the GPU.
+    };
+
     /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.
     class Session {
       public:
@@ -40,10 +61,29 @@ namespace vknn {
         /// ~Session(); also callable manually (e.g. before a checkpoint).
         void updateCache();
 
-        /// Run the model. To bind a zero-copy output, pre-fill `outputs` with an entry whose name +
-        /// dmaBufFd select that output's caller buffer; that output is written into the fd and returned
-        /// with no host data. `outputs` is then (re)filled with all results.
+        /// Run the model. The bound input shapes select which compiled plan bucket runs: an exact
+        /// match dispatches that bucket's pre-recorded segments; no match is Status::InvalidArgument
+        /// with the available bucket shapes listed. A fixed-shape model has one bucket and always
+        /// matches. To bind a zero-copy output, pre-fill `outputs` with an entry whose name + dmaBufFd
+        /// select that output's caller buffer; that output is written into the fd and returned with no
+        /// host data. `outputs` is then (re)filled with all results.
         Status run(const std::vector<IOTensor> &inputs, std::vector<IOTensor> &outputs);
+
+        /// Compile an additional plan bucket for a declared input-shape set and cache it on this
+        /// session, so a later run() with those shapes dispatches to it. The passes and plan re-run
+        /// for the new shapes from the pristine imported graph; this is explicit and never happens
+        /// implicitly inside run(). `shapes` maps an input tensor name to its full concrete shape;
+        /// inputs left out keep the default (batch-fallback) resolution. Re-declaring a shape already
+        /// planned is a no-op. Only sessions built from ONNX (createFromOnnx / create(Graph&&)) can add
+        /// buckets — a .vxm session dispatches among its compiled buckets only and returns
+        /// Status::Unsupported here.
+        Status prepareShapes(const std::map<std::string, Shape> &shapes);
+
+        /// Number of compiled plan buckets. Exactly 1 for a fixed-shape model; grows with each
+        /// distinct shape set compiled via prepareShapes() (or loaded from a multi-bucket .vxm).
+        size_t bucketCount() const noexcept {
+            return buckets_.size();
+        }
 
         // --- ergonomic API: names/shapes/dtypes come from the model; the caller passes only data ---
         /// Model inputs/outputs (name, concrete shape, dtype, element count). Use these to size buffers.
@@ -56,9 +96,10 @@ namespace vknn {
         /// Returns empty on error. The shape is whatever the model declares (see inputInfo()).
         std::vector<float> infer(const std::vector<float> &input);
 
-        /// The optimized graph this session runs (nodes, tensors, and their descriptors).
+        /// The optimized graph the default (first) bucket runs (nodes, tensors, and their
+        /// descriptors). A multi-bucket session has one such graph per shape; this returns bucket 0's.
         const Graph &graph() const noexcept {
-            return graph_;
+            return buckets_.front().graph;
         }
         /// The configuration this session was built with.
         const Config &config() const noexcept {
@@ -75,9 +116,9 @@ namespace vknn {
         std::vector<std::string> fallbackOps() const;
         /// Why each fallback in fallbackOps() happened, recorded once at plan() time: the requested
         /// backend's supportsNode refusal reason, or the tiny-GPU-island fold. Empty when the whole
-        /// model runs on the requested backend.
+        /// model runs on the requested backend. Reported for the default (first) bucket.
         const std::vector<FallbackReason> &fallbackReasons() const noexcept {
-            return fallbackReasons_;
+            return buckets_.front().fallbackReasons;
         }
 
         /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
@@ -86,28 +127,40 @@ namespace vknn {
 
       private:
         Session() = default;
-        void plan();               ///< Assign backends, partition into segments, and compile.
-        void foldTinyGpuIslands(); ///< Reassign small CPU-bounded GPU runs to CPU (avoid round trips).
-        /// Checks a caller-provided input shape against the plan-frozen buffers; the single point
-        /// every run() input shape passes through.
-        Status validateInputShape(TensorId id, const Shape &got) const;
+        /// Ensure the shared backends are instantiated (once per session, first bucket build).
+        void ensureBackends();
+        /// Assign backends, partition into segments, and compile `g` into a fresh PlanBucket labelled
+        /// `key`. Consumes `g` (it becomes the bucket's owned graph). Runs over the shared backends.
+        PlanBucket buildBucket(Graph &&g, const std::string &key);
+        /// Reassign small CPU-bounded GPU runs in `bucket` to CPU (avoid round trips).
+        void foldTinyGpuIslands(PlanBucket &bucket);
+        /// Checks a caller-provided input shape against `bucket`'s plan-frozen buffers; the single
+        /// point every run() input shape passes through when a bucket is already selected.
+        Status validateInputShape(const PlanBucket &bucket, TensorId id, const Shape &got) const;
+        /// The canonical key for a shape assignment: each graph input's name and resolved shape. Two
+        /// buckets with the same key are the same plan. `graph` supplies the input names/order.
+        static std::string shapeKey(const Graph &graph);
+        /// The key implied by a run's bound input shapes over the default bucket's inputs (an unbound
+        /// or empty caller shape adopts that input's default-bucket shape). Selects the bucket to run.
+        std::string runShapeKey(const std::vector<IOTensor> &inputs) const;
 
-        Graph    graph_;
         Config   cfg_;
         Profiler profiler_;
         // Declaration order matters for teardown: backends_ (owns the VulkanContext) must be
-        // destroyed LAST, after segments_ and pool_ release their device buffers. Members are
-        // destroyed in reverse declaration order, so backends_ is declared first here.
+        // destroyed LAST, after the buckets' segments and pools release their device buffers. Members
+        // are destroyed in reverse declaration order, so backends_ is declared first here.
         std::vector<std::unique_ptr<Backend>> backends_; // active, in priority order
         std::map<BackendKind, Backend *>      byKind_;
-        std::vector<int>                      nodeBackendIdx_; // backend index per node
-        std::vector<FallbackReason>           fallbackReasons_; // plan-time refusals of the requested backend
-        std::vector<std::unique_ptr<Segment>> segments_;
-        std::vector<RtTensor>                 pool_;
-        bool                                  planned_        = false;
-        bool                                  graphOptimized_ = false; // graph came from .vxm (passes already applied)
-        bool                                  ioGpuConvert_   = false; // whole graph on one GPU backend: 8-bit image
-                                                                       // graph-inputs upload raw + convert on the GPU
+        // One compiled plan per declared input-shape set. buckets_[0] is the default (batch-fallback)
+        // plan every fixed-shape model has; more are added by prepareShapes() or a multi-bucket .vxm.
+        std::vector<PlanBucket> buckets_;
+        // The pristine imported graph (pre-passes), retained only for ONNX-built sessions so
+        // prepareShapes() can re-run the pipeline at a new shape. Empty for a .vxm session, which
+        // cannot add buckets (its passes were baked at compile time, one shape per stored bucket).
+        Graph importedGraph_;
+        bool  hasImportedGraph_ = false;
+        bool  planned_          = false;
+        bool  graphOptimized_   = false; // graph came from .vxm (passes already applied)
     };
 
 } // namespace vknn
