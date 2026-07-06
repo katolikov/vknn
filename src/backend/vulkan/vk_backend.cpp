@@ -397,6 +397,21 @@ namespace vknn {
             {
                 return nd.inputs.size() == 2;
             }
+            // Conv: the GPU kernels cover group == 1 and pure depthwise (group == Cin == Cout).
+            // Partial groups (1 < group < Cin) and depthwise with a channel multiplier
+            // (group == Cin, Cout != Cin) would mis-index the dense [Cout][Cinb][KH][KW][4] weight
+            // pack — those fall back to the group-aware CPU op.
+            if (nd.type == OpType::Conv && nd.inputs.size() >= 2)
+            {
+                int64_t group = nd.attr.geti("group", 1);
+                if (group > 1)
+                {
+                    const Shape &xs = g.desc(nd.inputs[0]).shape;
+                    const Shape &ws = g.desc(nd.inputs[1]).shape;
+                    return xs.size() == 4 && ws.size() == 4 && group == xs[1] && ws[0] == xs[1];
+                }
+                return true;
+            }
             return true;
         }
 
