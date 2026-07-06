@@ -10,6 +10,7 @@
 // matrix), [4] pw_b [Cout] (optional); node.fusedResidual is an optional [N,Cout,OH,OW] tensor.
 // node.subOp is the depthwise-stage ActType; node.fusedAct is the projection-stage activation.
 #include "backend/cpu/cpu_backend.h"
+#include "core/conv_geom.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <vector>
@@ -32,13 +33,14 @@ namespace vknn {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
-                // Depthwise conv geometry; pads are [top, left, bottom, right] (begin then end).
-                auto               st = a("strides", {1, 1}), pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
-                // ONNX output spatial size: the dilated kernel spans dil*(K-1)+1, so the last valid
-                // window origin is (padded_extent - span); floor-dividing by the stride and adding one
-                // counts the window positions. pad[0]/pad[1] are begin (top/left), pad[2]/pad[3] end.
-                int64_t            OH  = (x.h + pad[0] + pad[2] - (dil[0] * (KH - 1) + 1)) / st[0] + 1;
-                int64_t            OW  = (x.w + pad[1] + pad[3] - (dil[1] * (KW - 1) + 1)) / st[1] + 1;
+                // Depthwise conv geometry through the shared forward helper (core/conv_geom.h): the
+                // node carries the depthwise Conv's attrs, so auto_pad resolves the same way there.
+                // pads are [top, left, bottom, right] (begin then end).
+                auto               st  = a("strides", {1, 1}), dil = a("dilations", {1, 1});
+                ConvGeom           geo = convGeom(x.h, x.w, KH, KW, node.attr);
+                auto               pad = geo.pads();
+                int64_t            OH  = geo.outH;
+                int64_t            OW  = geo.outW;
                 const float       *xd  = X.host.f32();
                 const float       *dw  = DW.host.f32();
                 const float       *pw  = PW.host.f32();

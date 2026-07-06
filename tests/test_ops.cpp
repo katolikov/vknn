@@ -276,6 +276,110 @@ TEST(Ops, Conv1x1Relu) {
     EXPECT_NEAR(outs[0].f32()[1], 10.0f, 1e-5);
 }
 
+// --- Conv auto_pad SAME_UPPER, 3x3 stride 1, all-ones weight: a 3x3 box filter over the
+// zero-padded 5x5 input 1..25. out = ceil(5/1) = 5; total_pad = (5-1)*1 + 3 - 5 = 2, split 1/1,
+// so each output is the sum of the input's in-bounds 3x3 neighborhood (e.g. out[0][0] =
+// 1+2+6+7 = 16, out[2][2] = (7+8+9)+(12+13+14)+(17+18+19) = 117). ---
+TEST(Ops, ConvAutoPadSameUpper) {
+    Attributes attr;
+    attr.map["auto_pad"] = str("SAME_UPPER");
+    std::vector<float> in(25);
+    for (int i = 0; i < 25; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::Conv, 0, attr, {1, 1, 5, 5}, in, {{{1, 1, 3, 3}, std::vector<float>(9, 1.f)}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 5, 5}));
+    expectNear(out.data, {16, 27, 33, 39, 28, 39, 63, 72, 81, 57, 69, 108, 117, 126, 87, 99, 153, 162, 171, 117, 76, 117, 123, 129, 88});
+}
+
+// --- Conv auto_pad SAME_UPPER, 3x3 stride 2, 4x4 input 1..16: the asymmetric-split case. out =
+// ceil(4/2) = 2; total_pad = (2-1)*2 + 3 - 4 = 1, SAME_UPPER puts the odd unit at the END
+// (pads = {0,0,1,1}), so window origins are {0,2} and only the bottom/right windows are cropped:
+// out[0][0] = rows 0-2 x cols 0-2 = 54, out[1][1] = rows 2-3 x cols 2-3 = 11+12+15+16 = 54. ---
+TEST(Ops, ConvAutoPadSameUpperStride2) {
+    Attributes attr;
+    attr.map["auto_pad"] = str("SAME_UPPER");
+    attr.map["strides"]  = ints({2, 2});
+    std::vector<float> in(16);
+    for (int i = 0; i < 16; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::Conv, 0, attr, {1, 1, 4, 4}, in, {{{1, 1, 3, 3}, std::vector<float>(9, 1.f)}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 2, 2}));
+    expectNear(out.data, {54, 45, 72, 54});
+}
+
+// --- Conv auto_pad SAME_LOWER, 3x3 stride 2, same 4x4 input: the odd pad unit moves to the BEGIN
+// (pads = {1,1,0,0}), window origins {-1,1}, so the top/left windows are cropped instead:
+// out[0][0] = rows 0-1 x cols 0-1 = 1+2+5+6 = 14 (vs SAME_UPPER's 54). ---
+TEST(Ops, ConvAutoPadSameLowerStride2) {
+    Attributes attr;
+    attr.map["auto_pad"] = str("SAME_LOWER");
+    attr.map["strides"]  = ints({2, 2});
+    std::vector<float> in(16);
+    for (int i = 0; i < 16; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::Conv, 0, attr, {1, 1, 4, 4}, in, {{{1, 1, 3, 3}, std::vector<float>(9, 1.f)}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 2, 2}));
+    expectNear(out.data, {14, 30, 57, 99});
+}
+
+// --- Conv auto_pad VALID: zero padding regardless of an accompanying pads attr (auto_pad wins
+// when it is not NOTSET). 5x5 input 1..25, ones 3x3: out[r][c] = 45r + 9c + 63. ---
+TEST(Ops, ConvAutoPadValid) {
+    Attributes attr;
+    attr.map["auto_pad"] = str("VALID");
+    attr.map["pads"]     = ints({1, 1, 1, 1});
+    std::vector<float> in(25);
+    for (int i = 0; i < 25; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::Conv, 0, attr, {1, 1, 5, 5}, in, {{{1, 1, 3, 3}, std::vector<float>(9, 1.f)}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 3, 3}));
+    expectNear(out.data, {63, 72, 81, 108, 117, 126, 153, 162, 171});
+}
+
+// --- MaxPool auto_pad SAME_UPPER, 2x2 stride 2 over 5x5 input 1..25: out = ceil(5/2) = 3,
+// total_pad = (3-1)*2 + 2 - 5 = 1 at the end, so the last row/col windows are half-size
+// (out[0][2] = max(5,10) = 10, out[2][2] = max(25) = 25). ---
+TEST(Ops, MaxPoolAutoPadSameUpper) {
+    Attributes attr;
+    attr.map["auto_pad"]     = str("SAME_UPPER");
+    attr.map["kernel_shape"] = ints({2, 2});
+    attr.map["strides"]      = ints({2, 2});
+    std::vector<float> in(25);
+    for (int i = 0; i < 25; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::MaxPool, 0, attr, {1, 1, 5, 5}, in, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 3, 3}));
+    expectNear(out.data, {7, 9, 10, 17, 19, 20, 22, 24, 25});
+}
+
+// --- AveragePool auto_pad SAME_LOWER, 2x2 stride 2 over 5x5 input 1..25: the odd pad unit is at
+// the begin, window origins {-1,1,3}; the default count_include_pad=0 divides by the in-bounds
+// count only (out[0][0] = avg{1} = 1, out[1][0] = avg{6,11} = 8.5, out[1][1] = avg{7,8,12,13} = 10). ---
+TEST(Ops, AvgPoolAutoPadSameLower) {
+    Attributes attr;
+    attr.map["auto_pad"]     = str("SAME_LOWER");
+    attr.map["kernel_shape"] = ints({2, 2});
+    attr.map["strides"]      = ints({2, 2});
+    std::vector<float> in(25);
+    for (int i = 0; i < 25; ++i)
+    {
+        in[i] = (float) (i + 1);
+    }
+    auto out = runOp(OpType::AvgPool, 0, attr, {1, 1, 5, 5}, in, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 1, 3, 3}));
+    expectNear(out.data, {1.f, 2.5f, 4.5f, 8.5f, 10.f, 12.f, 18.5f, 20.f, 22.f});
+}
+
 // --- Unary family: Sigmoid + HardSwish. ---
 TEST(Ops, UnarySigmoidHardSwish) {
     float vals[4] = {-2.f, -0.5f, 0.5f, 3.f};
@@ -1831,6 +1935,76 @@ namespace {
 
 } // namespace
 
+namespace {
+
+    // Single-Conv graph over a 1x2x6x6 input: weight [2,2,3,3] with a fixed non-uniform pattern.
+    // `attr` selects the padding form (auto_pad vs explicit pads) under test.
+    Graph convPadGraph(const Attributes &attr) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 2, 6, 6};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorDesc wi;
+        wi.name          = "w";
+        wi.shape         = {2, 2, 3, 3};
+        wi.isInitializer = true;
+        TensorId   w     = g.addTensor(wi);
+        HostBuffer wb;
+        wb.resizeElems(36, DType::Float32);
+        for (int i = 0; i < 36; ++i)
+        {
+            wb.f32()[i] = (float) (i % 5) - 2.f;
+        }
+        g.initializers[w] = wb;
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     c;
+        c.type    = OpType::Conv;
+        c.name    = "conv";
+        c.inputs  = {x, w};
+        c.outputs = {y};
+        c.attr    = attr;
+        g.nodes.push_back(c);
+        g.outputs = {y};
+        return g;
+    }
+
+    // Runs an already-passed graph on the CPU backend with input x = i * 0.25 - 4.
+    std::vector<float> runConvPadGraph(Graph g) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {1, 2, 6, 6};
+        in.dtype = DType::Float32;
+        in.data.resize(72 * 4);
+        for (int i = 0; i < 72; ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = (float) i * 0.25f - 4.f;
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+} // namespace
+
 TEST(Passes, DropoutInferenceModeEliminated) {
     Graph      g;
     TensorDesc xi;
@@ -2085,4 +2259,135 @@ TEST(Passes, DropoutRunStandardPassesRewires) {
     ASSERT_NE(matmul, nullptr);
     ASSERT_NE(softmax, nullptr);
     EXPECT_EQ(softmax->inputs[0], matmul->outputs[0]) << "Softmax must read the MatMul output directly";
+}
+
+// --- lowerConv x auto_pad parity: a SAME_UPPER conv is skipped by lowerConv (stays Conv, resolved
+// through convGeom), while the same conv with the explicit resolved pads {1,1,1,1} lowers to
+// ConvGemm; both paths must produce identical values. ---
+TEST(Passes, LowerConvSkipsAutoPadAndMatchesExplicit) {
+    Attributes same;
+    same.map["auto_pad"] = str("SAME_UPPER");
+    Attributes expl;
+    expl.map["pads"] = ints({1, 1, 1, 1}); // the resolved SAME_UPPER pads for 3x3/s1
+    PassOptions opt;
+    opt.lowerConv = true;
+
+    Graph gs = convPadGraph(same);
+    runStandardPasses(gs, opt);
+    ASSERT_EQ(gs.nodes.size(), 1u);
+    EXPECT_EQ(gs.nodes[0].type, OpType::Conv) << "lowerConv must skip auto_pad convs";
+
+    Graph ge = convPadGraph(expl);
+    runStandardPasses(ge, opt);
+    ASSERT_EQ(ge.nodes.size(), 1u);
+    EXPECT_EQ(ge.nodes[0].type, OpType::ConvGemm) << "explicit-pad twin must lower";
+
+    std::vector<float> outSame = runConvPadGraph(std::move(gs));
+    std::vector<float> outExpl = runConvPadGraph(std::move(ge));
+    ASSERT_EQ(outSame.size(), (size_t) (2 * 6 * 6));
+    expectNear(outSame, outExpl, 0.f); // identical fp32 loop order: bit-equal
+}
+
+// --- fuseDwPw x auto_pad: the fused node inherits the depthwise conv's attrs, auto_pad included,
+// so the fused and unfused paths must resolve the SAME_UPPER pads identically. ---
+TEST(Passes, FuseDwPwAutoPadSameUpper) {
+    auto build = [] {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 2, 5, 5};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorDesc di;
+        di.name          = "dw";
+        di.shape         = {2, 1, 3, 3};
+        di.isInitializer = true;
+        TensorId   dw    = g.addTensor(di);
+        HostBuffer db;
+        db.resizeElems(18, DType::Float32);
+        for (int i = 0; i < 18; ++i)
+        {
+            db.f32()[i] = (float) (i % 3) - 1.f;
+        }
+        g.initializers[dw] = db;
+        TensorDesc pi;
+        pi.name          = "pw";
+        pi.shape         = {2, 2, 1, 1};
+        pi.isInitializer = true;
+        TensorId   pw    = g.addTensor(pi);
+        HostBuffer pb;
+        pb.resizeElems(4, DType::Float32);
+        for (int i = 0; i < 4; ++i)
+        {
+            pb.f32()[i] = (float) i - 1.5f;
+        }
+        g.initializers[pw] = pb;
+        TensorDesc t0;
+        t0.name     = "t";
+        TensorId t  = g.addTensor(t0);
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     d;
+        d.type    = OpType::Conv;
+        d.name    = "dconv";
+        d.inputs  = {x, dw};
+        d.outputs = {t};
+        d.attr.map["auto_pad"] = str("SAME_UPPER");
+        {
+            Attr a;
+            a.kind             = Attr::Int;
+            a.i                = 2;
+            d.attr.map["group"] = a;
+        }
+        Node p;
+        p.type    = OpType::Conv;
+        p.name    = "pconv";
+        p.inputs  = {t, pw};
+        p.outputs = {y};
+        g.nodes.push_back(d);
+        g.nodes.push_back(p);
+        g.outputs = {y};
+        return g;
+    };
+    auto run = [](Graph g) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {1, 2, 5, 5};
+        in.dtype = DType::Float32;
+        in.data.resize(50 * 4);
+        for (int i = 0; i < 50; ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = (float) i * 0.5f - 12.f;
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    };
+
+    Graph       gf = build();
+    PassOptions opt;
+    opt.fuseDwPw = true;
+    runStandardPasses(gf, opt);
+    bool fused = false;
+    for (const Node &n: gf.nodes)
+    {
+        fused = fused || n.type == OpType::FusedDwPw;
+    }
+    ASSERT_TRUE(fused) << "SAME_UPPER depthwise + 1x1 project must still fuse";
+    ASSERT_EQ(gf.desc(gf.outputs[0]).shape, (Shape {1, 2, 5, 5})); // SAME keeps the extent
+
+    Graph gu = build();
+    runStandardPasses(gu, {}); // unfused reference
+    std::vector<float> outFused   = run(std::move(gf));
+    std::vector<float> outUnfused = run(std::move(gu));
+    ASSERT_EQ(outFused.size(), (size_t) 50);
+    expectNear(outFused, outUnfused, 0.f); // identical fp32 loop order: bit-equal
 }

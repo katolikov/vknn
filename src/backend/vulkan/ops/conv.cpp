@@ -2,6 +2,7 @@
 // covers 1x1 pointwise) and the depthwise case (the "dwconv" shader). Weights are repacked to
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -663,8 +664,12 @@ namespace vknn {
                 const Shape &ws   = g.desc(node.inputs[1]).shape; // [Cout, Cin/group, KH, KW]
                 int64_t      Cout = ws[0], inCg = ws[1], KH = ws[2], KW = ws[3];
                 auto         st    = attrInts(node, "strides", {1, 1});
-                auto         pad   = attrInts(node, "pads", {0, 0, 0, 0});
                 auto         dil   = attrInts(node, "dilations", {1, 1});
+                // Resolved through the shared forward geometry (core/conv_geom.h) so auto_pad convs
+                // carry real begin/end pads here: the kernel-eligibility checks below (pointwise /
+                // wino / lds3x3) and the push-constant begin pads all read the resolved values. The
+                // output extent itself comes from the graph desc (inferShapes, same helper).
+                auto         pad   = convGeom(x.h, x.w, KH, KW, node.attr).pads();
                 int64_t      group = node.attr.geti("group", 1);
                 hasRes             = (node.fusedResidual != kNoTensor); // set by the residual-Add fusion pass (1x1 only)
                 depthwise          = (group == x.c && group == Cout && inCg == 1);

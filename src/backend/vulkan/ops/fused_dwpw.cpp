@@ -1,6 +1,7 @@
 // Fused depthwise-3x3 + 1x1-project on the GPU. One workgroup per output pixel; depthwise output
 // staged in LDS (computed once), then projected. Gated by supportsNode to large-spatial fp16
 // blocks.
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
@@ -31,7 +32,10 @@ namespace vknn {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
-                auto st = a("strides", {1, 1}), pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
+                auto st = a("strides", {1, 1}), dil = a("dilations", {1, 1});
+                // Shared forward geometry (core/conv_geom.h) over the depthwise conv's attrs, so an
+                // inherited auto_pad resolves into the same begin/end pads as the unfused Conv path.
+                auto pad = convGeom(x.h, x.w, KH, KW, node.attr).pads();
                 hasRes                    = (node.fusedResidual != kNoTensor);
                 // Field order/types mirror fused_dwpw.comp's push_constant block: spatial/kernel geometry
                 // (N,E,H,W,Cout,OH,OW,KH,KW), then stride/pad/dilation (SH,SW,PT,PL,DH,DWd), then the fused

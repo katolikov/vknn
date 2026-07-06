@@ -91,7 +91,11 @@ namespace vknn {
             {
                 continue;
             }
-            auto poolStrides = ints(P, "strides", {1, 1}), poolPads = ints(P, "pads", {0, 0, 0, 0});
+            // Resolved pads (auto_pad included): a 1x1 stride-1 SAME conv resolves to zero pads, so
+            // it stays eligible; any conv whose resolved pads are non-zero is not a pure projection.
+            NCHW px          = NCHW::from(g.desc(P.inputs[0]).shape);
+            auto poolStrides = ints(P, "strides", {1, 1});
+            auto poolPads    = convGeom(px.h, px.w, pw[2], pw[3], P.attr).pads();
             if (poolStrides[0] != 1 || poolStrides[1] != 1 || poolPads[0] || poolPads[1] || poolPads[2] || poolPads[3])
             {
                 continue;
