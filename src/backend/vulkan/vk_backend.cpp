@@ -272,7 +272,7 @@ namespace vknn {
                 }
                 return true;
             }
-            if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual)
+            if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual)
             {
                 // flat broadcasting kernels (fixed PC arrays) decode up to kMaxRank=8 output dims.
                 return g.desc(nd.outputs[0]).shape.size() <= 8;

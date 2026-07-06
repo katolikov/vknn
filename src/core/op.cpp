@@ -108,6 +108,10 @@ namespace vknn {
                 return "ConvertDtype";
             case OpType::ConvGemm:
                 return "ConvGemm";
+            case OpType::Less:
+                return "Less";
+            case OpType::LessEqual:
+                return "LessEqual";
             default:
                 return "Unknown";
         }
@@ -203,6 +207,10 @@ namespace vknn {
             // GreaterOrEqual is the canonical ONNX spelling; GreaterEqual is accepted as an alias.
             {"GreaterOrEqual", OpType::GreaterEqual},
             {"GreaterEqual", OpType::GreaterEqual},
+            {"Less", OpType::Less},
+            // LessOrEqual is the canonical ONNX spelling; LessEqual is accepted as an alias.
+            {"LessOrEqual", OpType::LessEqual},
+            {"LessEqual", OpType::LessEqual},
             {"ConstantOfShape", OpType::ConstantOfShape},
             {"Range", OpType::Range},
             {"EyeLike", OpType::EyeLike},

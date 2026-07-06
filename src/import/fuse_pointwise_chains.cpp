@@ -72,6 +72,8 @@ namespace vknn {
             case OpType::Where:
             case OpType::Greater:
             case OpType::GreaterEqual:
+            case OpType::Less:
+            case OpType::LessEqual:
             case OpType::Equal:
                 break;
             default:
@@ -485,6 +487,18 @@ namespace vknn {
                             sA   = src[0].ref;
                             sB   = src[1].ref;
                             break;
+                        case OpType::Less:
+                            kind = kPwKindBinary;
+                            code = kPwBinLess;
+                            sA   = src[0].ref;
+                            sB   = src[1].ref;
+                            break;
+                        case OpType::LessEqual:
+                            kind = kPwKindBinary;
+                            code = kPwBinLessEqual;
+                            sA   = src[0].ref;
+                            sB   = src[1].ref;
+                            break;
                         case OpType::Equal:
                             kind = kPwKindBinary;
                             code = kPwBinEqual;
@@ -623,15 +637,15 @@ namespace vknn {
     } // namespace
 
     /// One general pointwise fusion: grow each maximal same-shape per-element region — Binary/Add/
-    /// Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Equal over one run shape, connected through
-    /// def-use edges in either direction, fanout included — and emit it as a single fused unit:
-    /// folded into an epilogue-capable producer's store when the region's entry stream comes from
-    /// one (pwEpilogueCapable), otherwise a standalone FusedPointwise node. Internal fanout rides
-    /// the unit's registers; values consumed outside the region (or graph outputs) are exported as
-    /// extra output streams (pw_outs), stored TO_STORE-rounded so they are byte-identical to the
-    /// tensors the unfused graph would materialize. A region that exceeds the step/operand/register/
-    /// export budgets is emitted as its largest fitting prefix and the remaining members seed the
-    /// next unit.
+    /// Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Less/LessEqual/Equal over one run shape,
+    /// connected through def-use edges in either direction, fanout included — and emit it as a
+    /// single fused unit: folded into an epilogue-capable producer's store when the region's entry
+    /// stream comes from one (pwEpilogueCapable), otherwise a standalone FusedPointwise node.
+    /// Internal fanout rides the unit's registers; values consumed outside the region (or graph
+    /// outputs) are exported as extra output streams (pw_outs), stored TO_STORE-rounded so they are
+    /// byte-identical to the tensors the unfused graph would materialize. A region that exceeds the
+    /// step/operand/register/export budgets is emitted as its largest fitting prefix and the
+    /// remaining members seed the next unit.
     ///
     /// Legality: regions are convex — an external node that transitively depends on a region value
     /// and feeds a later region member (only possible inside the region's node-index interval, as

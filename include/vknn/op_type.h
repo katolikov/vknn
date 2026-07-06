@@ -61,8 +61,10 @@ namespace vknn {
         ConvertLayout,
         // fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by markFp32)
         ConvertDtype,
-        Range,    // arange(start, limit, delta) -- scalar inputs, 1-D output
-        ConvGemm, // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
+        Range,     // arange(start, limit, delta) -- scalar inputs, 1-D output
+        ConvGemm,  // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
+        Less,      // A <  B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        LessEqual, // A <= B -> 1.0/0.0, elementwise with broadcasting (flat path)
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;
@@ -101,6 +103,8 @@ namespace vknn {
     constexpr int kPwBinGreaterEqual = 8;  ///< srcA >= srcB -> 1.0/0.0
     constexpr int kPwBinEqual        = 9;  ///< srcA == srcB -> 1.0/0.0
     constexpr int kPwBinPRelu        = 10; ///< srcA > 0 ? srcA : srcB * srcA (slope on srcB)
+    constexpr int kPwBinLess         = 11; ///< srcA <  srcB -> 1.0/0.0
+    constexpr int kPwBinLessEqual    = 12; ///< srcA <= srcB -> 1.0/0.0
 
     /// Stable ONNX-style spelling of an OpType (e.g. OpType::GlobalAvgPool -> "GlobalAveragePool").
     /// @returns A static, null-terminated string owned by the library; never null. An unrecognized

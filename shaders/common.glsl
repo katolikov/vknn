@@ -74,6 +74,8 @@ float vx_binary(float a, float b, int op) {
   if (op == 8)  return (a >= b) ? 1.0 : 0.0;
   if (op == 9)  return (a == b) ? 1.0 : 0.0;
   if (op == 10) return (a > 0.0) ? a : b * a;
+  if (op == 11) return (a < b)  ? 1.0 : 0.0;
+  if (op == 12) return (a <= b) ? 1.0 : 0.0;
   return a + b;
 }
 

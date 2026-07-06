@@ -388,6 +388,36 @@ TEST(Ops, GreaterBroadcastPerChannel) {
     EXPECT_EQ(out.data, (std::vector<float> {0, 0, 1, 1, 0, 0, 1, 1}));
 }
 
+// --- Less vs a scalar: strict <, ties are 0. ---
+TEST(Ops, LessScalar) {
+    auto out = runOp(OpType::Less, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{1}, {3.f}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {2, 3}));
+    EXPECT_EQ(out.data, (std::vector<float> {1, 1, 0, 0, 0, 0}));
+}
+
+// --- LessOrEqual vs a scalar: ties are 1 (the only difference from Less on this input). ---
+TEST(Ops, LessEqualScalarTies) {
+    auto out = runOp(OpType::LessEqual, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{1}, {3.f}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {2, 3}));
+    EXPECT_EQ(out.data, (std::vector<float> {1, 1, 1, 0, 0, 0}));
+}
+
+// --- Less with NumPy broadcasting: [2,3] vs a [3] row. ---
+TEST(Ops, LessBroadcastRow) {
+    auto out = runOp(OpType::Less, 0, {}, {2, 3}, {1, 5, 0, 3, 4, 2}, {{{3}, {2, 4, 1}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {2, 3}));
+    // row0 {1,5,0} vs {2,4,1} -> {1,0,1}; row1 {3,4,2} vs {2,4,1} -> {0,0,0}
+    EXPECT_EQ(out.data, (std::vector<float> {1, 0, 1, 0, 0, 0}));
+}
+
+// --- Less with rank-4 broadcasting: [1,2,2,2] vs a per-channel [1,2,1,1] threshold. ---
+TEST(Ops, LessBroadcastPerChannel) {
+    auto out = runOp(OpType::Less, 0, {}, {1, 2, 2, 2}, {1, 2, 3, 4, 5, 6, 7, 8}, {{{1, 2, 1, 1}, {2.5f, 6.5f}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 2, 2, 2}));
+    // ch0 {1,2,3,4} < 2.5 -> {1,1,0,0}; ch1 {5,6,7,8} < 6.5 -> {1,1,0,0}
+    EXPECT_EQ(out.data, (std::vector<float> {1, 1, 0, 0, 1, 1, 0, 0}));
+}
+
 // --- ConvertLayout on the CPU backend: NC4HW4 is a device-only storage format and every host
 //     residency is canonical NCHW, so both directions are value- and shape-preserving copies. A
 //     flat->NC4HW4 -> NC4HW4->flat pair must return the input exactly, including the odd channel
@@ -1434,6 +1464,62 @@ TEST(Passes, RangeConstFoldInt64) {
     for (int i = 0; i < 5; ++i)
     {
         EXPECT_EQ(g.initializers[r].i64()[i], ref[i]) << "i=" << i;
+    }
+}
+
+// --- Less/LessOrEqual over constant int64 shape tensors fold to an exact fp32 mask. The compare
+// reads each operand through its own dtype, so values past fp32's 24-bit mantissa (2^25 vs 2^25+1
+// would tie in fp32) still order correctly, and only <= counts the exact tie as 1. ---
+TEST(Passes, LessConstFoldInt64) {
+    Graph g;
+    auto  addI64 = [&](const char *name, const Shape &shape, const std::vector<int64_t> &vals) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = shape;
+        d.isInitializer = true;
+        d.dtype         = DType::Int64;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems((int64_t) vals.size(), DType::Int64);
+        for (size_t i = 0; i < vals.size(); ++i)
+        {
+            hb.i64()[i] = vals[i];
+        }
+        g.initializers[id] = hb;
+        return id;
+    };
+    TensorId a  = addI64("a", {4}, {0, 1ll << 25, (1ll << 25) + 1, 7});
+    TensorId b  = addI64("b", {1}, {1ll << 25});
+    TensorId y0 = g.addTensor({.name = "lt"});
+    TensorId y1 = g.addTensor({.name = "le"});
+    Node     lt;
+    lt.type    = OpType::Less;
+    lt.name    = "less";
+    lt.inputs  = {a, b};
+    lt.outputs = {y0};
+    Node le;
+    le.type    = OpType::LessEqual;
+    le.name    = "lessequal";
+    le.inputs  = {a, b};
+    le.outputs = {y1};
+    g.nodes    = {lt, le};
+    g.outputs  = {y0, y1};
+
+    inferShapes(g, 1);
+    ASSERT_EQ(g.desc(y0).shape, (Shape {4}));
+    ASSERT_EQ(g.desc(y1).shape, (Shape {4}));
+    constFold(g);
+    EXPECT_TRUE(g.nodes.empty()) << "all-constant compares must fold away";
+    ASSERT_TRUE(g.isInitializer(y0));
+    ASSERT_TRUE(g.isInitializer(y1));
+    EXPECT_EQ(g.desc(y0).dtype, DType::Float32); // canonical fp32 mask
+    EXPECT_EQ(g.desc(y1).dtype, DType::Float32);
+    const float refLt[4] = {1, 0, 0, 1}; // a < 2^25
+    const float refLe[4] = {1, 1, 0, 1}; // a <= 2^25: the exact tie flips to 1
+    for (int i = 0; i < 4; ++i)
+    {
+        EXPECT_EQ(g.initializers[y0].f32()[i], refLt[i]) << "i=" << i;
+        EXPECT_EQ(g.initializers[y1].f32()[i], refLe[i]) << "i=" << i;
     }
 }
 

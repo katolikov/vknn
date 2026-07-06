@@ -101,7 +101,9 @@ namespace vknn {
                     break;
                 case OpType::Equal:
                 case OpType::Greater:
-                case OpType::GreaterEqual: {
+                case OpType::GreaterEqual:
+                case OpType::Less:
+                case OpType::LessEqual: {
                     // Same empty-shape discrimination as Binary/Add: scalar only if initializer.
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);

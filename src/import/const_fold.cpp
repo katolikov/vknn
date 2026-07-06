@@ -86,6 +86,8 @@ namespace vknn {
                 case OpType::Equal:
                 case OpType::Greater:
                 case OpType::GreaterEqual:
+                case OpType::Less:
+                case OpType::LessEqual:
                 case OpType::EyeLike: // identity matrix is constant once the (now-known) shape is fixed
                 case OpType::ConstantOfShape: {
                     if (nd.inputs.empty())

@@ -27,7 +27,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Binary family | ✅ | ✅ | Mul, Sub, Div, Max, Min, Pow, Add — same-shape, channel-broadcast (SE), and general NumPy broadcast on the flat path |
 | Relu / Relu6 / Clip | ✅ | ✅ | standalone, and fused into the producing Conv/Gemm |
 | PRelu | ✅ | ✅ | per-channel slope |
-| Where / Equal / Greater / GreaterEqual | ✅ | ✅ | flat broadcast (fp32 + int64) |
+| Where / Equal / Greater / GreaterEqual / Less / LessOrEqual | ✅ | ✅ | flat broadcast (fp32 + int64) |
 
 ## Transformer / attention
 
@@ -68,7 +68,7 @@ an optimization level (`-O0` = none/reference, `-O1` = the default production se
 flags override a single pass on top of the level:
 
 - **General pointwise fusion** — the one fusion pass. It grows each maximal same-shape
-  per-element region (Binary/Add/Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Equal, fanout
+  per-element region (Binary/Add/Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Less/LessEqual/Equal, fanout
   included) and emits it as a single fused unit: folded into the producing kernel's store epilogue
   (MatMul, Gemm, Conv family, ConvGemm, Softmax, LayerNorm, Reduce, GridSample, Resize,
   ConvTranspose, pooling, Transpose/Slice, Concat) or one standalone `FusedPointwise` kernel.

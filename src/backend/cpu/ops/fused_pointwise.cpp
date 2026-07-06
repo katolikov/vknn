@@ -47,6 +47,14 @@ namespace vknn {
             {
                 return a > 0.f ? a : b * a;
             }
+            if (op == kPwBinLess)
+            {
+                return a < b ? 1.f : 0.f;
+            }
+            if (op == kPwBinLessEqual)
+            {
+                return a <= b ? 1.f : 0.f;
+            }
             return a + b;
         }
 
