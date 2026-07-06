@@ -76,6 +76,7 @@ namespace vknn {
             }
         }
         markScalarGatherIndices(g); // before const-fold erases the Constant nodes' original ranks
+        normalizeConv1d(g);         // before shape inference: conv arms assume 2-D weight/attr geometry
         inferShapes(g, batch);
         lowerReduceToGap(g); // needs input ranks; ReduceMean imports as generic Reduce
         inferShapes(g, batch);

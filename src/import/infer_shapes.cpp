@@ -64,9 +64,21 @@ namespace vknn {
                     auto    st  = ints("strides", {1, 1});
                     auto    pad = ints("pads", {0, 0, 0, 0});
                     auto    dil = ints("dilations", {1, 1});
-                    int64_t oh  = (x.h + pad[0] + pad[2] - (dil[0] * (kh - 1) + 1)) / st[0] + 1;
-                    int64_t ow  = (x.w + pad[1] + pad[3] - (dil[1] * (kw - 1) + 1)) / st[1] + 1;
-                    SH(o)       = {x.n, outC, oh, ow};
+                    if (st.size() < 2 || pad.size() < 4 || dil.size() < 2)
+                    {
+                        break; // 1-spatial-dim attributes: normalizeConv1d has not run (runtime weight)
+                    }
+                    int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (kh - 1) + 1)) / st[0] + 1;
+                    int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (kw - 1) + 1)) / st[1] + 1;
+                    // A rank-3 input is a normalized 1-D conv (NCHW::from maps [N,C,L] to h=L, w=1,
+                    // and the weight's kW extent is 1, so ow == 1); the output keeps rank 3.
+                    if (SH(nd.inputs[0]).size() == 3 && ow == 1)
+                    {
+                        SH(o) = {x.n, outC, oh};
+                    } else
+                    {
+                        SH(o) = {x.n, outC, oh, ow};
+                    }
                     break;
                 }
                 case OpType::ConvTranspose: {

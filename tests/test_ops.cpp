@@ -310,6 +310,23 @@ TEST(Ops, GlobalAveragePool) {
     expectNear(out.data, {2.5f}, 1e-5f);
 }
 
+// --- 1-D Conv (rank-3 input/weight, 1-length strides, 2-length pads): normalized at import to the
+// canonical 2-D geometry (kH=k, kW=1) with rank-3 output. Values from onnxruntime. ---
+TEST(Ops, Conv1dNormalizedGeometry) {
+    Attributes attr;
+    attr.map["pads"]    = ints({1, 1});
+    attr.map["strides"] = ints({2});
+    std::vector<float> x(16);
+    for (int i = 0; i < 16; ++i)
+    {
+        x[i] = (float) i;
+    }
+    auto out = runOp(OpType::Conv, 0, attr, {1, 2, 8}, x,
+                     {{{3, 2, 3}, {1, 0, -1, 2, 1, 0, 0, 1, 0, 1, 1, 1, -1, 2, -1, 0, 0, 3}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 3, 4}));
+    expectNear(out.data, {7, 26, 32, 38, 17, 32, 40, 48, 26, 33, 39, 45}, 1e-4f);
+}
+
 // --- Reduce with a caller-bound runtime shape that differs from the compiled desc. CPU ops derive
 // geometry from runtime shapes (the dynamic-shape contract); Reduce must size its accumulator bins
 // and output from the bound shape, or a divergent shape indexes past the desc-sized accumulator. ---
