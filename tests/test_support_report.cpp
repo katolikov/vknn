@@ -82,10 +82,12 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     castattr.map["to"] = intAttr(1);
     addNode(g, OpType::Cast, "cast_i64", {idx}, {cast}, castattr);
 
-    // TopK: CPU-only kernel
-    TensorId tv = tensor(g, "topk_vals", {1, 8, 8, 4});
-    TensorId ti = tensor(g, "topk_idx", {1, 8, 8, 4}, DType::Int64);
-    addNode(g, OpType::TopK, "topk", {gs}, {tv, ti});
+    // TopK with a compile-time k attribute: GPU (per-slice selection on the flat path)
+    TensorId   tv = tensor(g, "topk_vals", {1, 8, 8, 4});
+    TensorId   ti = tensor(g, "topk_idx", {1, 8, 8, 4}, DType::Int64);
+    Attributes tkattr;
+    tkattr.map["k"] = intAttr(4);
+    addNode(g, OpType::TopK, "topk", {gs}, {tv, ti}, tkattr);
 
     // Relu: GPU (registered, ungated)
     TensorId r = tensor(g, "relu_out", {1, 8, 8, 8});
@@ -115,8 +117,8 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     EXPECT_TRUE(rows[3].reason.empty());
 
     EXPECT_EQ(rows[4].node, "topk");
-    EXPECT_EQ(rows[4].backend, "cpu");
-    EXPECT_EQ(rows[4].reason, "no vulkan kernel registered");
+    EXPECT_EQ(rows[4].backend, "vulkan");
+    EXPECT_TRUE(rows[4].reason.empty());
 
     EXPECT_EQ(rows[5].node, "relu");
     EXPECT_EQ(rows[5].backend, "vulkan");
@@ -153,6 +155,49 @@ TEST(SupportReport, CastFromInt64TargetGate) {
     EXPECT_EQ(rows[2].backend, "vulkan");
     EXPECT_EQ(rows[3].backend, "cpu");
     EXPECT_EQ(rows[3].reason, "Cast: int64 input to a narrow integer target");
+}
+
+TEST(SupportReport, TopKGateOnCompileTimeK) {
+    // TopK runs on the GPU when k is a compile-time value: the `k` attribute (opset < 10) or a constant
+    // int64 input[1] (opset 10+). A runtime k input (a non-initializer) keeps the exact CPU op, since
+    // the static plan fixes the output slot count.
+    {
+        Graph      g;
+        TensorId   x  = tensor(g, "x", {1, 8, 8, 16});
+        TensorId   v  = tensor(g, "v", {1, 8, 8, 4});
+        TensorId   i  = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
+        Attributes a;
+        a.map["k"] = intAttr(4);
+        addNode(g, OpType::TopK, "topk_attr_k", {x}, {v, i}, a);
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "vulkan");
+        EXPECT_TRUE(rows[0].reason.empty());
+    }
+    {
+        Graph    g;
+        TensorId x  = tensor(g, "x", {1, 8, 8, 16});
+        TensorId k  = initializer(g, "k_const", {1}); // constant k input[1]
+        TensorId v  = tensor(g, "v", {1, 8, 8, 4});
+        TensorId i  = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
+        addNode(g, OpType::TopK, "topk_const_k", {x, k}, {v, i});
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "vulkan");
+        EXPECT_TRUE(rows[0].reason.empty());
+    }
+    {
+        Graph    g;
+        TensorId x  = tensor(g, "x", {1, 8, 8, 16});
+        TensorId k  = tensor(g, "k_runtime", {1}, DType::Int64); // runtime k, not an initializer
+        TensorId v  = tensor(g, "v", {1, 8, 8, 4});
+        TensorId i  = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
+        addNode(g, OpType::TopK, "topk_runtime_k", {x, k}, {v, i});
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "cpu");
+        EXPECT_EQ(rows[0].reason, "TopK: runtime k input");
+    }
 }
 
 TEST(SupportReport, QuantizeDequantizeRunOnGpuWithConstScale) {

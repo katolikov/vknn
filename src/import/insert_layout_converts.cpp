@@ -94,6 +94,15 @@ namespace vknn {
             case OpType::ScatterND:
                 // GPU flat scatter; index may be a constant or a runtime float activation.
                 return n.inputs.size() >= 3;
+            case OpType::TopK:
+                // Per-slice selection along an axis (flat row-major), with a compile-time k (the `k`
+                // attribute or a constant int64 input[1]); a runtime k stays on the CPU op. Mirrors the
+                // TopK gate in vkNodeGate so a GPU-assigned TopK is always marked flat.
+                if (sh(n.inputs[0]).empty())
+                {
+                    return false;
+                }
+                return n.attr.has("k") || (pwCoreInputs(n) > 1 && n.inputs[1] != kNoTensor && g.isInitializer(n.inputs[1]));
             case OpType::Einsum: {
                 // Only the "i,j->ij" outer product runs on the GPU; other equations use the CPU op.
                 std::string eq;

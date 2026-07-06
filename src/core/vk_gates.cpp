@@ -31,8 +31,6 @@ namespace vknn {
             case OpType::Constant:
             case OpType::Shape:
             case OpType::EyeLike:
-            // CPU-only kernels.
-            case OpType::TopK:
             // Erased/lowered at import; a survivor has no kernel in either backend.
             case OpType::Dropout:
             case OpType::InstanceNorm:
@@ -294,6 +292,26 @@ namespace vknn {
                 return true; // FLOAT/FLOAT16/DOUBLE, INT32, INT64
             }
             return refuse(whyNot, "Cast: int64 input to a narrow integer target");
+        }
+        if (nd.type == OpType::TopK)
+        {
+            // Per-slice selection along `axis` (flat row-major). Needs a resolved input shape and a
+            // compile-time k: the `k` attribute (opset < 10) or a constant int64 input[1] (opset 10+),
+            // baked into the push constant in prepare. A runtime k (non-initializer input[1]) stays on
+            // the exact CPU op, since the static plan fixes the output slot count.
+            if (g.desc(nd.inputs[0]).shape.empty())
+            {
+                return refuse(whyNot, "TopK: unresolved input shape");
+            }
+            if (nd.attr.has("k"))
+            {
+                return true;
+            }
+            if (pwCoreInputs(nd) > 1 && nd.inputs[1] != kNoTensor && g.isInitializer(nd.inputs[1]))
+            {
+                return true;
+            }
+            return refuse(whyNot, "TopK: runtime k input");
         }
         if (nd.type == OpType::Gather)
         {
