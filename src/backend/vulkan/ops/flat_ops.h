@@ -92,12 +92,19 @@ namespace vknn {
         };
 
         // ---- Pad (constant/edge/reflect): out[i] maps to an input element, pad region filled per mode ----
+        // A constant/absent pad value bakes into pc.cval and runs flat_pad (2 buffers). A RUNTIME pad
+        // value (a computed scalar, not an initializer) is not known in prepare(), so the op binds it as
+        // a single-element SSBO and runs flat_pad_rt (3 buffers); the pad geometry stays static either
+        // way (a runtime pads-geometry input is gated to the CPU, since it makes the output shape
+        // data-dependent). The PC block is identical for both shaders, so pc.cval is simply unused on the
+        // runtime path.
         struct Pad {
             struct PC {
                 int   rank, total, mode;
                 float cval;
                 int   outDim[kMaxRank], inDim[kMaxRank], inStride[kMaxRank], padBegin[kMaxRank];
             } pc {};
+            bool                                 runtimeVal = false;
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
             void                                 prepare(const Node &node, VkOpEnv &env) {
@@ -123,10 +130,11 @@ namespace vknn {
                     } else if (hb.bytes.size() >= sizeof(float))
                     { cval = hb.f32()[0]; }
                 }
-                pc.rank  = rank;
-                pc.total = (int) numElements(out);
-                pc.mode  = (mode == "edge") ? 1 : (mode == "reflect") ? 2 : 0;
-                pc.cval  = cval;
+                runtimeVal = node.inputs.size() > 2 && node.inputs[2] != kNoTensor && !g.isInitializer(node.inputs[2]);
+                pc.rank    = rank;
+                pc.total   = (int) numElements(out);
+                pc.mode    = (mode == "edge") ? 1 : (mode == "reflect") ? 2 : 0;
+                pc.cval    = cval;
                 for (int k = 0; k < rank; ++k)
                 {
                     pc.outDim[k]   = (int) out[k];
@@ -134,10 +142,18 @@ namespace vknn {
                     pc.inStride[k] = (int) inStride[k];
                     pc.padBegin[k] = pads.empty() ? 0 : (int) pads[k];
                 }
-                pipe = env.pipeline(shader("flat_pad", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
+                pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {})
+                                  : env.pipeline(shader("flat_pad", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
-                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
+                VkBuffer src = operandBuf(env, node.inputs[0], hold0)->handle();
+                VkBuffer dst = env.devBuf(node.outputs[0])->handle();
+                if (runtimeVal)
+                {
+                    pipe->dispatch(cmd, {src, env.devBuf(node.inputs[2])->handle(), dst}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
+                    return;
+                }
+                pipe->dispatch(cmd, {src, dst}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
             }
         };
 

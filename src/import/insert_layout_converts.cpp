@@ -33,20 +33,20 @@ namespace vknn {
                 return true;
             case OpType::ConvTranspose: {
                 // Flat row-major transposed conv (one thread per output element, gather form). Needs a
-                // 4D input and constant weight (uploaded flat); anything else falls back to the CPU op.
+                // 4D input and a weight input; the weight/bias may be constant (uploaded flat) or a
+                // runtime activation (bound at dispatch). A non-4D input falls back to the CPU op.
+                // Mirrors the ConvTranspose gate in vkNodeGate.
                 if (sh(n.inputs[0]).size() != 4)
                 {
                     return false;
                 }
-                if (n.inputs.size() < 2 || !g.isInitializer(n.inputs[1]))
-                {
-                    return false;
-                }
-                return !(pwCoreInputs(n) > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
+                return n.inputs.size() >= 2 && n.inputs[1] != kNoTensor;
             }
             case OpType::Pad: {
                 // Flat row-major pad (constant/edge/reflect). Needs static pads (attr or a constant
-                // input[1]) and rank within the flat limit; a runtime pad value falls back to CPU.
+                // input[1]) and rank within the flat limit; a runtime pad VALUE runs on the GPU via
+                // flat_pad_rt (the value binds as an SSBO). A runtime pads GEOMETRY falls back to CPU
+                // (data-dependent output shape). Mirrors the Pad gate in vkNodeGate.
                 if (sh(n.outputs[0]).size() > 8)
                 {
                     return false;
@@ -57,11 +57,7 @@ namespace vknn {
                     return false;
                 }
                 bool padsKnown = !n.attr.getints("pads").empty() || (n.inputs.size() > 1 && n.inputs[1] != kNoTensor && g.isInitializer(n.inputs[1]));
-                if (!padsKnown)
-                {
-                    return false;
-                }
-                return !(n.inputs.size() > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
+                return padsKnown;
             }
             case OpType::Gather:
                 // Flat row-major gather along an axis; index may be constant or a runtime float activation

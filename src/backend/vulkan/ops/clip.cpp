@@ -1,12 +1,23 @@
 // Flat elementwise Clip on the GPU. Bounds (min=input[1], max=input[2]) are constant scalars read
 // in prepare() and baked into the push constant; an absent bound is -/+inf. Runs on the flat
 // row-major path (the geometry-tail Clip is a rank-6 tensor that can't be NC4HW4-packed).
+//
+// When a bound is a RUNTIME tensor (computed min/max, not an initializer) the value isn't known in
+// prepare(), so the op switches to clip_rt.comp: the bounds bind as single-element SSBOs read at
+// dispatch. An absent or constant bound in that path is materialised as a one-element buffer holding
+// the -/+inf or the fixed value, so the shader always reads binding 1/2. The all-constant/absent case
+// keeps the baked push-constant kernel (clip.comp) byte-for-byte unchanged.
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <limits>
 
 namespace vknn {
     namespace {
+
+        // True iff input `idx` is a runtime (non-initializer) tensor that must be read at dispatch.
+        inline bool runtimeBound(const Graph &g, const Node &node, int idx) {
+            return (int) node.inputs.size() > idx && node.inputs[idx] != kNoTensor && !g.isInitializer(node.inputs[idx]);
+        }
 
         struct ClipOp: VulkanOp {
             // Field order/types mirror clip.comp's push_constant block { int total; float lo, hi; }.
@@ -15,8 +26,13 @@ namespace vknn {
                 int   total;
                 float lo, hi;
             } pc {};
+            struct RtPC {
+                int total; // clip_rt.comp reads lo/hi from SSBOs, so only the element count is a constant
+            } rtpc {};
+            bool                                 runtime = false; // a runtime min or max => bind bounds as SSBOs
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0;
+            std::shared_ptr<vk::Buffer>          loBuf, hiBuf; // runtime-path bound buffers (const/absent bounds too)
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g = *env.graph;
@@ -43,14 +59,41 @@ namespace vknn {
                 {
                     pc.hi = node.attr.getf("max", pc.hi);
                 }
-                pc.total = (int) numElements(g.desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader("clip", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
+                pc.total   = (int) numElements(g.desc(node.outputs[0]).shape);
+                rtpc.total = pc.total;
+
+                runtime = runtimeBound(g, node, 1) || runtimeBound(g, node, 2);
+                if (!runtime)
+                {
+                    pipe = env.pipeline(shader("clip", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
+                    return;
+                }
+                // Runtime path: a runtime bound binds directly at dispatch (record()); a constant or
+                // absent bound is uploaded once as a single-element buffer holding pc.lo / pc.hi so the
+                // shader unconditionally reads binding 1/2.
+                if (!runtimeBound(g, node, 1))
+                {
+                    loBuf = upload(*env.ctx, {pc.lo}, env.useFp16);
+                }
+                if (!runtimeBound(g, node, 2))
+                {
+                    hiBuf = upload(*env.ctx, {pc.hi}, env.useFp16);
+                }
+                pipe = env.pipeline(shader("clip_rt", env.useFp16), 4, sizeof(RtPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 // operandBuf (not devBuf) so a constant-initializer input[0] uploads flat into hold0 on
                 // first use instead of null-crashing. One flat 1D grid of 256-lane workgroups spans total.
-                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                VkBuffer src = operandBuf(env, node.inputs[0], hold0)->handle();
+                if (!runtime)
+                {
+                    pipe->dispatch(cmd, {src, env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                    return;
+                }
+                VkBuffer lo = loBuf ? loBuf->handle() : env.devBuf(node.inputs[1])->handle();
+                VkBuffer hi = hiBuf ? hiBuf->handle() : env.devBuf(node.inputs[2])->handle();
+                pipe->dispatch(cmd, {src, lo, hi, env.devBuf(node.outputs[0])->handle()}, &rtpc, sizeof(rtpc), groups(rtpc.total, 256));
             }
         };
 

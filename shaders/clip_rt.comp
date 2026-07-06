@@ -1,0 +1,20 @@
+#version 450
+#define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
+#include "precision.glsl"
+// Clip/clamp each element to [lo, hi] where the bounds arrive as runtime SSBO scalars (a computed
+// min/max tensor rather than a baked initializer). Bindings 1/2 each hold one element; an absent or
+// constant bound is materialised as a single-element buffer with the -/+inf or the fixed value in
+// prepare(). Matches clip.comp's math; only the bound source differs (SSBO read vs push constant).
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S  { STORE s[]; };
+layout(std430, binding = 1) readonly  buffer LO { STORE lo[]; };
+layout(std430, binding = 2) readonly  buffer HI { STORE hi[]; };
+layout(std430, binding = 3) writeonly buffer D  { STORE d[]; };
+layout(push_constant) uniform PC { int total; } pc;
+
+void main() {
+  uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (g >= uint(pc.total)) return;
+  d[g] = TO_STORE(clamp(float(s[g]), float(lo[0]), float(hi[0])));
+}

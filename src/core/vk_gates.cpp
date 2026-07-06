@@ -84,11 +84,10 @@ namespace vknn {
             bool padsKnown = !nd.attr.getints("pads").empty() || (nd.inputs.size() > 1 && nd.inputs[1] != kNoTensor && g.isInitializer(nd.inputs[1]));
             if (!padsKnown)
             {
+                // Runtime pads make the output shape data-dependent (no static buffer plan), so the
+                // pad GEOMETRY stays on the CPU op. (A runtime pad VALUE with static geometry runs on
+                // the GPU: flat_pad_rt reads the fill value from an SSBO.)
                 return refuse(whyNot, "Pad: runtime pads input");
-            }
-            if (pwCoreInputs(nd) > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
-            {
-                return refuse(whyNot, "Pad: runtime pad-value input");
             }
             return true;
         }
@@ -230,15 +229,12 @@ namespace vknn {
         }
         if (nd.type == OpType::LayerNorm)
         {
-            // Flat reduction over the trailing axes; scale (and bias, if present) must be const
-            // initializers.
-            if (nd.inputs.size() < 2 || !g.isInitializer(nd.inputs[1]))
+            // Flat reduction over the trailing axes. A constant scale/bias uploads flat; a runtime
+            // scale/bias binds its activation buffer at dispatch (the shader reads gamma[j]/beta[j] the
+            // same way). Only the presence of the scale input is required.
+            if (nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
             {
-                return refuse(whyNot, "LayerNorm: runtime scale input");
-            }
-            if (pwCoreInputs(nd) > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
-            {
-                return refuse(whyNot, "LayerNorm: runtime bias input");
+                return refuse(whyNot, "LayerNorm: missing scale input");
             }
             return true;
         }
@@ -253,19 +249,16 @@ namespace vknn {
         }
         if (nd.type == OpType::ConvTranspose)
         {
-            // Flat transposed conv: 4D input + constant weight (uploaded flat). A runtime weight or
-            // non-4D input falls back to the CPU op.
+            // Flat transposed conv: 4D input. A constant weight/bias uploads flat; a runtime weight/bias
+            // binds its activation buffer at dispatch (the shader indexes ws[]/bs[] identically). A
+            // non-4D input or a missing weight falls back to the CPU op.
             if (g.desc(nd.inputs[0]).shape.size() != 4)
             {
                 return refuse(whyNot, "ConvTranspose: input not 4D");
             }
-            if (nd.inputs.size() < 2 || !g.isInitializer(nd.inputs[1]))
+            if (nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
             {
-                return refuse(whyNot, "ConvTranspose: runtime weight input");
-            }
-            if (pwCoreInputs(nd) > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
-            {
-                return refuse(whyNot, "ConvTranspose: runtime bias input");
+                return refuse(whyNot, "ConvTranspose: missing weight input");
             }
             return true;
         }
@@ -352,16 +345,18 @@ namespace vknn {
         }
         if (nd.type == OpType::BatchNorm)
         {
-            // per-channel affine; needs 4D input and the 4 params (gamma/beta/mean/var) as constants.
+            // per-channel affine over 4D input. Constant params (gamma/beta/mean/var) fold on the host;
+            // runtime params bind as SSBOs and fold per channel in batchnorm_rt.comp. Needs the 5 inputs
+            // present and a 4D data tensor.
             if (nd.inputs.size() < 5 || g.desc(nd.inputs[0]).shape.size() != 4)
             {
                 return refuse(whyNot, "BatchNorm: fewer than 5 inputs or input not 4D");
             }
             for (int i = 1; i <= 4; ++i)
             {
-                if (!g.isInitializer(nd.inputs[i]))
+                if (nd.inputs[i] == kNoTensor)
                 {
-                    return refuse(whyNot, "BatchNorm: runtime scale/bias/mean/var input");
+                    return refuse(whyNot, "BatchNorm: missing scale/bias/mean/var input");
                 }
             }
             return true;
@@ -409,14 +404,8 @@ namespace vknn {
         }
         if (nd.type == OpType::Clip)
         {
-            // const-or-absent scalar bounds (baked into the PC in prepare); runtime bounds fall back.
-            for (int i = 1; i < 3 && i < (int) nd.inputs.size(); ++i)
-            {
-                if (nd.inputs[i] != kNoTensor && !g.isInitializer(nd.inputs[i]))
-                {
-                    return refuse(whyNot, "Clip: runtime min/max input");
-                }
-            }
+            // Constant/absent scalar bounds bake into the push constant (clip.comp); a runtime min/max
+            // binds as an SSBO scalar read at dispatch (clip_rt.comp). Both run on the flat path.
             return true;
         }
         if (nd.type == OpType::QuantizeLinear || nd.type == OpType::DequantizeLinear)

@@ -203,6 +203,140 @@ TEST(SupportReport, TopKGateOnCompileTimeK) {
     }
 }
 
+TEST(SupportReport, BatchNormRuntimeParamsRunOnGpu) {
+    // Constant params fold on the host; RUNTIME params (any of gamma/beta/mean/var a non-initializer)
+    // bind as SSBOs and fold per channel in batchnorm_rt.comp. Both run on the GPU now.
+    auto bnGate = [](bool allConst) {
+        Graph    g;
+        TensorId x = tensor(g, "x", {1, 8, 4, 4});
+        auto     p = [&](const char *nm) {
+            return allConst ? initializer(g, nm, {8}) : tensor(g, std::string(nm) + "_rt", {8});
+        };
+        TensorId ga = p("gamma"), be = p("beta"), me = p("mean"), va = p("var");
+        TensorId y = tensor(g, "bn_out", {1, 8, 4, 4});
+        addNode(g, OpType::BatchNorm, "bn", {x, ga, be, me, va}, {y});
+        return vkSupportSurvey(g);
+    };
+    for (auto ac: {true, false})
+    {
+        std::vector<NodeSupport> rows = bnGate(ac);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "vulkan") << "allConst=" << ac;
+        EXPECT_TRUE(rows[0].reason.empty());
+    }
+    {
+        // non-4D input still falls back to CPU
+        Graph    g;
+        TensorId x  = tensor(g, "x2", {8, 4});
+        TensorId ga = tensor(g, "gamma2", {4}), be = tensor(g, "beta2", {4});
+        TensorId me = tensor(g, "mean2", {4}), va = tensor(g, "var2", {4});
+        TensorId y  = tensor(g, "bn_out2", {8, 4});
+        addNode(g, OpType::BatchNorm, "bn2", {x, ga, be, me, va}, {y});
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "cpu");
+        EXPECT_EQ(rows[0].reason, "BatchNorm: fewer than 5 inputs or input not 4D");
+    }
+}
+
+TEST(SupportReport, LayerNormRuntimeScaleBiasRunOnGpu) {
+    // A constant scale/bias uploads flat; a RUNTIME scale/bias binds its activation buffer at dispatch.
+    // Both run on the GPU flat path now (was gated to initializers).
+    auto lnGate = [](bool constScale, bool constBias) {
+        Graph      g;
+        TensorId   x     = tensor(g, "x", {2, 8});
+        TensorId   scale = constScale ? initializer(g, "scale", {8}) : tensor(g, "scale_rt", {8});
+        TensorId   bias  = constBias ? initializer(g, "bias", {8}) : tensor(g, "bias_rt", {8});
+        TensorId   out   = tensor(g, "ln_out", {2, 8});
+        Attributes a;
+        a.map["axis"] = intAttr(-1);
+        addNode(g, OpType::LayerNorm, "ln", {x, scale, bias}, {out}, a);
+        return vkSupportSurvey(g);
+    };
+    for (auto sc: {true, false})
+    {
+        for (auto bi: {true, false})
+        {
+            std::vector<NodeSupport> rows = lnGate(sc, bi);
+            ASSERT_EQ(rows.size(), 1u);
+            EXPECT_EQ(rows[0].backend, "vulkan") << "constScale=" << sc << " constBias=" << bi;
+            EXPECT_TRUE(rows[0].reason.empty());
+        }
+    }
+}
+
+TEST(SupportReport, ConvTransposeRuntimeWeightBiasRunOnGpu) {
+    // A constant weight/bias uploads flat; a RUNTIME weight/bias binds its activation buffer at
+    // dispatch. Both run on the GPU flat path now (was gated to an initializer weight). A non-4D input
+    // still falls back to CPU.
+    auto ctGate = [](bool constW, bool constB) {
+        Graph    g;
+        TensorId x = tensor(g, "x", {1, 4, 8, 8});
+        TensorId w = constW ? initializer(g, "w", {4, 4, 3, 3}) : tensor(g, "w_rt", {4, 4, 3, 3});
+        TensorId b = constB ? initializer(g, "b", {4}) : tensor(g, "b_rt", {4});
+        TensorId y = tensor(g, "y", {1, 4, 10, 10});
+        addNode(g, OpType::ConvTranspose, "ct", {x, w, b}, {y});
+        return vkSupportSurvey(g);
+    };
+    for (auto cw: {true, false})
+    {
+        for (auto cb: {true, false})
+        {
+            std::vector<NodeSupport> rows = ctGate(cw, cb);
+            ASSERT_EQ(rows.size(), 1u);
+            EXPECT_EQ(rows[0].backend, "vulkan") << "constW=" << cw << " constB=" << cb;
+            EXPECT_TRUE(rows[0].reason.empty());
+        }
+    }
+    {
+        // non-4D input -> CPU
+        Graph    g;
+        TensorId x = tensor(g, "x3", {4, 8, 8});
+        TensorId w = tensor(g, "w3_rt", {4, 4, 3});
+        TensorId y = tensor(g, "y3", {4, 10, 10});
+        addNode(g, OpType::ConvTranspose, "ct3", {x, w}, {y});
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "cpu");
+        EXPECT_EQ(rows[0].reason, "ConvTranspose: input not 4D");
+    }
+}
+
+TEST(SupportReport, PadRuntimeValueRunsOnGpuButRuntimePadsStayCpu) {
+    // A runtime pad VALUE (static geometry) runs on the GPU: flat_pad_rt reads the fill value from an
+    // SSBO scalar. A runtime pads GEOMETRY keeps the CPU op, since the output shape is data-dependent.
+    {
+        // static pads (attr) + runtime pad value -> GPU
+        Graph    g;
+        TensorId x   = tensor(g, "x", {1, 4, 4, 4});
+        TensorId val = tensor(g, "pad_val", {}); // runtime scalar, not an initializer
+        TensorId out = tensor(g, "pad_out", {1, 4, 6, 6});
+        Attributes a;
+        Attr       pads;
+        pads.kind = Attr::Ints;
+        pads.ints = {0, 0, 1, 1, 0, 0, 1, 1};
+        a.map["pads"] = pads;
+        // input[1] (pads) absent via kNoTensor so the attr pads apply; input[2] is the runtime value.
+        addNode(g, OpType::Pad, "pad_runtime_val", {x, kNoTensor, val}, {out}, a);
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "vulkan");
+        EXPECT_TRUE(rows[0].reason.empty());
+    }
+    {
+        // runtime pads geometry -> CPU
+        Graph    g;
+        TensorId x    = tensor(g, "x", {1, 4, 4, 4});
+        TensorId pads = tensor(g, "pads_runtime", {8}, DType::Int64); // runtime, not an initializer
+        TensorId out  = tensor(g, "pad_out2", {1, 4, 6, 6});
+        addNode(g, OpType::Pad, "pad_runtime_geom", {x, pads}, {out});
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "cpu");
+        EXPECT_EQ(rows[0].reason, "Pad: runtime pads input");
+    }
+}
+
 TEST(SupportReport, QuantizeDequantizeRunOnGpuWithConstScale) {
     // Quantize/DequantizeLinear are the graph-boundary quant hops the import-time dequantize pass
     // keeps as nodes (a genuine int-graph-boundary dequant, e.g. a quantized embedding-table lookup).
@@ -265,16 +399,17 @@ TEST(SupportReport, FusedQLinearOpsReportNoKernel) {
 
 TEST(SupportReport, GateReasonIsNullSafeAndStable) {
     Graph g;
-    // A runtime-bounded Clip refuses with a stable reason string; a null whyNot is legal.
-    TensorId x   = tensor(g, "x", {1, 4, 4, 4});
-    TensorId lo  = tensor(g, "lo", {1}); // runtime tensor, not an initializer
-    TensorId out = tensor(g, "clip_out", {1, 4, 4, 4});
-    addNode(g, OpType::Clip, "clip_runtime", {x, lo}, {out});
+    // A Pad with runtime pads GEOMETRY refuses with a stable reason string; a null whyNot is legal.
+    // (Runtime pads make the output shape data-dependent, so this gate stays CPU.)
+    TensorId x    = tensor(g, "x", {1, 4, 4, 4});
+    TensorId pads = tensor(g, "pads", {8}, DType::Int64); // runtime tensor, not an initializer
+    TensorId out  = tensor(g, "pad_out", {1, 4, 6, 6});
+    addNode(g, OpType::Pad, "pad_runtime_geom", {x, pads}, {out});
 
     EXPECT_FALSE(vkNodeGate(g, g.nodes[0], nullptr));
     std::string why;
     EXPECT_FALSE(vkNodeGate(g, g.nodes[0], &why));
-    EXPECT_EQ(why, "Clip: runtime min/max input");
+    EXPECT_EQ(why, "Pad: runtime pads input");
 
     // An accepting gate leaves whyNot untouched.
     Node relu;
@@ -284,4 +419,32 @@ TEST(SupportReport, GateReasonIsNullSafeAndStable) {
     why          = "sentinel";
     EXPECT_TRUE(vkNodeGate(g, relu, &why));
     EXPECT_EQ(why, "sentinel");
+}
+
+TEST(SupportReport, ClipRuntimeBoundsRunOnGpu) {
+    // A constant or absent min/max bakes into the push constant; a RUNTIME min/max binds as an SSBO
+    // scalar read at dispatch (clip_rt.comp). Both cases run on the GPU flat path now.
+    {
+        Graph    g;
+        TensorId x   = tensor(g, "x", {1, 4, 4, 4});
+        TensorId lo  = initializer(g, "lo_const", {1}); // constant bound -> baked PC path
+        TensorId out = tensor(g, "clip_const_out", {1, 4, 4, 4});
+        addNode(g, OpType::Clip, "clip_const", {x, lo}, {out});
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "vulkan");
+        EXPECT_TRUE(rows[0].reason.empty());
+    }
+    {
+        Graph    g;
+        TensorId x   = tensor(g, "x", {1, 4, 4, 4});
+        TensorId lo  = tensor(g, "lo_runtime", {1}); // runtime bound -> clip_rt SSBO path
+        TensorId hi  = tensor(g, "hi_runtime", {1});
+        TensorId out = tensor(g, "clip_rt_out", {1, 4, 4, 4});
+        addNode(g, OpType::Clip, "clip_runtime", {x, lo, hi}, {out});
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "vulkan");
+        EXPECT_TRUE(rows[0].reason.empty());
+    }
 }
