@@ -17,7 +17,7 @@ namespace vknn {
         float *allocOut(RtTensor &rt, const Shape &shape) {
             rt.shape = shape;
             rt.dtype = DType::Float32;
-            rt.host.resizeElems(numElements(shape), DType::Float32);
+            rt.host.resizeElems(elemCount(shape), DType::Float32);
             rt.hostValid   = true;
             rt.deviceValid = false;
             return rt.host.f32();
@@ -25,7 +25,7 @@ namespace vknn {
         int64_t *allocOutI64(RtTensor &rt, const Shape &shape) {
             rt.shape = shape;
             rt.dtype = DType::Int64;
-            rt.host.resizeElems(numElements(shape), DType::Int64);
+            rt.host.resizeElems(elemCount(shape), DType::Int64);
             rt.hostValid   = true;
             rt.deviceValid = false;
             return rt.host.i64();
@@ -82,7 +82,7 @@ namespace vknn {
         void copyAs(const RtTensor &X, RtTensor &Y, const Shape &shape) {
             Y.shape = shape;
             Y.dtype = X.dtype;
-            Y.host.resizeElems(numElements(shape), X.dtype);
+            Y.host.resizeElems(elemCount(shape), X.dtype);
             Y.hostValid   = true;
             Y.deviceValid = false;
             // Pure metadata reshapes preserve element count, so the two byte spans are equal in size;

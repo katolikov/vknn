@@ -32,7 +32,7 @@ namespace vknn {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = numElements(out);
+                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand broadcast strides in the common frame, built by a right-to-left
                 // row-major scan: sA/sB accumulate each operand's own row-major stride, while a size-1
                 // (broadcast) axis is pinned to stride 0 so every output index along it rereads the

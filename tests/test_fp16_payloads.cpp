@@ -225,3 +225,94 @@ TEST(Fp16Payloads, FusedResidualInitializerCpu) {
         EXPECT_NEAR(outs[0].f32()[i], 2.f * (float) (i + 1) + 10.f * (float) (i + 1), 1e-6f) << "i=" << i;
     }
 }
+
+// A rank-0 (shape []) scalar operand carried through an elementwise CPU op during const-fold: the
+// op allocates and iterates by numElements(shape), which is 0 for an empty shape, so the folded
+// output is an empty (null-data) host buffer. A later const-folded consumer of that output reads
+// its host pointer and null-derefs. This is the detection-head (YOLO box-decode) crash class:
+// Cast(scalar) -> Div, both foldable, feeds a SIGSEGV inside the Binary kernel. The op must treat
+// a rank-0 tensor as its one element, so the folded scalar carries a value, not zero bytes.
+TEST(Fp16Payloads, ConstFoldScalarCastThenBinary) {
+    Graph      g;
+    auto       init = [&](const char *name, const Shape &shape, float v) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = shape;
+        d.isInitializer = true;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems(1, DType::Float32);
+        hb.f32()[0]        = v;
+        g.initializers[id] = hb;
+        return id;
+    };
+    // Numerator carries a [1] shape and the denominator a rank-0 [] shape: broadcasting [1] against
+    // the empty-scalar operand yields a [1] output the Binary loop actually iterates, so a null-data
+    // denominator is dereferenced (the tiny-yolov3 arange box-decode divide).
+    TensorId   num   = init("num", {1}, 6.f);   // numerator, shape [1]
+    TensorId   denIn = init("den_in", {}, 3.f); // pre-cast denominator scalar, rank-0
+    // Cast(den_in) -> den : a float->float cast of a rank-0 scalar, foldable by const-fold.
+    TensorDesc dc;
+    dc.name    = "den";
+    TensorId den = g.addTensor(dc);
+    Node       cast;
+    cast.type            = OpType::Cast;
+    cast.name            = "cast_den";
+    cast.inputs          = {denIn};
+    cast.outputs         = {den};
+    cast.attr.map["to"]  = [] { Attr a; a.kind = Attr::Int; a.i = 1 /*FLOAT*/; return a; }();
+    g.nodes.push_back(cast);
+    // Div(num, den) -> y : both operands are now known constants, folded on the CPU.
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     div;
+    div.type    = OpType::Binary;
+    div.name    = "div";
+    div.subOp   = (int) BinaryType::Div;
+    div.inputs  = {num, den};
+    div.outputs = {y};
+    g.nodes.push_back(div);
+    g.outputs = {y};
+
+    // runStandardPasses const-folds the whole chain; before the fix this SIGSEGVs in the Binary kernel.
+    ASSERT_NO_FATAL_FAILURE(runStandardPasses(g));
+    // The chain folds to the scalar 6/3 = 2, kept as a one-element initializer (not zero bytes).
+    ASSERT_TRUE(g.isInitializer(y));
+    ASSERT_GE(g.initializers[y].bytes.size(), 4u);
+    EXPECT_NEAR(g.initializers[y].f32()[0], 2.f, 1e-6f);
+}
+
+// The producer half in isolation: an elementwise CPU op (Cast) given a rank-0 scalar must fold to a
+// one-element initializer, never an empty payload. Guards the class at the source so no consumer can
+// inherit a null-data scalar.
+TEST(Fp16Payloads, ConstFoldScalarCastKeepsElement) {
+    Graph      g;
+    TensorDesc si;
+    si.name          = "s";
+    si.shape         = {}; // rank-0
+    si.isInitializer = true;
+    TensorId   s     = g.addTensor(si);
+    HostBuffer sb;
+    sb.resizeElems(1, DType::Float32);
+    sb.f32()[0]       = 42.f;
+    g.initializers[s] = sb;
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     cast;
+    cast.type           = OpType::Cast;
+    cast.name           = "cast_s";
+    cast.inputs         = {s};
+    cast.outputs        = {y};
+    cast.attr.map["to"] = [] { Attr a; a.kind = Attr::Int; a.i = 1 /*FLOAT*/; return a; }();
+    g.nodes.push_back(cast);
+    g.outputs = {y};
+
+    ASSERT_EQ(constFold(g), 1); // the Cast folds
+    ASSERT_TRUE(g.isInitializer(y));
+    ASSERT_GE(g.initializers[y].bytes.size(), 4u); // one fp32 element, not empty
+    EXPECT_NEAR(g.initializers[y].f32()[0], 42.f, 1e-6f);
+}

@@ -10,7 +10,7 @@ namespace vknn {
                 const RtTensor &X      = ctx.t(node.inputs[0]);
                 RtTensor       &Y      = ctx.t(node.outputs[0]);
                 int64_t         to     = node.attr.geti("to", 1); // ONNX TensorProto: 1=FLOAT, 7=INT64, 6=INT32
-                int64_t         n      = X.elems();
+                int64_t         n      = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
                 bool            inI64  = X.dtype == DType::Int64;
                 // Integer targets are carried as int64 storage (truncate toward zero, ONNX Cast semantics):
                 // 2=UINT8 3=INT8 4=UINT16 5=INT16 6=INT32 7=INT64 9=BOOL 12=UINT32 13=UINT64.
