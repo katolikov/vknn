@@ -1,4 +1,5 @@
 #include "passes_internal.h"
+#include "core/matmul_tile.h"
 #include <map>
 
 namespace vknn {
@@ -834,11 +835,12 @@ namespace vknn {
                 prod     = (u.entry >= 0 && u.entry < (TensorId) producer.size()) ? producer[u.entry] : -1;
                 entryExp = false;
                 bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") && g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
-                // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >= 32) has no
-                // register headroom for the VM at its 64-outputs-per-thread store loop — an attached
-                // unit collapses the GEMM's occupancy and costs far more than a standalone dispatch.
-                // Such units run standalone; small matmuls (the 1-thread-per-output kernel) still
-                // host epilogues.
+                // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >=
+                // kTiledMatMulMin — the same constant matmul.cpp gates on) has no register
+                // headroom for the VM at its per-thread register micro-tile store loop — an
+                // attached unit collapses the GEMM's occupancy and costs far more than a
+                // standalone dispatch. Such units run standalone; small matmuls (the
+                // 1-thread-per-output kernel) still host epilogues.
                 if (ok && g.nodes[prod].type == OpType::MatMul)
                 {
                     const Node  &P  = g.nodes[prod];
@@ -847,7 +849,7 @@ namespace vknn {
                     if (as.size() >= 2 && bs.size() >= 2)
                     {
                         int64_t M = as[as.size() - 2], K = as[as.size() - 1], N = bs[bs.size() - 1];
-                        if (M >= 32 && N >= 32 && K >= 32)
+                        if (M >= kTiledMatMulMin && N >= kTiledMatMulMin && K >= kTiledMatMulMin)
                         {
                             ok = false;
                         }

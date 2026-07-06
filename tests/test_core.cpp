@@ -1,6 +1,7 @@
 // vknn unit tests (host): dtype/fp16, config JSON, graph passes, layout packing math, and the
 // ergonomic Session API. Operator correctness lives in test_ops.cpp; Vulkan correctness is
 // validated on-device (see scripts).
+#include "core/matmul_tile.h"
 #include "vknn/config.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
@@ -104,6 +105,33 @@ TEST(Layout, PackMath) {
     EXPECT_EQ(s.n, 1);
     EXPECT_EQ(s.c, 32);
     EXPECT_EQ(s.h, 7);
+}
+
+// matmul_tiled tile-candidate table invariants. The tune table persists a winning INDEX into
+// kMatMulTiles, and the shader sizes its shared/register arrays for the widest variant, so every
+// entry must respect the shader's TM_MAX/TN_MAX/TK_MAX bounds and the cooperative-load loop
+// divisibility (matmul_tiled.comp assigns one panel element per thread per iteration).
+TEST(MatMulTile, CandidateTable) {
+    // Index 0 is the Tuning::None default and must stay the pre-race fixed geometry: it is what
+    // --tuning none dispatches and what a race-less build must byte-match.
+    EXPECT_EQ(kMatMulTiles[0].tm, 128);
+    EXPECT_EQ(kMatMulTiles[0].tn, 128);
+    EXPECT_EQ(kMatMulTiles[0].tk, 16);
+    EXPECT_GE(kMatMulTileCount, 1);
+    for (int i = 0; i < kMatMulTileCount; ++i)
+    {
+        const MatMulTile &t = kMatMulTiles[i];
+        EXPECT_LE(t.tm, 128) << "i=" << i; // TM_MAX
+        EXPECT_LE(t.tn, 128) << "i=" << i; // TN_MAX
+        EXPECT_LE(t.tk, 16) << "i=" << i;  // TK_MAX
+        EXPECT_GE(t.tm, 16) << "i=" << i;  // RM >= 1 at the fixed 16x16 workgroup
+        EXPECT_GE(t.tn, 16) << "i=" << i;
+        EXPECT_GE(t.tk, 1) << "i=" << i;
+        EXPECT_EQ(t.tm % 16, 0) << "i=" << i;
+        EXPECT_EQ(t.tn % 16, 0) << "i=" << i;
+        EXPECT_EQ((t.tm * t.tk) % 256, 0) << "i=" << i; // A-panel load loop
+        EXPECT_EQ((t.tk * t.tn) % 256, 0) << "i=" << i; // B-panel load loop
+    }
 }
 
 // Ergonomic Tensor API: construct, shape/size accessors, argmax.
