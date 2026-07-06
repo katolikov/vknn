@@ -137,15 +137,23 @@ namespace vknn {
     }
 
     std::unique_ptr<Session> Session::createFromVxm(const std::string &path, const Config &cfg) {
-        Graph g;
-        if (!loadGraphBin(g, path))
+        std::vector<Graph>       buckets;
+        std::vector<std::string> names;
+        if (!loadGraphBinBuckets(buckets, names, path) || buckets.empty())
         {
             VKNN_ERROR << "failed to load .vxm: " << path;
             return nullptr;
         }
+        // A single-bucket file (every fixed-shape model) plans exactly as before. A multi-bucket file
+        // carries one graph per declared shape; per-shape plan dispatch is a later stage, so for now
+        // the first bucket is planned and the rest are noted.
+        if (buckets.size() > 1)
+        {
+            VKNN_WARN << "loaded " << buckets.size() << " shape buckets from " << path << "; planning bucket 0 ('" << names.front() << "') -- per-shape dispatch is not yet wired";
+        }
         auto s             = std::unique_ptr<Session>(new Session());
         s->graphOptimized_ = true; // passes already baked in
-        s->graph_          = std::move(g);
+        s->graph_          = std::move(buckets.front());
         s->cfg_            = cfg;
         if (s->cfg_.cacheFile.empty())
         {

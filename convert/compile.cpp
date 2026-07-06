@@ -11,6 +11,10 @@
 //     --shape NAME=D0xD1x...  declare a graph input's full concrete shape (repeatable), resolving
 //                       every dynamic axis of that input, e.g. --shape pixel_values=1x3x224x224. An
 //                       undeclared dynamic non-batch axis is a hard error (never a silent 1x1 plan).
+//     --bucket "NAME=D0x...;NAME2=..."  declare ONE shape bucket per occurrence (repeatable): the
+//                       model is compiled once per bucket over a fresh import and the buckets share
+//                       one initializer pool in a multi-bucket .vxm. --batch/--shape are the shared
+//                       fallback. With no --bucket, a single bucket is written (legacy .vxm bytes).
 //     -O0..-O3 / --opt N  optimization level (default -O1):
 //                         O0 = no optional fusion (reference), O1 = the general pointwise
 //                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
@@ -98,6 +102,42 @@ static bool parseShapeSpec(const char *spec, std::string *name, Shape *shape) {
     return true;
 }
 
+/// Parse a `--bucket` value -- a ';'-separated list of `NAME=D0xD1x...` input-shape specs, e.g.
+/// "pixel_values=1x3x224x224;mask=1x224x224" -- into a per-input shape map. Every segment must be a
+/// valid shape spec (see parseShapeSpec); an empty value or any malformed segment fails. Returns
+/// false and leaves *shapes unspecified on error.
+static bool parseBucketSpec(const char *spec, std::map<std::string, Shape> *shapes) {
+    shapes->clear();
+    std::string s(spec);
+    if (s.empty())
+    {
+        return false;
+    }
+    size_t start = 0;
+    while (start <= s.size())
+    {
+        size_t      semi = s.find(';', start);
+        std::string seg  = s.substr(start, semi == std::string::npos ? std::string::npos : semi - start);
+        if (seg.empty())
+        {
+            return false; // empty segment (leading/trailing/double ';')
+        }
+        std::string name;
+        Shape       shape;
+        if (!parseShapeSpec(seg.c_str(), &name, &shape))
+        {
+            return false;
+        }
+        (*shapes)[name] = shape;
+        if (semi == std::string::npos)
+        {
+            break;
+        }
+        start = semi + 1;
+    }
+    return true;
+}
+
 /// JSON string escaping for the support report (quotes, backslashes, control characters).
 static std::string jsonEscape(const std::string &s) {
     std::string out;
@@ -165,7 +205,7 @@ static bool writeSupportReport(const Graph &g, const std::string &modelPath, con
 int main(int argc, char **argv) {
     if (argc < 3)
     {
-        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--shape NAME=D0xD1x...] [-O0..-O3 | --opt N] "
+        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--shape NAME=D0xD1x...] [--bucket \"NAME=...;NAME2=...\"] [-O0..-O3 | --opt N] "
                "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n",
                argv[0]);
         return 1;
@@ -212,6 +252,14 @@ int main(int argc, char **argv) {
     // (batch) axis; --shape NAME=D0xD1x... (repeatable) declares an input's full concrete shape and
     // resolves EVERY dynamic axis of that input. An undeclared dynamic non-batch axis is a hard error
     // in the passes (inferShapes), never a silent 1x1 plan.
+    //
+    // --bucket "NAME=D0xD1x...;NAME2=..." (repeatable) declares ONE shape bucket per occurrence: the
+    // whole model is compiled once per bucket over a fresh import (the passes mutate the graph
+    // irreversibly), and the buckets share one initializer pool in a multi-bucket .vxm. With no
+    // --bucket, exactly one bucket is produced from --shape/--batch (a legacy single-graph .vxm).
+    // --batch/--shape act as the shared fallback under every bucket.
+    std::vector<std::map<std::string, Shape>> bucketShapes; // one entry per --bucket occurrence
+    std::vector<std::string>                  bucketLabels; // the raw --bucket value, as the bucket's label
     for (int i = 3; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--batch") && i + 1 < argc)
@@ -227,11 +275,81 @@ int main(int argc, char **argv) {
                 return 1;
             }
             opt.inputShapes[name] = shape;
+        } else if (!strcmp(argv[i], "--bucket") && i + 1 < argc)
+        {
+            std::map<std::string, Shape> shapes;
+            if (!parseBucketSpec(argv[i + 1], &shapes))
+            {
+                printf("[compile] bad --bucket '%s' (expected NAME=D0xD1x...[;NAME2=...], non-negative dims)\n", argv[i + 1]);
+                return 1;
+            }
+            bucketShapes.push_back(std::move(shapes));
+            bucketLabels.emplace_back(argv[i + 1]);
         }
     }
 
-    Graph      g;
     const bool vxmInput = onnx.size() > 4 && onnx.compare(onnx.size() - 4, 4, ".vxm") == 0;
+
+    // Multi-bucket compile: one full import+passes product per --bucket occurrence, sharing one
+    // initializer pool. Requires an ONNX input (a .vxm has its passes already baked at one shape).
+    if (!bucketShapes.empty())
+    {
+        if (vxmInput)
+        {
+            printf("[compile] --bucket needs an ONNX input (a .vxm is already compiled at one shape)\n");
+            return 2;
+        }
+        std::vector<Graph>       buckets;
+        std::vector<std::string> names;
+        for (size_t b = 0; b < bucketShapes.size(); ++b)
+        {
+            // Fresh import per bucket: runStandardPasses mutates the graph irreversibly, so each
+            // bucket gets its own graph. bopt starts from the shared options (--batch and any base
+            // --shape declarations); the bucket's own declarations override per input.
+            PassOptions bopt = opt;
+            for (const auto &kv: bucketShapes[b])
+            {
+                bopt.inputShapes[kv.first] = kv.second;
+            }
+            printf("[compile] bucket %zu '%s': importing %s ...\n", b, bucketLabels[b].c_str(), onnx.c_str());
+            Graph gb;
+            try
+            {
+                gb = importOnnx(onnx);
+                runStandardPasses(gb, bopt);
+            } catch (const Error &e)
+            {
+                printf("[compile] bucket %zu '%s': %s\n", b, bucketLabels[b].c_str(), e.what());
+                return 2;
+            }
+            if (fp16)
+            {
+                convertInitializersFp16(gb);
+            }
+            printf("[compile] bucket %zu '%s': post-passes %zu nodes, %zu weights\n", b, bucketLabels[b].c_str(), gb.nodes.size(), gb.initializers.size());
+            buckets.push_back(std::move(gb));
+            names.push_back(bucketLabels[b]);
+        }
+        if (!supportReport.empty())
+        {
+            // The support report describes one graph; emit bucket 0's assignment.
+            if (!writeSupportReport(buckets.front(), onnx, supportReport))
+            {
+                printf("[compile] support report write failed\n");
+                return 2;
+            }
+            printf("[compile] wrote support report %s (bucket 0)\n", supportReport.c_str());
+        }
+        if (!saveGraphBinBuckets(buckets, names, out))
+        {
+            printf("[compile] save failed\n");
+            return 2;
+        }
+        printf("[compile] wrote %s (%zu buckets)\n", out.c_str(), buckets.size());
+        return 0;
+    }
+
+    Graph g;
     if (vxmInput)
     {
         printf("[compile] loading %s (.vxm input: passes already applied at its compile time)\n", onnx.c_str());

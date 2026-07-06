@@ -100,11 +100,27 @@ namespace vknn {
     Graph importOnnx(const std::string &path);
 
     /// Save the optimized graph (post-passes) as a compact self-contained ".vxm" binary, so a reload
-    /// skips ONNX parsing + all graph passes.
+    /// skips ONNX parsing + all graph passes. Writes the single-graph ("VXM3") container.
     /// @returns True on success; false if the file cannot be written.
     bool saveGraphBin(const Graph &g, const std::string &path);
-    /// Load a ".vxm" binary written by saveGraphBin() into `g`, replacing its contents.
+    /// Load a ".vxm" binary into `g`, replacing its contents. Accepts both the single-graph ("VXM3")
+    /// container and a multi-bucket ("VXM4") container -- for the latter the first bucket is taken, so
+    /// single-graph callers keep working against either format.
     /// @returns True on success; false if the file is missing or not a valid ".vxm".
     bool loadGraphBin(Graph &g, const std::string &path);
+
+    /// Save one or more shape buckets to a ".vxm". Each bucket is a full pass+plan graph for one
+    /// declared input-shape set; buckets may differ in node identity but share ONE content-deduped
+    /// initializer pool (identical weight payloads are stored once). A single bucket is written as the
+    /// legacy single-graph ("VXM3") container so a fixed-shape model's bytes are unchanged; two or more
+    /// buckets are written as the multi-bucket ("VXM4") container. `names` labels the buckets (a
+    /// missing entry defaults to empty); its length need not match `buckets`.
+    /// @returns True on success; false if `buckets` is empty or the file cannot be written.
+    bool saveGraphBinBuckets(const std::vector<Graph> &buckets, const std::vector<std::string> &names, const std::string &path);
+    /// Load every bucket from a ".vxm" into `buckets` (with per-bucket labels in `names`), replacing
+    /// their contents. A legacy VXM3 file loads as exactly one bucket; a VXM4 file loads all of its
+    /// buckets, each with the shared initializer payloads copied into its own initializer map.
+    /// @returns True on success; false if the file is missing, truncated, or not a valid ".vxm".
+    bool loadGraphBinBuckets(std::vector<Graph> &buckets, std::vector<std::string> &names, const std::string &path);
 
 } // namespace vknn
