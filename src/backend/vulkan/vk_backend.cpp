@@ -1486,7 +1486,39 @@ namespace vknn {
                     rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 } else if (rt.hostValid && !alreadyHere)
                 {
-                    VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_, flat);
+                    // The Vulkan device represents an integer tensor as its float value (index/shape ops
+                    // upload int64 indices decoded to float), but rt.host for an int64/int32 boundary
+                    // tensor holds raw integer bytes. packToBuffer reads host as fp32, so decode the
+                    // integer host to fp32 first; a Float32 host packs directly. Without this, an int64
+                    // boundary input crossing into a Vulkan segment (e.g. attention_mask when a mid-graph
+                    // CPU island splits the graph) is reinterpreted as fp32 and comes out ~0.
+                    if (rt.dtype == DType::Int64 || rt.dtype == DType::Int32)
+                    {
+                        RtTensor f32 = rt;
+                        f32.dtype    = DType::Float32;
+                        int64_t n    = numElements(rt.shape);
+                        f32.host.resizeElems(n, DType::Float32);
+                        float *d = f32.host.f32();
+                        if (rt.dtype == DType::Int64)
+                        {
+                            const int64_t *s = rt.host.i64();
+                            for (int64_t i = 0; i < n; ++i)
+                            {
+                                d[i] = (float) s[i];
+                            }
+                        } else
+                        {
+                            const int32_t *s = reinterpret_cast<const int32_t *>(rt.host.bytes.data());
+                            for (int64_t i = 0; i < n; ++i)
+                            {
+                                d[i] = (float) s[i];
+                            }
+                        }
+                        VulkanBackend::packToBuffer(bit->second.get(), f32, useFp16_, flat);
+                    } else
+                    {
+                        VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_, flat);
+                    }
                     rt.deviceValid  = true;
                     rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 }
@@ -1686,8 +1718,9 @@ namespace vknn {
     };
 
     std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) {
-        auto s     = std::make_unique<VulkanSegment>(idx, g, cfg, this);
-        s->backend = this;
+        auto s           = std::make_unique<VulkanSegment>(idx, g, cfg, this);
+        s->backend       = this;
+        s->compiledGraph = &g;
         return s;
     }
 

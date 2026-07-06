@@ -170,7 +170,7 @@ namespace vknn {
     }
 
     bool Session::saveOptimized(const std::string &path) const {
-        return saveGraphBin(buckets_.front().graph, path);
+        return saveGraphBin(*buckets_.front().graph, path);
     }
 
     std::unique_ptr<Session> Session::create(Graph &&g, const Config &cfg) {
@@ -190,7 +190,7 @@ namespace vknn {
         s->buckets_.push_back(s->buildBucket(std::move(def), key));
         // The default bucket resolved the input shapes (batch fallback + any Config::inputShapes); key
         // the bucket by those resolved shapes so run() dispatch matches concrete caller shapes.
-        s->buckets_.front().key = Session::shapeKey(s->buckets_.front().graph);
+        s->buckets_.front().key = Session::shapeKey(*s->buckets_.front().graph);
         s->planned_             = true;
         auto t1                 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
@@ -198,7 +198,7 @@ namespace vknn {
     }
 
     void Session::foldTinyGpuIslands(PlanBucket &bucket) {
-        Graph            &graph_          = bucket.graph;
+        Graph            &graph_          = *bucket.graph;
         std::vector<int> &nodeBackendIdx_ = bucket.nodeBackendIdx;
         int               cpuIdx          = -1;
         for (size_t i = 0; i < backends_.size(); ++i)
@@ -399,11 +399,11 @@ namespace vknn {
 
     PlanBucket Session::buildBucket(Graph &&g, const std::string &key) {
         PlanBucket        bucket;
-        bucket.key = key;
-        bucket.graph = std::move(g);
+        bucket.key   = key;
+        bucket.graph = std::make_unique<Graph>(std::move(g));
         // Alias the bucket's members under the names the body below was written against, so the plan
         // logic reads exactly as it did when it lived in plan() over the session members.
-        Graph                    &graph_          = bucket.graph;
+        Graph                    &graph_          = *bucket.graph;
         std::vector<int>         &nodeBackendIdx_ = bucket.nodeBackendIdx;
         std::vector<RtTensor>    &pool_           = bucket.pool;
         std::vector<std::unique_ptr<Segment>> &segments_ = bucket.segments;
@@ -756,7 +756,7 @@ namespace vknn {
         // caller shape adopts the default bucket's shape), then build the same key shapeKey() produces.
         // A single-input graph binds by position when the sole caller entry names no input or names one
         // the graph does not have — the same forgiving single-input match run()'s bind loop applies.
-        const Graph &g          = buckets_.front().graph;
+        const Graph &g          = *buckets_.front().graph;
         const bool   singleBind = g.inputs.size() == 1 && inputs.size() == 1;
         std::string  k;
         for (size_t i = 0; i < g.inputs.size(); ++i)
@@ -800,7 +800,7 @@ namespace vknn {
         try
         {
             PlanBucket b = buildBucket(std::move(copy), std::string());
-            b.key        = shapeKey(b.graph);
+            b.key        = shapeKey(*b.graph);
             k            = b.key;
             for (const auto &existing: buckets_)
             {
@@ -834,12 +834,12 @@ namespace vknn {
     std::vector<std::string> Session::fallbackOps() const {
         std::vector<std::string> v;
         const PlanBucket        &b0 = buckets_.front();
-        for (size_t n = 0; n < b0.nodeBackendIdx.size() && n < b0.graph.nodes.size(); ++n)
+        for (size_t n = 0; n < b0.nodeBackendIdx.size() && n < b0.graph->nodes.size(); ++n)
         {
             int bi = b0.nodeBackendIdx[n];
             if (bi >= 0 && backends_[bi]->kind() != cfg_.backend)
             {
-                v.push_back(std::string(opTypeName(b0.graph.nodes[n].type)) + " " + b0.graph.nodes[n].name);
+                v.push_back(std::string(opTypeName(b0.graph->nodes[n].type)) + " " + b0.graph->nodes[n].name);
             }
         }
         return v;
@@ -847,7 +847,7 @@ namespace vknn {
 
     const RtTensor *Session::tensor(const std::string &name) const {
         const PlanBucket &b0 = buckets_.front();
-        TensorId          id = b0.graph.find(name);
+        TensorId          id = b0.graph->find(name);
         if (id == kNoTensor)
         {
             return nullptr;
@@ -862,7 +862,7 @@ namespace vknn {
     // and always passes. An unresolved bucket shape (element count <= 0) accepts any caller shape,
     // mirroring the fully-dynamic escape in the vector<float> overload.
     Status Session::validateInputShape(const PlanBucket &bucket, TensorId id, const Shape &got) const {
-        const TensorDesc &d = bucket.graph.tensors[id];
+        const TensorDesc &d = bucket.graph->tensors[id];
         if (got.empty() || got == d.shape || numElements(d.shape) <= 0)
         {
             return Status::Ok;
@@ -922,7 +922,7 @@ namespace vknn {
         PlanBucket &bucket = *sel;
         // Alias the selected bucket's state under the names the body below was written against; run()
         // is otherwise unchanged, so a fixed-shape model's single bucket runs exactly as before.
-        Graph                                 &graph_        = bucket.graph;
+        Graph                                 &graph_        = *bucket.graph;
         std::vector<RtTensor>                 &pool_         = bucket.pool;
         std::vector<std::unique_ptr<Segment>> &segments_     = bucket.segments;
         const bool                             ioGpuConvert_ = bucket.ioGpuConvert;
@@ -1128,7 +1128,7 @@ namespace vknn {
     }
 
     std::vector<IOInfo> Session::inputInfo() const {
-        const Graph        &graph_ = buckets_.front().graph;
+        const Graph        &graph_ = *buckets_.front().graph;
         std::vector<IOInfo> v;
         for (TensorId id: graph_.inputs)
         {
@@ -1138,7 +1138,7 @@ namespace vknn {
     }
 
     std::vector<IOInfo> Session::outputInfo() const {
-        const Graph        &graph_ = buckets_.front().graph;
+        const Graph        &graph_ = *buckets_.front().graph;
         std::vector<IOInfo> v;
         for (TensorId id: graph_.outputs)
         {
@@ -1150,7 +1150,7 @@ namespace vknn {
     Status Session::run(const std::vector<std::vector<float>> &inputData, std::vector<IOTensor> &outputs) {
         // The convenience overload binds one buffer per input in default-bucket order; the built
         // IOTensors carry each input's default-bucket shape so run() dispatches to the default bucket.
-        const Graph &graph_ = buckets_.front().graph;
+        const Graph &graph_ = *buckets_.front().graph;
         if (inputData.size() != graph_.inputs.size())
         {
             VKNN_ERROR << "run: expected " << graph_.inputs.size() << " input(s), got " << inputData.size();
