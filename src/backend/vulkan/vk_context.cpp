@@ -270,9 +270,13 @@ namespace vknn { namespace vk {
         VkPhysicalDevice8BitStorageFeatures s8 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
         s8.storageBuffer8BitAccess = caps_.storage8bit;
         s16.pNext                  = &s8;
+        // Integer dot product: required (beyond the extension) for OpSDotKHR-family SPIR-V in int8 kernels.
+        VkPhysicalDeviceShaderIntegerDotProductFeatures dot {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES};
+        dot.shaderIntegerDotProduct = caps_.int8DotProduct;
+        s8.pNext                    = &dot;
         VkPhysicalDeviceTimelineSemaphoreFeatures tsem {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
         tsem.timelineSemaphore = caps_.timelineSemaphore;
-        s8.pNext               = &tsem;
+        dot.pNext              = &tsem;
 
         VkDeviceCreateInfo dci {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.pNext                   = &f16i8;
