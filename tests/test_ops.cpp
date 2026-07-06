@@ -3308,3 +3308,482 @@ TEST(Passes, NoDequantizeKeepsQuantizedNodes) {
     runStandardPasses(on, {});
     EXPECT_EQ(countQdq(on), 0) << "the default pipeline collapses the sandwich";
 }
+
+// --- C.2 QLinear decomposition + CPU Quantize/DequantizeLinear kernels. --------------------------
+// The QLinear family (QLinearConv/QLinearMatMul/QGemm/QLinearAdd/QLinearGlobalAveragePool) lowers at
+// import to a plain float op plus an output-range saturation Clip; the CPU Quantize/DequantizeLinear
+// kernels are the graph-boundary quant hops the decomposition keeps as nodes. These tests pin the
+// numeric behavior against hand-computed references and the ONNX saturation/round-half-even rules.
+namespace {
+
+    // QuantizeLinear(x, scale, zp) with a scalar or per-axis scale, run on CPU. `quantDt` sets the
+    // output integer dtype (its saturation range).
+    std::vector<float> runQuantize(const Shape &xshape, const std::vector<float> &xd, const Shape &sshape, const std::vector<float> &scale, const std::vector<float> &zp, DType quantDt, int64_t axis = 1) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId s = addFloatInit(g, "s", sshape, scale);
+        TensorId z = zp.empty() ? kNoTensor : addZeroPointInit(g, "z", sshape, zp, quantDt);
+        TensorId y = addUnshaped(g, "y");
+        g.desc(y).isOutput = true;
+        g.desc(y).dtype    = quantDt; // the declared graph-output quant type
+        g.outputs          = {y};
+        Node q;
+        q.type    = OpType::QuantizeLinear;
+        q.name    = "q";
+        q.inputs  = z == kNoTensor ? std::vector<TensorId> {x, s} : std::vector<TensorId> {x, s, z};
+        q.outputs = {y};
+        if (scale.size() > 1)
+        {
+            Attr a;
+            a.kind            = Attr::Int;
+            a.i               = axis;
+            q.attr.map["axis"] = a;
+        }
+        g.nodes = {q};
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = xshape;
+        in.dtype = DType::Float32;
+        in.data.resize(xd.size() * 4);
+        for (size_t i = 0; i < xd.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xd[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+    // DequantizeLinear(x, scale, zp) reading a float "x" input, run on CPU. The pass keeps a
+    // DequantizeLinear whose data input is not an initializer as a node, so the CPU kernel runs.
+    std::vector<float> runDequantize(const Shape &xshape, const std::vector<float> &xd, const Shape &sshape, const std::vector<float> &scale, const std::vector<float> &zp, int64_t axis = 1) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId s = addFloatInit(g, "s", sshape, scale);
+        TensorId z = zp.empty() ? kNoTensor : addFloatInit(g, "z", sshape, zp);
+        TensorId y = addUnshaped(g, "y");
+        g.desc(y).isOutput = true;
+        g.outputs          = {y};
+        Node dq;
+        dq.type    = OpType::DequantizeLinear;
+        dq.name    = "dq";
+        dq.inputs  = z == kNoTensor ? std::vector<TensorId> {x, s} : std::vector<TensorId> {x, s, z};
+        dq.outputs = {y};
+        if (scale.size() > 1)
+        {
+            Attr a;
+            a.kind             = Attr::Int;
+            a.i                = axis;
+            dq.attr.map["axis"] = a;
+        }
+        g.nodes = {dq};
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = xshape;
+        in.dtype = DType::Float32;
+        in.data.resize(xd.size() * 4);
+        for (size_t i = 0; i < xd.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xd[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+} // namespace
+
+TEST(Ops, DequantizeLinearPerTensor) {
+    // y = (x - zp) * scale, scalar scale/zp.
+    auto y = runDequantize({1, 4}, {10, 0, -5, 130}, {}, {0.5f}, {8});
+    expectNear(y, {(10 - 8) * 0.5f, (0 - 8) * 0.5f, (-5 - 8) * 0.5f, (130 - 8) * 0.5f});
+}
+
+TEST(Ops, DequantizeLinearPerAxis) {
+    // Per-axis over axis 1 (channel) of a [1,3,2] tensor: each channel gets its own scale/zp.
+    Shape              xs = {1, 3, 2};
+    std::vector<float> xd = {10, 12, 20, 22, 30, 32};
+    std::vector<float> sc = {0.1f, 0.2f, 0.5f};
+    std::vector<float> zp = {2, 4, 6};
+    auto               y  = runDequantize(xs, xd, {3}, sc, zp, /*axis=*/1);
+    std::vector<float> ref;
+    for (int c = 0; c < 3; ++c)
+    {
+        for (int j = 0; j < 2; ++j)
+        {
+            ref.push_back((xd[c * 2 + j] - zp[c]) * sc[c]);
+        }
+    }
+    expectNear(y, ref);
+}
+
+TEST(Ops, QuantizeLinearSaturatesAndRoundsHalfEven) {
+    // uint8 range [0,255]; round-half-to-even; saturation on both ends. x/scale with scale=1, zp=0:
+    //   0.5 -> 0 (even), 1.5 -> 2 (even), 2.5 -> 2 (even), 3.5 -> 4 (even)  [banker's rounding]
+    //   -3 -> 0 (saturate low), 300 -> 255 (saturate high).
+    auto y = runQuantize({1, 6}, {0.5f, 1.5f, 2.5f, 3.5f, -3.f, 300.f}, {}, {1.0f}, {0.f}, DType::UInt8);
+    expectNear(y, {0, 2, 2, 4, 0, 255});
+}
+
+TEST(Ops, QuantizeLinearInt8ZeroPoint) {
+    // int8 range [-128,127] with a nonzero zero_point and a real scale.
+    // q = round(x/scale) + zp, saturated. scale=0.25, zp=-10.
+    //   x=0    -> 0   + -10 = -10
+    //   x=1    -> 4   + -10 = -6
+    //   x=-40  -> -160 + -10 = -170 -> saturate -128
+    //   x=40   -> 160  + -10 = 150  -> saturate 127
+    auto y = runQuantize({1, 4}, {0.f, 1.f, -40.f, 40.f}, {}, {0.25f}, {-10.f}, DType::Int8);
+    expectNear(y, {-10, -6, -128, 127});
+}
+
+namespace {
+
+    // Adds an int32-labeled bias initializer (fp32 host storage, Int32 dtype label), as the ONNX
+    // importer produces for a QLinear op's int32 bias.
+    TensorId addInt32Init(Graph &g, const char *name, const Shape &shape, const std::vector<float> &v) {
+        TensorId id      = addFloatInit(g, name, shape, v);
+        g.desc(id).dtype = DType::Int32;
+        return id;
+    }
+
+    // Builds and runs a QLinearConv over a float "x" input:
+    //   QLinearConv(x_q, x_s, x_zp, w_q, w_s, w_zp, y_s, y_zp, [B_i32]) -> y_q
+    // then a trailing DequantizeLinear(y_q, y_s, y_zp) -> out so the graph output is real float that
+    // the decomposition's output clamp is visible in. The pass folds it to Conv + output Clip; the
+    // trailing DQ over the decomposed (float) output drops. `x` is fed directly as the pre-dequant
+    // float activation value (a standalone leading dequant is not modeled here -- the decomposition
+    // reads the producer's float, and here the "producer" is the graph input). Returns the fp32 out.
+    std::vector<float> runQLinearConv(const Shape &xshape, const std::vector<float> &xd,
+                                      const Shape &wshape, const std::vector<float> &wq,
+                                      const Shape &wsshape, const std::vector<float> &ws, const std::vector<float> &wzp, int64_t wAxis,
+                                      float xs, float xzp, float ys, float yzp, DType actDt,
+                                      const Shape &bshape, const std::vector<float> &bq, const Attributes &convAttr) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId xsI  = addFloatInit(g, "xs", {}, {xs});
+        TensorId xzpI = addZeroPointInit(g, "xzp", {}, {xzp}, actDt);
+        TensorId wI   = addFloatInit(g, "w", wshape, wq);
+        TensorId wsI  = addFloatInit(g, "ws", wsshape, ws);
+        TensorId wzpI = addZeroPointInit(g, "wzp", wsshape, wzp, DType::Int8);
+        TensorId ysI  = addFloatInit(g, "ys", {}, {ys});
+        TensorId yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
+        std::vector<TensorId> ins = {x, xsI, xzpI, wI, wsI, wzpI, ysI, yzpI};
+        if (!bq.empty())
+        {
+            ins.push_back(addInt32Init(g, "b", bshape, bq));
+        }
+        TensorId yq  = addUnshaped(g, "yq");
+        TensorId out = addUnshaped(g, "out");
+        g.desc(out).isOutput = true;
+        g.outputs            = {out};
+        Node conv;
+        conv.type    = OpType::QLinearConv;
+        conv.name    = "qconv";
+        conv.inputs  = ins;
+        conv.outputs = {yq};
+        conv.attr    = convAttr;
+        if (ws.size() > 1)
+        {
+            Attr a;
+            a.kind                = Attr::Int;
+            a.i                   = wAxis;
+            conv.attr.map["axis"] = a; // per-axis weight quant axis (default 0 for weights)
+        }
+        Node dq;
+        dq.type    = OpType::DequantizeLinear;
+        dq.name    = "outdq";
+        dq.inputs  = {yq, ysI, yzpI};
+        dq.outputs = {out};
+        g.nodes = {conv, dq};
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = xshape;
+        in.dtype = DType::Float32;
+        in.data.resize(xd.size() * 4);
+        for (size_t i = 0; i < xd.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = xd[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+    // The saturation range a y-quant (ys, yzp, dtype) encodes, in real float: [(qmin-zp)*s,(qmax-zp)*s].
+    void yClampRange(float ys, float yzp, DType dt, float &lo, float &hi) {
+        float qmin = dt == DType::Int8 ? -128.f : 0.f;
+        float qmax = dt == DType::Int8 ? 127.f : 255.f;
+        lo = (qmin - yzp) * ys;
+        hi = (qmax - yzp) * ys;
+    }
+
+} // namespace
+
+TEST(Ops, QLinearConvDecomposedNumericExactReluRecovered) {
+    // 1x1 conv, 2 in / 2 out channels, spatial 1x1, per-tensor weight quant. The y-quant range is a
+    // uint8 range with zp=0 (lo=0): the output Clip recovers a ReLU. Verify against a hand-computed
+    // float conv + clamp, and confirm a negative conv result is clamped to 0 (ReLU recovered).
+    //   x (real float, fed directly): channel0=1, channel1=-2
+    //   W_f = W_q * ws (wzp=0): [[3,0],[0,4]] -> out0 = 3*1 = 3 ; out1 = 4*(-2) = -8
+    //   B_f = B_i32 * (xs*ws): xs=1, ws=1 -> B_f = B_i32 = [-1, +1]
+    //   pre-clamp: out0 = 3 + -1 = 2 ; out1 = -8 + 1 = -7
+    //   y-clamp (uint8, ys=0.1, yzp=0): lo=0, hi=25.5 -> out0=2, out1=0 (ReLU!)
+    Attributes attr;
+    attr.map["kernel_shape"] = ints({1, 1});
+    std::vector<float> y = runQLinearConv(
+        /*xshape*/ {1, 2, 1, 1}, /*xd*/ {1.f, -2.f},
+        /*wshape*/ {2, 2, 1, 1}, /*wq*/ {3, 0, 0, 4},
+        /*wsshape*/ {}, /*ws*/ {1.0f}, /*wzp*/ {0.f}, /*wAxis*/ 0,
+        /*xs*/ 1.0f, /*xzp*/ 0.f, /*ys*/ 0.1f, /*yzp*/ 0.f, /*actDt*/ DType::UInt8,
+        /*bshape*/ {2}, /*bq*/ {-1.f, 1.f}, attr);
+    float lo, hi;
+    yClampRange(0.1f, 0.f, DType::UInt8, lo, hi);
+    auto clamp = [&](float v) { return v < lo ? lo : (v > hi ? hi : v); };
+    expectNear(y, {clamp(2.f), clamp(-7.f)});
+    EXPECT_NEAR(y[1], 0.f, 1e-5f) << "y-quant range with zp=0 recovers the fused ReLU (no ReLU deleted)";
+}
+
+TEST(Ops, QLinearConvPerAxisWeightScale) {
+    // Per-axis weight scale over output-channel axis 0: each of the 2 output channels gets its own
+    // ws. W_q = [[2,0],[0,2]], ws=[0.5, 3.0] -> W_f=[[1,0],[0,6]]. x=[4, 5], no bias.
+    //   out0 = 1*4 = 4 ; out1 = 6*5 = 30. y-quant int8, ys=1, yzp=0: lo=-128, hi=127 (no clamp).
+    Attributes attr;
+    attr.map["kernel_shape"] = ints({1, 1});
+    std::vector<float> y = runQLinearConv(
+        /*xshape*/ {1, 2, 1, 1}, /*xd*/ {4.f, 5.f},
+        /*wshape*/ {2, 2, 1, 1}, /*wq*/ {2, 0, 0, 2},
+        /*wsshape*/ {2}, /*ws*/ {0.5f, 3.0f}, /*wzp*/ {0.f, 0.f}, /*wAxis*/ 0,
+        /*xs*/ 1.0f, /*xzp*/ 0.f, /*ys*/ 1.0f, /*yzp*/ 0.f, /*actDt*/ DType::Int8,
+        /*bshape*/ {}, /*bq*/ {}, attr);
+    expectNear(y, {4.f, 30.f});
+}
+
+namespace {
+
+    // Builds and runs a QGemm(A, a_s, a_zp, B, b_s, b_zp, [C_i32], y_s, y_zp) over a float "A" input,
+    // with a trailing DequantizeLinear to expose the real-float output. transB selects B layout.
+    std::vector<float> runQGemm(const Shape &ashape, const std::vector<float> &ad,
+                                const Shape &bshape, const std::vector<float> &bq, const std::vector<float> &bs, const std::vector<float> &bzp,
+                                float as, float azp, float ys, float yzp, DType actDt,
+                                const std::vector<float> &cq, int64_t transB) {
+        Graph      g;
+        TensorDesc ai;
+        ai.name    = "A";
+        ai.shape   = ashape;
+        ai.isInput = true;
+        TensorId a = g.addTensor(ai);
+        g.inputs   = {a};
+        TensorId asI  = addFloatInit(g, "as", {}, {as});
+        TensorId azpI = addZeroPointInit(g, "azp", {}, {azp}, actDt);
+        TensorId bI   = addFloatInit(g, "B", bshape, bq);
+        TensorId bsI  = addFloatInit(g, "bs", bs.size() > 1 ? Shape {(int64_t) bs.size()} : Shape {}, bs);
+        TensorId bzpI = addZeroPointInit(g, "bzp", bzp.size() > 1 ? Shape {(int64_t) bzp.size()} : Shape {}, bzp, DType::Int8);
+        TensorId ysI  = addFloatInit(g, "ys", {}, {ys});
+        TensorId yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
+        std::vector<TensorId> ins = {a, asI, azpI, bI, bsI, bzpI};
+        if (!cq.empty())
+        {
+            ins.push_back(addInt32Init(g, "C", {(int64_t) cq.size()}, cq));
+        }
+        ins.push_back(ysI);
+        ins.push_back(yzpI);
+        TensorId yq  = addUnshaped(g, "yq");
+        TensorId out = addUnshaped(g, "out");
+        g.desc(out).isOutput = true;
+        g.outputs            = {out};
+        Node gemm;
+        gemm.type    = OpType::QGemm;
+        gemm.name    = "qgemm";
+        gemm.inputs  = ins;
+        gemm.outputs = {yq};
+        if (transB)
+        {
+            gemm.attr.map["transB"] = ints({}); // set below as Int
+            Attr t;
+            t.kind                  = Attr::Int;
+            t.i                     = 1;
+            gemm.attr.map["transB"] = t;
+        }
+        Node dq;
+        dq.type    = OpType::DequantizeLinear;
+        dq.name    = "outdq";
+        dq.inputs  = {yq, ysI, yzpI};
+        dq.outputs = {out};
+        g.nodes = {gemm, dq};
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        IOTensor in;
+        in.name  = "A";
+        in.shape = ashape;
+        in.dtype = DType::Float32;
+        in.data.resize(ad.size() * 4);
+        for (size_t i = 0; i < ad.size(); ++i)
+        {
+            reinterpret_cast<float *>(in.data.data())[i] = ad[i];
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+} // namespace
+
+TEST(Ops, QGemmWithBiasDecomposed) {
+    // A [1,2] * B [2,2] + C bias. B_q = [[2,0],[1,3]], bs=0.5 -> B_f=[[1,0],[0.5,1.5]].
+    //   A = [4, 6]  -> A*B_f = [4*1 + 6*0.5, 4*0 + 6*1.5] = [7, 9]
+    //   C_f = C_i32 * (as*bs): as=1, bs=0.5 -> C_f = C_i32 * 0.5 = [2, -4]*0.5? use C_i32=[2,-4] -> [1,-2]
+    //   pre-clamp: [8, 7]. y int8 ys=1 yzp=0: no clamp.
+    auto y = runQGemm(
+        /*ashape*/ {1, 2}, /*ad*/ {4.f, 6.f},
+        /*bshape*/ {2, 2}, /*bq*/ {2, 0, 1, 3}, /*bs*/ {0.5f}, /*bzp*/ {0.f},
+        /*as*/ 1.0f, /*azp*/ 0.f, /*ys*/ 1.0f, /*yzp*/ 0.f, /*actDt*/ DType::Int8,
+        /*cq*/ {2.f, -4.f}, /*transB*/ 0);
+    expectNear(y, {8.f, 7.f});
+}
+
+namespace {
+
+    // Builds and runs QLinearAdd(A, a_s, a_zp, B, b_s, b_zp, y_s, y_zp) where both A and B are float
+    // graph inputs (real activation values), with a trailing DequantizeLinear to expose real float.
+    std::vector<float> runQLinearAdd(const Shape &shape, const std::vector<float> &ad, const std::vector<float> &bd,
+                                     float as, float azp, float bs, float bzp, float ys, float yzp, DType actDt) {
+        Graph      g;
+        TensorDesc ai;
+        ai.name    = "A";
+        ai.shape   = shape;
+        ai.isInput = true;
+        TensorDesc bi;
+        bi.name    = "B";
+        bi.shape   = shape;
+        bi.isInput = true;
+        TensorId a = g.addTensor(ai);
+        TensorId b = g.addTensor(bi);
+        g.inputs   = {a, b};
+        TensorId asI  = addFloatInit(g, "as", {}, {as});
+        TensorId azpI = addZeroPointInit(g, "azp", {}, {azp}, actDt);
+        TensorId bsI  = addFloatInit(g, "bs", {}, {bs});
+        TensorId bzpI = addZeroPointInit(g, "bzp", {}, {bzp}, actDt);
+        TensorId ysI  = addFloatInit(g, "ys", {}, {ys});
+        TensorId yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
+        TensorId yq   = addUnshaped(g, "yq");
+        TensorId out  = addUnshaped(g, "out");
+        g.desc(out).isOutput = true;
+        g.outputs            = {out};
+        Node add;
+        add.type    = OpType::QLinearAdd;
+        add.name    = "qadd";
+        add.inputs  = {a, asI, azpI, b, bsI, bzpI, ysI, yzpI};
+        add.outputs = {yq};
+        Node dq;
+        dq.type    = OpType::DequantizeLinear;
+        dq.name    = "outdq";
+        dq.inputs  = {yq, ysI, yzpI};
+        dq.outputs = {out};
+        g.nodes = {add, dq};
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return {};
+        }
+        auto mkIn = [&](const char *nm, const std::vector<float> &d) {
+            IOTensor in;
+            in.name  = nm;
+            in.shape = shape;
+            in.dtype = DType::Float32;
+            in.data.resize(d.size() * 4);
+            for (size_t i = 0; i < d.size(); ++i)
+            {
+                reinterpret_cast<float *>(in.data.data())[i] = d[i];
+            }
+            return in;
+        };
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({mkIn("A", ad), mkIn("B", bd)}, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+} // namespace
+
+TEST(Ops, QLinearAddChainDecomposed) {
+    // Add of two real-float activation tensors, then output clamp. y-quant int8 zp=0 ys=0.5:
+    // lo=-64, hi=63.5. A=[10, 100, -100], B=[5, 50, -50] -> [15, 150, -150] -> clamp [15, 63.5, -64].
+    auto y = runQLinearAdd({1, 3}, {10.f, 100.f, -100.f}, {5.f, 50.f, -50.f},
+                           /*as*/ 1.f, 0.f, /*bs*/ 1.f, 0.f, /*ys*/ 0.5f, 0.f, DType::Int8);
+    float lo, hi;
+    yClampRange(0.5f, 0.f, DType::Int8, lo, hi);
+    auto clamp = [&](float v) { return v < lo ? lo : (v > hi ? hi : v); };
+    expectNear(y, {clamp(15.f), clamp(150.f), clamp(-150.f)});
+}
