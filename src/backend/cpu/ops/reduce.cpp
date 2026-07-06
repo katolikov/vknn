@@ -1,8 +1,10 @@
 // Reduce family (Mean/Sum/Max/Min/Prod/L2), generic N-D fp32. `node.subOp` selects the ReduceType.
 // The reduced `axes` come from the `axes` attribute, else from a runtime int64 input[1], else (when
-// neither is present) every axis. Reduction is always keepdims=false here: the output shape is
-// precomputed in the graph desc, so reduced axes are dropped and the remaining ("kept") axes stay in
-// input order. Accumulation walks the input once in row-major (flat) order, so the summation order is
+// neither is present) every axis. The output shape is derived from the RUNTIME input shape plus the
+// `keepdims` attribute (reduced axes become 1 or are dropped), mirroring the Reduce arm of
+// inferShapes — never from the static graph desc, so the accumulator bins and the bin indices are
+// sized from the same shape and a runtime shape that diverges from the plan cannot index out of
+// bounds. Accumulation walks the input once in row-major (flat) order, so the summation order is
 // deterministic and observable — do not reorder it.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
@@ -40,8 +42,28 @@ namespace vknn {
                 {
                     ax.insert((int) (a < 0 ? a + rank : a));
                 }
-                ReduceType           op       = (ReduceType) node.subOp;
-                Shape                out      = ctx.graph->desc(node.outputs[0]).shape;
+                ReduceType           op   = (ReduceType) node.subOp;
+                // Output shape from the runtime input: reduced axes collapse to 1 (keepdims, the ONNX
+                // default) or are dropped; a full reduction with keepdims=0 yields the scalar-like {1}.
+                bool                 keep = node.attr.geti("keepdims", 1) != 0;
+                Shape                out;
+                for (int i = 0; i < rank; ++i)
+                {
+                    if (ax.count(i))
+                    {
+                        if (keep)
+                        {
+                            out.push_back(1);
+                        }
+                    } else
+                    {
+                        out.push_back(X.shape[i]);
+                    }
+                }
+                if (out.empty())
+                {
+                    out.push_back(1);
+                }
                 int64_t              outElems = numElements(out), n = X.elems();
                 // Row-major strides of the full input tensor, used to decompose a flat index back into
                 // per-axis coordinates.

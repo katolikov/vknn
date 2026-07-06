@@ -310,6 +310,62 @@ TEST(Ops, GlobalAveragePool) {
     expectNear(out.data, {2.5f}, 1e-5f);
 }
 
+// --- Reduce with a caller-bound runtime shape that differs from the compiled desc. CPU ops derive
+// geometry from runtime shapes (the dynamic-shape contract); Reduce must size its accumulator bins
+// and output from the bound shape, or a divergent shape indexes past the desc-sized accumulator. ---
+TEST(Ops, ReduceGeometryFollowsRuntimeShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 3, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type             = OpType::Reduce;
+    n.subOp            = (int32_t) ReduceType::Mean;
+    n.name             = "rm";
+    n.inputs           = {x};
+    n.outputs          = {y};
+    n.attr.map["axes"] = ints({-1});
+    {
+        Attr a;
+        a.kind                 = Attr::Int;
+        a.i                    = 0;
+        n.attr.map["keepdims"] = a;
+    }
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg); // static desc for y: [2,3]
+    ASSERT_TRUE(sess);
+
+    // Bind the same 24 values as [4,3,2]: the reduced (last) axis extent becomes 2.
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {4, 3, 2};
+    in.dtype = DType::Float32;
+    in.data.resize(24 * sizeof(float));
+    for (int i = 0; i < 24; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) i;
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {4, 3}));
+    const float *o = outs[0].f32();
+    for (int i = 0; i < 12; ++i)
+    {
+        EXPECT_FLOAT_EQ(o[i], 2.f * i + 0.5f) << "bin " << i; // mean of {2i, 2i+1}
+    }
+}
+
 // --- MatMul A[2,3] @ B[3,2] (B constant). ---
 TEST(Ops, MatMul) {
     auto out = runOp(OpType::MatMul, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{3, 2}, {1, 0, 0, 1, 1, 1}}});
