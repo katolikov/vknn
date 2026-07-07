@@ -162,8 +162,9 @@ TEST(SupportReport, CastFromInt64TargetGate) {
     // An int64 input Cast runs on the GPU for the shape-arithmetic targets (FLOAT/FLOAT16/DOUBLE,
     // INT32, INT64) and for INT8/UINT8: the int64 lanes decode to compute-precision float at the pack
     // boundary, so cast.comp reads them like any float operand, and it narrows INT8 (modulo-wrap) /
-    // UINT8 (saturate) to match the CPU Cast op + readback narrowing bit-for-bit. INT16/UINT16/BOOL and
-    // the 32/64-bit unsigned targets keep the CPU op. `to` is the ONNX TensorProto dtype.
+    // UINT8 (saturate) to match the CPU Cast op + readback narrowing bit-for-bit. BOOL truncates and
+    // clamps to [0,1]. INT16/UINT16 and the 32/64-bit unsigned targets keep the CPU op. `to` is the
+    // ONNX TensorProto dtype.
     auto castNode = [&](Graph &g, const char *name, int64_t to, DType inDt) {
         TensorId   in  = tensor(g, std::string(name) + "_in", {4}, inDt);
         TensorId   out = tensor(g, std::string(name) + "_out", {4});
@@ -178,7 +179,7 @@ TEST(SupportReport, CastFromInt64TargetGate) {
     castNode(g, "cast_i64_to_int8", 3, DType::Int64);  // INT8   -> GPU (modulo-wrap narrow)
     castNode(g, "cast_i64_to_uint8", 2, DType::Int64); // UINT8  -> GPU (saturate narrow)
     castNode(g, "cast_i64_to_int16", 5, DType::Int64); // INT16  -> CPU (fp32 output, no readback narrow)
-    castNode(g, "cast_i64_to_bool", 9, DType::Int64);  // BOOL   -> CPU
+    castNode(g, "cast_i64_to_bool", 9, DType::Int64);  // BOOL   -> GPU (truncate + clamp to [0,1])
 
     std::vector<NodeSupport> rows = vkSupportSurvey(g);
     ASSERT_EQ(rows.size(), 7u);
@@ -192,8 +193,8 @@ TEST(SupportReport, CastFromInt64TargetGate) {
     EXPECT_TRUE(rows[4].reason.empty());
     EXPECT_EQ(rows[5].backend, "cpu"); // INT16
     EXPECT_EQ(rows[5].reason, "Cast: int64 input to a narrow integer target");
-    EXPECT_EQ(rows[6].backend, "cpu"); // BOOL
-    EXPECT_EQ(rows[6].reason, "Cast: int64 input to a narrow integer target");
+    EXPECT_EQ(rows[6].backend, "vulkan"); // BOOL (truncate + clamp to [0,1])
+    EXPECT_TRUE(rows[6].reason.empty());
 }
 
 TEST(SupportReport, ConstantOfShapeIntegerFillRunsOnGpu) {
