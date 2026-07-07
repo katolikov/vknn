@@ -186,7 +186,7 @@ def onnx_external_data(onnx):
     return locs
 
 
-def convert(onnx, out_vxm, conv, where="host"):
+def convert(onnx, out_vxm, conv, where="host", ddir="/data/local/tmp/vknn/bench"):
     if not os.path.exists(onnx):
         sys.exit(f"MISSING model: {onnx}")
     flags = convert_flags(conv)
@@ -198,7 +198,9 @@ def convert(onnx, out_vxm, conv, where="host"):
         log(f"  [convert] wrote {out_vxm}  ({human(os.path.getsize(out_vxm))})")
         return out_vxm
     need_device()
-    ddir = "/data/local/tmp/vknn/bench"
+    # A device convert writes the .vxm into the SAME device dir the run reads from (the caller's
+    # ddir), so a run stage with a non-default device.dir finds its freshly-converted model instead
+    # of a stale one in the default directory.
     adb(["shell", "mkdir", "-p", ddir])
     log(f"  [convert] device: {os.path.basename(onnx)} -> {os.path.basename(out_vxm)}  {' '.join(flags)}")
     push(onnx, f"{ddir}/_src.onnx", "model")
@@ -314,7 +316,7 @@ def run_stage(stage, base, idx, run_dir, clean_cli, where_convert="host"):
     else:
         model_name = conv.get("out") or (os.path.splitext(os.path.basename(model_host))[0] + ".vxm")
         local_vxm = os.path.join(tempfile.gettempdir(), model_name)
-        if convert(model_host, local_vxm, conv, where_convert):
+        if convert(model_host, local_vxm, conv, where_convert, ddir):
             push(local_vxm, f"{ddir}/{model_name}", "model")
         log(f"  [model] {model_name}")
 
