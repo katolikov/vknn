@@ -75,7 +75,7 @@ namespace vknn {
                         case 1: {
                             Node                     n;
                             std::vector<std::string> ni, no;
-                            NodeParser::parseNode(r.sub(), n, ni, no);
+                            NodeParser::parseNode(r.sub(), n, ni, no, baseDir, &extCache);
                             nodes.push_back(std::move(n));
                             nodeIns.push_back(std::move(ni));
                             nodeOuts.push_back(std::move(no));
