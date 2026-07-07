@@ -82,15 +82,18 @@ cfg.backend   = vknn::BackendKind::Vulkan;  // run on the GPU (CPU is the implic
 cfg.precision = vknn::Precision::Low;       // fp16 storage, fp32 accumulation
 
 vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
-if (!net) { return 1; }
+if (!net) {
+  return 1;
+}
 
 // Names + shapes come from the model; you supply only the data.
 auto in = net.inputs();
 vknn::Tensor input(pixels, in[0].shape, in[0].name);    // pixels: std::vector<float>, NCHW
 
 std::vector<vknn::Tensor> outputs = net.run({input});   // one input in, every output back
+
 const vknn::Tensor& y = outputs.front();
-int cls = (int) y.argmax();
+int cls = (int)y.argmax();
 ```
 
 Link the static lib **whole-archive** so the self-registering operators/backends survive; dropping a
