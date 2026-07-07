@@ -30,34 +30,35 @@ namespace vknn {
         rt.dtype = DType::Float32;
         rt.host.resizeElems(elems, DType::Float32);
         float *f = rt.host.f32();
-        auto   n = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
+        // Elements that fit in both the destination (elems) and the caller buffer at bytesPer each.
+        auto fitElems = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
         switch (src)
         {
             case DType::Float32: {
-                int64_t c = n(4);
+                int64_t c = fitElems(4);
                 std::memcpy(f, in.data(), (size_t) c * 4);
                 break;
             }
             case DType::Float16: {
                 const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
-                for (int64_t i = 0, c = n(2); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(2); i < c; ++i)
                     f[i] = halfToFloat(h[i]);
                 break;
             }
             case DType::UInt8:
-                for (int64_t i = 0, c = n(1); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(1); i < c; ++i)
                     f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
                 break;
             case DType::Int8:
-                for (int64_t i = 0, c = n(1); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(1); i < c; ++i)
                     f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
                 break;
             case DType::Int32:
-                for (int64_t i = 0, c = n(4); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(4); i < c; ++i)
                     f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
                 break;
             default: {
-                int64_t c = n(4);
+                int64_t c = fitElems(4);
                 std::memcpy(f, in.data(), (size_t) c * 4);
                 break;
             }

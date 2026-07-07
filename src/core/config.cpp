@@ -288,6 +288,8 @@ namespace vknn {
         return os.str();
     }
 
+    /// True when @p name appears as one whole comma-separated entry of @p list, ignoring surrounding
+    /// whitespace on each entry (so "a, b ,c" contains "b"). Substring hits do not count.
     bool Config::listContains(const std::string &list, std::string_view name) {
         if (name.empty())
         {
@@ -298,17 +300,18 @@ namespace vknn {
         {
             size_t comma = list.find(',', pos);
             size_t end   = comma == std::string::npos ? list.size() : comma;
-            size_t b     = pos;
-            size_t e     = end;
-            while (b < e && std::isspace((unsigned char) list[b]))
+            // Trim leading/trailing whitespace to get this entry's [tokBegin, tokEnd) span.
+            size_t tokBegin = pos;
+            size_t tokEnd   = end;
+            while (tokBegin < tokEnd && std::isspace((unsigned char) list[tokBegin]))
             {
-                ++b;
+                ++tokBegin;
             }
-            while (e > b && std::isspace((unsigned char) list[e - 1]))
+            while (tokEnd > tokBegin && std::isspace((unsigned char) list[tokEnd - 1]))
             {
-                --e;
+                --tokEnd;
             }
-            if (e - b == name.size() && list.compare(b, e - b, name.data(), name.size()) == 0)
+            if (tokEnd - tokBegin == name.size() && list.compare(tokBegin, tokEnd - tokBegin, name.data(), name.size()) == 0)
             {
                 return true;
             }
