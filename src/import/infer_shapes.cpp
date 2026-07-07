@@ -1,19 +1,24 @@
+#include "dim_expr.h"
 #include "passes_internal.h"
 
 namespace vknn {
 
     /// Forward shape (and, where it differs, dtype) inference over the whole graph.
     ///
-    /// First resolves every dynamic (negative) input dim (from `declared` when the input has a declared
-    /// shape, else the leading batch axis to `batch`), then walks the nodes in graph (topological
+    /// First resolves every dynamic (negative) input dim, then walks the nodes in graph (topological
     /// producer-before-consumer) order and fills each output's `Shape` from its resolved inputs using
     /// the ONNX per-op rules. Node visitation order is load-bearing: a producer's shape must land before
     /// a consumer reads it.
     ///
-    /// A dynamic non-batch axis with no declaration is a hard error rather than a silent substitution to
-    /// `batch`: freezing a real spatial/feature axis to 1 compiles the model to a 1x1 plan whose output
-    /// is quietly wrong (the vit_b16_q8 0.32-cosine bug). Only the leading axis (the batch dim) falls
-    /// back to `batch`, matching the documented dynamic-batch contract.
+    /// Input dim resolution, per still-dynamic axis (precedence high to low): a `declared` per-tensor
+    /// shape (--shape) overrides everything; else the axis's recorded symbolic dim_param
+    /// (TensorDesc::dimParams) is evaluated against `bindings` (--dim NAME=VALUE), which resolves a bare
+    /// symbol, an integer literal, and a compound expression like "past_sequence_length + sequence_length"
+    /// alike; else the leading axis falls back to `batch`. A non-leading axis that stays unresolved is a
+    /// hard error rather than a silent substitution to `batch`: freezing a real spatial/feature axis to 1
+    /// compiles the model to a 1x1 plan whose output is quietly wrong (the vit_b16_q8 0.32-cosine bug).
+    /// The error is aggregated across every input and lists the unbound symbol names to bind, so a
+    /// many-input decoder reports one actionable message instead of failing per tensor.
     ///
     /// Central invariant — an EMPTY shape means "not resolved yet", never a rank-0 scalar, EXCEPT on an
     /// initializer (a constant genuinely may be rank-0). Every case therefore refuses to compute from an
@@ -24,14 +29,34 @@ namespace vknn {
     /// their output unresolved and resolve on a subsequent call once the operand lands.
     ///
     /// Ops not listed (the `default` arm) are shape-path ops whose outputs are produced by constFold.
-    void inferShapes(Graph &g, int64_t batch, const std::map<std::string, Shape> *declared) {
+    void inferShapes(Graph &g, int64_t batch, const std::map<std::string, Shape> *declared,
+                     const std::map<std::string, int64_t> *bindings) {
+        static const std::map<std::string, int64_t> kNoBindings;
+        const std::map<std::string, int64_t>        &binds = bindings ? *bindings : kNoBindings;
+
+        // Symbols that no binding resolved, and dynamic axes with no recorded symbol at all: accumulated
+        // across every input so one aggregated error lists them together (instead of failing on the first
+        // tensor with a per-tensor message the caller must then rediscover once per input).
+        std::vector<std::string> freeSymbols; // distinct, first-seen order
+        std::vector<std::string> freeAxes;    // "name[axis]" for an axis carrying no dim_param symbol
+        auto                     addFreeSym = [&](const std::string &sym) {
+            for (const auto &f: freeSymbols)
+            {
+                if (f == sym)
+                {
+                    return;
+                }
+            }
+            freeSymbols.push_back(sym);
+        };
+
         // Resolve each input's dynamic (negative) dims. A dim resolved on an earlier call is already
         // positive and is skipped, so this is idempotent across the pipeline's repeated inferShapes runs.
         for (TensorId in: g.inputs)
         {
-            const TensorDesc &d0        = g.desc(in);
-            auto             &s         = g.desc(in).shape;
-            const Shape      *decl      = nullptr;
+            const TensorDesc &d0   = g.desc(in);
+            auto             &s    = g.desc(in).shape;
+            const Shape      *decl = nullptr;
             if (declared)
             {
                 auto it = declared->find(d0.name);
@@ -44,12 +69,14 @@ namespace vknn {
                     }
                 }
             }
+            const std::vector<std::string> &params = d0.dimParams;
             for (size_t ax = 0; ax < s.size(); ++ax)
             {
                 if (s[ax] >= 0)
                 {
                     continue; // already resolved (or statically known)
                 }
+                // 1. Per-tensor declared shape (--shape) overrides everything for this input.
                 if (decl)
                 {
                     if ((*decl)[ax] < 0)
@@ -57,14 +84,78 @@ namespace vknn {
                         throw Error(Status::InvalidArgument, "declared shape for input '" + d0.name + "' leaves axis " + std::to_string(ax) + " dynamic (" + std::to_string((*decl)[ax]) + "); declare a concrete extent");
                     }
                     s[ax] = (*decl)[ax];
-                } else if (ax == 0)
+                    continue;
+                }
+                // 2. A recorded dim_param symbol/expression resolved from `bindings` (the compound
+                //    "past_sequence_length + sequence_length" evaluates from its two bound symbols).
+                const std::string sym = ax < params.size() ? params[ax] : std::string();
+                if (!sym.empty())
+                {
+                    DimEval e = evalDimExpr(sym, binds);
+                    if (e.ok)
+                    {
+                        if (e.value < 0)
+                        {
+                            throw Error(Status::InvalidArgument, "input '" + d0.name + "' axis " + std::to_string(ax) + " (" + sym + ") resolves to a negative extent " + std::to_string(e.value));
+                        }
+                        s[ax] = e.value;
+                        continue;
+                    }
+                    if (ax == 0)
+                    {
+                        s[ax] = batch; // leading axis with an unbound symbol: the documented batch fallback
+                        continue;
+                    }
+                    for (const std::string &fs: e.freeSymbols)
+                    {
+                        addFreeSym(fs);
+                    }
+                    continue; // stays dynamic; the aggregated error below aborts the compile
+                }
+                // 3. No recorded symbol: only the leading (batch) axis falls back; any other is an error.
+                if (ax == 0)
                 {
                     s[ax] = batch; // leading axis = batch, the documented dynamic-batch fallback
-                } else
-                {
-                    throw Error(Status::InvalidArgument, "input '" + d0.name + "' has a dynamic non-batch axis " + std::to_string(ax) + " with no declared shape; pass --shape " + d0.name + "=D0xD1x... (or Config::inputShapes) so it does not silently compile to a 1x1 plan");
+                    continue;
                 }
+                freeAxes.push_back(d0.name + "[" + std::to_string(ax) + "]");
             }
+        }
+
+        if (!freeSymbols.empty() || !freeAxes.empty())
+        {
+            std::string msg = "cannot resolve dynamic input shapes: ";
+            if (!freeSymbols.empty())
+            {
+                msg += "unbound symbolic dim(s) {";
+                for (size_t i = 0; i < freeSymbols.size(); ++i)
+                {
+                    if (i)
+                    {
+                        msg += ", ";
+                    }
+                    msg += freeSymbols[i];
+                }
+                msg += "} -- bind each with --dim NAME=VALUE (or Config::dimBindings)";
+            }
+            if (!freeAxes.empty())
+            {
+                if (!freeSymbols.empty())
+                {
+                    msg += "; ";
+                }
+                msg += "undeclared dynamic axis/axes {";
+                for (size_t i = 0; i < freeAxes.size(); ++i)
+                {
+                    if (i)
+                    {
+                        msg += ", ";
+                    }
+                    msg += freeAxes[i];
+                }
+                msg += "} -- declare with --shape NAME=D0xD1x... (or Config::inputShapes)";
+            }
+            throw Error(Status::InvalidArgument, msg);
         }
         auto SH = [&](TensorId id) -> Shape & {
             return g.desc(id).shape;

@@ -37,6 +37,17 @@ namespace vknn {
         /// time (set them there via vknn_compile --shape / --batch).
         std::map<std::string, Shape> inputShapes;
 
+        /// Symbolic-dimension bindings for the ONNX-load path (createFromOnnx), keyed by the ONNX
+        /// dim_param name (e.g. "past_sequence_length" -> 256, "sequence_length" -> 1). A dynamic input
+        /// axis whose dim_param — a bare symbol, an integer literal, or a compound like
+        /// "past_sequence_length + sequence_length" — resolves entirely from these bindings is filled
+        /// automatically, so a many-input decoder needs only a couple of bindings instead of a per-tensor
+        /// `inputShapes` entry each. `inputShapes` (a per-tensor concrete shape) overrides a binding for
+        /// that tensor; the leading (batch) axis still falls back to `batch`. Empty (the default) keeps
+        /// the batch-only path unchanged. Consumed only when building a Session directly from ONNX; a
+        /// .vxm already has its shapes baked at compile time (set them there via vknn_compile --dim).
+        std::map<std::string, int64_t> dimBindings;
+
         /// Caches. Warm-start artifacts (compiled pipelines, prepacked/Winograd weights, the conv autotune
         /// table) are always saved to and reloaded from a per-model cache file, so a warm load skips shader
         /// compilation, weight prepacking, and autotuning. The file is self-validated (kernel hash + device

@@ -63,6 +63,9 @@ namespace vknn {
         // Per-input declared shapes for the batch/spatial resolution in inferShapes (empty = the
         // batch-only path). Passed by pointer so every inferShapes round below resolves identically.
         const std::map<std::string, Shape> *declared = opt.inputShapes.empty() ? nullptr : &opt.inputShapes;
+        // Symbolic-dim bindings (--dim) that resolve dynamic input axes from their dim_param names; passed
+        // alongside `declared` to every inferShapes round below (empty = the batch-only path).
+        const std::map<std::string, int64_t> *bindings = opt.dimBindings.empty() ? nullptr : &opt.dimBindings;
         // Snapshot each graph output's ONNX-declared dtype (from value_info, set by the builder) BEFORE
         // any pass runs. Two things would otherwise drop it: inferShapes overwrites a declared FLOAT16
         // output with the fp32 dtype of its internal producer, and fusion/elimination passes repoint
@@ -82,7 +85,7 @@ namespace vknn {
         eliminateDropout(g);        // before shape inference: Dropout has no shape rule -- the eliminable
                                     // (inference-mode) form is an identity and is rewired past here
         normalizeConv1d(g);         // before shape inference: conv arms assume 2-D weight/attr geometry
-        inferShapes(g, batch, declared);
+        inferShapes(g, batch, declared, bindings);
         if (opt.dequantize)
         {
             dequantizeGraph(g); // QDQ checkpoints collapse to the float graph before any lowering
@@ -90,7 +93,7 @@ namespace vknn {
                                 // kernel-less q/dq nodes left unresolved
         }
         lowerReduceToGap(g); // needs input ranks; ReduceMean imports as generic Reduce
-        inferShapes(g, batch, declared);
+        inferShapes(g, batch, declared, bindings);
         eliminateIdentity(g);
         foldBatchNorm(g);
         lowerBatchNorm(g); // whatever foldBatchNorm left becomes a fusable per-channel Mul+Add
@@ -121,23 +124,23 @@ namespace vknn {
             {
                 break;
             }
-            inferShapes(g, batch, declared);
+            inferShapes(g, batch, declared, bindings);
         }
         eliminateFloatCast(g); // drop float->float casts left by transformer import (post-fold)
         eliminateDeadNodes(g);
-        inferShapes(g, batch, declared);  // refresh shapes after fusion/folding
+        inferShapes(g, batch, declared, bindings);  // refresh shapes after fusion/folding
         lowerRMSNorm(g);        // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate
                                 // RMSNorm kernel; before pointwise fusion so a trailing residual Add can fold
-        inferShapes(g, batch, declared);  // set the RMSNorm output shape (identity rule)
+        inferShapes(g, batch, declared, bindings);  // set the RMSNorm output shape (identity rule)
         lowerInstanceNorm(g);   // needs the fixpoint-resolved input shapes; the emitted spatial
                                 // ReduceMeans recover as GlobalAvgPool in the pass below
         lowerReduceToGap(g);    // a late-resolving rank can expose the spatial-mean form
         lowerEinsum(g);        // batched einsums -> MatMul (needs the operand shapes resolved above)
-        inferShapes(g, batch, declared); // resolve the inserted Unsqueeze/MatMul/Squeeze
+        inferShapes(g, batch, declared, bindings); // resolve the inserted Unsqueeze/MatMul/Squeeze
         subpixelConvTranspose(g); // ConvTranspose -> Conv + DepthToSpace; runs on fully-resolved dims, before
-        inferShapes(g, batch, declared);    // the pointwise fusion so trailing pointwise ops can still fold onto the Conv
+        inferShapes(g, batch, declared, bindings);    // the pointwise fusion so trailing pointwise ops can still fold onto the Conv
         lowerGroupedConv(g); // general grouped Conv (1 < group < Cin) -> group-1 Convs + Concat, on resolved shapes
-        inferShapes(g, batch, declared); // shape the inserted Slice/Conv/Concat parts
+        inferShapes(g, batch, declared, bindings); // shape the inserted Slice/Conv/Concat parts
         if (opt.lowerConv)
         {
             lowerConv(g); // non-Winograd KxK Conv -> ConvGemm, on resolved shapes, before pointwise fusion
@@ -150,7 +153,7 @@ namespace vknn {
         if (opt.fusePointwiseChains)
         {
             fusePointwiseChains(g, opt.strictFuse);
-            inferShapes(g, batch, declared); // set the FusedPointwise output shapes
+            inferShapes(g, batch, declared, bindings); // set the FusedPointwise output shapes
         }
         pruneDeadInitializers(g); // after all rewiring: orphaned fold intermediates + Cast-copied weights
         // Restore the declared output dtypes dropped by the output-rewiring passes above (see snapshot).

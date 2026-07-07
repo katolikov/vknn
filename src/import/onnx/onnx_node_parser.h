@@ -152,8 +152,13 @@ namespace vknn {
             // Tensor field1=elem_type(int32), field2=shape(TensorShapeProto);
             // TensorShapeProto field1=dim(repeated Dimension); Dimension field1=dim_value(int64).
             // A symbolic dimension (Dimension.dim_param, field 2) has no static extent and is recorded
-            // as -1, so downstream shape inference treats it as the unknown/dynamic axis.
-            static void parseValueInfo(Reader r, std::string &name, Shape &shape, int32_t &elem) {
+            // as -1, so downstream shape inference treats it as the unknown/dynamic axis. When @p dimParams
+            // is non-null it is filled parallel to @p shape: the symbol/expression string of a symbolic
+            // axis (the raw dim_param, e.g. "past_sequence_length" or "past_sequence_length + sequence_length")
+            // and an empty string for a concrete axis, so a dynamic dim can later be resolved by binding its
+            // symbol instead of a full per-tensor shape.
+            static void parseValueInfo(Reader r, std::string &name, Shape &shape, int32_t &elem,
+                                       std::vector<std::string> *dimParams = nullptr) {
                 uint32_t f, w;
                 while (r.tag(f, w))
                 {
@@ -183,9 +188,10 @@ namespace vknn {
                                         {
                                             if (f4 == 1)
                                             { // dim
-                                                Reader   dim = sh.sub();
-                                                uint32_t f5, w5;
-                                                int64_t  val = -1;
+                                                Reader      dim = sh.sub();
+                                                uint32_t    f5, w5;
+                                                int64_t     val = -1;
+                                                std::string param; // dim_param symbol/expression, empty when concrete
                                                 while (dim.tag(f5, w5))
                                                 {
                                                     if (f5 == 1)
@@ -193,15 +199,18 @@ namespace vknn {
                                                         val = (int64_t) dim.varint(); // dim_value
                                                     } else if (f5 == 2)
                                                     {
-                                                        dim.str();
-                                                        val = -1;
-                                                    } // dim_param (dynamic)
-                                                    else
+                                                        param = dim.str(); // dim_param: retain the symbol name/expression
+                                                        val   = -1;
+                                                    } else
                                                     {
                                                         dim.skip(w5);
                                                     }
                                                 }
                                                 shape.push_back(val);
+                                                if (dimParams)
+                                                {
+                                                    dimParams->push_back(std::move(param));
+                                                }
                                             } else
                                             {
                                                 sh.skip(w4);
