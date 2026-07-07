@@ -3,7 +3,9 @@
 // nodes to the expected backends with the expected refusal reasons. A change in gate behavior or
 // reason vocabulary fails here before it silently shifts the scratchpad oracle snapshots.
 #include "core/vk_gates.h"
+#include "import/passes_internal.h" // gpuFlatNode
 #include "vknn/graph.h"
+#include "vknn/op_descriptor.h"
 #include <gtest/gtest.h>
 
 using namespace vknn;
@@ -536,5 +538,98 @@ TEST(SupportReport, ClipRuntimeBoundsRunOnGpu) {
         ASSERT_EQ(rows.size(), 1u);
         EXPECT_EQ(rows[0].backend, "vulkan");
         EXPECT_TRUE(rows[0].reason.empty());
+    }
+}
+
+TEST(OpDescriptor, LayoutClassAgreesWithGpuFlatNode) {
+    // Anti-drift canary for the per-op capability descriptor (op_descriptor.cpp). gpuFlatNode reads
+    // opDescriptor(t).layout instead of its own OpType list, so the two cannot drift for
+    // LayoutClass::Flat/Nc4. This test proves it: a LayoutClass::Flat op reports flat, a
+    // LayoutClass::Nc4 op reports NC4HW4, for EVERY node regardless of shape (both short-circuit
+    // before gpuFlatNode's per-node switch). LayoutClass::ShapeDependent ops are exactly the set the
+    // switch keeps a per-node predicate for; that set is enumerated here and cross-checked, so adding
+    // a ShapeDependent op without a switch arm (or vice versa) fails here.
+    auto isShapeDependent = [](OpType t) {
+        switch (t)
+        {
+            case OpType::ConvTranspose:
+            case OpType::Pad:
+            case OpType::Gather:
+            case OpType::Split:
+            case OpType::ScatterND:
+            case OpType::TopK:
+            case OpType::Einsum:
+            case OpType::Softmax:
+            case OpType::Concat:
+            case OpType::Binary:
+            case OpType::Add:
+            case OpType::FusedPointwise:
+                return true;
+            default:
+                return false;
+        }
+    };
+    // A minimally-populated node whose shape fields never crash the Flat/Nc4 short-circuit (those
+    // paths ignore the node contents entirely).
+    Graph    g;
+    TensorId a = tensor(g, "a", {1, 4, 4, 4});
+    TensorId b = tensor(g, "b", {1, 4, 4, 4});
+    for (int i = 1; i <= (int) OpType::QGemm; ++i)
+    {
+        OpType             t  = (OpType) i;
+        const OpDescriptor &d = opDescriptor(t);
+        // The descriptor's ShapeDependent set must be exactly the switch's predicate set.
+        EXPECT_EQ(d.layout == LayoutClass::ShapeDependent, isShapeDependent(t))
+            << "descriptor/gpuFlatNode disagree on whether " << opTypeName(t) << " is shape-dependent";
+        if (d.layout == LayoutClass::ShapeDependent)
+        {
+            continue; // the value is a per-node function; nothing fixed to assert
+        }
+        Node n;
+        n.type    = t;
+        n.name    = opTypeName(t);
+        n.inputs  = {a, b};
+        n.outputs = {b};
+        bool flat = gpuFlatNode(g, n);
+        if (d.layout == LayoutClass::Flat)
+        {
+            EXPECT_TRUE(flat) << opTypeName(t) << " is LayoutClass::Flat but gpuFlatNode returned NC4HW4";
+        } else
+        {
+            EXPECT_FALSE(flat) << opTypeName(t) << " is LayoutClass::Nc4 but gpuFlatNode returned flat";
+        }
+    }
+}
+
+TEST(OpDescriptor, FusionRolesAreStable) {
+    // Locks the descriptor's fusion-role flags (read by fusePointwiseChains' pwEligibleNode /
+    // pwEpilogueCapable). pwMember is the per-element member set; pwEpilogue is the epilogue-host set.
+    // A change here means the fusion surface moved and must be re-reviewed against the _epi kernels.
+    auto expectMember = [](OpType t, bool want) {
+        EXPECT_EQ(opDescriptor(t).pwMember, want) << opTypeName(t) << " pwMember";
+    };
+    for (OpType t: {OpType::Binary, OpType::Add, OpType::Unary, OpType::Clip, OpType::Relu, OpType::PRelu,
+                    OpType::Where, OpType::Greater, OpType::GreaterEqual, OpType::Less, OpType::LessEqual, OpType::Equal})
+    {
+        expectMember(t, true);
+    }
+    for (OpType t: {OpType::Conv, OpType::MatMul, OpType::Gemm, OpType::Softmax, OpType::Reduce, OpType::Concat})
+    {
+        expectMember(t, false); // epilogue hosts / structural ops are not pointwise members
+    }
+
+    auto expectEpi = [](OpType t, bool want) {
+        EXPECT_EQ(opDescriptor(t).pwEpilogue, want) << opTypeName(t) << " pwEpilogue";
+    };
+    for (OpType t: {OpType::MatMul, OpType::Gemm, OpType::Conv, OpType::ConvGemm, OpType::ConvTranspose,
+                    OpType::FusedDwPw, OpType::Softmax, OpType::LayerNorm, OpType::Reduce, OpType::GridSample,
+                    OpType::Resize, OpType::MaxPool, OpType::AvgPool, OpType::GlobalAvgPool, OpType::Transpose,
+                    OpType::Slice, OpType::Concat})
+    {
+        expectEpi(t, true);
+    }
+    for (OpType t: {OpType::Relu, OpType::Clip, OpType::Unary, OpType::Binary, OpType::Add, OpType::Where})
+    {
+        expectEpi(t, false); // pointwise members are not themselves epilogue hosts
     }
 }

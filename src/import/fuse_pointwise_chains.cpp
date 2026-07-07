@@ -62,25 +62,12 @@ namespace vknn {
 
     // Per-element ops eligible to join a fused-pointwise unit. Every input and the output must be
     // float-typed (comparisons on int/shape tensors and int Casts stay out), the output shape must
-    // be resolved, and the output must not be fp32-pinned.
+    // be resolved, and the output must not be fp32-pinned. The eligible OpType set is the descriptor's
+    // pwMember flag; the shape/dtype/bound checks below are the per-node part.
     static bool pwEligibleNode(const Graph &g, const Node &n) {
-        switch (n.type)
+        if (!opDescriptor(n.type).pwMember)
         {
-            case OpType::Binary:
-            case OpType::Add:
-            case OpType::Unary:
-            case OpType::Clip:
-            case OpType::Relu:
-            case OpType::PRelu:
-            case OpType::Where:
-            case OpType::Greater:
-            case OpType::GreaterEqual:
-            case OpType::Less:
-            case OpType::LessEqual:
-            case OpType::Equal:
-                break;
-            default:
-                return false;
+            return false;
         }
         if (n.outputs.size() != 1 || n.outputs[0] == kNoTensor || n.inputs.empty())
         {
@@ -110,32 +97,12 @@ namespace vknn {
     }
 
     // Ops whose kernel can apply a pointwise-unit epilogue at its store (the unit folds into the
-    // producer instead of a standalone node). Every listed type's GPU kernel family carries an _epi
-    // variant reading pw_steps; anything else keeps the standalone FusedPointwise node.
+    // producer instead of a standalone node). An epilogue-capable type's GPU kernel family carries an
+    // _epi variant reading pw_steps; anything else keeps the standalone FusedPointwise node. The set
+    // is the descriptor's pwEpilogue flag (Conv/Gemm/MatMul/ConvGemm/ConvTranspose/FusedDwPw/Softmax/
+    // LayerNorm/Reduce/GridSample/Resize/MaxPool/AvgPool/GlobalAvgPool/Transpose/Slice/Concat).
     static bool pwEpilogueCapable(OpType t) {
-        switch (t)
-        {
-            case OpType::MatMul:
-            case OpType::Gemm:
-            case OpType::Conv:
-            case OpType::ConvGemm:
-            case OpType::ConvTranspose:
-            case OpType::FusedDwPw:
-            case OpType::Softmax:
-            case OpType::LayerNorm:
-            case OpType::Reduce:
-            case OpType::GridSample:
-            case OpType::Resize:
-            case OpType::MaxPool:
-            case OpType::AvgPool:
-            case OpType::GlobalAvgPool:
-            case OpType::Transpose: // flat_gather _epi: fold consumers into the Transpose/Slice store,
-            case OpType::Slice:     // dropping their dispatch AND the materialized gather output
-            case OpType::Concat:    // per-part stores apply the unit in output space (concat/flat_scatter _epi)
-                return true;
-            default:
-                return false;
-        }
+        return opDescriptor(t).pwEpilogue;
     }
 
     // Broadcast class of tensor `t` against the unit's run shape: 0 same-shape, 3 scalar splat,

@@ -116,5 +116,6 @@ element through `cpu::elemCount`.
   correct fallback (ConvertLayout gained a CPU kernel for this reason).
 - Quantized accuracy is dequantized-execution accuracy, stated as such in the docs and tools — it
   is not, and does not claim to be, int-exact.
-- Adding an operator now also touches the shared `vk_gates.cpp` capability gate and `gpuFlatNode`;
-  `docs/adding-an-operator.md` lists these.
+- Adding an operator now also touches the shared `vk_gates.cpp` capability gate and, for its
+  OpType-keyed layout/fusion facts, the one-row-per-op `op_descriptor.cpp` table that `gpuFlatNode`
+  and the pointwise-fusion pass consult; `docs/adding-an-operator.md` lists these.

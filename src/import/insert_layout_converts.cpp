@@ -6,31 +6,26 @@ namespace vknn {
     // Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
     // Concat that isn't 4D channel-axis 4-aligned; Binary/Add with a constant operand or a broadcast/
     // rank that the packed kernel doesn't handle.
+    //
+    // The per-OpType layout fact lives in opDescriptor(): LayoutClass::Flat is unconditionally flat,
+    // LayoutClass::Nc4 unconditionally NC4HW4. Only LayoutClass::ShapeDependent ops keep a per-node
+    // predicate below; the switch handles exactly those (the anti-drift test asserts the two agree).
     bool gpuFlatNode(const Graph &g, const Node &n) {
         auto sh = [&](TensorId t) -> const Shape & {
             return g.desc(t).shape;
         };
+        LayoutClass lc = opDescriptor(n.type).layout;
+        if (lc == LayoutClass::Flat)
+        {
+            return true;
+        }
+        if (lc == LayoutClass::Nc4)
+        {
+            return false;
+        }
+        // LayoutClass::ShapeDependent: the layout is a per-node function of shapes/attributes.
         switch (n.type)
         {
-            case OpType::Transpose:
-            case OpType::Slice:
-            case OpType::Expand:       // numpy broadcast to a target shape, flat row-major gather
-            case OpType::Tile:         // repeat each dim, flat row-major gather
-            case OpType::LayerNorm:    // always flat: reduce over the trailing axes, row-major
-            case OpType::DepthToSpace: // spatial<->channel index remap, flat row-major gather
-            case OpType::Reduce:       // generic N-D reduce (incl. ReduceL2) runs flat
-            case OpType::MatMul:       // batched N-D matmul runs on the flat row-major path
-            case OpType::Where:        // cond?X:Y, broadcasting flat select
-            case OpType::Equal:        // A==B, broadcasting flat compare
-            case OpType::Greater:      // A>B,  broadcasting flat compare
-            case OpType::GreaterEqual: // A>=B, broadcasting flat compare
-            case OpType::Less:         // A<B,  broadcasting flat compare
-            case OpType::LessEqual:    // A<=B, broadcasting flat compare
-            case OpType::Range:              // 1-D arange, flat fill
-            case OpType::ConstantOfShape:    // scalar fill, flat
-            case OpType::QuantizeLinear:     // affine quant, flat row-major (embedding tables are 2-D)
-            case OpType::DequantizeLinear:   // affine dequant, flat row-major
-                return true;
             case OpType::ConvTranspose: {
                 // Flat row-major transposed conv (one thread per output element, gather form). Needs a
                 // 4D input and a weight input; the weight/bias may be constant (uploaded flat) or a
@@ -60,8 +55,6 @@ namespace vknn {
                 // Flat row-major gather along an axis; index may be constant or a runtime float activation
                 // (RoPE).
                 return n.inputs.size() >= 2;
-            case OpType::Clip:
-                return true; // flat elementwise clamp (geometry-tail Clip is rank-6, can't be NC4HW4)
             case OpType::Split: {
                 // Channel-axis 4-aligned split stays NC4HW4 (contiguous block copy); any other split is flat.
                 const Shape &in   = sh(n.inputs[0]);
@@ -188,6 +181,8 @@ namespace vknn {
                 // The fusion pass records the chain's own layout (all steps agree) in pw_flat.
                 return n.attr.geti("pw_flat", 0) != 0;
             default:
+                // A ShapeDependent descriptor with no arm here (a mis-registration): fall back to the
+                // NC4HW4 default, matching a plain Nc4 op.
                 return false;
         }
     }

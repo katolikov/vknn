@@ -349,16 +349,36 @@ exact gate the device engine runs, with no chance of the two drifting.
   runtime operand the kernel can't bind, an unresolved output shape); model it on the
   `Pad` / `ConstantOfShape` / `TopK` cases.
 
-### 3d. Flat vs NC4HW4: `gpuFlatNode`
+### 3d. The capability descriptor: `op_descriptor.cpp`
 
-VKNN has two GPU layouts — the CNN-default `NC4HW4` and a **flat row-major** path for
-generic N-D ops. `gpuFlatNode()` in `src/import/insert_layout_converts.cpp` is the
-switch that decides which layout an op runs in; the layout pass splices
-`ConvertLayout` nodes at the boundary between the two. A pointwise op that processes
-the packed buffer element-by-element (like `LeakyRelu`) stays on the NC4HW4 path and
-needs no entry here. Add a case to `gpuFlatNode` only if the kernel reasons about
-logical N-D shape (a gather/broadcast/reduce/matmul-shaped op), and keep it in sync
-with the matching `vkNodeGate` case so the two agree on which nodes are GPU-eligible.
+The OpType-keyed capability facts an op declares — its GPU **layout class** and its
+**pointwise-fusion roles** — live in one row of the table in `src/core/op_descriptor.cpp`
+(`opDescriptor(OpType)`, declared in `include/vknn/op_descriptor.h`). The layout classifier
+(`gpuFlatNode`) and the pointwise-fusion pass read that table instead of each keeping a parallel
+`OpType` switch, so these facts are edited in one place, not three. The `OpDescriptor` fields:
+
+- **`layout`** (`LayoutClass`) — how the op's kernel reads its tensors. VKNN has two GPU layouts:
+  the CNN-default `NC4HW4` (channels packed in `vec4` blocks) and a **flat row-major** path for
+  generic N-D ops; the layout pass splices `ConvertLayout` nodes at the boundary. `LayoutClass::Nc4`
+  (the default) is the pointwise / CPU-only case — a `LeakyRelu` that processes the packed buffer
+  element-by-element stays here and needs no entry. Use `LayoutClass::Flat` for an op whose kernel
+  reasons about logical N-D shape at *every* node (a gather/broadcast/reduce/matmul/compare-shaped
+  op). Use `LayoutClass::ShapeDependent` only when the layout is a per-node function of shapes or
+  attributes (e.g. `Concat` that isn't 4D channel-axis 4-aligned goes flat, otherwise NC4HW4) —
+  then add the matching per-node arm to the `switch` in `gpuFlatNode`
+  (`src/import/insert_layout_converts.cpp`), and keep it in sync with the `vkNodeGate` case so the
+  two agree on which nodes are GPU-eligible. A pure pointwise op needs `Nc4` (the default) and no
+  `gpuFlatNode` arm.
+- **`pwMember`** — set `true` for a per-element op that can join a fused-pointwise unit (a new
+  member type; the fusion pass still applies its own float-dtype/shape/bound checks per node).
+- **`pwEpilogue`** — set `true` for an op whose GPU kernel family carries an `_epi` store variant
+  that can host a fused pointwise unit (Conv/Gemm/MatMul/pools/Softmax/... do; a bare pointwise op
+  does not).
+
+`LeakyRelu` is a pure pointwise unary, so it takes the all-default row (`Nc4`, not a pw member, no
+epilogue) — no descriptor edit is needed. `op_descriptor.cpp`'s comment header enumerates which
+OpTypes deviate from the default. The `OpDescriptor.LayoutClassAgreesWithGpuFlatNode` test asserts
+the descriptor and `gpuFlatNode` never disagree.
 
 The Vulkan backend's `supports()` then returns `true` for `LeakyRelu`
 (because `VkOpRegistry::instance().has(LeakyRelu)` is true and `vkKernelDeclared`
@@ -526,8 +546,12 @@ Vulkan/CPU segments while keeping the output bit-comparable).
 - [ ] `src/core/vk_gates.cpp`: a `vkNodeGate` case only if the kernel can't take every
       shape/attribute the op admits (pure pointwise needs none); leave `vkKernelDeclared`
       alone unless the op has no GPU kernel.
-- [ ] `src/import/insert_layout_converts.cpp`: a `gpuFlatNode` case only if the op runs
-      on the flat row-major path (an N-D gather/broadcast/reduce/matmul-shaped op).
+- [ ] `src/core/op_descriptor.cpp`: the op's capability row — layout class (`Flat` /
+      `ShapeDependent` / default `Nc4`) and fusion roles (`pwMember` / `pwEpilogue`). This is the
+      single place those OpType-keyed facts live; `gpuFlatNode` and the pointwise-fusion pass read
+      it. A pure pointwise op keeps the all-default row (no edit). Only a `ShapeDependent` layout
+      also needs a per-node arm in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`), kept in
+      sync with its `vkNodeGate` case.
 - [ ] Add a gtest under `tests/` and run it; diff Vulkan output against the CPU reference
       (and against `scripts/get_golden.py` for an external check). Confirm the node lands
       on the GPU with `vknn_compile <model>.onnx out.vxm --support-report r.json`.

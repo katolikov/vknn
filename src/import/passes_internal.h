@@ -5,6 +5,7 @@
 #include "backend/cpu/cpu_backend.h"
 #include "core/conv_geom.h"
 #include "vknn/logging.h"
+#include "vknn/op_descriptor.h"
 #include "vknn/precision.h"
 #include <algorithm>
 #include <cmath>
