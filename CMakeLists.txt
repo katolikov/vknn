@@ -348,7 +348,7 @@ target_link_libraries(vknn PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  set(_vknn_examples probe classify profile readme_quickstart zerocopy_cache zerocopy_simple dmabuf_fd_io predict_cache backend_switch op_check image_bench predict run_io yonosplat)
+  set(_vknn_examples probe classify profile readme_quickstart zerocopy_cache zerocopy_simple dmabuf_fd_io predict_cache backend_switch op_check image_bench predict run_io yonosplat chat)
   if(VKNN_ENABLE_VULKAN)
     # microbench drives Vulkan kernels directly (includes vk_context.h), so it needs the backend.
     list(APPEND _vknn_examples microbench)
