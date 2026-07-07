@@ -72,25 +72,36 @@ namespace vknn {
     /// @returns The payload as fp32 elements.
     inline std::vector<float> initFloats(const Graph &g, TensorId id) {
         const HostBuffer &hb = g.initializers.at(id);
+        const DType       dt = g.desc(id).dtype;
         int64_t           n  = numElements(g.desc(id).shape);
         if (n <= 0)
         {
-            n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4));
+            int64_t es = dt == DType::Float16 ? 2 : (dt == DType::Int64 ? 8 : 4);
+            n          = (int64_t) (hb.bytes.size() / es);
         }
         std::vector<float> out((size_t) std::max<int64_t>(n, 0));
-        if (g.desc(id).dtype == DType::Float16)
+        if (dt == DType::Float16)
         {
             const fp16_t *h = reinterpret_cast<const fp16_t *>(hb.bytes.data());
             for (int64_t i = 0; i < n; ++i)
             {
                 out[i] = halfToFloat(h[i]);
             }
+        } else if (dt == DType::Int64)
+        {
+            // Int64 initializers keep raw 8-byte lanes (never widened to fp32 at import), so a bare fp32
+            // read would misinterpret the bytes. Const-folded boolean masks and shape/index constants reach
+            // the flat GPU ops (And / Equal / Where cond) as Int64 -- decode the lanes to fp32 the same way
+            // the CPU oracle reads them, so an Int64 constant operand loads its true 0/1 (or index) value.
+            const int64_t *v = hb.i64();
+            for (int64_t i = 0; i < n; ++i)
+            {
+                out[i] = (float) v[i];
+            }
         } else
         {
-            // Every non-fp16 initializer materializes to fp32 host bytes at import (FLOAT / FLOAT16 /
-            // DOUBLE and the widened INT8 / UINT8 / INT32 quant payloads), so a plain fp32 read recovers
-            // the value. INT64 initializers (raw 8-byte lanes) never reach this path -- they flow through
-            // the int64-specific readers -- so they are not decoded here.
+            // FLOAT / DOUBLE and the widened INT8 / UINT8 / INT32 quant payloads all materialize to fp32
+            // host bytes at import, so a plain fp32 read recovers the value.
             const float *f = hb.f32();
             for (int64_t i = 0; i < n; ++i)
             {
