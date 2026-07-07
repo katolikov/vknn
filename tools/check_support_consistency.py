@@ -34,10 +34,19 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_DEFAULT = os.path.dirname(HERE)
 
-# OpTypes that legitimately have no CPU kernel file (structural / handled inline). Keep small and
-# justified; each entry is an op the importer recognizes but the CPU backend never instantiates.
+# OpTypes that legitimately have no CPU kernel file. Each is an op the importer recognizes but the
+# backend never instantiates because an import pass rewrites or removes it before planning:
+#   - the quantized family is lowered to float ops by dequantizeGraph (ADR-0012 §2)
+#   - Dropout is removed in inference mode by eliminateDropout
+#   - InstanceNorm is decomposed to ReduceMean/Sub/Mul/Add by lowerInstanceNorm
+# plus the fallthrough sentinel. Keep small and justified.
 CPU_KERNEL_EXEMPT = {
     "kUnknown",  # the fallthrough sentinel, never a real op
+    # Quantized family — lowered to float ops at import; never reaches a backend.
+    "QLinearConv", "QLinearMatMul", "QLinearAdd", "QLinearGlobalAveragePool", "QGemm",
+    "MatMulInteger", "ConvInteger", "DynamicQuantizeLinear",
+    "Dropout",       # eliminated in inference mode at import
+    "InstanceNorm",  # decomposed into existing ops at import
 }
 
 
