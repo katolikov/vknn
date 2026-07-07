@@ -144,4 +144,9 @@ namespace vknn {
     // nodes at the fp16/fp32 frontier (Config::fp32Tensors). Runs at load, after insertLayoutConverts.
     void markFp32(Graph &g, const std::string &substrs);
 
+    // Pin every GPU Gather's runtime index (and the pure producer chain feeding it) to fp32 storage.
+    // An index is an integer (token id / position) whose value can exceed the fp16 range, so an fp16
+    // store would corrupt the lookup. Runs at load, after insertLayoutConverts, before markFp32.
+    void pinGatherIndexFp32(Graph &g);
+
 } // namespace vknn

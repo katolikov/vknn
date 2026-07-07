@@ -1,11 +1,13 @@
 #version 450
 #include "precision.glsl"
-// Gather along one axis; data, index, and output use STORE (fp16/fp32). Negative indices wrap by
-// axisSize.
+// Gather along one axis; data and output use STORE (fp16/fp32). The index is ALWAYS fp32: an index is
+// an integer (a token id up to the vocab size, a position), and fp16 cannot hold an integer above 2048
+// exactly or above 65504 at all (75698 would store as +inf), which would land the lookup on the wrong
+// row. Negative indices wrap by axisSize.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
-layout(std430, binding = 1) readonly  buffer I { STORE idx[]; };
+layout(std430, binding = 1) readonly  buffer I { float idx[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int total, outer, axisSize, inner, nIdx; } pc;
 

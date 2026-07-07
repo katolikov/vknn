@@ -1522,10 +1522,12 @@ namespace vknn {
                                 d[i] = (float) s[i];
                             }
                         }
-                        VulkanBackend::packToBuffer(bit->second.get(), f32, useFp16_, flat);
+                        // A storeFp32 boundary (a pinned Gather index) keeps its 4-byte fp32 buffer, so an
+                        // integer index above the fp16 range is not narrowed to +inf at upload.
+                        VulkanBackend::packToBuffer(bit->second.get(), f32, g_.desc(tid).storeFp32 ? false : useFp16_, flat);
                     } else
                     {
-                        VulkanBackend::packToBuffer(bit->second.get(), rt, useFp16_, flat);
+                        VulkanBackend::packToBuffer(bit->second.get(), rt, g_.desc(tid).storeFp32 ? false : useFp16_, flat);
                     }
                     rt.deviceValid  = true;
                     rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;

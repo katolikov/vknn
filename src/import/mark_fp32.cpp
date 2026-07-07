@@ -49,30 +49,32 @@ namespace vknn {
     // Initializers are skipped: ops upload them at the node's precision (env.useFp16). Runs at load, after
     // insertLayoutConverts, so it operates on the final flat names.
     void markFp32(Graph &g, const std::string &substrs) {
-        if (substrs.empty())
-        {
-            return;
-        }
-        auto matches = [&](const std::string &nm) {
-            return fp32NameMatch(nm, substrs);
-        };
-        // Only flat tensors are eligible: the flat transformer/geometry kernels all #include precision.glsl
-        // so an fp32 SPIR-V variant exists, whereas the NC4HW4 conv family (conv/wino/dwconv/fc/pool) is
-        // hand-written fp16-only. Marking an NC4HW4 tensor would request a non-existent fp32 kernel.
+        // Substring marks from Config::fp32Tensors are additive on top of any storage an earlier pass
+        // already pinned to fp32 (pinGatherIndexFp32's index chains). Only flat tensors are eligible for a
+        // substring mark: the flat transformer/geometry kernels all #include precision.glsl so an fp32
+        // SPIR-V variant exists, whereas the NC4HW4 conv family (conv/wino/dwconv/fc/pool) is hand-written
+        // fp16-only. Marking an NC4HW4 tensor would request a non-existent fp32 kernel.
         int marked = 0;
-        for (auto &t: g.tensors)
+        if (!substrs.empty())
         {
-            if (!t.isInitializer && t.gpuFlat && matches(t.name))
+            auto matches = [&](const std::string &nm) {
+                return fp32NameMatch(nm, substrs);
+            };
+            for (auto &t: g.tensors)
             {
-                t.storeFp32 = true;
-                ++marked;
+                if (!t.isInitializer && t.gpuFlat && matches(t.name))
+                {
+                    t.storeFp32 = true;
+                    ++marked;
+                }
+            }
+            if (!marked)
+            {
+                VKNN_INFO << "markFp32: no tensor matched fp32Tensors=\"" << substrs << "\"";
             }
         }
-        if (!marked)
-        {
-            VKNN_INFO << "markFp32: no tensor matched fp32Tensors=\"" << substrs << "\"";
-            return;
-        }
+        // The frontier walk below runs whether or not a substring matched, so a chain pinned by an earlier
+        // pass still gets its ConvertDtype bridges. With nothing anywhere in fp32 it is a pure no-op.
         // A kernel writes every output in ONE storage precision (its outputs[0]'s), so all outputs
         // of a multi-output node must share a mark — a fused unit's exported stream (pw_outs) pinned
         // differently from the main output would be written half-empty (fp16 stores into an fp32
@@ -107,11 +109,19 @@ namespace vknn {
                 continue;
             }
             bool nodeFp32 = g.desc(nd.outputs[0]).storeFp32; // the precision this node's kernel runs in
-            for (TensorId &in: nd.inputs)
+            for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
             {
+                TensorId &in = nd.inputs[inIdx];
                 if (in == kNoTensor || g.isInitializer(in))
                 {
                     continue; // initializers upload at the node's precision (env.useFp16)
+                }
+                // A Gather reads its index (input 1) as fp32 no matter the kernel's compute precision
+                // (gather.comp binding 1 is float), so a pinned fp32 index must not be narrowed back to
+                // fp16 by a frontier convert -- that would re-overflow a large token id to +inf.
+                if (nd.type == OpType::Gather && inIdx == 1)
+                {
+                    continue;
                 }
                 if (g.desc(in).storeFp32 == nodeFp32)
                 {
@@ -149,6 +159,60 @@ namespace vknn {
             g.topoSort();
         }
         VKNN_INFO << "markFp32: marked " << marked << " tensor(s) fp32, inserted " << converts.size() << " convert(s)";
+    }
+
+    void pinGatherIndexFp32(Graph &g) {
+        // Last writer of each tensor, so the index can be traced back to its boundary source.
+        std::vector<int> producer(g.tensors.size(), -1);
+        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        {
+            for (TensorId o: g.nodes[ni].outputs)
+            {
+                if (o != kNoTensor)
+                {
+                    producer[(size_t) o] = ni;
+                }
+            }
+        }
+        int pinned = 0;
+        for (const auto &nd: g.nodes)
+        {
+            if (nd.type != OpType::Gather || nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
+            {
+                continue;
+            }
+            // A constant index is uploaded fp32 by the op itself, so only a runtime index needs pinning.
+            // Walk it up through pure passthrough producers (the ConvertLayout the flat pass splices in) to
+            // the boundary input, pinning every hop to fp32 so an integer index never rounds to fp16 (a
+            // token id above 65504 would otherwise store as +inf and the lookup would read the wrong row).
+            TensorId t = nd.inputs[1];
+            for (int hop = 0; t != kNoTensor && !g.isInitializer(t) && hop < 64; ++hop)
+            {
+                if (g.desc(t).storeFp32)
+                {
+                    break; // already pinned (a shared index, or a prior hop)
+                }
+                g.desc(t).storeFp32 = true;
+                ++pinned;
+                int p = producer[(size_t) t];
+                if (p < 0)
+                {
+                    break; // graph-input boundary: pinned, nothing upstream to follow
+                }
+                const Node &pn = g.nodes[(size_t) p];
+                if (pn.type == OpType::ConvertLayout && pn.inputs.size() == 1)
+                {
+                    t = pn.inputs[0]; // same values, different layout -- keep pinning toward the source
+                } else
+                {
+                    break; // a real op computes the index; its (now-pinned) output runs fp32 via nodeFp32
+                }
+            }
+        }
+        if (pinned)
+        {
+            VKNN_INFO << "pinGatherIndexFp32: pinned " << pinned << " index tensor(s) to fp32";
+        }
     }
 
 } // namespace vknn
