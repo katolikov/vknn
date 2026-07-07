@@ -10,6 +10,7 @@
 #   4. ./build.sh --docs                the static documentation site
 #   5. tools/check_support_consistency.py  op.cpp <-> support-tool self-consistency (no model)
 #   6. tools/check_epi_sync.py          epilogue-shader sync check, if present (else skipped)
+#   6b. tools/check_shader_contracts.py store16 / VKNN_NO_RTE / gid-recovery contracts, if present
 #   7. clang-format --dry-run -Werror   format drift over include/src/examples/tests (never edits).
 #                                       ADVISORY by default — clang-format's include-sort/comment
 #                                       behavior changes between versions, so a newer local
@@ -94,11 +95,19 @@ fi
 # 5. support-tool self-consistency (no model, no device)
 step "check_support_consistency.py" python3 "$ROOT/tools/check_support_consistency.py"
 
-# 6. epilogue-shader sync check, if it exists (audit fix #5; not present yet -> skip cleanly)
+# 6. epilogue-shader sync check, if it exists (skip cleanly when absent)
 if [ -f "$ROOT/tools/check_epi_sync.py" ]; then
   step "check_epi_sync.py" python3 "$ROOT/tools/check_epi_sync.py"
 else
   skip "check_epi_sync.py" "tool not present in this tree"
+fi
+
+# 6b. shader-contract lint (store16 / VKNN_NO_RTE / gid-recovery), if it exists. Fatal contracts
+# fail the gate; advisory checks stay advisory here (run with --strict to enforce them).
+if [ -f "$ROOT/tools/check_shader_contracts.py" ]; then
+  step "check_shader_contracts.py" python3 "$ROOT/tools/check_shader_contracts.py"
+else
+  skip "check_shader_contracts.py" "tool not present in this tree"
 fi
 
 # 7. clang-format drift (dry-run, never edits). Advisory unless --strict-format (step-7 note).
