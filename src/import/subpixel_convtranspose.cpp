@@ -71,7 +71,10 @@ namespace vknn {
             int     R = (int) (kH / sh), S = (int) (kW / sw);
             auto    CyOf = [&](int a) { return (int) ((a + padH) / sh); };
             auto    CxOf = [&](int b) { return (int) ((b + padW) / sw); };
-            int     tyMin = 1 << 30, tyMax = -(1 << 30), txMin = 1 << 30, txMax = -(1 << 30);
+            // Seed the tap-index min/max reductions past any real tap index (taps are small kernel
+            // offsets), so the first CyOf/CxOf sample always replaces the sentinel.
+            constexpr int kTapIndexSentinel = 1 << 30;
+            int     tyMin = kTapIndexSentinel, tyMax = -kTapIndexSentinel, txMin = kTapIndexSentinel, txMax = -kTapIndexSentinel;
             for (int a = 0; a < (int) sh; ++a)
             {
                 tyMin = std::min(tyMin, CyOf(a) - R + 1);
