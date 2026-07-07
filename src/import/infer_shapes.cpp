@@ -137,6 +137,7 @@ namespace vknn {
                 case OpType::IsNaN:          // elementwise NaN test: bool output, same shape as input
                 case OpType::Softmax:
                 case OpType::LayerNorm:
+                case OpType::RMSNorm: // y = x*rsqrt(mean(x^2)+eps)*gamma over the last axis: same shape as input
                 case OpType::PRelu:
                 case OpType::EyeLike:        // identity-like, same shape as input
                 case OpType::ScatterND:      // same shape as data (input[0])

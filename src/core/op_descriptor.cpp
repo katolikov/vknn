@@ -18,8 +18,8 @@ namespace vknn {
     namespace {
         using L = LayoutClass;
 
-        // The largest enum value (append-only; And is last). The table is sized to cover it.
-        constexpr int kMaxOp = (int) OpType::And;
+        // The largest enum value (append-only; RMSNorm is last). The table is sized to cover it.
+        constexpr int kMaxOp = (int) OpType::RMSNorm;
 
         struct Table {
             OpDescriptor d[kMaxOp + 1];
@@ -46,6 +46,7 @@ namespace vknn {
                 set(OpType::Tile, L::Flat, false, false);
                 set(OpType::Softmax, L::ShapeDependent, false, true);
                 set(OpType::LayerNorm, L::Flat, false, true);
+                set(OpType::RMSNorm, L::Flat, false, true);
                 set(OpType::Concat, L::ShapeDependent, false, true);
                 set(OpType::Pad, L::ShapeDependent, false, false);
                 set(OpType::Gather, L::ShapeDependent, false, false);

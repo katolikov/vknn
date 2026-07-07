@@ -142,6 +142,8 @@ namespace vknn {
                 return "IsNaN";
             case OpType::And:
                 return "And";
+            case OpType::RMSNorm:
+                return "RMSNorm";
             default:
                 return "Unknown";
         }

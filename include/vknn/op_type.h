@@ -88,6 +88,9 @@ namespace vknn {
         QGemm,                    // com.microsoft: Gemm on int8 a/b with scales/zps, int32 bias
         IsNaN,                    // elementwise NaN test: float -> bool (1.0/0.0), same shape (flat path)
         And,                      // elementwise boolean AND with NumPy broadcasting -> 1.0/0.0 (flat path)
+        RMSNorm,                  // root-mean-square norm: y = x*rsqrt(mean(x^2,last-axis)+eps)*gamma.
+                                  // Created by lowerRMSNorm (a Pow/ReduceMean/Add/Sqrt/rsqrt/Mul chain),
+                                  // never parsed from ONNX; fp32 sum-of-squares in a fused flat kernel.
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

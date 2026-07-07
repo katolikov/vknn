@@ -1,0 +1,51 @@
+#version 450
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
+#include "common.glsl"
+// RMSNormalization, one workgroup per row. The threads cooperatively reduce the row's sum of squares
+// through LDS (fp32), so a wide row (norm = 896 in Qwen2.5-0.5B) is parallelised across the workgroup
+// instead of walked by one thread. Accumulating in fp32 regardless of storage tier is what makes the
+// fused op correct at fp16 storage, where the decomposed Pow/ReduceMean chain lost the wide sum of
+// squares. y = x * inversesqrt(mean(x^2) + eps) * gamma -- no mean subtraction, no bias. Row index
+// spans a 2D workgroup grid (ComputePipeline::dispatch spills the count into y past the per-dim limit).
+#define WG 256
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer S { STORE s[]; };
+layout(std430, binding = 1) readonly buffer G { STORE gamma[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(push_constant) uniform PC { int outer, norm; float eps; } pc;
+
+shared float rsq[WG];
+
+void main() {
+  uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (row >= uint(pc.outer)) return;
+  int base = int(row) * pc.norm;
+  uint t = gl_LocalInvocationID.x;
+
+  float pq = 0.0;
+  for (int j = int(t); j < pc.norm; j += WG) {
+    float v = float(s[base + j]);
+    pq += v * v;
+  }
+  rsq[t] = pq;
+  barrier();
+  for (uint stride = WG / 2; stride > 0; stride >>= 1) {
+    if (t < stride) {
+      rsq[t] += rsq[t + stride];
+    }
+    barrier();
+  }
+  float inv = inversesqrt(rsq[0] / float(pc.norm) + pc.eps);
+
+  for (int j = int(t); j < pc.norm; j += WG) {
+    float y = float(s[base + j]) * inv * float(gamma[j]);
+#ifdef PW_EPI
+    y = pw_apply(y, base + j);
+#endif
+    d[base + j] = TO_STORE(y);
+  }
+}

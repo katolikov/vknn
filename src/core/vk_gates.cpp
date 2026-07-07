@@ -225,6 +225,16 @@ namespace vknn {
             }
             return true;
         }
+        if (nd.type == OpType::RMSNorm)
+        {
+            // Flat sum-of-squares reduction over the trailing axis. The gamma (scale) input is a 1-D
+            // [norm] tensor uploaded flat in prepare(); its presence is the only requirement.
+            if (nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
+            {
+                return refuse(whyNot, "RMSNorm: missing scale input");
+            }
+            return true;
+        }
         if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And)
         {
             // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
