@@ -126,6 +126,9 @@ namespace vknn {
         eliminateFloatCast(g); // drop float->float casts left by transformer import (post-fold)
         eliminateDeadNodes(g);
         inferShapes(g, batch, declared);  // refresh shapes after fusion/folding
+        lowerRMSNorm(g);        // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate
+                                // RMSNorm kernel; before pointwise fusion so a trailing residual Add can fold
+        inferShapes(g, batch, declared);  // set the RMSNorm output shape (identity rule)
         lowerInstanceNorm(g);   // needs the fixpoint-resolved input shapes; the emitted spatial
                                 // ReduceMeans recover as GlobalAvgPool in the pass below
         lowerReduceToGap(g);    // a late-resolving rank can expose the spatial-mean form
