@@ -112,17 +112,18 @@ namespace vknn {
                 vk::Buffer *updates = operandBuf(env, node.inputs[2], holdUpd);
                 vk::Buffer *idx     = idxBuf ? idxBuf.get() : env.devBuf(node.inputs[1]);
                 vk::Buffer *out     = env.devBuf(node.outputs[0]);
-                // Pass 1: out = copy(data).
-                copyPipe->dispatch(cmd, {data->handle(), out->handle()}, &copyPc, sizeof(copyPc), groups(copyPc.count, 256));
+                // Pass 1: out = copy(data). scatternd_copy.comp is local_size_x=256 == flat::kFlatLocalSize.
+                copyPipe->dispatch(cmd, {data->handle(), out->handle()}, &copyPc, sizeof(copyPc), groups(copyPc.count, flat::kFlatLocalSize));
                 // The framework only barriers BETWEEN nodes (read-after-write across ops); two dispatches
                 // inside one record() are NOT auto-barriered. Pass 2 scatters into the SAME `out` buffer pass 1
                 // wrote, so without this compute->compute barrier the dispatches can overlap and read stale
                 // data.
                 vk::computeBarrier(cmd);
-                // Pass 2: scatter updates into out at the index rows.
+                // Pass 2: scatter updates into out at the index rows. scatternd.comp is local_size_x=256 ==
+                // flat::kFlatLocalSize.
                 if (pc.total > 0)
                 {
-                    scatterPipe->dispatch(cmd, {updates->handle(), idx->handle(), out->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                    scatterPipe->dispatch(cmd, {updates->handle(), idx->handle(), out->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
                 }
             }
         };

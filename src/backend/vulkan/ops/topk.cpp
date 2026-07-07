@@ -68,8 +68,9 @@ namespace vknn {
                 vk::Buffer *vals = env.devBuf(node.outputs[0]);
                 vk::Buffer *idx  = hasIdx ? env.devBuf(node.outputs[1]) : vals;
                 // One invocation per output slice (outer * inner); the shader loops the axis internally.
+                // topk.comp is local_size_x=256 == flat::kFlatLocalSize.
                 int64_t slices = (int64_t) pc.outer * pc.inner;
-                pipe->dispatch(cmd, {src->handle(), vals->handle(), idx->handle()}, &pc, sizeof(pc), groups(slices, 256));
+                pipe->dispatch(cmd, {src->handle(), vals->handle(), idx->handle()}, &pc, sizeof(pc), groups(slices, flat::kFlatLocalSize));
             }
         };
     } // namespace

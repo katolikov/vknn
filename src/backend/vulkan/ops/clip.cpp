@@ -14,6 +14,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x; matches local_size_x in shaders/clip.comp and clip_rt.comp.
+        constexpr uint32_t kClipLocalSize = 256;
+
         // True iff input `idx` is a runtime (non-initializer) tensor that must be read at dispatch.
         inline bool runtimeBound(const Graph &g, const Node &node, int idx) {
             return (int) node.inputs.size() > idx && node.inputs[idx] != kNoTensor && !g.isInitializer(node.inputs[idx]);
@@ -84,16 +87,16 @@ namespace vknn {
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 // operandBuf (not devBuf) so a constant-initializer input[0] uploads flat into hold0 on
-                // first use instead of null-crashing. One flat 1D grid of 256-lane workgroups spans total.
+                // first use instead of null-crashing. One flat 1D grid of kClipLocalSize-lane workgroups spans total.
                 VkBuffer src = operandBuf(env, node.inputs[0], hold0)->handle();
                 if (!runtime)
                 {
-                    pipe->dispatch(cmd, {src, env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                    pipe->dispatch(cmd, {src, env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kClipLocalSize));
                     return;
                 }
                 VkBuffer lo = loBuf ? loBuf->handle() : env.devBuf(node.inputs[1])->handle();
                 VkBuffer hi = hiBuf ? hiBuf->handle() : env.devBuf(node.inputs[2])->handle();
-                pipe->dispatch(cmd, {src, lo, hi, env.devBuf(node.outputs[0])->handle()}, &rtpc, sizeof(rtpc), groups(rtpc.total, 256));
+                pipe->dispatch(cmd, {src, lo, hi, env.devBuf(node.outputs[0])->handle()}, &rtpc, sizeof(rtpc), groups(rtpc.total, kClipLocalSize));
             }
         };
 

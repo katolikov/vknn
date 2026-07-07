@@ -71,8 +71,8 @@ namespace vknn {
                 VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst};
                 epi.append(bufs, node, env, dst);
-                // One flat 1D grid over the output: ceil(total / 256) workgroups of local_size_x=256.
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
+                // One flat 1D grid over the output; flat_reduce.comp is local_size_x=256 == flat::kFlatLocalSize.
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
             }
         };
     } // namespace

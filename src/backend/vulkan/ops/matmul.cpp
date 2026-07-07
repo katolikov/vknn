@@ -322,7 +322,8 @@ namespace vknn {
                 } else
                 {
                     // Naive kernel: one thread per output element over a flat 1-D grid of pc.total lanes.
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
+                    // matmul.comp is local_size_x=256 == flat::kFlatLocalSize.
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
                 }
             }
         };

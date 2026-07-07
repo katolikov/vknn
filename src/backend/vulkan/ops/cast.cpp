@@ -14,6 +14,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x; matches local_size_x in shaders/cast.comp.
+        constexpr uint32_t kCastLocalSize = 256;
+
         struct CastOp: VulkanOp {
             struct PC {
                 int   total;
@@ -78,7 +81,7 @@ namespace vknn {
                 if (truncate)
                 {
                     // 2 SSBO bindings (src, dst); the empty spec-constant vector leaves cast.comp
-                    // unspecialized (local_size_x is fixed at 256 in the shader, matching groups() below).
+                    // unspecialized (local_size_x is fixed at kCastLocalSize in the shader, matching groups() below).
                     pipe = env.pipeline(shader("cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
                 }
             }
@@ -98,7 +101,7 @@ namespace vknn {
                 // channel padding is truncated harmlessly). elemSize matches the compute precision.
                 int elemSize = env.useFp16 ? 2 : 4;
                 pc.total     = (int) (dst->bytes() / elemSize);
-                pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), groups(pc.total, kCastLocalSize));
             }
         };
 

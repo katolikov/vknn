@@ -12,6 +12,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x; matches local_size_x in shaders/dequantize_linear.comp.
+        constexpr uint32_t kDequantizeLocalSize = 256;
+
         // Field order/types mirror dequantize_linear.comp's push_constant block byte-for-byte.
         // total is the flat element count; sCount/zCount the scale/zero_point element counts (sCount 1 ==
         // per-tensor, zCount 0 == absent zero_point); inner the per-axis stride (elements between channel
@@ -77,7 +80,7 @@ namespace vknn {
                 // operandBuf so a constant-initializer data input (rare) uploads flat instead of null-
                 // crashing; the common case is a runtime activation (a quantized Gather output).
                 vk::Buffer *x = operandBuf(env, node.inputs[0], dataHold);
-                pipe->dispatch(cmd, {x->handle(), scaleBuf->handle(), zpBuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, {x->handle(), scaleBuf->handle(), zpBuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kDequantizeLocalSize));
             }
         };
 

@@ -7,6 +7,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x for the NC4HW4 path; matches local_size_x in shaders/binary.comp.
+        constexpr uint32_t kBinaryLocalSize = 256;
+
         struct BinaryPC {
             int count, HW, op;
         };
@@ -57,8 +60,8 @@ namespace vknn {
                 vk::Buffer *a = env.devBuf(node.inputs[0]);
                 vk::Buffer *b = env.devBuf(node.inputs[1]);
                 vk::Buffer *c = env.devBuf(node.outputs[0]);
-                // 256 = the shader's local_size_x; groups() rounds pc.count up to whole workgroups.
-                pipe->dispatch(cmd, {a->handle(), b->handle(), c->handle()}, &pc, sizeof(pc), groups(pc.count, 256));
+                // groups() rounds pc.count up to whole kBinaryLocalSize workgroups.
+                pipe->dispatch(cmd, {a->handle(), b->handle(), c->handle()}, &pc, sizeof(pc), groups(pc.count, kBinaryLocalSize));
             }
         };
 

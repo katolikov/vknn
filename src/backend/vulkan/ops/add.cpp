@@ -6,6 +6,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x for the NC4HW4 path; matches local_size_x in shaders/add.comp.
+        constexpr uint32_t kAddLocalSize = 256;
+
         struct AddPC {
             uint32_t count;
             int      act;
@@ -42,7 +45,7 @@ namespace vknn {
                 vk::Buffer *a = env.devBuf(node.inputs[0]);
                 vk::Buffer *b = env.devBuf(node.inputs[1]);
                 vk::Buffer *y = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {a->handle(), b->handle(), y->handle()}, &pc, sizeof(pc), groups(pc.count, 256));
+                pipe->dispatch(cmd, {a->handle(), b->handle(), y->handle()}, &pc, sizeof(pc), groups(pc.count, kAddLocalSize));
             }
         };
 

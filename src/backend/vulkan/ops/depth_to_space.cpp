@@ -30,9 +30,9 @@ namespace vknn {
                 pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                // 256 = the shader's local_size_x; groups() rounds pc.total (one thread per output
-                // element) up to whole workgroups.
-                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                // One thread per output element; flat_depth_to_space.comp is local_size_x=256 ==
+                // flat::kFlatLocalSize. groups() rounds pc.total up to whole workgroups.
+                pipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
             }
         };
     } // namespace

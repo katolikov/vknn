@@ -13,6 +13,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x; matches local_size_x in shaders/quantize_linear.comp.
+        constexpr uint32_t kQuantizeLocalSize = 256;
+
         // Field order/types mirror quantize_linear.comp's push_constant block byte-for-byte. total is the
         // flat element count; sCount/zCount the scale/zero_point element counts (sCount 1 == per-tensor,
         // zCount 0 == absent); inner the per-axis stride; qLo/qHi the output-dtype saturation range.
@@ -91,7 +94,7 @@ namespace vknn {
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *x = operandBuf(env, node.inputs[0], dataHold);
-                pipe->dispatch(cmd, {x->handle(), scaleBuf->handle(), zpBuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, {x->handle(), scaleBuf->handle(), zpBuf->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kQuantizeLocalSize));
             }
         };
 

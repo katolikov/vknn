@@ -11,6 +11,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x; matches local_size_x in shaders/convtranspose.comp.
+        constexpr uint32_t kConvTransposeLocalSize = 256;
+
         struct ConvTransposeVk: VulkanOp {
             struct PC {
                 int N, Cin, Cout, H, W, outH, outW, kH, kW;
@@ -89,7 +92,7 @@ namespace vknn {
                 VkBuffer              b   = rtBias ? env.devBuf(node.inputs[2])->handle() : bbuf->handle();
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), w, b, dst};
                 epi.append(bufs, node, env, dst);
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, kConvTransposeLocalSize));
             }
         };
 

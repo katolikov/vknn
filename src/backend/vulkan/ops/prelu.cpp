@@ -3,6 +3,9 @@
 
 namespace vknn {
     namespace {
+        // Local workgroup size along x; matches local_size_x in shaders/prelu.comp.
+        constexpr uint32_t kPReluLocalSize = 256;
+
         // Mirrors prelu.comp's push_constant block. count is the NC4HW4 packed lane count
         // (one vec4 per lane); the shader recovers each lane's channel block as (i/HW)%Cb to
         // index the per-block slope. HW = h*w spatial stride, Cb = number of channel blocks.
@@ -39,8 +42,8 @@ namespace vknn {
                 vk::Buffer *s = env.devBuf(node.inputs[0]);
                 vk::Buffer *d = env.devBuf(node.outputs[0]);
                 // Binding order src/slope/dst matches prelu.comp bindings 0/1/2. One flat 1D grid of
-                // 256-wide workgroups (the shader's local_size_x) covers every packed lane in pc.count.
-                pipe->dispatch(cmd, {s->handle(), slope->handle(), d->handle()}, &pc, sizeof(pc), groups(pc.count, 256));
+                // kPReluLocalSize-wide workgroups covers every packed lane in pc.count.
+                pipe->dispatch(cmd, {s->handle(), slope->handle(), d->handle()}, &pc, sizeof(pc), groups(pc.count, kPReluLocalSize));
             }
         };
     } // namespace

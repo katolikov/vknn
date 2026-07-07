@@ -8,6 +8,9 @@
 
 namespace vknn {
     namespace {
+        // Local workgroup size along x; matches local_size_x in shaders/gridsample.comp.
+        constexpr uint32_t kGridSampleLocalSize = 64;
+
         // Field order/types mirror gridsample.comp's push_constant block { N, C, Hin, Win, OH, OW, align }.
         // align is align_corners (0/1), which shifts the grid-to-pixel coordinate mapping in the shader.
         struct GsPC {
@@ -46,8 +49,8 @@ namespace vknn {
                 vk::Buffer           *d    = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {s->handle(), grid->handle(), d->handle()};
                 epi.append(bufs, node, env, d->handle());
-                // Flat 1D grid over the packed output lanes; 64 matches gridsample.comp's local_size_x.
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
+                // Flat 1D grid over the packed output lanes; kGridSampleLocalSize matches gridsample.comp's local_size_x.
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, kGridSampleLocalSize));
             }
         };
     } // namespace

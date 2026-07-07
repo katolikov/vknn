@@ -1,7 +1,7 @@
 // Flat (row-major) GreaterOrEqual on the GPU: out = (a >= b) ? 1 : 0, with
-// N-D broadcasting (rank <= 6). Always runs on the flat path (gpuFlatNode returns true). Constant
-// operands are uploaded flat in prepare(), exactly like Equal. Push-constant block byte-matches
-// shaders/greaterequal.comp.
+// N-D broadcasting up to flat::kMaxRank. Always runs on the flat path (gpuFlatNode returns true).
+// Constant operands are uploaded flat in prepare(), exactly like Equal. Push-constant block
+// byte-matches shaders/greaterequal.comp.
 #include "flat_ops.h"
 #include "vk_op_common.h"
 
@@ -57,7 +57,8 @@ namespace vknn {
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                // One flat invocation per output element; greaterequal.comp is local_size_x=256 == flat::kFlatLocalSize.
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
             }
         };
 

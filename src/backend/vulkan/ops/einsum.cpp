@@ -1,7 +1,6 @@
-// Einsum on the flat GPU path. Only the "i,j->ij" outer product runs on the GPU (the 102 RoPE
-// frequency tables); the batched mat-vec / matmul equations fall back to the CPU op (a handful of
-// tiny tensors in the geometry tail). Either operand may be a constant initializer (uploaded flat)
-// or an activation.
+// Einsum on the flat GPU path. Only the "i,j->ij" outer product runs on the GPU (e.g. RoPE
+// frequency tables); the batched mat-vec / matmul equations fall back to the CPU op. Either operand
+// may be a constant initializer (uploaded flat) or an activation.
 #include "flat_ops.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
@@ -54,8 +53,8 @@ namespace vknn {
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
-                // One flat 1D grid of total output lanes; 256 matches einsum_outer.comp's local_size_x.
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                // One flat 1D grid of total output lanes; einsum_outer.comp is local_size_x=256 == flat::kFlatLocalSize.
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
             }
         };
 
