@@ -87,6 +87,10 @@ namespace vknn {
             }
         } else
         {
+            // Every non-fp16 initializer materializes to fp32 host bytes at import (FLOAT / FLOAT16 /
+            // DOUBLE and the widened INT8 / UINT8 / INT32 quant payloads), so a plain fp32 read recovers
+            // the value. INT64 initializers (raw 8-byte lanes) never reach this path -- they flow through
+            // the int64-specific readers -- so they are not decoded here.
             const float *f = hb.f32();
             for (int64_t i = 0; i < n; ++i)
             {

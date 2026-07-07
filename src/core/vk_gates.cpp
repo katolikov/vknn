@@ -159,38 +159,33 @@ namespace vknn {
         }
         if (nd.type == OpType::ConstantOfShape)
         {
-            // The plan-time output size is the fill count; integer-valued fills (int64 index
-            // tensors) stay on the exact CPU op, as does an unresolved output size.
-            if (g.desc(nd.outputs[0]).shape.empty() || g.desc(nd.outputs[0]).dtype != DType::Float32)
+            // The plan-time output size is the fill count. An integer `value` fills the buffer with the
+            // constant carried as compute-precision float — exact for the index/shape magnitudes these
+            // produce — and the graph boundary repacks the declared int32/int64 dtype on readback. Only
+            // an unresolved output size (data-dependent shape input) stays on the exact CPU op.
+            if (g.desc(nd.outputs[0]).shape.empty())
             {
-                return refuse(whyNot, "ConstantOfShape: unresolved output shape or non-fp32 output");
+                return refuse(whyNot, "ConstantOfShape: unresolved output shape");
             }
-            auto it = nd.attr.map.find("value");
-            if (it == nd.attr.map.end() || it->second.kind != Attr::Ints)
-            {
-                return true;
-            }
-            return refuse(whyNot, "ConstantOfShape: integer fill value");
+            return true;
         }
         if (nd.type == OpType::Range)
         {
-            // The static plan fixes the output size; the scalar values may still be runtime
-            // (read from their buffers at dispatch). int64 ranges (index vectors) const-fold or
-            // stay on the exact CPU op, as does a Range whose size cannot resolve at plan time.
+            // The static plan fixes the output size; the scalar values may still be runtime (read from
+            // their buffers at dispatch). Integer start/limit/delta generate the ramp in compute-precision
+            // float — exact for the index magnitudes these produce — and the graph boundary repacks the
+            // declared int32/int64 dtype on readback. The int64/int32 scalars decode to float at the pack
+            // boundary, so the shader reads them like any float operand. Only a Range whose output size
+            // cannot resolve at plan time stays on the exact CPU op.
             if (nd.inputs.size() < 3 || g.desc(nd.outputs[0]).shape.empty())
             {
                 return refuse(whyNot, "Range: fewer than 3 inputs or unresolved output shape");
             }
-            if (g.desc(nd.outputs[0]).dtype != DType::Float32)
-            {
-                return refuse(whyNot, "Range: non-fp32 output");
-            }
             for (int k = 0; k < 3; ++k)
             {
-                // fp16 covers the scalars a --fp16 compile retyped; the upload decodes them.
-                if (nd.inputs[k] == kNoTensor || (g.desc(nd.inputs[k]).dtype != DType::Float32 && g.desc(nd.inputs[k]).dtype != DType::Float16))
+                if (nd.inputs[k] == kNoTensor)
                 {
-                    return refuse(whyNot, "Range: non-float scalar input");
+                    return refuse(whyNot, "Range: missing scalar input");
                 }
             }
             return true;

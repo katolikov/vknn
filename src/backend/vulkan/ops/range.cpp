@@ -1,8 +1,9 @@
 // Flat Range on the GPU: y[i] = start + i * delta over the plan-time output size. start/delta are
-// scalar operands — constants upload once, runtime scalars bind from their flat buffers (the
-// static plan fixes the element count; the values may still be computed on-GPU). int64 ranges
-// (index vectors) const-fold or stay on the exact CPU op, as does a Range whose size cannot
-// resolve at plan time.
+// scalar operands — constants upload once (int64/int32 lanes decode to fp32 via initFloats), runtime
+// scalars bind from their flat buffers (the static plan fixes the element count; the values may still
+// be computed on-GPU). An integer start/delta generates the ramp in compute-precision float — exact
+// for the index magnitudes these produce — and the graph boundary repacks the declared int32/int64
+// dtype on readback. Only a Range whose size cannot resolve at plan time stays on the exact CPU op.
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
