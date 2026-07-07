@@ -359,7 +359,23 @@ namespace vknn {
         if (magic != kMagic4)
         {
             fclose(f);
-            VKNN_WARN << "loadGraph: bad magic in " << path;
+            // Every VXM magic is the ASCII "VXM<version>" little-endian, so the low three bytes spell
+            // "VXM" and the top byte is the version digit. A recognizable "VXM<n>" with n outside {3,4}
+            // was written by a different engine version (recompile from the .onnx); anything else is not
+            // a .vxm at all (truncated, corrupt, or the wrong file). Both name the fix in the message so
+            // a stale or foreign file explains itself instead of just "bad magic".
+            constexpr uint32_t kVxmPrefix = 0x004d5856; // "VXM" -- low 3 bytes shared by every VXM<n>
+            if ((magic & 0x00ffffffu) == kVxmPrefix)
+            {
+                VKNN_WARN << "loadGraph: " << path << " is a VXM" << (char) (magic >> 24)
+                          << " container from an incompatible vknn version (this build reads VXM3/VXM4)"
+                          << " -- reconvert the model from its .onnx with the current vknn_compile";
+            } else
+            {
+                VKNN_WARN << "loadGraph: bad magic in " << path
+                          << " -- not a valid .vxm (truncated, corrupt, or the wrong file)"
+                          << " -- reconvert from the .onnx with the current vknn_compile";
+            }
             return false;
         }
         // Multi-bucket container: read the shared pool, then each bucket's structure + pool refs.
