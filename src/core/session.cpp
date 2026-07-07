@@ -428,6 +428,10 @@ namespace vknn {
         if (byKind_.count(BackendKind::Vulkan) && cfg_.flatLayout())
         {
             insertLayoutConverts(graph_);
+            // Integer index tensors (token ids / positions) must survive to the GPU without an fp16 store
+            // that would overflow a value above 65504 to +inf. Pin the Gather index chains to fp32 before
+            // markFp32 so the buffer planner sizes them 4-byte and their producers run in fp32.
+            pinGatherIndexFp32(graph_);
             // Selective fp32 storage. Precision::Normal ("normal") uses the built-in geometry-tail preset
             // when fp32Tensors is empty; an explicit fp32Tensors always wins.
             std::string fp32Marks = cfg_.fp32Tensors;

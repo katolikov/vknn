@@ -80,7 +80,7 @@ namespace vknn {
                             iv[(size_t) i] = hb.f32()[i];
                         }
                     }
-                    idxBuf = upload(*env.ctx, iv, env.useFp16);
+                    idxBuf = upload(*env.ctx, iv, false); // index is always fp32 (gather.comp binding 1)
                 }
 
                 pc = {(int) numElements(out), (int) outer, (int) axisSize, (int) inner, (int) nIdx};
