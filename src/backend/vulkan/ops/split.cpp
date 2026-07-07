@@ -21,14 +21,15 @@ namespace vknn {
             int               elem_    = 4;
             int64_t           cbTotal_ = 0, hw_ = 0;
             // ---- flat path ----
+            // FPC mirrors flat_gather.comp's push constant (scalars only); the per-output outDim/inStride
+            // geometry rides a content-deduped SSBO (flat::uploadFlatGeom, binding 2), one per output.
             struct FPC {
                 int rank, total, base;
-                int outDim[flat::kMaxRank];
-                int inStride[flat::kMaxRank];
             };
             std::vector<FPC>                                  fpcs_;
             std::vector<int>                                  foutIdx_;
             std::vector<std::shared_ptr<vk::ComputePipeline>> fpipes_;
+            std::vector<std::shared_ptr<vk::Buffer>>          fgeom_;
             std::shared_ptr<vk::Buffer>                       hold0_;
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -59,15 +60,17 @@ namespace vknn {
                         // in[base + sum_d outCoord_d * inStride_d]; base skips this output's axis offset (offset
                         // rows of the axis stride), and the input strides carry every other axis through unchanged.
                         pc.base  = (int) (offset * inStride[axis]);
+                        std::vector<int32_t> outDim(rank), inStr(rank);
                         for (int d = 0; d < rank; ++d)
                         {
-                            pc.outDim[d]   = (int) out[d];
-                            pc.inStride[d] = (int) inStride[d];
+                            outDim[d] = (int) out[d];
+                            inStr[d]  = (int) inStride[d];
                         }
+                        fgeom_.push_back(flat::uploadFlatGeom(env, {outDim, inStr}));
                         fpcs_.push_back(pc);
                         foutIdx_.push_back((int) k);
                         offset += out[axis]; // next output starts where this one ends
-                        fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 2, sizeof(FPC), std::vector<uint32_t> {}));
+                        fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 3, sizeof(FPC), std::vector<uint32_t> {}));
                     }
                     return;
                 }
@@ -101,7 +104,7 @@ namespace vknn {
                     {
                         // One flat_gather invocation per output element (local_size_x = kFlatLocalSize),
                         // gathering the slice for this output straight out of the shared input buffer.
-                        fpipes_[i]->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[foutIdx_[i]])->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, flat::kFlatLocalSize));
+                        fpipes_[i]->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[foutIdx_[i]])->handle(), fgeom_[i]->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, flat::kFlatLocalSize));
                     }
                     return;
                 }

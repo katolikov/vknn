@@ -1,19 +1,20 @@
 #version 450
 #include "precision.glsl"
 #ifdef PW_EPI
-#define PW_EPI_BASE 2
+#define PW_EPI_BASE 3
 #include "pw_epilogue.glsl"
 #endif
-// Flat row-major reduce.
+// Flat row-major reduce. Geometry (inDim/inStride/reduce) rides a content-deduped SSBO (binding 2),
+// not the push constant, so the decodable rank is unbounded (see flat::uploadFlatGeom). Arrays pack
+// back-to-back: inDim = g[0..rank), inStride = g[rank..2*rank), reduce = g[2*rank..3*rank). The fused
+// epilogue's bindings start after it.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
   int rank, total, op;
-  int inDim[8];
-  int inStride[8];
-  int reduce[8];
 } pc;
 
 void main() {
@@ -23,14 +24,14 @@ void main() {
   int rem = int(gid);
   int base = 0;
   for (int k = pc.rank - 1; k >= 0; --k) {
-    if (pc.reduce[k] != 0) continue;
-    int c = rem % pc.inDim[k];
-    rem /= pc.inDim[k];
-    base += c * pc.inStride[k];
+    if (geom.g[2 * pc.rank + k] != 0) continue;
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    base += c * geom.g[pc.rank + k];
   }
 
   int rcount = 1, nRed = 0, singleStride = 0;
-  for (int k = 0; k < pc.rank; ++k) if (pc.reduce[k] != 0) { rcount *= pc.inDim[k]; nRed++; singleStride = pc.inStride[k]; }
+  for (int k = 0; k < pc.rank; ++k) if (geom.g[2 * pc.rank + k] != 0) { rcount *= geom.g[k]; nRed++; singleStride = geom.g[pc.rank + k]; }
 
   float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
   // Fast path for a single reduced axis (the common global-min/max/sum-over-one-axis case): the reduced
@@ -49,10 +50,10 @@ void main() {
   for (int r = 0; r < rcount; ++r) {
     int rr = r, off = base;
     for (int k = pc.rank - 1; k >= 0; --k) {
-      if (pc.reduce[k] == 0) continue;
-      int c = rr % pc.inDim[k];
-      rr /= pc.inDim[k];
-      off += c * pc.inStride[k];
+      if (geom.g[2 * pc.rank + k] == 0) continue;
+      int c = rr % geom.g[k];
+      rr /= geom.g[k];
+      off += c * geom.g[pc.rank + k];
     }
     float v = float(s[off]);
     if (pc.op == 2) acc = max(acc, v);

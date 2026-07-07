@@ -1,15 +1,19 @@
 #version 450
 #define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
 #include "precision.glsl"
-// Flat broadcasting binary.
+// Flat broadcasting binary. Geometry (outDim/aStride/bStride) rides a content-deduped SSBO
+// (binding 3), not the push constant, so the decodable rank is unbounded (see flat::uploadFlatGeom).
+// Arrays pack back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank), bStride = g[2*rank..3*rank).
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
-  int rank, total, op; int outDim[8]; int aStride[8]; int bStride[8];
-  int act; float actLo, actHi; int bothFull;
+  int rank, total, op;
+  int act; float actLo, actHi;
+  int bothFull; // both operands same shape as output => index == gid (skip the stride loop)
 } pc;
 
 void main() {
@@ -21,10 +25,10 @@ void main() {
   if (pc.bothFull == 0) {
     int rem = int(gid); ai = 0; bi = 0;
     for (int k = pc.rank - 1; k >= 0; --k) {
-      int c = rem % pc.outDim[k];
-      rem /= pc.outDim[k];
-      ai += c * pc.aStride[k];
-      bi += c * pc.bStride[k];
+      int c = rem % geom.g[k];
+      rem /= geom.g[k];
+      ai += c * geom.g[pc.rank + k];
+      bi += c * geom.g[2 * pc.rank + k];
     }
   }
   d[gid] = TO_STORE(vx_act(vx_binary(float(a[ai]), float(b[bi]), pc.op), pc.act, pc.actLo, pc.actHi));

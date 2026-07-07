@@ -44,13 +44,10 @@ namespace vknn {
             }
             case OpType::Pad: {
                 // Flat row-major pad (constant/edge/reflect). Needs static pads (attr or a constant
-                // input[1]) and rank within the flat limit; a runtime pad VALUE runs on the GPU via
-                // flat_pad_rt (the value binds as an SSBO). A runtime pads GEOMETRY falls back to CPU
-                // (data-dependent output shape). Mirrors the Pad gate in vkNodeGate.
-                if (sh(n.outputs[0]).size() > 8)
-                {
-                    return false;
-                }
+                // input[1]); the flat kernel decodes any rank (geometry in a plan SSBO). A runtime pad
+                // VALUE runs on the GPU via flat_pad_rt (the value binds as an SSBO). A runtime pads
+                // GEOMETRY falls back to CPU (data-dependent output shape). Mirrors the Pad gate in
+                // vkNodeGate.
                 std::string mode = n.attr.gets("mode", "constant");
                 if (mode != "constant" && mode != "edge" && mode != "reflect")
                 {

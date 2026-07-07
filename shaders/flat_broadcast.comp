@@ -1,21 +1,25 @@
 #version 450
 #include "precision.glsl"
 // Flat broadcast: out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ].
-// STORE selects fp16/fp32 storage; values are read and written via float.
+// STORE selects fp16/fp32 storage; values are read and written via float. Geometry
+// (outDim/inDim/inStride) rides a content-deduped SSBO (binding 2), not the push constant, so the
+// decodable rank is unbounded (see flat::uploadFlatGeom). Arrays pack back-to-back:
+// outDim = g[0..rank), inDim = g[rank..2*rank), inStride = g[2*rank..3*rank).
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
-layout(push_constant) uniform PC { int rank, total, mode; int outDim[8]; int inDim[8]; int inStride[8]; } pc;
+layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
+layout(push_constant) uniform PC { int rank, total, mode; } pc;
 
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.total)) return;
   int rem = int(gid), inIdx = 0;
   for (int k = pc.rank - 1; k >= 0; --k) {
-    int c = rem % pc.outDim[k];
-    rem /= pc.outDim[k];
-    inIdx += (c % pc.inDim[k]) * pc.inStride[k];
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    inIdx += (c % geom.g[pc.rank + k]) * geom.g[2 * pc.rank + k];
   }
   d[gid] = STORE(float(s[inIdx]));
 }

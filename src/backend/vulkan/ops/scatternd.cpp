@@ -9,21 +9,21 @@
 namespace vknn {
     namespace {
 
-        constexpr int kMaxR = 8; // must match dataDim[8]/stride[8] in shaders/scatternd*.comp
         struct CopyPC {
             uint32_t count;
         };
+        // dataDim/stride ride the geometry SSBO (flat::uploadFlatGeom, binding 3 in scatternd.comp),
+        // so the decodable data rank is unbounded; the push constant carries only the scatter scalars.
         struct ScatterPC {
             uint32_t total;
             int      q, sliceSize, rank;
-            int      dataDim[kMaxR];
-            int      stride[kMaxR];
         };
 
         struct ScatterNDOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> copyPipe;
             std::shared_ptr<vk::ComputePipeline> scatterPipe;
             std::shared_ptr<vk::Buffer>          idxBuf; // const index uploaded as float; null when index is activation
+            std::shared_ptr<vk::Buffer>          geom;   // dataDim/stride, deduped SSBO
             std::shared_ptr<vk::Buffer>          holdData;
             std::shared_ptr<vk::Buffer>          holdUpd;
             CopyPC                               copyPc {};
@@ -66,11 +66,13 @@ namespace vknn {
                 pc.q         = q;
                 pc.sliceSize = (int) sliceSize;
                 pc.rank      = dr;
-                for (int k = 0; k < kMaxR; ++k)
+                std::vector<int32_t> dataDim(dr), strideArr(dr);
+                for (int k = 0; k < dr; ++k)
                 {
-                    pc.dataDim[k] = k < dr ? (int) ds[k] : 1;
-                    pc.stride[k]  = k < dr ? (int) stride[k] : 0;
+                    dataDim[k]   = (int) ds[k];
+                    strideArr[k] = (int) stride[k];
                 }
+                geom         = flat::uploadFlatGeom(env, {dataDim, strideArr});
                 copyPc.count = (uint32_t) numElements(ds);
 
                 // Index: a constant initializer is uploaded as float; a runtime float index activation (e.g.
@@ -104,7 +106,7 @@ namespace vknn {
 
                 copyPipe = env.pipeline(shader("scatternd_copy", env.useFp16), 2, sizeof(CopyPC), std::vector<uint32_t> {});
                 scatterPipe =
-                    env.pipeline(shader("scatternd", env.useFp16), 3, sizeof(ScatterPC), std::vector<uint32_t> {});
+                    env.pipeline(shader("scatternd", env.useFp16), 4, sizeof(ScatterPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -123,7 +125,7 @@ namespace vknn {
                 // flat::kFlatLocalSize.
                 if (pc.total > 0)
                 {
-                    scatterPipe->dispatch(cmd, {updates->handle(), idx->handle(), out->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                    scatterPipe->dispatch(cmd, {updates->handle(), idx->handle(), out->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
                 }
             }
         };

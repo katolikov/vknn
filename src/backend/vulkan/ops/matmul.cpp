@@ -16,16 +16,17 @@
 namespace vknn {
     namespace {
 
+        // Scalars only; the per-axis outDim/aStride/bStride geometry rides a content-deduped SSBO
+        // (flat::uploadFlatGeom) bound after the operands (and after the fused bias when present), so
+        // the decodable batch rank is unbounded and the push constant stays small.
         struct MatMulPC {
             int rank, total, M, N, K, aK, bK;
-            int outDim[flat::kMaxRank];
-            int aStride[flat::kMaxRank];
-            int bStride[flat::kMaxRank];
         };
 
         struct MatMulOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             MatMulPC                             pc {};
+            std::shared_ptr<vk::Buffer>          geom;        // outDim/aStride/bStride, deduped SSBO
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
             std::shared_ptr<vk::Buffer>          biasBuf;     // set when a rank-1 [N] bias is fused in
             bool                                 useTiled = false;
@@ -113,7 +114,7 @@ namespace vknn {
                 // would under-rank it against its own real (faster) dispatch.
                 const char *specBase = hasBias ? "matmul_tiled_bias" : "matmul_tiled";
                 const char *fastBase = hasBias ? "matmul_tiled_fast_bias" : "matmul_tiled_fast";
-                uint32_t    nbuf     = hasBias ? 4 : 3;
+                uint32_t    nbuf     = hasBias ? 5 : 4; // + the geometry SSBO bound after the operands/bias
                 int         best     = 0;
                 double      bestMs   = 1e30;
                 for (int ci = 0; ci < kMatMulTileCount; ++ci)
@@ -134,6 +135,7 @@ namespace vknn {
                         {
                             bufs.push_back(sBias->handle());
                         }
+                        bufs.push_back(geom->handle()); // geometry SSBO (matches the real dispatch's binding count)
                         p->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, gyT, (uint32_t) gzT);
                         vk::computeBarrier(cmd);
                     });
@@ -181,9 +183,10 @@ namespace vknn {
                 pc.K     = (int) K;
                 pc.aK    = 1;       // A is [...,M,K] row-major -> stepping K moves by 1
                 pc.bK    = (int) N; // B is [...,K,N] row-major -> stepping K moves by N
+                std::vector<int32_t> outDim(rank), aStride(rank, 0), bStride(rank, 0);
                 for (int k = 0; k < rank; ++k)
                 {
-                    pc.outDim[k] = (int) out[k];
+                    outDim[k] = (int) out[k];
                 }
 
                 // The trailing output dims are the matrix dims. With 1-D promotion an axis may be absent:
@@ -229,21 +232,22 @@ namespace vknn {
                 }
                 for (int i = 0; i < batchRank; ++i)
                 {
-                    pc.aStride[i] = (int) aBatchStride[i];
-                    pc.bStride[i] = (int) bBatchStride[i];
+                    aStride[i] = (int) aBatchStride[i];
+                    bStride[i] = (int) bBatchStride[i];
                 }
                 // Matrix-axis strides: A depends on m (row stride K) not n; B depends on n (col stride 1) not
                 // m.
                 if (mAxis >= 0)
                 {
-                    pc.aStride[mAxis] = (int) K;
-                    pc.bStride[mAxis] = 0;
+                    aStride[mAxis] = (int) K;
+                    bStride[mAxis] = 0;
                 }
                 if (nAxis >= 0)
                 {
-                    pc.aStride[nAxis] = 0;
-                    pc.bStride[nAxis] = 1;
+                    aStride[nAxis] = 0;
+                    bStride[nAxis] = 1;
                 }
+                geom = flat::uploadFlatGeom(env, {outDim, aStride, bStride});
 
                 // Upload a constant operand flat (row-major NCHW fp32 -> device, fp16 when half precision).
                 // Direct fp16->fp16 passthrough when the stored weight already matches compute precision.
@@ -283,15 +287,16 @@ namespace vknn {
                 bool useFastTiled = useTiled && isDefaultMatMulTile(tile);
 
                 // A fused Linear bias (rank-1 [N]) is added in the fp32 accumulator by the _bias kernel
-                // variant; upload it flat and bind it as a 4th buffer.
+                // variant; upload it flat and bind it as a 4th buffer. The geometry SSBO follows the
+                // operands (and the bias when present): binding 3 without bias, binding 4 with it.
                 const char *base = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : "matmul");
                 std::string name = base;
-                uint32_t    nbuf = 3;
+                uint32_t    nbuf = 4; // A, B, D, geometry
                 if (node.fusedBias != kNoTensor)
                 {
                     biasBuf = uploadInit(env, node.fusedBias, g.desc(node.fusedBias).shape);
                     name += "_bias";
-                    nbuf = 4;
+                    nbuf = 5; // A, B, D, bias, geometry
                 }
 
                 // A pointwise chain (fusePointwiseChains) attached to this MatMul runs in the kernel's own
@@ -321,6 +326,7 @@ namespace vknn {
                 {
                     bufs.push_back(biasBuf->handle());
                 }
+                bufs.push_back(geom->handle()); // geometry SSBO, after the operands/bias and before the epilogue
                 epi.append(bufs, node, env, dstHandle);
                 if (useTiled)
                 {

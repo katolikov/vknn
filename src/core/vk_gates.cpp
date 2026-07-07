@@ -54,28 +54,23 @@ namespace vknn {
 
     bool vkNodeGate(const Graph &g, const Node &nd, std::string *whyNot) {
         // Generic N-D ops the GPU runs flat (Transpose/Slice always; Concat/Softmax/Binary/Add either
-        // NC4HW4 or flat per the layout pass). The flat row-major kernels handle rank <= 6.
+        // NC4HW4 or flat per the layout pass). The flat row-major kernels decode any rank: the per-axis
+        // geometry rides a plan SSBO (flat::uploadFlatGeom), not the push constant, so there is no
+        // rank ceiling on the decode.
         if (nd.type == OpType::Transpose || nd.type == OpType::Slice || nd.type == OpType::ConvertLayout || nd.type == OpType::Concat || nd.type == OpType::Softmax || nd.type == OpType::Squeeze)
         {
             return true;
         }
         if (nd.type == OpType::Expand || nd.type == OpType::Tile)
         {
-            // flat broadcast/tile gather decodes up to kMaxRank=6 output dims.
-            if (g.desc(nd.outputs[0]).shape.size() <= 8)
-            {
-                return true;
-            }
-            return refuse(whyNot, std::string(opTypeName(nd.type)) + ": output rank > 8");
+            // flat broadcast/tile gather decodes any output rank (geometry in a plan SSBO).
+            return true;
         }
         if (nd.type == OpType::Pad)
         {
             // Flat pad runs on the GPU only for static pads + a supported mode (else CPU). Mirrors
-            // gpuFlatNode so a GPU-assigned Pad is always marked flat by the layout pass.
-            if (g.desc(nd.outputs[0]).shape.size() > 8)
-            {
-                return refuse(whyNot, "Pad: output rank > 8");
-            }
+            // gpuFlatNode so a GPU-assigned Pad is always marked flat by the layout pass. The flat
+            // kernel decodes any rank (geometry in a plan SSBO).
             std::string mode = nd.attr.gets("mode", "constant");
             if (mode != "constant" && mode != "edge" && mode != "reflect")
             {
@@ -93,20 +88,16 @@ namespace vknn {
         }
         if (nd.type == OpType::MatMul)
         {
-            // Batched N-D matmul on the flat row-major path; the kernel decodes up to kMaxRank=6 out
-            // dims. Two operands, or three when a rank-1 bias is fused in (the _bias kernel binds it
-            // as a 4th buffer). Inputs from pw_opbase on are fused pointwise-epilogue operands (bound
-            // after the core buffers), not matmul operands.
+            // Batched N-D matmul on the flat row-major path; the kernel decodes any output rank
+            // (geometry in a plan SSBO). Two operands, or three when a rank-1 bias is fused in (the
+            // _bias kernel binds it as a 4th buffer). Inputs from pw_opbase on are fused
+            // pointwise-epilogue operands (bound after the core buffers), not matmul operands.
             size_t core = nd.attr.has("pw_steps") ? (size_t) nd.attr.geti("pw_opbase", (int64_t) nd.inputs.size()) : nd.inputs.size();
             if (!(core == 2 || (core == 3 && nd.fusedBias != kNoTensor)))
             {
                 return refuse(whyNot, "MatMul: operand count not 2 (or 3 with fused bias)");
             }
-            if (g.desc(nd.outputs[0]).shape.size() <= 8)
-            {
-                return true;
-            }
-            return refuse(whyNot, "MatMul: output rank > 8");
+            return true;
         }
         if (nd.type == OpType::DepthToSpace)
         {
@@ -121,13 +112,14 @@ namespace vknn {
         }
         if (nd.type == OpType::Reduce)
         {
-            // flat reduce kernel: one thread per output element, loops the reduced axes. rank <= 6.
+            // flat reduce kernel: one thread per output element, loops the reduced axes. Any input rank
+            // (geometry in a plan SSBO); only an unresolved input shape stays on the CPU op.
             const Shape &in = g.desc(nd.inputs[0]).shape;
-            if (!in.empty() && in.size() <= 8)
+            if (!in.empty())
             {
                 return true;
             }
-            return refuse(whyNot, "Reduce: input rank unresolved or > 8");
+            return refuse(whyNot, "Reduce: input rank unresolved");
         }
         if (nd.type == OpType::FusedDwPw)
         {
@@ -235,12 +227,8 @@ namespace vknn {
         }
         if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual)
         {
-            // flat broadcasting kernels (fixed PC arrays) decode up to kMaxRank=8 output dims.
-            if (g.desc(nd.outputs[0]).shape.size() <= 8)
-            {
-                return true;
-            }
-            return refuse(whyNot, std::string(opTypeName(nd.type)) + ": output rank > 8");
+            // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
+            return true;
         }
         if (nd.type == OpType::ConvTranspose)
         {
@@ -316,13 +304,13 @@ namespace vknn {
         }
         if (nd.type == OpType::ScatterND)
         {
-            // flat scatter; index may be a constant or a runtime float activation. Data rank within
-            // kMaxRank.
-            if (nd.inputs.size() >= 3 && g.desc(nd.inputs[0]).shape.size() <= 8)
+            // flat scatter; index may be a constant or a runtime float activation. Any data rank
+            // (geometry in a plan SSBO).
+            if (nd.inputs.size() >= 3)
             {
                 return true;
             }
-            return refuse(whyNot, "ScatterND: fewer than 3 inputs or data rank > 8");
+            return refuse(whyNot, "ScatterND: fewer than 3 inputs");
         }
         if (nd.type == OpType::Einsum)
         {
@@ -362,7 +350,7 @@ namespace vknn {
         if (nd.type == OpType::Split)
         {
             // NC4HW4 channel split (4D, axis 1, 4-aligned outputs) is a block copy; any other split runs
-            // on the flat row-major path (a Slice per output) for rank <= kMaxRank.
+            // on the flat row-major path (a Slice per output) at any rank (geometry in a plan SSBO).
             const Shape &in = g.desc(nd.inputs[0]).shape;
             if (in.empty())
             {
@@ -394,11 +382,7 @@ namespace vknn {
                     return true;
                 }
             }
-            if (rank <= 8)
-            {
-                return true;
-            }
-            return refuse(whyNot, "Split: input rank > 8");
+            return true; // flat row-major split, any rank
         }
         if (nd.type == OpType::Clip)
         {
@@ -410,7 +394,8 @@ namespace vknn {
         {
             // Flat affine dequant/quant: scale (input[1]) and any zero_point (input[2]) must be
             // constant initializers (uploaded flat in prepare); a runtime scale/zp falls back to the
-            // exact CPU op. The flat kernel decodes the per-axis stride within the rank-8 bound.
+            // exact CPU op. The kernel decodes the per-axis channel via a single `inner` stride scalar
+            // (no per-rank push-constant arrays), so any rank runs on the GPU.
             if (nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor || !g.isInitializer(nd.inputs[1]))
             {
                 return refuse(whyNot, std::string(opTypeName(nd.type)) + ": runtime scale input");
@@ -418,10 +403,6 @@ namespace vknn {
             if (nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
             {
                 return refuse(whyNot, std::string(opTypeName(nd.type)) + ": runtime zero_point input");
-            }
-            if (g.desc(nd.outputs[0]).shape.size() > 8)
-            {
-                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": output rank > 8");
             }
             return true;
         }
