@@ -263,13 +263,14 @@ namespace vknn {
             // int64 -> FLOAT/FLOAT16/DOUBLE, INT32, INT64: the shape-arithmetic targets, exact in the
             // compute float. int64 -> INT8 (3) / UINT8 (2): cast.comp narrows to match the CPU Cast op
             // followed by the readback narrowing bit-for-bit (INT8 modulo-wrap, UINT8 saturate); the
-            // narrowed value is small and exact in fp16/fp32.
-            if (to == 1 || to == 10 || to == 11 || to == 6 || to == 7 || to == 2 || to == 3)
+            // narrowed value is small and exact in fp16/fp32. int64 -> BOOL (9): cast.comp truncates and
+            // clamps to [0,1], bit-identical to the CPU op for the {0,1} mask tensors this targets.
+            if (to == 1 || to == 10 || to == 11 || to == 6 || to == 7 || to == 2 || to == 3 || to == 9)
             {
                 return true;
             }
-            // int64 -> INT16/UINT16 (fp32 output tensor, no readback narrowing to lean on) / BOOL / the
-            // 32/64-bit unsigned targets keep the exact CPU op, where the wider range and modulo are exact.
+            // int64 -> INT16/UINT16 (fp32 output tensor, no readback narrowing to lean on) / the 32/64-bit
+            // unsigned targets keep the exact CPU op, where the wider range and modulo are exact.
             return refuse(whyNot, "Cast: int64 input to a narrow integer target");
         }
         if (nd.type == OpType::TopK)
