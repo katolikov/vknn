@@ -128,7 +128,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     #   plain/templated <stem>.comp      -> <stem>_epi[_rx].spv (+ <stem>_epi[_rx]_fp16.spv when templated)
     #   hand-written    <stem>_fp16.comp -> <stem>_epi[_rx]_fp16.spv
     set(_epi_stems
-        matmul matmul_bias matmul_tiled matmul_tiled_bias fc
+        matmul matmul_bias matmul_tiled matmul_tiled_bias matmul_tiled_fast matmul_tiled_fast_bias fc
         flat_softmax flat_layernorm flat_reduce softmax flat_gather flat_scatter
         gridsample resize convtranspose
         avgpool avgpool2d maxpool concat

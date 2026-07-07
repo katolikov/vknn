@@ -19,6 +19,18 @@ namespace vknn {
         int tm, tn, tk;
     };
 
+    /// The default {128,128,16} tile dispatches the compile-time matmul_tiled_fast.comp kernel
+    /// (literal #defines -> fully-unrolled, register-resident micro-tile) instead of the
+    /// spec-constant matmul_tiled.comp: the Xclipse driver loses the inner-loop unroll and spills
+    /// registers when the accumulator bounds are spec constants (~26% slower at this geometry), so
+    /// the common case — every --tuning none run, and the race's usual winner — keeps main's fast
+    /// literal kernel while non-default raced tiles use the flexible spec-constant kernel (ADR-0011:
+    /// prefer compile-time shader variants over runtime-parameterized shaders on this driver). The
+    /// two kernels are byte-identical at {128,128,16}.
+    constexpr bool isDefaultMatMulTile(const MatMulTile &t) {
+        return t.tm == 128 && t.tn == 128 && t.tk == 16;
+    }
+
     /// Raced tile candidates. Index 0 is the Tuning::None default and stays {128,128,16} (the
     /// geometry the fixed #defines used); the tune table persists a winning INDEX into this array,
     /// so adding or reordering entries requires renaming the tune-signature stem ("mm_") to keep

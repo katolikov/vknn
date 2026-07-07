@@ -87,9 +87,7 @@ TEST(OpTypes, ReduceNamesSingleSource) {
     // reduceFromOnnx is the single source of reduce-family name recognition: opTypeFromOnnx
     // classifies a name as OpType::Reduce exactly when reduceFromOnnx recognizes it. Candidates
     // cover every current member plus unsupported Reduce* spellings and non-reduce names.
-    for (const char *name: {"ReduceMean", "ReduceSum", "ReduceMax", "ReduceMin", "ReduceProd",
-                            "ReduceL2", "ReduceL1", "ReduceLogSum", "ReduceLogSumExp",
-                            "ReduceSumSquare", "Reduce", "Conv"})
+    for (const char *name: {"ReduceMean", "ReduceSum", "ReduceMax", "ReduceMin", "ReduceProd", "ReduceL2", "ReduceL1", "ReduceLogSum", "ReduceLogSumExp", "ReduceSumSquare", "Reduce", "Conv"})
     {
         const bool isReduce = reduceFromOnnx(name) != ReduceType::Invalid;
         EXPECT_EQ(opTypeFromOnnx(name) == OpType::Reduce, isReduce) << "name=" << name;
@@ -132,6 +130,22 @@ TEST(MatMulTile, CandidateTable) {
         EXPECT_EQ((t.tm * t.tk) % 256, 0) << "i=" << i; // A-panel load loop
         EXPECT_EQ((t.tk * t.tn) % 256, 0) << "i=" << i; // B-panel load loop
     }
+}
+
+// The Vulkan MatMul op routes the default tile to the compile-time matmul_tiled_fast kernel and
+// every other candidate to the spec-constant matmul_tiled kernel. isDefaultMatMulTile is that
+// routing predicate: it must match index 0 (the {128,128,16} default) and reject every other tile.
+TEST(MatMulTile, DefaultTileRouting) {
+    EXPECT_TRUE(isDefaultMatMulTile(kMatMulTiles[0]));
+    for (int i = 1; i < kMatMulTileCount; ++i)
+    {
+        EXPECT_FALSE(isDefaultMatMulTile(kMatMulTiles[i])) << "i=" << i;
+    }
+    // The predicate keys on the exact {128,128,16} geometry, not just any 128x128 tile.
+    EXPECT_TRUE(isDefaultMatMulTile({128, 128, 16}));
+    EXPECT_FALSE(isDefaultMatMulTile({128, 128, 8}));
+    EXPECT_FALSE(isDefaultMatMulTile({64, 128, 16}));
+    EXPECT_FALSE(isDefaultMatMulTile({128, 64, 16}));
 }
 
 // Ergonomic Tensor API: construct, shape/size accessors, argmax.

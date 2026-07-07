@@ -3,10 +3,10 @@
 // shaders/matmul.comp). Either operand may be an activation or a constant initializer (e.g. a
 // Linear weight); an initializer is uploaded flat in prepare(). Mirrors the CPU oracle's
 // broadcast/stride math byte-for-byte.
+#include "core/matmul_tile.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
-#include "core/matmul_tile.h"
 #include "vknn/logging.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -40,9 +40,7 @@ namespace vknn {
             // exceed the device limits must not be dispatched.
             bool tileFits(VkOpEnv &env, const MatMulTile &t) const {
                 const auto &cap = env.ctx->caps();
-                return (uint32_t) ((pc.N + t.tn - 1) / t.tn) <= cap.maxWorkGroupCount[0] &&
-                       (uint32_t) ((pc.M + t.tm - 1) / t.tm) <= cap.maxWorkGroupCount[1] &&
-                       (uint32_t) numBatch <= cap.maxWorkGroupCount[2];
+                return (uint32_t) ((pc.N + t.tn - 1) / t.tn) <= cap.maxWorkGroupCount[0] && (uint32_t) ((pc.M + t.tm - 1) / t.tm) <= cap.maxWorkGroupCount[1] && (uint32_t) numBatch <= cap.maxWorkGroupCount[2];
             }
 
             // Pick the tiled-GEMM tile for this shape (an index into kMatMulTiles; 0 = the default
@@ -79,15 +77,15 @@ namespace vknn {
                 {
                     return kMatMulTiles[0];
                 }
-                int gzT = (int) std::min<int64_t>({(int64_t) numBatch, 64, std::max<int64_t>(1, (int64_t) (((size_t) 128 << 20) / perBatch))});
-                auto mk = [&](size_t bytes) {
+                int  gzT = (int) std::min<int64_t>({(int64_t) numBatch, 64, std::max<int64_t>(1, (int64_t) (((size_t) 128 << 20) / perBatch))});
+                auto mk  = [&](size_t bytes) {
                     return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
                 };
-                auto sA = mk((size_t) gzT * pc.M * pc.K * es);
-                auto sB = mk((size_t) gzT * pc.K * pc.N * es);
-                auto sD = mk((size_t) gzT * pc.M * pc.N * es);
-                std::shared_ptr<vk::Buffer> sBias = hasBias ? mk((size_t) pc.N * es) : nullptr;
-                auto timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                auto                        sA     = mk((size_t) gzT * pc.M * pc.K * es);
+                auto                        sB     = mk((size_t) gzT * pc.K * pc.N * es);
+                auto                        sD     = mk((size_t) gzT * pc.M * pc.N * es);
+                std::shared_ptr<vk::Buffer> sBias  = hasBias ? mk((size_t) pc.N * es) : nullptr;
+                auto                        timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
                     VkCommandBuffer cmd = env.runner->allocate();
                     env.runner->begin(cmd);
                     for (int r = 0; r < 8; ++r)
@@ -109,10 +107,15 @@ namespace vknn {
                     }
                     return m;
                 };
-                const char *base   = hasBias ? "matmul_tiled_bias" : "matmul_tiled";
-                uint32_t    nbuf   = hasBias ? 4 : 3;
-                int         best   = 0;
-                double      bestMs = 1e30;
+                // Time each candidate with the kernel it will actually dispatch: the default tile
+                // runs the compile-time _fast kernel (what prepare() picks for it), every other tile
+                // runs the spec-constant kernel. Timing the default with the spec-constant kernel
+                // would under-rank it against its own real (faster) dispatch.
+                const char *specBase = hasBias ? "matmul_tiled_bias" : "matmul_tiled";
+                const char *fastBase = hasBias ? "matmul_tiled_fast_bias" : "matmul_tiled_fast";
+                uint32_t    nbuf     = hasBias ? 4 : 3;
+                int         best     = 0;
+                double      bestMs   = 1e30;
                 for (int ci = 0; ci < kMatMulTileCount; ++ci)
                 {
                     const MatMulTile &t = kMatMulTiles[ci];
@@ -120,10 +123,12 @@ namespace vknn {
                     {
                         continue;
                     }
-                    auto     p   = env.pipeline(shader(base, env.useFp16), nbuf, sizeof(MatMulPC), {(uint32_t) t.tm, (uint32_t) t.tn, (uint32_t) t.tk});
-                    uint32_t gxT = (uint32_t) ((pc.N + t.tn - 1) / t.tn);
-                    uint32_t gyT = (uint32_t) ((pc.M + t.tm - 1) / t.tm);
-                    double   ms  = bestOf([&](VkCommandBuffer cmd) {
+                    bool                  fast = isDefaultMatMulTile(t);
+                    std::vector<uint32_t> spec = fast ? std::vector<uint32_t> {} : std::vector<uint32_t> {(uint32_t) t.tm, (uint32_t) t.tn, (uint32_t) t.tk};
+                    auto                  p    = env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec);
+                    uint32_t              gxT  = (uint32_t) ((pc.N + t.tn - 1) / t.tn);
+                    uint32_t              gyT  = (uint32_t) ((pc.M + t.tm - 1) / t.tm);
+                    double                ms   = bestOf([&](VkCommandBuffer cmd) {
                         std::vector<VkBuffer> bufs {sA->handle(), sB->handle(), sD->handle()};
                         if (sBias)
                         {
@@ -271,9 +276,15 @@ namespace vknn {
                     tile = pickTile(env, node.fusedBias != kNoTensor);
                 }
 
+                // The default {128,128,16} tile runs the compile-time matmul_tiled_fast kernel (full
+                // inner-loop unroll, register-resident micro-tile — main's fast literal geometry);
+                // only a non-default raced tile runs the spec-constant matmul_tiled kernel. The
+                // tiled kernels are byte-identical at the default geometry (see core/matmul_tile.h).
+                bool useFastTiled = useTiled && isDefaultMatMulTile(tile);
+
                 // A fused Linear bias (rank-1 [N]) is added in the fp32 accumulator by the _bias kernel
                 // variant; upload it flat and bind it as a 4th buffer.
-                const char *base = useTiled ? "matmul_tiled" : "matmul";
+                const char *base = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : "matmul");
                 std::string name = base;
                 uint32_t    nbuf = 3;
                 if (node.fusedBias != kNoTensor)
@@ -290,9 +301,10 @@ namespace vknn {
                 name += epi.suffix();
                 nbuf += epi.extraBufs();
 
-                // The tiled kernel takes its TM/TN/TK tile as specialization constants 0/1/2.
+                // The spec-constant tiled kernel takes its TM/TN/TK tile as specialization constants
+                // 0/1/2; the fast kernel bakes {128,128,16} in as literal #defines (no spec words).
                 std::vector<uint32_t> spec;
-                if (useTiled)
+                if (useTiled && !useFastTiled)
                 {
                     spec = {(uint32_t) tile.tm, (uint32_t) tile.tn, (uint32_t) tile.tk};
                 }
