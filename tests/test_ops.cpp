@@ -517,6 +517,133 @@ TEST(Ops, RMSNormLastAxis) {
     expectNear(out.data, ref, 1e-5f);
 }
 
+// --- lowerRMSNorm fuses the decomposed Pow/ReduceMean/Add/Sqrt/Reciprocal/Mul/Mul chain into one
+// RMSNorm node, and the fused graph reproduces the decomposition's math. ---
+TEST(Ops, LowerRMSNormFusesChain) {
+    Graph g;
+    auto  addInit = [&](const std::string &nm, std::vector<int64_t> shape, std::vector<float> data) {
+        TensorDesc d;
+        d.name          = nm;
+        d.shape         = std::move(shape);
+        d.isInitializer = true;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems(data.size(), DType::Float32);
+        for (size_t i = 0; i < data.size(); ++i)
+        {
+            hb.f32()[i] = data[i];
+        }
+        g.initializers[id] = hb;
+        return id;
+    };
+    TensorDesc xi;
+    xi.name          = "x";
+    xi.shape         = {2, 4};
+    xi.isInput       = true;
+    TensorId x       = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorId           two   = addInit("two", {1}, {2.f});
+    TensorId           eps   = addInit("eps", {1}, {1e-5f});
+    std::vector<float> gammaData {2.f, 0.5f, 1.f, -1.f};
+    TensorId           gamma = addInit("gamma", {4}, gammaData);
+    auto               tmp   = [&](const std::string &nm) {
+        TensorDesc d;
+        d.name = nm;
+        return g.addTensor(d);
+    };
+    TensorId   p = tmp("p"), m = tmp("m"), a = tmp("a"), s = tmp("s"), r = tmp("r"), nrm = tmp("nrm");
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    auto     node = [&](OpType t, int sub, std::vector<TensorId> in, std::vector<TensorId> out, const std::string &nm) {
+        Node n;
+        n.type    = t;
+        n.subOp   = sub;
+        n.inputs  = std::move(in);
+        n.outputs = std::move(out);
+        n.name    = nm;
+        return n;
+    };
+    Node rmean = node(OpType::Reduce, (int) ReduceType::Mean, {p}, {m}, "rmean");
+    rmean.attr.map["axes"] = ints({-1});
+    Attr kd;
+    kd.kind                    = Attr::Int;
+    kd.i                       = 1;
+    rmean.attr.map["keepdims"] = kd;
+    g.nodes = {node(OpType::Binary, (int) BinaryType::Pow, {x, two}, {p}, "pow"),
+               rmean,
+               node(OpType::Add, 0, {m, eps}, {a}, "add"),
+               node(OpType::Unary, (int) UnaryType::Sqrt, {a}, {s}, "sqrt"),
+               node(OpType::Unary, (int) UnaryType::Reciprocal, {s}, {r}, "recip"),
+               node(OpType::Binary, (int) BinaryType::Mul, {x, r}, {nrm}, "mulN"),
+               node(OpType::Binary, (int) BinaryType::Mul, {gamma, nrm}, {y}, "mulG")};
+    g.outputs = {y};
+
+    runStandardPasses(g);
+
+    int rms = 0, pows = 0, reduces = 0, sqrts = 0, recips = 0;
+    for (const Node &n: g.nodes)
+    {
+        if (n.type == OpType::RMSNorm)
+        {
+            rms++;
+            EXPECT_EQ(g.desc(n.inputs[0]).name, "x");
+            EXPECT_EQ(g.desc(n.inputs[1]).name, "gamma");
+            EXPECT_NEAR(n.attr.getf("epsilon", -1.f), 1e-5f, 1e-9f);
+        } else if (n.type == OpType::Binary && n.subOp == (int) BinaryType::Pow)
+        {
+            pows++;
+        } else if (n.type == OpType::Reduce)
+        {
+            reduces++;
+        } else if (n.type == OpType::Unary && n.subOp == (int) UnaryType::Sqrt)
+        {
+            sqrts++;
+        } else if (n.type == OpType::Unary && n.subOp == (int) UnaryType::Reciprocal)
+        {
+            recips++;
+        }
+    }
+    EXPECT_EQ(rms, 1);
+    EXPECT_EQ(pows, 0);
+    EXPECT_EQ(reduces, 0);
+    EXPECT_EQ(sqrts, 0);
+    EXPECT_EQ(recips, 0);
+
+    // Run the fused graph on the CPU oracle and compare to the decomposition's hand-computed output.
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    std::vector<float> xd {1.f, -2.f, 3.f, -4.f, 0.5f, 1.5f, -2.5f, 4.f};
+    IOTensor           in;
+    in.name  = "x";
+    in.shape = {2, 4};
+    in.dtype = DType::Float32;
+    in.data.resize(xd.size() * 4);
+    std::memcpy(in.data.data(), xd.data(), xd.size() * 4);
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    std::vector<float> ref(8);
+    for (int rw = 0; rw < 2; ++rw)
+    {
+        double sq = 0.0;
+        for (int j = 0; j < 4; ++j)
+        {
+            sq += (double) xd[rw * 4 + j] * (double) xd[rw * 4 + j];
+        }
+        double inv = 1.0 / std::sqrt(sq / 4.0 + 1e-5);
+        for (int j = 0; j < 4; ++j)
+        {
+            ref[rw * 4 + j] = (float) ((double) xd[rw * 4 + j] * inv * (double) gammaData[j]);
+        }
+    }
+    std::vector<float> got(outs[0].f32(), outs[0].f32() + 8);
+    expectNear(got, ref, 1e-5f);
+}
+
 // --- GlobalAveragePool over HxW. ---
 TEST(Ops, GlobalAveragePool) {
     auto out = runOp(OpType::GlobalAvgPool, 0, {}, {1, 1, 2, 2}, {1, 2, 3, 4}, {});
