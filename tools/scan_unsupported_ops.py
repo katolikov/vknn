@@ -54,6 +54,9 @@ def supported_op_names(src_path):
     except OSError as e:
         sys.exit("error: cannot read VKNN op source %s: %s\n"
                  "       pass the correct path with --src" % (src_path, e))
+    # Match only identifier-shaped quoted strings (letter then alphanumerics): op names look
+    # like that, while incidental string literals — error messages, paths — carry spaces or
+    # punctuation and are skipped.
     names = set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', text))
     names -= _INTERNAL_NAMES
     if not names:
@@ -222,68 +225,69 @@ def opset_summary(model):
     return {imp.domain or "ai.onnx": imp.version for imp in model.opset_import}
 
 
-def _render_instance(L, f):
-    L.append("• %s  (node \"%s\", graph %s)" % (f["op_type"], f["node_name"], f["graph"]))
-    if f["domain"] != "ai.onnx":
-        L.append("    domain: %s" % f["domain"])
-    if f.get("reason"):
-        L.append("    reason: %s" % f["reason"])
-    for label, ios in (("inputs", f["inputs"]), ("outputs", f["outputs"])):
+def _render_instance(lines, finding):
+    lines.append("• %s  (node \"%s\", graph %s)"
+                 % (finding["op_type"], finding["node_name"], finding["graph"]))
+    if finding["domain"] != "ai.onnx":
+        lines.append("    domain: %s" % finding["domain"])
+    if finding.get("reason"):
+        lines.append("    reason: %s" % finding["reason"])
+    for label, ios in (("inputs", finding["inputs"]), ("outputs", finding["outputs"])):
         for io in ios:
             shape = io["shape"] if io["shape"] is not None else "?"
-            L.append("    %-7s %-22s shape=%s dtype=%s (%s)"
-                     % (label + ":", io["name"] or "<omitted>", shape,
-                        io["dtype"] or "?", io["source"]))
-    if f["attributes"]:
-        for k, v in f["attributes"].items():
-            L.append("    attr    %s = %s" % (k, v))
-    L.append("")
+            lines.append("    %-7s %-22s shape=%s dtype=%s (%s)"
+                         % (label + ":", io["name"] or "<omitted>", shape,
+                            io["dtype"] or "?", io["source"]))
+    if finding["attributes"]:
+        for attr_name, attr_value in finding["attributes"].items():
+            lines.append("    attr    %s = %s" % (attr_name, attr_value))
+    lines.append("")
 
 
 def render_text(report):
-    L = []
-    m = report["model"]
-    L.append("VKNN unsupported-operator scan")
-    L.append("=" * 60)
-    L.append("model:        %s" % m["path"])
-    L.append("opset:        %s" % ", ".join("%s=%d" % (k, v) for k, v in m["opset"].items()))
-    L.append("total nodes:  %d" % m["total_nodes"])
-    L.append("supported op types known to VKNN: %d" % m["supported_count"])
-    L.append("")
+    lines = []
+    model = report["model"]
+    lines.append("VKNN unsupported-operator scan")
+    lines.append("=" * 60)
+    lines.append("model:        %s" % model["path"])
+    lines.append("opset:        %s" % ", ".join("%s=%d" % (k, v) for k, v in model["opset"].items()))
+    lines.append("total nodes:  %d" % model["total_nodes"])
+    lines.append("supported op types known to VKNN: %d" % model["supported_count"])
+    lines.append("")
 
     summary = report["summary"]
     fb_summary = report["gpu_fallback_summary"]
     if not summary and not fb_summary:
-        L.append("All operators are supported by VKNN with a GPU path. Nothing to do. ✔")
-        return "\n".join(L)
+        lines.append("All operators are supported by VKNN with a GPU path. Nothing to do. ✔")
+        return "\n".join(lines)
 
     if not summary:
-        L.append("No unsupported operators — every op runs. ✔")
+        lines.append("No unsupported operators — every op runs. ✔")
     else:
-        L.append("UNSUPPORTED OP TYPES (cannot run — must be implemented): "
-                 "%d distinct, %d node(s)" % (len(summary), sum(s["count"] for s in summary)))
-        L.append("-" * 60)
+        lines.append("UNSUPPORTED OP TYPES (cannot run — must be implemented): "
+                     "%d distinct, %d node(s)" % (len(summary), sum(s["count"] for s in summary)))
+        lines.append("-" * 60)
         for s in summary:
             dom = "" if s["domain"] == "ai.onnx" else " [domain=%s]" % s["domain"]
-            L.append("  %-28s x%-4d%s" % (s["op_type"], s["count"], dom))
-        L.append("")
-        L.append("UNSUPPORTED — PER-INSTANCE DETAIL")
-        L.append("-" * 60)
-        for f in report["findings"]:
-            _render_instance(L, f)
+            lines.append("  %-28s x%-4d%s" % (s["op_type"], s["count"], dom))
+        lines.append("")
+        lines.append("UNSUPPORTED — PER-INSTANCE DETAIL")
+        lines.append("-" * 60)
+        for finding in report["findings"]:
+            _render_instance(lines, finding)
 
     if fb_summary:
-        L.append("GPU FALLBACK (runs correctly on CPU; add a GPU kernel to optimize): "
-                 "%d distinct, %d node(s)" % (len(fb_summary), sum(s["count"] for s in fb_summary)))
-        L.append("-" * 60)
+        lines.append("GPU FALLBACK (runs correctly on CPU; add a GPU kernel to optimize): "
+                     "%d distinct, %d node(s)" % (len(fb_summary), sum(s["count"] for s in fb_summary)))
+        lines.append("-" * 60)
         for s in fb_summary:
-            L.append("  %-28s x%-4d" % (s["op_type"], s["count"]))
-        L.append("")
-        L.append("GPU FALLBACK — PER-INSTANCE DETAIL")
-        L.append("-" * 60)
-        for f in report["gpu_fallbacks"]:
-            _render_instance(L, f)
-    return "\n".join(L)
+            lines.append("  %-28s x%-4d" % (s["op_type"], s["count"]))
+        lines.append("")
+        lines.append("GPU FALLBACK — PER-INSTANCE DETAIL")
+        lines.append("-" * 60)
+        for finding in report["gpu_fallbacks"]:
+            _render_instance(lines, finding)
+    return "\n".join(lines)
 
 
 def main():
@@ -303,7 +307,7 @@ def main():
 
     findings = []
     fallbacks = []
-    total = [0]
+    total = [0]  # one-element list as a mutable cell the recursive closure can add into
 
     def count_nodes(g):
         total[0] += len(g.node)

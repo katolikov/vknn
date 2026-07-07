@@ -140,7 +140,10 @@ static bool parseBucketSpec(const char *spec, std::map<std::string, Shape> *shap
 
 /// JSON string escaping for the support report (quotes, backslashes, control characters).
 static std::string jsonEscape(const std::string &s) {
-    std::string out;
+    // JSON requires the C0 control characters (everything below the first printable
+    // ASCII codepoint, U+0020 space) to be emitted as \uXXXX escapes.
+    constexpr unsigned char kFirstPrintableAscii = 0x20;
+    std::string             out;
     out.reserve(s.size() + 8);
     for (char c: s)
     {
@@ -148,7 +151,7 @@ static std::string jsonEscape(const std::string &s) {
         {
             out += '\\';
             out += c;
-        } else if ((unsigned char) c < 0x20)
+        } else if ((unsigned char) c < kFirstPrintableAscii)
         {
             char buf[8];
             snprintf(buf, sizeof buf, "\\u%04x", (unsigned) (unsigned char) c);
@@ -229,23 +232,24 @@ int main(int argc, char **argv) {
         }
     }
     PassOptions opt = PassOptions::forOptLevel(optLevel);
-    // per-fusion overrides on top of the level
-    auto over = [&](const char *on, const char *off, bool &v) {
-        if (has(argc, argv, on))
+    // Per-fusion overrides layered on top of the -O level: --<flag> forces the pass on,
+    // --no-<flag> forces it off; absent flags keep the level's default.
+    auto applyFlagOverride = [&](const char *enableFlag, const char *disableFlag, bool &option) {
+        if (has(argc, argv, enableFlag))
         {
-            v = true;
+            option = true;
         }
-        if (has(argc, argv, off))
+        if (has(argc, argv, disableFlag))
         {
-            v = false;
+            option = false;
         }
     };
-    over("--fuse-se", "--no-fuse-se", opt.fuseSqueezeExcite);
-    over("--fuse-dwpw", "--no-fuse-dwpw", opt.fuseDwPw);
-    over("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
-    over("--strict-fuse", "--no-strict-fuse", opt.strictFuse);
-    over("--lower-conv", "--no-lower-conv", opt.lowerConv);
-    over("--dequantize", "--no-dequantize", opt.dequantize);
+    applyFlagOverride("--fuse-se", "--no-fuse-se", opt.fuseSqueezeExcite);
+    applyFlagOverride("--fuse-dwpw", "--no-fuse-dwpw", opt.fuseDwPw);
+    applyFlagOverride("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
+    applyFlagOverride("--strict-fuse", "--no-strict-fuse", opt.strictFuse);
+    applyFlagOverride("--lower-conv", "--no-lower-conv", opt.lowerConv);
+    applyFlagOverride("--dequantize", "--no-dequantize", opt.dequantize);
     opt.dumpBig = has(argc, argv, "--dump-big");
 
     // Resolve dynamic input dims. --batch N sets the fallback substituted into a dynamic LEADING
@@ -288,7 +292,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    const bool vxmInput = onnx.size() > 4 && onnx.compare(onnx.size() - 4, 4, ".vxm") == 0;
+    // A ".vxm" path is a pre-compiled graph; anything else is treated as ONNX to import.
+    constexpr const char *kVxmExt   = ".vxm";
+    const size_t          vxmExtLen = 4; // strlen(".vxm")
+    const bool            vxmInput  = onnx.size() > vxmExtLen && onnx.compare(onnx.size() - vxmExtLen, vxmExtLen, kVxmExt) == 0;
 
     // Multi-bucket compile: one full import+passes product per --bucket occurrence, sharing one
     // initializer pool. Requires an ONNX input (a .vxm has its passes already baked at one shape).

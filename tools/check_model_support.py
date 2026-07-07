@@ -91,17 +91,26 @@ _SHAPE_LOGIC = {"INT64", "INT32", "BOOL", "INT8"}  # shape/index/mask tensors; f
 _NARROWED = {"DOUBLE"}                           # import narrows to fp32
 _UNUSABLE = {"STRING", "COMPLEX64", "COMPLEX128"}
 
+# Highest tensor rank the engine's flat broadcast/tile/pad kernels can decode; a node whose
+# operand exceeds it takes a CPU fallback (mirrors the rank bound baked into those shaders).
+_FLAT_KERNEL_MAX_RANK = 8
+
 
 def _function_body(text, name):
-    """The brace-balanced body of `name(...)` in C++ source text, or ''."""
-    m = re.search(r"\b%s\s*\([^)]*\)\s*\{" % re.escape(name), text)
-    if not m:
+    """The brace-balanced body of `name(...)` in C++ source text, or ''.
+
+    Locates the `<name>(...) {` signature, then walks forward counting braces so the
+    returned slice ends at the matching close. Assumes braces inside the function are
+    balanced and none appear in string/char literals (true for op.cpp's map tables).
+    """
+    match = re.search(r"\b%s\s*\([^)]*\)\s*\{" % re.escape(name), text)
+    if not match:
         return ""
-    depth, i = 1, m.end()
-    while i < len(text) and depth:
-        depth += {"{": 1, "}": -1}.get(text[i], 0)
-        i += 1
-    return text[m.end():i]
+    depth, cursor = 1, match.end()
+    while cursor < len(text) and depth:
+        depth += {"{": 1, "}": -1}.get(text[cursor], 0)
+        cursor += 1
+    return text[match.end():cursor]
 
 
 def parse_op_map(op_cpp_path):
@@ -112,13 +121,19 @@ def parse_op_map(op_cpp_path):
     except OSError as e:
         sys.exit("error: cannot read %s: %s (pass --repo)" % (op_cpp_path, e))
     name_to_type = {}
+    # opTypeFromOnnx is a `{"OnnxName", OpType::Foo}` initializer-list table; each entry maps
+    # one ONNX op name to its OpType.
     body = _function_body(text, "OpType opTypeFromOnnx")
-    for name, ty in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*OpType::(\w+)\}', body):
-        name_to_type[name] = ty
-    for fn, family in (("UnaryType unaryFromOnnx", "Unary"),
-                       ("BinaryType binaryFromOnnx", "Binary")):
-        for name in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*[UB]::\w+\}', _function_body(text, fn)):
+    for name, op_type in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*OpType::(\w+)\}', body):
+        name_to_type[name] = op_type
+    # unaryFromOnnx/binaryFromOnnx use the same `{"Name", U::Foo}` / `{"Name", B::Foo}` table
+    # shape; every entry collapses to the single Unary/Binary family OpType.
+    for fn_signature, family in (("UnaryType unaryFromOnnx", "Unary"),
+                                 ("BinaryType binaryFromOnnx", "Binary")):
+        for name in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*[UB]::\w+\}', _function_body(text, fn_signature)):
             name_to_type.setdefault(name, family)
+    # reduceFromOnnx dispatches on string compares (`s == "ReduceSum"`) rather than a table;
+    # every recognized name is a "Reduce"-prefixed literal that maps to the Reduce family.
     for name in re.findall(r's\s*==\s*"(Reduce\w+)"', _function_body(text, "ReduceType reduceFromOnnx")):
         name_to_type.setdefault(name, "Reduce")
     if not name_to_type:
@@ -127,14 +142,18 @@ def parse_op_map(op_cpp_path):
 
 
 def parse_registry(ops_dir, macro):
-    """Set of OpType names registered with `macro` under `ops_dir`."""
+    """Set of OpType names registered with `macro` under `ops_dir`.
+
+    Each kernel source registers itself with `MACRO(OpType::Foo, ...)`; the regex pulls the
+    OpType argument out of every such call across the directory's .cpp/.h files.
+    """
     types = set()
     if not os.path.isdir(ops_dir):
         return types
-    for fn in os.listdir(ops_dir):
-        if not fn.endswith((".cpp", ".h")):
+    for filename in os.listdir(ops_dir):
+        if not filename.endswith((".cpp", ".h")):
             continue
-        with open(os.path.join(ops_dir, fn), errors="replace") as f:
+        with open(os.path.join(ops_dir, filename), errors="replace") as f:
             types.update(re.findall(r"%s\(OpType::(\w+)" % macro, f.read()))
     return types
 
@@ -189,8 +208,8 @@ def attr_map(node):
 # returns a reason string when the node runs on the CPU backend instead of the GPU.
 def _gate_pad(node, attrs, index):
     shape = (index.get(node.output[0]) or {}).get("shape")
-    if shape is not None and len(shape) > 8:
-        return "Pad on a rank-%d tensor (flat kernels decode rank <= 8)" % len(shape)
+    if shape is not None and len(shape) > _FLAT_KERNEL_MAX_RANK:
+        return "Pad on a rank-%d tensor (flat kernels decode rank <= %d)" % (len(shape), _FLAT_KERNEL_MAX_RANK)
     mode = attrs.get("mode", "constant")
     if mode not in ("constant", "edge", "reflect"):
         return "Pad mode=%r (GPU kernel does constant/edge/reflect)" % mode
@@ -239,10 +258,11 @@ def _gate_conv(node, attrs, index):
             % (group, cin, cout))
 
 
-def _gate_rank8(node, attrs, index):
+def _gate_flat_rank(node, attrs, index):
     shape = (index.get(node.output[0]) or {}).get("shape")
-    if shape is not None and len(shape) > 8:
-        return "%s output rank %d (flat broadcast/tile kernels decode rank <= 8)" % (node.op_type, len(shape))
+    if shape is not None and len(shape) > _FLAT_KERNEL_MAX_RANK:
+        return "%s output rank %d (flat broadcast/tile kernels decode rank <= %d)" % (
+            node.op_type, len(shape), _FLAT_KERNEL_MAX_RANK)
     return None
 
 
@@ -252,8 +272,8 @@ CPU_FALLBACK_GATES = {
     "Cast": _gate_cast,
     "Einsum": _gate_einsum,
     "Conv": _gate_conv,
-    "Expand": _gate_rank8,
-    "Tile": _gate_rank8,
+    "Expand": _gate_flat_rank,
+    "Tile": _gate_flat_rank,
 }
 
 
