@@ -78,6 +78,15 @@ bit-close (cosine 1.0, maxAbsErr ~1e-5), and the CPU backend is the bit-exact re
 For accuracy-sensitive callers, set `precision = Precision::High` or fall back to CPU. fp16 is the
 default in `vknn::Config` because the accuracy cost is small and the bandwidth saving is real.
 
+An fp16 activation store **saturates to the finite extreme** (`±65504`) rather than overflowing to
+`±inf`, so a finite fp32 accumulation past the fp16 range never becomes a `NaN` that silently zeroes
+the output — the same clamp already applied to out-of-fp16-range constants. Saturation is not free
+accuracy, though: a model with **no normalization ops** whose activations genuinely exceed the fp16
+range (a deep conv stack that relies on trained weights to bound its intermediates) loses magnitude
+information at the clamp. Such a model wants fp32 storage — `Precision::High`, or `Precision::Normal`
+with its tensors named in `Config::fp32Tensors` — for full accuracy; at `Low` it stays finite but
+approximate on the overflowing tensors.
+
 ---
 
 ## 4. Conv kernels trail a years-tuned engine on the 3×3-heavy nets

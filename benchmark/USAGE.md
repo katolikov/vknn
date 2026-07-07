@@ -150,6 +150,14 @@ python benchmark/run.py convert model.onnx model.vxm [-O 0..3] [--fp32] \
 `-O` is the optimization level (see `docs/op-coverage.md` § Fusions); `--on device` runs
 `vknn_compile` on the phone for models too big to convert on the host.
 
+`--on device` rebuilds the current Android `vknn_compile` before pushing it (so the device compiler
+is never stale against your tree), pushes the ONNX's declared external-data file(s) alongside the
+model (an ONNX that stores its weights externally would otherwise compile to an all-zero `.vxm`),
+writes the `.vxm` into the same device directory the run reads from, and fails loudly if the
+on-device compile exits non-zero. The compiler writes the `.vxm` to a temporary file and renames it
+into place only after a clean flush, so a compile the low-memory killer interrupts on a large model
+leaves the previous file intact rather than a truncated one.
+
 ## 6. Making goldens
 
 `scripts/make_golden.py` runs an ONNX model with onnxruntime on given inputs and writes
