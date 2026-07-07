@@ -98,6 +98,35 @@ Link the static lib **whole-archive** so the self-registering operators/backends
 this. Everything is configured through `vknn::Config` — the engine reads **no environment variables**
 ([docs/config.md](docs/config.md)).
 
+## Chat with an LLM
+
+VKNN runs **Qwen2.5-Coder-0.5B** (a `qwen2` autoregressive decoder) end to end with **every compute
+op on the GPU — zero CPU fallbacks**, generating text that matches the HuggingFace greedy reference
+token-for-token. A small terminal chat app drives it: [`examples/chat.cpp`](examples/chat.cpp) owns
+the on-device GPU decode loop (fixed-context KV cache, token streaming) and
+[`examples/chat_host.py`](examples/chat_host.py) is the one host dependency (HuggingFace tokenizer +
+REPL). Asking it a question:
+
+```text
+user>  Write a Python function to check if a number is prime.
+model> def is_prime(n):
+           if n <= 1:
+               return False
+           if n <= 3:
+               return True
+           if n % 2 == 0 or n % 3 == 0:
+               return False
+           i = 5
+           while i * i <= n:
+               if n % i == 0 or n % (i + 2) == 0:
+                   return False
+               i += 6
+           return True
+```
+
+Full walkthrough (export → compile → run + more examples): [docs/running-an-llm.md](docs/running-an-llm.md)
+and the [Running an LLM on VKNN](https://github.com/katolikov/vknn/wiki/Running-an-LLM-on-VKNN) wiki page.
+
 ## Feature matrix
 
 | Capability | What VKNN does |
