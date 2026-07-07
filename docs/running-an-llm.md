@@ -1,0 +1,114 @@
+# Running an LLM on VKNN
+
+VKNN runs **Qwen2.5-Coder-0.5B** — a qwen2-architecture autoregressive decoder
+(24 layers, GQA with 2 key/value heads, head dimension 64, 151936-wide vocabulary)
+— **entirely on the GPU with zero CPU compute fallbacks**. Every tensor-compute op
+(the embedding gather, all projection and MLP matmuls, RMSNorm, RoPE, GQA attention,
+SwiGLU, softmax, residual adds, the KV-cache concats, and the final logits matmul)
+runs on the Vulkan backend. The only host code is the BPE tokenizer, the greedy /
+sampling argmax over the logits readback, and the token loop.
+
+The decoder is exported **with a KV cache** (`optimum-cli export onnx --task
+text-generation-with-past`), which decomposes RMSNorm, RoPE, and the GQA `repeat_kv`
+into ops VKNN already runs on the GPU. Keep the external-data weight file
+(`model.onnx_data`) beside the `.onnx` — the importer resolves it relative to the
+`.onnx` directory.
+
+## 1. Compile a fixed-context decode plan
+
+The decode loop is host-driven around a single **fixed-max-context (fixed-C)** plan:
+one static bucket, compiled at a fixed past length `C`, that serves every step. The KV
+cache lives in the `past_key_values` buffers, not in a graph re-plan.
+
+Declare every dynamic axis with `--shape` (an undeclared dynamic non-batch axis is a
+hard error) and write a support report — the 0-CPU-fallback oracle. For a fixed context
+of `C = 256`, `attention_mask` is length `C + 1 = 257` (the `C` past slots plus the one
+new token), the past key/value tensors are `1 x 2 x 256 x 64`, and `input_ids` /
+`position_ids` are `1 x 1`:
+
+```sh
+./build.sh --convert    # builds build-host/vknn_compile
+
+shapes=( --shape input_ids=1x1 --shape attention_mask=1x257 --shape position_ids=1x1 )
+for i in $(seq 0 23); do
+  shapes+=( --shape past_key_values.$i.key=1x2x256x64 )
+  shapes+=( --shape past_key_values.$i.value=1x2x256x64 )
+done
+build-host/vknn_compile qwen-onnx/model.onnx qwen_chat.vxm --fp16 -O1 \
+  "${shapes[@]}" --support-report qwen_chat_support.json
+```
+
+The full decoder compiles to **100% Vulkan** — the support report's `summary` reads
+`{"total": 931, "vulkan": 931, "reasons": {}}` (no `cpu` / `none` node). `examples/chat.cpp`
+reads `kv_heads`, `C`, and `head_dim` back from `past_key_values.0.key` at load, so the
+decode loop stays model-agnostic.
+
+To benchmark separately, compile a prefill-shaped plan (time-to-first-token) and a
+decode-step plan (time-per-output-token):
+
+```sh
+# prefill: seq=32, past=0    -> input_ids/position_ids 1x32, attention_mask 1x32, past 1x2x0x64
+# decode : seq=1,  past=64   -> input_ids/position_ids 1x1,  attention_mask 1x65, past 1x2x64x64
+```
+
+## 2. Build the runner and push it to a device
+
+`examples/chat.cpp` is on the explicit `_vknn_examples` list in `CMakeLists.txt`, so it
+builds as `vknn_chat`. GPU validation is Android-only (the host build has no Vulkan
+backend). Re-push the binary after every Android rebuild.
+
+```sh
+./build.sh --android          # builds build-android/vknn_chat
+
+SERIAL=R5CWB2KWVJY ; DDIR=/data/local/tmp/vknn/qwen
+adb -s $SERIAL shell "mkdir -p $DDIR"
+adb -s $SERIAL push build-android/vknn_chat qwen_chat.vxm $DDIR/
+```
+
+## 3. Run
+
+**`vknn_chat`** reads whitespace-separated prompt token ids on stdin (one turn per line),
+runs prefill + decode, and streams generated token ids to stdout (one integer per line,
+flushed), then an `END` sentinel per turn. The conversation KV cache and the absolute
+token position persist across turns. Sampling is greedy at `--temp 0`, otherwise
+temperature + top-k + top-p.
+
+```
+vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
+          [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
+```
+
+A one-shot completion, feeding token ids directly:
+
+```sh
+echo "750 75698 1445 1648" | adb -s $SERIAL shell \
+  "cd $DDIR && ./vknn_chat qwen_chat.vxm --backend vulkan --precision low --max-tokens 32 --temp 0"
+```
+
+**`examples/chat_host.py`** is the interactive front-end. It tokenizes with a
+HuggingFace `AutoTokenizer`, drives the device binary over `adb` (feeding prompt ids on
+stdin, reading generated ids from stdout), detokenizes and streams the completion to the
+terminal with a live tokens/s counter, and holds the REPL. All model compute stays on the
+device GPU; this process only tokenizes and displays.
+
+```sh
+python3 examples/chat_host.py --serial $SERIAL --ddir $DDIR --model qwen_chat.vxm \
+    --tokenizer qwen-onnx --precision low --max-tokens 128
+```
+
+## 4. Precision
+
+The plan is compiled `--fp16`, so weights are stored fp16; every kernel **accumulates in
+fp32** regardless of the `--precision` storage tier. RMSNorm is a native fused op (the
+`lower_rmsnorm` pass folds the decomposed mean/rsqrt/mul chain into one `RMSNorm` node)
+that accumulates the variance reduction in fp32, so the fp16-activation path (`--precision
+low`) stays numerically faithful through the norm — the prefill-logits argmax matches the
+HuggingFace reference.
+
+`--precision low` stores activations fp16; `--precision high` stores them fp32. Because a
+greedy token is the argmax over a 151936-wide logits row, two near-tied top logits can flip
+under fp16 rounding at a close decision, so a long greedy stream may diverge from an fp32
+reference even when each individual forward is correct. Pin the fragile tail to fp32 with
+`--fp32-tensors` (the final norm output and the wide `lm_head` logits) — or compile an fp32
+plan — when exact long-horizon greedy parity is required. fp16 stores round to nearest even
+and saturate a finite result to `±65504` rather than overflowing to `±inf`.
