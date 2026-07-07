@@ -170,18 +170,30 @@ namespace vknn {
         const auto  &po     = node.attr.getints("pw_outs");
         int          nSteps = (int) (st.size() / 8);
 
-        // NumPy-style broadcast strides for an operand of shape `s` against the rank-`rank` output.
-        // `s` is right-aligned to the output axes (leading axes it lacks, off = rank - s.size(), are
-        // treated as size 1); an axis of extent 1 gets stride 0 so every output index along it re-reads
-        // the same operand element, while other axes get the operand's own row-major stride.
-        auto broadcastStrides = [&](const Shape &s) {
+        // NumPy-style broadcast strides for operand tensor `t` of shape `s` against the rank-`rank`
+        // output. `s` is right-aligned to the output axes (leading axes it lacks, off = rank -
+        // s.size(), are treated as size 1); an axis of extent 1 gets stride 0 so every output index
+        // along it re-reads the same operand element, while other axes get the operand's own
+        // row-major stride. A valid broadcast requires each right-aligned operand axis to be 1 or
+        // equal to the output extent (and the operand rank cannot exceed the output rank); a
+        // non-conforming extent is a malformed graph that the index reassembly below would turn into
+        // an out-of-bounds read, so it is rejected here (once per operand, before the element loop).
+        auto broadcastStrides = [&](const Shape &s, TensorId t) {
+            if (s.size() > rank)
+            {
+                throw Error(Status::InvalidArgument, "FusedPointwise (" + node.name + ") operand tensor " + std::to_string(t) + " shape " + shapeStr(s) + " has higher rank than output " + shapeStr(out));
+            }
             std::vector<int64_t> ob(rank, 0);
             int64_t              stride = 1;
             size_t               off    = rank - s.size();
             for (int i = (int) rank - 1; i >= 0; --i)
             {
                 int64_t d = (i < (int) off) ? 1 : s[i - off];
-                ob[i]     = (d == 1) ? 0 : stride;
+                if (d != 1 && d != out[i])
+                {
+                    throw Error(Status::InvalidArgument, "FusedPointwise (" + node.name + ") operand tensor " + std::to_string(t) + " shape " + shapeStr(s) + " is not broadcast-compatible with output " + shapeStr(out) + " (axis " + std::to_string(i) + ": " + std::to_string(d) + " vs " + std::to_string(out[i]) + ")");
+                }
+                ob[i] = (d == 1) ? 0 : stride;
                 stride *= d;
             }
             return ob;
@@ -219,7 +231,7 @@ namespace vknn {
                         throw Error(Status::RuntimeError, "FusedPointwise operand tensor " + std::to_string(node.inputs[kPwRefOp0 - r.ref]) + " (" + node.name + ") has no fp32 host payload");
                     }
                     r.p               = O.host.f32();
-                    r.ob              = broadcastStrides(O.shape);
+                    r.ob              = broadcastStrides(O.shape, node.inputs[kPwRefOp0 - r.ref]);
                 }
             }
         }

@@ -120,6 +120,21 @@ namespace vknn {
                 {
                     ps[rank - 1 - k] = os[(int) os.size() - 1 - k];
                 }
+                // A valid broadcast requires each right-aligned operand axis to be 1 or equal to the
+                // output extent (outDim), and the operand rank cannot exceed the fused output rank; a
+                // non-conforming extent is a malformed graph that the strides below would turn into an
+                // out-of-bounds shader read, so it is rejected here at plan-build time.
+                if ((int) os.size() > rank)
+                {
+                    throw Error(Status::InvalidArgument, "FusedPointwise (" + node.name + ") operand tensor " + std::to_string(opd) + " shape " + shapeStr(os) + " has higher rank than fused output " + shapeStr(out));
+                }
+                for (int k = 0; k < rank; ++k)
+                {
+                    if (ps[k] != 1 && ps[k] != plan.outDim[k])
+                    {
+                        throw Error(Status::InvalidArgument, "FusedPointwise (" + node.name + ") operand tensor " + std::to_string(opd) + " shape " + shapeStr(os) + " is not broadcast-compatible with output " + shapeStr(out) + " (axis " + std::to_string(k) + ": " + std::to_string(ps[k]) + " vs " + std::to_string(plan.outDim[k]) + ")");
+                    }
+                }
                 std::vector<int64_t> ss(rank, 1);
                 for (int k = rank - 2; k >= 0; --k)
                 {
