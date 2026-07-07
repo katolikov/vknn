@@ -10,6 +10,7 @@
 #include "vknn/graph.h"
 #include "vknn/session.h"
 #include <cmath>
+#include <cstring>
 #include <gtest/gtest.h>
 
 using namespace vknn;
@@ -2228,6 +2229,111 @@ TEST(Passes, BinaryScalarInitializerBroadcasts) {
     g.outputs = {y};
     inferShapes(g, 1);
     EXPECT_EQ(g.desc(y).shape, (Shape {2, 8}));
+}
+
+// --- Add of two rank-0 (shape []) scalar graph inputs runs live on the CPU (inputs are never
+// const-folded), so its operands are materialized by bindInput. numElements([]) is 0, so sizing the
+// host buffer by the shape count alone yields an empty (null-data) buffer whose read null-derefs;
+// a rank-0 scalar must keep its one element so the operand read is in-bounds. ---
+TEST(Ops, CpuAddTwoRank0ScalarInputs) {
+    Graph      g;
+    TensorDesc ai;
+    ai.name    = "a";
+    ai.shape   = {}; // rank-0 scalar input
+    ai.isInput = true;
+    TensorId a = g.addTensor(ai);
+    TensorDesc bi;
+    bi.name    = "b";
+    bi.shape   = {}; // rank-0 scalar input
+    bi.isInput = true;
+    TensorId b = g.addTensor(bi);
+    g.inputs   = {a, b};
+    TensorId y = g.addTensor({.name = "y"});
+    g.desc(y).isOutput = true;
+    Node n;
+    n.type    = OpType::Add;
+    n.name    = "add";
+    n.inputs  = {a, b};
+    n.outputs = {y};
+    g.nodes   = {n};
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+
+    auto scalarIn = [](const char *nm, float v) {
+        IOTensor in;
+        in.name  = nm;
+        in.shape = {}; // rank-0
+        in.dtype = DType::Float32;
+        in.data.resize(sizeof(float));
+        std::memcpy(in.data.data(), &v, sizeof(float));
+        return in;
+    };
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({scalarIn("a", 3.0f), scalarIn("b", 4.0f)}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    const float *o = outs[0].f32();
+    ASSERT_NE(o, nullptr);
+    EXPECT_EQ(outs[0].shape, (Shape {}));
+    EXPECT_NEAR(o[0], 7.0f, 1e-6f);
+}
+
+// --- A rank-0 (shape []) scalar output declared in a non-fp32 dtype goes through readbackOutput's
+// conversion path, sized by the output element count. numElements([]) is 0, so counting the scalar by
+// the shape alone would emit an empty output and silently drop the value; the scalar's one element
+// must be counted so the converted output carries it. ---
+TEST(Ops, CpuRank0ScalarOutputFp16Readback) {
+    Graph      g;
+    TensorDesc ai;
+    ai.name    = "a";
+    ai.shape   = {}; // rank-0 scalar input
+    ai.isInput = true;
+    TensorId a = g.addTensor(ai);
+    TensorDesc bi;
+    bi.name    = "b";
+    bi.shape   = {}; // rank-0 scalar input
+    bi.isInput = true;
+    TensorId b = g.addTensor(bi);
+    g.inputs   = {a, b};
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.shape    = {};                 // rank-0 scalar output
+    yo.dtype    = DType::Float16;      // declared FLOAT16 -> readback converts from internal fp32
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node n;
+    n.type    = OpType::Add;
+    n.name    = "add";
+    n.inputs  = {a, b};
+    n.outputs = {y};
+    g.nodes   = {n};
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+
+    auto scalarIn = [](const char *nm, float v) {
+        IOTensor in;
+        in.name  = nm;
+        in.shape = {};
+        in.dtype = DType::Float32;
+        in.data.resize(sizeof(float));
+        std::memcpy(in.data.data(), &v, sizeof(float));
+        return in;
+    };
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({scalarIn("a", 2.0f), scalarIn("b", 5.0f)}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    EXPECT_EQ(outs[0].dtype, DType::Float16);
+    ASSERT_EQ(outs[0].data.size(), sizeof(fp16_t)); // one fp16 element, not an empty buffer
+    fp16_t h;
+    std::memcpy(&h, outs[0].data.data(), sizeof(fp16_t));
+    EXPECT_NEAR(halfToFloat(h), 7.0f, 1e-3f);
 }
 
 // --- pruneDeadInitializers: a folded chain's intermediate constants keep no payload; only the

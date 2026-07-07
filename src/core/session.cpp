@@ -985,7 +985,10 @@ namespace vknn {
                 // Convert the caller's bytes (in io.dtype) to the internal compute storage: fp32 for every
                 // real/8-bit/32-bit type (the compute path is fp32), int64 for Int64 (shape/index inputs).
                 // A UINT8/FLOAT16 image thus enters as fp32 and the model's own Cast handles the rest.
-                bindInput(io.dtype, io.data, numElements(rt.shape), rt);
+                // A rank-0 scalar input (shape [], numElements() 0) carries its one element, so the host
+                // buffer is non-empty and a CPU op reading the operand does not dereference a null pointer.
+                int64_t elems = rt.shape.empty() ? 1 : numElements(rt.shape);
+                bindInput(io.dtype, io.data, elems, rt);
                 rt.hostValid = true;
             }
             rt.deviceValid = false;
@@ -1079,8 +1082,11 @@ namespace vknn {
             if (rt.dmaBufFd < 0)
             {
                 // Emit the output in the model's DECLARED dtype (e.g. a UINT8 image, FLOAT16 tensor),
-                // converting from the internal fp32/int64 storage. Matches the ONNX output contract.
-                readbackOutput(graph_.tensors[oid].dtype, rt, numElements(rt.shape), io);
+                // converting from the internal fp32/int64 storage. Matches the ONNX output contract. A
+                // rank-0 scalar output (shape [], numElements() 0) counts its one element so the dtype
+                // conversion emits the value rather than an empty buffer.
+                int64_t outElems = rt.shape.empty() ? 1 : numElements(rt.shape);
+                readbackOutput(graph_.tensors[oid].dtype, rt, outElems, io);
             } else
             {
                 io.dtype = rt.dtype; // a bound output lives in the caller's fd, not here
