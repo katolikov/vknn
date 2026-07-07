@@ -23,8 +23,7 @@ namespace vknn {
                 // channel count (FC2 output width); Cr is the reduced squeeze width. W1 is [Cr][C] and
                 // W2 is [C][Cr], so the FC1 output count Cr is W1's row count (shape[0] of inputs[1]).
                 NCHW         x = NCHW::from(g.desc(node.inputs[0]).shape);
-                int64_t      C = x.c, Cr = g.desc(node.inputs[3]).shape[0];
-                Cr = g.desc(node.inputs[1]).shape[0]; // W1 is [Cr][C], so Cr is the row count of W1
+                int64_t      C = x.c, Cr = g.desc(node.inputs[1]).shape[0]; // W1 is [Cr][C], row count is Cr
                 pc = {(int) x.n, (int) C, (int) Cr, node.actLo, node.actHi};
                 w1 = uploadCached(env, node.name + "#w1", [&] {
                     return initFloats(g, node.inputs[1]);
