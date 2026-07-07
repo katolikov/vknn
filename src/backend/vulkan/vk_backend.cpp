@@ -19,6 +19,14 @@
 
 namespace vknn {
 
+    namespace {
+        // FNV-1a 64-bit hash constants. The model-tag hash keys the on-disk weight cache namespace and
+        // the dma-buf id folds the same prime, so these values are part of the cache-key contract and
+        // must not change.
+        constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+        constexpr uint64_t kFnvPrime       = 1099511628211ull;
+    } // namespace
+
     // True once the fp16 shader variants (conv_fp16, dwconv_fp16, ...) are compiled in. The ops
     // pick the _fp16 kernels and upload half weights when this and the device feature line up.
     bool vxVulkanFp16Available() {
@@ -894,15 +902,15 @@ namespace vknn {
             // that per-node profile ms attributes against. Read-only; no behaviour change.
             if (cfg_.debugSegments)
             {
-                auto shp = [](const Shape &s) {
-                    std::string o = "[";
+                auto formatShape = [](const Shape &s) {
+                    std::string out = "[";
                     for (size_t i = 0; i < s.size(); ++i)
                     {
-                        o += (i ? "," : "") + std::to_string(s[i]);
+                        out += (i ? "," : "") + std::to_string(s[i]);
                     }
-                    return o + "]";
+                    return out + "]";
                 };
-                int slV = 0, slS = 0, co = 0, trI = 0, trS = 0;
+                int sliceViews = 0, sliceStrided = 0, concatCount = 0, transposeIdentity = 0, transposeStrided = 0;
                 for (int ni: idx)
                 {
                     const Node &nd = g.nodes[ni];
@@ -913,7 +921,7 @@ namespace vknn {
                     if (nd.type == OpType::Slice)
                     {
                         Shape in = g.desc(nd.inputs[0]).shape, out = g.desc(nd.outputs[0]).shape;
-                        int   r  = (int) in.size();
+                        int   rank     = (int) in.size();
                         auto  steps    = readI64Param(g, nd, "steps", 4);
                         bool  unitStep = true;
                         for (auto s: steps)
@@ -924,7 +932,7 @@ namespace vknn {
                             }
                         }
                         int slicedAx = -1, nSliced = 0;
-                        for (int ax = 0; ax < r && ax < (int) out.size(); ++ax)
+                        for (int ax = 0; ax < rank && ax < (int) out.size(); ++ax)
                         {
                             if (out[ax] != in[ax])
                             {
@@ -940,11 +948,11 @@ namespace vknn {
                                 contig = false; // an outer dim >1 makes the slice several disjoint chunks
                             }
                         }
-                        (contig ? slV : slS)++;
-                        VKNN_INFO << "[rc-diag] Slice " << (contig ? "VIEW " : "strd ") << nd.name << " in" << shp(in) << "->out" << shp(out) << " ax=" << slicedAx << " step1=" << unitStep << " " << actBytes(nd.outputs[0]) << "B";
+                        (contig ? sliceViews : sliceStrided)++;
+                        VKNN_INFO << "[rc-diag] Slice " << (contig ? "VIEW " : "strd ") << nd.name << " in" << formatShape(in) << "->out" << formatShape(out) << " ax=" << slicedAx << " step1=" << unitStep << " " << actBytes(nd.outputs[0]) << "B";
                     } else if (nd.type == OpType::Concat)
                     {
-                        co++;
+                        concatCount++;
                         VKNN_INFO << "[rc-diag] Concat " << nd.name << " axis=" << nd.attr.geti("axis", 1) << " nin=" << nd.inputs.size() << " " << actBytes(nd.outputs[0]) << "B";
                     } else if (nd.type == OpType::Transpose)
                     {
@@ -957,11 +965,11 @@ namespace vknn {
                                 ident = false; // a real permutation needs strided reads (Stage B)
                             }
                         }
-                        (ident ? trI : trS)++;
+                        (ident ? transposeIdentity : transposeStrided)++;
                         VKNN_INFO << "[rc-diag] Transpose " << (ident ? "VIEW " : "strd ") << nd.name << " " << actBytes(nd.outputs[0]) << "B";
                     }
                 }
-                VKNN_INFO << "[rc-diag] SUMMARY Slice: " << slV << " view / " << slS << " strided | Concat: " << co << " | Transpose: " << trI << " ident / " << trS << " strided";
+                VKNN_INFO << "[rc-diag] SUMMARY Slice: " << sliceViews << " view / " << sliceStrided << " strided | Concat: " << concatCount << " | Transpose: " << transposeIdentity << " ident / " << transposeStrided << " strided";
             }
 
             // 2) build env + ops; prepare uploads weights.
@@ -977,12 +985,12 @@ namespace vknn {
             // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
             // model, distinct across models) so a shared cacheDir can't return another model's weights.
             {
-                uint64_t h   = 1469598103934665603ull;
+                uint64_t h   = kFnvOffsetBasis;
                 auto     mix = [&](const std::string &s) {
                     for (char c: s)
                     {
                         h ^= (uint8_t) c;
-                        h *= 1099511628211ull;
+                        h *= kFnvPrime;
                     }
                 };
                 for (const auto &nd: g.nodes)
@@ -996,10 +1004,10 @@ namespace vknn {
                 env_.modelTag = buf;
             }
             { // per-GPU autotune namespace: vendor/device/driver identify the kernel-timing target.
-                const auto &c = be_->ctx().caps();
-                char        g[40];
-                snprintf(g, sizeof(g), "%04x%04x-%08x", c.vendorID, c.deviceID, c.driverVersion);
-                env_.gpuTag = g;
+                const auto &caps = be_->ctx().caps();
+                char        tag[40];
+                snprintf(tag, sizeof(tag), "%04x%04x-%08x", caps.vendorID, caps.deviceID, caps.driverVersion);
+                env_.gpuTag = tag;
             }
             // Load + validate the model cache now that the model hash is known, then hand the primed
             // pipeline + weight caches to the env. loadCache is idempotent across this model's segments.
@@ -1672,7 +1680,7 @@ namespace vknn {
             {
                 return 0;
             }
-            return ((uint64_t) st.st_dev * 1099511628211ull) ^ (uint64_t) st.st_ino; // (dev,inode) -> stable id
+            return ((uint64_t) st.st_dev * kFnvPrime) ^ (uint64_t) st.st_ino; // (dev,inode) -> stable id
         }
         // Declared-format zero-copy: boundary tensors whose declared dma-buf layout/dtype differs from the
         // device-native boundary, so the GPU converts between the imported buffer and the pooled boundary
