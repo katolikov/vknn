@@ -9,7 +9,7 @@ namespace vknn {
     /// are C, H, W), so a multi-view input like [1,8,3,224,224] becomes N=8, C=3, H=224, W=224 and
     /// N*C*H*W stays equal to the element count.
     struct NCHW {
-        int64_t     n = 1, c = 1, h = 1, w = 1;
+        int64_t n = 1, c = 1, h = 1, w = 1;
         /// Interpret a logical shape as NCHW, folding rank>4 into N and right-aligning C, H, W.
         /// Lower ranks map dims left-to-right (rank 3 -> N,C,H with W=1; rank 2 -> N,C; rank 1 -> C),
         /// leaving the missing trailing dims at their default of 1.
@@ -60,7 +60,7 @@ namespace vknn {
     /// @param c Logical channel count.
     /// @returns ceil(c / kNC4Block).
     inline int64_t cBlocks(int64_t c) {
-        return (c + 3) / kNC4Block;
+        return (c + kNC4Block - 1) / kNC4Block; // ceil-div: the +block-1 bias rounds a partial block up
     }
 
     /// Stored element count for a logical NCHW shape in a boundary layout. NCHW and NHWC are dense

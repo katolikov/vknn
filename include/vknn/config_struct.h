@@ -44,9 +44,9 @@ namespace vknn {
         /// device/driver/model/code change. Set the path via Runtime::load()'s cacheFile argument (empty
         /// there -> "<model>.cache" next to the model); cacheDir is the fallback for a session built from an
         /// in-memory graph (no model path).
-        std::string cacheFile;                                  ///< unified cache path (resolved by Runtime::load; empty = no file cache)
-        std::string cacheDir  = "/data/local/tmp/vxrt/cache";   ///< fallback cache directory for an in-memory graph with no model path
-        bool        noCache   = false;                          ///< debug: skip all cache read/write (cold compile every load)
+        std::string cacheFile;                               ///< unified cache path (resolved by Runtime::load; empty = no file cache)
+        std::string cacheDir = "/data/local/tmp/vxrt/cache"; ///< fallback cache directory for an in-memory graph with no model path
+        bool        noCache  = false;                        ///< debug: skip all cache read/write (cold compile every load)
 
         /// Load-time conv-kernel autotune effort (None / Fast / Heavy). Effort only — never changes
         /// numerical output; the chosen kernels are cached and reused on a warm start.
@@ -93,10 +93,10 @@ namespace vknn {
         std::string fp32Tensors;
 
         // Profiling / debug.
-        bool        profile      = false;
-        int         verbosity    = 1; ///< maps to log level
-        bool        layerDump    = false;
-        std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
+        bool        profile      = false;                       ///< collect per-op timing into the Profiler and print the summary table
+        int         verbosity    = 1;                           ///< log verbosity applied by applyLogLevel(): 0=Warn, 1=Info, >=2=Debug
+        bool        layerDump    = false;                       ///< write every layer's output tensor to layerDumpDir for numeric debugging
+        std::string layerDumpDir = "/data/local/tmp/vxrt/dump"; ///< destination directory for the per-layer tensor dump
 
         /// Conv kernel selection + GPU-pass knobs, set via setHint(Hint, value) (see the Hint enum):
         /// Hint::Winograd (auto/on/off), the experimental Winograd variant hints, and FlatLayout /
