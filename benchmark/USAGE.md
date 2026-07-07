@@ -154,3 +154,13 @@ python benchmark/run.py convert model.onnx model.vxm [-O 0..3] [--fp32] \
 
 `scripts/make_golden.py` runs an ONNX model with onnxruntime on given inputs and writes
 `<output>_gold.npy` files + a starter config.
+
+## 7. Troubleshooting
+
+**`bad magic` / `incompatible vknn version` when loading a `.vxm`.** The `.vxm` container format
+carries a version word (`VXM3` / `VXM4`). A ready `.vxm` used **as-is** (a fetched or leftover file,
+not reconverted) can be stale relative to the runner you built, so the runner refuses it. The `.onnx`
+path never hits this — `run.py` rebuilds the host and device binaries and reconverts each run, so the
+compiler and runner always match. Fix: point the config at the `.onnx` (drop the ready `.vxm`), or
+delete the stale `<model>.vxm` and `<model>.cache` on the device and let it recompile. Always convert
+and run with the same build.

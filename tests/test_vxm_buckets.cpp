@@ -182,3 +182,41 @@ TEST(VxmBuckets, SharedPoolNotDuplicated) {
     // a second copy of the weight payload. The growth must be well under one weight copy.
     EXPECT_LT(twoSz - oneSz, weightBytes / 2);
 }
+
+// A non-VXM3/VXM4 file loads to a clean failure (returns false, no crash). The loader distinguishes an
+// incompatible-version VXM container (a "VXM<n>" magic) from a file that is not a .vxm at all so the
+// log names the fix; both paths must simply refuse the file.
+TEST(VxmBuckets, IncompatibleAndForeignFilesRejected) {
+    auto write = [](const std::string &path, const std::vector<uint8_t> &bytes) {
+        FILE *f = fopen(path.c_str(), "wb");
+        if (f)
+        {
+            if (!bytes.empty())
+            {
+                fwrite(bytes.data(), 1, bytes.size(), f);
+            }
+            fclose(f);
+        }
+    };
+    std::vector<Graph>       buckets;
+    std::vector<std::string> names;
+
+    // A "VXM2" container (0x324d5856) -- a recognizable but incompatible engine version.
+    std::string v2 = tmp("vxm_v2.vxm");
+    write(v2, {0x56, 0x58, 0x4d, 0x32, 0, 0, 0, 0});
+    EXPECT_FALSE(loadGraphBinBuckets(buckets, names, v2));
+
+    // A non-VXM magic -- not a .vxm at all (wrong file / corrupt).
+    std::string junk = tmp("vxm_junk.vxm");
+    write(junk, {0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4});
+    EXPECT_FALSE(loadGraphBinBuckets(buckets, names, junk));
+
+    // An empty file -- the first-word read cannot complete.
+    std::string empty = tmp("vxm_empty.vxm");
+    write(empty, {});
+    EXPECT_FALSE(loadGraphBinBuckets(buckets, names, empty));
+
+    std::remove(v2.c_str());
+    std::remove(junk.c_str());
+    std::remove(empty.c_str());
+}
