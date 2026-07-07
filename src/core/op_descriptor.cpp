@@ -18,8 +18,8 @@ namespace vknn {
     namespace {
         using L = LayoutClass;
 
-        // The largest enum value (append-only; QGemm is last). The table is sized to cover it.
-        constexpr int kMaxOp = (int) OpType::QGemm;
+        // The largest enum value (append-only; And is last). The table is sized to cover it.
+        constexpr int kMaxOp = (int) OpType::And;
 
         struct Table {
             OpDescriptor d[kMaxOp + 1];
@@ -74,6 +74,10 @@ namespace vknn {
                 set(OpType::TopK, L::ShapeDependent, false, false);
                 set(OpType::QuantizeLinear, L::Flat, false, false);
                 set(OpType::DequantizeLinear, L::Flat, false, false);
+                // Bool-producing flat elementwise ops (float->bool NaN test / broadcasting boolean AND).
+                // Own flat kernels rather than fusion members: no pw step code is defined for them.
+                set(OpType::IsNaN, L::Flat, false, false);
+                set(OpType::And, L::Flat, false, false);
                 // Everything not listed keeps the all-default row {Nc4, pwMember=false,
                 // pwEpilogue=false}: CPU-only / structural ops (Reshape, Flatten, Squeeze, Unsqueeze,
                 // Cast, Identity, Constant, Shape, BatchNorm, EyeLike, FusedSE, ConvertLayout,

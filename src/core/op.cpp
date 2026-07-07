@@ -138,6 +138,10 @@ namespace vknn {
                 return "ConvInteger";
             case OpType::QGemm:
                 return "QGemm";
+            case OpType::IsNaN:
+                return "IsNaN";
+            case OpType::And:
+                return "And";
             default:
                 return "Unknown";
         }
@@ -280,6 +284,10 @@ namespace vknn {
             {"MatMulInteger", OpType::MatMulInteger},
             {"ConvInteger", OpType::ConvInteger},
             {"QGemm", OpType::QGemm},
+            // Elementwise NaN test (float -> bool) and boolean AND (two bool operands). Both bool
+            // outputs are the canonical fp32 1.0/0.0 the flat comparison ops emit.
+            {"IsNaN", OpType::IsNaN},
+            {"And", OpType::And},
         };
         auto it = m.find(s);
         if (it != m.end())

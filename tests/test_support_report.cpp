@@ -134,6 +134,30 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     EXPECT_EQ(rows[6].reason, "no kernel in any backend");
 }
 
+TEST(SupportReport, IsNaNAndBooleanAndRunOnGpu) {
+    // The float->bool NaN guard and the broadcasting boolean AND both have flat GPU kernels: the
+    // survey (the same gate the device runs) must promote them to vulkan, not the CPU oracle.
+    Graph g;
+    TensorId sm  = tensor(g, "softmax_out", {1, 14, 4, 4});
+    TensorId nan = tensor(g, "isnan_out", {1, 14, 4, 4});
+    addNode(g, OpType::IsNaN, "isnan_guard", {sm}, {nan});
+
+    // A [1,1,q,k] causal mask AND a [1,1,1,k] padding mask -> [1,1,q,k] combined mask.
+    TensorId causal = tensor(g, "causal_mask", {1, 1, 4, 4});
+    TensorId pad    = tensor(g, "pad_mask", {1, 1, 1, 4});
+    TensorId comb   = tensor(g, "combined_mask", {1, 1, 4, 4});
+    addNode(g, OpType::And, "mask_and", {causal, pad}, {comb});
+
+    std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), 2u);
+    EXPECT_EQ(rows[0].node, "isnan_guard");
+    EXPECT_EQ(rows[0].backend, "vulkan");
+    EXPECT_TRUE(rows[0].reason.empty());
+    EXPECT_EQ(rows[1].node, "mask_and");
+    EXPECT_EQ(rows[1].backend, "vulkan");
+    EXPECT_TRUE(rows[1].reason.empty());
+}
+
 TEST(SupportReport, CastFromInt64TargetGate) {
     // An int64 input Cast runs on the GPU for the shape-arithmetic targets (FLOAT/FLOAT16/DOUBLE,
     // INT32, INT64) and for INT8/UINT8: the int64 lanes decode to compute-precision float at the pack
