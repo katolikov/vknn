@@ -64,7 +64,11 @@ namespace vknn {
         }
         for (TensorId id: g.inputs)
         {
-            setk(id, DType::Float32); // model inputs are float (image / intrinsics / ...)
+            // Seed each input with its DECLARED dtype, not a blanket float. Integer inputs (token ids,
+            // position_ids, attention_mask) are int64: their int->float Cast is a genuine conversion and
+            // must survive, or the raw integer bytes reach a float consumer (e.g. the RoPE position feeding
+            // the rotary MatMul) and read back as a near-zero denormal.
+            setk(id, g.tensors[id].dtype);
         }
         // Forward pass (nodes are topo-ordered after import): assign each output a dtype.
         for (const Node &nd: g.nodes)
