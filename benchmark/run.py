@@ -163,6 +163,29 @@ def convert_flags(conv):
     return f
 
 
+def onnx_external_data(onnx):
+    """External-data file names an ONNX references (initializer external_data 'location' entries),
+    relative to the onnx's directory. Empty list when the model is self-contained or the `onnx`
+    package is unavailable — run.py otherwise depends only on the stdlib, so the import is lazy and
+    optional and a missing package degrades to the legacy weights.bin behavior with a warning."""
+    try:
+        import onnx as onnx_mod
+    except Exception as e:
+        log(f"  [convert] WARNING: onnx package unavailable ({e}); external-data weights (if any) not pushed")
+        return []
+    try:
+        model = onnx_mod.load(onnx, load_external_data=False)
+    except Exception as e:
+        log(f"  [convert] WARNING: could not parse {os.path.basename(onnx)} for external data ({e})")
+        return []
+    locs = []
+    for init in model.graph.initializer:
+        for kv in init.external_data:
+            if kv.key == "location" and kv.value and kv.value not in locs:
+                locs.append(kv.value)
+    return locs
+
+
 def convert(onnx, out_vxm, conv, where="host"):
     if not os.path.exists(onnx):
         sys.exit(f"MISSING model: {onnx}")
@@ -182,6 +205,16 @@ def convert(onnx, out_vxm, conv, where="host"):
     wb = os.path.join(os.path.dirname(onnx), "weights.bin")
     if os.path.exists(wb):
         push(wb, f"{ddir}/weights.bin")
+    # External-data weights: an ONNX names its weight file(s) internally (e.g. "mnasnet1_0.onnx.data").
+    # The importer resolves each location relative to _src.onnx's directory, so push it under the same
+    # relative name into ddir; without this those weights load as 0 bytes and the .vxm is all-zero.
+    onnx_dir = os.path.dirname(onnx)
+    for loc in onnx_external_data(onnx):
+        src = os.path.join(onnx_dir, loc)
+        if os.path.exists(src):
+            push(src, f"{ddir}/{loc}", "external-data")
+        else:
+            log(f"  [convert] WARNING: external-data file referenced by onnx not found: {src}")
     push(android_bin("vknn_compile"), f"{ddir}/vknn_compile")
     adb(["shell", "chmod", "+x", f"{ddir}/vknn_compile"])
     r = adb(["shell", f"cd {ddir} && ./vknn_compile _src.onnx {os.path.basename(out_vxm)} " + " ".join(flags)])
@@ -190,7 +223,8 @@ def convert(onnx, out_vxm, conv, where="host"):
     if r.stderr.strip():  # the engine logs (incl. errors) all go to stderr
         log("  [compile] " + r.stderr.strip().replace("\n", "\n  [compile] "))
     if r.returncode != 0:
-        sys.exit("device convert failed")
+        sys.exit(f"device convert FAILED (exit={r.returncode}): the on-device vknn_compile did not finish "
+                 f"— on a large model this can be an LMK (low-memory) kill. See the [compile] output above.")
     log(f"  [convert] device wrote {os.path.basename(out_vxm)}")
     return None  # already on device under its basename
 
@@ -474,6 +508,7 @@ def main():
     convert_parser.add_argument("--no-fuse-swish", action="store_true")
     convert_parser.add_argument("--on", choices=["host", "device"], default="host")
     convert_parser.add_argument("--serial", default=None, help="adb device serial (for --on device with multiple devices)")
+    convert_parser.add_argument("--no-build", action="store_true", help="skip the automatic ./build.sh --android before a device convert")
     convert_parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
@@ -482,6 +517,11 @@ def main():
 
     if args.cmd == "convert":
         set_serial(args.serial)
+        # A device convert must push the CURRENT Android binary; android_bin() only rebuilds a MISSING
+        # one, so build here first (mirrors the `run` path) unless --no-build. A stale/foreign
+        # vknn_compile otherwise writes a .vxm the runner rejects as an incompatible version.
+        if args.on == "device" and BUILD:
+            build_android()
         convert(args.onnx, args.out, {"fp16": args.fp16, "opt": args.opt, "fuse_se": args.fuse_se,
                                       "fuse_dwpw": args.fuse_dwpw, "no_fuse_swish": args.no_fuse_swish}, args.on)
         log("done.")

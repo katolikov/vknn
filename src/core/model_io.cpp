@@ -213,13 +213,40 @@ namespace vknn {
             g.inputs  = r.vec<TensorId>();
             g.outputs = r.vec<TensorId>();
         }
+
+        // Atomic publish: a writer opens a sibling ".tmp" path in the same directory and only a fully
+        // written file is renamed onto the final path. A compile killed mid-write (Android's low-memory
+        // killer can SIGKILL vknn_compile on a large model) leaves only the temp, so a later load never
+        // sees a truncated final .vxm. std::rename between two names in one directory is atomic on the
+        // same filesystem.
+        FILE *openVxmTemp(const std::string &path, std::string &tmpPath) {
+            tmpPath = path + ".tmp";
+            return fopen(tmpPath.c_str(), "wb");
+        }
+        // Flush and close the temp, then rename it onto the final path. On any flush/write/close error
+        // the temp is removed and the final path is left untouched; returns whether the final file was
+        // published.
+        bool commitVxmTemp(FILE *f, const std::string &tmpPath, const std::string &path) {
+            bool bad = fflush(f) != 0 || ferror(f) != 0;
+            if (fclose(f) != 0)
+            {
+                bad = true;
+            }
+            if (bad || std::rename(tmpPath.c_str(), path.c_str()) != 0)
+            {
+                std::remove(tmpPath.c_str());
+                return false;
+            }
+            return true;
+        }
     } // namespace
 
     bool saveGraphBin(const Graph &g, const std::string &path) {
-        FILE *f = fopen(path.c_str(), "wb");
+        std::string tmpPath;
+        FILE       *f = openVxmTemp(path, tmpPath);
         if (!f)
         {
-            VKNN_WARN << "saveGraph: cannot write " << path;
+            VKNN_WARN << "saveGraph: cannot write " << tmpPath;
             return false;
         }
         Writer w {f};
@@ -232,7 +259,11 @@ namespace vknn {
             w.i64(kv.first);
             w.vec(kv.second.bytes);
         }
-        fclose(f);
+        if (!commitVxmTemp(f, tmpPath, path))
+        {
+            VKNN_WARN << "saveGraph: failed to finalize " << path;
+            return false;
+        }
         VKNN_INFO << "saved optimized model -> " << path << " (" << g.nodes.size() << " nodes, " << g.initializers.size() << " weights)";
         return true;
     }
@@ -262,10 +293,11 @@ namespace vknn {
         {
             return saveGraphBin(buckets.front(), path);
         }
-        FILE *f = fopen(path.c_str(), "wb");
+        std::string tmpPath;
+        FILE       *f = openVxmTemp(path, tmpPath);
         if (!f)
         {
-            VKNN_WARN << "saveGraphBuckets: cannot write " << path;
+            VKNN_WARN << "saveGraphBuckets: cannot write " << tmpPath;
             return false;
         }
         Writer w {f};
@@ -318,7 +350,11 @@ namespace vknn {
             }
             totalWeights += (int64_t) bucketInits[b].size();
         }
-        fclose(f);
+        if (!commitVxmTemp(f, tmpPath, path))
+        {
+            VKNN_WARN << "saveGraphBuckets: failed to finalize " << path;
+            return false;
+        }
         VKNN_INFO << "saved optimized model -> " << path << " (" << buckets.size() << " buckets, " << pool.size() << " shared weights, " << totalWeights << " refs)";
         return true;
     }
