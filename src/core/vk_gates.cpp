@@ -225,7 +225,7 @@ namespace vknn {
             }
             return true;
         }
-        if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual)
+        if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And)
         {
             // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
             return true;

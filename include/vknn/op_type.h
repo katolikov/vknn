@@ -86,6 +86,8 @@ namespace vknn {
         MatMulInteger,            // int8 x int8 -> int32 MatMul, optional zero points
         ConvInteger,              // int8 x int8 -> int32 Conv, optional zero points
         QGemm,                    // com.microsoft: Gemm on int8 a/b with scales/zps, int32 bias
+        IsNaN,                    // elementwise NaN test: float -> bool (1.0/0.0), same shape (flat path)
+        And,                      // elementwise boolean AND with NumPy broadcasting -> 1.0/0.0 (flat path)
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

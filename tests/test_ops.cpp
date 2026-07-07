@@ -839,6 +839,35 @@ TEST(Ops, LessBroadcastPerChannel) {
     EXPECT_EQ(out.data, (std::vector<float> {1, 1, 0, 0, 1, 1, 0, 0}));
 }
 
+// --- And, same shape: bool operands read as (x != 0), output 1.0/0.0. ---
+TEST(Ops, AndSameShape) {
+    auto out = runOp(OpType::And, 0, {}, {1, 4}, {1, 1, 0, 0}, {{{1, 4}, {1, 0, 1, 0}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 4}));
+    EXPECT_EQ(out.data, (std::vector<float> {1, 0, 0, 0}));
+}
+
+// --- And with NumPy broadcasting: a [2,3] mask AND a [3] row (the causal+padding mask combine). ---
+TEST(Ops, AndBroadcastRow) {
+    auto out = runOp(OpType::And, 0, {}, {2, 3}, {1, 0, 1, 0, 1, 0}, {{{3}, {1, 1, 0}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {2, 3}));
+    // row0 {1,0,1} & {1,1,0} -> {1,0,0}; row1 {0,1,0} & {1,1,0} -> {0,1,0}
+    EXPECT_EQ(out.data, (std::vector<float> {1, 0, 0, 0, 1, 0}));
+}
+
+// --- And treats any nonzero as true (not just exactly 1). ---
+TEST(Ops, AndNonzeroIsTrue) {
+    auto out = runOp(OpType::And, 0, {}, {1, 3}, {2.5f, 0.f, -1.f}, {{{1, 3}, {-3.f, 4.f, 0.f}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 3}));
+    EXPECT_EQ(out.data, (std::vector<float> {1, 0, 0}));
+}
+
+// --- IsNaN: only NaN maps to 1; finite values and +/-inf map to 0. ---
+TEST(Ops, IsNaN) {
+    auto out = runOp(OpType::IsNaN, 0, {}, {1, 5}, {1.0f, NAN, -2.0f, INFINITY, -INFINITY}, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 5}));
+    EXPECT_EQ(out.data, (std::vector<float> {0, 1, 0, 0, 0}));
+}
+
 namespace {
     struct TopKOut {
         std::vector<float>   values;

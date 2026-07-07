@@ -134,6 +134,7 @@ namespace vknn {
                 case OpType::InstanceNorm: // normalize over the spatial dims: same shape as input
                 case OpType::Identity:
                 case OpType::Unary:
+                case OpType::IsNaN:          // elementwise NaN test: bool output, same shape as input
                 case OpType::Softmax:
                 case OpType::LayerNorm:
                 case OpType::PRelu:
@@ -147,7 +148,8 @@ namespace vknn {
                 case OpType::Greater:
                 case OpType::GreaterEqual:
                 case OpType::Less:
-                case OpType::LessEqual: {
+                case OpType::LessEqual:
+                case OpType::And: {
                     // Same empty-shape discrimination as Binary/Add: scalar only if initializer.
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
