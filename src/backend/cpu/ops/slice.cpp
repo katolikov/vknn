@@ -1,6 +1,6 @@
 // ONNX Slice (generic N-D): extracts a strided sub-region of X. `starts`/`ends` are required;
 // `axes`/`steps` are optional. Each list is read either from a node attribute (opset < 10) or from
-// initializer inputs[1..4] (opset 10+); `rd` resolves whichever form is present. Only the axes named
+// initializer inputs[1..4] (opset 10+); readParamList resolves whichever form is present. Only the axes named
 // in `starts` are sliced — every other axis is copied whole. Handles both fp32 and int64 tensors
 // (the int64 path serves const-folded shape arithmetic feeding downstream Slice/Reshape bounds).
 #include "backend/cpu/cpu_backend.h"
@@ -16,7 +16,7 @@ namespace vknn {
             /// which the caller treats as the ONNX default (all axes / unit step). Reads are bounded
             /// by pwCoreInputs: inputs appended past it are fused-unit operands, and misreading one
             /// as `steps` would silently stride the slice by a float's bit pattern.
-            static std::vector<int64_t> rd(const Node &n, ExecContext &ctx, const char *attr, int idx) {
+            static std::vector<int64_t> readParamList(const Node &n, ExecContext &ctx, const char *attr, int idx) {
                 const auto &a = n.attr.getints(attr);
                 if (!a.empty())
                 {
@@ -33,8 +33,8 @@ namespace vknn {
                 const RtTensor      &X      = ctx.t(node.inputs[0]);
                 RtTensor            &Y      = ctx.t(node.outputs[0]);
                 int                  rank   = (int) X.shape.size();
-                auto                 starts = rd(node, ctx, "starts", 1), ends = rd(node, ctx, "ends", 2);
-                auto                 axes = rd(node, ctx, "axes", 3), steps = rd(node, ctx, "steps", 4);
+                auto                 starts = readParamList(node, ctx, "starts", 1), ends = readParamList(node, ctx, "ends", 2);
+                auto                 axes = readParamList(node, ctx, "axes", 3), steps = readParamList(node, ctx, "steps", 4);
                 // Per-axis begin/step default to a whole-axis copy (start 0, step 1); `out` starts as
                 // X's shape and is overwritten only on the sliced axes. The k-th entry of each list
                 // refers to axis `axes[k]` (or axis k when `axes` is absent, per ONNX default).

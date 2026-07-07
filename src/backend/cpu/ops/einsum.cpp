@@ -12,7 +12,7 @@ namespace vknn {
 
         /// Drop ASCII spaces and tabs so an equation is matched by its label content alone, letting
         /// "b i j , b n j k -> b n i k" compare equal to the canonical "bij,bnjk->bnik" below.
-        static std::string stripw(const std::string &s) {
+        static std::string stripWhitespace(const std::string &s) {
             std::string r;
             for (char c: s)
             {
@@ -33,7 +33,7 @@ namespace vknn {
         /// graph stays runnable.
         struct EinsumCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                std::string     eq = stripw(node.attr.gets("equation", ""));
+                std::string     eq = stripWhitespace(node.attr.gets("equation", ""));
                 const RtTensor &A  = ctx.t(node.inputs[0]);
                 const RtTensor &B  = ctx.t(node.inputs[1]);
                 RtTensor       &Y  = ctx.t(node.outputs[0]);
