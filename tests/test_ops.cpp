@@ -488,6 +488,35 @@ TEST(Ops, AddBroadcast) {
     expectNear(out.data, {10, 21, 32}, 1e-5f);
 }
 
+// --- RMSNorm over the last axis: y = x*rsqrt(mean(x^2)+eps)*gamma, no mean subtraction, no bias.
+// The CPU oracle the fused Vulkan kernel is diffed against; reference computed here in double. ---
+TEST(Ops, RMSNormLastAxis) {
+    Attributes attr;
+    Attr       eps;
+    eps.kind            = Attr::Float;
+    eps.f               = 1e-6f;
+    attr.map["epsilon"] = eps;
+    std::vector<float> x {1.f, -2.f, 3.f, -4.f, 0.5f, 1.5f, -2.5f, 4.f};
+    std::vector<float> gamma {2.f, 0.5f, 1.f, -1.f};
+    auto               out = runOp(OpType::RMSNorm, 0, attr, {2, 4}, x, {{{4}, gamma}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {2, 4}));
+    std::vector<float> ref(8);
+    for (int r = 0; r < 2; ++r)
+    {
+        double sq = 0.0;
+        for (int j = 0; j < 4; ++j)
+        {
+            sq += (double) x[r * 4 + j] * (double) x[r * 4 + j];
+        }
+        double inv = 1.0 / std::sqrt(sq / 4.0 + 1e-6);
+        for (int j = 0; j < 4; ++j)
+        {
+            ref[r * 4 + j] = (float) ((double) x[r * 4 + j] * inv * (double) gamma[j]);
+        }
+    }
+    expectNear(out.data, ref, 1e-5f);
+}
+
 // --- GlobalAveragePool over HxW. ---
 TEST(Ops, GlobalAveragePool) {
     auto out = runOp(OpType::GlobalAvgPool, 0, {}, {1, 1, 2, 2}, {1, 2, 3, 4}, {});
