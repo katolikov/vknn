@@ -152,11 +152,17 @@ is the interior per-tensor requantization that a float chain does not re-apply
 (mobilenetv2_int8 cosine ≈ 0.96, resnet50_int8 ≈ 0.998 vs the ORT int-exact goldens,
 argmax matching).
 
-Only static QDQ / QLinear quantization is lowered. The **dynamic-quantization** ops
-(`DynamicQuantizeLinear`, `MatMulInteger`, `ConvInteger`) are recognized and named at
-the boundary but have no float lowering yet, so models built on them (e.g. the
-transformer `*_q8` checkpoints) still report NOT SUPPORTED. There is no calibration
-tooling.
+Both static QDQ / QLinear **and** the common dynamic-quantization pattern are lowered.
+A dynamic-quant export emits a `DynamicQuantizeLinear → MatMulInteger / ConvInteger →
+Cast → Mul` cluster (the canonical shape ONNX Runtime's dynamic quantizer produces for
+BERT / GPT / ViT); the pass matches that cluster and lowers it to a plain float `MatMul`
+/ `Conv` with the weight folded to fp32, dropping the `DynamicQuantizeLinear`, both
+`Mul`s, and the `Cast`. Unlike the static QLinear path, **no output clamp is inserted**:
+the integer matmul has no output quant range, so the only difference from an int-exact
+runtime is the activation rounding `DynamicQuantizeLinear` would have applied. A cluster
+that does *not* match this shape (a `MatMulInteger` whose int32 output escapes to another
+consumer, a non-initializer weight, a missing `Cast`/`Mul`) is left intact, and — having
+no backend kernel — fails at planning. There is no calibration tooling.
 
 ---
 
@@ -189,7 +195,8 @@ LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, generato
 (Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement
 ops. The full table with per-op GPU/CPU coverage is in [op-coverage.md](op-coverage.md).
 
-**Not** supported: RNN/LSTM/GRU, dynamic control flow (`Loop` / `If` / `Scan`), training ops, sparse
+**Not** supported: RNN/LSTM/GRU, data-dependent control flow (`Loop` / `If` / `Scan` /
+`NonMaxSuppression` — their output shapes are not known at plan time), training ops, sparse
 tensors, and the long tail of the ONNX opset. Adding an op is mechanical (see
 [adding-an-operator.md](adding-an-operator.md)); until it is in the table the model will not
 import.
@@ -223,7 +230,7 @@ the zero-copy / capability assumptions do not transfer** and are not retested.
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs) |
-| Quantized models | Static QDQ / QLinear run dequantized to float (clamps preserved, rounding dropped — not int-exact); dynamic-quant ops (DynamicQuantizeLinear / MatMulInteger / ConvInteger) unsupported; no int8 compute tier |
+| Quantized models | Static QDQ / QLinear **and** the canonical dynamic-quant cluster run dequantized to float (static: clamps preserved, rounding dropped — not int-exact; dynamic: folded to float MatMul/Conv, no output clamp); a non-canonical dynamic-quant cluster fails at planning; no int8 compute tier |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |
 | ONNX ops | See op-coverage.md |
 | Devices tested | One (Android arm64-v8a, AMD RDNA-class mobile GPU) |

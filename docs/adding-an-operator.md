@@ -324,9 +324,46 @@ Register it at the bottom of the same file:
 VKNN_REGISTER_VK_OP(OpType::LeakyRelu, LeakyReluVulkanOp);
 ```
 
+### 3c. The capability gate: `src/core/vk_gates.cpp`
+
+The Vulkan backend's `supportsNode()` is not free-form — it delegates to two pure
+functions in `src/core/vk_gates.cpp` (declared in `vk_gates.h`). This file lives in
+**core**, so it compiles into every build, including a host with no Vulkan backend;
+that is what lets `vknn_compile --support-report` and the host tests evaluate the
+exact gate the device engine runs, with no chance of the two drifting.
+
+- **`vkKernelDeclared(OpType)`** — a `switch` that mirrors the `VKNN_REGISTER_VK_OP`
+  set. It returns `true` by default, and lists (as `return false`) the ops that have
+  *no* GPU kernel: the const-folded / import-lowered ops (`Shape`, `Constant`,
+  `Identity`, `Dropout`, `InstanceNorm`) and the quantized family lowered by the
+  dequantize pass. A new op with a Vulkan kernel is already covered by the `default:
+  return true` — leave it alone unless the op has no kernel.
+
+- **`vkNodeGate(const Graph&, const Node&, std::string* whyNot)`** — the shape/attribute
+  gate. It returns `true` when the GPU kernel accepts this node's shapes, attributes,
+  and operand constness, and on refusal fills `*whyNot` with a short stable
+  `"<Op>: <reason>"` string (the reason that shows up in the fallback warning and the
+  support report). A **pure pointwise** op like `LeakyRelu` needs nothing here — it
+  is not listed, so it falls through to the gate's `return true`. Add a case only when
+  the kernel cannot handle every shape/attribute the op admits (a non-4D input, a
+  runtime operand the kernel can't bind, an unresolved output shape); model it on the
+  `Pad` / `ConstantOfShape` / `TopK` cases.
+
+### 3d. Flat vs NC4HW4: `gpuFlatNode`
+
+VKNN has two GPU layouts — the CNN-default `NC4HW4` and a **flat row-major** path for
+generic N-D ops. `gpuFlatNode()` in `src/import/insert_layout_converts.cpp` is the
+switch that decides which layout an op runs in; the layout pass splices
+`ConvertLayout` nodes at the boundary between the two. A pointwise op that processes
+the packed buffer element-by-element (like `LeakyRelu`) stays on the NC4HW4 path and
+needs no entry here. Add a case to `gpuFlatNode` only if the kernel reasons about
+logical N-D shape (a gather/broadcast/reduce/matmul-shaped op), and keep it in sync
+with the matching `vkNodeGate` case so the two agree on which nodes are GPU-eligible.
+
 The Vulkan backend's `supports()` then returns `true` for `LeakyRelu`
-(because `VkOpRegistry::instance().has(LeakyRelu)` is true), and the session
-places LeakyRelu nodes in Vulkan segments.
+(because `VkOpRegistry::instance().has(LeakyRelu)` is true and `vkKernelDeclared`
+agrees), `supportsNode()` passes it through `vkNodeGate`, and the session places
+LeakyRelu nodes in Vulkan segments.
 
 ---
 
@@ -440,8 +477,11 @@ if (chosen < 0) throw Error(Status::Unsupported, "no backend supports op ...");
 ```
 
 `supportsNode()` defaults to `supports()`; a backend overrides it to gate specific
-ops on shapes or attributes (the Vulkan backend rejects, e.g., a cubic-mode
-GridSample or an unresolved-shape node this way).
+ops on shapes or attributes. The Vulkan backend's override is `vkNodeGate`
+(`src/core/vk_gates.cpp`, §3c) behind the availability + registry pre-checks, so a
+node is refused (and its reason reported) whenever the GPU kernel can't handle its
+shape/attributes — an unresolved-shape node, a runtime `k` on `TopK`, an
+int64→narrow-integer `Cast`, and so on.
 
 If the chosen backend is not the configured primary (because the primary's
 `supports()` said no), the session emits a throttled fallback warning. Contiguous
@@ -483,5 +523,11 @@ Vulkan/CPU segments while keeping the output bit-comparable).
 - [ ] `src/backend/cpu/ops/leakyrelu.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP` (one op per file).
 - [ ] `shaders/leakyrelu.comp` (`precision.glsl` + `STORE` buffers; the build emits the `_fp16` variant).
 - [ ] `src/backend/vulkan/ops/leakyrelu.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP` (one op per file).
-- [ ] Build and run; diff Vulkan output against the CPU reference (and against
-      `scripts/get_golden.py` for an external check).
+- [ ] `src/core/vk_gates.cpp`: a `vkNodeGate` case only if the kernel can't take every
+      shape/attribute the op admits (pure pointwise needs none); leave `vkKernelDeclared`
+      alone unless the op has no GPU kernel.
+- [ ] `src/import/insert_layout_converts.cpp`: a `gpuFlatNode` case only if the op runs
+      on the flat row-major path (an N-D gather/broadcast/reduce/matmul-shaped op).
+- [ ] Add a gtest under `tests/` and run it; diff Vulkan output against the CPU reference
+      (and against `scripts/get_golden.py` for an external check). Confirm the node lands
+      on the GPU with `vknn_compile <model>.onnx out.vxm --support-report r.json`.

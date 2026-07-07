@@ -1,10 +1,14 @@
 # VKNN Architecture
 
 `VKNN` (Vulkan Neural Network, namespace `vknn`) is a small C++17 inference runtime
-that loads an ONNX CNN, lowers it to a backend-agnostic NCHW IR, optimizes it with
-graph passes, partitions it into backend-specific *segments*, and executes those
-segments — primarily on a Vulkan compute backend tuned for an AMD RDNA-class mobile
-GPU, with a CPU backend that doubles as the reference path and the fallback.
+that loads an ONNX model — image CNNs, detection nets, and transformer/attention
+models, including statically-quantized checkpoints — lowers it to a backend-agnostic
+NCHW IR, optimizes it with graph passes, partitions it into backend-specific
+*segments*, and executes those segments — primarily on a Vulkan compute backend tuned
+for an AMD RDNA-class mobile GPU, with a CPU backend that doubles as the reference path
+and the fallback. Every executable op has a Vulkan kernel; only data-dependent control
+flow (`Loop` / `If` / `NonMaxSuppression`) and the const-folded import-time shape ops
+stay off the GPU.
 
 This document covers the end-to-end pipeline, the core abstractions, the internal
 `NC4HW4` tensor layout, the segment execution model (which provides both pre-recorded
@@ -31,7 +35,9 @@ references source under `include/vknn/` and `src/`.
  ┌───────────────────────────────────────────────────────────────────────┐
  │ GRAPH PASSES   src/import/ (passes.h, one .cpp per pass)                │
  │   runStandardPasses(g, PassOptions)                                     │
- │   inferShapes        (static batch = 1, fills dynamic dims)             │
+ │   dequantizeGraph    (QDQ/QLinear → float + saturation Clip; default on) │
+ │   inferShapes        (resolves dynamic dims from declared shapes;        │
+ │                       batch defaults to 1)                               │
  │   foldBatchNorm      (BN → scale/bias folded into Conv)                 │
  │   lowerBatchNorm     (remaining BN → per-channel Mul+Add)               │
  │   constFold+inferShapes to convergence (shape-path subgraphs)           │
@@ -152,14 +158,16 @@ struct Node {
 ```
 
 `OpType` (`include/vknn/op_type.h`, append-only — `.vxm` files store the raw
-integer) enumerates the full supported set (~60 ops, per-op coverage in
+integer) enumerates the full supported set (~67 ops, per-op coverage in
 [op-coverage.md](op-coverage.md)): the conv family (`Conv`, `ConvTranspose`),
 `Gemm`/`MatMul`/`Einsum`, pooling, normalization (`BatchNorm`, `LayerNorm`,
 `Softmax`), the elementwise `Unary`/`Binary` families, data movement
 (`Reshape`, `Transpose`, `Slice`, `Concat`, `Gather`, `ScatterND`, ...), the
-fused ops the passes synthesize (`FusedSE`, `FusedDwPw`, `FusedPointwise`),
-plus shape ops `Shape` / `Constant` / `ConstantOfShape` / `Range` (CPU-only,
-const-folded away on the Vulkan path). `ActType`
+generator ops `ConstantOfShape` / `Range` (which run on the GPU once their output
+size resolves), the quantized family the dequantize pass lowers (`QuantizeLinear`,
+`DequantizeLinear`, `QLinearConv`, `MatMulInteger`, ...), and the fused ops the
+passes synthesize (`FusedSE`, `FusedDwPw`, `FusedPointwise`). The pure shape ops
+`Shape` / `Constant` const-fold away before planning. `ActType`
 (`None`/`Relu`/`Relu6`/`Clip`/`HardSwish`/`SiLU`) is kept in sync with
 `shaders/common.glsl`; the last two are set by the swish self-gating fusion. `Attributes` is a typed `name → Attr` map with `geti` /
 `getf` / `getints` / `gets` accessors used by kernels to read pads, strides, etc.
@@ -385,7 +393,9 @@ reads and writes host, and the next Vulkan segment packs them back.
 
 ### 4.4 Pre-recorded command buffers
 
-Because batch is static (1) and the graph is fully planned, a `VulkanSegment`
+Because each plan is a single fully-static shape (batch 1 by default, or a declared
+shape / bucket — see [limitations.md §1](limitations.md)) and the graph is fully
+planned, a `VulkanSegment`
 allocates device buffers for all its activation tensors, calls `op->prepare()` on
 each op (which builds pipelines and prepacks+uploads weights), and then
 **records the command buffer once, at compile time**, in `VulkanSegment::record()`:
