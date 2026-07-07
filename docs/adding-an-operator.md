@@ -385,6 +385,42 @@ The Vulkan backend's `supports()` then returns `true` for `LeakyRelu`
 agrees), `supportsNode()` passes it through `vkNodeGate`, and the session places
 LeakyRelu nodes in Vulkan segments.
 
+### 3e. Hosting a pointwise-chain epilogue (producer ops only)
+
+`fusePointwiseChains` folds a chain of pointwise ops (activation → bias → scale …)
+into the store of the *producer* that feeds it, so the chain never becomes a
+standalone `FusedPointwise` node. `LeakyRelu` is itself pointwise and is *consumed*
+into a producer, not a host — skip this section for a pointwise op. A **producer**
+op (a Conv/MatMul/pool/reduce/gather-shaped kernel that others read from) can opt in
+to hosting the epilogue at its store. Three things wire it up, and a build check
+keeps them in sync:
+
+1. **Shader.** Under `#ifdef PW_EPI`, `#include "pw_epilogue.glsl"` and apply the
+   unit to each stored value (`v = pw_apply(v, idx)` for the flat world,
+   `pw_apply_nc4` for NC4HW4) before `STORE`. Including that header is what marks the
+   kernel epilogue-capable: the build sniffs the `#include` and generates the
+   `<stem>_epi` (strict per-step rounding) and `<stem>_epi_rx` (`-DPW_RELAX`,
+   fp32-chained; see [ADR-0011](adr/0011-fp32-chained-fusion.md)) SPIR-V variants.
+   There is no hand-maintained stem list — adding an epilogue-capable kernel is just
+   writing the shader.
+2. **Op.** Wire `PwEpi` into the kernel (`src/backend/vulkan/ops/pw_plan.h`):
+   `epi.prepare(node, env, flat, out)`, request the variant with
+   `shader((std::string("<stem>") + epi.suffix()).c_str(), …)` sized
+   `nbuf + epi.extraBufs()`, and `epi.append(bufs, …)` after the kernel's own
+   buffers. `epi.suffix()` resolves to `""` / `_epi` / `_epi_rx`.
+3. **Capability.** Mark the `OpType` epilogue-capable so `fusePointwiseChains`
+   attaches units to this producer — the flag `pwEpilogueCapable()` reads (in
+   `src/import/fuse_pointwise_chains.cpp`, or the op's descriptor row where the
+   OpType-keyed capability facts are tabled).
+
+`tools/check_epi_sync.py` (run at configure time and in `scripts/ci_host.sh`)
+FATAL-ERRORs if these disagree — a stem requested by an op with no `_epi` shader, a
+`pw_epilogue.glsl` shader no op requests, or a `pwEpilogueCapable` OpType whose kernel
+never requests an epilogue variant. That turns what used to be a device-load-time
+`shader not found` throw into a build diagnostic. `tools/check_shader_contracts.py`
+separately enforces the fp16 store contracts the epilogue relies on (`store16.glsl`
+inclusion, `VKNN_NO_RTE` ordering).
+
 ---
 
 ## Shape inference (ops that change shape)
@@ -552,6 +588,10 @@ Vulkan/CPU segments while keeping the output bit-comparable).
       it. A pure pointwise op keeps the all-default row (no edit). Only a `ShapeDependent` layout
       also needs a per-node arm in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`), kept in
       sync with its `vkNodeGate` case.
+- [ ] For a **producer** op that should host a fused pointwise-chain epilogue (§3e):
+      `#include "pw_epilogue.glsl"` under `#ifdef PW_EPI` in the shader (auto-derives the
+      `_epi` variants), `PwEpi` wiring in the op, and set the descriptor row's `pwEpilogue`.
+      `tools/check_epi_sync.py` enforces the three agree — no CMake stem list to edit.
 - [ ] Add a gtest under `tests/` and run it; diff Vulkan output against the CPU reference
       (and against `scripts/get_golden.py` for an external check). Confirm the node lands
       on the GPU with `vknn_compile <model>.onnx out.vxm --support-report r.json`.
