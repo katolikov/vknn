@@ -10,6 +10,7 @@
 #include "vknn/op.h"
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -21,7 +22,11 @@ namespace vknn {
             // ----------------------------- AttributeProto -----------------------------
             // fields: 1=name, 2=f(float32), 3=i(int64), 4=s(bytes), 7=floats(packed), 8=ints(packed),
             // 5=t(TensorProto), 20=type(int32)
-            static void parseAttr(Reader r, Node &node) {
+            // A tensor-valued attribute (Constant.value, ConstantOfShape.value) may hold its payload in a
+            // sibling external-data file exactly like a graph initializer; @p baseDir and @p extCache let it
+            // resolve that reference before materializing, so an external Constant is not read as all-zeros.
+            static void parseAttr(Reader r, Node &node, const std::string &baseDir = std::string(),
+                                  std::map<std::string, std::vector<uint8_t>> *extCache = nullptr) {
                 std::string name;
                 Attr        a;
                 uint32_t    f, w;
@@ -92,6 +97,13 @@ namespace vknn {
                 }
                 if (hasTp)
                 {
+                    // Pull an EXTERNAL attribute payload (data_location==1) out of the sibling data file into
+                    // tp.raw, so the raw_data decode paths below see real bytes instead of the empty inline
+                    // payload. No-op for an inline tensor or when no external cache is supplied.
+                    if (extCache)
+                    {
+                        TensorProtoParser::resolveExternal(baseDir, tp, *extCache);
+                    }
                     // A tensor-valued attribute (Constant.value, ConstantOfShape, etc.) is flattened into
                     // the same numeric attribute storage as inline floats/ints: int64 tensors -> `ints`,
                     // every other numeric dtype -> `floats`. `n` is the element count the decode loops
@@ -218,7 +230,9 @@ namespace vknn {
             // to ids here; GraphBuilder resolves them in its SSA pass so a trace that REUSES a tensor name
             // (two nodes both writing "Cast_output_0" — common in un-deduped PyTorch exports) does not
             // collapse onto one TensorId.
-            static void parseNode(Reader r, Node &node, std::vector<std::string> &ins, std::vector<std::string> &outs) {
+            static void parseNode(Reader r, Node &node, std::vector<std::string> &ins, std::vector<std::string> &outs,
+                                  const std::string &baseDir = std::string(),
+                                  std::map<std::string, std::vector<uint8_t>> *extCache = nullptr) {
                 uint32_t    f, w;
                 std::string opType;
                 while (r.tag(f, w))
@@ -238,7 +252,7 @@ namespace vknn {
                             opType = r.str();
                             break;
                         case 5:
-                            parseAttr(r.sub(), node);
+                            parseAttr(r.sub(), node, baseDir, extCache);
                             break;
                         default:
                             r.skip(w);
