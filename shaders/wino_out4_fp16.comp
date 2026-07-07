@@ -54,7 +54,7 @@ void main() {
 #define ACTF(v)                                                                                   \
   vec4(vx_act((v).x, pc.act, pc.actLo, pc.actHi), vx_act((v).y, pc.act, pc.actLo, pc.actHi),      \
        vx_act((v).z, pc.act, pc.actLo, pc.actHi), vx_act((v).w, pc.act, pc.actLo, pc.actHi))
-#define ACT(v) f16vec4(ACTF(v))
+#define ACT(v) f16vec4(vxSatF16(ACTF(v)))
 #ifdef PW_EPI
 #define PW_ST(v, idx) dst[idx] = f16vec4(pw_apply4(ACTF(v), idx))
 #else

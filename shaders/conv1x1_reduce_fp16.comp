@@ -34,5 +34,5 @@ void main() {
 #ifdef PW_EPI
   v = pw_apply4(v, ocb * pc.HW + pix);
 #endif
-  dst[ocb * pc.HW + pix] = f16vec4(v);
+  dst[ocb * pc.HW + pix] = TO_STORE4(v);
 }

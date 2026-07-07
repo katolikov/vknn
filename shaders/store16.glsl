@@ -8,6 +8,13 @@
 // every 16-bit-result conversion in this shader round to nearest even, at no runtime cost.
 #ifndef VX_STORE16_GLSL
 #define VX_STORE16_GLSL
+// Saturate a finite fp32 activation result to the largest finite fp16 magnitude so the fp16-narrowing
+// store never turns a finite value into +/-inf (an inf then feeds 0*inf = NaN and poisons the output).
+// NaN passes through unchanged. Mirrors clampToFp16Range in src/import/convert_fp16.cpp, so an
+// activation store saturates exactly like an imported constant. Identity for in-range values, so a
+// store that never overflows fp16 is byte-unchanged.
+float vxSatF16(float x) { return isnan(x) ? x : clamp(x, -65504.0, 65504.0); }
+vec4  vxSatF16(vec4 v)  { return vec4(vxSatF16(v.x), vxSatF16(v.y), vxSatF16(v.z), vxSatF16(v.w)); }
 // The integer-math vknnRte16 below is defined for EVERY fp16 kernel (not just VKNN_NO_RTE ones):
 // the fused-pointwise VM rounds each step with it so a step's bytes never depend on which host
 // kernel runs the unit — some drivers' RoundingModeRTE breaks round-to-nearest ties differently
@@ -38,18 +45,22 @@ uint vknnF32ToF16RteBits(float x) {  // same bits as a correct IEEE RTE FConvert
   return s | h;
 }
 float16_t vknnRte16(float v) {
-  return uint16BitsToFloat16(uint16_t(vknnF32ToF16RteBits(v)));
+  return uint16BitsToFloat16(uint16_t(vknnF32ToF16RteBits(vxSatF16(v))));
 }
 #ifndef VKNN_NO_RTE
 #extension GL_EXT_spirv_intrinsics : require
 // RoundingModeRTE execution mode (4462) for 16-bit results; requires the RoundingModeRTE capability
 // (4467) and the SPV_KHR_float_controls extension.
 spirv_execution_mode(capabilities = [4467], extensions = ["SPV_KHR_float_controls"], 4462, 16);
-#define TO_STORE(x) float16_t(x)
+#define TO_STORE(x) float16_t(vxSatF16(x))
 #else
 // Kernels that must not carry the float-controls execution mode (some drivers miscompile them:
 // nondeterministic output, faults under load; and both float16_t(x) and packHalf2x16 round toward
 // zero there) convert explicitly instead.
 #define TO_STORE(x) vknnRte16(float(x))
 #endif
+// Saturating fp16 store of a whole vec4 activation result. Narrows each lane through TO_STORE, so it
+// saturates and rounds identically to the scalar store and stays byte-identical to f16vec4(v) for
+// in-range v.
+#define TO_STORE4(v) f16vec4(TO_STORE((v).x), TO_STORE((v).y), TO_STORE((v).z), TO_STORE((v).w))
 #endif  // VX_STORE16_GLSL

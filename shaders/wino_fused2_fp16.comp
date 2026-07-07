@@ -114,5 +114,5 @@ void main() {
 #ifdef PW_EPI
   pv = pw_apply4(pv, obase + oy * pc.OW + ox);
 #endif
-  dst[obase + oy * pc.OW + ox] = f16vec4(pv);
+  dst[obase + oy * pc.OW + ox] = TO_STORE4(pv);
 }

@@ -50,5 +50,5 @@ void main() {
 #ifdef PW_EPI
   v = pw_apply4(v, d);
 #endif
-  dst[d] = f16vec4(v);
+  dst[d] = TO_STORE4(v);
 }

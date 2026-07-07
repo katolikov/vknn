@@ -73,7 +73,7 @@ void main() {
 #ifdef PW_EPI
       v = pw_apply4(v, dbase + pix);
 #endif
-      dst[dbase + pix] = f16vec4(v);
+      dst[dbase + pix] = TO_STORE4(v);
     }
   }
 }
