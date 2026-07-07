@@ -32,6 +32,11 @@ YOLOv8n detection, and a 965M-parameter transformer encoder (YoNoSplat) plus a f
 Host artifacts land in `build-host/`, Android in `build-android/`. Override the NDK with
 `ANDROID_NDK=...` and the API level with `ANDROID_API=...`.
 
+**Before you push, run `scripts/ci_host.sh`** — the host-only gate: host build + `vknn_tests` +
+`--android` + `--docs` + op-support self-consistency + clang-format drift + CPU determinism. It
+needs no device; the on-device byte and perf gates (`benchmark/scripts/gate_op.sh`,
+`gate_pw_probes.sh`, `dev_perfab.sh`) run separately. See [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
 ## Repo layout
 
 ```
