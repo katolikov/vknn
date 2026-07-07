@@ -32,6 +32,10 @@ pristine imported graph and add a bucket at runtime through `Session::prepareSha
 never implicit on `run()`). Weights are shape-independent and shared across buckets through a
 backend-level device weight pool keyed (initializer id, pack-kind, precision).
 
+[ADR-0013](0013-symbolic-dim-binding.md) extends this: a dynamic axis can also be resolved by binding
+its ONNX `dim_param` symbol (`--dim NAME=VALUE`) instead of a full per-tensor `--shape`, so a
+many-input decoder needs a couple of bindings.
+
 ### 2. Quantized checkpoints run dequantized to float, with the saturation clamp preserved
 `dequantizeGraph` (default on, `--no-dequantize` opts out) rewrites the quantized operator family
 at import so QDQ, QLinear, and dynamic-quant checkpoints run on the existing fp16 engine:

@@ -39,10 +39,14 @@ reuses tuning and uploaded weights.
   explicitly. It never happens implicitly on `run()`. A `.vxm` session returns
   `Status::Unsupported`.
 - **Declaring a symbolic axis:** a dynamic **batch** axis falls back to `batch = 1`
-  (or `--batch N`). A dynamic **non-batch** axis (spatial / feature) with no declared
-  shape is a **hard error** naming the input and axis, rather than the old silent
-  `1x1` plan — declare it with `--shape NAME=D0xD1x...`, `--bucket`, or
-  `Config::inputShapes`.
+  (or `--batch N`). A dynamic **non-batch** axis (spatial / feature) that stays
+  unresolved is a **hard error** — one aggregated message listing the unbound
+  `dim_param` symbol names — rather than the old silent `1x1` plan. Resolve it by
+  **binding the symbol** with `vknn_compile --dim NAME=VALUE` / `Config::dimBindings`
+  (the compiler evaluates each input axis's `dim_param`, including a compound like
+  `past_sequence_length + sequence_length`, so a with-past decoder needs a couple of
+  bindings), or declare a full per-tensor shape with `--shape NAME=D0xD1x...` /
+  `--bucket` / `Config::inputShapes`. `--list-dims` prints the free symbols to bind.
 
 The **fixed-shape path is unchanged and zero-cost**: a model with no dynamic axes (or
 only a dynamic batch) plans exactly **one** bucket, its `.vxm` bytes are byte-identical
