@@ -12,7 +12,7 @@ commands and code patterns; the reference docs in [`../docs/`](../docs/) cover t
 | [benchmark-a-model.md](benchmark-a-model.md) | Convert/run/validate a model on the device from one JSON config (npy/raw I/O, golden metrics, profiling). |
 | [run-yonosplat.md](run-yonosplat.md) | Run the full YoNoSplat 3D Gaussian Splatting pipeline end to end. |
 
-Companion reference docs: [ARCHITECTURE](../docs/ARCHITECTURE.md) ·
-[ADDING_AN_OPERATOR](../docs/ADDING_AN_OPERATOR.md) · [ADDING_A_BACKEND](../docs/ADDING_A_BACKEND.md) ·
-[CONFIG](../docs/CONFIG.md) · [OP_COVERAGE](../docs/OP_COVERAGE.md) · [BENCHMARK](../docs/BENCHMARK.md) ·
-[LIMITATIONS](../docs/LIMITATIONS.md).
+Companion reference docs: [ARCHITECTURE](../docs/architecture.md) ·
+[ADDING_AN_OPERATOR](../docs/adding-an-operator.md) · [ADDING_A_BACKEND](../docs/adding-a-backend.md) ·
+[CONFIG](../docs/config.md) · [OP_COVERAGE](../docs/op-coverage.md) · [BENCHMARK](../docs/benchmark.md) ·
+[LIMITATIONS](../docs/limitations.md).

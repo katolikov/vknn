@@ -56,8 +56,9 @@ namespace vknn {
 
         // ----------------------------- TensorProto -----------------------------
         // fields: 1=dims(int64 repeated/packed), 2=data_type(int32), 4=float_data(packed),
-        // 7=int64_data(packed), 8=name(string), 9=raw_data(bytes), 13=external_data
-        // (repeated StringStringEntryProto{1=key,2=value}), 14=data_location(0=DEFAULT,1=EXTERNAL).
+        // 5=int32_data(packed), 7=int64_data(packed), 8=name(string), 9=raw_data(bytes),
+        // 13=external_data (repeated StringStringEntryProto{1=key,2=value}),
+        // 14=data_location(0=DEFAULT,1=EXTERNAL).
         // Large models (incl. anything torch's newer exporter emits) keep weights in a sibling .onnx.data
         // file and reference them via external_data; resolved against the model dir at materialize time.
         struct TensorProto {
@@ -66,6 +67,7 @@ namespace vknn {
             std::string          name;
             std::vector<uint8_t> raw;
             std::vector<float>   floatData;
+            std::vector<int32_t> int32Data; // typed payload for INT32 and narrower (INT8/UINT8/INT16/UINT16/BOOL) plus FLOAT16 bit patterns
             std::vector<int64_t> int64Data;
             int32_t              dataLocation = 0; // 1 = EXTERNAL
             std::string          extLoc;           // external file (relative to the model dir)

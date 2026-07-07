@@ -52,12 +52,97 @@ set(VKNN_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set(VKNN_SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${VKNN_SHADER_GEN_DIR})
 
+# Every .comp directly under shaders/ — tracked or not — is compiled, embedded, and counted in
+# embeddedShadersHash(), so a stray scratch file invalidates every device model cache. Warn at
+# configure time; scratch/bench kernels belong in shaders/experimental/ (see its README.md).
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR} ls-files --others --exclude-standard -- shaders
+    OUTPUT_VARIABLE _untracked_shader_files
+    RESULT_VARIABLE _git_ls_result
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(_git_ls_result EQUAL 0 AND _untracked_shader_files)
+    string(REPLACE "\n" ";" _untracked_shader_files "${_untracked_shader_files}")
+    set(_stray_comps "")
+    foreach(_f IN LISTS _untracked_shader_files)
+      if(_f MATCHES "^shaders/[^/]+\\.comp$")
+        list(APPEND _stray_comps ${_f})
+      endif()
+    endforeach()
+    if(_stray_comps)
+      list(JOIN _stray_comps ", " _stray_comps)
+      message(WARNING
+        "untracked .comp directly under shaders/: ${_stray_comps} — these are embedded into the "
+        "engine and change embeddedShadersHash(), invalidating every device model cache. Move "
+        "scratch kernels to shaders/experimental/.")
+    endif()
+  endif()
+endif()
+
 set(EMBEDDED_SHADERS_CPP ${VKNN_SHADER_GEN_DIR}/vknn_embedded_shaders.cpp)
 set(_spv_files "")
 if(VKNN_ENABLE_VULKAN AND SHADERCC)
   file(GLOB VKNN_COMP_SHADERS CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.comp)
+  # shaders/experimental/ holds scratch and bench kernels: never compiled, embedded, or counted in
+  # embeddedShadersHash(). The glob above is non-recursive; the filter keeps the exclusion explicit
+  # should the glob ever become recursive.
+  list(FILTER VKNN_COMP_SHADERS EXCLUDE REGEX "/experimental/")
   # every .spv depends on every include: a .glsl edit must recompile all kernels that may pull it in
   file(GLOB VKNN_GLSL_INCLUDES CONFIGURE_DEPENDS ${VKNN_SHADER_DIR}/*.glsl)
+
+  # --- derive the epilogue-capable stem set from the shader sources -----------------------------
+  # A kernel that #includes pw_epilogue.glsl self-declares that its store can carry a fused
+  # pointwise-chain epilogue, so it needs _epi/_epi_rx SPIR-V variants (see the PW_EPI block below).
+  # Deriving the set from the sources means adding an epilogue-capable op = writing the shader; there
+  # is no hand-maintained stem list to drift from the shaders. tools/check_epi_sync.py enforces that
+  # this derivation, the C++ pwEpilogueCapable() OpType set, and the op-file stem call sites agree.
+  #   plain/templated <stem>.comp      -> _epi_stems   (base name is the stem)
+  #   hand-written    <stem>_fp16.comp -> _epi_stems   (stem = name without the _fp16 suffix)
+  #   the standalone pointwise VM      -> _rx_standalone (fused_pw_*; _rx twin, no _epi)
+  set(_epi_stems "")
+  set(_rx_standalone "")
+  foreach(_comp ${VKNN_COMP_SHADERS})
+    get_filename_component(_name ${_comp} NAME_WE)
+    file(READ ${_comp} _src)
+    # Match the include DIRECTIVE, not an incidental comment mention of the file.
+    if(_src MATCHES "#include[ \t]+\"pw_epilogue\\.glsl\"")
+      if(_name MATCHES "^fused_pw_")
+        list(APPEND _rx_standalone ${_name})
+      elseif(_name MATCHES "^(.+)_fp16$")
+        list(APPEND _epi_stems ${CMAKE_MATCH_1})
+      else()
+        list(APPEND _epi_stems ${_name})
+      endif()
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES _epi_stems)
+  list(REMOVE_DUPLICATES _rx_standalone)
+
+  # Fail configuration — not a device load — when the epilogue surfaces disagree (the shader set
+  # derived just above, the op-file kernel-name call sites, and the C++ pwEpilogueCapable OpType
+  # set) or a shader breaks the store16 / VKNN_NO_RTE contracts. These run only when shaders are
+  # actually being compiled (this VKNN_ENABLE_VULKAN branch); the host build has no shaders to check.
+  find_program(PYTHON3 NAMES python3 python)
+  if(PYTHON3)
+    execute_process(
+      COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_epi_sync.py --repo ${CMAKE_CURRENT_SOURCE_DIR}
+      RESULT_VARIABLE _epi_sync_rc OUTPUT_VARIABLE _epi_sync_out ERROR_VARIABLE _epi_sync_out)
+    if(NOT _epi_sync_rc EQUAL 0)
+      message(FATAL_ERROR "check_epi_sync.py: epilogue-surface drift\n${_epi_sync_out}")
+    endif()
+    execute_process(
+      COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_shader_contracts.py --shaders ${VKNN_SHADER_DIR}
+      RESULT_VARIABLE _shader_rc OUTPUT_VARIABLE _shader_out ERROR_VARIABLE _shader_out)
+    if(NOT _shader_rc EQUAL 0)
+      message(FATAL_ERROR "check_shader_contracts.py: shader contract violation\n${_shader_out}")
+    endif()
+  else()
+    message(WARNING "python3 not found; skipping check_epi_sync.py / check_shader_contracts.py "
+      "configure-time sync checks")
+  endif()
+
   foreach(_comp ${VKNN_COMP_SHADERS})
     get_filename_component(_name ${_comp} NAME_WE)
     # boundary_convert is built below as four cross-dtype variants, not the fp32/fp16 pair.
@@ -88,21 +173,12 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     endif()
     # Producer kernels that can carry a fused pointwise-chain epilogue (fusePointwiseChains
     # attaching a chain to its producer) also emit PW_EPI variants that pull in
-    # shaders/pw_epilogue.glsl. Curated per rolled-out family — not blanket-added to every shader.
+    # shaders/pw_epilogue.glsl. The hosting stems are derived above from the sources, not curated.
     # Each PW_EPI build comes in two rounding disciplines selected at compile time (a runtime
     # branch would carry both bodies in every kernel): the strict per-step-rounded "_epi" and the
     # fp32-chained "_epi_rx" (-DPW_RELAX, for units carrying the pw_relax attr):
     #   plain/templated <stem>.comp      -> <stem>_epi[_rx].spv (+ <stem>_epi[_rx]_fp16.spv when templated)
     #   hand-written    <stem>_fp16.comp -> <stem>_epi[_rx]_fp16.spv
-    set(_epi_stems
-        matmul matmul_bias matmul_tiled matmul_tiled_bias fc
-        flat_softmax flat_layernorm flat_reduce softmax flat_gather flat_scatter
-        gridsample resize convtranspose
-        avgpool avgpool2d maxpool concat
-        conv conv_gemm conv_gemm_kreduce conv_reg conv1x1 conv1x1_s2 conv3x3_lds conv1x1_reduce dwconv fused_dwpw
-        wino_out wino_out4 wino_full wino_fused wino_fused2)
-    # The standalone pointwise-VM shaders take the same two disciplines as bare "_rx" variants.
-    set(_rx_standalone fused_pw_flat fused_pw_nc4)
     list(FIND _epi_stems ${_name} _epiPlain)
     list(FIND _rx_standalone ${_name} _rxAlone)
     if(_epiPlain GREATER -1)
@@ -272,7 +348,7 @@ target_link_libraries(vknn PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  set(_vknn_examples probe classify profile zerocopy_cache zerocopy_simple predict_cache backend_switch op_check image_bench predict run_io yonosplat)
+  set(_vknn_examples probe classify profile readme_quickstart zerocopy_cache zerocopy_simple dmabuf_fd_io predict_cache backend_switch op_check image_bench predict run_io yonosplat)
   if(VKNN_ENABLE_VULKAN)
     # microbench drives Vulkan kernels directly (includes vk_context.h), so it needs the backend.
     list(APPEND _vknn_examples microbench)

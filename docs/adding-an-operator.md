@@ -324,9 +324,102 @@ Register it at the bottom of the same file:
 VKNN_REGISTER_VK_OP(OpType::LeakyRelu, LeakyReluVulkanOp);
 ```
 
+### 3c. The capability gate: `src/core/vk_gates.cpp`
+
+The Vulkan backend's `supportsNode()` is not free-form — it delegates to two pure
+functions in `src/core/vk_gates.cpp` (declared in `vk_gates.h`). This file lives in
+**core**, so it compiles into every build, including a host with no Vulkan backend;
+that is what lets `vknn_compile --support-report` and the host tests evaluate the
+exact gate the device engine runs, with no chance of the two drifting.
+
+- **`vkKernelDeclared(OpType)`** — a `switch` that mirrors the `VKNN_REGISTER_VK_OP`
+  set. It returns `true` by default, and lists (as `return false`) the ops that have
+  *no* GPU kernel: the const-folded / import-lowered ops (`Shape`, `Constant`,
+  `Identity`, `Dropout`, `InstanceNorm`) and the quantized family lowered by the
+  dequantize pass. A new op with a Vulkan kernel is already covered by the `default:
+  return true` — leave it alone unless the op has no kernel.
+
+- **`vkNodeGate(const Graph&, const Node&, std::string* whyNot)`** — the shape/attribute
+  gate. It returns `true` when the GPU kernel accepts this node's shapes, attributes,
+  and operand constness, and on refusal fills `*whyNot` with a short stable
+  `"<Op>: <reason>"` string (the reason that shows up in the fallback warning and the
+  support report). A **pure pointwise** op like `LeakyRelu` needs nothing here — it
+  is not listed, so it falls through to the gate's `return true`. Add a case only when
+  the kernel cannot handle every shape/attribute the op admits (a non-4D input, a
+  runtime operand the kernel can't bind, an unresolved output shape); model it on the
+  `Pad` / `ConstantOfShape` / `TopK` cases.
+
+### 3d. The capability descriptor: `op_descriptor.cpp`
+
+The OpType-keyed capability facts an op declares — its GPU **layout class** and its
+**pointwise-fusion roles** — live in one row of the table in `src/core/op_descriptor.cpp`
+(`opDescriptor(OpType)`, declared in `include/vknn/op_descriptor.h`). The layout classifier
+(`gpuFlatNode`) and the pointwise-fusion pass read that table instead of each keeping a parallel
+`OpType` switch, so these facts are edited in one place, not three. The `OpDescriptor` fields:
+
+- **`layout`** (`LayoutClass`) — how the op's kernel reads its tensors. VKNN has two GPU layouts:
+  the CNN-default `NC4HW4` (channels packed in `vec4` blocks) and a **flat row-major** path for
+  generic N-D ops; the layout pass splices `ConvertLayout` nodes at the boundary. `LayoutClass::Nc4`
+  (the default) is the pointwise / CPU-only case — a `LeakyRelu` that processes the packed buffer
+  element-by-element stays here and needs no entry. Use `LayoutClass::Flat` for an op whose kernel
+  reasons about logical N-D shape at *every* node (a gather/broadcast/reduce/matmul/compare-shaped
+  op). Use `LayoutClass::ShapeDependent` only when the layout is a per-node function of shapes or
+  attributes (e.g. `Concat` that isn't 4D channel-axis 4-aligned goes flat, otherwise NC4HW4) —
+  then add the matching per-node arm to the `switch` in `gpuFlatNode`
+  (`src/import/insert_layout_converts.cpp`), and keep it in sync with the `vkNodeGate` case so the
+  two agree on which nodes are GPU-eligible. A pure pointwise op needs `Nc4` (the default) and no
+  `gpuFlatNode` arm.
+- **`pwMember`** — set `true` for a per-element op that can join a fused-pointwise unit (a new
+  member type; the fusion pass still applies its own float-dtype/shape/bound checks per node).
+- **`pwEpilogue`** — set `true` for an op whose GPU kernel family carries an `_epi` store variant
+  that can host a fused pointwise unit (Conv/Gemm/MatMul/pools/Softmax/... do; a bare pointwise op
+  does not).
+
+`LeakyRelu` is a pure pointwise unary, so it takes the all-default row (`Nc4`, not a pw member, no
+epilogue) — no descriptor edit is needed. `op_descriptor.cpp`'s comment header enumerates which
+OpTypes deviate from the default. The `OpDescriptor.LayoutClassAgreesWithGpuFlatNode` test asserts
+the descriptor and `gpuFlatNode` never disagree.
+
 The Vulkan backend's `supports()` then returns `true` for `LeakyRelu`
-(because `VkOpRegistry::instance().has(LeakyRelu)` is true), and the session
-places LeakyRelu nodes in Vulkan segments.
+(because `VkOpRegistry::instance().has(LeakyRelu)` is true and `vkKernelDeclared`
+agrees), `supportsNode()` passes it through `vkNodeGate`, and the session places
+LeakyRelu nodes in Vulkan segments.
+
+### 3e. Hosting a pointwise-chain epilogue (producer ops only)
+
+`fusePointwiseChains` folds a chain of pointwise ops (activation → bias → scale …)
+into the store of the *producer* that feeds it, so the chain never becomes a
+standalone `FusedPointwise` node. `LeakyRelu` is itself pointwise and is *consumed*
+into a producer, not a host — skip this section for a pointwise op. A **producer**
+op (a Conv/MatMul/pool/reduce/gather-shaped kernel that others read from) can opt in
+to hosting the epilogue at its store. Three things wire it up, and a build check
+keeps them in sync:
+
+1. **Shader.** Under `#ifdef PW_EPI`, `#include "pw_epilogue.glsl"` and apply the
+   unit to each stored value (`v = pw_apply(v, idx)` for the flat world,
+   `pw_apply_nc4` for NC4HW4) before `STORE`. Including that header is what marks the
+   kernel epilogue-capable: the build sniffs the `#include` and generates the
+   `<stem>_epi` (strict per-step rounding) and `<stem>_epi_rx` (`-DPW_RELAX`,
+   fp32-chained; see [ADR-0011](adr/0011-fp32-chained-fusion.md)) SPIR-V variants.
+   There is no hand-maintained stem list — adding an epilogue-capable kernel is just
+   writing the shader.
+2. **Op.** Wire `PwEpi` into the kernel (`src/backend/vulkan/ops/pw_plan.h`):
+   `epi.prepare(node, env, flat, out)`, request the variant with
+   `shader((std::string("<stem>") + epi.suffix()).c_str(), …)` sized
+   `nbuf + epi.extraBufs()`, and `epi.append(bufs, …)` after the kernel's own
+   buffers. `epi.suffix()` resolves to `""` / `_epi` / `_epi_rx`.
+3. **Capability.** Mark the `OpType` epilogue-capable so `fusePointwiseChains`
+   attaches units to this producer — the flag `pwEpilogueCapable()` reads (in
+   `src/import/fuse_pointwise_chains.cpp`, or the op's descriptor row where the
+   OpType-keyed capability facts are tabled).
+
+`tools/check_epi_sync.py` (run at configure time and in `scripts/ci_host.sh`)
+FATAL-ERRORs if these disagree — a stem requested by an op with no `_epi` shader, a
+`pw_epilogue.glsl` shader no op requests, or a `pwEpilogueCapable` OpType whose kernel
+never requests an epilogue variant. That turns what used to be a device-load-time
+`shader not found` throw into a build diagnostic. `tools/check_shader_contracts.py`
+separately enforces the fp16 store contracts the epilogue relies on (`store16.glsl`
+inclusion, `VKNN_NO_RTE` ordering).
 
 ---
 
@@ -440,8 +533,11 @@ if (chosen < 0) throw Error(Status::Unsupported, "no backend supports op ...");
 ```
 
 `supportsNode()` defaults to `supports()`; a backend overrides it to gate specific
-ops on shapes or attributes (the Vulkan backend rejects, e.g., a cubic-mode
-GridSample or an unresolved-shape node this way).
+ops on shapes or attributes. The Vulkan backend's override is `vkNodeGate`
+(`src/core/vk_gates.cpp`, §3c) behind the availability + registry pre-checks, so a
+node is refused (and its reason reported) whenever the GPU kernel can't handle its
+shape/attributes — an unresolved-shape node, a runtime `k` on `TopK`, an
+int64→narrow-integer `Cast`, and so on.
 
 If the chosen backend is not the configured primary (because the primary's
 `supports()` said no), the session emits a throttled fallback warning. Contiguous
@@ -483,5 +579,19 @@ Vulkan/CPU segments while keeping the output bit-comparable).
 - [ ] `src/backend/cpu/ops/leakyrelu.cpp`: `LeakyReluCpuOp` + `VKNN_REGISTER_CPU_OP` (one op per file).
 - [ ] `shaders/leakyrelu.comp` (`precision.glsl` + `STORE` buffers; the build emits the `_fp16` variant).
 - [ ] `src/backend/vulkan/ops/leakyrelu.cpp`: `LeakyReluVulkanOp` + `VKNN_REGISTER_VK_OP` (one op per file).
-- [ ] Build and run; diff Vulkan output against the CPU reference (and against
-      `scripts/get_golden.py` for an external check).
+- [ ] `src/core/vk_gates.cpp`: a `vkNodeGate` case only if the kernel can't take every
+      shape/attribute the op admits (pure pointwise needs none); leave `vkKernelDeclared`
+      alone unless the op has no GPU kernel.
+- [ ] `src/core/op_descriptor.cpp`: the op's capability row — layout class (`Flat` /
+      `ShapeDependent` / default `Nc4`) and fusion roles (`pwMember` / `pwEpilogue`). This is the
+      single place those OpType-keyed facts live; `gpuFlatNode` and the pointwise-fusion pass read
+      it. A pure pointwise op keeps the all-default row (no edit). Only a `ShapeDependent` layout
+      also needs a per-node arm in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`), kept in
+      sync with its `vkNodeGate` case.
+- [ ] For a **producer** op that should host a fused pointwise-chain epilogue (§3e):
+      `#include "pw_epilogue.glsl"` under `#ifdef PW_EPI` in the shader (auto-derives the
+      `_epi` variants), `PwEpi` wiring in the op, and set the descriptor row's `pwEpilogue`.
+      `tools/check_epi_sync.py` enforces the three agree — no CMake stem list to edit.
+- [ ] Add a gtest under `tests/` and run it; diff Vulkan output against the CPU reference
+      (and against `scripts/get_golden.py` for an external check). Confirm the node lands
+      on the GPU with `vknn_compile <model>.onnx out.vxm --support-report r.json`.

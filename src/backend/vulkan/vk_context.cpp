@@ -8,9 +8,9 @@ namespace vknn { namespace vk {
     std::string VulkanCaps::summary() const {
         std::ostringstream os;
         os << deviceName << " | " << driverName << " (" << driverInfo << ")"
-           << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB"
+           << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B"
            << " tsPeriod=" << timestampPeriod << "ns\n"
-           << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
+           << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " int64=" << shaderInt64 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
            << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
            << "  globalPriority=" << globalPriority;
         return os.str();
@@ -56,23 +56,23 @@ namespace vknn { namespace vk {
     }
 
     void VulkanContext::selectPhysicalDevice() {
-        uint32_t n = 0;
-        VK_CHECK(vkEnumeratePhysicalDevices(instance_, &n, nullptr));
-        if (n == 0)
+        uint32_t deviceCount = 0;
+        VK_CHECK(vkEnumeratePhysicalDevices(instance_, &deviceCount, nullptr));
+        if (deviceCount == 0)
         {
             throw Error(Status::NotFound, "no Vulkan physical devices");
         }
-        std::vector<VkPhysicalDevice> devs(n);
-        VK_CHECK(vkEnumeratePhysicalDevices(instance_, &n, devs.data()));
-        // Prefer an integrated/discrete GPU with a compute queue. On phones there is one.
-        phys_ = devs[0];
-        for (auto d: devs)
+        std::vector<VkPhysicalDevice> devices(deviceCount);
+        VK_CHECK(vkEnumeratePhysicalDevices(instance_, &deviceCount, devices.data()));
+        // Prefer an integrated or discrete GPU; a phone typically exposes exactly one.
+        phys_ = devices[0];
+        for (auto dev: devices)
         {
-            VkPhysicalDeviceProperties p;
-            vkGetPhysicalDeviceProperties(d, &p);
-            if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU || p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(dev, &props);
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU || props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
             {
-                phys_ = d;
+                phys_ = dev;
                 break;
             }
         }
@@ -118,6 +118,7 @@ namespace vknn { namespace vk {
         caps_.maxWorkGroupCount[1]    = p.limits.maxComputeWorkGroupCount[1];
         caps_.maxWorkGroupCount[2]    = p.limits.maxComputeWorkGroupCount[2];
         caps_.maxSharedMemory         = p.limits.maxComputeSharedMemorySize;
+        caps_.maxPushConstantsSize    = p.limits.maxPushConstantsSize;
         caps_.timestampPeriod         = p.limits.timestampPeriod;
         caps_.timestampSupported      = p.limits.timestampComputeAndGraphics;
 
@@ -138,6 +139,7 @@ namespace vknn { namespace vk {
 
         caps_.shaderFloat16     = f16i8.shaderFloat16;
         caps_.shaderInt8        = f16i8.shaderInt8;
+        caps_.shaderInt64       = feats2.features.shaderInt64;
         caps_.storage16bit      = s16.storageBuffer16BitAccess;
         caps_.storage8bit       = s8.storageBuffer8BitAccess;
         caps_.int8DotProduct    = dot.shaderIntegerDotProduct;
@@ -158,20 +160,20 @@ namespace vknn { namespace vk {
     void VulkanContext::createDevice() {
         // Pick a compute-capable queue family, preferring a dedicated compute queue
         // (COMPUTE without GRAPHICS) - on the target GPU that is family 1.
-        uint32_t qn = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(phys_, &qn, nullptr);
-        std::vector<VkQueueFamilyProperties> qfs(qn);
-        vkGetPhysicalDeviceQueueFamilyProperties(phys_, &qn, qfs.data());
+        uint32_t familyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(phys_, &familyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> familyProps(familyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(phys_, &familyCount, familyProps.data());
         int chosen = -1, fallback = -1;
-        for (uint32_t i = 0; i < qn; ++i)
+        for (uint32_t i = 0; i < familyCount; ++i)
         {
-            if (qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT)
+            if (familyProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT)
             {
                 if (fallback < 0)
                 {
                     fallback = (int) i;
                 }
-                if (!(qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+                if (!(familyProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
                 {
                     chosen = (int) i;
                     break;
@@ -187,13 +189,13 @@ namespace vknn { namespace vk {
             throw Error(Status::NotFound, "no compute queue family");
         }
         queueFamily_ = (uint32_t) chosen;
-        VKNN_INFO << "Compute queue family = " << queueFamily_ << (qfs[chosen].queueFlags & VK_QUEUE_GRAPHICS_BIT ? " (shared w/ graphics)" : " (dedicated compute)");
+        VKNN_INFO << "Compute queue family = " << queueFamily_ << (familyProps[chosen].queueFlags & VK_QUEUE_GRAPHICS_BIT ? " (shared w/ graphics)" : " (dedicated compute)");
 
-        float                   prio = 1.0f;
+        float                   queuePriority = 1.0f;
         VkDeviceQueueCreateInfo qci {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
         qci.queueFamilyIndex = queueFamily_;
         qci.queueCount       = 1;
-        qci.pQueuePriorities = &prio;
+        qci.pQueuePriorities = &queuePriority;
 
         // Enable available perf extensions.
         auto addExt = [&](const char *e) {
@@ -220,30 +222,30 @@ namespace vknn { namespace vk {
         //   Largest allowed tier not exceeding the requested one (the driver reports the allowed set per
         //   family; the tier enum is monotonic LOW<MEDIUM<HIGH<REALTIME).
         auto clampGlobalPriority = [&](VkQueueGlobalPriorityKHR want) -> VkQueueGlobalPriorityKHR {
-            uint32_t qn2 = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties2(phys_, &qn2, nullptr);
-            std::vector<VkQueueFamilyGlobalPriorityPropertiesKHR> gp(qn2);
-            std::vector<VkQueueFamilyProperties2>                 qf(qn2);
-            for (uint32_t i = 0; i < qn2; ++i)
+            uint32_t familyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties2(phys_, &familyCount, nullptr);
+            std::vector<VkQueueFamilyGlobalPriorityPropertiesKHR> priorityProps(familyCount);
+            std::vector<VkQueueFamilyProperties2>                 familyProps(familyCount);
+            for (uint32_t i = 0; i < familyCount; ++i)
             {
-                gp[i]       = VkQueueFamilyGlobalPriorityPropertiesKHR {VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR};
-                qf[i]       = VkQueueFamilyProperties2 {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2};
-                qf[i].pNext = &gp[i];
+                priorityProps[i]     = VkQueueFamilyGlobalPriorityPropertiesKHR {VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR};
+                familyProps[i]       = VkQueueFamilyProperties2 {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2};
+                familyProps[i].pNext = &priorityProps[i];
             }
-            vkGetPhysicalDeviceQueueFamilyProperties2(phys_, &qn2, qf.data());
-            if (queueFamily_ >= qn2 || gp[queueFamily_].priorityCount == 0)
+            vkGetPhysicalDeviceQueueFamilyProperties2(phys_, &familyCount, familyProps.data());
+            if (queueFamily_ >= familyCount || priorityProps[queueFamily_].priorityCount == 0)
             {
                 return want; // family reports no set; request as-is (the create-time ladder handles refusal)
             }
-            const auto              &al = gp[queueFamily_];
+            const auto              &allowed = priorityProps[queueFamily_];
             VkQueueGlobalPriorityKHR best {};
             bool                     haveBest = false;
-            for (uint32_t k = 0; k < al.priorityCount; ++k)
+            for (uint32_t k = 0; k < allowed.priorityCount; ++k)
             {
-                VkQueueGlobalPriorityKHR t = al.priorities[k];
-                if (t <= want && (!haveBest || t > best))
+                VkQueueGlobalPriorityKHR tier = allowed.priorities[k];
+                if (tier <= want && (!haveBest || tier > best))
                 {
-                    best     = t;
+                    best     = tier;
                     haveBest = true;
                 }
             }
@@ -270,9 +272,13 @@ namespace vknn { namespace vk {
         VkPhysicalDevice8BitStorageFeatures s8 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
         s8.storageBuffer8BitAccess = caps_.storage8bit;
         s16.pNext                  = &s8;
+        // Integer dot product: required (beyond the extension) for OpSDotKHR-family SPIR-V in int8 kernels.
+        VkPhysicalDeviceShaderIntegerDotProductFeatures dot {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES};
+        dot.shaderIntegerDotProduct = caps_.int8DotProduct;
+        s8.pNext                    = &dot;
         VkPhysicalDeviceTimelineSemaphoreFeatures tsem {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
         tsem.timelineSemaphore = caps_.timelineSemaphore;
-        s8.pNext               = &tsem;
+        dot.pNext              = &tsem;
 
         VkDeviceCreateInfo dci {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.pNext                   = &f16i8;

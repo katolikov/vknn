@@ -7,6 +7,9 @@ namespace vknn {
     int vxResizeMode(const std::string &);
     int vxResizeCoord(const std::string &);
     namespace {
+        // Local workgroup size along x; matches local_size_x in shaders/resize.comp.
+        constexpr uint32_t kResizeLocalSize = 64;
+
         // Byte-matched to shaders/resize.comp's push_constant block { int N, C, IH, IW, OH, OW, mode, cm }.
         // mode is the resolved vxResizeMode() code (0=nearest, 1=bilinear); cm is the resolved
         // vxResizeCoord() coordinate-transform code the shader's coord() switches on.
@@ -36,9 +39,9 @@ namespace vknn {
                 vk::Buffer           *d    = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {s->handle(), d->handle()};
                 epi.append(bufs, node, env, d->handle());
-                // 64 matches resize.comp's local_size_x; groups() ceil-divides the per-block-pixel lane
-                // count so the 1D grid covers every lane (the shader's own bounds check drops the tail).
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
+                // kResizeLocalSize matches resize.comp's local_size_x; groups() ceil-divides the per-block-pixel
+                // lane count so the 1D grid covers every lane (the shader's own bounds check drops the tail).
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, kResizeLocalSize));
             }
         };
     } // namespace

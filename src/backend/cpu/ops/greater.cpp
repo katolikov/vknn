@@ -10,9 +10,6 @@ namespace vknn {
     namespace {
 
         struct GreaterCpu: CpuOp {
-            bool supportsDType(DType dt) const override {
-                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
-            }
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &A  = ctx.t(node.inputs[0]);
                 const RtTensor &B  = ctx.t(node.inputs[1]);
@@ -29,7 +26,7 @@ namespace vknn {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = numElements(out);
+                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand strides into the *original* (un-broadcast) buffers, indexed by output
                 // axis. Built right-to-left so each stride is the product of the trailing original
                 // dims. A broadcast axis (original extent 1) gets stride 0 so every output index on

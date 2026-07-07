@@ -2,7 +2,7 @@
 #define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
 #include "precision.glsl"
 #ifdef PW_EPI
-#define PW_EPI_BASE 4
+#define PW_EPI_BASE 5
 #include "pw_epilogue.glsl"
 #endif
 #include "common.glsl"
@@ -10,35 +10,42 @@
 // store. Mirrors matmul_tiled.comp with binding 3 = bias; matmul.cpp selects this variant when a
 // MatMul has a fused bias and runs the tiled kernel. See matmul_tiled.comp for the tiling details.
 
-#define TM 128
-#define TN 128
-#define TK 16
+// Tile geometry as specialization constants; see matmul_tiled.comp (same candidates, same
+// bit-neutrality: the fused bias is added once in the fp32 accumulator regardless of the tile).
+layout(constant_id = 0) const int TM = 128; // workgroup output rows
+layout(constant_id = 1) const int TN = 128; // workgroup output cols
+layout(constant_id = 2) const int TK = 16;  // K panel depth
+#define TM_MAX 128     // shared/register arrays are sized for the widest variant
+#define TN_MAX 128
+#define TK_MAX 16
 #define TILE 16        // threads per dim (16x16 = 256)
-#define RM (TM / TILE) // 8 output rows per thread
-#define RN (TN / TILE) // 8 output cols per thread
+#define RM (TM / TILE) // output rows per thread
+#define RN (TN / TILE) // output cols per thread
+#define RM_MAX (TM_MAX / TILE)
+#define RN_MAX (TN_MAX / TILE)
 
 layout(local_size_x = TILE, local_size_y = TILE) in;
 layout(std430, binding = 0) readonly buffer A  { STORE a[]; };
 layout(std430, binding = 1) readonly buffer B  { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 3) readonly buffer Bs { STORE bias[]; };
+layout(std430, binding = 4) readonly buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
   int rank, total, M, N, K, aK, bK;
-  int outDim[8]; int aStride[8]; int bStride[8];
 } pc;
 
-shared STORE As[TK][TM]; // transposed (k-major) so the inner loop reads As[kk][m] across threads
-shared STORE Bs_[TK][TN];
+shared STORE As[TK_MAX][TM_MAX]; // transposed (k-major) so the inner loop reads As[kk][m] across threads
+shared STORE Bs_[TK_MAX][TN_MAX];
 
 void main() {
   int M = pc.M, N = pc.N, K = pc.K;
   int batch = int(gl_WorkGroupID.z);
   int aBase = 0, bBase = 0, rem = batch;
   for (int k = pc.rank - 3; k >= 0; --k) {
-    int c = rem % pc.outDim[k];
-    rem /= pc.outDim[k];
-    aBase += c * pc.aStride[k];
-    bBase += c * pc.bStride[k];
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    aBase += c * geom.g[pc.rank + k];
+    bBase += c * geom.g[2 * pc.rank + k];
   }
   int dBase = batch * M * N;
 
@@ -48,7 +55,7 @@ void main() {
   int ty  = int(gl_LocalInvocationID.y);
   int tid = ty * TILE + tx;
 
-  float acc[RM][RN];
+  float acc[RM_MAX][RN_MAX];
   for (int i = 0; i < RM; ++i)
     for (int j = 0; j < RN; ++j)
       acc[i][j] = 0.0;
@@ -68,7 +75,7 @@ void main() {
     }
     barrier();
     for (int kk = 0; kk < TK; ++kk) {
-      float av[RM], bv[RN];
+      float av[RM_MAX], bv[RN_MAX];
       for (int i = 0; i < RM; ++i)
         av[i] = float(As[kk][ty * RM + i]);
       for (int j = 0; j < RN; ++j)

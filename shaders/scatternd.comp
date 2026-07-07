@@ -2,18 +2,20 @@
 #include "precision.glsl"
 // ScatterND scatter pass. Data, updates, and indices all use STORE (fp16/fp32); index values are
 // cast back to int. Computes a flat offset per slice from the index row, then writes the update slot.
+// Geometry (dataDim/stride) rides a content-deduped SSBO (binding 3), not the push constant, so the
+// decodable data rank is unbounded (see flat::uploadFlatGeom). Arrays pack back-to-back:
+// dataDim = g[0..rank), stride = g[rank..2*rank).
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer U   { STORE u[]; };
 layout(std430, binding = 1) readonly  buffer IDX { STORE ix[]; };  // index in STORE; one kernel for const and runtime indices
 layout(std430, binding = 2) buffer            D   { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer G   { int g[]; } geom;
 layout(push_constant) uniform PC {
   uint total;
   int  q;
   int  sliceSize;
   int  rank;
-  int  dataDim[8];
-  int  stride[8];
 } pc;
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -23,8 +25,8 @@ void main() {
   int off = 0;
   for (int c = 0; c < pc.q; ++c) {
     int v = int(ix[row * pc.q + c]);
-    if (v < 0) v += pc.dataDim[c];
-    off += v * pc.stride[c];
+    if (v < 0) v += geom.g[c];
+    off += v * geom.g[pc.rank + c];
   }
   d[off + slot] = u[gid];
 }

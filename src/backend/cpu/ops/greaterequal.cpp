@@ -12,12 +12,6 @@ namespace vknn {
         /// CPU reference for ONNX GreaterOrEqual: elementwise `A >= B` with NumPy broadcasting,
         /// emitting the canonical fp32 mask (1.0 for true, 0.0 for false).
         struct GreaterEqualCpu: CpuOp {
-            /// Int32 is accepted but shares the fp32 read path below (only Int64 is read as integer),
-            /// so its values must round-trip exactly through double — true for the shape/index
-            /// magnitudes these comparisons carry.
-            bool supportsDType(DType dt) const override {
-                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
-            }
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &A  = ctx.t(node.inputs[0]);
                 const RtTensor &B  = ctx.t(node.inputs[1]);
@@ -38,7 +32,7 @@ namespace vknn {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = numElements(out);
+                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand broadcast strides in the common frame, built by a right-to-left
                 // row-major scan: sA/sB accumulate each operand's own row-major stride, while a size-1
                 // (broadcast) axis is pinned to stride 0 so every output index along it rereads the

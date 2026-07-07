@@ -41,6 +41,7 @@ float vx_unary(float x, int op, float a, float b) {
   if (op == 17) return sin(x);
   if (op == 18) return 1.0 / x;                        // reciprocal
   if (op == 19) return max(x, 0.0) + log(1.0 + exp(-abs(x)));  // softplus
+  if (op == 20) return roundEven(x);                   // round (ties to even, per ONNX Round)
   if (op == 15) {                                      // erf (Abramowitz-Stegun 7.1.26, err<1.5e-7)
     float s = sign(x); float ax = abs(x);
     float t = 1.0 / (1.0 + 0.3275911 * ax);
@@ -74,6 +75,8 @@ float vx_binary(float a, float b, int op) {
   if (op == 8)  return (a >= b) ? 1.0 : 0.0;
   if (op == 9)  return (a == b) ? 1.0 : 0.0;
   if (op == 10) return (a > 0.0) ? a : b * a;
+  if (op == 11) return (a < b)  ? 1.0 : 0.0;
+  if (op == 12) return (a <= b) ? 1.0 : 0.0;
   return a + b;
 }
 

@@ -108,14 +108,63 @@ namespace vknn {
                 return "ConvertDtype";
             case OpType::ConvGemm:
                 return "ConvGemm";
+            case OpType::Less:
+                return "Less";
+            case OpType::LessEqual:
+                return "LessEqual";
+            case OpType::Dropout:
+                return "Dropout";
+            case OpType::TopK:
+                return "TopK";
+            case OpType::InstanceNorm:
+                return "InstanceNormalization";
+            case OpType::QuantizeLinear:
+                return "QuantizeLinear";
+            case OpType::DequantizeLinear:
+                return "DequantizeLinear";
+            case OpType::DynamicQuantizeLinear:
+                return "DynamicQuantizeLinear";
+            case OpType::QLinearConv:
+                return "QLinearConv";
+            case OpType::QLinearMatMul:
+                return "QLinearMatMul";
+            case OpType::QLinearAdd:
+                return "QLinearAdd";
+            case OpType::QLinearGlobalAveragePool:
+                return "QLinearGlobalAveragePool";
+            case OpType::MatMulInteger:
+                return "MatMulInteger";
+            case OpType::ConvInteger:
+                return "ConvInteger";
+            case OpType::QGemm:
+                return "QGemm";
             default:
                 return "Unknown";
         }
     }
 
+    bool opTypeIsQuantized(OpType t) {
+        switch (t)
+        {
+            case OpType::QuantizeLinear:
+            case OpType::DequantizeLinear:
+            case OpType::DynamicQuantizeLinear:
+            case OpType::QLinearConv:
+            case OpType::QLinearMatMul:
+            case OpType::QLinearAdd:
+            case OpType::QLinearGlobalAveragePool:
+            case OpType::MatMulInteger:
+            case OpType::ConvInteger:
+            case OpType::QGemm:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     UnaryType unaryFromOnnx(const std::string &s) {
         using U = UnaryType;
-        static const std::unordered_map<std::string, UnaryType> m = {{"Sigmoid", U::Sigmoid}, {"Tanh", U::Tanh}, {"HardSwish", U::HardSwish}, {"HardSigmoid", U::HardSigmoid}, {"LeakyRelu", U::LeakyRelu}, {"Elu", U::Elu}, {"Abs", U::Abs}, {"Neg", U::Neg}, {"Exp", U::Exp}, {"Log", U::Log}, {"Sqrt", U::Sqrt}, {"Floor", U::Floor}, {"Ceil", U::Ceil}, {"Erf", U::Erf}, {"Cos", U::Cos}, {"Sin", U::Sin}, {"Reciprocal", U::Reciprocal}, {"Softplus", U::Softplus}};
+        static const std::unordered_map<std::string, UnaryType> m = {{"Sigmoid", U::Sigmoid}, {"Tanh", U::Tanh}, {"HardSwish", U::HardSwish}, {"HardSigmoid", U::HardSigmoid}, {"LeakyRelu", U::LeakyRelu}, {"Elu", U::Elu}, {"Abs", U::Abs}, {"Neg", U::Neg}, {"Exp", U::Exp}, {"Log", U::Log}, {"Sqrt", U::Sqrt}, {"Floor", U::Floor}, {"Ceil", U::Ceil}, {"Erf", U::Erf}, {"Cos", U::Cos}, {"Sin", U::Sin}, {"Reciprocal", U::Reciprocal}, {"Softplus", U::Softplus}, {"Round", U::Round}};
         auto it = m.find(s);
         return it == m.end() ? U::Invalid : it->second;
     }
@@ -203,20 +252,45 @@ namespace vknn {
             // GreaterOrEqual is the canonical ONNX spelling; GreaterEqual is accepted as an alias.
             {"GreaterOrEqual", OpType::GreaterEqual},
             {"GreaterEqual", OpType::GreaterEqual},
+            {"Less", OpType::Less},
+            // LessOrEqual is the canonical ONNX spelling; LessEqual is accepted as an alias.
+            {"LessOrEqual", OpType::LessEqual},
+            {"LessEqual", OpType::LessEqual},
             {"ConstantOfShape", OpType::ConstantOfShape},
             {"Range", OpType::Range},
             {"EyeLike", OpType::EyeLike},
             {"ScatterND", OpType::ScatterND},
+            // Inference-mode Dropout is an identity on data; eliminateDropout removes it at import.
+            {"Dropout", OpType::Dropout},
+            {"TopK", OpType::TopK},
+            // Lowered at import to per-channel normalize ops (lowerInstanceNorm); no kernel exists.
+            {"InstanceNormalization", OpType::InstanceNorm},
+            // ONNX quantized operator family: recognized so quantized checkpoints are named
+            // precisely (never "unknown ONNX op"); the import-time dequantize lowering is the
+            // execution path — no kernel exists for any of them. QGemm, QLinearAdd and
+            // QLinearGlobalAveragePool live in the com.microsoft domain, but the wire parser
+            // drops NodeProto.domain, so name matching here covers them too.
+            {"QuantizeLinear", OpType::QuantizeLinear},
+            {"DequantizeLinear", OpType::DequantizeLinear},
+            {"DynamicQuantizeLinear", OpType::DynamicQuantizeLinear},
+            {"QLinearConv", OpType::QLinearConv},
+            {"QLinearMatMul", OpType::QLinearMatMul},
+            {"QLinearAdd", OpType::QLinearAdd},
+            {"QLinearGlobalAveragePool", OpType::QLinearGlobalAveragePool},
+            {"MatMulInteger", OpType::MatMulInteger},
+            {"ConvInteger", OpType::ConvInteger},
+            {"QGemm", OpType::QGemm},
         };
         auto it = m.find(s);
         if (it != m.end())
         {
             return it->second;
         }
-        // Fallbacks for the collapsed families: every Reduce* variant (except ReduceMean, which is
-        // in the table above so it can reach the GAP recovery) and then the Unary/Binary elementwise
-        // families, whose specific op is recovered separately via unaryFromOnnx/binaryFromOnnx.
-        if (s == "ReduceSum" || s == "ReduceMax" || s == "ReduceMin" || s == "ReduceProd" || s == "ReduceL2")
+        // Fallbacks for the collapsed families: the Reduce* variants (name recognition lives in
+        // reduceFromOnnx; ReduceMean also sits in the table above so it can reach the GAP recovery)
+        // and then the Unary/Binary elementwise families, whose specific op is recovered separately
+        // via unaryFromOnnx/binaryFromOnnx.
+        if (reduceFromOnnx(s) != ReduceType::Invalid)
         {
             return OpType::Reduce;
         }

@@ -33,10 +33,11 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SRC = os.path.join(REPO_ROOT, "src", "core", "op.cpp")
 
-# Op names that op.cpp accepts but that never appear in an ONNX export (they are
-# VKNN-internal fusion/layout pseudo-ops or the placeholder). Excluding them from
-# the "supported" set is harmless for scanning and keeps the report honest.
-_INTERNAL_NAMES = {"FusedSE", "FusedDwPw", "ConvertLayout", "Unknown", "Unary", "Binary"}
+# The internal-name set, the quantized-family set and the GPU-fallback gates are shared with
+# check_model_support.py — one source of truth between the two tools (each previously kept a
+# copy that drifted).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from check_model_support import _INTERNAL_NAMES, _QUANTIZED_ONNX, CPU_FALLBACK_GATES  # noqa: E402
 
 
 def supported_op_names(src_path):
@@ -53,6 +54,9 @@ def supported_op_names(src_path):
     except OSError as e:
         sys.exit("error: cannot read VKNN op source %s: %s\n"
                  "       pass the correct path with --src" % (src_path, e))
+    # Match only identifier-shaped quoted strings (letter then alphanumerics): op names look
+    # like that, while incidental string literals — error messages, paths — carry spaces or
+    # punctuation and are skipped.
     names = set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', text))
     names -= _INTERNAL_NAMES
     if not names:
@@ -157,55 +161,14 @@ def io_details(names, index):
 
 
 # ---------------------------------------------------------------------------
-# Attribute-level gates: op types VKNN *recognizes* but whose specific attribute
-# variant has no GPU kernel, so the node falls back to the (correct) CPU op. The
-# model still runs, but these are the prime targets for "implement a GPU path".
+# GPU-fallback gates: op types VKNN *recognizes* but whose specific variant has
+# no GPU kernel, so the node falls back to the (correct) CPU op. The model still
+# runs, but these are the prime targets for "implement a GPU path".
 #
-# Only attribute-checkable gates from vk_backend.cpp::supportsNode are encoded
-# here -- they need nothing but the node's own attributes, so they're reliable
-# from a raw ONNX file. The many shape/initializer/layout-dependent gates in
-# supportsNode (MatMul rank, DepthToSpace divisibility, Resize channel/batch,
-# const-initializer requirements, ...) are intentionally NOT replicated: they
-# depend on post-pass internal state and would produce false positives.
-_FLOAT_DTYPES = {"FLOAT", "FLOAT16", "DOUBLE", "BFLOAT16"}
-
-
-def _pad_fallback(attrs):
-    mode = attrs.get("mode", "constant")
-    if mode not in ("constant", "edge", "reflect"):
-        return "Pad mode=%r has no GPU kernel (GPU does only constant/edge/reflect)" % mode
-    return None
-
-
-def _gridsample_fallback(attrs):
-    mode = attrs.get("mode", "bilinear")
-    if mode not in ("bilinear", "linear", "nearest"):
-        return ("GridSample mode=%r has no GPU kernel (GPU does only "
-                "bilinear/linear/nearest; e.g. cubic falls back)" % mode)
-    return None
-
-
-def _cast_fallback(attrs):
-    to = attrs.get("to")
-    to_name = dtype_name(to) if isinstance(to, int) else str(to)
-    if to_name not in _FLOAT_DTYPES:
-        return ("Cast to=%s is a non-float target (GPU path is float->float only)" % to_name)
-    return None
-
-
-def _einsum_fallback(attrs):
-    eq = "".join(c for c in attrs.get("equation", "") if c not in " \t")
-    if eq != "i,j->ij":
-        return ("Einsum equation=%r has no GPU kernel (only 'i,j->ij' outer product)" % eq)
-    return None
-
-
-GPU_FALLBACK_RULES = {
-    "Pad": _pad_fallback,
-    "GridSample": _gridsample_fallback,
-    "Cast": _cast_fallback,
-    "Einsum": _einsum_fallback,
-}
+# The gate functions are CPU_FALLBACK_GATES imported from check_model_support.py:
+# the attribute/shape-checkable subset of vk_backend.cpp::supportsNode. Deeper
+# gates depend on post-pass internal state and are intentionally not replicated —
+# they would produce false positives from a raw ONNX file.
 
 
 def scan_graph(graph, supported, path, unsupported, fallbacks):
@@ -225,11 +188,14 @@ def scan_graph(graph, supported, path, unsupported, fallbacks):
             "outputs": io_details(node.output, index),
             "attributes": attrs,
         }
-        if node.op_type not in supported or not in_default_domain:
+        # The quantized family is recognized by the importer (so it appears in `supported`) but
+        # has no kernel: it runs only once the import-time dequantize pass lands, so it stays in
+        # the unsupported bucket regardless of domain.
+        if node.op_type in _QUANTIZED_ONNX or node.op_type not in supported or not in_default_domain:
             unsupported.append(record)
         else:
-            rule = GPU_FALLBACK_RULES.get(node.op_type)
-            reason = rule(attrs) if rule else None
+            rule = CPU_FALLBACK_GATES.get(node.op_type)
+            reason = rule(node, attrs, index) if rule else None
             if reason:
                 record["reason"] = reason
                 fallbacks.append(record)
@@ -259,68 +225,69 @@ def opset_summary(model):
     return {imp.domain or "ai.onnx": imp.version for imp in model.opset_import}
 
 
-def _render_instance(L, f):
-    L.append("• %s  (node \"%s\", graph %s)" % (f["op_type"], f["node_name"], f["graph"]))
-    if f["domain"] != "ai.onnx":
-        L.append("    domain: %s" % f["domain"])
-    if f.get("reason"):
-        L.append("    reason: %s" % f["reason"])
-    for label, ios in (("inputs", f["inputs"]), ("outputs", f["outputs"])):
+def _render_instance(lines, finding):
+    lines.append("• %s  (node \"%s\", graph %s)"
+                 % (finding["op_type"], finding["node_name"], finding["graph"]))
+    if finding["domain"] != "ai.onnx":
+        lines.append("    domain: %s" % finding["domain"])
+    if finding.get("reason"):
+        lines.append("    reason: %s" % finding["reason"])
+    for label, ios in (("inputs", finding["inputs"]), ("outputs", finding["outputs"])):
         for io in ios:
             shape = io["shape"] if io["shape"] is not None else "?"
-            L.append("    %-7s %-22s shape=%s dtype=%s (%s)"
-                     % (label + ":", io["name"] or "<omitted>", shape,
-                        io["dtype"] or "?", io["source"]))
-    if f["attributes"]:
-        for k, v in f["attributes"].items():
-            L.append("    attr    %s = %s" % (k, v))
-    L.append("")
+            lines.append("    %-7s %-22s shape=%s dtype=%s (%s)"
+                         % (label + ":", io["name"] or "<omitted>", shape,
+                            io["dtype"] or "?", io["source"]))
+    if finding["attributes"]:
+        for attr_name, attr_value in finding["attributes"].items():
+            lines.append("    attr    %s = %s" % (attr_name, attr_value))
+    lines.append("")
 
 
 def render_text(report):
-    L = []
-    m = report["model"]
-    L.append("VKNN unsupported-operator scan")
-    L.append("=" * 60)
-    L.append("model:        %s" % m["path"])
-    L.append("opset:        %s" % ", ".join("%s=%d" % (k, v) for k, v in m["opset"].items()))
-    L.append("total nodes:  %d" % m["total_nodes"])
-    L.append("supported op types known to VKNN: %d" % m["supported_count"])
-    L.append("")
+    lines = []
+    model = report["model"]
+    lines.append("VKNN unsupported-operator scan")
+    lines.append("=" * 60)
+    lines.append("model:        %s" % model["path"])
+    lines.append("opset:        %s" % ", ".join("%s=%d" % (k, v) for k, v in model["opset"].items()))
+    lines.append("total nodes:  %d" % model["total_nodes"])
+    lines.append("supported op types known to VKNN: %d" % model["supported_count"])
+    lines.append("")
 
     summary = report["summary"]
     fb_summary = report["gpu_fallback_summary"]
     if not summary and not fb_summary:
-        L.append("All operators are supported by VKNN with a GPU path. Nothing to do. ✔")
-        return "\n".join(L)
+        lines.append("All operators are supported by VKNN with a GPU path. Nothing to do. ✔")
+        return "\n".join(lines)
 
     if not summary:
-        L.append("No unsupported operators — every op runs. ✔")
+        lines.append("No unsupported operators — every op runs. ✔")
     else:
-        L.append("UNSUPPORTED OP TYPES (cannot run — must be implemented): "
-                 "%d distinct, %d node(s)" % (len(summary), sum(s["count"] for s in summary)))
-        L.append("-" * 60)
+        lines.append("UNSUPPORTED OP TYPES (cannot run — must be implemented): "
+                     "%d distinct, %d node(s)" % (len(summary), sum(s["count"] for s in summary)))
+        lines.append("-" * 60)
         for s in summary:
             dom = "" if s["domain"] == "ai.onnx" else " [domain=%s]" % s["domain"]
-            L.append("  %-28s x%-4d%s" % (s["op_type"], s["count"], dom))
-        L.append("")
-        L.append("UNSUPPORTED — PER-INSTANCE DETAIL")
-        L.append("-" * 60)
-        for f in report["findings"]:
-            _render_instance(L, f)
+            lines.append("  %-28s x%-4d%s" % (s["op_type"], s["count"], dom))
+        lines.append("")
+        lines.append("UNSUPPORTED — PER-INSTANCE DETAIL")
+        lines.append("-" * 60)
+        for finding in report["findings"]:
+            _render_instance(lines, finding)
 
     if fb_summary:
-        L.append("GPU FALLBACK (runs correctly on CPU; add a GPU kernel to optimize): "
-                 "%d distinct, %d node(s)" % (len(fb_summary), sum(s["count"] for s in fb_summary)))
-        L.append("-" * 60)
+        lines.append("GPU FALLBACK (runs correctly on CPU; add a GPU kernel to optimize): "
+                     "%d distinct, %d node(s)" % (len(fb_summary), sum(s["count"] for s in fb_summary)))
+        lines.append("-" * 60)
         for s in fb_summary:
-            L.append("  %-28s x%-4d" % (s["op_type"], s["count"]))
-        L.append("")
-        L.append("GPU FALLBACK — PER-INSTANCE DETAIL")
-        L.append("-" * 60)
-        for f in report["gpu_fallbacks"]:
-            _render_instance(L, f)
-    return "\n".join(L)
+            lines.append("  %-28s x%-4d" % (s["op_type"], s["count"]))
+        lines.append("")
+        lines.append("GPU FALLBACK — PER-INSTANCE DETAIL")
+        lines.append("-" * 60)
+        for finding in report["gpu_fallbacks"]:
+            _render_instance(lines, finding)
+    return "\n".join(lines)
 
 
 def main():
@@ -340,7 +307,7 @@ def main():
 
     findings = []
     fallbacks = []
-    total = [0]
+    total = [0]  # one-element list as a mutable cell the recursive closure can add into
 
     def count_nodes(g):
         total[0] += len(g.node)
@@ -377,7 +344,7 @@ def main():
         "gpu_fallbacks": fallbacks,
         "vknn_implementation_guide": {
             "note": "To add each op type below, follow the per-op recipe.",
-            "recipe": "skills/add-an-operator.md, docs/ADDING_AN_OPERATOR.md",
+            "recipe": "skills/add-an-operator.md, docs/adding-an-operator.md",
             "files_to_touch": [
                 "include/vknn/op.h            (add OpType::kFoo)",
                 "src/core/op.cpp              (opTypeName + opTypeFromOnnx)",

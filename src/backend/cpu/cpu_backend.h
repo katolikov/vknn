@@ -1,6 +1,6 @@
 // CPU reference backend + scalar/NEON operator registry.
 //
-// Adding a CPU op (see docs/ADDING_AN_OPERATOR.md):
+// Adding a CPU op (see docs/adding-an-operator.md):
 //   1. subclass CpuOp, implement run().
 //   2. VKNN_REGISTER_CPU_OP(OpType::Foo, FooCpuOp);
 // No edits to core dispatch are required.
@@ -22,12 +22,6 @@ namespace vknn {
       public:
         virtual ~CpuOp()                                     = default;
         virtual void run(const Node &node, ExecContext &ctx) = 0;
-        /// Report whether this op can execute for tensor dtype `dt`, gating capability/fallback
-        /// selection. The default admits fp32 (the canonical compute type) and int64 (shape/index
-        /// tensors); ops that widen or restrict that set override this.
-        virtual bool supportsDType(DType dt) const {
-            return dt == DType::Float32 || dt == DType::Int64;
-        }
     };
 
     using CpuOpFactory = std::function<std::unique_ptr<CpuOp>()>;
@@ -73,6 +67,13 @@ namespace vknn {
 
     // ---- helpers shared by CPU ops ----
     namespace cpu {
+        /// Element count for a CPU buffer, treating a rank-0 (empty-shape) tensor as its one scalar
+        /// element. numElements() returns 0 for an empty shape, so an op that sized or iterated a
+        /// scalar by numElements() alone would produce a zero-length (null-data) buffer whose read
+        /// null-derefs; this is the one count CPU ops allocate and loop over so a scalar keeps its value.
+        inline int64_t elemCount(const Shape &shape) {
+            return shape.empty() ? 1 : numElements(shape);
+        }
         /// Size `rt`'s host buffer to `shape`, mark its host copy valid, and hand back a typed
         /// fp32 pointer to element 0. The op writes its result straight through this pointer.
         float *allocOut(RtTensor &rt, const Shape &shape);

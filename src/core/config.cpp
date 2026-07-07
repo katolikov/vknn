@@ -1,6 +1,7 @@
 #include "vknn/config.h"
 #include "json.h"
 #include "vknn/logging.h"
+#include <cctype>
 #include <fstream>
 #include <sstream>
 
@@ -285,6 +286,42 @@ namespace vknn {
         os << "  \"directConv3x3\": " << hint(Hint::DirectConv3x3, 0) << "\n";
         os << "}\n";
         return os.str();
+    }
+
+    /// True when @p name appears as one whole comma-separated entry of @p list, ignoring surrounding
+    /// whitespace on each entry (so "a, b ,c" contains "b"). Substring hits do not count.
+    bool Config::listContains(const std::string &list, std::string_view name) {
+        if (name.empty())
+        {
+            return false;
+        }
+        size_t pos = 0;
+        while (pos <= list.size())
+        {
+            size_t comma = list.find(',', pos);
+            size_t end   = comma == std::string::npos ? list.size() : comma;
+            // Trim leading/trailing whitespace to get this entry's [tokBegin, tokEnd) span.
+            size_t tokBegin = pos;
+            size_t tokEnd   = end;
+            while (tokBegin < tokEnd && std::isspace((unsigned char) list[tokBegin]))
+            {
+                ++tokBegin;
+            }
+            while (tokEnd > tokBegin && std::isspace((unsigned char) list[tokEnd - 1]))
+            {
+                --tokEnd;
+            }
+            if (tokEnd - tokBegin == name.size() && list.compare(tokBegin, tokEnd - tokBegin, name.data(), name.size()) == 0)
+            {
+                return true;
+            }
+            if (comma == std::string::npos)
+            {
+                break;
+            }
+            pos = comma + 1;
+        }
+        return false;
     }
 
     void Config::applyLogLevel() const {

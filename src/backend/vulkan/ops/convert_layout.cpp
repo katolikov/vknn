@@ -6,6 +6,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x; matches local_size_x in shaders/convert_layout.comp.
+        constexpr uint32_t kConvertLayoutLocalSize = 256;
+
         struct ConvertPC {
             int N, C, H, W, dir;
         };
@@ -30,7 +33,7 @@ namespace vknn {
                 // bindings 0/1 = scalar views, 2/3 = vec4 views of the same src/dst buffers
                 vk::Buffer *s = env.devBuf(node.inputs[0]);
                 vk::Buffer *d = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {s->handle(), d->handle(), s->handle(), d->handle()}, &pc, sizeof(pc), groups(count, 256));
+                pipe->dispatch(cmd, {s->handle(), d->handle(), s->handle(), d->handle()}, &pc, sizeof(pc), groups(count, kConvertLayoutLocalSize));
             }
         };
 

@@ -3,34 +3,155 @@
 // shaders/matmul.comp). Either operand may be an activation or a constant initializer (e.g. a
 // Linear weight); an initializer is uploaded flat in prepare(). Mirrors the CPU oracle's
 // broadcast/stride math byte-for-byte.
+#include "core/matmul_tile.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
+#include "vknn/logging.h"
 #include "vknn/op.h"
 #include <algorithm>
+#include <functional>
 #include <vector>
 
 namespace vknn {
     namespace {
 
+        // Scalars only; the per-axis outDim/aStride/bStride geometry rides a content-deduped SSBO
+        // (flat::uploadFlatGeom) bound after the operands (and after the fused bias when present), so
+        // the decodable batch rank is unbounded and the push constant stays small.
         struct MatMulPC {
             int rank, total, M, N, K, aK, bK;
-            int outDim[flat::kMaxRank];
-            int aStride[flat::kMaxRank];
-            int bStride[flat::kMaxRank];
         };
 
         struct MatMulOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             MatMulPC                             pc {};
+            std::shared_ptr<vk::Buffer>          geom;        // outDim/aStride/bStride, deduped SSBO
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
             std::shared_ptr<vk::Buffer>          biasBuf;     // set when a rank-1 [N] bias is fused in
             bool                                 useTiled = false;
             int                                  numBatch = 1;
-            static constexpr int                 kTile    = 128; // must match TM/TN in matmul_tiled.comp
+            MatMulTile                           tile     = kMatMulTiles[0]; // matmul_tiled spec constants (TM/TN/TK)
 
             // Set when a pointwise chain (fusePointwiseChains) is attached to this MatMul's store.
             PwEpi epi;
+
+            // The tiled dispatch is 3-D, so it gets no runtime X-overflow rescue (the 1-D split in
+            // ComputePipeline::dispatch only applies when gy==gz==1); a tile whose group counts
+            // exceed the device limits must not be dispatched.
+            bool tileFits(VkOpEnv &env, const MatMulTile &t) const {
+                const auto &cap = env.ctx->caps();
+                return (uint32_t) ((pc.N + t.tn - 1) / t.tn) <= cap.maxWorkGroupCount[0] && (uint32_t) ((pc.M + t.tm - 1) / t.tm) <= cap.maxWorkGroupCount[1] && (uint32_t) numBatch <= cap.maxWorkGroupCount[2];
+            }
+
+            // Pick the tiled-GEMM tile for this shape (an index into kMatMulTiles; 0 = the default
+            // {128,128,16}). Tuning::None keeps the default; Fast/Heavy race the candidates
+            // min-of-5 x 8 reps on scratch buffers and persist the winning index in the tune
+            // table. Every candidate is bit-neutral (the per-output fp32 K chain is one
+            // ascending-k sequence for any tile), so the race needs no anti-noise margin and the
+            // choice never affects output bits.
+            MatMulTile pickTile(VkOpEnv &env, bool hasBias) {
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return kMatMulTiles[0];
+                }
+                char buf[112];
+                snprintf(buf, sizeof(buf), "mm_%d_%d_%d_%d_%d", pc.M, pc.N, pc.K, numBatch, hasBias ? 1 : 0);
+                std::string sig = env.gpuTag + "/" + buf;
+                if (env.weights)
+                {
+                    // Decode guard: a stale/foreign index, or a cached tile whose dispatch no
+                    // longer fits the device limits, re-races instead of decoding as garbage.
+                    int cached = env.weights->tuned(sig, -1);
+                    if (cached >= 0 && cached < kMatMulTileCount && tileFits(env, kMatMulTiles[cached]))
+                    {
+                        return kMatMulTiles[cached];
+                    }
+                }
+                // Dedicated scratch operands sized like the real tensors (never the live
+                // activation buffers). The timing batch is clamped: per-batch work is identical
+                // across candidates, so the relative ranking is preserved while attention-scale
+                // batch counts keep the scratch footprint bounded.
+                size_t es       = env.useFp16 ? 2 : 4;
+                size_t perBatch = ((size_t) pc.M * pc.K + (size_t) pc.K * pc.N + (size_t) pc.M * pc.N) * es;
+                if (perBatch == 0 || perBatch > ((size_t) 256 << 20))
+                {
+                    return kMatMulTiles[0];
+                }
+                int  gzT = (int) std::min<int64_t>({(int64_t) numBatch, 64, std::max<int64_t>(1, (int64_t) (((size_t) 128 << 20) / perBatch))});
+                auto mk  = [&](size_t bytes) {
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                };
+                auto                        sA     = mk((size_t) gzT * pc.M * pc.K * es);
+                auto                        sB     = mk((size_t) gzT * pc.K * pc.N * es);
+                auto                        sD     = mk((size_t) gzT * pc.M * pc.N * es);
+                std::shared_ptr<vk::Buffer> sBias  = hasBias ? mk((size_t) pc.N * es) : nullptr;
+                auto                        timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                    VkCommandBuffer cmd = env.runner->allocate();
+                    env.runner->begin(cmd);
+                    for (int r = 0; r < 8; ++r)
+                    {
+                        rec(cmd);
+                    }
+                    env.runner->end(cmd);
+                    double ms = env.runner->submitAndWait(cmd);
+                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
+                    return ms;
+                };
+                // Min over repeats: the fastest observed time is the least OS-perturbed estimate
+                // (see tuneWino); winners persist, so the measurement earns the rigorous tier.
+                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                    double m = 1e30;
+                    for (int k = 0; k < 5; ++k)
+                    {
+                        m = std::min(m, timeIt(rec));
+                    }
+                    return m;
+                };
+                // Time each candidate with the kernel it will actually dispatch: the default tile
+                // runs the compile-time _fast kernel (what prepare() picks for it), every other tile
+                // runs the spec-constant kernel. Timing the default with the spec-constant kernel
+                // would under-rank it against its own real (faster) dispatch.
+                const char *specBase = hasBias ? "matmul_tiled_bias" : "matmul_tiled";
+                const char *fastBase = hasBias ? "matmul_tiled_fast_bias" : "matmul_tiled_fast";
+                uint32_t    nbuf     = hasBias ? 5 : 4; // + the geometry SSBO bound after the operands/bias
+                int         best     = 0;
+                double      bestMs   = 1e30;
+                for (int ci = 0; ci < kMatMulTileCount; ++ci)
+                {
+                    const MatMulTile &t = kMatMulTiles[ci];
+                    if (!tileFits(env, t))
+                    {
+                        continue;
+                    }
+                    bool                  fast = isDefaultMatMulTile(t);
+                    std::vector<uint32_t> spec = fast ? std::vector<uint32_t> {} : std::vector<uint32_t> {(uint32_t) t.tm, (uint32_t) t.tn, (uint32_t) t.tk};
+                    auto                  p    = env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec);
+                    uint32_t              gxT  = (uint32_t) ((pc.N + t.tn - 1) / t.tn);
+                    uint32_t              gyT  = (uint32_t) ((pc.M + t.tm - 1) / t.tm);
+                    double                ms   = bestOf([&](VkCommandBuffer cmd) {
+                        std::vector<VkBuffer> bufs {sA->handle(), sB->handle(), sD->handle()};
+                        if (sBias)
+                        {
+                            bufs.push_back(sBias->handle());
+                        }
+                        bufs.push_back(geom->handle()); // geometry SSBO (matches the real dispatch's binding count)
+                        p->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, gyT, (uint32_t) gzT);
+                        vk::computeBarrier(cmd);
+                    });
+                    if (ms < bestMs)
+                    {
+                        bestMs = ms;
+                        best   = ci;
+                    }
+                }
+                VKNN_DEBUG << "autotune " << sig << " -> tile " << kMatMulTiles[best].tm << "x" << kMatMulTiles[best].tn << "x" << kMatMulTiles[best].tk;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, best);
+                }
+                return kMatMulTiles[best];
+            }
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g   = *env.graph;
@@ -62,9 +183,10 @@ namespace vknn {
                 pc.K     = (int) K;
                 pc.aK    = 1;       // A is [...,M,K] row-major -> stepping K moves by 1
                 pc.bK    = (int) N; // B is [...,K,N] row-major -> stepping K moves by N
+                std::vector<int32_t> outDim(rank), aStride(rank, 0), bStride(rank, 0);
                 for (int k = 0; k < rank; ++k)
                 {
-                    pc.outDim[k] = (int) out[k];
+                    outDim[k] = (int) out[k];
                 }
 
                 // The trailing output dims are the matrix dims. With 1-D promotion an axis may be absent:
@@ -110,21 +232,22 @@ namespace vknn {
                 }
                 for (int i = 0; i < batchRank; ++i)
                 {
-                    pc.aStride[i] = (int) aBatchStride[i];
-                    pc.bStride[i] = (int) bBatchStride[i];
+                    aStride[i] = (int) aBatchStride[i];
+                    bStride[i] = (int) bBatchStride[i];
                 }
                 // Matrix-axis strides: A depends on m (row stride K) not n; B depends on n (col stride 1) not
                 // m.
                 if (mAxis >= 0)
                 {
-                    pc.aStride[mAxis] = (int) K;
-                    pc.bStride[mAxis] = 0;
+                    aStride[mAxis] = (int) K;
+                    bStride[mAxis] = 0;
                 }
                 if (nAxis >= 0)
                 {
-                    pc.aStride[nAxis] = 0;
-                    pc.bStride[nAxis] = 1;
+                    aStride[nAxis] = 0;
+                    bStride[nAxis] = 1;
                 }
+                geom = flat::uploadFlatGeom(env, {outDim, aStride, bStride});
 
                 // Upload a constant operand flat (row-major NCHW fp32 -> device, fp16 when half precision).
                 // Direct fp16->fp16 passthrough when the stored weight already matches compute precision.
@@ -141,20 +264,39 @@ namespace vknn {
                 // Use the register-blocked tiled GEMM for the standard (non-mat-vec) case with large
                 // enough matrices; it assumes M at out[rank-2], N at out[rank-1], so the batch dims are
                 // exactly out[0..rank-3] (true when neither operand was 1-D). Tiny / mat-vec / 1-D cases
-                // keep the naive 1-thread/output kernel.
-                useTiled = !aWas1D && !bWas1D && M >= 32 && N >= 32 && K >= 32;
+                // keep the naive 1-thread/output kernel. fusePointwiseChains mirrors this predicate via
+                // the same constant (core/matmul_tile.h).
+                useTiled = !aWas1D && !bWas1D && M >= kTiledMatMulMin && N >= kTiledMatMulMin && K >= kTiledMatMulMin;
                 numBatch = (M > 0 && N > 0) ? pc.total / (int) (M * N) : 1;
+                if (useTiled && !tileFits(env, kMatMulTiles[0]))
+                {
+                    // A shape whose group counts exceed the device limits keeps the naive kernel:
+                    // its 1-D dispatch gets the runtime X-overflow split, and it is byte-identical
+                    // to the tiled kernel (same ascending-k fp32 chain per output).
+                    useTiled = false;
+                }
+                if (useTiled)
+                {
+                    tile = pickTile(env, node.fusedBias != kNoTensor);
+                }
+
+                // The default {128,128,16} tile runs the compile-time matmul_tiled_fast kernel (full
+                // inner-loop unroll, register-resident micro-tile — main's fast literal geometry);
+                // only a non-default raced tile runs the spec-constant matmul_tiled kernel. The
+                // tiled kernels are byte-identical at the default geometry (see core/matmul_tile.h).
+                bool useFastTiled = useTiled && isDefaultMatMulTile(tile);
 
                 // A fused Linear bias (rank-1 [N]) is added in the fp32 accumulator by the _bias kernel
-                // variant; upload it flat and bind it as a 4th buffer.
-                const char *base = useTiled ? "matmul_tiled" : "matmul";
+                // variant; upload it flat and bind it as a 4th buffer. The geometry SSBO follows the
+                // operands (and the bias when present): binding 3 without bias, binding 4 with it.
+                const char *base = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : "matmul");
                 std::string name = base;
-                uint32_t    nbuf = 3;
+                uint32_t    nbuf = 4; // A, B, D, geometry
                 if (node.fusedBias != kNoTensor)
                 {
                     biasBuf = uploadInit(env, node.fusedBias, g.desc(node.fusedBias).shape);
                     name += "_bias";
-                    nbuf = 4;
+                    nbuf = 5; // A, B, D, bias, geometry
                 }
 
                 // A pointwise chain (fusePointwiseChains) attached to this MatMul runs in the kernel's own
@@ -164,7 +306,14 @@ namespace vknn {
                 name += epi.suffix();
                 nbuf += epi.extraBufs();
 
-                pipe = env.pipeline(shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulPC), std::vector<uint32_t> {});
+                // The spec-constant tiled kernel takes its TM/TN/TK tile as specialization constants
+                // 0/1/2; the fast kernel bakes {128,128,16} in as literal #defines (no spec words).
+                std::vector<uint32_t> spec;
+                if (useTiled && !useFastTiled)
+                {
+                    spec = {(uint32_t) tile.tm, (uint32_t) tile.tn, (uint32_t) tile.tk};
+                }
+                pipe = env.pipeline(shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulPC), spec);
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -177,19 +326,22 @@ namespace vknn {
                 {
                     bufs.push_back(biasBuf->handle());
                 }
+                bufs.push_back(geom->handle()); // geometry SSBO, after the operands/bias and before the epilogue
                 epi.append(bufs, node, env, dstHandle);
                 if (useTiled)
                 {
-                    // Tiled GEMM contract: one workgroup per kTile x kTile output tile, dispatched as
-                    // (ceil(N/kTile), ceil(M/kTile), numBatch). x/y cover the N/M matrix dims, z indexes the
-                    // flattened batch dims (see matmul_tiled.comp).
-                    uint32_t gx = (uint32_t) ((pc.N + kTile - 1) / kTile);
-                    uint32_t gy = (uint32_t) ((pc.M + kTile - 1) / kTile);
+                    // Tiled GEMM contract: one workgroup per tm x tn output tile, dispatched as
+                    // (ceil(N/tn), ceil(M/tm), numBatch). x/y cover the N/M matrix dims, z indexes the
+                    // flattened batch dims (see matmul_tiled.comp). The tile is the pipeline's
+                    // spec-constant geometry, so the dispatch math and the kernel cannot drift.
+                    uint32_t gx = (uint32_t) ((pc.N + tile.tn - 1) / tile.tn);
+                    uint32_t gy = (uint32_t) ((pc.M + tile.tm - 1) / tile.tm);
                     pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gx, gy, (uint32_t) numBatch);
                 } else
                 {
                     // Naive kernel: one thread per output element over a flat 1-D grid of pc.total lanes.
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, 256));
+                    // matmul.comp is local_size_x=256 == flat::kFlatLocalSize.
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
                 }
             }
         };

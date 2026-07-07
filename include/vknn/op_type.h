@@ -61,8 +61,31 @@ namespace vknn {
         ConvertLayout,
         // fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by markFp32)
         ConvertDtype,
-        Range,    // arange(start, limit, delta) -- scalar inputs, 1-D output
-        ConvGemm, // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
+        Range,     // arange(start, limit, delta) -- scalar inputs, 1-D output
+        ConvGemm,  // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
+        Less,      // A <  B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        LessEqual, // A <= B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        Dropout,   // identity in inference mode; eliminated at import (eliminateDropout) -- a kept
+                   // training-mode / consumed-mask Dropout has no kernel and is unsupported
+        TopK,      // k largest/smallest along an axis -> (values, int64 indices); const k (CPU)
+        InstanceNorm, // InstanceNormalization: per-channel normalize over the spatial dims; lowered
+                      // at import to Reduce/Sub/Mul/Add/Sqrt/Div (lowerInstanceNorm) -- no kernel
+        // ONNX quantized operator family (QDQ, QLinear, dynamic quantization). Recognized at
+        // import so quantized checkpoints are named precisely; the com.microsoft members (QGemm,
+        // QLinearAdd, QLinearGlobalAveragePool) match by op name because the wire parser drops
+        // NodeProto.domain. No shape rule and no kernel in either backend: the import-time
+        // dequantize lowering is the only execution path, and a node it leaves behind is
+        // unsupported at plan (opTypeIsQuantized() tests family membership).
+        QuantizeLinear,           // fp -> int8/uint8: saturate(round(x / scale) + zero_point)
+        DequantizeLinear,         // int8/uint8/int32 -> fp: (q - zero_point) * scale, per-tensor or per-axis
+        DynamicQuantizeLinear,    // derives scale/zp from the input range -> (x_q u8, x_scale, x_zp)
+        QLinearConv,              // Conv on int8 x/w with per-input scale/zp + output requant, int32 bias
+        QLinearMatMul,            // MatMul on int8 a/b with per-input scale/zp + output requant
+        QLinearAdd,               // com.microsoft: Add on int8 a/b with per-input scale/zp + output requant
+        QLinearGlobalAveragePool, // com.microsoft: GlobalAveragePool on int8 x with x/y scale/zp
+        MatMulInteger,            // int8 x int8 -> int32 MatMul, optional zero points
+        ConvInteger,              // int8 x int8 -> int32 Conv, optional zero points
+        QGemm,                    // com.microsoft: Gemm on int8 a/b with scales/zps, int32 bias
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;
@@ -101,6 +124,8 @@ namespace vknn {
     constexpr int kPwBinGreaterEqual = 8;  ///< srcA >= srcB -> 1.0/0.0
     constexpr int kPwBinEqual        = 9;  ///< srcA == srcB -> 1.0/0.0
     constexpr int kPwBinPRelu        = 10; ///< srcA > 0 ? srcA : srcB * srcA (slope on srcB)
+    constexpr int kPwBinLess         = 11; ///< srcA <  srcB -> 1.0/0.0
+    constexpr int kPwBinLessEqual    = 12; ///< srcA <= srcB -> 1.0/0.0
 
     /// Stable ONNX-style spelling of an OpType (e.g. OpType::GlobalAvgPool -> "GlobalAveragePool").
     /// @returns A static, null-terminated string owned by the library; never null. An unrecognized
@@ -112,5 +137,8 @@ namespace vknn {
     /// @param s ONNX op_type string (case-sensitive).
     /// @returns The matching OpType, or OpType::Unknown when `s` names no supported operator.
     OpType      opTypeFromOnnx(const std::string &s);
+    /// True for the ONNX quantized operator family (QuantizeLinear..QGemm) — the ops the
+    /// import-time dequantize lowering rewrites; none has a backend kernel.
+    bool        opTypeIsQuantized(OpType t);
 
 } // namespace vknn

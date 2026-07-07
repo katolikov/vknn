@@ -47,9 +47,42 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `gpuIslandFold` | bool | `true` / `false` | `true` | Fold tiny GPU op-islands between CPU segments onto the CPU (fewer boundary round-trips). On by default (fastest). `false` (CLI `--no-fold-islands`) keeps every supported op on the GPU — verification runs use it so the fallback count is meaningful. Backed by `Hint::GpuIslandFold`. |
 | `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
-| `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). |
+| `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). Entries match whole op-type names: `"Conv"` does not disable `ConvTranspose`. |
 | `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
 | `fp32Tensors` | string (C++ only, not serialized to JSON) | e.g. `"/enc/MatMul_,-camera_head"` | `""` | Advanced override of the selective-fp32 set: tensor-name substrings (leading `-` excludes) kept in fp32 storage under fp16 compute. Empty + `precision:"normal"` uses the built-in geometry-tail preset; a non-empty value replaces it (and also applies under `precision:"low"`). |
+| `inputShapes` | `map<string, Shape>` (C++ only, not serialized to JSON) | input tensor name → full concrete shape, e.g. `{{"pixel_values",{1,3,224,224}}}` | `{}` (empty) | Declared concrete shapes for graph inputs on the **ONNX-load path** (`createFromOnnx` / `Model::load` from `.onnx`), keyed by input name. Each listed input has its dynamic (negative) dims resolved from the declared shape; an input absent here falls back to `batch = 1` on its leading axis, and a dynamic **non-batch** axis with no declaration is a hard error (never a silent `1x1` plan). Empty = the fixed-shape / batch-only path (byte-identical to before). **Ignored for a `.vxm` session** — a `.vxm` already has its shapes baked at compile time; set them there with `vknn_compile --shape` / `--bucket` (see below). |
+
+### The `vknn_compile` flags
+
+`vknn_compile <model.onnx> <out.vxm> [flags]` runs the import passes ahead of time and
+writes a pre-optimized `.vxm`. Its flags cover optimization level, weight precision,
+declared shapes, the quantization path, and the support report. A fixed-shape,
+default-optimization model needs none of them.
+
+| `vknn_compile` flag | Meaning |
+|---------------------|---------|
+| `--fp16` | Store weights as fp16 in the `.vxm` (default fp32). Halves the file and the runtime host repack; the run-time compute precision is a separate `Config::precision` knob. |
+| `-O0` / `-O1` / `-O2` / `-O3` (or `--opt N`) | Optimization level, default `-O1`. `-O0` = no optional fusion (reference); `-O1` = the general pointwise fusion (the bit-exact production set); `-O2`/`-O3` = + the experimental Squeeze-Excite and depthwise+1×1 fusions. |
+| `--[no-]fuse-pointwise` / `--[no-]fuse-se` / `--[no-]fuse-dwpw` / `--[no-]lower-conv` | Override a single fusion/lowering pass on top of the `-O` level. |
+| `--strict-fuse` | Round every fused step so `fused == unfused` byte-identical (the byte-verification mode). The default fast mode fp32-chains each fused unit and rounds once per stored stream — faster, and at least as accurate as the unfused graph. |
+| `--no-dequantize` | Keep `QuantizeLinear` / `DequantizeLinear` / QLinear ops instead of folding them to float. Default (off) compiles a quantized checkpoint to a plain float graph (see [limitations.md §6](limitations.md)). |
+| `--batch N` | Leading-axis (batch) fallback for a dynamic batch dim. Default `1`. |
+| `--shape NAME=D0xD1x...` (repeatable) | Declare one graph input's full concrete shape, resolving every dynamic axis of that input, e.g. `--shape pixel_values=1x3x224x224`. Populates the same map as `Config::inputShapes`. |
+| `--bucket "NAME=D0x...;NAME2=..."` (repeatable) | Declare **one plan bucket** per occurrence: the model is compiled once per bucket over a fresh import, and the buckets share one content-deduped initializer pool in a multi-bucket `.vxm`. `--batch` / `--shape` are the shared fallback under every bucket. With no `--bucket`, exactly one bucket is written (a legacy single-graph `.vxm`, byte-identical to before). `--bucket` requires an ONNX input. |
+| `--support-report <out.json>` | Write the per-node backend assignment (node, op, backend, and the refusal reason for every CPU node) from the engine's own capability model (`vkSupportSurvey` — the exact gate the device runs), then continue the compile. Consumed by `tools/check_model_support.py --engine-report`. |
+
+A multi-bucket `.vxm` loads all its buckets; `Session::run()` selects the bucket by the
+bound input shapes and rejects an unmatched shape with `Status::InvalidArgument`. An
+ONNX-loaded session can add a bucket at run time with `Session::prepareShapes(shapes)`
+(a `.vxm` session returns `Status::Unsupported`). See
+[limitations.md §1](limitations.md) for the full contract.
+
+Run-time-only knobs are `Config` fields set on the **session**, not compile flags: they
+are in the field table above and reach the CLI through the runner examples. `vknn_classify`
+exposes `--precision`, `--tuning`, `--winograd`, `--profile`, and `--layer-dump`
+([below](#how-the-classify-example-exposes-config-flags)); `vknn_run_io` adds
+`--disable-vk-ops`, `--no-fold-islands`, and `--no-flat` for exercising the fallback and
+layout paths.
 
 ### Enum reference
 

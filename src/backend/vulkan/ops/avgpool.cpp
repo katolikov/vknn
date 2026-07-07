@@ -1,5 +1,6 @@
 // Windowed AveragePool2D on the GPU (NC4HW4). GlobalAveragePool has its own op; this is the
 // kernel/stride/pad form used by Inception/SqueezeNet.
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 
@@ -21,7 +22,9 @@ namespace vknn {
                 };
                 auto ks  = ints("kernel_shape", {1, 1});
                 auto st  = ints("strides", {1, 1});
-                auto pad = ints("pads", {0, 0, 0, 0});
+                // Shared pool geometry (core/conv_geom.h): resolves auto_pad; the shader reads the
+                // begin pads and clamps the window to H/W (end pads are folded into the output extent).
+                auto pad = poolGeom(x.h, x.w, node.attr).pads();
                 // Positional fields map 1:1 to AvgPC / the shader's PC block (N,C,H,W,OH,OW,KH,KW,SH,SW,PT,PL,
                 // countIncludePad). count_include_pad follows ONNX: 0 (default) divides by the in-bounds window
                 // count, 1 divides by the full KH*KW, so its value changes the numerical result.

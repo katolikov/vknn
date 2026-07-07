@@ -47,6 +47,14 @@ namespace vknn {
             {
                 return a > 0.f ? a : b * a;
             }
+            if (op == kPwBinLess)
+            {
+                return a < b ? 1.f : 0.f;
+            }
+            if (op == kPwBinLessEqual)
+            {
+                return a <= b ? 1.f : 0.f;
+            }
             return a + b;
         }
 
@@ -99,6 +107,10 @@ namespace vknn {
                     // Numerically-stable log(1 + exp(x)): factoring out exp(max(x,0)) leaves the
                     // exponent argument always <= 0, so exp() never overflows for large positive x.
                     return std::max(x, 0.f) + std::log1p(std::exp(-std::fabs(x)));
+                case UnaryType::Round:
+                    // Nearest integer, ties to even (the FE_TONEAREST default); agrees bitwise with
+                    // GLSL roundEven, including the sign of a zero result (-0.5 -> -0.0).
+                    return std::nearbyint(x);
                 case UnaryType::Invalid:
                     break;
             }
@@ -198,6 +210,14 @@ namespace vknn {
                 if (r.ref <= kPwRefOp0)
                 {
                     const RtTensor &O = ctx.t(node.inputs[kPwRefOp0 - r.ref]);
+                    // The pool holds every pw operand as valid fp32 (the session decodes fp16
+                    // initializers at load; activations are fp32 by construction). Anything else
+                    // here is a wrong-payload bug upstream — fail loudly rather than read
+                    // reinterpreted or missing bytes as values.
+                    if (!O.hostValid || O.dtype != DType::Float32 || O.host.bytes.size() < 4)
+                    {
+                        throw Error(Status::RuntimeError, "FusedPointwise operand tensor " + std::to_string(node.inputs[kPwRefOp0 - r.ref]) + " (" + node.name + ") has no fp32 host payload");
+                    }
                     r.p               = O.host.f32();
                     r.ob              = broadcastStrides(O.shape);
                 }

@@ -22,16 +22,11 @@ namespace vknn {
                 // element-for-element copy over the flat fp32 buffer.
                 float          *y = cpu::allocOut(Y, X.shape);
                 const float    *x = X.host.f32();
-                int64_t         n = X.elems();
+                int64_t         n = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
                 for (int64_t i = 0; i < n; ++i)
                 {
                     y[i] = x[i];
                 }
-            }
-            /// Accept every dtype, widening CpuOp's fp32+int64 default: a value-preserving copy is
-            /// correct for any element type, and this op must run wherever the fp32 pass placed it.
-            bool supportsDType(DType) const override {
-                return true;
             }
         };
     } // namespace

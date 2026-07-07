@@ -1,12 +1,15 @@
 /// Runtime config: a plain struct of knobs plus a JSON loader. Field set mirrors MNN's config.
-/// Every field is documented in docs/CONFIG.md.
+/// Every field is documented in docs/config.md.
 #pragma once
 #include "vknn/backend_kind.h"
 #include "vknn/hint.h"
 #include "vknn/precision.h"
 #include "vknn/priority.h"
+#include "vknn/shape.h"
 #include "vknn/tuning.h"
+#include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace vknn {
@@ -25,6 +28,15 @@ namespace vknn {
         /// device without a global-priority extension.
         Priority priority = Priority::Normal;
 
+        /// Declared concrete shapes for graph inputs on the ONNX-load path (createFromOnnx), keyed by
+        /// input tensor name. An input listed here has its dynamic (negative) dims resolved from the
+        /// declared shape; an input absent here falls back to `batch` (=1) on its leading axis and a
+        /// dynamic non-batch axis is a hard error rather than a silent 1x1 plan (see inferShapes). The
+        /// batch-only default (empty map) compiles a fixed-shape model byte-identically. Consumed only
+        /// when building a Session directly from ONNX; a .vxm already has its shapes baked at compile
+        /// time (set them there via vknn_compile --shape / --batch).
+        std::map<std::string, Shape> inputShapes;
+
         /// Caches. Warm-start artifacts (compiled pipelines, prepacked/Winograd weights, the conv autotune
         /// table) are always saved to and reloaded from a per-model cache file, so a warm load skips shader
         /// compilation, weight prepacking, and autotuning. The file is self-validated (kernel hash + device
@@ -32,9 +44,9 @@ namespace vknn {
         /// device/driver/model/code change. Set the path via Runtime::load()'s cacheFile argument (empty
         /// there -> "<model>.cache" next to the model); cacheDir is the fallback for a session built from an
         /// in-memory graph (no model path).
-        std::string cacheFile;                                  ///< unified cache path (resolved by Runtime::load; empty = no file cache)
-        std::string cacheDir  = "/data/local/tmp/vxrt/cache";   ///< fallback cache directory for an in-memory graph with no model path
-        bool        noCache   = false;                          ///< debug: skip all cache read/write (cold compile every load)
+        std::string cacheFile;                               ///< unified cache path (resolved by Runtime::load; empty = no file cache)
+        std::string cacheDir = "/data/local/tmp/vxrt/cache"; ///< fallback cache directory for an in-memory graph with no model path
+        bool        noCache  = false;                        ///< debug: skip all cache read/write (cold compile every load)
 
         /// Load-time conv-kernel autotune effort (None / Fast / Heavy). Effort only — never changes
         /// numerical output; the chosen kernels are cached and reused on a warm start.
@@ -81,10 +93,10 @@ namespace vknn {
         std::string fp32Tensors;
 
         // Profiling / debug.
-        bool        profile      = false;
-        int         verbosity    = 1; ///< maps to log level
-        bool        layerDump    = false;
-        std::string layerDumpDir = "/data/local/tmp/vxrt/dump";
+        bool        profile      = false;                       ///< collect per-op timing into the Profiler and print the summary table
+        int         verbosity    = 1;                           ///< log verbosity applied by applyLogLevel(): 0=Warn, 1=Info, >=2=Debug
+        bool        layerDump    = false;                       ///< write every layer's output tensor to layerDumpDir for numeric debugging
+        std::string layerDumpDir = "/data/local/tmp/vxrt/dump"; ///< destination directory for the per-layer tensor dump
 
         /// Conv kernel selection + GPU-pass knobs, set via setHint(Hint, value) (see the Hint enum):
         /// Hint::Winograd (auto/on/off), the experimental Winograd variant hints, and FlatLayout /
@@ -122,6 +134,11 @@ namespace vknn {
         static Config fromJsonString(const std::string &json);
         std::string   toJson() const;
         void          applyLogLevel() const;
+
+        /// True when comma-separated @p list contains @p name as a whole entry. Entries are trimmed
+        /// of surrounding whitespace and compared exactly, so "Conv" matches only Conv — never
+        /// ConvTranspose/ConvGemm/ConvertLayout. Matcher for op-name lists such as disableVkOps.
+        static bool listContains(const std::string &list, std::string_view name);
     };
 
 } // namespace vknn

@@ -22,6 +22,14 @@ Verdict classes:
                            (incl. custom domains and control-flow subgraph ops), an op
                            with no kernel in either backend, or an unusable dtype.
 
+Quantized models (QDQ / QLinear / dynamic quantization) get a dedicated op class:
+the importer recognizes the family (incl. the com.microsoft members, matched by name),
+and the QDQ and QLinear members run dequantized to float via the import-time pass,
+saturation clamps preserved; --no-dequantize disables. The regex mode below cannot run
+that pass, so it flags every quantized op — use --engine-report for the authoritative
+post-pass verdict, which lowers the decomposable ops and only reports the members with
+no float lowering yet (dynamic-quantization ops) as blockers.
+
 Tensor checks: graph input/output dtypes against the engine's I/O surface
 (fp32/fp16 native, uint8 via the declared-format boundary, integer tensors for
 shape/index logic), initializer dtypes (DOUBLE narrows to fp32 at import),
@@ -32,12 +40,26 @@ Usage:
   tools/check_model_support.py model.onnx
   tools/check_model_support.py model.onnx --json report.json
   tools/check_model_support.py model.onnx --repo /path/to/vknn
+  tools/check_model_support.py model.onnx --engine-report report.json
+
+Engine-emitted mode (--engine-report): the node/backend analysis comes from the
+engine itself instead of the regex-derived gates above. Generate the JSON with
+
+  build-host/vknn_compile model.onnx /tmp/m.vxm --support-report report.json
+
+which evaluates vkSupportSurvey — the exact gate code VulkanBackend::supportsNode
+runs — over the post-pass graph, so tool and engine cannot drift. The report's
+per-node rows become the fallback list verbatim (backend "none" rows become
+blockers); the tensor/dtype checks still come from the ONNX file. Without the
+flag, the regex derivation above is the no-binary fallback.
 
 Exit code: 0 = supported (with or without CPU fallbacks), 1 = not supported,
 2 = bad invocation / unreadable model. Requires: onnx (pip install onnx).
 
 Sibling tool: scan_unsupported_ops.py emits an implementation brief (shapes +
-attributes per missing op) for the unsupported bucket this tool reports.
+attributes per missing op) for the unsupported bucket this tool reports. It
+imports _INTERNAL_NAMES and CPU_FALLBACK_GATES from this file, so the gate
+definitions here are the single source of truth between the two tools.
 """
 import argparse
 import json
@@ -48,9 +70,20 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Names accepted by op.cpp that never appear in an ONNX export (VKNN-internal
-# fusion/layout pseudo-ops, family selectors, the placeholder).
+# fusion/layout pseudo-ops, family selectors, the placeholder). Canonical definition —
+# scan_unsupported_ops.py imports this set rather than keeping its own copy.
 _INTERNAL_NAMES = {"FusedSE", "FusedDwPw", "FusedPointwise", "ConvGemm", "ConvertLayout",
                    "ConvertDtype", "Unknown", "Unary", "Binary", "Reduce"}
+
+# The ONNX quantized operator family (mirrors opTypeIsQuantized in src/core/op.cpp). The importer
+# recognizes each as its own OpType, but no kernel executes them directly: the QDQ and QLinear
+# members run dequantized to float via the import-time pass (saturation clamps preserved), while the
+# dynamic-quantization members have no float lowering yet. QGemm/QLinearAdd/QLinearGlobalAveragePool are
+# com.microsoft-domain ops the importer matches by name (the wire parser drops NodeProto.domain),
+# so the custom-domain blocker does not apply to them.
+_QUANTIZED_ONNX = {"QuantizeLinear", "DequantizeLinear", "DynamicQuantizeLinear", "QLinearConv",
+                   "QLinearMatMul", "QLinearAdd", "QLinearGlobalAveragePool", "MatMulInteger",
+                   "ConvInteger", "QGemm"}
 
 # ONNX dtype numbers (TensorProto.DataType) the engine handles, by role.
 _NATIVE_IO = {"FLOAT", "FLOAT16", "UINT8"}       # graph I/O incl. the declared-format boundary
@@ -58,17 +91,26 @@ _SHAPE_LOGIC = {"INT64", "INT32", "BOOL", "INT8"}  # shape/index/mask tensors; f
 _NARROWED = {"DOUBLE"}                           # import narrows to fp32
 _UNUSABLE = {"STRING", "COMPLEX64", "COMPLEX128"}
 
+# Highest tensor rank the engine's flat broadcast/tile/pad kernels can decode; a node whose
+# operand exceeds it takes a CPU fallback (mirrors the rank bound baked into those shaders).
+_FLAT_KERNEL_MAX_RANK = 8
+
 
 def _function_body(text, name):
-    """The brace-balanced body of `name(...)` in C++ source text, or ''."""
-    m = re.search(r"\b%s\s*\([^)]*\)\s*\{" % re.escape(name), text)
-    if not m:
+    """The brace-balanced body of `name(...)` in C++ source text, or ''.
+
+    Locates the `<name>(...) {` signature, then walks forward counting braces so the
+    returned slice ends at the matching close. Assumes braces inside the function are
+    balanced and none appear in string/char literals (true for op.cpp's map tables).
+    """
+    match = re.search(r"\b%s\s*\([^)]*\)\s*\{" % re.escape(name), text)
+    if not match:
         return ""
-    depth, i = 1, m.end()
-    while i < len(text) and depth:
-        depth += {"{": 1, "}": -1}.get(text[i], 0)
-        i += 1
-    return text[m.end():i]
+    depth, cursor = 1, match.end()
+    while cursor < len(text) and depth:
+        depth += {"{": 1, "}": -1}.get(text[cursor], 0)
+        cursor += 1
+    return text[match.end():cursor]
 
 
 def parse_op_map(op_cpp_path):
@@ -79,13 +121,19 @@ def parse_op_map(op_cpp_path):
     except OSError as e:
         sys.exit("error: cannot read %s: %s (pass --repo)" % (op_cpp_path, e))
     name_to_type = {}
+    # opTypeFromOnnx is a `{"OnnxName", OpType::Foo}` initializer-list table; each entry maps
+    # one ONNX op name to its OpType.
     body = _function_body(text, "OpType opTypeFromOnnx")
-    for name, ty in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*OpType::(\w+)\}', body):
-        name_to_type[name] = ty
-    for fn, family in (("UnaryType unaryFromOnnx", "Unary"),
-                       ("BinaryType binaryFromOnnx", "Binary")):
-        for name in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*[UB]::\w+\}', _function_body(text, fn)):
+    for name, op_type in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*OpType::(\w+)\}', body):
+        name_to_type[name] = op_type
+    # unaryFromOnnx/binaryFromOnnx use the same `{"Name", U::Foo}` / `{"Name", B::Foo}` table
+    # shape; every entry collapses to the single Unary/Binary family OpType.
+    for fn_signature, family in (("UnaryType unaryFromOnnx", "Unary"),
+                                 ("BinaryType binaryFromOnnx", "Binary")):
+        for name in re.findall(r'\{"([A-Za-z][A-Za-z0-9]*)",\s*[UB]::\w+\}', _function_body(text, fn_signature)):
             name_to_type.setdefault(name, family)
+    # reduceFromOnnx dispatches on string compares (`s == "ReduceSum"`) rather than a table;
+    # every recognized name is a "Reduce"-prefixed literal that maps to the Reduce family.
     for name in re.findall(r's\s*==\s*"(Reduce\w+)"', _function_body(text, "ReduceType reduceFromOnnx")):
         name_to_type.setdefault(name, "Reduce")
     if not name_to_type:
@@ -94,14 +142,18 @@ def parse_op_map(op_cpp_path):
 
 
 def parse_registry(ops_dir, macro):
-    """Set of OpType names registered with `macro` under `ops_dir`."""
+    """Set of OpType names registered with `macro` under `ops_dir`.
+
+    Each kernel source registers itself with `MACRO(OpType::Foo, ...)`; the regex pulls the
+    OpType argument out of every such call across the directory's .cpp/.h files.
+    """
     types = set()
     if not os.path.isdir(ops_dir):
         return types
-    for fn in os.listdir(ops_dir):
-        if not fn.endswith((".cpp", ".h")):
+    for filename in os.listdir(ops_dir):
+        if not filename.endswith((".cpp", ".h")):
             continue
-        with open(os.path.join(ops_dir, fn), errors="replace") as f:
+        with open(os.path.join(ops_dir, filename), errors="replace") as f:
             types.update(re.findall(r"%s\(OpType::(\w+)" % macro, f.read()))
     return types
 
@@ -156,8 +208,8 @@ def attr_map(node):
 # returns a reason string when the node runs on the CPU backend instead of the GPU.
 def _gate_pad(node, attrs, index):
     shape = (index.get(node.output[0]) or {}).get("shape")
-    if shape is not None and len(shape) > 8:
-        return "Pad on a rank-%d tensor (flat kernels decode rank <= 8)" % len(shape)
+    if shape is not None and len(shape) > _FLAT_KERNEL_MAX_RANK:
+        return "Pad on a rank-%d tensor (flat kernels decode rank <= %d)" % (len(shape), _FLAT_KERNEL_MAX_RANK)
     mode = attrs.get("mode", "constant")
     if mode not in ("constant", "edge", "reflect"):
         return "Pad mode=%r (GPU kernel does constant/edge/reflect)" % mode
@@ -166,8 +218,9 @@ def _gate_pad(node, attrs, index):
 
 def _gate_gridsample(node, attrs, index):
     mode = attrs.get("mode", "bilinear")
-    if mode not in ("bilinear", "linear", "nearest"):
-        return "GridSample mode=%r (GPU kernel does bilinear/linear/nearest)" % mode
+    # Mirrors vkNodeGate: the GPU kernel bakes the mode as a spec constant and covers cubic too.
+    if mode not in ("bilinear", "linear", "nearest", "cubic", "bicubic"):
+        return "GridSample mode=%r (GPU kernel does bilinear/linear/nearest/cubic/bicubic)" % mode
     return None
 
 
@@ -205,10 +258,11 @@ def _gate_conv(node, attrs, index):
             % (group, cin, cout))
 
 
-def _gate_rank8(node, attrs, index):
+def _gate_flat_rank(node, attrs, index):
     shape = (index.get(node.output[0]) or {}).get("shape")
-    if shape is not None and len(shape) > 8:
-        return "%s output rank %d (flat broadcast/tile kernels decode rank <= 8)" % (node.op_type, len(shape))
+    if shape is not None and len(shape) > _FLAT_KERNEL_MAX_RANK:
+        return "%s output rank %d (flat broadcast/tile kernels decode rank <= %d)" % (
+            node.op_type, len(shape), _FLAT_KERNEL_MAX_RANK)
     return None
 
 
@@ -218,8 +272,8 @@ CPU_FALLBACK_GATES = {
     "Cast": _gate_cast,
     "Einsum": _gate_einsum,
     "Conv": _gate_conv,
-    "Expand": _gate_rank8,
-    "Tile": _gate_rank8,
+    "Expand": _gate_flat_rank,
+    "Tile": _gate_flat_rank,
 }
 
 
@@ -263,15 +317,92 @@ class Report:
         self.blockers.append({"kind": kind, "detail": detail, "nodes": [node] if node else []})
 
 
+def _scalar_const(graph, name):
+    """First element of initializer or Constant-node output `name` as a float, or None."""
+    from onnx import numpy_helper
+    try:
+        for init in graph.initializer:
+            if init.name == name:
+                arr = numpy_helper.to_array(init)
+                return float(arr.reshape(-1)[0]) if arr.size else None
+        for n in graph.node:
+            if n.op_type == "Constant" and name in n.output:
+                for a in n.attribute:
+                    if a.name == "value":
+                        arr = numpy_helper.to_array(a.t)
+                        return float(arr.reshape(-1)[0]) if arr.size else None
+    except Exception:
+        return None
+    return None
+
+
+def _constant_names(graph):
+    """Names holding compile-time constants: initializers plus Constant-node outputs."""
+    names = {i.name for i in graph.initializer}
+    for n in graph.node:
+        if n.op_type == "Constant":
+            names.update(o for o in n.output if o)
+    return names
+
+
+def _instancenorm_reason(node, graph, index):
+    """Blocker reason for an InstanceNormalization the importer cannot lower, or None.
+
+    Mirrors src/import/lower_instancenorm.cpp: a node whose scale/B are compile-time constants
+    and whose input is rank >= 3 lowers to spatial ReduceMean + Sub/Mul/Add/Sqrt/Div at import;
+    anything else keeps the opaque op, which has no kernel in either backend.
+    """
+    consts = _constant_names(graph)
+    for role, name in (("scale", node.input[1] if len(node.input) > 1 else ""),
+                       ("B", node.input[2] if len(node.input) > 2 else "")):
+        if not name or name not in consts:
+            return ("op InstanceNormalization — %s is not a compile-time constant "
+                    "(import lowers only the constant-parameter form)" % role)
+    shape = (index.get(node.input[0]) or {}).get("shape")
+    if shape is not None and len(shape) < 3:
+        return ("op InstanceNormalization — input rank %d (import lowers only rank >= 3, "
+                "[N,C,spatial...])" % len(shape))
+    return None
+
+
+def _dropout_reason(node, graph, consumed):
+    """Blocker reason for a Dropout the importer cannot erase, or None when it erases.
+
+    Mirrors src/import/eliminate_dropout.cpp: inference-mode Dropout (training_mode input absent
+    or a constant false, mask output absent or unconsumed) is removed at import with consumers
+    rewired to the producer; anything else keeps the node, which has no kernel in either backend.
+    """
+    if len(node.output) > 1 and node.output[1] and node.output[1] in consumed:
+        return ("op Dropout — mask output is consumed (import erases only the identity form; "
+                "the mask is never fabricated)")
+    if len(node.input) > 2 and node.input[2]:
+        val = _scalar_const(graph, node.input[2])
+        if val is None:
+            return ("op Dropout — training_mode is not a constant "
+                    "(import erases only the provably inference-mode form)")
+        if val != 0:
+            return "op Dropout — training_mode is constant true (training-mode Dropout has no kernel)"
+    return None
+
+
 def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=None):
     index = build_value_index(graph, parent_index)
+    consumed = {i for n in graph.node for i in n.input if i} | {o.name for o in graph.output}
     for i, node in enumerate(graph.node):
         label = "%s '%s' (%s#%d)" % (node.op_type, node.name or "unnamed", path, i)
         attrs = attr_map(node)
-        if node.domain not in ("", "ai.onnx"):
+        if node.domain not in ("", "ai.onnx") and node.op_type not in _QUANTIZED_ONNX:
             rep.blocker("custom domain",
                         "op %s from domain %r — only the default ONNX domain is implemented"
                         % (node.op_type, node.domain), label)
+            continue
+        if node.op_type in _QUANTIZED_ONNX:
+            rep.blocker("quantized op",
+                        "op %s — quantized operator: runs dequantized to float via the import-time "
+                        "pass, saturation clamps preserved; --no-dequantize disables. Regex mode "
+                        "cannot run the pass — use --engine-report for the post-pass verdict"
+                        % node.op_type,
+                        label)
             continue
         ty = name_to_type.get(node.op_type)
         if ty is None:
@@ -282,6 +413,17 @@ def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=Non
             # Erased at import: Constant materializes as an initializer, Identity is eliminated,
             # and Shape of a compile-time-static tensor const-folds (VKNN compiles fixed shapes).
             pass
+        elif node.op_type == "Dropout":
+            # Erased at import when inference-mode (see _dropout_reason); otherwise kernel-less.
+            reason = _dropout_reason(node, graph, consumed)
+            if reason:
+                rep.blocker("no kernel", reason, label)
+        elif node.op_type == "InstanceNormalization":
+            # Lowered at import to per-channel normalize ops (see _instancenorm_reason);
+            # otherwise kernel-less.
+            reason = _instancenorm_reason(node, graph, index)
+            if reason:
+                rep.blocker("no kernel", reason, label)
         else:
             has_vk = ty in vk_ops
             has_cpu = ty in cpu_ops
@@ -415,26 +557,50 @@ def main():
     ap.add_argument("model")
     ap.add_argument("--repo", default=REPO_ROOT, help="VKNN repo root (default: this tree)")
     ap.add_argument("--json", help="also write the full report as JSON")
+    ap.add_argument("--engine-report", metavar="JSON",
+                    help="per-node assignment from `vknn_compile --support-report`; replaces the "
+                         "regex-derived node/gate analysis with the engine's own answer")
     args = ap.parse_args()
-
-    name_to_type = parse_op_map(os.path.join(args.repo, "src", "core", "op.cpp"))
-    vk_ops = parse_registry(os.path.join(args.repo, "src", "backend", "vulkan", "ops"),
-                            "VKNN_REGISTER_VK_OP")
-    cpu_ops = parse_registry(os.path.join(args.repo, "src", "backend", "cpu", "ops"),
-                             "VKNN_REGISTER_CPU_OP")
-    if not vk_ops or not cpu_ops:
-        sys.stderr.write("warning: backend registries not found under %s; kernel checks degrade\n"
-                         % args.repo)
 
     model = load_model(args.model)
     rep = Report()
     rep.stats["opset"] = {imp.domain or "ai.onnx": imp.version for imp in model.opset_import}
     rep.stats["node_count"] = len(model.graph.node)
     scan_tensors(model, args.model, rep)
-    scan_nodes(model.graph, "main", name_to_type, vk_ops, cpu_ops, rep)
+
+    if args.engine_report:
+        # Engine truth: the report rows are the post-pass node assignment computed by the same
+        # gate code supportsNode runs; no regex derivation is involved.
+        try:
+            with open(args.engine_report) as f:
+                engine = json.load(f)
+        except (OSError, ValueError) as e:
+            sys.exit("error: cannot read engine report %s: %s" % (args.engine_report, e))
+        for n in engine.get("nodes", []):
+            label = "%s '%s' (engine)" % (n.get("op", "?"), n.get("name") or "unnamed")
+            if n.get("backend") == "none":
+                rep.blocker("no kernel", "op %s — %s" % (n.get("op", "?"),
+                                                         n.get("reason", "no kernel")), label)
+            elif n.get("backend") != "vulkan":
+                rep.fallbacks.append({"op_type": n.get("op", "?"), "node": label,
+                                      "reason": n.get("reason", "")})
+        rep.stats["node_source"] = "engine-report:%s" % os.path.abspath(args.engine_report)
+        rep.stats["engine_node_count"] = (engine.get("summary") or {}).get("total")
+    else:
+        name_to_type = parse_op_map(os.path.join(args.repo, "src", "core", "op.cpp"))
+        vk_ops = parse_registry(os.path.join(args.repo, "src", "backend", "vulkan", "ops"),
+                                "VKNN_REGISTER_VK_OP")
+        cpu_ops = parse_registry(os.path.join(args.repo, "src", "backend", "cpu", "ops"),
+                                 "VKNN_REGISTER_CPU_OP")
+        if not vk_ops or not cpu_ops:
+            sys.stderr.write("warning: backend registries not found under %s; kernel checks degrade\n"
+                             % args.repo)
+        scan_nodes(model.graph, "main", name_to_type, vk_ops, cpu_ops, rep)
 
     supported = not rep.blockers
     print("== VKNN support report: %s ==" % os.path.basename(args.model))
+    if args.engine_report:
+        print("(node assignment: engine-emitted, %s)" % args.engine_report)
     ini = rep.stats.get("initializers", {})
     print("opset %s | %d node(s) | %d initializer(s), %.1f MB weights"
           % (rep.stats["opset"], rep.stats["node_count"], ini.get("count", 0),

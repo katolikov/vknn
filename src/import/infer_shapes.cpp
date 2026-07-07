@@ -4,10 +4,16 @@ namespace vknn {
 
     /// Forward shape (and, where it differs, dtype) inference over the whole graph.
     ///
-    /// First resolves every dynamic (negative) input dim to the concrete `batch`, then walks the nodes
-    /// in graph (topological producer-before-consumer) order and fills each output's `Shape` from its
-    /// resolved inputs using the ONNX per-op rules. Node visitation order is load-bearing: a producer's
-    /// shape must land before a consumer reads it.
+    /// First resolves every dynamic (negative) input dim (from `declared` when the input has a declared
+    /// shape, else the leading batch axis to `batch`), then walks the nodes in graph (topological
+    /// producer-before-consumer) order and fills each output's `Shape` from its resolved inputs using
+    /// the ONNX per-op rules. Node visitation order is load-bearing: a producer's shape must land before
+    /// a consumer reads it.
+    ///
+    /// A dynamic non-batch axis with no declaration is a hard error rather than a silent substitution to
+    /// `batch`: freezing a real spatial/feature axis to 1 compiles the model to a 1x1 plan whose output
+    /// is quietly wrong (the vit_b16_q8 0.32-cosine bug). Only the leading axis (the batch dim) falls
+    /// back to `batch`, matching the documented dynamic-batch contract.
     ///
     /// Central invariant — an EMPTY shape means "not resolved yet", never a rank-0 scalar, EXCEPT on an
     /// initializer (a constant genuinely may be rank-0). Every case therefore refuses to compute from an
@@ -18,16 +24,45 @@ namespace vknn {
     /// their output unresolved and resolve on a subsequent call once the operand lands.
     ///
     /// Ops not listed (the `default` arm) are shape-path ops whose outputs are produced by constFold.
-    void inferShapes(Graph &g, int64_t batch) {
-        // Resolve dynamic dims on inputs to `batch`.
+    void inferShapes(Graph &g, int64_t batch, const std::map<std::string, Shape> *declared) {
+        // Resolve each input's dynamic (negative) dims. A dim resolved on an earlier call is already
+        // positive and is skipped, so this is idempotent across the pipeline's repeated inferShapes runs.
         for (TensorId in: g.inputs)
         {
-            auto &s = g.desc(in).shape;
-            for (auto &d: s)
+            const TensorDesc &d0        = g.desc(in);
+            auto             &s         = g.desc(in).shape;
+            const Shape      *decl      = nullptr;
+            if (declared)
             {
-                if (d < 0)
+                auto it = declared->find(d0.name);
+                if (it != declared->end())
                 {
-                    d = batch;
+                    decl = &it->second;
+                    if (decl->size() != s.size())
+                    {
+                        throw Error(Status::InvalidArgument, "declared shape for input '" + d0.name + "' has rank " + std::to_string(decl->size()) + " but the model declares rank " + std::to_string(s.size()));
+                    }
+                }
+            }
+            for (size_t ax = 0; ax < s.size(); ++ax)
+            {
+                if (s[ax] >= 0)
+                {
+                    continue; // already resolved (or statically known)
+                }
+                if (decl)
+                {
+                    if ((*decl)[ax] < 0)
+                    {
+                        throw Error(Status::InvalidArgument, "declared shape for input '" + d0.name + "' leaves axis " + std::to_string(ax) + " dynamic (" + std::to_string((*decl)[ax]) + "); declare a concrete extent");
+                    }
+                    s[ax] = (*decl)[ax];
+                } else if (ax == 0)
+                {
+                    s[ax] = batch; // leading axis = batch, the documented dynamic-batch fallback
+                } else
+                {
+                    throw Error(Status::InvalidArgument, "input '" + d0.name + "' has a dynamic non-batch axis " + std::to_string(ax) + " with no declared shape; pass --shape " + d0.name + "=D0xD1x... (or Config::inputShapes) so it does not silently compile to a 1x1 plan");
                 }
             }
         }
@@ -56,17 +91,25 @@ namespace vknn {
                     {
                         break;
                     }
-                    int64_t outC = w[0], kh = w[2], kw = w[3];
-                    auto    ints = [&](const char *k, std::vector<int64_t> d) {
-                        const auto &v = nd.attr.getints(k);
-                        return v.empty() ? d : v;
-                    };
-                    auto    st  = ints("strides", {1, 1});
-                    auto    pad = ints("pads", {0, 0, 0, 0});
-                    auto    dil = ints("dilations", {1, 1});
-                    int64_t oh  = (x.h + pad[0] + pad[2] - (dil[0] * (kh - 1) + 1)) / st[0] + 1;
-                    int64_t ow  = (x.w + pad[1] + pad[3] - (dil[1] * (kw - 1) + 1)) / st[1] + 1;
-                    SH(o)       = {x.n, outC, oh, ow};
+                    int64_t     outC = w[0], kh = w[2], kw = w[3];
+                    const auto &st   = nd.attr.getints("strides");
+                    const auto &pad  = nd.attr.getints("pads");
+                    const auto &dil  = nd.attr.getints("dilations");
+                    if ((!st.empty() && st.size() < 2) || (!pad.empty() && pad.size() < 4) ||
+                        (!dil.empty() && dil.size() < 2))
+                    {
+                        break; // 1-spatial-dim attributes: normalizeConv1d has not run (runtime weight)
+                    }
+                    ConvGeom cg = convGeom(x.h, x.w, kh, kw, nd.attr); // resolves auto_pad
+                    // A rank-3 input is a normalized 1-D conv (NCHW::from maps [N,C,L] to h=L, w=1,
+                    // and the weight's kW extent is 1, so outW == 1); the output keeps rank 3.
+                    if (SH(nd.inputs[0]).size() == 3 && cg.outW == 1)
+                    {
+                        SH(o) = {x.n, outC, cg.outH};
+                    } else
+                    {
+                        SH(o) = {x.n, outC, cg.outH, cg.outW};
+                    }
                     break;
                 }
                 case OpType::ConvTranspose: {
@@ -88,6 +131,7 @@ namespace vknn {
                 case OpType::Clip:
                 case OpType::Relu:
                 case OpType::BatchNorm:
+                case OpType::InstanceNorm: // normalize over the spatial dims: same shape as input
                 case OpType::Identity:
                 case OpType::Unary:
                 case OpType::Softmax:
@@ -101,7 +145,9 @@ namespace vknn {
                     break;
                 case OpType::Equal:
                 case OpType::Greater:
-                case OpType::GreaterEqual: {
+                case OpType::GreaterEqual:
+                case OpType::Less:
+                case OpType::LessEqual: {
                     // Same empty-shape discrimination as Binary/Add: scalar only if initializer.
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
@@ -292,6 +338,23 @@ namespace vknn {
                     SH(o) = SH(nd.inputs[0]);
                     break;
                 }
+                case OpType::DequantizeLinear:
+                    // y = (x - zp) * scale: same shape as x, real-valued fp32 output.
+                    SH(o)           = SH(nd.inputs[0]);
+                    g.desc(o).dtype = DType::Float32;
+                    break;
+                case OpType::QuantizeLinear: {
+                    // Same shape as x; the output is the integer quant type, read from the zero_point
+                    // input's dtype (ONNX defaults an absent zero_point to uint8).
+                    SH(o)     = SH(nd.inputs[0]);
+                    DType out = DType::UInt8;
+                    if (nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor)
+                    {
+                        out = g.desc(nd.inputs[2]).dtype;
+                    }
+                    g.desc(o).dtype = out;
+                    break;
+                }
                 case OpType::FusedSE: {
                     if (SH(nd.inputs[0]).empty())
                     {
@@ -316,12 +379,9 @@ namespace vknn {
                     // Kernel size from the depthwise weight shape: the kernel_shape attr is
                     // optional in ONNX and the runtime kernel reads the weight dims too — a {3,3}
                     // fallback mis-sizes every 5x5 pair whose conv omitted the attr.
-                    auto    k   = dw.size() == 4 ? std::vector<int64_t> {dw[2], dw[3]} : a("kernel_shape", {3, 3});
-                    auto    st  = a("strides", {1, 1});
-                    auto    pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
-                    int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (k[0] - 1) + 1)) / st[0] + 1;
-                    int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (k[1] - 1) + 1)) / st[1] + 1;
-                    SH(o)      = {x.n, pw.empty() ? x.c : pw[0], oh, ow};
+                    auto     k  = dw.size() == 4 ? std::vector<int64_t> {dw[2], dw[3]} : a("kernel_shape", {3, 3});
+                    ConvGeom cg = convGeom(x.h, x.w, k[0], k[1], nd.attr); // attrs come from the depthwise Conv, auto_pad included
+                    SH(o)       = {x.n, pw.empty() ? x.c : pw[0], cg.outH, cg.outW};
                     break;
                 }
                 case OpType::ConvGemm: {
@@ -335,11 +395,9 @@ namespace vknn {
                         const auto &v = nd.attr.getints(k);
                         return v.empty() ? d : v;
                     };
-                    auto    k = a("kernel_shape", {1, 1}), st = a("strides", {1, 1});
-                    auto    pad = a("pads", {0, 0, 0, 0}), dil = a("dilations", {1, 1});
-                    int64_t oh = (x.h + pad[0] + pad[2] - (dil[0] * (k[0] - 1) + 1)) / st[0] + 1;
-                    int64_t ow = (x.w + pad[1] + pad[3] - (dil[1] * (k[1] - 1) + 1)) / st[1] + 1;
-                    SH(o)      = {x.n, wt.size() == 2 ? wt[1] : x.c, oh, ow};
+                    auto     k  = a("kernel_shape", {1, 1});
+                    ConvGeom cg = convGeom(x.h, x.w, k[0], k[1], nd.attr);
+                    SH(o)       = {x.n, wt.size() == 2 ? wt[1] : x.c, cg.outH, cg.outW};
                     break;
                 }
                 case OpType::Split: {
@@ -373,6 +431,53 @@ namespace vknn {
                         Shape os          = a;
                         os[axis]          = sp[k];
                         SH(nd.outputs[k]) = os;
+                    }
+                    break;
+                }
+                case OpType::TopK: {
+                    // Both outputs (values, indices) share the input shape with the axis dim replaced
+                    // by k. k is the `k` attribute (opset < 10) or the const int64 input[1] (opset 10+);
+                    // a runtime k leaves the outputs unresolved. Indices are int64 regardless of the
+                    // data dtype — the session readback keys off this for a graph-output index tensor.
+                    const Shape &a = SH(nd.inputs[0]);
+                    if (a.empty())
+                    {
+                        break;
+                    }
+                    int64_t rank = (int64_t) a.size();
+                    int64_t axis = nd.attr.geti("axis", -1);
+                    if (axis < 0)
+                    {
+                        axis += rank;
+                    }
+                    if (axis < 0 || axis >= rank)
+                    {
+                        break;
+                    }
+                    int64_t k = -1;
+                    if (nd.attr.has("k"))
+                    {
+                        k = nd.attr.geti("k", -1);
+                    } else
+                    {
+                        std::vector<int64_t> kv = readI64Param(g, nd, "k", 1);
+                        if (!kv.empty())
+                        {
+                            k = kv[0];
+                        }
+                    }
+                    if (k < 0)
+                    {
+                        break; // k const-folds later; resolved on a subsequent pass
+                    }
+                    Shape out = a;
+                    out[axis] = std::min(k, a[axis]); // an oversized k saturates at the axis length
+                    SH(o)     = out;
+                    g.desc(o).dtype = g.desc(nd.inputs[0]).dtype;
+                    if (nd.outputs.size() > 1 && nd.outputs[1] != kNoTensor)
+                    {
+                        SH(nd.outputs[1])           = out;
+                        g.desc(nd.outputs[1]).dtype = DType::Int64;
                     }
                     break;
                 }
@@ -644,17 +749,9 @@ namespace vknn {
                     {
                         break;
                     }
-                    NCHW x    = NCHW::from(SH(nd.inputs[0]));
-                    auto ints = [&](const char *k, std::vector<int64_t> d) {
-                        const auto &v = nd.attr.getints(k);
-                        return v.empty() ? d : v;
-                    };
-                    auto    ks  = ints("kernel_shape", {1, 1});
-                    auto    st  = ints("strides", {1, 1});
-                    auto    pad = ints("pads", {0, 0, 0, 0});
-                    int64_t oh  = (x.h + pad[0] + pad[2] - ks[0]) / st[0] + 1;
-                    int64_t ow  = (x.w + pad[1] + pad[3] - ks[1]) / st[1] + 1;
-                    SH(o)       = {x.n, x.c, oh, ow};
+                    NCHW     x  = NCHW::from(SH(nd.inputs[0]));
+                    ConvGeom cg = poolGeom(x.h, x.w, nd.attr); // resolves auto_pad
+                    SH(o)       = {x.n, x.c, cg.outH, cg.outW};
                     break;
                 }
                 case OpType::Gemm: {

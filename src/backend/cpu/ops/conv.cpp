@@ -2,6 +2,7 @@
 // pointwise through the same loop. This is the correctness oracle the GPU path is checked
 // against, so it stays simple and readable rather than fast.
 #include "backend/cpu/cpu_backend.h"
+#include "core/conv_geom.h"
 
 namespace vknn {
     namespace {
@@ -20,27 +21,46 @@ namespace vknn {
 
                 NCHW x = NCHW::from(X.shape);
                 // Weight layout is ONNX [M, C/group, kH, kW]: outC output channels, inCg = input
-                // channels per group, and the kh*kw spatial kernel.
+                // channels per group, and the kh*kw spatial kernel. 1-D convs arrive normalized to
+                // this form by normalizeConv1d (kW == 1); a weight that is still rank 3 (a runtime-
+                // produced weight the pass cannot normalize) is rejected rather than mis-indexed.
+                if (W.shape.size() < 4)
+                {
+                    throw Error(Status::Unsupported, "Conv '" + node.name + "': weight rank " + std::to_string(W.shape.size()) + " (expects the normalized [M, C/group, kH, kW] form)");
+                }
                 int64_t outC = W.shape[0], inCg = W.shape[1], kh = W.shape[2], kw = W.shape[3];
+                // Attribute lists shorter than their 2-spatial-dim length (a malformed graph) pad
+                // with identity values instead of indexing past the vector.
                 auto    ints = [&](const char *k, std::vector<int64_t> d) {
-                    const auto &v = node.attr.getints(k);
-                    return v.empty() ? d : v;
+                    std::vector<int64_t> v = node.attr.getints(k);
+                    if (v.empty())
+                    {
+                        return d;
+                    }
+                    while (v.size() < d.size())
+                    {
+                        v.push_back(d[v.size()]);
+                    }
+                    return v;
                 };
                 auto    strides = ints("strides", {1, 1});
-                auto    pads    = ints("pads", {0, 0, 0, 0});
                 auto    dil     = ints("dilations", {1, 1});
                 int64_t group   = node.attr.geti("group", 1);
                 int64_t sh = strides[0], sw = strides[1];
-                int64_t pt = pads[0], pl = pads[1]; // begin pads (top, left); pads[2]/pads[3] are the end pads
                 int64_t dh = dil[0], dw = dil[1];
 
-                // ONNX output spatial size: the dilated kernel spans dh*(kh-1)+1 rows, so the last valid
-                // window origin is (padded_h - span); integer division by the stride (floor) plus one
-                // gives the number of window positions. pads[2]/pads[3] are the bottom/right end pads.
-                int64_t outH = (x.h + pt + pads[2] - (dh * (kh - 1) + 1)) / sh + 1;
-                int64_t outW = (x.w + pl + pads[3] - (dw * (kw - 1) + 1)) / sw + 1;
+                // Pads and output extent through the shared forward geometry (core/conv_geom.h),
+                // which resolves auto_pad (SAME_UPPER/SAME_LOWER/VALID) into begin/end pads; the
+                // loop below reads only the begin pads (the end pads are folded into outH/outW).
+                ConvGeom geo  = convGeom(x.h, x.w, kh, kw, node.attr);
+                int64_t  pt = geo.padT, pl = geo.padL;
+                int64_t  outH = geo.outH;
+                int64_t  outW = geo.outW;
 
-                float       *y  = cpu::allocOut(Y, {x.n, outC, outH, outW});
+                // A rank-3 input is a normalized 1-D conv (h carries the single spatial dim, w == 1,
+                // kw == 1 so outW == 1): the output keeps the input's rank, mirroring inferShapes.
+                const bool   oneD = X.shape.size() == 3 && outW == 1;
+                float       *y    = cpu::allocOut(Y, oneD ? Shape {x.n, outC, outH} : Shape {x.n, outC, outH, outW});
                 const float *xd = X.host.f32();
                 const float *wd = W.host.f32();
                 const float *bd = B ? B->host.f32() : nullptr;

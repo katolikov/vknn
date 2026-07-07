@@ -22,7 +22,7 @@ namespace vknn {
                 }
                 axis = std::max<int64_t>(0, std::min<int64_t>(axis, rank > 0 ? rank - 1 : 0));
 
-                int64_t nidx = I.elems();
+                int64_t nidx = cpu::elemCount(I.shape); // a rank-0 scalar index selects its one row
                 // Index dtype varies: const int64 (attention Q/K/V) or a runtime float activation (RoPE).
                 auto indexAt = [&](int64_t k) -> int64_t {
                     return I.dtype == DType::Int64 ? I.host.i64()[k] : (int64_t) I.host.f32()[k];
@@ -96,9 +96,6 @@ namespace vknn {
                     float *y = cpu::allocOut(Y, outShape);
                     copy(y, D.host.f32());
                 }
-            }
-            bool supportsDType(DType) const override {
-                return true;
             }
         };
 

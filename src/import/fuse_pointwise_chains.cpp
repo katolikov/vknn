@@ -1,4 +1,5 @@
 #include "passes_internal.h"
+#include "core/matmul_tile.h"
 #include <map>
 
 namespace vknn {
@@ -30,9 +31,11 @@ namespace vknn {
     static bool pwClipBounds(const Graph &g, const Node &n, float &lo, float &hi) {
         lo = -3.4e38f;
         hi = 3.4e38f;
+        // A bound must be a constant scalar with a materialized payload to encode as a step; a runtime
+        // tensor or an empty (unresolved rank-0) buffer is not fusable, so refuse rather than index [0].
         if (n.inputs.size() > 1 && n.inputs[1] != kNoTensor)
         {
-            if (!g.isInitializer(n.inputs[1]))
+            if (!g.isInitializer(n.inputs[1]) || g.initializers.at(n.inputs[1]).bytes.empty())
             {
                 return false;
             }
@@ -40,7 +43,7 @@ namespace vknn {
         }
         if (n.inputs.size() > 2 && n.inputs[2] != kNoTensor)
         {
-            if (!g.isInitializer(n.inputs[2]))
+            if (!g.isInitializer(n.inputs[2]) || g.initializers.at(n.inputs[2]).bytes.empty())
             {
                 return false;
             }
@@ -59,23 +62,12 @@ namespace vknn {
 
     // Per-element ops eligible to join a fused-pointwise unit. Every input and the output must be
     // float-typed (comparisons on int/shape tensors and int Casts stay out), the output shape must
-    // be resolved, and the output must not be fp32-pinned.
+    // be resolved, and the output must not be fp32-pinned. The eligible OpType set is the descriptor's
+    // pwMember flag; the shape/dtype/bound checks below are the per-node part.
     static bool pwEligibleNode(const Graph &g, const Node &n) {
-        switch (n.type)
+        if (!opDescriptor(n.type).pwMember)
         {
-            case OpType::Binary:
-            case OpType::Add:
-            case OpType::Unary:
-            case OpType::Clip:
-            case OpType::Relu:
-            case OpType::PRelu:
-            case OpType::Where:
-            case OpType::Greater:
-            case OpType::GreaterEqual:
-            case OpType::Equal:
-                break;
-            default:
-                return false;
+            return false;
         }
         if (n.outputs.size() != 1 || n.outputs[0] == kNoTensor || n.inputs.empty())
         {
@@ -105,32 +97,12 @@ namespace vknn {
     }
 
     // Ops whose kernel can apply a pointwise-unit epilogue at its store (the unit folds into the
-    // producer instead of a standalone node). Every listed type's GPU kernel family carries an _epi
-    // variant reading pw_steps; anything else keeps the standalone FusedPointwise node.
+    // producer instead of a standalone node). An epilogue-capable type's GPU kernel family carries an
+    // _epi variant reading pw_steps; anything else keeps the standalone FusedPointwise node. The set
+    // is the descriptor's pwEpilogue flag (Conv/Gemm/MatMul/ConvGemm/ConvTranspose/FusedDwPw/Softmax/
+    // LayerNorm/Reduce/GridSample/Resize/MaxPool/AvgPool/GlobalAvgPool/Transpose/Slice/Concat).
     static bool pwEpilogueCapable(OpType t) {
-        switch (t)
-        {
-            case OpType::MatMul:
-            case OpType::Gemm:
-            case OpType::Conv:
-            case OpType::ConvGemm:
-            case OpType::ConvTranspose:
-            case OpType::FusedDwPw:
-            case OpType::Softmax:
-            case OpType::LayerNorm:
-            case OpType::Reduce:
-            case OpType::GridSample:
-            case OpType::Resize:
-            case OpType::MaxPool:
-            case OpType::AvgPool:
-            case OpType::GlobalAvgPool:
-            case OpType::Transpose: // flat_gather _epi: fold consumers into the Transpose/Slice store,
-            case OpType::Slice:     // dropping their dispatch AND the materialized gather output
-            case OpType::Concat:    // per-part stores apply the unit in output space (concat/flat_scatter _epi)
-                return true;
-            default:
-                return false;
-        }
+        return opDescriptor(t).pwEpilogue;
     }
 
     // Broadcast class of tensor `t` against the unit's run shape: 0 same-shape, 3 scalar splat,
@@ -485,6 +457,18 @@ namespace vknn {
                             sA   = src[0].ref;
                             sB   = src[1].ref;
                             break;
+                        case OpType::Less:
+                            kind = kPwKindBinary;
+                            code = kPwBinLess;
+                            sA   = src[0].ref;
+                            sB   = src[1].ref;
+                            break;
+                        case OpType::LessEqual:
+                            kind = kPwKindBinary;
+                            code = kPwBinLessEqual;
+                            sA   = src[0].ref;
+                            sB   = src[1].ref;
+                            break;
                         case OpType::Equal:
                             kind = kPwKindBinary;
                             code = kPwBinEqual;
@@ -623,15 +607,15 @@ namespace vknn {
     } // namespace
 
     /// One general pointwise fusion: grow each maximal same-shape per-element region — Binary/Add/
-    /// Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Equal over one run shape, connected through
-    /// def-use edges in either direction, fanout included — and emit it as a single fused unit:
-    /// folded into an epilogue-capable producer's store when the region's entry stream comes from
-    /// one (pwEpilogueCapable), otherwise a standalone FusedPointwise node. Internal fanout rides
-    /// the unit's registers; values consumed outside the region (or graph outputs) are exported as
-    /// extra output streams (pw_outs), stored TO_STORE-rounded so they are byte-identical to the
-    /// tensors the unfused graph would materialize. A region that exceeds the step/operand/register/
-    /// export budgets is emitted as its largest fitting prefix and the remaining members seed the
-    /// next unit.
+    /// Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Less/LessEqual/Equal over one run shape,
+    /// connected through def-use edges in either direction, fanout included — and emit it as a
+    /// single fused unit: folded into an epilogue-capable producer's store when the region's entry
+    /// stream comes from one (pwEpilogueCapable), otherwise a standalone FusedPointwise node.
+    /// Internal fanout rides the unit's registers; values consumed outside the region (or graph
+    /// outputs) are exported as extra output streams (pw_outs), stored TO_STORE-rounded so they are
+    /// byte-identical to the tensors the unfused graph would materialize. A region that exceeds the
+    /// step/operand/register/export budgets is emitted as its largest fitting prefix and the
+    /// remaining members seed the next unit.
     ///
     /// Legality: regions are convex — an external node that transitively depends on a region value
     /// and feeds a later region member (only possible inside the region's node-index interval, as
@@ -820,11 +804,12 @@ namespace vknn {
                 prod     = (u.entry >= 0 && u.entry < (TensorId) producer.size()) ? producer[u.entry] : -1;
                 entryExp = false;
                 bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") && g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
-                // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >= 32) has no
-                // register headroom for the VM at its 64-outputs-per-thread store loop — an attached
-                // unit collapses the GEMM's occupancy and costs far more than a standalone dispatch.
-                // Such units run standalone; small matmuls (the 1-thread-per-output kernel) still
-                // host epilogues.
+                // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >=
+                // kTiledMatMulMin — the same constant matmul.cpp gates on) has no register
+                // headroom for the VM at its per-thread register micro-tile store loop — an
+                // attached unit collapses the GEMM's occupancy and costs far more than a
+                // standalone dispatch. Such units run standalone; small matmuls (the
+                // 1-thread-per-output kernel) still host epilogues.
                 if (ok && g.nodes[prod].type == OpType::MatMul)
                 {
                     const Node  &P  = g.nodes[prod];
@@ -833,7 +818,7 @@ namespace vknn {
                     if (as.size() >= 2 && bs.size() >= 2)
                     {
                         int64_t M = as[as.size() - 2], K = as[as.size() - 1], N = bs[bs.size() - 1];
-                        if (M >= 32 && N >= 32 && K >= 32)
+                        if (M >= kTiledMatMulMin && N >= kTiledMatMulMin && K >= kTiledMatMulMin)
                         {
                             ok = false;
                         }

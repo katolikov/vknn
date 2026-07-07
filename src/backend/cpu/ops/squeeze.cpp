@@ -59,9 +59,6 @@ namespace vknn {
                 // Element count is unchanged, so this is a byte copy of X's data under the new shape.
                 cpu::copyAs(X, Y, out);
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
 
     } // namespace

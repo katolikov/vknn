@@ -43,14 +43,14 @@ namespace vknn {
                 }
 
                 const int64_t *idx = I.host.i64();
-                // updates and output share data's dtype; only element size (8 vs 4 bytes) and buffer
-                // typing differ between the two branches, so the index arithmetic below is identical.
+                // updates and output share data's dtype; only element size (sizeof int64 vs float) and
+                // buffer typing differ between the two branches, so the index arithmetic below is identical.
                 bool i64 = D.dtype == DType::Int64;
 
                 if (i64)
                 {
                     int64_t *y = cpu::allocOutI64(Y, ds);
-                    std::memcpy(y, D.host.i64(), (size_t) D.elems() * 8);
+                    std::memcpy(y, D.host.i64(), (size_t) D.elems() * sizeof(int64_t));
                     const int64_t *u = U.host.i64();
                     for (int64_t r = 0; r < rows; ++r)
                     {
@@ -66,12 +66,12 @@ namespace vknn {
                             }
                             off += ix * stride[c];
                         }
-                        std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * 8);
+                        std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * sizeof(int64_t));
                     }
                 } else
                 {
                     float *y = cpu::allocOut(Y, ds);
-                    std::memcpy(y, D.host.f32(), (size_t) D.elems() * 4);
+                    std::memcpy(y, D.host.f32(), (size_t) D.elems() * sizeof(float));
                     const float *u = U.host.f32();
                     for (int64_t r = 0; r < rows; ++r)
                     {
@@ -87,12 +87,9 @@ namespace vknn {
                             }
                             off += ix * stride[c];
                         }
-                        std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * 4);
+                        std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * sizeof(float));
                     }
                 }
-            }
-            bool supportsDType(DType) const override {
-                return true;
             }
         };
 

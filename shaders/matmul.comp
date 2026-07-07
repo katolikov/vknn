@@ -2,19 +2,21 @@
 #define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
 #include "precision.glsl"
 #ifdef PW_EPI
-#define PW_EPI_BASE 3
+#define PW_EPI_BASE 4
 #include "pw_epilogue.glsl"
 #endif
 // Flat batched MatMul: fp16/fp32 storage (STORE) with fp32 accumulation. One thread per output
-// element; per-operand strides handle broadcasting and batching.
+// element; per-operand strides handle broadcasting and batching. Geometry (outDim/aStride/bStride)
+// rides a content-deduped SSBO (binding 3), not the push constant, so the decodable rank is unbounded
+// (see flat::uploadFlatGeom): outDim = g[0..rank), aStride = g[rank..2*rank), bStride = g[2*rank..3*rank).
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 3) readonly buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
   int rank, total, M, N, K, aK, bK;
-  int outDim[8]; int aStride[8]; int bStride[8];
 } pc;
 
 void main() {
@@ -22,10 +24,10 @@ void main() {
   if (gid >= uint(pc.total)) return;
   int rem = int(gid), aBase = 0, bBase = 0;
   for (int k = pc.rank - 1; k >= 0; --k) {
-    int c = rem % pc.outDim[k];
-    rem /= pc.outDim[k];
-    aBase += c * pc.aStride[k];
-    bBase += c * pc.bStride[k];
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    aBase += c * geom.g[pc.rank + k];
+    bBase += c * geom.g[2 * pc.rank + k];
   }
   float acc = 0.0;
   for (int k = 0; k < pc.K; ++k)

@@ -1,5 +1,6 @@
 // Windowed AveragePool2D (scalar reference). ONNX count_include_pad selects the divisor.
 #include "backend/cpu/cpu_backend.h"
+#include "core/conv_geom.h"
 #include <algorithm>
 
 namespace vknn {
@@ -14,17 +15,16 @@ namespace vknn {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
-                auto    ks  = ints("kernel_shape", {1, 1});
-                auto    st  = ints("strides", {1, 1});
-                // ONNX `pads` is [begin_h, begin_w, end_h, end_w]: pt/pl shift the window origin,
-                // while the end pads (pad[2]/pad[3]) only widen the valid output-size range.
-                auto    pad = ints("pads", {0, 0, 0, 0});
-                int64_t kh = ks[0], kw = ks[1], sh = st[0], sw = st[1], pt = pad[0], pl = pad[1];
-                bool    incPad = node.attr.geti("count_include_pad", 0) != 0;
-                // Standard pooling output extent (floor mode): a window of size k slides over the
-                // padded input with step s, yielding floor((in + begin + end - k)/s) + 1 positions.
-                int64_t oh     = (x.h + pt + pad[2] - kh) / sh + 1;
-                int64_t ow     = (x.w + pl + pad[3] - kw) / sw + 1;
+                auto    ks = ints("kernel_shape", {1, 1});
+                auto    st = ints("strides", {1, 1});
+                // Pads and output extent through the shared pool geometry (core/conv_geom.h), which
+                // resolves auto_pad into begin/end pads: pt/pl shift the window origin, while the end
+                // pads only widen the output extent (already folded into oh/ow).
+                ConvGeom geo = poolGeom(x.h, x.w, node.attr);
+                int64_t  kh = ks[0], kw = ks[1], sh = st[0], sw = st[1], pt = geo.padT, pl = geo.padL;
+                bool     incPad = node.attr.geti("count_include_pad", 0) != 0;
+                int64_t  oh     = geo.outH;
+                int64_t  ow     = geo.outW;
 
                 float       *y  = cpu::allocOut(Y, {x.n, x.c, oh, ow});
                 const float *xd = X.host.f32();

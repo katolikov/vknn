@@ -88,4 +88,4 @@ Notes:
   under the GPU watchdog; leave `profile` off for very long runs (e.g. the 8-view YoNoSplat encoder).
 - Runtime is thermally sensitive (the device throttles 3–5×); `cooldown` sleeps before each run and
   `bench` reports the median. See [compile-and-run-a-model.md](compile-and-run-a-model.md) for the
-  lower-level `vknn_compile` / `vknn_run_io` path and [../docs/CONFIG.md](../docs/CONFIG.md).
+  lower-level `vknn_compile` / `vknn_run_io` path and [../docs/config.md](../docs/config.md).

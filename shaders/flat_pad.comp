@@ -2,18 +2,18 @@
 #include "precision.glsl"
 // Flat row-major Pad: out[i] maps to an input element, with the pad region filled per mode
 // (0 = constant value, 1 = edge clamp, 2 = reflect). padBegin[k] is the begin pad of dim k; the
-// end pad is implicit in the output shape.
+// end pad is implicit in the output shape. Geometry (outDim/inDim/inStride/padBegin) rides a
+// content-deduped SSBO (binding 2), not the push constant, so the decodable rank is unbounded (see
+// flat::uploadFlatGeom). Arrays pack back-to-back: outDim = g[0..rank), inDim = g[rank..2*rank),
+// inStride = g[2*rank..3*rank), padBegin = g[3*rank..4*rank).
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
   int rank, total, mode;
   float cval;
-  int outDim[8];
-  int inDim[8];
-  int inStride[8];
-  int padBegin[8];
 } pc;
 
 void main() {
@@ -22,10 +22,10 @@ void main() {
   int rem = int(gid), inIdx = 0;
   bool oob = false;
   for (int k = pc.rank - 1; k >= 0; --k) {
-    int oc = rem % pc.outDim[k];
-    rem /= pc.outDim[k];
-    int n = pc.inDim[k];
-    int ic = oc - pc.padBegin[k];
+    int oc = rem % geom.g[k];
+    rem /= geom.g[k];
+    int n = geom.g[pc.rank + k];
+    int ic = oc - geom.g[3 * pc.rank + k];
     if (ic < 0 || ic >= n) {
       if (pc.mode == 1) {              // edge: clamp to the border
         ic = clamp(ic, 0, n - 1);
@@ -42,7 +42,7 @@ void main() {
         ic = 0;                         // keep inIdx in-bounds; the value is discarded
       }
     }
-    inIdx += ic * pc.inStride[k];
+    inIdx += ic * geom.g[2 * pc.rank + k];
   }
   d[gid] = oob ? STORE(pc.cval) : s[inIdx];
 }

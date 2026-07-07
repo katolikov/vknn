@@ -1,4 +1,7 @@
-// Split a tensor along an axis into N outputs (generic N-D, dtype-agnostic).
+// Split a tensor along an axis into N outputs (generic N-D, dtype-agnostic). Segment sizes come
+// from the `split` attribute, else from the optional int64 `split` input[1] (opset-13 form), else
+// (when neither is present) an equal division of the runtime axis extent — never from the static
+// graph desc, so each output's shape follows the runtime input shape.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 
@@ -13,7 +16,13 @@ namespace vknn {
                 {
                     axis += rank;
                 }
-                int64_t nout = (int64_t) node.outputs.size();
+                int64_t              nout = (int64_t) node.outputs.size();
+                std::vector<int64_t> sp   = node.attr.getints("split");
+                if (sp.empty() && pwCoreInputs(node) > 1 && node.inputs[1] != kNoTensor)
+                {
+                    const RtTensor &S = ctx.t(node.inputs[1]);
+                    sp.assign(S.host.i64(), S.host.i64() + S.elems());
+                }
                 // Collapse the input to a 3-D view [outer, X.shape[axis], inner] by folding every
                 // dim before the split axis into `outer` and every dim after it into `inner`. The
                 // split then partitions only the middle (axis) dimension; outer and inner are shared
@@ -40,8 +49,12 @@ namespace vknn {
                         continue;
                     }
                     RtTensor &Y   = ctx.t(node.outputs[k]);
-                    Shape     os  = ctx.graph->desc(node.outputs[k]).shape;
-                    int64_t   seg = os[axis]; // this output's extent along the split axis (its share of the split)
+                    // This output's extent along the split axis: its `split` entry, or an equal share
+                    // of the runtime axis. The output shape is the runtime input shape with the split
+                    // axis swapped for that extent.
+                    int64_t   seg = k < (int64_t) sp.size() ? sp[k] : X.shape[axis] / nout;
+                    Shape     os  = X.shape;
+                    os[axis]      = seg;
                     float    *yf  = i64 ? nullptr : cpu::allocOut(Y, os);
                     int64_t  *yi  = i64 ? cpu::allocOutI64(Y, os) : nullptr;
                     // For each outer slab `o` and each position `s` within this output's segment, copy
@@ -73,9 +86,6 @@ namespace vknn {
                     }
                     off += seg;
                 }
-            }
-            bool supportsDType(DType) const override {
-                return true;
             }
         };
     } // namespace

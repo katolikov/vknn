@@ -90,7 +90,7 @@ namespace vknn {
                 vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
                 epi.append(bufs, node, env, dst->handle());
-                // One thread per output element: Cout channels * M rows, ceil-divided into 64-wide
+                // One thread per output element: Cout channels * M rows, ceil-divided into kLocalSize-wide
                 // workgroups. The shader linearizes gid across a 2D grid, so an overflowing X count folds
                 // into Y — no per-op 65535-limit handling needed here.
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(Cout * pc.M, kLocalSize));

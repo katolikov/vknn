@@ -14,7 +14,7 @@ partitions into maximal same-backend **segments**, and runs each segment on a ba
 (NC4HW4 packed layout, one pre-recorded command buffer per static segment, fp16 storage + fp32
 accumulation) or **CPU** (scalar + NEON reference and automatic fallback). It runs image CNNs,
 YOLOv8n detection, and a 965M-parameter transformer encoder (YoNoSplat) plus a from-scratch Vulkan
-3D Gaussian Splatting rasterizer. See [README.md](README.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+3D Gaussian Splatting rasterizer. See [README.md](README.md) and [docs/architecture.md](docs/architecture.md).
 
 ## Build & test
 
@@ -31,6 +31,11 @@ YOLOv8n detection, and a 965M-parameter transformer encoder (YoNoSplat) plus a f
 
 Host artifacts land in `build-host/`, Android in `build-android/`. Override the NDK with
 `ANDROID_NDK=...` and the API level with `ANDROID_API=...`.
+
+**Before you push, run `scripts/ci_host.sh`** — the host-only gate: host build + `vknn_tests` +
+`--android` + `--docs` + op-support self-consistency + clang-format drift + CPU determinism. It
+needs no device; the on-device byte and perf gates (`benchmark/scripts/gate_op.sh`,
+`gate_pw_probes.sh`, `dev_perfab.sh`) run separately. See [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Repo layout
 
@@ -65,8 +70,8 @@ existing `.vxm`), the ONNX-name map
 (`src/backend/cpu/ops/<op>.cpp`), and optionally a Vulkan op + GLSL shader gated by
 `supportsNode`. The CMake globs use `CONFIGURE_DEPENDS`, so a new file is picked up on the next
 configure (which `./build.sh` runs). Full recipe: [skills/add-an-operator.md](skills/add-an-operator.md)
-and [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md). Backends:
-[skills/add-a-backend.md](skills/add-a-backend.md) / [docs/ADDING_A_BACKEND.md](docs/ADDING_A_BACKEND.md).
+and [docs/adding-an-operator.md](docs/adding-an-operator.md). Backends:
+[skills/add-a-backend.md](skills/add-a-backend.md) / [docs/adding-a-backend.md](docs/adding-a-backend.md).
 
 ## Run & validate on device
 
@@ -85,7 +90,7 @@ adb shell /data/local/tmp/vxrt/vknn_run_io M.vxm /data/local/tmp/vxrt/out in0.bi
 Check correctness with **cosine vs an onnxruntime golden**, and for any perf-sensitive change,
 **measure runtime too**: beating MNN is a standing goal, so a change that keeps cosine but slows the
 GPU is a regression. See [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md) and
-[docs/BENCHMARK.md](docs/BENCHMARK.md).
+[docs/benchmark.md](docs/benchmark.md).
 
 ## Conventions
 

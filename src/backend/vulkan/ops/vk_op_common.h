@@ -125,56 +125,36 @@ namespace vknn {
         return b;
     }
 
-    // Same as upload(), but reuse the prepacked blob from the weight cache on warm starts.
-    // `compute` only runs on a cache miss.
+    // Upload a prepacked weight/bias/transformed-weight blob, reusing (1) the device buffer across op
+    // instances and plan buckets via the backend weight pool, and (2) the prepacked host blob from the
+    // weight cache on warm starts. `compute` runs only when neither is available.
+    //
+    // The device pool is keyed by (weight-cache key, precision); a hit returns the shared device buffer
+    // with no host lookup and no upload — this is what lets N shape buckets share ONE uploaded copy of
+    // each weight. A miss falls through to today's path (host-cache consult, prepack, upload), so a
+    // single-bucket model uploads exactly the same buffer it did before the pool existed.
     template <typename Fn> inline std::shared_ptr<vk::Buffer> uploadCached(VkOpEnv &env, const std::string &rawKey, Fn compute) {
-        std::string        key = env.modelTag.empty() ? rawKey : env.modelTag + "/" + rawKey;
-        std::vector<float> v;
-        if (!(env.weights && env.weights->get(key, v)))
-        {
-            v = compute();
-            // Only retain the prepacked blob when the cache is persistent (a disk path). Without a path the
-            // cache would still balloon RAM with every weight (a 965M model: ~3.85GB of prepacked fp32) for
-            // no warm-start benefit — so a pathless run (WeightCache::enabled() false) computes + uploads + frees.
-            if (env.weights && env.weights->enabled())
+        std::string key = env.modelTag.empty() ? rawKey : env.modelTag + "/" + rawKey;
+        return env.acquireWeight(key, env.useFp16, [&] {
+            std::vector<float> v;
+            if (!(env.weights && env.weights->get(key, v)))
             {
-                env.weights->put(key, v);
+                v = compute();
+                // Only retain the prepacked blob when the cache is persistent (a disk path). Without a path the
+                // cache would still balloon RAM with every weight (a 965M model: ~3.85GB of prepacked fp32) for
+                // no warm-start benefit — so a pathless run (WeightCache::enabled() false) computes + uploads + frees.
+                if (env.weights && env.weights->enabled())
+                {
+                    env.weights->put(key, v);
+                }
             }
-        }
-        return upload(*env.ctx, v, env.useFp16);
+            return upload(*env.ctx, v, env.useFp16);
+        });
     }
 
-    // Read an initializer as fp32, decoding from fp16 if it was stored fp16 (an fp16 .vxm from
-    // vknn_compile). Ops prepack/transpose weights in fp32, then upload() re-encodes to fp16 for the
-    // GPU (fp16->fp32->fp16 is exact). Use this instead of `g.initializers.at(id).f32()` so a model
-    // loaded from an fp16 .vxm works unchanged; for an fp32 source it's a plain copy.
-    inline std::vector<float> initFloats(const Graph &g, TensorId id) {
-        const HostBuffer  &hb = g.initializers.at(id);
-        int64_t            n  = numElements(g.desc(id).shape);
-        if (n <= 0)
-        {
-            // A 0-D scalar constant has shape [] -> numElements 0, but it holds one element; recover the
-            // count from the raw bytes so the value is read (not dropped).
-            n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4));
-        }
-        std::vector<float> out((size_t) std::max<int64_t>(n, 0));
-        if (g.desc(id).dtype == DType::Float16)
-        {
-            const fp16_t *h = reinterpret_cast<const fp16_t *>(hb.bytes.data());
-            for (int64_t i = 0; i < n; ++i)
-            {
-                out[i] = halfToFloat(h[i]);
-            }
-        } else
-        {
-            const float *f = hb.f32();
-            for (int64_t i = 0; i < n; ++i)
-            {
-                out[i] = f[i];
-            }
-        }
-        return out;
-    }
+    // Initializer payloads decode to fp32 through initFloats (vknn/graph.h) — the shared decode
+    // path for host-side payload reads. Ops prepack/transpose weights in fp32, then upload()
+    // re-encodes to fp16 for the GPU (fp16->fp32->fp16 is exact).
 
     // Upload an initializer uploaded FLAT (no transpose/prepack) to a device buffer with at most one
     // element conversion. When the stored dtype already matches the compute precision the raw bytes are

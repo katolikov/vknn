@@ -1,0 +1,62 @@
+#version 450
+#include "precision.glsl"
+#include "common.glsl"
+// TopK along one axis (ONNX TopK): the k largest (largest=1) or smallest (largest=0) elements of each
+// axis slice, emitted as values (input dtype) and their source indices (int64, carried as a
+// compute-precision float here — index magnitudes are small enough to be exact). One invocation owns
+// one output slice (outer, inner); it runs k selection passes over the `dim` axis, each pass picking
+// the next best not-yet-taken element. Equal values break the comparison tie on the source index so
+// the winners come out in ascending source order — the ONNX tie rule, matching the CPU op exactly.
+// sorted is always emitted (deterministic); the same order serves sorted=0 and sorted=1.
+//
+// Slice element j sits at (o*dim + j)*inner + in for slice (o, in); the k outputs sit at
+// (o*k + p)*inner + in for pass p. `largest` selects the max vs min per pass.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer V { STORE v[]; };
+layout(std430, binding = 2) writeonly buffer I { STORE idx[]; };
+layout(push_constant) uniform PC {
+  int outer;    // product of dims before the axis
+  int dim;      // axis length
+  int inner;    // product of dims after the axis
+  int k;        // clamped to [0, dim]
+  int largest;  // 1 = k largest, 0 = k smallest
+  int writeIdx; // 1 = emit indices to buffer I, 0 = indices output absent (skip the store)
+} pc;
+
+void main() {
+  uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint slices = uint(pc.outer) * uint(pc.inner);
+  if (g >= slices) return;
+  int o   = int(g) / pc.inner;
+  int ipos = int(g) % pc.inner;               // position within the inner (post-axis) block
+  int base  = (o * pc.dim) * pc.inner + ipos; // slice element j at base + j*inner
+  int obase = (o * pc.k)   * pc.inner + ipos; // output slot p at obase + p*inner
+
+  // prevBest / prevIdx fence off the winners already taken: because winners come out in strictly
+  // decreasing (value, index) order, "ranks strictly after the pass-(p-1) winner" excludes every
+  // earlier winner too. Exact ties are consumed one per pass in ascending index order with no
+  // separate taken-mask. The (value, index) order is: better value wins; on a tie the lower index.
+  float prevBest = 0.0;
+  int   prevIdx  = -1;
+  for (int p = 0; p < pc.k; ++p) {
+    float best = 0.0;
+    int   bidx = -1;
+    for (int j = 0; j < pc.dim; ++j) {
+      float jv = float(s[base + j * pc.inner]);
+      if (p > 0) {
+        // skip elements ordered before-or-equal to the previous winner (already emitted).
+        bool after = (jv != prevBest) ? (pc.largest != 0 ? jv < prevBest : jv > prevBest) : (j > prevIdx);
+        if (!after) continue;
+      }
+      if (bidx < 0) { best = jv; bidx = j; continue; }
+      bool better = (jv != best) ? (pc.largest != 0 ? jv > best : jv < best) : (j < bidx);
+      if (better) { best = jv; bidx = j; }
+    }
+    if (bidx < 0) break; // k > dim guard (k is clamped upstream, so this only trips on an empty axis)
+    v[obase + p * pc.inner] = STORE(best);
+    if (pc.writeIdx != 0) idx[obase + p * pc.inner] = STORE(float(bidx));
+    prevBest = best;
+    prevIdx  = bidx;
+  }
+}

@@ -162,7 +162,17 @@ namespace vknn {
                         TensorProtoParser::fillHostI64(pi.tp, hb, n);
                     } else
                     {
-                        d.dtype = DType::Float32; // FLOAT / FLOAT16 / DOUBLE all materialize to fp32 storage
+                        // Payload materializes to fp32 host storage regardless (FLOAT / FLOAT16 / DOUBLE and
+                        // the widened integer narrows all read through initFloats, which treats any non-fp16
+                        // dtype as fp32 bytes). The descriptor dtype, though, records INT8/UINT8 for a
+                        // quantized initializer so the dequantize pass can recover the quantize dtype's
+                        // saturation range ([-128,127] / [0,255]) from a zero_point tensor -- lost otherwise,
+                        // since the range decides the clamp that a QDQ collapse must preserve. BOOL (which
+                        // also decodes to UInt8 storage) is deliberately not stamped: it is normalized to
+                        // 0/1 fp32 and is never a quantization parameter.
+                        d.dtype = isType(pi.tp.dataType, OnnxType::Int8)    ? DType::Int8
+                                : isType(pi.tp.dataType, OnnxType::Uint8)   ? DType::UInt8
+                                                                            : DType::Float32;
                         TensorProtoParser::fillHostFloat(pi.tp, hb, n);
                     }
                     g.initializers[id] = std::move(hb);

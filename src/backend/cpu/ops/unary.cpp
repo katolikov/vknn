@@ -60,6 +60,10 @@ namespace vknn {
                     // log(1 + exp(x)), evaluated as max(x,0) + log1p(exp(-|x|)) so the exp never
                     // overflows for large positive x and stays accurate for large negative x.
                     return std::max(x, 0.f) + std::log1p(std::exp(-std::fabs(x)));
+                case UnaryType::Round:
+                    // Nearest integer, ties to even (the FE_TONEAREST default); agrees bitwise with
+                    // GLSL roundEven, including the sign of a zero result (-0.5 -> -0.0).
+                    return std::nearbyint(x);
                 case UnaryType::Invalid:
                     break;
             }
@@ -72,7 +76,7 @@ namespace vknn {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X = ctx.t(node.inputs[0]);
                 RtTensor       &Y = ctx.t(node.outputs[0]);
-                int64_t         n = X.elems();
+                int64_t         n = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
                 float          *y = cpu::allocOut(Y, X.shape);
                 const float    *x = X.host.f32();
                 for (int64_t i = 0; i < n; ++i)

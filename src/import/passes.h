@@ -8,11 +8,26 @@
 // layout/dtype passes at the bottom are Vulkan-backend-oriented and run after backend selection.
 #pragma once
 #include "vknn/graph.h"
+#include <map>
+#include <string>
 
 namespace vknn {
 
-    // Resolve dynamic batch to `batch` and infer concrete shapes for all tensors possible.
-    void inferShapes(Graph &g, int64_t batch = 1);
+    // Resolve each graph input's dynamic (negative) dims, then infer concrete shapes for all tensors
+    // possible. A dim is resolved from `declared` (keyed by input tensor name) when that input has a
+    // declared shape; otherwise the leading (batch) axis falls back to `batch` and any OTHER dynamic
+    // axis with no declaration is a hard error (@throws Error{InvalidArgument}) naming the input and
+    // axis -- substituting `batch` into a dynamic spatial/feature axis silently compiles the model to
+    // a 1x1 plan, which is the class of bug this refuses. `declared` may be null (no declarations, the
+    // batch-only path). A declared entry's rank must match the input's rank and its dims must be
+    // non-negative. The pass is idempotent: a dim resolved on an earlier call is already positive and
+    // is left untouched (the declaration lookup and the error fire only while a dim is still dynamic).
+    void inferShapes(Graph &g, int64_t batch = 1, const std::map<std::string, Shape> *declared = nullptr);
+    // Normalize 1-D Convs (rank-3 constant weight, 1-spatial-dim attributes) to the canonical 2-D
+    // geometry every conv consumer indexes: weight [M,C/g,k] -> [M,C/g,k,1], strides/dilations/
+    // kernel_shape/pads extended with the W dim's identity values. Activation ranks are unchanged.
+    // Runs before the first inferShapes so conv shape inference only ever sees 2-D geometry.
+    void normalizeConv1d(Graph &g);
     // Constant-fold ops whose inputs are all known constants (shape arithmetic, scalar Binary, etc.)
     // into initializers (requires inferShapes first). Returns the number of nodes folded.
     int constFold(Graph &g);
@@ -50,8 +65,19 @@ namespace vknn {
     // order shifts, as Winograd's does). Needs resolved shapes; runs before pointwise fusion so
     // trailing units fold onto the ConvGemm.
     void lowerConv(Graph &g);
+    // Collapse ONNX quantized graphs (QDQ form) to plain float. DequantizeLinear over
+    // all-initializer inputs folds to an fp32 initializer ((x - zero_point) * scale in double,
+    // per-tensor or per-axis via the axis attribute), and a QuantizeLinear->DequantizeLinear
+    // activation sandwich with matching scale/zero_point drops, consumers rewired to the float
+    // producer. Residual activation q/dq nodes (mismatched sandwiches, graph-boundary q/dq) stay
+    // in place; no kernel exists for them, so they surface through the support report. Idempotent.
+    void dequantizeGraph(Graph &g);
     // Remove Identity nodes, rewiring consumers to the input.
     void eliminateIdentity(Graph &g);
+    // Remove inference-mode Dropout nodes (training_mode absent or a constant false, mask output
+    // absent or unconsumed), rewiring consumers to the input. A Dropout that is not provably
+    // inference-mode, or whose mask is consumed, stays in place and is unsupported downstream.
+    void eliminateDropout(Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
     void eliminateDeadNodes(Graph &g);
     // Drop initializer payloads no node/output references (folded-chain intermediates, Cast-copied
@@ -60,6 +86,11 @@ namespace vknn {
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch               = 1;
+        // Declared concrete shapes for graph inputs, keyed by input tensor name. An input listed here
+        // has its dynamic (negative) dims resolved from its declared shape; an input absent here falls
+        // back to `batch` on its leading axis and errors on any other dynamic axis (see inferShapes).
+        // Empty = the batch-only path, so existing callers that set only `batch` are unchanged.
+        std::map<std::string, Shape> inputShapes;
         bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
@@ -69,6 +100,10 @@ namespace vknn {
         bool    lowerConv           = false; // non-Winograd KxK Conv -> ConvGemm (experimental: the
                                              // v1 64x64x16 kernel loses to the direct conv on
                                              // classifier-CNN shapes — opt in per model, measure)
+        bool    dequantize          = true;  // fold DequantizeLinear weights + collapse matching
+                                             // QDQ sandwiches so quantized checkpoints run as
+                                             // float graphs (--no-dequantize keeps the quantized
+                                             // ops; they have no kernel and fail planning)
         bool    dumpBig             = false; // debug: log tensors > 50M elements after shape inference
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
@@ -88,6 +123,16 @@ namespace vknn {
 
     // Run the standard pipeline used before backend planning.
     void runStandardPasses(Graph &g, const PassOptions &opt = {});
+
+    // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
+    struct Fp16ConvertStats {
+        int64_t converted = 0, kept = 0, bytesBefore = 0, bytesAfter = 0;
+    };
+    // Convert every Float32 initializer payload to Float16 in place (vknn_compile --fp16), stamping
+    // the tensor descs. Non-fp32 payloads (int64 shape tensors, ...) stay untouched. Runs after the
+    // standard passes, immediately before saveGraphBin.
+    Fp16ConvertStats convertInitializersFp16(Graph &g);
+
     // Read an int64 list param from a node attribute or an initializer input (Slice/Pad/Reduce style).
     std::vector<int64_t> readI64Param(const Graph &g, const Node &nd, const char *attrName, int inputIdx);
     // Insert ConvertLayout nodes + mark tensors gpuFlat so the generic head ops run on the Vulkan

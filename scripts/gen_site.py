@@ -22,14 +22,14 @@ PAGES = [
     ("skills/add-a-backend.md",            "howto-add-backend.html",   "Add a backend",       "How-to"),
     ("skills/compile-and-run-a-model.md",  "howto-compile-run.html",   "Compile & run",       "How-to"),
     ("skills/run-yonosplat.md",            "howto-yonosplat.html",     "Run YoNoSplat",       "How-to"),
-    ("docs/ARCHITECTURE.md",               "architecture.html",        "Architecture",        "Reference"),
-    ("docs/OP_COVERAGE.md",                "op-coverage.html",         "Op coverage",         "Reference"),
-    ("docs/CONFIG.md",                     "config.html",              "Config",              "Reference"),
-    ("docs/ADDING_AN_OPERATOR.md",         "adding-an-operator.html",  "Adding an operator",  "Reference"),
-    ("docs/ADDING_A_BACKEND.md",           "adding-a-backend.html",    "Adding a backend",    "Reference"),
-    ("docs/BENCHMARK.md",                  "benchmark.html",           "Benchmarks",          "Reference"),
-    ("docs/LIMITATIONS.md",                "limitations.html",         "Limitations",         "Reference"),
-    ("docs/MNN_ANALYSIS.md",               "mnn-analysis.html",        "MNN analysis",        "Reference"),
+    ("docs/architecture.md",               "architecture.html",        "Architecture",        "Reference"),
+    ("docs/op-coverage.md",                "op-coverage.html",         "Op coverage",         "Reference"),
+    ("docs/config.md",                     "config.html",              "Config",              "Reference"),
+    ("docs/adding-an-operator.md",         "adding-an-operator.html",  "Adding an operator",  "Reference"),
+    ("docs/adding-a-backend.md",           "adding-a-backend.html",    "Adding a backend",    "Reference"),
+    ("docs/benchmark.md",                  "benchmark.html",           "Benchmarks",          "Reference"),
+    ("docs/limitations.md",                "limitations.html",         "Limitations",         "Reference"),
+    ("docs/mnn-analysis.md",               "mnn-analysis.html",        "MNN analysis",        "Reference"),
 ]
 # Architecture Decision Records, added programmatically (kept in nav under "Design").
 for fn in sorted(os.listdir(os.path.join(ROOT, "docs", "adr"))):

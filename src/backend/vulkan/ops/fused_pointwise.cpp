@@ -85,9 +85,10 @@ namespace vknn {
                     bool live = 1 + o < (int) node.outputs.size() && node.outputs[1 + o] != kNoTensor;
                     bufs.push_back(live ? env.devBuf(node.outputs[1 + o])->handle() : dst->handle());
                 }
-                // One int push constant: the element count guarding the 1D grid (local_size_x=256).
+                // One int push constant: the element count guarding the 1D grid. The fused_pw_flat/nc4
+                // shaders are local_size_x=256 == flat::kFlatLocalSize.
                 int pc = total;
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 256));
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, flat::kFlatLocalSize));
             }
         };
     } // namespace

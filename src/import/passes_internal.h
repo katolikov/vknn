@@ -5,6 +5,7 @@
 #include "backend/cpu/cpu_backend.h"
 #include "core/conv_geom.h"
 #include "vknn/logging.h"
+#include "vknn/op_descriptor.h"
 #include "vknn/precision.h"
 #include <algorithm>
 #include <cmath>
@@ -38,8 +39,19 @@ namespace vknn {
     // [1,C,1..] fp32 scale/shift initializers, so the pointwise fusion pass can fold it. Runs
     // unconditionally after foldBatchNorm (defined in lower_batchnorm.cpp).
     void lowerBatchNorm(Graph &g);
+    // Lower every InstanceNormalization with fp32-initializer scale/B and a resolved rank>=3 input
+    // to spatial ReduceMean + Sub/Mul/Add/Sqrt/Div ops (no InstanceNorm kernel exists); an
+    // ineligible node keeps its opaque op with a WARN. Needs resolved input shapes, so it runs
+    // after the const-fold/infer fixpoint (defined in lower_instancenorm.cpp).
+    void lowerInstanceNorm(Graph &g);
     // Drop Cast nodes converting float->float (a same-size buffer copy), rewiring consumers to the
     // cast input; a forward dtype pass gates removal to a float source so int<->float casts survive.
     // Graph outputs are never renamed (defined in eliminate_float_cast.cpp).
     void eliminateFloatCast(Graph &g);
+    // Lower a general grouped Conv (1 < group < Cin, incl. the channel-multiplier depthwise
+    // group == Cin/Cout != Cin) into `group` independent group-1 Convs over per-group channel slices
+    // joined by a Concat, so each part runs on the proven dense Conv GPU kernel. Needs a resolved
+    // rank-4 input, a constant rank-4 weight, and channels that partition evenly by group; anything
+    // else is left as a grouped Conv for the group-aware CPU op (defined in lower_grouped_conv.cpp).
+    void lowerGroupedConv(Graph &g);
 }

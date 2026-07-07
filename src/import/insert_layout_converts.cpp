@@ -6,65 +6,55 @@ namespace vknn {
     // Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
     // Concat that isn't 4D channel-axis 4-aligned; Binary/Add with a constant operand or a broadcast/
     // rank that the packed kernel doesn't handle.
+    //
+    // The per-OpType layout fact lives in opDescriptor(): LayoutClass::Flat is unconditionally flat,
+    // LayoutClass::Nc4 unconditionally NC4HW4. Only LayoutClass::ShapeDependent ops keep a per-node
+    // predicate below; the switch handles exactly those (the anti-drift test asserts the two agree).
     bool gpuFlatNode(const Graph &g, const Node &n) {
         auto sh = [&](TensorId t) -> const Shape & {
             return g.desc(t).shape;
         };
+        LayoutClass lc = opDescriptor(n.type).layout;
+        if (lc == LayoutClass::Flat)
+        {
+            return true;
+        }
+        if (lc == LayoutClass::Nc4)
+        {
+            return false;
+        }
+        // LayoutClass::ShapeDependent: the layout is a per-node function of shapes/attributes.
         switch (n.type)
         {
-            case OpType::Transpose:
-            case OpType::Slice:
-            case OpType::Expand:       // numpy broadcast to a target shape, flat row-major gather
-            case OpType::Tile:         // repeat each dim, flat row-major gather
-            case OpType::LayerNorm:    // always flat: reduce over the trailing axes, row-major
-            case OpType::DepthToSpace: // spatial<->channel index remap, flat row-major gather
-            case OpType::Reduce:       // generic N-D reduce (incl. ReduceL2) runs flat
-            case OpType::MatMul:       // batched N-D matmul runs on the flat row-major path
-            case OpType::Where:        // cond?X:Y, broadcasting flat select
-            case OpType::Equal:        // A==B, broadcasting flat compare
-            case OpType::Greater:      // A>B,  broadcasting flat compare
-            case OpType::GreaterEqual: // A>=B, broadcasting flat compare
-            case OpType::Range:           // 1-D arange, flat fill
-            case OpType::ConstantOfShape: // scalar fill, flat
-                return true;
             case OpType::ConvTranspose: {
                 // Flat row-major transposed conv (one thread per output element, gather form). Needs a
-                // 4D input and constant weight (uploaded flat); anything else falls back to the CPU op.
+                // 4D input and a weight input; the weight/bias may be constant (uploaded flat) or a
+                // runtime activation (bound at dispatch). A non-4D input falls back to the CPU op.
+                // Mirrors the ConvTranspose gate in vkNodeGate.
                 if (sh(n.inputs[0]).size() != 4)
                 {
                     return false;
                 }
-                if (n.inputs.size() < 2 || !g.isInitializer(n.inputs[1]))
-                {
-                    return false;
-                }
-                return !(pwCoreInputs(n) > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
+                return n.inputs.size() >= 2 && n.inputs[1] != kNoTensor;
             }
             case OpType::Pad: {
                 // Flat row-major pad (constant/edge/reflect). Needs static pads (attr or a constant
-                // input[1]) and rank within the flat limit; a runtime pad value falls back to CPU.
-                if (sh(n.outputs[0]).size() > 8)
-                {
-                    return false;
-                }
+                // input[1]); the flat kernel decodes any rank (geometry in a plan SSBO). A runtime pad
+                // VALUE runs on the GPU via flat_pad_rt (the value binds as an SSBO). A runtime pads
+                // GEOMETRY falls back to CPU (data-dependent output shape). Mirrors the Pad gate in
+                // vkNodeGate.
                 std::string mode = n.attr.gets("mode", "constant");
                 if (mode != "constant" && mode != "edge" && mode != "reflect")
                 {
                     return false;
                 }
                 bool padsKnown = !n.attr.getints("pads").empty() || (n.inputs.size() > 1 && n.inputs[1] != kNoTensor && g.isInitializer(n.inputs[1]));
-                if (!padsKnown)
-                {
-                    return false;
-                }
-                return !(n.inputs.size() > 2 && n.inputs[2] != kNoTensor && !g.isInitializer(n.inputs[2]));
+                return padsKnown;
             }
             case OpType::Gather:
                 // Flat row-major gather along an axis; index may be constant or a runtime float activation
                 // (RoPE).
                 return n.inputs.size() >= 2;
-            case OpType::Clip:
-                return true; // flat elementwise clamp (geometry-tail Clip is rank-6, can't be NC4HW4)
             case OpType::Split: {
                 // Channel-axis 4-aligned split stays NC4HW4 (contiguous block copy); any other split is flat.
                 const Shape &in   = sh(n.inputs[0]);
@@ -90,6 +80,15 @@ namespace vknn {
             case OpType::ScatterND:
                 // GPU flat scatter; index may be a constant or a runtime float activation.
                 return n.inputs.size() >= 3;
+            case OpType::TopK:
+                // Per-slice selection along an axis (flat row-major), with a compile-time k (the `k`
+                // attribute or a constant int64 input[1]); a runtime k stays on the CPU op. Mirrors the
+                // TopK gate in vkNodeGate so a GPU-assigned TopK is always marked flat.
+                if (sh(n.inputs[0]).empty())
+                {
+                    return false;
+                }
+                return n.attr.has("k") || (pwCoreInputs(n) > 1 && n.inputs[1] != kNoTensor && g.isInitializer(n.inputs[1]));
             case OpType::Einsum: {
                 // Only the "i,j->ij" outer product runs on the GPU; other equations use the CPU op.
                 std::string eq;
@@ -182,6 +181,8 @@ namespace vknn {
                 // The fusion pass records the chain's own layout (all steps agree) in pw_flat.
                 return n.attr.geti("pw_flat", 0) != 0;
             default:
+                // A ShapeDependent descriptor with no arm here (a mis-registration): fall back to the
+                // NC4HW4 default, matching a plain Nc4 op.
                 return false;
         }
     }

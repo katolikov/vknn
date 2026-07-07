@@ -30,34 +30,35 @@ namespace vknn {
         rt.dtype = DType::Float32;
         rt.host.resizeElems(elems, DType::Float32);
         float *f = rt.host.f32();
-        auto   n = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
+        // Elements that fit in both the destination (elems) and the caller buffer at bytesPer each.
+        auto fitElems = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
         switch (src)
         {
             case DType::Float32: {
-                int64_t c = n(4);
+                int64_t c = fitElems(4);
                 std::memcpy(f, in.data(), (size_t) c * 4);
                 break;
             }
             case DType::Float16: {
                 const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
-                for (int64_t i = 0, c = n(2); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(2); i < c; ++i)
                     f[i] = halfToFloat(h[i]);
                 break;
             }
             case DType::UInt8:
-                for (int64_t i = 0, c = n(1); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(1); i < c; ++i)
                     f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
                 break;
             case DType::Int8:
-                for (int64_t i = 0, c = n(1); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(1); i < c; ++i)
                     f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
                 break;
             case DType::Int32:
-                for (int64_t i = 0, c = n(4); i < c; ++i)
+                for (int64_t i = 0, c = fitElems(4); i < c; ++i)
                     f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
                 break;
             default: {
-                int64_t c = n(4);
+                int64_t c = fitElems(4);
                 std::memcpy(f, in.data(), (size_t) c * 4);
                 break;
             }
@@ -137,15 +138,15 @@ namespace vknn {
     }
 
     std::unique_ptr<Session> Session::createFromVxm(const std::string &path, const Config &cfg) {
-        Graph g;
-        if (!loadGraphBin(g, path))
+        std::vector<Graph>       buckets;
+        std::vector<std::string> names;
+        if (!loadGraphBinBuckets(buckets, names, path) || buckets.empty())
         {
             VKNN_ERROR << "failed to load .vxm: " << path;
             return nullptr;
         }
         auto s             = std::unique_ptr<Session>(new Session());
-        s->graphOptimized_ = true; // passes already baked in
-        s->graph_          = std::move(g);
+        s->graphOptimized_ = true; // passes already baked in; buckets carry one shape each
         s->cfg_            = cfg;
         if (s->cfg_.cacheFile.empty())
         {
@@ -154,31 +155,53 @@ namespace vknn {
         cfg.applyLogLevel();
         s->profiler_.setEnabled(cfg.profile);
         auto t0 = std::chrono::high_resolution_clock::now();
-        s->plan();
-        auto t1 = std::chrono::high_resolution_clock::now();
-        VKNN_INFO << "Session created from .vxm in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
+        // A .vxm carries one already-optimized graph per declared shape. Compile every stored bucket
+        // over the shared backends so run() can dispatch among them by input shape. A single-bucket
+        // file (every fixed-shape model) yields exactly one PlanBucket, unchanged from before.
+        s->ensureBackends();
+        for (size_t b = 0; b < buckets.size(); ++b)
+        {
+            std::string key = Session::shapeKey(buckets[b]);
+            s->buckets_.push_back(s->buildBucket(std::move(buckets[b]), key));
+        }
+        s->planned_ = true;
+        auto t1     = std::chrono::high_resolution_clock::now();
+        VKNN_INFO << "Session created from .vxm in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms (" << s->buckets_.size() << " bucket(s))";
         return s;
     }
 
     bool Session::saveOptimized(const std::string &path) const {
-        return saveGraphBin(graph_, path);
+        return saveGraphBin(*buckets_.front().graph, path);
     }
 
     std::unique_ptr<Session> Session::create(Graph &&g, const Config &cfg) {
-        auto s    = std::unique_ptr<Session>(new Session());
-        s->graph_ = std::move(g);
-        s->cfg_   = cfg;
+        auto s  = std::unique_ptr<Session>(new Session());
+        s->cfg_ = cfg;
         cfg.applyLogLevel();
         s->profiler_.setEnabled(cfg.profile);
-        auto t0 = std::chrono::high_resolution_clock::now();
-        s->plan();
-        auto t1 = std::chrono::high_resolution_clock::now();
+        // ONNX-built session: retain the pristine imported graph so prepareShapes() can re-run the
+        // pass pipeline at a new declared shape. The default bucket is compiled from a copy so the
+        // pristine graph (with its weights) survives the passes and the freeWeightsAfterUpload reclaim.
+        s->importedGraph_    = g;
+        s->hasImportedGraph_ = true;
+        auto  t0             = std::chrono::high_resolution_clock::now();
+        Graph def            = std::move(g);
+        s->ensureBackends();
+        std::string key = Session::shapeKey(def); // key reflects the input names before shape resolution
+        s->buckets_.push_back(s->buildBucket(std::move(def), key));
+        // The default bucket resolved the input shapes (batch fallback + any Config::inputShapes); key
+        // the bucket by those resolved shapes so run() dispatch matches concrete caller shapes.
+        s->buckets_.front().key = Session::shapeKey(*s->buckets_.front().graph);
+        s->planned_             = true;
+        auto t1                 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
         return s;
     }
 
-    void Session::foldTinyGpuIslands() {
-        int cpuIdx = -1;
+    void Session::foldTinyGpuIslands(PlanBucket &bucket) {
+        Graph            &graph_          = *bucket.graph;
+        std::vector<int> &nodeBackendIdx_ = bucket.nodeBackendIdx;
+        int               cpuIdx          = -1;
         for (size_t i = 0; i < backends_.size(); ++i)
         {
             if (backends_[i]->kind() == BackendKind::Cpu)
@@ -308,21 +331,21 @@ namespace vknn {
                 for (int ni: runNodes[r])
                 {
                     nodeBackendIdx_[ni] = cpuIdx;
+                    if (backends_[cpuIdx]->kind() != cfg_.backend)
+                    {
+                        bucket.fallbackReasons.push_back({graph_.nodes[ni].name, opTypeName(graph_.nodes[ni].type), "tiny GPU island folded to CPU (round-trip cost exceeds the work)"});
+                    }
                 }
                 changed = true; // restart: the fold may have merged neighbours into a new island
             }
         }
     }
 
-    void Session::plan() {
-        // --- graph optimization passes (NCHW IR, static batch=1) ---
-        // Skipped when the graph came from a .vxm (passes already applied at save time).
-        if (!graphOptimized_)
+    void Session::ensureBackends() {
+        if (!backends_.empty())
         {
-            runStandardPasses(graph_); // defaults; the compiler tool sets fusion options explicitly
+            return; // instantiated once per session; every bucket plans over the same backends
         }
-        graph_.topoSort();
-
         // --- instantiate backends in priority order: primary, fallbacks..., CPU last ---
         std::vector<BackendKind> order;
         order.push_back(cfg_.backend);
@@ -361,6 +384,10 @@ namespace vknn {
         {
             throw Error(Status::RuntimeError, "no usable backend");
         }
+        for (auto &b: backends_)
+        {
+            b->configure(cfg_); // apply Config (e.g. disableVkOps) before capability queries
+        }
         VKNN_INFO << "Active backends (priority): " << [&] {
             std::string s;
             for (auto &b: backends_)
@@ -369,6 +396,31 @@ namespace vknn {
             }
             return s;
         }();
+    }
+
+    PlanBucket Session::buildBucket(Graph &&g, const std::string &key) {
+        PlanBucket        bucket;
+        bucket.key   = key;
+        bucket.graph = std::make_unique<Graph>(std::move(g));
+        // Alias the bucket's members under the names the body below was written against, so the plan
+        // logic reads exactly as it did when it lived in plan() over the session members.
+        Graph                    &graph_          = *bucket.graph;
+        std::vector<int>         &nodeBackendIdx_ = bucket.nodeBackendIdx;
+        std::vector<RtTensor>    &pool_           = bucket.pool;
+        std::vector<std::unique_ptr<Segment>> &segments_ = bucket.segments;
+
+        // --- graph optimization passes (NCHW IR; batch=1 fallback + any Config::inputShapes) ---
+        // Skipped when the graph came from a .vxm (passes already applied at save time). The default
+        // fusion set is used (the compiler tool sets fusion options explicitly); the ONNX-load path only
+        // needs the caller's declared input shapes threaded in so a dynamic-spatial model resolves
+        // instead of silently freezing to a 1x1 plan.
+        if (!graphOptimized_)
+        {
+            PassOptions opt;
+            opt.inputShapes = cfg_.inputShapes;
+            runStandardPasses(graph_, opt);
+        }
+        graph_.topoSort();
 
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
         //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
@@ -401,10 +453,7 @@ namespace vknn {
         // the graph weights after upload — essential for fitting a 965M-param fp16 model on-device.
 
         // --- per-node backend assignment (highest-priority backend that supports it) ---
-        for (auto &b: backends_)
-        {
-            b->configure(cfg_); // apply Config (e.g. disableVkOps) before capability queries
-        }
+        // The backends are configured once in ensureBackends(); each bucket only assigns nodes.
         nodeBackendIdx_.assign(graph_.nodes.size(), -1);
         for (size_t n = 0; n < graph_.nodes.size(); ++n)
         {
@@ -424,11 +473,17 @@ namespace vknn {
                 throw Error(Status::Unsupported, std::string("no backend supports op ") + opTypeName(nd.type) + " (" + nd.name + ")");
             }
             nodeBackendIdx_[n] = chosen;
-            // warn if the primary backend couldn't take it
-            if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend) && !byKind_[cfg_.backend]->supportsNode(graph_, nd, dt))
+            // warn if the primary backend couldn't take it; keep the refusal reason for
+            // fallbackReasons() (the support report and fallback diagnostics)
+            if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend))
             {
-                VKNN_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2) << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by " << backendName(cfg_.backend) << " backend -> falling back to "
-                                                                                      << backends_[chosen]->name() << ". Perf note: this op does not run on the requested backend.";
+                std::string why;
+                if (!byKind_[cfg_.backend]->supportsNode(graph_, nd, dt, &why))
+                {
+                    bucket.fallbackReasons.push_back({nd.name, opTypeName(nd.type), why});
+                    VKNN_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2) << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by " << backendName(cfg_.backend) << " backend -> falling back to "
+                                                                                          << backends_[chosen]->name() << " (" << why << "). Perf note: this op does not run on the requested backend.";
+                }
             }
         }
 
@@ -441,14 +496,23 @@ namespace vknn {
         // accelerator.
         if (cfg_.gpuIslandFold())
         {
-            foldTinyGpuIslands();
+            foldTinyGpuIslands(bucket);
         }
 
         // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---
         // Only weights a CPU-assigned node reads need a host copy; GPU ops upload from
-        // graph_.initializers.
+        // graph_.initializers. Every CPU op reads pool payloads through host.f32()/i64() with no
+        // per-site dtype handling, so this load is the one place the stored dtype is honored: a
+        // Float16 payload decodes to fp32 here (via initFloats, which also recovers a rank-0
+        // scalar's element from the payload size), and any other dtype copies through as-is.
         {
             std::set<TensorId> cpuNeeded;
+            auto               need = [&](TensorId t) {
+                if (t != kNoTensor && graph_.isInitializer(t))
+                {
+                    cpuNeeded.insert(t);
+                }
+            };
             for (size_t n = 0; n < graph_.nodes.size(); ++n)
             {
                 bool isCpu = nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Cpu;
@@ -458,38 +522,30 @@ namespace vknn {
                 }
                 for (TensorId in: graph_.nodes[n].inputs)
                 {
-                    if (in != kNoTensor && graph_.isInitializer(in))
-                    {
-                        cpuNeeded.insert(in);
-                    }
+                    need(in);
                 }
+                // Fusion edges reference tensors outside node.inputs; a legacy .vxm may point them
+                // at an initializer, which the op reads from the pool like any other operand.
+                need(graph_.nodes[n].fusedResidual);
+                need(graph_.nodes[n].fusedBias);
             }
             for (TensorId id: graph_.outputs)
             {
-                if (id != kNoTensor && graph_.isInitializer(id))
-                {
-                    cpuNeeded.insert(id);
-                }
+                need(id);
             }
             for (TensorId id: cpuNeeded)
             {
-                RtTensor         &rt  = pool_[id];
-                const HostBuffer &src = graph_.initializers[id];
-                rt.shape              = graph_.tensors[id].shape;
+                RtTensor &rt = pool_[id];
+                rt.shape     = graph_.tensors[id].shape;
                 if (graph_.tensors[id].dtype == DType::Float16)
                 {
-                    int64_t       nel = numElements(rt.shape);
-                    const fp16_t *h   = reinterpret_cast<const fp16_t *>(src.bytes.data());
-                    rt.host.bytes.resize((size_t) nel * 4);
-                    float *f = rt.host.f32();
-                    for (int64_t i = 0; i < nel; ++i)
-                    {
-                        f[i] = halfToFloat(h[i]);
-                    }
+                    std::vector<float> f = initFloats(graph_, id);
+                    rt.host.bytes.resize(f.size() * 4);
+                    std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);
                     rt.dtype = DType::Float32;
                 } else
                 {
-                    rt.host  = src;
+                    rt.host  = graph_.initializers[id];
                     rt.dtype = graph_.tensors[id].dtype;
                 }
                 rt.hostValid = true;
@@ -602,18 +658,18 @@ namespace vknn {
         // a CPU segment consuming a graph input needs the fp32 host copy that bindInput would otherwise
         // produce. When enabled, 8-bit image graph-inputs are uploaded raw and converted on the GPU (see the
         // boundary_convert staging path in the Vulkan backend), skipping the host uint8->fp32->fp16 pack.
-        ioGpuConvert_ = cfg_.backend != BackendKind::Cpu;
+        bucket.ioGpuConvert = cfg_.backend != BackendKind::Cpu;
         for (const auto &seg: segments_)
         {
             if (seg->backend && seg->backend->kind() == BackendKind::Cpu)
             {
-                ioGpuConvert_ = false;
+                bucket.ioGpuConvert = false;
                 break;
             }
         }
         for (const auto &seg: segments_)
         {
-            seg->ioGpuConvert = ioGpuConvert_;
+            seg->ioGpuConvert = bucket.ioGpuConvert;
         }
         // The pipeline/weight/tuning caches are flushed once at teardown (Session::updateCache, from the
         // destructor), not here, so any autotune/pipeline results land in the unified cache file.
@@ -674,13 +730,102 @@ namespace vknn {
             VKNN_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
         }
 
-        planned_ = true;
-        VKNN_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size() << " nodes";
+        VKNN_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size() << " nodes [bucket '" << key << "']";
+        return bucket;
+    }
+
+    // The canonical key for a shape assignment: each graph input's "name=DxDxD" joined by ';'. Buckets
+    // with equal keys are the same plan; run() builds the same string from the bound input shapes.
+    std::string Session::shapeKey(const Graph &graph) {
+        std::string k;
+        for (size_t i = 0; i < graph.inputs.size(); ++i)
+        {
+            const TensorDesc &d = graph.desc(graph.inputs[i]);
+            if (i)
+            {
+                k += ';';
+            }
+            k += d.name;
+            k += '=';
+            k += shapeStr(d.shape);
+        }
+        return k;
+    }
+
+    std::string Session::runShapeKey(const std::vector<IOTensor> &inputs) const {
+        // Resolve each default-bucket input to the shape this run binds for it (an unbound or empty
+        // caller shape adopts the default bucket's shape), then build the same key shapeKey() produces.
+        // A single-input graph binds by position when the sole caller entry names no input or names one
+        // the graph does not have — the same forgiving single-input match run()'s bind loop applies.
+        const Graph &g          = *buckets_.front().graph;
+        const bool   singleBind = g.inputs.size() == 1 && inputs.size() == 1;
+        std::string  k;
+        for (size_t i = 0; i < g.inputs.size(); ++i)
+        {
+            const TensorDesc &d     = g.desc(g.inputs[i]);
+            Shape             shape = d.shape;
+            for (const auto &io: inputs)
+            {
+                bool match = io.name == d.name || singleBind;
+                if (match && !io.shape.empty())
+                {
+                    shape = io.shape;
+                    break;
+                }
+            }
+            if (i)
+            {
+                k += ';';
+            }
+            k += d.name;
+            k += '=';
+            k += shapeStr(shape);
+        }
+        return k;
+    }
+
+    Status Session::prepareShapes(const std::map<std::string, Shape> &shapes) {
+        if (!hasImportedGraph_)
+        {
+            VKNN_ERROR << "prepareShapes: this session was loaded from a .vxm; its buckets are fixed at "
+                          "compile time. Recompile with vknn_compile --bucket to add shapes.";
+            return Status::Unsupported;
+        }
+        // Re-run the whole pipeline from the pristine imported graph at the declared shapes, then key
+        // the bucket by the shapes the passes actually resolved. If that key already exists this is a
+        // no-op (re-declaring a prepared shape is idempotent).
+        Config saved       = cfg_;
+        cfg_.inputShapes = shapes; // threaded into the passes by buildBucket via cfg_
+        Graph      copy    = importedGraph_;
+        std::string k;
+        try
+        {
+            PlanBucket b = buildBucket(std::move(copy), std::string());
+            b.key        = shapeKey(*b.graph);
+            k            = b.key;
+            for (const auto &existing: buckets_)
+            {
+                if (existing.key == k)
+                {
+                    cfg_ = saved;
+                    return Status::Ok; // already planned this shape
+                }
+            }
+            buckets_.push_back(std::move(b));
+        } catch (const Error &e)
+        {
+            cfg_ = saved;
+            VKNN_ERROR << "prepareShapes: " << e.what();
+            return e.status();
+        }
+        cfg_ = saved;
+        VKNN_INFO << "prepareShapes: added bucket '" << k << "' (" << buckets_.size() << " total)";
+        return Status::Ok;
     }
 
     std::vector<BackendKind> Session::nodeBackends() const {
         std::vector<BackendKind> v;
-        for (int bi: nodeBackendIdx_)
+        for (int bi: buckets_.front().nodeBackendIdx)
         {
             v.push_back(bi >= 0 ? backends_[bi]->kind() : BackendKind::Cpu);
         }
@@ -689,24 +834,50 @@ namespace vknn {
 
     std::vector<std::string> Session::fallbackOps() const {
         std::vector<std::string> v;
-        for (size_t n = 0; n < nodeBackendIdx_.size() && n < graph_.nodes.size(); ++n)
+        const PlanBucket        &b0 = buckets_.front();
+        for (size_t n = 0; n < b0.nodeBackendIdx.size() && n < b0.graph->nodes.size(); ++n)
         {
-            int bi = nodeBackendIdx_[n];
+            int bi = b0.nodeBackendIdx[n];
             if (bi >= 0 && backends_[bi]->kind() != cfg_.backend)
             {
-                v.push_back(std::string(opTypeName(graph_.nodes[n].type)) + " " + graph_.nodes[n].name);
+                v.push_back(std::string(opTypeName(b0.graph->nodes[n].type)) + " " + b0.graph->nodes[n].name);
             }
         }
         return v;
     }
 
     const RtTensor *Session::tensor(const std::string &name) const {
-        TensorId id = graph_.find(name);
+        const PlanBucket &b0 = buckets_.front();
+        TensorId          id = b0.graph->find(name);
         if (id == kNoTensor)
         {
             return nullptr;
         }
-        return &pool_[id];
+        return &b0.pool[id];
+    }
+
+    // Buffer sizes, push constants, and dispatch geometry are frozen from a bucket's graph shapes at
+    // plan() time, so a caller shape whose packed footprint differs from the bucket would overrun
+    // (or misread) the mapped boundary buffer at pack time. Every run() input shape passes through
+    // this single check once its bucket is selected; an empty caller shape adopts the bucket's shape
+    // and always passes. An unresolved bucket shape (element count <= 0) accepts any caller shape,
+    // mirroring the fully-dynamic escape in the vector<float> overload.
+    Status Session::validateInputShape(const PlanBucket &bucket, TensorId id, const Shape &got) const {
+        const TensorDesc &d = bucket.graph->tensors[id];
+        if (got.empty() || got == d.shape || numElements(d.shape) <= 0)
+        {
+            return Status::Ok;
+        }
+        // Stored footprint under the tensor's planned packing: flat tensors store dense row-major
+        // elements, everything else packs NC4HW4 (channels padded to blocks of four). The element
+        // size is the same for both shapes, so equal stored element counts mean equal byte counts.
+        TensorFormat fmt = d.gpuFlat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+        if (formatElems(fmt, NCHW::from(got)) != formatElems(fmt, NCHW::from(d.shape)))
+        {
+            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not fit the planned shape " << shapeStr(d.shape);
+            return Status::InvalidArgument;
+        }
+        return Status::Ok;
     }
 
     Status Session::run(const std::vector<IOTensor> &inputs, std::vector<IOTensor> &outputs) {
@@ -714,7 +885,49 @@ namespace vknn {
         auto       now = [] {
             return std::chrono::high_resolution_clock::now();
         };
-        auto        tA = now();
+        auto tA = now();
+
+        // --- select the plan bucket by the bound input shapes (the W0.1 shape choke point, now the
+        //     bucket selector). A fixed-shape model has ONE bucket and takes the fast path below: no
+        //     key is built, so the hot path allocates nothing new for a bucket lookup. A multi-bucket
+        //     session builds the run's shape key and dispatches by exact match; an unknown shape lists
+        //     the available shapes and is rejected with no compute.
+        //
+        //     Single-bucket runs still honor validateInputShape() (footprint fit), preserving the
+        //     pre-bucket contract where a caller may bind a different-but-same-footprint shape (the CPU
+        //     dynamic-reshape path). A multi-bucket session requires an exact per-shape plan instead.
+        PlanBucket *sel = &buckets_.front();
+        if (buckets_.size() > 1)
+        {
+            std::string wantKey = runShapeKey(inputs);
+            sel                 = nullptr;
+            for (auto &b: buckets_)
+            {
+                if (b.key == wantKey)
+                {
+                    sel = &b;
+                    break;
+                }
+            }
+            if (!sel)
+            {
+                std::string avail;
+                for (size_t i = 0; i < buckets_.size(); ++i)
+                {
+                    avail += (i ? ", " : "") + buckets_[i].key;
+                }
+                VKNN_ERROR << "run: input shape (" << wantKey << ") matches no compiled bucket; available: " << avail << ". Add it with prepareShapes() (ONNX session) or recompile with --bucket.";
+                return Status::InvalidArgument;
+            }
+        }
+        PlanBucket &bucket = *sel;
+        // Alias the selected bucket's state under the names the body below was written against; run()
+        // is otherwise unchanged, so a fixed-shape model's single bucket runs exactly as before.
+        Graph                                 &graph_        = *bucket.graph;
+        std::vector<RtTensor>                 &pool_         = bucket.pool;
+        std::vector<std::unique_ptr<Segment>> &segments_     = bucket.segments;
+        const bool                             ioGpuConvert_ = bucket.ioGpuConvert;
+
         ExecContext ctx;
         ctx.pool     = &pool_;
         ctx.graph    = &graph_;
@@ -746,7 +959,11 @@ namespace vknn {
                     return Status::InvalidArgument;
                 }
             }
-            RtTensor &rt    = pool_[id];
+            RtTensor &rt = pool_[id];
+            if (Status vs = validateInputShape(bucket, id, io.shape); vs != Status::Ok)
+            {
+                return vs;
+            }
             rt.shape        = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
             rt.dmaBufFd     = io.dmaBufFd;
             rt.dmaBufFormat = io.dmaBufFormat;
@@ -769,7 +986,10 @@ namespace vknn {
                 // Convert the caller's bytes (in io.dtype) to the internal compute storage: fp32 for every
                 // real/8-bit/32-bit type (the compute path is fp32), int64 for Int64 (shape/index inputs).
                 // A UINT8/FLOAT16 image thus enters as fp32 and the model's own Cast handles the rest.
-                bindInput(io.dtype, io.data, numElements(rt.shape), rt);
+                // A rank-0 scalar input (shape [], numElements() 0) carries its one element, so the host
+                // buffer is non-empty and a CPU op reading the operand does not dereference a null pointer.
+                int64_t elems = rt.shape.empty() ? 1 : numElements(rt.shape);
+                bindInput(io.dtype, io.data, elems, rt);
                 rt.hostValid = true;
             }
             rt.deviceValid = false;
@@ -863,8 +1083,11 @@ namespace vknn {
             if (rt.dmaBufFd < 0)
             {
                 // Emit the output in the model's DECLARED dtype (e.g. a UINT8 image, FLOAT16 tensor),
-                // converting from the internal fp32/int64 storage. Matches the ONNX output contract.
-                readbackOutput(graph_.tensors[oid].dtype, rt, numElements(rt.shape), io);
+                // converting from the internal fp32/int64 storage. Matches the ONNX output contract. A
+                // rank-0 scalar output (shape [], numElements() 0) counts its one element so the dtype
+                // conversion emits the value rather than an empty buffer.
+                int64_t outElems = rt.shape.empty() ? 1 : numElements(rt.shape);
+                readbackOutput(graph_.tensors[oid].dtype, rt, outElems, io);
             } else
             {
                 io.dtype = rt.dtype; // a bound output lives in the caller's fd, not here
@@ -912,6 +1135,7 @@ namespace vknn {
     }
 
     std::vector<IOInfo> Session::inputInfo() const {
+        const Graph        &graph_ = *buckets_.front().graph;
         std::vector<IOInfo> v;
         for (TensorId id: graph_.inputs)
         {
@@ -921,6 +1145,7 @@ namespace vknn {
     }
 
     std::vector<IOInfo> Session::outputInfo() const {
+        const Graph        &graph_ = *buckets_.front().graph;
         std::vector<IOInfo> v;
         for (TensorId id: graph_.outputs)
         {
@@ -930,6 +1155,9 @@ namespace vknn {
     }
 
     Status Session::run(const std::vector<std::vector<float>> &inputData, std::vector<IOTensor> &outputs) {
+        // The convenience overload binds one buffer per input in default-bucket order; the built
+        // IOTensors carry each input's default-bucket shape so run() dispatches to the default bucket.
+        const Graph &graph_ = *buckets_.front().graph;
         if (inputData.size() != graph_.inputs.size())
         {
             VKNN_ERROR << "run: expected " << graph_.inputs.size() << " input(s), got " << inputData.size();

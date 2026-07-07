@@ -9,9 +9,13 @@ namespace vknn {
     // inputs, gates the removal strictly to a float input and a float ONNX target so genuine
     // int<->float casts (shape / index paths) are left intact.
     void eliminateFloatCast(Graph &g) {
+        // ONNX TensorProto.DataType codes for the float element types a Cast can target.
+        constexpr int64_t kOnnxFloat   = 1;
+        constexpr int64_t kOnnxFloat16 = 10;
+        constexpr int64_t kOnnxDouble  = 11;
         auto onnxToIsFloat = [](int64_t to) {
-            return to == 1 || to == 10 || to == 11;
-        }; // FLOAT/FLOAT16/DOUBLE
+            return to == kOnnxFloat || to == kOnnxFloat16 || to == kOnnxDouble;
+        };
         auto isFloat = [](DType d) {
             return d == DType::Float32 || d == DType::Float16;
         };
@@ -82,6 +86,21 @@ namespace vknn {
             } else if (nd.type == OpType::Equal)
             {
                 out = DType::Int32; // boolean result, not float
+            } else if (nd.type == OpType::TopK)
+            {
+                // Per-output dtypes: values (output 0) carry the data input's dtype; indices
+                // (output 1) are int64, so a Cast-to-float of the indices is a genuine int->float
+                // cast and must be kept.
+                if (nd.outputs.size() > 1)
+                {
+                    setk(nd.outputs[1], DType::Int64);
+                }
+                TensorId pin = nd.inputs.empty() ? kNoTensor : nd.inputs[0];
+                if (pin != kNoTensor && pin < (TensorId) known.size() && known[pin])
+                {
+                    setk(nd.outputs[0], dt[pin]);
+                }
+                continue;
             } else if (floatResult(nd.type))
             {
                 out = DType::Float32;

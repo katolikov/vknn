@@ -1,0 +1,30 @@
+#version 450
+#include "precision.glsl"
+// Inference BatchNorm over NC4HW4 with RUNTIME parameters: gamma/beta/mean/var arrive as SSBOs (a
+// computed affine, not baked initializers), so the per-channel fold happens here instead of on the
+// host. out = in * (gamma/sqrt(var+eps)) + (beta - mean*gamma/sqrt(var+eps)), per channel. The params
+// are 1-D [C] tensors; in NC4HW4 with H=W=1 channel c lands at index c, so the shader reads them by
+// channel directly. fp16/fp32 storage, fp32 math. Mirrors batchnorm.comp's math with the fold inlined.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S  { STORE s[]; };
+layout(std430, binding = 1) readonly  buffer G  { STORE gamma[]; };
+layout(std430, binding = 2) readonly  buffer B  { STORE beta[]; };
+layout(std430, binding = 3) readonly  buffer M  { STORE mean[]; };
+layout(std430, binding = 4) readonly  buffer V  { STORE varr[]; };
+layout(std430, binding = 5) writeonly buffer D  { STORE d[]; };
+layout(push_constant) uniform PC { int count, Cb, HW, C; float eps; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.count)) return;
+  int lane = int(gid) % 4;
+  int cb = (int(gid) / 4 / pc.HW) % pc.Cb;
+  int c = cb * 4 + lane;
+  // Padded NC4HW4 lanes (c >= C) have no real channel; their output is unused, so clamp the param
+  // read in-bounds and let the result be discarded downstream.
+  int cc = c < pc.C ? c : 0;
+  float a = float(gamma[cc]) / sqrt(float(varr[cc]) + pc.eps);
+  float b = float(beta[cc]) - float(mean[cc]) * a;
+  d[gid] = STORE(float(s[gid]) * a + b);
+}

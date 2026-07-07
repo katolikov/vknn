@@ -23,7 +23,8 @@ The runtime pipeline is:
 ONNX file
   -> dependency-free protobuf parser
   -> backend-agnostic NCHW IR (vknn::Graph)
-  -> graph passes (inferShapes, foldBatchNorm, fuseActivations, constFold, eliminateDeadNodes)
+  -> graph passes (inferShapes, foldBatchNorm/lowerBatchNorm, constFold,
+     fusePointwiseChains, eliminateDeadNodes)
   -> Session partitions the topo-ordered nodes into maximal same-backend "segments"
   -> backends compile + run each segment
 ```
@@ -85,7 +86,7 @@ means a new `BackendKind` enumerator there.
 BackendKind kind() const override { return BackendKind::Cpu; }
 ```
 
-### `name()` — human-readable label
+### `name()` — a short label
 
 Used in logs and profiler tags. Keep it short.
 

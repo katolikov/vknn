@@ -1,9 +1,10 @@
 // LayerNormalization on the GPU via the FLAT (row-major) path. One WORKGROUP per OUTER row (outer =
 // product of dims before `axis`); the workgroup's threads cooperatively LDS-reduce the row's
 // normalized block (norm = product of dims from `axis` to the end) to mean and variance, then write
-// (x-mean)/sqrt(var+eps)*gamma + beta. gamma (Scale) and beta (B, optional) are 1-D [norm]
-// initializers, uploaded as flat constant buffers in prepare(). Output shape == input shape.
-// supportsNode gates to scale/bias-as-initializers.
+// (x-mean)/sqrt(var+eps)*gamma + beta. gamma (Scale) and beta (B, optional) are 1-D [norm] tensors.
+// A constant scale/bias uploads as a flat buffer in prepare(); a RUNTIME (computed) scale/bias binds
+// its activation buffer directly at dispatch — the shader reads gamma[j]/beta[j] the same way in both
+// cases, so only the buffer source differs. Output shape == input shape.
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
@@ -20,7 +21,8 @@ namespace vknn {
         struct LayerNormOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             LnPC                                 pc {};
-            std::shared_ptr<vk::Buffer>          gammaBuf, betaBuf;
+            std::shared_ptr<vk::Buffer>          gammaBuf, betaBuf; // hold the CONST/zero buffers; null for a runtime operand
+            bool                                 rtGamma = false, rtBeta = false;
             PwEpi                                epi;
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -51,20 +53,27 @@ namespace vknn {
                     norm = 1;
                 }
                 int64_t outer   = numElements(s) / norm;
-                bool    hasBeta = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor && g.isInitializer(node.inputs[2]);
+                bool    hasBeta = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor;
                 pc              = {(int) outer, (int) norm, hasBeta ? 1 : 0, node.attr.getf("epsilon", 1e-5f)};
 
-                // gamma (Scale) is a 1-D [norm] initializer; upload it flat.
-                std::vector<float> gv = initFloats(g, node.inputs[1]);
-                gv.resize(norm);
-                gammaBuf = upload(*env.ctx, gv, env.useFp16);
-                // beta (optional): real bias, or a zero buffer so binding 2 is always valid.
-                if (hasBeta)
+                // gamma (Scale) is a 1-D [norm] tensor. A constant uploads flat here; a runtime scale
+                // binds its activation buffer at dispatch (record()).
+                rtGamma = !g.isInitializer(node.inputs[1]);
+                if (!rtGamma)
+                {
+                    std::vector<float> gv = initFloats(g, node.inputs[1]);
+                    gv.resize(norm);
+                    gammaBuf = upload(*env.ctx, gv, env.useFp16);
+                }
+                // beta (optional): a constant real bias uploads here, a runtime bias binds at dispatch,
+                // and an absent bias becomes a zero buffer so binding 2 is always valid.
+                rtBeta = hasBeta && !g.isInitializer(node.inputs[2]);
+                if (hasBeta && !rtBeta)
                 {
                     std::vector<float> bv = initFloats(g, node.inputs[2]);
                     bv.resize(norm);
                     betaBuf = upload(*env.ctx, bv, env.useFp16);
-                } else
+                } else if (!hasBeta)
                 {
                     betaBuf = upload(*env.ctx, std::vector<float>((size_t) norm, 0.0f), env.useFp16);
                 }
@@ -76,8 +85,11 @@ namespace vknn {
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 // Bind order must match the shader: input, gamma, beta, output, then epilogue buffers.
-                VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
-                std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), gammaBuf->handle(), betaBuf->handle(), dst};
+                // A const scale/bias uses its uploaded buffer; a runtime one binds its activation buffer.
+                VkBuffer              dst   = env.devBuf(node.outputs[0])->handle();
+                VkBuffer              gamma = rtGamma ? env.devBuf(node.inputs[1])->handle() : gammaBuf->handle();
+                VkBuffer              beta  = rtBeta ? env.devBuf(node.inputs[2])->handle() : betaBuf->handle();
+                std::vector<VkBuffer> bufs  = {env.devBuf(node.inputs[0])->handle(), gamma, beta, dst};
                 epi.append(bufs, node, env, dst);
                 // Group count = outer (one workgroup per row; flat_layernorm reduces across the
                 // workgroup via LDS). dispatch() spills an outer that exceeds the per-dim group limit

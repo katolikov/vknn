@@ -1,12 +1,21 @@
 // Save/load the optimized vknn graph (post-import, post-passes) as a compact binary ".vxm" so a
 // reload skips both ONNX protobuf parsing and all graph passes. Self-contained (embeds weights).
 // Complements the weight/pipeline/tuning caches for fast warm starts.
+//
+// A ".vxm" holds either ONE graph (the "VXM3" container, a fixed-shape model) or SEVERAL shape
+// buckets (the "VXM4" container). A bucket is a full pass+plan graph product for one declared
+// input-shape set; buckets may differ in node identity (lowerConv/subpixel/layout-converts depend on
+// shape) but share ONE content-deduped initializer pool because weights are shape-independent. A
+// single-bucket save writes the VXM3 container verbatim, so a fixed-shape model's on-disk bytes are
+// unchanged by the multi-bucket feature; the VXM4 container is written only for two or more buckets.
 #include "vknn/graph.h"
 #include "vknn/logging.h"
 #include "vknn/op.h"
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace vknn {
 
@@ -17,6 +26,12 @@ namespace vknn {
         // pw_steps encoding from 4-int chain records to 8-int register-DAG records (+pw_outs);
         // older files fail the check rather than mis-parse their fused nodes.
         constexpr uint32_t kMagic = 0x334d5856; // "VXM3"
+        // Multi-bucket container magic. A VXM4 file is: this word, the bucket count, a shared
+        // initializer pool (content-deduped blobs), then one entry per bucket -- its name and its
+        // graph body, whose initializer table references pool blobs by index instead of inlining
+        // bytes. Single-bucket files stay VXM3 (byte-identical to legacy). A reader dispatches on the
+        // leading word, so old files load as one bucket and new single-bucket files match legacy.
+        constexpr uint32_t kMagic4 = 0x344d5856; // "VXM4"
 
         // Raw fixed-width serialization: every pod()/vec() writes host-endian bytes with no framing.
         // The Reader must consume fields in the exact same order the Writer emits them.
@@ -107,6 +122,97 @@ namespace vknn {
             a.str    = r.str();
             return a;
         }
+
+        // Write the tensor and node tables plus the graph I/O id lists -- everything in a graph body
+        // except the initializers, which the two container formats serialize differently (VXM3 inlines
+        // bytes per body; VXM4 references a shared pool). The byte layout is exactly the legacy one up
+        // to the initializer section, so a VXM3 body written here matches the pre-bucket format.
+        void writeGraphStructure(Writer &w, const Graph &g) {
+            w.u32((uint32_t) g.tensors.size());
+            for (const auto &t: g.tensors)
+            {
+                w.str(t.name);
+                w.vec(t.shape);
+                w.u32((uint32_t) t.dtype);
+                w.u32((uint32_t) t.format);
+                // Pack the three tensor roles into one word: bit0 input, bit1 output, bit2 initializer.
+                w.u32((t.isInput ? 1u : 0) | (t.isOutput ? 2u : 0) | (t.isInitializer ? 4u : 0));
+            }
+            w.u32((uint32_t) g.nodes.size());
+            for (const auto &n: g.nodes)
+            {
+                w.u32((uint32_t) n.type);
+                w.str(n.name);
+                w.vec(n.inputs);
+                w.vec(n.outputs);
+                w.u32((uint32_t) n.fusedAct);
+                w.f32(n.actLo);
+                w.f32(n.actHi);
+                // subOp (int32) and the fused-tensor ids (TensorId == int32, kNoTensor when unset) are
+                // stored as i64 so the on-disk width is independent of the in-memory type; the load
+                // path narrows them back.
+                w.i64(n.subOp);
+                w.i64(n.fusedResidual);
+                w.i64(n.fusedBias);
+                w.u32((uint32_t) n.attr.map.size());
+                for (const auto &kv: n.attr.map)
+                {
+                    w.str(kv.first);
+                    writeAttr(w, kv.second);
+                }
+            }
+            w.vec(g.inputs);
+            w.vec(g.outputs);
+        }
+
+        // Read the tensor/node/I/O tables written by writeGraphStructure into a fresh graph body and
+        // rebuild the derived name index. Initializers are read separately by the caller.
+        void readGraphStructure(Reader &r, Graph &g) {
+            uint32_t nt = r.u32();
+            g.tensors.resize(nt);
+            for (uint32_t i = 0; i < nt; ++i)
+            {
+                TensorDesc &t   = g.tensors[i];
+                t.name          = r.str();
+                t.shape         = r.vec<int64_t>();
+                t.dtype         = (DType) r.u32();
+                t.format        = (TensorFormat) r.u32();
+                uint32_t flags  = r.u32();
+                t.isInput       = flags & 1;
+                t.isOutput      = flags & 2;
+                t.isInitializer = flags & 4;
+                // tensorByName is a derived index, not serialized: rebuild it from tensor position as
+                // tensors are read. Unnamed tensors are addressed only by id and stay out of the map.
+                if (!t.name.empty())
+                {
+                    g.tensorByName[t.name] = (TensorId) i;
+                }
+            }
+            uint32_t nn = r.u32();
+            g.nodes.resize(nn);
+            for (uint32_t i = 0; i < nn; ++i)
+            {
+                Node &n         = g.nodes[i];
+                n.type          = (OpType) r.u32();
+                n.name          = r.str();
+                n.inputs        = r.vec<TensorId>();
+                n.outputs       = r.vec<TensorId>();
+                n.fusedAct      = (ActType) r.u32();
+                n.actLo         = r.f32();
+                n.actHi         = r.f32();
+                n.subOp         = (int32_t) r.i64();
+                n.fusedResidual = (TensorId) r.i64();
+                n.fusedBias     = (TensorId) r.i64();
+                uint32_t na     = r.u32();
+                for (uint32_t a = 0; a < na; ++a)
+                {
+                    std::string k = r.str();
+                    n.attr.map[k] = readAttr(r);
+                }
+            }
+            g.inputs  = r.vec<TensorId>();
+            g.outputs = r.vec<TensorId>();
+        }
     } // namespace
 
     bool saveGraphBin(const Graph &g, const std::string &path) {
@@ -118,44 +224,8 @@ namespace vknn {
         }
         Writer w {f};
         w.u32(kMagic);
-        // tensors
-        w.u32((uint32_t) g.tensors.size());
-        for (const auto &t: g.tensors)
-        {
-            w.str(t.name);
-            w.vec(t.shape);
-            w.u32((uint32_t) t.dtype);
-            w.u32((uint32_t) t.format);
-            // Pack the three tensor roles into one word: bit0 input, bit1 output, bit2 initializer.
-            w.u32((t.isInput ? 1u : 0) | (t.isOutput ? 2u : 0) | (t.isInitializer ? 4u : 0));
-        }
-        // nodes
-        w.u32((uint32_t) g.nodes.size());
-        for (const auto &n: g.nodes)
-        {
-            w.u32((uint32_t) n.type);
-            w.str(n.name);
-            w.vec(n.inputs);
-            w.vec(n.outputs);
-            w.u32((uint32_t) n.fusedAct);
-            w.f32(n.actLo);
-            w.f32(n.actHi);
-            // subOp (int32) and the fused-tensor ids (TensorId == int32, kNoTensor when unset) are
-            // stored as i64 so the on-disk width is independent of the in-memory type; the load path
-            // narrows them back.
-            w.i64(n.subOp);
-            w.i64(n.fusedResidual);
-            w.i64(n.fusedBias);
-            w.u32((uint32_t) n.attr.map.size());
-            for (const auto &kv: n.attr.map)
-            {
-                w.str(kv.first);
-                writeAttr(w, kv.second);
-            }
-        }
-        w.vec(g.inputs);
-        w.vec(g.outputs);
-        // initializers
+        writeGraphStructure(w, g);
+        // initializers (inlined bytes, keyed by tensor id -- the VXM3 layout)
         w.u32((uint32_t) g.initializers.size());
         for (const auto &kv: g.initializers)
         {
@@ -168,70 +238,159 @@ namespace vknn {
     }
 
     bool loadGraphBin(Graph &g, const std::string &path) {
+        std::vector<Graph>       buckets;
+        std::vector<std::string> names;
+        if (!loadGraphBinBuckets(buckets, names, path) || buckets.empty())
+        {
+            return false;
+        }
+        // Single-graph callers take the first bucket. A VXM3 file has exactly one; a VXM4 file's
+        // buckets are all the same model at different shapes, so bucket 0 is a valid representative.
+        g = std::move(buckets.front());
+        return true;
+    }
+
+    bool saveGraphBinBuckets(const std::vector<Graph> &buckets, const std::vector<std::string> &names, const std::string &path) {
+        if (buckets.empty())
+        {
+            VKNN_WARN << "saveGraphBuckets: no buckets to write " << path;
+            return false;
+        }
+        // A single bucket is a fixed-shape model: write the legacy VXM3 container so its on-disk bytes
+        // are unchanged by the multi-bucket feature.
+        if (buckets.size() == 1)
+        {
+            return saveGraphBin(buckets.front(), path);
+        }
+        FILE *f = fopen(path.c_str(), "wb");
+        if (!f)
+        {
+            VKNN_WARN << "saveGraphBuckets: cannot write " << path;
+            return false;
+        }
+        Writer w {f};
+        w.u32(kMagic4);
+        w.u32((uint32_t) buckets.size());
+        // Build the content-deduped initializer pool: identical payloads across buckets (the common
+        // case -- weights are shape-independent) collapse to one blob. A blob is keyed by its raw
+        // bytes; a bucket then references its initializers by pool index.
+        std::vector<const std::vector<uint8_t> *> pool;
+        std::map<std::string, uint32_t>           poolIndex; // payload bytes -> pool slot
+        auto                                      internPayload = [&](const std::vector<uint8_t> &bytes) -> uint32_t {
+            std::string key(bytes.begin(), bytes.end());
+            auto        it = poolIndex.find(key);
+            if (it != poolIndex.end())
+            {
+                return it->second;
+            }
+            uint32_t slot = (uint32_t) pool.size();
+            pool.push_back(&bytes);
+            poolIndex.emplace(std::move(key), slot);
+            return slot;
+        };
+        // Reference-map every bucket's initializers into the pool first, so the pool blob table is
+        // written once ahead of the bucket bodies.
+        std::vector<std::vector<std::pair<int64_t, uint32_t>>> bucketInits(buckets.size());
+        for (size_t b = 0; b < buckets.size(); ++b)
+        {
+            for (const auto &kv: buckets[b].initializers)
+            {
+                bucketInits[b].emplace_back(kv.first, internPayload(kv.second.bytes));
+            }
+        }
+        // Shared pool: one blob per distinct payload.
+        w.u32((uint32_t) pool.size());
+        for (const auto *blob: pool)
+        {
+            w.vec(*blob);
+        }
+        // Per bucket: name, graph structure, then its (tensor id -> pool index) initializer table.
+        int64_t totalWeights = 0;
+        for (size_t b = 0; b < buckets.size(); ++b)
+        {
+            w.str(b < names.size() ? names[b] : std::string());
+            writeGraphStructure(w, buckets[b]);
+            w.u32((uint32_t) bucketInits[b].size());
+            for (const auto &ref: bucketInits[b])
+            {
+                w.i64(ref.first);
+                w.u32(ref.second);
+            }
+            totalWeights += (int64_t) bucketInits[b].size();
+        }
+        fclose(f);
+        VKNN_INFO << "saved optimized model -> " << path << " (" << buckets.size() << " buckets, " << pool.size() << " shared weights, " << totalWeights << " refs)";
+        return true;
+    }
+
+    bool loadGraphBinBuckets(std::vector<Graph> &buckets, std::vector<std::string> &names, const std::string &path) {
         FILE *f = fopen(path.c_str(), "rb");
         if (!f)
         {
             return false;
         }
-        Reader r {f};
-        if (r.u32() != kMagic)
+        Reader   r {f};
+        uint32_t magic = r.u32();
+        if (magic == kMagic)
+        {
+            // Legacy single-bucket container: one graph, initializers inlined.
+            buckets.clear();
+            names.clear();
+            buckets.emplace_back();
+            names.emplace_back();
+            Graph &g = buckets.back();
+            readGraphStructure(r, g);
+            uint32_t ni = r.u32();
+            for (uint32_t i = 0; i < ni; ++i)
+            {
+                TensorId   id = (TensorId) r.i64();
+                HostBuffer hb;
+                hb.bytes           = r.vec<uint8_t>();
+                g.initializers[id] = std::move(hb);
+            }
+            fclose(f);
+            if (!r.ok)
+            {
+                VKNN_WARN << "loadGraph: truncated " << path;
+                return false;
+            }
+            return true;
+        }
+        if (magic != kMagic4)
         {
             fclose(f);
             VKNN_WARN << "loadGraph: bad magic in " << path;
             return false;
         }
-        g           = Graph {};
-        uint32_t nt = r.u32();
-        g.tensors.resize(nt);
-        for (uint32_t i = 0; i < nt; ++i)
+        // Multi-bucket container: read the shared pool, then each bucket's structure + pool refs.
+        uint32_t nb = r.u32();
+        uint32_t np = r.u32();
+        std::vector<std::vector<uint8_t>> pool(np);
+        for (uint32_t i = 0; i < np; ++i)
         {
-            TensorDesc &t   = g.tensors[i];
-            t.name          = r.str();
-            t.shape         = r.vec<int64_t>();
-            t.dtype         = (DType) r.u32();
-            t.format        = (TensorFormat) r.u32();
-            uint32_t flags  = r.u32();
-            t.isInput       = flags & 1;
-            t.isOutput      = flags & 2;
-            t.isInitializer = flags & 4;
-            // tensorByName is a derived index, not serialized: rebuild it from tensor position as
-            // tensors are read. Unnamed tensors are addressed only by id and stay out of the map.
-            if (!t.name.empty())
-            {
-                g.tensorByName[t.name] = (TensorId) i;
-            }
+            pool[i] = r.vec<uint8_t>();
         }
-        uint32_t nn = r.u32();
-        g.nodes.resize(nn);
-        for (uint32_t i = 0; i < nn; ++i)
+        buckets.clear();
+        names.clear();
+        buckets.resize(nb);
+        names.resize(nb);
+        for (uint32_t b = 0; b < nb; ++b)
         {
-            Node &n         = g.nodes[i];
-            n.type          = (OpType) r.u32();
-            n.name          = r.str();
-            n.inputs        = r.vec<TensorId>();
-            n.outputs       = r.vec<TensorId>();
-            n.fusedAct      = (ActType) r.u32();
-            n.actLo         = r.f32();
-            n.actHi         = r.f32();
-            n.subOp         = (int32_t) r.i64();
-            n.fusedResidual = (TensorId) r.i64();
-            n.fusedBias     = (TensorId) r.i64();
-            uint32_t na     = r.u32();
-            for (uint32_t a = 0; a < na; ++a)
+            names[b] = r.str();
+            Graph &g = buckets[b];
+            readGraphStructure(r, g);
+            uint32_t ni = r.u32();
+            for (uint32_t i = 0; i < ni; ++i)
             {
-                std::string k = r.str();
-                n.attr.map[k] = readAttr(r);
+                TensorId id  = (TensorId) r.i64();
+                uint32_t idx = r.u32();
+                HostBuffer hb;
+                if (idx < pool.size())
+                {
+                    hb.bytes = pool[idx]; // shared payload copied into this bucket's initializer map
+                }
+                g.initializers[id] = std::move(hb);
             }
-        }
-        g.inputs    = r.vec<TensorId>();
-        g.outputs   = r.vec<TensorId>();
-        uint32_t ni = r.u32();
-        for (uint32_t i = 0; i < ni; ++i)
-        {
-            TensorId   id = (TensorId) r.i64();
-            HostBuffer hb;
-            hb.bytes           = r.vec<uint8_t>();
-            g.initializers[id] = std::move(hb);
         }
         fclose(f);
         if (!r.ok)

@@ -1,26 +1,29 @@
 #version 450
 #include "precision.glsl"
 // Flat broadcasting 3-input Where.
+// Geometry (outDim/cStride/xStride/yStride) rides a content-deduped SSBO (binding 4), not the push
+// constant, so the decodable rank is unbounded (see flat::uploadFlatGeom). The four rank-length
+// arrays pack back-to-back: outDim = g[0..rank), cStride = g[rank..2*rank),
+// xStride = g[2*rank..3*rank), yStride = g[3*rank..4*rank).
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer C { STORE cond[]; };
 layout(std430, binding = 1) readonly  buffer X { STORE x[]; };
 layout(std430, binding = 2) readonly  buffer Y { STORE y[]; };
 layout(std430, binding = 3) writeonly buffer D { STORE d[]; };
-layout(push_constant) uniform PC {
-  int rank, total; int outDim[8]; int cStride[8]; int xStride[8]; int yStride[8];
-} pc;
+layout(std430, binding = 4) readonly  buffer G { int g[]; } geom;
+layout(push_constant) uniform PC { int rank, total; } pc;
 
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.total)) return;
   int rem = int(gid), ci = 0, xi = 0, yi = 0;
   for (int k = pc.rank - 1; k >= 0; --k) {
-    int c = rem % pc.outDim[k];
-    rem /= pc.outDim[k];
-    ci += c * pc.cStride[k];
-    xi += c * pc.xStride[k];
-    yi += c * pc.yStride[k];
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    ci += c * geom.g[pc.rank + k];
+    xi += c * geom.g[2 * pc.rank + k];
+    yi += c * geom.g[3 * pc.rank + k];
   }
   d[gid] = (float(cond[ci]) != 0.0) ? x[xi] : y[yi];
 }

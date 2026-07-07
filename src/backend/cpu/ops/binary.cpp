@@ -51,7 +51,7 @@ namespace vknn {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
                     out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t n       = numElements(out);
+                int64_t n       = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand broadcast strides (row-major, built back-to-front). A stride of 0 on a
                 // broadcast axis (operand extent 1 where the output extent is larger) makes every output
                 // index along that axis map to the same source element, i.e. the operand is repeated.

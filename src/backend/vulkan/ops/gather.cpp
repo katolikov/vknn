@@ -10,6 +10,9 @@
 namespace vknn {
     namespace {
 
+        // Local workgroup size along x; matches local_size_x in shaders/gather.comp.
+        constexpr uint32_t kGatherLocalSize = 256;
+
         struct GatherOp: VulkanOp {
             // Field order/types mirror gather.comp's push_constant block. The data tensor is
             // flattened around `axis` into [outer, axisSize, inner]: outer = product of dims before
@@ -88,9 +91,9 @@ namespace vknn {
                 // Const index uses the float buffer uploaded in prepare(); a runtime index reads its
                 // device buffer directly. Either way the kernel treats index[] as float (see header).
                 vk::Buffer *idx = idxBuf ? idxBuf.get() : env.devBuf(node.inputs[1]);
-                // 256 = the shader's local_size_x; groups() rounds pc.total (one thread per output
-                // element) up to whole workgroups. Buffer order matches gather.comp: data, index, out.
-                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), idx->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, 256));
+                // groups() rounds pc.total (one thread per output element) up to whole kGatherLocalSize
+                // workgroups. Buffer order matches gather.comp: data, index, out.
+                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), idx->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, kGatherLocalSize));
             }
         };
 

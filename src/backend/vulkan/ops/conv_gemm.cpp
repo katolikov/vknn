@@ -11,6 +11,7 @@
 // (conv_gemm_ksplit fp32 partials + conv_gemm_kreduce finish); split-K changes the summation
 // order, so it is only ever selected by the race, never by default. Winners persist in the tune
 // cache so warm runs are stable.
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -23,6 +24,10 @@ namespace vknn {
         // faster: it reorders the fp32 summation (fp16-floor legal), so a near-tie must keep the
         // single-pass kernel or timing noise would flip the output bits across cold builds.
         constexpr double kKsplitMargin = 0.97;
+
+        // Local workgroup size along x for the split-K reduce pass; matches local_size_x in
+        // shaders/conv_gemm_kreduce.comp.
+        constexpr uint32_t kKreduceLocalSize = 64;
 
         struct ConvGemmOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
@@ -134,7 +139,7 @@ namespace vknn {
                     auto         pk    = env.pipeline(shader("conv_gemm_ksplit", env.useFp16), 3, sizeof(ConvGemmKsPC), {(uint32_t) tm});
                     auto         pr    = env.pipeline(shader("conv_gemm_kreduce", env.useFp16), 3, sizeof(ConvGemmKrPC));
                     uint32_t     gyT   = (uint32_t) ((M + tm - 1) / tm);
-                    uint32_t     rg    = groups(x.n * Coutb * M, 64);
+                    uint32_t     rg    = groups(x.n * Coutb * M, kKreduceLocalSize);
                     double       ms    = bestOf([&](VkCommandBuffer cmd) {
                         pk->dispatch(cmd, {sSrc->handle(), wt->handle(), sPart->handle()}, &tksp, sizeof(tksp), gxT, gyT, (uint32_t) (x.n * S));
                         vk::computeBarrier(cmd);
@@ -165,7 +170,9 @@ namespace vknn {
                     return v.empty() ? d : v;
                 };
                 auto k = a("kernel_shape", {1, 1}), st = a("strides", {1, 1});
-                auto p = a("pads", {0, 0, 0, 0}), dl = a("dilations", {1, 1});
+                auto dl = a("dilations", {1, 1});
+                // Shared forward geometry (core/conv_geom.h): resolves auto_pad into begin/end pads.
+                auto p = convGeom(x.h, x.w, k[0], k[1], node.attr).pads();
 
                 // Bias presence bounds by pwCoreInputs: inputs appended past it are fused-unit
                 // operands, and reading one as the bias would double-apply it.
@@ -199,7 +206,7 @@ namespace vknn {
                     kspc = {pc.C, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, S, chunk};
                     krpc = {(int) y.n, pc.Cout, (int) M, S, pc.act, pc.hasBias, pc.actLo, pc.actHi};
                     partBuf  = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) y.n * S * Coutb * M * 4 * 4, 16), vk::MemPref::kDeviceOnly);
-                    krGroups = groups(y.n * Coutb * M, 64);
+                    krGroups = groups(y.n * Coutb * M, kKreduceLocalSize);
                     gz       = (uint32_t) (y.n * S);
                     ksPipe = env.pipeline(shader("conv_gemm_ksplit", env.useFp16), 3, sizeof(ConvGemmKsPC), {(uint32_t) tm});
                     krPipe = env.pipeline(shader((std::string("conv_gemm_kreduce") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(ConvGemmKrPC));

@@ -1,10 +1,13 @@
 // vknn unit tests (host): dtype/fp16, config JSON, graph passes, layout packing math, and the
 // ergonomic Session API. Operator correctness lives in test_ops.cpp; Vulkan correctness is
 // validated on-device (see scripts).
+#include "core/matmul_tile.h"
 #include "vknn/config.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
 #include "vknn/model.h"
+#include "vknn/op_type.h"
+#include "vknn/reduce_type.h"
 #include "vknn/session.h"
 #include "vknn/tensor_format.h"
 #include <cmath>
@@ -55,6 +58,42 @@ TEST(Config, ParseExplicit) {
     EXPECT_EQ(c.fallback[0], BackendKind::Vulkan);
 }
 
+TEST(Config, ListContainsWholeNameMatch) {
+    // disableVkOps entries match whole op-type names: "Conv" leaves ConvTranspose/ConvGemm/
+    // ConvertLayout enabled even though Conv is a prefix of all three.
+    EXPECT_TRUE(Config::listContains("Conv", opTypeName(OpType::Conv)));
+    EXPECT_FALSE(Config::listContains("Conv", opTypeName(OpType::ConvTranspose)));
+    EXPECT_FALSE(Config::listContains("Conv", opTypeName(OpType::ConvGemm)));
+    EXPECT_FALSE(Config::listContains("Conv", opTypeName(OpType::ConvertLayout)));
+
+    // Multi-entry list disables exactly the named ops; entries are trimmed of whitespace.
+    const std::string list = " Conv , MatMul ";
+    EXPECT_TRUE(Config::listContains(list, opTypeName(OpType::Conv)));
+    EXPECT_TRUE(Config::listContains(list, opTypeName(OpType::MatMul)));
+    EXPECT_FALSE(Config::listContains(list, opTypeName(OpType::ConvTranspose)));
+    EXPECT_FALSE(Config::listContains(list, opTypeName(OpType::Gemm)));
+    EXPECT_FALSE(Config::listContains(list, opTypeName(OpType::Add)));
+
+    // Reverse containment: an entry never disables an op whose name is its substring.
+    EXPECT_TRUE(Config::listContains("PRelu", opTypeName(OpType::PRelu)));
+    EXPECT_FALSE(Config::listContains("PRelu", opTypeName(OpType::Relu)));
+
+    // Empty list / empty entries match nothing.
+    EXPECT_FALSE(Config::listContains("", "Conv"));
+    EXPECT_FALSE(Config::listContains(",,", "Conv"));
+}
+
+TEST(OpTypes, ReduceNamesSingleSource) {
+    // reduceFromOnnx is the single source of reduce-family name recognition: opTypeFromOnnx
+    // classifies a name as OpType::Reduce exactly when reduceFromOnnx recognizes it. Candidates
+    // cover every current member plus unsupported Reduce* spellings and non-reduce names.
+    for (const char *name: {"ReduceMean", "ReduceSum", "ReduceMax", "ReduceMin", "ReduceProd", "ReduceL2", "ReduceL1", "ReduceLogSum", "ReduceLogSumExp", "ReduceSumSquare", "Reduce", "Conv"})
+    {
+        const bool isReduce = reduceFromOnnx(name) != ReduceType::Invalid;
+        EXPECT_EQ(opTypeFromOnnx(name) == OpType::Reduce, isReduce) << "name=" << name;
+    }
+}
+
 TEST(Layout, PackMath) {
     EXPECT_EQ(cBlocks(3), 1);
     EXPECT_EQ(cBlocks(4), 1);
@@ -64,6 +103,49 @@ TEST(Layout, PackMath) {
     EXPECT_EQ(s.n, 1);
     EXPECT_EQ(s.c, 32);
     EXPECT_EQ(s.h, 7);
+}
+
+// matmul_tiled tile-candidate table invariants. The tune table persists a winning INDEX into
+// kMatMulTiles, and the shader sizes its shared/register arrays for the widest variant, so every
+// entry must respect the shader's TM_MAX/TN_MAX/TK_MAX bounds and the cooperative-load loop
+// divisibility (matmul_tiled.comp assigns one panel element per thread per iteration).
+TEST(MatMulTile, CandidateTable) {
+    // Index 0 is the Tuning::None default and must stay the pre-race fixed geometry: it is what
+    // --tuning none dispatches and what a race-less build must byte-match.
+    EXPECT_EQ(kMatMulTiles[0].tm, 128);
+    EXPECT_EQ(kMatMulTiles[0].tn, 128);
+    EXPECT_EQ(kMatMulTiles[0].tk, 16);
+    EXPECT_GE(kMatMulTileCount, 1);
+    for (int i = 0; i < kMatMulTileCount; ++i)
+    {
+        const MatMulTile &t = kMatMulTiles[i];
+        EXPECT_LE(t.tm, 128) << "i=" << i; // TM_MAX
+        EXPECT_LE(t.tn, 128) << "i=" << i; // TN_MAX
+        EXPECT_LE(t.tk, 16) << "i=" << i;  // TK_MAX
+        EXPECT_GE(t.tm, 16) << "i=" << i;  // RM >= 1 at the fixed 16x16 workgroup
+        EXPECT_GE(t.tn, 16) << "i=" << i;
+        EXPECT_GE(t.tk, 1) << "i=" << i;
+        EXPECT_EQ(t.tm % 16, 0) << "i=" << i;
+        EXPECT_EQ(t.tn % 16, 0) << "i=" << i;
+        EXPECT_EQ((t.tm * t.tk) % 256, 0) << "i=" << i; // A-panel load loop
+        EXPECT_EQ((t.tk * t.tn) % 256, 0) << "i=" << i; // B-panel load loop
+    }
+}
+
+// The Vulkan MatMul op routes the default tile to the compile-time matmul_tiled_fast kernel and
+// every other candidate to the spec-constant matmul_tiled kernel. isDefaultMatMulTile is that
+// routing predicate: it must match index 0 (the {128,128,16} default) and reject every other tile.
+TEST(MatMulTile, DefaultTileRouting) {
+    EXPECT_TRUE(isDefaultMatMulTile(kMatMulTiles[0]));
+    for (int i = 1; i < kMatMulTileCount; ++i)
+    {
+        EXPECT_FALSE(isDefaultMatMulTile(kMatMulTiles[i])) << "i=" << i;
+    }
+    // The predicate keys on the exact {128,128,16} geometry, not just any 128x128 tile.
+    EXPECT_TRUE(isDefaultMatMulTile({128, 128, 16}));
+    EXPECT_FALSE(isDefaultMatMulTile({128, 128, 8}));
+    EXPECT_FALSE(isDefaultMatMulTile({64, 128, 16}));
+    EXPECT_FALSE(isDefaultMatMulTile({128, 64, 16}));
 }
 
 // Ergonomic Tensor API: construct, shape/size accessors, argmax.
@@ -78,6 +160,56 @@ TEST(Api, TensorHelpers) {
     Tensor flat(std::vector<float> {1.f, 2.f, 3.f});
     EXPECT_EQ(flat.rank(), 1);
     EXPECT_EQ(flat.shapeString(), "3");
+}
+
+// Session::run validates a caller-provided IOTensor shape against the planned buffers: buffer
+// sizes, push constants, and dispatch geometry are frozen at plan() time, so a shape whose packed
+// footprint differs from the plan is rejected instead of overrunning the boundary buffer at pack
+// time. An empty caller shape adopts the planned shape; the planned shape itself runs.
+TEST(Api, RunRejectsMismatchedInputShape) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 2, 2, 2};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     n;
+    n.type    = OpType::Relu;
+    n.name    = "relu";
+    n.inputs  = {x};
+    n.outputs = {y};
+    g.nodes.push_back(n);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+
+    auto makeIn = [](const Shape &shape) {
+        IOTensor in;
+        in.name  = "x";
+        in.shape = shape;
+        in.dtype = DType::Float32;
+        in.data.assign((size_t) numElements(shape) * 4, 0);
+        return in;
+    };
+    std::vector<IOTensor> outs;
+    // Larger spatial footprint than the planned [1,2,2,2] buffer: rejected, not adopted.
+    EXPECT_EQ(sess->run({makeIn({1, 2, 4, 4})}, outs), Status::InvalidArgument);
+    // A leading-dim (batch) mismatch is rejected the same way.
+    EXPECT_EQ(sess->run({makeIn({2, 2, 2, 2})}, outs), Status::InvalidArgument);
+    // The planned shape runs.
+    EXPECT_EQ(sess->run({makeIn({1, 2, 2, 2})}, outs), Status::Ok);
+    // An empty caller shape adopts the planned shape.
+    IOTensor noShape = makeIn({1, 2, 2, 2});
+    noShape.shape.clear();
+    EXPECT_EQ(sess->run({noShape}, outs), Status::Ok);
 }
 
 // Ergonomic API: infer()/inputInfo() — caller passes only data, metadata comes from the model.

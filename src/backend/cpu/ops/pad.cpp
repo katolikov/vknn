@@ -2,8 +2,10 @@
 // mapped back to a source coordinate per axis: an out-of-input coordinate is filled with `cval` under
 // "constant", clamped to the nearest edge under "edge", or mirrored under "reflect". Only the leading
 // `begin` half of `pads` shifts coordinates (out coord - begin[axis] = in coord); the trailing `end`
-// half only enlarges the output shape, which the graph has already computed. Iteration is over the
-// output in row-major order, so the accumulation is a plain gather (no reduction, order-independent).
+// half only enlarges the output shape, which derives from the RUNTIME input shape plus `pads` (never
+// from the static graph desc, so the output follows a runtime shape that diverges from the plan).
+// Iteration is over the output in row-major order, so the accumulation is a plain gather (no
+// reduction, order-independent).
 //
 // pads = [begin_0..begin_{rank-1}, end_0..end_{rank-1}] (length 2*rank) from attr "pads" or input[1];
 // constant fill value from attr "value" or input[2]. Data is fp32.
@@ -42,10 +44,19 @@ namespace vknn {
                 {
                     cval = ctx.t(node.inputs[2]).host.f32()[0];
                 }
-                // Output shape is taken from the graph (already begin+end padded); build row-major
-                // (contiguous, last-axis-fastest) strides for both input and output so a per-axis
-                // coordinate can be reconstructed from, and folded back into, a flat index.
-                Shape                out = ctx.graph->desc(node.outputs[0]).shape;
+                // Output shape = runtime input shape + begin/end pads per axis, mirroring the Pad arm
+                // of inferShapes; a pads vector shorter than 2*rank shifts and enlarges nothing. Build
+                // row-major (contiguous, last-axis-fastest) strides for both input and output so a
+                // per-axis coordinate can be reconstructed from, and folded back into, a flat index.
+                const bool           padded = (int64_t) pads.size() >= 2 * (int64_t) rank;
+                Shape                out    = X.shape;
+                if (padded)
+                {
+                    for (int i = 0; i < rank; ++i)
+                    {
+                        out[i] = X.shape[i] + pads[i] + pads[i + rank];
+                    }
+                }
                 std::vector<int64_t> inStride(rank, 1), outStride(rank, 1);
                 for (int i = rank - 2; i >= 0; --i)
                 {
@@ -74,7 +85,7 @@ namespace vknn {
                 // axis's `begin` pad to the input coordinate `ic`, and accumulate the flat input offset
                 // `inf`. Under "constant" an in-range axis simply advances; the first out-of-range axis
                 // sets `oob` and short-circuits so the element takes `cval`. "edge"/"reflect" instead
-                // remap `ic` back in-range and never set `oob`. `pads` empty means no shift on any axis.
+                // remap `ic` back in-range and never set `oob`. A short `pads` means no shift on any axis.
                 for (int64_t oi = 0; oi < elems; ++oi)
                 {
                     int64_t rem = oi, inf = 0;
@@ -83,7 +94,7 @@ namespace vknn {
                     {
                         int64_t oc = rem / outStride[i];
                         rem %= outStride[i];
-                        int64_t ic = oc - (pads.empty() ? 0 : pads[i]);
+                        int64_t ic = oc - (padded ? pads[i] : 0);
                         if (ic < 0 || ic >= X.shape[i])
                         {
                             if (mode == "edge")

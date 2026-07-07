@@ -13,7 +13,7 @@ namespace vknn {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X = ctx.t(node.inputs[0]);
                 RtTensor       &Y = ctx.t(node.outputs[0]);
-                int64_t         n = X.elems();
+                int64_t         n = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
                 float          *y = cpu::allocOut(Y, X.shape);
                 const float    *x = X.host.f32();
                 for (int64_t i = 0; i < n; ++i)

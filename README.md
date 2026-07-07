@@ -1,7 +1,7 @@
 <h1 align="center">VKNN</h1>
 
 <p align="center">
-  <b>Vulkan Neural Network</b> — a small, dependency-free C++17 inference engine for neural networks on Android GPUs.
+  <b>Vulkan Neural Network</b> — a small, dependency-free C++17 inference engine that runs ONNX models on Android GPUs.
 </p>
 
 <p align="center">
@@ -13,24 +13,25 @@
 </p>
 
 <p align="center">
+  <a href="#what-it-does">What it does</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#feature-matrix">Features</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
-  <a href="#compile-and-run-a-model">Compile &amp; run</a> ·
-  <a href="#supported-operators">Operators</a> ·
   <a href="#documentation">Docs</a>
 </p>
 
-## About
+## What it does
 
-**VKNN** (namespace `vknn`) runs neural networks on Android arm64 GPUs through **Vulkan compute**. It
-imports an ONNX model with a hand-rolled protobuf parser, lowers it to an NCHW IR, runs graph passes
-(shape inference, BatchNorm folding, activation/residual fusion, pointwise-chain fusion into producer
-epilogues, constant folding, dead-initializer pruning), partitions the graph into maximal same-backend
-segments, and executes each on a pluggable backend. The primary backend is Vulkan (NC4HW4 packed
-layout, pre-recorded command buffers per segment (one, chunked past `Config::maxSubmitNodes` for the
-GPU watchdog), fp16 storage
-with fp32 accumulation, caller-owned DMA-BUF I/O); a scalar + NEON **CPU backend** is the reference path and
-the automatic fallback for ops the GPU declines. There are no third-party runtime dependencies —
-only Vulkan and the C++ standard library. Every result is checked against an onnxruntime golden.
+**VKNN** (namespace `vknn`) is an on-device inference engine: you give it an ONNX model, and it runs
+on the **Android GPU** (Vulkan compute, primarily the Samsung Xclipse driver) with a scalar + NEON
+**CPU backend** as the reference path and automatic fallback. It imports the model with a hand-rolled
+protobuf parser, lowers it to an NCHW IR, runs graph passes (shape inference, BatchNorm folding,
+activation/residual fusion, pointwise-chain fusion into producer epilogues, quantized-node
+dequantization, constant folding), partitions the graph into maximal same-backend segments, and
+executes each on a pluggable backend. The Vulkan path uses an NC4HW4 packed layout, pre-recorded
+command buffers per segment, fp16 storage with fp32 accumulation, and caller-owned DMA-BUF I/O. There
+are **no third-party runtime dependencies** — only Vulkan and the C++ standard library — and every
+result is checked against an onnxruntime golden.
 
 It runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
 detection (YOLOv8n), and a 965M-parameter transformer encoder (the YoNoSplat feed-forward 3D Gaussian
@@ -40,6 +41,76 @@ Splatting model) plus a from-scratch Vulkan 3DGS rasterizer — all on the GPU.
   <img src="docs/images/vknn_gpu_outputs.png" alt="VKNN classifying a real photo on the Vulkan GPU" width="780">
 </p>
 <p align="center"><sub>The benchmark CNNs classifying a real photo on the Vulkan GPU (fp16), with top-5 ImageNet labels.</sub></p>
+
+## Quickstart
+
+Build the engine and tools:
+
+```sh
+./build.sh             # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
+./build.sh --android   # full engine incl. the Vulkan backend (NDK r27 arm64-v8a)
+./build.sh --docs      # the static documentation site -> docs/site/index.html
+```
+
+**Compile once, run many times.** `vknn_compile` turns an ONNX model into an optimized `.vxm` that
+skips ONNX parsing and graph passes at load:
+
+```sh
+# model.onnx -> model.vxm.  --fp16 halves the file + host upload; --shape resolves a dynamic input.
+vknn_compile model.onnx model.vxm --fp16 --shape input=1x3x224x224
+```
+
+Push the model and run it on the device:
+
+```sh
+adb push build-android/vknn_classify model.vxm input.bin /data/local/tmp/vknn/
+adb shell /data/local/tmp/vknn/vknn_classify --model model.vxm --input input.bin \
+    --backend vulkan --precision low --bench 20
+```
+
+`--precision` is a quality tier: **`low`** (fp16 storage + fp32 accumulation), **`normal`** (fp16 with
+a precision-critical geometry tail kept fp32), or **`high`** (full fp32).
+
+**Or from C++.** The model reports its own input/output names and shapes — you supply only the data.
+This is [`examples/readme_quickstart.cpp`](examples/readme_quickstart.cpp), compiled by the build:
+
+```cpp
+#include "vknn/model.h"
+
+vknn::Config cfg;
+cfg.backend   = vknn::BackendKind::Vulkan;  // run on the GPU (CPU is the implicit fallback)
+cfg.precision = vknn::Precision::Low;       // fp16 storage, fp32 accumulation
+
+vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
+if (!net) { return 1; }
+
+// Names + shapes come from the model; you supply only the data.
+auto in = net.inputs();
+vknn::Tensor input(pixels, in[0].shape, in[0].name);    // pixels: std::vector<float>, NCHW
+
+std::vector<vknn::Tensor> outputs = net.run({input});   // one input in, every output back
+const vknn::Tensor& y = outputs.front();
+int cls = (int) y.argmax();
+```
+
+Link the static lib **whole-archive** so the self-registering operators/backends survive; dropping a
+`.cpp` into `examples/` and adding it to the `_vknn_examples` list in `CMakeLists.txt` already does
+this. Everything is configured through `vknn::Config` — the engine reads **no environment variables**
+([docs/config.md](docs/config.md)).
+
+## Feature matrix
+
+| Capability | What VKNN does |
+|---|---|
+| **Backends** | Vulkan compute GPU (primary) + scalar/NEON CPU (reference & automatic fallback), selected per segment. |
+| **Full-GPU op coverage** | Every *executable* operator has a Vulkan kernel; a whole benchmark model runs on the GPU with **0 CPU fallbacks**. Only data-dependent control flow (`Loop` / `If` / `NonMaxSuppression`) and const-folded import ops stay off the GPU. See [docs/op-coverage.md](docs/op-coverage.md). |
+| **Precision** | fp16 storage + fp32 accumulation (`low`), selective-fp32 geometry tail (`normal`), or full fp32 (`high`). Stores rounded to nearest even; every path checked against an onnxruntime golden. |
+| **Dynamic shapes** | Declared shape **plan buckets**: `vknn_compile --shape NAME=D0xD1x...` / `--bucket "..."` bakes one plan per shape set; at runtime `Session::prepareShapes()` compiles more, and `run()` selects a bucket by the bound input shapes. A fixed-shape model is one bucket (a single map lookup on the hot path). |
+| **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. |
+| **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. |
+| **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/dmabuf_fd_io.cpp`](examples/dmabuf_fd_io.cpp). |
+| **Warm-start cache** | A self-validating, multi-variant per-model `.cache` (kernel hash + device + config) auto-heals across driver/model/code changes. |
+| **Tools** | `vknn_compile` (ONNX → `.vxm`, with `--support-report <out.json>` for the per-node backend assignment), `vknn_run_io` (any multi-input/multi-output model), plus the example runners below. |
 
 ## Benchmarks
 
@@ -59,109 +130,33 @@ autotuning, its strongest path here):
 | YoNoSplat encoder (965M params) | 17.0 s | cannot convert | cannot convert | 6 outputs, cosine 0.99999 |
 
 The VKNN figure is the full `run()` wall (it includes the host↔device copies); MNN's is inference-only.
-
-The encoder end-to-end on two GPU generations (fp16, 0 CPU fallbacks, one Vulkan segment over
-7696 nodes, peak 3.4 GB device memory; identical output bits on both):
-
-| device | `.vxm` load (warm) | run (submit+GPU) | vs onnxruntime fp32 goldens |
-|---|---|---|---|
-| benchmark device (table above) | 2.3 s | 17.0 s | cosine 0.99999, SNR 46–55 dB, 0 NaN |
-| newer-generation GPU | 2.0 s | 9.4 s | identical bits |
 Against MNN's absolute best (min over OpenCL-HEAVY, CPU-4-thread, Vulkan), VKNN is faster on **8 of 9**
 models and at **parity on ResNet-50**. Methodology, per-stage timings, and the OpenCL-tuned comparison:
-[docs/BENCHMARK.md](docs/BENCHMARK.md).
-
-## Compile and run a model
-
-```sh
-./build.sh             # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
-./build.sh --android   # full engine incl. the Vulkan backend (NDK r27 arm64-v8a)
-```
-
-Run an ONNX (or compiled `.vxm`) model on the device:
-
-```sh
-adb push build-android/vknn_classify model.onnx input.bin /data/local/tmp/vknn/
-adb shell /data/local/tmp/vknn/vknn_classify --model model.onnx --input input.bin \
-    --backend vulkan --precision low --bench 20
-```
-
-`--precision` is a quality tier: **`low`** (fp16 storage + fp32 accumulation, stores rounded to nearest
-even), **`normal`** (fp16, but a precision-critical geometry-tail set is kept fp32 — selective fp32, a
-no-op for models without it), or **`high`** (full fp32). `vknn_compile` turns an ONNX model into an optimized `.vxm` (skips parsing/passes
-at load; optional fp16 weights; `-O0..-O3` select the optimization level); `vknn_run_io` runs any
-multi-input/multi-output model. Full flow (compile, run,
-YoNoSplat): [skills/compile-and-run-a-model.md](skills/compile-and-run-a-model.md).
-
-**Or from C++.** `vknn::Model` reads each input/output name and shape from the model — you supply only
-the data. Vulkan, fp16, maximum autotuning, default fusions; two inputs → two outputs:
-
-```cpp
-#include "vknn/model.h"
-#include <cstdio>
-#include <fstream>
-#include <vector>
-
-// Read a raw fp32 .bin into a float vector.
-static std::vector<float> readBin(const char* path) {
-  std::ifstream f(path, std::ios::binary | std::ios::ate);
-  size_t n = f ? (size_t)f.tellg() / sizeof(float) : 0;
-  std::vector<float> v(n);
-  if (f) { f.seekg(0); f.read(reinterpret_cast<char*>(v.data()), n * sizeof(float)); }
-  return v;
-}
-
-int main() {
-  vknn::Config cfg;
-  cfg.backend   = vknn::BackendKind::Vulkan;     // run on the GPU (CPU is the implicit fallback)
-  cfg.precision = vknn::Precision::Low;         // fp16 storage, fp32 accumulation
-  cfg.tuning    = vknn::Tuning::Heavy;          // maximum load-time autotuning (cached in <model>.cache)
-
-  vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
-  if (!net) { fprintf(stderr, "failed to load model\n"); return 1; }
-
-  // Names + shapes come from the model; you supply only the data.
-  auto in = net.inputs();
-  vknn::Tensor a(readBin("in0.bin"), in[0].shape, in[0].name);
-  vknn::Tensor b(readBin("in1.bin"), in[1].shape, in[1].name);
-
-  std::vector<vknn::Tensor> outs = net.run({a, b});  // two inputs -> two outputs
-
-  for (const vknn::Tensor& o : outs)
-    printf("output '%s'  %s  max=%.4f\n", o.name().c_str(), o.shapeString().c_str(), o.max());
-
-  // ...or fetch a specific output by name:
-  if (const vknn::Tensor* y = vknn::findTensor(outs, net.outputs()[0].name))
-    printf("argmax of '%s' = %lld\n", net.outputs()[0].name.c_str(), (long long)y->argmax());
-  return 0;
-}
-```
-
-Link the static lib **whole-archive** so the self-registering operators/backends survive (drop the
-`.cpp` in `examples/` and add it to the `examples` list in `CMakeLists.txt`, which already does this).
-Everything is configured through `vknn::Config` — the engine reads no environment variables
-([docs/CONFIG.md](docs/CONFIG.md)).
+[docs/benchmark.md](docs/benchmark.md).
 
 ## Supported operators
 
 A broad ONNX op set: convolution/pooling, the elementwise unary/binary families, MatMul (batched N-D),
-Gemm, LayerNorm, Softmax, Einsum, RoPE, Gather/Scatter, Resize, Pad, GridSample, Range, and the
-shape/data-movement ops — enough for CNNs, detection, and transformer/attention models. Per-op
-GPU/CPU coverage: [docs/OP_COVERAGE.md](docs/OP_COVERAGE.md). Adding an op is one new file via the
-self-registration macros: [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md).
+Gemm, LayerNorm, Softmax, Einsum, RoPE, Gather/Scatter, Resize, Pad, GridSample, Range, the
+QDQ/QLinear quantization ops (dequantized at import), and the shape/data-movement ops — enough for
+CNNs, detection, and transformer/attention models. Per-op GPU/CPU coverage:
+[docs/op-coverage.md](docs/op-coverage.md). Adding an op is one new file via the self-registration
+macros: [docs/adding-an-operator.md](docs/adding-an-operator.md).
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — import → IR → passes → segments → backends, and the NC4HW4 compute path.
-- [docs/CONFIG.md](docs/CONFIG.md) — every `vknn::Config` field, the `setHint` API, and the JSON form.
-- [docs/OP_COVERAGE.md](docs/OP_COVERAGE.md) — the operator set and its backend coverage.
-- [docs/BENCHMARK.md](docs/BENCHMARK.md) — on-device VKNN vs MNN numbers and methodology.
-- [docs/LIMITATIONS.md](docs/LIMITATIONS.md) — known gaps and the single-device caveat.
-- [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md) · [docs/ADDING_A_BACKEND.md](docs/ADDING_A_BACKEND.md) — extend the engine (one new file, no core edits).
+- [docs/architecture.md](docs/architecture.md) — import → IR → passes → segments → backends, and the NC4HW4 compute path.
+- [docs/config.md](docs/config.md) — every `vknn::Config` field, the `setHint` API, and the JSON form.
+- [docs/op-coverage.md](docs/op-coverage.md) — the operator set and its backend coverage.
+- [docs/benchmark.md](docs/benchmark.md) — on-device VKNN vs MNN numbers and methodology.
+- [docs/limitations.md](docs/limitations.md) — known gaps, dynamic-shape buckets, quantization, and the single-device caveat.
+- [docs/adding-an-operator.md](docs/adding-an-operator.md) · [docs/adding-a-backend.md](docs/adding-a-backend.md) — extend the engine (one new file, no core edits).
 - [docs/adr/](docs/adr/) — architecture decision records.
 - [AGENTS.md](AGENTS.md) + [skills/](skills/) — orientation and focused how-to guides.
 
-Build the static documentation site with `./build.sh --docs` (→ `docs/site/index.html`).
+Runnable examples live in [`examples/`](examples/): `readme_quickstart` (load-set-run-read),
+`zerocopy_simple` / `zerocopy_cache` and `dmabuf_fd_io` (caller-owned DMA-BUF I/O), `run_io` (generic
+multi-I/O), `classify` / `predict` (CNN classifiers), and `yonosplat` (the transformer encoder).
 
 ## License
 

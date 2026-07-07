@@ -3,6 +3,14 @@
 
 namespace vknn {
 
+    // Vulkan's per-dimension compute-workgroup-count limit (maxComputeWorkGroupCount): a dispatch
+    // whose group count on any axis exceeds this must be split, and the ConvGemm kernel's X/Z axes
+    // cannot be split, so a shape that would overflow keeps the plain Conv (whose kernels split on X).
+    static constexpr int64_t kMaxWorkGroupCount = 65535;
+    // Pixels the ConvGemm kernel packs into one dispatch-Y workgroup at its narrowest spec-constant
+    // tile; the eligibility guard rounds OH*OW up by this so every runtime tile choice fits the limit.
+    static constexpr int64_t kConvGemmMinPixelTile = 16;
+
     /// Lower each eligible Conv to a ConvGemm node — one implicit-GEMM kernel over the receptive
     /// field — with the weights repacked to row-major [K][Cout] (K = Cin*KH*KW, k = (ky*KW+kx)*Cin+ic,
     /// channel-fastest so the kernel's A panel gathers whole NC4HW4 channel blocks per k quad)
@@ -65,12 +73,12 @@ namespace vknn {
             {
                 continue; // tuneWino owns this shape
             }
-            // The kernel tiles OH*OW on the dispatch Y axis (a specialization-constant tile, 16
-            // pixels per group at the narrowest) and batch on Z, neither of which the runtime's 1-D
-            // split can rescue past the device group-count limit; an oversized spatial output keeps
-            // the plain Conv (its kernels split on X). The guard uses the narrowest tile so every
-            // runtime tile choice fits.
-            if ((os[2] * os[3] + 15) / 16 > 65535 || os[0] > 65535)
+            // The kernel tiles OH*OW on the dispatch Y axis (a specialization-constant tile,
+            // kConvGemmMinPixelTile pixels per group at the narrowest) and batch on Z, neither of
+            // which the runtime's 1-D split can rescue past the device group-count limit; an oversized
+            // spatial output keeps the plain Conv (its kernels split on X). The guard uses the
+            // narrowest tile so every runtime tile choice fits.
+            if ((os[2] * os[3] + kConvGemmMinPixelTile - 1) / kConvGemmMinPixelTile > kMaxWorkGroupCount || os[0] > kMaxWorkGroupCount)
             {
                 continue;
             }

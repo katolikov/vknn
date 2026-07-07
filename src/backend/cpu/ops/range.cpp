@@ -63,9 +63,6 @@ namespace vknn {
                     }
                 }
             }
-            bool supportsDType(DType) const override {
-                return true;
-            }
         };
 
     } // namespace

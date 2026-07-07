@@ -1,7 +1,9 @@
 // ConvGemm reference: the Conv lowered by lowerConv, with weights repacked [K][Cout]
-// (K = Cin*KH*KW, k = (ic*KH + ky)*KW + kx). Plain fp32 convolution loops indexed through the
-// repacked layout; the executor's epilogue hook applies any attached pointwise unit afterwards.
+// (K = Cin*KH*KW, k = (ky*KW + kx)*Cin + ic, channel-fastest — the same order lowerConv packs and
+// the GPU kernel gathers). Plain fp32 convolution loops indexed through the repacked layout; the
+// executor's epilogue hook applies any attached pointwise unit afterwards.
 #include "backend/cpu/cpu_backend.h"
+#include "core/conv_geom.h"
 
 namespace vknn {
     namespace {
@@ -21,11 +23,13 @@ namespace vknn {
                     return v.empty() ? d : v;
                 };
                 auto    kk = a("kernel_shape", {1, 1}), st = a("strides", {1, 1});
-                auto    pd = a("pads", {0, 0, 0, 0}), dl = a("dilations", {1, 1});
+                auto    dl = a("dilations", {1, 1});
                 int64_t N = X.shape[0], C = X.shape[1], H = X.shape[2], W = X.shape[3];
                 int64_t Cout = Wt.shape[1], KH = kk[0], KW = kk[1];
-                int64_t OH = (H + pd[0] + pd[2] - (dl[0] * (KH - 1) + 1)) / st[0] + 1;
-                int64_t OW = (W + pd[1] + pd[3] - (dl[1] * (KW - 1) + 1)) / st[1] + 1;
+                // Shared forward geometry (core/conv_geom.h): resolves auto_pad into begin/end pads.
+                ConvGeom geo = convGeom(H, W, KH, KW, node.attr);
+                auto     pd  = geo.pads();
+                int64_t  OH = geo.outH, OW = geo.outW;
 
                 RtTensor    &Y = ctx.t(node.outputs[0]);
                 float       *y = cpu::allocOut(Y, {N, Cout, OH, OW});
@@ -57,7 +61,7 @@ namespace vknn {
                                             {
                                                 continue;
                                             }
-                                            int64_t k = (ic * KH + ky) * KW + kx;
+                                            int64_t k = (ky * KW + kx) * C + ic; // lowerConv's channel-fastest pack order
                                             acc += x[((n * C + ic) * H + iy) * W + ix] * w[k * Cout + oc];
                                         }
                                     }

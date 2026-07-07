@@ -29,12 +29,19 @@ namespace vknn { namespace vk {
         // the overflow into the y dimension (see ComputePipeline::dispatch).
         uint32_t maxWorkGroupCount[3] = {0, 0, 0};
         uint32_t maxSharedMemory      = 0;
+        // Largest push-constant block the device accepts; the Vulkan-guaranteed floor is 128 B
+        // and some kernel PC blocks exceed it, so ComputePipeline validates against this cap.
+        uint32_t maxPushConstantsSize = 0;
         float    timestampPeriod      = 0.f;
         bool     timestampSupported   = false;
 
         // Feature flags we exploit
         bool shaderFloat16        = false;
         bool shaderInt8           = false;
+        // Core VkPhysicalDeviceFeatures::shaderInt64 — 64-bit ints in shader code. The Cast-from-int64
+        // path does not require it (int64 shape/index tensors decode to compute-precision float at the
+        // pack boundary, exact for their small magnitudes), so this is reported for diagnostics only.
+        bool shaderInt64          = false;
         bool storage16bit         = false;
         bool storage8bit          = false;
         bool int8DotProduct       = false;

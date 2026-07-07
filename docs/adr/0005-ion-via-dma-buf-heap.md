@@ -25,7 +25,7 @@ allocation via the kernel `DMA_HEAP_IOCTL_ALLOC` ioctl, which needs no vendor li
   with no staging copy.
 
 When dma-buf import fails on a build, the fallback chain is the AHB route, then a staged copy
-with a logged `LIMITATIONS.md` entry.
+with a logged `limitations.md` entry.
 
 ## Consequences
 - No dependency on Samsung's libion headers; uses stable kernel uAPI.

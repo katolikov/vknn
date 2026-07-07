@@ -7,30 +7,49 @@ All numbers come from on-device runs against onnxruntime goldens.
 
 VKNN runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
 YOLOv8n detection, and the 965M-param YoNoSplat transformer encoder. Per-model latencies and the
-VKNN-vs-MNN comparison are in [BENCHMARK.md](BENCHMARK.md); this document covers what the engine
+VKNN-vs-MNN comparison are in [benchmark.md](benchmark.md); this document covers what the engine
 does **not** do.
 
 ---
 
-## 1. Static `batch = 1`, resolved at plan time
+## 1. Shapes are resolved at plan time; dynamic shapes need declared buckets
 
 The engine plans a graph for a **fixed, fully-static shape**. `Session::plan()`
 runs the import passes' shape inference to a fixed point at construction; every
 segment, every Vulkan command buffer, and every prepacked weight is specialized to
 those shapes. The Vulkan backend **pre-records the segment's `VkCommandBuffer`s**
 (`Segment` in `include/vknn/segment.h`; a segment above `Config::maxSubmitNodes`
-records as multiple chunked submits), so there is no mechanism to vary `N`, `H`, or
-`W` at run time.
+records as multiple chunked submits), so a single plan cannot vary `N`, `H`, or `W`
+at run time. A shape that was not planned has no plan — the engine never re-plans
+implicitly inside `run()`.
 
-Concretely:
+Dynamic shapes are supported by declaring the shapes ahead of time as **plan
+buckets**: each bucket is a full pass-and-plan product for one input-shape set, and
+`run()` selects the bucket by the bound input shapes (an exact-match map lookup; an
+unmatched shape is `Status::InvalidArgument` listing the available buckets). Buckets
+share the backends, caches, pipeline pool, and device weight pool, so a second bucket
+reuses tuning and uploaded weights.
 
-- `batch = 1` only. Dynamic batch, dynamic spatial dims, and symbolic dimensions
-  are not supported. A model with an unresolved dim will not plan.
-- Changing input size requires **building a new `Session`** (and paying cold-start cost,
-  see below).
-- This is a deliberate trade: static planning is what makes the pre-recorded
-  command buffer + push-descriptor + prepacked-weight design possible. It is a hard
-  constraint callers must design around.
+- **Compile-time buckets:** `vknn_compile --bucket "NAME=D0xD1x...;NAME2=..."`
+  (repeatable) compiles the model once per bucket into one multi-bucket `.vxm` (see
+  [config.md](config.md)). A `.vxm` session dispatches among its stored buckets and
+  cannot add more at run time.
+- **Runtime buckets (ONNX-loaded sessions only):** `Session::prepareShapes(shapes)`
+  re-runs the passes and plan from the retained pristine graph to add a bucket
+  explicitly. It never happens implicitly on `run()`. A `.vxm` session returns
+  `Status::Unsupported`.
+- **Declaring a symbolic axis:** a dynamic **batch** axis falls back to `batch = 1`
+  (or `--batch N`). A dynamic **non-batch** axis (spatial / feature) with no declared
+  shape is a **hard error** naming the input and axis, rather than the old silent
+  `1x1` plan — declare it with `--shape NAME=D0xD1x...`, `--bucket`, or
+  `Config::inputShapes`.
+
+The **fixed-shape path is unchanged and zero-cost**: a model with no dynamic axes (or
+only a dynamic batch) plans exactly **one** bucket, its `.vxm` bytes are byte-identical
+to before this feature, and `run()` takes a fast path that builds no shape key and adds
+no allocation, pipeline creation, or re-record. Static planning is what makes the
+pre-recorded command buffer + push-descriptor + prepacked-weight design possible; a
+bucket is a second such plan, not a per-run reshape.
 
 ---
 
@@ -44,7 +63,7 @@ is not available for the target hardware.
 
 The pluggable-backend architecture supports one: adding a backend is a new
 `Backend` subclass + `VKNN_REGISTER_BACKEND`, with no edits to core dispatch — see
-`docs/ADDING_A_BACKEND.md`, which documents the offline-compiled-accelerator pattern.
+`docs/adding-a-backend.md`, which documents the offline-compiled-accelerator pattern.
 
 ---
 
@@ -80,7 +99,7 @@ an untiled depthwise, and **split-K** for deep low-parallelism 1×1 convs. Other
 register/LDS/occupancy pressure (register-tiled 3×3, LDS input-halo, naive-matmul Winograd, packed-math)
 regress on this driver — it punishes occupancy pressure, and the 3×3 weights already L2-cache, so
 cutting weight reads does not cut DRAM traffic. Matching MNN on ResNet/YOLO requires a production
-fused-cooperative Winograd, a large kernel. See [BENCHMARK.md](BENCHMARK.md).
+fused-cooperative Winograd, a large kernel. See [benchmark.md](benchmark.md).
 
 ---
 
@@ -104,14 +123,46 @@ conversion on the GPU, would remove most of it. It is not optimized.
 
 ---
 
-## 6. int8 is a stretch goal — not implemented
+## 6. Quantized models run dequantized to float — not int-exact
 
-The device advertises the capabilities for it (`shaderInt8 = 1`, 8-bit storage,
-`VK_KHR_shader_integer_dot_product`), and `Config::precision` only exposes
-`Low | Normal | High` (fp16 / fp16 + selective fp32 / fp32) — there is **no int8
-tier**. There is no quantization
-pass, no int8 kernel, and no calibration tooling. int8 inference is a documented
-stretch goal that is **not** built.
+There is no int8 compute tier: the device advertises the capabilities for it
+(`shaderInt8 = 1`, 8-bit storage, `VK_KHR_shader_integer_dot_product`) and
+`Config::precision` only exposes `Low | Normal | High` (fp16 / fp16 + selective
+fp32 / fp32), but no kernel computes in int8. Instead, a quantized checkpoint runs
+through the **import-time dequantize pass** (`src/import/dequantize_graph.cpp`,
+default on; `PassOptions::dequantize` / `--no-dequantize` disables it):
+
+- DequantizeLinear over an initializer folds the weight to fp32 (`(W_q − zp) · scale`,
+  per-tensor and per-axis).
+- The fused QLinear family (QLinearConv / QLinearMatMul / QGemm / QLinearAdd /
+  QLinearGlobalAveragePool) lowers to its plain float op plus a `Clip` to the op's own
+  output quant range.
+- A QuantizeLinear→DequantizeLinear activation sandwich collapses to a `Clip` over the
+  quant range, not to a raw passthrough.
+
+**Dequantized execution drops the 8-bit rounding but preserves the saturation clamp.**
+Collapsing a quantize round-trip is *not* an identity: `QuantizeLinear` composed with
+`DequantizeLinear` (ignoring rounding) equals `clamp(x, (qmin − zp)·scale,
+(qmax − zp)·scale)`, and ORT's QDQ quantizer folds a preceding ReLU into that range
+(lower bound 0). Dropping the round-trip to raw float would silently delete that ReLU
+and let activations explode, so the pass always keeps the clamp as a `Clip` with
+constant bounds (pointwise-fusable, GPU-eligible) and only drops the grid snap. Results
+are therefore **close to but not bit-identical** with an int-exact runtime — the residual
+is the interior per-tensor requantization that a float chain does not re-apply
+(mobilenetv2_int8 cosine ≈ 0.96, resnet50_int8 ≈ 0.998 vs the ORT int-exact goldens,
+argmax matching).
+
+Both static QDQ / QLinear **and** the common dynamic-quantization pattern are lowered.
+A dynamic-quant export emits a `DynamicQuantizeLinear → MatMulInteger / ConvInteger →
+Cast → Mul` cluster (the canonical shape ONNX Runtime's dynamic quantizer produces for
+BERT / GPT / ViT); the pass matches that cluster and lowers it to a plain float `MatMul`
+/ `Conv` with the weight folded to fp32, dropping the `DynamicQuantizeLinear`, both
+`Mul`s, and the `Cast`. Unlike the static QLinear path, **no output clamp is inserted**:
+the integer matmul has no output quant range, so the only difference from an int-exact
+runtime is the activation rounding `DynamicQuantizeLinear` would have applied. A cluster
+that does *not* match this shape (a `MatMulInteger` whose int32 output escapes to another
+consumer, a non-initializer weight, a missing `Cast`/`Mul`) is left intact, and — having
+no backend kernel — fails at planning. There is no calibration tooling.
 
 ---
 
@@ -142,11 +193,12 @@ The supported set is broad — it covers CNNs, detection, **and** transformer/at
 convolution/pooling, the full elementwise unary/binary families, MatMul (batched N-D), Gemm,
 LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, generator ops
 (Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement
-ops. The full table with per-op GPU/CPU coverage is in [OP_COVERAGE.md](OP_COVERAGE.md).
+ops. The full table with per-op GPU/CPU coverage is in [op-coverage.md](op-coverage.md).
 
-**Not** supported: RNN/LSTM/GRU, dynamic control flow (`Loop` / `If` / `Scan`), training ops, sparse
+**Not** supported: RNN/LSTM/GRU, data-dependent control flow (`Loop` / `If` / `Scan` /
+`NonMaxSuppression` — their output shapes are not known at plan time), training ops, sparse
 tensors, and the long tail of the ONNX opset. Adding an op is mechanical (see
-[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md)); until it is in the table the model will not
+[adding-an-operator.md](adding-an-operator.md)); until it is in the table the model will not
 import.
 
 ---
@@ -173,12 +225,12 @@ the zero-copy / capability assumptions do not transfer** and are not retested.
 
 | Area | Status |
 |------|--------|
-| Batch / shapes | Static `batch = 1`, resolved at plan time; reshape ⇒ new Session |
-| NPU / accelerator | None; Vulkan + CPU only (pluggable — see ADDING_A_BACKEND.md) |
+| Batch / shapes | Resolved at plan time. Dynamic shapes supported via **declared plan buckets** (`--bucket` at compile, `Session::prepareShapes()` at run on ONNX sessions); fixed-shape path unchanged and zero-cost (one bucket). A dynamic non-batch axis with no declared shape is a hard error, not a silent `1x1` plan |
+| NPU / accelerator | None; Vulkan + CPU only (pluggable — see adding-a-backend.md) |
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs) |
-| int8 | Not implemented (stretch goal) |
+| Quantized models | Static QDQ / QLinear **and** the canonical dynamic-quant cluster run dequantized to float (static: clamps preserved, rounding dropped — not int-exact; dynamic: folded to float MatMul/Conv, no output clamp); a non-canonical dynamic-quant cluster fails at planning; no int8 compute tier |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |
-| ONNX ops | See OP_COVERAGE.md |
+| ONNX ops | See op-coverage.md |
 | Devices tested | One (Android arm64-v8a, AMD RDNA-class mobile GPU) |
