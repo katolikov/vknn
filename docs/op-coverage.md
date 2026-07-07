@@ -133,4 +133,4 @@ An operator requires: an `OpType` value appended at the END of the enum in `incl
 an ONNX name in `src/core/op.cpp`, a shape rule
 in `src/import/infer_shapes.cpp` `inferShapes`, a CPU oracle in `src/backend/cpu/ops/`, and (when the layout
 allows) a Vulkan op + GLSL shader gated by `Backend::supportsNode()`. See
-[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md) and [../skills/add-an-operator.md](../skills/add-an-operator.md).
+[adding-an-operator.md](adding-an-operator.md) and [../skills/add-an-operator.md](../skills/add-an-operator.md).

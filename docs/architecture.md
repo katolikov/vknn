@@ -153,7 +153,7 @@ struct Node {
 
 `OpType` (`include/vknn/op_type.h`, append-only — `.vxm` files store the raw
 integer) enumerates the full supported set (~60 ops, per-op coverage in
-[OP_COVERAGE.md](OP_COVERAGE.md)): the conv family (`Conv`, `ConvTranspose`),
+[op-coverage.md](op-coverage.md)): the conv family (`Conv`, `ConvTranspose`),
 `Gemm`/`MatMul`/`Einsum`, pooling, normalization (`BatchNorm`, `LayerNorm`,
 `Softmax`), the elementwise `Unary`/`Binary` families, data movement
 (`Reshape`, `Transpose`, `Slice`, `Concat`, `Gather`, `ScatterND`, ...), the

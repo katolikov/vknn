@@ -67,7 +67,7 @@ A multi-bucket `.vxm` loads all its buckets; `Session::run()` selects the bucket
 bound input shapes and rejects an unmatched shape with `Status::InvalidArgument`. An
 ONNX-loaded session can add a bucket at run time with `Session::prepareShapes(shapes)`
 (a `.vxm` session returns `Status::Unsupported`). See
-[LIMITATIONS.md §1](LIMITATIONS.md) for the full contract.
+[limitations.md §1](limitations.md) for the full contract.
 
 ### Enum reference
 

@@ -7,7 +7,7 @@ All numbers come from on-device runs against onnxruntime goldens.
 
 VKNN runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
 YOLOv8n detection, and the 965M-param YoNoSplat transformer encoder. Per-model latencies and the
-VKNN-vs-MNN comparison are in [BENCHMARK.md](BENCHMARK.md); this document covers what the engine
+VKNN-vs-MNN comparison are in [benchmark.md](benchmark.md); this document covers what the engine
 does **not** do.
 
 ---
@@ -32,7 +32,7 @@ reuses tuning and uploaded weights.
 
 - **Compile-time buckets:** `vknn_compile --bucket "NAME=D0xD1x...;NAME2=..."`
   (repeatable) compiles the model once per bucket into one multi-bucket `.vxm` (see
-  [CONFIG.md](CONFIG.md)). A `.vxm` session dispatches among its stored buckets and
+  [config.md](config.md)). A `.vxm` session dispatches among its stored buckets and
   cannot add more at run time.
 - **Runtime buckets (ONNX-loaded sessions only):** `Session::prepareShapes(shapes)`
   re-runs the passes and plan from the retained pristine graph to add a bucket
@@ -63,7 +63,7 @@ is not available for the target hardware.
 
 The pluggable-backend architecture supports one: adding a backend is a new
 `Backend` subclass + `VKNN_REGISTER_BACKEND`, with no edits to core dispatch — see
-`docs/ADDING_A_BACKEND.md`, which documents the offline-compiled-accelerator pattern.
+`docs/adding-a-backend.md`, which documents the offline-compiled-accelerator pattern.
 
 ---
 
@@ -99,7 +99,7 @@ an untiled depthwise, and **split-K** for deep low-parallelism 1×1 convs. Other
 register/LDS/occupancy pressure (register-tiled 3×3, LDS input-halo, naive-matmul Winograd, packed-math)
 regress on this driver — it punishes occupancy pressure, and the 3×3 weights already L2-cache, so
 cutting weight reads does not cut DRAM traffic. Matching MNN on ResNet/YOLO requires a production
-fused-cooperative Winograd, a large kernel. See [BENCHMARK.md](BENCHMARK.md).
+fused-cooperative Winograd, a large kernel. See [benchmark.md](benchmark.md).
 
 ---
 
@@ -187,11 +187,11 @@ The supported set is broad — it covers CNNs, detection, **and** transformer/at
 convolution/pooling, the full elementwise unary/binary families, MatMul (batched N-D), Gemm,
 LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, generator ops
 (Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement
-ops. The full table with per-op GPU/CPU coverage is in [OP_COVERAGE.md](OP_COVERAGE.md).
+ops. The full table with per-op GPU/CPU coverage is in [op-coverage.md](op-coverage.md).
 
 **Not** supported: RNN/LSTM/GRU, dynamic control flow (`Loop` / `If` / `Scan`), training ops, sparse
 tensors, and the long tail of the ONNX opset. Adding an op is mechanical (see
-[ADDING_AN_OPERATOR.md](ADDING_AN_OPERATOR.md)); until it is in the table the model will not
+[adding-an-operator.md](adding-an-operator.md)); until it is in the table the model will not
 import.
 
 ---
@@ -219,11 +219,11 @@ the zero-copy / capability assumptions do not transfer** and are not retested.
 | Area | Status |
 |------|--------|
 | Batch / shapes | Resolved at plan time. Dynamic shapes supported via **declared plan buckets** (`--bucket` at compile, `Session::prepareShapes()` at run on ONNX sessions); fixed-shape path unchanged and zero-cost (one bucket). A dynamic non-batch axis with no declared shape is a hard error, not a silent `1x1` plan |
-| NPU / accelerator | None; Vulkan + CPU only (pluggable — see ADDING_A_BACKEND.md) |
+| NPU / accelerator | None; Vulkan + CPU only (pluggable — see adding-a-backend.md) |
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs) |
 | Quantized models | Static QDQ / QLinear run dequantized to float (clamps preserved, rounding dropped — not int-exact); dynamic-quant ops (DynamicQuantizeLinear / MatMulInteger / ConvInteger) unsupported; no int8 compute tier |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |
-| ONNX ops | See OP_COVERAGE.md |
+| ONNX ops | See op-coverage.md |
 | Devices tested | One (Android arm64-v8a, AMD RDNA-class mobile GPU) |

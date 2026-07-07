@@ -12,7 +12,7 @@ namespace vknn {
 
     class Segment;
 
-    /// Abstract backend. Subclass + register to add a backend (see docs/ADDING_A_BACKEND.md).
+    /// Abstract backend. Subclass + register to add a backend (see docs/adding-a-backend.md).
     ///
     /// One instance is constructed per session by the registered factory. Lifecycle: configure()
     /// once, then supportsNode() drives per-op assignment, compileSegment() lowers each assigned run

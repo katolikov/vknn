@@ -1,8 +1,8 @@
 # How to compile and run a model
 
 Goal: take an ONNX model, compile it to an optimized `.vxm`, and run it on the device with the right
-`Config`. For the public API see [../docs/CONFIG.md](../docs/CONFIG.md); for op support see
-[../docs/OP_COVERAGE.md](../docs/OP_COVERAGE.md).
+`Config`. For the public API see [../docs/config.md](../docs/config.md); for op support see
+[../docs/op-coverage.md](../docs/op-coverage.md).
 
 ## 1. (Optional) Compile ONNX -> .vxm
 
@@ -108,4 +108,4 @@ same `Config` and exposes per-tensor residency and DMA-BUF zero-copy.
 Compare against an **onnxruntime golden** (cosine ≥ 0.999 for fp16, 1.0 for fp32/CPU). Generate
 goldens with `scripts/get_golden.py` (CNNs) or `scripts/yonosplat/gen_golden.py` (YoNoSplat). On any
 perf-sensitive change, record runtime too (`--bench` / `VKNN_TIMING=1`) — holding cosine but slowing
-the GPU is a regression. Methodology and cooldown protocol: [../docs/BENCHMARK.md](../docs/BENCHMARK.md).
+the GPU is a regression. Methodology and cooldown protocol: [../docs/benchmark.md](../docs/benchmark.md).

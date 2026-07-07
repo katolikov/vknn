@@ -69,7 +69,7 @@ The encoder end-to-end on two GPU generations (fp16, 0 CPU fallbacks, one Vulkan
 | newer-generation GPU | 2.0 s | 9.4 s | identical bits |
 Against MNN's absolute best (min over OpenCL-HEAVY, CPU-4-thread, Vulkan), VKNN is faster on **8 of 9**
 models and at **parity on ResNet-50**. Methodology, per-stage timings, and the OpenCL-tuned comparison:
-[docs/BENCHMARK.md](docs/BENCHMARK.md).
+[docs/benchmark.md](docs/benchmark.md).
 
 ## Compile and run a model
 
@@ -140,24 +140,24 @@ int main() {
 Link the static lib **whole-archive** so the self-registering operators/backends survive (drop the
 `.cpp` in `examples/` and add it to the `examples` list in `CMakeLists.txt`, which already does this).
 Everything is configured through `vknn::Config` — the engine reads no environment variables
-([docs/CONFIG.md](docs/CONFIG.md)).
+([docs/config.md](docs/config.md)).
 
 ## Supported operators
 
 A broad ONNX op set: convolution/pooling, the elementwise unary/binary families, MatMul (batched N-D),
 Gemm, LayerNorm, Softmax, Einsum, RoPE, Gather/Scatter, Resize, Pad, GridSample, Range, and the
 shape/data-movement ops — enough for CNNs, detection, and transformer/attention models. Per-op
-GPU/CPU coverage: [docs/OP_COVERAGE.md](docs/OP_COVERAGE.md). Adding an op is one new file via the
-self-registration macros: [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md).
+GPU/CPU coverage: [docs/op-coverage.md](docs/op-coverage.md). Adding an op is one new file via the
+self-registration macros: [docs/adding-an-operator.md](docs/adding-an-operator.md).
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — import → IR → passes → segments → backends, and the NC4HW4 compute path.
-- [docs/CONFIG.md](docs/CONFIG.md) — every `vknn::Config` field, the `setHint` API, and the JSON form.
-- [docs/OP_COVERAGE.md](docs/OP_COVERAGE.md) — the operator set and its backend coverage.
-- [docs/BENCHMARK.md](docs/BENCHMARK.md) — on-device VKNN vs MNN numbers and methodology.
-- [docs/LIMITATIONS.md](docs/LIMITATIONS.md) — known gaps and the single-device caveat.
-- [docs/ADDING_AN_OPERATOR.md](docs/ADDING_AN_OPERATOR.md) · [docs/ADDING_A_BACKEND.md](docs/ADDING_A_BACKEND.md) — extend the engine (one new file, no core edits).
+- [docs/architecture.md](docs/architecture.md) — import → IR → passes → segments → backends, and the NC4HW4 compute path.
+- [docs/config.md](docs/config.md) — every `vknn::Config` field, the `setHint` API, and the JSON form.
+- [docs/op-coverage.md](docs/op-coverage.md) — the operator set and its backend coverage.
+- [docs/benchmark.md](docs/benchmark.md) — on-device VKNN vs MNN numbers and methodology.
+- [docs/limitations.md](docs/limitations.md) — known gaps and the single-device caveat.
+- [docs/adding-an-operator.md](docs/adding-an-operator.md) · [docs/adding-a-backend.md](docs/adding-a-backend.md) — extend the engine (one new file, no core edits).
 - [docs/adr/](docs/adr/) — architecture decision records.
 - [AGENTS.md](AGENTS.md) + [skills/](skills/) — orientation and focused how-to guides.
 

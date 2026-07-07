@@ -340,7 +340,7 @@ def main():
         "gpu_fallbacks": fallbacks,
         "vknn_implementation_guide": {
             "note": "To add each op type below, follow the per-op recipe.",
-            "recipe": "skills/add-an-operator.md, docs/ADDING_AN_OPERATOR.md",
+            "recipe": "skills/add-an-operator.md, docs/adding-an-operator.md",
             "files_to_touch": [
                 "include/vknn/op.h            (add OpType::kFoo)",
                 "src/core/op.cpp              (opTypeName + opTypeFromOnnx)",

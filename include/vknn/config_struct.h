@@ -1,5 +1,5 @@
 /// Runtime config: a plain struct of knobs plus a JSON loader. Field set mirrors MNN's config.
-/// Every field is documented in docs/CONFIG.md.
+/// Every field is documented in docs/config.md.
 #pragma once
 #include "vknn/backend_kind.h"
 #include "vknn/hint.h"

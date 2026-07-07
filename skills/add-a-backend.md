@@ -2,7 +2,7 @@
 
 A backend runs a piece of hardware or runtime, selectable from `Config`, with no edits to core
 dispatch. For the deep dive — worked snippets and the offline-compiled-accelerator pattern — see
-[../docs/ADDING_A_BACKEND.md](../docs/ADDING_A_BACKEND.md).
+[../docs/adding-a-backend.md](../docs/adding-a-backend.md).
 
 ## The contract
 

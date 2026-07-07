@@ -1,6 +1,6 @@
 // CPU reference backend + scalar/NEON operator registry.
 //
-// Adding a CPU op (see docs/ADDING_AN_OPERATOR.md):
+// Adding a CPU op (see docs/adding-an-operator.md):
 //   1. subclass CpuOp, implement run().
 //   2. VKNN_REGISTER_CPU_OP(OpType::Foo, FooCpuOp);
 // No edits to core dispatch are required.

@@ -147,7 +147,7 @@ into every stage. A single-stage config may drop `stages` and put the fields at 
 python benchmark/run.py convert model.onnx model.vxm [-O 0..3] [--fp32] \
     [--fuse-se] [--fuse-dwpw] [--no-fuse-swish] [--on host|device]
 ```
-`-O` is the optimization level (see `docs/OP_COVERAGE.md` § Fusions); `--on device` runs
+`-O` is the optimization level (see `docs/op-coverage.md` § Fusions); `--on device` runs
 `vknn_compile` on the phone for models too big to convert on the host.
 
 ## 6. Making goldens

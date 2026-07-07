@@ -2,7 +2,7 @@
 
 Importing a new ONNX op requires a CPU reference implementation (the correctness oracle) and an
 optional GPU kernel. The convention is **one operator per file**. Full writeup:
-[../docs/ADDING_AN_OPERATOR.md](../docs/ADDING_AN_OPERATOR.md).
+[../docs/adding-an-operator.md](../docs/adding-an-operator.md).
 
 ## The five touch points
 
