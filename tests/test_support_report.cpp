@@ -134,9 +134,10 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
 
 TEST(SupportReport, CastFromInt64TargetGate) {
     // An int64 input Cast runs on the GPU for the shape-arithmetic targets (FLOAT/FLOAT16/DOUBLE,
-    // INT32, INT64): the int64 lanes decode to compute-precision float at the pack boundary, so
-    // cast.comp reads them like any float operand. A narrow integer target (INT8 here) keeps the CPU
-    // op, where the wider int range and saturation are exact. `to` is the ONNX TensorProto dtype.
+    // INT32, INT64) and for INT8/UINT8: the int64 lanes decode to compute-precision float at the pack
+    // boundary, so cast.comp reads them like any float operand, and it narrows INT8 (modulo-wrap) /
+    // UINT8 (saturate) to match the CPU Cast op + readback narrowing bit-for-bit. INT16/UINT16/BOOL and
+    // the 32/64-bit unsigned targets keep the CPU op. `to` is the ONNX TensorProto dtype.
     auto castNode = [&](Graph &g, const char *name, int64_t to, DType inDt) {
         TensorId   in  = tensor(g, std::string(name) + "_in", {4}, inDt);
         TensorId   out = tensor(g, std::string(name) + "_out", {4});
@@ -148,16 +149,105 @@ TEST(SupportReport, CastFromInt64TargetGate) {
     castNode(g, "cast_i64_to_float", 1, DType::Int64); // FLOAT  -> GPU
     castNode(g, "cast_i64_to_int32", 6, DType::Int64); // INT32  -> GPU
     castNode(g, "cast_i64_to_int64", 7, DType::Int64); // INT64  -> GPU
-    castNode(g, "cast_i64_to_int8", 3, DType::Int64);  // INT8   -> CPU (narrow target)
+    castNode(g, "cast_i64_to_int8", 3, DType::Int64);  // INT8   -> GPU (modulo-wrap narrow)
+    castNode(g, "cast_i64_to_uint8", 2, DType::Int64); // UINT8  -> GPU (saturate narrow)
+    castNode(g, "cast_i64_to_int16", 5, DType::Int64); // INT16  -> CPU (fp32 output, no readback narrow)
+    castNode(g, "cast_i64_to_bool", 9, DType::Int64);  // BOOL   -> CPU
 
     std::vector<NodeSupport> rows = vkSupportSurvey(g);
-    ASSERT_EQ(rows.size(), 4u);
+    ASSERT_EQ(rows.size(), 7u);
     EXPECT_EQ(rows[0].backend, "vulkan");
     EXPECT_TRUE(rows[0].reason.empty());
     EXPECT_EQ(rows[1].backend, "vulkan");
     EXPECT_EQ(rows[2].backend, "vulkan");
-    EXPECT_EQ(rows[3].backend, "cpu");
-    EXPECT_EQ(rows[3].reason, "Cast: int64 input to a narrow integer target");
+    EXPECT_EQ(rows[3].backend, "vulkan"); // INT8
+    EXPECT_TRUE(rows[3].reason.empty());
+    EXPECT_EQ(rows[4].backend, "vulkan"); // UINT8
+    EXPECT_TRUE(rows[4].reason.empty());
+    EXPECT_EQ(rows[5].backend, "cpu"); // INT16
+    EXPECT_EQ(rows[5].reason, "Cast: int64 input to a narrow integer target");
+    EXPECT_EQ(rows[6].backend, "cpu"); // BOOL
+    EXPECT_EQ(rows[6].reason, "Cast: int64 input to a narrow integer target");
+}
+
+TEST(SupportReport, ConstantOfShapeIntegerFillRunsOnGpu) {
+    // A resolved output shape runs on the GPU regardless of the fill dtype: an integer `value` fills as
+    // the compute-precision float and the graph boundary repacks the declared int dtype on readback.
+    // Only an unresolved (empty) output shape stays on the exact CPU op.
+    auto cosNode = [&](Graph &g, const char *name, Shape outShape, bool intFill, DType outDt) {
+        TensorId   shp = tensor(g, std::string(name) + "_shape", {(int64_t) outShape.size()}, DType::Int64);
+        TensorId   out = tensor(g, std::string(name) + "_out", std::move(outShape), outDt);
+        Attributes a;
+        Attr       v;
+        if (intFill)
+        {
+            v.kind = Attr::Ints;
+            v.ints = {7};
+        } else
+        {
+            v.kind   = Attr::Floats;
+            v.floats = {1.5f};
+        }
+        a.map["value"] = v;
+        addNode(g, OpType::ConstantOfShape, name, {shp}, {out}, a);
+    };
+    {
+        Graph g;
+        cosNode(g, "cos_int64", {6}, true, DType::Int64);   // integer fill, int64 output -> GPU
+        cosNode(g, "cos_int32", {6}, true, DType::Int32);   // integer fill, int32 output -> GPU
+        cosNode(g, "cos_float", {6}, false, DType::Float32); // float fill -> GPU (unchanged)
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 3u);
+        for (const NodeSupport &row: rows)
+        {
+            EXPECT_EQ(row.backend, "vulkan") << row.node;
+            EXPECT_TRUE(row.reason.empty()) << row.node;
+        }
+    }
+    {
+        // unresolved (empty) output shape -> CPU
+        Graph g;
+        cosNode(g, "cos_unresolved", {}, true, DType::Int64);
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "cpu");
+        EXPECT_EQ(rows[0].reason, "ConstantOfShape: unresolved output shape");
+    }
+}
+
+TEST(SupportReport, RangeIntegerRunsOnGpu) {
+    // A Range with a resolved output size runs on the GPU regardless of the scalar dtype: integer
+    // start/limit/delta generate the ramp in compute-precision float and the graph boundary repacks the
+    // declared int dtype on readback. An unresolved output size stays on the exact CPU op.
+    auto rangeNode = [&](Graph &g, const char *name, Shape outShape, DType scalarDt, DType outDt) {
+        TensorId   s   = tensor(g, std::string(name) + "_s", {}, scalarDt);
+        TensorId   l   = tensor(g, std::string(name) + "_l", {}, scalarDt);
+        TensorId   d   = tensor(g, std::string(name) + "_d", {}, scalarDt);
+        TensorId   out = tensor(g, std::string(name) + "_out", std::move(outShape), outDt);
+        addNode(g, OpType::Range, name, {s, l, d}, {out});
+    };
+    {
+        Graph g;
+        rangeNode(g, "range_int64", {8}, DType::Int64, DType::Int64); // int64 scalars/output -> GPU
+        rangeNode(g, "range_int32", {8}, DType::Int32, DType::Int32); // int32 scalars/output -> GPU
+        rangeNode(g, "range_float", {8}, DType::Float32, DType::Float32); // float -> GPU (unchanged)
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 3u);
+        for (const NodeSupport &row: rows)
+        {
+            EXPECT_EQ(row.backend, "vulkan") << row.node;
+            EXPECT_TRUE(row.reason.empty()) << row.node;
+        }
+    }
+    {
+        // unresolved output shape -> CPU
+        Graph g;
+        rangeNode(g, "range_unresolved", {}, DType::Int64, DType::Int64);
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        ASSERT_EQ(rows.size(), 1u);
+        EXPECT_EQ(rows[0].backend, "cpu");
+        EXPECT_EQ(rows[0].reason, "Range: fewer than 3 inputs or unresolved output shape");
+    }
 }
 
 TEST(SupportReport, TopKGateOnCompileTimeK) {

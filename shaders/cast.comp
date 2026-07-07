@@ -1,17 +1,36 @@
 #version 450
 #include "precision.glsl"
 #include "common.glsl"
-// Cast to an integer target (UINT8/INT8/INT16/INT32/INT64/BOOL): truncate toward zero, then clamp to
-// the target's representable range. The flat GPU path carries logical integers as compute-precision
-// storage (STORE = fp32 or fp16), so a UINT8 image / INT64 index is a truncated float here; the graph
-// boundary repacks it to the declared output dtype. float->float casts stay a plain buffer copy in the op.
+// Cast to an integer target. The flat GPU path carries logical integers as compute-precision storage
+// (STORE = fp32 or fp16), so an integer value is a truncated float here; the graph boundary repacks it
+// to the declared output dtype. float->float casts stay a plain buffer copy in the op.
+//
+// `mode` selects the narrowing so the stored value matches the CPU Cast op followed by the readback
+// narrowing (session.cpp readbackOutput), bit-for-bit:
+//   0  wide integer (INT32/INT64/UINT32/UINT64): truncate toward zero, clamp only to fence off inf/NaN.
+//   1  INT8: truncate, then wrap modulo 2^8 into [-128,127] (ONNX Cast to a smaller int is modulo,
+//      matching the C (int8_t) narrowing readbackOutput applies).
+//   2  UINT8: truncate, then saturate to [0,255] (matching readbackOutput's clamp for uint8).
+// The narrowed result is always small (<=255 magnitude for INT8/UINT8), hence exact in both fp16 and
+// fp32 storage, and the terminal readback re-narrowing is idempotent.
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
-layout(push_constant) uniform PC { int total; float lo, hi; } pc;
+layout(push_constant) uniform PC { int total; float lo, hi; int mode; } pc;
 
 void main() {
   uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (g >= uint(pc.total)) return;
-  d[g] = STORE(clamp(trunc(float(s[g])), pc.lo, pc.hi));
+  float t = trunc(float(s[g]));
+  float outv;
+  if (pc.mode == 1) {
+    // INT8 modulo wrap: reinterpret the low 8 bits of the truncated integer as a signed byte.
+    int m = int(t) & 0xFF;
+    if (m >= 128) m -= 256;
+    outv = float(m);
+  } else {
+    // mode 0 (wide, clamp to fence inf/NaN) and mode 2 (UINT8, saturate to [0,255]) both clamp.
+    outv = clamp(t, pc.lo, pc.hi);
+  }
+  d[g] = STORE(outv);
 }

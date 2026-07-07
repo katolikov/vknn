@@ -263,22 +263,25 @@ namespace vknn {
         }
         if (nd.type == OpType::Cast)
         {
-            // float->float is a no-op copy; float->int truncates+clamps on the flat path (cast.comp),
+            // float->float is a no-op copy; float->int truncates+narrows on the flat path (cast.comp),
             // carrying the logical integer as compute-precision storage. An int64 INPUT (a shape/index
             // tensor) is decoded to compute-precision float when it is packed to the device (packToBuffer),
-            // so cast.comp reads it like any other operand. This covers int64 -> float/int32/int64 (the
-            // shape-arithmetic targets), whose magnitudes are small enough to be exact in the compute float.
-            // A cast to a narrow integer target (int8/uint8/int16/bool) from int64 keeps the CPU op, where
-            // the wider integer range and saturation are exact.
+            // so cast.comp reads it like any other operand. A non-int64 input always runs on the GPU.
             if (g.desc(nd.inputs[0]).dtype != DType::Int64)
             {
                 return true;
             }
             int64_t to = nd.attr.geti("to", 1); // ONNX TensorProto dtype
-            if (to == 1 || to == 10 || to == 11 || to == 6 || to == 7)
+            // int64 -> FLOAT/FLOAT16/DOUBLE, INT32, INT64: the shape-arithmetic targets, exact in the
+            // compute float. int64 -> INT8 (3) / UINT8 (2): cast.comp narrows to match the CPU Cast op
+            // followed by the readback narrowing bit-for-bit (INT8 modulo-wrap, UINT8 saturate); the
+            // narrowed value is small and exact in fp16/fp32.
+            if (to == 1 || to == 10 || to == 11 || to == 6 || to == 7 || to == 2 || to == 3)
             {
-                return true; // FLOAT/FLOAT16/DOUBLE, INT32, INT64
+                return true;
             }
+            // int64 -> INT16/UINT16 (fp32 output tensor, no readback narrowing to lean on) / BOOL / the
+            // 32/64-bit unsigned targets keep the exact CPU op, where the wider range and modulo are exact.
             return refuse(whyNot, "Cast: int64 input to a narrow integer target");
         }
         if (nd.type == OpType::TopK)
