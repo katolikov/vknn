@@ -10,5 +10,5 @@ layout(push_constant) uniform PC { uint total; int I, J; } pc;
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= pc.total) return;
-  d[gid] = STORE(float(a[int(gid) / pc.J]) * float(b[int(gid) % pc.J]));
+  d[gid] = TO_STORE(float(a[int(gid) / pc.J]) * float(b[int(gid) % pc.J])); // saturating: a product of in-range values can exceed the fp16 range
 }
