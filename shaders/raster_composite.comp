@@ -1,7 +1,12 @@
 #version 450
-// 3DGS per-tile compositor: one workgroup per 16x16 screen tile, one thread per pixel. Walks the
-// tile's depth-sorted gaussian list (GPU-built: raster_duplicate emit -> radix sort -> raster_ranges)
-// front-to-back, evaluating each 2D gaussian's alpha and alpha-compositing colour with transmittance.
+// 3DGS per-tile compositor: one workgroup per 16x16 screen tile, one thread per pixel. The tile's
+// depth-sorted gaussian list (GPU-built: raster_duplicate emit -> radix sort -> raster_ranges) is
+// consumed cooperatively in 256-entry batches: each thread stages one entry's fields from global
+// memory into shared memory, then every pixel walks the staged batch in list order — so each
+// entry is fetched once per tile instead of once per pixel. The per-entry arithmetic and the
+// front-to-back order match the per-pixel definition exactly (same operations on the same
+// values), so the output is independent of the batching. A pixel whose transmittance drops below
+// 1e-4 stops compositing; the batch loop ends early once every pixel in the tile has stopped.
 // Matches ref_rasterizer.py's per-pixel loop. dims.w selects the store: 0 writes fp32 [H*W*3],
 // 1 writes packed 0xAARRGGBB uints [H*W] (Android Bitmap ARGB_8888 IntArray order) quantized
 // exactly like the fp32 path's host pack: round-half-up in fp32, contraction disabled (precise)
@@ -14,28 +19,55 @@ layout(std430, binding = 3) writeonly buffer Img      { float img[]; };       //
 layout(std430, binding = 4) writeonly buffer PackedImg { uint packedImg[]; }; // [H*W] (dims.w == 1)
 layout(push_constant) uniform PC { ivec4 dims; } pc;  // H, W, numTilesX, outputMode
 
+shared vec4  stagedPositionConic[256]; // (u, v, conic a, conic b) per staged entry
+shared vec4  stagedConicColor[256];    // (conic c, r, g, b) per staged entry
+shared float stagedOpacity[256];
+shared uint  donePixels;               // threads that stopped compositing (or sit outside the image)
+
 void main() {
   int H = pc.dims.x, W = pc.dims.y, ntx = pc.dims.z;
   int px = int(gl_GlobalInvocationID.x), py = int(gl_GlobalInvocationID.y);
-  if (px >= W || py >= H) return;
-  int tile = (py / 16) * ntx + (px / 16);
+  uint stageIndex = gl_LocalInvocationID.y * 16u + gl_LocalInvocationID.x;
+  if (stageIndex == 0u) donePixels = 0u;
+  barrier();
+  bool insideImage = px < W && py < H;
+  bool done = !insideImage; // out-of-image threads only help stage entries
+  if (done) atomicAdd(donePixels, 1u);
+  barrier();
+  int tile = int(gl_WorkGroupID.y) * ntx + int(gl_WorkGroupID.x);
   int start = ranges[2*tile], count = ranges[2*tile+1];
   vec3 C = vec3(0.0);
   float T = 1.0;
-  for (int k = 0; k < count; ++k) {
-    int gi = sortedIdx[start + k];
-    uint o = uint(gi) * 12u;
-    float dx = float(px) - gd[o+0u];
-    float dy = float(py) - gd[o+1u];
-    float power = -0.5 * (gd[o+3u]*dx*dx + gd[o+5u]*dy*dy) - gd[o+4u]*dx*dy;
-    if (power > 0.0) continue;
-    float alpha = min(0.99, gd[o+9u] * exp(power));
-    if (alpha < (1.0/255.0)) continue;
-    float w = alpha * T;
-    C += w * vec3(gd[o+6u], gd[o+7u], gd[o+8u]);
-    T *= (1.0 - alpha);
-    if (T < 1e-4) break;
+  for (int base = 0; base < count; base += 256) {
+    if (donePixels == 256u) break; // uniform: every write is ordered before this read by a barrier
+    int loadIndex = base + int(stageIndex);
+    if (loadIndex < count) {
+      uint o = uint(sortedIdx[start + loadIndex]) * 12u;
+      stagedPositionConic[stageIndex] = vec4(gd[o+0u], gd[o+1u], gd[o+3u], gd[o+4u]);
+      stagedConicColor[stageIndex]    = vec4(gd[o+5u], gd[o+6u], gd[o+7u], gd[o+8u]);
+      stagedOpacity[stageIndex]       = gd[o+9u];
+    }
+    barrier();
+    if (!done) {
+      int stagedCount = min(256, count - base);
+      for (int k = 0; k < stagedCount; ++k) {
+        vec4 positionConic = stagedPositionConic[uint(k)];
+        vec4 conicColor = stagedConicColor[uint(k)];
+        float dx = float(px) - positionConic.x;
+        float dy = float(py) - positionConic.y;
+        float power = -0.5 * (positionConic.z*dx*dx + conicColor.x*dy*dy) - positionConic.w*dx*dy;
+        if (power > 0.0) continue;
+        float alpha = min(0.99, stagedOpacity[uint(k)] * exp(power));
+        if (alpha < (1.0/255.0)) continue;
+        float w = alpha * T;
+        C += w * vec3(conicColor.y, conicColor.z, conicColor.w);
+        T *= (1.0 - alpha);
+        if (T < 1e-4) { done = true; atomicAdd(donePixels, 1u); break; }
+      }
+    }
+    barrier();
   }
+  if (!insideImage) return;
   if (pc.dims.w == 0) {
     uint pix = (uint(py) * uint(W) + uint(px)) * 3u;
     img[pix+0u] = clamp(C.x, 0.0, 1.0);
