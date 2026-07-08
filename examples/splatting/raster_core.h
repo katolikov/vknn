@@ -1,11 +1,14 @@
 // The from-scratch Vulkan compute 3D-Gaussian-splatting rasterizer (preprocess -> GPU tile-bin ->
 // stable radix sort -> per-tile alpha compositing), shared by the vknn_yonosplat example and the
-// app-demo JNI bridge. Gaussians upload once; every render() runs the two-submission structure: a
-// count-only pass (CAP = 0) whose atomic total is read back on the host across a fence, then the
-// exactly-sized bin + sort + composite submission. The sort is a 4-pass LSD radix sort over the
-// 32-bit keys (8-bit digits: per-chunk histogram -> global exclusive scan -> stable ordered
-// scatter into ping-pong key/value buffers), so it needs no power-of-two padding and equal keys
-// keep their emit order.
+// app-demo JNI bridge. Gaussians upload once. The first render after setGaussians runs two
+// submissions: a count-only pass (CAP = 0) whose atomic total is read back on the host across a
+// fence sizes the sort buffers exactly, then the bin + sort + composite submission runs. Later
+// renders elide the count pass while the persisted grow-only sort buffers keep 1.25x headroom
+// over the last emitted total, collapsing the steady state to a single submission; a headroom
+// breach (emitted > capacity) grows the buffers and re-renders once. The sort is a 4-pass LSD
+// radix sort over the 32-bit keys (8-bit digits: per-chunk histogram -> global exclusive scan ->
+// stable ordered scatter into ping-pong key/value buffers), so it needs no power-of-two padding
+// and equal keys keep their emit order.
 #pragma once
 #if defined(VKNN_ENABLE_VULKAN)
 #include "backend/vulkan/vk_buffer.h"
@@ -27,11 +30,11 @@ namespace raster {
     };
 
     struct Stats {
-        uint32_t entries = 0; // exact tile-entry count from the count-only pass
-        int64_t  cap     = 0; // sort-buffer capacity in entries (>= entries, floor 2^16)
-        uint32_t emitted = 0; // entries the emit pass produced (> cap would mean drops)
-        double   msCount = 0; // submission 1 (preprocess + count) GPU ms
-        double   msMain  = 0; // submission 2 (bin + sort + composite) GPU ms
+        uint32_t entries = 0; // tile-entry total (count pass when it runs, else the emit counter)
+        int64_t  cap     = 0; // persisted sort-buffer capacity in entries (>= entries, floor 2^16)
+        uint32_t emitted = 0; // entries the emit pass produced
+        double   msCount = 0; // count-only submission GPU ms (0 when the count pass is elided)
+        double   msMain  = 0; // main submission(s) GPU ms (preprocess + bin + sort + composite)
     };
 
     class Rasterizer {
@@ -65,6 +68,10 @@ namespace raster {
         }
 
       private:
+        /// Grow the persisted sort buffers (ping-pong keys/values + radix histogram) to hold
+        /// `capacity` entries; no-op when they are already large enough.
+        void ensureSortCapacity(int64_t capacity);
+
         int   height_, width_;
         float nearPlane_;
         bool  ok_            = false;
@@ -83,6 +90,12 @@ namespace raster {
         std::unique_ptr<vknn::vk::Buffer> meansBuffer_, covariancesBuffer_, colorsBuffer_, opacitiesBuffer_, geometryBuffer_;
         // Per (height, width):
         std::unique_ptr<vknn::vk::Buffer> counterBuffer_, standInBuffer_, tileRangesBuffer_, imageBuffer_;
+        // Sort working set, grow-only across renders (see ensureSortCapacity): the ping-pong
+        // (key, value) buffer pairs and the radix digit histogram.
+        std::unique_ptr<vknn::vk::Buffer> sortKeysBuffer_, sortValuesBuffer_, sortKeysPingBuffer_, sortValuesPingBuffer_, radixHistogramBuffer_;
+        int64_t                           sortCapacity_      = 0;     // entries the sort buffers hold
+        uint32_t                          lastEmittedCount_  = 0;     // previous render's emit total
+        bool                              emittedCountKnown_ = false; // false forces the exact count pass (fresh Gaussians)
     };
 
 } // namespace raster
