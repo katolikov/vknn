@@ -10,7 +10,7 @@
 //
 //   vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
 //             [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
-//             [--no-kv-link]
+//             [--no-kv-link] [--timing]
 //
 // The model is a with-past decoder compiled at a fixed past length C (read from the .vxm). Each step
 // feeds one token at absolute position p, the [1, kv_heads, C, head_dim] cache as the past key/value
@@ -86,6 +86,7 @@ int main(int argc, char **argv) {
     const float   topP         = (float) atof(opt(argc, argv, "--top-p", "1"));
     const int64_t eos          = atoll(opt(argc, argv, "--eos", "151643"));
     const bool    kvLink       = !flagSet(argc, argv, "--no-kv-link");
+    cfg.timing                 = flagSet(argc, argv, "--timing"); // per-run pack/submit/unpack walls
     std::mt19937  rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
 
     auto sess = Runtime::load(model, cfg);

@@ -135,6 +135,10 @@ int main(int argc, char **argv) {
         {
             kvLink = false;
         }
+        if (!strcmp(argv[i], "--timing"))
+        {
+            cfg.timing = true; // per-run pack/submit/unpack walls
+        }
     }
     std::mt19937 rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));
 
