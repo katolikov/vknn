@@ -164,14 +164,27 @@ namespace vknn {
             }
             throw Error(Status::InvalidArgument, msg);
         }
+        for (auto &nd: g.nodes)
+        {
+            inferNodeShape(g, nd);
+        }
+    }
+
+    /// The per-node forward shape rule of inferShapes, callable on its own so constFold can interleave
+    /// it with value folding inside ONE program-order walk: folding a Shape/Gather/Concat chain makes a
+    /// dynamic Reshape's target constant, this rule then resolves the Reshape (and the activations
+    /// behind it) immediately, which unblocks folding the NEXT block's Shape() later in the same walk.
+    /// Without the interleave each fold/infer alternation advanced exactly one such block per round (a
+    /// deep encoder took dozens of full-graph rounds to converge, re-warning on every still-unresolved
+    /// tensor each round). Idempotent; only ever fills shapes that are derivable from resolved inputs.
+    void inferNodeShape(Graph &g, Node &nd) {
         auto SH = [&](TensorId id) -> Shape & {
             return g.desc(id).shape;
         };
-        for (auto &nd: g.nodes)
         {
             if (nd.outputs.empty())
             {
-                continue;
+                return;
             }
             TensorId o = nd.outputs[0];
             switch (nd.type)
@@ -583,10 +596,16 @@ namespace vknn {
                     break;
                 }
                 case OpType::Transpose: {
-                    const Shape &a    = SH(nd.inputs[0]);
-                    const auto  &perm = nd.attr.getints("perm");
+                    const Shape &a = SH(nd.inputs[0]);
+                    if (a.empty())
+                    {
+                        break; // input unresolved: defer silently, a later fold/infer round fills it
+                    }
+                    const auto &perm = nd.attr.getints("perm");
                     if (!perm.empty() && perm.size() != a.size())
                     {
+                        // A RESOLVED input whose rank disagrees with perm is a real model/import
+                        // defect (an unresolved input is the silent deferral above, never this).
                         VKNN_WARN << "Transpose '" << nd.name << "': perm rank " << perm.size() << " != input rank " << a.size() << " (shape " << shapeStr(a) << "); leaving unresolved";
                         break; // indexing a mismatched perm would read past the shape vector
                     }

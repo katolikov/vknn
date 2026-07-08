@@ -2065,6 +2065,75 @@ TEST(Passes, InferShapesLeadingUnnamedAxisFallsBack) {
 }
 
 namespace {
+    // Two chained "blocks" of the dynamic-shape pattern deep encoders emit — each block reads
+    // Shape() of ITS OWN activations to build the next Reshape's target — ending in a Transpose:
+    //   t1=Relu(x); s1=Shape(t1); r1=Reshape(t1,s1); t2=Relu(r1); s2=Shape(t2); r2=Reshape(t2,s2);
+    //   y=Transpose(r2, perm)
+    // Exercises the fold/infer interleave (const_fold.cpp calling inferNodeShape per node) and the
+    // Transpose unresolved-input deferral.
+    Graph makeShapeChainedBlocksGraph() {
+        Graph g;
+        auto  addT = [&](const char *nm, Shape sh = {}) {
+            TensorDesc d;
+            d.name  = nm;
+            d.shape = std::move(sh);
+            return g.addTensor(d);
+        };
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {2, 3};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId t1 = addT("t1"), s1 = addT("s1"), r1 = addT("r1");
+        TensorId t2 = addT("t2"), s2 = addT("s2"), r2 = addT("r2");
+        TensorId y  = addT("y");
+        g.desc(s1).dtype = g.desc(s2).dtype = DType::Int64;
+        g.desc(y).isOutput                  = true;
+        auto node = [&](OpType t, const char *nm, std::vector<TensorId> in, std::vector<TensorId> out) {
+            Node n;
+            n.type    = t;
+            n.name    = nm;
+            n.inputs  = std::move(in);
+            n.outputs = std::move(out);
+            return n;
+        };
+        Node tr = node(OpType::Transpose, "tr", {r2}, {y});
+        tr.attr.map["perm"] = ints({1, 0});
+        g.nodes             = {node(OpType::Relu, "relu1", {x}, {t1}), node(OpType::Shape, "shape1", {t1}, {s1}),
+                               node(OpType::Reshape, "reshape1", {t1, s1}, {r1}), node(OpType::Relu, "relu2", {r1}, {t2}),
+                               node(OpType::Shape, "shape2", {t2}, {s2}), node(OpType::Reshape, "reshape2", {t2, s2}, {r2}), tr};
+        g.outputs           = {y};
+        return g;
+    }
+} // namespace
+
+// --- A Transpose whose input shape is still UNRESOLVED defers silently (empty output shape, no
+// crash): an unresolved input is a normal mid-pipeline state, not the perm/rank-mismatch defect the
+// warning names. Before the deferral fix this warned "perm rank 2 != input rank 0" on every
+// inference round until the chain folded — thousands of false alarms on a deep encoder. ---
+TEST(Passes, TransposeDefersOnUnresolvedInput) {
+    Graph g = makeShapeChainedBlocksGraph();
+    inferShapes(g, 1); // no folding yet: reshape targets are runtime, so r1/r2/y stay unresolved
+    EXPECT_TRUE(g.desc(g.outputs[0]).shape.empty()) << "Transpose must defer, not fabricate a shape";
+}
+
+// --- constFold interleaves the per-node shape rule with value folding, so a chain of blocks that
+// each read Shape() of their own activations resolves in ONE fold pass: folding block 1's Shape
+// resolves its Reshape (and the activations behind it) immediately, which unblocks folding block
+// 2's Shape later in the SAME walk. Before the interleave each fold/infer alternation advanced one
+// block per round. ---
+TEST(Passes, ConstFoldResolvesChainedShapeBlocksInOnePass) {
+    Graph g = makeShapeChainedBlocksGraph();
+    inferShapes(g, 1);
+    EXPECT_GT(constFold(g), 0) << "the Shape chains must fold";
+    // Everything — both Reshapes AND the final Transpose — is resolved after the single pass.
+    TensorId y = g.outputs[0];
+    EXPECT_EQ(g.desc(y).shape, (Shape {3, 2})) << "Transpose output must be resolved (perm {1,0} of [2,3])";
+    EXPECT_EQ(constFold(g), 0) << "a second pass must find nothing left to fold";
+}
+
+namespace {
     // data[1,4,8,8] (NC4) + a RUNTIME grid chain: flow (graph input, NC4) -> ConvertLayout ->
     // flow_flat -> Add(base const) -> grid (flat) -> GridSample -> y. Exercises pinGridSampleGridFp32
     // and the markFp32 frontier around a GridSample grid input.

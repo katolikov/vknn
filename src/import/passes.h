@@ -28,6 +28,12 @@ namespace vknn {
     // and is left untouched (the lookups and the error fire only while a dim is still dynamic).
     void inferShapes(Graph &g, int64_t batch = 1, const std::map<std::string, Shape> *declared = nullptr,
                      const std::map<std::string, int64_t> *bindings = nullptr);
+    // The per-node forward shape rule of inferShapes, callable on its own. constFold interleaves it
+    // with value folding in one program-order walk so a folded Reshape/Slice/Expand target resolves
+    // its consumer's shape (and everything behind it) within the SAME fold pass, instead of one
+    // fold/infer alternation per dependent block. Idempotent; fills only shapes derivable from
+    // resolved inputs.
+    void inferNodeShape(Graph &g, Node &nd);
     // Normalize 1-D Convs (rank-3 constant weight, 1-spatial-dim attributes) to the canonical 2-D
     // geometry every conv consumer indexes: weight [M,C/g,k] -> [M,C/g,k,1], strides/dilations/
     // kernel_shape/pads extended with the W dim's identity values. Activation ranks are unchanged.
