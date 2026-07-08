@@ -23,8 +23,11 @@ namespace raster {
             int32_t gaussians, tilesX, tilesY, depthBits, capacity;
             float   nearPlane, invDepthRange;
         };
-        struct BitonicPush {
-            uint32_t j, k, n;
+        struct RadixPush {
+            uint32_t shift, numGroups, capacity;
+        };
+        struct RadixScanPush {
+            uint32_t totalBins;
         };
         struct RangesPush {
             int32_t mode, tileCount, capacity, depthBits;
@@ -33,10 +36,16 @@ namespace raster {
             int32_t dims[4];
         };
 
+        // Radix-sort geometry, mirrored in the raster_radix_{count,scan,scatter}.comp shaders:
+        // 256 lanes per workgroup x 16 sequential batches = 4096 entries per chunk, 8-bit digits
+        // over 32-bit keys = 4 passes, 256 histogram bins per chunk.
+        constexpr uint32_t kRadixChunkEntries = 4096;
+        constexpr uint32_t kRadixDigitBins    = 256;
+        constexpr uint32_t kRadixPasses       = 4;
+
     } // namespace
 
-    Rasterizer::Rasterizer(int height, int width, float nearPlane)
-        : height_(height), width_(width), nearPlane_(nearPlane) {
+    Rasterizer::Rasterizer(int height, int width, float nearPlane): height_(height), width_(width), nearPlane_(nearPlane) {
         if (!context_.initialized())
         {
             return;
@@ -52,13 +61,15 @@ namespace raster {
         depthBits_     = 32 - tileBits; // key bits left for the depth field
         invDepthRange_ = 1.0f / (256.0f - nearPlane_);
 
-        runner_         = std::make_unique<vk::CommandRunner>(context_);
-        preprocessPipe_ = std::make_unique<vk::ComputePipeline>(context_, "raster_preprocess", 5, sizeof(PreprocessPush));
-        fillPipe_       = std::make_unique<vk::ComputePipeline>(context_, "raster_fill", 1, sizeof(FillPush));
-        duplicatePipe_  = std::make_unique<vk::ComputePipeline>(context_, "raster_duplicate", 4, sizeof(DuplicatePush));
-        bitonicPipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_bitonic", 2, sizeof(BitonicPush));
-        rangesPipe_     = std::make_unique<vk::ComputePipeline>(context_, "raster_ranges", 2, sizeof(RangesPush));
-        compositePipe_  = std::make_unique<vk::ComputePipeline>(context_, "raster_composite", 4, sizeof(CompositePush));
+        runner_           = std::make_unique<vk::CommandRunner>(context_);
+        preprocessPipe_   = std::make_unique<vk::ComputePipeline>(context_, "raster_preprocess", 5, sizeof(PreprocessPush));
+        fillPipe_         = std::make_unique<vk::ComputePipeline>(context_, "raster_fill", 1, sizeof(FillPush));
+        duplicatePipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_duplicate", 4, sizeof(DuplicatePush));
+        radixCountPipe_   = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_count", 3, sizeof(RadixPush));
+        radixScanPipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_scan", 1, sizeof(RadixScanPush));
+        radixScatterPipe_ = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_scatter", 6, sizeof(RadixPush));
+        rangesPipe_       = std::make_unique<vk::ComputePipeline>(context_, "raster_ranges", 3, sizeof(RangesPush));
+        compositePipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_composite", 4, sizeof(CompositePush));
 
         // Counter is read back on the host between the two submissions, hence kReadback.
         counterBuffer_    = std::make_unique<vk::Buffer>(context_, 4, vk::MemPref::kReadback);
@@ -72,8 +83,7 @@ namespace raster {
 
     Rasterizer::~Rasterizer() = default;
 
-    void Rasterizer::setGaussians(const float *means, const float *covariances, const float *colors,
-                                  const float *opacities, int n) {
+    void Rasterizer::setGaussians(const float *means, const float *covariances, const float *colors, const float *opacities, int n) {
         if (!ok_)
         {
             return;
@@ -90,8 +100,7 @@ namespace raster {
         opacitiesBuffer_->upload(opacities, (size_t) n * 4);
     }
 
-    Result Rasterizer::render(const float cameraToWorld[16], float focalX, float focalY,
-                              float centerX, float centerY, float *out, Stats *stats) {
+    Result Rasterizer::render(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, float *out, Stats *stats) {
         if (!ok_ || gaussianCount_ == 0)
         {
             return Result::Error;
@@ -139,7 +148,8 @@ namespace raster {
         FillPush        counterReset {1u, 0u};
         VkCommandBuffer cmd = runner_->allocate();
         runner_->begin(cmd);
-        preprocessPipe_->dispatch(cmd, {meansBuffer_->handle(), covariancesBuffer_->handle(), colorsBuffer_->handle(), opacitiesBuffer_->handle(), geometryBuffer_->handle()}, &preprocessPush, sizeof(preprocessPush), (uint32_t) ((gaussianCount + 63) / 64));
+        preprocessPipe_->dispatch(cmd,
+                                  {meansBuffer_->handle(), covariancesBuffer_->handle(), colorsBuffer_->handle(), opacitiesBuffer_->handle(), geometryBuffer_->handle()}, &preprocessPush, sizeof(preprocessPush), (uint32_t) ((gaussianCount + 63) / 64));
         fillPipe_->dispatch(cmd, {counterBuffer_->handle()}, &counterReset, sizeof(counterReset), 1);
         vk::computeBarrier(cmd);
         DuplicatePush countOnly {gaussianCount, tilesX_, tilesY_, depthBits_, 0, nearPlane_, invDepthRange_};
@@ -150,53 +160,57 @@ namespace raster {
         uint32_t entryCount = 0;
         counterBuffer_->download(&entryCount, 4);
 
-        // Sort-buffer capacity: next power of two >= max(entryCount, 65536). The bitonic network
-        // needs a power-of-two element count; padding slots hold key = ~0u, which sorts after
-        // every real key (a real key's tile field is < tileCount, so it is below the all-ones
-        // pattern).
-        int64_t capacity = 1;
-        while (capacity < (int64_t) entryCount || capacity < (1 << 16))
-        {
-            capacity <<= 1;
-        }
+        // Sort-buffer capacity: the radix sort needs no power-of-two padding, so the buffers hold
+        // exactly the real entries (floor 2^16 to keep tiny scenes off the reallocation path).
+        int64_t capacity = entryCount > (1u << 16) ? (int64_t) entryCount : (int64_t) (1 << 16);
         if (stats)
         {
             stats->entries = entryCount;
             stats->cap     = capacity;
             stats->msCount = msCount;
         }
-        if (capacity > ((int64_t) 1 << 30))
+        if (entryCount > (1u << 30))
         {
             return Result::SortLimitExceeded;
         }
-        vk::Buffer keyBuffer(context_, (size_t) capacity * 4), valueBuffer(context_, (size_t) capacity * 4);
+        const uint32_t radixGroups = (uint32_t) ((capacity + kRadixChunkEntries - 1) / kRadixChunkEntries);
+        vk::Buffer     keyBuffer(context_, (size_t) capacity * 4), valueBuffer(context_, (size_t) capacity * 4);
+        vk::Buffer     keyPingBuffer(context_, (size_t) capacity * 4), valuePingBuffer(context_, (size_t) capacity * 4);
+        vk::Buffer     histogramBuffer(context_, (size_t) radixGroups * kRadixDigitBins * 4);
 
         // Submission 2 - bin, sort, and composite into the exactly-sized buffers. The geometry
         // buffer carries the preprocess results across the fence from submission 1.
         cmd = runner_->allocate();
         runner_->begin(cmd);
-        FillPush keyPadding {(uint32_t) capacity, 0xffffffffu};
-        fillPipe_->dispatch(cmd, {keyBuffer.handle()}, &keyPadding, sizeof(keyPadding), (uint32_t) ((capacity + 255) / 256));
         fillPipe_->dispatch(cmd, {counterBuffer_->handle()}, &counterReset, sizeof(counterReset), 1);
         vk::computeBarrier(cmd);
         DuplicatePush emit {gaussianCount, tilesX_, tilesY_, depthBits_, (int) capacity, nearPlane_, invDepthRange_};
         duplicatePipe_->dispatch(cmd, {geometryBuffer_->handle(), counterBuffer_->handle(), keyBuffer.handle(), valueBuffer.handle()}, &emit, sizeof(emit), (uint32_t) ((gaussianCount + 63) / 64));
         vk::computeBarrier(cmd);
-        // Bitonic sort of the (key, value) arrays: each (k, j) pair is one compare-exchange stage,
-        // dispatched separately so the compute barrier orders the stages.
-        for (uint32_t k = 2; k <= (uint32_t) capacity; k <<= 1)
+        // Stable LSD radix sort, least-significant digit first: each 8-bit pass histograms the
+        // digits per chunk, exclusive-scans the digit-major histogram into global scatter bases,
+        // and stably scatters (key, value) pairs between the ping-pong buffer pairs. Four passes
+        // (an even number) land the sorted arrays back in keyBuffer/valueBuffer.
+        for (uint32_t pass = 0; pass < kRadixPasses; ++pass)
         {
-            for (uint32_t j = k >> 1; j > 0; j >>= 1)
-            {
-                BitonicPush stage {j, k, (uint32_t) capacity};
-                bitonicPipe_->dispatch(cmd, {keyBuffer.handle(), valueBuffer.handle()}, &stage, sizeof(stage), (uint32_t) ((capacity + 255) / 256));
-                vk::computeBarrier(cmd);
-            }
+            vk::Buffer &sourceKeys   = (pass % 2 == 0) ? keyBuffer : keyPingBuffer;
+            vk::Buffer &sourceValues = (pass % 2 == 0) ? valueBuffer : valuePingBuffer;
+            vk::Buffer &destKeys     = (pass % 2 == 0) ? keyPingBuffer : keyBuffer;
+            vk::Buffer &destValues   = (pass % 2 == 0) ? valuePingBuffer : valueBuffer;
+            RadixPush   digitPass {pass * 8, radixGroups, (uint32_t) capacity};
+            radixCountPipe_->dispatch(cmd, {sourceKeys.handle(), counterBuffer_->handle(), histogramBuffer.handle()}, &digitPass, sizeof(digitPass), radixGroups);
+            vk::computeBarrier(cmd);
+            RadixScanPush scan {radixGroups * kRadixDigitBins};
+            radixScanPipe_->dispatch(cmd, {histogramBuffer.handle()}, &scan, sizeof(scan), 1);
+            vk::computeBarrier(cmd);
+            radixScatterPipe_->dispatch(
+                cmd, {sourceKeys.handle(), sourceValues.handle(), counterBuffer_->handle(), histogramBuffer.handle(), destKeys.handle(), destValues.handle()}, &digitPass, sizeof(digitPass), radixGroups);
+            vk::computeBarrier(cmd);
         }
         RangesPush rangesClear {0, tileCount_, (int) capacity, depthBits_}, rangesAccumulate {1, tileCount_, (int) capacity, depthBits_};
-        rangesPipe_->dispatch(cmd, {keyBuffer.handle(), tileRangesBuffer_->handle()}, &rangesClear, sizeof(rangesClear), (uint32_t) ((tileCount_ + 255) / 256));
+        rangesPipe_->dispatch(cmd, {keyBuffer.handle(), tileRangesBuffer_->handle(), counterBuffer_->handle()}, &rangesClear, sizeof(rangesClear), (uint32_t) ((tileCount_ + 255) / 256));
         vk::computeBarrier(cmd);
-        rangesPipe_->dispatch(cmd, {keyBuffer.handle(), tileRangesBuffer_->handle()}, &rangesAccumulate, sizeof(rangesAccumulate), (uint32_t) ((capacity + 255) / 256));
+        rangesPipe_->dispatch(cmd, {keyBuffer.handle(), tileRangesBuffer_->handle(), counterBuffer_->handle()}, &rangesAccumulate, sizeof(rangesAccumulate), (uint32_t) ((capacity + 255) / 256));
         vk::computeBarrier(cmd);
         CompositePush compositePush {};
         compositePush.dims[0] = height_;

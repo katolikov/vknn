@@ -3,8 +3,8 @@
 //   image + intrinsics --> encoder (vknn Vulkan) --> Gaussians --> Vulkan rasterizer --> rendered
 //   view.
 // The encoder runs as a normal vknn Session; its 6 Gaussian outputs feed the from-scratch Vulkan
-// compute rasterizer (raster_core.h: preprocess + exact tile-entry count -> GPU tile-bin ->
-// bitonic sort -> per-tile alpha compositing), which the app-demo JNI bridge shares.
+// compute rasterizer (raster_core.h: preprocess -> GPU tile-bin -> stable radix sort -> per-tile
+// alpha compositing), which the app-demo JNI bridge shares.
 // The rendered view is written as a PPM. See scripts/yonosplat/ for how the encoder .vxm + inputs
 // are made.
 //

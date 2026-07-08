@@ -1,0 +1,39 @@
+#version 450
+// Radix-sort global exclusive scan (pass 2 of 3 per digit), in place over the digit-major
+// histogram raster_radix_count wrote. One workgroup walks the array in 256-element tiles,
+// scans each tile in shared memory (Hillis-Steele), and carries the running total across tiles,
+// so histogram[digit * numGroups + group] becomes the global scatter base for that (digit, group)
+// pair. Single-workgroup and sequential across tiles: fully deterministic, and fast enough —
+// the array holds 256 bins per 4096-entry chunk (~256K values for a 4M-entry sort).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Histo { uint histogram[]; }; // [totalBins], scanned in place
+layout(push_constant) uniform PC {
+  uint totalBins; // 256 * numGroups
+} pc;
+
+shared uint tileValues[256];
+shared uint carryTotal;
+
+void main() {
+  uint lane = gl_LocalInvocationID.x;
+  if (lane == 0u) carryTotal = 0u;
+  barrier();
+  uint tiles = (pc.totalBins + 255u) / 256u;
+  for (uint tile = 0u; tile < tiles; ++tile) {
+    uint index = tile * 256u + lane;
+    uint value = index < pc.totalBins ? histogram[index] : 0u;
+    tileValues[lane] = value;
+    barrier();
+    for (uint offset = 1u; offset < 256u; offset <<= 1u) { // inclusive Hillis-Steele scan
+      uint addend = lane >= offset ? tileValues[lane - offset] : 0u;
+      barrier();
+      tileValues[lane] += addend;
+      barrier();
+    }
+    uint inclusive = tileValues[lane];
+    if (index < pc.totalBins) histogram[index] = inclusive - value + carryTotal;
+    barrier();
+    if (lane == 255u) carryTotal += inclusive; // lane 255's inclusive sum = the tile total
+    barrier();
+  }
+}

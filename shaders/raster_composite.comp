@@ -1,7 +1,8 @@
 #version 450
 // 3DGS per-tile compositor: one workgroup per 16x16 screen tile, one thread per pixel. Walks the
-// tile's depth-sorted gaussian list (built on the host) front-to-back, evaluating each 2D gaussian's
-// alpha and alpha-compositing colour with transmittance. Matches ref_rasterizer.py's per-pixel loop.
+// tile's depth-sorted gaussian list (GPU-built: raster_duplicate emit -> radix sort -> raster_ranges)
+// front-to-back, evaluating each 2D gaussian's alpha and alpha-compositing colour with transmittance.
+// Matches ref_rasterizer.py's per-pixel loop.
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(std430, binding = 0) readonly buffer GD     { float gd[]; };       // [N][12] from preprocess
 layout(std430, binding = 1) readonly buffer Sorted { int sortedIdx[]; };  // flat depth-sorted gaussian ids

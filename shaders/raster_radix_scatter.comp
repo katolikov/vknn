@@ -1,0 +1,67 @@
+#version 450
+// Radix-sort stable ordered scatter (pass 3 of 3 per digit). Each workgroup re-reads the same
+// 4096-entry chunk raster_radix_count histogrammed, in 16 sequential 256-lane batches, and writes
+// every (key, value) pair to
+//   scannedHistogram[digit][group] + entriesOfThisDigitInEarlierBatches + rankWithinBatch.
+// rankWithinBatch is the lane's position among equal digits in the batch, computed from per-digit
+// lane bitmasks (atomicOr builds each mask; the popcount of the mask bits below the lane is the
+// rank). Ranks follow lane order, batches run in order, and the scan orders chunks, so equal keys
+// keep their input order exactly — a stable pass, which is what lets four 8-bit passes compose
+// into a full 32-bit sort and keeps the render deterministic for equal sort keys.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer KeysIn    { uint keysIn[]; };
+layout(std430, binding = 1) readonly buffer ValsIn    { uint valsIn[]; };
+layout(std430, binding = 2) readonly buffer Counter   { uint counter[]; };   // [0] = emitted entries
+layout(std430, binding = 3) readonly buffer Histo     { uint histogram[]; }; // scanned, digit-major
+layout(std430, binding = 4) writeonly buffer KeysOut  { uint keysOut[]; };
+layout(std430, binding = 5) writeonly buffer ValsOut  { uint valsOut[]; };
+layout(push_constant) uniform PC {
+  uint shift;     // digit position: 0, 8, 16, 24
+  uint numGroups; // workgroups in this dispatch = ceil(capacity / 4096)
+  uint capacity;  // key/value buffer capacity in entries
+} pc;
+
+shared uint laneMasks[256 * 8]; // [digit][word]: bit L of word W = lane 32W+L holds this digit
+shared uint digitBases[256];    // scanned global scatter base for (digit, this group)
+shared uint digitRunning[256];  // this digit's entries already scattered from earlier batches
+
+void main() {
+  uint lane  = gl_LocalInvocationID.x;
+  uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (group >= pc.numGroups) return; // y-spill overshoot (whole workgroup exits together)
+  digitBases[lane]   = histogram[lane * pc.numGroups + group];
+  digitRunning[lane] = 0u;
+  uint entryCount = min(counter[0], pc.capacity);
+  uint chunkStart = group * 4096u;
+  for (uint batch = 0u; batch < 16u; ++batch) {
+    uint batchStart = chunkStart + batch * 256u;
+    if (batchStart >= entryCount) break; // uniform across the workgroup
+    for (uint word = 0u; word < 8u; ++word) laneMasks[lane * 8u + word] = 0u;
+    barrier();
+    uint index  = batchStart + lane;
+    bool laneActive = index < entryCount;
+    uint key = 0u, value = 0u, digit = 0u;
+    if (laneActive) {
+      key   = keysIn[index];
+      value = valsIn[index];
+      digit = (key >> pc.shift) & 255u;
+      atomicOr(laneMasks[digit * 8u + (lane >> 5u)], 1u << (lane & 31u));
+    }
+    barrier();
+    if (laneActive) {
+      uint word = lane >> 5u;
+      uint rank = bitCount(laneMasks[digit * 8u + word] & ((1u << (lane & 31u)) - 1u));
+      for (uint earlier = 0u; earlier < word; ++earlier) {
+        rank += bitCount(laneMasks[digit * 8u + earlier]);
+      }
+      uint destination      = digitBases[digit] + digitRunning[digit] + rank;
+      keysOut[destination]  = key;
+      valsOut[destination]  = value;
+    }
+    barrier();
+    uint batchTotal = 0u; // lane d folds digit d's batch count into the running total
+    for (uint word = 0u; word < 8u; ++word) batchTotal += bitCount(laneMasks[lane * 8u + word]);
+    digitRunning[lane] += batchTotal;
+    barrier();
+  }
+}

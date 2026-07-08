@@ -1,8 +1,11 @@
-// The from-scratch Vulkan compute 3D-Gaussian-splatting rasterizer (preprocess + exact tile-entry
-// count -> GPU tile-bin -> bitonic sort -> per-tile alpha compositing), shared by the
-// vknn_yonosplat example and the app-demo JNI bridge. Gaussians upload once; every render() runs
-// the two-submission structure: a count-only pass (CAP = 0) whose atomic total is read back on the
-// host across a fence, then the exactly-sized bin + sort + composite submission.
+// The from-scratch Vulkan compute 3D-Gaussian-splatting rasterizer (preprocess -> GPU tile-bin ->
+// stable radix sort -> per-tile alpha compositing), shared by the vknn_yonosplat example and the
+// app-demo JNI bridge. Gaussians upload once; every render() runs the two-submission structure: a
+// count-only pass (CAP = 0) whose atomic total is read back on the host across a fence, then the
+// exactly-sized bin + sort + composite submission. The sort is a 4-pass LSD radix sort over the
+// 32-bit keys (8-bit digits: per-chunk histogram -> global exclusive scan -> stable ordered
+// scatter into ping-pong key/value buffers), so it needs no power-of-two padding and equal keys
+// keep their emit order.
 #pragma once
 #if defined(VKNN_ENABLE_VULKAN)
 #include "backend/vulkan/vk_buffer.h"
@@ -25,7 +28,7 @@ namespace raster {
 
     struct Stats {
         uint32_t entries = 0; // exact tile-entry count from the count-only pass
-        int64_t  cap     = 0; // sort capacity: next power of two >= max(entries, 2^16)
+        int64_t  cap     = 0; // sort-buffer capacity in entries (>= entries, floor 2^16)
         uint32_t emitted = 0; // entries the emit pass produced (> cap would mean drops)
         double   msCount = 0; // submission 1 (preprocess + count) GPU ms
         double   msMain  = 0; // submission 2 (bin + sort + composite) GPU ms
@@ -45,13 +48,11 @@ namespace raster {
 
         /// Upload n Gaussians: means [n*3], covariances [n*9], colors [n*3] (linear RGB, see kC0),
         /// opacities [n]. Replaces any previously uploaded set.
-        void setGaussians(const float *means, const float *covariances, const float *colors,
-                          const float *opacities, int n);
+        void setGaussians(const float *means, const float *covariances, const float *colors, const float *opacities, int n);
 
         /// Render from a row-major camera-to-world [16] (w2c = its rigid inverse, computed here)
         /// with pixel-unit intrinsics into out [height*width*3 fp32].
-        Result render(const float cameraToWorld[16], float focalX, float focalY, float centerX,
-                      float centerY, float *out, Stats *stats = nullptr);
+        Result render(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, float *out, Stats *stats = nullptr);
 
         int gaussians() const noexcept {
             return gaussianCount_;
@@ -75,16 +76,13 @@ namespace raster {
         int   tilesX_, tilesY_, tileCount_, depthBits_;
         float invDepthRange_; // normalizes depth in [near, 256) to [0, 1) before key quantization
 
-        vknn::vk::VulkanContext                    context_;
-        std::unique_ptr<vknn::vk::CommandRunner>   runner_;
-        std::unique_ptr<vknn::vk::ComputePipeline> preprocessPipe_, fillPipe_, duplicatePipe_,
-            bitonicPipe_, rangesPipe_, compositePipe_;
+        vknn::vk::VulkanContext                  context_;
+        std::unique_ptr<vknn::vk::CommandRunner> runner_;
+        std::unique_ptr<vknn::vk::ComputePipeline> preprocessPipe_, fillPipe_, duplicatePipe_, radixCountPipe_, radixScanPipe_, radixScatterPipe_, rangesPipe_, compositePipe_;
         // Per setGaussians (sized by the Gaussian count):
-        std::unique_ptr<vknn::vk::Buffer> meansBuffer_, covariancesBuffer_, colorsBuffer_,
-            opacitiesBuffer_, geometryBuffer_;
+        std::unique_ptr<vknn::vk::Buffer> meansBuffer_, covariancesBuffer_, colorsBuffer_, opacitiesBuffer_, geometryBuffer_;
         // Per (height, width):
-        std::unique_ptr<vknn::vk::Buffer> counterBuffer_, standInBuffer_, tileRangesBuffer_,
-            imageBuffer_;
+        std::unique_ptr<vknn::vk::Buffer> counterBuffer_, standInBuffer_, tileRangesBuffer_, imageBuffer_;
     };
 
 } // namespace raster
