@@ -159,4 +159,11 @@ namespace vknn {
     // store would corrupt the lookup. Runs at load, after insertLayoutConverts, before markFp32.
     void pinGatherIndexFp32(Graph &g);
 
+    // Pin every GPU GridSample's runtime grid (and the flat passthrough chain feeding it) to fp32
+    // storage. The grid holds normalized sampling coordinates whose fp16 quantization drifts the
+    // sample point by up to ~0.5 px at 1920-wide inputs (a direct warp/UV-quality loss); the shader
+    // decodes the grid at its storage precision via the GRID_FP32 spec constant. Runs at load, after
+    // insertLayoutConverts, before markFp32.
+    void pinGridSampleGridFp32(Graph &g);
+
 } // namespace vknn
