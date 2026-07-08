@@ -112,6 +112,44 @@ TEST(DType, FloatToHalfBulkMatchesScalarOnBoundaries) {
     expectBulkMatchesScalar(v);
 }
 
+// The saturating boundary conversion (data entering fp16 COMPUTE storage): finite and infinite
+// values beyond +/-65504 narrow to the largest finite half instead of +/-inf — mirroring GPU
+// activation stores (vxSatF16) and imported constants (clampToFp16Range) — NaN passes through, and
+// in-range values are bit-identical to the plain conversion. The bulk form matches the scalar one
+// at every length (vector body + chunk boundary + scalar tail).
+TEST(DType, FloatToHalfSatSaturatesInsteadOfInf) {
+    const fp16_t maxFinite = floatToHalf(65504.f); // 0x7BFF
+    EXPECT_EQ(floatToHalfSat(65505.f), maxFinite);
+    EXPECT_EQ(floatToHalfSat(1e9f), maxFinite);
+    EXPECT_EQ(floatToHalfSat(bitsToFloat(0x7F800000u)), maxFinite); // +inf
+    EXPECT_EQ(floatToHalfSat(-65505.f), (fp16_t) (0x8000u | maxFinite));
+    EXPECT_EQ(floatToHalfSat(bitsToFloat(0xFF800000u)), (fp16_t) (0x8000u | maxFinite)); // -inf
+    EXPECT_EQ(floatToHalfSat(bitsToFloat(0x7FC00000u)), floatToHalf(bitsToFloat(0x7FC00000u))); // NaN passes
+    for (float in: {0.f, -1.f, 3.14159f, 65504.f, -65504.f, 6.1e-5f})
+    {
+        EXPECT_EQ(floatToHalfSat(in), floatToHalf(in)) << "in-range must be bit-identical, v=" << in;
+    }
+    // Bulk == scalar at lengths spanning the 256-element chunk boundary and a non-multiple-of-4 tail.
+    std::vector<float> v(517);
+    uint32_t           s = 0xC0FFEEu;
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        v[i] = (i % 7 == 0) ? 1e8f * ((i & 1) ? -1.f : 1.f) : bitsToFloat(s);
+    }
+    std::vector<fp16_t> bulk(v.size(), 0xDEAD);
+    for (size_t len: {0u, 1u, 3u, 255u, 256u, 257u, 517u})
+    {
+        floatToHalfSatBulk(v.data(), bulk.data(), (int64_t) len);
+        for (size_t i = 0; i < len; ++i)
+        {
+            ASSERT_EQ(bulk[i], floatToHalfSat(v[i])) << "len=" << len << " i=" << i;
+        }
+    }
+}
+
 // A pseudorandom sweep of the fp32 bit space, covering the exponent/mantissa combinations the boundary
 // list does not name. The length is not a multiple of four, so the scalar tail runs.
 TEST(DType, FloatToHalfBulkMatchesScalarOnRandomBits) {

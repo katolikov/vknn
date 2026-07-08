@@ -421,7 +421,9 @@ namespace vknn {
                 const float *src = hostSrc;
                 if (fp16)
                 {
-                    floatToHalfBulk(src, reinterpret_cast<fp16_t *>(buf->host()), n);
+                    // Saturating convert: a caller value beyond +/-65504 packs as the max finite fp16
+                    // (like every GPU activation store and imported constant), never as +/-inf.
+                    floatToHalfSatBulk(src, reinterpret_cast<fp16_t *>(buf->host()), n);
                 } else
                 {
                     std::memcpy(buf->host(), src, (size_t) n * 4);
@@ -453,12 +455,16 @@ namespace vknn {
                                     }
                                 }
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
-                                // convert the 4 gathered channels to fp16 in one instruction
-                                vst1_f16(reinterpret_cast<__fp16 *>(dst + base), vcvt_f16_f32(vld1q_f32(t)));
+                                // Saturate to +/-65504 (FMIN/FMAX propagate a NaN lane, so NaN passes
+                                // like the scalar path), then convert the 4 gathered channels to fp16
+                                // in one instruction.
+                                float32x4_t tf = vld1q_f32(t);
+                                tf             = vmaxq_f32(vminq_f32(tf, vdupq_n_f32(65504.0f)), vdupq_n_f32(-65504.0f));
+                                vst1_f16(reinterpret_cast<__fp16 *>(dst + base), vcvt_f16_f32(tf));
 #else
                                 for (int l = 0; l < 4; ++l)
                                 {
-                                    dst[base + l] = floatToHalf(t[l]);
+                                    dst[base + l] = floatToHalfSat(t[l]);
                                 }
 #endif
                             }

@@ -110,12 +110,14 @@ namespace vknn {
 
     // Push a float vector into a fresh HOST-VISIBLE device buffer, converting to fp16 when asked.
     // For small operand constants (norm scales, comparison operands, scalar clip bounds); weight
-    // payloads go through uploadWeight() below so they stay out of host-mapped memory.
+    // payloads go through uploadWeight() below so they stay out of host-mapped memory. The fp16
+    // convert saturates to +/-65504 like an imported constant (clampToFp16Range), so the ONNX-load
+    // path uploads the same bytes a --fp16 .vxm compile would store.
     inline std::shared_ptr<vk::Buffer> upload(vk::VulkanContext &ctx, const std::vector<float> &data, bool fp16) {
         if (fp16)
         {
             std::vector<uint16_t> h(data.size());
-            floatToHalfBulk(data.data(), h.data(), (int64_t) data.size());
+            floatToHalfSatBulk(data.data(), h.data(), (int64_t) data.size());
             auto b = std::make_shared<vk::Buffer>(ctx, std::max<size_t>(h.size(), 4) * 2, vk::MemPref::kAuto);
             b->upload(h.data(), h.size() * 2);
             return b;
@@ -133,7 +135,7 @@ namespace vknn {
         if (fp16)
         {
             std::vector<uint16_t> halfWords(data.size());
-            floatToHalfBulk(data.data(), halfWords.data(), (int64_t) data.size());
+            floatToHalfSatBulk(data.data(), halfWords.data(), (int64_t) data.size());
             return env.uploadWeightDeviceOnly(halfWords.data(), halfWords.size() * 2, std::max<size_t>(halfWords.size(), 4) * 2);
         }
         return env.uploadWeightDeviceOnly(data.data(), data.size() * 4, std::max<size_t>(data.size(), 4) * 4);
