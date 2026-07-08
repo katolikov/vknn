@@ -1,0 +1,8 @@
+#version 450
+// Resident-link range copy over 2-byte elements (fp16 boundaries). The copy moves uint16 words — a bit
+// move with no float conversion or rounding, so store16.glsl's RTE machinery does not apply here. See
+// link_copy_core.glsl.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define LINK_ELEM_T uint16_t
+#include "link_copy_core.glsl"

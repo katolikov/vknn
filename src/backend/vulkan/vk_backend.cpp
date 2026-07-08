@@ -1,4 +1,12 @@
 #include "vk_backend.h"
+#include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
+#include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
+#include "core/vk_gates.h"        // vkNodeGate/vkKernelDeclared (shared capability model)
+#include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
+#include "ops/boundary_convert.h"
+#include "vknn/dtype.h"
+#include "vknn/logging.h"
+#include "vknn/profiler.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -7,15 +15,6 @@
 #include <set>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
-#include <arm_neon.h>
-#endif
-#include "core/vk_gates.h" // vkNodeGate/vkKernelDeclared (shared capability model)
-#include "import/passes.h" // readI64Param (raster-core view-eligibility diagnostic)
-#include "ops/boundary_convert.h"
-#include "vknn/dtype.h"
-#include "vknn/logging.h"
-#include "vknn/profiler.h"
 
 namespace vknn {
 
@@ -132,8 +131,7 @@ namespace vknn {
             // (the host support report); a disagreement means the table missed a kernel add/remove.
             if (registered != vkKernelDeclared(t))
             {
-                VKNN_WARN_THROTTLE(std::string("vk_kernel_decl_") + opTypeName(t), 1) << "vkKernelDeclared(" << opTypeName(t) << ") disagrees with the live registry (" << (registered ? "registered" : "missing")
-                                                                                      << ") - update src/core/vk_gates.cpp";
+                VKNN_WARN_THROTTLE(std::string("vk_kernel_decl_") + opTypeName(t), 1) << "vkKernelDeclared(" << opTypeName(t) << ") disagrees with the live registry (" << (registered ? "registered" : "missing") << ") - update src/core/vk_gates.cpp";
             }
             return registered;
         }
@@ -217,9 +215,8 @@ namespace vknn {
                 {
                     std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
                     CacheDoc             loaded;
-                    if (cacheDecode(bytes.data(), bytes.size(), loaded) && loaded.format == cacheDoc_.format &&
-                        loaded.kernelHash == cacheDoc_.kernelHash && loaded.vendorId == cacheDoc_.vendorId &&
-                        loaded.deviceId == cacheDoc_.deviceId && loaded.driverVersion == cacheDoc_.driverVersion &&
+                    if (cacheDecode(bytes.data(), bytes.size(), loaded) && loaded.format == cacheDoc_.format && loaded.kernelHash == cacheDoc_.kernelHash &&
+                        loaded.vendorId == cacheDoc_.vendorId && loaded.deviceId == cacheDoc_.deviceId && loaded.driverVersion == cacheDoc_.driverVersion &&
                         loaded.pipelineCacheUUID == cacheDoc_.pipelineCacheUUID && loaded.model == cacheDoc_.model)
                     {
                         cacheDoc_    = std::move(loaded); // keep every cached variant
@@ -323,7 +320,7 @@ namespace vknn {
             {
                 return it->second;
             }
-            auto p = std::make_shared<vk::ComputePipeline>(*ctx_, name, numBuffers, pushConstBytes, spec, cache);
+            auto p         = std::make_shared<vk::ComputePipeline>(*ctx_, name, numBuffers, pushConstBytes, spec, cache);
             pipePool_[key] = p;
             return p;
         }
@@ -370,7 +367,7 @@ namespace vknn {
         // host-visible, so the staged copy is the only way its bytes arrive; the result is
         // byte-identical to a direct host write.
         std::shared_ptr<vk::Buffer> stageWeightToDevice(const void *src, size_t srcBytes, size_t bufferBytes) {
-            auto destination = std::make_shared<vk::Buffer>(*ctx_, bufferBytes, vk::MemPref::kDeviceOnly);
+            auto           destination = std::make_shared<vk::Buffer>(*ctx_, bufferBytes, vk::MemPref::kDeviceOnly);
             const uint8_t *sourceBytes = static_cast<const uint8_t *>(src);
             for (size_t offset = 0; offset < srcBytes;)
             {
@@ -397,7 +394,7 @@ namespace vknn {
         // count not divisible by four pads the final block's unused lanes with zero on pack, and those
         // padding lanes are dropped on unpack. The flat path skips all of this: a gpuFlat tensor stores
         // plain NCHW row-major, matching host layout byte-for-byte (fp16 conversion aside).
-        static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false) {
+        static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false, int threads = 1) {
             // An int64 boundary input (a shape/index tensor produced by a CPU op, e.g. the Cast-from-int64
             // shape path) has int64 host bytes. The device carries it as compute-precision float, so decode
             // the int64 lanes into a scratch fp32 vector once and pack from that; the magnitudes are small
@@ -417,81 +414,22 @@ namespace vknn {
             }
             if (flat)
             { // host NCHW row-major == the flat device buffer; straight copy (+ fp16 convert)
-                int64_t      n   = numElements(rt.shape);
-                const float *src = hostSrc;
+                int64_t n = numElements(rt.shape);
                 if (fp16)
                 {
-                    floatToHalfBulk(src, reinterpret_cast<fp16_t *>(buf->host()), n);
+                    boundary::packFlatFp16(hostSrc, reinterpret_cast<fp16_t *>(buf->host()), n, threads);
                 } else
                 {
-                    std::memcpy(buf->host(), src, (size_t) n * 4);
+                    std::memcpy(buf->host(), hostSrc, (size_t) n * 4);
                 }
                 return;
             }
-            NCHW         x   = NCHW::from(rt.shape);
-            int64_t      Cb  = cBlocks(x.c);
-            const float *src = hostSrc;
-            if (fp16)
-            {
-                fp16_t *dst = reinterpret_cast<fp16_t *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t cb = 0; cb < Cb; ++cb)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t base = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4;
-                                float   t[4] = {0, 0, 0, 0};
-                                for (int l = 0; l < 4; ++l)
-                                {
-                                    int64_t c = cb * 4 + l;
-                                    if (c < x.c)
-                                    {
-                                        t[l] = src[((n * x.c + c) * x.h + h) * x.w + w];
-                                    }
-                                }
-#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
-                                // convert the 4 gathered channels to fp16 in one instruction
-                                vst1_f16(reinterpret_cast<__fp16 *>(dst + base), vcvt_f16_f32(vld1q_f32(t)));
-#else
-                                for (int l = 0; l < 4; ++l)
-                                {
-                                    dst[base + l] = floatToHalf(t[l]);
-                                }
-#endif
-                            }
-                        }
-                    }
-                }
-            } else
-            {
-                float *dst = reinterpret_cast<float *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t cb = 0; cb < Cb; ++cb)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t base = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4;
-                                for (int l = 0; l < 4; ++l)
-                                {
-                                    int64_t c     = cb * 4 + l;
-                                    dst[base + l] = (c < x.c) ? src[((n * x.c + c) * x.h + h) * x.w + w] : 0.f;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            boundary::packNc4(hostSrc, buf->host(), NCHW::from(rt.shape), fp16, threads);
         }
         // Inverse of packToBuffer: gather each logical channel c back out of NC4HW4 by its block cb = c/4
         // and lane l = c%4, so the source index is `sidx = (((n*Cb + cb)*H + h)*W + w) * 4 + l`. Always
         // produces fp32 host data (rt.dtype set to Float32); readbackOutput does any final dtype convert.
-        static void unpackFromBuffer(vk::Buffer *buf, RtTensor &rt, bool fp16, bool flat = false) {
+        static void unpackFromBuffer(vk::Buffer *buf, RtTensor &rt, bool fp16, bool flat = false, int threads = 1) {
             if (flat)
             { // flat device buffer == host NCHW row-major; straight copy (+ fp16 convert)
                 int64_t n = numElements(rt.shape);
@@ -500,7 +438,7 @@ namespace vknn {
                 float *dst = rt.host.f32();
                 if (fp16)
                 {
-                    halfToFloatBulk(reinterpret_cast<const fp16_t *>(buf->host()), dst, n);
+                    boundary::unpackFlatFp16(reinterpret_cast<const fp16_t *>(buf->host()), dst, n, threads);
                 } else
                 {
                     std::memcpy(dst, buf->host(), (size_t) n * 4);
@@ -508,48 +446,10 @@ namespace vknn {
                 rt.hostValid = true;
                 return;
             }
-            NCHW    x  = NCHW::from(rt.shape);
-            int64_t Cb = cBlocks(x.c);
+            NCHW x = NCHW::from(rt.shape);
             rt.host.resizeElems(x.elems(), DType::Float32);
-            rt.dtype   = DType::Float32;
-            float *dst = rt.host.f32();
-            if (fp16)
-            {
-                const fp16_t *src = reinterpret_cast<const fp16_t *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t c = 0; c < x.c; ++c)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t cb = c / 4, l = c % 4;
-                                int64_t sidx                             = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4 + l;
-                                dst[((n * x.c + c) * x.h + h) * x.w + w] = halfToFloat(src[sidx]);
-                            }
-                        }
-                    }
-                }
-            } else
-            {
-                const float *src = reinterpret_cast<const float *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t c = 0; c < x.c; ++c)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t cb = c / 4, l = c % 4;
-                                int64_t sidx                             = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4 + l;
-                                dst[((n * x.c + c) * x.h + h) * x.w + w] = src[sidx];
-                            }
-                        }
-                    }
-                }
-            }
+            rt.dtype = DType::Float32;
+            boundary::unpackNc4(buf->host(), rt.host.f32(), x, fp16, threads);
             rt.hostValid = true;
         }
 
@@ -558,7 +458,7 @@ namespace vknn {
         // readbackOutput would do. Only valid for terminal graph outputs: inter-segment boundaries are
         // re-uploaded by packToBuffer, which reads rt.host as fp32, so they keep the fp32 unpack. rt.dtype
         // is set to what rt.host now holds so readbackOutput takes its dst==rt.dtype memcpy fast path.
-        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared) {
+        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared, int threads = 1) {
             int64_t n = numElements(rt.shape);
             if (deviceFp16 && declared == DType::Float16)
             { // fp16 device -> fp16 output: straight copy, no conversion
@@ -573,7 +473,7 @@ namespace vknn {
             } else if (declared == DType::Float16)
             { // fp32 device -> fp16 output
                 rt.host.resizeElems(n, DType::Float16);
-                floatToHalfBulk(reinterpret_cast<const float *>(buf->host()), reinterpret_cast<fp16_t *>(rt.host.bytes.data()), n);
+                boundary::packFlatFp16(reinterpret_cast<const float *>(buf->host()), reinterpret_cast<fp16_t *>(rt.host.bytes.data()), n, threads);
                 rt.dtype = DType::Float16;
             } else
             { // integer / other declared dtype: decode to fp32, readbackOutput does the final convert
@@ -581,7 +481,7 @@ namespace vknn {
                 float *d = rt.host.f32();
                 if (deviceFp16)
                 {
-                    halfToFloatBulk(reinterpret_cast<const fp16_t *>(buf->host()), d, n);
+                    boundary::unpackFlatFp16(reinterpret_cast<const fp16_t *>(buf->host()), d, n, threads);
                 } else
                 {
                     std::memcpy(d, buf->host(), (size_t) n * 4);
@@ -1053,7 +953,7 @@ namespace vknn {
             be_->loadCache(cfg, env_.modelTag);
             env_.cache   = be_->pipelineCache();
             env_.weights = be_->weightCache();
-            env_.devBuf  = [this](TensorId t) -> vk::Buffer * {
+            env_.devBuf  = [this](TensorId t) -> vk::Buffer  *{
                 auto it = buffers_.find(t);
                 return it == buffers_.end() ? nullptr : it->second.get();
             };
@@ -1066,8 +966,8 @@ namespace vknn {
                     it->second.bytes.clear();
                     it->second.bytes.shrink_to_fit();
                 }
-            })
-                                                                 : nullptr;
+            }) :
+                                                                   nullptr;
             // Memo scoped to this segment's graph; the ops themselves own the buffers, so a weak handle
             // keeps the allocation count identical to the pre-memo path.
             flatWeightByTensor_.clear();
@@ -1106,8 +1006,7 @@ namespace vknn {
             // 4) pre-record the command buffer for the static graph.
             record();
 
-            VKNN_INFO << "vk memory after segment build: live " << (vk::Buffer::liveBytes() >> 20) << " MB / " << vk::Buffer::liveCount() << " buffers (peak " << (vk::Buffer::peakBytes() >> 20) << " MB / "
-                      << vk::Buffer::peakCount() << ", host rss " << hostRssMb() << " MB)";
+            VKNN_INFO << "vk memory after segment build: live " << (vk::Buffer::liveBytes() >> 20) << " MB / " << vk::Buffer::liveCount() << " buffers (peak " << (vk::Buffer::peakBytes() >> 20) << " MB / " << vk::Buffer::peakCount() << ", host rss " << hostRssMb() << " MB)";
         }
 
         // Process resident-set size in MB (0 where /proc is unavailable). The vk buffer totals only
@@ -1146,6 +1045,38 @@ namespace vknn {
             if (queryPool_)
             {
                 vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t) (nodeIdx.size() * 2));
+            }
+            // Device-resident links: fold each linked output's PREVIOUS-run values into its linked
+            // input, per the host-updated ranges SSBO, before anything else executes. The barrier
+            // orders the copies against both hazards below: nodes reading the destination (the fold
+            // must land first) and nodes rewriting the source (the copy must read the old values).
+            if (!residentLinks_.empty())
+            {
+                struct LinkCopyPC {
+                    int srcC, srcH, srcW, dstC, dstH, dstW, srcFmt, dstFmt;
+                };
+                for (const ResidentLink &link: residentLinks_)
+                {
+                    const bool fp16 = boundaryElemBytes(link.src) == 2;
+                    auto      &pipe = fp16 ? linkPipeFp16_ : linkPipeFp32_;
+                    if (!pipe)
+                    {
+                        pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "link_copy_fp16" : "link_copy", 3, sizeof(LinkCopyPC), std::vector<uint32_t> {},
+                                                                     env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                    }
+                    NCHW       srcShape = NCHW::from(g_.tensors[link.src].shape);
+                    NCHW       dstShape = NCHW::from(g_.tensors[link.dst].shape);
+                    LinkCopyPC pc {(int) srcShape.c,
+                                   (int) srcShape.h,
+                                   (int) srcShape.w,
+                                   (int) dstShape.c,
+                                   (int) dstShape.h,
+                                   (int) dstShape.w,
+                                   g_.desc(link.src).gpuFlat ? 0 : 2,
+                                   g_.desc(link.dst).gpuFlat ? 0 : 2};
+                    pipe->dispatch(cmd_, {buffers_[link.src]->handle(), buffers_[link.dst]->handle(), link.rangesBuf->handle()}, &pc, sizeof(pc), kLinkCopyGroups);
+                }
+                vk::computeBarrier(cmd_);
             }
             // Declared-format zero-copy inputs: convert each caller dma-buf (declared layout/dtype) into
             // this segment's device-native boundary buffer, then a barrier before the ops read it.
@@ -1312,7 +1243,7 @@ namespace vknn {
                 // the boundary. Only when not profiling.
                 nodesSinceSplit++;
                 bindsSinceSplit += bindEstimate(node);
-                const int chunkNodes = cfg_.maxSubmitNodes, chunkBinds = cfg_.maxSubmitBindings;
+                const int  chunkNodes = cfg_.maxSubmitNodes, chunkBinds = cfg_.maxSubmitBindings;
                 const bool splitNodes = chunkNodes > 0 && nodesSinceSplit >= chunkNodes;
                 const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
                 if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
@@ -1508,6 +1439,13 @@ namespace vknn {
                 {
                     reRecord = true;
                 }
+                if (linksChanged_)
+                {
+                    // The resident-link set (or a ranges buffer's identity) changed since the last
+                    // recording; the command stream must pick up the new link_copy dispatches.
+                    linksChanged_ = false;
+                    reRecord      = true;
+                }
                 if (reRecord)
                 {
                     if (!cmds_.empty())
@@ -1538,7 +1476,7 @@ namespace vknn {
                     rt.device = std::make_shared<DeviceStorage>();
                 }
                 rt.device->buffer = bit->second;
-                auto sit = stagingIn_.find(tid);
+                auto sit          = stagingIn_.find(tid);
                 if (rt.dmaBufFd >= 0)
                 {
                     // zero-copy: the GPU reads the caller's dma-buf directly (device-native bytes); no pack.
@@ -1584,11 +1522,20 @@ namespace vknn {
                         }
                         // A storeFp32 boundary (a pinned Gather index) keeps its 4-byte fp32 buffer, so an
                         // integer index above the fp16 range is not narrowed to +inf at upload.
-                        VulkanBackend::packToBuffer(bit->second.get(), f32, g_.desc(tid).storeFp32 ? false : useFp16_, flat);
+                        VulkanBackend::packToBuffer(bit->second.get(), f32, g_.desc(tid).storeFp32 ? false : useFp16_, flat, cpu::threadCount(&cfg_));
                     } else
                     {
-                        VulkanBackend::packToBuffer(bit->second.get(), rt, g_.desc(tid).storeFp32 ? false : useFp16_, flat);
+                        VulkanBackend::packToBuffer(bit->second.get(), rt, g_.desc(tid).storeFp32 ? false : useFp16_, flat, cpu::threadCount(&cfg_));
                     }
+                    rt.deviceValid  = true;
+                    rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+                }
+                if (linkedInputs_.count(tid))
+                {
+                    // A linked input's device buffer IS its state: never bound -> the zero-initialized
+                    // buffer (plus the link copies) is authoritative; a caller (re)bind went through the
+                    // pack above because the Session stamped deviceValid=false on it. Either way the
+                    // residency is now valid and stays so across runs.
                     rt.deviceValid  = true;
                     rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                 }
@@ -1620,15 +1567,22 @@ namespace vknn {
                 rt.device->buffer = bit->second;
                 rt.deviceValid    = true;
                 rt.deviceFormat   = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+                if (linkedOutputs_.count(tid))
+                {
+                    // A linked output stays device-resident: no download. The stale host copy is
+                    // invalidated; readResident() unpacks on demand.
+                    rt.hostValid = false;
+                    continue;
+                }
                 if (rt.dmaBufFd < 0)
                 {
                     bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
                     if (flat && graphOut.count(tid))
                     { // terminal graph output: convert straight to the declared dtype (skip fp32 round trip)
-                        VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype);
+                        VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
                     } else
                     {
-                        VulkanBackend::unpackFromBuffer(bit->second.get(), rt, deviceFp16, flat);
+                        VulkanBackend::unpackFromBuffer(bit->second.get(), rt, deviceFp16, flat, cpu::threadCount(&cfg_));
                     }
                 }
                 // else: the GPU wrote device-native bytes straight into the caller's dma-buf; caller reads it.
@@ -1710,6 +1664,97 @@ namespace vknn {
             }
         }
 
+        // ---- device-resident output->input links (Session::linkOutputToInput) ----
+
+        Status addResidentLink(TensorId sourceOutput, TensorId destInput, std::string &whyNot) override {
+            auto srcIt = buffers_.find(sourceOutput);
+            auto dstIt = buffers_.find(destInput);
+            if (srcIt == buffers_.end() || dstIt == buffers_.end())
+            {
+                whyNot = "the segment holds no device buffer for a linked tensor";
+                return Status::InvalidArgument;
+            }
+            if (boundaryElemBytes(sourceOutput) != boundaryElemBytes(destInput))
+            {
+                whyNot = "device element size differs between '" + g_.tensors[sourceOutput].name + "' and '" + g_.tensors[destInput].name + "' (fp16 vs pinned-fp32 storage); the raw copy would misalign";
+                return Status::InvalidArgument;
+            }
+            if (srcIt->second == dstIt->second)
+            {
+                whyNot = "'" + g_.tensors[sourceOutput].name + "' and '" + g_.tensors[destInput].name + "' share one device buffer; an in-place ranged copy would race";
+                return Status::InvalidArgument;
+            }
+            for (const ResidentLink &link: residentLinks_)
+            {
+                if (link.src == sourceOutput && link.dst == destInput)
+                {
+                    return Status::Ok; // already registered; ranges arrive via setResidentLinkRanges
+                }
+            }
+            ResidentLink link;
+            link.src      = sourceOutput;
+            link.dst      = destInput;
+            link.capacity = kLinkInitialRangeCapacity;
+            link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), kLinkRangeHeaderBytes + (size_t) link.capacity * 12, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+            residentLinks_.push_back(std::move(link));
+            linkedInputs_.insert(destInput);
+            linkedOutputs_.insert(sourceOutput);
+            linksChanged_ = true; // the next run re-records with the link_copy dispatch at the head
+            return Status::Ok;
+        }
+
+        void setResidentLinkRanges(TensorId sourceOutput, TensorId destInput, const std::vector<LinkRange> &ranges) override {
+            for (ResidentLink &link: residentLinks_)
+            {
+                if (link.src != sourceOutput || link.dst != destInput)
+                {
+                    continue;
+                }
+                if ((uint32_t) ranges.size() > link.capacity)
+                {
+                    link.capacity = std::max<uint32_t>(link.capacity * 2, (uint32_t) ranges.size());
+                    link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), kLinkRangeHeaderBytes + (size_t) link.capacity * 12, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                    linksChanged_ = true; // buffer identity changed; the recorded dispatch binds the old one
+                }
+                // Header {rangeCount, totalElems} + 3 uint32 per range. The previous run's fence has
+                // signalled (submitAndWait), so the GPU is not reading this buffer here.
+                uint32_t *words = reinterpret_cast<uint32_t *>(link.rangesBuf->host());
+                uint32_t  total = 0;
+                for (size_t i = 0; i < ranges.size(); ++i)
+                {
+                    words[2 + i * 3 + 0] = (uint32_t) ranges[i].sourceElem;
+                    words[2 + i * 3 + 1] = (uint32_t) ranges[i].destElem;
+                    words[2 + i * 3 + 2] = (uint32_t) ranges[i].count;
+                    total += (uint32_t) ranges[i].count;
+                }
+                words[0] = (uint32_t) ranges.size();
+                words[1] = total;
+                return;
+            }
+        }
+
+        void clearResidentLinks() override {
+            if (residentLinks_.empty())
+            {
+                return;
+            }
+            residentLinks_.clear();
+            linkedInputs_.clear();
+            linkedOutputs_.clear();
+            linksChanged_ = true;
+        }
+
+        bool downloadResident(TensorId id, RtTensor &rt) override {
+            auto bit = buffers_.find(id);
+            if (bit == buffers_.end())
+            {
+                return false;
+            }
+            rt.shape = rt.shape.empty() ? g_.tensors[id].shape : rt.shape;
+            VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[id].storeFp32, g_.desc(id).gpuFlat, cpu::threadCount(&cfg_));
+            return true;
+        }
+
       private:
         VulkanBackend                                  *be_;
         Graph                                          &g_;
@@ -1722,8 +1767,8 @@ namespace vknn {
         // Memo of the flat device buffer uploaded for each initializer of this segment's graph (weak:
         // the ops own the buffers). A weight feeding several nodes resolves through it instead of
         // re-digesting host bytes the first upload already released.
-        std::map<TensorId, std::weak_ptr<vk::Buffer>>   flatWeightByTensor_;
-        VkCommandBuffer                                 cmd_ = VK_NULL_HANDLE;
+        std::map<TensorId, std::weak_ptr<vk::Buffer>> flatWeightByTensor_;
+        VkCommandBuffer                               cmd_ = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;
@@ -1768,7 +1813,29 @@ namespace vknn {
         // into the device-native boundary — no host uint8->fp32->fp16 pack. Allocated once, stable identity.
         std::map<TensorId, std::shared_ptr<vk::Buffer>> stagingIn_;
         std::set<TensorId>                              graphInputs_; // g_.inputs, for the staging-input gate
-        static bool                        sameConvert(const std::map<TensorId, ConvertBinding> &a, const std::map<TensorId, ConvertBinding> &b) {
+        // Device-resident output->input links (Session::linkOutputToInput). Each link's ranges live in a
+        // small host-visible SSBO the recorded link_copy dispatch reads, so per-run range updates (the
+        // moving destination slot of a KV fold) need no re-record — the copy runs at the head of the
+        // first command chunk, reading the source buffer's PREVIOUS-run values (nothing has executed
+        // yet) and writing the destination in place. Both buffers are dedicated boundary buffers whose
+        // identity never changes, so the recording stays valid across runs.
+        struct ResidentLink {
+            TensorId                    src = kNoTensor, dst = kNoTensor;
+            std::shared_ptr<vk::Buffer> rangesBuf;    // header {count,total} + 3 uints per range
+            uint32_t                    capacity = 0; // ranges rangesBuf can hold
+        };
+        std::vector<ResidentLink>            residentLinks_;
+        std::set<TensorId>                   linkedInputs_, linkedOutputs_;
+        bool                                 linksChanged_ = false; // link set / ranges buffer identity changed -> re-record
+        std::unique_ptr<vk::ComputePipeline> linkPipeFp16_, linkPipeFp32_;
+        static constexpr uint32_t            kLinkRangeHeaderBytes     = 8;  // {rangeCount, totalElems}
+        static constexpr uint32_t            kLinkInitialRangeCapacity = 16; // ranges; grows on demand
+        static constexpr uint32_t            kLinkCopyGroups           = 4;  // fixed grid; the shader strides over totalElems
+        // Device element width of a boundary tensor (2 for fp16 storage, 4 for fp32/storeFp32).
+        int boundaryElemBytes(TensorId tid) const {
+            return (useFp16_ && !g_.tensors[tid].storeFp32) ? 2 : 4;
+        }
+        static bool sameConvert(const std::map<TensorId, ConvertBinding> &a, const std::map<TensorId, ConvertBinding> &b) {
             if (a.size() != b.size())
             {
                 return false;

@@ -4,6 +4,7 @@
 #include "vknn/config.h"
 #include "vknn/graph.h"
 #include "vknn/io_info.h"
+#include "vknn/io_link.h"
 #include "vknn/io_tensor.h"
 #include "vknn/profiler.h"
 #include "vknn/tensor.h"
@@ -35,17 +36,17 @@ namespace vknn {
     /// device weight pool are shared across buckets on the owning Session — a second bucket reuses
     /// them (autotune sigs and weight-cache keys are shape-safe).
     struct PlanBucket {
-        std::string                           key;             ///< Canonical input-shape key (see Session::shapeKey).
+        std::string key; ///< Canonical input-shape key (see Session::shapeKey).
         /// This bucket's optimized graph, held by pointer so its address is stable: the compiled
         /// segments capture a `Graph &` into it, and that reference must stay valid across every
         /// PlanBucket move (buildBucket returns by value) and every buckets_ vector reallocation
         /// (a multi-bucket .vxm or prepareShapes appends buckets). A by-value Graph member would
         /// relocate on those moves and dangle the segments' reference — the boundary-residency crash.
         std::unique_ptr<Graph>                graph;
-        std::vector<int>                      nodeBackendIdx;  ///< Backend index (into Session::backends_) per node.
-        std::vector<std::unique_ptr<Segment>> segments;        ///< Compiled segments, run in order.
-        std::vector<RtTensor>                 pool;            ///< Runtime tensor pool for this bucket, indexed by TensorId.
-        std::vector<FallbackReason>           fallbackReasons; ///< Requested-backend refusals recorded while planning this bucket.
+        std::vector<int>                      nodeBackendIdx;       ///< Backend index (into Session::backends_) per node.
+        std::vector<std::unique_ptr<Segment>> segments;             ///< Compiled segments, run in order.
+        std::vector<RtTensor>                 pool;                 ///< Runtime tensor pool for this bucket, indexed by TensorId.
+        std::vector<FallbackReason>           fallbackReasons;      ///< Requested-backend refusals recorded while planning this bucket.
         bool                                  ioGpuConvert = false; ///< Whole graph on one GPU backend: 8-bit inputs upload raw + convert on the GPU.
     };
 
@@ -134,6 +135,45 @@ namespace vknn {
             return buckets_.front().fallbackReasons;
         }
 
+        // --- engine-resident output->input links ------------------------------------------------
+        // A link declares "this graph output feeds that graph input on the NEXT run" so recurrent
+        // state (e.g. an autoregressive decoder's KV cache) stays inside the engine instead of
+        // round-tripping through the caller every run. Semantics, identical on both backends:
+        //   - A linked OUTPUT stays engine-resident: run() returns its IOTensor with name/shape/
+        //     dtype but NO data (no device->host download on the GPU, no host donation on the CPU).
+        //   - A linked INPUT keeps its engine-side values across runs. At the START of each run —
+        //     before any node executes — the declared ranges are copied from the linked output's
+        //     resident values (i.e. the PREVIOUS run's result) into it. With no prior run its
+        //     values are zero.
+        //   - Binding host data for a linked input is allowed and REINITIALIZES its resident state
+        //     (the bound bytes form the base; the ranged copies then apply on top — pass empty
+        //     ranges when reinitializing to suppress them). Binding a dma-buf fd to a linked tensor
+        //     is rejected.
+        //   - The copies never change math: the linked path moves the exact device (or host) bytes
+        //     the unlinked path would have round-tripped, so results are bit-identical.
+        // Declaring no links leaves every run byte-identical to a build without this feature.
+
+        /// Link output `outputName` to input `inputName` with the given copy ranges (canonical
+        /// elements; see LinkRange). Calling again for the same pair replaces the ranges — the
+        /// per-run way to move the destination slot. On the Vulkan backend both tensors must be
+        /// boundary tensors of one GPU segment with equal device element size; a violation is
+        /// returned as an error naming both tensors (there is no silent slow path). This form
+        /// requires the (outputName, inputName) pair to exist in exactly one plan bucket;
+        /// multi-bucket sessions with the pair in several buckets use the bucket overload.
+        Status linkOutputToInput(const std::string &outputName, const std::string &inputName, const std::vector<LinkRange> &ranges = {});
+        /// Bucket-explicit form of linkOutputToInput() for multi-bucket sessions (bucket indices
+        /// follow bucketKeys() order). The link applies only to runs that dispatch to `bucket`.
+        Status linkOutputToInput(size_t bucket, const std::string &outputName, const std::string &inputName, const std::vector<LinkRange> &ranges = {});
+        /// Copy the CURRENT resident values of a linked tensor (input or output name) into `out`,
+        /// in the engine's internal storage dtype (fp32, or int64 for integer tensors). Reads the
+        /// state as of the last completed run: a linked input reflects every ranged copy applied so
+        /// far; a linked output holds the last run's produced values (whose fold into the input is
+        /// still pending until the next run).
+        Status readResident(const std::string &name, IOTensor &out);
+        /// Remove every link. Linked outputs are returned with data again from the next run on;
+        /// previously linked inputs keep their engine-side values until rebound.
+        void clearLinks();
+
         /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
         /// The returned data is host-resident.
         const RtTensor *tensor(const std::string &name) const;
@@ -183,6 +223,25 @@ namespace vknn {
         /// Cached; recomputed when the bucket count changes.
         bool bucketsShareInputNames() const;
 
+        /// One declared output->input link (see linkOutputToInput). `deviceSegment` set = the owning
+        /// GPU segment applies the copies on-device; null = the Session copies host storage (the CPU
+        /// backend's path).
+        struct ResidentLink {
+            size_t                 bucket = 0;
+            std::string            outputName, inputName;
+            TensorId               outId = kNoTensor, inId = kNoTensor;
+            Segment               *deviceSegment = nullptr;
+            std::vector<LinkRange> ranges;
+            bool                   rangesDirty = false; ///< Ranges changed since last pushed to the device segment.
+        };
+        /// Bounds/overlap validation for a link's ranges against both tensors' logical shapes.
+        Status validateLinkRanges(const Graph &g, TensorId outId, TensorId inId, const std::vector<LinkRange> &ranges) const;
+        /// The link record for (bucket, tensor id) on the given side, or nullptr when not linked.
+        const ResidentLink *linkedOutput(size_t bucket, TensorId id) const;
+        const ResidentLink *linkedInput(size_t bucket, TensorId id) const;
+        /// Per-run link step: push dirty ranges to device segments and apply host-path copies.
+        Status applyResidentLinks(size_t bucketIndex, PlanBucket &bucket);
+
         Config   cfg_;
         Profiler profiler_;
         // Declaration order matters for teardown: backends_ (owns the VulkanContext) must be
@@ -203,6 +262,8 @@ namespace vknn {
         // bucketsShareInputNames() cache: valid while the bucket count equals uniformCheckedFor_.
         mutable size_t uniformCheckedFor_ = 0;
         mutable bool   bucketsUniform_    = true;
+        // Declared output->input links, applied at the start of each run of their bucket.
+        std::vector<ResidentLink> links_;
     };
 
 } // namespace vknn
