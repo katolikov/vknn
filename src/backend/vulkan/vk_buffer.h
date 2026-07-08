@@ -19,7 +19,7 @@ namespace vknn { namespace vk {
     enum class MemPref {
         kAuto,       ///< DEVICE_LOCAL + HOST_VISIBLE, avoiding HOST_CACHED (write-combined is the fast upload path on UMA).
         kReadback,   ///< DEVICE_LOCAL + HOST_VISIBLE + HOST_CACHED — efficient CPU reads of GPU-written outputs.
-        kDeviceOnly, ///< DEVICE_LOCAL only; no host mapping (host()/upload()/download() are unavailable).
+        kDeviceOnly, ///< DEVICE_LOCAL, preferring a non-host-visible type; mapped (and host-accessible) only when every device-local type is host-visible.
     };
 
     /// A GPU buffer that owns exactly one VkBuffer and one dedicated VkDeviceMemory (RAII). On a

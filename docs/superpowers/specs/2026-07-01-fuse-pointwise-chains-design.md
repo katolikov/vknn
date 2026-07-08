@@ -29,7 +29,7 @@ Hard requirements (unchanged, standing principles):
 - **0 fallback.** GPU-resident; CPU path exists as oracle + safety net.
 - **One op per file / shared helpers.** New standalone op in its own file; the epilogue is a shared
   GLSL include + a shared C++ helper, not copy-paste per kernel.  (`[[one-op-per-file]]`)
-- **Measurable win**, confirmed via `run_io --timing/--profile` on device `R5CWB2KWVJY`.
+- **Measurable win**, confirmed via `run_io --timing/--profile` on the device.
 
 Test set: **CNN suite**, **yonosplat encoder**, **model.json** (frame-interp tail).
 

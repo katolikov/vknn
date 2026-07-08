@@ -7,24 +7,63 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.vknn.chat.ui.ChatScreen
+import com.vknn.chat.model.BackendPolicy
+import com.vknn.chat.splat.SplatViewModel
+import com.vknn.chat.ui.AppShell
 import com.vknn.chat.ui.VknnChatTheme
+import com.vknn.chat.vlm.VlmViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val app = application as VknnApp
+        val models = app.models
         setContent {
             VknnChatTheme {
                 val vm: ChatViewModel = viewModel()
-                val ui by vm.ui.collectAsState()
-                ChatScreen(
-                    ui = ui,
-                    onDownload = vm::download,
+                val vlm: VlmViewModel = viewModel()
+                val splat: SplatViewModel = viewModel()
+                val chatUi by vm.ui.collectAsState()
+                val vlmUi by vlm.ui.collectAsState()
+                val splatUi by splat.ui.collectAsState()
+                val modelStates by models.states.collectAsState()
+                val modelLoadErrors by models.loadErrors.collectAsState()
+                val backend by app.settings.backend.collectAsState()
+                val chatPromptTemplate by app.prompts.chatPromptTemplate.collectAsState()
+                val vlmQuestion by app.prompts.vlmQuestion.collectAsState()
+                AppShell(
+                    chatUi = chatUi,
+                    vlmUi = vlmUi,
+                    modelStates = modelStates,
+                    modelLoadErrors = modelLoadErrors,
+                    freeBytes = models::freeBytes,
+                    isMetered = models::isMetered,
+                    backend = backend,
+                    onBackend = app.settings::set,
+                    cpuVerdictFor = { spec -> BackendPolicy.cpuVerdict(spec, app.totalRamBytes()) },
+                    onDownload = models::start,
+                    onPause = models::pause,
+                    onDelete = models::delete,
                     onLoad = vm::loadModel,
                     onSend = vm::send,
                     onReset = vm::reset,
                     onTemp = vm::setTemperature,
+                    chatPromptTemplate = chatPromptTemplate,
+                    onChatPromptTemplate = app.prompts::setChatPromptTemplate,
+                    onVlmLoad = vlm::loadModel,
+                    onVlmCapture = vlm::onCapture,
+                    onVlmCancel = vlm::cancel,
+                    onVlmRetake = vlm::retake,
+                    vlmQuestion = vlmQuestion,
+                    onVlmQuestion = vlm::setQuestion,
+                    measureVlmPrompt = vlm::measurePrompt,
+                    splatUi = splatUi,
+                    onSplatLoad = splat::loadModel,
+                    onSplatStartCapture = splat::startCapture,
+                    onSplatFrame = splat::addFrame,
+                    onSplatOrbit = splat::setOrbit,
+                    onSplatRecapture = splat::recapture,
                 )
             }
         }

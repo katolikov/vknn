@@ -25,6 +25,11 @@ namespace vknn {
         // must not change.
         constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
         constexpr uint64_t kFnvPrime       = 1099511628211ull;
+
+        // Staging-buffer bound for VulkanBackend::stageWeightToDevice: large enough that a multi-GiB
+        // weight set moves in tens of fenced submits, small enough to be a rounding error next to the
+        // weights themselves.
+        constexpr size_t kWeightStagingBufferBytes = (size_t) 64 << 20;
     } // namespace
 
     // True once the fp16 shader variants (conv_fp16, dwconv_fp16, ...) are compiled in. The ops
@@ -350,6 +355,41 @@ namespace vknn {
             return weightPool_.acquire(key, fp16, make);
         }
 
+        // Fill a device-only buffer with a weight payload through the persistent staging buffer.
+        //
+        // Weights must not live in host-mapped memory: some UMA drivers cap per-process HOST_VISIBLE
+        // allocations far below the device budget (one mobile driver caps near ~4.4 GiB while the heap
+        // reports 7.8 GiB free), so a large-weight model whose weights are MemPref::kAuto
+        // (DEVICE_LOCAL + HOST_VISIBLE) exhausts that cap and vkAllocateMemory fails with
+        // VK_ERROR_OUT_OF_HOST_MEMORY long before the heap is full. Weight bytes are written once at
+        // upload and never host-read again, so the destination is kDeviceOnly (allocated from a
+        // non-host-visible type where one exists) and is filled by a bounded staged copy: memcpy into
+        // the reusable host-visible staging buffer, then one fenced one-shot vkCmdCopyBuffer per
+        // chunk of kWeightStagingBufferBytes. Synchronous by design — this is load-time code. A
+        // kDeviceOnly buffer is never mapped even on a UMA device whose every memory type is
+        // host-visible, so the staged copy is the only way its bytes arrive; the result is
+        // byte-identical to a direct host write.
+        std::shared_ptr<vk::Buffer> stageWeightToDevice(const void *src, size_t srcBytes, size_t bufferBytes) {
+            auto destination = std::make_shared<vk::Buffer>(*ctx_, bufferBytes, vk::MemPref::kDeviceOnly);
+            const uint8_t *sourceBytes = static_cast<const uint8_t *>(src);
+            for (size_t offset = 0; offset < srcBytes;)
+            {
+                const size_t chunkBytes = std::min(srcBytes - offset, kWeightStagingBufferBytes);
+                if (!weightStaging_ || weightStaging_->bytes() < chunkBytes)
+                {
+                    weightStaging_.reset(); // release before growing so two staging allocations never coexist
+                    weightStaging_ = std::make_unique<vk::Buffer>(*ctx_, chunkBytes, vk::MemPref::kAuto);
+                }
+                weightStaging_->upload(sourceBytes + offset, chunkBytes);
+                const VkBufferCopy region {0, offset, chunkBytes};
+                runner_->oneShot([&](VkCommandBuffer cmd) {
+                    vkCmdCopyBuffer(cmd, weightStaging_->handle(), destination->handle(), 1, &region);
+                });
+                offset += chunkBytes;
+            }
+            return destination;
+        }
+
         // ---- host NCHW fp32  <->  device NC4HW4 (fp32 path; fp16 device buffers handled here) ----
         // NC4HW4 groups channels into blocks of four laid out as [N, Cblock, H, W, 4]: the four channels
         // of a block are the innermost contiguous axis, so one (n,cb,h,w) location owns a 4-lane vector at
@@ -572,6 +612,10 @@ namespace vknn {
         std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;   // sharedPipeline()
         std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_;  // uploadPooled()
         DeviceWeightPool<vk::Buffer>                                weightPool_; // acquireWeight() — shared across plan buckets
+        // stageWeightToDevice() staging buffer, bounded by kWeightStagingBufferBytes and kept for the
+        // backend's lifetime: constant operands also upload at RECORD time (operandBuf in ops'
+        // record()), and segments re-record when a boundary buffer changes, so uploads outlive load.
+        std::unique_ptr<vk::Buffer> weightStaging_;
     };
 
     std::shared_ptr<vk::ComputePipeline> VkOpEnv::pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData) const {
@@ -584,6 +628,10 @@ namespace vknn {
 
     std::shared_ptr<vk::Buffer> VkOpEnv::acquireWeight(const std::string &key, bool fp16, std::function<std::shared_ptr<vk::Buffer>()> make) const {
         return backend->acquireWeight(key, fp16, make);
+    }
+
+    std::shared_ptr<vk::Buffer> VkOpEnv::uploadWeightDeviceOnly(const void *src, size_t srcBytes, size_t bufferBytes) const {
+        return backend->stageWeightToDevice(src, srcBytes, bufferBytes);
     }
 
     // ============================ VulkanSegment ============================
@@ -1008,6 +1056,27 @@ namespace vknn {
             env_.devBuf  = [this](TensorId t) -> vk::Buffer * {
                 auto it = buffers_.find(t);
                 return it == buffers_.end() ? nullptr : it->second.get();
+            };
+            // `g` outlives every prepare() below (it is the bucket's owned graph), so the hook can drop
+            // uploaded weight payloads as the ops consume them. Session frees whatever survives.
+            env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g](TensorId t) {
+                auto it = g.initializers.find(t);
+                if (it != g.initializers.end())
+                {
+                    it->second.bytes.clear();
+                    it->second.bytes.shrink_to_fit();
+                }
+            })
+                                                                 : nullptr;
+            // Memo scoped to this segment's graph; the ops themselves own the buffers, so a weak handle
+            // keeps the allocation count identical to the pre-memo path.
+            flatWeightByTensor_.clear();
+            env_.lookupFlatWeight = [this](TensorId t) -> std::shared_ptr<vk::Buffer> {
+                auto it = flatWeightByTensor_.find(t);
+                return it == flatWeightByTensor_.end() ? nullptr : it->second.lock();
+            };
+            env_.rememberFlatWeight = [this](TensorId t, std::shared_ptr<vk::Buffer> buffer) {
+                flatWeightByTensor_[t] = buffer;
             };
             for (int ni: idx)
             {
@@ -1650,6 +1719,10 @@ namespace vknn {
         std::map<TensorId, std::shared_ptr<vk::Buffer>> buffers_;
         std::vector<std::unique_ptr<VulkanOp>>          ops_;
         VkOpEnv                                         env_;
+        // Memo of the flat device buffer uploaded for each initializer of this segment's graph (weak:
+        // the ops own the buffers). A weight feeding several nodes resolves through it instead of
+        // re-digesting host bytes the first upload already released.
+        std::map<TensorId, std::weak_ptr<vk::Buffer>>   flatWeightByTensor_;
         VkCommandBuffer                                 cmd_ = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;

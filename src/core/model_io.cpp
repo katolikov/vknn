@@ -10,9 +10,11 @@
 // unchanged by the multi-bucket feature; the VXM4 container is written only for two or more buckets.
 #include "vknn/graph.h"
 #include "vknn/logging.h"
+#include "vknn/mapped_file.h"
 #include "vknn/op.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -61,6 +63,14 @@ namespace vknn {
                 if (!v.empty())
                 {
                     fwrite(v.data(), sizeof(T), v.size(), f);
+                }
+            }
+            /// Byte blob with vec<uint8_t>'s framing, for storage that may be a mapped view.
+            void vecBytes(const uint8_t *p, size_t n) {
+                u32((uint32_t) n);
+                if (n)
+                {
+                    fwrite(p, 1, n, f);
                 }
             }
         };
@@ -257,7 +267,7 @@ namespace vknn {
         for (const auto &kv: g.initializers)
         {
             w.i64(kv.first);
-            w.vec(kv.second.bytes);
+            w.vecBytes(kv.second.bytes.data(), kv.second.bytes.size());
         }
         if (!commitVxmTemp(f, tmpPath, path))
         {
@@ -269,16 +279,23 @@ namespace vknn {
     }
 
     bool loadGraphBin(Graph &g, const std::string &path) {
-        std::vector<Graph>       buckets;
-        std::vector<std::string> names;
-        if (!loadGraphBinBuckets(buckets, names, path) || buckets.empty())
+        // Single-graph callers take the first bucket but the stream still walks the WHOLE file, so a
+        // truncated/corrupt later bucket fails the load exactly as the pre-streaming reader did (a
+        // recompile from a damaged .vxm must not silently succeed on bucket 0). Discarding the later
+        // buckets as they stream keeps the memory peak at one bucket.
+        bool got = false;
+        if (!loadGraphBinBucketsStreamed(path, [&](Graph &&b, const std::string &, size_t idx, size_t) {
+                if (idx == 0)
+                {
+                    g   = std::move(b);
+                    got = true;
+                }
+                return true;
+            }))
         {
             return false;
         }
-        // Single-graph callers take the first bucket. A VXM3 file has exactly one; a VXM4 file's
-        // buckets are all the same model at different shapes, so bucket 0 is a valid representative.
-        g = std::move(buckets.front());
-        return true;
+        return got;
     }
 
     bool saveGraphBinBuckets(const std::vector<Graph> &buckets, const std::vector<std::string> &names, const std::string &path) {
@@ -304,20 +321,32 @@ namespace vknn {
         w.u32(kMagic4);
         w.u32((uint32_t) buckets.size());
         // Build the content-deduped initializer pool: identical payloads across buckets (the common
-        // case -- weights are shape-independent) collapse to one blob. A blob is keyed by its raw
-        // bytes; a bucket then references its initializers by pool index.
-        std::vector<const std::vector<uint8_t> *> pool;
-        std::map<std::string, uint32_t>           poolIndex; // payload bytes -> pool slot
-        auto                                      internPayload = [&](const std::vector<uint8_t> &bytes) -> uint32_t {
-            std::string key(bytes.begin(), bytes.end());
-            auto        it = poolIndex.find(key);
-            if (it != poolIndex.end())
+        // case -- weights are shape-independent) collapse to one blob. A blob is looked up by a
+        // (size, FNV-1a 64) digest with an exact byte compare on digest collision -- never by a
+        // full-payload map key, whose copies would double the writer's memory for multi-GB weight
+        // sets. Pool slots keep first-seen order, so the on-disk layout is unchanged.
+        std::vector<const ByteStorage *>                          pool;
+        std::map<std::pair<uint64_t, uint64_t>, std::vector<uint32_t>> poolIndex; // (size, digest) -> candidate slots
+        auto                                                      internPayload = [&](const ByteStorage &bytes) -> uint32_t {
+            constexpr uint64_t kFnvBasis = 1469598103934665603ull;
+            constexpr uint64_t kFnvPrime = 1099511628211ull;
+            uint64_t           h         = kFnvBasis;
+            for (size_t i = 0; i < bytes.size(); ++i)
             {
-                return it->second;
+                h ^= bytes.data()[i];
+                h *= kFnvPrime;
+            }
+            std::vector<uint32_t> &slots = poolIndex[{(uint64_t) bytes.size(), h}];
+            for (uint32_t s: slots)
+            {
+                if (pool[s]->size() == bytes.size() && std::memcmp(pool[s]->data(), bytes.data(), bytes.size()) == 0)
+                {
+                    return s;
+                }
             }
             uint32_t slot = (uint32_t) pool.size();
             pool.push_back(&bytes);
-            poolIndex.emplace(std::move(key), slot);
+            slots.push_back(slot);
             return slot;
         };
         // Reference-map every bucket's initializers into the pool first, so the pool blob table is
@@ -334,7 +363,7 @@ namespace vknn {
         w.u32((uint32_t) pool.size());
         for (const auto *blob: pool)
         {
-            w.vec(*blob);
+            w.vecBytes(blob->data(), blob->size());
         }
         // Per bucket: name, graph structure, then its (tensor id -> pool index) initializer table.
         int64_t totalWeights = 0;
@@ -360,41 +389,74 @@ namespace vknn {
     }
 
     bool loadGraphBinBuckets(std::vector<Graph> &buckets, std::vector<std::string> &names, const std::string &path) {
+        buckets.clear();
+        names.clear();
+        return loadGraphBinBucketsStreamed(path, [&](Graph &&g, const std::string &name, size_t, size_t) {
+            buckets.push_back(std::move(g));
+            names.push_back(name);
+            return true;
+        });
+    }
+
+    bool loadGraphBinBucketsStreamed(const std::string &path, const std::function<bool(Graph &&g, const std::string &name, size_t index, size_t count)> &consume) {
         FILE *f = fopen(path.c_str(), "rb");
         if (!f)
         {
             return false;
         }
-        Reader   r {f};
-        uint32_t magic = r.u32();
+        // consume() runs arbitrary caller code (a session bucket build) that may throw; the guard
+        // closes the file on every exit path.
+        struct FileGuard {
+            FILE *f;
+            ~FileGuard() {
+                fclose(f);
+            }
+        } guard {f};
+        // The whole file is mapped read-only once; initializers view into it instead of copying their
+        // bytes onto the heap. A failed mapping is not an error: every read falls back to fread.
+        std::shared_ptr<const MappedFile> mapping = MappedFile::open(path);
+        Reader                            r {f};
+        uint32_t                          magic = r.u32();
         if (magic == kMagic)
         {
             // Legacy single-bucket container: one graph, initializers inlined.
-            buckets.clear();
-            names.clear();
-            buckets.emplace_back();
-            names.emplace_back();
-            Graph &g = buckets.back();
+            Graph g;
             readGraphStructure(r, g);
             uint32_t ni = r.u32();
             for (uint32_t i = 0; i < ni; ++i)
             {
                 TensorId   id = (TensorId) r.i64();
                 HostBuffer hb;
-                hb.bytes           = r.vec<uint8_t>();
+                const uint32_t blobBytes = r.u32();
+                const int64_t  blobAt    = (int64_t) ftello(f);
+                if (mapping && blobAt >= 0 && (size_t) blobAt + blobBytes <= mapping->size())
+                {
+                    hb.bytes.setView(mapping, mapping->data() + blobAt, blobBytes);
+                    if (fseeko(f, (off_t) blobBytes, SEEK_CUR) != 0)
+                    {
+                        r.ok = false;
+                    }
+                } else
+                {
+                    std::vector<uint8_t> owned(blobBytes);
+                    if (blobBytes)
+                    {
+                        r.ok = r.ok && fread(owned.data(), 1, blobBytes, f) == blobBytes;
+                    }
+                    hb.bytes = std::move(owned);
+                }
                 g.initializers[id] = std::move(hb);
             }
-            fclose(f);
             if (!r.ok)
             {
                 VKNN_WARN << "loadGraph: truncated " << path;
                 return false;
             }
+            consume(std::move(g), std::string(), 0, 1);
             return true;
         }
         if (magic != kMagic4)
         {
-            fclose(f);
             // Every VXM magic is the ASCII "VXM<version>" little-endian, so the low three bytes spell
             // "VXM" and the top byte is the version digit. A recognizable "VXM<n>" with n outside {3,4}
             // was written by a different engine version (recompile from the .onnx); anything else is not
@@ -414,37 +476,75 @@ namespace vknn {
             }
             return false;
         }
-        // Multi-bucket container: read the shared pool, then each bucket's structure + pool refs.
+        // Multi-bucket container. The pool region is INDEXED (offset+size per blob), not read: each
+        // bucket's payloads are read from the file straight into that bucket's initializer map, so
+        // resident memory peaks at one bucket, never at pool + all buckets.
         uint32_t nb = r.u32();
         uint32_t np = r.u32();
-        std::vector<std::vector<uint8_t>> pool(np);
-        for (uint32_t i = 0; i < np; ++i)
+        std::vector<std::pair<int64_t, uint32_t>> blobs(np); // file offset + byte size per pool blob
+        for (uint32_t i = 0; r.ok && i < np; ++i)
         {
-            pool[i] = r.vec<uint8_t>();
-        }
-        buckets.clear();
-        names.clear();
-        buckets.resize(nb);
-        names.resize(nb);
-        for (uint32_t b = 0; b < nb; ++b)
-        {
-            names[b] = r.str();
-            Graph &g = buckets[b];
-            readGraphStructure(r, g);
-            uint32_t ni = r.u32();
-            for (uint32_t i = 0; i < ni; ++i)
+            uint32_t sz = r.u32();
+            blobs[i]    = {(int64_t) ftello(f), sz};
+            if (fseeko(f, (off_t) sz, SEEK_CUR) != 0)
             {
-                TensorId id  = (TensorId) r.i64();
-                uint32_t idx = r.u32();
-                HostBuffer hb;
-                if (idx < pool.size())
-                {
-                    hb.bytes = pool[idx]; // shared payload copied into this bucket's initializer map
-                }
-                g.initializers[id] = std::move(hb);
+                r.ok = false;
             }
         }
-        fclose(f);
+        for (uint32_t b = 0; r.ok && b < nb; ++b)
+        {
+            std::string name = r.str();
+            Graph       g;
+            readGraphStructure(r, g);
+            uint32_t                                   ni = r.u32();
+            std::vector<std::pair<TensorId, uint32_t>> refs(ni);
+            for (uint32_t i = 0; i < ni; ++i)
+            {
+                TensorId id = (TensorId) r.i64();
+                uint32_t ix = r.u32();
+                refs[i]     = {id, ix};
+            }
+            if (!r.ok)
+            {
+                break;
+            }
+            // The next bucket's records follow this ref table; blob reads seek away and back.
+            int64_t next = (int64_t) ftello(f);
+            for (const auto &ref: refs)
+            {
+                HostBuffer hb;
+                if (ref.second < blobs.size())
+                {
+                    const int64_t  blobAt    = blobs[ref.second].first;
+                    const uint32_t blobBytes = blobs[ref.second].second;
+                    // Every bucket referencing this blob views the SAME mapped bytes: a weight shared by
+                    // the prefill and decode plans of one model is materialized zero times, not twice.
+                    if (mapping && (size_t) blobAt + blobBytes <= mapping->size())
+                    {
+                        hb.bytes.setView(mapping, mapping->data() + blobAt, blobBytes);
+                    } else
+                    {
+                        std::vector<uint8_t> owned(blobBytes);
+                        if (blobBytes && (fseeko(f, (off_t) blobAt, SEEK_SET) != 0 || fread(owned.data(), 1, blobBytes, f) != blobBytes))
+                        {
+                            r.ok = false;
+                            break;
+                        }
+                        hb.bytes = std::move(owned);
+                    }
+                }
+                g.initializers[ref.first] = std::move(hb);
+            }
+            if (!r.ok || fseeko(f, (off_t) next, SEEK_SET) != 0)
+            {
+                r.ok = false;
+                break;
+            }
+            if (!consume(std::move(g), name, b, nb))
+            {
+                return true; // caller stopped the stream; not an error
+            }
+        }
         if (!r.ok)
         {
             VKNN_WARN << "loadGraph: truncated " << path;

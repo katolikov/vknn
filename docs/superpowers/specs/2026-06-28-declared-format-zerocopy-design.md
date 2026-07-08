@@ -193,7 +193,7 @@ Part 1 (feature):
 ## Testing & verification
 
 - **Host**: `./build.sh`; `vknn_tests` 11/11 pass after Part 0 and after Part 1.
-- **Device** (R3CY905E04M, Xclipse 960): `./build.sh --android`; push `vknn_*`; run the extended
+- **Device** (the target mobile GPU): `./build.sh --android`; push `vknn_*`; run the extended
   example for `resnet50.vxm` and `encoder8_fp16.vxm`.
 - **Verification matrix**: for each model, for inputs and outputs, run each declared format in
   `{NCHW Float32, NCHW Float16, NHWC Float32, NC4HW4 Float16}`. The host fills each input DMA-BUF in

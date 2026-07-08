@@ -39,4 +39,4 @@ to persist) and `tuning` (off/fast/thorough, autotune effort). Three gaps drove 
   `config.json` `cacheMode` keys are ignored with a warning; old `tuning` values still parse via aliases.
 - `tuning` selects conv kernels, which can differ by one fp16 ULP (outputs stay cos ≈ 1.0, same argmax) —
   it is not a bit-exact knob, unlike `precision` and `priority`. Verified warm==cold bit-exact and
-  multi-variant reuse bit-exact on both target devices (Xclipse 960 + 940).
+  multi-variant reuse bit-exact on both target devices.

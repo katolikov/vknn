@@ -1,6 +1,6 @@
 # Release verification — 2026-07-02 (branch `fuse-pointwise-epilogue`)
 
-Device: Samsung Xclipse 940 (`R5CWB2KWVJY`), fp16 (`--precision low`), warm timing = median/min over
+Device: the target mobile GPU, fp16 (`--precision low`), warm timing = median/min over
 10-15 in-process iterations after warmup (`benchmark/run.py`, per-stage results under
 `benchmark/result/release-suite-final/`). Every stage runs with `fold_islands=false` — the fallback
 count is over ALL ops.
@@ -130,9 +130,9 @@ fixes; 55 fold rounds, 0 oversized tensors, 235 chains fused / 122 epilogues). D
 flat-fill GPU kernel), run-to-run deterministic, fused==nofuse 8/8 byte-identical, on both
 test devices (2.5 s submit+gpu on the newer GPU).
 
-## Second device R3CY905E04M: RoundingModeRTE miscompilation, root-caused and FIXED
+## Second device: RoundingModeRTE miscompilation, root-caused and FIXED
 
-The device (a newer driver generation than R5CWB2KWVJY) executed the 8-view encoder
+The device (a newer driver generation than the other device) executed the 8-view encoder
 nondeterministically — different output bytes every run at BOTH precisions, surviving per-op
 barriers, single submit, fusion off, tuning off, and a reboot — with occasional kernel-level
 crashes/reboots under load. Golden metrics there (SNR 16–23 dB) were corruption noise. The

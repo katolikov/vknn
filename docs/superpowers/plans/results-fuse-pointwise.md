@@ -19,7 +19,7 @@ Shipped: the generic `fusePointwiseChains` pass + standalone `FusedPointwise` GP
 Host tests: **28/28** (incl. `Ops.FusedPw*`, `Passes.FusePointwise*`, `Ops.CpuEpilogueHookOnProducer`,
 `Passes.FusePointwiseRuntimePrimary`).
 
-## Device validation — Xclipse 940 (`R5CWB2KWVJY`), `--winograd off --tuning off`
+## Device validation — the target mobile GPU, `--winograd off --tuning off`
 
 Bit-exactness gate = fused vs `--no-fuse-pointwise`, byte-identical (`cmp`):
 
@@ -82,7 +82,7 @@ operands (flat uploads were misordered for C%4!=0 / H*W>1), scalar broadcast mod
 attach (const-operand chains fold into NC4 producers), ReduceMean import fix (generic Reduce +
 lowerReduceToGap), Config::foldGpuIslands for verification runs.
 
-## Device gate — Xclipse 940, fused vs `--no-fuse-pointwise`, `cmp` byte-identical
+## Device gate — the target mobile GPU, fused vs `--no-fuse-pointwise`, `cmp` byte-identical
 
 | Gate | fp32 | fp16 |
 |---|---|---|

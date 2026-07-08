@@ -11,7 +11,7 @@ against per-model accuracy and runtime gates:
 
 - **Per-step rounding dominated the mobile-net class.** On graphs whose chains never matched a
   special case, the integer-math RTE per VM step cost roughly half the model runtime:
-  MobileNetV2 ran 4.0→1.8 ms on the Xclipse 960 once the per-step rounding was removed
+  MobileNetV2 ran 4.0→1.8 ms on the target mobile GPU once the per-step rounding was removed
   (MobileNetV3 -48%, MNASNet -44%).
 - **The special cases were the wrong boundary.** They covered three fixed patterns; everything
   else paid full price, and the same fp32-accumulator trick generalizes to every unit.
@@ -55,7 +55,7 @@ against per-model accuracy and runtime gates:
    and the dense kernel sums every input channel block, so results were silently wrong. They fall
    back to the group-aware CPU op; group == 1 and pure depthwise keep their GPU kernels.
 
-## Gates (all on both devices, Xclipse 960 + 940)
+## Gates (all on both target devices)
 - `--strict-fuse` vs `--no-fuse-pointwise`: byte-identical, 22/22 suite models + stand-ins +
   frame-interp.
 - Fast mode vs unfused, SNR/cosine against onnxruntime-fp32 goldens with deterministic kernels

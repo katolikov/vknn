@@ -99,7 +99,7 @@ through shared `conv_geom.h` geometry; 1-D Conv is normalized to canonical 2-D a
 reduce/split/pad/resize CPU ops derive geometry from runtime shapes; rank-0 scalars count as one
 element through `cpu::elemCount`.
 
-## Gates (host, and both devices — Xclipse 960 + 940)
+## Gates (host, and both target devices)
 - Host: `./build.sh`, `./build-host/vknn_tests`, `./build.sh --android` green.
 - Fixed-shape byte invariant: a fixed-shape `.vxm` and its output are byte-identical before/after
   the dynamic-shape work; the single-bucket path adds no allocation or re-record.

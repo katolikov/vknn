@@ -47,7 +47,7 @@ namespace vknn {
                     {
                         return false;
                     }
-                    out = (double) hb.bytes[0];
+                    out = (double) hb.bytes.data()[0];
                     return true;
                 default:
                     return false;

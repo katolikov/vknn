@@ -290,7 +290,7 @@ namespace vknn { namespace vk {
         VkResult r = vkCreateDevice(phys_, &dci, nullptr, &device_);
         // A driver may gate HIGH/REALTIME behind a privilege and return VK_ERROR_NOT_PERMITTED_KHR. Step
         // the requested tier down (High->Medium->Low), then drop the priority request entirely, so the
-        // hint degrades to the default path rather than failing device creation. (The target Xclipse
+        // hint degrades to the default path rather than failing device creation. (The target mobile
         // drivers permit every tier for an ordinary process, so this ladder is a portability safety net.)
         while (r == VK_ERROR_NOT_PERMITTED_KHR && qci.pNext)
         {

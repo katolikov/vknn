@@ -8,7 +8,7 @@
 #include "common.glsl"
 // Compile-time {128,128,16} twin of matmul_tiled_bias.comp (a fused rank-1 [N] bias added in fp32
 // before the store). The literal #defines give the driver a fully-unrolled, register-resident
-// micro-tile — faster than the spec-constant kernel at the identical geometry on the Xclipse driver
+// micro-tile — faster than the spec-constant kernel at the identical geometry on the target mobile driver
 // (ADR-0011). matmul.cpp dispatches this (as matmul_tiled_fast + the "_bias" suffix) for the default
 // {128,128,16} tile; the spec-constant matmul_tiled_bias.comp serves only a non-default tile the
 // race picks. Byte-identical to matmul_tiled_bias.comp at {128,128,16}.

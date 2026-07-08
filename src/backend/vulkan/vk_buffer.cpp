@@ -161,6 +161,11 @@ namespace vknn { namespace vk {
                     want |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
                     break;
                 case MemPref::kDeviceOnly:
+                    // Prefer a type WITHOUT host visibility: host-mappable allocations count against a
+                    // per-process driver budget that GPU-only weights and scratch must not consume
+                    // (see VulkanBackend::stageWeightToDevice). The second findMemoryType pass drops
+                    // the avoid bit, so a device whose every type is host-visible still allocates.
+                    avoid = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
                     break;
             }
 
@@ -195,7 +200,12 @@ namespace vknn { namespace vk {
             }
             VK_CHECK(vkBindBufferMemory(ctx_.device(), buf_, mem_, 0));
 
-            if (isHostVisible(typeIdx))
+            // A kDeviceOnly buffer is never mapped, even when the chosen type IS host-visible: on a UMA
+            // device every memory type carries HOST_VISIBLE, so selecting a type cannot keep weights out
+            // of the driver's per-process host-mapping budget — only declining to MAP them can. Its
+            // contents arrive by device copy (VulkanBackend::stageWeightToDevice) and host()/upload()/
+            // download() stay unavailable, as the MemPref contract states.
+            if (isHostVisible(typeIdx) && pref != MemPref::kDeviceOnly)
             {
                 void *p = nullptr;
                 VK_CHECK(vkMapMemory(ctx_.device(), mem_, 0, VK_WHOLE_SIZE, 0, &p));
@@ -204,6 +214,9 @@ namespace vknn { namespace vk {
                 {
                     std::memset(mapped_, 0, bytes_);
                 }
+            } else if (zeroInit)
+            {
+                throw Error(Status::InvalidArgument, "zeroInit requires a host-mapped buffer; kDeviceOnly cannot be memset from the host");
             }
             account();
         } catch (...)

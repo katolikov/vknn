@@ -180,7 +180,7 @@ void main(){
   cosine ≥ 0.999. Print a per-(binding,format) line.
 - [ ] Build host. Commit.
 
-### Task 10: Run on device (Xclipse 960, R3CY905E04M)
+### Task 10: Run on device
 
 - [ ] `./build.sh --android`; `adb push` `vknn_*` + ensure `resnet50.vxm`, `encoder8_fp16.vxm`
   under `/data/local/tmp/vxrt/bench`.

@@ -92,8 +92,16 @@ namespace vknn {
 
         // --- ergonomic API: names/shapes/dtypes come from the model; the caller passes only data ---
         /// Model inputs/outputs (name, concrete shape, dtype, element count). Use these to size buffers.
+        /// The no-argument forms describe the default (first) bucket; the indexed forms describe any
+        /// bucket, which differ per bucket in a multi-graph .vxm (each bucket is its own graph with its
+        /// own input/output names) and in shape across shape buckets of one graph.
         std::vector<IOInfo> inputInfo() const;
         std::vector<IOInfo> outputInfo() const;
+        std::vector<IOInfo> inputInfo(size_t bucket) const;
+        std::vector<IOInfo> outputInfo(size_t bucket) const;
+        /// Every compiled bucket's canonical key (see shapeKey), in bucket order. run() dispatches to
+        /// the bucket whose key matches the caller's bound input names+shapes.
+        std::vector<std::string> bucketKeys() const;
         /// Run with raw fp32 data, one buffer per model input in model order. Names/shapes/dtypes are
         /// filled from the model and the element counts are validated. Outputs come back fully described.
         Status run(const std::vector<std::vector<float>> &inputData, std::vector<IOTensor> &outputs);
@@ -164,9 +172,16 @@ namespace vknn {
         /// The canonical key for a shape assignment: each graph input's name and resolved shape. Two
         /// buckets with the same key are the same plan. `graph` supplies the input names/order.
         static std::string shapeKey(const Graph &graph);
-        /// The key implied by a run's bound input shapes over the default bucket's inputs (an unbound
-        /// or empty caller shape adopts that input's default-bucket shape). Selects the bucket to run.
-        std::string runShapeKey(const std::vector<IOTensor> &inputs) const;
+        /// The key implied by a run's bound input shapes over `graph`'s inputs (an unbound or empty
+        /// caller shape adopts that input's shape in `graph`). run() evaluates this per candidate
+        /// bucket — buckets of a multi-graph .vxm have distinct input NAME sets, so the key must be
+        /// built from each bucket's own graph, never from bucket 0's. `allowPositional` extends the
+        /// forgiving single-input positional match to misnamed callers (homogeneous sessions only).
+        static std::string runShapeKey(const Graph &graph, const std::vector<IOTensor> &inputs, bool allowPositional);
+        /// True when every bucket exposes bucket 0's input names in the same order (one graph at
+        /// several shapes). Falsity marks a multi-graph session, which dispatches strictly by name.
+        /// Cached; recomputed when the bucket count changes.
+        bool bucketsShareInputNames() const;
 
         Config   cfg_;
         Profiler profiler_;
@@ -185,6 +200,9 @@ namespace vknn {
         bool  hasImportedGraph_ = false;
         bool  planned_          = false;
         bool  graphOptimized_   = false; // graph came from .vxm (passes already applied)
+        // bucketsShareInputNames() cache: valid while the bucket count equals uniformCheckedFor_.
+        mutable size_t uniformCheckedFor_ = 0;
+        mutable bool   bucketsUniform_    = true;
     };
 
 } // namespace vknn

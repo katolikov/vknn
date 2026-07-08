@@ -33,7 +33,11 @@ reuses tuning and uploaded weights.
 - **Compile-time buckets:** `vknn_compile --bucket "NAME=D0xD1x...;NAME2=..."`
   (repeatable) compiles the model once per bucket into one multi-bucket `.vxm` (see
   [config.md](config.md)). A `.vxm` session dispatches among its stored buckets and
-  cannot add more at run time.
+  cannot add more at run time. The `--graph "FILE.onnx[;segments]"` form generalizes
+  a bucket to its **own source graph**: several graphs (a vision tower + a decoder's
+  prefill/decode plans) compile into one `.vxm` over a content-deduped weight pool,
+  and `run()` dispatches to the bucket matching the bound input **names + shapes**
+  ([running-a-vlm.md](running-a-vlm.md), [ADR-0014](adr/0014-multi-graph-vxm.md)).
 - **Runtime buckets (ONNX-loaded sessions only):** `Session::prepareShapes(shapes)`
   re-runs the passes and plan from the retained pristine graph to add a bucket
   explicitly. It never happens implicitly on `run()`. A `.vxm` session returns

@@ -3,7 +3,8 @@
 //   image + intrinsics --> encoder (vknn Vulkan) --> Gaussians --> Vulkan rasterizer --> rendered
 //   view.
 // The encoder runs as a normal vknn Session; its 6 Gaussian outputs feed the from-scratch Vulkan
-// compute rasterizer (preprocess -> GPU tile-bin -> bitonic sort -> per-tile alpha compositing).
+// compute rasterizer (raster_core.h: preprocess + exact tile-entry count -> GPU tile-bin ->
+// bitonic sort -> per-tile alpha compositing), which the app-demo JNI bridge shares.
 // The rendered view is written as a PPM. See scripts/yonosplat/ for how the encoder .vxm + inputs
 // are made.
 //
@@ -21,15 +22,10 @@
 #include <fstream>
 #include <vector>
 #if defined(VKNN_ENABLE_VULKAN)
-#include "backend/vulkan/vk_buffer.h"
-#include "backend/vulkan/vk_command.h"
-#include "backend/vulkan/vk_pipeline.h"
+#include "raster_core.h"
 #endif
 
 using namespace vknn;
-// Spherical-harmonics band-0 (DC) basis factor 1/(2*sqrt(pi)); converts the encoder's degree-0
-// harmonic coefficient to a base RGB color via color = C0*sh + 0.5.
-static const float C0 = 0.28209479177387814f;
 
 // Reads an entire file into a byte vector; returns an empty vector if the file cannot be opened.
 static std::vector<uint8_t> readFile(const std::string &p) {
@@ -129,7 +125,7 @@ int main(int argc, char **argv) {
     std::vector<float> mv(means, means + (size_t) N * 3), cvv(covs, covs + (size_t) N * 9), opv(opac, opac + (size_t) N), cols((size_t) N * 3);
     for (size_t i = 0; i < (size_t) N * 3; ++i)
     {
-        cols[i] = std::max(0.f, C0 * harm[i] + 0.5f);
+        cols[i] = std::max(0.f, raster::kC0 * harm[i] + 0.5f);
     }
     std::vector<float> intr(36, 0);
     {
@@ -170,124 +166,33 @@ int main(int argc, char **argv) {
     }
     float fx = K[0] * W, fy = K[4] * H, cx = K[2] * W, cy = K[5] * H;
 
-    // ---------- 3. rasterizer: Gaussians -> view, entirely on the GPU ----------
-    vk::VulkanContext ctx;
-    if (!ctx.initialized())
+    // ---------- 3. rasterizer: Gaussians -> view, entirely on the GPU (raster_core.h) ----------
+    raster::Rasterizer rz(H, W, NEAR);
+    if (!rz.ok())
     {
         fprintf(stderr, "no Vulkan for rasterizer\n");
         return 1;
     }
-    vk::CommandRunner runner(ctx);
-    vk::Buffer        mB(ctx, mv.size() * 4), cvB(ctx, cvv.size() * 4), clB(ctx, cols.size() * 4), opB(ctx, opv.size() * 4);
-    vk::Buffer        gdB(ctx, (size_t) N * 12 * 4);
-    mB.upload(mv.data(), mv.size() * 4);
-    cvB.upload(cvv.data(), cvv.size() * 4);
-    clB.upload(cols.data(), cols.size() * 4);
-    opB.upload(opv.data(), opv.size() * 4);
-    struct PrePC {
-        int32_t dims[4];
-        float   cam[4];
-        float   cam2[4];
-        float   r0[4], r1[4], r2[4];
-    } ppc {};
-    ppc.dims[0] = N;
-    ppc.dims[1] = H;
-    ppc.dims[2] = W;
-    ppc.cam[0]  = NEAR;
-    ppc.cam[1]  = fx;
-    ppc.cam[2]  = fy;
-    ppc.cam[3]  = cx;
-    ppc.cam2[0] = cy;
-    for (int c = 0; c < 3; ++c)
-    {
-        ppc.r0[c] = Rt[c];
-        ppc.r1[c] = Rt[3 + c];
-        ppc.r2[c] = Rt[6 + c];
-    }
-    ppc.r0[3] = tp[0];
-    ppc.r1[3] = tp[1];
-    ppc.r2[3] = tp[2];
-
-    // 16x16-pixel screen tiles. Each sort key packs the tile index in its high bits and a
-    // depth-derived value in the low DB bits, so a single ascending sort groups splats by tile and
-    // orders them front-to-back within each tile.
-    int ntx = (W + 15) / 16, nty = (H + 15) / 16, nTiles = ntx * nty;
-    int tileBits = 1;
-    while ((1 << tileBits) < nTiles)
-    {
-        ++tileBits;
-    }
-    int     DB  = 32 - tileBits; // key bits left for the depth field
-    // Sort-buffer capacity: next power of two >= max(N*8, 65536); a splat may be duplicated across
-    // the tiles it overlaps, and the bitonic sort requires a power-of-two element count.
-    int64_t CAP = 1;
-    while (CAP < (int64_t) N * 8 || CAP < (1 << 16))
-    {
-        CAP <<= 1;
-    }
-    // Normalizes depth in [NEAR, 256) to [0, 1) before it is quantized into the key's low bits.
-    float               invRange = 1.0f / (256.0f - NEAR);
-    vk::Buffer          cntB(ctx, 4), keyB(ctx, CAP * 4), valB(ctx, CAP * 4), rgB(ctx, (size_t) nTiles * 2 * 4);
-    vk::Buffer          imB(ctx, (size_t) H * W * 3 * 4, vk::MemPref::kReadback);
-    vk::ComputePipeline pre(ctx, "raster_preprocess", 5, sizeof(PrePC));
-    struct FillPC {
-        uint32_t count, value;
-    };
-    vk::ComputePipeline fill(ctx, "raster_fill", 1, sizeof(FillPC));
-    struct DupPC {
-        int32_t N, ntx, nty, DB, CAP;
-        float   near, invRange;
-    } dpc {N, ntx, nty, DB, (int) CAP, NEAR, invRange};
-    vk::ComputePipeline dup(ctx, "raster_duplicate", 4, sizeof(DupPC));
-    struct BitPC {
-        uint32_t j, k, n;
-    };
-    vk::ComputePipeline bit(ctx, "raster_bitonic", 2, sizeof(BitPC));
-    struct RngPC {
-        int32_t mode, nTiles, CAP, DB;
-    };
-    vk::ComputePipeline rng(ctx, "raster_ranges", 2, sizeof(RngPC));
-    struct CompPC {
-        int32_t dims[4];
-    } cpc {};
-    cpc.dims[0] = H;
-    cpc.dims[1] = W;
-    cpc.dims[2] = ntx;
-    vk::ComputePipeline comp(ctx, "raster_composite", 4, sizeof(CompPC));
-
-    VkCommandBuffer cmd = runner.allocate();
-    runner.begin(cmd);
-    pre.dispatch(cmd, {mB.handle(), cvB.handle(), clB.handle(), opB.handle(), gdB.handle()}, &ppc, sizeof(ppc), (uint32_t) ((N + 63) / 64));
-    vk::computeBarrier(cmd);
-    FillPC fk {(uint32_t) CAP, 0xffffffffu}, fc {1u, 0u};
-    fill.dispatch(cmd, {keyB.handle()}, &fk, sizeof(fk), (uint32_t) ((CAP + 255) / 256));
-    fill.dispatch(cmd, {cntB.handle()}, &fc, sizeof(fc), 1);
-    vk::computeBarrier(cmd);
-    dup.dispatch(cmd, {gdB.handle(), cntB.handle(), keyB.handle(), valB.handle()}, &dpc, sizeof(dpc), (uint32_t) ((N + 63) / 64));
-    vk::computeBarrier(cmd);
-    // Bitonic sort of the (key, value) arrays: each (k, j) pair is one compare-exchange stage,
-    // dispatched separately so the compute barrier orders the stages.
-    for (uint32_t k = 2; k <= (uint32_t) CAP; k <<= 1)
-    {
-        for (uint32_t j = k >> 1; j > 0; j >>= 1)
-        {
-            BitPC bp {j, k, (uint32_t) CAP};
-            bit.dispatch(cmd, {keyB.handle(), valB.handle()}, &bp, sizeof(bp), (uint32_t) ((CAP + 255) / 256));
-            vk::computeBarrier(cmd);
-        }
-    }
-    RngPC rc {0, nTiles, (int) CAP, DB}, ra {1, nTiles, (int) CAP, DB};
-    rng.dispatch(cmd, {keyB.handle(), rgB.handle()}, &rc, sizeof(rc), (uint32_t) ((nTiles + 255) / 256));
-    vk::computeBarrier(cmd);
-    rng.dispatch(cmd, {keyB.handle(), rgB.handle()}, &ra, sizeof(ra), (uint32_t) ((CAP + 255) / 256));
-    vk::computeBarrier(cmd);
-    comp.dispatch(cmd, {gdB.handle(), valB.handle(), rgB.handle(), imB.handle()}, &cpc, sizeof(cpc), (uint32_t) ((W + 15) / 16), (uint32_t) ((H + 15) / 16));
-    runner.end(cmd);
-    double ms = runner.submitAndWait(cmd);
-    vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &cmd);
+    rz.setGaussians(mv.data(), cvv.data(), cols.data(), opv.data(), N);
     std::vector<float> img((size_t) H * W * 3);
-    imB.download(img.data(), img.size() * 4);
-    printf("[rasterizer] view %d rendered on GPU in %.2f ms\n", view, ms);
+    raster::Stats      st;
+    raster::Result     rr = rz.render(c2w, fx, fy, cx, cy, img.data(), &st);
+    if (rr == raster::Result::SortLimitExceeded)
+    {
+        fprintf(stderr, "[rasterizer] %u tile entries exceed the 2^30 sort limit\n", st.entries);
+        return 3;
+    }
+    if (rr != raster::Result::Ok)
+    {
+        fprintf(stderr, "no Vulkan for rasterizer\n");
+        return 1;
+    }
+    printf("[rasterizer] %u tile entries, sort capacity %lld\n", st.entries, (long long) st.cap);
+    if (st.emitted > (uint32_t) st.cap)
+    {
+        fprintf(stderr, "[rasterizer] WARNING: %u tile entries exceed capacity %lld - %u dropped, image is incomplete\n", st.emitted, (long long) st.cap, st.emitted - (uint32_t) st.cap);
+    }
+    printf("[rasterizer] view %d rendered on GPU in %.2f ms\n", view, st.msCount + st.msMain);
 
     // ---------- 4. save PPM ----------
     std::ofstream f(outp, std::ios::binary);

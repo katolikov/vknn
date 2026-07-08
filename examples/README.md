@@ -14,11 +14,14 @@ group folder). Build them with the host or Android build (`./build.sh` / `./buil
 | `vision/` | `image_bench.cpp` | `vknn_image_bench` | Image-model latency benchmark. |
 | `llm/` | `chat.cpp` | `vknn_chat` | On-device autoregressive decode loop for a Qwen2 with-past decoder. |
 | `llm/` | `chat_host.py` | — | Terminal front-end that tokenizes and drives `vknn_chat` over adb. |
-| `splatting/` | `yonosplat.cpp` | `vknn_yonosplat` | YoNoSplat 3D Gaussian-Splatting encoder. |
+| `llm/` | `vlm.cpp` | `vknn_vlm` | Vision-language chat (SmolVLM2) over a one-file multi-graph `.vxm`: image encode → on-device embedding splice → prefill → streamed decode. |
+| `llm/` | `vlm_host.py` | — | Front-end for `vknn_vlm`: HF processor (tokenizer + chat template) and image preprocessing over adb. |
+| `splatting/` | `yonosplat.cpp` | `vknn_yonosplat` | YoNoSplat 3D Gaussian-Splatting encoder + the Vulkan rasterizer (`raster_core`). |
 | `io/` | `run_io.cpp` | `vknn_run_io` | Run any model over positional input files (the workhorse harness). |
 | `io/` | `dmabuf_fd_io.cpp` | `vknn_dmabuf_fd_io` | Zero-copy caller-owned DMA-BUF I/O. |
 | `io/` | `zerocopy_cache.cpp` / `zerocopy_simple.cpp` | `vknn_zerocopy_cache` / `vknn_zerocopy_simple` | Zero-copy + unified cache paths. |
 | `bench/` | `profile.cpp` | `vknn_profile` | Per-op profiling summary. |
 | `bench/` | `microbench.cpp` | `vknn_microbench` | Drives Vulkan kernels directly (Android/Vulkan only). |
 
-For a full on-device chat app built on `llm/`, see [`../app-demo/`](../app-demo/).
+For a full on-device app built on `llm/` and `splatting/` — Chat, VLM camera coach, and 3D Splat
+capture over a model library — see [`../app-demo/`](../app-demo/).

@@ -1,6 +1,6 @@
 # Phase 0 baseline profile — where the fusable pointwise time is
 
-Device `R5CWB2KWVJY` (Xclipse), `vknn_benchmark --profile`, `precision normal` (fp16), fresh VXM2
+The device (the target mobile GPU), `vknn_benchmark --profile`, `precision normal` (fp16), fresh VXM2
 compiled from ONNX. Per-op-type GPU breakdown (`profile_by_type_ms`). Absolute ms for yonosplat are a
 **cold, untuned, per-op-barriered** run (inflated); use the **relative** split for rollout ordering.
 

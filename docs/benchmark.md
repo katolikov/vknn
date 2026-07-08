@@ -176,7 +176,7 @@ The thermal A/B discipline and the byte gates below are committed as scripts, no
   fused==unfused byte-identity with zero CPU fallback. Pass `--ref-binary <fresh-main vknn_run_io>`
   to also cross-compare against main for a no-regression verdict.
   ```bash
-  benchmark/scripts/gate_op.sh --onnx probe.onnx --inputs "in0.bin" --device R5CWB2KWVJY
+  benchmark/scripts/gate_op.sh --onnx probe.onnx --inputs "in0.bin" --device <device-serial>
   ```
 
 - **`benchmark/scripts/gate_pw_probes.sh`** — the same byte gate over the fixed 22-probe
@@ -197,7 +197,7 @@ The thermal A/B discipline and the byte gates below are committed as scripts, no
   git worktree add /tmp/main-ref main && (cd /tmp/main-ref && ./build.sh --android)
   cp /tmp/main-ref/build-android/vknn_run_io /tmp/a_run_io
   benchmark/scripts/dev_perfab.sh --a /tmp/a_run_io --b /tmp/b_run_io \
-    --models models.txt --device R5CWB2KWVJY
+    --models models.txt --device <device-serial>
   ```
 
 ## Reproduce

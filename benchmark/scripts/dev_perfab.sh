@@ -24,7 +24,7 @@
 #   --a FILE            host vknn_run_io built from FRESH main (the reference)      (required)
 #   --b FILE            host vknn_run_io from this branch                           (required)
 #   --models FILE       model list (required; see format above)
-#   --device SERIAL     adb serial            (default $DEVICE, else the S25 serial below)
+#   --device SERIAL     adb serial            (default $DEVICE, else the connected device)
 #   --n N               iterations per binary per model, min kept   (default 5)
 #   --cooldown SEC      idle seconds BEFORE each run                (default 12)
 #   --repeat R          --repeat passed to the runner to warm steady state (default 3)
@@ -37,8 +37,8 @@
 # Environment: none. Every knob is a flag.
 set -euo pipefail
 
-# Default device: the S25 (standing on-device test target; Config, not a secret).
-DEFAULT_DEVICE="R5CWB2KWVJY"
+# Default device: empty — adb targets the single connected device (override with --device).
+DEFAULT_DEVICE=""
 
 A="" B="" MODELS="" DEVICE="${DEVICE:-$DEFAULT_DEVICE}"
 N=5 COOLDOWN=12 REPEAT=3 PRECISION="low" WINO="auto" THRESHOLD=3
@@ -74,7 +74,7 @@ die() { echo "dev_perfab: $*" >&2; exit 1; }
 [ -n "$B" ] && [ -f "$B" ] || die "need --b FILE (branch vknn_run_io); not found: $B"
 [ -n "$MODELS" ] && [ -f "$MODELS" ] || die "need --models FILE; not found: $MODELS"
 
-ADB="adb -s $DEVICE"
+ADB="adb${DEVICE:+ -s $DEVICE}"
 gate_require_device "$ADB" "$DEVICE" || die "no device"
 
 # --- stage binaries ---

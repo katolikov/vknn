@@ -3,6 +3,7 @@
 #include "vknn/op.h"
 #include "vknn/tensor.h"
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -137,5 +138,13 @@ namespace vknn {
     /// buckets, each with the shared initializer payloads copied into its own initializer map.
     /// @returns True on success; false if the file is missing, truncated, or not a valid ".vxm".
     bool loadGraphBinBuckets(std::vector<Graph> &buckets, std::vector<std::string> &names, const std::string &path);
+    /// Stream every bucket of a ".vxm" through `consume` one at a time, so only ONE bucket's weights
+    /// are materialized in host memory at any moment — the difference between fitting and OOMing a
+    /// device load whose buckets share multi-GB weights (the resident-pool + per-bucket-copy peak of
+    /// loadGraphBinBuckets is the sum over all buckets). Shared pool payloads are read from the file
+    /// region directly per bucket. `consume` receives the bucket graph (weights populated), its label,
+    /// its index, and the bucket count; returning false stops the iteration early (not an error).
+    /// @returns True when every consumed bucket read cleanly; false on a missing/truncated/foreign file.
+    bool loadGraphBinBucketsStreamed(const std::string &path, const std::function<bool(Graph &&g, const std::string &name, size_t index, size_t count)> &consume);
 
 } // namespace vknn

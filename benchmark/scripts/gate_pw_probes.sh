@@ -24,7 +24,7 @@
 #   benchmark/scripts/gate_pw_probes.sh [compile|push|run|all] [probes-dir] [device-dir] [options]
 #
 # Options (after the three positionals):
-#   --device SERIAL      adb serial (default $DEVICE, else the S25 serial below)
+#   --device SERIAL      adb serial (default $DEVICE, else the connected device)
 #   --ref-binary FILE    host vknn_run_io built from a FRESH main; pushed and cross-compared so the
 #                        verdict is branch-vs-ref (no-regression), not just per-branch byte-identity
 set -u
@@ -33,8 +33,8 @@ cd "$HERE/../.." || { echo "gate_pw_probes.sh: cannot cd to repo root" >&2; exit
 # shellcheck source=benchmark/scripts/gate_lib.sh
 . "$HERE/gate_lib.sh"
 
-# Default device: the S25 (standing on-device test target; Config, not a secret).
-DEFAULT_DEVICE="R5CWB2KWVJY"
+# Default device: empty — adb targets the single connected device (override with --device).
+DEFAULT_DEVICE=""
 
 phase="${1:-all}"
 PROBES_DIR=${2:-/tmp/pwprobe}
@@ -53,7 +53,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-ADB="adb -s $DEVICE"
+ADB="adb${DEVICE:+ -s $DEVICE}"
 RUN="../vknn_run_io"      # runner lives one dir above $DEV (pushed to /data/local/tmp/pw)
 
 PROBES="p_conv p_conv1x1 p_dwconv p_convtr p_softmax p_layernorm p_reduce p_gridsample p_resize p_avgpool p_maxpool p_gap p_gemm p_matmul p_conv1x1s2 p_conv1x1deep p_conv3x3w p_softmax_nc4 p_gemm_nobias p_layernorm_nobeta p_reduce_attr p_maxpool_full"

@@ -3,10 +3,17 @@ package com.vknn.chat
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vknn.chat.model.BackendPolicy
+import com.vknn.chat.model.InferenceBackend
+import com.vknn.chat.model.ModelCatalog
+import com.vknn.chat.model.ModelState
+import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -14,65 +21,81 @@ import java.io.File
 enum class Role { USER, ASSISTANT }
 data class Msg(val role: Role, val text: String)
 data class Metrics(val ttftMs: Long = 0, val tokPerSec: Double = 0.0, val prefillMs: Long = 0, val tokens: Int = 0)
-enum class Phase { NEED_DOWNLOAD, DOWNLOADING, DOWNLOADED, LOADING, READY }
+enum class Phase { MISSING, DOWNLOADED, LOADING, READY }
 
 data class UiState(
-    val phase: Phase = Phase.NEED_DOWNLOAD,
-    val downloadPct: Int = 0,
-    val downloadMB: Long = 0,
-    val totalMB: Long = 0,
+    val phase: Phase = Phase.MISSING,
     val messages: List<Msg> = emptyList(),
     val metrics: Metrics = Metrics(),
     val temperature: Float = 0f,
     val generating: Boolean = false,
     val contextUsed: Int = 0,
     val contextMax: Int = 0,
+    val backend: String = "", // engine backend of the loaded session (empty until loaded)
     val status: String? = null,
 )
 
-// Drives the on-device decoder: download/load the model, then encode -> prefill -> stream decode a reply
-// while tracking latency metrics and the KV-cache context usage. All native/tokenizer work runs off the
-// main thread; UI state is a StateFlow the Compose layer collects.
+// Drives the on-device decoder: encode -> prefill -> stream decode a reply while tracking latency
+// metrics and the KV-cache context usage. The model itself is owned by the ModelStore (Library tab);
+// this view model only observes its presence and loads it onto the GPU. All native/tokenizer work
+// runs off the main thread; UI state is a StateFlow the Compose layer collects.
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
-    private val filesDir: File = app.filesDir
+    private val store = (app as VknnApp).models
+    private val settings = (app as VknnApp).settings
+    private val prompts = (app as VknnApp).prompts
     private var tokenizer: Tokenizer? = null
     private var handle: Long = 0L
     private var position = 0
     private var contextMax = 0
+    private var vocabSize = 0
+    private var pendingFree = false
 
-    private val eos = 151643      // <|endoftext|>
     private val maxNew = 220
     private val topK = 40
     private val topP = 0.95f
 
     init {
-        if (ModelDownloader.isPresent(filesDir)) _ui.value = _ui.value.copy(phase = Phase.DOWNLOADED)
+        // Follow the library: the chat mode is usable only while the Qwen model is on device, and
+        // reverts to MISSING (releasing the decoder) when the model is deleted from the Library.
+        viewModelScope.launch {
+            store.states
+                .map { it[ModelCatalog.QWEN.id] is ModelState.Ready }
+                .distinctUntilChanged()
+                .collect { present ->
+                    if (present) {
+                        if (_ui.value.phase == Phase.MISSING) _ui.value = _ui.value.copy(phase = Phase.DOWNLOADED)
+                    } else {
+                        if (handle != 0L) pendingFree = true
+                        _ui.value = _ui.value.copy(
+                            phase = Phase.MISSING,
+                            messages = emptyList(),
+                            contextUsed = 0,
+                            metrics = Metrics(),
+                            status = null,
+                        )
+                        releaseIfIdle()
+                    }
+                }
+        }
     }
 
     fun setTemperature(t: Float) {
         _ui.value = _ui.value.copy(temperature = t)
     }
 
-    fun download() {
-        if (_ui.value.phase == Phase.DOWNLOADING) return
-        _ui.value = _ui.value.copy(phase = Phase.DOWNLOADING, status = null, downloadPct = 0)
-        viewModelScope.launch {
-            try {
-                ModelDownloader.download(filesDir) { pct, done, total ->
-                    _ui.value = _ui.value.copy(downloadPct = pct, downloadMB = done shr 20, totalMB = total shr 20)
-                }
-                _ui.value = _ui.value.copy(phase = Phase.DOWNLOADED)
-            } catch (e: Exception) {
-                _ui.value = _ui.value.copy(phase = Phase.NEED_DOWNLOAD, status = "Download failed: ${e.message}")
-            }
-        }
-    }
-
     fun loadModel() {
         if (_ui.value.phase != Phase.DOWNLOADED) return
+        val chosenBackend = settings.current()
+        if (chosenBackend == InferenceBackend.CPU) {
+            val verdict = BackendPolicy.cpuVerdict(ModelCatalog.QWEN, getApplication<VknnApp>().totalRamBytes())
+            if (verdict is BackendPolicy.CpuVerdict.Blocked) {
+                _ui.value = _ui.value.copy(status = "CPU backend: ${verdict.reason}")
+                return
+            }
+        }
         _ui.value = _ui.value.copy(phase = Phase.LOADING, status = null)
         viewModelScope.launch {
             try {
@@ -82,18 +105,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         ctx.assets.open("vocab.json").bufferedReader().use { it.readText() },
                         ctx.assets.open("merges.txt").bufferedReader().use { it.readText() },
                     )
-                    val vxm = ModelDownloader.modelFile(filesDir).absolutePath
-                    val cache = File(filesDir, "qwen.cache").absolutePath
-                    val h = NativeLib.nativeInit(vxm, cache, "low")
+                    val vxm = store.file(ModelCatalog.QWEN).absolutePath
+                    val cache = File(ctx.filesDir, "qwen.cache").absolutePath
+                    val h = NativeLib.nativeInit(vxm, cache, "low", chosenBackend.engineName)
                     if (h == 0L) throw RuntimeException("model load failed (is the device Vulkan-capable?)")
                     handle = h
-                    contextMax = NativeLib.nativeInfo(h)[2] // {L,kvHeads,C,headDim,vocab}
+                    val info = NativeLib.nativeInfo(h) // {L,kvHeads,C,headDim,vocab}
+                    contextMax = info[2]
+                    vocabSize = info[4]
                     NativeLib.nativeReset(h, 1234)
                     position = 0
                 }
-                _ui.value = _ui.value.copy(phase = Phase.READY, contextMax = contextMax, contextUsed = 0)
+                if (store.isReady(ModelCatalog.QWEN)) {
+                    store.clearLoadError(ModelCatalog.QWEN)
+                    _ui.value = _ui.value.copy(phase = Phase.READY, contextMax = contextMax, contextUsed = 0, backend = chosenBackend.engineName)
+                } else { // deleted from the Library while loading
+                    freeHandle()
+                    _ui.value = _ui.value.copy(phase = Phase.MISSING)
+                }
             } catch (e: Exception) {
-                _ui.value = _ui.value.copy(phase = Phase.DOWNLOADED, status = "Load failed: ${e.message}")
+                val friendly = friendlyLoadError(ModelCatalog.QWEN, e.message)
+                store.reportLoadError(ModelCatalog.QWEN, friendly)
+                val back = if (store.isReady(ModelCatalog.QWEN)) Phase.DOWNLOADED else Phase.MISSING
+                _ui.value = _ui.value.copy(phase = back, status = friendly)
             }
         }
     }
@@ -110,6 +144,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val h = handle
         val tk = tokenizer ?: return
         if (h == 0L || _ui.value.generating || text.isBlank()) return
+        // Pinned for the whole turn, so editing the template mid-reply cannot change the prompt in flight.
+        val template = prompts.chatPromptTemplate.value
         val temp = _ui.value.temperature
         val kMsgs = _ui.value.messages + Msg(Role.USER, text) + Msg(Role.ASSISTANT, "")
         val asstIdx = kMsgs.size - 1
@@ -118,8 +154,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             withContext(Dispatchers.Default) {
                 val t0 = System.nanoTime()
-                // Prefill: continue the running context (a leading newline separates turns after the first).
-                val prompt = tk.encode(if (position == 0) text else "\n$text")
+                // A template renders one self-contained turn, so it starts from a cleared context: appending
+                // a fresh system block onto a running ChatML stream would leave the previous assistant turn
+                // unclosed. An untemplated message continues the running context instead.
+                if (ChatPromptTemplate.isActive(template)) {
+                    NativeLib.nativeReset(h, 1234)
+                    position = 0
+                }
+                val prompt = ChatPromptTemplate.encodeTurn(tk, template, text, continuingContext = position > 0)
+                // Control-token ids sit above the bundled vocab.json; a decoder whose embedding table stops
+                // short of them would index out of range rather than fail.
+                if (vocabSize > 0 && prompt.any { it >= vocabSize }) {
+                    setAssistant(asstIdx, "[this model has no chat-template tokens — clear the prompt template]", Metrics())
+                    return@withContext
+                }
                 var ok = true
                 for (id in prompt) {
                     if (position >= contextMax - 1) { ok = false; break }
@@ -131,13 +179,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     setAssistant(asstIdx, "[context full — tap reset to start over]", Metrics(prefillMs = prefillMs))
                     return@withContext
                 }
+                // A templated turn ends on the template's own stop token; the base model's end-of-stream
+                // never arrives inside a ChatML turn.
+                val stopTokens = ChatPromptTemplate.stopTokensFor(template)
                 val dec = Tokenizer.StreamDecoder(tk)
                 val sb = StringBuilder()
                 var next = NativeLib.nativeSample(h, temp, if (temp > 0) topK else 0, topP)
                 val firstNs = System.nanoTime()
                 val ttftMs = (firstNs - t0) / 1_000_000
                 var gen = 0
-                while (gen < maxNew && next != eos && position < contextMax - 1) {
+                while (gen < maxNew && next !in stopTokens && position < contextMax - 1) {
                     val piece = dec.add(next)
                     gen++
                     if (piece.isNotEmpty()) sb.append(piece)
@@ -154,6 +205,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.i("vknnchat-app", "reply: gen=$gen ttft=${ttftMs}ms prefill=${prefillMs}ms tps=${(tps * 10).toInt() / 10.0} text=${sb.toString().replace("\n", "\\n")}")
             }
             _ui.value = _ui.value.copy(generating = false, contextUsed = position)
+            releaseIfIdle()
         }
     }
 
@@ -165,10 +217,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(messages = next, metrics = metrics)
     }
 
-    override fun onCleared() {
+    // A delete while a reply is streaming defers the native free until the decode loop finishes
+    // (both this and the collector run on the main dispatcher, so the flag is race-free).
+    private fun releaseIfIdle() {
+        if (pendingFree && !_ui.value.generating) {
+            pendingFree = false
+            freeHandle()
+        }
+    }
+
+    private fun freeHandle() {
         val h = handle
         handle = 0L
+        position = 0
         if (h != 0L) NativeLib.nativeFree(h)
+    }
+
+    override fun onCleared() {
+        freeHandle()
         super.onCleared()
     }
 }
