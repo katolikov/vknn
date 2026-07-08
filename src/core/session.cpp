@@ -22,7 +22,7 @@ namespace vknn {
     static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
         if (src == DType::Int64)
         {
-            rt.dtype      = DType::Int64;
+            rt.dtype = DType::Int64;
             rt.host.resizeElems(elems, DType::Int64);
             int64_t avail = std::min<int64_t>(elems, (int64_t) (in.size() / 8));
             std::memcpy(rt.host.bytes.data(), in.data(), (size_t) avail * 8);
@@ -36,8 +36,10 @@ namespace vknn {
         rt.host.resizeElems(elems, DType::Float32);
         float *f = rt.host.f32();
         // Elements that fit in both the destination (elems) and the caller buffer at bytesPer each.
-        auto    fitElems = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
-        int64_t filled   = 0;
+        auto fitElems = [&](int64_t bytesPer) {
+            return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer));
+        };
+        int64_t filled = 0;
         switch (src)
         {
             case DType::Float32: {
@@ -49,23 +51,31 @@ namespace vknn {
                 const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
                 filled          = fitElems(2);
                 for (int64_t i = 0; i < filled; ++i)
+                {
                     f[i] = halfToFloat(h[i]);
+                }
                 break;
             }
             case DType::UInt8:
                 filled = fitElems(1);
                 for (int64_t i = 0; i < filled; ++i)
+                {
                     f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
+                }
                 break;
             case DType::Int8:
                 filled = fitElems(1);
                 for (int64_t i = 0; i < filled; ++i)
+                {
                     f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
+                }
                 break;
             case DType::Int32:
                 filled = fitElems(4);
                 for (int64_t i = 0; i < filled; ++i)
+                {
                     f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
+                }
                 break;
             default: {
                 filled = fitElems(4);
@@ -92,20 +102,28 @@ namespace vknn {
             return;
         }
         bool srcI64 = rt.dtype == DType::Int64;
-        auto srcF32 = [&](int64_t i) -> float { return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i]; };
-        auto srcI   = [&](int64_t i) -> int64_t { return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i]; };
+        auto srcF32 = [&](int64_t i) -> float {
+            return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i];
+        };
+        auto srcI = [&](int64_t i) -> int64_t {
+            return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i];
+        };
         io.data.assign((size_t) elems * dtypeSize(dst), 0);
         switch (dst)
         {
             case DType::Float32:
                 for (int64_t i = 0; i < elems; ++i)
+                {
                     reinterpret_cast<float *>(io.data.data())[i] = srcF32(i);
+                }
                 break;
             case DType::Float16:
                 if (srcI64)
                 {
                     for (int64_t i = 0; i < elems; ++i)
+                    {
                         reinterpret_cast<fp16_t *>(io.data.data())[i] = floatToHalf(srcF32(i));
+                    }
                 } else
                 {
                     floatToHalfBulk(rt.host.f32(), reinterpret_cast<fp16_t *>(io.data.data()), elems);
@@ -114,21 +132,27 @@ namespace vknn {
             case DType::UInt8:
                 for (int64_t i = 0; i < elems; ++i)
                 {
-                    int64_t v                                            = srcI(i);
-                    reinterpret_cast<uint8_t *>(io.data.data())[i]       = (uint8_t) (v < 0 ? 0 : (v > 255 ? 255 : v));
+                    int64_t v                                      = srcI(i);
+                    reinterpret_cast<uint8_t *>(io.data.data())[i] = (uint8_t) (v < 0 ? 0 : (v > 255 ? 255 : v));
                 }
                 break;
             case DType::Int8:
                 for (int64_t i = 0; i < elems; ++i)
+                {
                     reinterpret_cast<int8_t *>(io.data.data())[i] = (int8_t) srcI(i);
+                }
                 break;
             case DType::Int32:
                 for (int64_t i = 0; i < elems; ++i)
+                {
                     reinterpret_cast<int32_t *>(io.data.data())[i] = (int32_t) srcI(i);
+                }
                 break;
             case DType::Int64:
                 for (int64_t i = 0; i < elems; ++i)
+                {
                     reinterpret_cast<int64_t *>(io.data.data())[i] = srcI(i);
+                }
                 break;
             default:
                 io.data = rt.host.bytes.toVector();
@@ -421,15 +445,15 @@ namespace vknn {
     }
 
     PlanBucket Session::buildBucket(Graph &&g, const std::string &key) {
-        PlanBucket        bucket;
+        PlanBucket bucket;
         bucket.key   = key;
         bucket.graph = std::make_unique<Graph>(std::move(g));
         // Alias the bucket's members under the names the body below was written against, so the plan
         // logic reads exactly as it did when it lived in plan() over the session members.
-        Graph                    &graph_          = *bucket.graph;
-        std::vector<int>         &nodeBackendIdx_ = bucket.nodeBackendIdx;
-        std::vector<RtTensor>    &pool_           = bucket.pool;
-        std::vector<std::unique_ptr<Segment>> &segments_ = bucket.segments;
+        Graph                                 &graph_          = *bucket.graph;
+        std::vector<int>                      &nodeBackendIdx_ = bucket.nodeBackendIdx;
+        std::vector<RtTensor>                 &pool_           = bucket.pool;
+        std::vector<std::unique_ptr<Segment>> &segments_       = bucket.segments;
 
         // --- graph optimization passes (NCHW IR; batch=1 fallback + any Config::inputShapes/dimBindings) ---
         // Skipped when the graph came from a .vxm (passes already applied at save time). The default
@@ -877,9 +901,9 @@ namespace vknn {
         // A single-input graph binds by position when the sole caller entry names no input — or, when
         // `allowPositional`, names one the graph does not have (the legacy forgiving match, kept for
         // homogeneous sessions; see runInputsBind).
-        const bool positional = g.inputs.size() == 1 && inputs.size() == 1 && (allowPositional || inputs[0].name.empty());
-        const bool singleBind = positional;
-        std::string  k;
+        const bool  positional = g.inputs.size() == 1 && inputs.size() == 1 && (allowPositional || inputs[0].name.empty());
+        const bool  singleBind = positional;
+        std::string k;
         for (size_t i = 0; i < g.inputs.size(); ++i)
         {
             const TensorDesc &d     = g.desc(g.inputs[i]);
@@ -914,9 +938,9 @@ namespace vknn {
         // Re-run the whole pipeline from the pristine imported graph at the declared shapes, then key
         // the bucket by the shapes the passes actually resolved. If that key already exists this is a
         // no-op (re-declaring a prepared shape is idempotent).
-        Config saved       = cfg_;
+        Config saved     = cfg_;
         cfg_.inputShapes = shapes; // threaded into the passes by buildBucket via cfg_
-        Graph      copy    = importedGraph_;
+        Graph       copy = importedGraph_;
         std::string k;
         try
         {
@@ -974,6 +998,320 @@ namespace vknn {
             return nullptr;
         }
         return &b0.pool[id];
+    }
+
+    // ---- engine-resident output->input links ---------------------------------------------------
+
+    namespace {
+        bool idInList(const std::vector<TensorId> &v, TensorId id) {
+            return std::find(v.begin(), v.end(), id) != v.end();
+        }
+        // Internal host-storage class of a boundary tensor: int64 for declared Int64 (shape/index
+        // tensors), fp32 for everything else — the same rule bindInput/CPU ops follow.
+        DType internalStorageDtype(DType declared) {
+            return declared == DType::Int64 ? DType::Int64 : DType::Float32;
+        }
+        // Allocate + zero a linked tensor's host storage when it has never been bound or produced,
+        // so the resident state starts as zeros (mirrors the GPU boundary buffers' zero init).
+        void ensureResidentHostStorage(const Graph &g, TensorId id, RtTensor &rt) {
+            if (rt.hostValid && !rt.host.bytes.empty())
+            {
+                return;
+            }
+            rt.shape      = rt.shape.empty() ? g.tensors[id].shape : rt.shape;
+            rt.dtype      = internalStorageDtype(g.tensors[id].dtype);
+            int64_t elems = rt.shape.empty() ? 1 : numElements(rt.shape);
+            rt.host.resizeElems(elems, rt.dtype);
+            std::memset(rt.host.bytes.data(), 0, rt.host.bytes.size());
+            rt.hostValid = true;
+        }
+    } // namespace
+
+    Status Session::validateLinkRanges(const Graph &g, TensorId outId, TensorId inId, const std::vector<LinkRange> &ranges) const {
+        const int64_t srcElems = numElements(g.tensors[outId].shape);
+        const int64_t dstElems = numElements(g.tensors[inId].shape);
+        for (const LinkRange &r: ranges)
+        {
+            if (r.count <= 0 || r.sourceElem < 0 || r.destElem < 0 || r.sourceElem + r.count > srcElems || r.destElem + r.count > dstElems)
+            {
+                VKNN_ERROR << "link: range [src " << r.sourceElem << ", dst " << r.destElem << ", count " << r.count << ") exceeds '" << g.tensors[outId].name << "' (" << srcElems << " elems) or '"
+                           << g.tensors[inId].name << "' (" << dstElems << " elems)";
+                return Status::InvalidArgument;
+            }
+        }
+        // Overlapping destination ranges would race on the GPU copy; reject them.
+        std::vector<std::pair<int64_t, int64_t>> spans;
+        spans.reserve(ranges.size());
+        for (const LinkRange &r: ranges)
+        {
+            spans.emplace_back(r.destElem, r.destElem + r.count);
+        }
+        std::sort(spans.begin(), spans.end());
+        for (size_t i = 1; i < spans.size(); ++i)
+        {
+            if (spans[i].first < spans[i - 1].second)
+            {
+                VKNN_ERROR << "link: destination ranges overlap at element " << spans[i].first << " of '" << g.tensors[inId].name << "'";
+                return Status::InvalidArgument;
+            }
+        }
+        return Status::Ok;
+    }
+
+    const Session::ResidentLink *Session::linkedOutput(size_t bucket, TensorId id) const {
+        for (const ResidentLink &link: links_)
+        {
+            if (link.bucket == bucket && link.outId == id)
+            {
+                return &link;
+            }
+        }
+        return nullptr;
+    }
+
+    const Session::ResidentLink *Session::linkedInput(size_t bucket, TensorId id) const {
+        for (const ResidentLink &link: links_)
+        {
+            if (link.bucket == bucket && link.inId == id)
+            {
+                return &link;
+            }
+        }
+        return nullptr;
+    }
+
+    Status Session::linkOutputToInput(const std::string &outputName, const std::string &inputName, const std::vector<LinkRange> &ranges) {
+        // Resolve the unique bucket exposing both names; several matches need the bucket overload.
+        size_t match = buckets_.size(), matches = 0;
+        for (size_t b = 0; b < buckets_.size(); ++b)
+        {
+            const Graph &g   = *buckets_[b].graph;
+            TensorId     out = g.find(outputName), in = g.find(inputName);
+            if (out != kNoTensor && in != kNoTensor && idInList(g.outputs, out) && idInList(g.inputs, in))
+            {
+                match = b;
+                ++matches;
+            }
+        }
+        if (matches == 0)
+        {
+            VKNN_ERROR << "link: no bucket has output '" << outputName << "' and input '" << inputName << "'";
+            return Status::NotFound;
+        }
+        if (matches > 1)
+        {
+            VKNN_ERROR << "link: output '" << outputName << "' and input '" << inputName << "' exist in " << matches << " buckets; use the bucket-explicit linkOutputToInput overload";
+            return Status::InvalidArgument;
+        }
+        return linkOutputToInput(match, outputName, inputName, ranges);
+    }
+
+    Status Session::linkOutputToInput(size_t bucket, const std::string &outputName, const std::string &inputName, const std::vector<LinkRange> &ranges) {
+        if (bucket >= buckets_.size())
+        {
+            VKNN_ERROR << "link: bucket " << bucket << " out of range (have " << buckets_.size() << ")";
+            return Status::InvalidArgument;
+        }
+        PlanBucket    &b     = buckets_[bucket];
+        const Graph   &g     = *b.graph;
+        const TensorId outId = g.find(outputName);
+        const TensorId inId  = g.find(inputName);
+        if (outId == kNoTensor || !idInList(g.outputs, outId))
+        {
+            VKNN_ERROR << "link: '" << outputName << "' is not a graph output of bucket " << bucket;
+            return Status::NotFound;
+        }
+        if (inId == kNoTensor || !idInList(g.inputs, inId))
+        {
+            VKNN_ERROR << "link: '" << inputName << "' is not a graph input of bucket " << bucket;
+            return Status::NotFound;
+        }
+        if (outId == inId || idInList(g.inputs, outId) || idInList(g.outputs, inId))
+        {
+            VKNN_ERROR << "link: '" << outputName << "' -> '" << inputName << "' would alias a tensor that is both a graph input and output";
+            return Status::InvalidArgument;
+        }
+        // The copies move raw storage; both sides must live in the same storage class.
+        if (internalStorageDtype(g.tensors[outId].dtype) != internalStorageDtype(g.tensors[inId].dtype))
+        {
+            VKNN_ERROR << "link: dtype mismatch between output '" << outputName << "' (" << dtypeStr(g.tensors[outId].dtype) << ") and input '" << inputName << "' ("
+                       << dtypeStr(g.tensors[inId].dtype) << ")";
+            return Status::InvalidArgument;
+        }
+        if (Status rangeStatus = validateLinkRanges(g, outId, inId, ranges); rangeStatus != Status::Ok)
+        {
+            return rangeStatus;
+        }
+        // Re-linking an existing pair replaces the ranges (the per-token update path).
+        for (ResidentLink &link: links_)
+        {
+            if (link.bucket == bucket && link.outputName == outputName && link.inputName == inputName)
+            {
+                link.ranges      = ranges;
+                link.rangesDirty = true;
+                return Status::Ok;
+            }
+        }
+        ResidentLink link;
+        link.bucket      = bucket;
+        link.outputName  = outputName;
+        link.inputName   = inputName;
+        link.outId       = outId;
+        link.inId        = inId;
+        link.ranges      = ranges;
+        link.rangesDirty = true;
+        if (cfg_.backend != BackendKind::Cpu)
+        {
+            // Device path: one segment must both produce the output and consume the input, so the
+            // resident copy stays entirely inside its pre-recorded command stream and the values it
+            // reads are the previous run's. There is no silent host fallback on a GPU session — a
+            // link that cannot be device-resident is an error the caller must see.
+            Segment *owner = nullptr;
+            for (const std::unique_ptr<Segment> &seg: b.segments)
+            {
+                if (idInList(seg->boundaryOutputs, outId) && idInList(seg->boundaryInputs, inId))
+                {
+                    owner = seg.get();
+                    break;
+                }
+            }
+            if (!owner)
+            {
+                VKNN_ERROR << "link: no single segment produces '" << outputName << "' and consumes '" << inputName << "' (a CPU-fallback island splits them); device-resident linking unavailable";
+                return Status::Unsupported;
+            }
+            // Every reader of the linked input must live in that segment (an outside reader would
+            // consume a stale host copy), and the linked output must have no readers outside it.
+            std::set<int> ownNodes(owner->nodeIdx.begin(), owner->nodeIdx.end());
+            for (size_t n = 0; n < g.nodes.size(); ++n)
+            {
+                if (ownNodes.count((int) n))
+                {
+                    continue;
+                }
+                for (TensorId in: g.nodes[n].inputs)
+                {
+                    if (in == inId || in == outId)
+                    {
+                        VKNN_ERROR << "link: '" << g.tensors[in].name << "' is read outside the owning GPU segment (node '" << g.nodes[n].name << "'); device-resident linking unavailable";
+                        return Status::Unsupported;
+                    }
+                }
+                if (g.nodes[n].fusedResidual == inId || g.nodes[n].fusedResidual == outId)
+                {
+                    VKNN_ERROR << "link: a linked tensor is read as a fused residual outside the owning GPU segment (node '" << g.nodes[n].name << "'); device-resident linking unavailable";
+                    return Status::Unsupported;
+                }
+            }
+            std::string whyNot;
+            Status      addStatus = owner->addResidentLink(outId, inId, whyNot);
+            if (addStatus != Status::Ok)
+            {
+                VKNN_ERROR << "link: '" << outputName << "' -> '" << inputName << "': " << (whyNot.empty() ? "backend has no device-resident path" : whyNot);
+                return addStatus;
+            }
+            link.deviceSegment = owner;
+        }
+        links_.push_back(std::move(link));
+        return Status::Ok;
+    }
+
+    Status Session::readResident(const std::string &name, IOTensor &out) {
+        const ResidentLink *found       = nullptr;
+        bool                isInputSide = false;
+        for (const ResidentLink &link: links_)
+        {
+            bool matchIn = link.inputName == name, matchOut = link.outputName == name;
+            if (!matchIn && !matchOut)
+            {
+                continue;
+            }
+            if (found)
+            {
+                VKNN_ERROR << "readResident: '" << name << "' is linked more than once; state is ambiguous";
+                return Status::InvalidArgument;
+            }
+            found       = &link;
+            isInputSide = matchIn;
+        }
+        if (!found)
+        {
+            VKNN_ERROR << "readResident: '" << name << "' is not a linked tensor";
+            return Status::NotFound;
+        }
+        PlanBucket &b   = buckets_[found->bucket];
+        TensorId    tid = isInputSide ? found->inId : found->outId;
+        RtTensor   &rt  = b.pool[tid];
+        if (found->deviceSegment)
+        {
+            rt.shape = rt.shape.empty() ? b.graph->tensors[tid].shape : rt.shape;
+            if (!found->deviceSegment->downloadResident(tid, rt))
+            {
+                VKNN_ERROR << "readResident: '" << name << "' has no device residency to download";
+                return Status::RuntimeError;
+            }
+        } else
+        {
+            ensureResidentHostStorage(*b.graph, tid, rt);
+        }
+        out.name  = name;
+        out.shape = rt.shape.empty() ? b.graph->tensors[tid].shape : rt.shape;
+        out.dtype = rt.dtype;
+        out.data  = rt.host.bytes.toVector();
+        return Status::Ok;
+    }
+
+    void Session::clearLinks() {
+        for (ResidentLink &link: links_)
+        {
+            if (link.deviceSegment)
+            {
+                link.deviceSegment->clearResidentLinks();
+            }
+        }
+        links_.clear();
+    }
+
+    Status Session::applyResidentLinks(size_t bucketIndex, PlanBucket &bucket) {
+        for (ResidentLink &link: links_)
+        {
+            if (link.bucket != bucketIndex)
+            {
+                continue;
+            }
+            RtTensor &src = bucket.pool[link.outId];
+            RtTensor &dst = bucket.pool[link.inId];
+            if (src.dmaBufFd >= 0 || dst.dmaBufFd >= 0)
+            {
+                VKNN_ERROR << "run: linked tensor '" << (src.dmaBufFd >= 0 ? link.outputName : link.inputName) << "' cannot also bind a dma-buf fd";
+                return Status::InvalidArgument;
+            }
+            if (link.deviceSegment)
+            {
+                if (link.rangesDirty)
+                {
+                    link.deviceSegment->setResidentLinkRanges(link.outId, link.inId, link.ranges);
+                    link.rangesDirty = false;
+                }
+                continue;
+            }
+            // Host path (CPU backend): the ranged copy moves the exact fp32/int64 storage bytes the
+            // caller's own fold would have, so values are identical to the unlinked loop.
+            const Graph &g = *bucket.graph;
+            ensureResidentHostStorage(g, link.outId, src);
+            ensureResidentHostStorage(g, link.inId, dst);
+            if (src.dtype != dst.dtype)
+            {
+                VKNN_ERROR << "run: linked tensors '" << link.outputName << "' (" << dtypeStr(src.dtype) << ") and '" << link.inputName << "' (" << dtypeStr(dst.dtype) << ") hold different storage dtypes";
+                return Status::InvalidArgument;
+            }
+            const size_t elemBytes = dtypeSize(src.dtype);
+            for (const LinkRange &r: link.ranges)
+            {
+                std::memcpy(dst.host.bytes.data() + (size_t) r.destElem * elemBytes, src.host.bytes.data() + (size_t) r.sourceElem * elemBytes, (size_t) r.count * elemBytes);
+            }
+        }
+        return Status::Ok;
     }
 
     // Buffer sizes, push constants, and dispatch geometry are frozen from a bucket's graph shapes at
@@ -1075,7 +1413,8 @@ namespace vknn {
                 return Status::InvalidArgument;
             }
         }
-        PlanBucket &bucket = *sel;
+        PlanBucket  &bucket      = *sel;
+        const size_t bucketIndex = (size_t) (sel - buckets_.data());
         // Alias the selected bucket's state under the names the body below was written against; run()
         // is otherwise unchanged, so a fixed-shape model's single bucket runs exactly as before.
         Graph                                 &graph_        = *bucket.graph;
@@ -1127,8 +1466,10 @@ namespace vknn {
             {
                 rt.dtype     = io.dtype;
                 rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
-            } else if (ioGpuConvert_ && (io.dtype == DType::UInt8 || io.dtype == DType::Int8))
+            } else if (ioGpuConvert_ && (io.dtype == DType::UInt8 || io.dtype == DType::Int8) && !linkedInput(bucketIndex, id))
             {
+                // (A LINKED input takes the fp32 bindInput path below even for 8-bit data: the raw-
+                // byte staging convert re-runs every submit and would overwrite the resident state.)
                 // Whole-graph GPU run: keep the caller's raw 8-bit bytes (rt.dtype stays the declared 8-bit
                 // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16 + NC4HW4
                 // gather — skipping the host uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit
@@ -1199,6 +1540,16 @@ namespace vknn {
             rt.host.bytes = std::move(outputs[i].data);
         }
 
+        // --- engine-resident links: push updated copy ranges to the owning GPU segment, or apply
+        //     the host-path ranged copies (CPU backend), before anything reads the linked inputs.
+        if (!links_.empty())
+        {
+            if (Status linkStatus = applyResidentLinks(bucketIndex, bucket); linkStatus != Status::Ok)
+            {
+                return linkStatus;
+            }
+        }
+
         auto tB = now();
         // --- run segments in order ---
         try
@@ -1258,7 +1609,12 @@ namespace vknn {
             io.dmaBufFd     = rt.dmaBufFd;
             io.dmaBufFormat = rt.dmaBufFormat;
             io.dmaBufDtype  = rt.dmaBufDtype;
-            if (rt.dmaBufFd < 0)
+            if (linkedOutput(bucketIndex, oid))
+            {
+                // A linked output stays engine-resident: the entry carries its metadata but no data
+                // (readResident() fetches the values when a caller needs them).
+                io.dtype = graph_.tensors[oid].dtype;
+            } else if (rt.dmaBufFd < 0)
             {
                 // Emit the output in the model's DECLARED dtype (e.g. a UINT8 image, FLOAT16 tensor),
                 // converting from the internal fp32/int64 storage. Matches the ONNX output contract. A
