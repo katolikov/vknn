@@ -1152,6 +1152,16 @@ namespace vknn {
                 return Status::Ok;
             }
         }
+        // One input takes at most one source: a second link into the same input would make the copy
+        // order (and any cross-link range overlap) undefined.
+        for (const ResidentLink &existing: links_)
+        {
+            if (existing.bucket == bucket && existing.inId == inId)
+            {
+                VKNN_ERROR << "link: input '" << inputName << "' is already linked from output '" << existing.outputName << "'";
+                return Status::InvalidArgument;
+            }
+        }
         ResidentLink link;
         link.bucket      = bucket;
         link.outputName  = outputName;

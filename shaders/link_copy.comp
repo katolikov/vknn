@@ -1,0 +1,4 @@
+#version 450
+// Resident-link range copy over 4-byte elements (fp32 / storeFp32 boundaries). See link_copy_core.glsl.
+#define LINK_ELEM_T uint
+#include "link_copy_core.glsl"
