@@ -14,6 +14,7 @@ import com.vknn.chat.model.ModelResidency
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -129,7 +130,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.H
             } catch (e: Exception) {
                 val abandonedHandle = handle
                 handle = 0L
-                if (abandonedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeSplatFree(abandonedHandle) }
+                if (abandonedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeSplatFree(abandonedHandle) }
                 residency.dropResidency(this@SplatViewModel)
                 val friendly = friendlyLoadError(ModelCatalog.DL3DV, e.message)
                 store.reportLoadError(ModelCatalog.DL3DV, friendly)
@@ -282,7 +283,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.H
     override suspend fun freeResidentSession() {
         val releasedHandle = handle
         handle = 0L
-        if (releasedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeSplatFree(releasedHandle) }
+        if (releasedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeSplatFree(releasedHandle) }
     }
 
     override fun resetToUnloadedState() {

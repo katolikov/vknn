@@ -15,6 +15,7 @@ import com.vknn.chat.model.ModelResidency
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -144,7 +145,7 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
             } catch (e: Exception) {
                 val abandonedHandle = handle
                 handle = 0L
-                if (abandonedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeVlmFree(abandonedHandle) }
+                if (abandonedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeVlmFree(abandonedHandle) }
                 residency.dropResidency(this@VlmViewModel)
                 val friendly = friendlyLoadError(ModelCatalog.SMOLVLM2, e.message)
                 store.reportLoadError(ModelCatalog.SMOLVLM2, friendly)
@@ -270,7 +271,7 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
         handle = 0L
         // The window belongs to the released session; no prompt can be measured until one is loaded again.
         prefillWindow = 0
-        if (releasedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeVlmFree(releasedHandle) }
+        if (releasedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeVlmFree(releasedHandle) }
     }
 
     override fun resetToUnloadedState() {

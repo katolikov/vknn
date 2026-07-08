@@ -10,6 +10,7 @@ import com.vknn.chat.model.ModelResidency
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -138,7 +139,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
             } catch (e: Exception) {
                 val abandonedHandle = handle
                 handle = 0L
-                if (abandonedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeFree(abandonedHandle) }
+                if (abandonedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeFree(abandonedHandle) }
                 residency.dropResidency(this@ChatViewModel)
                 val friendly = friendlyLoadError(ModelCatalog.QWEN, e.message)
                 store.reportLoadError(ModelCatalog.QWEN, friendly)
@@ -254,7 +255,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
         val releasedHandle = handle
         handle = 0L
         position = 0
-        if (releasedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeFree(releasedHandle) }
+        if (releasedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeFree(releasedHandle) }
     }
 
     override fun resetToUnloadedState() {
