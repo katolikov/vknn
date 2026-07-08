@@ -17,9 +17,17 @@
 // along n (bStride[nAxis] == 1) and keep the coalesced access matmul.comp has. Geometry rides the
 // same content-deduped SSBO (binding 3) as matmul.comp: outDim = g[0..rank), aStride = g[rank..2*rank),
 // bStride = g[2*rank..3*rank).
+//
+// The kernel is DRAM-latency bound, not ALU bound: it streams K*N halves of B and does one FMA per
+// half. Its achieved bandwidth is (bytes a wave keeps in flight) * (waves) / (DRAM latency), so the
+// k loop is unrolled GEMV_U-wide with all GEMV_U loads issued ahead of the FMA chain.
+// shaders/matmul_gemv4.comp keeps the same k partition and per-output accumulation order and instead
+// gives each lane GEMV_VEC adjacent n, trading waves for load width; both kernels produce identical
+// bits and matmul.cpp picks between them on N's divisibility.
 #include "common.glsl"
 #define GEMV_NX 64 // lanes along n: one coalesced 128-byte fp16 burst of B per row
 #define GEMV_KS 16 // lanes reducing over k; GEMV_NX * GEMV_KS == 1024 == maxComputeWorkGroupInvocations
+#define GEMV_U 4   // k steps a lane loads before it consumes any of them (memory-level parallelism)
 layout(local_size_x = GEMV_NX, local_size_y = GEMV_KS) in;
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
@@ -49,9 +57,30 @@ void main() {
     }
   }
 
+  // GEMV_U k steps load into registers before the accumulator consumes any of them, so every wave
+  // holds GEMV_U B requests in flight rather than one. B is the streamed operand (K*N elements
+  // against A's K), so in-flight B bytes are what bound this kernel's achieved bandwidth. The
+  // accumulator still walks k in ascending order, term by term. The four steps are spelled out
+  // rather than looped over a register array: an array indexed by a loop variable lands in scratch
+  // memory unless the driver unrolls it.
   float acc = 0.0;
   if (live) {
-    for (int k = int(ky); k < pc.K; k += GEMV_KS)
+    int k = int(ky);
+    for (; k + (GEMV_U - 1) * GEMV_KS < pc.K; k += GEMV_U * GEMV_KS) {
+      float a0 = float(a[aBase + k * pc.aK]);
+      float a1 = float(a[aBase + (k + GEMV_KS) * pc.aK]);
+      float a2 = float(a[aBase + (k + 2 * GEMV_KS) * pc.aK]);
+      float a3 = float(a[aBase + (k + 3 * GEMV_KS) * pc.aK]);
+      float b0 = float(b[bBase + k * pc.bK]);
+      float b1 = float(b[bBase + (k + GEMV_KS) * pc.bK]);
+      float b2 = float(b[bBase + (k + 2 * GEMV_KS) * pc.bK]);
+      float b3 = float(b[bBase + (k + 3 * GEMV_KS) * pc.bK]);
+      acc += a0 * b0;
+      acc += a1 * b1;
+      acc += a2 * b2;
+      acc += a3 * b3;
+    }
+    for (; k < pc.K; k += GEMV_KS)
       acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
   }
   // Every invocation stores (dead lanes store 0) so barrier() stays in uniform control flow.
