@@ -2,6 +2,7 @@
 // so it can feed a downstream Where over fp32 tensors. Inputs may be fp32 or int64 (Equal often
 // runs on int64 shape tensors); each operand is read through its own dtype so the comparison is
 // exact.
+#include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -45,25 +46,13 @@ namespace vknn {
                     return T.dtype == DType::Int64 ? (double) T.host.i64()[i] : (double) T.host.f32()[i];
                 };
                 float *y = cpu::allocOut(Y, out); // canonical fp32 output (1.0 / 0.0)
-                for (int64_t lin = 0; lin < n; ++lin)
+                // Walk the output in row-major order, carrying each operand's broadcast source offset
+                // through the zero-collapsing strides oa/ob by an odometer carry.
+                cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                w.seek(0);
+                for (int64_t lin = 0; lin < n; ++lin, w.next())
                 {
-                    // Unravel the row-major linear output index into per-axis coordinates, then map
-                    // each coordinate through the broadcast strides oa/ob to reach the source
-                    // elements. `stride` is the trailing product of output extents for axis d, so
-                    // (lin / stride) % out[d] recovers that axis's index.
-                    int64_t ia = 0, ib = 0;
-                    for (size_t d = 0; d < rank; ++d)
-                    {
-                        int64_t stride = 1;
-                        for (size_t e = d + 1; e < rank; ++e)
-                        {
-                            stride *= out[e];
-                        }
-                        int64_t id = (lin / stride) % out[d];
-                        ia += id * oa[d];
-                        ib += id * ob[d];
-                    }
-                    y[lin] = (val(A, ia) == val(B, ib)) ? 1.0f : 0.0f;
+                    y[lin] = (val(A, w.offset(0)) == val(B, w.offset(1))) ? 1.0f : 0.0f;
                 }
             }
         };

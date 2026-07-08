@@ -1,5 +1,6 @@
 // Elementwise add with NumPy-style broadcasting. Equal-shape inputs (the residual connections)
 // take a NEON fast path; broadcasting falls back to the general index walk.
+#include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/logging.h"
 #include <algorithm>
@@ -54,25 +55,13 @@ namespace vknn {
                         sA *= dimOf(sa, i);
                         sB *= dimOf(sb, i);
                     }
-                    // Walk the output in flat row-major order, decoding each linear index `lin` back into
-                    // its per-axis coordinate `id` (the output row-major stride is the product of the
-                    // trailing output dims). Projecting `id` through the zero-collapsing input strides
-                    // oa/ob yields each operand's source offset under broadcasting.
-                    for (int64_t lin = 0; lin < n; ++lin)
+                    // Walk the output in flat row-major order, carrying each operand's source offset
+                    // through the zero-collapsing strides oa/ob by an odometer carry.
+                    cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                    w.seek(0);
+                    for (int64_t lin = 0; lin < n; ++lin, w.next())
                     {
-                        int64_t ia = 0, ib = 0;
-                        for (size_t d = 0; d < rank; ++d)
-                        {
-                            int64_t stride = 1;
-                            for (size_t e = d + 1; e < rank; ++e)
-                            {
-                                stride *= out[e];
-                            }
-                            int64_t id = (lin / stride) % out[d];
-                            ia += id * oa[d];
-                            ib += id * ob[d];
-                        }
-                        y[lin] = val(A, ia) + val(B, ib);
+                        y[lin] = val(A, w.offset(0)) + val(B, w.offset(1));
                     }
                     return;
                 }
@@ -130,22 +119,12 @@ namespace vknn {
                     sA *= dimOf(sa, i);
                     sB *= dimOf(sb, i);
                 }
-                // Decode each flat output index into its per-axis coordinate and project through oa/ob.
-                for (int64_t lin = 0; lin < n; ++lin)
+                // Walk the output row-major, projecting each position through oa/ob by odometer carry.
+                cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                w.seek(0);
+                for (int64_t lin = 0; lin < n; ++lin, w.next())
                 {
-                    int64_t ia = 0, ib = 0;
-                    for (size_t d = 0; d < rank; ++d)
-                    {
-                        int64_t stride = 1;
-                        for (size_t e = d + 1; e < rank; ++e)
-                        {
-                            stride *= out[e];
-                        }
-                        int64_t id = (lin / stride) % out[d];
-                        ia += id * oa[d];
-                        ib += id * ob[d];
-                    }
-                    y[lin] = a[ia] + b[ib];
+                    y[lin] = a[w.offset(0)] + b[w.offset(1)];
                 }
                 cpu::applyAct(y, n, node.fusedAct, node.actLo, node.actHi); // a broadcast Add carries fusedAct too
             }

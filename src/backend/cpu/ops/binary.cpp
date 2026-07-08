@@ -1,4 +1,5 @@
 // Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting.
+#include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -66,23 +67,6 @@ namespace vknn {
                         sB *= dimOf(sb, i);
                     }
                 };
-                // Map a flat output offset `lin` to the source offsets `ia`/`ib`. Recovering each axis
-                // coordinate `id` costs a suffix-product of trailing output extents (`stride`); dotting
-                // those coordinates with the broadcast strides gives the operand element to read.
-                auto idx = [&](const std::vector<int64_t> &oa, const std::vector<int64_t> &ob, int64_t lin, int64_t &ia, int64_t &ib) {
-                    ia = ib = 0;
-                    for (size_t d = 0; d < rank; ++d)
-                    {
-                        int64_t stride = 1;
-                        for (size_t e = d + 1; e < rank; ++e)
-                        {
-                            stride *= out[e];
-                        }
-                        int64_t id = (lin / stride) % out[d];
-                        ia += id * oa[d];
-                        ib += id * ob[d];
-                    }
-                };
                 // Shape arithmetic is int64 (Shape/Gather feed Add/Div/Mul to compute slice/reshape bounds).
                 // Compute it in int64 so const-folding stays exact — reading those bytes as float corrupts
                 // them.
@@ -97,11 +81,13 @@ namespace vknn {
                     auto val = [](const RtTensor &T, int64_t i) {
                         return T.dtype == DType::Int64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
                     };
-                    for (int64_t lin = 0; lin < n; ++lin)
+                    // Walk the output in row-major order, carrying each operand's broadcast source
+                    // offset by an odometer carry instead of re-unravelling `lin` per element.
+                    cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                    w.seek(0);
+                    for (int64_t lin = 0; lin < n; ++lin, w.next())
                     {
-                        int64_t ia, ib;
-                        idx(oa, ob, lin, ia, ib);
-                        int64_t av = val(A, ia), bv = val(B, ib);
+                        int64_t av = val(A, w.offset(0)), bv = val(B, w.offset(1));
                         switch ((BinaryType) node.subOp)
                         {
                             case BinaryType::Mul:
@@ -128,9 +114,8 @@ namespace vknn {
                     }
                     return;
                 }
-                // Float fast path: same broadcast-stride and unravel arithmetic as the strides/idx
-                // lambdas above, inlined into the element loop so the hot case avoids a per-element
-                // std::function-style indirection. Keep the two in step when editing either.
+                // Float fast path: same broadcast-stride scheme as the int64 path above, with the
+                // stride build inlined so the hot case avoids the lambda's indirection.
                 float               *y = cpu::allocOut(Y, out);
                 const float         *a = A.host.f32();
                 const float         *b = B.host.f32();
@@ -143,21 +128,11 @@ namespace vknn {
                     sA *= dimOf(sa, i);
                     sB *= dimOf(sb, i);
                 }
-                for (int64_t lin = 0; lin < n; ++lin)
+                cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                w.seek(0);
+                for (int64_t lin = 0; lin < n; ++lin, w.next())
                 {
-                    int64_t ia = 0, ib = 0;
-                    for (size_t d = 0; d < rank; ++d)
-                    {
-                        int64_t stride = 1;
-                        for (size_t e = d + 1; e < rank; ++e)
-                        {
-                            stride *= out[e];
-                        }
-                        int64_t id = (lin / stride) % out[d];
-                        ia += id * oa[d];
-                        ib += id * ob[d];
-                    }
-                    y[lin] = binary(a[ia], b[ib], (BinaryType) node.subOp);
+                    y[lin] = binary(a[w.offset(0)], b[w.offset(1)], (BinaryType) node.subOp);
                 }
             }
         };

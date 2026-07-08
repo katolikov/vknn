@@ -3,6 +3,7 @@
 // the value operands. Output dtype follows X/Y, and the value operands are read in their native
 // dtype: the dynamic-shape subgraph runs Where on INT64 shape vectors (e.g.
 // Where(Equal(dim,-1), input_shape, target)), where reading int bytes as fp32 would corrupt them.
+#include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -50,25 +51,9 @@ namespace vknn {
                 auto condTrue = [](const RtTensor &T, int64_t i) -> bool {
                     return T.dtype == DType::Int64 ? T.host.i64()[i] != 0 : T.host.f32()[i] != 0.0f;
                 };
-                // Broadcast-index helper: decodes a flat row-major output index `lin` back into its
-                // per-axis coordinate `id` (the output stride along axis d is the product of the
-                // trailing output dims), then projects `id` through the zero-collapsing strides
-                // oc/ox/oy to yield each operand's source offset under broadcasting.
-                auto offsets = [&](int64_t lin, int64_t &ic, int64_t &ix, int64_t &iy) {
-                    ic = ix = iy = 0;
-                    for (size_t d = 0; d < rank; ++d)
-                    {
-                        int64_t stride = 1;
-                        for (size_t e = d + 1; e < rank; ++e)
-                        {
-                            stride *= out[e];
-                        }
-                        int64_t id = (lin / stride) % out[d];
-                        ic += id * oc[d];
-                        ix += id * ox[d];
-                        iy += id * oy[d];
-                    }
-                };
+                // Walk the output in row-major order, carrying each operand's source offset through
+                // the zero-collapsing strides oc/ox/oy by an odometer carry: offset(0) is cond's,
+                // offset(1) is X's, offset(2) is Y's.
                 // Output type follows the value operands (int64 for the shape-arithmetic Where).
                 bool i64 = X.dtype == DType::Int64 && Yv.dtype == DType::Int64;
                 if (i64)
@@ -76,22 +61,22 @@ namespace vknn {
                     int64_t       *o = cpu::allocOutI64(Out, out);
                     const int64_t *x = X.host.i64();
                     const int64_t *y = Yv.host.i64();
-                    for (int64_t lin = 0; lin < n; ++lin)
+                    cpu::BroadcastWalk w(out, {oc.data(), ox.data(), oy.data()});
+                    w.seek(0);
+                    for (int64_t lin = 0; lin < n; ++lin, w.next())
                     {
-                        int64_t ic, ix, iy;
-                        offsets(lin, ic, ix, iy);
-                        o[lin] = condTrue(C, ic) ? x[ix] : y[iy];
+                        o[lin] = condTrue(C, w.offset(0)) ? x[w.offset(1)] : y[w.offset(2)];
                     }
                 } else
                 {
-                    float       *o = cpu::allocOut(Out, out);
-                    const float *x = X.host.f32();
-                    const float *y = Yv.host.f32();
-                    for (int64_t lin = 0; lin < n; ++lin)
+                    float             *o = cpu::allocOut(Out, out);
+                    const float       *x = X.host.f32();
+                    const float       *y = Yv.host.f32();
+                    cpu::BroadcastWalk w(out, {oc.data(), ox.data(), oy.data()});
+                    w.seek(0);
+                    for (int64_t lin = 0; lin < n; ++lin, w.next())
                     {
-                        int64_t ic, ix, iy;
-                        offsets(lin, ic, ix, iy);
-                        o[lin] = condTrue(C, ic) ? x[ix] : y[iy];
+                        o[lin] = condTrue(C, w.offset(0)) ? x[w.offset(1)] : y[w.offset(2)];
                     }
                 }
             }

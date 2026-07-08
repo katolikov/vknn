@@ -1,6 +1,7 @@
 // FusedPointwise: run a per-element step chain (pw_steps/pw_params) in fp32. The CPU op is the
 // correctness oracle for the fused-epilogue chain; applyPwEpilogue is also the shared applier a
 // later phase's executor hook calls to run an epilogue carried by a producer node.
+#include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -198,18 +199,14 @@ namespace vknn {
             }
             return ob;
         };
-        // Row-major strides of the output itself, for decomposing a flat index into coordinates.
-        std::vector<int64_t> ostride(rank, 1);
-        for (int i = (int) rank - 2; i >= 0; --i)
-        {
-            ostride[i] = ostride[i + 1] * out[i + 1];
-        }
-
         // Hoist per-source operand pointers and broadcast strides out of the element loop; a
         // non-operand source keeps a null pointer and resolves from acc/entry/registers instead.
+        // `slot` is the source's index into the BroadcastWalk built below, which carries the operand
+        // offsets across the element sweep so the loop never unravels `lin` per source.
         struct SrcRef {
-            int                  ref = kPwRefNone;
-            const float         *p   = nullptr;
+            int                  ref  = kPwRefNone;
+            const float         *p    = nullptr;
+            size_t               slot = 0;
             std::vector<int64_t> ob;
         };
         std::vector<SrcRef> src((size_t) nSteps * 3);
@@ -235,6 +232,19 @@ namespace vknn {
                 }
             }
         }
+        // One walker slot per operand source; `src` is sized up front so the borrowed `ob` pointers
+        // stay valid for the walker's lifetime.
+        std::vector<const int64_t *> srcStrides;
+        for (SrcRef &r: src)
+        {
+            if (r.p)
+            {
+                r.slot = srcStrides.size();
+                srcStrides.push_back(r.ob.data());
+            }
+        }
+        cpu::BroadcastWalk walk(out, std::move(srcStrides));
+        walk.seek(0);
 
         // Extra output streams share the unit's output shape (the fuser only exports same-shape
         // step values); allocate them here since the producing op only writes outputs[0].
@@ -247,7 +257,7 @@ namespace vknn {
             outStep[o] = (int) po[o];
         }
 
-        for (int64_t lin = 0; lin < n; ++lin)
+        for (int64_t lin = 0; lin < n; ++lin, walk.next())
         {
             float entry = y[lin];
             float acc   = entry;
@@ -262,14 +272,9 @@ namespace vknn {
             auto value = [&](const SrcRef &r) -> float {
                 if (r.p)
                 {
-                    // Decompose the flat output index into per-axis coordinates and reassemble the
-                    // operand offset from the broadcast strides (0 on a broadcast axis).
-                    int64_t io = 0;
-                    for (size_t d = 0; d < rank; ++d)
-                    {
-                        io += ((lin / ostride[d]) % out[d]) * r.ob[d];
-                    }
-                    return r.p[io];
+                    // The walker already holds this operand's broadcast source offset for `lin`
+                    // (0 strides collapse its broadcast axes onto element 0).
+                    return r.p[walk.offset(r.slot)];
                 }
                 if (r.ref == kPwRefAcc)
                 {
