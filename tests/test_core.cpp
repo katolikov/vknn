@@ -5,13 +5,16 @@
 #include "vknn/config.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
+#include "vknn/host_buffer.h"
 #include "vknn/model.h"
 #include "vknn/op_type.h"
 #include "vknn/reduce_type.h"
 #include "vknn/session.h"
 #include "vknn/tensor_format.h"
 #include <cmath>
+#include <cstring>
 #include <gtest/gtest.h>
+#include <vector>
 
 using namespace vknn;
 
@@ -23,6 +26,147 @@ TEST(DType, HalfRoundTrip) {
     }
     EXPECT_EQ(dtypeSize(DType::Float32), 4u);
     EXPECT_EQ(dtypeSize(DType::Float16), 2u);
+}
+
+namespace {
+    float bitsToFloat(uint32_t b) {
+        float f;
+        std::memcpy(&f, &b, 4);
+        return f;
+    }
+    // floatToHalfBulk() equals floatToHalf() bit-for-bit at every length, so both the vector body and the
+    // scalar tail are exercised.
+    void expectBulkMatchesScalar(const std::vector<float> &v) {
+        std::vector<fp16_t> bulk(v.size(), 0xDEAD);
+        for (size_t len = 0; len <= v.size(); ++len)
+        {
+            floatToHalfBulk(v.data(), bulk.data(), (int64_t) len);
+            for (size_t i = 0; i < len; ++i)
+            {
+                uint32_t b;
+                std::memcpy(&b, &v[i], 4);
+                ASSERT_EQ(bulk[i], floatToHalf(v[i])) << "len=" << len << " i=" << i << " bits=0x" << std::hex << b;
+            }
+        }
+    }
+} // namespace
+
+// Every fp16 bit pattern, widened and narrowed back, returns to itself -- except a NaN, whose payload and
+// signaling bit floatToHalf collapses onto the quiet pattern by contract.
+TEST(DType, HalfRoundTripAllPatterns) {
+    for (uint32_t h = 0; h < 0x10000u; ++h)
+    {
+        fp16_t   half = (fp16_t) h;
+        fp16_t   back = floatToHalf(halfToFloat(half));
+        uint32_t exp = (h >> 10) & 0x1F, mant = h & 0x3FF;
+        if (exp == 0x1F && mant != 0)
+        {
+            EXPECT_EQ(back, (fp16_t) ((h & 0x8000u) | 0x7E00u)) << "nan h=0x" << std::hex << h;
+        } else
+        {
+            EXPECT_EQ(back, half) << "h=0x" << std::hex << h;
+        }
+    }
+}
+
+// The vectorized narrowing reproduces the scalar one exactly on the values that separate the rounding
+// rules: the tie cases, the subnormal and flush-to-zero boundaries, the overflow boundary, and NaN.
+TEST(DType, FloatToHalfBulkMatchesScalarOnBoundaries) {
+    std::vector<float> v = {
+            0.f, -0.f, 1.f, -1.f, 0.5f, 6.f, 3.14159f, -2.71828f,
+            65504.f,                                            // largest finite half
+            65519.996f, 65520.f,                                // the last value below the tie, and the tie that saturates
+            65535.f, 65536.f, 65537.f,                          // at and past 2^16, where the exponent branch trips
+            -65504.f, -65520.f, -65536.f,                       //
+            6.10352e-5f, 6.09756e-5f,                           // smallest normal half, and the largest subnormal below it
+            5.96046e-8f,                                        // smallest positive subnormal half (2^-24)
+            2.98023e-8f, -2.98023e-8f,                          // 2^-25: the tie between zero and the smallest subnormal
+            1.49012e-8f,                                        // 2^-26: below every tie, flushes to zero
+            bitsToFloat(0x7F800000u), bitsToFloat(0xFF800000u), // +/- inf
+            bitsToFloat(0x7FC00000u),                           // quiet nan
+            bitsToFloat(0x7F800001u), bitsToFloat(0xFF800001u), // signaling nan, both signs
+            bitsToFloat(0x7FFFFFFFu),                           // nan, every payload bit set
+    };
+    // Exact ties on the dropped mantissa bits (low 13 bits == 0x1000) over even and odd retained
+    // mantissas: floatToHalf rounds both away from zero rather than to even.
+    for (uint32_t retained: {0u, 1u, 2u, 3u, 0x3FEu, 0x3FFu})
+    {
+        for (uint32_t e: {113u, 127u, 142u})
+        {
+            uint32_t bits = (e << 23) | (retained << 13) | 0x1000u;
+            v.push_back(bitsToFloat(bits));
+            v.push_back(bitsToFloat(bits | 0x80000000u));
+            v.push_back(bitsToFloat(bits + 1u)); // just above the tie
+            v.push_back(bitsToFloat(bits - 1u)); // just below the tie
+        }
+    }
+    // Exponents around the subnormal-half window, where the significand takes the variable-shift path.
+    for (uint32_t e = 100; e <= 113; ++e)
+    {
+        for (uint32_t m: {0u, 0x1000u, 0x400000u, 0x7FFFFFu})
+        {
+            v.push_back(bitsToFloat((e << 23) | m));
+            v.push_back(bitsToFloat(0x80000000u | (e << 23) | m));
+        }
+    }
+    expectBulkMatchesScalar(v);
+}
+
+// A pseudorandom sweep of the fp32 bit space, covering the exponent/mantissa combinations the boundary
+// list does not name. The length is not a multiple of four, so the scalar tail runs.
+TEST(DType, FloatToHalfBulkMatchesScalarOnRandomBits) {
+    std::vector<float> v(4093);
+    uint32_t           s = 0x12345678u;
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        v[i] = bitsToFloat(s);
+    }
+    std::vector<fp16_t> bulk(v.size(), 0);
+    floatToHalfBulk(v.data(), bulk.data(), (int64_t) v.size());
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        ASSERT_EQ(bulk[i], floatToHalf(v[i])) << "i=" << i;
+    }
+}
+
+// resizeElems() zero-fills whenever the byte size moves, and leaves both the bytes and the allocation
+// alone when it does not.
+TEST(DType, HostBufferResizeElemsSemantics) {
+    HostBuffer hb;
+    hb.resizeElems(4, DType::Float32);
+    EXPECT_EQ(hb.bytes.size(), 16u);
+    for (uint8_t b: hb.bytes)
+    {
+        EXPECT_EQ(b, 0u); // a grow from empty zero-fills
+    }
+    for (int i = 0; i < 4; ++i)
+    {
+        hb.f32()[i] = (float) (i + 1);
+    }
+    const void *before = hb.bytes.data();
+    hb.resizeElems(4, DType::Float32); // the same byte size: contents and allocation survive
+    EXPECT_EQ((const void *) hb.bytes.data(), before);
+    EXPECT_EQ(hb.f32()[3], 4.f);
+    hb.resizeElems(8, DType::Float16); // the same byte size through a different dtype: still no wipe
+    EXPECT_EQ(hb.bytes.size(), 16u);
+    EXPECT_EQ(hb.f32()[3], 4.f);
+    hb.resizeElems(8, DType::Float32); // grow: zero-filled
+    EXPECT_EQ(hb.bytes.size(), 32u);
+    for (uint8_t b: hb.bytes)
+    {
+        EXPECT_EQ(b, 0u);
+    }
+    hb.f32()[0] = 7.f;
+    hb.resizeElems(2, DType::Float32); // shrink: zero-filled
+    EXPECT_EQ(hb.bytes.size(), 8u);
+    EXPECT_EQ(hb.f32()[0], 0.f);
+    hb.resizeElems(0, DType::Float32); // a rank-0 shape reports 0 elements; the buffer empties
+    EXPECT_TRUE(hb.bytes.empty());
+    hb.resizeElems(-1, DType::Float32); // a negative count empties rather than overflowing the byte size
+    EXPECT_TRUE(hb.bytes.empty());
 }
 
 TEST(Config, JsonRoundTrip) {

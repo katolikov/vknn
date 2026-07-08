@@ -17,7 +17,8 @@ namespace vknn {
 
     // Caller bytes (in dtype `src`) -> internal storage: int64 for Int64, fp32 for everything else.
     // Storage is always sized for `elems`; a short caller buffer is tolerated, not rejected — every
-    // branch fills only min(elems, in.size()/bytesPer) elements and leaves the tail untouched.
+    // branch fills only min(elems, in.size()/bytesPer) elements and zeroes the tail past them, so a bound
+    // tensor never carries an earlier run's values into the elements the caller left out.
     static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
         if (src == DType::Int64)
         {
@@ -25,43 +26,56 @@ namespace vknn {
             rt.host.resizeElems(elems, DType::Int64);
             int64_t avail = std::min<int64_t>(elems, (int64_t) (in.size() / 8));
             std::memcpy(rt.host.bytes.data(), in.data(), (size_t) avail * 8);
+            if (avail < elems)
+            {
+                std::memset(rt.host.i64() + avail, 0, (size_t) (elems - avail) * 8);
+            }
             return;
         }
         rt.dtype = DType::Float32;
         rt.host.resizeElems(elems, DType::Float32);
         float *f = rt.host.f32();
         // Elements that fit in both the destination (elems) and the caller buffer at bytesPer each.
-        auto fitElems = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
+        auto    fitElems = [&](int64_t bytesPer) { return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer)); };
+        int64_t filled   = 0;
         switch (src)
         {
             case DType::Float32: {
-                int64_t c = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) c * 4);
+                filled = fitElems(4);
+                std::memcpy(f, in.data(), (size_t) filled * 4);
                 break;
             }
             case DType::Float16: {
                 const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
-                for (int64_t i = 0, c = fitElems(2); i < c; ++i)
+                filled          = fitElems(2);
+                for (int64_t i = 0; i < filled; ++i)
                     f[i] = halfToFloat(h[i]);
                 break;
             }
             case DType::UInt8:
-                for (int64_t i = 0, c = fitElems(1); i < c; ++i)
+                filled = fitElems(1);
+                for (int64_t i = 0; i < filled; ++i)
                     f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
                 break;
             case DType::Int8:
-                for (int64_t i = 0, c = fitElems(1); i < c; ++i)
+                filled = fitElems(1);
+                for (int64_t i = 0; i < filled; ++i)
                     f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
                 break;
             case DType::Int32:
-                for (int64_t i = 0, c = fitElems(4); i < c; ++i)
+                filled = fitElems(4);
+                for (int64_t i = 0; i < filled; ++i)
                     f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
                 break;
             default: {
-                int64_t c = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) c * 4);
+                filled = fitElems(4);
+                std::memcpy(f, in.data(), (size_t) filled * 4);
                 break;
             }
+        }
+        if (filled < elems)
+        {
+            std::memset(f + filled, 0, (size_t) (elems - filled) * 4);
         }
     }
 
@@ -88,8 +102,14 @@ namespace vknn {
                     reinterpret_cast<float *>(io.data.data())[i] = srcF32(i);
                 break;
             case DType::Float16:
-                for (int64_t i = 0; i < elems; ++i)
-                    reinterpret_cast<fp16_t *>(io.data.data())[i] = floatToHalf(srcF32(i));
+                if (srcI64)
+                {
+                    for (int64_t i = 0; i < elems; ++i)
+                        reinterpret_cast<fp16_t *>(io.data.data())[i] = floatToHalf(srcF32(i));
+                } else
+                {
+                    floatToHalfBulk(rt.host.f32(), reinterpret_cast<fp16_t *>(io.data.data()), elems);
+                }
                 break;
             case DType::UInt8:
                 for (int64_t i = 0; i < elems; ++i)
@@ -1024,6 +1044,29 @@ namespace vknn {
                 pool_[id].dmaBufFormat = b.dmaBufFormat;
                 pool_[id].dmaBufDtype  = b.dmaBufDtype;
             }
+        }
+        // Reclaim the byte storage the previous run donated to the caller. readbackOutput() moves an
+        // output tensor's host bytes into the caller's IOTensor, leaving that tensor's host residency with
+        // no allocation; `outputs` carries those buffers back in and is cleared below regardless. Taking
+        // them back here — before any segment writes an output — lets the download's resizeElems() land on
+        // the byte size already held, so a steady-state loop allocates nothing and zeroes nothing per run.
+        // Entries match positionally against graph_.outputs and are rejected on a name mismatch, so a
+        // caller that reorders or substitutes the vector merely forgoes the reuse. A tensor whose host
+        // residency is live (a graph input also declared an output, a dtype-conversion buffer) keeps what
+        // it holds, and a zero-copy output has no host residency to refill.
+        for (size_t i = 0, no = std::min(outputs.size(), graph_.outputs.size()); i < no; ++i)
+        {
+            TensorId  oid = graph_.outputs[i];
+            RtTensor &rt  = pool_[oid];
+            if (outputs[i].data.empty() || rt.dmaBufFd >= 0 || rt.hostValid || !rt.host.bytes.empty())
+            {
+                continue;
+            }
+            if (outputs[i].name != graph_.tensors[oid].name)
+            {
+                continue;
+            }
+            rt.host.bytes = std::move(outputs[i].data);
         }
 
         auto tB = now();

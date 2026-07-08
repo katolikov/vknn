@@ -381,11 +381,7 @@ namespace vknn {
                 const float *src = hostSrc;
                 if (fp16)
                 {
-                    fp16_t *dst = reinterpret_cast<fp16_t *>(buf->host());
-                    for (int64_t i = 0; i < n; ++i)
-                    {
-                        dst[i] = floatToHalf(src[i]);
-                    }
+                    floatToHalfBulk(src, reinterpret_cast<fp16_t *>(buf->host()), n);
                 } else
                 {
                     std::memcpy(buf->host(), src, (size_t) n * 4);
@@ -537,12 +533,7 @@ namespace vknn {
             } else if (declared == DType::Float16)
             { // fp32 device -> fp16 output
                 rt.host.resizeElems(n, DType::Float16);
-                fp16_t      *d = reinterpret_cast<fp16_t *>(rt.host.bytes.data());
-                const float *s = reinterpret_cast<const float *>(buf->host());
-                for (int64_t i = 0; i < n; ++i)
-                {
-                    d[i] = floatToHalf(s[i]);
-                }
+                floatToHalfBulk(reinterpret_cast<const float *>(buf->host()), reinterpret_cast<fp16_t *>(rt.host.bytes.data()), n);
                 rt.dtype = DType::Float16;
             } else
             { // integer / other declared dtype: decode to fp32, readbackOutput does the final convert

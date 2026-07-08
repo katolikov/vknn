@@ -130,8 +130,13 @@ namespace vknn {
     }
 #endif
 
-    /// Narrow a float to a half-precision bit pattern, rounding the mantissa to nearest-even. Values
-    /// beyond the fp16 range saturate to inf; subnormals underflow to zero; inf/NaN are preserved.
+    /// Narrow a float to a half-precision bit pattern. The top bit of the dropped mantissa alone decides
+    /// the rounding, so an exact halfway value rounds away from zero rather than to even. Values at or
+    /// beyond 2^16 saturate to infinity; values below 2^-25 flush to a signed zero and the range between
+    /// yields an fp16 subnormal; infinities pass through; every NaN collapses to the quiet pattern
+    /// `sign | 0x7E00`, dropping its payload.
+    ///
+    /// floatToHalfBulk() reproduces this rounding bit-for-bit over a contiguous range.
     inline fp16_t floatToHalf(float v) noexcept {
         uint32_t f;
         std::memcpy(&f, &v, 4);
@@ -155,7 +160,7 @@ namespace vknn {
             mant |= 0x800000;
             uint32_t shift = (uint32_t) (14 - exp);
             uint32_t half  = (mant >> shift);
-            // round to nearest even
+            // round up on the dropped top bit alone (a halfway value rounds away from zero)
             if ((mant >> (shift - 1)) & 1)
             {
                 half += 1;
@@ -165,9 +170,70 @@ namespace vknn {
         fp16_t out = (fp16_t) (sign | (exp << 10) | (mant >> 13));
         if (mant & 0x1000)
         {
-            out += 1; // round
+            out += 1; // round up on the dropped top bit; a carry rolls into the exponent
         }
         return out;
     }
+
+// Bulk fp32 -> fp16 for contiguous buffers (the graph-input upload of a flat device tensor, an
+// fp16-declared graph output, weight staging). AArch64 evaluates floatToHalf's branchy bit-twiddle four
+// lanes at a time with integer NEON: each branch becomes a lane mask and the results merge with vbsl.
+// The hardware convert vcvt_f16_f32 is NOT used here - it rounds a halfway value to even, where
+// floatToHalf rounds it away from zero, so it would not be bit-identical. Falls back to the scalar path
+// on other targets and on the tail.
+#if defined(__aarch64__)
+    /// Narrow `n` contiguous floats at `src` into half-precision bit patterns at `dst`. Bit-identical to
+    /// floatToHalf() per element, tie rule, NaN collapse and saturation included; `src` and `dst` must not
+    /// overlap.
+    inline void floatToHalfBulk(const float *src, fp16_t *dst, int64_t n) noexcept {
+        const uint32x4_t kOne = vdupq_n_u32(1);
+        const uint32x4_t kInf = vdupq_n_u32(0x7C00);
+        int64_t          i    = 0;
+        for (; i + 4 <= n; i += 4)
+        {
+            uint32x4_t f    = vld1q_u32(reinterpret_cast<const uint32_t *>(src + i));
+            uint32x4_t sign = vandq_u32(vshrq_n_u32(f, 16), vdupq_n_u32(0x8000));
+            uint32x4_t e    = vandq_u32(vshrq_n_u32(f, 23), vdupq_n_u32(0xFF)); // biased fp32 exponent
+            uint32x4_t mant = vandq_u32(f, vdupq_n_u32(0x7FFFFF));
+
+            // Normal half: rebias the exponent (127 -> 15), drop 13 mantissa bits, round up on bit 12.
+            // A lane outside the normal exponent range wraps here and is replaced by a select below.
+            uint32x4_t nrm = vorrq_u32(sign, vorrq_u32(vshlq_n_u32(vsubq_u32(e, vdupq_n_u32(112)), 10), vshrq_n_u32(mant, 13)));
+            nrm            = vaddq_u32(nrm, vandq_u32(vshrq_n_u32(mant, 12), kOne));
+
+            // Subnormal half: restore the hidden bit and shift the significand down by 126 - e (14..24
+            // across the subnormal exponent range), rounding up on the last dropped bit. vshlq_u32 takes a
+            // signed per-lane count, so negating it turns the left shift into the right shift, and a count
+            // of 32 or more -- every lane outside the range -- yields zero rather than undefined behavior.
+            int32x4_t  sh    = vsubq_s32(vdupq_n_s32(126), vreinterpretq_s32_u32(e));
+            uint32x4_t m     = vorrq_u32(mant, vdupq_n_u32(0x800000));
+            uint32x4_t half  = vshlq_u32(m, vnegq_s32(sh));
+            uint32x4_t guard = vandq_u32(vshlq_u32(m, vnegq_s32(vsubq_s32(sh, vdupq_n_s32(1)))), kOne);
+            uint32x4_t sub   = vorrq_u32(sign, vaddq_u32(half, guard));
+
+            // The exponent ranges, in the priority floatToHalf applies them: NaN/inf (e == 255) wins over
+            // overflow (e >= 143, i.e. |v| >= 2^16), which is disjoint from the subnormal-or-zero range
+            // (e <= 112); the flush-to-zero range (e < 102, i.e. |v| < 2^-25) sits inside the latter.
+            uint32x4_t nanv = vorrq_u32(vorrq_u32(sign, kInf), vandq_u32(vdupq_n_u32(0x200), vtstq_u32(mant, mant)));
+            uint32x4_t r    = nrm;
+            r               = vbslq_u32(vcleq_u32(e, vdupq_n_u32(112)), sub, r);
+            r               = vbslq_u32(vcltq_u32(e, vdupq_n_u32(102)), sign, r);
+            r               = vbslq_u32(vcgeq_u32(e, vdupq_n_u32(143)), vorrq_u32(sign, kInf), r);
+            r               = vbslq_u32(vceqq_u32(e, vdupq_n_u32(0xFF)), nanv, r);
+            vst1_u16(dst + i, vmovn_u32(r));
+        }
+        for (; i < n; ++i)
+        {
+            dst[i] = floatToHalf(src[i]);
+        }
+    }
+#else
+    inline void floatToHalfBulk(const float *src, fp16_t *dst, int64_t n) noexcept {
+        for (int64_t i = 0; i < n; ++i)
+        {
+            dst[i] = floatToHalf(src[i]);
+        }
+    }
+#endif
 
 } // namespace vknn
