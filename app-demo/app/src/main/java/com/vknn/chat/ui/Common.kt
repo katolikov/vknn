@@ -5,11 +5,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -31,6 +34,18 @@ internal fun PrimaryButton(label: String, onClick: () -> Unit) {
             .padding(horizontal = 28.dp, vertical = 13.dp),
         contentAlignment = Alignment.Center,
     ) { Text(label, color = OnAccent, fontSize = 15.sp, fontWeight = FontWeight.Medium) }
+}
+
+// The square icon action used in the mode top bars (edit prompt, unload model).
+@Composable
+internal fun TopBarIconButton(icon: ImageVector, description: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(30.dp)
+            .background(Surface, RoundedCornerShape(9.dp))
+            .clickableNoRipple(onClick),
+        contentAlignment = Alignment.Center,
+    ) { Icon(icon, description, tint = TextSecondary, modifier = Modifier.size(16.dp)) }
 }
 
 @Composable

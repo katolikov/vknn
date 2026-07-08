@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Eject
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.CircularProgressIndicator
@@ -82,14 +83,18 @@ import kotlin.math.roundToInt
 fun SplatScreen(
     ui: SplatUiState,
     onLoad: () -> Unit,
+    onUnload: () -> Unit,
     onStartCapture: () -> Unit,
     onFrame: (Bitmap, Float, Float) -> Unit,
     onOrbit: (OrbitCamera) -> Unit,
     onRecapture: () -> Unit,
     onOpenLibrary: () -> Unit,
 ) {
+    val encoderLoaded = ui.phase == SplatPhase.CAPTURING ||
+        ui.phase == SplatPhase.ENCODING ||
+        ui.phase == SplatPhase.VIEWER
     Column(Modifier.fillMaxSize().background(Bg)) {
-        SplatTopBar()
+        SplatTopBar(showUnload = encoderLoaded, onUnload = onUnload)
         when (ui.phase) {
             SplatPhase.MISSING -> SplatSetup(
                 title = "Model not downloaded",
@@ -114,7 +119,7 @@ fun SplatScreen(
 }
 
 @Composable
-private fun SplatTopBar() {
+private fun SplatTopBar(showUnload: Boolean, onUnload: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -127,6 +132,10 @@ private fun SplatTopBar() {
         Column(Modifier.weight(1f)) {
             Text("YoNoSplat", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text("3D splat capture — on-device", color = TextSecondary, fontSize = 11.sp)
+        }
+        if (showUnload) {
+            TopBarIconButton(Icons.Filled.Eject, "unload model", onUnload)
+            Spacer(Modifier.width(8.dp))
         }
         Row(
             Modifier.background(AccentDim, RoundedCornerShape(999.dp)).padding(horizontal = 9.dp, vertical = 4.dp),

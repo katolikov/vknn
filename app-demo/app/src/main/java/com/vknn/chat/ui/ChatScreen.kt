@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Eject
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,6 +61,7 @@ import kotlin.math.roundToInt
 fun ChatScreen(
     ui: UiState,
     onLoad: () -> Unit,
+    onUnload: () -> Unit,
     onSend: (String) -> Unit,
     onReset: () -> Unit,
     onTemp: (Float) -> Unit,
@@ -90,7 +92,11 @@ fun ChatScreen(
             .fillMaxSize()
             .background(Bg)
     ) {
-        TopBar(onEditPromptTemplate = { editingTemplate = true })
+        TopBar(
+            onEditPromptTemplate = { editingTemplate = true },
+            showUnload = ui.phase == Phase.READY,
+            onUnload = onUnload,
+        )
         if (ui.phase == Phase.READY) {
             MetricsBar(ui.metrics, ui.temperature, ui.contextUsed, ui.contextMax, ui.backend, onTemp)
             MessageList(ui.messages, Modifier.weight(1f))
@@ -112,7 +118,7 @@ internal fun validatePromptTemplate(draft: String): PromptValidation = when {
 }
 
 @Composable
-private fun TopBar(onEditPromptTemplate: () -> Unit) {
+private fun TopBar(onEditPromptTemplate: () -> Unit, showUnload: Boolean, onUnload: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -129,6 +135,10 @@ private fun TopBar(onEditPromptTemplate: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(ModelCatalog.QWEN.displayName, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text("on-device", color = TextSecondary, fontSize = 11.sp)
+        }
+        if (showUnload) {
+            TopBarIconButton(Icons.Filled.Eject, "unload model", onUnload)
+            Spacer(Modifier.width(8.dp))
         }
         Box(
             Modifier
