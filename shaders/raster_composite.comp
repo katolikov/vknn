@@ -2,11 +2,14 @@
 // 3DGS per-tile compositor: one workgroup per 16x16 screen tile, one thread per pixel. The tile's
 // depth-sorted gaussian list (GPU-built: raster_duplicate emit -> radix sort -> raster_ranges) is
 // consumed cooperatively in 256-entry batches: each thread stages one entry's fields from global
-// memory into shared memory, then every pixel walks the staged batch in list order — so each
-// entry is fetched once per tile instead of once per pixel. The per-entry arithmetic and the
-// front-to-back order match the per-pixel definition exactly (same operations on the same
-// values), so the output is independent of the batching. A pixel whose transmittance drops below
-// 1e-4 stops compositing; the batch loop ends early once every pixel in the tile has stopped.
+// memory into shared memory plus a 4-bit coverage mask over the tile's 8x8 quadrants, then every
+// pixel walks the staged batch in list order, skipping entries whose quadrant bit is clear — the
+// mask clears a bit only when a conservative alpha bound proves every pixel of that quadrant
+// would skip the entry anyway. The per-entry arithmetic and the front-to-back order of the
+// surviving entries match the per-pixel definition exactly (same operations on the same values),
+// so the output is independent of the batching and the mask. A pixel whose transmittance drops
+// below 1e-4 stops compositing; the batch loop ends early once every pixel in the tile has
+// stopped.
 // Matches ref_rasterizer.py's per-pixel loop. dims.w selects the store: 0 writes fp32 [H*W*3],
 // 1 writes packed 0xAARRGGBB uints [H*W] (Android Bitmap ARGB_8888 IntArray order) quantized
 // exactly like the fp32 path's host pack: round-half-up in fp32, contraction disabled (precise)
@@ -22,6 +25,7 @@ layout(push_constant) uniform PC { ivec4 dims; } pc;  // H, W, numTilesX, output
 shared vec4  stagedPositionConic[256]; // (u, v, conic a, conic b) per staged entry
 shared vec4  stagedConicColor[256];    // (conic c, r, g, b) per staged entry
 shared float stagedOpacity[256];
+shared uint  stagedQuadrantMask[256];  // bit q set: 8x8 quadrant q may contain a contributing pixel
 shared uint  donePixels;               // threads that stopped compositing (or sit outside the image)
 
 void main() {
@@ -43,14 +47,46 @@ void main() {
     int loadIndex = base + int(stageIndex);
     if (loadIndex < count) {
       uint o = uint(sortedIdx[start + loadIndex]) * 12u;
-      stagedPositionConic[stageIndex] = vec4(gd[o+0u], gd[o+1u], gd[o+3u], gd[o+4u]);
-      stagedConicColor[stageIndex]    = vec4(gd[o+5u], gd[o+6u], gd[o+7u], gd[o+8u]);
-      stagedOpacity[stageIndex]       = gd[o+9u];
+      vec4 positionConicEntry = vec4(gd[o+0u], gd[o+1u], gd[o+3u], gd[o+4u]);
+      vec4 conicColorEntry    = vec4(gd[o+5u], gd[o+6u], gd[o+7u], gd[o+8u]);
+      float opacityEntry      = gd[o+9u];
+      stagedPositionConic[stageIndex] = positionConicEntry;
+      stagedConicColor[stageIndex]    = conicColorEntry;
+      stagedOpacity[stageIndex]       = opacityEntry;
+      // Per-quadrant coverage: clear bit q only when every pixel of the 8x8 quadrant provably
+      // skips this entry. Same bound as the preprocess radius: alpha <= opacity *
+      // exp(-0.5 |d|^2 / lambdaMax), with lambdaMax(cov2d) = 1/lambdaMin(conic) <= (a + c) /
+      // det(conic) — an overestimate, which only weakens the bound conservatively. With
+      // rSkip = sqrt(2 ln(255 opacity) lambdaBound) + 1 (the same 1-pixel pad that dominates
+      // fp32 rounding), any pixel farther than rSkip from the splat center has alpha < 1/255
+      // and would hit the alpha-cutoff continue below, so skipping it never changes the blend
+      // sequence. The point-to-rect distance over the quadrant's pixel-center rect lower-bounds
+      // every covered pixel's distance. On any doubt (non-positive determinant or log term) the
+      // bit stays set.
+      uint coverageMask = 0xfu;
+      float conicDet = positionConicEntry.z * conicColorEntry.x - positionConicEntry.w * positionConicEntry.w;
+      float logTerm = 2.0 * log(255.0 * opacityEntry);
+      if (conicDet > 0.0 && logTerm > 0.0) {
+        float lambdaBound = (positionConicEntry.z + conicColorEntry.x) / conicDet;
+        float rSkip = sqrt(logTerm * lambdaBound) + 1.0;
+        float rSkipSq = rSkip * rSkip;
+        float tileX0 = float(int(gl_WorkGroupID.x) * 16), tileY0 = float(int(gl_WorkGroupID.y) * 16);
+        for (uint q = 0u; q < 4u; ++q) {
+          float qx0 = tileX0 + float((q & 1u) * 8u);
+          float qy0 = tileY0 + float((q >> 1u) * 8u);
+          float ddx = max(max(qx0 - positionConicEntry.x, positionConicEntry.x - (qx0 + 7.0)), 0.0);
+          float ddy = max(max(qy0 - positionConicEntry.y, positionConicEntry.y - (qy0 + 7.0)), 0.0);
+          if (ddx * ddx + ddy * ddy > rSkipSq) coverageMask &= ~(1u << q);
+        }
+      }
+      stagedQuadrantMask[stageIndex] = coverageMask;
     }
     barrier();
     if (!done) {
+      uint quadrantBit = 1u << ((gl_LocalInvocationID.y >> 3u) * 2u + (gl_LocalInvocationID.x >> 3u));
       int stagedCount = min(256, count - base);
       for (int k = 0; k < stagedCount; ++k) {
+        if ((stagedQuadrantMask[uint(k)] & quadrantBit) == 0u) continue;
         vec4 positionConic = stagedPositionConic[uint(k)];
         vec4 conicColor = stagedConicColor[uint(k)];
         float dx = float(px) - positionConic.x;
