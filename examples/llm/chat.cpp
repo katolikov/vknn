@@ -99,14 +99,22 @@ int main(int argc, char **argv) {
 
     auto findIn = [&](const std::string &n) -> int {
         for (size_t i = 0; i < ins.size(); ++i)
+        {
             if (ins[i].name == n)
+            {
                 return (int) i;
+            }
+        }
         return -1;
     };
     auto findOut = [&](const std::string &n) -> int {
         for (size_t i = 0; i < outs.size(); ++i)
+        {
             if (outs[i].name == n)
+            {
                 return (int) i;
+            }
+        }
         return -1;
     };
 
@@ -123,7 +131,9 @@ int main(int argc, char **argv) {
         snprintf(vb, sizeof vb, "past_key_values.%d.value", l);
         const int ik = findIn(kb), iv = findIn(vb);
         if (ik < 0 || iv < 0)
+        {
             break;
+        }
         snprintf(pk, sizeof pk, "present.%d.key", l);
         snprintf(pv, sizeof pv, "present.%d.value", l);
         pastKey.push_back(ik);
@@ -144,8 +154,7 @@ int main(int argc, char **argv) {
     const int     C       = (int) ks[2];
     const int     headDim = (int) ks[3];
     const int64_t vocab   = outs[logitsIdx].shape.back();
-    fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d vocab=%lld\n",
-            model.c_str(), L, kvHeads, C, headDim, (long long) vocab);
+    fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, (long long) vocab);
 
     // Persistent boundary tensors, in model input order. Under --no-kv-link the past key/value
     // buffers ARE the KV cache (fp32 host boundary), retained across steps and turns; with linking
@@ -155,7 +164,9 @@ int main(int argc, char **argv) {
         for (int l = 0; l < L; ++l)
         {
             if ((int) i == pastKey[l] || (int) i == pastVal[l])
+            {
                 return true;
+            }
         }
         return false;
     };
@@ -166,7 +177,9 @@ int main(int argc, char **argv) {
         inputs[i].shape = ins[i].shape;
         inputs[i].dtype = ins[i].dtype;
         if (!(kvLink && isPastInput(i)))
+        {
             inputs[i].data.assign((size_t) ins[i].elems * dtypeSize(ins[i].dtype), 0);
+        }
     }
     auto setI64 = [&](int idx, const std::vector<int64_t> &vals) {
         std::memcpy(inputs[idx].data.data(), vals.data(), vals.size() * sizeof(int64_t));
@@ -202,8 +215,10 @@ int main(int argc, char **argv) {
         setI64(posIdx, {(int64_t) p});
         std::vector<int64_t> am((size_t) C + 1, 0);
         for (int j = 0; j < p && j < C; ++j)
+        {
             am[(size_t) j] = 1; // valid past slots
-        am[(size_t) C] = 1;      // the current token (appended at index C)
+        }
+        am[(size_t) C] = 1; // the current token (appended at index C)
         setI64(maskIdx, am);
 
         Status runStatus;
@@ -217,7 +232,9 @@ int main(int argc, char **argv) {
                 const int64_t          slot = (p - 1) < C ? (p - 1) : C - 1;
                 std::vector<LinkRange> ranges((size_t) kvHeads);
                 for (int64_t h = 0; h < kvHeads; ++h)
+                {
                     ranges[(size_t) h] = {(h * (C + 1) + C) * headDim, (h * C + slot) * headDim, headDim};
+                }
                 for (int l = 0; l < L; ++l)
                 {
                     if (sess->linkOutputToInput(outs[(size_t) presKey[l]].name, ins[(size_t) pastKey[l]].name, ranges) != Status::Ok ||
@@ -242,9 +259,15 @@ int main(int argc, char **argv) {
         if (!mapped)
         {
             for (size_t j = 0; j < outputs.size(); ++j)
+            {
                 for (size_t k = 0; k < outs.size(); ++k)
+                {
                     if (outputs[j].name == outs[k].name)
+                    {
                         outIdxByInfo[k] = (int) j;
+                    }
+                }
+            }
             mapped = true;
         }
         if (!kvLink)
@@ -279,19 +302,24 @@ int main(int argc, char **argv) {
             int64_t best = 0;
             float   bv   = logits[0];
             for (int64_t i = 1; i < vocab; ++i)
+            {
                 if (logits[i] > bv)
                 {
                     bv   = logits[i];
                     best = i;
                 }
+            }
             return best;
         }
         std::vector<std::pair<float, int64_t>> v((size_t) vocab);
         for (int64_t i = 0; i < vocab; ++i)
+        {
             v[(size_t) i] = {logits[i] / temp, i};
+        }
         const int keep = topK > 0 && topK < (int) vocab ? topK : (int) vocab;
-        std::partial_sort(v.begin(), v.begin() + keep, v.end(),
-                          [](const auto &a, const auto &b) { return a.first > b.first; });
+        std::partial_sort(v.begin(), v.begin() + keep, v.end(), [](const auto &a, const auto &b) {
+            return a.first > b.first;
+        });
         v.resize((size_t) keep);
         float mx = v[0].first, sum = 0.0f;
         for (auto &e: v)
@@ -299,8 +327,8 @@ int main(int argc, char **argv) {
             e.first = std::exp(e.first - mx);
             sum += e.first;
         }
-        float cum = 0.0f;
-        size_t n = v.size();
+        float  cum = 0.0f;
+        size_t n   = v.size();
         for (size_t i = 0; i < v.size(); ++i)
         {
             cum += v[i].first / sum;
@@ -310,13 +338,15 @@ int main(int argc, char **argv) {
                 break;
             }
         }
-        float r = std::uniform_real_distribution<float>(0.0f, 1.0f)(rng) * (sum * (cum > 0 ? cum : 1.0f));
+        float r   = std::uniform_real_distribution<float>(0.0f, 1.0f)(rng) * (sum * (cum > 0 ? cum : 1.0f));
         float acc = 0.0f;
         for (size_t i = 0; i < n; ++i)
         {
             acc += v[i].first;
             if (acc >= r)
+            {
                 return v[i].second;
+            }
         }
         return v[n - 1].second;
     };
@@ -326,32 +356,42 @@ int main(int argc, char **argv) {
     std::string line;
     while (std::getline(std::cin, line))
     {
-        std::istringstream    ss(line);
-        std::vector<int64_t>  prompt;
-        int64_t               t;
+        std::istringstream   ss(line);
+        std::vector<int64_t> prompt;
+        int64_t              t;
         while (ss >> t)
+        {
             prompt.push_back(t);
+        }
         if (prompt.empty())
+        {
             continue;
+        }
 
         const float *logits = nullptr;
         for (int64_t tk: prompt)
         {
             logits = step(tk);
             if (!logits)
+            {
                 return 3;
+            }
             ++p;
         }
         for (int n = 0; n < maxTokens; ++n)
         {
             const int64_t next = sample(logits);
             if (next == eos)
+            {
                 break;
+            }
             printf("%lld\n", (long long) next);
             fflush(stdout);
             logits = step(next);
             if (!logits)
+            {
                 return 3;
+            }
             ++p;
         }
         printf("END\n");
