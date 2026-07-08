@@ -348,12 +348,36 @@ TEST(Api, RunRejectsMismatchedInputShape) {
     EXPECT_EQ(sess->run({makeIn({1, 2, 4, 4})}, outs), Status::InvalidArgument);
     // A leading-dim (batch) mismatch is rejected the same way.
     EXPECT_EQ(sess->run({makeIn({2, 2, 2, 2})}, outs), Status::InvalidArgument);
+    // An N/C/spatial-product-preserving reshape fits (the CPU dynamic-reshape contract).
+    EXPECT_EQ(sess->run({makeIn({1, 2, 4, 1})}, outs), Status::Ok);
     // The planned shape runs.
     EXPECT_EQ(sess->run({makeIn({1, 2, 2, 2})}, outs), Status::Ok);
     // An empty caller shape adopts the planned shape.
     IOTensor noShape = makeIn({1, 2, 2, 2});
     noShape.shape.clear();
     EXPECT_EQ(sess->run({noShape}, outs), Status::Ok);
+}
+
+// boundShapeCompatible: the per-consumer input-rebinding contracts behind validateInputShape.
+// The frozen-plan (GPU-consumed) branch demands byte-identical packing; the CPU branch only a
+// footprint fit. The frozen NC4 case is the wrong-values class: equal PADDED footprints with a
+// different channel split pack differently, and frozen kernels then misread every channel.
+TEST(Api, BoundShapeCompatibleContracts) {
+    // Frozen plan, NC4HW4 store: N, C and the spatial product must match.
+    EXPECT_TRUE(boundShapeCompatible({1, 2, 4, 1}, {1, 2, 2, 2}, false, true));  // spatial reshape
+    EXPECT_TRUE(boundShapeCompatible({1, 2, 1, 4}, {1, 2, 2, 2}, false, true));
+    // [1,1,2,4] and [1,2,2,4] have the SAME padded NC4 footprint (both one 4-lane channel block x
+    // 8 pixels = 32) but a different channel count: must be rejected under a frozen plan.
+    EXPECT_TRUE(formatElems(TensorFormat::NC4HW4, NCHW::from({1, 1, 2, 4})) == formatElems(TensorFormat::NC4HW4, NCHW::from({1, 2, 2, 4})));
+    EXPECT_FALSE(boundShapeCompatible({1, 1, 2, 4}, {1, 2, 2, 4}, false, true));
+    EXPECT_FALSE(boundShapeCompatible({2, 1, 2, 2}, {1, 2, 2, 2}, false, true)); // N<->C swap
+    // Frozen plan, flat store: dense row-major, any equal element count reinterprets losslessly.
+    EXPECT_TRUE(boundShapeCompatible({4, 2}, {2, 4}, true, true));
+    EXPECT_FALSE(boundShapeCompatible({4, 2}, {2, 5}, true, true));
+    // CPU-consumed: the loose footprint-fit contract (ops follow the runtime shape).
+    EXPECT_TRUE(boundShapeCompatible({1, 1, 2, 4}, {1, 2, 2, 4}, false, false)); // fits the alloc
+    EXPECT_TRUE(boundShapeCompatible({2, 8}, {2, 6}, false, false));             // both pad to 2x8
+    EXPECT_FALSE(boundShapeCompatible({2, 9}, {2, 6}, false, false));            // 3 blocks > 2
 }
 
 // Ergonomic API: infer()/inputInfo() — caller passes only data, metadata comes from the model.

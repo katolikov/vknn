@@ -976,25 +976,45 @@ namespace vknn {
         return &b0.pool[id];
     }
 
-    // Buffer sizes, push constants, and dispatch geometry are frozen from a bucket's graph shapes at
-    // plan() time, so a caller shape whose packed footprint differs from the bucket would overrun
-    // (or misread) the mapped boundary buffer at pack time. Every run() input shape passes through
-    // this single check once its bucket is selected; an empty caller shape adopts the bucket's shape
-    // and always passes. An unresolved bucket shape (element count <= 0) accepts any caller shape,
-    // mirroring the fully-dynamic escape in the vector<float> overload.
+    // Every run() input shape passes through this single check once its bucket is selected; an empty
+    // caller shape adopts the bucket's shape and always passes. An unresolved bucket shape (element
+    // count <= 0) accepts any caller shape, mirroring the fully-dynamic escape in the vector<float>
+    // overload. A DIFFERENT caller shape is judged by boundShapeCompatible (nchw.h): the loose
+    // footprint-fit dynamic-reshape contract when only CPU segments consume the input (CPU ops
+    // recompute geometry from the runtime shape — a session planned at x=[2,6] runs a [2,8] bind),
+    // or byte-identical-packing when a GPU segment consumes it (its pack layout, push constants and
+    // dispatch geometry are frozen from the planned shape, so a shape that packs differently — even
+    // at an equal padded footprint — silently misreads).
     Status Session::validateInputShape(const PlanBucket &bucket, TensorId id, const Shape &got) const {
         const TensorDesc &d = bucket.graph->tensors[id];
         if (got.empty() || got == d.shape || numElements(d.shape) <= 0)
         {
             return Status::Ok;
         }
-        // Stored footprint under the tensor's planned packing: flat tensors store dense row-major
-        // elements, everything else packs NC4HW4 (channels padded to blocks of four). The element
-        // size is the same for both shapes, so equal stored element counts mean equal byte counts.
-        TensorFormat fmt = d.gpuFlat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-        if (formatElems(fmt, NCHW::from(got)) != formatElems(fmt, NCHW::from(d.shape)))
+        bool gpuConsumed = false;
+        for (const auto &seg: bucket.segments)
         {
-            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not fit the planned shape " << shapeStr(d.shape);
+            if (!seg->backend || seg->backend->kind() == BackendKind::Cpu)
+            {
+                continue;
+            }
+            for (TensorId t: seg->boundaryInputs)
+            {
+                if (t == id)
+                {
+                    gpuConsumed = true;
+                    break;
+                }
+            }
+            if (gpuConsumed)
+            {
+                break;
+            }
+        }
+        if (!boundShapeCompatible(got, d.shape, d.gpuFlat, gpuConsumed))
+        {
+            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not " << (gpuConsumed ? "pack like" : "fit") << " the planned shape " << shapeStr(d.shape)
+                       << (gpuConsumed ? " (a GPU-consumed input must bind the planned shape, or an N/C/spatial-product-preserving reshape of it)" : "");
             return Status::InvalidArgument;
         }
         return Status::Ok;
