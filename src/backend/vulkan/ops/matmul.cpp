@@ -1,8 +1,12 @@
 // Batched N-D MatMul on the FLAT row-major GPU path: out[...,m,n] = sum_k A[...,m,k]*B[...,k,n]
-// with NumPy broadcasting on the batch dims. One thread per output element walks K (see
-// shaders/matmul.comp). Either operand may be an activation or a constant initializer (e.g. a
-// Linear weight); an initializer is uploaded flat in prepare(). Mirrors the CPU oracle's
-// broadcast/stride math byte-for-byte.
+// with NumPy broadcasting on the batch dims. Three kernels serve it, by shape: the register-blocked
+// tiled GEMM (shaders/matmul_tiled*.comp) for full matrices, the split-K mat-vec
+// (shaders/matmul_gemv*.comp — vector-load when N % kGemvVec == 0, scalar otherwise) for a narrow
+// M == 1 row, and otherwise one thread per output element walking K (shaders/matmul.comp). Either
+// operand may be an activation or a constant initializer (e.g. a Linear weight); an initializer is
+// uploaded flat in prepare(). The naive and tiled kernels mirror the CPU oracle's broadcast/stride
+// math byte-for-byte; the split-K kernels regroup the k chain (deterministically, identically to each
+// other) and so agree only to fp32 rounding.
 #include "core/matmul_tile.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
@@ -30,6 +34,7 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
             std::shared_ptr<vk::Buffer>          biasBuf;     // set when a rank-1 [N] bias is fused in
             bool                                 useTiled = false;
+            bool                                 useGemv  = false; // split-K mat-vec (shaders/matmul_gemv*.comp)
             int                                  numBatch = 1;
             MatMulTile                           tile     = kMatMulTiles[0]; // matmul_tiled spec constants (TM/TN/TK)
 
@@ -280,6 +285,28 @@ namespace vknn {
                     tile = pickTile(env, node.fusedBias != kNoTensor);
                 }
 
+                // A mat-vec too narrow to fill the naive grid takes the split-K kernel. B must keep its
+                // n axis last (bWas1D strips it), both so the GEMV_NX lanes of a row stay coalesced and
+                // so the _bias variant's `gid % N` indexes the bias.
+                bool gemvShape = !useTiled && !bWas1D && M == 1 && K >= kGemvMinK && N < kGemvMaxN;
+
+                // The two mat-vec kernels spend a different number of invocations on the same kGemvNx
+                // outputs, and a workgroup above maxComputeWorkGroupInvocations fails pipeline creation
+                // rather than degrading. Vulkan guarantees only 128, so each kernel is gated on the limit
+                // it needs: matmul_gemv4 packs kGemvVec adjacent n into one lane and needs
+                // kGemvNx/kGemvVec x kGemvKs invocations; matmul_gemv gives every n its own lane and needs
+                // kGemvNx x kGemvKs. An N indivisible by kGemvVec on a device too small for the scalar
+                // kernel keeps matmul.comp -- correct everywhere, merely slower.
+                const uint32_t maxInv = env.ctx->caps().maxWorkGroupInvocations;
+
+                // An N divisible by kGemvVec lets a mat-vec lane pull its kGemvVec adjacent n as one
+                // vector element of B (a quarter of the lanes, four times the bytes per load
+                // instruction, same kGemvNx outputs per workgroup). The two mat-vec kernels are
+                // bit-identical, so an indivisible N simply falls back to the scalar one.
+                bool useGemvVec = gemvShape && N % kGemvVec == 0 && maxInv >= (uint32_t) (kGemvNx / kGemvVec * kGemvKs);
+
+                useGemv = useGemvVec || (gemvShape && maxInv >= (uint32_t) (kGemvNx * kGemvKs));
+
                 // The default {128,128,16} tile runs the compile-time matmul_tiled_fast kernel (full
                 // inner-loop unroll, register-resident micro-tile — main's fast literal geometry);
                 // only a non-default raced tile runs the spec-constant matmul_tiled kernel. The
@@ -289,7 +316,8 @@ namespace vknn {
                 // A fused Linear bias (rank-1 [N]) is added in the fp32 accumulator by the _bias kernel
                 // variant; upload it flat and bind it as a 4th buffer. The geometry SSBO follows the
                 // operands (and the bias when present): binding 3 without bias, binding 4 with it.
-                const char *base = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : "matmul");
+                const char *gemvBase = useGemvVec ? "matmul_gemv4" : "matmul_gemv";
+                const char *base     = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : (useGemv ? gemvBase : "matmul"));
                 std::string name = base;
                 uint32_t    nbuf = 4; // A, B, D, geometry
                 if (node.fusedBias != kNoTensor)
@@ -337,6 +365,13 @@ namespace vknn {
                     uint32_t gx = (uint32_t) ((pc.N + tile.tn - 1) / tile.tn);
                     uint32_t gy = (uint32_t) ((pc.M + tile.tm - 1) / tile.tm);
                     pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gx, gy, (uint32_t) numBatch);
+                } else if (useGemv)
+                {
+                    // Split-K mat-vec: a workgroup covers kGemvNx output elements along the flat grid and
+                    // spends its local y lanes on the k reduction, so only x counts groups. The 1-D grid
+                    // keeps the dispatch's runtime X-overflow rescue (it spills into y, which the kernel
+                    // folds back through gl_WorkGroupID.y).
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, (uint32_t) kGemvNx));
                 } else
                 {
                     // Naive kernel: one thread per output element over a flat 1-D grid of pc.total lanes.

@@ -5,6 +5,7 @@
 //   --backend cpu|vulkan   (default vulkan)   --precision low|normal|high (default low; normal = fp16 + selective fp32)
 //   --priority low|normal|high  GPU queue scheduling priority (default normal; Vulkan queue global priority)
 //   --tuning none|fast|heavy    load-time conv autotune effort (none = no per-shape measurement) (default fast)
+//   --cpu-threads N        CPU-backend worker threads (default 4; 1 = serial). Effort only: output is bit-identical.
 //   --keep-weights         keep host weights after upload (default: free them)
 //   --no-flat              disable the flat-layout GPU pass (advanced)
 //   --no-fold-islands      keep tiny GPU op-islands on the GPU instead of folding to CPU (advanced)
@@ -95,6 +96,7 @@ int main(int argc, char **argv) {
     cfg.maxSubmitNodes    = atoi(opt(argc, argv, "--max-submit-nodes", std::to_string(cfg.maxSubmitNodes).c_str()));
     cfg.maxSubmitBindings = atoi(opt(argc, argv, "--max-submit-bindings", std::to_string(cfg.maxSubmitBindings).c_str()));
     cfg.disableVkOps      = opt(argc, argv, "--disable-vk-ops", "");
+    cfg.cpuThreads        = atoi(opt(argc, argv, "--cpu-threads", std::to_string(cfg.cpuThreads).c_str()));
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -110,7 +112,7 @@ int main(int argc, char **argv) {
         if (argv[i][0] == '-')
         {
             if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
-                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat"))
+                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads"))
             {
                 ++i; // skip the flag's value
             }

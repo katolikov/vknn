@@ -1,7 +1,9 @@
 // FusedPointwise: run a per-element step chain (pw_steps/pw_params) in fp32. The CPU op is the
 // correctness oracle for the fused-epilogue chain; applyPwEpilogue is also the shared applier a
 // later phase's executor hook calls to run an epilogue carried by a producer node.
+#include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <cmath>
@@ -198,18 +200,14 @@ namespace vknn {
             }
             return ob;
         };
-        // Row-major strides of the output itself, for decomposing a flat index into coordinates.
-        std::vector<int64_t> ostride(rank, 1);
-        for (int i = (int) rank - 2; i >= 0; --i)
-        {
-            ostride[i] = ostride[i + 1] * out[i + 1];
-        }
-
         // Hoist per-source operand pointers and broadcast strides out of the element loop; a
         // non-operand source keeps a null pointer and resolves from acc/entry/registers instead.
+        // `slot` is the source's index into the BroadcastWalk built below, which carries the operand
+        // offsets across the element sweep so the loop never unravels `lin` per source.
         struct SrcRef {
-            int                  ref = kPwRefNone;
-            const float         *p   = nullptr;
+            int                  ref  = kPwRefNone;
+            const float         *p    = nullptr;
+            size_t               slot = 0;
             std::vector<int64_t> ob;
         };
         std::vector<SrcRef> src((size_t) nSteps * 3);
@@ -235,6 +233,17 @@ namespace vknn {
                 }
             }
         }
+        // One walker slot per operand source; `src` is sized up front so the borrowed `ob` pointers
+        // stay valid for every walker built from them.
+        std::vector<const int64_t *> srcStrides;
+        for (SrcRef &r: src)
+        {
+            if (r.p)
+            {
+                r.slot = srcStrides.size();
+                srcStrides.push_back(r.ob.data());
+            }
+        }
 
         // Extra output streams share the unit's output shape (the fuser only exports same-shape
         // step values); allocate them here since the producing op only writes outputs[0].
@@ -247,82 +256,84 @@ namespace vknn {
             outStep[o] = (int) po[o];
         }
 
-        for (int64_t lin = 0; lin < n; ++lin)
-        {
-            float entry = y[lin];
-            float acc   = entry;
-            float reg[kPwMaxRegs] = {};
-            for (int o = 0; o < numOuts; ++o)
+        // The chain's acc/registers live and die inside one element, and every element writes only its
+        // own y[lin] / outPtr[o][lin], so the sweep partitions across threads. Each chunk owns a walker
+        // seeked to its start.
+        cpu::parallelFor(cpu::threadCount(ctx.config), 0, n, cpu::minChunkForWork(1), [&](int64_t chunkBegin, int64_t chunkEnd) {
+            cpu::BroadcastWalk walk(out, srcStrides);
+            walk.seek(chunkBegin);
+            for (int64_t lin = chunkBegin; lin < chunkEnd; ++lin, walk.next())
             {
-                if (outStep[o] == kPwRefEntry)
-                {
-                    outPtr[o][lin] = entry;
-                }
-            }
-            auto value = [&](const SrcRef &r) -> float {
-                if (r.p)
-                {
-                    // Decompose the flat output index into per-axis coordinates and reassemble the
-                    // operand offset from the broadcast strides (0 on a broadcast axis).
-                    int64_t io = 0;
-                    for (size_t d = 0; d < rank; ++d)
-                    {
-                        io += ((lin / ostride[d]) % out[d]) * r.ob[d];
-                    }
-                    return r.p[io];
-                }
-                if (r.ref == kPwRefAcc)
-                {
-                    return acc;
-                }
-                if (r.ref == kPwRefEntry)
-                {
-                    return entry;
-                }
-                if (r.ref <= kPwRefReg0 && r.ref > kPwRefReg0 - kPwMaxRegs)
-                {
-                    return reg[kPwRefReg0 - r.ref];
-                }
-                return 0.f;
-            };
-            for (int s = 0; s < nSteps; ++s)
-            {
-                int   kind = (int) st[s * 8 + 0];
-                int   code = (int) st[s * 8 + 1];
-                int   dst  = (int) st[s * 8 + 5];
-                float p0   = pr[s * 2 + 0];
-                float p1   = pr[s * 2 + 1];
-                float va   = value(src[(size_t) s * 3 + 0]);
-                if (kind == kPwKindBinary)
-                {
-                    acc = pwBinary(va, value(src[(size_t) s * 3 + 1]), code);
-                } else if (kind == kPwKindUnary)
-                {
-                    acc = pwUnary(va, code, p0, p1);
-                } else if (kind == kPwKindAct)
-                {
-                    acc = pwAct(va, code, p0, p1);
-                } else if (kind == kPwKindSelect)
-                {
-                    acc = va != 0.f ? value(src[(size_t) s * 3 + 1]) : value(src[(size_t) s * 3 + 2]);
-                } else
-                {
-                    acc = va; // kPwKindLoad
-                }
-                if (dst >= 0 && dst < kPwMaxRegs)
-                {
-                    reg[dst] = acc;
-                }
+                float entry = y[lin];
+                float acc   = entry;
+                float reg[kPwMaxRegs] = {};
                 for (int o = 0; o < numOuts; ++o)
                 {
-                    if (outStep[o] == s)
+                    if (outStep[o] == kPwRefEntry)
                     {
-                        outPtr[o][lin] = acc;
+                        outPtr[o][lin] = entry;
                     }
                 }
+                auto value = [&](const SrcRef &r) -> float {
+                    if (r.p)
+                    {
+                        // The walker already holds this operand's broadcast source offset for `lin`
+                        // (0 strides collapse its broadcast axes onto element 0).
+                        return r.p[walk.offset(r.slot)];
+                    }
+                    if (r.ref == kPwRefAcc)
+                    {
+                        return acc;
+                    }
+                    if (r.ref == kPwRefEntry)
+                    {
+                        return entry;
+                    }
+                    if (r.ref <= kPwRefReg0 && r.ref > kPwRefReg0 - kPwMaxRegs)
+                    {
+                        return reg[kPwRefReg0 - r.ref];
+                    }
+                    return 0.f;
+                };
+                for (int s = 0; s < nSteps; ++s)
+                {
+                    int   kind = (int) st[s * 8 + 0];
+                    int   code = (int) st[s * 8 + 1];
+                    int   dst  = (int) st[s * 8 + 5];
+                    float p0   = pr[s * 2 + 0];
+                    float p1   = pr[s * 2 + 1];
+                    float va   = value(src[(size_t) s * 3 + 0]);
+                    if (kind == kPwKindBinary)
+                    {
+                        acc = pwBinary(va, value(src[(size_t) s * 3 + 1]), code);
+                    } else if (kind == kPwKindUnary)
+                    {
+                        acc = pwUnary(va, code, p0, p1);
+                    } else if (kind == kPwKindAct)
+                    {
+                        acc = pwAct(va, code, p0, p1);
+                    } else if (kind == kPwKindSelect)
+                    {
+                        acc = va != 0.f ? value(src[(size_t) s * 3 + 1]) : value(src[(size_t) s * 3 + 2]);
+                    } else
+                    {
+                        acc = va; // kPwKindLoad
+                    }
+                    if (dst >= 0 && dst < kPwMaxRegs)
+                    {
+                        reg[dst] = acc;
+                    }
+                    for (int o = 0; o < numOuts; ++o)
+                    {
+                        if (outStep[o] == s)
+                        {
+                            outPtr[o][lin] = acc;
+                        }
+                    }
+                }
+                y[lin] = acc;
             }
-            y[lin] = acc;
-        }
+        });
     }
 
     namespace {

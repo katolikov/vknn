@@ -190,6 +190,7 @@ namespace vknn {
         {
             c.tuning = tuningFromStr(j->asStr("fast"));
         }
+        I("cpuThreads", c.cpuThreads);
         B("freeWeightsAfterUpload", c.freeWeightsAfterUpload);
         // Flat-layout pass + GPU-island folding are hints now (default On). Accept the new keys
         // (flatLayout / gpuIslandFold) and the legacy booleans. noFlatOps is the negation of
@@ -269,6 +270,7 @@ namespace vknn {
         os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
         os << "  \"noCache\": " << (noCache ? "true" : "false") << ",\n";
         os << "  \"tuning\": \"" << tuningStr(tuning) << "\",\n";
+        os << "  \"cpuThreads\": " << cpuThreads << ",\n";
         os << "  \"freeWeightsAfterUpload\": " << (freeWeightsAfterUpload ? "true" : "false") << ",\n";
         os << "  \"flatLayout\": " << (flatLayout() ? "true" : "false") << ",\n";
         os << "  \"gpuIslandFold\": " << (gpuIslandFold() ? "true" : "false") << ",\n";

@@ -87,8 +87,14 @@ namespace vknn {
             Y.deviceValid = false;
             // Pure metadata reshapes preserve element count, so the two byte spans are equal in size;
             // the min() guards against a caller passing a mismatched `shape` by copying only the
-            // overlap rather than reading or writing past either buffer.
-            std::memcpy(Y.host.bytes.data(), X.host.bytes.data(), std::min(Y.host.bytes.size(), X.host.bytes.size()));
+            // overlap rather than reading or writing past either buffer, and zeroing whatever of the
+            // destination the overlap leaves uncovered.
+            const size_t overlap = std::min(Y.host.bytes.size(), X.host.bytes.size());
+            std::memcpy(Y.host.bytes.data(), X.host.bytes.data(), overlap);
+            if (overlap < Y.host.bytes.size())
+            {
+                std::memset(Y.host.bytes.data() + overlap, 0, Y.host.bytes.size() - overlap);
+            }
         }
     } // namespace cpu
 

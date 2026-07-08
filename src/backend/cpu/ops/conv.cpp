@@ -2,6 +2,7 @@
 // pointwise through the same loop. This is the correctness oracle the GPU path is checked
 // against, so it stays simple and readable rather than fast.
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "core/conv_geom.h"
 
 namespace vknn {
@@ -66,10 +67,14 @@ namespace vknn {
                 const float *bd = B ? B->host.f32() : nullptr;
 
                 int64_t outCg = outC / group; // output channels per group
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t oc = 0; oc < outC; ++oc)
+                // Each (image, output channel) pair owns one output plane and accumulates entirely
+                // within its own iteration, so the x.n*outC planes are independent: partitioning them
+                // across threads leaves every acc sum whole, in its original tap order.
+                cpu::parallelFor(cpu::threadCount(ctx.config), 0, x.n * outC, cpu::minChunkForWork(outH * outW * inCg * kh * kw), [&](int64_t planeBegin, int64_t planeEnd) {
+                    for (int64_t plane = planeBegin; plane < planeEnd; ++plane)
                     {
+                        int64_t n  = plane / outC;
+                        int64_t oc = plane % outC;
                         // Grouped conv partitions channels: output channel oc belongs to group g and
                         // reads only that group's inCg input channels, starting at icStart. group==1 is
                         // plain conv (icStart==0); group==inChannels with inCg==1 is depthwise.
@@ -117,7 +122,7 @@ namespace vknn {
                             }
                         }
                     }
-                }
+                });
                 // Fused epilogue: out = act(conv + residual). The residual is a same-shaped skip
                 // connection added elementwise before the activation, matching the order the fused
                 // GPU kernel applies so both backends agree bit-for-bit.

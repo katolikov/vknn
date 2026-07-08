@@ -13,6 +13,33 @@ namespace vknn {
     /// MatMuls (the register-blocked kernel has no register headroom for the VM).
     constexpr int64_t kTiledMatMulMin = 32;
 
+    /// A mat-vec (M == 1) launches only N threads under matmul.comp's one-thread-per-output grid, so
+    /// its time scales with K once N stops filling the GPU. shaders/matmul_gemv.comp splits the k
+    /// reduction across GEMV_KS lanes per output instead. It takes over when the naive grid is too
+    /// narrow to saturate (N < kGemvMaxN) and K is long enough for the split to pay for its shared-
+    /// memory reduction (K >= kGemvMinK). Above kGemvMaxN the naive grid already reaches peak
+    /// bandwidth (an LLM's [896,151936] lm_head projection does), so it keeps the simpler kernel.
+    constexpr int64_t kGemvMinK = 512;
+    constexpr int64_t kGemvMaxN = 16384;
+
+    /// Output elements one mat-vec workgroup covers along the flat grid; the dispatch splits the
+    /// output grid by it. Both mat-vec kernels cover exactly this many: matmul_gemv.comp as
+    /// GEMV_NX == 64 scalar lanes, matmul_gemv4.comp as GEMV_NX == 16 lanes of GEMV_VEC == 4.
+    constexpr int64_t kGemvNx = 64;
+
+    /// Lanes each mat-vec kernel spends reducing over k (both shaders' GEMV_KS). With kGemvNx it sets the
+    /// workgroup size the kernel needs the device to host: kGemvNx * kGemvKs invocations for the scalar
+    /// kernel, kGemvNx / kGemvVec * kGemvKs for the vector one. Vulkan guarantees only 128, so MatMul
+    /// checks maxComputeWorkGroupInvocations before selecting either.
+    constexpr int64_t kGemvKs = 16;
+
+    /// Adjacent n a single lane of shaders/matmul_gemv4.comp owns, loaded as one vector element of B.
+    /// That vector index is exact only when B's n axis is kGemvVec-aligned at every k, which N %
+    /// kGemvVec == 0 gives (it also aligns every batch stride, a multiple of K*N, and every
+    /// workgroup's first n, a multiple of kGemvNx). An indivisible N keeps the scalar kernel; the two
+    /// share a k partition and a per-output accumulation order, so the choice never affects bits.
+    constexpr int64_t kGemvVec = 4;
+
     /// One matmul_tiled tile geometry: specialization constants 0/1/2 (TM/TN/TK). The workgroup
     /// stays 16x16 = 256 threads; each thread computes a (tm/16)x(tn/16) register micro-tile.
     struct MatMulTile {

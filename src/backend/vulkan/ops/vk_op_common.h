@@ -112,10 +112,7 @@ namespace vknn {
         if (fp16)
         {
             std::vector<uint16_t> h(data.size());
-            for (size_t i = 0; i < data.size(); ++i)
-            {
-                h[i] = floatToHalf(data[i]);
-            }
+            floatToHalfBulk(data.data(), h.data(), (int64_t) data.size());
             auto b = std::make_shared<vk::Buffer>(ctx, std::max<size_t>(h.size(), 4) * 2, vk::MemPref::kAuto);
             b->upload(h.data(), h.size() * 2);
             return b;
