@@ -72,7 +72,7 @@ adb shell /data/local/tmp/vknn/vknn_classify --model model.vxm --input input.bin
 a precision-critical geometry tail kept fp32), or **`high`** (full fp32).
 
 **Or from C++.** The model reports its own input/output names and shapes — you supply only the data.
-This is [`examples/readme_quickstart.cpp`](examples/readme_quickstart.cpp), compiled by the build:
+This is [`examples/basics/readme_quickstart.cpp`](examples/basics/readme_quickstart.cpp), compiled by the build:
 
 ```cpp
 #include "vknn/model.h"
@@ -105,9 +105,9 @@ this. Everything is configured through `vknn::Config` — the engine reads **no 
 
 VKNN runs **Qwen2.5-Coder-0.5B** (a `qwen2` autoregressive decoder) end to end with **every compute
 op on the GPU — zero CPU fallbacks**, generating text that matches the HuggingFace greedy reference
-token-for-token. A small terminal chat app drives it: [`examples/chat.cpp`](examples/chat.cpp) owns
+token-for-token. A small terminal chat app drives it: [`examples/llm/chat.cpp`](examples/llm/chat.cpp) owns
 the on-device GPU decode loop (fixed-context KV cache, token streaming) and
-[`examples/chat_host.py`](examples/chat_host.py) is the one host dependency (HuggingFace tokenizer +
+[`examples/llm/chat_host.py`](examples/llm/chat_host.py) is the one host dependency (HuggingFace tokenizer +
 REPL). Asking it a question:
 
 ```text
@@ -140,7 +140,7 @@ and the [Running an LLM on VKNN](https://github.com/katolikov/vknn/wiki/Running-
 | **Dynamic shapes** | Declared shape **plan buckets**: `vknn_compile --shape NAME=D0xD1x...` / `--bucket "..."` bakes one plan per shape set; at runtime `Session::prepareShapes()` compiles more, and `run()` selects a bucket by the bound input shapes. A fixed-shape model is one bucket (a single map lookup on the hot path). |
 | **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. |
 | **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. |
-| **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/dmabuf_fd_io.cpp`](examples/dmabuf_fd_io.cpp). |
+| **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/io/dmabuf_fd_io.cpp`](examples/io/dmabuf_fd_io.cpp). |
 | **Warm-start cache** | A self-validating, multi-variant per-model `.cache` (kernel hash + device + config) auto-heals across driver/model/code changes. |
 | **Tools** | `vknn_compile` (ONNX → `.vxm`, with `--support-report <out.json>` for the per-node backend assignment), `vknn_run_io` (any multi-input/multi-output model), plus the example runners below. |
 
