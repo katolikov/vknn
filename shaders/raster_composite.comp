@@ -2,13 +2,17 @@
 // 3DGS per-tile compositor: one workgroup per 16x16 screen tile, one thread per pixel. Walks the
 // tile's depth-sorted gaussian list (GPU-built: raster_duplicate emit -> radix sort -> raster_ranges)
 // front-to-back, evaluating each 2D gaussian's alpha and alpha-compositing colour with transmittance.
-// Matches ref_rasterizer.py's per-pixel loop.
+// Matches ref_rasterizer.py's per-pixel loop. dims.w selects the store: 0 writes fp32 [H*W*3],
+// 1 writes packed 0xAARRGGBB uints [H*W] (Android Bitmap ARGB_8888 IntArray order) quantized
+// exactly like the fp32 path's host pack: round-half-up in fp32, contraction disabled (precise)
+// so the two paths agree bit-for-bit.
 layout(local_size_x = 16, local_size_y = 16) in;
-layout(std430, binding = 0) readonly buffer GD     { float gd[]; };       // [N][12] from preprocess
-layout(std430, binding = 1) readonly buffer Sorted { int sortedIdx[]; };  // flat depth-sorted gaussian ids
-layout(std430, binding = 2) readonly buffer Ranges { int ranges[]; };     // [numTiles][2] = (start,count)
-layout(std430, binding = 3) writeonly buffer Img   { float img[]; };       // [H*W*3]
-layout(push_constant) uniform PC { ivec4 dims; } pc;  // H, W, numTilesX, _
+layout(std430, binding = 0) readonly buffer GD        { float gd[]; };        // [N][12] from preprocess
+layout(std430, binding = 1) readonly buffer Sorted    { int sortedIdx[]; };   // flat depth-sorted gaussian ids
+layout(std430, binding = 2) readonly buffer Ranges    { int ranges[]; };      // [numTiles][2] = (start,count)
+layout(std430, binding = 3) writeonly buffer Img      { float img[]; };       // [H*W*3] (dims.w == 0)
+layout(std430, binding = 4) writeonly buffer PackedImg { uint packedImg[]; }; // [H*W] (dims.w == 1)
+layout(push_constant) uniform PC { ivec4 dims; } pc;  // H, W, numTilesX, outputMode
 
 void main() {
   int H = pc.dims.x, W = pc.dims.y, ntx = pc.dims.z;
@@ -32,8 +36,16 @@ void main() {
     T *= (1.0 - alpha);
     if (T < 1e-4) break;
   }
-  uint pix = (uint(py) * uint(W) + uint(px)) * 3u;
-  img[pix+0u] = clamp(C.x, 0.0, 1.0);
-  img[pix+1u] = clamp(C.y, 0.0, 1.0);
-  img[pix+2u] = clamp(C.z, 0.0, 1.0);
+  if (pc.dims.w == 0) {
+    uint pix = (uint(py) * uint(W) + uint(px)) * 3u;
+    img[pix+0u] = clamp(C.x, 0.0, 1.0);
+    img[pix+1u] = clamp(C.y, 0.0, 1.0);
+    img[pix+2u] = clamp(C.z, 0.0, 1.0);
+  } else {
+    precise float scaledR = clamp(C.x, 0.0, 1.0) * 255.0 + 0.5;
+    precise float scaledG = clamp(C.y, 0.0, 1.0) * 255.0 + 0.5;
+    precise float scaledB = clamp(C.z, 0.0, 1.0) * 255.0 + 0.5;
+    packedImg[uint(py) * uint(W) + uint(px)] =
+        0xff000000u | (uint(scaledR) << 16) | (uint(scaledG) << 8) | uint(scaledB);
+  }
 }

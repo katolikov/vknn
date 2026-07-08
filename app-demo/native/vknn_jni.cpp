@@ -32,19 +32,24 @@ namespace {
             int64_t best = 0;
             float   bv   = lg[0];
             for (int64_t i = 1; i < vocab; ++i)
+            {
                 if (lg[i] > bv)
                 {
                     bv   = lg[i];
                     best = i;
                 }
+            }
             return best;
         }
         std::vector<std::pair<float, int64_t>> v((size_t) vocab);
         for (int64_t i = 0; i < vocab; ++i)
+        {
             v[(size_t) i] = {lg[i] / temp, i};
+        }
         const int keep = topK > 0 && topK < (int) vocab ? topK : (int) vocab;
-        std::partial_sort(v.begin(), v.begin() + keep, v.end(),
-                          [](const auto &a, const auto &b) { return a.first > b.first; });
+        std::partial_sort(v.begin(), v.begin() + keep, v.end(), [](const auto &a, const auto &b) {
+            return a.first > b.first;
+        });
         v.resize((size_t) keep);
         float mx = v[0].first, sum = 0.0f;
         for (auto &e: v)
@@ -69,7 +74,9 @@ namespace {
         {
             acc += v[i].first;
             if (acc >= r)
+            {
                 return v[i].second;
+            }
         }
         return v[n - 1].second;
     }
@@ -82,7 +89,7 @@ namespace {
         std::vector<IOTensor>    outputs; // last run()'s outputs
         std::vector<IOInfo>      inInfo, outInfo;
 
-        int idIdx = -1, maskIdx = -1, posIdx = -1, logitsIdx = -1;
+        int              idIdx = -1, maskIdx = -1, posIdx = -1, logitsIdx = -1;
         std::vector<int> pastKey, pastVal, presKey, presVal;
         std::vector<int> outIdxByInfo; // outInfo index -> index in outputs vector (stable across runs)
         bool             mapped = false;
@@ -96,14 +103,22 @@ namespace {
 
         int findIn(const std::string &n) const {
             for (size_t i = 0; i < inInfo.size(); ++i)
+            {
                 if (inInfo[i].name == n)
+                {
                     return (int) i;
+                }
+            }
             return -1;
         }
         int findOut(const std::string &n) const {
             for (size_t i = 0; i < outInfo.size(); ++i)
+            {
                 if (outInfo[i].name == n)
+                {
                     return (int) i;
+                }
+            }
             return -1;
         }
         void setI64(int idx, const std::vector<int64_t> &vals) {
@@ -117,8 +132,10 @@ namespace {
             setI64(posIdx, {(int64_t) p});
             std::vector<int64_t> am((size_t) C + 1, 0);
             for (int j = 0; j < p && j < C; ++j)
+            {
                 am[(size_t) j] = 1; // valid past slots
-            am[(size_t) C] = 1;      // the current token (present slot C)
+            }
+            am[(size_t) C] = 1; // the current token (present slot C)
             setI64(maskIdx, am);
 
             if (sess->run(inputs, outputs) != Status::Ok)
@@ -130,9 +147,15 @@ namespace {
             {
                 outIdxByInfo.assign(outInfo.size(), -1);
                 for (size_t j = 0; j < outputs.size(); ++j)
+                {
                     for (size_t k = 0; k < outInfo.size(); ++k)
+                    {
                         if (outputs[j].name == outInfo[k].name)
+                        {
                             outIdxByInfo[k] = (int) j;
+                        }
+                    }
+                }
                 mapped = true;
             }
             const int slot = p < C ? p : C - 1; // guard the rare overrun past the compiled context
@@ -193,8 +216,12 @@ namespace {
 
         const IOTensor *outByName(const std::string &n) const {
             for (const IOTensor &o: outs)
+            {
                 if (o.name == n)
+                {
                     return &o;
+                }
+            }
             return nullptr;
         }
 
@@ -215,7 +242,9 @@ namespace {
                 {
                     const IOTensor *pres = outByName(part ? pv : pk);
                     if (!pres)
+                    {
                         return false;
+                    }
                     const float *src = reinterpret_cast<const float *>(pres->data.data());
                     float       *dst = reinterpret_cast<float *>(dec[(size_t) (part ? pastVal[l] : pastKey[l])].data.data());
                     for (int h = 0; h < kvHeads; ++h)
@@ -260,8 +289,7 @@ namespace {
         // Prefill one prompt: embed the padded ids, splice image rows over image-token rows, build the
         // additive mask + clamped positions, run the prefill bucket, and fold the real present rows.
         // Pad rows are masked causally anyway but are NEVER folded into the cache.
-        int prefill(const int64_t *ids, int nReal, const float *imgEmb, int imgRowsGiven,
-                    int64_t imageToken, int64_t padId) {
+        int prefill(const int64_t *ids, int nReal, const float *imgEmb, int imgRowsGiven, int64_t imageToken, int64_t padId) {
             if (nReal <= 0 || nReal > prefillS)
             {
                 LOGE("prompt %d tokens, prefill window %d", nReal, prefillS);
@@ -303,7 +331,9 @@ namespace {
                 }
             }
             if (imgRow != 0 && imgRow != imgRowsGiven)
+            {
                 LOGE("prompt consumed %d of %d image rows -- id stream and tile disagree", imgRow, imgRowsGiven);
+            }
 
             // Additive mask [1,1,S,C+S]: past slots < p visible to every row, new tokens causal.
             setDecShape(maskIdx, {1, 1, (int64_t) prefillS, (int64_t) (C + prefillS)}, DType::Float32);
@@ -312,14 +342,20 @@ namespace {
             {
                 float *row = m + (size_t) q * (C + prefillS);
                 for (int c = 0; c < C; ++c)
+                {
                     row[c] = c < p ? 0.0f : kMaskFill;
+                }
                 for (int j = 0; j < prefillS; ++j)
+                {
                     row[C + j] = j <= q ? 0.0f : kMaskFill;
+                }
             }
             setDecShape(posIdx, {1, (int64_t) prefillS}, DType::Int64);
             int64_t *pos = reinterpret_cast<int64_t *>(dec[(size_t) posIdx].data.data());
             for (int q = 0; q < prefillS; ++q)
+            {
                 pos[q] = p + (q < nReal ? q : nReal - 1); // pad rows clamp; they are never folded
+            }
 
             if (sess->run(dec, outs) != Status::Ok)
             {
@@ -333,7 +369,9 @@ namespace {
             }
             const IOTensor *lg = outByName("logits");
             if (!lg)
+            {
                 return -1;
+            }
             p += nReal;
             const float *lp = reinterpret_cast<const float *>(lg->data.data()) + (size_t) (nReal - 1) * vocab;
             logits.assign(lp, lp + vocab);
@@ -351,27 +389,39 @@ namespace {
             embedIn[0].data.resize(sizeof(int64_t));
             std::memcpy(embedIn[0].data.data(), &tok, sizeof(int64_t));
             if (sess->run(embedIn, outs) != Status::Ok)
+            {
                 return -1;
+            }
             const IOTensor *emb = outByName("inputs_embeds");
             if (!emb)
+            {
                 return -1;
+            }
             setDecShape(embIdx, {1, 1, (int64_t) H}, DType::Float32);
             std::memcpy(dec[(size_t) embIdx].data.data(), emb->data.data(), (size_t) H * sizeof(float));
             setDecShape(maskIdx, {1, 1, 1, (int64_t) C + 1}, DType::Float32);
             float *m = reinterpret_cast<float *>(dec[(size_t) maskIdx].data.data());
             for (int c = 0; c < C + 1; ++c)
+            {
                 m[c] = (c < p || c == C) ? 0.0f : kMaskFill;
+            }
             setDecShape(posIdx, {1, 1}, DType::Int64);
             int64_t pos = p;
             std::memcpy(dec[(size_t) posIdx].data.data(), &pos, sizeof(int64_t));
             if (sess->run(dec, outs) != Status::Ok)
+            {
                 return -1;
+            }
             const int slot = p < C ? p : C - 1;
             if (!foldPresent(1, 1, slot))
+            {
                 return -1;
+            }
             const IOTensor *lg = outByName("logits");
             if (!lg)
+            {
                 return -1;
+            }
             const float *lp = reinterpret_cast<const float *>(lg->data.data());
             logits.assign(lp, lp + vocab);
             ++p;
@@ -381,26 +431,38 @@ namespace {
 
     int findByName(const std::vector<IOInfo> &v, const std::string &n) {
         for (size_t i = 0; i < v.size(); ++i)
+        {
             if (v[i].name == n)
+            {
                 return (int) i;
+            }
+        }
         return -1;
     }
 
     Precision precFromStr(const std::string &s) {
         if (s == "normal")
+        {
             return Precision::Normal;
+        }
         if (s == "high")
+        {
             return Precision::High;
+        }
         return Precision::Low;
     }
 
     std::string jstr(JNIEnv *env, jstring s) {
         if (!s)
+        {
             return {};
+        }
         const char *c = env->GetStringUTFChars(s, nullptr);
         std::string out(c ? c : "");
         if (c)
+        {
             env->ReleaseStringUTFChars(s, c);
+        }
         return out;
     }
 
@@ -448,7 +510,9 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             snprintf(vb, sizeof vb, "past_key_values.%d.value", l);
             const int ik = d->findIn(kb), iv = d->findIn(vb);
             if (ik < 0 || iv < 0)
+            {
                 break;
+            }
             snprintf(pk, sizeof pk, "present.%d.key", l);
             snprintf(pv, sizeof pv, "present.%d.value", l);
             d->pastKey.push_back(ik);
@@ -493,9 +557,9 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
 
 // int[5] = {L, kv_heads, C, head_dim, vocab}.
 JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeInfo(JNIEnv *env, jobject, jlong ptr) {
-    auto     *d   = reinterpret_cast<Decoder *>(ptr);
+    auto     *d    = reinterpret_cast<Decoder *>(ptr);
     jint      v[5] = {d->L, d->kvHeads, d->C, d->headDim, (jint) d->vocab};
-    jintArray a   = env->NewIntArray(5);
+    jintArray a    = env->NewIntArray(5);
     env->SetIntArrayRegion(a, 0, 5, v);
     return a;
 }
@@ -516,7 +580,9 @@ JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeReset(JNIEnv *, jobjec
 JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeStep(JNIEnv *, jobject, jlong ptr, jint tok) {
     auto *d = reinterpret_cast<Decoder *>(ptr);
     if (d->step((int64_t) tok) != 0)
+    {
         return -1;
+    }
     ++d->p;
     return 0;
 }
@@ -535,7 +601,7 @@ JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeFree(JNIEnv *, jobject
 
 // Load a multi-graph vision-language .vxm and build a Vlm. Returns a native handle (0 on failure).
 JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend) {
-    auto  *m = new Vlm();
+    auto *m = new Vlm();
     try
     {
         Config cfg;
@@ -596,7 +662,9 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
             snprintf(vb, sizeof vb, "past_key_values.%d.value", l);
             const int ik = findByName(m->decIn, kb), iv = findByName(m->decIn, vb);
             if (ik < 0 || iv < 0)
+            {
                 break;
+            }
             m->pastKey.push_back(ik);
             m->pastVal.push_back(iv);
         }
@@ -638,8 +706,8 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
         m->visInT[0].shape = m->visIn[0].shape;
         m->visInT[0].dtype = DType::Float32;
 
-        LOGI("vlm loaded: L=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imgRows=%d img=%d",
-             m->L, m->kvHeads, m->C, m->headDim, m->H, (long long) m->vocab, m->prefillS, m->imgRows, m->imgSide);
+        LOGI("vlm loaded: L=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imgRows=%d img=%d", m->L, m->kvHeads, m->C, m->headDim, m->H,
+             (long long) m->vocab, m->prefillS, m->imgRows, m->imgSide);
         return reinterpret_cast<jlong>(m);
     } catch (const std::exception &loadError)
     {
@@ -676,14 +744,16 @@ JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeVlmReset(JNIEnv *, job
 // Run the vision bucket on fp32 CHW pixels [3*IMG*IMG]. Returns the [imageRows*H] embedding rows,
 // or null on failure.
 JNIEXPORT jfloatArray JNICALL Java_com_vknn_chat_NativeLib_nativeVisionEncode(JNIEnv *env, jobject, jlong ptr, jfloatArray jpix) {
-    auto        *m = reinterpret_cast<Vlm *>(ptr);
-    const jsize  n = env->GetArrayLength(jpix);
-    jfloat      *p = env->GetFloatArrayElements(jpix, nullptr);
+    auto              *m = reinterpret_cast<Vlm *>(ptr);
+    const jsize        n = env->GetArrayLength(jpix);
+    jfloat            *p = env->GetFloatArrayElements(jpix, nullptr);
     std::vector<float> out;
-    const int    rc = m->visionEncode(p, (size_t) n, out);
+    const int          rc = m->visionEncode(p, (size_t) n, out);
     env->ReleaseFloatArrayElements(jpix, p, JNI_ABORT);
     if (rc != 0)
+    {
         return nullptr;
+    }
     jfloatArray a = env->NewFloatArray((jsize) out.size());
     env->SetFloatArrayRegion(a, 0, (jsize) out.size(), out.data());
     return a;
@@ -693,16 +763,17 @@ JNIEXPORT jfloatArray JNICALL Java_com_vknn_chat_NativeLib_nativeVisionEncode(JN
 // prompt's image-token rows; `padId` fills the window past the real ids. The first sampled token
 // comes from nativeVlmSample afterwards. Returns 0 ok, <0 error.
 JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeVlmPrefill(JNIEnv *env, jobject, jlong ptr, jlongArray jids, jfloatArray jimg, jint imageToken, jint padId) {
-    auto        *m     = reinterpret_cast<Vlm *>(ptr);
-    const jsize  nReal = env->GetArrayLength(jids);
-    jlong       *ids   = env->GetLongArrayElements(jids, nullptr);
-    jfloat      *img   = jimg ? env->GetFloatArrayElements(jimg, nullptr) : nullptr;
-    const int    imgRowsGiven = jimg ? (int) (env->GetArrayLength(jimg) / (jsize) m->H) : 0;
+    auto       *m            = reinterpret_cast<Vlm *>(ptr);
+    const jsize nReal        = env->GetArrayLength(jids);
+    jlong      *ids          = env->GetLongArrayElements(jids, nullptr);
+    jfloat     *img          = jimg ? env->GetFloatArrayElements(jimg, nullptr) : nullptr;
+    const int   imgRowsGiven = jimg ? (int) (env->GetArrayLength(jimg) / (jsize) m->H) : 0;
     static_assert(sizeof(jlong) == sizeof(int64_t), "jlong is int64");
-    const int rc = m->prefill(reinterpret_cast<const int64_t *>(ids), (int) nReal, img, imgRowsGiven,
-                              (int64_t) imageToken, (int64_t) padId);
+    const int rc = m->prefill(reinterpret_cast<const int64_t *>(ids), (int) nReal, img, imgRowsGiven, (int64_t) imageToken, (int64_t) padId);
     if (img)
+    {
         env->ReleaseFloatArrayElements(jimg, img, JNI_ABORT);
+    }
     env->ReleaseLongArrayElements(jids, ids, JNI_ABORT);
     return rc;
 }
@@ -743,9 +814,11 @@ namespace {
 
 } // namespace
 
-// Load the encoder .vxm (session survives across captures). Returns a native handle (0 on failure).
-JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend) {
-    auto  *splat = new Splat();
+// Load the encoder .vxm (session survives across captures). renderSize is the square rasterizer
+// output side, independent of the encoder input side (<= 0 falls back to the encoder side).
+// Returns a native handle (0 on failure).
+JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend, jint renderSize) {
+    auto *splat = new Splat();
     try
     {
         Config cfg;
@@ -772,14 +845,17 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env
         splat->views  = (int) inputs[0].shape[1];
         splat->height = (int) inputs[0].shape[3];
         splat->width  = (int) inputs[0].shape[4];
-        splat->rasterizer = std::make_unique<raster::Rasterizer>(splat->height, splat->width);
+        // The render resolution is decoupled from the encoder input side: the intrinsics are
+        // normalized, so nativeSplatRender scales focal/center by the rasterizer size.
+        const int renderSide = renderSize > 0 ? (int) renderSize : splat->width;
+        splat->rasterizer    = std::make_unique<raster::Rasterizer>(renderSide, renderSide);
         if (!splat->rasterizer->ok())
         {
             LOGE("splat: no Vulkan for the rasterizer");
             delete splat;
             return 0;
         }
-        LOGI("splat loaded: views=%d %dx%d", splat->views, splat->width, splat->height);
+        LOGI("splat loaded: views=%d %dx%d render %dx%d", splat->views, splat->width, splat->height, renderSide, renderSide);
         return reinterpret_cast<jlong>(splat);
     } catch (const std::exception &loadError)
     {
@@ -804,9 +880,9 @@ JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatInfo(JNIEnv 
 // Run the encoder on fp32 images [1,V,3,H,W] + normalized intrinsics [1,V,3,3]; the Gaussians
 // upload to the rasterizer and the predicted camera poses are kept. Returns 0 ok, <0 error.
 JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *env, jobject, jlong ptr, jfloatArray jimages, jfloatArray jintrinsics) {
-    auto     *splat        = reinterpret_cast<Splat *>(ptr);
-    const int pixelElems   = splat->views * 3 * splat->height * splat->width;
-    const int intrElems    = splat->views * 9;
+    auto     *splat      = reinterpret_cast<Splat *>(ptr);
+    const int pixelElems = splat->views * 3 * splat->height * splat->width;
+    const int intrElems  = splat->views * 9;
     if (env->GetArrayLength(jimages) != pixelElems || env->GetArrayLength(jintrinsics) != intrElems)
     {
         LOGE("splat: encode input sizes %d/%d, want %d/%d", env->GetArrayLength(jimages), env->GetArrayLength(jintrinsics), pixelElems, intrElems);
@@ -821,8 +897,8 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
         tensor.shape = info.shape;
         tensor.dtype = DType::Float32;
         tensor.data.resize((size_t) numElements(info.shape) * 4);
-        const bool isImage = info.name == inputInfos[0].name; // first input = image (as the example maps)
-        jfloatArray source = isImage ? jimages : jintrinsics;
+        const bool  isImage = info.name == inputInfos[0].name; // first input = image (as the example maps)
+        jfloatArray source  = isImage ? jimages : jintrinsics;
         env->GetFloatArrayRegion(source, 0, (jsize) numElements(info.shape), reinterpret_cast<jfloat *>(tensor.data.data()));
         inputs.push_back(std::move(tensor));
     }
@@ -848,7 +924,7 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
         LOGE("splat: encoder outputs missing");
         return -3;
     }
-    const int gaussianCount = (int) (numElements(means->shape) / 3);
+    const int          gaussianCount = (int) (numElements(means->shape) / 3);
     std::vector<float> colors((size_t) gaussianCount * 3);
     const float       *harmonicValues = harmonics->f32();
     for (size_t i = 0; i < colors.size(); ++i)
@@ -896,7 +972,7 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
     // Pivot depth for the orbit viewer: median Gaussian depth in view-0 camera space.
     {
         const float *pose = splat->cameraPoses.data();
-        float rotationT[9];
+        float        rotationT[9];
         for (int row = 0; row < 3; ++row)
         {
             for (int col = 0; col < 3; ++col)
@@ -904,7 +980,7 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
                 rotationT[row * 3 + col] = pose[col * 4 + row];
             }
         }
-        const float translationZ = -(rotationT[6] * pose[3] + rotationT[7] * pose[7] + rotationT[8] * pose[11]);
+        const float        translationZ = -(rotationT[6] * pose[3] + rotationT[7] * pose[7] + rotationT[8] * pose[11]);
         std::vector<float> depths;
         depths.reserve((size_t) gaussianCount);
         const float *meanValues = means->f32();
@@ -940,7 +1016,9 @@ JNIEXPORT jfloat JNICALL Java_com_vknn_chat_NativeLib_nativeSplatPivotDepth(JNIE
 }
 
 // Render from a row-major camera-to-world [16] using view-0 intrinsics. Returns packed ARGB
-// [height*width] for a Bitmap, or null on failure.
+// [renderHeight*renderWidth] for a Bitmap (packed on the GPU by the composite pass), or null on
+// failure. The normalized intrinsics scale by the rasterizer size, so the render resolution
+// tracks nativeSplatLoad's renderSize rather than the encoder input side.
 JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatRender(JNIEnv *env, jobject, jlong ptr, jfloatArray jcameraToWorld) {
     auto *splat = reinterpret_cast<Splat *>(ptr);
     if (!splat->rasterizer || splat->rasterizer->gaussians() == 0 || env->GetArrayLength(jcameraToWorld) != 16 || splat->intrinsics.size() < 9)
@@ -949,27 +1027,21 @@ JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatRender(JNIEn
     }
     float cameraToWorld[16];
     env->GetFloatArrayRegion(jcameraToWorld, 0, 16, cameraToWorld);
+    const int    renderWidth = splat->rasterizer->width(), renderHeight = splat->rasterizer->height();
     const float *view0K = splat->intrinsics.data();
-    const float  focalX = view0K[0] * splat->width, focalY = view0K[4] * splat->height;
-    const float  centerX = view0K[2] * splat->width, centerY = view0K[5] * splat->height;
-    std::vector<float> pixels((size_t) splat->height * splat->width * 3);
-    raster::Stats      stats;
-    if (splat->rasterizer->render(cameraToWorld, focalX, focalY, centerX, centerY, pixels.data(), &stats) != raster::Result::Ok)
+    const float  focalX = view0K[0] * renderWidth, focalY = view0K[4] * renderHeight;
+    const float  centerX = view0K[2] * renderWidth, centerY = view0K[5] * renderHeight;
+    static_assert(sizeof(jint) == sizeof(uint32_t), "jint is 32-bit");
+    std::vector<uint32_t> packed((size_t) renderHeight * renderWidth);
+    raster::Stats         stats;
+    if (splat->rasterizer->renderPacked(cameraToWorld, focalX, focalY, centerX, centerY, packed.data(), &stats) != raster::Result::Ok)
     {
         LOGE("splat: render failed (%u entries)", stats.entries);
         return nullptr;
     }
     LOGI("splat: rendered %u entries in %.1f ms", stats.entries, stats.msCount + stats.msMain);
-    std::vector<jint> packed((size_t) splat->height * splat->width);
-    for (size_t i = 0; i < packed.size(); ++i)
-    {
-        auto channel = [&](int c) -> uint32_t {
-            return (uint32_t) (uint8_t) (std::min(1.0f, std::max(0.0f, pixels[i * 3 + (size_t) c])) * 255 + 0.5f);
-        };
-        packed[i] = (jint) (0xff000000u | (channel(0) << 16) | (channel(1) << 8) | channel(2));
-    }
     jintArray out = env->NewIntArray((jsize) packed.size());
-    env->SetIntArrayRegion(out, 0, (jsize) packed.size(), packed.data());
+    env->SetIntArrayRegion(out, 0, (jsize) packed.size(), reinterpret_cast<const jint *>(packed.data()));
     return out;
 }
 

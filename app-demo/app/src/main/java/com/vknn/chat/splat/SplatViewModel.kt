@@ -50,8 +50,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
     private val settings = (app as VknnApp).settings
     private var handle: Long = 0L
     private var views = 8
-    private var renderWidth = 224
-    private var renderHeight = 224
+    private var encoderSide = 224 // square side of the encoder's input frames; set at load
     private var pendingFree = false
 
     // Capture accumulators (main-thread only: the analyzer executor is the main executor).
@@ -86,7 +85,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The square side (pixels) each captured frame must be scaled to; valid once loaded. */
-    fun captureSide(): Int = renderWidth
+    fun captureSide(): Int = encoderSide
 
     fun loadModel() {
         if (_ui.value.phase != SplatPhase.DOWNLOADED) return
@@ -104,17 +103,16 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.Default) {
                     val spec = ModelCatalog.DL3DV
                     val cache = File(getApplication<Application>().filesDir, "dl3dv.cache").absolutePath
-                    val loaded = NativeLib.nativeSplatLoad(store.file(spec).absolutePath, cache, "low", chosenBackend.engineName)
+                    val loaded = NativeLib.nativeSplatLoad(store.file(spec).absolutePath, cache, "low", chosenBackend.engineName, RENDER_SIDE)
                     if (loaded == 0L) throw RuntimeException("encoder load failed (is the device Vulkan-capable?)")
                     handle = loaded
                     val info = NativeLib.nativeSplatInfo(loaded) // {gaussians, views, height, width}
                     views = info[1]
-                    renderHeight = info[2]
-                    renderWidth = info[3]
+                    encoderSide = info[3]
                 }
                 if (store.isReady(ModelCatalog.DL3DV)) {
                     store.clearLoadError(ModelCatalog.DL3DV)
-                    _ui.value = _ui.value.copy(captureSide = renderWidth, backend = chosenBackend.engineName)
+                    _ui.value = _ui.value.copy(captureSide = encoderSide, backend = chosenBackend.engineName)
                     startFreshCapture()
                 } else {
                     freeHandle()
@@ -211,7 +209,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
                 pivotDepth = NativeLib.nativeSplatPivotDepth(loaded)
                 val gaussians = NativeLib.nativeSplatInfo(loaded)[0]
                 val pixels = NativeLib.nativeSplatRender(loaded, basePose) ?: return@withContext null
-                gaussians to Bitmap.createBitmap(pixels, renderWidth, renderHeight, Bitmap.Config.ARGB_8888)
+                gaussians to Bitmap.createBitmap(pixels, RENDER_SIDE, RENDER_SIDE, Bitmap.Config.ARGB_8888)
             }
             frameSlab = FloatArray(0)
             nativeBusy = false
@@ -247,7 +245,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
                 val pose = if (camera == OrbitCamera()) basePose
                 else SplatPose.orbitPose(basePose, pivotDepth, camera)
                 NativeLib.nativeSplatRender(loaded, pose)
-                    ?.let { Bitmap.createBitmap(it, renderWidth, renderHeight, Bitmap.Config.ARGB_8888) }
+                    ?.let { Bitmap.createBitmap(it, RENDER_SIDE, RENDER_SIDE, Bitmap.Config.ARGB_8888) }
             }
             renderJobActive = false
             nativeBusy = false
@@ -287,5 +285,9 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val FRAME_GAP_MS = 900L // pacing between grabs while the user arcs the phone
+
+        // Square side (pixels) of the rasterizer output. Independent of the encoder input side:
+        // the intrinsics are normalized, so the render sharpens without re-encoding.
+        const val RENDER_SIDE = 512
     }
 }

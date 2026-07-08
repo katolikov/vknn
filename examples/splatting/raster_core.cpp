@@ -86,12 +86,13 @@ namespace raster {
         radixScanPipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_scan", 1, sizeof(RadixScanPush));
         radixScatterPipe_ = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_scatter", 6, sizeof(RadixPush));
         rangesPipe_       = std::make_unique<vk::ComputePipeline>(context_, "raster_ranges", 3, sizeof(RangesPush));
-        compositePipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_composite", 4, sizeof(CompositePush));
+        compositePipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_composite", 5, sizeof(CompositePush));
 
-        // Counter is read back on the host between the two submissions, hence kReadback.
-        counterBuffer_    = std::make_unique<vk::Buffer>(context_, 4, vk::MemPref::kReadback);
-        tileRangesBuffer_ = std::make_unique<vk::Buffer>(context_, (size_t) tileCount_ * 2 * 4);
-        imageBuffer_      = std::make_unique<vk::Buffer>(context_, (size_t) height_ * width_ * 3 * 4, vk::MemPref::kReadback);
+        // Counter and image outputs are read back on the host, hence kReadback.
+        counterBuffer_     = std::make_unique<vk::Buffer>(context_, 4, vk::MemPref::kReadback);
+        tileRangesBuffer_  = std::make_unique<vk::Buffer>(context_, (size_t) tileCount_ * 2 * 4);
+        imageBuffer_       = std::make_unique<vk::Buffer>(context_, (size_t) height_ * width_ * 3 * 4, vk::MemPref::kReadback);
+        packedImageBuffer_ = std::make_unique<vk::Buffer>(context_, (size_t) height_ * width_ * 4, vk::MemPref::kReadback);
         // Stand-in for the duplicate pass's key/value bindings during the count-only pass, which
         // never writes them (CAP = 0).
         standInBuffer_ = std::make_unique<vk::Buffer>(context_, 4);
@@ -119,6 +120,14 @@ namespace raster {
     }
 
     Result Rasterizer::render(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, float *out, Stats *stats) {
+        return renderInternal(cameraToWorld, focalX, focalY, centerX, centerY, out, nullptr, stats);
+    }
+
+    Result Rasterizer::renderPacked(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, uint32_t *out, Stats *stats) {
+        return renderInternal(cameraToWorld, focalX, focalY, centerX, centerY, nullptr, out, stats);
+    }
+
+    Result Rasterizer::renderInternal(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, float *fp32Out, uint32_t *packedOut, Stats *stats) {
         if (!ok_ || gaussianCount_ == 0)
         {
             return Result::Error;
@@ -205,7 +214,9 @@ namespace raster {
             compositePush.dims[0] = height_;
             compositePush.dims[1] = width_;
             compositePush.dims[2] = tilesX_;
-            compositePipe_->dispatch(cmd, {geometryBuffer_->handle(), sortValuesBuffer_->handle(), tileRangesBuffer_->handle(), imageBuffer_->handle()}, &compositePush, sizeof(compositePush), (uint32_t) ((width_ + 15) / 16), (uint32_t) ((height_ + 15) / 16));
+            compositePush.dims[3] = packedOut ? 1 : 0; // composite store: fp32 planes or packed ARGB
+            compositePipe_->dispatch(
+                cmd, {geometryBuffer_->handle(), sortValuesBuffer_->handle(), tileRangesBuffer_->handle(), imageBuffer_->handle(), packedImageBuffer_->handle()}, &compositePush, sizeof(compositePush), (uint32_t) ((width_ + 15) / 16), (uint32_t) ((height_ + 15) / 16));
             runner_->end(cmd);
             double ms = runner_->submitAndWait(cmd);
             vkFreeCommandBuffers(context_.device(), runner_->pool(), 1, &cmd);
@@ -276,7 +287,14 @@ namespace raster {
         }
         lastEmittedCount_  = emittedCount;
         emittedCountKnown_ = true;
-        imageBuffer_->download(out, (size_t) height_ * width_ * 3 * 4);
+        if (fp32Out)
+        {
+            imageBuffer_->download(fp32Out, (size_t) height_ * width_ * 3 * 4);
+        }
+        if (packedOut)
+        {
+            packedImageBuffer_->download(packedOut, (size_t) height_ * width_ * 4);
+        }
         if (stats)
         {
             stats->entries = exactCountPass ? entryCount : emittedCount;

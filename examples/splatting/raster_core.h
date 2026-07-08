@@ -57,6 +57,11 @@ namespace raster {
         /// with pixel-unit intrinsics into out [height*width*3 fp32].
         Result render(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, float *out, Stats *stats = nullptr);
 
+        /// render() with a packed store: out [height*width] holds 0xAARRGGBB uints (Android
+        /// Bitmap ARGB_8888 IntArray order, alpha 0xff), quantized on the GPU exactly like the
+        /// fp32 path's round-half-up host pack: byte = trunc(clamp(c, 0, 1) * 255 + 0.5) in fp32.
+        Result renderPacked(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, uint32_t *out, Stats *stats = nullptr);
+
         int gaussians() const noexcept {
             return gaussianCount_;
         }
@@ -68,6 +73,10 @@ namespace raster {
         }
 
       private:
+        /// Shared implementation of render()/renderPacked(): exactly one of fp32Out/packedOut is
+        /// non-null and selects the composite store.
+        Result renderInternal(const float cameraToWorld[16], float focalX, float focalY, float centerX, float centerY, float *fp32Out, uint32_t *packedOut, Stats *stats);
+
         /// Grow the persisted sort buffers (ping-pong keys/values + radix histogram) to hold
         /// `capacity` entries; no-op when they are already large enough.
         void ensureSortCapacity(int64_t capacity);
@@ -89,7 +98,7 @@ namespace raster {
         // Per setGaussians (sized by the Gaussian count):
         std::unique_ptr<vknn::vk::Buffer> meansBuffer_, covariancesBuffer_, colorsBuffer_, opacitiesBuffer_, geometryBuffer_;
         // Per (height, width):
-        std::unique_ptr<vknn::vk::Buffer> counterBuffer_, standInBuffer_, tileRangesBuffer_, imageBuffer_;
+        std::unique_ptr<vknn::vk::Buffer> counterBuffer_, standInBuffer_, tileRangesBuffer_, imageBuffer_, packedImageBuffer_;
         // Sort working set, grow-only across renders (see ensureSortCapacity): the ping-pong
         // (key, value) buffer pairs and the radix digit histogram.
         std::unique_ptr<vknn::vk::Buffer> sortKeysBuffer_, sortValuesBuffer_, sortKeysPingBuffer_, sortValuesPingBuffer_, radixHistogramBuffer_;

@@ -55,8 +55,12 @@ object NativeLib {
 
     // --- Splat: YoNoSplat encoder + the shared Vulkan rasterizer (raster_core) ---
 
-    /** Load the encoder .vxm once; returns a native handle, or 0 on failure. */
-    external fun nativeSplatLoad(vxmPath: String, cacheFile: String, precision: String, backend: String): Long
+    /**
+     * Load the encoder .vxm once; returns a native handle, or 0 on failure. renderSize is the
+     * square rasterizer output side, independent of the encoder input side (<= 0 falls back to
+     * the encoder side).
+     */
+    external fun nativeSplatLoad(vxmPath: String, cacheFile: String, precision: String, backend: String, renderSize: Int): Long
 
     /** {gaussians, views, height, width}; gaussians is 0 until an encode succeeds. */
     external fun nativeSplatInfo(ptr: Long): IntArray
@@ -74,7 +78,7 @@ object NativeLib {
     /** Median Gaussian depth in view-0 camera space; the orbit viewer's look-at distance. */
     external fun nativeSplatPivotDepth(ptr: Long): Float
 
-    /** Render from a row-major camera-to-world [16]; packed ARGB [height*width], or null on failure. */
+    /** Render from a row-major camera-to-world [16]; packed ARGB [renderSize*renderSize], or null on failure. */
     external fun nativeSplatRender(ptr: Long, cameraToWorld: FloatArray): IntArray?
 
     external fun nativeSplatFree(ptr: Long)
