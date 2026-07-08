@@ -12,6 +12,14 @@ namespace vknn {
     struct TensorDesc {
         std::string  name;  ///< Unique tensor name; ops reference their inputs and outputs by this name.
         Shape        shape; ///< Logical NCHW shape. A dynamic dimension is encoded as -1.
+        /// Per-axis symbolic dimension names for a graph input, mirroring `shape`: entry `i` is the ONNX
+        /// `dim_param` string of axis `i` (a symbol like "past_sequence_length", or a compound expression
+        /// like "past_sequence_length + sequence_length") when that axis is dynamic, and empty when the
+        /// axis is a concrete extent. Empty (or shorter than `shape`) means "no symbol recorded". Set by
+        /// the ONNX importer for graph inputs and consumed by inferShapes to resolve dynamic dims from a
+        /// small set of dim bindings (Config::dimBindings / --dim). Compile-time only: it is never
+        /// serialized into a .vxm (a compiled model already has concrete shapes).
+        std::vector<std::string> dimParams;
         DType        dtype         = DType::Float32; ///< Element type of the logical tensor.
         TensorFormat format        = TensorFormat::NCHW; ///< Logical layout of the tensor (the IR is always NCHW).
         bool         isInput       = false; ///< True for a graph input (a value the caller supplies).

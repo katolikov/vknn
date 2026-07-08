@@ -20,35 +20,47 @@ The decode loop is host-driven around a single **fixed-max-context (fixed-C)** p
 one static bucket, compiled at a fixed past length `C`, that serves every step. The KV
 cache lives in the `past_key_values` buffers, not in a graph re-plan.
 
-Declare every dynamic axis with `--shape` (an undeclared dynamic non-batch axis is a
-hard error) and write a support report — the 0-CPU-fallback oracle. For a fixed context
-of `C = 256`, `attention_mask` is length `C + 1 = 257` (the `C` past slots plus the one
-new token), the past key/value tensors are `1 x 2 x 256 x 64`, and `input_ids` /
-`position_ids` are `1 x 1`:
+Bind the symbolic dimensions with `--dim` — the compiler resolves every one of the 51
+inputs from the graph's own `dim_param` structure, so a fixed context of `C = 256`
+(`sequence_length = 1`, `past_sequence_length = 256`, `batch_size` defaulted to 1) needs
+just two bindings. The compound `attention_mask` axis `past_sequence_length +
+sequence_length` evaluates to `257` (the `C` past slots plus the one new token), the past
+key/value tensors resolve to `1 x 2 x 256 x 64`, and `input_ids` / `position_ids` to
+`1 x 1`. Write a support report — the 0-CPU-fallback oracle:
 
 ```sh
 ./build.sh --convert    # builds build-host/vknn_compile
 
+build-host/vknn_compile qwen-onnx/model.onnx qwen_chat.vxm --fp16 -O1 \
+  --dim sequence_length=1 --dim past_sequence_length=256 \
+  --support-report qwen_chat_support.json
+```
+
+Run `vknn_compile qwen-onnx/model.onnx x.vxm --list-dims` first to print the free
+symbolic dims to bind. `--dim` replaces the older per-tensor form (still supported, and
+overriding `--dim` for an oddball tensor); the two produce a byte-identical `.vxm`:
+
+```sh
+# equivalent, one --shape per tensor (an undeclared dynamic non-batch axis is a hard error)
 shapes=( --shape input_ids=1x1 --shape attention_mask=1x257 --shape position_ids=1x1 )
 for i in $(seq 0 23); do
-  shapes+=( --shape past_key_values.$i.key=1x2x256x64 )
-  shapes+=( --shape past_key_values.$i.value=1x2x256x64 )
+  shapes+=( --shape past_key_values.$i.key=1x2x256x64 --shape past_key_values.$i.value=1x2x256x64 )
 done
-build-host/vknn_compile qwen-onnx/model.onnx qwen_chat.vxm --fp16 -O1 \
-  "${shapes[@]}" --support-report qwen_chat_support.json
+build-host/vknn_compile qwen-onnx/model.onnx qwen_chat.vxm --fp16 -O1 "${shapes[@]}"
 ```
 
 The full decoder compiles to **100% Vulkan** — the support report's `summary` reads
-`{"total": 931, "vulkan": 931, "reasons": {}}` (no `cpu` / `none` node). `examples/chat.cpp`
+`{"total": 932, "vulkan": 932, "reasons": {}}` (no `cpu` / `none` node). `examples/chat.cpp`
 reads `kv_heads`, `C`, and `head_dim` back from `past_key_values.0.key` at load, so the
 decode loop stays model-agnostic.
 
 To benchmark separately, compile a prefill-shaped plan (time-to-first-token) and a
-decode-step plan (time-per-output-token):
+decode-step plan (time-per-output-token) — each is just a different `past_sequence_length`
+(and `sequence_length`) binding:
 
 ```sh
-# prefill: seq=32, past=0    -> input_ids/position_ids 1x32, attention_mask 1x32, past 1x2x0x64
-# decode : seq=1,  past=64   -> input_ids/position_ids 1x1,  attention_mask 1x65, past 1x2x64x64
+# prefill: --dim sequence_length=32 --dim past_sequence_length=0   -> mask 1x32,  past 1x2x0x64
+# decode : --dim sequence_length=1  --dim past_sequence_length=64  -> mask 1x65,  past 1x2x64x64
 ```
 
 ## 2. Build the runner and push it to a device
