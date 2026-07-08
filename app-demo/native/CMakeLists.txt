@@ -21,3 +21,6 @@ add_library(vknnchat SHARED ${CMAKE_CURRENT_SOURCE_DIR}/vknn_jni.cpp)
 target_link_libraries(vknnchat PRIVATE
   "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>"
   log android vulkan)
+# Align load segments to 16 KB so the .so loads on 16-KB-page-size devices (Android 15+). NDK r27 still
+# defaults to 4 KB, which trips the "ELF alignment check failed" app-compatibility warning on newer Galaxy.
+target_link_options(vknnchat PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-z,common-page-size=16384")

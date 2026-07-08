@@ -35,10 +35,11 @@ android {
     buildFeatures {
         compose = true
     }
-    // Keep the prebuilt libvknnchat.so uncompressed and don't strip it (already release-built).
+    // Store the prebuilt libvknnchat.so uncompressed and page-aligned (useLegacyPackaging = false) so the
+    // loader mmaps it directly — required for 16-KB-page-size devices; the .so is already release-built.
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
     }
     testOptions {
