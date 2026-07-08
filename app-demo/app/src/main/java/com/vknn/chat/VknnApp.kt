@@ -3,6 +3,7 @@ package com.vknn.chat
 import android.app.ActivityManager
 import android.app.Application
 import com.vknn.chat.model.BackendSetting
+import com.vknn.chat.model.ModelResidency
 import com.vknn.chat.model.ModelStore
 import com.vknn.chat.model.PromptSettings
 
@@ -15,12 +16,15 @@ class VknnApp : Application() {
         private set
     lateinit var prompts: PromptSettings
         private set
+    lateinit var residency: ModelResidency
+        private set
 
     override fun onCreate() {
         super.onCreate()
         models = ModelStore(this)
         settings = BackendSetting(this)
         prompts = PromptSettings(this)
+        residency = ModelResidency()
     }
 
     /** Physical device RAM; the CPU-backend admission check budgets against it. */

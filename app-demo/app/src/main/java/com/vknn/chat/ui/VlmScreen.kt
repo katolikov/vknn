@@ -42,6 +42,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Eject
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -94,6 +95,7 @@ private const val SuggestionCardMaxHeightFraction = 0.35f
 fun VlmScreen(
     ui: VlmUiState,
     onLoad: () -> Unit,
+    onUnload: () -> Unit,
     onCapture: (Bitmap) -> Unit,
     onCancel: () -> Unit,
     onRetake: () -> Unit,
@@ -127,7 +129,12 @@ fun VlmScreen(
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
-        VlmTopBar(showEditPrompt = true, onEditPrompt = { editingQuestion = true })
+        VlmTopBar(
+            showEditPrompt = true,
+            onEditPrompt = { editingQuestion = true },
+            showUnload = ui.phase == VlmPhase.CAMERA || ui.phase == VlmPhase.ANSWERING,
+            onUnload = onUnload,
+        )
         when (ui.phase) {
             VlmPhase.MISSING -> VlmSetup(
                 title = "Model not downloaded",
@@ -179,7 +186,7 @@ internal fun validateCoachQuestion(
 }
 
 @Composable
-private fun VlmTopBar(showEditPrompt: Boolean, onEditPrompt: () -> Unit) {
+private fun VlmTopBar(showEditPrompt: Boolean, onEditPrompt: () -> Unit, showUnload: Boolean, onUnload: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -192,6 +199,10 @@ private fun VlmTopBar(showEditPrompt: Boolean, onEditPrompt: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text("SmolVLM2 2.2B", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text("camera coach — on-device", color = TextSecondary, fontSize = 11.sp)
+        }
+        if (showUnload) {
+            TopBarIconButton(Icons.Filled.Eject, "unload model", onUnload)
+            Spacer(Modifier.width(8.dp))
         }
         if (showEditPrompt) {
             Box(
