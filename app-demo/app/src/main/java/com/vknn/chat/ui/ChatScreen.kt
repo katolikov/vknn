@@ -38,6 +38,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -184,8 +185,22 @@ private fun TempCell(mod: Modifier, temp: Float, onClick: () -> Unit) {
 @Composable
 private fun MessageList(messages: List<Msg>, mod: Modifier) {
     val state = rememberLazyListState()
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
-        if (messages.isNotEmpty()) state.animateScrollToItem(messages.size - 1)
+    // True only when the last item's bottom is on screen. Auto-follow the stream only while stuck at the
+    // bottom, so scrolling up to read earlier text mid-generation is not yanked back each token; scroll to
+    // the item's END (Int.MAX_VALUE offset, clamped) so a message taller than the viewport shows its newest
+    // text at the bottom instead of pinning to its top.
+    val atBottom by remember {
+        derivedStateOf {
+            val info = state.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
+            last.index >= messages.lastIndex && last.offset + last.size <= info.viewportEndOffset + 4
+        }
+    }
+    LaunchedEffect(messages.size) { // a new message always jumps to the bottom
+        if (messages.isNotEmpty()) state.scrollToItem(messages.lastIndex, Int.MAX_VALUE)
+    }
+    LaunchedEffect(messages.lastOrNull()?.text) { // streaming text follows the bottom only when stuck there
+        if (atBottom && messages.isNotEmpty()) state.scrollToItem(messages.lastIndex, Int.MAX_VALUE)
     }
     LazyColumn(
         mod.fillMaxWidth().padding(horizontal = 14.dp),
