@@ -1,5 +1,6 @@
 // Tensor element types.
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -235,5 +236,41 @@ namespace vknn {
         }
     }
 #endif
+
+    /// Saturate a value to the largest finite fp16 magnitude before an fp16-narrowing conversion:
+    /// finite and infinite values clamp to +/-65504, NaN passes through. Mirrors the engine's other
+    /// two fp16 entry points — GPU activation stores (shaders/store16.glsl vxSatF16) and imported
+    /// constants (clampToFp16Range in src/import/convert_fp16.cpp) — so a graph input packed to fp16
+    /// or a weight uploaded fp16 never introduces an infinity the compute path itself would refuse
+    /// to produce (an inf then feeds 0*inf = NaN and poisons the output). The std::min/std::max pair
+    /// preserves NaN: both comparisons are false for a NaN operand, so the value passes unchanged.
+    inline float saturateToFp16Range(float v) noexcept {
+        return std::min(std::max(v, -65504.0f), 65504.0f);
+    }
+
+    /// floatToHalf() of the fp16-range-saturated value: the boundary conversion for data entering
+    /// fp16 COMPUTE storage. Declared-dtype I/O conversion (readbackOutput) keeps the plain
+    /// floatToHalf() IEEE overflow-to-infinity instead — an fp16-declared OUTPUT reports the same
+    /// bytes ONNX Runtime would.
+    inline fp16_t floatToHalfSat(float v) noexcept {
+        return floatToHalf(saturateToFp16Range(v));
+    }
+
+    /// Bulk floatToHalfSat() over a contiguous range: saturates a cache-resident chunk, then narrows
+    /// it through floatToHalfBulk(), so the rounding stays bit-identical to the scalar path and the
+    /// NEON fast path is reused rather than duplicated.
+    inline void floatToHalfSatBulk(const float *src, fp16_t *dst, int64_t n) noexcept {
+        constexpr int64_t kChunkElems = 256;
+        float             clamped[kChunkElems];
+        for (int64_t i = 0; i < n; i += kChunkElems)
+        {
+            const int64_t m = std::min<int64_t>(kChunkElems, n - i);
+            for (int64_t j = 0; j < m; ++j)
+            {
+                clamped[j] = saturateToFp16Range(src[i + j]);
+            }
+            floatToHalfBulk(clamped, dst + i, m);
+        }
+    }
 
 } // namespace vknn

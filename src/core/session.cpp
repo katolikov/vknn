@@ -479,6 +479,10 @@ namespace vknn {
             // that would overflow a value above 65504 to +inf. Pin the Gather index chains to fp32 before
             // markFp32 so the buffer planner sizes them 4-byte and their producers run in fp32.
             pinGatherIndexFp32(graph_);
+            // GridSample grids hold normalized sampling coordinates whose fp16 storage quantization
+            // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
+            // the same way; the GridSample shader decodes the grid at its storage precision.
+            pinGridSampleGridFp32(graph_);
             // Selective fp32 storage. Precision::Normal ("normal") uses the built-in geometry-tail preset
             // when fp32Tensors is empty; an explicit fp32Tensors always wins.
             std::string fp32Marks = cfg_.fp32Tensors;
@@ -782,6 +786,34 @@ namespace vknn {
         }
 
         VKNN_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size() << " nodes [bucket '" << key << "']";
+        // One un-throttled fallback summary per bucket: the per-node warnings above are throttled to
+        // 2 per op type, so a model with 50 CPU GridSamples prints 2 warnings — without this line a
+        // user can believe the whole graph runs on the requested backend while a divergent (or slow)
+        // CPU implementation quietly handles part of it. Counts per op type plus the first few node
+        // names; the full list stays available via Session::fallbackReasons() and
+        // `vknn_compile --support-report`.
+        if (!bucket.fallbackReasons.empty() && cfg_.backend != BackendKind::Cpu)
+        {
+            std::map<std::string, int> perOp;
+            for (const FallbackReason &fr: bucket.fallbackReasons)
+            {
+                ++perOp[fr.op];
+            }
+            std::string ops;
+            for (const auto &kv: perOp)
+            {
+                ops += (ops.empty() ? "" : ", ") + kv.first + " x" + std::to_string(kv.second);
+            }
+            std::string    first;
+            constexpr int  kNamedNodes = 3;
+            for (int i = 0; i < kNamedNodes && i < (int) bucket.fallbackReasons.size(); ++i)
+            {
+                const FallbackReason &fr = bucket.fallbackReasons[(size_t) i];
+                first += (first.empty() ? "" : "; ") + fr.node + " (" + fr.reason + ")";
+            }
+            VKNN_INFO << bucket.fallbackReasons.size() << " node(s) fall back to CPU [bucket '" << key << "']: " << ops << " -- first: " << first
+                      << (bucket.fallbackReasons.size() > kNamedNodes ? " ... (full list: Session::fallbackReasons(), vknn_compile --support-report)" : "");
+        }
         return bucket;
     }
 
@@ -1330,19 +1362,45 @@ namespace vknn {
     // this single check once its bucket is selected; an empty caller shape adopts the bucket's shape
     // and always passes. An unresolved bucket shape (element count <= 0) accepts any caller shape,
     // mirroring the fully-dynamic escape in the vector<float> overload.
+    // Every run() input shape passes through this single check once its bucket is selected; an empty
+    // caller shape adopts the bucket's shape and always passes. An unresolved bucket shape (element
+    // count <= 0) accepts any caller shape, mirroring the fully-dynamic escape in the vector<float>
+    // overload. A DIFFERENT caller shape is judged by boundShapeCompatible (nchw.h): the loose
+    // footprint-fit dynamic-reshape contract when only CPU segments consume the input (CPU ops
+    // recompute geometry from the runtime shape — a session planned at x=[2,6] runs a [2,8] bind),
+    // or byte-identical-packing when a GPU segment consumes it (its pack layout, push constants and
+    // dispatch geometry are frozen from the planned shape, so a shape that packs differently — even
+    // at an equal padded footprint — silently misreads).
     Status Session::validateInputShape(const PlanBucket &bucket, TensorId id, const Shape &got) const {
         const TensorDesc &d = bucket.graph->tensors[id];
         if (got.empty() || got == d.shape || numElements(d.shape) <= 0)
         {
             return Status::Ok;
         }
-        // Stored footprint under the tensor's planned packing: flat tensors store dense row-major
-        // elements, everything else packs NC4HW4 (channels padded to blocks of four). The element
-        // size is the same for both shapes, so equal stored element counts mean equal byte counts.
-        TensorFormat fmt = d.gpuFlat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-        if (formatElems(fmt, NCHW::from(got)) != formatElems(fmt, NCHW::from(d.shape)))
+        bool gpuConsumed = false;
+        for (const auto &seg: bucket.segments)
         {
-            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not fit the planned shape " << shapeStr(d.shape);
+            if (!seg->backend || seg->backend->kind() == BackendKind::Cpu)
+            {
+                continue;
+            }
+            for (TensorId t: seg->boundaryInputs)
+            {
+                if (t == id)
+                {
+                    gpuConsumed = true;
+                    break;
+                }
+            }
+            if (gpuConsumed)
+            {
+                break;
+            }
+        }
+        if (!boundShapeCompatible(got, d.shape, d.gpuFlat, gpuConsumed))
+        {
+            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not " << (gpuConsumed ? "pack like" : "fit") << " the planned shape " << shapeStr(d.shape)
+                       << (gpuConsumed ? " (a GPU-consumed input must bind the planned shape, or an N/C/spatial-product-preserving reshape of it)" : "");
             return Status::InvalidArgument;
         }
         return Status::Ok;

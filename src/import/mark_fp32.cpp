@@ -123,6 +123,15 @@ namespace vknn {
                 {
                     continue;
                 }
+                // An fp16 GridSample decodes its grid (input 1) at the grid's OWN storage precision
+                // (gridsample_fp16.comp reads raw words per the GRID_FP32 spec constant), so a grid
+                // pinned fp32 by pinGridSampleGridFp32 must not be narrowed back to fp16 -- that would
+                // re-quantize the sampling coordinates the pin exists to protect. An fp32 GridSample
+                // (nodeFp32) keeps the bridge: gridsample.comp reads the grid as float only.
+                if (nd.type == OpType::GridSample && inIdx == 1 && !nodeFp32)
+                {
+                    continue;
+                }
                 if (g.desc(in).storeFp32 == nodeFp32)
                 {
                     continue;
@@ -212,6 +221,64 @@ namespace vknn {
         if (pinned)
         {
             VKNN_INFO << "pinGatherIndexFp32: pinned " << pinned << " index tensor(s) to fp32";
+        }
+    }
+
+    void pinGridSampleGridFp32(Graph &g) {
+        // Last writer of each tensor, so the grid can be traced back toward its source.
+        std::vector<int> producer(g.tensors.size(), -1);
+        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        {
+            for (TensorId o: g.nodes[ni].outputs)
+            {
+                if (o != kNoTensor)
+                {
+                    producer[(size_t) o] = ni;
+                }
+            }
+        }
+        int pinned = 0;
+        for (const auto &nd: g.nodes)
+        {
+            if (nd.type != OpType::GridSample || nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
+            {
+                continue;
+            }
+            // The grid holds normalized sampling COORDINATES: fp16 storage quantizes them at ~4.9e-4
+            // near |g|=1, which drifts the sample point by up to ~0.5 px at 1920-wide inputs — a direct
+            // warp-quality (UV) loss. A constant grid is uploaded fp32 by the op itself, so only a
+            // runtime grid (optical flow) needs pinning. Walk it up through pure passthrough producers
+            // (the ConvertLayout the flat pass splices in) pinning every hop, but only while the hop is
+            // FLAT: the NC4HW4 conv family is hand-written fp16-only, so pinning a conv output would
+            // request a non-existent fp32 kernel (the frontier walk in markFp32 bridges the boundary
+            // with a ConvertDtype instead). Mirrors pinGatherIndexFp32.
+            TensorId t = nd.inputs[1];
+            for (int hop = 0; t != kNoTensor && !g.isInitializer(t) && g.desc(t).gpuFlat && hop < 64; ++hop)
+            {
+                if (g.desc(t).storeFp32)
+                {
+                    break; // already pinned (a shared grid, or a prior hop)
+                }
+                g.desc(t).storeFp32 = true;
+                ++pinned;
+                int p = producer[(size_t) t];
+                if (p < 0)
+                {
+                    break; // graph-input boundary: pinned, nothing upstream to follow
+                }
+                const Node &pn = g.nodes[(size_t) p];
+                if (pn.type == OpType::ConvertLayout && pn.inputs.size() == 1)
+                {
+                    t = pn.inputs[0]; // same values, different layout -- keep pinning toward the source
+                } else
+                {
+                    break; // a real op computes the grid; its (now-pinned) output runs fp32 via nodeFp32
+                }
+            }
+        }
+        if (pinned)
+        {
+            VKNN_INFO << "pinGridSampleGridFp32: pinned " << pinned << " grid tensor(s) to fp32";
         }
     }
 

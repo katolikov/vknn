@@ -218,6 +218,11 @@ namespace vknn {
         for (size_t ni = 0; ni < g.nodes.size(); ++ni)
         {
             Node &nd = g.nodes[ni];
+            // Interleave the forward shape rule with folding: a target vector folded earlier in THIS
+            // walk resolves this node's shape now, which lets a Shape() later in the walk fold in the
+            // same pass. Without this each fold/infer alternation advanced one dependent block per
+            // round, so a deep encoder needed dozens of full-graph rounds to converge.
+            inferNodeShape(g, nd);
             if (!foldable(nd))
             {
                 continue;

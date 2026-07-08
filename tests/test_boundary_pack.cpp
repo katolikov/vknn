@@ -73,11 +73,15 @@ namespace {
                         if (fp16)
                         {
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
-                            vst1_f16(reinterpret_cast<__fp16 *>(static_cast<fp16_t *>(dst) + base), vcvt_f16_f32(vld1q_f32(t)));
+                            // Mirrors packNc4's saturating NEON convert (clamp to +/-65504; FMIN/FMAX
+                            // propagate a NaN lane, matching the scalar path).
+                            float32x4_t gathered = vld1q_f32(t);
+                            gathered             = vmaxq_f32(vminq_f32(gathered, vdupq_n_f32(65504.0f)), vdupq_n_f32(-65504.0f));
+                            vst1_f16(reinterpret_cast<__fp16 *>(static_cast<fp16_t *>(dst) + base), vcvt_f16_f32(gathered));
 #else
                             for (int l = 0; l < 4; ++l)
                             {
-                                static_cast<fp16_t *>(dst)[base + l] = floatToHalf(t[l]);
+                                static_cast<fp16_t *>(dst)[base + l] = floatToHalfSat(t[l]);
                             }
 #endif
                         } else
@@ -181,7 +185,7 @@ TEST(BoundaryPack, FlatFp16ConvertsMatchScalarAtAnyThreadCount) {
         std::vector<fp16_t> want((size_t) elems);
         for (int64_t i = 0; i < elems; ++i)
         {
-            want[(size_t) i] = floatToHalf(src[(size_t) i]);
+            want[(size_t) i] = floatToHalfSat(src[(size_t) i]);
         }
         std::vector<float> wantBack((size_t) elems);
         for (int64_t i = 0; i < elems; ++i)

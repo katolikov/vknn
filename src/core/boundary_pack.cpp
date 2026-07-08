@@ -1,8 +1,10 @@
 // See boundary_pack.h. The NC4HW4 loops partition over the (n, channel-block/channel, h) row
 // product and keep the innermost w loop serial per row, so each parallel chunk executes the same
 // per-element expressions, in the same order, as the serial nest — the byte-oracle contract the
-// host test pins. The flat converts chunk the contiguous range; floatToHalfBulk/halfToFloatBulk are
-// bit-identical to their scalar per-element forms, so chunk boundaries cannot change any value.
+// host test pins. The flat converts chunk the contiguous range; floatToHalfSatBulk/halfToFloatBulk
+// are bit-identical to their scalar per-element forms, so chunk boundaries cannot change any value.
+// fp16 packs saturate out-of-range values to +/-65504 (matching GPU activation stores and imported
+// constants) instead of overflowing to +/-inf.
 #include "core/boundary_pack.h"
 #include "backend/cpu/parallel.h"
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
@@ -13,7 +15,9 @@ namespace vknn { namespace boundary {
 
     void packFlatFp16(const float *src, fp16_t *dst, int64_t elems, int threads) {
         cpu::parallelFor(threads, 0, elems, cpu::kMinChunkOps, [&](int64_t begin, int64_t end) {
-            floatToHalfBulk(src + begin, dst + begin, end - begin);
+            // Saturating convert: a caller value beyond +/-65504 packs as the max finite fp16 (like
+            // every GPU activation store and imported constant), never as +/-inf.
+            floatToHalfSatBulk(src + begin, dst + begin, end - begin);
         });
     }
 
@@ -50,12 +54,16 @@ namespace vknn { namespace boundary {
                             }
                         }
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
-                        // convert the 4 gathered channels to fp16 in one instruction
-                        vst1_f16(reinterpret_cast<__fp16 *>(out + base), vcvt_f16_f32(vld1q_f32(t)));
+                        // Saturate to +/-65504 (FMIN/FMAX propagate a NaN lane, so NaN passes like
+                        // the scalar path), then convert the 4 gathered channels to fp16 in one
+                        // instruction.
+                        float32x4_t gathered = vld1q_f32(t);
+                        gathered             = vmaxq_f32(vminq_f32(gathered, vdupq_n_f32(65504.0f)), vdupq_n_f32(-65504.0f));
+                        vst1_f16(reinterpret_cast<__fp16 *>(out + base), vcvt_f16_f32(gathered));
 #else
                         for (int l = 0; l < 4; ++l)
                         {
-                            out[base + l] = floatToHalf(t[l]);
+                            out[base + l] = floatToHalfSat(t[l]);
                         }
 #endif
                     }
