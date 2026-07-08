@@ -1,4 +1,12 @@
 #include "vk_backend.h"
+#include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
+#include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
+#include "core/vk_gates.h"        // vkNodeGate/vkKernelDeclared (shared capability model)
+#include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
+#include "ops/boundary_convert.h"
+#include "vknn/dtype.h"
+#include "vknn/logging.h"
+#include "vknn/profiler.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -7,15 +15,6 @@
 #include <set>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
-#include <arm_neon.h>
-#endif
-#include "core/vk_gates.h" // vkNodeGate/vkKernelDeclared (shared capability model)
-#include "import/passes.h" // readI64Param (raster-core view-eligibility diagnostic)
-#include "ops/boundary_convert.h"
-#include "vknn/dtype.h"
-#include "vknn/logging.h"
-#include "vknn/profiler.h"
 
 namespace vknn {
 
@@ -395,7 +394,7 @@ namespace vknn {
         // count not divisible by four pads the final block's unused lanes with zero on pack, and those
         // padding lanes are dropped on unpack. The flat path skips all of this: a gpuFlat tensor stores
         // plain NCHW row-major, matching host layout byte-for-byte (fp16 conversion aside).
-        static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false) {
+        static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false, int threads = 1) {
             // An int64 boundary input (a shape/index tensor produced by a CPU op, e.g. the Cast-from-int64
             // shape path) has int64 host bytes. The device carries it as compute-precision float, so decode
             // the int64 lanes into a scratch fp32 vector once and pack from that; the magnitudes are small
@@ -415,81 +414,22 @@ namespace vknn {
             }
             if (flat)
             { // host NCHW row-major == the flat device buffer; straight copy (+ fp16 convert)
-                int64_t      n   = numElements(rt.shape);
-                const float *src = hostSrc;
+                int64_t n = numElements(rt.shape);
                 if (fp16)
                 {
-                    floatToHalfBulk(src, reinterpret_cast<fp16_t *>(buf->host()), n);
+                    boundary::packFlatFp16(hostSrc, reinterpret_cast<fp16_t *>(buf->host()), n, threads);
                 } else
                 {
-                    std::memcpy(buf->host(), src, (size_t) n * 4);
+                    std::memcpy(buf->host(), hostSrc, (size_t) n * 4);
                 }
                 return;
             }
-            NCHW         x   = NCHW::from(rt.shape);
-            int64_t      Cb  = cBlocks(x.c);
-            const float *src = hostSrc;
-            if (fp16)
-            {
-                fp16_t *dst = reinterpret_cast<fp16_t *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t cb = 0; cb < Cb; ++cb)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t base = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4;
-                                float   t[4] = {0, 0, 0, 0};
-                                for (int l = 0; l < 4; ++l)
-                                {
-                                    int64_t c = cb * 4 + l;
-                                    if (c < x.c)
-                                    {
-                                        t[l] = src[((n * x.c + c) * x.h + h) * x.w + w];
-                                    }
-                                }
-#if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
-                                // convert the 4 gathered channels to fp16 in one instruction
-                                vst1_f16(reinterpret_cast<__fp16 *>(dst + base), vcvt_f16_f32(vld1q_f32(t)));
-#else
-                                for (int l = 0; l < 4; ++l)
-                                {
-                                    dst[base + l] = floatToHalf(t[l]);
-                                }
-#endif
-                            }
-                        }
-                    }
-                }
-            } else
-            {
-                float *dst = reinterpret_cast<float *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t cb = 0; cb < Cb; ++cb)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t base = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4;
-                                for (int l = 0; l < 4; ++l)
-                                {
-                                    int64_t c     = cb * 4 + l;
-                                    dst[base + l] = (c < x.c) ? src[((n * x.c + c) * x.h + h) * x.w + w] : 0.f;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            boundary::packNc4(hostSrc, buf->host(), NCHW::from(rt.shape), fp16, threads);
         }
         // Inverse of packToBuffer: gather each logical channel c back out of NC4HW4 by its block cb = c/4
         // and lane l = c%4, so the source index is `sidx = (((n*Cb + cb)*H + h)*W + w) * 4 + l`. Always
         // produces fp32 host data (rt.dtype set to Float32); readbackOutput does any final dtype convert.
-        static void unpackFromBuffer(vk::Buffer *buf, RtTensor &rt, bool fp16, bool flat = false) {
+        static void unpackFromBuffer(vk::Buffer *buf, RtTensor &rt, bool fp16, bool flat = false, int threads = 1) {
             if (flat)
             { // flat device buffer == host NCHW row-major; straight copy (+ fp16 convert)
                 int64_t n = numElements(rt.shape);
@@ -498,7 +438,7 @@ namespace vknn {
                 float *dst = rt.host.f32();
                 if (fp16)
                 {
-                    halfToFloatBulk(reinterpret_cast<const fp16_t *>(buf->host()), dst, n);
+                    boundary::unpackFlatFp16(reinterpret_cast<const fp16_t *>(buf->host()), dst, n, threads);
                 } else
                 {
                     std::memcpy(dst, buf->host(), (size_t) n * 4);
@@ -506,48 +446,10 @@ namespace vknn {
                 rt.hostValid = true;
                 return;
             }
-            NCHW    x  = NCHW::from(rt.shape);
-            int64_t Cb = cBlocks(x.c);
+            NCHW x = NCHW::from(rt.shape);
             rt.host.resizeElems(x.elems(), DType::Float32);
-            rt.dtype   = DType::Float32;
-            float *dst = rt.host.f32();
-            if (fp16)
-            {
-                const fp16_t *src = reinterpret_cast<const fp16_t *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t c = 0; c < x.c; ++c)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t cb = c / 4, l = c % 4;
-                                int64_t sidx                             = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4 + l;
-                                dst[((n * x.c + c) * x.h + h) * x.w + w] = halfToFloat(src[sidx]);
-                            }
-                        }
-                    }
-                }
-            } else
-            {
-                const float *src = reinterpret_cast<const float *>(buf->host());
-                for (int64_t n = 0; n < x.n; ++n)
-                {
-                    for (int64_t c = 0; c < x.c; ++c)
-                    {
-                        for (int64_t h = 0; h < x.h; ++h)
-                        {
-                            for (int64_t w = 0; w < x.w; ++w)
-                            {
-                                int64_t cb = c / 4, l = c % 4;
-                                int64_t sidx                             = ((((n * Cb + cb) * x.h + h) * x.w) + w) * 4 + l;
-                                dst[((n * x.c + c) * x.h + h) * x.w + w] = src[sidx];
-                            }
-                        }
-                    }
-                }
-            }
+            rt.dtype = DType::Float32;
+            boundary::unpackNc4(buf->host(), rt.host.f32(), x, fp16, threads);
             rt.hostValid = true;
         }
 
@@ -556,7 +458,7 @@ namespace vknn {
         // readbackOutput would do. Only valid for terminal graph outputs: inter-segment boundaries are
         // re-uploaded by packToBuffer, which reads rt.host as fp32, so they keep the fp32 unpack. rt.dtype
         // is set to what rt.host now holds so readbackOutput takes its dst==rt.dtype memcpy fast path.
-        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared) {
+        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared, int threads = 1) {
             int64_t n = numElements(rt.shape);
             if (deviceFp16 && declared == DType::Float16)
             { // fp16 device -> fp16 output: straight copy, no conversion
@@ -571,7 +473,7 @@ namespace vknn {
             } else if (declared == DType::Float16)
             { // fp32 device -> fp16 output
                 rt.host.resizeElems(n, DType::Float16);
-                floatToHalfBulk(reinterpret_cast<const float *>(buf->host()), reinterpret_cast<fp16_t *>(rt.host.bytes.data()), n);
+                boundary::packFlatFp16(reinterpret_cast<const float *>(buf->host()), reinterpret_cast<fp16_t *>(rt.host.bytes.data()), n, threads);
                 rt.dtype = DType::Float16;
             } else
             { // integer / other declared dtype: decode to fp32, readbackOutput does the final convert
@@ -579,7 +481,7 @@ namespace vknn {
                 float *d = rt.host.f32();
                 if (deviceFp16)
                 {
-                    halfToFloatBulk(reinterpret_cast<const fp16_t *>(buf->host()), d, n);
+                    boundary::unpackFlatFp16(reinterpret_cast<const fp16_t *>(buf->host()), d, n, threads);
                 } else
                 {
                     std::memcpy(d, buf->host(), (size_t) n * 4);
@@ -1620,10 +1522,10 @@ namespace vknn {
                         }
                         // A storeFp32 boundary (a pinned Gather index) keeps its 4-byte fp32 buffer, so an
                         // integer index above the fp16 range is not narrowed to +inf at upload.
-                        VulkanBackend::packToBuffer(bit->second.get(), f32, g_.desc(tid).storeFp32 ? false : useFp16_, flat);
+                        VulkanBackend::packToBuffer(bit->second.get(), f32, g_.desc(tid).storeFp32 ? false : useFp16_, flat, cpu::threadCount(&cfg_));
                     } else
                     {
-                        VulkanBackend::packToBuffer(bit->second.get(), rt, g_.desc(tid).storeFp32 ? false : useFp16_, flat);
+                        VulkanBackend::packToBuffer(bit->second.get(), rt, g_.desc(tid).storeFp32 ? false : useFp16_, flat, cpu::threadCount(&cfg_));
                     }
                     rt.deviceValid  = true;
                     rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
@@ -1677,10 +1579,10 @@ namespace vknn {
                     bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
                     if (flat && graphOut.count(tid))
                     { // terminal graph output: convert straight to the declared dtype (skip fp32 round trip)
-                        VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype);
+                        VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
                     } else
                     {
-                        VulkanBackend::unpackFromBuffer(bit->second.get(), rt, deviceFp16, flat);
+                        VulkanBackend::unpackFromBuffer(bit->second.get(), rt, deviceFp16, flat, cpu::threadCount(&cfg_));
                     }
                 }
                 // else: the GPU wrote device-native bytes straight into the caller's dma-buf; caller reads it.
@@ -1849,7 +1751,7 @@ namespace vknn {
                 return false;
             }
             rt.shape = rt.shape.empty() ? g_.tensors[id].shape : rt.shape;
-            VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[id].storeFp32, g_.desc(id).gpuFlat);
+            VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[id].storeFp32, g_.desc(id).gpuFlat, cpu::threadCount(&cfg_));
             return true;
         }
 
