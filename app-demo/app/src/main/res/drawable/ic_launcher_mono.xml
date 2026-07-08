@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon (monochrome) layer: the V silhouette alone — the system supplies the tint, so the
+     layer must be a single flat shape with no gradients or accent dots. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M31,34 L43,34 L54,61 L65,34 L77,34 L60,76 L48,76 Z" />
+</vector>

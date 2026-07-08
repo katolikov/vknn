@@ -183,6 +183,111 @@ TEST(VxmBuckets, SharedPoolNotDuplicated) {
     EXPECT_LT(twoSz - oneSz, weightBytes / 2);
 }
 
+// Buckets from DIFFERENT source graphs (disjoint input/weight names) round-trip in one container:
+// each bucket keeps its own input name, shape, and weight bytes. This is the multi-graph .vxm a
+// vision tower + decoder ship as.
+TEST(VxmBuckets, MultiGraphBucketsRoundTrip) {
+    Graph gx = makeGraph({1, 3, 4, 4}, {1.f, 2.f});
+    Graph gp = makeGraph({1, 3, 384, 384}, {9.f, 8.f, 7.f});
+    // Rename gp's IO/weight so the two buckets are genuinely different graphs.
+    gp.tensors[gp.inputs[0]].name  = "pix";
+    gp.tensors[gp.outputs[0]].name = "emb";
+    gp.tensors[gp.find("w")].name  = "wp";
+
+    std::string path = tmp("vxm_multi_graph.vxm");
+    ASSERT_TRUE(saveGraphBinBuckets({gx, gp}, {"gx", "gp"}, path));
+
+    std::vector<Graph>       buckets;
+    std::vector<std::string> names;
+    ASSERT_TRUE(loadGraphBinBuckets(buckets, names, path));
+    std::remove(path.c_str());
+
+    ASSERT_EQ(buckets.size(), 2u);
+    EXPECT_EQ(buckets[0].desc(buckets[0].inputs[0]).name, "x");
+    EXPECT_EQ(buckets[1].desc(buckets[1].inputs[0]).name, "pix");
+    EXPECT_EQ(buckets[1].desc(buckets[1].inputs[0]).shape, (Shape{1, 3, 384, 384}));
+    TensorId wp = buckets[1].find("wp");
+    ASSERT_NE(wp, kNoTensor);
+    EXPECT_EQ(initFloats(buckets[1], wp), (std::vector<float>{9.f, 8.f, 7.f}));
+    TensorId wx = buckets[0].find("w");
+    ASSERT_NE(wx, kNoTensor);
+    EXPECT_EQ(initFloats(buckets[0], wx), (std::vector<float>{1.f, 2.f}));
+}
+
+// Identical weight bytes dedupe in the pool even when they belong to DIFFERENT graphs: the pool is
+// content-keyed, so a weight shared by two unrelated buckets is stored once.
+TEST(VxmBuckets, CrossGraphContentDedup) {
+    std::vector<float> bigW(4096, 2.71f);
+    Graph              gA = makeGraph({1, 3, 16, 16}, bigW);
+    Graph              gB = makeGraph({1, 3, 32, 32}, bigW);
+    gB.tensors[gB.inputs[0]].name  = "in2";
+    gB.tensors[gB.outputs[0]].name = "out2";
+    gB.tensors[gB.find("w")].name  = "w2"; // different name, same bytes
+
+    std::string oneP = tmp("vxm_xg_one.vxm");
+    std::string twoP = tmp("vxm_xg_two.vxm");
+    ASSERT_TRUE(saveGraphBinBuckets({gA}, {"a"}, oneP));
+    ASSERT_TRUE(saveGraphBinBuckets({gA, gB}, {"a", "b"}, twoP));
+    long oneSz = (long) readFile(oneP).size();
+    long twoSz = (long) readFile(twoP).size();
+    std::remove(oneP.c_str());
+    std::remove(twoP.c_str());
+    EXPECT_LT(twoSz - oneSz, (long) (bigW.size() * sizeof(float)) / 2);
+}
+
+// The streamed reader delivers the same buckets the bulk reader does (same names, structure, weight
+// bytes), one at a time and in order; returning false from the consumer stops the stream cleanly
+// after the current bucket with a true (non-error) result.
+TEST(VxmBuckets, StreamedLoadMatchesBulkLoad) {
+    Graph g1 = makeGraph({1, 3, 8, 8}, {1.f, 2.f, 3.f});
+    Graph g2 = makeGraph({1, 3, 16, 16}, {1.f, 2.f, 3.f});
+    Graph g3 = makeGraph({1, 3, 24, 24}, {4.f});
+
+    std::string path = tmp("vxm_streamed.vxm");
+    ASSERT_TRUE(saveGraphBinBuckets({g1, g2, g3}, {"b1", "b2", "b3"}, path));
+
+    std::vector<Graph>       bulk;
+    std::vector<std::string> bulkNames;
+    ASSERT_TRUE(loadGraphBinBuckets(bulk, bulkNames, path));
+
+    std::vector<Graph>       streamed;
+    std::vector<std::string> streamedNames;
+    std::vector<size_t>      counts;
+    ASSERT_TRUE(loadGraphBinBucketsStreamed(path, [&](Graph &&g, const std::string &n, size_t idx, size_t count) {
+        EXPECT_EQ(idx, streamed.size());
+        counts.push_back(count);
+        streamed.push_back(std::move(g));
+        streamedNames.push_back(n);
+        return true;
+    }));
+    ASSERT_EQ(streamed.size(), bulk.size());
+    EXPECT_EQ(streamedNames, bulkNames);
+    for (size_t b = 0; b < bulk.size(); ++b)
+    {
+        EXPECT_EQ(counts[b], 3u);
+        EXPECT_EQ(streamed[b].nodes.size(), bulk[b].nodes.size());
+        EXPECT_EQ(streamed[b].tensors.size(), bulk[b].tensors.size());
+        TensorId ws = streamed[b].find("w");
+        TensorId wb = bulk[b].find("w");
+        ASSERT_NE(ws, kNoTensor);
+        EXPECT_EQ(initFloats(streamed[b], ws), initFloats(bulk[b], wb));
+    }
+
+    // Early stop: the consumer takes bucket 0 only; the stream ends true with one bucket delivered.
+    size_t seen = 0;
+    ASSERT_TRUE(loadGraphBinBucketsStreamed(path, [&](Graph &&, const std::string &, size_t, size_t) {
+        ++seen;
+        return false;
+    }));
+    EXPECT_EQ(seen, 1u);
+
+    // loadGraphBin takes the first bucket of a multi-bucket file.
+    Graph first;
+    ASSERT_TRUE(loadGraphBin(first, path));
+    EXPECT_EQ(first.desc(first.inputs[0]).shape, (Shape{1, 3, 8, 8}));
+    std::remove(path.c_str());
+}
+
 // A non-VXM3/VXM4 file loads to a clean failure (returns false, no crash). The loader distinguishes an
 // incompatible-version VXM container (a "VXM<n>" magic) from a file that is not a .vxm at all so the
 // log names the fix; both paths must simply refuse the file.

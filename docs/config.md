@@ -59,7 +59,9 @@ All defaults below are the C++ member initializers in `struct Config`.
 `vknn_compile <model.onnx> <out.vxm> [flags]` runs the import passes ahead of time and
 writes a pre-optimized `.vxm`. Its flags cover optimization level, weight precision,
 declared shapes, the quantization path, and the support report. A fixed-shape,
-default-optimization model needs none of them.
+default-optimization model needs none of them. The multi-graph form
+`vknn_compile <out.vxm> --graph "FILE.onnx[;segments]" [--graph ...]` takes **no positional
+input model** — each `--graph` occurrence names its own source file (see the `--graph` row).
 
 | `vknn_compile` flag | Meaning |
 |---------------------|---------|
@@ -73,10 +75,15 @@ default-optimization model needs none of them.
 | `--list-dims` | Import the model and print its free symbolic input dimensions (the `dim_param` names to bind with `--dim`), then exit without compiling. |
 | `--shape NAME=D0xD1x...` (repeatable) | Declare one graph input's full concrete shape, resolving every dynamic axis of that input, e.g. `--shape pixel_values=1x3x224x224`. Populates the same map as `Config::inputShapes`; overrides `--dim` for that tensor. |
 | `--bucket "NAME=D0x...;dim:NAME2=VALUE;..."` (repeatable) | Declare **one plan bucket** per occurrence: the model is compiled once per bucket over a fresh import, and the buckets share one content-deduped initializer pool in a multi-bucket `.vxm`. A bucket segment is either a per-tensor `NAME=D0xD1x...` shape or a `dim:NAME=VALUE` symbolic binding (so prefill vs decode plans differ only by their bound `sequence_length` / `past_sequence_length`). `--batch` / `--shape` / `--dim` are the shared fallback under every bucket. With no `--bucket`, exactly one bucket is written (a legacy single-graph `.vxm`, byte-identical to before). `--bucket` requires an ONNX input. |
-| `--support-report <out.json>` | Write the per-node backend assignment (node, op, backend, and the refusal reason for every CPU node) from the engine's own capability model (`vkSupportSurvey` — the exact gate the device runs), then continue the compile. Consumed by `tools/check_model_support.py --engine-report`. |
+| `--graph "FILE.onnx[;NAME=D0x...;dim:NAME2=VALUE;...]"` (repeatable) | **Multi-graph form**: each occurrence compiles **one bucket from its own source file**, with its own shape/dim segments (the `--bucket` segment syntax) over the shared `--batch`/`--shape`/`--dim` fallback. Occurrences may repeat a file at different shapes (a decoder's prefill + decode plans) or name different files (a vision tower + its decoder); every bucket lands in one `.vxm` over a content-deduped initializer pool, and the device weight pool shares GPU copies by payload content, so N buckets over one weight set cost one copy ([ADR-0014](adr/0014-multi-graph-vxm.md)). The only positional argument is the output `.vxm`; mutually exclusive with `--bucket`; a `.vxm` cannot be a graph source. See [running-a-vlm.md](running-a-vlm.md) for a five-bucket VLM compile. |
+| `--support-report <out.json>` | Write the per-node backend assignment (node, op, backend, and the refusal reason for every CPU node) from the engine's own capability model (`vkSupportSurvey` — the exact gate the device runs), then continue the compile. Consumed by `tools/check_model_support.py --engine-report`. On a multi-bucket/multi-graph compile, one report per bucket: `out.json` for bucket 0, then `out.bucketN.json`. |
 
-A multi-bucket `.vxm` loads all its buckets; `Session::run()` selects the bucket by the
-bound input shapes and rejects an unmatched shape with `Status::InvalidArgument`. An
+A multi-bucket `.vxm` streams its buckets at load (host memory peaks at one bucket's
+weights, not the file total); `Session::run()` selects the bucket by the bound input
+**names + shapes** and rejects an unmatched key with `Status::InvalidArgument`. A
+one-graph multi-shape session keeps the legacy positional single-input forgiveness; a
+multi-graph session dispatches named inputs strictly. `Session::bucketKeys()` and the
+indexed `inputInfo(bucket)` / `outputInfo(bucket)` describe each bucket. An
 ONNX-loaded session can add a bucket at run time with `Session::prepareShapes(shapes)`
 (a `.vxm` session returns `Status::Unsupported`). See
 [limitations.md §1](limitations.md) for the full contract.

@@ -28,7 +28,7 @@ When dma-buf import fails on a build, the fallback chain is the AHB route, then 
 with a logged `limitations.md` entry.
 
 ## Consequences
-- No dependency on Samsung's libion headers; uses stable kernel uAPI.
+- No dependency on vendor libion headers; uses stable kernel uAPI.
 - vknn allocates no dma-bufs: buffer lifetime and the dma-heap allocation are the caller's job.
 - The fd is `dup()`'d for import (the driver takes ownership of its dup), leaving the caller's fd
   valid; `wrapFd` does not close the caller's fd unless `takeOwnership` is set.

@@ -1,7 +1,7 @@
 # app-demo — VKNN Qwen chat (Android, on-device GPU)
 
 A small Android chat app that downloads the Qwen2.5-Coder-0.5B VKNN `.vxm` from HuggingFace, runs it
-on the GPU (Vulkan) via VKNN, and streams a chat reply with live latency metrics. Samsung One UI dark
+on the GPU (Vulkan) via VKNN, and streams a chat reply with live latency metrics. A dark system
 theme. Kotlin + Jetpack Compose + a JNI bridge over the VKNN runtime.
 
 ## Model source
@@ -35,7 +35,7 @@ The tokenizer (`vocab.json` + `merges.txt`) is bundled into the APK assets; only
 6. `ChatViewModel.kt` — orchestrates encode→prefill(step per prompt token)→decode(sample→step) on
    Dispatchers.Default; streams tokens to the thread; captures metrics.
 7. Compose UI (`MainActivity.kt`, `ui/…`) — download screen (button + progress), chat thread (bubbles),
-   input row, top info+metrics bar, Samsung One UI dark theme.
+   input row, top info+metrics bar, a dark system theme.
 
 ## Metrics (info bar, above the thread)
 TTFT (send→first token, incl. prefill), decode speed (tok/s), prefill time (ms), token count, and the
@@ -46,15 +46,15 @@ encode(prompt via chat template) → for each prompt token `nativeStep` (prefill
 remain) → `nativeSample` = first token (stop TTFT clock) → loop: emit, `nativeStep(prev)`, `nativeSample`
 until `<|im_end|>` or maxNewTokens or context (p==C) → update metrics.
 
-## Theme (Samsung One UI dark, fixed)
-bg #000000, surface #141416 / elevated #1B1B1E, primary One UI blue #3E9BFF, text #EDEDED / secondary
+## Theme (dark, fixed)
+bg #000000, surface #141416 / elevated #1B1B1E, primary blue #3E9BFF, text #EDEDED / secondary
 #8A8A8E; user bubble = blue, assistant bubble = surface; 20dp bubbles, airy spacing.
 
 ## Build + smoke test
 `build_native.sh` → `libvknnchat.so`; `gradle :app:assembleDebug` → `app-debug.apk`; `adb install`;
 `adb push` the local `.vxm` into the app files dir to skip the 1.26 GB download during the test; launch,
 send "Write a python function to reverse a linked list.", confirm a coherent GPU-generated reply +
-non-zero metrics on S25. Compare a greedy reply to the known-good stream.
+non-zero metrics on the device. Compare a greedy reply to the known-good stream.
 
 ## Scope / YAGNI
 One model, C=256, arm64-v8a only, no history persistence, no markdown rendering (monospace text). Greedy
@@ -62,5 +62,5 @@ One model, C=256, arm64-v8a only, no history persistence, no markdown rendering 
 
 ## Risks
 - Pure-Kotlin BPE correctness — cross-check ids vs HF before trusting chat (the one place bad output hides).
-- 1.26 GB model on device: needs ~1.3 GB; fine on S25/S26 (prior session ran it).
+- 1.26 GB model on device: needs ~1.3 GB; fine on the target devices (prior session ran it).
 - Gradle/NDK version friction — sidestepped by building the `.so` out-of-band with homebrew cmake.

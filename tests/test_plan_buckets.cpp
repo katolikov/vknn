@@ -12,6 +12,7 @@
 #include "vknn/graph.h"
 #include "vknn/session.h"
 #include <cstdio>
+#include <cstring>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -300,4 +301,170 @@ TEST(PlanBuckets, MultiBucketVxmLoadsAndDispatches) {
     // A .vxm session's buckets are fixed at compile time.
     EXPECT_EQ(s->prepareShapes({{"data", {3, 4, 3, 3}}}), Status::Unsupported);
     EXPECT_EQ(s->bucketCount(), 2u);
+}
+
+// A multi-graph .vxm (buckets from DIFFERENT graphs with disjoint input names) dispatches run() by
+// the bound input NAME, not just shape: a caller binding one graph's input can never select another
+// graph's bucket, whatever the shapes. Each bucket computes with its own weights, and the per-bucket
+// IO accessors describe each graph.
+TEST(PlanBuckets, MultiGraphVxmDispatchesByInputName) {
+    // Graph A: "data" [1,4,3,3] -> conv(diag 2) -> relu -> "y".
+    Graph ga = makeDynamicBatchConvRelu(4, 4, 3, 3);
+    // Graph B: same structure, but its own names ("pix" -> "emb") and weight scale 3.
+    Graph gb = makeDynamicBatchConvRelu(4, 4, 3, 3);
+    gb.tensors[gb.inputs[0]].name  = "pix";
+    gb.tensors[gb.outputs[0]].name = "emb";
+    {
+        TensorId w = gb.find("w");
+        ASSERT_NE(w, kNoTensor);
+        HostBuffer &hb = gb.initializers[w];
+        for (int64_t i = 0; i < 16; ++i)
+        {
+            hb.f32()[i] = (i % 5 == 0) ? 3.f : 0.f; // diag(3) over the 4x4 channel matrix
+        }
+        gb.tensors[w].name = "wb"; // distinct weight identity across the two graphs
+    }
+
+    // Resolve both graphs' dynamic batch to 1 through the pass pipeline and save the optimized
+    // buckets into one container — the same product vknn_compile --graph writes.
+    PassOptions oa;
+    oa.batch = 1;
+    PassOptions ob;
+    ob.batch = 1;
+    runStandardPasses(ga, oa);
+    runStandardPasses(gb, ob);
+    std::string path = testing::TempDir() + "vxm_multi_graph_session.vxm";
+    ASSERT_TRUE(saveGraphBinBuckets({ga, gb}, {"a", "b"}, path));
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto s = Session::createFromVxm(path, cfg);
+    std::remove(path.c_str());
+    ASSERT_TRUE(s);
+    ASSERT_EQ(s->bucketCount(), 2u);
+    EXPECT_TRUE(s->segmentGraphsLive());
+
+    // Per-bucket IO: bucket 0 is "data"->"y", bucket 1 is "pix"->"emb".
+    ASSERT_EQ(s->inputInfo(0).size(), 1u);
+    ASSERT_EQ(s->inputInfo(1).size(), 1u);
+    EXPECT_EQ(s->inputInfo(0)[0].name, "data");
+    EXPECT_EQ(s->inputInfo(1)[0].name, "pix");
+    EXPECT_EQ(s->outputInfo(1)[0].name, "emb");
+    ASSERT_EQ(s->bucketKeys().size(), 2u);
+
+    auto runNamed = [&](const char *name, const std::vector<float> &xdata, Status *st) {
+        IOTensor in;
+        in.name  = name;
+        in.shape = Shape {1, 4, 3, 3};
+        in.dtype = DType::Float32;
+        in.data.resize(xdata.size() * 4);
+        std::memcpy(in.data.data(), xdata.data(), in.data.size());
+        std::vector<IOTensor> outs;
+        Status                r = s->run({in}, outs);
+        if (st)
+        {
+            *st = r;
+        }
+        if (r != Status::Ok || outs.empty())
+        {
+            return std::vector<float>();
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    };
+
+    std::vector<float> x = ramp(1 * 4 * 3 * 3);
+    Status             ra, rb, rc;
+
+    // "data" selects graph A: relu(2x).
+    std::vector<float> ya = runNamed("data", x, &ra);
+    EXPECT_EQ(ra, Status::Ok);
+    EXPECT_EQ(ya, reference(x));
+
+    // "pix" selects graph B: relu(3x) — same input SHAPE, different graph; the name decides.
+    std::vector<float> yb = runNamed("pix", x, &rb);
+    EXPECT_EQ(rb, Status::Ok);
+    std::vector<float> want(x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        float v = 3.f * x[i];
+        want[i] = v > 0 ? v : 0;
+    }
+    EXPECT_EQ(yb, want);
+
+    // An input name no bucket has is rejected (never silently served by bucket 0's defaults).
+    runNamed("nosuch", x, &rc);
+    EXPECT_EQ(rc, Status::InvalidArgument);
+}
+
+// An UNNAMED sole entry in a multi-graph session binds positionally to a SINGLE-input graph only:
+// its shape picks that graph even when a multi-input bucket precedes it in file order (an
+// all-defaults key match on a bucket that binds nothing of the caller is no claim on it), and a
+// run binding no bucket at all is rejected.
+TEST(PlanBuckets, MultiGraphUnnamedSoleEntryPicksBySingleInputShape) {
+    // Bucket 0: TWO inputs (a+b elementwise add). Bucket 1: single-input conv graph "pix".
+    Graph g2in;
+    {
+        TensorDesc ai;
+        ai.name    = "a";
+        ai.shape   = {1, 4, 3, 3};
+        ai.isInput = true;
+        TensorId a = g2in.addTensor(ai);
+        TensorDesc bi;
+        bi.name    = "b";
+        bi.shape   = {1, 4, 3, 3};
+        bi.isInput = true;
+        TensorId b = g2in.addTensor(bi);
+        g2in.inputs = {a, b};
+        TensorDesc yo;
+        yo.name     = "sum";
+        yo.isOutput = true;
+        TensorId y  = g2in.addTensor(yo);
+        g2in.outputs = {y};
+        Node n;
+        n.type    = OpType::Add;
+        n.name    = "add";
+        n.inputs  = {a, b};
+        n.outputs = {y};
+        g2in.nodes.push_back(n);
+    }
+    Graph g1in = makeDynamicBatchConvRelu(4, 4, 5, 5);
+    g1in.tensors[g1in.inputs[0]].name  = "pix";
+    g1in.tensors[g1in.outputs[0]].name = "emb";
+
+    PassOptions o;
+    o.batch = 1;
+    runStandardPasses(g2in, o);
+    runStandardPasses(g1in, o);
+    std::string path = testing::TempDir() + "vxm_unnamed_dispatch.vxm";
+    ASSERT_TRUE(saveGraphBinBuckets({g2in, g1in}, {"add2", "conv1"}, path));
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto s      = Session::createFromVxm(path, cfg);
+    std::remove(path.c_str());
+    ASSERT_TRUE(s);
+    ASSERT_EQ(s->bucketCount(), 2u);
+
+    // Unnamed sole entry with the conv graph's shape: must reach bucket 1 (not the earlier add
+    // bucket via its all-defaults key).
+    IOTensor in;
+    in.shape = Shape {1, 4, 5, 5};
+    in.dtype = DType::Float32;
+    std::vector<float> x = ramp(1 * 4 * 5 * 5);
+    in.data.resize(x.size() * 4);
+    std::memcpy(in.data.data(), x.data(), in.data.size());
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(s->run({in}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    EXPECT_EQ(outs[0].name, "emb");
+    EXPECT_EQ(std::vector<float>(outs[0].f32(), outs[0].f32() + x.size()), reference(x));
+
+    // An unnamed entry whose shape matches NO single-input bucket binds nothing anywhere: rejected.
+    IOTensor bad;
+    bad.shape = Shape {1, 4, 7, 7};
+    bad.dtype = DType::Float32;
+    bad.data.assign(1 * 4 * 7 * 7 * 4, 0);
+    std::vector<IOTensor> outs2;
+    EXPECT_EQ(s->run({bad}, outs2), Status::InvalidArgument);
 }

@@ -353,7 +353,7 @@ if(VKNN_BUILD_EXAMPLES)
   set(_vknn_examples
       basics/probe basics/readme_quickstart basics/backend_switch basics/op_check
       vision/classify vision/predict vision/predict_cache vision/image_bench
-      llm/chat
+      llm/chat llm/vlm
       splatting/yonosplat
       io/run_io io/dmabuf_fd_io io/zerocopy_cache io/zerocopy_simple
       bench/profile)
@@ -370,6 +370,11 @@ if(VKNN_BUILD_EXAMPLES)
       target_link_libraries(vknn_${_name} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
     endif()
   endforeach()
+  # The splatting rasterizer lives in raster_core.cpp so the app-demo JNI bridge compiles the
+  # same pipeline; the example adds it as a second source.
+  if(TARGET vknn_yonosplat)
+    target_sources(vknn_yonosplat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/splatting/raster_core.cpp)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------

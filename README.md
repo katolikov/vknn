@@ -23,7 +23,7 @@
 ## What it does
 
 **VKNN** (namespace `vknn`) is an on-device inference engine: you give it an ONNX model, and it runs
-on the **Android GPU** (Vulkan compute, primarily the Samsung Xclipse driver) with a scalar + NEON
+on the **Android GPU** (Vulkan compute) with a scalar + NEON
 **CPU backend** as the reference path and automatic fallback. It imports the model with a hand-rolled
 protobuf parser, lowers it to an NCHW IR, runs graph passes (shape inference, BatchNorm folding,
 activation/residual fusion, pointwise-chain fusion into producer epilogues, quantized-node
@@ -34,8 +34,10 @@ are **no third-party runtime dependencies** — only Vulkan and the C++ standard
 result is checked against an onnxruntime golden.
 
 It runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
-detection (YOLOv8n), and a 965M-parameter transformer encoder (the YoNoSplat feed-forward 3D Gaussian
-Splatting model) plus a from-scratch Vulkan 3DGS rasterizer — all on the GPU.
+detection (YOLOv8n), an autoregressive LLM (Qwen2.5-Coder-0.5B), a 2.2B vision-language model
+(SmolVLM2 — vision tower + decoder prefill/decode shipped as **one multi-graph `.vxm`**), and a
+965M-parameter transformer encoder (the YoNoSplat feed-forward 3D Gaussian Splatting model) plus a
+from-scratch Vulkan 3DGS rasterizer — all on the GPU.
 
 <p align="center">
   <img src="docs/images/vknn_gpu_outputs.png" alt="VKNN classifying a real photo on the Vulkan GPU" width="780">
@@ -130,6 +132,23 @@ model> def is_prime(n):
 Full walkthrough (export → compile → run + more examples): [docs/running-an-llm.md](docs/running-an-llm.md)
 and the [Running an LLM on VKNN](https://github.com/katolikov/vknn/wiki/Running-an-LLM-on-VKNN) wiki page.
 
+## Show it a picture
+
+**SmolVLM2-2.2B** vision-language chat runs full-GPU from **one multi-graph `.vxm`**: the SigLIP
+vision tower, the token embedding, and the text decoder's prefill + decode plans compile into a
+single file over a content-deduped weight pool
+([hf.co/katolikov/smolvlm2-vknn](https://huggingface.co/katolikov/smolvlm2-vknn)), and the session
+dispatches each `run()` to the right graph by its bound input names + shapes.
+[`examples/llm/vlm.cpp`](examples/llm/vlm.cpp) drives the device loop (image encode → on-device
+embedding splice → prefill → streamed decode) with
+[`examples/llm/vlm_host.py`](examples/llm/vlm_host.py) as the host front-end. On a current flagship
+phone GPU it answers questions about a photo at 6–7.5 tokens/s with a 0.85 s prefill, matching the
+fp32 onnxruntime reference token-for-token. Walkthrough: [docs/running-a-vlm.md](docs/running-a-vlm.md).
+
+The same models power [`app-demo/`](app-demo/) — an Android app (Kotlin/Compose over JNI) with three
+on-device modes, **Chat**, **VLM camera coach**, and **3D Splat capture**, behind a model library
+that downloads each `.vxm` from HuggingFace.
+
 ## Feature matrix
 
 | Capability | What VKNN does |
@@ -138,6 +157,7 @@ and the [Running an LLM on VKNN](https://github.com/katolikov/vknn/wiki/Running-
 | **Full-GPU op coverage** | Every *executable* operator has a Vulkan kernel; a whole benchmark model runs on the GPU with **0 CPU fallbacks**. Only data-dependent control flow (`Loop` / `If` / `NonMaxSuppression`) and const-folded import ops stay off the GPU. See [docs/op-coverage.md](docs/op-coverage.md). |
 | **Precision** | fp16 storage + fp32 accumulation (`low`), selective-fp32 geometry tail (`normal`), or full fp32 (`high`). Stores rounded to nearest even; every path checked against an onnxruntime golden. |
 | **Dynamic shapes** | Declared shape **plan buckets**: `vknn_compile --shape NAME=D0xD1x...` / `--bucket "..."` bakes one plan per shape set; at runtime `Session::prepareShapes()` compiles more, and `run()` selects a bucket by the bound input shapes. A fixed-shape model is one bucket (a single map lookup on the hot path). |
+| **Multi-graph `.vxm`** | `vknn_compile --graph "FILE[;shape/dim segments]"` (repeatable) compiles **several source graphs** — or one graph at several shapes — into one `.vxm` over a content-deduped weight pool; `run()` dispatches to the bucket matching the bound input names + shapes. Buckets stream at load (host peak = one bucket's weights) and share GPU weight copies by content, so a whole VLM (vision tower + embedding + decoder prefill/decode) is one file and one session. See [docs/running-a-vlm.md](docs/running-a-vlm.md). |
 | **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. |
 | **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. |
 | **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/io/dmabuf_fd_io.cpp`](examples/io/dmabuf_fd_io.cpp). |
@@ -188,7 +208,9 @@ macros: [docs/adding-an-operator.md](docs/adding-an-operator.md).
 
 Runnable examples live in [`examples/`](examples/): `readme_quickstart` (load-set-run-read),
 `zerocopy_simple` / `zerocopy_cache` and `dmabuf_fd_io` (caller-owned DMA-BUF I/O), `run_io` (generic
-multi-I/O), `classify` / `predict` (CNN classifiers), and `yonosplat` (the transformer encoder).
+multi-I/O), `classify` / `predict` (CNN classifiers), `chat` / `vlm` (LLM and VLM device loops), and
+`yonosplat` (the transformer encoder + rasterizer). [`app-demo/`](app-demo/) wraps the LLM, VLM, and
+splatting paths in a three-mode Android app.
 
 ## License
 

@@ -87,7 +87,7 @@ namespace vknn {
             // fast path: rt.host already holds the declared dtype (fp32/fp16/uint8/...). MOVE it into the
             // output instead of copying — rt.host is refilled from the device buffer on the next run before
             // it is read again, so donating its storage here avoids a full-tensor copy of every output.
-            io.data      = std::move(rt.host.bytes);
+            io.data      = rt.host.bytes.release();
             rt.hostValid = false;
             return;
         }
@@ -131,7 +131,7 @@ namespace vknn {
                     reinterpret_cast<int64_t *>(io.data.data())[i] = srcI(i);
                 break;
             default:
-                io.data = rt.host.bytes;
+                io.data = rt.host.bytes.toVector();
                 break;
         }
     }
@@ -158,13 +158,6 @@ namespace vknn {
     }
 
     std::unique_ptr<Session> Session::createFromVxm(const std::string &path, const Config &cfg) {
-        std::vector<Graph>       buckets;
-        std::vector<std::string> names;
-        if (!loadGraphBinBuckets(buckets, names, path) || buckets.empty())
-        {
-            VKNN_ERROR << "failed to load .vxm: " << path;
-            return nullptr;
-        }
         auto s             = std::unique_ptr<Session>(new Session());
         s->graphOptimized_ = true; // passes already baked in; buckets carry one shape each
         s->cfg_            = cfg;
@@ -175,14 +168,23 @@ namespace vknn {
         cfg.applyLogLevel();
         s->profiler_.setEnabled(cfg.profile);
         auto t0 = std::chrono::high_resolution_clock::now();
-        // A .vxm carries one already-optimized graph per declared shape. Compile every stored bucket
-        // over the shared backends so run() can dispatch among them by input shape. A single-bucket
-        // file (every fixed-shape model) yields exactly one PlanBucket, unchanged from before.
+        // A .vxm carries one already-optimized graph per declared shape (or per graph, for a
+        // multi-graph file). Compile every stored bucket over the shared backends so run() can
+        // dispatch among them by bound input names+shapes. Buckets are STREAMED from the file and
+        // built one at a time: with freeWeightsAfterUpload, host memory peaks at a single bucket's
+        // weights instead of the whole file's expansion — the difference between loading and OOMing
+        // a multi-bucket LLM on-device. A single-bucket file (every fixed-shape model) yields
+        // exactly one PlanBucket, unchanged from before.
         s->ensureBackends();
-        for (size_t b = 0; b < buckets.size(); ++b)
+        bool ok = loadGraphBinBucketsStreamed(path, [&](Graph &&gb, const std::string &, size_t, size_t) {
+            std::string key = Session::shapeKey(gb);
+            s->buckets_.push_back(s->buildBucket(std::move(gb), key));
+            return true;
+        });
+        if (!ok || s->buckets_.empty())
         {
-            std::string key = Session::shapeKey(buckets[b]);
-            s->buckets_.push_back(s->buildBucket(std::move(buckets[b]), key));
+            VKNN_ERROR << "failed to load .vxm: " << path;
+            return nullptr;
         }
         s->planned_ = true;
         auto t1     = std::chrono::high_resolution_clock::now();
@@ -759,6 +761,35 @@ namespace vknn {
         return bucket;
     }
 
+    bool Session::bucketsShareInputNames() const {
+        // Recomputed only when the bucket count changes (prepareShapes appends; a .vxm load fills
+        // once): the classification drives per-run dispatch and must not rescan name lists per token.
+        if (uniformCheckedFor_ != buckets_.size())
+        {
+            uniformCheckedFor_ = buckets_.size();
+            bucketsUniform_    = true;
+            const Graph &g0    = *buckets_.front().graph;
+            for (size_t b = 1; b < buckets_.size() && bucketsUniform_; ++b)
+            {
+                const Graph &g = *buckets_[b].graph;
+                if (g.inputs.size() != g0.inputs.size())
+                {
+                    bucketsUniform_ = false;
+                    break;
+                }
+                for (size_t i = 0; i < g.inputs.size(); ++i)
+                {
+                    if (g.desc(g.inputs[i]).name != g0.desc(g0.inputs[i]).name)
+                    {
+                        bucketsUniform_ = false;
+                        break;
+                    }
+                }
+            }
+        }
+        return bucketsUniform_;
+    }
+
     // The canonical key for a shape assignment: each graph input's "name=DxDxD" joined by ';'. Buckets
     // with equal keys are the same plan; run() builds the same string from the bound input shapes.
     std::string Session::shapeKey(const Graph &graph) {
@@ -777,13 +808,77 @@ namespace vknn {
         return k;
     }
 
-    std::string Session::runShapeKey(const std::vector<IOTensor> &inputs) const {
-        // Resolve each default-bucket input to the shape this run binds for it (an unbound or empty
-        // caller shape adopts the default bucket's shape), then build the same key shapeKey() produces.
-        // A single-input graph binds by position when the sole caller entry names no input or names one
-        // the graph does not have — the same forgiving single-input match run()'s bind loop applies.
-        const Graph &g          = *buckets_.front().graph;
-        const bool   singleBind = g.inputs.size() == 1 && inputs.size() == 1;
+    // True when every named caller input is an input of `g`. run() requires this of a bucket before
+    // comparing shape keys: buckets of a multi-graph .vxm carry disjoint input NAME sets, and a key
+    // built over a graph that lacks the caller's names would adopt that graph's defaults for every
+    // input and "match" a bucket the caller never addressed. Callers may bind fewer inputs than the
+    // graph has (the rest adopt bucket shapes).
+    //
+    // `allowPositional` extends the forgiving single-input match (a sole caller entry binds a sole
+    // graph input whatever its name) to selection. It is true for a HOMOGENEOUS session — every
+    // bucket exposes the same input names, i.e. one graph at several shapes — preserving the legacy
+    // misnamed-single-input contract there. A heterogeneous (multi-graph) session dispatches named
+    // inputs strictly by name: with two single-input graphs of equal input shape, a positional match
+    // would silently run whichever bucket loads first. An UNNAMED sole entry stays positional even
+    // then (the caller expressed "the only input"; the shape picks the graph).
+    static bool runInputsBind(const Graph &g, const std::vector<IOTensor> &inputs, bool allowPositional) {
+        const bool singleBind = g.inputs.size() == 1 && inputs.size() == 1;
+        for (const IOTensor &io: inputs)
+        {
+            if (io.name.empty())
+            {
+                continue; // an unnamed entry never disqualifies; the bind loop resolves it
+            }
+            bool found = false;
+            for (TensorId in: g.inputs)
+            {
+                if (g.desc(in).name == io.name)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && !(singleBind && allowPositional))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // True when at least one caller entry binds an input of `g`: by name, or positionally as the
+    // sole unnamed entry against a single-input graph. Multi-graph selection requires this of a
+    // candidate — a run binding nothing of a bucket must not match it through its own defaults.
+    static bool runBindsAny(const Graph &g, const std::vector<IOTensor> &inputs) {
+        if (g.inputs.size() == 1 && inputs.size() == 1 && inputs[0].name.empty())
+        {
+            return true;
+        }
+        for (const IOTensor &io: inputs)
+        {
+            if (io.name.empty())
+            {
+                continue;
+            }
+            for (TensorId in: g.inputs)
+            {
+                if (g.desc(in).name == io.name)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    std::string Session::runShapeKey(const Graph &g, const std::vector<IOTensor> &inputs, bool allowPositional) {
+        // Resolve each of `g`'s inputs to the shape this run binds for it (an unbound or empty
+        // caller shape adopts the graph's shape), then build the same key shapeKey() produces.
+        // A single-input graph binds by position when the sole caller entry names no input — or, when
+        // `allowPositional`, names one the graph does not have (the legacy forgiving match, kept for
+        // homogeneous sessions; see runInputsBind).
+        const bool positional = g.inputs.size() == 1 && inputs.size() == 1 && (allowPositional || inputs[0].name.empty());
+        const bool singleBind = positional;
         std::string  k;
         for (size_t i = 0; i < g.inputs.size(); ++i)
         {
@@ -924,24 +1019,59 @@ namespace vknn {
         PlanBucket *sel = &buckets_.front();
         if (buckets_.size() > 1)
         {
-            std::string wantKey = runShapeKey(inputs);
-            sel                 = nullptr;
-            for (auto &b: buckets_)
+            sel = nullptr;
+            if (bucketsShareInputNames())
             {
-                if (b.key == wantKey)
+                // Homogeneous multi-shape session (one graph at several shapes): the pre-multi-graph
+                // semantics verbatim — ONE key built over the default bucket's inputs (an unbound
+                // input adopts bucket 0's shape, a misnamed sole entry binds positionally), matched
+                // exactly against each bucket's key. Evaluating the key per candidate instead would
+                // let a partially-bound run adopt a CANDIDATE's shapes for its unbound inputs and
+                // dispatch where the old code errored.
+                const std::string wantKey = runShapeKey(*buckets_.front().graph, inputs, true);
+                for (auto &b: buckets_)
                 {
-                    sel = &b;
-                    break;
+                    if (b.key == wantKey)
+                    {
+                        sel = &b;
+                        break;
+                    }
+                }
+            } else
+            {
+                // Multi-graph session: the key is evaluated over each CANDIDATE bucket's own graph
+                // (the buckets have disjoint input names, so there is no single key for a run). A
+                // bucket is eligible when every named caller input binds to it, it BINDS AT LEAST
+                // ONE caller entry (an all-defaults key trivially equals the bucket's own key — a
+                // run that binds nothing of a bucket is no claim on it), and the resolved shapes
+                // reproduce its key. Named inputs dispatch strictly; an unnamed sole entry binds
+                // positionally to a single-input graph, so the shape picks the graph.
+                for (auto &b: buckets_)
+                {
+                    if (!runInputsBind(*b.graph, inputs, false) || !runBindsAny(*b.graph, inputs))
+                    {
+                        continue;
+                    }
+                    if (b.key == runShapeKey(*b.graph, inputs, false))
+                    {
+                        sel = &b;
+                        break;
+                    }
                 }
             }
             if (!sel)
             {
+                std::string bound;
+                for (const auto &io: inputs)
+                {
+                    bound += (bound.empty() ? "" : ";") + io.name + "=" + shapeStr(io.shape);
+                }
                 std::string avail;
                 for (size_t i = 0; i < buckets_.size(); ++i)
                 {
                     avail += (i ? ", " : "") + buckets_[i].key;
                 }
-                VKNN_ERROR << "run: input shape (" << wantKey << ") matches no compiled bucket; available: " << avail << ". Add it with prepareShapes() (ONNX session) or recompile with --bucket.";
+                VKNN_ERROR << "run: bound inputs (" << bound << ") match no compiled bucket (by name and shape); available: " << avail << ". Add the shape with prepareShapes() (ONNX session) or recompile with --bucket/--graph.";
                 return Status::InvalidArgument;
             }
         }
@@ -1198,6 +1328,43 @@ namespace vknn {
         for (TensorId id: graph_.outputs)
         {
             v.push_back(ioInfoOf(graph_, id, cfg_.precision));
+        }
+        return v;
+    }
+
+    std::vector<IOInfo> Session::inputInfo(size_t bucket) const {
+        std::vector<IOInfo> v;
+        if (bucket >= buckets_.size())
+        {
+            return v;
+        }
+        const Graph &g = *buckets_[bucket].graph;
+        for (TensorId id: g.inputs)
+        {
+            v.push_back(ioInfoOf(g, id, cfg_.precision));
+        }
+        return v;
+    }
+
+    std::vector<IOInfo> Session::outputInfo(size_t bucket) const {
+        std::vector<IOInfo> v;
+        if (bucket >= buckets_.size())
+        {
+            return v;
+        }
+        const Graph &g = *buckets_[bucket].graph;
+        for (TensorId id: g.outputs)
+        {
+            v.push_back(ioInfoOf(g, id, cfg_.precision));
+        }
+        return v;
+    }
+
+    std::vector<std::string> Session::bucketKeys() const {
+        std::vector<std::string> v;
+        for (const PlanBucket &b: buckets_)
+        {
+            v.push_back(b.key);
         }
         return v;
     }

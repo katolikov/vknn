@@ -24,3 +24,4 @@ assets/*.vxm
 benchmark/results/
 benchmark/result/
 benchmark/*.result.json
+.claude/

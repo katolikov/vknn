@@ -14,6 +14,10 @@ into ops VKNN already runs on the GPU. Keep the external-data weight file
 (`model.onnx_data`) beside the `.onnx` — the importer resolves it relative to the
 `.onnx` directory.
 
+A **vision-language** decoder runs the same way, with the vision tower, the token
+embedding, and the decoder's prefill + decode plans compiled into **one multi-graph
+`.vxm`** — see [running-a-vlm.md](running-a-vlm.md).
+
 ## 1. Compile a fixed-context decode plan
 
 The decode loop is host-driven around a single **fixed-max-context (fixed-C)** plan:
@@ -72,7 +76,7 @@ backend). Re-push the binary after every Android rebuild.
 ```sh
 ./build.sh --android          # builds build-android/vknn_chat
 
-SERIAL=R5CWB2KWVJY ; DDIR=/data/local/tmp/vknn/qwen
+SERIAL=<adb-serial> ; DDIR=/data/local/tmp/vknn/qwen
 adb -s $SERIAL shell "mkdir -p $DDIR"
 adb -s $SERIAL push build-android/vknn_chat qwen_chat.vxm $DDIR/
 ```

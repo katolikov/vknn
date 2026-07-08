@@ -6,7 +6,7 @@
 
 **Architecture:** Convert-stage pass (`fusePointwiseChains` in `runStandardPasses`, baked into `.vxm`) attaches a maximal single-consumer chain to its producer as a step-table in `node.attr` (operands appended to `node.inputs`), or emits a standalone `FusedPointwise`. **One shared mechanism**: a plan SSBO + `shaders/pw_epilogue.glsl` (`pw_apply`/`pw_apply4`), used by *both* the standalone kernel and every producer epilogue. Producer kernels opt in with three lines + a `-DPW_EPI` build variant; epilogue operand/plan buffers **append** to the kernel's push-descriptor buffer list (no second descriptor set). Each step rounds through `float(STORE(x))` → bit-identical to the unfused fp16/fp32 graph. One central CPU hook applies the chain after any op (oracle + fallback).
 
-**Tech Stack:** C++17, Vulkan compute (GLSL→SPIR-V; auto `_fp16` + new `_epi` variants), GoogleTest host tests, device validation on `R5CWB2KWVJY` (Xclipse).
+**Tech Stack:** C++17, Vulkan compute (GLSL→SPIR-V; auto `_fp16` + new `_epi` variants), GoogleTest host tests, device validation on the device.
 
 **Spec:** `docs/superpowers/specs/2026-07-01-fuse-pointwise-chains-design.md`.
 **Baseline:** `docs/superpowers/plans/baseline-profile.md` (rollout order grounded).

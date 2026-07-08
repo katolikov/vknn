@@ -1,8 +1,6 @@
 package com.vknn.chat.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,16 +9,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -29,11 +21,11 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,6 +34,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,42 +46,73 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.vknn.chat.ChatPromptTemplate
 import com.vknn.chat.Metrics
 import com.vknn.chat.Msg
 import com.vknn.chat.Phase
 import com.vknn.chat.Role
 import com.vknn.chat.UiState
+import com.vknn.chat.model.ModelCatalog
 import kotlin.math.roundToInt
 
+// Window insets (status bar, ime, nav bar) are handled by the AppShell around this screen.
 @Composable
 fun ChatScreen(
     ui: UiState,
-    onDownload: () -> Unit,
     onLoad: () -> Unit,
     onSend: (String) -> Unit,
     onReset: () -> Unit,
     onTemp: (Float) -> Unit,
+    onOpenLibrary: () -> Unit,
+    promptTemplate: String,
+    onPromptTemplate: (String) -> Unit,
 ) {
+    var editingTemplate by remember { mutableStateOf(false) }
+    // The template needs no loaded model: it is text, validated by inspection, applied on the next send.
+    if (editingTemplate) {
+        PromptEditorDialog(
+            title = "Prompt template",
+            explanation = "This model completes text rather than answering it, so a bare message gets continued. " +
+                "Wrap the message in an instruct template and the same weights answer instead. Leave it empty " +
+                "for raw completion. A templated message is sent as one fresh turn.",
+            initialPrompt = promptTemplate,
+            defaultPrompt = ChatPromptTemplate.DEFAULT,
+            fieldPlaceholder = "Empty — the model continues your message",
+            presets = listOf(PromptPreset("Instruct (ChatML)", ChatPromptTemplate.INSTRUCT_PRESET)),
+            monospaceField = true,
+            validate = ::validatePromptTemplate,
+            onSave = onPromptTemplate,
+            onDismiss = { editingTemplate = false },
+        )
+    }
     Column(
         Modifier
             .fillMaxSize()
             .background(Bg)
-            .statusBarsPadding()
     ) {
-        TopBar()
+        TopBar(onEditPromptTemplate = { editingTemplate = true })
         if (ui.phase == Phase.READY) {
-            MetricsBar(ui.metrics, ui.temperature, ui.contextUsed, ui.contextMax, onTemp)
+            MetricsBar(ui.metrics, ui.temperature, ui.contextUsed, ui.contextMax, ui.backend, onTemp)
             MessageList(ui.messages, Modifier.weight(1f))
             ui.status?.let { StatusLine(it) }
             InputBar(ui.generating, onSend, onReset)
         } else {
-            SetupPanel(Modifier.weight(1f), ui, onDownload, onLoad)
+            SetupPanel(Modifier.weight(1f), ui, onLoad, onOpenLibrary)
         }
     }
 }
 
+// A template the editor will accept: empty (raw completion), or marking where the message goes.
+internal fun validatePromptTemplate(draft: String): PromptValidation = when {
+    !ChatPromptTemplate.isActive(draft) ->
+        PromptValidation(counterText = "No template — the model continues your message")
+    !ChatPromptTemplate.isApplicable(draft) ->
+        PromptValidation(rejectionReason = "Add ${ChatPromptTemplate.PLACEHOLDER} where the message should go")
+    else -> PromptValidation(counterText = "Template active — the model answers your message")
+}
+
 @Composable
-private fun TopBar() {
+private fun TopBar(onEditPromptTemplate: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -103,9 +127,17 @@ private fun TopBar() {
         ) { Icon(Icons.Filled.Memory, null, tint = Accent, modifier = Modifier.size(18.dp)) }
         Spacer(Modifier.width(9.dp))
         Column(Modifier.weight(1f)) {
-            Text("Qwen2.5-Coder 0.5B", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(ModelCatalog.QWEN.displayName, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text("on-device", color = TextSecondary, fontSize = 11.sp)
         }
+        Box(
+            Modifier
+                .size(30.dp)
+                .background(Surface, RoundedCornerShape(9.dp))
+                .clickableNoRipple(onEditPromptTemplate),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Filled.Edit, "edit prompt template", tint = TextSecondary, modifier = Modifier.size(16.dp)) }
+        Spacer(Modifier.width(8.dp))
         Row(
             Modifier
                 .background(AccentDim, RoundedCornerShape(999.dp))
@@ -120,7 +152,7 @@ private fun TopBar() {
 }
 
 @Composable
-private fun MetricsBar(m: Metrics, temp: Float, ctxUsed: Int, ctxMax: Int, onTemp: (Float) -> Unit) {
+private fun MetricsBar(m: Metrics, temp: Float, ctxUsed: Int, ctxMax: Int, backend: String, onTemp: (Float) -> Unit) {
     var showTemp by remember { mutableStateOf(false) }
     Column(Modifier.padding(horizontal = 12.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -143,7 +175,7 @@ private fun MetricsBar(m: Metrics, temp: Float, ctxUsed: Int, ctxMax: Int, onTem
         }
         if (ctxMax > 0) {
             Text(
-                "context ${ctxUsed}/${ctxMax}",
+                if (backend.isEmpty()) "context ${ctxUsed}/${ctxMax}" else "context ${ctxUsed}/${ctxMax} · $backend",
                 color = TextSecondary,
                 fontSize = 10.sp,
                 modifier = Modifier.padding(top = 4.dp),
@@ -189,11 +221,14 @@ private fun MessageList(messages: List<Msg>, mod: Modifier) {
     // bottom, so scrolling up to read earlier text mid-generation is not yanked back each token; scroll to
     // the item's END (Int.MAX_VALUE offset, clamped) so a message taller than the viewport shows its newest
     // text at the bottom instead of pinning to its top.
+    // `messages` is a plain parameter, so the derived state reads it through a State holder: capturing it
+    // directly would pin `lastIndex` to the list the enclosing `remember` first saw (empty at load).
+    val latestMessages by rememberUpdatedState(messages)
     val atBottom by remember {
         derivedStateOf {
             val info = state.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
-            last.index >= messages.lastIndex && last.offset + last.size <= info.viewportEndOffset + 4
+            last.index >= latestMessages.lastIndex && last.offset + last.size <= info.viewportEndOffset + 4
         }
     }
     LaunchedEffect(messages.size) { // a new message always jumps to the bottom
@@ -247,9 +282,6 @@ private fun InputBar(generating: Boolean, onSend: (String) -> Unit, onReset: () 
     Row(
         Modifier
             .fillMaxWidth()
-            // Sit above the keyboard when it opens (ime) and the nav bar otherwise; union avoids
-            // double-padding since the ime inset already spans the nav-bar region.
-            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
             .padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -299,31 +331,19 @@ private fun InputBar(generating: Boolean, onSend: (String) -> Unit, onReset: () 
 }
 
 @Composable
-private fun SetupPanel(mod: Modifier, ui: UiState, onDownload: () -> Unit, onLoad: () -> Unit) {
+private fun SetupPanel(mod: Modifier, ui: UiState, onLoad: () -> Unit, onOpenLibrary: () -> Unit) {
     Column(
         mod.fillMaxWidth().padding(28.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         when (ui.phase) {
-            Phase.NEED_DOWNLOAD -> {
-                Text("Download the model", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Phase.MISSING -> {
+                Text("Model not downloaded", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(6.dp))
-                Text("Qwen2.5-Coder 0.5B, ~1.2 GB, runs on the GPU.", color = TextSecondary, fontSize = 13.sp)
+                Text("Get Qwen2.5-Coder 0.5B (~1.3 GB) from the Model Library to start chatting.", color = TextSecondary, fontSize = 13.sp)
                 Spacer(Modifier.height(20.dp))
-                PrimaryButton("Download model", onDownload)
-            }
-            Phase.DOWNLOADING -> {
-                Text("Downloading… ${ui.downloadPct}%", color = TextPrimary, fontSize = 16.sp)
-                Spacer(Modifier.height(4.dp))
-                Text("${ui.downloadMB} / ${ui.totalMB} MB", color = TextSecondary, fontSize = 12.sp)
-                Spacer(Modifier.height(16.dp))
-                LinearProgressIndicator(
-                    progress = { ui.downloadPct / 100f },
-                    modifier = Modifier.fillMaxWidth().height(6.dp),
-                    color = Accent,
-                    trackColor = Surface,
-                )
+                PrimaryButton("Open Library", onOpenLibrary)
             }
             Phase.DOWNLOADED -> {
                 Text("Model ready", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Medium)
@@ -345,22 +365,3 @@ private fun SetupPanel(mod: Modifier, ui: UiState, onDownload: () -> Unit, onLoa
         }
     }
 }
-
-@Composable
-private fun PrimaryButton(label: String, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .background(Accent, RoundedCornerShape(999.dp))
-            .clickableNoRipple(onClick)
-            .padding(horizontal = 28.dp, vertical = 13.dp),
-        contentAlignment = Alignment.Center,
-    ) { Text(label, color = OnAccent, fontSize = 15.sp, fontWeight = FontWeight.Medium) }
-}
-
-// A no-ripple clickable (One UI's flat feel) that avoids pulling the material ripple indication setup.
-private fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier =
-    this.clickable(
-        interactionSource = MutableInteractionSource(),
-        indication = null,
-        onClick = onClick,
-    )

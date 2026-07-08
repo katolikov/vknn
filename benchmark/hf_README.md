@@ -34,7 +34,7 @@ python benchmark/scripts/fetch_model.py --repo katolikov/yonosplat-vknn --out be
 python benchmark/run.py run benchmark/configs/yonosplat.json
 ```
 
-On the Samsung Xclipse 960 (Vulkan, fp16) the compiled encoder matches an onnxruntime golden at
+On the target mobile GPU (Vulkan, fp16) the compiled encoder matches an onnxruntime golden at
 cosine ≥ 0.9997 on all six outputs.
 
 ## Provenance & license

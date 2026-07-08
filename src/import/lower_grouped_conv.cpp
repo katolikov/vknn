@@ -87,8 +87,8 @@ namespace vknn {
             size_t  bes = dtypeSize(bdt);
             // Capture the source bytes before addTensor (Graph::tensors may reallocate, invalidating
             // any reference into g.initializers / g.desc).
-            std::vector<uint8_t> wsrc = g.initializers.at(wId).bytes;
-            std::vector<uint8_t> bsrc = hasBias ? g.initializers.at(bId).bytes : std::vector<uint8_t> {};
+            std::vector<uint8_t> wsrc = g.initializers.at(wId).bytes.toVector();
+            std::vector<uint8_t> bsrc = hasBias ? g.initializers.at(bId).bytes.toVector() : std::vector<uint8_t> {};
             std::string          base = g.desc(c.outputs[0]).name;
             DType                xdt = g.desc(xId).dtype;
             DType                odt = g.desc(c.outputs[0]).dtype;

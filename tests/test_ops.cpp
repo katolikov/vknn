@@ -2920,7 +2920,7 @@ namespace {
                 hb.i64()[0] = (int64_t) v;
                 break;
             default:
-                hb.bytes[0] = (uint8_t) v;
+                hb.bytes.data()[0] = (uint8_t) v;
                 break;
         }
         g.initializers[id] = hb;

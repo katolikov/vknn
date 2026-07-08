@@ -9,7 +9,7 @@
 // Compile-time {128,128,16} twin of matmul_tiled.comp. The literal #defines make the register
 // accumulator acc[8][8] and the LDS panels As/Bs[16][128] compile-time-sized, so the driver fully
 // unrolls the inner K loop and keeps the micro-tile in registers instead of spilling — measurably
-// faster on the Xclipse driver than the spec-constant kernel at the identical geometry (ADR-0011:
+// faster on the target mobile driver than the spec-constant kernel at the identical geometry (ADR-0011:
 // prefer compile-time shader variants over runtime-parameterized shaders). matmul.cpp dispatches
 // this variant for the default tile (the Tuning::None geometry and the race's usual winner) and
 // keeps matmul_tiled.comp only for a non-default tile the race picks. Byte-identical to

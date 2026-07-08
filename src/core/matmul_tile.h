@@ -48,7 +48,7 @@ namespace vknn {
 
     /// The default {128,128,16} tile dispatches the compile-time matmul_tiled_fast.comp kernel
     /// (literal #defines -> fully-unrolled, register-resident micro-tile) instead of the
-    /// spec-constant matmul_tiled.comp: the Xclipse driver loses the inner-loop unroll and spills
+    /// spec-constant matmul_tiled.comp: the target mobile driver loses the inner-loop unroll and spills
     /// registers when the accumulator bounds are spec constants (~26% slower at this geometry), so
     /// the common case — every --tuning none run, and the race's usual winner — keeps main's fast
     /// literal kernel while non-default raced tiles use the flexible spec-constant kernel (ADR-0011:

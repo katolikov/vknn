@@ -5,7 +5,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// Samsung One UI dark palette: true-black canvas, elevated near-black surfaces, One UI blue accent.
+// Dark palette: true-black canvas, elevated near-black surfaces, blue accent.
 val Bg = Color(0xFF000000)
 val Surface = Color(0xFF141416)
 val SurfaceHi = Color(0xFF1B1B1E)
@@ -15,6 +15,8 @@ val OnAccent = Color(0xFFFFFFFF)
 val TextPrimary = Color(0xFFEDEDED)
 val TextSecondary = Color(0xFF8A8A8E)
 val Line = Color(0xFF2A2A2C)
+val Warn = Color(0xFFE0B34D)
+val Err = Color(0xFFE07A7A)
 
 private val Scheme = darkColorScheme(
     primary = Accent,

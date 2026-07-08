@@ -66,6 +66,17 @@ namespace vknn {
         const Graph                          *graph   = nullptr;
         const Config                         *config  = nullptr;
         std::function<vk::Buffer *(TensorId)> devBuf; // resolves a tensor id to its (possibly pool-aliased) activation buffer
+        // Drops an initializer's HOST bytes the moment its device copy exists, so a large-weight model
+        // never holds the host and device copy of the same weight at once (the load-time peak would
+        // otherwise be twice the weight set, which exhausts phone RAM on a multi-GB model). Null when
+        // the session keeps its weights (Config::freeWeightsAfterUpload off). Only weights uploaded at
+        // prepare() time are released; record-time constant operands stay resident.
+        std::function<void(TensorId)>         releaseInitializer;
+        // Memo of the flat device buffer already uploaded for an initializer of THIS graph. A weight may
+        // feed several nodes; once its host bytes are released the content digest can no longer be
+        // recomputed, so every consumer after the first resolves through this memo instead.
+        std::function<std::shared_ptr<vk::Buffer>(TensorId)>       lookupFlatWeight;
+        std::function<void(TensorId, std::shared_ptr<vk::Buffer>)> rememberFlatWeight;
         bool                                  useFp16  = false; // per-node: false for a storeFp32 node so it runs its fp32 kernel
         bool                                  baseFp16 = false; // segment-wide precision (what a non-storeFp32 tensor is stored as)
         WeightCache                          *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
@@ -89,6 +100,13 @@ namespace vknn {
         // Content-addressed upload for small parameter blocks (e.g. pw_epilogue plans): identical bytes
         // yield one shared device buffer, so per-node metadata does not multiply vkAllocateMemory count.
         std::shared_ptr<vk::Buffer> uploadPooled(const void *data, size_t bytes) const;
+
+        // Upload a weight payload into device-only memory through the backend's persistent staging
+        // buffer (VulkanBackend::stageWeightToDevice): `srcBytes` are copied into a fresh buffer of
+        // `bufferBytes` (>= srcBytes; the tail is allocated padding, never read as data). The
+        // destination has no host mapping, so weights stay outside the driver's per-process
+        // host-mappable memory budget.
+        std::shared_ptr<vk::Buffer> uploadWeightDeviceOnly(const void *src, size_t srcBytes, size_t bufferBytes) const;
 
         // Backend-level device-weight pool. Uploaded weight/bias/transformed-weight buffers are shared
         // across plan buckets keyed by (weight-cache key, precision): the first op instance to acquire a

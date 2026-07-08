@@ -32,7 +32,7 @@
 #   --ref-binary FILE    host path of a fresh-main vknn_run_io; pushed and cross-compared for
 #                        no-regression (optional; without it the gate is fused-vs-unfused only)
 #   --compile PATH       host vknn_compile                     (default ./build-host/vknn_compile)
-#   --device SERIAL      adb serial to target        (default $DEVICE, else the S25 serial below)
+#   --device SERIAL      adb serial to target        (default $DEVICE, else the connected device)
 #   --dev-dir DIR        on-device working directory  (default /data/local/tmp/pw/gate_op)
 #   --keep               keep the on-device work dir (default: leave it, re-used next run)
 #   -h, --help           this text
@@ -40,8 +40,8 @@
 # Environment: none. Every knob is a flag. adb must see exactly the requested device.
 set -euo pipefail
 
-# Default device: the S25 (Config, not a secret — it is the standing on-device test target).
-DEFAULT_DEVICE="R5CWB2KWVJY"
+# Default device: empty — adb targets the single connected device (override with --device).
+DEFAULT_DEVICE=""
 
 ONNX="" BUILDER="" INPUTS="" NAME="" PREC="low" PREC_BOTH=0 WINO="off"
 RUN_BINARY="/data/local/tmp/pw/vknn_run_io" REF_BINARY=""
@@ -75,7 +75,7 @@ cd "$HERE/../.." || { echo "gate_op.sh: cannot cd to repo root" >&2; exit 1; }
 # shellcheck source=benchmark/scripts/gate_lib.sh
 . "$HERE/gate_lib.sh"
 
-ADB="adb -s $DEVICE"
+ADB="adb${DEVICE:+ -s $DEVICE}"
 
 fail() { echo "GATE FAIL: $*" >&2; exit 1; }
 

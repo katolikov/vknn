@@ -8,7 +8,7 @@ in the device binary; this process only tokenizes, displays, and holds the REPL.
 KV cache lives in the device binary and persists across turns.
 
 Usage:
-  chat_host.py --serial R5CWB2KWVJY --ddir /data/local/tmp/vknn/qwen --model qwen_chat.vxm \
+  chat_host.py --serial <device-serial> --ddir /data/local/tmp/vknn/qwen --model qwen_chat.vxm \
                --tokenizer qwen-onnx --precision low --fp32-tensors CSV --max-tokens 128 [--temp 0]
 """
 import argparse

@@ -23,7 +23,12 @@ float vx_act(float x, int act, float lo, float hi) {
 // Unary family (codes must match vknn::UnaryType in include/vknn/op.h). a,b are op params.
 float vx_unary(float x, int op, float a, float b) {
   if (op == 0)  return 1.0 / (1.0 + exp(-x));          // sigmoid
-  if (op == 1)  return tanh(x);                        // tanh
+  // tanh: the driver lowers the built-in to (e^x - e^-x)/(e^x + e^-x), which is inf/inf = NaN for
+  // |x| > ln(FLT_MAX)/1 ~ 88.7 (measured on the target mobile driver). True tanh(+-10) already rounds to +-1.0 in
+  // fp32, so the clamp is bit-identical for every |x| < 88.7 and repairs the NaN region to the
+  // correct saturated value. Large tanh arguments are real: a tanh-GELU MLP feeds it
+  // sqrt(2/pi)*(x + 0.0447 x^3), which passes +-230 at x ~ +-18.
+  if (op == 1)  return tanh(clamp(x, -10.0, 10.0));    // tanh
   if (op == 2)  return x * clamp(x + 3.0, 0.0, 6.0) / 6.0;  // hardswish
   if (op == 3)  return clamp(a * x + b, 0.0, 1.0);     // hardsigmoid
   if (op == 4)  return x > 0.0 ? x : a * x;            // leakyrelu
