@@ -88,14 +88,16 @@ namespace vknn {
                             break;
                         }
                         case 11: {
-                            std::string nm;
-                            Shape       sh;
-                            int32_t     el = 1;
-                            NodeParser::parseValueInfo(r.sub(), nm, sh, el);
-                            TensorId id        = g.findOrAdd(nm);
-                            g.desc(id).shape   = sh;
-                            g.desc(id).dtype   = dtypeFromElem(el);
-                            g.desc(id).isInput = true;
+                            std::string              nm;
+                            Shape                    sh;
+                            int32_t                  el = 1;
+                            std::vector<std::string> params; // per-axis dim_param symbols (empty = concrete)
+                            NodeParser::parseValueInfo(r.sub(), nm, sh, el, &params);
+                            TensorId id           = g.findOrAdd(nm);
+                            g.desc(id).shape      = sh;
+                            g.desc(id).dimParams  = std::move(params); // retained so inferShapes can bind symbols
+                            g.desc(id).dtype      = dtypeFromElem(el);
+                            g.desc(id).isInput    = true;
                             g.inputs.push_back(id);
                             break;
                         }

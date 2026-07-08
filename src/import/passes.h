@@ -15,14 +15,19 @@ namespace vknn {
 
     // Resolve each graph input's dynamic (negative) dims, then infer concrete shapes for all tensors
     // possible. A dim is resolved from `declared` (keyed by input tensor name) when that input has a
-    // declared shape; otherwise the leading (batch) axis falls back to `batch` and any OTHER dynamic
-    // axis with no declaration is a hard error (@throws Error{InvalidArgument}) naming the input and
-    // axis -- substituting `batch` into a dynamic spatial/feature axis silently compiles the model to
-    // a 1x1 plan, which is the class of bug this refuses. `declared` may be null (no declarations, the
-    // batch-only path). A declared entry's rank must match the input's rank and its dims must be
-    // non-negative. The pass is idempotent: a dim resolved on an earlier call is already positive and
-    // is left untouched (the declaration lookup and the error fire only while a dim is still dynamic).
-    void inferShapes(Graph &g, int64_t batch = 1, const std::map<std::string, Shape> *declared = nullptr);
+    // declared shape; otherwise a symbolic axis whose dim_param(s) are all present in `bindings` is
+    // resolved by evaluating its expression (Config::dimBindings / --dim NAME=VALUE), the leading (batch)
+    // axis falls back to `batch`, and any OTHER dynamic axis that stays unresolved is a hard error
+    // (@throws Error{InvalidArgument}) that LISTS the unbound symbol names (or, for an axis with no
+    // recorded symbol, the input and axis) so the caller can bind them -- substituting `batch` into a
+    // dynamic spatial/feature axis silently compiles the model to a 1x1 plan, which is the class of bug
+    // this refuses. `declared` and `bindings` may be null (no declarations/bindings, the batch-only path).
+    // Precedence per still-dynamic axis: `declared` (per-tensor override) > symbol binding > batch
+    // fallback (leading axis) > error. A declared entry's rank must match the input's rank and its dims
+    // must be non-negative. The pass is idempotent: a dim resolved on an earlier call is already positive
+    // and is left untouched (the lookups and the error fire only while a dim is still dynamic).
+    void inferShapes(Graph &g, int64_t batch = 1, const std::map<std::string, Shape> *declared = nullptr,
+                     const std::map<std::string, int64_t> *bindings = nullptr);
     // Normalize 1-D Convs (rank-3 constant weight, 1-spatial-dim attributes) to the canonical 2-D
     // geometry every conv consumer indexes: weight [M,C/g,k] -> [M,C/g,k,1], strides/dilations/
     // kernel_shape/pads extended with the W dim's identity values. Activation ranks are unchanged.
@@ -91,6 +96,11 @@ namespace vknn {
         // back to `batch` on its leading axis and errors on any other dynamic axis (see inferShapes).
         // Empty = the batch-only path, so existing callers that set only `batch` are unchanged.
         std::map<std::string, Shape> inputShapes;
+        // Symbolic-dimension bindings keyed by ONNX dim_param name (e.g. "past_sequence_length" -> 256).
+        // A dynamic input axis whose dim_param expression resolves entirely from these bindings is filled
+        // automatically by inferShapes; `inputShapes` (per-tensor) overrides a binding for that tensor.
+        // Empty = the batch-only path.
+        std::map<std::string, int64_t> dimBindings;
         bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)

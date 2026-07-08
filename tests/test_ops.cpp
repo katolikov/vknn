@@ -6,6 +6,7 @@
 // output_shape yield the same output size here but different values, so a regression in either
 // attribute is caught.
 #include "core/matmul_tile.h"
+#include "import/dim_expr.h"
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
@@ -1940,6 +1941,89 @@ TEST(Passes, InferShapesDeclaredRankMismatchErrors) {
         EXPECT_EQ(e.status(), Status::InvalidArgument);
     }
     EXPECT_TRUE(threw) << "declared shape of the wrong rank must hard-error";
+}
+
+namespace {
+    // A single graph input with the given shape and per-axis dim_param symbols, no nodes -- exercises
+    // just the input dim-resolution path of inferShapes (bindings / batch fallback / aggregated error).
+    Graph makeSymbolicInputGraph(const Shape &shape, const std::vector<std::string> &dimParams) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name      = "x";
+        xi.shape     = shape;
+        xi.dimParams = dimParams;
+        xi.isInput   = true;
+        TensorId x   = g.addTensor(xi);
+        g.inputs.push_back(x);
+        return g;
+    }
+} // namespace
+
+// --- The dim-expression evaluator: a bare symbol, an integer literal, a compound sum, and a product,
+// each resolved from bound symbols; an unbound symbol reports itself as free. ---
+TEST(DimExpr, EvaluatesGrammar) {
+    std::map<std::string, int64_t> b = {{"past_sequence_length", 256}, {"sequence_length", 1}};
+    EXPECT_TRUE(evalDimExpr("past_sequence_length", b).ok);
+    EXPECT_EQ(evalDimExpr("past_sequence_length", b).value, 256);
+    EXPECT_EQ(evalDimExpr("7", b).value, 7);
+    EXPECT_EQ(evalDimExpr("past_sequence_length + sequence_length", b).value, 257);
+    EXPECT_EQ(evalDimExpr("2 * sequence_length + past_sequence_length", b).value, 258);
+    DimEval free = evalDimExpr("num_heads + sequence_length", b);
+    EXPECT_FALSE(free.ok);
+    ASSERT_EQ(free.freeSymbols.size(), 1u);
+    EXPECT_EQ(free.freeSymbols[0], "num_heads");
+}
+
+// --- A symbolic input axis resolves from a --dim binding of its dim_param name; batch_size (axis 0)
+// falls back to `batch` while sequence_length (axis 1) is bound. ---
+TEST(Passes, InferShapesDimBindingResolves) {
+    Graph                          g     = makeSymbolicInputGraph({-1, -1}, {"batch_size", "sequence_length"});
+    std::map<std::string, int64_t> binds = {{"sequence_length", 5}};
+    inferShapes(g, 1, nullptr, &binds);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {1, 5}));
+}
+
+// --- A bound --dim of the leading (batch) symbol wins over the --batch fallback. ---
+TEST(Passes, InferShapesDimBindingBatchSymbol) {
+    Graph                          g     = makeSymbolicInputGraph({-1, -1}, {"batch_size", "sequence_length"});
+    std::map<std::string, int64_t> binds = {{"batch_size", 4}, {"sequence_length", 7}};
+    inferShapes(g, 1, nullptr, &binds);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {4, 7}));
+}
+
+// --- A compound dim_param expression evaluates from its two bound symbols (the optimum attention_mask
+// axis "past_sequence_length + sequence_length" at decode C=256 -> 257). ---
+TEST(Passes, InferShapesDimBindingCompound) {
+    Graph                          g     = makeSymbolicInputGraph({-1, -1}, {"batch_size", "past_sequence_length + sequence_length"});
+    std::map<std::string, int64_t> binds = {{"past_sequence_length", 256}, {"sequence_length", 1}};
+    inferShapes(g, 1, nullptr, &binds);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {1, 257}));
+}
+
+// --- An unbound symbolic non-batch axis is an aggregated hard error that NAMES the free symbol, so the
+// caller knows exactly what to bind (not a per-tensor "pass --shape" message). ---
+TEST(Passes, InferShapesUnboundSymbolErrors) {
+    Graph g     = makeSymbolicInputGraph({-1, -1}, {"batch_size", "sequence_length"});
+    bool  threw = false;
+    try
+    {
+        inferShapes(g, 1); // no bindings
+    } catch (const Error &e)
+    {
+        threw = true;
+        EXPECT_EQ(e.status(), Status::InvalidArgument);
+        EXPECT_NE(std::string(e.what()).find("sequence_length"), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(threw) << "an unbound symbolic non-batch axis must hard-error naming the symbol";
+}
+
+// --- A per-tensor --shape declaration overrides a --dim binding for that tensor (declared wins). ---
+TEST(Passes, InferShapesShapeOverridesDim) {
+    Graph                          g        = makeSymbolicInputGraph({-1, -1}, {"batch_size", "sequence_length"});
+    std::map<std::string, Shape>   declared = {{"x", {2, 9}}};
+    std::map<std::string, int64_t> binds    = {{"sequence_length", 5}};
+    inferShapes(g, 1, &declared, &binds);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {2, 9}));
 }
 
 namespace {

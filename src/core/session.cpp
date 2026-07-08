@@ -409,15 +409,16 @@ namespace vknn {
         std::vector<RtTensor>    &pool_           = bucket.pool;
         std::vector<std::unique_ptr<Segment>> &segments_ = bucket.segments;
 
-        // --- graph optimization passes (NCHW IR; batch=1 fallback + any Config::inputShapes) ---
+        // --- graph optimization passes (NCHW IR; batch=1 fallback + any Config::inputShapes/dimBindings) ---
         // Skipped when the graph came from a .vxm (passes already applied at save time). The default
         // fusion set is used (the compiler tool sets fusion options explicitly); the ONNX-load path only
-        // needs the caller's declared input shapes threaded in so a dynamic-spatial model resolves
-        // instead of silently freezing to a 1x1 plan.
+        // needs the caller's declared input shapes and symbolic-dim bindings threaded in so a dynamic model
+        // resolves instead of silently freezing to a 1x1 plan.
         if (!graphOptimized_)
         {
             PassOptions opt;
             opt.inputShapes = cfg_.inputShapes;
+            opt.dimBindings = cfg_.dimBindings;
             runStandardPasses(graph_, opt);
         }
         graph_.topoSort();
