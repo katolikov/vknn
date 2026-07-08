@@ -10,6 +10,7 @@
 // matrix), [4] pw_b [Cout] (optional); node.fusedResidual is an optional [N,Cout,OH,OW] tensor.
 // node.subOp is the depthwise-stage ActType; node.fusedAct is the projection-stage activation.
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "core/conv_geom.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -50,67 +51,76 @@ namespace vknn {
                 // Per-batch scratch for the depthwise stage, laid out [E, OH, OW]; reused across n so
                 // the E intermediate channels never become a full tensor.
                 std::vector<float> dwOut(E * OH * OW);
+                const int          threads = cpu::threadCount(ctx.config);
                 for (int64_t n = 0; n < x.n; ++n)
                 {
                     // Stage 1: depthwise conv. Each output channel e convolves only input channel e
-                    // (group == E), accumulating in fp32 from the optional per-channel bias.
-                    for (int64_t e = 0; e < E; ++e)
-                    {
-                        for (int64_t oy = 0; oy < OH; ++oy)
+                    // (group == E), accumulating in fp32 from the optional per-channel bias. The E
+                    // channels write disjoint dwOut slabs and share no accumulator, so they partition
+                    // across threads; parallelFor joins before stage 2 reads the whole scratch.
+                    cpu::parallelFor(threads, 0, E, cpu::minChunkForWork(OH * OW * KH * KW), [&](int64_t eBegin, int64_t eEnd) {
+                        for (int64_t e = eBegin; e < eEnd; ++e)
                         {
-                            for (int64_t ox = 0; ox < OW; ++ox)
+                            for (int64_t oy = 0; oy < OH; ++oy)
                             {
-                                float acc = db ? db[e] : 0.f;
-                                for (int64_t ky = 0; ky < KH; ++ky)
+                                for (int64_t ox = 0; ox < OW; ++ox)
                                 {
-                                    // Map kernel row to the strided, dilated, pad-shifted input row;
-                                    // rows outside [0, x.h) are the zero-pad border, so skip them.
-                                    int64_t iy = oy * st[0] - pad[0] + ky * dil[0];
-                                    if (iy < 0 || iy >= x.h)
+                                    float acc = db ? db[e] : 0.f;
+                                    for (int64_t ky = 0; ky < KH; ++ky)
                                     {
-                                        continue;
-                                    }
-                                    for (int64_t kx = 0; kx < KW; ++kx)
-                                    {
-                                        int64_t ix = ox * st[1] - pad[1] + kx * dil[1];
-                                        if (ix < 0 || ix >= x.w)
+                                        // Map kernel row to the strided, dilated, pad-shifted input row;
+                                        // rows outside [0, x.h) are the zero-pad border, so skip them.
+                                        int64_t iy = oy * st[0] - pad[0] + ky * dil[0];
+                                        if (iy < 0 || iy >= x.h)
                                         {
                                             continue;
                                         }
-                                        // X[n,e,iy,ix] * dw_w[e,0,ky,kx]; dw_w has one channel of
-                                        // input so its stride is (e*KH + ky)*KW + kx.
-                                        acc += xd[((n * E + e) * x.h + iy) * x.w + ix] * dw[(e * KH + ky) * KW + kx];
+                                        for (int64_t kx = 0; kx < KW; ++kx)
+                                        {
+                                            int64_t ix = ox * st[1] - pad[1] + kx * dil[1];
+                                            if (ix < 0 || ix >= x.w)
+                                            {
+                                                continue;
+                                            }
+                                            // X[n,e,iy,ix] * dw_w[e,0,ky,kx]; dw_w has one channel of
+                                            // input so its stride is (e*KH + ky)*KW + kx.
+                                            acc += xd[((n * E + e) * x.h + iy) * x.w + ix] * dw[(e * KH + ky) * KW + kx];
+                                        }
                                     }
+                                    dwOut[(e * OH + oy) * OW + ox] = acc;
                                 }
-                                dwOut[(e * OH + oy) * OW + ox] = acc;
                             }
                         }
-                    }
+                    });
                     // Depthwise-stage activation applied in place to dwOut. subOp is an ActType code;
                     // the 0, 6 are the Clip lo/hi bounds, consulted only when subOp == Clip.
                     cpu::applyAct(dwOut.data(), E * OH * OW, (ActType) node.subOp, 0, 6);
                     // Stage 2: 1x1 pointwise projection. Treating each of the OH*OW spatial positions
                     // as a column, pw_w [Cout, E] maps the E depthwise channels to Cout output
-                    // channels: y[c, p] = pw_b[c] + sum_e pw_w[c, e] * dwOut[e, p].
-                    for (int64_t c = 0; c < Cout; ++c)
-                    {
-                        for (int64_t p = 0; p < OH * OW; ++p)
+                    // channels: y[c, p] = pw_b[c] + sum_e pw_w[c, e] * dwOut[e, p]. Output channel c
+                    // owns its own output plane and its own E-contraction, so the Cout channels
+                    // partition across threads.
+                    cpu::parallelFor(threads, 0, Cout, cpu::minChunkForWork(OH * OW * E), [&](int64_t cBegin, int64_t cEnd) {
+                        for (int64_t c = cBegin; c < cEnd; ++c)
                         {
-                            float acc = pb ? pb[c] : 0.f;
-                            for (int64_t e = 0; e < E; ++e)
+                            for (int64_t p = 0; p < OH * OW; ++p)
                             {
-                                acc += pw[c * E + e] * dwOut[e * OH * OW + p];
+                                float acc = pb ? pb[c] : 0.f;
+                                for (int64_t e = 0; e < E; ++e)
+                                {
+                                    acc += pw[c * E + e] * dwOut[e * OH * OW + p];
+                                }
+                                int64_t oi = (n * Cout + c) * OH * OW + p;
+                                // Optional fused residual (elementwise, same NCHW shape as Y), added
+                                // before the projection activation per inverted-residual semantics.
+                                if (res)
+                                {
+                                    acc += res[oi];
+                                }
+                                y[oi] = acc;
                             }
-                            int64_t oi = (n * Cout + c) * OH * OW + p;
-                            // Optional fused residual (elementwise, same NCHW shape as Y), added
-                            // before the projection activation per inverted-residual semantics.
-                            if (res)
-                            {
-                                acc += res[oi];
-                            }
-                            y[oi] = acc;
                         }
-                    }
+                    });
                 }
                 // Projection-stage activation over the whole output, with its clamp/param bounds.
                 cpu::applyAct(y, Y.elems(), node.fusedAct, node.actLo, node.actHi);

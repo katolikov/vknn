@@ -4,6 +4,7 @@
 // CPU reference: a straight triple loop over the broadcasted batch, then M,N,K. Host buffers are
 // canonical NCHW fp32, so this is the oracle the host tests validate against.
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <vector>
@@ -89,25 +90,30 @@ namespace vknn {
                 // A fused Linear bias (rank-1 [N]) added per output column, matching the GPU epilogue.
                 const float *bias = node.fusedBias != kNoTensor ? ctx.t(node.fusedBias).host.f32() : nullptr;
 
-                for (int64_t bi = 0; bi < batchElems; ++bi)
-                {
-                    // Decode the batch index into per-dim coords to find the A/B base offsets.
-                    int64_t aBase = 0, bBase = 0, rem = bi;
-                    for (int64_t i = batchRank - 1; i >= 0; --i)
+                // Flatten (batch, row) into one index: each output row of each batch matrix is written by
+                // exactly one iteration and its K-contraction completes inside that iteration, so the rows
+                // partition across threads with every acc summed in the same ascending-k order.
+                cpu::parallelFor(cpu::threadCount(ctx.config), 0, batchElems * M, cpu::minChunkForWork(N * K), [&](int64_t rowBegin, int64_t rowEnd) {
+                    for (int64_t row = rowBegin; row < rowEnd; ++row)
                     {
-                        int64_t c = rem % batch[i];
-                        rem /= batch[i];
-                        aBase += c * aBatchStride[i];
-                        bBase += c * bBatchStride[i];
-                    }
-                    const float *am = a + aBase;
-                    const float *bm = b + bBase;
-                    float       *ym = y + bi * M * N;
-                    // Row-major single-matrix product: A[m,k] is am[m*K+k], B[k,n] is bm[k*N+n], and the
-                    // result Y[m,n] is ym[m*N+n]. acc sums over k in ascending order in fp32; that
-                    // accumulation order is the observable reference the host byte-compare validates.
-                    for (int64_t m = 0; m < M; ++m)
-                    {
+                        int64_t bi = row / M;
+                        int64_t m  = row % M;
+                        // Decode the batch index into per-dim coords to find the A/B base offsets.
+                        int64_t aBase = 0, bBase = 0, rem = bi;
+                        for (int64_t i = batchRank - 1; i >= 0; --i)
+                        {
+                            int64_t c = rem % batch[i];
+                            rem /= batch[i];
+                            aBase += c * aBatchStride[i];
+                            bBase += c * bBatchStride[i];
+                        }
+                        const float *am = a + aBase;
+                        const float *bm = b + bBase;
+                        float       *ym = y + bi * M * N;
+                        // Row-major single-matrix product: A[m,k] is am[m*K+k], B[k,n] is bm[k*N+n], and
+                        // the result Y[m,n] is ym[m*N+n]. acc sums over k in ascending order in fp32;
+                        // that accumulation order is the observable reference the host byte-compare
+                        // validates.
                         for (int64_t n = 0; n < N; ++n)
                         {
                             float acc = 0.f;
@@ -118,7 +124,7 @@ namespace vknn {
                             ym[m * N + n] = bias ? acc + bias[n] : acc;
                         }
                     }
-                }
+                });
             }
         };
 

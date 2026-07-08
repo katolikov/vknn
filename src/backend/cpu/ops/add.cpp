@@ -2,6 +2,7 @@
 // take a NEON fast path; broadcasting falls back to the general index walk.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "vknn/logging.h"
 #include <algorithm>
 #if defined(VKNN_ENABLE_NEON) && defined(__ARM_NEON)
@@ -72,19 +73,24 @@ namespace vknn {
                     float       *y = cpu::allocOut(Y, sa);
                     const float *a = A.host.f32();
                     const float *b = B.host.f32();
-                    int64_t      i = 0;
+                    // y[i] is one fp32 add of a[i] and b[i]: no lane crosses an element and no sum spans
+                    // iterations, so both the NEON block and the scalar tail give the same bits wherever
+                    // the partition puts a chunk boundary.
+                    cpu::parallelFor(cpu::threadCount(ctx.config), 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
+                        int64_t i = lo;
 #if defined(VKNN_HAS_NEON)
-                    // Four lanes per iteration; the scalar loop below finishes the tail of up to 3
-                    // elements. Both compute a[i]+b[i] in fp32, so the result is identical either way.
-                    for (; i + 4 <= n; i += 4)
-                    {
-                        vst1q_f32(y + i, vaddq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
-                    }
+                        // Four lanes per iteration; the scalar loop below finishes the tail of up to 3
+                        // elements. Both compute a[i]+b[i] in fp32, so the result is identical either way.
+                        for (; i + 4 <= hi; i += 4)
+                        {
+                            vst1q_f32(y + i, vaddq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
+                        }
 #endif
-                    for (; i < n; ++i)
-                    {
-                        y[i] = a[i] + b[i];
-                    }
+                        for (; i < hi; ++i)
+                        {
+                            y[i] = a[i] + b[i];
+                        }
+                    });
                     cpu::applyAct(y, n, node.fusedAct, node.actLo, node.actHi); // fused Relu (e.g. ResNet)
                     return;
                 }
@@ -120,12 +126,15 @@ namespace vknn {
                     sB *= dimOf(sb, i);
                 }
                 // Walk the output row-major, projecting each position through oa/ob by odometer carry.
-                cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
-                w.seek(0);
-                for (int64_t lin = 0; lin < n; ++lin, w.next())
-                {
-                    y[lin] = a[w.offset(0)] + b[w.offset(1)];
-                }
+                // Each chunk seeks its own start, so the partition changes no element's expression.
+                cpu::parallelFor(cpu::threadCount(ctx.config), 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
+                    cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                    w.seek(lo);
+                    for (int64_t lin = lo; lin < hi; ++lin, w.next())
+                    {
+                        y[lin] = a[w.offset(0)] + b[w.offset(1)];
+                    }
+                });
                 cpu::applyAct(y, n, node.fusedAct, node.actLo, node.actHi); // a broadcast Add carries fusedAct too
             }
         };

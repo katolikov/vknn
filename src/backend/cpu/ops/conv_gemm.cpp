@@ -3,6 +3,7 @@
 // the GPU kernel gathers). Plain fp32 convolution loops indexed through the repacked layout; the
 // executor's epilogue hook applies any attached pointwise unit afterwards.
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "core/conv_geom.h"
 
 namespace vknn {
@@ -36,10 +37,14 @@ namespace vknn {
                 const float *x = X.host.f32();
                 const float *w = Wt.host.f32();
 
-                for (int64_t n = 0; n < N; ++n)
-                {
-                    for (int64_t oc = 0; oc < Cout; ++oc)
+                // One output plane per (image, output channel): disjoint stores, and each acc sums over
+                // its own ic/ky/kx within a single iteration, so the planes partition across threads
+                // without touching any accumulation order.
+                cpu::parallelFor(cpu::threadCount(ctx.config), 0, N * Cout, cpu::minChunkForWork(OH * OW * C * KH * KW), [&](int64_t planeBegin, int64_t planeEnd) {
+                    for (int64_t plane = planeBegin; plane < planeEnd; ++plane)
                     {
+                        int64_t n  = plane / Cout;
+                        int64_t oc = plane % Cout;
                         for (int64_t oy = 0; oy < OH; ++oy)
                         {
                             for (int64_t ox = 0; ox < OW; ++ox)
@@ -70,7 +75,7 @@ namespace vknn {
                             }
                         }
                     }
-                }
+                });
                 cpu::applyAct(y, Y.elems(), node.fusedAct, node.actLo, node.actHi);
             }
         };

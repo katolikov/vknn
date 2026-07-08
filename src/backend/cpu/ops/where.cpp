@@ -5,6 +5,7 @@
 // Where(Equal(dim,-1), input_shape, target)), where reading int bytes as fp32 would corrupt them.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "vknn/op.h"
 #include <algorithm>
 
@@ -55,29 +56,36 @@ namespace vknn {
                 // the zero-collapsing strides oc/ox/oy by an odometer carry: offset(0) is cond's,
                 // offset(1) is X's, offset(2) is Y's.
                 // Output type follows the value operands (int64 for the shape-arithmetic Where).
-                bool i64 = X.dtype == DType::Int64 && Yv.dtype == DType::Int64;
+                bool i64     = X.dtype == DType::Int64 && Yv.dtype == DType::Int64;
+                int  threads = cpu::threadCount(ctx.config);
+                // Each output element selects independently, so the sweep partitions across threads and
+                // each chunk seeks its own walker start.
                 if (i64)
                 {
                     int64_t       *o = cpu::allocOutI64(Out, out);
                     const int64_t *x = X.host.i64();
                     const int64_t *y = Yv.host.i64();
-                    cpu::BroadcastWalk w(out, {oc.data(), ox.data(), oy.data()});
-                    w.seek(0);
-                    for (int64_t lin = 0; lin < n; ++lin, w.next())
-                    {
-                        o[lin] = condTrue(C, w.offset(0)) ? x[w.offset(1)] : y[w.offset(2)];
-                    }
+                    cpu::parallelFor(threads, 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
+                        cpu::BroadcastWalk w(out, {oc.data(), ox.data(), oy.data()});
+                        w.seek(lo);
+                        for (int64_t lin = lo; lin < hi; ++lin, w.next())
+                        {
+                            o[lin] = condTrue(C, w.offset(0)) ? x[w.offset(1)] : y[w.offset(2)];
+                        }
+                    });
                 } else
                 {
-                    float             *o = cpu::allocOut(Out, out);
-                    const float       *x = X.host.f32();
-                    const float       *y = Yv.host.f32();
-                    cpu::BroadcastWalk w(out, {oc.data(), ox.data(), oy.data()});
-                    w.seek(0);
-                    for (int64_t lin = 0; lin < n; ++lin, w.next())
-                    {
-                        o[lin] = condTrue(C, w.offset(0)) ? x[w.offset(1)] : y[w.offset(2)];
-                    }
+                    float       *o = cpu::allocOut(Out, out);
+                    const float *x = X.host.f32();
+                    const float *y = Yv.host.f32();
+                    cpu::parallelFor(threads, 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
+                        cpu::BroadcastWalk w(out, {oc.data(), ox.data(), oy.data()});
+                        w.seek(lo);
+                        for (int64_t lin = lo; lin < hi; ++lin, w.next())
+                        {
+                            o[lin] = condTrue(C, w.offset(0)) ? x[w.offset(1)] : y[w.offset(2)];
+                        }
+                    });
                 }
             }
         };

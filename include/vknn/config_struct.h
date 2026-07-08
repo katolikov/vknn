@@ -63,6 +63,16 @@ namespace vknn {
         /// numerical output; the chosen kernels are cached and reused on a warm start.
         Tuning tuning = Tuning::Fast;
 
+        /// Worker threads the CPU backend partitions its hot output loops across (Conv, ConvGemm,
+        /// FusedDwPw, Gemm, MatMul, the elementwise family). Only loops whose iterations write disjoint
+        /// outputs and carry no cross-iteration accumulation are split, so every output element is
+        /// computed by the same expression in the same order as a serial run: the result is
+        /// bit-identical for any thread count and the CPU backend stays the byte oracle for the GPU
+        /// path. 1 runs the loops inline with no pool involvement. The default targets the big cluster
+        /// of a typical mobile SoC and is a fixed number rather than a probe of the host, so a plan
+        /// runs the same way on every machine. Values below 1 are clamped to 1.
+        int cpuThreads = 4;
+
         /// Free host weight buffers after they are uploaded to the device / decoded into the pool. run()
         /// never reads graph initializers (it uses GPU buffers + the pool), so this is safe and reclaims
         /// the full weight blob — needed to fit large (e.g. 965M-param fp16) models on-device.

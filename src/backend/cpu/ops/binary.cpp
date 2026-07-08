@@ -1,6 +1,7 @@
 // Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/parallel.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <cmath>
@@ -128,12 +129,16 @@ namespace vknn {
                     sA *= dimOf(sa, i);
                     sB *= dimOf(sb, i);
                 }
-                cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
-                w.seek(0);
-                for (int64_t lin = 0; lin < n; ++lin, w.next())
-                {
-                    y[lin] = binary(a[w.offset(0)], b[w.offset(1)], (BinaryType) node.subOp);
-                }
+                // Each output element is one independent binary() evaluation, so the sweep partitions
+                // across threads; a chunk seeks its own walker start.
+                cpu::parallelFor(cpu::threadCount(ctx.config), 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
+                    cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                    w.seek(lo);
+                    for (int64_t lin = lo; lin < hi; ++lin, w.next())
+                    {
+                        y[lin] = binary(a[w.offset(0)], b[w.offset(1)], (BinaryType) node.subOp);
+                    }
+                });
             }
         };
 
