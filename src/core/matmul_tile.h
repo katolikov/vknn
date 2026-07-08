@@ -22,9 +22,17 @@ namespace vknn {
     constexpr int64_t kGemvMinK = 512;
     constexpr int64_t kGemvMaxN = 16384;
 
-    /// Lanes along n / lanes reducing over k in shaders/matmul_gemv.comp. The dispatch splits the flat
-    /// output grid by kGemvNx, so this must track the shader's GEMV_NX #define.
+    /// Output elements one mat-vec workgroup covers along the flat grid; the dispatch splits the
+    /// output grid by it. Both mat-vec kernels cover exactly this many: matmul_gemv.comp as
+    /// GEMV_NX == 64 scalar lanes, matmul_gemv4.comp as GEMV_NX == 16 lanes of GEMV_VEC == 4.
     constexpr int64_t kGemvNx = 64;
+
+    /// Adjacent n a single lane of shaders/matmul_gemv4.comp owns, loaded as one vector element of B.
+    /// That vector index is exact only when B's n axis is kGemvVec-aligned at every k, which N %
+    /// kGemvVec == 0 gives (it also aligns every batch stride, a multiple of K*N, and every
+    /// workgroup's first n, a multiple of kGemvNx). An indivisible N keeps the scalar kernel; the two
+    /// share a k partition and a per-output accumulation order, so the choice never affects bits.
+    constexpr int64_t kGemvVec = 4;
 
     /// One matmul_tiled tile geometry: specialization constants 0/1/2 (TM/TN/TK). The workgroup
     /// stays 16x16 = 256 threads; each thread computes a (tm/16)x(tn/16) register micro-tile.

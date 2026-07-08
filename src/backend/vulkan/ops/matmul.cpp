@@ -1,11 +1,12 @@
 // Batched N-D MatMul on the FLAT row-major GPU path: out[...,m,n] = sum_k A[...,m,k]*B[...,k,n]
 // with NumPy broadcasting on the batch dims. Three kernels serve it, by shape: the register-blocked
 // tiled GEMM (shaders/matmul_tiled*.comp) for full matrices, the split-K mat-vec
-// (shaders/matmul_gemv*.comp) for a narrow M == 1 row, and otherwise one thread per output element
-// walking K (shaders/matmul.comp). Either operand may be an activation or a constant initializer
-// (e.g. a Linear weight); an initializer is uploaded flat in prepare(). The naive and tiled kernels
-// mirror the CPU oracle's broadcast/stride math byte-for-byte; the split-K kernel regroups the k
-// chain (deterministically) and so agrees only to fp32 rounding.
+// (shaders/matmul_gemv*.comp — vector-load when N % kGemvVec == 0, scalar otherwise) for a narrow
+// M == 1 row, and otherwise one thread per output element walking K (shaders/matmul.comp). Either
+// operand may be an activation or a constant initializer (e.g. a Linear weight); an initializer is
+// uploaded flat in prepare(). The naive and tiled kernels mirror the CPU oracle's broadcast/stride
+// math byte-for-byte; the split-K kernels regroup the k chain (deterministically, identically to each
+// other) and so agree only to fp32 rounding.
 #include "core/matmul_tile.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
@@ -33,7 +34,7 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>          constBuf[2]; // set when an operand is an initializer
             std::shared_ptr<vk::Buffer>          biasBuf;     // set when a rank-1 [N] bias is fused in
             bool                                 useTiled = false;
-            bool                                 useGemv  = false; // split-K mat-vec (shaders/matmul_gemv.comp)
+            bool                                 useGemv  = false; // split-K mat-vec (shaders/matmul_gemv*.comp)
             int                                  numBatch = 1;
             MatMulTile                           tile     = kMatMulTiles[0]; // matmul_tiled spec constants (TM/TN/TK)
 
@@ -289,6 +290,12 @@ namespace vknn {
                 // so the _bias variant's `gid % N` indexes the bias.
                 useGemv = !useTiled && !bWas1D && M == 1 && K >= kGemvMinK && N < kGemvMaxN;
 
+                // An N divisible by kGemvVec lets a mat-vec lane pull its kGemvVec adjacent n as one
+                // vector element of B (a quarter of the lanes, four times the bytes per load
+                // instruction, same 64 outputs per workgroup). The two mat-vec kernels are
+                // bit-identical, so an indivisible N simply falls back to the scalar one.
+                bool useGemvVec = useGemv && N % kGemvVec == 0;
+
                 // The default {128,128,16} tile runs the compile-time matmul_tiled_fast kernel (full
                 // inner-loop unroll, register-resident micro-tile — main's fast literal geometry);
                 // only a non-default raced tile runs the spec-constant matmul_tiled kernel. The
@@ -298,7 +305,8 @@ namespace vknn {
                 // A fused Linear bias (rank-1 [N]) is added in the fp32 accumulator by the _bias kernel
                 // variant; upload it flat and bind it as a 4th buffer. The geometry SSBO follows the
                 // operands (and the bias when present): binding 3 without bias, binding 4 with it.
-                const char *base = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : (useGemv ? "matmul_gemv" : "matmul"));
+                const char *gemvBase = useGemvVec ? "matmul_gemv4" : "matmul_gemv";
+                const char *base     = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : (useGemv ? gemvBase : "matmul"));
                 std::string name = base;
                 uint32_t    nbuf = 4; // A, B, D, geometry
                 if (node.fusedBias != kNoTensor)

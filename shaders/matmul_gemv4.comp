@@ -1,0 +1,126 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+// Vector-load split-K batched mat-vec: out[...,n] = sum_k A[...,k]*B[...,k,n] for a single output row
+// (M == 1), for an N divisible by GEMV_VEC. Same k partition, same per-output accumulation order and
+// therefore the same bits as shaders/matmul_gemv.comp — the two differ only in how B's row is spread
+// over the lanes of a wave.
+//
+// matmul_gemv.comp gives thread (x, ky) one output and one 2-byte B element per k step, so a wave
+// spends all 64 of its lanes on 128 bytes. Here a lane owns GEMV_VEC adjacent n and pulls them as one
+// GEMV_VEC-wide element, so the same 64 outputs per workgroup cost a quarter of the lanes: the
+// workgroup is 256 threads instead of 1024 (finer scheduling granularity, four times fewer waves) and
+// each load instruction moves four times the bytes. Per-wave in-flight bytes rise by GEMV_VEC and the
+// wave count falls by GEMV_VEC, so the k loop is unrolled GEMV_U-wide for the same reason it is there:
+// in-flight bytes, not instruction count, bound a DRAM-latency-bound stream.
+//
+// Vector indexing is exact only when B's n axis is GEMV_VEC-aligned at every k: matmul.cpp selects this
+// kernel on N % GEMV_VEC == 0, which also makes every batch stride (a multiple of K*N) and every
+// workgroup's first n (a multiple of GEMV_NX*GEMV_VEC) a multiple of GEMV_VEC. Shapes with an
+// indivisible N keep the scalar kernel.
+//
+// Geometry rides the same content-deduped SSBO (binding 3) as matmul.comp: outDim = g[0..rank),
+// aStride = g[rank..2*rank), bStride = g[2*rank..3*rank).
+#include "common.glsl"
+#define GEMV_VEC 4 // adjacent n per lane, loaded as one vector element of B
+#define GEMV_NX 16 // lanes along n; GEMV_NX * GEMV_VEC == 64 outputs per workgroup (matmul.cpp's kGemvNx)
+#define GEMV_KS 16 // lanes reducing over k; GEMV_NX * GEMV_KS == 256 threads
+#define GEMV_U 4   // k steps a lane loads before it consumes any of them (memory-level parallelism)
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+layout(local_size_x = GEMV_NX, local_size_y = GEMV_KS) in;
+layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE4 b4[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 3) readonly buffer G { int g[]; } geom;
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK;
+} pc;
+
+shared float part[GEMV_KS][GEMV_VEC][GEMV_NX];
+
+void main() {
+  // The 1-D output grid is spilled into y when it overflows maxWorkGroupCount[0]; local y is the
+  // k-split, so the workgroup id — not gl_GlobalInvocationID.y — carries the overflow.
+  uint blk = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  uint x   = gl_LocalInvocationID.x;
+  uint gid = blk * (GEMV_NX * GEMV_VEC) + x * GEMV_VEC;
+  uint ky  = gl_LocalInvocationID.y;
+  // total is a multiple of GEMV_VEC (its last dim N is), so a lane's GEMV_VEC outputs are live or
+  // dead together and never straddle a row of B.
+  bool live = gid < uint(pc.total);
+
+  int aBase = 0, bBase = 0;
+  if (live) {
+    int rem = int(gid);
+    for (int k = pc.rank - 1; k >= 0; --k) {
+      int c = rem % geom.g[k];
+      rem /= geom.g[k];
+      aBase += c * geom.g[pc.rank + k];
+      bBase += c * geom.g[2 * pc.rank + k];
+    }
+  }
+  // aStride[nAxis] == 0 and bStride[nAxis] == 1, so the lane's GEMV_VEC outputs share aBase and sit
+  // at bBase..bBase+GEMV_VEC-1 — one vector element of B, at vector index bBase / GEMV_VEC.
+  int bVec  = bBase / GEMV_VEC;
+  int bStep = pc.bK / GEMV_VEC;
+
+  // Four k steps load before the accumulator consumes any of them; the terms still fold into acc in
+  // ascending k, per output lane, exactly as the scalar kernel folds them. Spelled out rather than
+  // looped over a register array: an array indexed by a loop variable lands in scratch memory unless
+  // the driver unrolls it.
+  vec4 acc = vec4(0.0);
+  if (live) {
+    int k = int(ky);
+    for (; k + (GEMV_U - 1) * GEMV_KS < pc.K; k += GEMV_U * GEMV_KS) {
+      float a0 = float(a[aBase + k * pc.aK]);
+      float a1 = float(a[aBase + (k + GEMV_KS) * pc.aK]);
+      float a2 = float(a[aBase + (k + 2 * GEMV_KS) * pc.aK]);
+      float a3 = float(a[aBase + (k + 3 * GEMV_KS) * pc.aK]);
+      vec4  b0 = vec4(b4[bVec + k * bStep]);
+      vec4  b1 = vec4(b4[bVec + (k + GEMV_KS) * bStep]);
+      vec4  b2 = vec4(b4[bVec + (k + 2 * GEMV_KS) * bStep]);
+      vec4  b3 = vec4(b4[bVec + (k + 3 * GEMV_KS) * bStep]);
+      acc += a0 * b0;
+      acc += a1 * b1;
+      acc += a2 * b2;
+      acc += a3 * b3;
+    }
+    for (; k < pc.K; k += GEMV_KS)
+      acc += float(a[aBase + k * pc.aK]) * vec4(b4[bVec + k * bStep]);
+  }
+  // Every invocation stores (dead lanes store 0) so barrier() stays in uniform control flow. The
+  // [ky][j][x] layout keeps each lane's write and each reducer's read stride-1 along x.
+  part[ky][0][x] = acc.x;
+  part[ky][1][x] = acc.y;
+  part[ky][2][x] = acc.z;
+  part[ky][3][x] = acc.w;
+  barrier();
+  if (ky != 0 || !live) return;
+
+  vec4 s = vec4(0.0);
+  for (int i = 0; i < GEMV_KS; ++i) {
+    s.x += part[i][0][x];
+    s.y += part[i][1][x];
+    s.z += part[i][2][x];
+    s.w += part[i][3][x];
+  }
+#ifdef PW_EPI
+  d[gid + 0u] = TO_STORE(pw_apply(s.x, int(gid) + 0));
+  d[gid + 1u] = TO_STORE(pw_apply(s.y, int(gid) + 1));
+  d[gid + 2u] = TO_STORE(pw_apply(s.z, int(gid) + 2));
+  d[gid + 3u] = TO_STORE(pw_apply(s.w, int(gid) + 3));
+#else
+  d[gid + 0u] = TO_STORE(s.x);
+  d[gid + 1u] = TO_STORE(s.y);
+  d[gid + 2u] = TO_STORE(s.z);
+  d[gid + 3u] = TO_STORE(s.w);
+#endif
+}
