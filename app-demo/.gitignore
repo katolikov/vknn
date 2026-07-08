@@ -1,0 +1,9 @@
+# Build artifacts
+native/build/
+app/build/
+app/src/main/jniLibs/**/*.so
+.gradle/
+local.properties
+*.apk
+*.iml
+.idea/
