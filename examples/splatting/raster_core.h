@@ -1,14 +1,20 @@
 // The from-scratch Vulkan compute 3D-Gaussian-splatting rasterizer (preprocess -> GPU tile-bin ->
 // stable radix sort -> per-tile alpha compositing), shared by the vknn_yonosplat example and the
-// app-demo JNI bridge. Gaussians upload once. The first render after setGaussians runs two
-// submissions: a count-only pass (CAP = 0) whose atomic total is read back on the host across a
-// fence sizes the sort buffers exactly, then the bin + sort + composite submission runs. Later
-// renders elide the count pass while the persisted grow-only sort buffers keep 1.25x headroom
-// over the last emitted total, collapsing the steady state to a single submission; a headroom
-// breach (emitted > capacity) grows the buffers and re-renders once. The sort is a 4-pass LSD
-// radix sort over the 32-bit keys (8-bit digits: per-chunk histogram -> global exclusive scan ->
-// stable ordered scatter into ping-pong key/value buffers), so it needs no power-of-two padding
-// and equal keys keep their emit order.
+// app-demo JNI bridge. Gaussians upload once.
+//
+// Tile binning is deterministic: a count pass writes each gaussian's tile-entry count, an
+// exclusive scan turns the counts into per-gaussian emit offsets (and the exact entry total), and
+// the emit pass writes each entry at its scanned slot — no atomic slot reservation, so the emit
+// order and every pass downstream of it are byte-reproducible run to run. The sort is a 4-pass
+// LSD radix sort over the 32-bit keys (8-bit digits: per-chunk histogram -> global exclusive
+// scan -> stable ordered scatter into ping-pong key/value buffers); it needs no power-of-two
+// padding and equal keys keep their emit order.
+//
+// The first render after setGaussians runs two submissions: preprocess + count + scan, whose
+// entry total is read back across a fence to size the sort buffers exactly, then the emit + sort
+// + composite submission. Later renders run as a single submission while the persisted grow-only
+// sort buffers keep 1.25x headroom over the last total; a headroom breach (total > capacity)
+// grows the buffers and re-renders once.
 #pragma once
 #if defined(VKNN_ENABLE_VULKAN)
 #include "backend/vulkan/vk_buffer.h"
@@ -30,11 +36,11 @@ namespace raster {
     };
 
     struct Stats {
-        uint32_t entries = 0; // tile-entry total (count pass when it runs, else the emit counter)
+        uint32_t entries = 0; // exact tile-entry total from the binning scan
         int64_t  cap     = 0; // persisted sort-buffer capacity in entries (>= entries, floor 2^16)
-        uint32_t emitted = 0; // entries the emit pass produced
-        double   msCount = 0; // count-only submission GPU ms (0 when the count pass is elided)
-        double   msMain  = 0; // main submission(s) GPU ms (preprocess + bin + sort + composite)
+        uint32_t emitted = 0; // the rendered frame's tile-entry total (== entries)
+        double   msCount = 0; // sizing submission GPU ms (0 in the steady single-submission state)
+        double   msMain  = 0; // main submission(s) GPU ms (bin + sort + composite)
     };
 
     class Rasterizer {
@@ -94,9 +100,10 @@ namespace raster {
 
         vknn::vk::VulkanContext                  context_;
         std::unique_ptr<vknn::vk::CommandRunner> runner_;
-        std::unique_ptr<vknn::vk::ComputePipeline> preprocessPipe_, fillPipe_, duplicatePipe_, radixCountPipe_, radixScanPipe_, radixScatterPipe_, rangesPipe_, compositePipe_;
-        // Per setGaussians (sized by the Gaussian count):
-        std::unique_ptr<vknn::vk::Buffer> meansBuffer_, covariancesBuffer_, colorsBuffer_, opacitiesBuffer_, geometryBuffer_;
+        std::unique_ptr<vknn::vk::ComputePipeline> preprocessPipe_, duplicatePipe_, radixCountPipe_, radixScanPipe_, radixScatterPipe_, rangesPipe_, compositePipe_;
+        // Per setGaussians (sized by the Gaussian count). gaussianOffsetsBuffer_ holds the
+        // per-gaussian tile-entry counts, scanned in place into the deterministic emit offsets.
+        std::unique_ptr<vknn::vk::Buffer> meansBuffer_, covariancesBuffer_, colorsBuffer_, opacitiesBuffer_, geometryBuffer_, gaussianOffsetsBuffer_;
         // Per (height, width):
         std::unique_ptr<vknn::vk::Buffer> counterBuffer_, standInBuffer_, tileRangesBuffer_, imageBuffer_, packedImageBuffer_;
         // Sort working set, grow-only across renders (see ensureSortCapacity): the ping-pong

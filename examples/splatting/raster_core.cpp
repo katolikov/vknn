@@ -16,9 +16,6 @@ namespace raster {
             float   cam2[4];
             float   r0[4], r1[4], r2[4];
         };
-        struct FillPush {
-            uint32_t count, value;
-        };
         struct DuplicatePush {
             int32_t gaussians, tilesX, tilesY, depthBits, capacity;
             float   nearPlane, invDepthRange;
@@ -27,7 +24,7 @@ namespace raster {
             uint32_t shift, numGroups, capacity;
         };
         struct RadixScanPush {
-            uint32_t totalBins;
+            uint32_t totalBins, writeTotal;
         };
         struct RangesPush {
             int32_t mode, tileCount, capacity, depthBits;
@@ -47,9 +44,9 @@ namespace raster {
         constexpr uint32_t kMaxSortEntries = 1u << 30;
 
         // Sort-buffer capacity policy: 1.25x headroom over the entry total so small view changes
-        // stay within the persisted buffers (and keep the count pass elided), floor 2^16 to keep
-        // tiny scenes off the reallocation path, next power of two as the grow-only allocation
-        // granularity, clamped to the sort limit.
+        // stay within the persisted buffers (and keep the sizing submission elided), floor 2^16
+        // to keep tiny scenes off the reallocation path, next power of two as the grow-only
+        // allocation granularity, clamped to the sort limit.
         int64_t sortCapacityFor(uint32_t entries) {
             const int64_t withHeadroom = (int64_t) entries + (int64_t) entries / 4;
             int64_t       capacity     = 1 << 16;
@@ -80,21 +77,21 @@ namespace raster {
 
         runner_           = std::make_unique<vk::CommandRunner>(context_);
         preprocessPipe_   = std::make_unique<vk::ComputePipeline>(context_, "raster_preprocess", 5, sizeof(PreprocessPush));
-        fillPipe_         = std::make_unique<vk::ComputePipeline>(context_, "raster_fill", 1, sizeof(FillPush));
         duplicatePipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_duplicate", 4, sizeof(DuplicatePush));
         radixCountPipe_   = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_count", 3, sizeof(RadixPush));
-        radixScanPipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_scan", 1, sizeof(RadixScanPush));
+        radixScanPipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_scan", 2, sizeof(RadixScanPush));
         radixScatterPipe_ = std::make_unique<vk::ComputePipeline>(context_, "raster_radix_scatter", 6, sizeof(RadixPush));
         rangesPipe_       = std::make_unique<vk::ComputePipeline>(context_, "raster_ranges", 3, sizeof(RangesPush));
         compositePipe_    = std::make_unique<vk::ComputePipeline>(context_, "raster_composite", 5, sizeof(CompositePush));
 
-        // Counter and image outputs are read back on the host, hence kReadback.
+        // The binning scan writes the exact tile-entry total into counterBuffer_; it and the
+        // image outputs are read back on the host, hence kReadback.
         counterBuffer_     = std::make_unique<vk::Buffer>(context_, 4, vk::MemPref::kReadback);
         tileRangesBuffer_  = std::make_unique<vk::Buffer>(context_, (size_t) tileCount_ * 2 * 4);
         imageBuffer_       = std::make_unique<vk::Buffer>(context_, (size_t) height_ * width_ * 3 * 4, vk::MemPref::kReadback);
         packedImageBuffer_ = std::make_unique<vk::Buffer>(context_, (size_t) height_ * width_ * 4, vk::MemPref::kReadback);
-        // Stand-in for the duplicate pass's key/value bindings during the count-only pass, which
-        // never writes them (CAP = 0).
+        // Stand-in for bindings a dispatch declares but never touches: the duplicate pass's
+        // key/value slots in count mode and the scan's total slot when writeTotal is 0.
         standInBuffer_ = std::make_unique<vk::Buffer>(context_, 4);
         ok_            = true;
     }
@@ -106,13 +103,14 @@ namespace raster {
         {
             return;
         }
-        gaussianCount_     = n;
-        emittedCountKnown_ = false; // a new Gaussian set re-runs the exact count pass once
-        meansBuffer_       = std::make_unique<vk::Buffer>(context_, (size_t) n * 3 * 4);
-        covariancesBuffer_ = std::make_unique<vk::Buffer>(context_, (size_t) n * 9 * 4);
-        colorsBuffer_      = std::make_unique<vk::Buffer>(context_, (size_t) n * 3 * 4);
-        opacitiesBuffer_   = std::make_unique<vk::Buffer>(context_, (size_t) n * 4);
-        geometryBuffer_    = std::make_unique<vk::Buffer>(context_, (size_t) n * 12 * 4);
+        gaussianCount_         = n;
+        emittedCountKnown_     = false; // a new Gaussian set re-runs the sizing submission once
+        meansBuffer_           = std::make_unique<vk::Buffer>(context_, (size_t) n * 3 * 4);
+        covariancesBuffer_     = std::make_unique<vk::Buffer>(context_, (size_t) n * 9 * 4);
+        colorsBuffer_          = std::make_unique<vk::Buffer>(context_, (size_t) n * 3 * 4);
+        opacitiesBuffer_       = std::make_unique<vk::Buffer>(context_, (size_t) n * 4);
+        geometryBuffer_        = std::make_unique<vk::Buffer>(context_, (size_t) n * 12 * 4);
+        gaussianOffsetsBuffer_ = std::make_unique<vk::Buffer>(context_, (size_t) n * 4);
         meansBuffer_->upload(means, (size_t) n * 3 * 4);
         covariancesBuffer_->upload(covariances, (size_t) n * 9 * 4);
         colorsBuffer_->upload(colors, (size_t) n * 3 * 4);
@@ -166,24 +164,36 @@ namespace raster {
         preprocessPush.r1[3] = translation[1];
         preprocessPush.r2[3] = translation[2];
 
-        // Records and runs the main submission: (optionally) preprocess, counter reset, tile-bin
-        // emit, radix sort, per-tile ranges, composite. Returns the submission's wall time in ms.
-        // includePreprocess is false only right after the count-only submission, whose fence
-        // already left this pose's preprocess results in the geometry buffer.
-        auto runMainSubmission = [&](bool includePreprocess) -> double {
-            const uint32_t  radixGroups = (uint32_t) ((sortCapacity_ + kRadixChunkEntries - 1) / kRadixChunkEntries);
-            FillPush        counterReset {1u, 0u};
-            VkCommandBuffer cmd = runner_->allocate();
-            runner_->begin(cmd);
-            if (includePreprocess)
-            {
-                preprocessPipe_->dispatch(
-                    cmd, {meansBuffer_->handle(), covariancesBuffer_->handle(), colorsBuffer_->handle(), opacitiesBuffer_->handle(), geometryBuffer_->handle()}, &preprocessPush, sizeof(preprocessPush), (uint32_t) ((gaussianCount + 63) / 64));
-            }
-            fillPipe_->dispatch(cmd, {counterBuffer_->handle()}, &counterReset, sizeof(counterReset), 1);
+        // Records the deterministic tile-binning prelude into `cmd`: preprocess the gaussians for
+        // this pose, write each gaussian's tile-entry count, and exclusive-scan the counts into
+        // per-gaussian emit offsets, leaving the exact entry total in counterBuffer_.
+        auto recordBinningPrelude = [&](VkCommandBuffer cmd) {
+            preprocessPipe_->dispatch(
+                cmd, {meansBuffer_->handle(), covariancesBuffer_->handle(), colorsBuffer_->handle(), opacitiesBuffer_->handle(), geometryBuffer_->handle()}, &preprocessPush, sizeof(preprocessPush), (uint32_t) ((gaussianCount + 63) / 64));
             vk::computeBarrier(cmd);
+            DuplicatePush countMode {gaussianCount, tilesX_, tilesY_, depthBits_, 0, nearPlane_, invDepthRange_};
+            duplicatePipe_->dispatch(cmd, {geometryBuffer_->handle(), gaussianOffsetsBuffer_->handle(), standInBuffer_->handle(), standInBuffer_->handle()}, &countMode, sizeof(countMode), (uint32_t) ((gaussianCount + 63) / 64));
+            vk::computeBarrier(cmd);
+            RadixScanPush offsetsScan {(uint32_t) gaussianCount, 1u};
+            radixScanPipe_->dispatch(cmd, {gaussianOffsetsBuffer_->handle(), counterBuffer_->handle()}, &offsetsScan, sizeof(offsetsScan), 1);
+        };
+
+        // Records and runs the main submission: (optionally) the binning prelude, then the
+        // offset-directed emit, radix sort, per-tile ranges, and composite. Returns the
+        // submission's wall time in ms. includePrelude is false only right after the sizing
+        // submission, whose fence already left this pose's preprocess results, emit offsets, and
+        // entry total in place.
+        auto runMainSubmission = [&](bool includePrelude) -> double {
+            const uint32_t  radixGroups = (uint32_t) ((sortCapacity_ + kRadixChunkEntries - 1) / kRadixChunkEntries);
+            VkCommandBuffer cmd         = runner_->allocate();
+            runner_->begin(cmd);
+            if (includePrelude)
+            {
+                recordBinningPrelude(cmd);
+                vk::computeBarrier(cmd);
+            }
             DuplicatePush emit {gaussianCount, tilesX_, tilesY_, depthBits_, (int) sortCapacity_, nearPlane_, invDepthRange_};
-            duplicatePipe_->dispatch(cmd, {geometryBuffer_->handle(), counterBuffer_->handle(), sortKeysBuffer_->handle(), sortValuesBuffer_->handle()}, &emit, sizeof(emit), (uint32_t) ((gaussianCount + 63) / 64));
+            duplicatePipe_->dispatch(cmd, {geometryBuffer_->handle(), gaussianOffsetsBuffer_->handle(), sortKeysBuffer_->handle(), sortValuesBuffer_->handle()}, &emit, sizeof(emit), (uint32_t) ((gaussianCount + 63) / 64));
             vk::computeBarrier(cmd);
             // Stable LSD radix sort, least-significant digit first: each 8-bit pass histograms
             // the digits per chunk, exclusive-scans the digit-major histogram into global scatter
@@ -198,8 +208,8 @@ namespace raster {
                 RadixPush   digitPass {pass * 8, radixGroups, (uint32_t) sortCapacity_};
                 radixCountPipe_->dispatch(cmd, {sourceKeys.handle(), counterBuffer_->handle(), radixHistogramBuffer_->handle()}, &digitPass, sizeof(digitPass), radixGroups);
                 vk::computeBarrier(cmd);
-                RadixScanPush scan {radixGroups * kRadixDigitBins};
-                radixScanPipe_->dispatch(cmd, {radixHistogramBuffer_->handle()}, &scan, sizeof(scan), 1);
+                RadixScanPush histogramScan {radixGroups * kRadixDigitBins, 0u};
+                radixScanPipe_->dispatch(cmd, {radixHistogramBuffer_->handle(), standInBuffer_->handle()}, &histogramScan, sizeof(histogramScan), 1);
                 vk::computeBarrier(cmd);
                 radixScatterPipe_->dispatch(
                     cmd, {sourceKeys.handle(), sourceValues.handle(), counterBuffer_->handle(), radixHistogramBuffer_->handle(), destKeys.handle(), destValues.handle()}, &digitPass, sizeof(digitPass), radixGroups);
@@ -223,28 +233,19 @@ namespace raster {
             return ms;
         };
 
-        // The count-only submission runs when no emitted total is known for this Gaussian set or
-        // the persisted sort capacity lacks headroom over the last one: preprocess, then the
-        // duplicate shader in count-only mode (CAP = 0), which writes no entries and leaves the
-        // atomic counter holding the exact tile-entry total (computed by the same bbox/validity
-        // code the emit pass runs). The fence inside submitAndWait makes the counter
-        // host-readable, so the sort buffers are sized to the exact per-view demand. In the
-        // steady state the persisted capacity absorbs pose-to-pose variation and the render
-        // collapses to the single main submission.
+        // The sizing submission runs when no entry total is known for this Gaussian set or the
+        // persisted sort capacity lacks headroom over the last one: just the binning prelude,
+        // whose fence makes the scan's exact tile-entry total host-readable so the sort buffers
+        // are sized to the exact per-view demand. In the steady state the persisted capacity
+        // absorbs pose-to-pose variation and the render collapses to the single main submission.
         double     msCount        = 0;
         uint32_t   entryCount     = 0;
         const bool exactCountPass = !emittedCountKnown_ || sortCapacity_ < sortCapacityFor(lastEmittedCount_);
         if (exactCountPass)
         {
-            FillPush        counterReset {1u, 0u};
             VkCommandBuffer cmd = runner_->allocate();
             runner_->begin(cmd);
-            preprocessPipe_->dispatch(
-                cmd, {meansBuffer_->handle(), covariancesBuffer_->handle(), colorsBuffer_->handle(), opacitiesBuffer_->handle(), geometryBuffer_->handle()}, &preprocessPush, sizeof(preprocessPush), (uint32_t) ((gaussianCount + 63) / 64));
-            fillPipe_->dispatch(cmd, {counterBuffer_->handle()}, &counterReset, sizeof(counterReset), 1);
-            vk::computeBarrier(cmd);
-            DuplicatePush countOnly {gaussianCount, tilesX_, tilesY_, depthBits_, 0, nearPlane_, invDepthRange_};
-            duplicatePipe_->dispatch(cmd, {geometryBuffer_->handle(), counterBuffer_->handle(), standInBuffer_->handle(), standInBuffer_->handle()}, &countOnly, sizeof(countOnly), (uint32_t) ((gaussianCount + 63) / 64));
+            recordBinningPrelude(cmd);
             runner_->end(cmd);
             msCount = runner_->submitAndWait(cmd);
             vkFreeCommandBuffers(context_.device(), runner_->pool(), 1, &cmd);
@@ -261,11 +262,11 @@ namespace raster {
             ensureSortCapacity(sortCapacityFor(entryCount));
         }
 
-        double msMain = runMainSubmission(/*includePreprocess=*/!exactCountPass);
-        // The emit pass re-accumulates the counter, so it holds the true entry total even when
-        // writes were clamped at capacity. An elided count pass can under-provision when the pose
-        // change grew the total past the headroom; grow and re-render once (the retried capacity
-        // covers the just-measured total, so the retry cannot overflow again).
+        double msMain = runMainSubmission(/*includePrelude=*/!exactCountPass);
+        // counterBuffer_ holds the binning scan's exact entry total, independent of the emit
+        // clamp. An elided sizing submission can under-provision when the pose change grew the
+        // total past the headroom; grow and re-render once (the retried capacity covers the
+        // just-measured total, so the retry cannot overflow again).
         uint32_t emittedCount = 0;
         counterBuffer_->download(&emittedCount, 4);
         if ((int64_t) emittedCount > sortCapacity_)
@@ -282,7 +283,7 @@ namespace raster {
                 return Result::SortLimitExceeded;
             }
             ensureSortCapacity(sortCapacityFor(emittedCount));
-            msMain += runMainSubmission(/*includePreprocess=*/true);
+            msMain += runMainSubmission(/*includePrelude=*/true);
             counterBuffer_->download(&emittedCount, 4);
         }
         lastEmittedCount_  = emittedCount;

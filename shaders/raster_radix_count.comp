@@ -5,11 +5,11 @@
 // digit-major order: histogram[digit * numGroups + group]. A single exclusive scan over that
 // layout (raster_radix_scan) then yields, for every (digit, group) pair, the global scatter base
 // that keeps chunks in input order — the foundation of the sort's stability.
-// The live entry total is read from the binning pass's atomic counter, clamped to the buffer
+// The live entry total is read from the binning scan's grand total, clamped to the buffer
 // capacity, so the dispatch can be sized to capacity while sorting only the real entries.
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer Keys      { uint keys[]; };
-layout(std430, binding = 1) readonly buffer Counter   { uint counter[]; };   // [0] = emitted entries
+layout(std430, binding = 1) readonly buffer Counter   { uint counter[]; };   // [0] = tile-entry total
 layout(std430, binding = 2) writeonly buffer Histo    { uint histogram[]; }; // [256 * numGroups]
 layout(push_constant) uniform PC {
   uint shift;     // digit position: 0, 8, 16, 24

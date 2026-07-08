@@ -1,14 +1,20 @@
 #version 450
-// Radix-sort global exclusive scan (pass 2 of 3 per digit), in place over the digit-major
-// histogram raster_radix_count wrote. One workgroup walks the array in 256-element tiles,
-// scans each tile in shared memory (Hillis-Steele), and carries the running total across tiles,
-// so histogram[digit * numGroups + group] becomes the global scatter base for that (digit, group)
-// pair. Single-workgroup and sequential across tiles: fully deterministic, and fast enough —
-// the array holds 256 bins per 4096-entry chunk (~256K values for a 4M-entry sort).
+// In-place global exclusive scan over a uint array, shared by two rasterizer stages:
+//  - radix sort (writeTotal 0): scans the digit-major histogram raster_radix_count wrote, turning
+//    histogram[digit * numGroups + group] into the global scatter base for that pair.
+//  - tile binning (writeTotal 1): scans the per-gaussian tile-entry counts into per-gaussian emit
+//    offsets and writes the grand total (the exact tile-entry count) to total[0], where the sort
+//    passes and the host read it.
+// One workgroup walks the array in 256-element tiles, scans each tile in shared memory
+// (Hillis-Steele), and carries the running sum across tiles. Single-workgroup and sequential
+// across tiles: fully deterministic, and fast enough for both arrays (256 bins per 4096-entry
+// chunk, one count per gaussian).
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) buffer Histo { uint histogram[]; }; // [totalBins], scanned in place
+layout(std430, binding = 0) buffer Data { uint data[]; };   // [totalBins], scanned in place
+layout(std430, binding = 1) writeonly buffer Total { uint total[]; }; // [1] (writeTotal 1)
 layout(push_constant) uniform PC {
-  uint totalBins; // 256 * numGroups
+  uint totalBins;  // element count
+  uint writeTotal; // 1 = write the grand total to total[0]
 } pc;
 
 shared uint tileValues[256];
@@ -21,7 +27,7 @@ void main() {
   uint tiles = (pc.totalBins + 255u) / 256u;
   for (uint tile = 0u; tile < tiles; ++tile) {
     uint index = tile * 256u + lane;
-    uint value = index < pc.totalBins ? histogram[index] : 0u;
+    uint value = index < pc.totalBins ? data[index] : 0u;
     tileValues[lane] = value;
     barrier();
     for (uint offset = 1u; offset < 256u; offset <<= 1u) { // inclusive Hillis-Steele scan
@@ -31,9 +37,10 @@ void main() {
       barrier();
     }
     uint inclusive = tileValues[lane];
-    if (index < pc.totalBins) histogram[index] = inclusive - value + carryTotal;
+    if (index < pc.totalBins) data[index] = inclusive - value + carryTotal;
     barrier();
     if (lane == 255u) carryTotal += inclusive; // lane 255's inclusive sum = the tile total
     barrier();
   }
+  if (pc.writeTotal == 1u && lane == 0u) total[0] = carryTotal;
 }

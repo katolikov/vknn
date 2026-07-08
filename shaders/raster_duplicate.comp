@@ -1,15 +1,18 @@
 #version 450
-// GPU tile binning: one thread per gaussian. For each 16x16 tile the gaussian's screen bbox covers,
-// emit a sort entry: key = (tileId << DB) | quantized-depth, value = gaussian index. A single global
-// atomic counter hands out contiguous slots (no host prefix-sum). Sorting these keys then groups
-// gaussians by tile and orders them front-to-back within each tile. With CAP = 0 the pass is
-// count-only: the counter still accumulates the exact entry total but nothing is written to
-// keys/vals, which lets the host size those buffers exactly before the emit pass.
+// GPU tile binning: one thread per gaussian, in two modes over the same bindings.
+// CAP == 0 (count mode): write the gaussian's tile-entry count — the number of 16x16 tiles its
+// screen bbox covers, 0 when invalid or off-screen — to countsOrOffsets[i]. An exclusive scan
+// (raster_radix_scan) then turns those counts into per-gaussian base offsets and the grand total.
+// CAP > 0 (emit mode): countsOrOffsets[i] holds the scanned base offset; emit one sort entry per
+// covered tile at sequential slots from it: key = (tileId << DB) | quantized-depth, value = the
+// gaussian index. Slots at or beyond CAP are dropped (the host detects total > CAP and re-renders
+// at a grown capacity). Slot assignment is a pure function of the preprocess output, so the emit
+// order — and every pass downstream of it — is byte-reproducible run to run.
 layout(local_size_x = 64) in;
-layout(std430, binding = 0) readonly buffer GD   { float gd[]; };   // [N][12] from preprocess
-layout(std430, binding = 1) buffer Counter       { uint counter[]; }; // [1] atomic
-layout(std430, binding = 2) writeonly buffer Keys { uint keys[]; };
-layout(std430, binding = 3) writeonly buffer Vals { uint vals[]; };
+layout(std430, binding = 0) readonly buffer GD     { float gd[]; };   // [N][12] from preprocess
+layout(std430, binding = 1) buffer CountsOrOffsets { uint countsOrOffsets[]; }; // [N]
+layout(std430, binding = 2) writeonly buffer Keys  { uint keys[]; };
+layout(std430, binding = 3) writeonly buffer Vals  { uint vals[]; };
 layout(push_constant) uniform PC {
   int N, ntx, nty, DB, CAP;
   float near, invRange;
@@ -19,18 +22,28 @@ void main() {
   uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (i >= uint(pc.N)) return;
   uint o = i * 12u;
-  if (gd[o + 11u] < 0.5) return;  // invalid gaussian
-  float u = gd[o + 0u], v = gd[o + 1u], z = gd[o + 2u], r = gd[o + 10u];
-  int tx0 = max(0, int((u - r) / 16.0)), tx1 = min(pc.ntx - 1, int((u + r) / 16.0));
-  int ty0 = max(0, int((v - r) / 16.0)), ty1 = min(pc.nty - 1, int((v + r) / 16.0));
-  uint dq = uint(clamp((z - pc.near) * pc.invRange, 0.0, 1.0) * float((1u << uint(pc.DB)) - 1u));
+  bool valid = gd[o + 11u] >= 0.5;
+  int tx0 = 0, tx1 = -1, ty0 = 0, ty1 = -1;
+  uint dq = 0u;
+  if (valid) {
+    float u = gd[o + 0u], v = gd[o + 1u], z = gd[o + 2u], r = gd[o + 10u];
+    tx0 = max(0, int((u - r) / 16.0)); tx1 = min(pc.ntx - 1, int((u + r) / 16.0));
+    ty0 = max(0, int((v - r) / 16.0)); ty1 = min(pc.nty - 1, int((v + r) / 16.0));
+    dq = uint(clamp((z - pc.near) * pc.invRange, 0.0, 1.0) * float((1u << uint(pc.DB)) - 1u));
+  }
+  int spanX = tx1 - tx0 + 1, spanY = ty1 - ty0 + 1;
+  if (pc.CAP == 0) {
+    countsOrOffsets[i] = (spanX > 0 && spanY > 0) ? uint(spanX) * uint(spanY) : 0u;
+    return;
+  }
+  if (spanX <= 0 || spanY <= 0) return;
+  uint slot = countsOrOffsets[i];
   for (int ty = ty0; ty <= ty1; ++ty)
     for (int tx = tx0; tx <= tx1; ++tx) {
-      uint tile = uint(ty * pc.ntx + tx);
-      uint slot = atomicAdd(counter[0], 1u);
       if (slot < uint(pc.CAP)) {
-        keys[slot] = (tile << uint(pc.DB)) | dq;
+        keys[slot] = (uint(ty * pc.ntx + tx) << uint(pc.DB)) | dq;
         vals[slot] = i;
       }
+      ++slot;
     }
 }

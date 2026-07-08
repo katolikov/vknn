@@ -11,7 +11,7 @@
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer KeysIn    { uint keysIn[]; };
 layout(std430, binding = 1) readonly buffer ValsIn    { uint valsIn[]; };
-layout(std430, binding = 2) readonly buffer Counter   { uint counter[]; };   // [0] = emitted entries
+layout(std430, binding = 2) readonly buffer Counter   { uint counter[]; };   // [0] = tile-entry total
 layout(std430, binding = 3) readonly buffer Histo     { uint histogram[]; }; // scanned, digit-major
 layout(std430, binding = 4) writeonly buffer KeysOut  { uint keysOut[]; };
 layout(std430, binding = 5) writeonly buffer ValsOut  { uint valsOut[]; };
