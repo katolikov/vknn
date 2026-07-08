@@ -1,0 +1,23 @@
+# Builds libvknnchat.so — the JNI decoder bridge — against the repo's static `vknn` engine (Vulkan
+# backend + embedded shaders). Configured by build_native.sh with the NDK arm64-v8a toolchain and a
+# cmake >= 3.24 (for the WHOLE_ARCHIVE generator expression the op registries need). VKNN_ROOT is the
+# repo root, passed on the command line.
+cmake_minimum_required(VERSION 3.24)
+project(vknnchat LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Only the engine library is needed; skip its tests and example executables.
+set(VKNN_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+set(VKNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(${VKNN_ROOT} ${CMAKE_BINARY_DIR}/vknn_build)
+
+add_library(vknnchat SHARED ${CMAKE_CURRENT_SOURCE_DIR}/vknn_jni.cpp)
+# WHOLE_ARCHIVE keeps the op-registry self-registration static initializers (dropped by a normal link,
+# which would leave the engine with no kernels). vknn's PUBLIC includes + transitive Vulkan/android/log/
+# msgpack/Threads deps propagate through the target.
+target_link_libraries(vknnchat PRIVATE
+  "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>"
+  log android vulkan)
