@@ -1,0 +1,60 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 5
+#include "pw_epilogue.glsl"
+#endif
+// Split-K batched mat-vec with a fused rank-1 [N] bias: out[...,n] = sum_k A*B + bias[n]. Mirrors
+// matmul_gemv.comp with binding 3 = bias; matmul.cpp selects this variant when a mat-vec MatMul has a
+// fused bias. The bias enters the reduction once, in the lane that stores, so it is added exactly
+// once regardless of GEMV_KS.
+#include "common.glsl"
+#define GEMV_NX 64 // lanes along n: one coalesced 128-byte fp16 burst of B per row
+#define GEMV_KS 16 // lanes reducing over k; GEMV_NX * GEMV_KS == 1024 == maxComputeWorkGroupInvocations
+layout(local_size_x = GEMV_NX, local_size_y = GEMV_KS) in;
+layout(std430, binding = 0) readonly  buffer A  { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B  { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D  { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer Bs { STORE bias[]; };
+layout(std430, binding = 4) readonly buffer G { int g[]; } geom;
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK;
+} pc;
+
+shared float part[GEMV_KS][GEMV_NX];
+
+void main() {
+  uint gid = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * GEMV_NX + gl_LocalInvocationID.x;
+  uint ky  = gl_LocalInvocationID.y;
+  bool live = gid < uint(pc.total);
+
+  int aBase = 0, bBase = 0;
+  if (live) {
+    int rem = int(gid);
+    for (int k = pc.rank - 1; k >= 0; --k) {
+      int c = rem % geom.g[k];
+      rem /= geom.g[k];
+      aBase += c * geom.g[pc.rank + k];
+      bBase += c * geom.g[2 * pc.rank + k];
+    }
+  }
+
+  float acc = 0.0;
+  if (live) {
+    for (int k = int(ky); k < pc.K; k += GEMV_KS)
+      acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
+  }
+  part[ky][gl_LocalInvocationID.x] = acc;
+  barrier();
+  if (ky != 0 || !live) return;
+
+  float s = float(bias[int(gid) % pc.N]); // N is the contiguous last output dim
+  for (int i = 0; i < GEMV_KS; ++i)
+    s += part[i][gl_LocalInvocationID.x];
+#ifdef PW_EPI
+  d[gid] = TO_STORE(pw_apply(s, int(gid)));
+#else
+  d[gid] = TO_STORE(s);
+#endif
+}

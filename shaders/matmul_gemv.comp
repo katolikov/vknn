@@ -1,0 +1,70 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+// Split-K batched mat-vec: out[...,n] = sum_k A[...,k]*B[...,k,n] for a single output row (M == 1).
+// matmul.comp gives each output element one thread, so a mat-vec launches only N threads and leaves
+// the GPU idle whenever N is small — its time then scales with K at fixed occupancy (a K=4864,N=896
+// projection runs 5x longer than the K=896,N=896 one at the same bytes/second). Here GEMV_KS threads
+// share each output: lane ky sums the k == ky (mod GEMV_KS) terms into an fp32 partial, and the
+// partials reduce through shared memory in ascending lane order (a fixed order, so the result is
+// deterministic; the k chain is regrouped, so it is NOT bit-identical to matmul.comp).
+//
+// Thread (x, ky) owns output gid = wg*GEMV_NX + x, so the GEMV_NX lanes of a row read B contiguously
+// along n (bStride[nAxis] == 1) and keep the coalesced access matmul.comp has. Geometry rides the
+// same content-deduped SSBO (binding 3) as matmul.comp: outDim = g[0..rank), aStride = g[rank..2*rank),
+// bStride = g[2*rank..3*rank).
+#include "common.glsl"
+#define GEMV_NX 64 // lanes along n: one coalesced 128-byte fp16 burst of B per row
+#define GEMV_KS 16 // lanes reducing over k; GEMV_NX * GEMV_KS == 1024 == maxComputeWorkGroupInvocations
+layout(local_size_x = GEMV_NX, local_size_y = GEMV_KS) in;
+layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 3) readonly buffer G { int g[]; } geom;
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK;
+} pc;
+
+shared float part[GEMV_KS][GEMV_NX];
+
+void main() {
+  // The 1-D output grid is spilled into y when it overflows maxWorkGroupCount[0]; local y is the
+  // k-split, so the workgroup id — not gl_GlobalInvocationID.y — carries the overflow.
+  uint gid = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * GEMV_NX + gl_LocalInvocationID.x;
+  uint ky  = gl_LocalInvocationID.y;
+  bool live = gid < uint(pc.total);
+
+  int aBase = 0, bBase = 0;
+  if (live) {
+    int rem = int(gid);
+    for (int k = pc.rank - 1; k >= 0; --k) {
+      int c = rem % geom.g[k];
+      rem /= geom.g[k];
+      aBase += c * geom.g[pc.rank + k];
+      bBase += c * geom.g[2 * pc.rank + k];
+    }
+  }
+
+  float acc = 0.0;
+  if (live) {
+    for (int k = int(ky); k < pc.K; k += GEMV_KS)
+      acc += float(a[aBase + k * pc.aK]) * float(b[bBase + k * pc.bK]);
+  }
+  // Every invocation stores (dead lanes store 0) so barrier() stays in uniform control flow.
+  part[ky][gl_LocalInvocationID.x] = acc;
+  barrier();
+  if (ky != 0 || !live) return;
+
+  float s = 0.0;
+  for (int i = 0; i < GEMV_KS; ++i)
+    s += part[i][gl_LocalInvocationID.x];
+#ifdef PW_EPI
+  d[gid] = TO_STORE(pw_apply(s, int(gid)));
+#else
+  d[gid] = TO_STORE(s);
+#endif
+}

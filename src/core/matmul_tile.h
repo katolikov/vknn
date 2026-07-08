@@ -13,6 +13,19 @@ namespace vknn {
     /// MatMuls (the register-blocked kernel has no register headroom for the VM).
     constexpr int64_t kTiledMatMulMin = 32;
 
+    /// A mat-vec (M == 1) launches only N threads under matmul.comp's one-thread-per-output grid, so
+    /// its time scales with K once N stops filling the GPU. shaders/matmul_gemv.comp splits the k
+    /// reduction across GEMV_KS lanes per output instead. It takes over when the naive grid is too
+    /// narrow to saturate (N < kGemvMaxN) and K is long enough for the split to pay for its shared-
+    /// memory reduction (K >= kGemvMinK). Above kGemvMaxN the naive grid already reaches peak
+    /// bandwidth (an LLM's [896,151936] lm_head projection does), so it keeps the simpler kernel.
+    constexpr int64_t kGemvMinK = 512;
+    constexpr int64_t kGemvMaxN = 16384;
+
+    /// Lanes along n / lanes reducing over k in shaders/matmul_gemv.comp. The dispatch splits the flat
+    /// output grid by kGemvNx, so this must track the shader's GEMV_NX #define.
+    constexpr int64_t kGemvNx = 64;
+
     /// One matmul_tiled tile geometry: specialization constants 0/1/2 (TM/TN/TK). The workgroup
     /// stays 16x16 = 256 threads; each thread computes a (tm/16)x(tn/16) register micro-tile.
     struct MatMulTile {
