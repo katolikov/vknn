@@ -229,7 +229,7 @@ a `std::unique_ptr<Session>`.
 
 ## How the `classify` example exposes config flags
 
-[`examples/classify.cpp`](../examples/classify.cpp) (`vknn_classify`) layers
+[`examples/vision/classify.cpp`](../examples/vision/classify.cpp) (`vknn_classify`) layers
 file config and CLI overrides. It loads `--config` first (if given), then
 lets individual flags override specific fields:
 

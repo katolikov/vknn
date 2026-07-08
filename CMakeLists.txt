@@ -348,17 +348,26 @@ target_link_libraries(vknn PUBLIC Threads::Threads)
 # Examples
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_EXAMPLES)
-  set(_vknn_examples probe classify profile readme_quickstart zerocopy_cache zerocopy_simple dmabuf_fd_io predict_cache backend_switch op_check image_bench predict run_io yonosplat chat)
+  # Examples are grouped by theme under examples/<group>/; the target name is the file basename
+  # (vknn_classify, vknn_run_io, ...), unchanged by the grouping so scripts and docs still reference it.
+  set(_vknn_examples
+      basics/probe basics/readme_quickstart basics/backend_switch basics/op_check
+      vision/classify vision/predict vision/predict_cache vision/image_bench
+      llm/chat
+      splatting/yonosplat
+      io/run_io io/dmabuf_fd_io io/zerocopy_cache io/zerocopy_simple
+      bench/profile)
   if(VKNN_ENABLE_VULKAN)
     # microbench drives Vulkan kernels directly (includes vk_context.h), so it needs the backend.
-    list(APPEND _vknn_examples microbench)
+    list(APPEND _vknn_examples bench/microbench)
   endif()
   foreach(ex ${_vknn_examples})
+    get_filename_component(_name ${ex} NAME) # target name = basename, independent of the group dir
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
-      add_executable(vknn_${ex} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
+      add_executable(vknn_${_name} ${CMAKE_CURRENT_SOURCE_DIR}/examples/${ex}.cpp)
       # whole-archive so self-registering backend/operators (static initializers in the
       # static lib) are retained even though no symbol references them directly.
-      target_link_libraries(vknn_${ex} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
+      target_link_libraries(vknn_${_name} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
     endif()
   endforeach()
 endif()

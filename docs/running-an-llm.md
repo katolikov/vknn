@@ -39,7 +39,7 @@ build-host/vknn_compile qwen-onnx/model.onnx qwen_chat.vxm --fp16 -O1 \
 ```
 
 The full decoder compiles to **100% Vulkan** — the support report's `summary` reads
-`{"total": 931, "vulkan": 931, "reasons": {}}` (no `cpu` / `none` node). `examples/chat.cpp`
+`{"total": 931, "vulkan": 931, "reasons": {}}` (no `cpu` / `none` node). `examples/llm/chat.cpp`
 reads `kv_heads`, `C`, and `head_dim` back from `past_key_values.0.key` at load, so the
 decode loop stays model-agnostic.
 
@@ -53,7 +53,7 @@ decode-step plan (time-per-output-token):
 
 ## 2. Build the runner and push it to a device
 
-`examples/chat.cpp` is on the explicit `_vknn_examples` list in `CMakeLists.txt`, so it
+`examples/llm/chat.cpp` is on the explicit `_vknn_examples` list in `CMakeLists.txt`, so it
 builds as `vknn_chat`. GPU validation is Android-only (the host build has no Vulkan
 backend). Re-push the binary after every Android rebuild.
 
@@ -85,14 +85,14 @@ echo "750 75698 1445 1648" | adb -s $SERIAL shell \
   "cd $DDIR && ./vknn_chat qwen_chat.vxm --backend vulkan --precision low --max-tokens 32 --temp 0"
 ```
 
-**`examples/chat_host.py`** is the interactive front-end. It tokenizes with a
+**`examples/llm/chat_host.py`** is the interactive front-end. It tokenizes with a
 HuggingFace `AutoTokenizer`, drives the device binary over `adb` (feeding prompt ids on
 stdin, reading generated ids from stdout), detokenizes and streams the completion to the
 terminal with a live tokens/s counter, and holds the REPL. All model compute stays on the
 device GPU; this process only tokenizes and displays.
 
 ```sh
-python3 examples/chat_host.py --serial $SERIAL --ddir $DDIR --model qwen_chat.vxm \
+python3 examples/llm/chat_host.py --serial $SERIAL --ddir $DDIR --model qwen_chat.vxm \
     --tokenizer qwen-onnx --precision low --max-tokens 128
 ```
 
