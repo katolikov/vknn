@@ -762,6 +762,34 @@ namespace vknn {
         }
 
         VKNN_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size() << " nodes [bucket '" << key << "']";
+        // One un-throttled fallback summary per bucket: the per-node warnings above are throttled to
+        // 2 per op type, so a model with 50 CPU GridSamples prints 2 warnings — without this line a
+        // user can believe the whole graph runs on the requested backend while a divergent (or slow)
+        // CPU implementation quietly handles part of it. Counts per op type plus the first few node
+        // names; the full list stays available via Session::fallbackReasons() and
+        // `vknn_compile --support-report`.
+        if (!bucket.fallbackReasons.empty() && cfg_.backend != BackendKind::Cpu)
+        {
+            std::map<std::string, int> perOp;
+            for (const FallbackReason &fr: bucket.fallbackReasons)
+            {
+                ++perOp[fr.op];
+            }
+            std::string ops;
+            for (const auto &kv: perOp)
+            {
+                ops += (ops.empty() ? "" : ", ") + kv.first + " x" + std::to_string(kv.second);
+            }
+            std::string    first;
+            constexpr int  kNamedNodes = 3;
+            for (int i = 0; i < kNamedNodes && i < (int) bucket.fallbackReasons.size(); ++i)
+            {
+                const FallbackReason &fr = bucket.fallbackReasons[(size_t) i];
+                first += (first.empty() ? "" : "; ") + fr.node + " (" + fr.reason + ")";
+            }
+            VKNN_INFO << bucket.fallbackReasons.size() << " node(s) fall back to CPU [bucket '" << key << "']: " << ops << " -- first: " << first
+                      << (bucket.fallbackReasons.size() > kNamedNodes ? " ... (full list: Session::fallbackReasons(), vknn_compile --support-report)" : "");
+        }
         return bucket;
     }
 
