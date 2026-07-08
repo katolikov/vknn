@@ -288,13 +288,24 @@ namespace vknn {
                 // A mat-vec too narrow to fill the naive grid takes the split-K kernel. B must keep its
                 // n axis last (bWas1D strips it), both so the GEMV_NX lanes of a row stay coalesced and
                 // so the _bias variant's `gid % N` indexes the bias.
-                useGemv = !useTiled && !bWas1D && M == 1 && K >= kGemvMinK && N < kGemvMaxN;
+                bool gemvShape = !useTiled && !bWas1D && M == 1 && K >= kGemvMinK && N < kGemvMaxN;
+
+                // The two mat-vec kernels spend a different number of invocations on the same kGemvNx
+                // outputs, and a workgroup above maxComputeWorkGroupInvocations fails pipeline creation
+                // rather than degrading. Vulkan guarantees only 128, so each kernel is gated on the limit
+                // it needs: matmul_gemv4 packs kGemvVec adjacent n into one lane and needs
+                // kGemvNx/kGemvVec x kGemvKs invocations; matmul_gemv gives every n its own lane and needs
+                // kGemvNx x kGemvKs. An N indivisible by kGemvVec on a device too small for the scalar
+                // kernel keeps matmul.comp -- correct everywhere, merely slower.
+                const uint32_t maxInv = env.ctx->caps().maxWorkGroupInvocations;
 
                 // An N divisible by kGemvVec lets a mat-vec lane pull its kGemvVec adjacent n as one
                 // vector element of B (a quarter of the lanes, four times the bytes per load
-                // instruction, same 64 outputs per workgroup). The two mat-vec kernels are
+                // instruction, same kGemvNx outputs per workgroup). The two mat-vec kernels are
                 // bit-identical, so an indivisible N simply falls back to the scalar one.
-                bool useGemvVec = useGemv && N % kGemvVec == 0;
+                bool useGemvVec = gemvShape && N % kGemvVec == 0 && maxInv >= (uint32_t) (kGemvNx / kGemvVec * kGemvKs);
+
+                useGemv = useGemvVec || (gemvShape && maxInv >= (uint32_t) (kGemvNx * kGemvKs));
 
                 // The default {128,128,16} tile runs the compile-time matmul_tiled_fast kernel (full
                 // inner-loop unroll, register-resident micro-tile — main's fast literal geometry);

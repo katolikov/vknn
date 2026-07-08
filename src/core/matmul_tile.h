@@ -27,6 +27,12 @@ namespace vknn {
     /// GEMV_NX == 64 scalar lanes, matmul_gemv4.comp as GEMV_NX == 16 lanes of GEMV_VEC == 4.
     constexpr int64_t kGemvNx = 64;
 
+    /// Lanes each mat-vec kernel spends reducing over k (both shaders' GEMV_KS). With kGemvNx it sets the
+    /// workgroup size the kernel needs the device to host: kGemvNx * kGemvKs invocations for the scalar
+    /// kernel, kGemvNx / kGemvVec * kGemvKs for the vector one. Vulkan guarantees only 128, so MatMul
+    /// checks maxComputeWorkGroupInvocations before selecting either.
+    constexpr int64_t kGemvKs = 16;
+
     /// Adjacent n a single lane of shaders/matmul_gemv4.comp owns, loaded as one vector element of B.
     /// That vector index is exact only when B's n axis is kGemvVec-aligned at every k, which N %
     /// kGemvVec == 0 gives (it also aligns every batch stride, a multiple of K*N, and every
