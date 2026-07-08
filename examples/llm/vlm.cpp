@@ -15,6 +15,13 @@
 //
 //   vknn_vlm model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--max-tokens N]
 //            [--temp T] [--top-k K] [--top-p P] [--eos ID] [--image-token ID] [--seed S]
+//            [--no-kv-link]
+//
+// During decode the KV cache is ENGINE-RESIDENT on the S=1 decoder bucket by default
+// (Session::linkOutputToInput): each step binds only embeds/mask/positions and the engine folds the
+// new row in place. The prefill bucket keeps the host cache flow (once per turn), so at each turn
+// boundary the device state materializes back into the host cache via readResident(). --no-kv-link
+// keeps the host loop everywhere; both paths produce the same token stream.
 //
 // The decoder consumes a host-built 4-D ADDITIVE attention mask. Its fill value is -1e4, never
 // -FLT_MAX/-65504: the mask crosses the fp16 boundary, where -FLT_MAX overflows to -inf and
@@ -117,14 +124,19 @@ int main(int argc, char **argv) {
     const int64_t eosToken     = atoll(argValue(argc, argv, "--eos", "49279"));
     const int64_t imageToken   = atoll(argValue(argc, argv, "--image-token", "49190"));
     bool          debugStats   = false;
+    bool          kvLink       = true;
     for (int i = 2; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--debug-stats"))
         {
             debugStats = true;
         }
+        if (!strcmp(argv[i], "--no-kv-link"))
+        {
+            kvLink = false;
+        }
     }
-    std::mt19937  rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));
+    std::mt19937 rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));
 
     auto session = Runtime::load(argv[1], cfg);
     if (!session)
@@ -171,9 +183,9 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    const std::vector<IOInfo> visionInputInfo  = session->inputInfo((size_t) visionBucket);
-    const std::vector<IOInfo> visionOutputInfo = session->outputInfo((size_t) visionBucket);
-    const std::vector<IOInfo> decoderInputInfo = session->inputInfo((size_t) decoderPrefillBucket);
+    const std::vector<IOInfo> visionInputInfo   = session->inputInfo((size_t) visionBucket);
+    const std::vector<IOInfo> visionOutputInfo  = session->outputInfo((size_t) visionBucket);
+    const std::vector<IOInfo> decoderInputInfo  = session->inputInfo((size_t) decoderPrefillBucket);
     const std::vector<IOInfo> decoderOutputInfo = session->outputInfo((size_t) decoderPrefillBucket);
 
     // Decoder geometry from the past/present tensors and logits.
@@ -183,7 +195,7 @@ int main(int argc, char **argv) {
         char keyName[64], valueName[64];
         snprintf(keyName, sizeof keyName, "past_key_values.%d.key", layer);
         snprintf(valueName, sizeof valueName, "past_key_values.%d.value", layer);
-        const int keyAt = indexOfName(decoderInputInfo, keyName);
+        const int keyAt   = indexOfName(decoderInputInfo, keyName);
         const int valueAt = indexOfName(decoderInputInfo, valueName);
         if (keyAt < 0 || valueAt < 0)
         {
@@ -202,12 +214,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "decoder bucket misses inputs_embeds/attention_mask/position_ids/logits/past\n");
         return 2;
     }
-    const Shape  &pastShape  = decoderInputInfo[(size_t) pastKeyInputIdx[0]].shape; // [1, KV, C, HD]
-    const int     kvHeads    = (int) pastShape[1];
-    const int     cacheSlots = (int) pastShape[2];
-    const int     headDim    = (int) pastShape[3];
-    const int     hiddenDim  = (int) decoderInputInfo[(size_t) embedsInputIdx].shape[2];
-    const int64_t vocabSize  = decoderOutputInfo[(size_t) logitsOutputIdx].shape.back();
+    const Shape  &pastShape      = decoderInputInfo[(size_t) pastKeyInputIdx[0]].shape; // [1, KV, C, HD]
+    const int     kvHeads        = (int) pastShape[1];
+    const int     cacheSlots     = (int) pastShape[2];
+    const int     headDim        = (int) pastShape[3];
+    const int     hiddenDim      = (int) decoderInputInfo[(size_t) embedsInputIdx].shape[2];
+    const int64_t vocabSize      = decoderOutputInfo[(size_t) logitsOutputIdx].shape.back();
     const Shape  &visionOutShape = visionOutputInfo[0].shape; // [1, imageRowCount, hiddenDim]
     const int     imageRowCount  = (int) visionOutShape[1];
     // The vision and embedding buckets feed rows straight into the decoder's inputs_embeds buffer;
@@ -215,12 +227,11 @@ int main(int argc, char **argv) {
     const std::vector<IOInfo> embedOutputInfo = session->outputInfo((size_t) embedPrefillBucket);
     if (visionOutShape.back() != hiddenDim || embedOutputInfo.empty() || embedOutputInfo[0].shape.back() != hiddenDim)
     {
-        fprintf(stderr, "[vlm] hidden-dim mismatch: vision %lld / embed %lld / decoder %d\n",
-                (long long) visionOutShape.back(), (long long) (embedOutputInfo.empty() ? -1 : embedOutputInfo[0].shape.back()), hiddenDim);
+        fprintf(stderr, "[vlm] hidden-dim mismatch: vision %lld / embed %lld / decoder %d\n", (long long) visionOutShape.back(),
+                (long long) (embedOutputInfo.empty() ? -1 : embedOutputInfo[0].shape.back()), hiddenDim);
         return 2;
     }
-    fprintf(stderr, "[vlm] %s: layers=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imageRows=%d\n",
-            argv[1], numLayers, kvHeads, cacheSlots, headDim, hiddenDim, (long long) vocabSize, prefillWindow, imageRowCount);
+    fprintf(stderr, "[vlm] %s: layers=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imageRows=%d\n", argv[1], numLayers, kvHeads, cacheSlots, headDim, hiddenDim, (long long) vocabSize, prefillWindow, imageRowCount);
 
     // --- persistent boundary tensors -------------------------------------------------------------
     // One input vector serves BOTH decoder buckets: the past entries hold the KV cache across the
@@ -243,8 +254,8 @@ int main(int argc, char **argv) {
     };
 
     std::vector<IOTensor> embedInputs(1), visionInputs(1);
-    embedInputs[0].name  = "input_ids";
-    embedInputs[0].dtype = DType::Int64;
+    embedInputs[0].name   = "input_ids";
+    embedInputs[0].dtype  = DType::Int64;
     visionInputs[0].name  = "pixel_values";
     visionInputs[0].shape = visionInputInfo[0].shape;
     visionInputs[0].dtype = DType::Float32;
@@ -252,8 +263,117 @@ int main(int argc, char **argv) {
     std::vector<float> imageEmbeddings; // imageRowCount*hiddenDim floats once an image is loaded
     int                absolutePos = 0; // token position across the whole conversation
 
+    // Engine-resident KV cache on the DECODE bucket: link every present output to its past input
+    // (empty ranges; the per-step fold slot arrives before each run). The prefill bucket keeps the
+    // host cache, so turn boundaries materialize the device state back into decoderInputs.
+    auto pastNameOf = [](int layer, int part, char (&buf)[64]) {
+        snprintf(buf, sizeof buf, part ? "past_key_values.%d.value" : "past_key_values.%d.key", layer);
+    };
+    auto presentNameOf = [](int layer, int part, char (&buf)[64]) {
+        snprintf(buf, sizeof buf, part ? "present.%d.value" : "present.%d.key", layer);
+    };
+    bool decodeLinked = false;
+    if (kvLink)
+    {
+        decodeLinked = true;
+        for (int layer = 0; layer < numLayers && decodeLinked; ++layer)
+        {
+            for (int part = 0; part < 2 && decodeLinked; ++part)
+            {
+                char pastBuf[64], presentBuf[64];
+                pastNameOf(layer, part, pastBuf);
+                presentNameOf(layer, part, presentBuf);
+                if (session->linkOutputToInput((size_t) decoderDecodeBucket, presentBuf, pastBuf, {}) != Status::Ok)
+                {
+                    fprintf(stderr, "[vlm] KV link setup failed (layer %d); using the host cache loop\n", layer);
+                    session->clearLinks();
+                    decodeLinked = false;
+                }
+            }
+        }
+        if (decodeLinked)
+        {
+            fprintf(stderr, "[vlm] decode KV cache engine-resident (%d links)\n", 2 * numLayers);
+        }
+    }
+    bool cacheOnDevice      = false; // the decode bucket's resident past is ahead of decoderInputs
+    bool rebindPastNextStep = false; // next decode step re-seeds the device cache from decoderInputs
+    int  pendingFoldSlot    = -1;    // cache slot of the fold the next decode run applies
+
+    // Update every decode link: fold the previous run's present row (index cacheSlots per head) into
+    // cache slot `slot`, or clear the pending fold when `slot` < 0.
+    auto setDecodeFoldSlot = [&](int64_t slot) {
+        std::vector<LinkRange> ranges;
+        if (slot >= 0)
+        {
+            ranges.resize((size_t) kvHeads);
+            for (int64_t head = 0; head < kvHeads; ++head)
+            {
+                ranges[(size_t) head] = {(head * (cacheSlots + 1) + cacheSlots) * headDim, (head * cacheSlots + slot) * headDim, headDim};
+            }
+        }
+        for (int layer = 0; layer < numLayers; ++layer)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                char pastBuf[64], presentBuf[64];
+                pastNameOf(layer, part, pastBuf);
+                presentNameOf(layer, part, presentBuf);
+                if (session->linkOutputToInput((size_t) decoderDecodeBucket, presentBuf, pastBuf, ranges) != Status::Ok)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    // Copy the decode bucket's device-resident cache (plus the pending fold) back into the host
+    // decoderInputs past buffers, so the prefill bucket sees the full conversation state.
+    auto materializeDeviceCache = [&]() {
+        for (int layer = 0; layer < numLayers; ++layer)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                char pastBuf[64], presentBuf[64];
+                pastNameOf(layer, part, pastBuf);
+                presentNameOf(layer, part, presentBuf);
+                IOTensor resident;
+                if (session->readResident(pastBuf, resident) != Status::Ok)
+                {
+                    return false;
+                }
+                IOTensor &hostPast = decoderInputs[(size_t) (part ? pastValueInputIdx[layer] : pastKeyInputIdx[layer])];
+                if (resident.data.size() != hostPast.data.size())
+                {
+                    fprintf(stderr, "[vlm] resident cache size mismatch for %s\n", pastBuf);
+                    return false;
+                }
+                std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                if (pendingFoldSlot >= 0)
+                {
+                    IOTensor present;
+                    if (session->readResident(presentBuf, present) != Status::Ok)
+                    {
+                        return false;
+                    }
+                    const float *src   = reinterpret_cast<const float *>(present.data.data());
+                    float       *cache = reinterpret_cast<float *>(hostPast.data.data());
+                    for (int head = 0; head < kvHeads; ++head)
+                    {
+                        const float *srcRow   = src + ((size_t) head * (cacheSlots + 1) + cacheSlots) * headDim;
+                        float       *cacheRow = cache + ((size_t) head * cacheSlots + pendingFoldSlot) * headDim;
+                        std::memcpy(cacheRow, srcRow, (size_t) headDim * sizeof(float));
+                    }
+                }
+            }
+        }
+        pendingFoldSlot = -1;
+        return true;
+    };
+
     std::vector<IOTensor> outputs;
-    auto findOutput = [&](const std::string &name) -> const IOTensor * {
+    auto                  findOutput = [&](const std::string &name) -> const IOTensor                  *{
         for (const IOTensor &out: outputs)
         {
             if (out.name == name)
@@ -279,7 +399,7 @@ int main(int argc, char **argv) {
                 {
                     return false;
                 }
-                const float *src = present->f32();
+                const float *src   = present->f32();
                 float       *cache = reinterpret_cast<float *>(decoderInputs[(size_t) (part ? pastValueInputIdx[layer] : pastKeyInputIdx[layer])].data.data());
                 for (int head = 0; head < kvHeads; ++head)
                 {
@@ -380,14 +500,43 @@ int main(int argc, char **argv) {
         const int64_t position = absolutePos;
         std::memcpy(decoderInputs[(size_t) positionInputIdx].data.data(), &position, sizeof(int64_t));
 
-        if (session->run(decoderInputs, outputs) != Status::Ok)
-        {
-            return nullptr;
-        }
         const int slot = absolutePos < cacheSlots ? absolutePos : cacheSlots - 1;
-        if (!foldPresentIntoCache(/*presentRows=*/1, /*copyRows=*/1, slot))
+        if (decodeLinked)
         {
-            return nullptr;
+            // The engine folds the previous run's row into pendingFoldSlot at the start of this run.
+            // The first decode step of a turn re-seeds the device cache from the host past buffers
+            // (which prefill just updated) and clears any pending fold.
+            const bool rebind = rebindPastNextStep || !cacheOnDevice;
+            if (!setDecodeFoldSlot(rebind ? -1 : pendingFoldSlot))
+            {
+                return (const float *) nullptr;
+            }
+            std::vector<IOTensor> bound {decoderInputs[(size_t) embedsInputIdx], decoderInputs[(size_t) maskInputIdx], decoderInputs[(size_t) positionInputIdx]};
+            if (rebind)
+            {
+                for (int layer = 0; layer < numLayers; ++layer)
+                {
+                    bound.push_back(decoderInputs[(size_t) pastKeyInputIdx[layer]]);
+                    bound.push_back(decoderInputs[(size_t) pastValueInputIdx[layer]]);
+                }
+            }
+            if (session->run(bound, outputs) != Status::Ok)
+            {
+                return (const float *) nullptr;
+            }
+            rebindPastNextStep = false;
+            cacheOnDevice      = true;
+            pendingFoldSlot    = slot;
+        } else
+        {
+            if (session->run(decoderInputs, outputs) != Status::Ok)
+            {
+                return nullptr;
+            }
+            if (!foldPresentIntoCache(/*presentRows=*/1, /*copyRows=*/1, slot))
+            {
+                return nullptr;
+            }
         }
         const IOTensor *logitsOut = findOutput("logits");
         return logitsOut ? logitsOut->f32() : nullptr;
@@ -467,6 +616,19 @@ int main(int argc, char **argv) {
             printf("END\n");
             fflush(stdout);
             continue;
+        }
+        // A turn boundary: the decode loop left the cache device-resident; bring it back to the host
+        // buffers (with the pending fold applied) for the prefill bucket, and mark the next decode
+        // step to re-seed the device cache.
+        if (decodeLinked && cacheOnDevice)
+        {
+            if (!materializeDeviceCache())
+            {
+                fprintf(stderr, "[vlm] device cache materialization failed\n");
+                return 3;
+            }
+            cacheOnDevice      = false;
+            rebindPastNextStep = true;
         }
 
         std::vector<int64_t> padded(prompt);
