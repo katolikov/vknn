@@ -42,10 +42,12 @@ reuses tuning and uploaded weights.
   re-runs the passes and plan from the retained pristine graph to add a bucket
   explicitly. It never happens implicitly on `run()`. A `.vxm` session returns
   `Status::Unsupported`.
-- **Declaring a symbolic axis:** a dynamic **batch** axis falls back to `batch = 1`
-  (or `--batch N`). A dynamic **non-batch** axis (spatial / feature) that stays
+- **Declaring a symbolic axis:** a dynamic **batch** axis — a leading axis that is
+  unnamed or batch-named (`N`/`B`/`*batch*`, case-insensitive) — falls back to
+  `batch = 1` (or `--batch N`). Any **other** dynamic axis — spatial / feature, or a
+  leading axis with a non-batch `dim_param` name like `num_frames` — that stays
   unresolved is a **hard error** — one aggregated message listing the unbound
-  `dim_param` symbol names — rather than the old silent `1x1` plan. Resolve it by
+  `dim_param` symbol names — rather than a silent freeze to 1. Resolve it by
   **binding the symbol** with `vknn_compile --dim NAME=VALUE` / `Config::dimBindings`
   (the compiler evaluates each input axis's `dim_param`, including a compound like
   `past_sequence_length + sequence_length`, so a with-past decoder needs a couple of

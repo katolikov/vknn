@@ -7,7 +7,10 @@
 //
 //   vknn_compile <model.onnx|model.vxm> <out.vxm> [flags]
 //     --fp16            store weights as fp16 (default: fp32)
-//     --batch N         resolve a dynamic LEADING (batch) axis to N (default 1)
+//     --batch N         resolve a dynamic LEADING batch axis to N (default 1). Applies to a leading
+//                       axis that is unnamed or batch-named ("N"/"B"/*batch*); a leading axis with any
+//                       other dim_param name (num_frames, views...) must be bound with --dim — an
+//                       unbound one is a hard error, never a silent freeze to 1
 //     --dim NAME=VALUE  bind a symbolic input dimension by its ONNX dim_param name (repeatable), e.g.
 //                       --dim sequence_length=1 --dim past_sequence_length=256. Every dynamic input axis
 //                       whose dim_param resolves from the bindings — a bare symbol, an integer literal, or
@@ -204,9 +207,10 @@ static bool parseBucketSpec(const char *spec, BucketSpec *out) {
 }
 
 /// Print each graph input's shape -- a concrete extent, or `$symbol` for a dynamic axis -- and the
-/// distinct set of dim_param symbols the model leaves free (the names to bind with --dim). A symbol
-/// appearing only on a leading (batch) axis is omitted: that axis also honors --batch. Used by
-/// --list-dims to answer "what do I need to bind?" without compiling.
+/// distinct set of dim_param symbols the model leaves free (the names to bind with --dim). A
+/// batch-NAMED symbol ("N"/"B"/*batch*) on a leading axis is omitted: that axis honors --batch. Any
+/// other leading symbol is must-bind, exactly like shape resolution treats it. Used by --list-dims
+/// to answer "what do I need to bind?" without compiling.
 static void listDims(const Graph &g) {
     const std::map<std::string, int64_t> noBind;
     std::vector<std::string>             freeSyms; // distinct, first-seen order
@@ -238,7 +242,9 @@ static void listDims(const Graph &g) {
             } else if (!sym.empty())
             {
                 line += "$" + sym;
-                if (ax != 0) // a leading-axis symbol has the --batch fallback, so it is not "must-bind"
+                // A batch-NAMED leading symbol has the --batch fallback, so it is not "must-bind";
+                // every other symbol (leading or not) must be bound or the compile hard-errors.
+                if (ax != 0 || !batchLikeDimSymbol(sym))
                 {
                     DimEval e = evalDimExpr(sym, noBind);
                     for (const std::string &fs: e.freeSymbols)

@@ -2017,6 +2017,53 @@ TEST(Passes, InferShapesUnboundSymbolErrors) {
     EXPECT_TRUE(threw) << "an unbound symbolic non-batch axis must hard-error naming the symbol";
 }
 
+// --- The leading-axis batch fallback applies only to batch-NAMED symbols: "batch_size"/"N"/"B"
+// (case-insensitive, or any name containing "batch") freeze to `batch` when unbound. ---
+TEST(Passes, InferShapesLeadingBatchNamedSymbolFallsBack) {
+    for (const char *sym: {"batch_size", "batch", "N", "b", "Batch"})
+    {
+        Graph g = makeSymbolicInputGraph({-1, 3}, {sym, ""});
+        inferShapes(g, 2); // no bindings; batch = 2
+        EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {2, 3})) << "symbol '" << sym << "' should take the batch fallback";
+    }
+}
+
+// --- A leading symbol that does NOT name the batch axis (num_frames/views/...) is a real extent: an
+// unbound one is the aggregated hard error naming the symbol, never a silent freeze to batch=1 (the
+// frame-interp class: a [num_frames,C,H,W] input frozen to 1 frame runs on truncated data and returns
+// near-zero-cosine output with no diagnostic). ---
+TEST(Passes, InferShapesLeadingNonBatchSymbolErrors) {
+    Graph g     = makeSymbolicInputGraph({-1, 3, 16, 16}, {"num_frames", "", "", ""});
+    bool  threw = false;
+    try
+    {
+        inferShapes(g, 1); // no bindings
+    } catch (const Error &e)
+    {
+        threw = true;
+        EXPECT_EQ(e.status(), Status::InvalidArgument);
+        EXPECT_NE(std::string(e.what()).find("num_frames"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("--dim"), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(threw) << "an unbound non-batch LEADING symbol must hard-error naming the symbol";
+}
+
+// --- The same non-batch leading symbol resolves normally from a --dim binding. ---
+TEST(Passes, InferShapesLeadingNonBatchSymbolBinds) {
+    Graph                          g     = makeSymbolicInputGraph({-1, 3, 16, 16}, {"num_frames", "", "", ""});
+    std::map<std::string, int64_t> binds = {{"num_frames", 4}};
+    inferShapes(g, 1, nullptr, &binds);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {4, 3, 16, 16}));
+}
+
+// --- A leading dynamic axis with NO recorded symbol keeps the documented batch fallback (a bare
+// dynamic batch dim is exported without a dim_param by several toolchains). ---
+TEST(Passes, InferShapesLeadingUnnamedAxisFallsBack) {
+    Graph g = makeSymbolicInputGraph({-1, 3}, {"", ""});
+    inferShapes(g, 3);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {3, 3}));
+}
+
 // --- A per-tensor --shape declaration overrides a --dim binding for that tensor (declared wins). ---
 TEST(Passes, InferShapesShapeOverridesDim) {
     Graph                          g        = makeSymbolicInputGraph({-1, -1}, {"batch_size", "sequence_length"});

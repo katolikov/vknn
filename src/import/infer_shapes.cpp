@@ -14,11 +14,16 @@ namespace vknn {
     /// shape (--shape) overrides everything; else the axis's recorded symbolic dim_param
     /// (TensorDesc::dimParams) is evaluated against `bindings` (--dim NAME=VALUE), which resolves a bare
     /// symbol, an integer literal, and a compound expression like "past_sequence_length + sequence_length"
-    /// alike; else the leading axis falls back to `batch`. A non-leading axis that stays unresolved is a
-    /// hard error rather than a silent substitution to `batch`: freezing a real spatial/feature axis to 1
-    /// compiles the model to a 1x1 plan whose output is quietly wrong (the vit_b16_q8 0.32-cosine bug).
-    /// The error is aggregated across every input and lists the unbound symbol names to bind, so a
-    /// many-input decoder reports one actionable message instead of failing per tensor.
+    /// alike; else the leading axis falls back to `batch` — but ONLY when it carries no symbol or a
+    /// batch-named one ("N", "B", or any name containing "batch", case-insensitive). A leading symbol
+    /// with any other name (num_frames, views, num_cameras...) is a real extent, not a batch: freezing
+    /// it to 1 compiles a 1-frame plan that silently truncates the caller's data (a frame-interp model
+    /// fed [num_frames,C,H,W] returns near-zero-cosine output with no diagnostic), so it hard-errors
+    /// like a non-leading axis. Any axis that stays unresolved is a hard error rather than a silent
+    /// substitution to `batch`: freezing a real spatial/feature axis to 1 compiles the model to a 1x1
+    /// plan whose output is quietly wrong (the vit_b16_q8 0.32-cosine bug). The error is aggregated
+    /// across every input and lists the unbound symbol names to bind, so a many-input decoder reports
+    /// one actionable message instead of failing per tensor.
     ///
     /// Central invariant — an EMPTY shape means "not resolved yet", never a rank-0 scalar, EXCEPT on an
     /// initializer (a constant genuinely may be rank-0). Every case therefore refuses to compute from an
@@ -101,9 +106,11 @@ namespace vknn {
                         s[ax] = e.value;
                         continue;
                     }
-                    if (ax == 0)
+                    // Only a batch-NAMED leading symbol takes the batch fallback; any other leading
+                    // symbol (num_frames, views...) is a real extent and hard-errors below when unbound.
+                    if (ax == 0 && batchLikeDimSymbol(sym))
                     {
-                        s[ax] = batch; // leading axis with an unbound symbol: the documented batch fallback
+                        s[ax] = batch;
                         continue;
                     }
                     for (const std::string &fs: e.freeSymbols)
