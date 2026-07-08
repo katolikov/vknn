@@ -10,6 +10,7 @@ import com.vknn.chat.VknnApp
 import com.vknn.chat.model.BackendPolicy
 import com.vknn.chat.model.InferenceBackend
 import com.vknn.chat.model.ModelCatalog
+import com.vknn.chat.model.ModelResidency
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
@@ -41,18 +42,20 @@ data class SplatUiState(
 // Drives the 3D-splat mode: a guided multi-frame capture feeds the YoNoSplat encoder once, then the
 // orbit viewer re-renders the uploaded Gaussians from user-driven camera poses. The encoder session
 // loads once and survives recaptures; only the pose changes per render. The model file is owned by
-// the ModelStore (Library tab).
-class SplatViewModel(app: Application) : AndroidViewModel(app) {
+// the ModelStore (Library tab). The shared ModelResidency keeps at most one mode's model resident:
+// every load acquires the slot (freeing any other mode's model first) and Unload/library-delete
+// release it.
+class SplatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Holder {
     private val _ui = MutableStateFlow(SplatUiState())
     val ui: StateFlow<SplatUiState> = _ui.asStateFlow()
 
     private val store = (app as VknnApp).models
     private val settings = (app as VknnApp).settings
+    private val residency = (app as VknnApp).residency
     private var handle: Long = 0L
     private var views = 8
     private var renderWidth = 224
     private var renderHeight = 224
-    private var pendingFree = false
 
     // Capture accumulators (main-thread only: the analyzer executor is the main executor).
     private var frameSlab = FloatArray(0)
@@ -66,7 +69,6 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
     private var pivotDepth = 1f
     private var latestCamera = OrbitCamera()
     private var renderJobActive = false
-    private var nativeBusy = false // native call in flight on the Default dispatcher
 
     init {
         viewModelScope.launch {
@@ -77,9 +79,9 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
                     if (present) {
                         if (_ui.value.phase == SplatPhase.MISSING) _ui.value = _ui.value.copy(phase = SplatPhase.DOWNLOADED)
                     } else {
-                        if (handle != 0L) pendingFree = true
                         _ui.value = SplatUiState(phase = SplatPhase.MISSING)
-                        releaseIfIdle()
+                        // Frees the encoder once any encode/render settles; no-op when not loaded.
+                        viewModelScope.launch { residency.releaseResidentModel(this@SplatViewModel) }
                     }
                 }
         }
@@ -100,6 +102,9 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
         }
         _ui.value = _ui.value.copy(phase = SplatPhase.LOADING, status = null)
         viewModelScope.launch {
+            // Frees any other mode's resident model before this load allocates, so at most one
+            // heavy model lives in the process.
+            residency.acquireResidency(this@SplatViewModel)
             try {
                 withContext(Dispatchers.Default) {
                     val spec = ModelCatalog.DL3DV
@@ -112,21 +117,31 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
                     renderHeight = info[2]
                     renderWidth = info[3]
                 }
+                residency.nativeCallSettled(this@SplatViewModel) // a release requested mid-load lands here
+                if (!residency.isResident(this@SplatViewModel)) return@launch // released: UI already reset
                 if (store.isReady(ModelCatalog.DL3DV)) {
                     store.clearLoadError(ModelCatalog.DL3DV)
                     _ui.value = _ui.value.copy(captureSide = renderWidth, backend = chosenBackend.engineName)
                     startFreshCapture()
-                } else {
-                    freeHandle()
-                    _ui.value = _ui.value.copy(phase = SplatPhase.MISSING)
+                } else { // deleted from the Library while loading: free the fresh session, revert to MISSING
+                    residency.releaseResidentModel(this@SplatViewModel)
                 }
             } catch (e: Exception) {
+                val abandonedHandle = handle
+                handle = 0L
+                if (abandonedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeSplatFree(abandonedHandle) }
+                residency.dropResidency(this@SplatViewModel)
                 val friendly = friendlyLoadError(ModelCatalog.DL3DV, e.message)
                 store.reportLoadError(ModelCatalog.DL3DV, friendly)
                 val back = if (store.isReady(ModelCatalog.DL3DV)) SplatPhase.DOWNLOADED else SplatPhase.MISSING
                 _ui.value = _ui.value.copy(phase = back, status = friendly)
             }
         }
+    }
+
+    /** The Unload control: frees the resident encoder once any encode/render settles and returns to DOWNLOADED. */
+    fun unloadModel() {
+        viewModelScope.launch { residency.releaseResidentModel(this@SplatViewModel) }
     }
 
     /** Arms the guided grab loop; frames then accumulate via addFrame. */
@@ -190,7 +205,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
         val loaded = handle
         if (loaded == 0L) return
         _ui.value = _ui.value.copy(phase = SplatPhase.ENCODING, capturing = false)
-        nativeBusy = true
+        residency.nativeCallStarted(this)
         viewModelScope.launch {
             val startedMs = SystemClock.elapsedRealtime()
             val outcome = withContext(Dispatchers.Default) {
@@ -214,11 +229,8 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
                 gaussians to Bitmap.createBitmap(pixels, renderWidth, renderHeight, Bitmap.Config.ARGB_8888)
             }
             frameSlab = FloatArray(0)
-            nativeBusy = false
-            if (pendingFree) { // the model left the library mid-encode: stay reverted
-                releaseIfIdle()
-                return@launch
-            }
+            residency.nativeCallSettled(this@SplatViewModel) // a release requested mid-encode lands here
+            if (!residency.isResident(this@SplatViewModel)) return@launch // released: UI already reset
             if (outcome == null) {
                 _ui.value = _ui.value.copy(phase = SplatPhase.CAPTURING, capturing = false, framesCaptured = 0, status = "Encode failed — try again")
                 framesFilled = 0
@@ -237,7 +249,7 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
     private fun scheduleRender() {
         if (renderJobActive || handle == 0L || _ui.value.phase != SplatPhase.VIEWER) return
         renderJobActive = true
-        nativeBusy = true
+        residency.nativeCallStarted(this)
         val camera = latestCamera
         val loaded = handle
         _ui.value = _ui.value.copy(rendering = true)
@@ -250,11 +262,8 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
                     ?.let { Bitmap.createBitmap(it, renderWidth, renderHeight, Bitmap.Config.ARGB_8888) }
             }
             renderJobActive = false
-            nativeBusy = false
-            if (pendingFree) { // the model left the library mid-render: stay reverted
-                releaseIfIdle()
-                return@launch
-            }
+            residency.nativeCallSettled(this@SplatViewModel) // a release requested mid-render lands here
+            if (!residency.isResident(this@SplatViewModel)) return@launch // released: UI already reset
             _ui.value = _ui.value.copy(
                 render = bitmap ?: _ui.value.render,
                 rendering = false,
@@ -265,23 +274,31 @@ class SplatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // A model delete while encoding/rendering defers the native free until the in-flight call
-    // settles (all mutation happens on the main dispatcher, so the flags are race-free).
-    private fun releaseIfIdle() {
-        if (pendingFree && !nativeBusy) {
-            pendingFree = false
-            freeHandle()
-        }
+    // ModelResidency.Holder: the coordinator calls these on the main dispatcher when this mode's
+    // model has to leave the GPU (Unload, library delete, or another mode acquiring the slot).
+    // Encode and render are single native calls with nothing to stop early, so onReleaseRequested
+    // keeps its no-op default.
+
+    override suspend fun freeResidentSession() {
+        val releasedHandle = handle
+        handle = 0L
+        if (releasedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeSplatFree(releasedHandle) }
     }
 
-    private fun freeHandle() {
-        val loaded = handle
-        handle = 0L
-        if (loaded != 0L) NativeLib.nativeSplatFree(loaded)
+    override fun resetToUnloadedState() {
+        framesFilled = 0
+        frameSlab = FloatArray(0)
+        latestCamera = OrbitCamera()
+        _ui.value = SplatUiState(
+            phase = if (store.isReady(ModelCatalog.DL3DV)) SplatPhase.DOWNLOADED else SplatPhase.MISSING,
+        )
     }
 
     override fun onCleared() {
-        freeHandle()
+        val abandonedHandle = handle
+        handle = 0L
+        if (abandonedHandle != 0L) NativeLib.nativeSplatFree(abandonedHandle)
+        residency.dropResidency(this)
         super.onCleared()
     }
 

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.vknn.chat.model.BackendPolicy
 import com.vknn.chat.model.InferenceBackend
 import com.vknn.chat.model.ModelCatalog
+import com.vknn.chat.model.ModelResidency
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
@@ -38,20 +39,26 @@ data class UiState(
 // Drives the on-device decoder: encode -> prefill -> stream decode a reply while tracking latency
 // metrics and the KV-cache context usage. The model itself is owned by the ModelStore (Library tab);
 // this view model only observes its presence and loads it onto the GPU. All native/tokenizer work
-// runs off the main thread; UI state is a StateFlow the Compose layer collects.
-class ChatViewModel(app: Application) : AndroidViewModel(app) {
+// runs off the main thread; UI state is a StateFlow the Compose layer collects. The shared
+// ModelResidency keeps at most one mode's model resident: every load acquires the slot (freeing any
+// other mode's model first) and Unload/library-delete release it.
+class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Holder {
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     private val store = (app as VknnApp).models
     private val settings = (app as VknnApp).settings
     private val prompts = (app as VknnApp).prompts
+    private val residency = (app as VknnApp).residency
     private var tokenizer: Tokenizer? = null
     private var handle: Long = 0L
     private var position = 0
     private var contextMax = 0
     private var vocabSize = 0
-    private var pendingFree = false
+
+    // Set when a residency release waits on the streaming reply; the decode loop then stops early.
+    @Volatile
+    private var cancelRequested = false
 
     private val maxNew = 220
     private val topK = 40
@@ -68,7 +75,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (present) {
                         if (_ui.value.phase == Phase.MISSING) _ui.value = _ui.value.copy(phase = Phase.DOWNLOADED)
                     } else {
-                        if (handle != 0L) pendingFree = true
                         _ui.value = _ui.value.copy(
                             phase = Phase.MISSING,
                             messages = emptyList(),
@@ -76,7 +82,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             metrics = Metrics(),
                             status = null,
                         )
-                        releaseIfIdle()
+                        // Frees the decoder once any streaming reply settles; no-op when not loaded.
+                        viewModelScope.launch { residency.releaseResidentModel(this@ChatViewModel) }
                     }
                 }
         }
@@ -98,6 +105,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         _ui.value = _ui.value.copy(phase = Phase.LOADING, status = null)
         viewModelScope.launch {
+            // Frees any other mode's resident model before this load allocates, so at most one
+            // heavy model lives in the process.
+            residency.acquireResidency(this@ChatViewModel)
+            cancelRequested = false
             try {
                 withContext(Dispatchers.Default) {
                     val ctx = getApplication<Application>()
@@ -116,20 +127,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     NativeLib.nativeReset(h, 1234)
                     position = 0
                 }
+                residency.nativeCallSettled(this@ChatViewModel) // a release requested mid-load lands here
+                if (!residency.isResident(this@ChatViewModel)) return@launch // released: UI already reset
                 if (store.isReady(ModelCatalog.QWEN)) {
                     store.clearLoadError(ModelCatalog.QWEN)
                     _ui.value = _ui.value.copy(phase = Phase.READY, contextMax = contextMax, contextUsed = 0, backend = chosenBackend.engineName)
-                } else { // deleted from the Library while loading
-                    freeHandle()
-                    _ui.value = _ui.value.copy(phase = Phase.MISSING)
+                } else { // deleted from the Library while loading: free the fresh session, revert to MISSING
+                    residency.releaseResidentModel(this@ChatViewModel)
                 }
             } catch (e: Exception) {
+                val abandonedHandle = handle
+                handle = 0L
+                if (abandonedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeFree(abandonedHandle) }
+                residency.dropResidency(this@ChatViewModel)
                 val friendly = friendlyLoadError(ModelCatalog.QWEN, e.message)
                 store.reportLoadError(ModelCatalog.QWEN, friendly)
                 val back = if (store.isReady(ModelCatalog.QWEN)) Phase.DOWNLOADED else Phase.MISSING
                 _ui.value = _ui.value.copy(phase = back, status = friendly)
             }
         }
+    }
+
+    /** The Unload control: frees the resident decoder once any streaming reply settles and returns to DOWNLOADED. */
+    fun unloadModel() {
+        viewModelScope.launch { residency.releaseResidentModel(this@ChatViewModel) }
     }
 
     fun reset() {
@@ -150,6 +171,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val kMsgs = _ui.value.messages + Msg(Role.USER, text) + Msg(Role.ASSISTANT, "")
         val asstIdx = kMsgs.size - 1
         _ui.value = _ui.value.copy(messages = kMsgs, generating = true, status = null)
+        cancelRequested = false
+        residency.nativeCallStarted(this)
 
         viewModelScope.launch {
             withContext(Dispatchers.Default) {
@@ -188,7 +211,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val firstNs = System.nanoTime()
                 val ttftMs = (firstNs - t0) / 1_000_000
                 var gen = 0
-                while (gen < maxNew && next !in stopTokens && position < contextMax - 1) {
+                while (gen < maxNew && next !in stopTokens && position < contextMax - 1 && !cancelRequested) {
                     val piece = dec.add(next)
                     gen++
                     if (piece.isNotEmpty()) sb.append(piece)
@@ -204,8 +227,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val tps = if (gen > 0) gen / ((System.nanoTime() - firstNs) / 1e9) else 0.0
                 android.util.Log.i("vknnchat-app", "reply: gen=$gen ttft=${ttftMs}ms prefill=${prefillMs}ms tps=${(tps * 10).toInt() / 10.0} text=${sb.toString().replace("\n", "\\n")}")
             }
-            _ui.value = _ui.value.copy(generating = false, contextUsed = position)
-            releaseIfIdle()
+            residency.nativeCallSettled(this@ChatViewModel) // a release requested mid-reply lands here
+            if (residency.isResident(this@ChatViewModel)) {
+                _ui.value = _ui.value.copy(generating = false, contextUsed = position)
+            }
         }
     }
 
@@ -217,24 +242,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(messages = next, metrics = metrics)
     }
 
-    // A delete while a reply is streaming defers the native free until the decode loop finishes
-    // (both this and the collector run on the main dispatcher, so the flag is race-free).
-    private fun releaseIfIdle() {
-        if (pendingFree && !_ui.value.generating) {
-            pendingFree = false
-            freeHandle()
-        }
+    // ModelResidency.Holder: the coordinator calls these on the main dispatcher when this mode's
+    // model has to leave the GPU (Unload, library delete, or another mode acquiring the slot).
+
+    /** Stops a streaming reply between native calls, so a pending release settles quickly. */
+    override fun onReleaseRequested() {
+        cancelRequested = true
     }
 
-    private fun freeHandle() {
-        val h = handle
+    override suspend fun freeResidentSession() {
+        val releasedHandle = handle
         handle = 0L
         position = 0
-        if (h != 0L) NativeLib.nativeFree(h)
+        if (releasedHandle != 0L) withContext(Dispatchers.Default) { NativeLib.nativeFree(releasedHandle) }
+    }
+
+    override fun resetToUnloadedState() {
+        contextMax = 0
+        vocabSize = 0
+        _ui.value = UiState(
+            phase = if (store.isReady(ModelCatalog.QWEN)) Phase.DOWNLOADED else Phase.MISSING,
+            temperature = _ui.value.temperature,
+        )
     }
 
     override fun onCleared() {
-        freeHandle()
+        cancelRequested = true
+        val abandonedHandle = handle
+        handle = 0L
+        if (abandonedHandle != 0L) NativeLib.nativeFree(abandonedHandle)
+        residency.dropResidency(this)
         super.onCleared()
     }
 }
