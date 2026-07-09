@@ -8,6 +8,7 @@
 // shape) but share ONE content-deduped initializer pool because weights are shape-independent. A
 // single-bucket save writes the VXM3 container verbatim, so a fixed-shape model's on-disk bytes are
 // unchanged by the multi-bucket feature; the VXM4 container is written only for two or more buckets.
+#include "core/quant_int4.h"
 #include "vknn/graph.h"
 #include "vknn/logging.h"
 #include "vknn/mapped_file.h"
@@ -34,6 +35,25 @@ namespace vknn {
         // bytes. Single-bucket files stay VXM3 (byte-identical to legacy). A reader dispatches on the
         // leading word, so old files load as one bucket and new single-bucket files match legacy.
         constexpr uint32_t kMagic4 = 0x344d5856; // "VXM4"
+        // Quantized-model container magic (vknn_compile -Os). A VXM5 file is: this word, one u32
+        // subcontainer tag (3 = the VXM3 single-graph body, 4 = the VXM4 multi-bucket body), then the
+        // EXACT body of that container. The bump exists only so an engine without the int4 kernels
+        // rejects a packed-weight model with its "incompatible version -- reconvert" message instead
+        // of misreading packed payloads as fp16; non-quantized compiles keep VXM3/VXM4 byte-identical.
+        constexpr uint32_t kMagic5 = 0x354d5856; // "VXM5"
+
+        // A graph whose nodes carry the int4 weight-quantization attribute stores packed payloads
+        // (core/quant_int4.h) and must be stamped VXM5.
+        bool graphHasInt4Weights(const Graph &g) {
+            for (const Node &n: g.nodes)
+            {
+                if (n.attr.has(kWq))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
 
         // Raw fixed-width serialization: every pod()/vec() writes host-endian bytes with no framing.
         // The Reader must consume fields in the exact same order the Writer emits them.
@@ -260,7 +280,14 @@ namespace vknn {
             return false;
         }
         Writer w {f};
-        w.u32(kMagic);
+        if (graphHasInt4Weights(g))
+        {
+            w.u32(kMagic5);
+            w.u32(3); // subcontainer tag: the VXM3 single-graph body follows
+        } else
+        {
+            w.u32(kMagic);
+        }
         writeGraphStructure(w, g);
         // initializers (inlined bytes, keyed by tensor id -- the VXM3 layout)
         w.u32((uint32_t) g.initializers.size());
@@ -318,7 +345,19 @@ namespace vknn {
             return false;
         }
         Writer w {f};
-        w.u32(kMagic4);
+        bool anyQuantized = false;
+        for (const Graph &b: buckets)
+        {
+            anyQuantized = anyQuantized || graphHasInt4Weights(b);
+        }
+        if (anyQuantized)
+        {
+            w.u32(kMagic5);
+            w.u32(4); // subcontainer tag: the VXM4 multi-bucket body follows
+        } else
+        {
+            w.u32(kMagic4);
+        }
         w.u32((uint32_t) buckets.size());
         // Build the content-deduped initializer pool: identical payloads across buckets (the common
         // case -- weights are shape-independent) collapse to one blob. A blob is looked up by a
@@ -417,6 +456,13 @@ namespace vknn {
         std::shared_ptr<const MappedFile> mapping = MappedFile::open(path);
         Reader                            r {f};
         uint32_t                          magic = r.u32();
+        if (magic == kMagic5)
+        {
+            // Quantized container: a subcontainer tag then the exact VXM3/VXM4 body. Remap and fall
+            // through to the matching reader; a foreign tag falls into the bad-magic diagnostics.
+            const uint32_t sub = r.u32();
+            magic              = sub == 3 ? kMagic : (sub == 4 ? kMagic4 : 0);
+        }
         if (magic == kMagic)
         {
             // Legacy single-bucket container: one graph, initializers inlined.
@@ -466,7 +512,7 @@ namespace vknn {
             if ((magic & 0x00ffffffu) == kVxmPrefix)
             {
                 VKNN_WARN << "loadGraph: " << path << " is a VXM" << (char) (magic >> 24)
-                          << " container from an incompatible vknn version (this build reads VXM3/VXM4)"
+                          << " container from an incompatible vknn version (this build reads VXM3/VXM4/VXM5)"
                           << " -- reconvert the model from its .onnx with the current vknn_compile";
             } else
             {

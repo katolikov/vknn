@@ -143,6 +143,35 @@ namespace vknn {
     // Run the standard pipeline used before backend planning.
     void runStandardPasses(Graph &g, const PassOptions &opt = {});
 
+    // Knobs for the -Os INT4 weight-quantization pass (quantize_weights.cpp). Structural defaults
+    // that hold for any model — never tuned per model. All thresholds are generic eligibility rules:
+    // small weights and shallow reductions (depthwise convs, tiny heads) stay fp16 by construction.
+    struct QuantOptions {
+        int64_t group          = 128;   // scale group size along the reduction axis
+        double  outlierFrac    = 0.01;  // fraction of activation-salient columns kept fp16 (AWQ)
+        int     calibSamples   = 8;     // synthetic calibration samples when calibFiles is empty
+        // Per-layer weighted relative weight-error bar; above it the layer stays fp16. Symmetric
+        // int4 with grouped scales sits at ~8-15% weight-space error by construction (the OUTPUT
+        // error is far smaller — independent per-column errors average out across the reduction), so
+        // the bar catches anomalously quantization-hostile layers, not typical ones.
+        double maxLayerRelErr = 0.25;
+        int64_t minElems       = 16384; // weights smaller than this stay fp16 (no size win)
+        int64_t minK           = 256;   // reductions shallower than this stay fp16 (excludes depthwise)
+        // Caller calibration data: each entry is ONE sample — raw .bin files in graph-input order
+        // (the vknn_run_io convention). Empty = deterministic synthetic samples.
+        std::vector<std::vector<std::string>> calibFiles;
+    };
+    // Totals from quantizeWeightsInt4, for the compiler's summary line.
+    struct QuantStats {
+        int64_t sites = 0, quantized = 0, guardKept = 0, outlierCols = 0;
+        int64_t bytesBefore = 0, bytesAfter = 0;
+        bool    calibrated = false;
+    };
+    // Quantize eligible MatMul/Gemm/Conv weights to packed int4 with fp16 group scales, fp16 outlier
+    // columns, and calibrated min-MSE steps (vknn_compile -Os). Layout/attribute contract in
+    // core/quant_int4.h. Runs after runStandardPasses, before convertInitializersFp16.
+    QuantStats quantizeWeightsInt4(Graph &g, const QuantOptions &opt);
+
     // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
     struct Fp16ConvertStats {
         int64_t converted = 0, kept = 0, bytesBefore = 0, bytesAfter = 0;

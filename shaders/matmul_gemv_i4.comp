@@ -1,0 +1,134 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 6
+#include "pw_epilogue.glsl"
+#endif
+// Split-K mat-vec over an int4-packed weight (vknn_compile -Os): out[r,n] = sum_k A[r,k]*W[k,n] for
+// M == 1 rows, where W is stored as 4-bit groups with fp16 scales plus a few fp16 outlier columns
+// (core/quant_int4.h). The weight stream is the whole traffic of a decode-step projection, so 4-bit
+// packing moves a quarter of the bytes the fp16 kernel does; the FMA count is unchanged and the
+// kernel stays DRAM-bound, which is exactly where the packing pays.
+//
+// Thread layout: I4_NX lanes each own 8 ADJACENT outputs n — one packed 32-bit word per k step —
+// and I4_KS lanes split the k reduction, partials reduced through shared memory in ascending lane
+// order (deterministic; the k chain is regrouped like matmul_gemv.comp's, so it agrees with the
+// fp16 kernels only to fp32 rounding). A workgroup covers 64 outputs of one output row; the
+// dispatch is (ceil(N/64), rows), so a lane's 8-output block is always word-aligned within its row.
+//
+// Weight addressing (k-major, n-minor): word = bp[k*rowWords + n/8], nibble n%8, sign-extended int4
+// times the fp16 group scale sc[(k/group)*N + n]. Outlier columns carry q = 0 in the grid and are
+// added from the dense fp16 rows ov[j*N + n] by the reducing lane, so they contribute exactly once.
+#include "common.glsl"
+#define I4_NX 8  // lanes along n, 8 outputs each: 64 outputs per workgroup
+#define I4_KS 16 // lanes reducing over k; 8 x 16 = 128 == the Vulkan-guaranteed workgroup size
+#define I4_U 4   // k steps a lane loads before it consumes any of them (memory-level parallelism)
+layout(local_size_x = I4_NX, local_size_y = I4_KS) in;
+layout(std430, binding = 0) readonly  buffer A  { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer BP { uint bp[]; };
+layout(std430, binding = 2) writeonly buffer D  { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer SC { STORE sc[]; };
+layout(std430, binding = 4) readonly  buffer OI { int oi[]; };
+layout(std430, binding = 5) readonly  buffer OV { STORE ov[]; };
+layout(push_constant) uniform PC {
+  int total, M, N, K, group, nOut, rowWords, nGroups;
+} pc;
+
+shared vec4 part0[I4_KS][I4_NX];
+shared vec4 part1[I4_KS][I4_NX];
+
+// Sign-extended int4 lanes 0..3 / 4..7 of a packed word.
+vec4 nibLo(uint w) {
+  return vec4(bitfieldExtract(int(w), 0, 4), bitfieldExtract(int(w), 4, 4),
+              bitfieldExtract(int(w), 8, 4), bitfieldExtract(int(w), 12, 4));
+}
+vec4 nibHi(uint w) {
+  return vec4(bitfieldExtract(int(w), 16, 4), bitfieldExtract(int(w), 20, 4),
+              bitfieldExtract(int(w), 24, 4), bitfieldExtract(int(w), 28, 4));
+}
+
+void main() {
+  int row = int(gl_WorkGroupID.y);                              // output row (flattened batch, M == 1)
+  int n0  = (int(gl_WorkGroupID.x) * I4_NX + int(gl_LocalInvocationID.x)) * 8;
+  int ky  = int(gl_LocalInvocationID.y);
+  bool live = n0 < pc.N;
+  int aBase = row * pc.K;
+  int wcol  = n0 / 8; // this lane's packed word column
+
+  // Guarded per-column scale fetch: the tail block past N reads 0, so its padding nibbles stay 0.
+  #define SCALE4(g4, off) vec4( \
+      n0 + off + 0 < pc.N ? float(sc[(g4) * pc.N + n0 + off + 0]) : 0.0, \
+      n0 + off + 1 < pc.N ? float(sc[(g4) * pc.N + n0 + off + 1]) : 0.0, \
+      n0 + off + 2 < pc.N ? float(sc[(g4) * pc.N + n0 + off + 2]) : 0.0, \
+      n0 + off + 3 < pc.N ? float(sc[(g4) * pc.N + n0 + off + 3]) : 0.0)
+
+  vec4 acc0 = vec4(0.0), acc1 = vec4(0.0);
+  if (live) {
+    for (int g = 0; g < pc.nGroups; ++g) {
+      vec4 s0 = SCALE4(g, 0), s1 = SCALE4(g, 4);
+      int kEnd = min(pc.K, (g + 1) * pc.group);
+      int k = g * pc.group + ky;
+      // I4_U k steps issue their word + activation loads before any FMA consumes them, keeping
+      // several weight requests in flight per wave (the kernel is latency-bound like the fp16 GEMV).
+      for (; k + (I4_U - 1) * I4_KS < kEnd; k += I4_U * I4_KS) {
+        float a0 = float(a[aBase + k]);
+        float a1 = float(a[aBase + k + I4_KS]);
+        float a2 = float(a[aBase + k + 2 * I4_KS]);
+        float a3 = float(a[aBase + k + 3 * I4_KS]);
+        uint  w0 = bp[k * pc.rowWords + wcol];
+        uint  w1 = bp[(k + I4_KS) * pc.rowWords + wcol];
+        uint  w2 = bp[(k + 2 * I4_KS) * pc.rowWords + wcol];
+        uint  w3 = bp[(k + 3 * I4_KS) * pc.rowWords + wcol];
+        acc0 += a0 * nibLo(w0) * s0; acc1 += a0 * nibHi(w0) * s1;
+        acc0 += a1 * nibLo(w1) * s0; acc1 += a1 * nibHi(w1) * s1;
+        acc0 += a2 * nibLo(w2) * s0; acc1 += a2 * nibHi(w2) * s1;
+        acc0 += a3 * nibLo(w3) * s0; acc1 += a3 * nibHi(w3) * s1;
+      }
+      for (; k < kEnd; k += I4_KS) {
+        float ak = float(a[aBase + k]);
+        uint  w  = bp[k * pc.rowWords + wcol];
+        acc0 += ak * nibLo(w) * s0;
+        acc1 += ak * nibHi(w) * s1;
+      }
+    }
+  }
+  // Every invocation stores (dead lanes store 0) so barrier() stays in uniform control flow.
+  part0[ky][gl_LocalInvocationID.x] = acc0;
+  part1[ky][gl_LocalInvocationID.x] = acc1;
+  barrier();
+  if (ky != 0 || !live) return;
+
+  vec4 s0 = vec4(0.0), s1 = vec4(0.0);
+  for (int i = 0; i < I4_KS; ++i) {
+    s0 += part0[i][gl_LocalInvocationID.x];
+    s1 += part1[i][gl_LocalInvocationID.x];
+  }
+  // Outlier columns: dense fp16 rows, added once by the reducing lane.
+  for (int j = 0; j < pc.nOut; ++j) {
+    float av = float(a[aBase + oi[j]]);
+    for (int t = 0; t < 4; ++t) {
+      if (n0 + t < pc.N)     s0[t] += av * float(ov[j * pc.N + n0 + t]);
+      if (n0 + 4 + t < pc.N) s1[t] += av * float(ov[j * pc.N + n0 + 4 + t]);
+    }
+  }
+  int dBase = row * pc.N;
+  for (int t = 0; t < 4; ++t) {
+    int n = n0 + t;
+    if (n < pc.N) {
+#ifdef PW_EPI
+      d[dBase + n] = TO_STORE(pw_apply(s0[t], dBase + n));
+#else
+      d[dBase + n] = TO_STORE(s0[t]);
+#endif
+    }
+    n = n0 + 4 + t;
+    if (n < pc.N) {
+#ifdef PW_EPI
+      d[dBase + n] = TO_STORE(pw_apply(s1[t], dBase + n));
+#else
+      d[dBase + n] = TO_STORE(s1[t]);
+#endif
+    }
+  }
+}
