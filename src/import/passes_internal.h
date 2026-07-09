@@ -55,6 +55,14 @@ namespace vknn {
     // const-fold/shape fixpoint (the eps/exponent constants are resolved initializers), before the
     // pointwise fusion (defined in lower_rmsnorm.cpp).
     void lowerRMSNorm(Graph &g);
+    // Fuse the scaled-flow warp coordinate idiom
+    // Mul(flow,scale)->Transpose(0,2,3,1)->Add(base_grid,.)->GridSample into one GridSample that
+    // computes coord = base + scale*flow in its own coordinate lookup, so the full-resolution grid
+    // and its NHWC Transpose are never materialized. Bit-exact with the split chain; opportunistic
+    // (only the exact single-consumer pattern). Needs resolved shapes; runs before fusePointwiseChains
+    // so the coordinate chain is claimed before the pointwise fusion would host the Add
+    // (defined in fuse_gridsample_warp.cpp).
+    void fuseGridSampleWarp(Graph &g);
     // Lower a general grouped Conv (1 < group < Cin, incl. the channel-multiplier depthwise
     // group == Cin/Cout != Cin) into `group` independent group-1 Convs over per-group channel slices
     // joined by a Concat, so each part runs on the proven dense Conv GPU kernel. Needs a resolved

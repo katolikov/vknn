@@ -32,11 +32,38 @@ namespace vknn {
 
         struct GridSampleCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X    = ctx.t(node.inputs[0]);
-                const RtTensor &G    = ctx.t(node.inputs[1]);
-                RtTensor       &Y    = ctx.t(node.outputs[0]);
-                NCHW            x    = NCHW::from(X.shape);
-                int             Hout = (int) G.shape[1], Wout = (int) G.shape[2];
+                const RtTensor &X = ctx.t(node.inputs[0]);
+                RtTensor       &Y = ctx.t(node.outputs[0]);
+                NCHW            x = NCHW::from(X.shape);
+                // Coordinate source. The plain op reads a materialized normalized grid
+                // grid[N,Hout,Wout,2] (input 1). The fused warp op (fuseGridSampleWarp) instead reads
+                // an NCHW flow[N,2,Hout,Wout] (input 1) + a base grid[Nb,Hout,Wout,2] (input 2) and a
+                // scalar scale, computing coord = base + scale*flow per output location. The arithmetic
+                // reproduces the split Mul(float)+Add(float) it replaces exactly, so the two paths are
+                // byte-identical on this fp32 oracle.
+                const bool      warp  = node.attr.has("warp");
+                const RtTensor &G     = ctx.t(node.inputs[1]);
+                int             Hout  = warp ? (int) G.shape[2] : (int) G.shape[1];
+                int             Wout  = warp ? (int) G.shape[3] : (int) G.shape[2];
+                const float    *gd    = warp ? nullptr : G.host.f32();
+                const float    *flowd = warp ? G.host.f32() : nullptr;                     // [N,2,Hout,Wout]
+                const float    *based = warp ? ctx.t(node.inputs[2]).host.f32() : nullptr; // [Nb,Hout,Wout,2]
+                const float     scale = warp ? node.attr.getf("warp_scale", 1.f) : 0.f;
+                const bool      baseBroadcastN = warp && ctx.t(node.inputs[2]).shape[0] == 1;
+                // Normalized grid value at (n,oy,ox) for coordinate axis c (0=x, 1=y).
+                auto            gridVal        = [&](int64_t n, int oy, int ox, int c) -> double {
+                    if (warp)
+                    {
+                        int64_t bn = baseBroadcastN ? 0 : n;
+                        float   b  = based[((bn * Hout + oy) * Wout + ox) * 2 + c];
+                        // The product is rounded to float on its own line before the add: the split
+                        // path stores fsc = float(flow*scale) then adds, so a single b + flow*scale
+                        // expression (contractable to an FMA, one rounding) would diverge by a ULP.
+                        float fsc = flowd[((n * 2 + c) * Hout + oy) * Wout + ox] * scale;
+                        return (double) (b + fsc);
+                    }
+                    return (double) gd[((n * Hout + oy) * Wout + ox) * 2 + c];
+                };
                 std::string     mode    = node.attr.gets("mode", "linear");
                 bool            nearest = (mode == "nearest");
                 bool            cubic   = (mode == "cubic" || mode == "bicubic");
@@ -49,7 +76,6 @@ namespace vknn {
 
                 float       *y      = cpu::allocOut(Y, {x.n, x.c, (int64_t) Hout, (int64_t) Wout});
                 const float *xd     = X.host.f32();
-                const float *gd     = G.host.f32();
                 // Grid value g in [-1, 1] -> input coordinate. Expands to (g+1)/2*(S-1) when
                 // align_corners (a=1,b=0) and ((g+1)*S - 1)/2 otherwise (a=0,b=1).
                 auto         unnorm = [&](double g, int S) {
@@ -86,9 +112,8 @@ namespace vknn {
                     {
                         for (int ox = 0; ox < Wout; ++ox)
                         {
-                            int64_t gi = ((n * Hout + oy) * Wout + ox) * 2;
-                            double  ix = handle(unnorm(gd[gi + 0], (int) x.w), (int) x.w);
-                            double  iy = handle(unnorm(gd[gi + 1], (int) x.h), (int) x.h);
+                            double  ix = handle(unnorm(gridVal(n, oy, ox, 0), (int) x.w), (int) x.w);
+                            double  iy = handle(unnorm(gridVal(n, oy, ox, 1), (int) x.h), (int) x.h);
                             if (nearest)
                             {
                                 // Round half up (floor(x+0.5)), the ONNX nearest convention: exact .5

@@ -1,0 +1,99 @@
+#version 450
+// Warp-mode GridSample (NC4HW4 fp32 data, fused scaled-flow coordinate source). Reads an NCHW flow
+// [N,2,OH,OW] (binding 1) and a base grid [.,OH,OW,2] (binding 2) and computes the sample coordinate
+// coord = base + scale*flow inline (fuseGridSampleWarp), so the full-resolution grid and its
+// NCHW->NHWC Transpose are never materialized. In fp32 the product carries no intermediate rounding,
+// exactly like the split Mul+Add it replaces. The sampler body matches gridsample.comp, so the warp
+// output is identical to the materialized-grid path. MODE: 0=bilinear 1=nearest 2=cubic. PADMODE:
+// 0=zeros 1=border 2=reflection.
+#include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+layout(constant_id = 0) const int MODE = 0;
+layout(constant_id = 1) const int PADMODE = 0;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src  { vec4 src[]; };
+layout(std430, binding = 1) readonly  buffer Flow { vec4 flow[]; };
+layout(std430, binding = 2) readonly  buffer Base { float base[]; };
+layout(std430, binding = 3) writeonly buffer Dst  { vec4 dst[]; };
+layout(push_constant) uniform PC { int N, C, Hin, Win, OH, OW, align; float scale; int baseNStride; } pc;
+
+float reflectc(float x, float lo, float hi) {
+  if (hi <= lo) return lo;
+  float rng = hi - lo, t = mod(x - lo, 2.0 * rng);
+  if (t < 0.0) t += 2.0 * rng;
+  if (t > rng) t = 2.0 * rng - t;
+  return lo + t;
+}
+float handle(float c, int S) {
+  if (PADMODE == 2) return reflectc(c, pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(S - 1) : float(S) - 0.5);
+  return c;
+}
+// fetch a channel-block vec4 at (px,py) with padding behaviour; returns vec4(0) for zeros-OOB.
+// Reflection reflects each tap (cubic taps reach +-2 px past the mapped coordinate, where a clamp
+// diverges from the reflected pixel; for linear/nearest the two agree).
+vec4 fetchBlk(int sb, int px, int py, int Cb) {
+  if (PADMODE == 0) { if (px < 0 || px >= pc.Win || py < 0 || py >= pc.Hin) return vec4(0.0); }
+  else if (PADMODE == 2) {
+    px = clamp(int(round(reflectc(float(px), pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(pc.Win - 1) : float(pc.Win) - 0.5))), 0, pc.Win - 1);
+    py = clamp(int(round(reflectc(float(py), pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(pc.Hin - 1) : float(pc.Hin) - 0.5))), 0, pc.Hin - 1);
+  }
+  else { px = clamp(px, 0, pc.Win - 1); py = clamp(py, 0, pc.Hin - 1); }
+  return vec4(src[sb + py * pc.Win + px]);
+}
+// Cubic convolution weights (alpha = -0.75): taps at floor-1..floor+2 per axis.
+void cubicW(float t, out float w[4]) {
+  const float A = -0.75;
+  float t1 = 1.0 + t, t2 = 2.0 - t;
+  w[0] = A * t1 * t1 * t1 - 5.0 * A * t1 * t1 + 8.0 * A * t1 - 4.0 * A;
+  w[1] = (A + 2.0) * t * t * t - (A + 3.0) * t * t + 1.0;
+  w[2] = (A + 2.0) * (1.0 - t) * (1.0 - t) * (1.0 - t) - (A + 3.0) * (1.0 - t) * (1.0 - t) + 1.0;
+  w[3] = A * t2 * t2 * t2 - 5.0 * A * t2 * t2 + 8.0 * A * t2 - 4.0 * A;
+}
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (i >= uint(pc.N * Cb * pc.OH * pc.OW)) return;
+  int ox = int(i) % pc.OW;
+  int oy = (int(i) / pc.OW) % pc.OH;
+  int cb = (int(i) / (pc.OW * pc.OH)) % Cb;
+  int n = int(i) / (pc.OW * pc.OH * Cb);
+  // Coordinate = base + scale*flow. flow is NC4HW4 with C=2, so one block per pixel holds
+  // (flow_x, flow_y) in lanes .x/.y; the fp32 product needs no rounding.
+  int fb = n * pc.OH * pc.OW + oy * pc.OW + ox;
+  vec4 fblk = flow[fb];
+  float fscx = fblk.x * pc.scale;
+  float fscy = fblk.y * pc.scale;
+  int bi = n * pc.baseNStride + 2 * (oy * pc.OW + ox);
+  int a = pc.align == 1 ? 1 : 0, b = 1 - a;
+  float ix = handle(((1.0 + (base[bi + 0] + fscx)) * float(pc.Win - a) - float(b)) * 0.5, pc.Win);
+  float iy = handle(((1.0 + (base[bi + 1] + fscy)) * float(pc.Hin - a) - float(b)) * 0.5, pc.Hin);
+  int sb = (n * Cb + cb) * pc.Hin * pc.Win;
+  vec4 v;
+  if (MODE == 1) {
+    int rx = int(floor(ix + 0.5)), ry = int(floor(iy + 0.5));
+    v = fetchBlk(sb, rx, ry, Cb);
+  } else if (MODE == 2) {
+    int x0 = int(floor(ix)), y0 = int(floor(iy));
+    float wx[4], wy[4];
+    cubicW(ix - float(x0), wx);
+    cubicW(iy - float(y0), wy);
+    v = vec4(0.0);
+    for (int j = 0; j < 4; ++j)
+      for (int i2 = 0; i2 < 4; ++i2)
+        v += wy[j] * wx[i2] * fetchBlk(sb, x0 - 1 + i2, y0 - 1 + j, Cb);
+  } else {
+    int x0 = int(floor(ix)), y0 = int(floor(iy));
+    float wx = ix - float(x0), wy = iy - float(y0);
+    vec4 v00 = fetchBlk(sb, x0, y0, Cb), v01 = fetchBlk(sb, x0 + 1, y0, Cb);
+    vec4 v10 = fetchBlk(sb, x0, y0 + 1, Cb), v11 = fetchBlk(sb, x0 + 1, y0 + 1, Cb);
+    v = (1.0 - wy) * ((1.0 - wx) * v00 + wx * v01) + wy * ((1.0 - wx) * v10 + wx * v11);
+  }
+#ifdef PW_EPI
+  v = pw_apply4(v, (n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox);
+#endif
+  dst[(n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox] = vec4(v);
+}

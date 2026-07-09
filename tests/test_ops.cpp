@@ -2516,6 +2516,216 @@ TEST(Ops, GridSampleCubicVsOrt) {
     }
 }
 
+namespace {
+    // The scaled-flow warp coordinate idiom Mul(flow,scale) -> Transpose(0,2,3,1) -> Add(base,.) ->
+    // GridSample, built raw so fuseGridSampleWarp can claim it. img[1,3,6,6], flow[1,2,6,6], an
+    // identity base grid[1,6,6,2], scalar scale. mode=bilinear, padding=border, align_corners=0.
+    Graph makeWarpIdiomGraph(float scale) {
+        Graph g;
+        auto  addT = [&](const char *nm, Shape sh, bool input = false, bool output = false) {
+            TensorDesc d;
+            d.name     = nm;
+            d.shape    = std::move(sh);
+            d.isInput  = input;
+            d.isOutput = output;
+            return g.addTensor(d);
+        };
+        TensorId img  = addT("img", {1, 3, 6, 6}, true);
+        TensorId flow = addT("flow", {1, 2, 6, 6}, true);
+        g.inputs      = {img, flow};
+        TensorId base = addT("base", {1, 6, 6, 2});
+        {
+            TensorDesc &bd   = g.desc(base);
+            bd.isInitializer = true;
+            HostBuffer hb;
+            hb.resizeElems(72, DType::Float32);
+            // Identity grid: base[oy,ox,0] = x in [-1,1], base[oy,ox,1] = y in [-1,1] (linspace over 6).
+            for (int oy = 0; oy < 6; ++oy)
+            {
+                for (int ox = 0; ox < 6; ++ox)
+                {
+                    hb.f32()[(oy * 6 + ox) * 2 + 0] = -1.f + ox * 0.4f;
+                    hb.f32()[(oy * 6 + ox) * 2 + 1] = -1.f + oy * 0.4f;
+                }
+            }
+            g.initializers[base] = hb;
+        }
+        TensorId fs = addT("fs", {1});
+        {
+            TensorDesc &sd   = g.desc(fs);
+            sd.isInitializer = true;
+            HostBuffer hb;
+            hb.resizeElems(1, DType::Float32);
+            hb.f32()[0]        = scale;
+            g.initializers[fs] = hb;
+        }
+        TensorId fsc   = addT("fsc", {1, 2, 6, 6});
+        TensorId fnhwc = addT("fnhwc", {1, 6, 6, 2});
+        TensorId grid  = addT("grid", {1, 6, 6, 2});
+        TensorId y     = addT("y", {1, 3, 6, 6}, false, true);
+        Node     mul;
+        mul.type    = OpType::Binary;
+        mul.subOp   = (int) BinaryType::Mul;
+        mul.name    = "scale_flow";
+        mul.inputs  = {flow, fs};
+        mul.outputs = {fsc};
+        Node tr;
+        tr.type             = OpType::Transpose;
+        tr.name             = "to_nhwc";
+        tr.attr.map["perm"] = ints({0, 2, 3, 1});
+        tr.inputs           = {fsc};
+        tr.outputs          = {fnhwc};
+        Node add;
+        add.type    = OpType::Add;
+        add.name    = "add_base";
+        add.inputs  = {base, fnhwc};
+        add.outputs = {grid};
+        Node gs;
+        gs.type = OpType::GridSample;
+        gs.name = "warp";
+        gs.attr.map["mode"]         = str("bilinear");
+        gs.attr.map["padding_mode"] = str("border");
+        Attr al;
+        al.kind                      = Attr::Int;
+        al.i                         = 0;
+        gs.attr.map["align_corners"] = al;
+        gs.inputs                    = {img, grid};
+        gs.outputs                   = {y};
+        g.nodes   = {mul, tr, add, gs};
+        g.outputs = {y};
+        return g;
+    }
+
+    // Run makeWarpIdiomGraph on the CPU backend and return the flat output.
+    std::vector<float> runWarpIdiomCpu(bool fuseWarp, const std::vector<float> &img, const std::vector<float> &flow, float scale) {
+        Graph       g = makeWarpIdiomGraph(scale);
+        PassOptions opt;
+        opt.fuseGridSampleWarp = fuseWarp;
+        runStandardPasses(g, opt);
+        if (fuseWarp)
+        {
+            // The whole coordinate chain collapses into one warp-mode GridSample.
+            EXPECT_EQ(g.nodes.size(), 1u);
+            EXPECT_EQ(g.nodes[0].type, OpType::GridSample);
+            EXPECT_TRUE(g.nodes[0].attr.has("warp"));
+            for (const Node &nd: g.nodes)
+            {
+                EXPECT_NE(nd.type, OpType::Transpose);
+                EXPECT_NE(nd.type, OpType::Add);
+            }
+        }
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        auto mkIn = [](const char *nm, Shape sh, const std::vector<float> &d) {
+            IOTensor t;
+            t.name  = nm;
+            t.shape = std::move(sh);
+            t.dtype = DType::Float32;
+            t.data.resize(d.size() * 4);
+            std::memcpy(t.data.data(), d.data(), d.size() * 4);
+            return t;
+        };
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({mkIn("img", {1, 3, 6, 6}, img), mkIn("flow", {1, 2, 6, 6}, flow)}, outs), Status::Ok);
+        EXPECT_FALSE(outs.empty());
+        if (outs.empty())
+        {
+            return {};
+        }
+        const float *o = outs[0].f32();
+        return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+} // namespace
+
+// --- fuseGridSampleWarp: the scaled-flow warp idiom collapses to ONE warp-mode GridSample whose
+// fp32 CPU-oracle output is BYTE-IDENTICAL to the unfused Mul->Transpose->Add->GridSample chain (the
+// warp op reproduces the split Mul(float)+Add(float) exactly), and matches an onnxruntime golden. The
+// device byte gate then diffs the fp16 GPU warp shader against the materialized-grid path. ---
+TEST(Passes, GridSampleWarpFusionByteExactAndOrt) {
+    static const std::vector<float> kImg = {
+        0.0763083f, 0.7799188f, 0.4384092f, 0.7234652f, 0.9779895f, 0.5384959f,
+        0.5011204f, 0.0720511f, 0.2684390f, 0.4998825f, 0.6792300f, 0.8037390f,
+        0.3809411f, 0.0659363f, 0.2881456f, 0.9095935f, 0.2133854f, 0.4521240f,
+        0.9312060f, 0.0248992f, 0.6005489f, 0.9501295f, 0.2303029f, 0.5484899f,
+        0.9091284f, 0.1331694f, 0.5234126f, 0.7504098f, 0.6690133f, 0.4677529f,
+        0.2048491f, 0.4907659f, 0.3723847f, 0.4774012f, 0.3658904f, 0.8379180f,
+        0.7686475f, 0.3139947f, 0.5726253f, 0.2760490f, 0.4528429f, 0.3529784f,
+        0.6573995f, 0.3703511f, 0.4590930f, 0.7193241f, 0.4129918f, 0.9064233f,
+        0.1804516f, 0.7411188f, 0.4223740f, 0.4264536f, 0.6343799f, 0.5229062f,
+        0.4148860f, 0.0014269f, 0.0922623f, 0.7093944f, 0.5243456f, 0.6961604f,
+        0.9554683f, 0.6829138f, 0.0531287f, 0.3088527f, 0.5925947f, 0.2351204f,
+        0.9649710f, 0.9450482f, 0.8484009f, 0.4723240f, 0.8414767f, 0.1311106f,
+        0.3087337f, 0.4629964f, 0.7418472f, 0.4858252f, 0.1368761f, 0.3435365f,
+        0.3244262f, 0.3004189f, 0.1655014f, 0.4149018f, 0.4481207f, 0.7749004f,
+        0.7963907f, 0.5223901f, 0.4606303f, 0.7782136f, 0.8872889f, 0.6749188f,
+        0.8004791f, 0.9391114f, 0.0406558f, 0.8756717f, 0.2765631f, 0.4757645f,
+        0.7967610f, 0.7172422f, 0.1471476f, 0.6587483f, 0.0692521f, 0.3570706f,
+        0.8128296f, 0.4277048f, 0.5998544f, 0.7281613f, 0.8212276f, 0.7605151f
+    };
+    static const std::vector<float> kFlow = {
+        -0.4928567f, -0.0797432f, -0.0368638f, -0.4445005f, 0.0414422f, 0.1077707f,
+        0.3284532f, 0.4418093f, -0.3718522f, -0.2695693f, 0.1591584f, -0.3675260f,
+        -0.2759213f, 0.0748626f, -0.3304763f, 0.2822301f, 0.3569756f, -0.4663258f,
+        0.0326448f, 0.2969514f, 0.4751397f, -0.2257414f, -0.3308989f, 0.3767009f,
+        0.4091825f, -0.3024671f, -0.0584702f, 0.2192321f, 0.3453451f, -0.3317247f,
+        0.1649690f, 0.3078355f, 0.0497141f, -0.3352833f, -0.4644712f, -0.2184662f,
+        0.3078709f, -0.4552338f, -0.4917835f, -0.1383834f, -0.4363777f, -0.3505137f,
+        -0.4768096f, 0.0247198f, 0.1966959f, -0.0729465f, -0.3654295f, -0.1686428f,
+        0.0903459f, 0.4406614f, 0.4925577f, -0.2583971f, -0.4894201f, 0.3306403f,
+        0.4266129f, -0.0413965f, 0.2714424f, 0.3661990f, 0.1096148f, 0.3726272f,
+        -0.4760970f, -0.2284048f, -0.2227804f, -0.3793676f, 0.4107134f, -0.4695607f,
+        0.1725610f, -0.4286603f, -0.1392195f, -0.0819004f, -0.3185957f, 0.0210141f
+    };
+    static const std::vector<float> kGold = {
+        0.0763083f, 0.5604194f, 0.4744486f, 0.7319473f, 0.8434094f, 0.5384959f,
+        0.3432936f, 0.3036323f, 0.3064879f, 0.5814788f, 0.7607469f, 0.7174563f,
+        0.3913304f, 0.1582244f, 0.2544957f, 0.7709401f, 0.3715707f, 0.4698468f,
+        0.9275855f, 0.2634536f, 0.5739062f, 0.8781204f, 0.3459068f, 0.5359035f,
+        0.7481402f, 0.3987327f, 0.4554524f, 0.6722538f, 0.5742499f, 0.5527302f,
+        0.2048491f, 0.4181931f, 0.3833400f, 0.4718582f, 0.4746123f, 0.8379180f,
+        0.7686475f, 0.4558288f, 0.5453321f, 0.2819407f, 0.4222628f, 0.3529784f,
+        0.6987305f, 0.4323515f, 0.4688203f, 0.5721927f, 0.5187625f, 0.7263896f,
+        0.2216829f, 0.5749440f, 0.4694164f, 0.4865305f, 0.5936636f, 0.5422369f,
+        0.5035371f, 0.1675891f, 0.0870592f, 0.6399031f, 0.5598788f, 0.6242869f,
+        0.9576405f, 0.8235193f, 0.3181778f, 0.3890557f, 0.5119392f, 0.2112433f,
+        0.9649710f, 0.9501051f, 0.8573449f, 0.4906737f, 0.6778585f, 0.1311106f,
+        0.3087337f, 0.4148723f, 0.7124202f, 0.4741964f, 0.2001589f, 0.3435365f,
+        0.3185961f, 0.3418550f, 0.3249826f, 0.4318554f, 0.4297186f, 0.6345792f,
+        0.7555903f, 0.5915412f, 0.4624459f, 0.7418277f, 0.7691038f, 0.6799582f,
+        0.7998693f, 0.8881143f, 0.0801252f, 0.8025380f, 0.3048799f, 0.4572608f,
+        0.8004340f, 0.6958122f, 0.3083186f, 0.6193363f, 0.3980885f, 0.4496878f,
+        0.8128296f, 0.5254591f, 0.5839232f, 0.7327874f, 0.8072437f, 0.7605151f
+    };
+    const float scale = 0.05f;
+
+    std::vector<float> fused   = runWarpIdiomCpu(true, kImg, kFlow, scale);
+    std::vector<float> unfused = runWarpIdiomCpu(false, kImg, kFlow, scale);
+    ASSERT_EQ(fused.size(), kGold.size());
+    ASSERT_EQ(unfused.size(), kGold.size());
+
+    // Byte-exact: the fused warp op and the materialized-grid chain must agree bit for bit on the
+    // fp32 oracle (the property the device fp16 byte gate mirrors).
+    for (size_t i = 0; i < fused.size(); ++i)
+    {
+        EXPECT_EQ(std::memcmp(&fused[i], &unfused[i], sizeof(float)), 0) << "byte mismatch at i=" << i << " fused=" << fused[i] << " unfused=" << unfused[i];
+    }
+    // Cosine vs the onnxruntime golden >= 0.9999 (the sampler math is unchanged; only the coordinate
+    // source is fused).
+    double dot = 0, na = 0, nb = 0, maxAbs = 0;
+    for (size_t i = 0; i < fused.size(); ++i)
+    {
+        dot += (double) fused[i] * kGold[i];
+        na += (double) fused[i] * fused[i];
+        nb += (double) kGold[i] * kGold[i];
+        maxAbs = std::max(maxAbs, (double) std::abs(fused[i] - kGold[i]));
+    }
+    double cosine = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
+    EXPECT_GE(cosine, 0.9999) << "cosine vs onnxruntime golden";
+    EXPECT_LT(maxAbs, 2e-4) << "max abs diff vs onnxruntime golden";
+}
+
 // --- Zero-element constants broadcast per NumPy: a 0 dim propagates (0 x 1 -> 0), it is not
 // max'ed into 1. Regression: constFold ran BinaryCpu on an empty folded constant (arange(0)),
 // the max-based broadcast fabricated n=1 and read element 0 of a null buffer (SIGSEGV). ---
