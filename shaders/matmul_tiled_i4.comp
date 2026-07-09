@@ -14,6 +14,13 @@
 // their A values gather through the same cooperative LDS staging, and their packed nibbles are 0,
 // so each contributes exactly once. Accumulation is fp32, ascending k within the packed grid, then
 // the outlier tiles in oidx order.
+//
+// B staging is word-granular: a tile k-row is TN/8 packed uint words, and the TK * (TN/8) words of
+// a tile spread exactly one per thread. Each thread loads its word once and dequantizes all 8
+// adjacent-n nibbles against the 8 consecutive scales of its k-row (one scale-row base per thread,
+// tracked incrementally across k tiles — no per-element word/scale refetch, no division in the k
+// loop). The staged values are the same nib * scale products narrowed to STORE as per-element
+// staging produces.
 
 #define TM 128
 #define TN 128
@@ -21,6 +28,11 @@
 #define TILE 16        // threads per dim (16x16 = 256)
 #define RM (TM / TILE) // 8 output rows per thread
 #define RN (TN / TILE) // 8 output cols per thread
+#define WPR (TN / 8)   // packed uint words per B-tile k-row
+
+#if TK * WPR != TILE * TILE
+#error B-panel word staging assumes TK * (TN / 8) == TILE * TILE (one packed word per thread)
+#endif
 
 layout(local_size_x = TILE, local_size_y = TILE) in;
 layout(std430, binding = 0) readonly  buffer A  { STORE a[]; };
@@ -62,6 +74,19 @@ void main() {
     for (int j = 0; j < RN; ++j)
       acc[i][j] = 0.0;
 
+  // B-staging coordinates, invariant across k tiles: this thread owns packed word wCol of tile
+  // k-row kRow.
+  int kRow  = tid / WPR;    // k within the tile
+  int wCol  = tid % WPR;    // word within the k-row
+  int n0    = wCol * 8;     // first tile-local n of the word
+  int gn0   = tileN + n0;   // first global n of the word
+  int bpCol = gn0 >> 3;     // word column in the packed payload
+  // Scale-row base for gk = k0 + kRow, carried incrementally: each k tile advances gk % group by
+  // TK, which crosses at most one group boundary when group >= TK (group is always >= 16 == TK;
+  // the while keeps smaller groups correct too). The k loop then runs division-free.
+  int sRow = (kRow / pc.group) * N; // (gk / group) * N
+  int sRem = kRow % pc.group;       // gk % group
+
   for (int k0 = 0; k0 < K; k0 += TK) {
     for (int t = 0; t < (TM * TK) / (TILE * TILE); ++t) {
       int idx = tid + t * (TILE * TILE); // 0 .. TM*TK-1, laid out as m*TK + k
@@ -69,17 +94,35 @@ void main() {
       int gm = tileM + m, gk = k0 + k;
       As[k][m] = (gm < M && gk < K) ? a[aBase + gm * K + gk] : STORE(0.0);
     }
-    for (int t = 0; t < (TK * TN) / (TILE * TILE); ++t) {
-      int idx = tid + t * (TILE * TILE); // 0 .. TK*TN-1, laid out as k*TN + n
-      int k = idx / TN, n = idx % TN;
-      int gk = k0 + k, gn = tileN + n;
-      if (gk < K && gn < N) {
-        uint  w = bp[gk * pc.rowWords + gn / 8];
-        float s = float(sc[(gk / pc.group) * N + gn]);
-        Bs[k][n] = STORE(nib(w, gn % 8) * s);
+    // B panel: one uint load + 8 consecutive scale loads dequantize the thread's whole word
+    // (per-element staging refetches the same word and scale row 8x).
+    {
+      int gk = k0 + kRow;
+      if (gk < K && gn0 + 7 < N) {
+        uint word = bp[gk * pc.rowWords + bpCol];
+        int  scaleBase = sRow + gn0;
+        Bs[kRow][n0    ] = STORE(nib(word, 0) * float(sc[scaleBase    ]));
+        Bs[kRow][n0 + 1] = STORE(nib(word, 1) * float(sc[scaleBase + 1]));
+        Bs[kRow][n0 + 2] = STORE(nib(word, 2) * float(sc[scaleBase + 2]));
+        Bs[kRow][n0 + 3] = STORE(nib(word, 3) * float(sc[scaleBase + 3]));
+        Bs[kRow][n0 + 4] = STORE(nib(word, 4) * float(sc[scaleBase + 4]));
+        Bs[kRow][n0 + 5] = STORE(nib(word, 5) * float(sc[scaleBase + 5]));
+        Bs[kRow][n0 + 6] = STORE(nib(word, 6) * float(sc[scaleBase + 6]));
+        Bs[kRow][n0 + 7] = STORE(nib(word, 7) * float(sc[scaleBase + 7]));
       } else {
-        Bs[k][n] = STORE(0.0);
+        // K edge (whole row zero) or the last partial word of the N edge (per-nibble guard).
+        bool rowLive = gk < K && gn0 < N;
+        uint word = 0u;
+        if (rowLive) word = bp[gk * pc.rowWords + bpCol];
+        for (int e = 0; e < 8; ++e) {
+          int   gn = gn0 + e;
+          STORE v  = STORE(0.0);
+          if (rowLive && gn < N) v = STORE(nib(word, e) * float(sc[sRow + gn]));
+          Bs[kRow][n0 + e] = v;
+        }
       }
+      sRem += TK;
+      while (sRem >= pc.group) { sRem -= pc.group; sRow += N; }
     }
     barrier();
     for (int kk = 0; kk < TK; ++kk) {
@@ -98,11 +141,16 @@ void main() {
   // Outlier columns as extra K tiles: As gathers A at the outlier k indices, Bs stages the dense
   // fp16 rows, and the identical micro-kernel accumulates them.
   for (int j0 = 0; j0 < pc.nOut; j0 += TK) {
+    // idx = tid + t * (TILE * TILE) keeps k = idx % TK fixed per thread (TK divides TILE * TILE),
+    // so the outlier k index loads once per tile instead of once per staged element.
+    int  kOut    = tid % TK;
+    int  gjOut   = j0 + kOut;
+    bool outLive = gjOut < pc.nOut;
+    int  aCol    = outLive ? oi[gjOut] : 0;
     for (int t = 0; t < (TM * TK) / (TILE * TILE); ++t) {
-      int idx = tid + t * (TILE * TILE);
-      int m = idx / TK, k = idx % TK;
-      int gm = tileM + m, gj = j0 + k;
-      As[k][m] = (gm < M && gj < pc.nOut) ? a[aBase + gm * K + oi[gj]] : STORE(0.0);
+      int m = (tid + t * (TILE * TILE)) / TK;
+      int gm = tileM + m;
+      As[kOut][m] = (gm < M && outLive) ? a[aBase + gm * K + aCol] : STORE(0.0);
     }
     for (int t = 0; t < (TK * TN) / (TILE * TILE); ++t) {
       int idx = tid + t * (TILE * TILE);
