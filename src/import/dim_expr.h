@@ -13,12 +13,28 @@
 // (distinct, first-seen order) and marks the result not-ok; a malformed expression is likewise not-ok
 // with the raw text recorded so the caller can name it in a diagnostic.
 #pragma once
+#include <cctype>
 #include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
 
 namespace vknn {
+
+    /// True when a dim_param symbol NAMES the batch axis: "N", "B", or any name containing "batch"
+    /// (case-insensitive) — the universal ONNX-export conventions. Only such a symbol may take the
+    /// leading-axis `batch` fallback when unbound; any other leading symbol (num_frames, views,
+    /// num_points...) is a real data extent whose silent freeze to batch=1 would truncate the caller's
+    /// input, so shape resolution hard-errors on it and --list-dims reports it as must-bind.
+    inline bool batchLikeDimSymbol(const std::string &sym) {
+        std::string low;
+        low.reserve(sym.size());
+        for (char ch: sym)
+        {
+            low += (char) std::tolower((unsigned char) ch);
+        }
+        return low == "n" || low == "b" || low.find("batch") != std::string::npos;
+    }
 
     /// Outcome of evaluating a symbolic dim expression: a resolved extent, or the set of unbound symbols
     /// that prevented resolution.

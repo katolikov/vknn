@@ -11,9 +11,11 @@ import com.vknn.chat.VknnApp
 import com.vknn.chat.model.BackendPolicy
 import com.vknn.chat.model.InferenceBackend
 import com.vknn.chat.model.ModelCatalog
+import com.vknn.chat.model.ModelResidency
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,21 +41,22 @@ data class VlmUiState(
 // image tokens) -> streamed greedy decode, all through the VLM native bridge. Each capture is a
 // fresh single-turn conversation (KV cache reset). The model is owned by the ModelStore; this view
 // model observes its presence and loads it onto the GPU. Cancellation stops calling the native
-// side between steps — the session itself is never torn down mid-run.
-class VlmViewModel(app: Application) : AndroidViewModel(app) {
+// side between steps — the session itself is never torn down mid-run. The shared ModelResidency
+// keeps at most one mode's model resident: every load acquires the slot (freeing any other mode's
+// model first) and Unload/library-delete release it.
+class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Holder {
     private val _ui = MutableStateFlow(VlmUiState())
     val ui: StateFlow<VlmUiState> = _ui.asStateFlow()
 
     private val store = (app as VknnApp).models
     private val settings = (app as VknnApp).settings
     private val prompts = (app as VknnApp).prompts
+    private val residency = (app as VknnApp).residency
     private var tokenizer: Tokenizer? = null
     private var handle: Long = 0L
     private var contextMax = 0
     private var prefillWindow = 0
     private var imageSide = 384
-    private var pendingFree = false
-    private var nativeBusy = false // decode work in flight on the Default dispatcher
 
     @Volatile
     private var cancelRequested = false
@@ -69,10 +72,10 @@ class VlmViewModel(app: Application) : AndroidViewModel(app) {
                     if (present) {
                         if (_ui.value.phase == VlmPhase.MISSING) _ui.value = _ui.value.copy(phase = VlmPhase.DOWNLOADED)
                     } else {
-                        if (handle != 0L) pendingFree = true
                         cancelRequested = true
                         _ui.value = VlmUiState(phase = VlmPhase.MISSING)
-                        releaseIfIdle()
+                        // Frees the session once any in-flight decode settles; no-op when not loaded.
+                        viewModelScope.launch { residency.releaseResidentModel(this@VlmViewModel) }
                     }
                 }
         }
@@ -109,6 +112,10 @@ class VlmViewModel(app: Application) : AndroidViewModel(app) {
         }
         _ui.value = _ui.value.copy(phase = VlmPhase.LOADING, status = null)
         viewModelScope.launch {
+            // Frees any other mode's resident model before this load allocates, so at most one
+            // heavy model lives in the process.
+            residency.acquireResidency(this@VlmViewModel)
+            cancelRequested = false
             try {
                 withContext(Dispatchers.Default) {
                     val spec = ModelCatalog.SMOLVLM2
@@ -127,20 +134,30 @@ class VlmViewModel(app: Application) : AndroidViewModel(app) {
                     imageSide = info[8]
                     NativeLib.nativeVlmReset(h, 1234)
                 }
+                residency.nativeCallSettled(this@VlmViewModel) // a release requested mid-load lands here
+                if (!residency.isResident(this@VlmViewModel)) return@launch // released: UI already reset
                 if (store.isReady(ModelCatalog.SMOLVLM2)) {
                     store.clearLoadError(ModelCatalog.SMOLVLM2)
                     _ui.value = _ui.value.copy(phase = VlmPhase.CAMERA, backend = chosenBackend.engineName)
-                } else {
-                    freeHandle()
-                    _ui.value = _ui.value.copy(phase = VlmPhase.MISSING)
+                } else { // deleted from the Library while loading: free the fresh session, revert to MISSING
+                    residency.releaseResidentModel(this@VlmViewModel)
                 }
             } catch (e: Exception) {
+                val abandonedHandle = handle
+                handle = 0L
+                if (abandonedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeVlmFree(abandonedHandle) }
+                residency.dropResidency(this@VlmViewModel)
                 val friendly = friendlyLoadError(ModelCatalog.SMOLVLM2, e.message)
                 store.reportLoadError(ModelCatalog.SMOLVLM2, friendly)
                 val back = if (store.isReady(ModelCatalog.SMOLVLM2)) VlmPhase.DOWNLOADED else VlmPhase.MISSING
                 _ui.value = _ui.value.copy(phase = back, status = friendly)
             }
         }
+    }
+
+    /** The Unload control: frees the resident session once any in-flight decode settles and returns to DOWNLOADED. */
+    fun unloadModel() {
+        viewModelScope.launch { residency.releaseResidentModel(this@VlmViewModel) }
     }
 
     /** One captured photo (already rotated upright): run the full see-and-answer turn. */
@@ -163,7 +180,7 @@ class VlmViewModel(app: Application) : AndroidViewModel(app) {
         }
         cancelRequested = false
         _ui.value = _ui.value.copy(phase = VlmPhase.ANSWERING, photo = photo, answer = "", metrics = Metrics(), generating = true, status = null)
-        nativeBusy = true
+        residency.nativeCallStarted(this)
 
         viewModelScope.launch {
             withContext(Dispatchers.Default) {
@@ -216,8 +233,7 @@ class VlmViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 finish()
             }
-            nativeBusy = false
-            releaseIfIdle()
+            residency.nativeCallSettled(this@VlmViewModel) // a release requested mid-turn lands here
         }
     }
 
@@ -242,26 +258,36 @@ class VlmViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(generating = false)
     }
 
-    // A delete while a reply streams defers the native free until the decode coroutine settles;
-    // pendingFree and nativeBusy only mutate on the main dispatcher, so the pair is race-free.
-    private fun releaseIfIdle() {
-        if (pendingFree && !nativeBusy) {
-            pendingFree = false
-            freeHandle()
-        }
+    // ModelResidency.Holder: the coordinator calls these on the main dispatcher when this mode's
+    // model has to leave the GPU (Unload, library delete, or another mode acquiring the slot).
+
+    /** Stops a streaming answer between native calls, so a pending release settles quickly. */
+    override fun onReleaseRequested() {
+        cancelRequested = true
     }
 
-    private fun freeHandle() {
-        val h = handle
+    override suspend fun freeResidentSession() {
+        val releasedHandle = handle
         handle = 0L
         // The window belongs to the released session; no prompt can be measured until one is loaded again.
         prefillWindow = 0
-        if (h != 0L) NativeLib.nativeVlmFree(h)
+        if (releasedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeVlmFree(releasedHandle) }
+    }
+
+    override fun resetToUnloadedState() {
+        contextMax = 0
+        _ui.value = VlmUiState(
+            phase = if (store.isReady(ModelCatalog.SMOLVLM2)) VlmPhase.DOWNLOADED else VlmPhase.MISSING,
+        )
     }
 
     override fun onCleared() {
         cancelRequested = true
-        freeHandle()
+        val abandonedHandle = handle
+        handle = 0L
+        prefillWindow = 0
+        if (abandonedHandle != 0L) NativeLib.nativeVlmFree(abandonedHandle)
+        residency.dropResidency(this)
         super.onCleared()
     }
 }

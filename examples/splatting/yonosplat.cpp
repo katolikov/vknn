@@ -3,16 +3,21 @@
 //   image + intrinsics --> encoder (vknn Vulkan) --> Gaussians --> Vulkan rasterizer --> rendered
 //   view.
 // The encoder runs as a normal vknn Session; its 6 Gaussian outputs feed the from-scratch Vulkan
-// compute rasterizer (raster_core.h: preprocess + exact tile-entry count -> GPU tile-bin ->
-// bitonic sort -> per-tile alpha compositing), which the app-demo JNI bridge shares.
+// compute rasterizer (raster_core.h: preprocess -> GPU tile-bin -> stable radix sort -> per-tile
+// alpha compositing), which the app-demo JNI bridge shares.
 // The rendered view is written as a PPM. See scripts/yonosplat/ for how the encoder .vxm + inputs
 // are made.
 //
-//   vknn_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr extr.bin] [--view
-//   N]
+//   vknn_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr extr.bin]
+//     [--view N] [--render S] [--repeat N] [--raw out.f32] [--packed out.u32]
 // image.bin = fp32 [1,V,3,224,224], intrinsics.bin = fp32 [1,V,3,3] (normalized). extr.bin
 // (optional) = fp32 [V,4,4] camera-to-world (the encoder's predicted pose, dumpable via
 // Config::dumpTensors); identity if omitted. Renders view N.
+// --render S rasterizes at SxS instead of the encoder's 224 (the normalized intrinsics scale
+// with the render size). --repeat N renders N times, times each, and verifies the fp32 outputs
+// are byte-identical (determinism gate). --raw dumps the fp32 render; --packed additionally runs
+// the packed-ARGB path, dumps it, and verifies it equals the fp32 render's round-half-up 8-bit
+// quantization exactly.
 #include "vknn/session.h"
 #include <algorithm>
 #include <cmath>
@@ -60,13 +65,21 @@ int main(int argc, char **argv) {
     if (argc < 5)
     {
         printf("usage: vknn_yonosplat <encoder.vxm> <image.bin> <intrinsics.bin> <out.ppm> [--extr "
-               "extr.bin] [--view N]\n");
+               "extr.bin] [--view N] [--render S] [--repeat N] [--raw out.f32] [--packed out.u32]\n");
         return 1;
     }
     std::string enc = argv[1], imgp = argv[2], intp = argv[3], outp = argv[4];
-    std::string extp = opt(argc, argv, "--extr", "");
-    int         view = atoi(opt(argc, argv, "--view", "0"));
-    const int   H = 224, W = 224;
+    std::string extp       = opt(argc, argv, "--extr", "");
+    std::string rawPath    = opt(argc, argv, "--raw", "");
+    std::string packedPath = opt(argc, argv, "--packed", "");
+    int         view       = atoi(opt(argc, argv, "--view", "0"));
+    int         renderSide = atoi(opt(argc, argv, "--render", "224"));
+    int         repeat     = atoi(opt(argc, argv, "--repeat", "1"));
+    if (renderSide <= 0)
+    {
+        renderSide = 224;
+    }
+    const int   H = renderSide, W = renderSide;
     const float NEAR = 0.2f;
 
     // ---------- 1. encoder: image + intrinsics -> 6 Gaussian outputs (vknn Vulkan) ----------
@@ -190,9 +203,74 @@ int main(int argc, char **argv) {
     printf("[rasterizer] %u tile entries, sort capacity %lld\n", st.entries, (long long) st.cap);
     if (st.emitted > (uint32_t) st.cap)
     {
-        fprintf(stderr, "[rasterizer] WARNING: %u tile entries exceed capacity %lld - %u dropped, image is incomplete\n", st.emitted, (long long) st.cap, st.emitted - (uint32_t) st.cap);
+        fprintf(stderr, "[rasterizer] WARNING: %u tile entries exceed capacity %lld - %u dropped, image is incomplete\n", st.emitted, (long long) st.cap,
+                st.emitted - (uint32_t) st.cap);
     }
-    printf("[rasterizer] view %d rendered on GPU in %.2f ms\n", view, st.msCount + st.msMain);
+    printf("[rasterizer] view %d rendered %dx%d on GPU in %.2f ms (count %.2f + main %.2f)\n", view, W, H, st.msCount + st.msMain, st.msCount, st.msMain);
+
+    // --repeat: re-render the same pose and require byte-identical fp32 output (determinism
+    // gate). Repeats also report the steady-state time, where the count pass is elided.
+    for (int rerun = 1; rerun < repeat; ++rerun)
+    {
+        std::vector<float> imgRepeat(img.size());
+        raster::Stats      stRepeat;
+        if (rz.render(c2w, fx, fy, cx, cy, imgRepeat.data(), &stRepeat) != raster::Result::Ok)
+        {
+            fprintf(stderr, "[determinism] repeat %d render failed\n", rerun);
+            return 4;
+        }
+        printf("[rasterizer] repeat %d rendered in %.2f ms (count %.2f + main %.2f)\n", rerun, stRepeat.msCount + stRepeat.msMain, stRepeat.msCount, stRepeat.msMain);
+        if (memcmp(img.data(), imgRepeat.data(), img.size() * 4) != 0)
+        {
+            fprintf(stderr, "[determinism] repeat %d fp32 output DIFFERS\n", rerun);
+            return 5;
+        }
+        printf("[determinism] repeat %d fp32 output byte-identical\n", rerun);
+    }
+
+    if (!rawPath.empty())
+    {
+        std::ofstream rawFile(rawPath, std::ios::binary);
+        rawFile.write(reinterpret_cast<const char *>(img.data()), (std::streamsize) (img.size() * 4));
+        printf("[raw] fp32 render -> %s\n", rawPath.c_str());
+    }
+
+    // --packed: the GPU-packed ARGB path must equal the fp32 render's round-half-up 8-bit
+    // quantization exactly (byte = trunc(clamp(c, 0, 1) * 255 + 0.5) in fp32).
+    if (!packedPath.empty())
+    {
+        std::vector<uint32_t> packed((size_t) H * W);
+        raster::Stats         stPacked;
+        if (rz.renderPacked(c2w, fx, fy, cx, cy, packed.data(), &stPacked) != raster::Result::Ok)
+        {
+            fprintf(stderr, "[packed] render failed\n");
+            return 6;
+        }
+        printf("[packed] rendered in %.2f ms (count %.2f + main %.2f)\n", stPacked.msCount + stPacked.msMain, stPacked.msCount, stPacked.msMain);
+        size_t mismatches = 0;
+        for (size_t i = 0; i < packed.size(); ++i)
+        {
+            auto quantize = [&](int channel) -> uint32_t {
+                // Separate statements keep the mul and add unfused (matches the shader's
+                // contraction-disabled quantization bit-for-bit).
+                float scaled = std::min(1.0f, std::max(0.0f, img[i * 3 + (size_t) channel])) * 255.0f;
+                scaled += 0.5f;
+                return (uint32_t) scaled;
+            };
+            const uint32_t expected = 0xff000000u | (quantize(0) << 16) | (quantize(1) << 8) | quantize(2);
+            if (packed[i] != expected)
+            {
+                ++mismatches;
+            }
+        }
+        std::ofstream packedFile(packedPath, std::ios::binary);
+        packedFile.write(reinterpret_cast<const char *>(packed.data()), (std::streamsize) (packed.size() * 4));
+        printf("[packed] ARGB render -> %s, %zu/%zu pixels differ from the quantized fp32 render\n", packedPath.c_str(), mismatches, packed.size());
+        if (mismatches != 0)
+        {
+            return 7;
+        }
+    }
 
     // ---------- 4. save PPM ----------
     std::ofstream f(outp, std::ios::binary);

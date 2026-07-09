@@ -72,4 +72,35 @@ namespace vknn {
         return fmt == TensorFormat::NC4HW4 ? x.n * cBlocks(x.c) * kNC4Block * x.h * x.w : x.elems();
     }
 
+    /// Whether a caller-bound input shape is compatible with the planned shape it replaces. Two
+    /// contracts, selected by @p frozenPlan:
+    ///
+    ///  - frozenPlan=false (input consumed only by CPU segments): the dynamic-reshape contract — CPU
+    ///    ops recompute geometry from the runtime shape, so any rebinding whose stored footprint
+    ///    (flat dense, or NC4HW4-padded) equals the planned allocation is valid.
+    ///
+    ///  - frozenPlan=true (input consumed by a GPU segment): push constants and dispatch geometry
+    ///    are frozen from the planned shape while the boundary pack follows the runtime shape, so
+    ///    the shapes must produce IDENTICAL stored bytes. Flat tensors store dense row-major (any
+    ///    equal element count reinterprets losslessly); NC4HW4 packing is a function of N, C, and
+    ///    the spatial product h*w (block index = (n*cBlocks(C) + cb)*h*w + spatial), so those must
+    ///    match — equal PADDED footprints alone are not enough: [1,1,H,W] bound against a planned
+    ///    [1,2,H,W] pads to the same block count but interleaves channels differently, and the
+    ///    kernels then silently misread every channel (a wrong-values class, not an overrun).
+    ///
+    /// @param got        The caller's bound shape (non-empty, already known != planned).
+    /// @param planned    The bucket's planned shape.
+    /// @param flatStore  True when the tensor stores flat/dense (TensorDesc::gpuFlat), false = NC4HW4.
+    /// @param frozenPlan True when a GPU segment consumes the input (frozen pack/dispatch geometry).
+    /// @returns True when the rebinding is safe under the applicable contract.
+    inline bool boundShapeCompatible(const Shape &got, const Shape &planned, bool flatStore, bool frozenPlan) {
+        const NCHW a = NCHW::from(got), b = NCHW::from(planned);
+        if (frozenPlan)
+        {
+            return flatStore ? a.elems() == b.elems() : (a.n == b.n && a.c == b.c && a.h * a.w == b.h * b.w);
+        }
+        const TensorFormat fmt = flatStore ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+        return formatElems(fmt, a) == formatElems(fmt, b);
+    }
+
 } // namespace vknn

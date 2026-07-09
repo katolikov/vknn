@@ -15,5 +15,5 @@ void main() {
   int lane = int(gid) % 4;
   int cb = (int(gid) / 4 / pc.HW) % pc.Cb;
   int c = cb * 4 + lane;
-  d[gid] = STORE(float(s[gid]) * float(sc[c]) + float(bi[c]));
+  d[gid] = TO_STORE(float(s[gid]) * float(sc[c]) + float(bi[c])); // saturating: scale+shift can exceed the fp16 range
 }

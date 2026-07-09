@@ -32,19 +32,24 @@ namespace {
             int64_t best = 0;
             float   bv   = lg[0];
             for (int64_t i = 1; i < vocab; ++i)
+            {
                 if (lg[i] > bv)
                 {
                     bv   = lg[i];
                     best = i;
                 }
+            }
             return best;
         }
         std::vector<std::pair<float, int64_t>> v((size_t) vocab);
         for (int64_t i = 0; i < vocab; ++i)
+        {
             v[(size_t) i] = {lg[i] / temp, i};
+        }
         const int keep = topK > 0 && topK < (int) vocab ? topK : (int) vocab;
-        std::partial_sort(v.begin(), v.begin() + keep, v.end(),
-                          [](const auto &a, const auto &b) { return a.first > b.first; });
+        std::partial_sort(v.begin(), v.begin() + keep, v.end(), [](const auto &a, const auto &b) {
+            return a.first > b.first;
+        });
         v.resize((size_t) keep);
         float mx = v[0].first, sum = 0.0f;
         for (auto &e: v)
@@ -69,7 +74,9 @@ namespace {
         {
             acc += v[i].first;
             if (acc >= r)
+            {
                 return v[i].second;
+            }
         }
         return v[n - 1].second;
     }
@@ -82,46 +89,191 @@ namespace {
         std::vector<IOTensor>    outputs; // last run()'s outputs
         std::vector<IOInfo>      inInfo, outInfo;
 
-        int idIdx = -1, maskIdx = -1, posIdx = -1, logitsIdx = -1;
+        int              idIdx = -1, maskIdx = -1, posIdx = -1, logitsIdx = -1;
         std::vector<int> pastKey, pastVal, presKey, presVal;
         std::vector<int> outIdxByInfo; // outInfo index -> index in outputs vector (stable across runs)
         bool             mapped = false;
 
         int     L = 0, kvHeads = 0, C = 0, headDim = 0;
-        int64_t vocab = 0;
-        int     p     = 0; // absolute position across the whole conversation
+        int     presRows = 0; // rows the present outputs carry ([1,KV,presRows,HD]); the newest row is the last
+        int64_t vocab    = 0;
+        int     p        = 0; // absolute position across the whole conversation
+
+        // Engine-resident KV cache (Session::linkOutputToInput): every present output is linked to
+        // its past input, the fold happens inside the engine (on-device on the GPU backend), and only
+        // id/mask/position are bound per step. False = the host-side cache loop (link setup failed).
+        bool kvLinked = false;
+        // The next step rebinds the (host-zeroed) past buffers with empty ranges — the reset path.
+        bool rebindPastNextStep = false;
 
         std::vector<float> logits; // last step's logits row (vocab floats)
         std::mt19937       rng {1234};
 
         int findIn(const std::string &n) const {
             for (size_t i = 0; i < inInfo.size(); ++i)
+            {
                 if (inInfo[i].name == n)
+                {
                     return (int) i;
+                }
+            }
             return -1;
         }
         int findOut(const std::string &n) const {
             for (size_t i = 0; i < outInfo.size(); ++i)
+            {
                 if (outInfo[i].name == n)
+                {
                     return (int) i;
+                }
+            }
             return -1;
         }
         void setI64(int idx, const std::vector<int64_t> &vals) {
             std::memcpy(inputs[(size_t) idx].data.data(), vals.data(), vals.size() * sizeof(int64_t));
         }
 
-        // Feed one token at the current position: write id/pos/mask, run the plan on the GPU, append the
-        // new key/value into the KV cache, and keep the logits row. Returns 0 on success, -1 on error.
+        // Declare the KV links: every present output feeds its past input on the next run. Empty
+        // ranges to start (the cache begins as zeros); step() re-links per token with the fold
+        // ranges. On failure the decoder stays on the host-side cache loop.
+        void setupKvLinks() {
+            for (int l = 0; l < L; ++l)
+            {
+                if (sess->linkOutputToInput(outInfo[(size_t) presKey[l]].name, inInfo[(size_t) pastKey[l]].name, {}) != Status::Ok ||
+                    sess->linkOutputToInput(outInfo[(size_t) presVal[l]].name, inInfo[(size_t) pastVal[l]].name, {}) != Status::Ok)
+                {
+                    LOGE("KV link setup failed at layer %d; using the host cache loop", l);
+                    sess->clearLinks();
+                    kvLinked = false;
+                    return;
+                }
+            }
+            kvLinked = true;
+        }
+
+        // Update every link's ranges: fold the previous token's present row (the LAST present row —
+        // index C for a cache-concat present, 0 for a rows-only present) into cache slot `slot`, or
+        // clear the pending fold when `slot` < 0 (reset/first step).
+        bool setKvFoldSlot(int64_t slot) {
+            const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRows, C, headDim, slot);
+            for (int l = 0; l < L; ++l)
+            {
+                for (int part = 0; part < 2; ++part)
+                {
+                    const std::string &pres = outInfo[(size_t) (part ? presVal[l] : presKey[l])].name;
+                    const std::string &past = inInfo[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                    const Status       st   = sess->linkOutputToInput(pres, past, ranges);
+                    if (st != Status::Ok)
+                    {
+                        LOGE("KV link update failed for %s -> %s at slot %lld: %s (engine log has the reason)", pres.c_str(), past.c_str(), (long long) slot, statusStr(st));
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Rebuild the host `inputs` past buffers from the engine-resident state — the device cache
+        // plus the pending fold from the last run's present — so the host cache loop can take over
+        // MID-STREAM with no token divergence. Call while the links still exist (readResident
+        // resolves linked names only).
+        bool resyncHostCache() {
+            const int64_t pendingSlot = p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1;
+            for (int l = 0; l < L; ++l)
+            {
+                for (int part = 0; part < 2; ++part)
+                {
+                    const std::string &presName = outInfo[(size_t) (part ? presVal[l] : presKey[l])].name;
+                    const std::string &pastName = inInfo[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                    IOTensor           resident;
+                    if (sess->readResident(pastName, resident) != Status::Ok)
+                    {
+                        return false;
+                    }
+                    IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
+                    if (resident.data.size() != hostPast.data.size())
+                    {
+                        LOGE("resync: resident %s holds %zu bytes, host expects %zu", pastName.c_str(), resident.data.size(), hostPast.data.size());
+                        return false;
+                    }
+                    std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                    if (pendingSlot >= 0)
+                    {
+                        IOTensor present;
+                        if (sess->readResident(presName, present) != Status::Ok)
+                        {
+                            return false;
+                        }
+                        const float *src = reinterpret_cast<const float *>(present.data.data());
+                        float       *dst = reinterpret_cast<float *>(hostPast.data.data());
+                        for (int h = 0; h < kvHeads; ++h)
+                        {
+                            const float *s = src + ((size_t) h * presRows + (presRows - 1)) * headDim;
+                            float       *d = dst + ((size_t) h * C + pendingSlot) * headDim;
+                            std::memcpy(d, s, (size_t) headDim * sizeof(float));
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Feed one token at the current position: write id/pos/mask, run the plan on the GPU, fold the
+        // new key/value into the KV cache (in-engine when linked), and keep the logits row. Returns 0
+        // on success, -1 on error.
         int step(int64_t tok) {
             setI64(idIdx, {tok});
             setI64(posIdx, {(int64_t) p});
             std::vector<int64_t> am((size_t) C + 1, 0);
             for (int j = 0; j < p && j < C; ++j)
+            {
                 am[(size_t) j] = 1; // valid past slots
-            am[(size_t) C] = 1;      // the current token (present slot C)
+            }
+            am[(size_t) C] = 1; // the current token (present slot C)
             setI64(maskIdx, am);
 
-            if (sess->run(inputs, outputs) != Status::Ok)
+            Status runStatus = Status::Ok;
+            bool   ranLinked = false;
+            if (kvLinked)
+            {
+                // The engine folds the PREVIOUS token's row into slot p-1 at the start of this run;
+                // a reset step clears the pending fold and rebinds the zeroed past buffers instead.
+                const bool rebind = rebindPastNextStep;
+                if (setKvFoldSlot(rebind || p == 0 ? -1 : std::min<int64_t>(p - 1, C - 1)))
+                {
+                    std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+                    if (rebind)
+                    {
+                        for (int l = 0; l < L; ++l)
+                        {
+                            bound.push_back(inputs[(size_t) pastKey[l]]);
+                            bound.push_back(inputs[(size_t) pastVal[l]]);
+                        }
+                    }
+                    runStatus          = sess->run(bound, outputs);
+                    rebindPastNextStep = false;
+                    ranLinked          = true;
+                } else
+                {
+                    // A mid-stream link failure: bring the engine-resident cache (device rows + the
+                    // pending fold) back into the host buffers, drop the links, and continue THIS and
+                    // every later step on the host cache loop — same tokens, no lost state.
+                    LOGE("switching to the host KV loop at p=%d (resyncing the cache from the engine)", p);
+                    if (!resyncHostCache())
+                    {
+                        LOGE("host cache resync failed; cannot continue");
+                        return -1;
+                    }
+                    sess->clearLinks();
+                    kvLinked           = false;
+                    rebindPastNextStep = false;
+                }
+            }
+            if (!ranLinked)
+            {
+                runStatus = sess->run(inputs, outputs);
+            }
+            if (runStatus != Status::Ok)
             {
                 LOGE("run() failed at p=%d", p);
                 return -1;
@@ -130,25 +282,34 @@ namespace {
             {
                 outIdxByInfo.assign(outInfo.size(), -1);
                 for (size_t j = 0; j < outputs.size(); ++j)
+                {
                     for (size_t k = 0; k < outInfo.size(); ++k)
+                    {
                         if (outputs[j].name == outInfo[k].name)
+                        {
                             outIdxByInfo[k] = (int) j;
+                        }
+                    }
+                }
                 mapped = true;
             }
-            const int slot = p < C ? p : C - 1; // guard the rare overrun past the compiled context
-            for (int l = 0; l < L; ++l)
+            if (!kvLinked)
             {
-                for (int part = 0; part < 2; ++part)
+                const int slot = p < C ? p : C - 1; // guard the rare overrun past the compiled context
+                for (int l = 0; l < L; ++l)
                 {
-                    const IOTensor &pres = outputs[(size_t) outIdxByInfo[(size_t) (part ? presVal[l] : presKey[l])]];
-                    IOTensor       &past = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
-                    const float    *src  = reinterpret_cast<const float *>(pres.data.data());
-                    float          *dst  = reinterpret_cast<float *>(past.data.data());
-                    for (int h = 0; h < kvHeads; ++h)
+                    for (int part = 0; part < 2; ++part)
                     {
-                        const float *s = src + ((size_t) h * (C + 1) + C) * headDim;
-                        float       *d = dst + ((size_t) h * C + slot) * headDim;
-                        std::memcpy(d, s, (size_t) headDim * sizeof(float));
+                        const IOTensor &pres = outputs[(size_t) outIdxByInfo[(size_t) (part ? presVal[l] : presKey[l])]];
+                        IOTensor       &past = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
+                        const float    *src  = reinterpret_cast<const float *>(pres.data.data());
+                        float          *dst  = reinterpret_cast<float *>(past.data.data());
+                        for (int h = 0; h < kvHeads; ++h)
+                        {
+                            const float *s = src + ((size_t) h * presRows + (presRows - 1)) * headDim;
+                            float       *d = dst + ((size_t) h * C + slot) * headDim;
+                            std::memcpy(d, s, (size_t) headDim * sizeof(float));
+                        }
                     }
                 }
             }
@@ -188,13 +349,28 @@ namespace {
         int64_t          vocab = 0;
         int              p     = 0; // absolute token position across the conversation
 
+        // Engine-resident KV cache for the S=1 DECODE bucket (Session::linkOutputToInput): during a
+        // decode run the fold happens inside the engine and only embeds/mask/positions are bound.
+        // The PREFILL bucket keeps the host cache flow (it runs once per turn), so at each turn
+        // boundary the device state materializes back into `dec` via readResident().
+        int  decodeBucket       = -1;
+        int  presRowsDecode     = 0;     // rows the DECODE bucket's present outputs carry ([1,KV,rows,HD])
+        bool decodeLinked       = false; // links declared on the decode bucket
+        bool cacheOnDevice      = false; // the decode bucket's resident past is ahead of dec[]
+        bool rebindPastNextStep = false; // next decode step re-seeds the device cache from dec[]
+        int  pendingSlot        = -1;    // cache slot of the fold the next decode run applies
+
         std::vector<float> logits; // last run's next-token logits row
         std::mt19937       rng {1234};
 
         const IOTensor *outByName(const std::string &n) const {
             for (const IOTensor &o: outs)
+            {
                 if (o.name == n)
+                {
                     return &o;
+                }
+            }
             return nullptr;
         }
 
@@ -202,6 +378,104 @@ namespace {
             dec[(size_t) idx].shape = s;
             dec[(size_t) idx].dtype = dt;
             dec[(size_t) idx].data.assign((size_t) numElements(s) * dtypeSize(dt), 0);
+        }
+
+        void pastName(int layer, int part, char (&buf)[64]) const {
+            snprintf(buf, sizeof buf, part ? "past_key_values.%d.value" : "past_key_values.%d.key", layer);
+        }
+        void presentName(int layer, int part, char (&buf)[64]) const {
+            snprintf(buf, sizeof buf, part ? "present.%d.value" : "present.%d.key", layer);
+        }
+
+        // Declare the decode-bucket KV links (empty ranges; per-step folds arrive via
+        // setDecodeFoldSlot). On failure the decode loop stays on the host cache path.
+        void setupDecodeLinks() {
+            for (int l = 0; l < L; ++l)
+            {
+                for (int part = 0; part < 2; ++part)
+                {
+                    char pastBuf[64], presBuf[64];
+                    pastName(l, part, pastBuf);
+                    presentName(l, part, presBuf);
+                    if (sess->linkOutputToInput((size_t) decodeBucket, presBuf, pastBuf, {}) != Status::Ok)
+                    {
+                        LOGE("VLM KV link setup failed at layer %d; using the host cache loop", l);
+                        sess->clearLinks();
+                        decodeLinked = false;
+                        return;
+                    }
+                }
+            }
+            decodeLinked = true;
+        }
+
+        // Update every decode link: fold the previous run's present row into cache slot `slot`, or
+        // clear the pending fold when `slot` < 0. The source row is the LAST row of the decode
+        // bucket's present output — its row count comes from that bucket's own output shape
+        // (presRowsDecode), never assumed: this decoder's present carries only the produced rows
+        // ([1,KV,1,HD] at S=1), unlike a cache-concat decoder's [1,KV,C+1,HD].
+        bool setDecodeFoldSlot(int64_t slot) {
+            const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRowsDecode, C, headDim, slot);
+            for (int l = 0; l < L; ++l)
+            {
+                for (int part = 0; part < 2; ++part)
+                {
+                    char pastBuf[64], presBuf[64];
+                    pastName(l, part, pastBuf);
+                    presentName(l, part, presBuf);
+                    const Status st = sess->linkOutputToInput((size_t) decodeBucket, presBuf, pastBuf, ranges);
+                    if (st != Status::Ok)
+                    {
+                        LOGE("VLM KV link update failed for %s -> %s at slot %lld: %s (engine log has the reason)", presBuf, pastBuf, (long long) slot, statusStr(st));
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Copy the decode bucket's device-resident cache (plus the pending fold) back into the host
+        // `dec` past buffers, so the prefill bucket sees the full conversation state.
+        bool materializeDeviceCache() {
+            for (int l = 0; l < L; ++l)
+            {
+                for (int part = 0; part < 2; ++part)
+                {
+                    char pastBuf[64], presBuf[64];
+                    pastName(l, part, pastBuf);
+                    presentName(l, part, presBuf);
+                    IOTensor resident;
+                    if (sess->readResident(pastBuf, resident) != Status::Ok)
+                    {
+                        return false;
+                    }
+                    IOTensor &hostPast = dec[(size_t) (part ? pastVal[l] : pastKey[l])];
+                    if (resident.data.size() != hostPast.data.size())
+                    {
+                        LOGE("resident cache size mismatch for %s", pastBuf);
+                        return false;
+                    }
+                    std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                    if (pendingSlot >= 0)
+                    {
+                        IOTensor present;
+                        if (sess->readResident(presBuf, present) != Status::Ok)
+                        {
+                            return false;
+                        }
+                        const float *src = reinterpret_cast<const float *>(present.data.data());
+                        float       *dst = reinterpret_cast<float *>(hostPast.data.data());
+                        for (int h = 0; h < kvHeads; ++h)
+                        {
+                            const float *s = src + ((size_t) h * presRowsDecode + (presRowsDecode - 1)) * headDim;
+                            float       *d = dst + ((size_t) h * C + pendingSlot) * headDim;
+                            std::memcpy(d, s, (size_t) headDim * sizeof(float));
+                        }
+                    }
+                }
+            }
+            pendingSlot = -1;
+            return true;
         }
 
         // Copy present rows [1,KV,S,HD] (rows 0..n-1) into cache slots startSlot.. of every layer.
@@ -215,7 +489,9 @@ namespace {
                 {
                     const IOTensor *pres = outByName(part ? pv : pk);
                     if (!pres)
+                    {
                         return false;
+                    }
                     const float *src = reinterpret_cast<const float *>(pres->data.data());
                     float       *dst = reinterpret_cast<float *>(dec[(size_t) (part ? pastVal[l] : pastKey[l])].data.data());
                     for (int h = 0; h < kvHeads; ++h)
@@ -260,8 +536,7 @@ namespace {
         // Prefill one prompt: embed the padded ids, splice image rows over image-token rows, build the
         // additive mask + clamped positions, run the prefill bucket, and fold the real present rows.
         // Pad rows are masked causally anyway but are NEVER folded into the cache.
-        int prefill(const int64_t *ids, int nReal, const float *imgEmb, int imgRowsGiven,
-                    int64_t imageToken, int64_t padId) {
+        int prefill(const int64_t *ids, int nReal, const float *imgEmb, int imgRowsGiven, int64_t imageToken, int64_t padId) {
             if (nReal <= 0 || nReal > prefillS)
             {
                 LOGE("prompt %d tokens, prefill window %d", nReal, prefillS);
@@ -271,6 +546,19 @@ namespace {
             {
                 LOGE("context full (%d + %d > %d)", p, nReal, C);
                 return -2;
+            }
+            // A turn boundary: the decode loop left the cache device-resident; bring it back to the
+            // host `dec` buffers (with the pending fold applied) for the prefill bucket, and mark the
+            // next decode step to re-seed the device cache.
+            if (decodeLinked && cacheOnDevice)
+            {
+                if (!materializeDeviceCache())
+                {
+                    LOGE("device cache materialization failed");
+                    return -1;
+                }
+                cacheOnDevice      = false;
+                rebindPastNextStep = true;
             }
             std::vector<int64_t> padded(ids, ids + nReal);
             padded.resize((size_t) prefillS, padId);
@@ -303,7 +591,9 @@ namespace {
                 }
             }
             if (imgRow != 0 && imgRow != imgRowsGiven)
+            {
                 LOGE("prompt consumed %d of %d image rows -- id stream and tile disagree", imgRow, imgRowsGiven);
+            }
 
             // Additive mask [1,1,S,C+S]: past slots < p visible to every row, new tokens causal.
             setDecShape(maskIdx, {1, 1, (int64_t) prefillS, (int64_t) (C + prefillS)}, DType::Float32);
@@ -312,14 +602,20 @@ namespace {
             {
                 float *row = m + (size_t) q * (C + prefillS);
                 for (int c = 0; c < C; ++c)
+                {
                     row[c] = c < p ? 0.0f : kMaskFill;
+                }
                 for (int j = 0; j < prefillS; ++j)
+                {
                     row[C + j] = j <= q ? 0.0f : kMaskFill;
+                }
             }
             setDecShape(posIdx, {1, (int64_t) prefillS}, DType::Int64);
             int64_t *pos = reinterpret_cast<int64_t *>(dec[(size_t) posIdx].data.data());
             for (int q = 0; q < prefillS; ++q)
+            {
                 pos[q] = p + (q < nReal ? q : nReal - 1); // pad rows clamp; they are never folded
+            }
 
             if (sess->run(dec, outs) != Status::Ok)
             {
@@ -333,7 +629,9 @@ namespace {
             }
             const IOTensor *lg = outByName("logits");
             if (!lg)
+            {
                 return -1;
+            }
             p += nReal;
             const float *lp = reinterpret_cast<const float *>(lg->data.data()) + (size_t) (nReal - 1) * vocab;
             logits.assign(lp, lp + vocab);
@@ -351,27 +649,85 @@ namespace {
             embedIn[0].data.resize(sizeof(int64_t));
             std::memcpy(embedIn[0].data.data(), &tok, sizeof(int64_t));
             if (sess->run(embedIn, outs) != Status::Ok)
+            {
                 return -1;
+            }
             const IOTensor *emb = outByName("inputs_embeds");
             if (!emb)
+            {
                 return -1;
+            }
             setDecShape(embIdx, {1, 1, (int64_t) H}, DType::Float32);
             std::memcpy(dec[(size_t) embIdx].data.data(), emb->data.data(), (size_t) H * sizeof(float));
             setDecShape(maskIdx, {1, 1, 1, (int64_t) C + 1}, DType::Float32);
             float *m = reinterpret_cast<float *>(dec[(size_t) maskIdx].data.data());
             for (int c = 0; c < C + 1; ++c)
+            {
                 m[c] = (c < p || c == C) ? 0.0f : kMaskFill;
+            }
             setDecShape(posIdx, {1, 1}, DType::Int64);
             int64_t pos = p;
             std::memcpy(dec[(size_t) posIdx].data.data(), &pos, sizeof(int64_t));
-            if (sess->run(dec, outs) != Status::Ok)
-                return -1;
-            const int slot = p < C ? p : C - 1;
-            if (!foldPresent(1, 1, slot))
-                return -1;
+            const int slot      = p < C ? p : C - 1;
+            bool      ranLinked = false;
+            if (decodeLinked)
+            {
+                // The engine folds the previous run's row into `pendingSlot` at the start of this
+                // run. The first decode step of a turn re-seeds the device cache from the host `dec`
+                // past (which prefill just updated) and clears any pending fold.
+                const bool rebind = rebindPastNextStep || !cacheOnDevice;
+                if (setDecodeFoldSlot(rebind ? -1 : pendingSlot))
+                {
+                    std::vector<IOTensor> bound {dec[(size_t) embIdx], dec[(size_t) maskIdx], dec[(size_t) posIdx]};
+                    if (rebind)
+                    {
+                        for (int l = 0; l < L; ++l)
+                        {
+                            bound.push_back(dec[(size_t) pastKey[l]]);
+                            bound.push_back(dec[(size_t) pastVal[l]]);
+                        }
+                    }
+                    if (sess->run(bound, outs) != Status::Ok)
+                    {
+                        return -1;
+                    }
+                    rebindPastNextStep = false;
+                    cacheOnDevice      = true;
+                    pendingSlot        = slot;
+                    ranLinked          = true;
+                } else
+                {
+                    // A mid-stream link failure: bring the engine-resident cache (device rows + the
+                    // pending fold) back into the host `dec` buffers, drop the links, and continue
+                    // THIS and every later step on the host cache loop — same tokens, no lost state.
+                    LOGE("switching to the host KV loop at p=%d (resyncing the cache from the engine)", p);
+                    if (cacheOnDevice && !materializeDeviceCache())
+                    {
+                        LOGE("host cache resync failed; cannot continue");
+                        return -1;
+                    }
+                    sess->clearLinks();
+                    decodeLinked       = false;
+                    cacheOnDevice      = false;
+                    rebindPastNextStep = false;
+                }
+            }
+            if (!ranLinked)
+            {
+                if (sess->run(dec, outs) != Status::Ok)
+                {
+                    return -1;
+                }
+                if (!foldPresent(1, 1, slot))
+                {
+                    return -1;
+                }
+            }
             const IOTensor *lg = outByName("logits");
             if (!lg)
+            {
                 return -1;
+            }
             const float *lp = reinterpret_cast<const float *>(lg->data.data());
             logits.assign(lp, lp + vocab);
             ++p;
@@ -381,26 +737,38 @@ namespace {
 
     int findByName(const std::vector<IOInfo> &v, const std::string &n) {
         for (size_t i = 0; i < v.size(); ++i)
+        {
             if (v[i].name == n)
+            {
                 return (int) i;
+            }
+        }
         return -1;
     }
 
     Precision precFromStr(const std::string &s) {
         if (s == "normal")
+        {
             return Precision::Normal;
+        }
         if (s == "high")
+        {
             return Precision::High;
+        }
         return Precision::Low;
     }
 
     std::string jstr(JNIEnv *env, jstring s) {
         if (!s)
+        {
             return {};
+        }
         const char *c = env->GetStringUTFChars(s, nullptr);
         std::string out(c ? c : "");
         if (c)
+        {
             env->ReleaseStringUTFChars(s, c);
+        }
         return out;
     }
 
@@ -448,7 +816,9 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             snprintf(vb, sizeof vb, "past_key_values.%d.value", l);
             const int ik = d->findIn(kb), iv = d->findIn(vb);
             if (ik < 0 || iv < 0)
+            {
                 break;
+            }
             snprintf(pk, sizeof pk, "present.%d.key", l);
             snprintf(pv, sizeof pv, "present.%d.value", l);
             d->pastKey.push_back(ik);
@@ -467,8 +837,20 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
         d->kvHeads      = (int) ks[1];
         d->C            = (int) ks[2];
         d->headDim      = (int) ks[3];
-        d->vocab        = d->outInfo[(size_t) d->logitsIdx].shape.back();
+        // Present rows from the PRESENT output's own shape, never assumed: a cache-concat decoder
+        // carries C+1 rows, a rows-only decoder carries exactly the step's rows.
+        if (d->presKey[0] >= 0 && d->outInfo[(size_t) d->presKey[0]].shape.size() == 4)
+        {
+            d->presRows = (int) d->outInfo[(size_t) d->presKey[0]].shape[2];
+        }
+        d->vocab = d->outInfo[(size_t) d->logitsIdx].shape.back();
         d->logits.assign((size_t) d->vocab, 0.0f);
+        if (d->presRows <= 0)
+        {
+            LOGE("present outputs are missing or not [1,KV,rows,HD]; cannot drive the KV fold");
+            delete d;
+            return 0;
+        }
 
         d->inputs.resize(d->inInfo.size());
         for (size_t i = 0; i < d->inInfo.size(); ++i)
@@ -478,7 +860,8 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             d->inputs[i].dtype = d->inInfo[i].dtype;
             d->inputs[i].data.assign((size_t) d->inInfo[i].elems * dtypeSize(d->inInfo[i].dtype), 0);
         }
-        LOGI("loaded: L=%d kv_heads=%d C=%d head_dim=%d vocab=%lld", d->L, d->kvHeads, d->C, d->headDim, (long long) d->vocab);
+        d->setupKvLinks();
+        LOGI("loaded: L=%d kv_heads=%d C=%d head_dim=%d vocab=%lld kv_linked=%d", d->L, d->kvHeads, d->C, d->headDim, (long long) d->vocab, d->kvLinked ? 1 : 0);
         return reinterpret_cast<jlong>(d);
     } catch (const std::exception &loadError)
     {
@@ -493,14 +876,16 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
 
 // int[5] = {L, kv_heads, C, head_dim, vocab}.
 JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeInfo(JNIEnv *env, jobject, jlong ptr) {
-    auto     *d   = reinterpret_cast<Decoder *>(ptr);
+    auto     *d    = reinterpret_cast<Decoder *>(ptr);
     jint      v[5] = {d->L, d->kvHeads, d->C, d->headDim, (jint) d->vocab};
-    jintArray a   = env->NewIntArray(5);
+    jintArray a    = env->NewIntArray(5);
     env->SetIntArrayRegion(a, 0, 5, v);
     return a;
 }
 
-// Reset the conversation: position 0 and a cleared KV cache. Reseeds the sampler RNG.
+// Reset the conversation: position 0 and a cleared KV cache. Reseeds the sampler RNG. With the
+// linked cache the zeroed past buffers rebind on the next step (with the pending fold cleared),
+// reinitializing the engine-resident state.
 JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeReset(JNIEnv *, jobject, jlong ptr, jint seed) {
     auto *d = reinterpret_cast<Decoder *>(ptr);
     d->p    = 0;
@@ -510,13 +895,16 @@ JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeReset(JNIEnv *, jobjec
         std::fill(d->inputs[(size_t) d->pastKey[l]].data.begin(), d->inputs[(size_t) d->pastKey[l]].data.end(), (uint8_t) 0);
         std::fill(d->inputs[(size_t) d->pastVal[l]].data.begin(), d->inputs[(size_t) d->pastVal[l]].data.end(), (uint8_t) 0);
     }
+    d->rebindPastNextStep = d->kvLinked;
 }
 
 // Feed one token at the current position (runs the plan on the GPU). Returns 0 ok, -1 error.
 JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeStep(JNIEnv *, jobject, jlong ptr, jint tok) {
     auto *d = reinterpret_cast<Decoder *>(ptr);
     if (d->step((int64_t) tok) != 0)
+    {
         return -1;
+    }
     ++d->p;
     return 0;
 }
@@ -535,7 +923,7 @@ JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeFree(JNIEnv *, jobject
 
 // Load a multi-graph vision-language .vxm and build a Vlm. Returns a native handle (0 on failure).
 JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend) {
-    auto  *m = new Vlm();
+    auto *m = new Vlm();
     try
     {
         Config cfg;
@@ -596,7 +984,9 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
             snprintf(vb, sizeof vb, "past_key_values.%d.value", l);
             const int ik = findByName(m->decIn, kb), iv = findByName(m->decIn, vb);
             if (ik < 0 || iv < 0)
+            {
                 break;
+            }
             m->pastKey.push_back(ik);
             m->pastVal.push_back(iv);
         }
@@ -637,9 +1027,28 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
         m->visInT[0].name  = "pixel_values";
         m->visInT[0].shape = m->visIn[0].shape;
         m->visInT[0].dtype = DType::Float32;
+        m->decodeBucket    = decDecB;
+        // Present rows from the DECODE bucket's own present output shape (decOut describes the
+        // PREFILL bucket, whose present carries prefillS rows — a different count). This decoder's
+        // present holds only the produced rows: [1,KV,1,HD] at S=1.
+        {
+            const std::vector<IOInfo> decodeOut = m->sess->outputInfo((size_t) decDecB);
+            const int                 presAt    = findByName(decodeOut, "present.0.key");
+            if (presAt >= 0 && decodeOut[(size_t) presAt].shape.size() == 4)
+            {
+                m->presRowsDecode = (int) decodeOut[(size_t) presAt].shape[2];
+            }
+        }
+        if (m->presRowsDecode > 0)
+        {
+            m->setupDecodeLinks();
+        } else
+        {
+            LOGE("decode-bucket present outputs are missing or not [1,KV,rows,HD]; using the host cache loop");
+        }
 
-        LOGI("vlm loaded: L=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imgRows=%d img=%d",
-             m->L, m->kvHeads, m->C, m->headDim, m->H, (long long) m->vocab, m->prefillS, m->imgRows, m->imgSide);
+        LOGI("vlm loaded: L=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imgRows=%d img=%d presRowsDec=%d kv_linked=%d", m->L, m->kvHeads, m->C, m->headDim, m->H,
+             (long long) m->vocab, m->prefillS, m->imgRows, m->imgSide, m->presRowsDecode, m->decodeLinked ? 1 : 0);
         return reinterpret_cast<jlong>(m);
     } catch (const std::exception &loadError)
     {
@@ -661,7 +1070,8 @@ JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInfo(JNIEnv *e
     return a;
 }
 
-// Reset the conversation: position 0 and a cleared KV cache. Reseeds the sampler RNG.
+// Reset the conversation: position 0 and a cleared KV cache. Reseeds the sampler RNG. The zeroed
+// host cache re-seeds the decode bucket's device-resident state on the next decode step.
 JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeVlmReset(JNIEnv *, jobject, jlong ptr, jint seed) {
     auto *m = reinterpret_cast<Vlm *>(ptr);
     m->p    = 0;
@@ -671,19 +1081,24 @@ JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeVlmReset(JNIEnv *, job
         std::fill(m->dec[(size_t) m->pastKey[l]].data.begin(), m->dec[(size_t) m->pastKey[l]].data.end(), (uint8_t) 0);
         std::fill(m->dec[(size_t) m->pastVal[l]].data.begin(), m->dec[(size_t) m->pastVal[l]].data.end(), (uint8_t) 0);
     }
+    m->cacheOnDevice      = false;
+    m->rebindPastNextStep = m->decodeLinked;
+    m->pendingSlot        = -1;
 }
 
 // Run the vision bucket on fp32 CHW pixels [3*IMG*IMG]. Returns the [imageRows*H] embedding rows,
 // or null on failure.
 JNIEXPORT jfloatArray JNICALL Java_com_vknn_chat_NativeLib_nativeVisionEncode(JNIEnv *env, jobject, jlong ptr, jfloatArray jpix) {
-    auto        *m = reinterpret_cast<Vlm *>(ptr);
-    const jsize  n = env->GetArrayLength(jpix);
-    jfloat      *p = env->GetFloatArrayElements(jpix, nullptr);
+    auto              *m = reinterpret_cast<Vlm *>(ptr);
+    const jsize        n = env->GetArrayLength(jpix);
+    jfloat            *p = env->GetFloatArrayElements(jpix, nullptr);
     std::vector<float> out;
-    const int    rc = m->visionEncode(p, (size_t) n, out);
+    const int          rc = m->visionEncode(p, (size_t) n, out);
     env->ReleaseFloatArrayElements(jpix, p, JNI_ABORT);
     if (rc != 0)
+    {
         return nullptr;
+    }
     jfloatArray a = env->NewFloatArray((jsize) out.size());
     env->SetFloatArrayRegion(a, 0, (jsize) out.size(), out.data());
     return a;
@@ -693,16 +1108,17 @@ JNIEXPORT jfloatArray JNICALL Java_com_vknn_chat_NativeLib_nativeVisionEncode(JN
 // prompt's image-token rows; `padId` fills the window past the real ids. The first sampled token
 // comes from nativeVlmSample afterwards. Returns 0 ok, <0 error.
 JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeVlmPrefill(JNIEnv *env, jobject, jlong ptr, jlongArray jids, jfloatArray jimg, jint imageToken, jint padId) {
-    auto        *m     = reinterpret_cast<Vlm *>(ptr);
-    const jsize  nReal = env->GetArrayLength(jids);
-    jlong       *ids   = env->GetLongArrayElements(jids, nullptr);
-    jfloat      *img   = jimg ? env->GetFloatArrayElements(jimg, nullptr) : nullptr;
-    const int    imgRowsGiven = jimg ? (int) (env->GetArrayLength(jimg) / (jsize) m->H) : 0;
+    auto       *m            = reinterpret_cast<Vlm *>(ptr);
+    const jsize nReal        = env->GetArrayLength(jids);
+    jlong      *ids          = env->GetLongArrayElements(jids, nullptr);
+    jfloat     *img          = jimg ? env->GetFloatArrayElements(jimg, nullptr) : nullptr;
+    const int   imgRowsGiven = jimg ? (int) (env->GetArrayLength(jimg) / (jsize) m->H) : 0;
     static_assert(sizeof(jlong) == sizeof(int64_t), "jlong is int64");
-    const int rc = m->prefill(reinterpret_cast<const int64_t *>(ids), (int) nReal, img, imgRowsGiven,
-                              (int64_t) imageToken, (int64_t) padId);
+    const int rc = m->prefill(reinterpret_cast<const int64_t *>(ids), (int) nReal, img, imgRowsGiven, (int64_t) imageToken, (int64_t) padId);
     if (img)
+    {
         env->ReleaseFloatArrayElements(jimg, img, JNI_ABORT);
+    }
     env->ReleaseLongArrayElements(jids, ids, JNI_ABORT);
     return rc;
 }
@@ -743,9 +1159,11 @@ namespace {
 
 } // namespace
 
-// Load the encoder .vxm (session survives across captures). Returns a native handle (0 on failure).
-JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend) {
-    auto  *splat = new Splat();
+// Load the encoder .vxm (session survives across captures). renderSize is the square rasterizer
+// output side, independent of the encoder input side (<= 0 falls back to the encoder side).
+// Returns a native handle (0 on failure).
+JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend, jint renderSize) {
+    auto *splat = new Splat();
     try
     {
         Config cfg;
@@ -772,14 +1190,17 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env
         splat->views  = (int) inputs[0].shape[1];
         splat->height = (int) inputs[0].shape[3];
         splat->width  = (int) inputs[0].shape[4];
-        splat->rasterizer = std::make_unique<raster::Rasterizer>(splat->height, splat->width);
+        // The render resolution is decoupled from the encoder input side: the intrinsics are
+        // normalized, so nativeSplatRender scales focal/center by the rasterizer size.
+        const int renderSide = renderSize > 0 ? (int) renderSize : splat->width;
+        splat->rasterizer    = std::make_unique<raster::Rasterizer>(renderSide, renderSide);
         if (!splat->rasterizer->ok())
         {
             LOGE("splat: no Vulkan for the rasterizer");
             delete splat;
             return 0;
         }
-        LOGI("splat loaded: views=%d %dx%d", splat->views, splat->width, splat->height);
+        LOGI("splat loaded: views=%d %dx%d render %dx%d", splat->views, splat->width, splat->height, renderSide, renderSide);
         return reinterpret_cast<jlong>(splat);
     } catch (const std::exception &loadError)
     {
@@ -804,9 +1225,9 @@ JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatInfo(JNIEnv 
 // Run the encoder on fp32 images [1,V,3,H,W] + normalized intrinsics [1,V,3,3]; the Gaussians
 // upload to the rasterizer and the predicted camera poses are kept. Returns 0 ok, <0 error.
 JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *env, jobject, jlong ptr, jfloatArray jimages, jfloatArray jintrinsics) {
-    auto     *splat        = reinterpret_cast<Splat *>(ptr);
-    const int pixelElems   = splat->views * 3 * splat->height * splat->width;
-    const int intrElems    = splat->views * 9;
+    auto     *splat      = reinterpret_cast<Splat *>(ptr);
+    const int pixelElems = splat->views * 3 * splat->height * splat->width;
+    const int intrElems  = splat->views * 9;
     if (env->GetArrayLength(jimages) != pixelElems || env->GetArrayLength(jintrinsics) != intrElems)
     {
         LOGE("splat: encode input sizes %d/%d, want %d/%d", env->GetArrayLength(jimages), env->GetArrayLength(jintrinsics), pixelElems, intrElems);
@@ -821,8 +1242,8 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
         tensor.shape = info.shape;
         tensor.dtype = DType::Float32;
         tensor.data.resize((size_t) numElements(info.shape) * 4);
-        const bool isImage = info.name == inputInfos[0].name; // first input = image (as the example maps)
-        jfloatArray source = isImage ? jimages : jintrinsics;
+        const bool  isImage = info.name == inputInfos[0].name; // first input = image (as the example maps)
+        jfloatArray source  = isImage ? jimages : jintrinsics;
         env->GetFloatArrayRegion(source, 0, (jsize) numElements(info.shape), reinterpret_cast<jfloat *>(tensor.data.data()));
         inputs.push_back(std::move(tensor));
     }
@@ -848,7 +1269,7 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
         LOGE("splat: encoder outputs missing");
         return -3;
     }
-    const int gaussianCount = (int) (numElements(means->shape) / 3);
+    const int          gaussianCount = (int) (numElements(means->shape) / 3);
     std::vector<float> colors((size_t) gaussianCount * 3);
     const float       *harmonicValues = harmonics->f32();
     for (size_t i = 0; i < colors.size(); ++i)
@@ -896,7 +1317,7 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
     // Pivot depth for the orbit viewer: median Gaussian depth in view-0 camera space.
     {
         const float *pose = splat->cameraPoses.data();
-        float rotationT[9];
+        float        rotationT[9];
         for (int row = 0; row < 3; ++row)
         {
             for (int col = 0; col < 3; ++col)
@@ -904,7 +1325,7 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
                 rotationT[row * 3 + col] = pose[col * 4 + row];
             }
         }
-        const float translationZ = -(rotationT[6] * pose[3] + rotationT[7] * pose[7] + rotationT[8] * pose[11]);
+        const float        translationZ = -(rotationT[6] * pose[3] + rotationT[7] * pose[7] + rotationT[8] * pose[11]);
         std::vector<float> depths;
         depths.reserve((size_t) gaussianCount);
         const float *meanValues = means->f32();
@@ -940,7 +1361,9 @@ JNIEXPORT jfloat JNICALL Java_com_vknn_chat_NativeLib_nativeSplatPivotDepth(JNIE
 }
 
 // Render from a row-major camera-to-world [16] using view-0 intrinsics. Returns packed ARGB
-// [height*width] for a Bitmap, or null on failure.
+// [renderHeight*renderWidth] for a Bitmap (packed on the GPU by the composite pass), or null on
+// failure. The normalized intrinsics scale by the rasterizer size, so the render resolution
+// tracks nativeSplatLoad's renderSize rather than the encoder input side.
 JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatRender(JNIEnv *env, jobject, jlong ptr, jfloatArray jcameraToWorld) {
     auto *splat = reinterpret_cast<Splat *>(ptr);
     if (!splat->rasterizer || splat->rasterizer->gaussians() == 0 || env->GetArrayLength(jcameraToWorld) != 16 || splat->intrinsics.size() < 9)
@@ -949,27 +1372,21 @@ JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatRender(JNIEn
     }
     float cameraToWorld[16];
     env->GetFloatArrayRegion(jcameraToWorld, 0, 16, cameraToWorld);
+    const int    renderWidth = splat->rasterizer->width(), renderHeight = splat->rasterizer->height();
     const float *view0K = splat->intrinsics.data();
-    const float  focalX = view0K[0] * splat->width, focalY = view0K[4] * splat->height;
-    const float  centerX = view0K[2] * splat->width, centerY = view0K[5] * splat->height;
-    std::vector<float> pixels((size_t) splat->height * splat->width * 3);
-    raster::Stats      stats;
-    if (splat->rasterizer->render(cameraToWorld, focalX, focalY, centerX, centerY, pixels.data(), &stats) != raster::Result::Ok)
+    const float  focalX = view0K[0] * renderWidth, focalY = view0K[4] * renderHeight;
+    const float  centerX = view0K[2] * renderWidth, centerY = view0K[5] * renderHeight;
+    static_assert(sizeof(jint) == sizeof(uint32_t), "jint is 32-bit");
+    std::vector<uint32_t> packed((size_t) renderHeight * renderWidth);
+    raster::Stats         stats;
+    if (splat->rasterizer->renderPacked(cameraToWorld, focalX, focalY, centerX, centerY, packed.data(), &stats) != raster::Result::Ok)
     {
         LOGE("splat: render failed (%u entries)", stats.entries);
         return nullptr;
     }
     LOGI("splat: rendered %u entries in %.1f ms", stats.entries, stats.msCount + stats.msMain);
-    std::vector<jint> packed((size_t) splat->height * splat->width);
-    for (size_t i = 0; i < packed.size(); ++i)
-    {
-        auto channel = [&](int c) -> uint32_t {
-            return (uint32_t) (uint8_t) (std::min(1.0f, std::max(0.0f, pixels[i * 3 + (size_t) c])) * 255 + 0.5f);
-        };
-        packed[i] = (jint) (0xff000000u | (channel(0) << 16) | (channel(1) << 8) | channel(2));
-    }
     jintArray out = env->NewIntArray((jsize) packed.size());
-    env->SetIntArrayRegion(out, 0, (jsize) packed.size(), packed.data());
+    env->SetIntArrayRegion(out, 0, (jsize) packed.size(), reinterpret_cast<const jint *>(packed.data()));
     return out;
 }
 

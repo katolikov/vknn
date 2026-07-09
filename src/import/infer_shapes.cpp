@@ -14,11 +14,16 @@ namespace vknn {
     /// shape (--shape) overrides everything; else the axis's recorded symbolic dim_param
     /// (TensorDesc::dimParams) is evaluated against `bindings` (--dim NAME=VALUE), which resolves a bare
     /// symbol, an integer literal, and a compound expression like "past_sequence_length + sequence_length"
-    /// alike; else the leading axis falls back to `batch`. A non-leading axis that stays unresolved is a
-    /// hard error rather than a silent substitution to `batch`: freezing a real spatial/feature axis to 1
-    /// compiles the model to a 1x1 plan whose output is quietly wrong (the vit_b16_q8 0.32-cosine bug).
-    /// The error is aggregated across every input and lists the unbound symbol names to bind, so a
-    /// many-input decoder reports one actionable message instead of failing per tensor.
+    /// alike; else the leading axis falls back to `batch` — but ONLY when it carries no symbol or a
+    /// batch-named one ("N", "B", or any name containing "batch", case-insensitive). A leading symbol
+    /// with any other name (num_frames, views, num_cameras...) is a real extent, not a batch: freezing
+    /// it to 1 compiles a 1-frame plan that silently truncates the caller's data (a frame-interp model
+    /// fed [num_frames,C,H,W] returns near-zero-cosine output with no diagnostic), so it hard-errors
+    /// like a non-leading axis. Any axis that stays unresolved is a hard error rather than a silent
+    /// substitution to `batch`: freezing a real spatial/feature axis to 1 compiles the model to a 1x1
+    /// plan whose output is quietly wrong (the vit_b16_q8 0.32-cosine bug). The error is aggregated
+    /// across every input and lists the unbound symbol names to bind, so a many-input decoder reports
+    /// one actionable message instead of failing per tensor.
     ///
     /// Central invariant — an EMPTY shape means "not resolved yet", never a rank-0 scalar, EXCEPT on an
     /// initializer (a constant genuinely may be rank-0). Every case therefore refuses to compute from an
@@ -101,9 +106,11 @@ namespace vknn {
                         s[ax] = e.value;
                         continue;
                     }
-                    if (ax == 0)
+                    // Only a batch-NAMED leading symbol takes the batch fallback; any other leading
+                    // symbol (num_frames, views...) is a real extent and hard-errors below when unbound.
+                    if (ax == 0 && batchLikeDimSymbol(sym))
                     {
-                        s[ax] = batch; // leading axis with an unbound symbol: the documented batch fallback
+                        s[ax] = batch;
                         continue;
                     }
                     for (const std::string &fs: e.freeSymbols)
@@ -157,14 +164,27 @@ namespace vknn {
             }
             throw Error(Status::InvalidArgument, msg);
         }
+        for (auto &nd: g.nodes)
+        {
+            inferNodeShape(g, nd);
+        }
+    }
+
+    /// The per-node forward shape rule of inferShapes, callable on its own so constFold can interleave
+    /// it with value folding inside ONE program-order walk: folding a Shape/Gather/Concat chain makes a
+    /// dynamic Reshape's target constant, this rule then resolves the Reshape (and the activations
+    /// behind it) immediately, which unblocks folding the NEXT block's Shape() later in the same walk.
+    /// Without the interleave each fold/infer alternation advanced exactly one such block per round (a
+    /// deep encoder took dozens of full-graph rounds to converge, re-warning on every still-unresolved
+    /// tensor each round). Idempotent; only ever fills shapes that are derivable from resolved inputs.
+    void inferNodeShape(Graph &g, Node &nd) {
         auto SH = [&](TensorId id) -> Shape & {
             return g.desc(id).shape;
         };
-        for (auto &nd: g.nodes)
         {
             if (nd.outputs.empty())
             {
-                continue;
+                return;
             }
             TensorId o = nd.outputs[0];
             switch (nd.type)
@@ -576,10 +596,16 @@ namespace vknn {
                     break;
                 }
                 case OpType::Transpose: {
-                    const Shape &a    = SH(nd.inputs[0]);
-                    const auto  &perm = nd.attr.getints("perm");
+                    const Shape &a = SH(nd.inputs[0]);
+                    if (a.empty())
+                    {
+                        break; // input unresolved: defer silently, a later fold/infer round fills it
+                    }
+                    const auto &perm = nd.attr.getints("perm");
                     if (!perm.empty() && perm.size() != a.size())
                     {
+                        // A RESOLVED input whose rank disagrees with perm is a real model/import
+                        // defect (an unresolved input is the silent deferral above, never this).
                         VKNN_WARN << "Transpose '" << nd.name << "': perm rank " << perm.size() << " != input rank " << a.size() << " (shape " << shapeStr(a) << "); leaving unresolved";
                         break; // indexing a mismatched perm would read past the shape vector
                     }

@@ -1,7 +1,10 @@
 // Segment: one compiled, executable run of graph nodes assigned to a single backend.
 #pragma once
 #include "vknn/exec_context.h"
+#include "vknn/io_link.h"
+#include "vknn/status.h"
 #include "vknn/tensor.h"
+#include <string>
 #include <vector>
 
 namespace vknn {
@@ -13,10 +16,45 @@ namespace vknn {
     /// runs its segments in order. Produced by Backend::compileSegment() and owned by the Session.
     class Segment {
       public:
-        virtual ~Segment()                 = default;
+        virtual ~Segment() = default;
         /// Execute this segment's nodes against the run's tensor pool. `ctx` is valid only for the
         /// duration of the call and must not be retained past it.
         virtual void run(ExecContext &ctx) = 0;
+
+        // ---- device-resident output->input links (Session::linkOutputToInput) ----
+        // A backend that keeps boundary tensors resident across runs (the Vulkan segment) overrides
+        // these; the default says "no device path" and the Session falls back to host-buffer linking
+        // (the CPU backend's semantics).
+
+        /// Register `sourceOutput` (one of this segment's boundary outputs) as the resident source
+        /// for `destInput` (one of its boundary inputs): the segment copies the declared ranges from
+        /// the source's device buffer into the destination's at the START of each run, before any
+        /// node executes, and stops downloading the source to host. Returns Unsupported when this
+        /// segment has no device-resident path; any other failure fills `whyNot`.
+        virtual Status addResidentLink(TensorId sourceOutput, TensorId destInput, std::string &whyNot) {
+            (void) sourceOutput;
+            (void) destInput;
+            (void) whyNot;
+            return Status::Unsupported;
+        }
+        /// Replace the copy ranges of a link registered by addResidentLink(). Offsets/counts are
+        /// canonical elements, already bounds-checked by the Session.
+        virtual void setResidentLinkRanges(TensorId sourceOutput, TensorId destInput, const std::vector<LinkRange> &ranges) {
+            (void) sourceOutput;
+            (void) destInput;
+            (void) ranges;
+        }
+        /// Drop every link registered by addResidentLink() (linked outputs download again, linked
+        /// inputs re-pack from host state on the next run).
+        virtual void clearResidentLinks() {
+        }
+        /// Download the current device residency of a linked boundary tensor into `rt.host` (fp32
+        /// canonical NCHW). False when this segment holds no buffer for `id`.
+        virtual bool downloadResident(TensorId id, RtTensor &rt) {
+            (void) id;
+            (void) rt;
+            return false;
+        }
 
         /// Backend that compiled and owns this segment. Non-owning; the backend outlives the segment.
         Backend *backend = nullptr;

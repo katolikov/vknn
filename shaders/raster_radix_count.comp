@@ -1,0 +1,36 @@
+#version 450
+// Radix-sort digit histogram (pass 1 of 3 per digit). Each workgroup owns a contiguous chunk of
+// 4096 sort keys (256 lanes x 16 batches), counts the chunk's 8-bit digit occurrences at the
+// current shift in a shared 256-bin histogram, and writes the bins to the global histogram in
+// digit-major order: histogram[digit * numGroups + group]. A single exclusive scan over that
+// layout (raster_radix_scan) then yields, for every (digit, group) pair, the global scatter base
+// that keeps chunks in input order — the foundation of the sort's stability.
+// The live entry total is read from the binning scan's grand total, clamped to the buffer
+// capacity, so the dispatch can be sized to capacity while sorting only the real entries.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Keys      { uint keys[]; };
+layout(std430, binding = 1) readonly buffer Counter   { uint counter[]; };   // [0] = tile-entry total
+layout(std430, binding = 2) writeonly buffer Histo    { uint histogram[]; }; // [256 * numGroups]
+layout(push_constant) uniform PC {
+  uint shift;     // digit position: 0, 8, 16, 24
+  uint numGroups; // workgroups in this dispatch = ceil(capacity / 4096)
+  uint capacity;  // key/value buffer capacity in entries
+} pc;
+
+shared uint localHistogram[256];
+
+void main() {
+  uint lane  = gl_LocalInvocationID.x;
+  uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (group >= pc.numGroups) return; // y-spill overshoot (whole workgroup exits together)
+  localHistogram[lane] = 0u;
+  barrier();
+  uint entryCount = min(counter[0], pc.capacity);
+  uint chunkStart = group * 4096u;
+  for (uint batch = 0u; batch < 16u; ++batch) {
+    uint index = chunkStart + batch * 256u + lane;
+    if (index < entryCount) atomicAdd(localHistogram[(keys[index] >> pc.shift) & 255u], 1u);
+  }
+  barrier();
+  histogram[lane * pc.numGroups + group] = localHistogram[lane];
+}

@@ -35,8 +35,8 @@ the axis's `dim_param` — a bare symbol, an integer literal, or a `+`/`-`/`*` c
 recursive-descent evaluator, `src/import/dim_expr.h`) — against the bindings. The compound
 `past_sequence_length + sequence_length` resolves from its two bound symbols; binding three symbols
 resolves all 51 Qwen inputs. Precedence per axis: a per-tensor `--shape` declaration overrides a
-binding; else the binding evaluates; else the leading (batch) axis falls back to `batch`; else it is an
-error.
+binding; else the binding evaluates; else a leading axis that is unnamed or batch-named
+(`N`/`B`/`*batch*`, case-insensitive) falls back to `batch`; else it is an error.
 
 ### 3. Aggregate the unresolved-axis error and list the free symbols
 A dynamic non-batch axis that no declaration or binding resolves is still a hard error (never a silent

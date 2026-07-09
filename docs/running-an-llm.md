@@ -92,7 +92,15 @@ temperature + top-k + top-p.
 ```
 vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
           [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
+          [--no-kv-link]
 ```
+
+The KV cache is engine-resident by default: `vknn_chat` links every `present.*` output to
+its `past_key_values.*` input (`Session::linkOutputToInput`), so each token binds only
+`input_ids`/`attention_mask`/`position_ids` and the engine folds the new key/value row
+into the cache in place — on the Vulkan backend entirely on-device, with no host copy of
+the cache in either direction. `--no-kv-link` selects the host-side cache loop instead;
+both paths produce the same token stream.
 
 A one-shot completion, feeding token ids directly:
 

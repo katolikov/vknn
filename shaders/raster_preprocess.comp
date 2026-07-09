@@ -2,7 +2,11 @@
 // 3DGS preprocess: one thread per gaussian. Projects the world-space mean to 2D, projects the
 // world-space 3D covariance to a 2D conic via the perspective Jacobian (+0.3 screen-space low-pass),
 // computes the screen radius and packs everything the per-tile compositor needs. Matches the gsplat
-// 'classic' math in scripts/yonosplat/ref_rasterizer.py.
+// 'classic' math in scripts/yonosplat/ref_rasterizer.py. The binning radius is opacity-aware:
+// gaussians whose opacity sits below the compositor's 1/255 alpha cutoff are dropped, and the
+// 3-sigma radius shrinks to the ring where the conservative alpha bound crosses that cutoff —
+// both culls remove only tile entries every covered pixel would skip, leaving the composite
+// unchanged.
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Means { float means[]; };   // [N][3] world
 layout(std430, binding = 1) readonly buffer Covs  { float covs[]; };    // [N][9] world 3x3 row-major
@@ -61,11 +65,30 @@ void main() {
   if (det <= 1e-12) return;
   float mid = 0.5 * (c00 + c11);
   float lam = mid + sqrt(max(0.1, mid*mid - det));
+  // Opacity cull: the compositor computes alpha = min(0.99, opacity * exp(power)) with
+  // power <= 0, so alpha <= opacity — below the 1/255 alpha cutoff the gaussian is skipped at
+  // every pixel and contributes nothing anywhere. The 0.999999 factor keeps the drop
+  // conservative against the compositor's exp() rounding (exp of a non-positive value can land
+  // a few ulp above 1.0).
+  float opacity = opac[i];
+  if (opacity < (1.0 / 255.0) * 0.999999) return;
   float radius = ceil(3.0 * sqrt(lam));
+  // Opacity-aware radius: for any pixel offset d, qform(conic, d) >= |d|^2 / lambdaMax(cov2d)
+  // (1/lambdaMax is the smallest conic eigenvalue), so alpha <= opacity * exp(-0.5 |d|^2 /
+  // lambdaMax) — the bound along the max-variance axis, the weakest direction. With
+  // rEff^2 = 2 ln(255 opacity) lambdaMax, every pixel farther than rEff has alpha < 1/255 and
+  // hits the compositor's alpha cutoff, so tiles beyond rEff can be culled without changing the
+  // composite. ceil plus 1 pixel of pad dominates the fp32 rounding of this bound and of the
+  // compositor's own alpha evaluation; lam only ever overestimates lambdaMax (the discriminant
+  // floor), which weakens rEff conservatively. The 3-sigma radius is only ever shrunk.
+  float logTerm = 2.0 * log(255.0 * opacity);
+  if (logTerm > 0.0) {
+    radius = min(radius, ceil(sqrt(logTerm * lam)) + 1.0);
+  }
   gd[o+0u] = u; gd[o+1u] = v; gd[o+2u] = z;
   gd[o+3u] = c11/det; gd[o+4u] = -c01/det; gd[o+5u] = c00/det;  // conic (a,b,c)
   gd[o+6u] = cols[3u*i]; gd[o+7u] = cols[3u*i+1u]; gd[o+8u] = cols[3u*i+2u];
-  gd[o+9u] = opac[i];
+  gd[o+9u] = opacity;
   gd[o+10u] = radius;
   gd[o+11u] = 1.0;  // valid
 }

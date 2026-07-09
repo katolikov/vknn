@@ -140,6 +140,18 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "cannot open input file '%s' for '%s'\n", inFiles[i].c_str(), in.name.c_str());
                 return 1; // silently feeding zeros would fake a successful run on wrong data
             }
+            // The file must hold exactly the declared payload: a short file (wrong shape or dtype on
+            // the producing side) would zero-fill the tail and an oversized one would be silently
+            // truncated — both run "successfully" on garbage and surface as an inexplicable
+            // near-zero-cosine output instead of an error here.
+            f.seekg(0, std::ios::end);
+            int64_t fileBytes = (int64_t) f.tellg();
+            f.seekg(0, std::ios::beg);
+            if (fileBytes != need)
+            {
+                fprintf(stderr, "input file '%s' for '%s' holds %lld bytes but the declared %s %s input needs %lld\n", inFiles[i].c_str(), in.name.c_str(), (long long) fileBytes, shapeStr(in.shape).c_str(), dtypeStr(in.dtype), (long long) need);
+                return 1;
+            }
             f.read(reinterpret_cast<char *>(in.data.data()), need);
         }
         printf("input  '%s'  %s  %s\n", in.name.c_str(), shapeStr(in.shape).c_str(), dtypeStr(in.dtype));

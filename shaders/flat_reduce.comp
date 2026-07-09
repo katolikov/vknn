@@ -67,5 +67,5 @@ void main() {
 #ifdef PW_EPI
   acc = pw_apply(acc, int(gid));
 #endif
-  d[gid] = STORE(acc);
+  d[gid] = TO_STORE(acc); // saturating: a Sum/Prod reduction of in-range values can exceed the fp16 range
 }

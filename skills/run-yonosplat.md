@@ -10,9 +10,8 @@ export recipe live in [`../scripts/yonosplat/`](../scripts/yonosplat/) (see its
 - The **encoder** (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian/camera heads, 965M params) is a
   normal VKNN `Session`. It runs 100% on the GPU and produces 6 Gaussian outputs
   (means, covariances, harmonics, opacities, rotations, scales).
-- The **rasterizer** is a from-scratch Vulkan compute pipeline (preprocess -> tile-bin -> bitonic sort
-  -> per-tile alpha compositing), all in one GPU command buffer. `examples/yonosplat.cpp` wires the two
-  together.
+- The **rasterizer** is a from-scratch Vulkan compute pipeline (preprocess -> tile-bin -> stable radix
+  sort -> per-tile alpha compositing). `examples/splatting/yonosplat.cpp` wires the two together.
 
 ## One-shot demo
 

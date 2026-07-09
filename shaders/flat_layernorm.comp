@@ -52,6 +52,6 @@ void main() {
 #ifdef PW_EPI
     y = pw_apply(y, base + j);
 #endif
-    d[base + j] = STORE(y);
+    d[base + j] = TO_STORE(y); // saturating: gamma*xhat+beta can exceed the fp16 range
   }
 }

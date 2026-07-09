@@ -30,8 +30,10 @@ namespace vknn {
 
         /// Declared concrete shapes for graph inputs on the ONNX-load path (createFromOnnx), keyed by
         /// input tensor name. An input listed here has its dynamic (negative) dims resolved from the
-        /// declared shape; an input absent here falls back to `batch` (=1) on its leading axis and a
-        /// dynamic non-batch axis is a hard error rather than a silent 1x1 plan (see inferShapes). The
+        /// declared shape; an input absent here falls back to `batch` (=1) on an unnamed or batch-named
+        /// leading axis, and any other dynamic axis (a spatial/feature axis, or a leading axis whose
+        /// dim_param is not batch-named) is a hard error rather than a silent freeze to 1 (see
+        /// inferShapes). The
         /// batch-only default (empty map) compiles a fixed-shape model byte-identically. Consumed only
         /// when building a Session directly from ONNX; a .vxm already has its shapes baked at compile
         /// time (set them there via vknn_compile --shape / --batch).
@@ -43,7 +45,8 @@ namespace vknn {
         /// "past_sequence_length + sequence_length" — resolves entirely from these bindings is filled
         /// automatically, so a many-input decoder needs only a couple of bindings instead of a per-tensor
         /// `inputShapes` entry each. `inputShapes` (a per-tensor concrete shape) overrides a binding for
-        /// that tensor; the leading (batch) axis still falls back to `batch`. Empty (the default) keeps
+        /// that tensor; an unnamed or batch-named leading axis still falls back to `batch`. Empty (the
+        /// default) keeps
         /// the batch-only path unchanged. Consumed only when building a Session directly from ONNX; a
         /// .vxm already has its shapes baked at compile time (set them there via vknn_compile --dim).
         std::map<std::string, int64_t> dimBindings;

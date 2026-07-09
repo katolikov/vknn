@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Eject
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,12 +44,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,8 +69,6 @@ import com.vknn.chat.splat.OrbitCamera
 import com.vknn.chat.splat.SplatPhase
 import com.vknn.chat.splat.SplatPose
 import com.vknn.chat.splat.SplatUiState
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.flow.debounce
 import kotlin.math.roundToInt
 
 // The 3D-splat mode: a guided 8-frame capture (slowly arc the phone around the subject) feeds the
@@ -82,14 +79,18 @@ import kotlin.math.roundToInt
 fun SplatScreen(
     ui: SplatUiState,
     onLoad: () -> Unit,
+    onUnload: () -> Unit,
     onStartCapture: () -> Unit,
     onFrame: (Bitmap, Float, Float) -> Unit,
     onOrbit: (OrbitCamera) -> Unit,
     onRecapture: () -> Unit,
     onOpenLibrary: () -> Unit,
 ) {
+    val encoderLoaded = ui.phase == SplatPhase.CAPTURING ||
+        ui.phase == SplatPhase.ENCODING ||
+        ui.phase == SplatPhase.VIEWER
     Column(Modifier.fillMaxSize().background(Bg)) {
-        SplatTopBar()
+        SplatTopBar(showUnload = encoderLoaded, onUnload = onUnload)
         when (ui.phase) {
             SplatPhase.MISSING -> SplatSetup(
                 title = "Model not downloaded",
@@ -114,7 +115,7 @@ fun SplatScreen(
 }
 
 @Composable
-private fun SplatTopBar() {
+private fun SplatTopBar(showUnload: Boolean, onUnload: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -127,6 +128,10 @@ private fun SplatTopBar() {
         Column(Modifier.weight(1f)) {
             Text("YoNoSplat", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text("3D splat capture — on-device", color = TextSecondary, fontSize = 11.sp)
+        }
+        if (showUnload) {
+            TopBarIconButton(Icons.Filled.Eject, "unload model", onUnload)
+            Spacer(Modifier.width(8.dp))
         }
         Row(
             Modifier.background(AccentDim, RoundedCornerShape(999.dp)).padding(horizontal = 9.dp, vertical = 4.dp),
@@ -284,17 +289,15 @@ private fun CapturePane(ui: SplatUiState, onStartCapture: () -> Unit, onFrame: (
 // The rendered splat with its orbit gestures. One finger drives the whole orbit: horizontal drag =
 // azimuth, vertical drag = elevation. Zoom is reachable one-handed through a double tap (dolly in)
 // and the +/- control pinned to the render's bottom corner; a pinch still dollies both ways for
-// two-handed use. The camera state accumulates locally at motion-event rate and a debounce fires the
-// re-render (~0.3-0.7 s of GPU work), so a render never chases the finger; snapshotFlow conflates,
-// so a burst of gesture updates collapses to the camera the finger settled on.
-@OptIn(FlowPreview::class)
+// two-handed use. Every gesture update reaches the view model immediately; its single-flight
+// render loop coalesces the stream to back-to-back renders of the latest pose, so the orbit
+// tracks the finger continuously at whatever rate the rasterizer sustains.
 @Composable
 private fun ViewerPane(ui: SplatUiState, onOrbit: (OrbitCamera) -> Unit, onRecapture: () -> Unit) {
     var camera by remember { mutableStateOf(OrbitCamera()) }
-    LaunchedEffect(Unit) {
-        snapshotFlow { camera }
-            .debounce(RENDER_DEBOUNCE_MS)
-            .collect { settled -> if (settled != OrbitCamera()) onOrbit(settled) }
+    val moveCamera: (OrbitCamera) -> Unit = { next ->
+        camera = next
+        onOrbit(next)
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
         Box(
@@ -307,13 +310,15 @@ private fun ViewerPane(ui: SplatUiState, onOrbit: (OrbitCamera) -> Unit, onRecap
                 // with requireUnconsumed = false; a drag past touch slop then consumes the moves and
                 // cancels the pending tap. The two coexist without stealing from each other.
                 .pointerInput(Unit) {
-                    detectTapGestures(onDoubleTap = { camera = SplatPose.doubleTapZoomStep(camera) })
+                    detectTapGestures(onDoubleTap = { moveCamera(SplatPose.doubleTapZoomStep(camera)) })
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, dragDelta, pinchScale, _ ->
-                        camera = SplatPose.applyPinch(
-                            SplatPose.applyDrag(camera, dragDelta.x, dragDelta.y),
-                            pinchScale,
+                        moveCamera(
+                            SplatPose.applyPinch(
+                                SplatPose.applyDrag(camera, dragDelta.x, dragDelta.y),
+                                pinchScale,
+                            ),
                         )
                     }
                 },
@@ -335,8 +340,8 @@ private fun ViewerPane(ui: SplatUiState, onOrbit: (OrbitCamera) -> Unit, onRecap
                 )
             }
             ZoomControl(
-                onZoomIn = { camera = SplatPose.zoomInStep(camera) },
-                onZoomOut = { camera = SplatPose.zoomOutStep(camera) },
+                onZoomIn = { moveCamera(SplatPose.zoomInStep(camera)) },
+                onZoomOut = { moveCamera(SplatPose.zoomOutStep(camera)) },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp),
             )
         }
@@ -367,7 +372,8 @@ private fun ViewerPane(ui: SplatUiState, onOrbit: (OrbitCamera) -> Unit, onRecap
 // The one-handed zoom affordance: two discrete dolly steps in a translucent pill over the render's
 // bottom corner, where a thumb already rests. Each button consumes the taps that land on it, so a tap
 // zooms instead of orbiting; it leaves motion unconsumed, so a drag that starts on the pill still
-// orbits. Steps coalesce through the same debounce as a drag, and a burst of taps costs one render.
+// orbits. Steps flow through the view model's render coalescing, so a burst of taps renders the
+// latest dolly.
 @Composable
 private fun ZoomControl(onZoomIn: () -> Unit, onZoomOut: () -> Unit, modifier: Modifier = Modifier) {
     Column(
@@ -454,6 +460,3 @@ internal fun normalizedFocals(
     return focalXNorm to focalYNorm
 }
 
-// Gesture-to-render quiet period: long enough that a continuous drag issues no render, short enough
-// that the render starts as the finger lifts.
-private const val RENDER_DEBOUNCE_MS = 300L

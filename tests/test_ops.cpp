@@ -2017,6 +2017,241 @@ TEST(Passes, InferShapesUnboundSymbolErrors) {
     EXPECT_TRUE(threw) << "an unbound symbolic non-batch axis must hard-error naming the symbol";
 }
 
+// --- The leading-axis batch fallback applies only to batch-NAMED symbols: "batch_size"/"N"/"B"
+// (case-insensitive, or any name containing "batch") freeze to `batch` when unbound. ---
+TEST(Passes, InferShapesLeadingBatchNamedSymbolFallsBack) {
+    for (const char *sym: {"batch_size", "batch", "N", "b", "Batch"})
+    {
+        Graph g = makeSymbolicInputGraph({-1, 3}, {sym, ""});
+        inferShapes(g, 2); // no bindings; batch = 2
+        EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {2, 3})) << "symbol '" << sym << "' should take the batch fallback";
+    }
+}
+
+// --- A leading symbol that does NOT name the batch axis (num_frames/views/...) is a real extent: an
+// unbound one is the aggregated hard error naming the symbol, never a silent freeze to batch=1 (the
+// frame-interp class: a [num_frames,C,H,W] input frozen to 1 frame runs on truncated data and returns
+// near-zero-cosine output with no diagnostic). ---
+TEST(Passes, InferShapesLeadingNonBatchSymbolErrors) {
+    Graph g     = makeSymbolicInputGraph({-1, 3, 16, 16}, {"num_frames", "", "", ""});
+    bool  threw = false;
+    try
+    {
+        inferShapes(g, 1); // no bindings
+    } catch (const Error &e)
+    {
+        threw = true;
+        EXPECT_EQ(e.status(), Status::InvalidArgument);
+        EXPECT_NE(std::string(e.what()).find("num_frames"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("--dim"), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(threw) << "an unbound non-batch LEADING symbol must hard-error naming the symbol";
+}
+
+// --- The same non-batch leading symbol resolves normally from a --dim binding. ---
+TEST(Passes, InferShapesLeadingNonBatchSymbolBinds) {
+    Graph                          g     = makeSymbolicInputGraph({-1, 3, 16, 16}, {"num_frames", "", "", ""});
+    std::map<std::string, int64_t> binds = {{"num_frames", 4}};
+    inferShapes(g, 1, nullptr, &binds);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {4, 3, 16, 16}));
+}
+
+// --- A leading dynamic axis with NO recorded symbol keeps the documented batch fallback (a bare
+// dynamic batch dim is exported without a dim_param by several toolchains). ---
+TEST(Passes, InferShapesLeadingUnnamedAxisFallsBack) {
+    Graph g = makeSymbolicInputGraph({-1, 3}, {"", ""});
+    inferShapes(g, 3);
+    EXPECT_EQ(g.desc(g.inputs[0]).shape, (Shape {3, 3}));
+}
+
+namespace {
+    // Two chained "blocks" of the dynamic-shape pattern deep encoders emit — each block reads
+    // Shape() of ITS OWN activations to build the next Reshape's target — ending in a Transpose:
+    //   t1=Relu(x); s1=Shape(t1); r1=Reshape(t1,s1); t2=Relu(r1); s2=Shape(t2); r2=Reshape(t2,s2);
+    //   y=Transpose(r2, perm)
+    // Exercises the fold/infer interleave (const_fold.cpp calling inferNodeShape per node) and the
+    // Transpose unresolved-input deferral.
+    Graph makeShapeChainedBlocksGraph() {
+        Graph g;
+        auto  addT = [&](const char *nm, Shape sh = {}) {
+            TensorDesc d;
+            d.name  = nm;
+            d.shape = std::move(sh);
+            return g.addTensor(d);
+        };
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {2, 3};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId t1 = addT("t1"), s1 = addT("s1"), r1 = addT("r1");
+        TensorId t2 = addT("t2"), s2 = addT("s2"), r2 = addT("r2");
+        TensorId y  = addT("y");
+        g.desc(s1).dtype = g.desc(s2).dtype = DType::Int64;
+        g.desc(y).isOutput                  = true;
+        auto node = [&](OpType t, const char *nm, std::vector<TensorId> in, std::vector<TensorId> out) {
+            Node n;
+            n.type    = t;
+            n.name    = nm;
+            n.inputs  = std::move(in);
+            n.outputs = std::move(out);
+            return n;
+        };
+        Node tr = node(OpType::Transpose, "tr", {r2}, {y});
+        tr.attr.map["perm"] = ints({1, 0});
+        g.nodes             = {node(OpType::Relu, "relu1", {x}, {t1}), node(OpType::Shape, "shape1", {t1}, {s1}),
+                               node(OpType::Reshape, "reshape1", {t1, s1}, {r1}), node(OpType::Relu, "relu2", {r1}, {t2}),
+                               node(OpType::Shape, "shape2", {t2}, {s2}), node(OpType::Reshape, "reshape2", {t2, s2}, {r2}), tr};
+        g.outputs           = {y};
+        return g;
+    }
+} // namespace
+
+// --- A Transpose whose input shape is still UNRESOLVED defers silently (empty output shape, no
+// crash): an unresolved input is a normal mid-pipeline state, not the perm/rank-mismatch defect the
+// warning names. Before the deferral fix this warned "perm rank 2 != input rank 0" on every
+// inference round until the chain folded — thousands of false alarms on a deep encoder. ---
+TEST(Passes, TransposeDefersOnUnresolvedInput) {
+    Graph g = makeShapeChainedBlocksGraph();
+    inferShapes(g, 1); // no folding yet: reshape targets are runtime, so r1/r2/y stay unresolved
+    EXPECT_TRUE(g.desc(g.outputs[0]).shape.empty()) << "Transpose must defer, not fabricate a shape";
+}
+
+// --- constFold interleaves the per-node shape rule with value folding, so a chain of blocks that
+// each read Shape() of their own activations resolves in ONE fold pass: folding block 1's Shape
+// resolves its Reshape (and the activations behind it) immediately, which unblocks folding block
+// 2's Shape later in the SAME walk. Before the interleave each fold/infer alternation advanced one
+// block per round. ---
+TEST(Passes, ConstFoldResolvesChainedShapeBlocksInOnePass) {
+    Graph g = makeShapeChainedBlocksGraph();
+    inferShapes(g, 1);
+    EXPECT_GT(constFold(g), 0) << "the Shape chains must fold";
+    // Everything — both Reshapes AND the final Transpose — is resolved after the single pass.
+    TensorId y = g.outputs[0];
+    EXPECT_EQ(g.desc(y).shape, (Shape {3, 2})) << "Transpose output must be resolved (perm {1,0} of [2,3])";
+    EXPECT_EQ(constFold(g), 0) << "a second pass must find nothing left to fold";
+}
+
+namespace {
+    // data[1,4,8,8] (NC4) + a RUNTIME grid chain: flow (graph input, NC4) -> ConvertLayout ->
+    // flow_flat -> Add(base const) -> grid (flat) -> GridSample -> y. Exercises pinGridSampleGridFp32
+    // and the markFp32 frontier around a GridSample grid input.
+    Graph makeRuntimeGridGraph() {
+        Graph g;
+        auto  addT = [&](const char *nm, Shape sh, bool flat, bool input = false, bool output = false) {
+            TensorDesc d;
+            d.name     = nm;
+            d.shape    = std::move(sh);
+            d.gpuFlat  = flat;
+            d.isInput  = input;
+            d.isOutput = output;
+            return g.addTensor(d);
+        };
+        TensorId data = addT("data", {1, 4, 8, 8}, false, true);
+        TensorId flow = addT("flow", {1, 2, 8, 8}, false, true);
+        g.inputs      = {data, flow};
+        TensorId flowFlat = addT("flow#flat", {1, 8, 8, 2}, true);
+        TensorId base     = addT("base", {1, 8, 8, 2}, true);
+        {
+            TensorDesc &bd    = g.desc(base);
+            bd.isInitializer  = true;
+            HostBuffer hb;
+            hb.resizeElems(128, DType::Float32);
+            for (int i = 0; i < 128; ++i)
+            {
+                hb.f32()[i] = 0.f;
+            }
+            g.initializers[base] = hb;
+        }
+        TensorId grid = addT("grid", {1, 8, 8, 2}, true);
+        TensorId y    = addT("y", {1, 4, 8, 8}, false, false, true);
+        Node     cv;
+        cv.type    = OpType::ConvertLayout;
+        cv.name    = "to_flat";
+        cv.subOp   = 0; // NC4HW4 -> flat
+        cv.inputs  = {flow};
+        cv.outputs = {flowFlat};
+        Node add;
+        add.type    = OpType::Binary;
+        add.subOp   = (int) BinaryType::Add;
+        add.name    = "mk_grid";
+        add.inputs  = {flowFlat, base};
+        add.outputs = {grid};
+        Node gs;
+        gs.type    = OpType::GridSample;
+        gs.name    = "warp";
+        gs.inputs  = {data, grid};
+        gs.outputs = {y};
+        g.nodes    = {cv, add, gs};
+        g.outputs  = {y};
+        return g;
+    }
+} // namespace
+
+// --- pinGridSampleGridFp32: a RUNTIME grid tensor is pinned to fp32 storage (the grid holds
+// normalized sampling coordinates; fp16 storage quantizes them by up to ~0.5 px at 1920-wide
+// inputs), and the pin stops at the producing op — it never crosses onto a non-flat (NC4HW4)
+// tensor, whose conv-family kernels have no fp32 variant. ---
+TEST(Passes, PinGridSampleGridFp32PinsRuntimeGrid) {
+    Graph g = makeRuntimeGridGraph();
+    pinGridSampleGridFp32(g);
+    const Node &gs = g.nodes[2];
+    ASSERT_EQ(gs.type, OpType::GridSample);
+    EXPECT_TRUE(g.desc(gs.inputs[1]).storeFp32) << "runtime grid must be pinned fp32";
+    // The Add producing the grid is a real op: the walk stops there (its output IS the grid, so the
+    // node runs fp32), leaving upstream tensors untouched.
+    EXPECT_FALSE(g.desc(g.nodes[1].inputs[0]).storeFp32) << "flow#flat is upstream of the producer";
+    EXPECT_FALSE(g.desc(g.inputs[1]).storeFp32) << "the NC4 flow input must never be pinned";
+}
+
+// --- The pin walks THROUGH a passthrough ConvertLayout (same values, different layout) but stops
+// at the flat/NC4 frontier: the layout convert's NC4 source stays fp16 and the markFp32 frontier
+// walk bridges it with a ConvertDtype instead. ---
+TEST(Passes, PinGridSampleGridFp32StopsAtNc4) {
+    Graph g = makeRuntimeGridGraph();
+    // Rewire so the grid IS the ConvertLayout output: GridSample(data, flow#flat).
+    g.nodes[2].inputs[1] = g.nodes[0].outputs[0];
+    pinGridSampleGridFp32(g);
+    EXPECT_TRUE(g.desc(g.nodes[0].outputs[0]).storeFp32) << "the ConvertLayout output (the grid) is pinned";
+    EXPECT_FALSE(g.desc(g.inputs[1]).storeFp32) << "the walk must stop before the NC4 flow input";
+}
+
+// --- markFp32's frontier walk must NOT narrow a pinned grid back to fp16 for an fp16 GridSample:
+// the fp16 shader decodes the grid at its storage precision (GRID_FP32), so inserting a #f16
+// convert would re-quantize the coordinates the pin protects. Other fp16 consumers of fp32 tensors
+// still get their converts. ---
+TEST(Passes, MarkFp32KeepsPinnedGridWide) {
+    Graph g = makeRuntimeGridGraph();
+    pinGridSampleGridFp32(g);
+    TensorId pinnedGrid = g.nodes[2].inputs[1];
+    markFp32(g, "");
+    const Node *gs = nullptr;
+    for (const auto &nd: g.nodes)
+    {
+        if (nd.type == OpType::GridSample)
+        {
+            gs = &nd;
+        }
+    }
+    ASSERT_NE(gs, nullptr);
+    EXPECT_EQ(gs->inputs[1], pinnedGrid) << "the GridSample must keep reading the pinned fp32 grid directly";
+    EXPECT_TRUE(g.desc(gs->inputs[1]).storeFp32);
+    // The grid's producer (mk_grid, now an fp32 node) reads fp16 flow#flat: the frontier walk must
+    // bridge THAT input with a ConvertDtype so the fp32 kernel reads fp32 bytes.
+    const Node *mkGrid = nullptr;
+    for (const auto &nd: g.nodes)
+    {
+        if (nd.name == "mk_grid")
+        {
+            mkGrid = &nd;
+        }
+    }
+    ASSERT_NE(mkGrid, nullptr);
+    EXPECT_TRUE(g.desc(mkGrid->inputs[0]).storeFp32) << "the producer's fp16 operand gets an fp32 bridge";
+    EXPECT_NE(g.desc(mkGrid->inputs[0]).name.find("#f32"), std::string::npos) << g.desc(mkGrid->inputs[0]).name;
+}
+
 // --- A per-tensor --shape declaration overrides a --dim binding for that tensor (declared wins). ---
 TEST(Passes, InferShapesShapeOverridesDim) {
     Graph                          g        = makeSymbolicInputGraph({-1, -1}, {"batch_size", "sequence_length"});

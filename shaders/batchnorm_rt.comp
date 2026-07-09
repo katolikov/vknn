@@ -26,5 +26,5 @@ void main() {
   int cc = c < pc.C ? c : 0;
   float a = float(gamma[cc]) / sqrt(float(varr[cc]) + pc.eps);
   float b = float(beta[cc]) - float(mean[cc]) * a;
-  d[gid] = STORE(float(s[gid]) * a + b);
+  d[gid] = TO_STORE(float(s[gid]) * a + b); // saturating: scale+shift can exceed the fp16 range
 }
