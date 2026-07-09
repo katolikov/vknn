@@ -1,0 +1,48 @@
+#version 450
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
+// Pass 2 of the cooperative GlobalAveragePool (see global_avg_pool.cpp / avgpool_partial.comp). One
+// workgroup per (n, channel-block) folds that block's `groups` vec4 partial sums, divides by H*W,
+// runs any fused pointwise epilogue, and stores the four packed channels.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer P { vec4 part[]; };
+layout(std430, binding = 1) writeonly buffer Dst { STORE dst[]; };
+layout(push_constant) uniform PC { int N, C, H, W, groups; } pc;
+
+shared vec4 red[256];
+
+void main() {
+  int  Cb  = (pc.C + 3) / 4;
+  uint ncb = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (ncb >= uint(pc.N * Cb)) return;
+  int  cb = int(ncb) % Cb;
+  int  n  = int(ncb) / Cb;
+  int  hw = pc.H * pc.W;
+  uint t  = gl_LocalInvocationID.x;
+
+  vec4 acc = vec4(0.0);
+  for (int gi = int(t); gi < pc.groups; gi += 256) {
+    acc += part[ncb * uint(pc.groups) + uint(gi)];
+  }
+  red[t] = acc;
+  barrier();
+  for (uint s = 128u; s > 0u; s >>= 1) {
+    if (t < s) red[t] += red[t + s];
+    barrier();
+  }
+  if (t == 0u) {
+    vec4 r    = red[0] / float(hw);
+    int  didx = (n * Cb + cb) * 4;
+    for (int l = 0; l < 4; ++l) {
+      float v = r[l];
+#ifdef PW_EPI
+      v = pw_apply_nc4(v, didx + l);
+#endif
+      dst[didx + l] = STORE(v);
+    }
+  }
+}
