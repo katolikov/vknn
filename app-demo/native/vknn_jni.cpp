@@ -95,8 +95,9 @@ namespace {
         bool             mapped = false;
 
         int     L = 0, kvHeads = 0, C = 0, headDim = 0;
-        int64_t vocab = 0;
-        int     p     = 0; // absolute position across the whole conversation
+        int     presRows = 0; // rows the present outputs carry ([1,KV,presRows,HD]); the newest row is the last
+        int64_t vocab    = 0;
+        int     p        = 0; // absolute position across the whole conversation
 
         // Engine-resident KV cache (Session::linkOutputToInput): every present output is linked to
         // its past input, the fold happens inside the engine (on-device on the GPU backend), and only
@@ -150,25 +151,68 @@ namespace {
             kvLinked = true;
         }
 
-        // Update every link's ranges: fold the previous token's present row (index C per head) into
-        // cache slot `slot`, or clear the pending fold when `slot` < 0 (reset/first step).
+        // Update every link's ranges: fold the previous token's present row (the LAST present row —
+        // index C for a cache-concat present, 0 for a rows-only present) into cache slot `slot`, or
+        // clear the pending fold when `slot` < 0 (reset/first step).
         bool setKvFoldSlot(int64_t slot) {
-            std::vector<LinkRange> ranges;
-            if (slot >= 0)
-            {
-                ranges.resize((size_t) kvHeads);
-                for (int64_t h = 0; h < kvHeads; ++h)
-                {
-                    ranges[(size_t) h] = {(h * (C + 1) + C) * headDim, (h * C + slot) * headDim, headDim};
-                }
-            }
+            const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRows, C, headDim, slot);
             for (int l = 0; l < L; ++l)
             {
-                if (sess->linkOutputToInput(outInfo[(size_t) presKey[l]].name, inInfo[(size_t) pastKey[l]].name, ranges) != Status::Ok ||
-                    sess->linkOutputToInput(outInfo[(size_t) presVal[l]].name, inInfo[(size_t) pastVal[l]].name, ranges) != Status::Ok)
+                for (int part = 0; part < 2; ++part)
                 {
-                    LOGE("KV link update failed");
-                    return false;
+                    const std::string &pres = outInfo[(size_t) (part ? presVal[l] : presKey[l])].name;
+                    const std::string &past = inInfo[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                    const Status       st   = sess->linkOutputToInput(pres, past, ranges);
+                    if (st != Status::Ok)
+                    {
+                        LOGE("KV link update failed for %s -> %s at slot %lld: %s (engine log has the reason)", pres.c_str(), past.c_str(), (long long) slot, statusStr(st));
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Rebuild the host `inputs` past buffers from the engine-resident state — the device cache
+        // plus the pending fold from the last run's present — so the host cache loop can take over
+        // MID-STREAM with no token divergence. Call while the links still exist (readResident
+        // resolves linked names only).
+        bool resyncHostCache() {
+            const int64_t pendingSlot = p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1;
+            for (int l = 0; l < L; ++l)
+            {
+                for (int part = 0; part < 2; ++part)
+                {
+                    const std::string &presName = outInfo[(size_t) (part ? presVal[l] : presKey[l])].name;
+                    const std::string &pastName = inInfo[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                    IOTensor           resident;
+                    if (sess->readResident(pastName, resident) != Status::Ok)
+                    {
+                        return false;
+                    }
+                    IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
+                    if (resident.data.size() != hostPast.data.size())
+                    {
+                        LOGE("resync: resident %s holds %zu bytes, host expects %zu", pastName.c_str(), resident.data.size(), hostPast.data.size());
+                        return false;
+                    }
+                    std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                    if (pendingSlot >= 0)
+                    {
+                        IOTensor present;
+                        if (sess->readResident(presName, present) != Status::Ok)
+                        {
+                            return false;
+                        }
+                        const float *src = reinterpret_cast<const float *>(present.data.data());
+                        float       *dst = reinterpret_cast<float *>(hostPast.data.data());
+                        for (int h = 0; h < kvHeads; ++h)
+                        {
+                            const float *s = src + ((size_t) h * presRows + (presRows - 1)) * headDim;
+                            float       *d = dst + ((size_t) h * C + pendingSlot) * headDim;
+                            std::memcpy(d, s, (size_t) headDim * sizeof(float));
+                        }
+                    }
                 }
             }
             return true;
@@ -188,28 +232,44 @@ namespace {
             am[(size_t) C] = 1; // the current token (present slot C)
             setI64(maskIdx, am);
 
-            Status runStatus;
+            Status runStatus = Status::Ok;
+            bool   ranLinked = false;
             if (kvLinked)
             {
                 // The engine folds the PREVIOUS token's row into slot p-1 at the start of this run;
                 // a reset step clears the pending fold and rebinds the zeroed past buffers instead.
                 const bool rebind = rebindPastNextStep;
-                if (!setKvFoldSlot(rebind || p == 0 ? -1 : std::min<int64_t>(p - 1, C - 1)))
+                if (setKvFoldSlot(rebind || p == 0 ? -1 : std::min<int64_t>(p - 1, C - 1)))
                 {
-                    return -1;
-                }
-                std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
-                if (rebind)
-                {
-                    for (int l = 0; l < L; ++l)
+                    std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+                    if (rebind)
                     {
-                        bound.push_back(inputs[(size_t) pastKey[l]]);
-                        bound.push_back(inputs[(size_t) pastVal[l]]);
+                        for (int l = 0; l < L; ++l)
+                        {
+                            bound.push_back(inputs[(size_t) pastKey[l]]);
+                            bound.push_back(inputs[(size_t) pastVal[l]]);
+                        }
                     }
+                    runStatus          = sess->run(bound, outputs);
+                    rebindPastNextStep = false;
+                    ranLinked          = true;
+                } else
+                {
+                    // A mid-stream link failure: bring the engine-resident cache (device rows + the
+                    // pending fold) back into the host buffers, drop the links, and continue THIS and
+                    // every later step on the host cache loop — same tokens, no lost state.
+                    LOGE("switching to the host KV loop at p=%d (resyncing the cache from the engine)", p);
+                    if (!resyncHostCache())
+                    {
+                        LOGE("host cache resync failed; cannot continue");
+                        return -1;
+                    }
+                    sess->clearLinks();
+                    kvLinked           = false;
+                    rebindPastNextStep = false;
                 }
-                runStatus          = sess->run(bound, outputs);
-                rebindPastNextStep = false;
-            } else
+            }
+            if (!ranLinked)
             {
                 runStatus = sess->run(inputs, outputs);
             }
@@ -246,7 +306,7 @@ namespace {
                         float          *dst  = reinterpret_cast<float *>(past.data.data());
                         for (int h = 0; h < kvHeads; ++h)
                         {
-                            const float *s = src + ((size_t) h * (C + 1) + C) * headDim;
+                            const float *s = src + ((size_t) h * presRows + (presRows - 1)) * headDim;
                             float       *d = dst + ((size_t) h * C + slot) * headDim;
                             std::memcpy(d, s, (size_t) headDim * sizeof(float));
                         }
@@ -294,6 +354,7 @@ namespace {
         // The PREFILL bucket keeps the host cache flow (it runs once per turn), so at each turn
         // boundary the device state materializes back into `dec` via readResident().
         int  decodeBucket       = -1;
+        int  presRowsDecode     = 0;     // rows the DECODE bucket's present outputs carry ([1,KV,rows,HD])
         bool decodeLinked       = false; // links declared on the decode bucket
         bool cacheOnDevice      = false; // the decode bucket's resident past is ahead of dec[]
         bool rebindPastNextStep = false; // next decode step re-seeds the device cache from dec[]
@@ -348,18 +409,13 @@ namespace {
             decodeLinked = true;
         }
 
-        // Update every decode link: fold the previous run's present row (index C per head) into
-        // cache slot `slot`, or clear the pending fold when `slot` < 0.
+        // Update every decode link: fold the previous run's present row into cache slot `slot`, or
+        // clear the pending fold when `slot` < 0. The source row is the LAST row of the decode
+        // bucket's present output — its row count comes from that bucket's own output shape
+        // (presRowsDecode), never assumed: this decoder's present carries only the produced rows
+        // ([1,KV,1,HD] at S=1), unlike a cache-concat decoder's [1,KV,C+1,HD].
         bool setDecodeFoldSlot(int64_t slot) {
-            std::vector<LinkRange> ranges;
-            if (slot >= 0)
-            {
-                ranges.resize((size_t) kvHeads);
-                for (int64_t h = 0; h < kvHeads; ++h)
-                {
-                    ranges[(size_t) h] = {(h * (C + 1) + C) * headDim, (h * C + slot) * headDim, headDim};
-                }
-            }
+            const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRowsDecode, C, headDim, slot);
             for (int l = 0; l < L; ++l)
             {
                 for (int part = 0; part < 2; ++part)
@@ -367,9 +423,10 @@ namespace {
                     char pastBuf[64], presBuf[64];
                     pastName(l, part, pastBuf);
                     presentName(l, part, presBuf);
-                    if (sess->linkOutputToInput((size_t) decodeBucket, presBuf, pastBuf, ranges) != Status::Ok)
+                    const Status st = sess->linkOutputToInput((size_t) decodeBucket, presBuf, pastBuf, ranges);
+                    if (st != Status::Ok)
                     {
-                        LOGE("VLM KV link update failed");
+                        LOGE("VLM KV link update failed for %s -> %s at slot %lld: %s (engine log has the reason)", presBuf, pastBuf, (long long) slot, statusStr(st));
                         return false;
                     }
                 }
@@ -410,7 +467,7 @@ namespace {
                         float       *dst = reinterpret_cast<float *>(hostPast.data.data());
                         for (int h = 0; h < kvHeads; ++h)
                         {
-                            const float *s = src + ((size_t) h * (C + 1) + C) * headDim;
+                            const float *s = src + ((size_t) h * presRowsDecode + (presRowsDecode - 1)) * headDim;
                             float       *d = dst + ((size_t) h * C + pendingSlot) * headDim;
                             std::memcpy(d, s, (size_t) headDim * sizeof(float));
                         }
@@ -611,34 +668,51 @@ namespace {
             setDecShape(posIdx, {1, 1}, DType::Int64);
             int64_t pos = p;
             std::memcpy(dec[(size_t) posIdx].data.data(), &pos, sizeof(int64_t));
-            const int slot = p < C ? p : C - 1;
+            const int slot      = p < C ? p : C - 1;
+            bool      ranLinked = false;
             if (decodeLinked)
             {
                 // The engine folds the previous run's row into `pendingSlot` at the start of this
                 // run. The first decode step of a turn re-seeds the device cache from the host `dec`
                 // past (which prefill just updated) and clears any pending fold.
                 const bool rebind = rebindPastNextStep || !cacheOnDevice;
-                if (!setDecodeFoldSlot(rebind ? -1 : pendingSlot))
+                if (setDecodeFoldSlot(rebind ? -1 : pendingSlot))
                 {
-                    return -1;
-                }
-                std::vector<IOTensor> bound {dec[(size_t) embIdx], dec[(size_t) maskIdx], dec[(size_t) posIdx]};
-                if (rebind)
-                {
-                    for (int l = 0; l < L; ++l)
+                    std::vector<IOTensor> bound {dec[(size_t) embIdx], dec[(size_t) maskIdx], dec[(size_t) posIdx]};
+                    if (rebind)
                     {
-                        bound.push_back(dec[(size_t) pastKey[l]]);
-                        bound.push_back(dec[(size_t) pastVal[l]]);
+                        for (int l = 0; l < L; ++l)
+                        {
+                            bound.push_back(dec[(size_t) pastKey[l]]);
+                            bound.push_back(dec[(size_t) pastVal[l]]);
+                        }
                     }
-                }
-                if (sess->run(bound, outs) != Status::Ok)
+                    if (sess->run(bound, outs) != Status::Ok)
+                    {
+                        return -1;
+                    }
+                    rebindPastNextStep = false;
+                    cacheOnDevice      = true;
+                    pendingSlot        = slot;
+                    ranLinked          = true;
+                } else
                 {
-                    return -1;
+                    // A mid-stream link failure: bring the engine-resident cache (device rows + the
+                    // pending fold) back into the host `dec` buffers, drop the links, and continue
+                    // THIS and every later step on the host cache loop — same tokens, no lost state.
+                    LOGE("switching to the host KV loop at p=%d (resyncing the cache from the engine)", p);
+                    if (cacheOnDevice && !materializeDeviceCache())
+                    {
+                        LOGE("host cache resync failed; cannot continue");
+                        return -1;
+                    }
+                    sess->clearLinks();
+                    decodeLinked       = false;
+                    cacheOnDevice      = false;
+                    rebindPastNextStep = false;
                 }
-                rebindPastNextStep = false;
-                cacheOnDevice      = true;
-                pendingSlot        = slot;
-            } else
+            }
+            if (!ranLinked)
             {
                 if (sess->run(dec, outs) != Status::Ok)
                 {
@@ -763,8 +837,20 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
         d->kvHeads      = (int) ks[1];
         d->C            = (int) ks[2];
         d->headDim      = (int) ks[3];
-        d->vocab        = d->outInfo[(size_t) d->logitsIdx].shape.back();
+        // Present rows from the PRESENT output's own shape, never assumed: a cache-concat decoder
+        // carries C+1 rows, a rows-only decoder carries exactly the step's rows.
+        if (d->presKey[0] >= 0 && d->outInfo[(size_t) d->presKey[0]].shape.size() == 4)
+        {
+            d->presRows = (int) d->outInfo[(size_t) d->presKey[0]].shape[2];
+        }
+        d->vocab = d->outInfo[(size_t) d->logitsIdx].shape.back();
         d->logits.assign((size_t) d->vocab, 0.0f);
+        if (d->presRows <= 0)
+        {
+            LOGE("present outputs are missing or not [1,KV,rows,HD]; cannot drive the KV fold");
+            delete d;
+            return 0;
+        }
 
         d->inputs.resize(d->inInfo.size());
         for (size_t i = 0; i < d->inInfo.size(); ++i)
@@ -942,10 +1028,27 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
         m->visInT[0].shape = m->visIn[0].shape;
         m->visInT[0].dtype = DType::Float32;
         m->decodeBucket    = decDecB;
-        m->setupDecodeLinks();
+        // Present rows from the DECODE bucket's own present output shape (decOut describes the
+        // PREFILL bucket, whose present carries prefillS rows — a different count). This decoder's
+        // present holds only the produced rows: [1,KV,1,HD] at S=1.
+        {
+            const std::vector<IOInfo> decodeOut = m->sess->outputInfo((size_t) decDecB);
+            const int                 presAt    = findByName(decodeOut, "present.0.key");
+            if (presAt >= 0 && decodeOut[(size_t) presAt].shape.size() == 4)
+            {
+                m->presRowsDecode = (int) decodeOut[(size_t) presAt].shape[2];
+            }
+        }
+        if (m->presRowsDecode > 0)
+        {
+            m->setupDecodeLinks();
+        } else
+        {
+            LOGE("decode-bucket present outputs are missing or not [1,KV,rows,HD]; using the host cache loop");
+        }
 
-        LOGI("vlm loaded: L=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imgRows=%d img=%d kv_linked=%d", m->L, m->kvHeads, m->C, m->headDim, m->H,
-             (long long) m->vocab, m->prefillS, m->imgRows, m->imgSide, m->decodeLinked ? 1 : 0);
+        LOGI("vlm loaded: L=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imgRows=%d img=%d presRowsDec=%d kv_linked=%d", m->L, m->kvHeads, m->C, m->headDim, m->H,
+             (long long) m->vocab, m->prefillS, m->imgRows, m->imgSide, m->presRowsDecode, m->decodeLinked ? 1 : 0);
         return reinterpret_cast<jlong>(m);
     } catch (const std::exception &loadError)
     {

@@ -85,9 +85,9 @@ int main(int argc, char **argv) {
     const int     topK         = atoi(opt(argc, argv, "--top-k", "0"));
     const float   topP         = (float) atof(opt(argc, argv, "--top-p", "1"));
     const int64_t eos          = atoll(opt(argc, argv, "--eos", "151643"));
-    const bool    kvLink       = !flagSet(argc, argv, "--no-kv-link");
-    cfg.timing                 = flagSet(argc, argv, "--timing"); // per-run pack/submit/unpack walls
-    std::mt19937  rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
+    bool          kvLink       = !flagSet(argc, argv, "--no-kv-link"); // may drop to the host loop mid-stream on a link failure
+    cfg.timing                 = flagSet(argc, argv, "--timing");      // per-run pack/submit/unpack walls
+    std::mt19937 rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -155,7 +155,16 @@ int main(int argc, char **argv) {
     const int     C       = (int) ks[2];
     const int     headDim = (int) ks[3];
     const int64_t vocab   = outs[logitsIdx].shape.back();
-    fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, (long long) vocab);
+    // Present rows from the PRESENT output's own shape, never assumed: a cache-concat decoder
+    // carries C+1 rows (the new token at index C), a rows-only decoder carries exactly the step's
+    // rows (one row at S=1). The fold source is always the LAST present row.
+    const int presRows = (presKey[0] >= 0 && outs[(size_t) presKey[0]].shape.size() == 4) ? (int) outs[(size_t) presKey[0]].shape[2] : 0;
+    if (presRows <= 0)
+    {
+        fprintf(stderr, "present outputs are missing or not [1,KV,rows,HD]; cannot drive the KV fold\n");
+        return 2;
+    }
+    fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d present_rows=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, presRows, (long long) vocab);
 
     // Persistent boundary tensors, in model input order. Under --no-kv-link the past key/value
     // buffers ARE the KV cache (fp32 host boundary), retained across steps and turns; with linking
@@ -222,33 +231,80 @@ int main(int argc, char **argv) {
         am[(size_t) C] = 1; // the current token (appended at index C)
         setI64(maskIdx, am);
 
-        Status runStatus;
+        Status runStatus = Status::Ok;
+        bool   ranLinked = false;
         if (kvLink)
         {
-            // The engine folds the PREVIOUS token's present row (index C of each head) into cache
-            // slot p-1 at the start of this run (min guards the overrun past the compiled context,
-            // like the host loop's slot clamp).
-            if (p > 0)
+            // The engine folds the PREVIOUS token's present row (the last row of each head) into
+            // cache slot p-1 at the start of this run (min guards the overrun past the compiled
+            // context, like the host loop's slot clamp).
+            bool linksOk = true;
             {
-                const int64_t          slot = (p - 1) < C ? (p - 1) : C - 1;
-                std::vector<LinkRange> ranges((size_t) kvHeads);
-                for (int64_t h = 0; h < kvHeads; ++h)
+                const int64_t                slot   = p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1;
+                const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRows, C, headDim, slot);
+                for (int l = 0; l < L && linksOk; ++l)
                 {
-                    ranges[(size_t) h] = {(h * (C + 1) + C) * headDim, (h * C + slot) * headDim, headDim};
-                }
-                for (int l = 0; l < L; ++l)
-                {
-                    if (sess->linkOutputToInput(outs[(size_t) presKey[l]].name, ins[(size_t) pastKey[l]].name, ranges) != Status::Ok ||
-                        sess->linkOutputToInput(outs[(size_t) presVal[l]].name, ins[(size_t) pastVal[l]].name, ranges) != Status::Ok)
+                    for (int part = 0; part < 2 && linksOk; ++part)
                     {
-                        fprintf(stderr, "[chat] KV link update failed\n");
-                        return nullptr;
+                        const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                        const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                        const Status       st   = sess->linkOutputToInput(pres, past, ranges);
+                        if (st != Status::Ok)
+                        {
+                            fprintf(stderr, "[chat] KV link update failed for %s -> %s at slot %lld: %s (see log)\n", pres.c_str(), past.c_str(), (long long) slot, statusStr(st));
+                            linksOk = false;
+                        }
                     }
                 }
             }
-            std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
-            runStatus = sess->run(bound, outputs);
-        } else
+            if (linksOk)
+            {
+                std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+                runStatus = sess->run(bound, outputs);
+                ranLinked = true;
+            } else
+            {
+                // A mid-stream link failure: bring the engine-resident cache (device rows + the
+                // pending fold from the last run's present) back into freshly allocated host past
+                // buffers, drop the links, and continue THIS and every later step on the host cache
+                // loop — same tokens, no lost state.
+                fprintf(stderr, "[chat] switching to the host KV loop at p=%d (resyncing the cache from the engine)\n", p);
+                const int64_t pendingSlot = p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1;
+                for (int l = 0; l < L; ++l)
+                {
+                    for (int part = 0; part < 2; ++part)
+                    {
+                        IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
+                        hostPast.data.assign((size_t) ins[(size_t) (part ? pastVal[l] : pastKey[l])].elems * sizeof(float), 0);
+                        IOTensor resident;
+                        if (sess->readResident(hostPast.name, resident) != Status::Ok || resident.data.size() != hostPast.data.size())
+                        {
+                            fprintf(stderr, "[chat] host cache resync failed for %s; cannot continue\n", hostPast.name.c_str());
+                            return nullptr;
+                        }
+                        std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                        if (pendingSlot >= 0)
+                        {
+                            IOTensor present;
+                            if (sess->readResident(outs[(size_t) (part ? presVal[l] : presKey[l])].name, present) != Status::Ok)
+                            {
+                                fprintf(stderr, "[chat] host cache resync failed; cannot continue\n");
+                                return nullptr;
+                            }
+                            const float *src = reinterpret_cast<const float *>(present.data.data());
+                            float       *dst = reinterpret_cast<float *>(hostPast.data.data());
+                            for (int h = 0; h < kvHeads; ++h)
+                            {
+                                std::memcpy(dst + ((size_t) h * C + pendingSlot) * headDim, src + ((size_t) h * presRows + (presRows - 1)) * headDim, (size_t) headDim * sizeof(float));
+                            }
+                        }
+                    }
+                }
+                sess->clearLinks();
+                kvLink = false;
+            }
+        }
+        if (!ranLinked)
         {
             runStatus = sess->run(inputs, outputs);
         }
@@ -273,7 +329,7 @@ int main(int argc, char **argv) {
         }
         if (!kvLink)
         {
-            // Host fold: append the new token's key/value (present slot C) into cache slot p
+            // Host fold: append the new token's key/value (the last present row) into cache slot p
             // (min(p, C-1) guards the rare overrun past the compiled context).
             const int slot = p < C ? p : C - 1;
             for (int l = 0; l < L; ++l)
@@ -286,7 +342,7 @@ int main(int argc, char **argv) {
                     float          *dst  = reinterpret_cast<float *>(past.data.data());
                     for (int h = 0; h < kvHeads; ++h)
                     {
-                        const float *s = src + ((size_t) h * (C + 1) + C) * headDim;
+                        const float *s = src + ((size_t) h * presRows + (presRows - 1)) * headDim;
                         float       *d = dst + ((size_t) h * C + slot) * headDim;
                         std::memcpy(d, s, (size_t) headDim * sizeof(float));
                     }

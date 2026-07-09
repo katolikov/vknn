@@ -276,8 +276,21 @@ int main(int argc, char **argv) {
     auto presentNameOf = [](int layer, int part, char (&buf)[64]) {
         snprintf(buf, sizeof buf, part ? "present.%d.value" : "present.%d.key", layer);
     };
+    // Present rows from the DECODE bucket's own present output shape (decoderOutputInfo describes
+    // the PREFILL bucket, whose present carries prefillWindow rows). This decoder's present holds
+    // only the produced rows — [1,KV,1,HD] at S=1 — unlike a cache-concat decoder's [1,KV,C+1,HD];
+    // the fold source is always the LAST present row, so both conventions drive the same code.
+    int presRowsDecode = 0;
+    {
+        const std::vector<IOInfo> decodeOut = session->outputInfo((size_t) decoderDecodeBucket);
+        const int                 presAt    = indexOfName(decodeOut, "present.0.key");
+        if (presAt >= 0 && decodeOut[(size_t) presAt].shape.size() == 4)
+        {
+            presRowsDecode = (int) decodeOut[(size_t) presAt].shape[2];
+        }
+    }
     bool decodeLinked = false;
-    if (kvLink)
+    if (kvLink && presRowsDecode > 0)
     {
         decodeLinked = true;
         for (int layer = 0; layer < numLayers && decodeLinked; ++layer)
@@ -297,25 +310,18 @@ int main(int argc, char **argv) {
         }
         if (decodeLinked)
         {
-            fprintf(stderr, "[vlm] decode KV cache engine-resident (%d links)\n", 2 * numLayers);
+            fprintf(stderr, "[vlm] decode KV cache engine-resident (%d links, present rows %d)\n", 2 * numLayers, presRowsDecode);
         }
-    }
+    } else if (kvLink)
+    { fprintf(stderr, "[vlm] decode-bucket present outputs are missing or not [1,KV,rows,HD]; using the host cache loop\n"); }
     bool cacheOnDevice      = false; // the decode bucket's resident past is ahead of decoderInputs
     bool rebindPastNextStep = false; // next decode step re-seeds the device cache from decoderInputs
     int  pendingFoldSlot    = -1;    // cache slot of the fold the next decode run applies
 
-    // Update every decode link: fold the previous run's present row (index cacheSlots per head) into
-    // cache slot `slot`, or clear the pending fold when `slot` < 0.
+    // Update every decode link: fold the previous run's present row (the last row of the decode
+    // bucket's present) into cache slot `slot`, or clear the pending fold when `slot` < 0.
     auto setDecodeFoldSlot = [&](int64_t slot) {
-        std::vector<LinkRange> ranges;
-        if (slot >= 0)
-        {
-            ranges.resize((size_t) kvHeads);
-            for (int64_t head = 0; head < kvHeads; ++head)
-            {
-                ranges[(size_t) head] = {(head * (cacheSlots + 1) + cacheSlots) * headDim, (head * cacheSlots + slot) * headDim, headDim};
-            }
-        }
+        const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRowsDecode, cacheSlots, headDim, slot);
         for (int layer = 0; layer < numLayers; ++layer)
         {
             for (int part = 0; part < 2; ++part)
@@ -323,8 +329,10 @@ int main(int argc, char **argv) {
                 char pastBuf[64], presentBuf[64];
                 pastNameOf(layer, part, pastBuf);
                 presentNameOf(layer, part, presentBuf);
-                if (session->linkOutputToInput((size_t) decoderDecodeBucket, presentBuf, pastBuf, ranges) != Status::Ok)
+                const Status st = session->linkOutputToInput((size_t) decoderDecodeBucket, presentBuf, pastBuf, ranges);
+                if (st != Status::Ok)
                 {
+                    fprintf(stderr, "[vlm] KV link update failed for %s -> %s at slot %lld: %s (engine log has the reason)\n", presentBuf, pastBuf, (long long) slot, statusStr(st));
                     return false;
                 }
             }
@@ -365,7 +373,7 @@ int main(int argc, char **argv) {
                     float       *cache = reinterpret_cast<float *>(hostPast.data.data());
                     for (int head = 0; head < kvHeads; ++head)
                     {
-                        const float *srcRow   = src + ((size_t) head * (cacheSlots + 1) + cacheSlots) * headDim;
+                        const float *srcRow   = src + ((size_t) head * presRowsDecode + (presRowsDecode - 1)) * headDim;
                         float       *cacheRow = cache + ((size_t) head * cacheSlots + pendingFoldSlot) * headDim;
                         std::memcpy(cacheRow, srcRow, (size_t) headDim * sizeof(float));
                     }
@@ -504,34 +512,51 @@ int main(int argc, char **argv) {
         const int64_t position = absolutePos;
         std::memcpy(decoderInputs[(size_t) positionInputIdx].data.data(), &position, sizeof(int64_t));
 
-        const int slot = absolutePos < cacheSlots ? absolutePos : cacheSlots - 1;
+        const int slot      = absolutePos < cacheSlots ? absolutePos : cacheSlots - 1;
+        bool      ranLinked = false;
         if (decodeLinked)
         {
             // The engine folds the previous run's row into pendingFoldSlot at the start of this run.
             // The first decode step of a turn re-seeds the device cache from the host past buffers
             // (which prefill just updated) and clears any pending fold.
             const bool rebind = rebindPastNextStep || !cacheOnDevice;
-            if (!setDecodeFoldSlot(rebind ? -1 : pendingFoldSlot))
+            if (setDecodeFoldSlot(rebind ? -1 : pendingFoldSlot))
             {
-                return (const float *) nullptr;
-            }
-            std::vector<IOTensor> bound {decoderInputs[(size_t) embedsInputIdx], decoderInputs[(size_t) maskInputIdx], decoderInputs[(size_t) positionInputIdx]};
-            if (rebind)
-            {
-                for (int layer = 0; layer < numLayers; ++layer)
+                std::vector<IOTensor> bound {decoderInputs[(size_t) embedsInputIdx], decoderInputs[(size_t) maskInputIdx], decoderInputs[(size_t) positionInputIdx]};
+                if (rebind)
                 {
-                    bound.push_back(decoderInputs[(size_t) pastKeyInputIdx[layer]]);
-                    bound.push_back(decoderInputs[(size_t) pastValueInputIdx[layer]]);
+                    for (int layer = 0; layer < numLayers; ++layer)
+                    {
+                        bound.push_back(decoderInputs[(size_t) pastKeyInputIdx[layer]]);
+                        bound.push_back(decoderInputs[(size_t) pastValueInputIdx[layer]]);
+                    }
                 }
-            }
-            if (session->run(bound, outputs) != Status::Ok)
+                if (session->run(bound, outputs) != Status::Ok)
+                {
+                    return (const float *) nullptr;
+                }
+                rebindPastNextStep = false;
+                cacheOnDevice      = true;
+                pendingFoldSlot    = slot;
+                ranLinked          = true;
+            } else
             {
-                return (const float *) nullptr;
+                // A mid-stream link failure: bring the engine-resident cache (device rows + the
+                // pending fold) back into the host past buffers, drop the links, and continue THIS
+                // and every later step on the host cache loop — same tokens, no lost state.
+                fprintf(stderr, "[vlm] switching to the host KV loop at p=%d (resyncing the cache from the engine)\n", absolutePos);
+                if (cacheOnDevice && !materializeDeviceCache())
+                {
+                    fprintf(stderr, "[vlm] host cache resync failed; cannot continue\n");
+                    return (const float *) nullptr;
+                }
+                session->clearLinks();
+                decodeLinked       = false;
+                cacheOnDevice      = false;
+                rebindPastNextStep = false;
             }
-            rebindPastNextStep = false;
-            cacheOnDevice      = true;
-            pendingFoldSlot    = slot;
-        } else
+        }
+        if (!ranLinked)
         {
             if (session->run(decoderInputs, outputs) != Status::Ok)
             {

@@ -391,3 +391,304 @@ TEST(ResidentLink, Int64LinkCopiesExactly) {
     }
     EXPECT_EQ(f32Values(*idsFloat), expect);
 }
+
+// ---- with-past decoder geometry (the on-device VLM shape class) -------------------------------
+// A rows-only-present decoder at the real VLM geometry: 32 kv-heads, C=512 cache slots, head_dim
+// 64, a 128-row prefill bucket plus an S=1 decode bucket. The present outputs carry ONLY the
+// produced rows ([1,32,S,64]) — the OTHER with-past convention from the cache-concat decoder the
+// history tests model — so the fold source is the LAST present row, not row C.
+
+namespace {
+
+    Attr singleInt(int64_t v) {
+        Attr a;
+        a.kind = Attr::Int;
+        a.i    = v;
+        return a;
+    }
+    Attr intList(std::vector<int64_t> v) {
+        Attr a;
+        a.kind = Attr::Ints;
+        a.ints = std::move(v);
+        return a;
+    }
+
+    // past_key_values.0.{key,value} [1,heads,C,HD] + obs [1,heads,S,HD] ->
+    //   present.0.key   = Relu(obs)      (rows-only present; obs values are kept positive)
+    //   present.0.value = obs + obs      (distinct per part, so a key/value cross-link shows)
+    //   logits          = ReduceSum_{heads,HD}(Concat(pastK,obs)) + ReduceSum_{heads,HD}(Concat(pastV,obs))
+    // Every cache slot feeds logits, so a wrong fold slot, source row, or timing changes the output.
+    Graph makeVlmStyleDecoder(int64_t heads, int64_t cacheSlots, int64_t headDim) {
+        Graph      g;
+        TensorDesc pkDesc;
+        pkDesc.name      = "past_key_values.0.key";
+        pkDesc.shape     = {1, heads, cacheSlots, headDim};
+        pkDesc.isInput   = true;
+        TensorId   pastK = g.addTensor(pkDesc);
+        TensorDesc pvDesc;
+        pvDesc.name      = "past_key_values.0.value";
+        pvDesc.shape     = {1, heads, cacheSlots, headDim};
+        pvDesc.isInput   = true;
+        TensorId   pastV = g.addTensor(pvDesc);
+        TensorDesc obsDesc;
+        obsDesc.name    = "obs";
+        obsDesc.shape   = {1, heads, -1, headDim}; // S resolved per bucket (Config::inputShapes / prepareShapes)
+        obsDesc.isInput = true;
+        TensorId obs    = g.addTensor(obsDesc);
+        g.inputs        = {pastK, pastV, obs};
+
+        auto addOut = [&](const char *name) {
+            TensorDesc d;
+            d.name     = name;
+            d.isOutput = true;
+            TensorId t = g.addTensor(d);
+            g.outputs.push_back(t);
+            return t;
+        };
+        auto addMid = [&](const char *name) {
+            TensorDesc d;
+            d.name = name;
+            return g.addTensor(d);
+        };
+        TensorId presK = addOut("present.0.key");
+        TensorId presV = addOut("present.0.value");
+        TensorId catK  = addMid("catK");
+        TensorId catV  = addMid("catV");
+        TensorId sumK  = addMid("sumK");
+        TensorId sumV  = addMid("sumV");
+        TensorId lg    = addOut("logits");
+
+        auto addNode = [&](OpType t, const char *name, std::vector<TensorId> in, std::vector<TensorId> out) -> Node & {
+            Node n;
+            n.type    = t;
+            n.name    = name;
+            n.inputs  = std::move(in);
+            n.outputs = std::move(out);
+            g.nodes.push_back(std::move(n));
+            return g.nodes.back();
+        };
+        addNode(OpType::Relu, "pres_key", {obs}, {presK});
+        addNode(OpType::Add, "pres_value", {obs, obs}, {presV});
+        addNode(OpType::Concat, "cat_key", {pastK, obs}, {catK}).attr.map["axis"]   = singleInt(2);
+        addNode(OpType::Concat, "cat_value", {pastV, obs}, {catV}).attr.map["axis"] = singleInt(2);
+        {
+            Node &n                = addNode(OpType::Reduce, "sum_key", {catK}, {sumK});
+            n.attr.map["axes"]     = intList({1, 3});
+            n.attr.map["keepdims"] = singleInt(0);
+            n.subOp                = 1; // ReduceType::Sum
+        }
+        {
+            Node &n                = addNode(OpType::Reduce, "sum_value", {catV}, {sumV});
+            n.attr.map["axes"]     = intList({1, 3});
+            n.attr.map["keepdims"] = singleInt(0);
+            n.subOp                = 1; // ReduceType::Sum
+        }
+        addNode(OpType::Add, "logits_add", {sumK, sumV}, {lg});
+        return g;
+    }
+
+    constexpr int64_t kVlmHeads = 32, kVlmSlots = 512, kVlmHeadDim = 64, kVlmPrefill = 128;
+
+    // A decode/prefill two-bucket session: bucket 0 = S=1 (decode), bucket 1 = S=128 (prefill).
+    std::unique_ptr<Session> makeVlmStyleSession() {
+        Config cfg;
+        cfg.backend     = BackendKind::Cpu;
+        cfg.inputShapes = {{"obs", {1, kVlmHeads, 1, kVlmHeadDim}}};
+        auto s          = Session::create(makeVlmStyleDecoder(kVlmHeads, kVlmSlots, kVlmHeadDim), cfg);
+        if (s && s->prepareShapes({{"obs", {1, kVlmHeads, kVlmPrefill, kVlmHeadDim}}}) != Status::Ok)
+        {
+            return nullptr;
+        }
+        return s;
+    }
+
+    // Deterministic positive obs values (Relu passthrough) that differ per step and per element.
+    std::vector<float> obsValues(int64_t rows, int64_t seed) {
+        std::vector<float> v((size_t) (kVlmHeads * rows * kVlmHeadDim));
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            v[(size_t) i] = 1.0f + (float) ((i * 31 + (size_t) seed * 977) % 251) * 0.03125f;
+        }
+        return v;
+    }
+
+    // Host-side fold of a rows-only present ([1,heads,rows,HD]) into a host cache, rows
+    // 0..copyRows-1 landing at startSlot.. — the driver's foldPresent.
+    void hostFold(std::vector<float> &cache, const std::vector<float> &present, int64_t presentRows, int64_t copyRows, int64_t startSlot) {
+        for (int64_t h = 0; h < kVlmHeads; ++h)
+        {
+            for (int64_t r = 0; r < copyRows; ++r)
+            {
+                std::memcpy(cache.data() + ((size_t) h * kVlmSlots + startSlot + r) * kVlmHeadDim, present.data() + ((size_t) h * presentRows + r) * kVlmHeadDim, (size_t) kVlmHeadDim * sizeof(float));
+            }
+        }
+    }
+
+    IOTensor pastTensor(const char *name, const std::vector<float> &cache) {
+        return f32Tensor(name, {1, kVlmHeads, kVlmSlots, kVlmHeadDim}, cache);
+    }
+
+} // namespace
+
+// kvFoldRanges covers both with-past conventions: the cache-concat present (rows = C+1, new row at
+// index C) and the rows-only present (rows = 1, new row at index 0). slot < 0 means no fold.
+TEST(ResidentLink, KvFoldRangesCoversBothConventions) {
+    // qwen-style: [1, 2, C+1, 4] with C = 8.
+    auto q = kvFoldRanges(2, 9, 8, 4, 5);
+    ASSERT_EQ(q.size(), 2u);
+    EXPECT_EQ(q[0].sourceElem, 8 * 4);       // head 0, row C = 8
+    EXPECT_EQ(q[0].destElem, 5 * 4);         // head 0, slot 5
+    EXPECT_EQ(q[1].sourceElem, (9 + 8) * 4); // head 1, row C
+    EXPECT_EQ(q[1].destElem, (8 + 5) * 4);   // head 1, slot 5
+    EXPECT_EQ(q[0].count, 4);
+    // rows-only style: [1, 32, 1, 64] against a 512-slot cache — the on-device VLM geometry.
+    auto r = kvFoldRanges(kVlmHeads, 1, kVlmSlots, kVlmHeadDim, 209);
+    ASSERT_EQ(r.size(), (size_t) kVlmHeads);
+    EXPECT_EQ(r[0].sourceElem, 0); // head 0, row 0 (the only row)
+    EXPECT_EQ(r[0].destElem, 209 * kVlmHeadDim);
+    EXPECT_EQ(r[31].sourceElem, 31 * kVlmHeadDim);
+    EXPECT_EQ(r[31].destElem, (31 * kVlmSlots + 209) * kVlmHeadDim);
+    EXPECT_TRUE(kvFoldRanges(kVlmHeads, 1, kVlmSlots, kVlmHeadDim, -1).empty());
+}
+
+// The device failure signature: cache-concat source offsets applied to a rows-only present are out
+// of bounds and MUST be rejected (InvalidArgument naming both tensors in the log) — never applied.
+TEST(ResidentLink, CacheConcatRangesRejectedOnRowsOnlyPresent) {
+    auto s = makeVlmStyleSession();
+    ASSERT_TRUE(s);
+    ASSERT_EQ(s->linkOutputToInput(0, "present.0.key", "past_key_values.0.key", {}), Status::Ok);
+    // The pre-fix fold ranges: source row C of a present assumed to be [1,KV,C+1,HD].
+    std::vector<LinkRange> wrong((size_t) kVlmHeads);
+    for (int64_t h = 0; h < kVlmHeads; ++h)
+    {
+        wrong[(size_t) h] = {(h * (kVlmSlots + 1) + kVlmSlots) * kVlmHeadDim, (h * kVlmSlots + 130) * kVlmHeadDim, kVlmHeadDim};
+    }
+    EXPECT_EQ(s->linkOutputToInput(0, "present.0.key", "past_key_values.0.key", wrong), Status::InvalidArgument);
+    // The corrected ranges (last present row = row 0) are accepted at the same slot.
+    EXPECT_EQ(s->linkOutputToInput(0, "present.0.key", "past_key_values.0.key", kvFoldRanges(kVlmHeads, 1, kVlmSlots, kVlmHeadDim, 130)), Status::Ok);
+}
+
+// The full VLM decode flow at the on-device geometry, linked vs host loop: two turns (prefill 128
+// rows, decode; prefill 81 more rows crossing slot 209, decode), byte-identical logits at every
+// step — and a MID-STREAM switch to the host loop (the link-failure fallback path: materialize the
+// resident cache + pending fold, drop the links, continue host-side) with no divergence.
+TEST(ResidentLink, VlmGeometryLinkedMatchesUnlinkedWithMidStreamResync) {
+    auto linked = makeVlmStyleSession();
+    auto plain  = makeVlmStyleSession();
+    ASSERT_TRUE(linked && plain);
+    ASSERT_EQ(linked->bucketCount(), 2u);
+    for (int part = 0; part < 2; ++part)
+    {
+        ASSERT_EQ(linked->linkOutputToInput(0, part ? "present.0.value" : "present.0.key", part ? "past_key_values.0.value" : "past_key_values.0.key", {}), Status::Ok);
+    }
+
+    const size_t       cacheElems = (size_t) (kVlmHeads * kVlmSlots * kVlmHeadDim);
+    std::vector<float> linkedPastK(cacheElems, 0.f), linkedPastV(cacheElems, 0.f); // host mirror (prefill source)
+    std::vector<float> plainPastK(cacheElems, 0.f), plainPastV(cacheElems, 0.f);
+    int64_t            p = 0;
+
+    std::vector<IOTensor> linkedOuts, plainOuts;
+    bool                  linkedMode    = true;  // flips to host mode at the mid-stream resync below
+    bool                  cacheOnDevice = false; // engine-resident state is ahead of linkedPast*
+    int64_t               pendingSlot   = -1;
+
+    auto runPrefill = [&](int64_t seed, int64_t realRows) {
+        std::vector<float> obs  = obsValues(kVlmPrefill, seed);
+        IOTensor           obsT = f32Tensor("obs", {1, kVlmHeads, kVlmPrefill, kVlmHeadDim}, obs);
+        ASSERT_EQ(plain->run({pastTensor("past_key_values.0.key", plainPastK), pastTensor("past_key_values.0.value", plainPastV), obsT}, plainOuts), Status::Ok);
+        ASSERT_EQ(linked->run({pastTensor("past_key_values.0.key", linkedPastK), pastTensor("past_key_values.0.value", linkedPastV), obsT}, linkedOuts), Status::Ok);
+        EXPECT_EQ(outByName(linkedOuts, "logits")->data, outByName(plainOuts, "logits")->data) << "prefill p=" << p;
+        // Fold the real rows on the host (the prefill bucket is unlinked in both sessions).
+        hostFold(plainPastK, f32Values(*outByName(plainOuts, "present.0.key")), kVlmPrefill, realRows, p);
+        hostFold(plainPastV, f32Values(*outByName(plainOuts, "present.0.value")), kVlmPrefill, realRows, p);
+        hostFold(linkedPastK, f32Values(*outByName(linkedOuts, "present.0.key")), kVlmPrefill, realRows, p);
+        hostFold(linkedPastV, f32Values(*outByName(linkedOuts, "present.0.value")), kVlmPrefill, realRows, p);
+        p += realRows;
+    };
+
+    // Bring the engine-resident cache (plus the pending fold) back into the linked session's host
+    // mirror — the driver's materializeDeviceCache / mid-stream resync.
+    auto materialize = [&]() {
+        for (int part = 0; part < 2; ++part)
+        {
+            const char         *pastNm = part ? "past_key_values.0.value" : "past_key_values.0.key";
+            const char         *presNm = part ? "present.0.value" : "present.0.key";
+            std::vector<float> &mirror = part ? linkedPastV : linkedPastK;
+            IOTensor            resident;
+            ASSERT_EQ(linked->readResident(pastNm, resident), Status::Ok);
+            ASSERT_EQ(resident.data.size(), mirror.size() * sizeof(float));
+            std::memcpy(mirror.data(), resident.data.data(), resident.data.size());
+            if (pendingSlot >= 0)
+            {
+                IOTensor present;
+                ASSERT_EQ(linked->readResident(presNm, present), Status::Ok);
+                hostFold(mirror, f32Values(present), 1, 1, pendingSlot);
+            }
+        }
+        pendingSlot = -1;
+    };
+
+    auto runDecode = [&](int64_t seed) {
+        const int64_t      slot = p < kVlmSlots ? p : kVlmSlots - 1;
+        std::vector<float> obs  = obsValues(1, seed);
+        IOTensor           obsT = f32Tensor("obs", {1, kVlmHeads, 1, kVlmHeadDim}, obs);
+        // Reference: host loop, full binds, host fold of the (only) present row.
+        ASSERT_EQ(plain->run({pastTensor("past_key_values.0.key", plainPastK), pastTensor("past_key_values.0.value", plainPastV), obsT}, plainOuts), Status::Ok);
+        hostFold(plainPastK, f32Values(*outByName(plainOuts, "present.0.key")), 1, 1, slot);
+        hostFold(plainPastV, f32Values(*outByName(plainOuts, "present.0.value")), 1, 1, slot);
+        if (linkedMode)
+        {
+            const bool rebind = !cacheOnDevice;
+            for (int part = 0; part < 2; ++part)
+            {
+                ASSERT_EQ(linked->linkOutputToInput(0, part ? "present.0.value" : "present.0.key", part ? "past_key_values.0.value" : "past_key_values.0.key", kvFoldRanges(kVlmHeads, 1, kVlmSlots, kVlmHeadDim, rebind ? -1 : pendingSlot)), Status::Ok);
+            }
+            if (rebind)
+            {
+                ASSERT_EQ(linked->run({pastTensor("past_key_values.0.key", linkedPastK), pastTensor("past_key_values.0.value", linkedPastV), obsT}, linkedOuts), Status::Ok);
+            } else
+            {
+                ASSERT_EQ(linked->run({obsT}, linkedOuts), Status::Ok);
+            }
+            cacheOnDevice = true;
+            pendingSlot   = slot;
+            EXPECT_TRUE(outByName(linkedOuts, "present.0.key")->data.empty()); // engine-resident
+        } else
+        {
+            ASSERT_EQ(linked->run({pastTensor("past_key_values.0.key", linkedPastK), pastTensor("past_key_values.0.value", linkedPastV), obsT}, linkedOuts), Status::Ok);
+            hostFold(linkedPastK, f32Values(*outByName(linkedOuts, "present.0.key")), 1, 1, slot);
+            hostFold(linkedPastV, f32Values(*outByName(linkedOuts, "present.0.value")), 1, 1, slot);
+        }
+        EXPECT_EQ(outByName(linkedOuts, "logits")->data, outByName(plainOuts, "logits")->data) << "decode p=" << p;
+        ++p;
+    };
+
+    // Turn 1: prefill 128 rows, decode 6 tokens (slots 128..133).
+    runPrefill(/*seed=*/1, /*realRows=*/kVlmPrefill);
+    for (int t = 0; t < 6; ++t)
+    {
+        runDecode(100 + t);
+    }
+    // Turn boundary: materialize the device cache for the prefill bucket, then 81 more rows —
+    // the image-token count — pushing the cache past slot 209 (134..214).
+    materialize();
+    cacheOnDevice = false;
+    runPrefill(/*seed=*/2, /*realRows=*/81);
+    // Turn 2 decode: 4 linked steps (slots 215..218), then the MID-STREAM RESYNC to the host loop
+    // (the link-failure fallback), then 4 more host-mode steps (219..222).
+    for (int t = 0; t < 4; ++t)
+    {
+        runDecode(200 + t);
+    }
+    materialize();
+    linked->clearLinks();
+    linkedMode    = false;
+    cacheOnDevice = false;
+    for (int t = 4; t < 8; ++t)
+    {
+        runDecode(200 + t);
+    }
+    // The resynced host mirror equals the reference cache byte-for-byte.
+    EXPECT_EQ(0, std::memcmp(linkedPastK.data(), plainPastK.data(), linkedPastK.size() * sizeof(float)));
+    EXPECT_EQ(0, std::memcmp(linkedPastV.data(), plainPastV.data(), linkedPastV.size() * sizeof(float)));
+}
