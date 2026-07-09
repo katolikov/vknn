@@ -1805,6 +1805,155 @@ TEST(Passes, FusePointwiseBitExact) {
     }
 }
 
+// foldIntRoundtripCast lives in the internal pass header (passes_internal.h); the umbrella passes.h
+// this file includes does not re-export it, so declare it here for the structural assertions below.
+namespace vknn {
+    void foldIntRoundtripCast(Graph &g);
+}
+
+namespace {
+
+    // Chain broken by a float -> integer -> float round-trip: y = Mul(Trunc-of(Mul(x, s1)), s2). The
+    // integer intermediate is what foldIntRoundtripCast collapses into one Unary(Trunc); castTo/castBack
+    // are the ONNX dtype codes of the two casts so a test can build the foldable wide-int form or an
+    // excluded narrow-int / non-float-source form from the same skeleton. A float x input is the
+    // default; pass an integer xDtype to exercise the shape/index-source guard.
+    Graph makeIntRoundtripGraph(int64_t castTo, int64_t castBack, DType xDtype = DType::Float32) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 1, 2, 2}; // matches runGraphCpu's fixed input shape
+        xi.isInput = true;
+        xi.dtype   = xDtype;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        auto k     = [&](const char *nm, std::vector<float> d) {
+            TensorDesc t;
+            t.name          = nm;
+            t.shape         = {1};
+            t.isInitializer = true;
+            TensorId   id   = g.addTensor(t);
+            HostBuffer hb;
+            hb.resizeElems(d.size(), DType::Float32);
+            for (size_t i = 0; i < d.size(); ++i)
+            {
+                hb.f32()[i] = d[i];
+            }
+            g.initializers[id] = hb;
+            return id;
+        };
+        auto tensor = [&](const char *nm) {
+            TensorDesc t;
+            t.name = nm;
+            return g.addTensor(t);
+        };
+        auto castAttr = [](int64_t to) {
+            Attr a;
+            a.kind = Attr::Int;
+            a.i    = to;
+            return a;
+        };
+        TensorId s1 = k("s1", {2}), s2 = k("s2", {3});
+        TensorId t0 = tensor("t0"), ti = tensor("ti"), tf = tensor("tf"), y = tensor("y");
+        g.desc(y).isOutput = true;
+        Node mul1;
+        mul1.type    = OpType::Binary;
+        mul1.subOp   = (int) BinaryType::Mul;
+        mul1.name    = "mul1";
+        mul1.inputs  = {x, s1};
+        mul1.outputs = {t0};
+        Node c1;
+        c1.type           = OpType::Cast;
+        c1.name           = "cast_to_int";
+        c1.inputs         = {t0};
+        c1.outputs        = {ti};
+        c1.attr.map["to"] = castAttr(castTo);
+        Node c2;
+        c2.type           = OpType::Cast;
+        c2.name           = "cast_to_float";
+        c2.inputs         = {ti};
+        c2.outputs        = {tf};
+        c2.attr.map["to"] = castAttr(castBack);
+        Node mul2;
+        mul2.type    = OpType::Binary;
+        mul2.subOp   = (int) BinaryType::Mul;
+        mul2.name    = "mul2";
+        mul2.inputs  = {tf, s2};
+        mul2.outputs = {y};
+        g.nodes   = {mul1, c1, c2, mul2};
+        g.outputs = {y};
+        return g;
+    }
+
+} // namespace
+
+// --- A float -> INT32 -> float round-trip between two Muls folds to Unary(Trunc), letting the whole
+// chain fuse into ONE unit; the CPU result is exactly trunc(x*s1)*s2 (the value the two standalone
+// Cast kernels produce), so fusing across the former integer barrier is byte-exact. ---
+TEST(Passes, FoldIntRoundtripFusesByteExact) {
+    Graph g = makeIntRoundtripGraph(/*castTo=*/6 /*INT32*/, /*castBack=*/1 /*FLOAT*/);
+    inferShapes(g, 1);
+    foldIntRoundtripCast(g);
+    int casts = 0, truncs = 0;
+    for (const Node &n: g.nodes)
+    {
+        casts += n.type == OpType::Cast;
+        truncs += n.type == OpType::Unary && (UnaryType) n.subOp == UnaryType::Trunc;
+    }
+    EXPECT_EQ(casts, 0) << "both casts of the round-trip must be gone";
+    EXPECT_EQ(truncs, 1) << "the pair must collapse to exactly one Unary(Trunc)";
+
+    fusePointwiseChains(g, true);
+    int fused = 0;
+    for (const Node &n: g.nodes)
+    {
+        fused += n.type == OpType::FusedPointwise;
+    }
+    EXPECT_EQ(fused, 1) << "Trunc is a float pointwise member, so the chain fuses into one unit";
+
+    std::vector<float> xd {-1.9f, 0.6f, 2.5f, 4.9f};
+    auto               got = runGraphCpu(makeIntRoundtripGraph(6, 1), xd);
+    ASSERT_EQ(got.size(), xd.size());
+    for (size_t i = 0; i < xd.size(); ++i)
+    {
+        float ref = std::trunc(xd[i] * 2.0f) * 3.0f; // the two standalone Cast kernels' fp32 result
+        EXPECT_FLOAT_EQ(got[i], ref) << "i=" << i;
+    }
+}
+
+// --- The gate excludes narrow integer targets (UINT8 saturates / INT8 wraps -- not a pure trunc): a
+// float -> UINT8 -> float round-trip is left as two Cast nodes, never folded to Trunc. ---
+TEST(Passes, FoldIntRoundtripSkipsNarrowInt) {
+    Graph g = makeIntRoundtripGraph(/*castTo=*/2 /*UINT8*/, /*castBack=*/1 /*FLOAT*/);
+    inferShapes(g, 1);
+    foldIntRoundtripCast(g);
+    int casts = 0, truncs = 0;
+    for (const Node &n: g.nodes)
+    {
+        casts += n.type == OpType::Cast;
+        truncs += n.type == OpType::Unary && (UnaryType) n.subOp == UnaryType::Trunc;
+    }
+    EXPECT_EQ(casts, 2) << "a narrow-int round-trip must survive as two Casts";
+    EXPECT_EQ(truncs, 0);
+}
+
+// --- The gate requires the first cast to read a proven FLOAT value: an integer graph input feeding
+// int64 -> int32 -> float is a shape/index path, never folded (its integer value must not become a
+// truncated float activation). ---
+TEST(Passes, FoldIntRoundtripSkipsIntSource) {
+    Graph g = makeIntRoundtripGraph(/*castTo=*/6 /*INT32*/, /*castBack=*/1 /*FLOAT*/, DType::Int64);
+    inferShapes(g, 1);
+    foldIntRoundtripCast(g);
+    int casts = 0, truncs = 0;
+    for (const Node &n: g.nodes)
+    {
+        casts += n.type == OpType::Cast;
+        truncs += n.type == OpType::Unary && (UnaryType) n.subOp == UnaryType::Trunc;
+    }
+    EXPECT_EQ(casts, 2) << "an int-sourced round-trip is a shape/index path and must survive";
+    EXPECT_EQ(truncs, 0);
+}
+
 namespace {
 
     // A graph with a fully-symbolic input [-1,-1,-1,-1] feeding a 3x3 Conv (16 out-channels, pad 1,

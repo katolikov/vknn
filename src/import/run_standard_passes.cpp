@@ -126,7 +126,9 @@ namespace vknn {
             }
             inferShapes(g, batch, declared, bindings);
         }
-        eliminateFloatCast(g); // drop float->float casts left by transformer import (post-fold)
+        eliminateFloatCast(g);   // drop float->float casts left by transformer import (post-fold)
+        foldIntRoundtripCast(g); // collapse float->wide-int->float cast pairs to Unary(Trunc) so the
+                                 // truncation joins the surrounding pointwise unit instead of splitting it
         eliminateDeadNodes(g);
         inferShapes(g, batch, declared, bindings);  // refresh shapes after fusion/folding
         lowerRMSNorm(g);        // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate

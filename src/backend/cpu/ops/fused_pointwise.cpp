@@ -113,6 +113,10 @@ namespace vknn {
                     // Nearest integer, ties to even (the FE_TONEAREST default); agrees bitwise with
                     // GLSL roundEven, including the sign of a zero result (-0.5 -> -0.0).
                     return std::nearbyint(x);
+                case UnaryType::Trunc:
+                    // Round toward zero (drop the fraction); agrees bitwise with GLSL trunc and with
+                    // the float->wide-int->float Cast pair foldIntRoundtripCast collapses into it.
+                    return std::trunc(x);
                 case UnaryType::Invalid:
                     break;
             }

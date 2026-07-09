@@ -48,6 +48,13 @@ namespace vknn {
     // cast input; a forward dtype pass gates removal to a float source so int<->float casts survive.
     // Graph outputs are never renamed (defined in eliminate_float_cast.cpp).
     void eliminateFloatCast(Graph &g);
+    // Fold a float -> wide-integer -> float Cast pair (INT32/INT64/UINT32/UINT64 intermediate, read by
+    // that second cast alone) into one Unary(Trunc), so the truncation becomes a float pointwise
+    // member the fuser can span instead of a fusion-splitting integer barrier. Byte-identical to the
+    // cast pair (both truncate toward zero) for every finite value; the same forward dtype lattice as
+    // eliminateFloatCast gates it to a proven float source. Runs after eliminateFloatCast, before the
+    // pointwise fusion (defined in fold_int_roundtrip_cast.cpp).
+    void foldIntRoundtripCast(Graph &g);
     // Fuse the decomposed RMSNormalization chain (Pow(x,2) -> ReduceMean(last-axis) -> Add(eps) ->
     // Sqrt -> Reciprocal|Div(1,.) -> Mul(x,.) -> Mul(gamma,.)) into one OpType::RMSNorm node, so the
     // wide sum of squares accumulates in fp32 in a single kernel instead of losing precision across
