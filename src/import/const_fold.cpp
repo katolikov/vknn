@@ -240,11 +240,86 @@ namespace vknn {
             try
             { op->run(nd, ctx); } catch (...)
             { continue; }
+            // The CPU ops normalize a rank-0 result to [1] (a zero-byte runtime buffer would be the
+            // alternative), but on the fold path the TRUE ONNX rank is part of the value: a scalar
+            // Gather-of-Shape that keeps the [1] turns the following Unsqueeze into rank 2, a Concat
+            // of those into rank 2, and a Where/Equal against a genuine 1-D vector broadcasts the
+            // shape VECTOR into a matrix — an Expand target of 257^4 elements instead of [1,1,S,T]
+            // (the ORT transformer mask subgraph). A folded output is an INITIALIZER, where an empty
+            // shape is the established rank-0 convention (imported scalar initializers carry it and
+            // every payload reader recovers the element from the byte size), so restore the true
+            // rank here, on both the desc and the pool entry later folds in this walk read.
+            bool scalarOut = false;
+            switch (nd.type)
+            {
+                case OpType::Gather:
+                    // out rank = data.rank - 1 + index.rank; scalar iff 1-D data and rank-0 index
+                    // (the desc-empty form, or the idx_scalar tag markScalarGatherIndices saved
+                    // before the index Constant folded).
+                    scalarOut = nd.inputs.size() >= 2 &&
+                                (g.desc(nd.inputs[1]).shape.empty() || nd.attr.geti("idx_scalar", 0) != 0) &&
+                                g.desc(nd.inputs[0]).shape.size() == 1;
+                    break;
+                case OpType::Squeeze: {
+                    // Scalar iff every input dim is dropped (explicit axes covering the whole rank,
+                    // or no axes over an all-ones shape).
+                    const Shape         &in   = g.desc(nd.inputs[0]).shape;
+                    std::vector<int64_t> axes = readI64Param(g, nd, "axes", 1);
+                    if (in.empty())
+                    {
+                        scalarOut = true;
+                        break;
+                    }
+                    int kept = 0;
+                    for (int64_t k = 0; k < (int64_t) in.size(); ++k)
+                    {
+                        bool dropK = axes.empty() ? in[(size_t) k] == 1 : false;
+                        for (int64_t ax: axes)
+                        {
+                            if (ax < 0)
+                            {
+                                ax += (int64_t) in.size();
+                            }
+                            dropK = dropK || ax == k;
+                        }
+                        kept += dropK ? 0 : 1;
+                    }
+                    scalarOut = kept == 0;
+                    break;
+                }
+                // Scalar arithmetic between scalars stays scalar (the mask subgraph's
+                // past+seq additions and casts sit between the Gathers and the Unsqueezes).
+                case OpType::Add:
+                case OpType::Binary:
+                case OpType::Cast:
+                case OpType::Where:
+                case OpType::Equal:
+                case OpType::Greater:
+                case OpType::GreaterEqual:
+                case OpType::Less:
+                case OpType::LessEqual: {
+                    scalarOut = !nd.inputs.empty();
+                    for (TensorId in: nd.inputs)
+                    {
+                        if (in != kNoTensor && !g.desc(in).shape.empty())
+                        {
+                            scalarOut = false;
+                        }
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
             for (TensorId o: nd.outputs)
             {
                 if (o == kNoTensor)
                 {
                     continue;
+                }
+                if (scalarOut && numElements(pool[o].shape) == 1)
+                {
+                    pool[o].shape = Shape {};
                 }
                 g.initializers[o]       = pool[o].host;
                 g.desc(o).isInitializer = true;

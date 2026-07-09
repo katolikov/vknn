@@ -144,6 +144,20 @@ namespace vknn {
                 return "And";
             case OpType::RMSNorm:
                 return "RMSNorm";
+            case OpType::SimplifiedLayerNorm:
+                return "SimplifiedLayerNormalization";
+            case OpType::SkipSimplifiedLayerNorm:
+                return "SkipSimplifiedLayerNormalization";
+            case OpType::SkipLayerNorm:
+                return "SkipLayerNormalization";
+            case OpType::RotaryEmbedding:
+                return "RotaryEmbedding";
+            case OpType::MultiHeadAttention:
+                return "MultiHeadAttention";
+            case OpType::GroupQueryAttention:
+                return "GroupQueryAttention";
+            case OpType::MatMulNBits:
+                return "MatMulNBits";
             default:
                 return "Unknown";
         }
@@ -290,6 +304,17 @@ namespace vknn {
             // outputs are the canonical fp32 1.0/0.0 the flat comparison ops emit.
             {"IsNaN", OpType::IsNaN},
             {"And", OpType::And},
+            // ORT contrib operators (com.microsoft; the wire parser drops the domain, so name
+            // matching covers them). lowerOrtContribOps expands each to primitive ops right after
+            // the first shape-inference round; a variant it declines keeps its real name through
+            // the support report. GroupQueryAttention is recognized but not yet expanded.
+            {"SimplifiedLayerNormalization", OpType::SimplifiedLayerNorm},
+            {"SkipSimplifiedLayerNormalization", OpType::SkipSimplifiedLayerNorm},
+            {"SkipLayerNormalization", OpType::SkipLayerNorm},
+            {"RotaryEmbedding", OpType::RotaryEmbedding},
+            {"MultiHeadAttention", OpType::MultiHeadAttention},
+            {"GroupQueryAttention", OpType::GroupQueryAttention},
+            {"MatMulNBits", OpType::MatMulNBits},
         };
         auto it = m.find(s);
         if (it != m.end())

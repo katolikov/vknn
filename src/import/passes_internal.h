@@ -62,6 +62,14 @@ namespace vknn {
     // const-fold/shape fixpoint (the eps/exponent constants are resolved initializers), before the
     // pointwise fusion (defined in lower_rmsnorm.cpp).
     void lowerRMSNorm(Graph &g);
+    // Expand the ORT contrib operators (com.microsoft: Skip/SimplifiedLayerNormalization,
+    // RotaryEmbedding, the pure MultiHeadAttention form, MatMulNBits) into primitive ops in a
+    // fixpoint with inferShapes — the attention/rotary expansions emit concrete shape constants, so
+    // each round unlocks the next layer's chain. A variant outside the expanded forms is left in
+    // place under its real name (unsupported at plan, never silently miscomputed); a graph without
+    // contrib ops is a scan-only no-op. Runs right after the first inferShapes (defined in
+    // lower_ort_contrib.cpp).
+    void lowerOrtContribOps(Graph &g);
     // Fuse the scaled-flow warp coordinate idiom
     // Mul(flow,scale)->Transpose(0,2,3,1)->Add(base_grid,.)->GridSample into one GridSample that
     // computes coord = base + scale*flow in its own coordinate lookup, so the full-resolution grid

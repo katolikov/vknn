@@ -86,6 +86,9 @@ namespace vknn {
                                     // (inference-mode) form is an identity and is rewired past here
         normalizeConv1d(g);         // before shape inference: conv arms assume 2-D weight/attr geometry
         inferShapes(g, batch, declared, bindings);
+        lowerOrtContribOps(g);      // ORT contrib ops (Skip/SimplifiedLayerNorm, RotaryEmbedding,
+                                    // MultiHeadAttention, MatMulNBits) expand to primitives in a
+                                    // fixpoint with shape inference; a scan-only no-op without them
         if (opt.dequantize)
         {
             dequantizeGraph(g); // QDQ checkpoints collapse to the float graph before any lowering
