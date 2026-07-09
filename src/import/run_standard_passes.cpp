@@ -126,7 +126,9 @@ namespace vknn {
             }
             inferShapes(g, batch, declared, bindings);
         }
-        eliminateFloatCast(g); // drop float->float casts left by transformer import (post-fold)
+        eliminateFloatCast(g);   // drop float->float casts left by transformer import (post-fold)
+        foldIntRoundtripCast(g); // collapse float->wide-int->float cast pairs to Unary(Trunc) so the
+                                 // truncation joins the surrounding pointwise unit instead of splitting it
         eliminateDeadNodes(g);
         inferShapes(g, batch, declared, bindings);  // refresh shapes after fusion/folding
         lowerRMSNorm(g);        // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate
@@ -144,6 +146,13 @@ namespace vknn {
         if (opt.lowerConv)
         {
             lowerConv(g); // non-Winograd KxK Conv -> ConvGemm, on resolved shapes, before pointwise fusion
+        }
+        if (opt.fuseGridSampleWarp)
+        {
+            // Claim the scaled-flow + base-grid warp coordinate chain into GridSample before the
+            // pointwise fusion would host the Add on the Transpose. Needs the resolved shapes above.
+            fuseGridSampleWarp(g);
+            inferShapes(g, batch, declared, bindings); // GridSample warp output shape from the flow input
         }
         // Pointwise-chain fusion runs LAST, after const-fold + shape resolution: the shape-computation
         // subgraph (Shape/Gather/Neg/Sqrt/... feeding dynamic Reshapes) is now folded to constants, so

@@ -31,6 +31,9 @@ namespace vknn {
         Reciprocal  = 18, ///< Multiplicative inverse (ONNX "Reciprocal").
         Softplus    = 19, ///< Smooth ReLU log(1 + exp(x)) (ONNX "Softplus"); building block for GELU, RoPE, and similar transformer activations.
         Round       = 20, ///< Nearest integer, ties to even (ONNX "Round"); matches GLSL roundEven bitwise, including the sign of a zero result.
+        Trunc       = 21, ///< Round toward zero (drop the fraction). Not an ONNX operator: produced only by
+                          ///< foldIntRoundtripCast, which collapses a float->wide-int->float Cast pair into
+                          ///< this single step so the truncation joins the surrounding pointwise unit.
     };
 
     /// Map an ONNX op-type name to its UnaryType.

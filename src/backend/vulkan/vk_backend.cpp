@@ -948,6 +948,48 @@ namespace vknn {
                 snprintf(tag, sizeof(tag), "%04x%04x-%08x", caps.vendorID, caps.deviceID, caps.driverVersion);
                 env_.gpuTag = tag;
             }
+            // Const-folding can leave an initializer as a spatial op's ACTIVATION input[0] (e.g. a baked
+            // image constant fed through Cast->Resize). Such ops read input[0] via env.devBuf(), which
+            // returns null for initializers — they are otherwise consumed only as weights via operandBuf.
+            // Materialize any such constant into an activation buffer packed in its assigned layout so every
+            // devBuf-reading op finds a valid buffer. operandBuf consumers are unaffected: they test
+            // isInitializer first and upload their own flat copy, ignoring this entry.
+            {
+                auto materialize = [&](TensorId t) {
+                    if (t == kNoTensor || !g.isInitializer(t) || buffers_.count(t))
+                    {
+                        return;
+                    }
+                    const auto        &td   = g.tensors[t];
+                    std::vector<float> vals = initFloats(g, t);
+                    int64_t            n    = numElements(td.shape);
+                    bool               fp16 = !td.storeFp32 && useFp16_;
+                    auto               buf  = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(t), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                    if (td.gpuFlat)
+                    {
+                        if (fp16)
+                        {
+                            boundary::packFlatFp16(vals.data(), reinterpret_cast<fp16_t *>(buf->host()), n, 1);
+                        } else
+                        {
+                            std::memcpy(buf->host(), vals.data(), (size_t) n * 4);
+                        }
+                    } else
+                    {
+                        boundary::packNc4(vals.data(), buf->host(), NCHW::from(td.shape), fp16, 1);
+                    }
+                    buffers_[t] = buf;
+                };
+                for (int ni: idx)
+                {
+                    const Node &nd = g.nodes[ni];
+                    if (!nd.inputs.empty())
+                    {
+                        materialize(nd.inputs[0]);
+                    }
+                    materialize(nd.fusedResidual);
+                }
+            }
             // Load + validate the model cache now that the model hash is known, then hand the primed
             // pipeline + weight caches to the env. loadCache is idempotent across this model's segments.
             be_->loadCache(cfg, env_.modelTag);

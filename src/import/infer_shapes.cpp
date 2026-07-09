@@ -440,7 +440,15 @@ namespace vknn {
                 case OpType::GridSample: {
                     const Shape &xs = SH(nd.inputs[0]);
                     const Shape &gs = SH(nd.inputs[1]);
-                    if (xs.size() == 4 && gs.size() == 4)
+                    // Warp mode (fuseGridSampleWarp): input 1 is the NCHW flow [N,2,Hout,Wout], so the
+                    // output spatial dims come from the flow's spatial axes, not a channels-last grid.
+                    if (nd.attr.has("warp"))
+                    {
+                        if (xs.size() == 4 && gs.size() == 4)
+                        {
+                            SH(o) = {xs[0], xs[1], gs[2], gs[3]};
+                        }
+                    } else if (xs.size() == 4 && gs.size() == 4)
                     {
                         SH(o) = {xs[0], xs[1], gs[1], gs[2]};
                     }

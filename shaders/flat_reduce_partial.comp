@@ -1,0 +1,86 @@
+#version 450
+#include "precision.glsl"
+// Pass 1 of the cooperative flat reduce (see reduce.cpp). Splits each output's reduced extent into
+// `groups` contiguous chunks and assigns one workgroup per (output, chunk): its 256 lanes stride the
+// chunk and tree-reduce a partial into the fp32 scratch buffer at scratch[outIdx*groups + chunk]. Pass 2
+// (flat_reduce_combine) folds the `groups` partials per output and finalises. Many workgroups per
+// output fill the GPU for the pathological small-output / huge-reduced-extent case that the scalar
+// flat_reduce.comp serialises on a single lane. Geometry SSBO layout matches flat_reduce.comp:
+// inDim[0..rank), inStride[rank..2*rank), reduce[2*rank..3*rank). Partials are raw (no mean-divide /
+// L2-sqrt): Mean stores the sum, L2 stores the sum of squares; the combine pass finalises.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer P { float part[]; };
+layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
+layout(push_constant) uniform PC {
+  int rank, total, op, groups;
+} pc;
+
+shared float red[256];
+
+void main() {
+  // One workgroup per (output, chunk). The linear id folds a y-spill (ComputePipeline::dispatch).
+  uint wg  = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  uint outIdx = wg / uint(pc.groups);
+  uint gi  = wg % uint(pc.groups);
+  if (outIdx >= uint(pc.total)) return;
+
+  // Kept-axes base offset for this output (identical to flat_reduce.comp).
+  int rem = int(outIdx);
+  int base = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    if (geom.g[2 * pc.rank + k] != 0) continue;
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    base += c * geom.g[pc.rank + k];
+  }
+
+  int rcount = 1, nRed = 0, singleStride = 0;
+  for (int k = 0; k < pc.rank; ++k) if (geom.g[2 * pc.rank + k] != 0) { rcount *= geom.g[k]; nRed++; singleStride = geom.g[pc.rank + k]; }
+
+  // This workgroup owns the reduced-index chunk [start, end).
+  int chunk = (rcount + pc.groups - 1) / pc.groups;
+  int start = int(gi) * chunk;
+  int end   = min(start + chunk, rcount);
+
+  uint t = gl_LocalInvocationID.x;
+  float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
+  if (nRed == 1) {
+    for (int r = start + int(t); r < end; r += 256) {
+      float v = float(s[base + r * singleStride]);
+      if (pc.op == 2) acc = max(acc, v);
+      else if (pc.op == 3) acc = min(acc, v);
+      else if (pc.op == 4) acc *= v;
+      else if (pc.op == 5) acc += v * v;
+      else acc += v;
+    }
+  } else {
+    for (int r = start + int(t); r < end; r += 256) {
+      int rr = r, off = base;
+      for (int k = pc.rank - 1; k >= 0; --k) {
+        if (geom.g[2 * pc.rank + k] == 0) continue;
+        int c = rr % geom.g[k];
+        rr /= geom.g[k];
+        off += c * geom.g[pc.rank + k];
+      }
+      float v = float(s[off]);
+      if (pc.op == 2) acc = max(acc, v);
+      else if (pc.op == 3) acc = min(acc, v);
+      else if (pc.op == 4) acc *= v;
+      else if (pc.op == 5) acc += v * v;
+      else acc += v;
+    }
+  }
+
+  red[t] = acc;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1) {
+    if (t < stride) {
+      float a = red[t], b = red[t + stride];
+      red[t] = (pc.op == 2) ? max(a, b) : (pc.op == 3) ? min(a, b) : (pc.op == 4) ? a * b : a + b;
+    }
+    barrier();
+  }
+  if (t == 0u) part[wg] = red[0];   // scratch[outIdx*groups + gi]
+}

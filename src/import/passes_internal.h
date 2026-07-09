@@ -48,6 +48,13 @@ namespace vknn {
     // cast input; a forward dtype pass gates removal to a float source so int<->float casts survive.
     // Graph outputs are never renamed (defined in eliminate_float_cast.cpp).
     void eliminateFloatCast(Graph &g);
+    // Fold a float -> wide-integer -> float Cast pair (INT32/INT64/UINT32/UINT64 intermediate, read by
+    // that second cast alone) into one Unary(Trunc), so the truncation becomes a float pointwise
+    // member the fuser can span instead of a fusion-splitting integer barrier. Byte-identical to the
+    // cast pair (both truncate toward zero) for every finite value; the same forward dtype lattice as
+    // eliminateFloatCast gates it to a proven float source. Runs after eliminateFloatCast, before the
+    // pointwise fusion (defined in fold_int_roundtrip_cast.cpp).
+    void foldIntRoundtripCast(Graph &g);
     // Fuse the decomposed RMSNormalization chain (Pow(x,2) -> ReduceMean(last-axis) -> Add(eps) ->
     // Sqrt -> Reciprocal|Div(1,.) -> Mul(x,.) -> Mul(gamma,.)) into one OpType::RMSNorm node, so the
     // wide sum of squares accumulates in fp32 in a single kernel instead of losing precision across
@@ -55,6 +62,14 @@ namespace vknn {
     // const-fold/shape fixpoint (the eps/exponent constants are resolved initializers), before the
     // pointwise fusion (defined in lower_rmsnorm.cpp).
     void lowerRMSNorm(Graph &g);
+    // Fuse the scaled-flow warp coordinate idiom
+    // Mul(flow,scale)->Transpose(0,2,3,1)->Add(base_grid,.)->GridSample into one GridSample that
+    // computes coord = base + scale*flow in its own coordinate lookup, so the full-resolution grid
+    // and its NHWC Transpose are never materialized. Bit-exact with the split chain; opportunistic
+    // (only the exact single-consumer pattern). Needs resolved shapes; runs before fusePointwiseChains
+    // so the coordinate chain is claimed before the pointwise fusion would host the Add
+    // (defined in fuse_gridsample_warp.cpp).
+    void fuseGridSampleWarp(Graph &g);
     // Lower a general grouped Conv (1 < group < Cin, incl. the channel-multiplier depthwise
     // group == Cin/Cout != Cin) into `group` independent group-1 Convs over per-group channel slices
     // joined by a Concat, so each part runs on the proven dense Conv GPU kernel. Needs a resolved

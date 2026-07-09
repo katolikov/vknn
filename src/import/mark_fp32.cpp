@@ -244,6 +244,14 @@ namespace vknn {
             {
                 continue;
             }
+            // A warp-mode GridSample (fuseGridSampleWarp) has no runtime grid to pin: input 1 is the
+            // NCHW flow (read fp16 in the NC4HW4 activation layout) and the base grid (input 2, uploaded
+            // fp32 by the op) carries the coordinates' full precision. The fp16 sampler reproduces the
+            // split Mul's fp16-rounded product, so flow must stay fp16 — pinning it would diverge.
+            if (nd.attr.has("warp"))
+            {
+                continue;
+            }
             // The grid holds normalized sampling COORDINATES: fp16 storage quantizes them at ~4.9e-4
             // near |g|=1, which drifts the sample point by up to ~0.5 px at 1920-wide inputs — a direct
             // warp-quality (UV) loss. A constant grid is uploaded fp32 by the op itself, so only a

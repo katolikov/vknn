@@ -1,0 +1,45 @@
+#version 450
+#include "precision.glsl"
+// Pass 1 of the cooperative GlobalAveragePool (see global_avg_pool.cpp). Splits H*W across `groups`
+// workgroups per (n, channel-block): each tree-reduces its spatial slice to a vec4 partial SUM (not yet
+// divided) into the fp32 scratch buffer at part[(n*Cb+cb)*groups + chunk]. The single-workgroup
+// avgpool.comp leaves the GPU idle when there are few channel-blocks (a shallow-channel global mean over
+// a large plane); fanning the plane across many workgroups fills it. Pass 2 (avgpool_combine) folds the
+// partials, divides by H*W, and runs the epilogue.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Src { STORE src[]; };
+layout(std430, binding = 1) writeonly buffer P { vec4 part[]; };
+layout(push_constant) uniform PC { int N, C, H, W, groups; } pc;
+
+shared vec4 red[256];
+
+void main() {
+  int  Cb  = (pc.C + 3) / 4;
+  uint wg  = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  uint ncb = wg / uint(pc.groups);
+  uint gi  = wg % uint(pc.groups);
+  if (ncb >= uint(pc.N * Cb)) return;
+  int cb = int(ncb) % Cb;
+  int n  = int(ncb) / Cb;
+  int hw = pc.H * pc.W;
+  int base = (((n * Cb + cb) * pc.H) * pc.W) * 4;
+
+  int chunk = (hw + pc.groups - 1) / pc.groups;
+  int start = int(gi) * chunk;
+  int end   = min(start + chunk, hw);
+
+  uint t = gl_LocalInvocationID.x;
+  vec4 acc = vec4(0.0);
+  for (int i = start + int(t); i < end; i += 256) {
+    int idx = base + i * 4;
+    acc += vec4(float(src[idx]), float(src[idx + 1]), float(src[idx + 2]), float(src[idx + 3]));
+  }
+  red[t] = acc;
+  barrier();
+  for (uint s = 128u; s > 0u; s >>= 1) {
+    if (t < s) red[t] += red[t + s];
+    barrier();
+  }
+  if (t == 0u) part[wg] = red[0];   // scratch[(n*Cb+cb)*groups + gi]
+}

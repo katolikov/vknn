@@ -17,7 +17,7 @@
   "stages": [
     {
       "name": "yonosplat_dl3dv_encoder8",
-      "model": "models/encoder8_dl3dv_fp16.vxm",
+      "model": "models/dl3dv/encoder8_fp16.vxm",
       "inputs": [
         "models/dl3dv"
       ],
