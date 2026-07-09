@@ -38,7 +38,7 @@
 //     -O0..-O3 / --opt N  optimization level (default -O1):
 //                         O0 = no optional fusion (reference), O1 = the general pointwise
 //                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
-//     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise / --[no-]lower-conv
+//     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise / --[no-]fuse-gridsample-warp / --[no-]lower-conv
 //     --no-dequantize   keep QuantizeLinear/DequantizeLinear ops instead of folding DQ weights and
 //                       collapsing matching QDQ sandwiches (default: quantized checkpoints compile
 //                       to plain float graphs and run dequantized)
@@ -439,6 +439,7 @@ int main(int argc, char **argv) {
     applyFlagOverride("--fuse-se", "--no-fuse-se", opt.fuseSqueezeExcite);
     applyFlagOverride("--fuse-dwpw", "--no-fuse-dwpw", opt.fuseDwPw);
     applyFlagOverride("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
+    applyFlagOverride("--fuse-gridsample-warp", "--no-fuse-gridsample-warp", opt.fuseGridSampleWarp);
     applyFlagOverride("--strict-fuse", "--no-strict-fuse", opt.strictFuse);
     applyFlagOverride("--lower-conv", "--no-lower-conv", opt.lowerConv);
     applyFlagOverride("--dequantize", "--no-dequantize", opt.dequantize);

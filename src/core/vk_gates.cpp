@@ -190,11 +190,29 @@ namespace vknn {
             {
                 return refuse(whyNot, "GridSample: missing grid input");
             }
-            const Shape &in   = g.desc(nd.inputs[0]).shape;
-            const Shape &grid = g.desc(nd.inputs[1]).shape;
-            if (in.size() != 4 || grid.size() != 4 || grid.back() != 2)
+            const Shape &in = g.desc(nd.inputs[0]).shape;
+            // Warp mode (fuseGridSampleWarp): 4D NC4HW4 data + an NCHW flow [N,2,Hout,Wout] (input 1)
+            // + a base-grid constant [.,Hout,Wout,2] (input 2); the op computes coord = base +
+            // scale*flow inside the sampler, so no [.,.,.,2] grid is materialized.
+            if (nd.attr.has("warp"))
             {
-                return refuse(whyNot, "GridSample: data/grid not 4D with trailing grid dim 2");
+                if (nd.inputs.size() < 3 || nd.inputs[2] == kNoTensor)
+                {
+                    return refuse(whyNot, "GridSample (warp): missing base-grid input");
+                }
+                const Shape &flow = g.desc(nd.inputs[1]).shape;
+                const Shape &base = g.desc(nd.inputs[2]).shape;
+                if (in.size() != 4 || flow.size() != 4 || flow[1] != 2 || base.size() != 4 || base.back() != 2)
+                {
+                    return refuse(whyNot, "GridSample (warp): data/flow/base not 4D with flow C==2 and base trailing dim 2");
+                }
+            } else
+            {
+                const Shape &grid = g.desc(nd.inputs[1]).shape;
+                if (in.size() != 4 || grid.size() != 4 || grid.back() != 2)
+                {
+                    return refuse(whyNot, "GridSample: data/grid not 4D with trailing grid dim 2");
+                }
             }
             std::string m = nd.attr.gets("mode", "bilinear");
             if (m == "bilinear" || m == "linear" || m == "nearest" || m == "cubic" || m == "bicubic")

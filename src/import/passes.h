@@ -110,6 +110,8 @@ namespace vknn {
         bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
         bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
         bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
+        bool    fuseGridSampleWarp  = true;  // fold a scaled-flow + base-grid coordinate chain into
+                                             // GridSample (bit-exact; default on, part of O1)
         bool    strictFuse          = false; // rounded steps everywhere: fused == unfused byte-identical
                                              // (the byte-gate mode; default fast mode fp32-chains each
                                              // unit and rounds once per stored stream)
@@ -131,6 +133,7 @@ namespace vknn {
         static PassOptions forOptLevel(int level) {
             PassOptions o;
             o.fusePointwiseChains = level >= 1;
+            o.fuseGridSampleWarp  = level >= 1;
             o.fuseSqueezeExcite   = level >= 2;
             o.fuseDwPw            = level >= 2;
             return o;

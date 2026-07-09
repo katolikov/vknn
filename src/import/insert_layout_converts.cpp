@@ -295,8 +295,10 @@ namespace vknn {
                     continue; // constants handled inside flat ops
                 }
                 // GridSample's grid (input 1) is a flat [N,Hout,Wout,2] buffer regardless of the NC4HW4
-                // data path — keep it flat so a runtime grid is not mis-packed as NC4HW4.
-                bool wantFlat = (nd.type == OpType::GridSample && inIdx == 1) ? true : needFlat;
+                // data path — keep it flat so a runtime grid is not mis-packed as NC4HW4. A warp-mode
+                // GridSample instead reads its NCHW flow (input 1) in the NC4HW4 activation layout (the
+                // op computes coordinates from it directly), so it follows the node's own format.
+                bool wantFlat = (nd.type == OpType::GridSample && inIdx == 1 && !nd.attr.has("warp")) ? true : needFlat;
                 if (g.desc(in).gpuFlat == wantFlat)
                 {
                     continue;
