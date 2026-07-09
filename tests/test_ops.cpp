@@ -279,6 +279,74 @@ TEST(Ops, Conv1x1Relu) {
     EXPECT_NEAR(outs[0].f32()[1], 10.0f, 1e-5);
 }
 
+// A constant initializer consumed as an ACTIVATION input: const -> Relu -> Add(runtime x). Const-folding
+// can leave a constant feeding an op that reads input[0] as an activation (in the wild: a baked image
+// constant fed through Cast into a Resize/GridSample). On the Vulkan backend such an op reads input[0]
+// via devBuf, which returns null for an initializer; the backend now materializes these into activation
+// buffers (that GPU path is device-validated — the host build has no GPU). Here the CPU oracle confirms
+// the pattern imports and computes correctly.
+TEST(Ops, ConstActivationInput) {
+    Graph      g;
+    TensorDesc ci;
+    ci.name          = "c";
+    ci.shape         = {1, 1, 2, 2};
+    ci.isInitializer = true;
+    TensorId   c     = g.addTensor(ci);
+    HostBuffer cb;
+    cb.resizeElems(4, DType::Float32);
+    cb.f32()[0]       = -2.f; // relu -> 0
+    cb.f32()[1]       = -1.f; // relu -> 0
+    cb.f32()[2]       = 3.f;
+    cb.f32()[3]       = 5.f;
+    g.initializers[c] = cb;
+
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {1, 1, 2, 2};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+
+    TensorDesc ro;
+    ro.name    = "r";
+    TensorId r = g.addTensor(ro);
+    Node     relu;
+    relu.type    = OpType::Relu; // reads input[0] via devBuf on the GPU path
+    relu.name    = "relu";
+    relu.inputs  = {c}; // the constant IS the activation input
+    relu.outputs = {r};
+    g.nodes.push_back(relu);
+
+    TensorDesc yo;
+    yo.name    = "y";
+    TensorId y = g.addTensor(yo);
+    Node     add;
+    add.type    = OpType::Add; // runtime x keeps the relu output from folding to a bare constant
+    add.name    = "add";
+    add.inputs  = {r, x};
+    add.outputs = {y};
+    g.nodes.push_back(add);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {1, 1, 2, 2};
+    in.dtype = DType::Float32;
+    in.data.resize(4 * 4);
+    std::memset(in.data.data(), 0, in.data.size()); // x = 0, so y = relu(const)
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    EXPECT_NEAR(outs[0].f32()[0], 0.0f, 1e-5);
+    EXPECT_NEAR(outs[0].f32()[1], 0.0f, 1e-5);
+    EXPECT_NEAR(outs[0].f32()[2], 3.0f, 1e-5);
+    EXPECT_NEAR(outs[0].f32()[3], 5.0f, 1e-5);
+}
+
 // --- Conv auto_pad SAME_UPPER, 3x3 stride 1, all-ones weight: a 3x3 box filter over the
 // zero-padded 5x5 input 1..25. out = ceil(5/1) = 5; total_pad = (5-1)*1 + 3 - 5 = 2, split 1/1,
 // so each output is the sum of the input's in-bounds 3x3 neighborhood (e.g. out[0][0] =
