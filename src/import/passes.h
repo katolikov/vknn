@@ -147,9 +147,16 @@ namespace vknn {
     // that hold for any model — never tuned per model. All thresholds are generic eligibility rules:
     // small weights and shallow reductions (depthwise convs, tiny heads) stay fp16 by construction.
     struct QuantOptions {
-        int64_t group          = 128;   // scale group size along the reduction axis
-        double  outlierFrac    = 0.01;  // fraction of activation-salient columns kept fp16 (AWQ)
-        int     calibSamples   = 8;     // synthetic calibration samples when calibFiles is empty
+        // Grouping/outlier defaults split by op CLASS (structural, never per-model): a MatMul weight
+        // is read natively packed by the GPU (its bytes are decode traffic, and LLM residual streams
+        // tolerate int4 well), so it takes the coarse traffic-optimal setting; Conv/Gemm weights are
+        // dequantized to fp16 at load (file-size win only, zero runtime cost), so they take the fine
+        // quality-optimal setting that deep conv stacks need.
+        int64_t group          = 128;  // MatMul scale group size along the reduction axis
+        double  outlierFrac    = 0.01; // MatMul fraction of activation-salient columns kept fp16 (AWQ)
+        int64_t convGroup      = 32;   // Conv/Gemm scale group size
+        double  convOutlierFrac = 0.05; // Conv/Gemm outlier fraction
+        int     calibSamples   = 8;    // synthetic calibration samples when calibFiles is empty
         // Per-layer weighted relative weight-error bar; above it the layer stays fp16. Symmetric
         // int4 with grouped scales sits at ~8-15% weight-space error by construction (the OUTPUT
         // error is far smaller — independent per-column errors average out across the reduction), so

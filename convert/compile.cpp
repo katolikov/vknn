@@ -451,6 +451,24 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--support-report") && i + 1 < argc)
         {
             supportReport = argv[i + 1];
+        } else if (!strcmp(argv[i], "--quant-group") && i + 1 < argc)
+        {
+            quantOpts.group = atoll(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-outliers") && i + 1 < argc)
+        {
+            quantOpts.outlierFrac = atof(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-conv-group") && i + 1 < argc)
+        {
+            quantOpts.convGroup = atoll(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-conv-outliers") && i + 1 < argc)
+        {
+            quantOpts.convOutlierFrac = atof(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-samples") && i + 1 < argc)
+        {
+            quantOpts.calibSamples = atoi(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-err") && i + 1 < argc)
+        {
+            quantOpts.maxLayerRelErr = atof(argv[i + 1]);
         } else if (!strcmp(argv[i], "--calib") && i + 1 < argc)
         {
             // One sample per occurrence: comma-separated raw .bin files in graph-input order.

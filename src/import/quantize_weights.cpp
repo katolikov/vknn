@@ -183,8 +183,11 @@ namespace vknn {
             return 2;
         }
 
-        // Per-activation-tensor accumulated column second moments over the calibration runs.
+        // Per-activation-tensor accumulated column moments over the calibration runs. The second
+        // moment weights the min-MSE step search; the first moment drives the bias correction
+        // (E[Δy] = ΔW·E[x] is the systematic output shift quantization introduces).
         struct ActStats {
+            std::vector<double> sum;   // per channel
             std::vector<double> sumSq; // per channel
             int64_t             count = 0;
         };
@@ -296,6 +299,7 @@ namespace vknn {
             }
             if (st.sumSq.empty())
             {
+                st.sum.assign((size_t) channels, 0.0);
                 st.sumSq.assign((size_t) channels, 0.0);
             }
             if ((int64_t) st.sumSq.size() != channels)
@@ -306,6 +310,7 @@ namespace vknn {
             for (int64_t i = 0; i < total; ++i)
             {
                 const int64_t c = convChannels ? (i % span) / inner : i % channels;
+                st.sum[(size_t) c] += (double) v[i];
                 st.sumSq[(size_t) c] += (double) v[i] * (double) v[i];
             }
             st.count += total / channels;
@@ -452,6 +457,128 @@ namespace vknn {
             return w;
         }
 
+        // Per-column activation means for a site, mirroring columnWeights' channel replication and
+        // conv-group averaging. Empty when calibration is unavailable (no correction possible).
+        std::vector<double> columnMeans(const QuantSite &s, const std::map<TensorId, ActStats> &stats) {
+            auto it = stats.find(s.act);
+            if (it == stats.end() || it->second.count <= 0)
+            {
+                return {};
+            }
+            const ActStats &st = it->second;
+            std::vector<double> m((size_t) s.K, 0.0);
+            if (!s.convChannels)
+            {
+                if ((int64_t) st.sum.size() != s.K)
+                {
+                    return {};
+                }
+                for (int64_t k = 0; k < s.K; ++k)
+                {
+                    m[(size_t) k] = st.sum[(size_t) k] / (double) st.count;
+                }
+                return m;
+            }
+            const int64_t Cg   = s.actChannels;
+            const int64_t taps = s.K / std::max<int64_t>(Cg, 1);
+            if ((int64_t) st.sum.size() < Cg)
+            {
+                return {};
+            }
+            const int64_t groups = std::max<int64_t>((int64_t) st.sum.size() / Cg, 1);
+            for (int64_t c = 0; c < Cg; ++c)
+            {
+                double v = 0;
+                for (int64_t gp = 0; gp < std::min(groups, s.convGroups); ++gp)
+                {
+                    v += st.sum[(size_t) (gp * Cg + c)];
+                }
+                v /= (double) (std::min(groups, s.convGroups) * std::max<int64_t>(st.count, 1));
+                for (int64_t t = 0; t < taps; ++t)
+                {
+                    m[(size_t) (c * taps + t)] = v;
+                }
+            }
+            return m;
+        }
+
+        // Subtract the systematic quantization shift ΔW·E[x] from the site's bias so every layer's
+        // output keeps its calibrated mean (classic PTQ bias correction: round-to-nearest errors are
+        // zero-mean per weight but NOT per output once weighted by E[x], and the shifts compound
+        // through a deep stack). The correction lands in the existing bias when the node has one
+        // (Conv/Gemm input[2], MatMul fusedBias); a bias-free node gets a fresh one only where that
+        // cannot disturb fused-chain operand indexing.
+        void applyBiasCorrection(Graph &g, Node &nd, const QuantSite &s, const std::vector<double> &delta,
+                                 const std::string &weightName) {
+            TensorId biasId = kNoTensor;
+            if (nd.type == OpType::MatMul)
+            {
+                biasId = nd.fusedBias;
+            } else if (pwCoreInputs(nd) >= 3)
+            {
+                biasId = nd.inputs[2];
+            }
+            if (biasId != kNoTensor)
+            {
+                if (!g.isInitializer(biasId) || tensorUses(g, biasId) != 1 ||
+                    numElements(g.desc(biasId).shape) != s.N)
+                {
+                    return; // shared / runtime / oddly-shaped bias: skip rather than corrupt
+                }
+                const DType        bdt = g.desc(biasId).dtype;
+                std::vector<float> b   = initFloats(g, biasId);
+                for (int64_t n = 0; n < s.N; ++n)
+                {
+                    b[(size_t) n] -= (float) delta[(size_t) n];
+                }
+                HostBuffer hb;
+                if (bdt == DType::Float16)
+                {
+                    std::vector<uint8_t> half((size_t) s.N * 2);
+                    fp16_t              *h = reinterpret_cast<fp16_t *>(half.data());
+                    for (int64_t n = 0; n < s.N; ++n)
+                    {
+                        h[n] = floatToHalfSat(b[(size_t) n]);
+                    }
+                    hb.bytes = std::move(half);
+                } else if (bdt == DType::Float32)
+                {
+                    hb.resizeElems(s.N, DType::Float32);
+                    std::memcpy(hb.f32(), b.data(), (size_t) s.N * 4);
+                } else
+                {
+                    return;
+                }
+                g.initializers[biasId] = std::move(hb);
+                return;
+            }
+            // No bias yet. A fused pointwise chain indexes its operands by input position, so only a
+            // chain-free Conv/Gemm can grow an input[2]; a MatMul takes the fusedBias edge instead
+            // (never an inputs change).
+            TensorDesc bd;
+            bd.name          = weightName + "#i4b";
+            bd.shape         = {s.N};
+            bd.dtype         = DType::Float32;
+            bd.isInitializer = true;
+            HostBuffer hb;
+            hb.resizeElems(s.N, DType::Float32);
+            for (int64_t n = 0; n < s.N; ++n)
+            {
+                hb.f32()[n] = (float) -delta[(size_t) n];
+            }
+            if (nd.type == OpType::MatMul)
+            {
+                TensorId id        = g.addTensor(bd);
+                g.initializers[id] = std::move(hb);
+                nd.fusedBias       = id;
+            } else if (!nd.attr.has("pw_steps") && nd.inputs.size() == 2)
+            {
+                TensorId id        = g.addTensor(bd);
+                g.initializers[id] = std::move(hb);
+                nd.inputs.push_back(id);
+            }
+        }
+
     } // namespace
 
     QuantStats quantizeWeightsInt4(Graph &g, const QuantOptions &opt) {
@@ -493,7 +620,8 @@ namespace vknn {
 
             // Outlier preservation: the top outlierFrac of columns by (activation scale x weight
             // magnitude) stay fp16. Ties break on the lower k so the selection is deterministic.
-            const int64_t        nOut = (int64_t) ((double) K * opt.outlierFrac);
+            const double         outlierFrac = nd.type == OpType::MatMul ? opt.outlierFrac : opt.convOutlierFrac;
+            const int64_t        nOut = (int64_t) ((double) K * outlierFrac);
             std::vector<int32_t> oidx;
             std::vector<char>    isOut((size_t) K, 0);
             if (nOut > 0)
@@ -526,7 +654,7 @@ namespace vknn {
             // Group-wise symmetric int4 with an activation-weighted min-MSE step search. The scale is
             // rounded to fp16 BEFORE requantization so q is optimal for the exact step the runtime
             // dequantizes with.
-            const int64_t         G       = std::min<int64_t>(opt.group, K);
+            const int64_t         G       = std::min<int64_t>(nd.type == OpType::MatMul ? opt.group : opt.convGroup, K);
             const int64_t         nGroups = int4GroupCount(K, G);
             std::vector<uint16_t> scales((size_t) (nGroups * N), floatToHalf(1.0f));
             std::vector<int8_t>   q((size_t) (K * N), 0);
@@ -674,6 +802,32 @@ namespace vknn {
             {
                 seti(kWqOidx, oidxId);
                 seti(kWqOval, ovalId);
+            }
+
+            // Bias correction from the calibration means: remove the systematic ΔW·E[x] output shift
+            // this layer's rounding introduces (outlier columns are exact, so they contribute none).
+            const std::vector<double> colMean = columnMeans(s, actStats);
+            if (!colMean.empty())
+            {
+                std::vector<double> delta((size_t) N, 0.0);
+                for (int64_t gp = 0; gp < nGroups; ++gp)
+                {
+                    const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
+                    for (int64_t n = 0; n < N; ++n)
+                    {
+                        const double s16 = halfToFloat(scales[(size_t) (gp * N + n)]);
+                        double       acc = 0;
+                        for (int64_t k = k0; k < k1; ++k)
+                        {
+                            if (!isOut[(size_t) k])
+                            {
+                                acc += ((double) q[(size_t) (k * N + n)] * s16 - (double) w[(size_t) (k * N + n)]) * colMean[(size_t) k];
+                            }
+                        }
+                        delta[(size_t) n] += acc;
+                    }
+                }
+                applyBiasCorrection(g, nd, s, delta, wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name);
             }
             ++stats.quantized;
             stats.outlierCols += (int64_t) oidx.size();

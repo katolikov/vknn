@@ -376,6 +376,11 @@ TEST(QuantInt4, MaterializeReconstructsPlainFp16Weight) {
     }
     for (const auto &kv: g.initializers)
     {
-        EXPECT_EQ(g.desc(kv.first).name.find("#i4"), std::string::npos) << "side tensor payload survived materialization";
+        // The scale/outlier side tensors must be gone; a bias-correction bias (#i4b) is a real
+        // operand and legitimately survives.
+        for (const char *suffix: {"#i4s", "#i4oi", "#i4ov"})
+        {
+            EXPECT_EQ(g.desc(kv.first).name.find(suffix), std::string::npos) << "side tensor payload survived materialization";
+        }
     }
 }
