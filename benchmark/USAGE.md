@@ -103,7 +103,7 @@ into every stage. A single-stage config may drop `stages` and put the fields at 
 
       "convert": {                             // only used for an .onnx model
         "fp16": true,                          // store weights fp16 (default true)
-        "opt": 1,                              // optimization level -O0..-O3 (default 1)
+        "opt": 1,                              // optimization level -O0..-O3 (default 1), or "s" for -Os (all fusion + INT4 weight quantization)
         "no_fuse_swish": false, "fuse_se": false,
         "fuse_dwpw": false, "no_fuse_pointwise": false,   // per-fusion overrides
         "out": "resnet50_fp16.vxm"             // device .vxm name (default: <onnx-stem>.vxm)

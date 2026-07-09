@@ -19,7 +19,7 @@ Config (see benchmark/configs/example.json and USAGE.md):
     "stages": [
       { "name": "resnet50",
         "model": "models/resnet50.onnx",            # .onnx (converted) or .vxm (as-is)
-        "convert": { "fp16": true, "opt": 1 },      # opt level -O0..-O3 + per-fusion overrides
+        "convert": { "fp16": true, "opt": 1 },      # opt level -O0..-O3, or "s" (-Os: +int4 quant)
         "device":  { "serial": "", "dir": "/data/local/tmp/vknn/bench", "clean": false,
                      "cooldown": 0 },               # cooldown: seconds to idle before the run
         "run":     { "backend": "vulkan", "precision": "low",
@@ -155,7 +155,10 @@ def merge(defaults, stage):
 # ----------------------------------------------------------------- convert
 def convert_flags(conv):
     f = ["--fp16"] if conv.get("fp16", True) else []
-    f.append(f"-O{int(conv.get('opt', 1))}")  # optimization level; per-fusion keys override below
+    # Optimization level: 0..3 (fusion presets) or "s" for the -Os MAX preset (all fusion + INT4
+    # weight quantization; --fp16 is implied by the compiler there). Per-fusion keys override below.
+    opt = conv.get("opt", 1)
+    f.append("-Os" if str(opt).lower() == "s" else f"-O{int(opt)}")
     for key, flag_ in (("no_fuse_swish", "--no-fuse-swish"), ("fuse_se", "--fuse-se"),
                        ("fuse_dwpw", "--fuse-dwpw"), ("no_fuse_pointwise", "--no-fuse-pointwise")):
         if conv.get(key):

@@ -11,7 +11,7 @@
 #include "common.glsl"
 #define I4_NX 8  // lanes along n, 8 outputs each: 64 outputs per workgroup
 #define I4_KS 16 // lanes reducing over k; 8 x 16 = 128 == the Vulkan-guaranteed workgroup size
-#define I4_U 4   // k steps a lane loads before it consumes any of them (memory-level parallelism)
+#define I4_U 8   // k steps a lane loads before it consumes any of them (memory-level parallelism)
 layout(local_size_x = I4_NX, local_size_y = I4_KS) in;
 layout(std430, binding = 0) readonly  buffer A  { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer BP { uint bp[]; };
@@ -56,25 +56,46 @@ void main() {
       vec4 s0 = SCALE4(g, 0), s1 = SCALE4(g, 4);
       int kEnd = min(pc.K, (g + 1) * pc.group);
       int k = g * pc.group + ky;
+      // Deep unroll for memory-level parallelism; rationale in matmul_gemv_i4.comp.
       for (; k + (I4_U - 1) * I4_KS < kEnd; k += I4_U * I4_KS) {
         float a0 = float(a[aBase + k]);
         float a1 = float(a[aBase + k + I4_KS]);
         float a2 = float(a[aBase + k + 2 * I4_KS]);
         float a3 = float(a[aBase + k + 3 * I4_KS]);
+        float a4 = float(a[aBase + k + 4 * I4_KS]);
+        float a5 = float(a[aBase + k + 5 * I4_KS]);
+        float a6 = float(a[aBase + k + 6 * I4_KS]);
+        float a7 = float(a[aBase + k + 7 * I4_KS]);
         uint  w0 = bp[k * pc.rowWords + wcol];
         uint  w1 = bp[(k + I4_KS) * pc.rowWords + wcol];
         uint  w2 = bp[(k + 2 * I4_KS) * pc.rowWords + wcol];
         uint  w3 = bp[(k + 3 * I4_KS) * pc.rowWords + wcol];
+        uint  w4 = bp[(k + 4 * I4_KS) * pc.rowWords + wcol];
+        uint  w5 = bp[(k + 5 * I4_KS) * pc.rowWords + wcol];
+        uint  w6 = bp[(k + 6 * I4_KS) * pc.rowWords + wcol];
+        uint  w7 = bp[(k + 7 * I4_KS) * pc.rowWords + wcol];
         acc0 += a0 * nibLo(w0) * s0; acc1 += a0 * nibHi(w0) * s1;
         acc0 += a1 * nibLo(w1) * s0; acc1 += a1 * nibHi(w1) * s1;
         acc0 += a2 * nibLo(w2) * s0; acc1 += a2 * nibHi(w2) * s1;
         acc0 += a3 * nibLo(w3) * s0; acc1 += a3 * nibHi(w3) * s1;
+        acc0 += a4 * nibLo(w4) * s0; acc1 += a4 * nibHi(w4) * s1;
+        acc0 += a5 * nibLo(w5) * s0; acc1 += a5 * nibHi(w5) * s1;
+        acc0 += a6 * nibLo(w6) * s0; acc1 += a6 * nibHi(w6) * s1;
+        acc0 += a7 * nibLo(w7) * s0; acc1 += a7 * nibHi(w7) * s1;
       }
       for (; k < kEnd; k += I4_KS) {
         float ak = float(a[aBase + k]);
         uint  w  = bp[k * pc.rowWords + wcol];
         acc0 += ak * nibLo(w) * s0;
         acc1 += ak * nibHi(w) * s1;
+      }
+    }
+    // Outlier columns, split over the ky lanes (rationale in matmul_gemv_i4.comp).
+    for (int j = int(ky); j < pc.nOut; j += I4_KS) {
+      float av = float(a[aBase + oi[j]]);
+      for (int t = 0; t < 4; ++t) {
+        if (n0 + t < pc.N)     acc0[t] += av * float(ov[j * pc.N + n0 + t]);
+        if (n0 + 4 + t < pc.N) acc1[t] += av * float(ov[j * pc.N + n0 + 4 + t]);
       }
     }
   }
@@ -91,13 +112,6 @@ void main() {
   for (int t = 0; t < 4; ++t) {
     if (n0 + t < pc.N)     s0[t] += float(bias[n0 + t]);
     if (n0 + 4 + t < pc.N) s1[t] += float(bias[n0 + 4 + t]);
-  }
-  for (int j = 0; j < pc.nOut; ++j) {
-    float av = float(a[aBase + oi[j]]);
-    for (int t = 0; t < 4; ++t) {
-      if (n0 + t < pc.N)     s0[t] += av * float(ov[j * pc.N + n0 + t]);
-      if (n0 + 4 + t < pc.N) s1[t] += av * float(ov[j * pc.N + n0 + 4 + t]);
-    }
   }
   int dBase = row * pc.N;
   for (int t = 0; t < 4; ++t) {
