@@ -73,6 +73,19 @@ object ModelCatalog {
         auxFiles = listOf("vocab.json", "merges.txt"), // the SmolVLM2 tokenizer rides along with the model
     )
 
+    val SMOLVLM2_INT4 = ModelSpec(
+        id = "smolvlm2_int4",
+        displayName = "SmolVLM2 2.2B (int4)",
+        mode = "VLM",
+        variant = "int4",
+        description = "Int4-weight SmolVLM2 (calibration-free -Os quantization): the camera coach at ~1/3 the size, same GPU pipeline.",
+        repoId = "katolikov/smolvlm2-vknn",
+        repoFile = "smolvlm2-2.2b-i4.vxm",
+        approxBytes = 1_353_832_261L,
+        sha256 = "b2701e53217f3a996f4ff061824ed8b795c2cae3c2935cf99509edaf291f7903",
+        auxFiles = listOf("vocab.json", "merges.txt"), // shares the SmolVLM2 tokenizer
+    )
+
     val DL3DV = ModelSpec(
         id = "dl3dv",
         displayName = "YoNoSplat encoder",
@@ -85,7 +98,7 @@ object ModelCatalog {
         sha256 = "406dfebef5f9135af2085ec586f10ff7efbe8eb76c919242f64c464b13144835",
     )
 
-    val ALL = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, SMOLVLM2, DL3DV)
+    val ALL = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, SMOLVLM2, SMOLVLM2_INT4, DL3DV)
 
     fun byId(id: String): ModelSpec? = ALL.firstOrNull { it.id == id }
 
