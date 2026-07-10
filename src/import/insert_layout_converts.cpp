@@ -280,6 +280,38 @@ namespace vknn {
         std::map<std::pair<TensorId, bool>, TensorId> cache; // (tensor, needFlat) -> converted tensor
         std::vector<Node>                             converts;
         int                                           n = 0;
+        // Route one tensor read through a ConvertLayout when its layout differs from the layout the
+        // reader operates in, reusing an already-converted copy from `cache`. `ref` is the reader's
+        // reference (a node input or a fused edge) and is rewired to the converted tensor in place.
+        auto convertRead = [&](TensorId &ref, bool wantFlat) {
+            if (ref == kNoTensor || g.isInitializer(ref))
+            {
+                return; // constants handled inside flat ops
+            }
+            if (g.desc(ref).gpuFlat == wantFlat)
+            {
+                return;
+            }
+            auto key = std::make_pair(ref, wantFlat);
+            auto it  = cache.find(key);
+            if (it == cache.end())
+            {
+                TensorDesc d    = g.desc(ref);
+                d.name          = g.desc(ref).name + (wantFlat ? "#flat" : "#nc4") + std::to_string(n);
+                d.isInitializer = d.isInput = d.isOutput = false;
+                d.gpuFlat                                = wantFlat;
+                TensorId t2                              = g.addTensor(d);
+                Node     cv;
+                cv.type    = OpType::ConvertLayout;
+                cv.name    = "convert" + std::to_string(n++);
+                cv.subOp   = wantFlat ? 0 : 1; // 0: NC4HW4->flat, 1: flat->NC4HW4
+                cv.inputs  = {ref};
+                cv.outputs = {t2};
+                converts.push_back(cv);
+                it = cache.emplace(key, t2).first;
+            }
+            ref = it->second;
+        };
         for (auto &nd: g.nodes)
         {
             if (nd.outputs.empty() || nd.outputs[0] == kNoTensor)
@@ -289,40 +321,20 @@ namespace vknn {
             bool needFlat = g.desc(nd.outputs[0]).gpuFlat; // the format this node operates in
             for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
             {
-                TensorId &in = nd.inputs[inIdx];
-                if (in == kNoTensor || g.isInitializer(in))
-                {
-                    continue; // constants handled inside flat ops
-                }
                 // GridSample's grid (input 1) is a flat [N,Hout,Wout,2] buffer regardless of the NC4HW4
                 // data path — keep it flat so a runtime grid is not mis-packed as NC4HW4. A warp-mode
                 // GridSample instead reads its NCHW flow (input 1) in the NC4HW4 activation layout (the
                 // op computes coordinates from it directly), so it follows the node's own format.
                 bool wantFlat = (nd.type == OpType::GridSample && inIdx == 1 && !nd.attr.has("warp")) ? true : needFlat;
-                if (g.desc(in).gpuFlat == wantFlat)
-                {
-                    continue;
-                }
-                auto key = std::make_pair(in, wantFlat);
-                auto it  = cache.find(key);
-                if (it == cache.end())
-                {
-                    TensorDesc d    = g.desc(in);
-                    d.name          = g.desc(in).name + (wantFlat ? "#flat" : "#nc4") + std::to_string(n);
-                    d.isInitializer = d.isInput = d.isOutput = false;
-                    d.gpuFlat                                = wantFlat;
-                    TensorId t2                              = g.addTensor(d);
-                    Node     cv;
-                    cv.type    = OpType::ConvertLayout;
-                    cv.name    = "convert" + std::to_string(n++);
-                    cv.subOp   = wantFlat ? 0 : 1; // 0: NC4HW4->flat, 1: flat->NC4HW4
-                    cv.inputs  = {in};
-                    cv.outputs = {t2};
-                    converts.push_back(cv);
-                    it = cache.emplace(key, t2).first;
-                }
-                in = it->second;
+                convertRead(nd.inputs[inIdx], wantFlat);
             }
+            // Fused residual/bias edges are reads outside the inputs list (rewireTensor's contract)
+            // and the kernel decodes them in ITS layout world, so they take the same converts as any
+            // input. An edge mirrored into inputs (a conv residual doubling at the bias slot; the conv
+            // kernel tests inputs[2] != fusedResidual to tell the two apart) resolves through the same
+            // cache entry, so the mirrored entry and the edge stay one tensor.
+            convertRead(nd.fusedResidual, needFlat);
+            convertRead(nd.fusedBias, needFlat);
         }
         // Graph outputs have no consumer to trigger a convert, so a conv/pool output stays NC4HW4 and the
         // host readback pays an expensive scalar NC4HW4->NCHW gather (per-element, strided, fp16->fp32).

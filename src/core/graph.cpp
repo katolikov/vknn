@@ -70,6 +70,17 @@ namespace vknn {
                     preds.insert(it->second);
                 }
             }
+            // Fused residual/bias edges are read dependencies outside the inputs list
+            // (rewireTensor's contract): the reader must still be scheduled after the edge's
+            // producer, or the recorded dispatch stream reads the tensor before it is written.
+            for (TensorId t: {nodes[i].fusedResidual, nodes[i].fusedBias})
+            {
+                auto it = producer.find(t);
+                if (it != producer.end() && it->second != (int) i)
+                {
+                    preds.insert(it->second);
+                }
+            }
             for (int p: preds)
             {
                 succ[p].push_back((int) i);

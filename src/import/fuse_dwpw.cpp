@@ -3,9 +3,10 @@
 namespace vknn {
 
     // Redirect every reference to tensor `from` so it points at `to`: node inputs, the fused-residual
-    // edge (which is not in the inputs list on every op), and graph outputs. Fusion passes that delete a
-    // node and fold its output into a producer must use this; rewiring only node.inputs leaves a stale
-    // fusedResidual edge dangling at a dead tensor, which crashes a conv residual read.
+    // and fused-bias edges (which are not in the inputs list on every op), and graph outputs. Fusion
+    // passes that delete a node and fold its output into a producer must use this; rewiring only
+    // node.inputs leaves a stale fused edge dangling at a dead tensor, which crashes a conv residual
+    // (or matmul bias) read.
     void rewireTensor(Graph &g, TensorId from, TensorId to) {
         if (from == to || from == kNoTensor)
         {
@@ -23,6 +24,10 @@ namespace vknn {
             if (nn.fusedResidual == from)
             {
                 nn.fusedResidual = to;
+            }
+            if (nn.fusedBias == from)
+            {
+                nn.fusedBias = to;
             }
         }
         for (TensorId &go: g.outputs)
