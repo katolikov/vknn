@@ -117,10 +117,16 @@ namespace {
         return t;
     }
     // Run on the CPU backend with caller-built typed feeds; returns every output.
-    std::vector<IOTensor> runCpuAll(Graph g, const std::vector<IOTensor> &ins) {
+    std::vector<IOTensor> runCpuAll(Graph g, const std::vector<IOTensor> &ins, bool kvConcatFold = true) {
         Config cfg;
         cfg.backend = BackendKind::Cpu;
-        auto sess   = Session::create(std::move(g), cfg);
+        // KvConcatFold rewrites a decode attention's present output to the rows-only convention; a
+        // test asserting the canonical Concat(past, new) present pins it off to read the unfolded form.
+        if (!kvConcatFold)
+        {
+            cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
+        }
+        auto sess = Session::create(std::move(g), cfg);
         EXPECT_TRUE(sess);
         std::vector<IOTensor> outs;
         if (sess)
@@ -634,7 +640,8 @@ TEST(OrtContrib, GroupQueryAttentionDecodeExpands) {
                            mkFeedF32("v", {r.B, r.S, r.Hkv * r.hd}, r.v),
                            mkFeedF32("past_key", {r.B, r.Hkv, r.P, r.hd}, r.pastK),
                            mkFeedF32("past_value", {r.B, r.Hkv, r.P, r.hd}, r.pastV),
-                           mkFeedI64("attention_mask", {r.B, T}, mask)});
+                           mkFeedI64("attention_mask", {r.B, T}, mask)},
+                          /*kvConcatFold=*/false);
     const IOTensor *y = findOutput(outs, "y");
     ASSERT_TRUE(y);
     const std::vector<float> want = r.attention();
