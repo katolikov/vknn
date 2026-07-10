@@ -5,8 +5,8 @@ VKNN runs **Qwen2.5-Coder-0.5B** — a qwen2-architecture autoregressive decoder
 — **entirely on the GPU with zero CPU compute fallbacks**. Every tensor-compute op
 (the embedding gather, all projection and MLP matmuls, RMSNorm, RoPE, GQA attention,
 SwiGLU, softmax, residual adds, the KV-cache concats, and the final logits matmul)
-runs on the Vulkan backend. The only host code is the BPE tokenizer, the greedy /
-sampling argmax over the logits readback, and the token loop.
+runs on the Vulkan backend. The only host code is the BPE tokenizer, the sampling argmax over the
+logits readback (greedy runs an engine-side GPU argmax by default), and the token loop.
 
 The decoder is exported **with a KV cache** (`optimum-cli export onnx --task
 text-generation-with-past`), which decomposes RMSNorm, RoPE, and the GQA `repeat_kv`
@@ -67,6 +67,27 @@ decode-step plan (time-per-output-token) — each is just a different `past_sequ
 # decode : --dim sequence_length=1  --dim past_sequence_length=64  -> mask 1x65,  past 1x2x64x64
 ```
 
+To prefill the whole prompt in one forward instead of one host step per prompt token,
+compile a **multi-bucket** plan whose second bucket takes `input_ids [1, S]` with
+`S > 1`. `vknn_chat` selects that prefill bucket automatically and folds the entire
+prompt in a single `S`-token pass, cutting time-to-first-token by an order of magnitude;
+`--no-prefill` forces the token-by-token path for A/B. Compile a decode bucket (`S = 1`)
+and a prefill bucket (`S = 256`) with the `--graph` multi-bucket form:
+
+```sh
+vknn_compile out.vxm --fp16 \
+  --graph "model.onnx;dim:sequence_length=256;dim:past_sequence_length=1024;dim:total_sequence_length=1280" \
+  --graph "model.onnx;dim:sequence_length=1;dim:past_sequence_length=1024;dim:total_sequence_length=1025"
+```
+
+`-Os` compiles the same fusion set plus **calibration-free int4 weight quantization** (a
+native int4 GPU MatMul) in place of `--fp16`: the instruct model is ~2.4x smaller and
+stays coherent. `--quant-samples 0` selects weight-only quantization, which a multi-bucket
+compile requires — pair it with the `--graph` form above for an int4 prefill model. The
+published `katolikov/qwen-vknn` repo hosts exactly that — an int4 instruct model with the
+256-token prefill bucket (~517 MB) — alongside the fp16 single-bucket and fp16-prefill
+files.
+
 ## 2. Build the runner and push it to a device
 
 `examples/llm/chat.cpp` is on the explicit `_vknn_examples` list in `CMakeLists.txt`, so it
@@ -92,7 +113,8 @@ temperature + top-k + top-p.
 ```
 vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
           [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
-          [--no-kv-link]
+          [--no-kv-link] [--no-prefill] [--no-gpu-argmax]
+          [--no-rope-fusion] [--no-fused-attention] [--no-matmul-view-fold]
 ```
 
 The KV cache is engine-resident by default: `vknn_chat` links every `present.*` output to
@@ -101,6 +123,13 @@ its `past_key_values.*` input (`Session::linkOutputToInput`), so each token bind
 into the cache in place — on the Vulkan backend entirely on-device, with no host copy of
 the cache in either direction. `--no-kv-link` selects the host-side cache loop instead;
 both paths produce the same token stream.
+
+Greedy decode (the default `--temp 0`) reads the next token off the GPU. `vknn_chat`
+registers the decode bucket's `logits` output for an engine-side argmax
+(`Session::setOutputArgMax`), so the winning id comes back as 8 bytes from a GPU reduction
+instead of downloading and scanning the full 151936-wide logits row — the token stream is
+identical (first-occurrence argmax). `--no-gpu-argmax` forces the host scan for A/B.
+Temperature sampling (`--temp > 0`) keeps the full-row readback.
 
 A one-shot completion, feeding token ids directly:
 
@@ -120,7 +149,27 @@ python3 examples/llm/chat_host.py --serial $SERIAL --ddir $DDIR --model qwen_cha
     --tokenizer qwen-onnx --precision low --max-tokens 128
 ```
 
-## 4. Precision
+## 4. Decode fusions
+
+At load, the runner re-collapses the decode step's decomposed chains into fused kernels.
+Both passes are **load-time only and never rewrite the compiled `.vxm`** — an existing
+model simply runs faster once it loads. Each is on by default.
+
+- **RoPE chain fusion.** The rotate-half chain around each q/k site — the last-axis half
+  `Slice`s, the cos/sin table `Gather`s, the rotate products, and the final `Concat` —
+  collapses into one `Rope` dispatch per site. `--no-rope-fusion` keeps the decomposed
+  chain for A/B.
+- **Fused decode attention.** The single-query attention core — `MatMul` scores →
+  scale/mask → `Softmax` → `MatMul` context — fuses into one `FusedAttention` kernel per
+  layer that reads the GQA key/value cache through per-axis operand-view strides (the
+  MatMul operand-view fold), so the `repeat_kv` broadcast is never materialized.
+  `--no-fused-attention` restores the decomposed core, and `--no-matmul-view-fold`
+  disables the operand-view fold.
+
+Both kernels compute scores and softmax in fp32, so they are **numerically finer** than
+the decomposed chain rather than byte-identical — the greedy token stream is unchanged.
+
+## 5. Precision
 
 The plan is compiled `--fp16`, so weights are stored fp16; every kernel **accumulates in
 fp32** regardless of the `--precision` storage tier. RMSNorm is a native fused op (the
