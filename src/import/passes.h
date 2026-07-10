@@ -220,4 +220,15 @@ namespace vknn {
     // Hint::MatMulViewFold, before insertLayoutConverts; never serialized.
     void foldMatMulViews(Graph &g, const std::string &fp32Pins = "");
 
+    // Fuse the single-query decode-attention chain — MatMul(view) [-> scale/mask pointwise] ->
+    // Softmax -> MatMul(view) [-> Transpose -> Reshape] — into one FusedAttention node
+    // (core/fused_attention.h), so a decode step's attention core is one dispatch per layer and
+    // the score/probability intermediates never touch memory. Consumes the operand-view stride
+    // attrs foldMatMulViews composed, so it must run after that pass; only the M == 1 (query
+    // length 1) form matches, and prefill/CNN graphs are untouched. Numerics-changing (fp32
+    // scores + softmax without the decomposed chain's fp16 round-trips); `fp32Pins` mirrors
+    // foldMatMulViews — a chain whose erased tensors match the markFp32 set keeps its
+    // decomposed form. Runs at load only, gated by Hint::FusedAttention; never serialized.
+    void fuseDecodeAttention(Graph &g, const std::string &fp32Pins = "");
+
 } // namespace vknn

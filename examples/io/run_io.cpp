@@ -60,10 +60,11 @@ static const char *opt(int c, char **v, const char *k, const char *d) noexcept {
 int main(int argc, char **argv) {
     if (argc < 3)
     {
-        printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
-               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--timing] [--cache DIR]"
-               " [--winograd auto|on|off] [--max-submit-nodes N] in0.bin in1.bin ...\n",
-               argv[0]);
+        printf(
+            "usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
+            " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--no-fused-attention] [--timing] [--cache DIR]"
+            " [--winograd auto|on|off] [--max-submit-nodes N] in0.bin in1.bin ...\n",
+            argv[0]);
         return 1;
     }
     std::string model = argv[1], outdir = argv[2];
@@ -87,6 +88,10 @@ int main(int argc, char **argv) {
     if (flag(argc, argv, "--no-matmul-view-fold"))
     {
         cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+    }
+    if (flag(argc, argv, "--no-fused-attention"))
+    {
+        cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
     }
     cfg.layerDump     = flag(argc, argv, "--layer-dump");
     cfg.debugSegments = flag(argc, argv, "--debug-segments");

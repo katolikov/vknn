@@ -490,6 +490,17 @@ namespace vknn {
             foldMatMulViews(graph_, vulkanFlat ? fp32Marks : std::string());
         }
 
+        // --- decode-attention fusion: collapse the M == 1 MatMul -> scale/mask -> Softmax -> MatMul
+        //     (-> Transpose -> Reshape) chain into one FusedAttention node, consuming the operand-view
+        //     strides the fold above composed, so a decode step's attention core is one dispatch per
+        //     layer and the score/probability intermediates never touch memory. Load-time only (never
+        //     serialized); numerics-changing (fp32 scores + softmax replace the decomposed chain's
+        //     fp16 round-trips), so it has its own hint and cache-variant key entry.
+        if (cfg_.fusedAttention())
+        {
+            fuseDecodeAttention(graph_, vulkanFlat ? fp32Marks : std::string());
+        }
+
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
         //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
         //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).

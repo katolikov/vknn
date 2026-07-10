@@ -143,6 +143,10 @@ int main(int argc, char **argv) {
         {
             cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
         }
+        if (!strcmp(argv[i], "--no-fused-attention"))
+        {
+            cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
+        }
     }
     std::mt19937 rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));
 
