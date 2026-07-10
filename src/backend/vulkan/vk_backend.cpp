@@ -1101,6 +1101,17 @@ namespace vknn {
                 qi.queryCount = (uint32_t) (idx.size() * 2);
                 vkCreateQueryPool(be_->ctx().device(), &qi, nullptr, &queryPool_);
             }
+            // Chunk begin/end timestamps for Config::timingSummary: 2 queries per command-buffer
+            // chunk, written at each chunk's head/tail, read after the run's last fence. Never
+            // coexists with the profiler pool - profiling forces a single chunk and per-op
+            // barriers, which would perturb exactly the boundaries measured here.
+            if (be_->ctx().caps().timestampSupported && cfg.timingSummary && !cfg.profile)
+            {
+                VkQueryPoolCreateInfo qi {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                qi.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+                qi.queryCount = kMaxTimedChunks * 2;
+                vkCreateQueryPool(be_->ctx().device(), &qi, nullptr, &chunkPool_);
+            }
 
             // 4) pre-record the command buffer for the static graph.
             record();
@@ -1127,6 +1138,18 @@ namespace vknn {
         }
 
         ~VulkanSegment() override {
+            if (cfg_.timingSummary && stat_.runs > 0)
+            {
+                const double n = (double) stat_.runs;
+                VKNN_INFO << "segment summary (" << nodeIdx.size() << " nodes, " << cmds_.size() << " chunk(s), " << stat_.runs
+                          << " run(s)) avg ms/run: pack=" << stat_.packMs / n << " submitCall=" << stat_.submitCallMs / n
+                          << " fenceWait=" << stat_.fenceWaitMs / n << " gpuBusy=" << stat_.gpuBusyMs / n
+                          << " gpuGap=" << stat_.gpuGapMs / n << " unpack=" << stat_.unpackMs / n;
+            }
+            if (chunkPool_)
+            {
+                vkDestroyQueryPool(be_->ctx().device(), chunkPool_, nullptr);
+            }
             if (queryPool_)
             {
                 vkDestroyQueryPool(be_->ctx().device(), queryPool_, nullptr);
@@ -1139,12 +1162,31 @@ namespace vknn {
         }
 
         void record() {
+            // Per-chunk begin/end timestamps (Config::timingSummary): each chunk resets and writes
+            // its own query pair, so a re-recorded buffer stays self-contained. Chunks past the
+            // pool capacity execute untimed; gpuBusy/gpuGap then undercount rather than misindex.
+            uint32_t timedChunk   = 0;
+            auto     chunkTsBegin = [&] {
+                if (chunkPool_ && timedChunk < kMaxTimedChunks)
+                {
+                    vkCmdResetQueryPool(cmd_, chunkPool_, timedChunk * 2, 2);
+                    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, chunkPool_, timedChunk * 2);
+                }
+            };
+            auto chunkTsEnd = [&] {
+                if (chunkPool_ && timedChunk < kMaxTimedChunks)
+                {
+                    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, chunkPool_, timedChunk * 2 + 1);
+                    ++timedChunk;
+                }
+            };
             cmd_ = be_->runner().allocate();
             be_->runner().begin(cmd_);
             if (queryPool_)
             {
                 vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t) (nodeIdx.size() * 2));
             }
+            chunkTsBegin();
             // Device-resident links: fold each linked output's PREVIOUS-run values into its linked
             // input, per the host-updated ranges SSBO, before anything else executes. The barrier
             // orders the copies against both hazards below: nodes reading the destination (the fold
@@ -1347,10 +1389,12 @@ namespace vknn {
                 const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
                 if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
                 {
+                    chunkTsEnd();
                     be_->runner().end(cmd_);
                     cmds_.push_back(cmd_);
                     cmd_ = be_->runner().allocate();
                     be_->runner().begin(cmd_);
+                    chunkTsBegin();
                     writtenBufs.clear();
                     readBufs.clear();
                     copySinceBarrier = false;
@@ -1407,8 +1451,10 @@ namespace vknn {
                     vk::computeBarrier(cmd_);
                 }
             }
+            chunkTsEnd();
             be_->runner().end(cmd_);
             cmds_.push_back(cmd_);
+            timedChunks_     = timedChunk;
             recorded_        = true;
             recordedConvert_ = convert_;
         }
@@ -1665,10 +1711,14 @@ namespace vknn {
             }
             auto t1 = now();
 
-            double wall = 0;
+            const bool summarize   = cfg_.timingSummary;
+            double     wall        = 0;
+            double     submitCalls = 0;
             for (VkCommandBuffer c: cmds_)
             {
-                wall += be_->runner().submitAndWait(c);
+                double sc = 0;
+                wall += be_->runner().submitAndWait(c, summarize ? &sc : nullptr);
+                submitCalls += sc;
             }
             auto t2 = now();
 
@@ -1717,13 +1767,40 @@ namespace vknn {
                 }
                 // else: the GPU wrote device-native bytes straight into the caller's dma-buf; caller reads it.
             }
-            if (timing)
+            if (timing || summarize)
             {
                 auto t3 = now();
                 auto ms = [&](auto a, auto b) {
                     return std::chrono::duration<double, std::milli>(b - a).count();
                 };
-                VKNN_INFO << "timing: pack=" << ms(t0, t1) << "ms submit+gpu=" << wall << "ms unpack=" << ms(t2, t3) << "ms";
+                if (summarize)
+                {
+                    stat_.runs += 1;
+                    stat_.packMs += ms(t0, t1);
+                    stat_.submitCallMs += submitCalls;
+                    stat_.fenceWaitMs += wall - submitCalls;
+                    stat_.unpackMs += ms(t2, t3);
+                    // All fences above have signalled, so the chunk timestamps are available.
+                    if (chunkPool_ && timedChunks_ > 0)
+                    {
+                        std::vector<uint64_t> ts((size_t) timedChunks_ * 2, 0);
+                        vkGetQueryPoolResults(be_->ctx().device(), chunkPool_, 0, (uint32_t) ts.size(), ts.size() * sizeof(uint64_t), ts.data(), sizeof(uint64_t),
+                                              VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+                        const double period = be_->ctx().caps().timestampPeriod;
+                        for (uint32_t c = 0; c < timedChunks_; ++c)
+                        {
+                            stat_.gpuBusyMs += (double) (ts[c * 2 + 1] - ts[c * 2]) * period / 1e6;
+                            if (c > 0)
+                            {
+                                stat_.gpuGapMs += (double) (ts[c * 2] - ts[(c - 1) * 2 + 1]) * period / 1e6;
+                            }
+                        }
+                    }
+                }
+                if (timing)
+                {
+                    VKNN_INFO << "timing: pack=" << ms(t0, t1) << "ms submit+gpu=" << wall << "ms unpack=" << ms(t2, t3) << "ms";
+                }
             }
 
             // Config::dumpTensors targeted dump: write the named tensors (dedicated buffers) to disk for
@@ -1937,6 +2014,15 @@ namespace vknn {
         std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;
+        // Config::timingSummary state: the chunk-timestamp pool, how many chunks carry a query
+        // pair, and the lifetime accumulators printed once by the destructor.
+        static constexpr uint32_t kMaxTimedChunks = 64;
+        VkQueryPool               chunkPool_      = VK_NULL_HANDLE;
+        uint32_t                  timedChunks_    = 0;
+        struct {
+            uint64_t runs = 0;
+            double   packMs = 0, submitCallMs = 0, fenceWaitMs = 0, gpuBusyMs = 0, gpuGapMs = 0, unpackMs = 0;
+        } stat_;
         std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
         // Zero-copy: each boundary tensor's pooled buffer (the fallback) and its imported dma-buf. The
         // import is kept per boundary tensor and refreshed when that tensor's dma-buf or required size

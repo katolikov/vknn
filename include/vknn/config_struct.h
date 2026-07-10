@@ -104,7 +104,14 @@ namespace vknn {
         int maxSubmitBindings = 1024;
 
         // Debug.
-        bool        timing        = false; ///< print pack/submit/unpack + per-stage timing
+        bool timing = false; ///< print pack/submit/unpack + per-stage timing
+        /// Accumulate per-segment submit/sync walls silently and print ONE summary line per GPU
+        /// segment at teardown: runs, chunk count, and per-run averages of pack, vkQueueSubmit call,
+        /// fence wait, GPU-busy (begin/end timestamps per chunk), GPU inter-chunk gap, and unpack.
+        /// Unlike `timing` this emits no per-run log lines, so the measured loop is not perturbed
+        /// by log I/O. GPU-busy/gap need timestamp support and are 0 when `profile` already owns
+        /// the query machinery.
+        bool        timingSummary = false;
         bool        debugSegments = false; ///< trace per-segment + per-CPU-op execution
         std::string disableVkOps;          ///< comma list of op types to force onto CPU
         std::string dumpTensors;           ///< comma list of tensor names to dump to disk

@@ -43,7 +43,9 @@ namespace vknn { namespace vk {
         void            begin(VkCommandBuffer cmd);
         void            end(VkCommandBuffer cmd);
         /// Submit a pre-recorded buffer and wait on the fence. @returns wall time in ms.
-        double submitAndWait(VkCommandBuffer cmd);
+        /// When `submitCallMs` is non-null it receives the vkQueueSubmit call's own wall share,
+        /// so the caller can split queue-submission cost from the fence wait.
+        double submitAndWait(VkCommandBuffer cmd, double *submitCallMs = nullptr);
 
         VkCommandPool pool() const noexcept {
             return pool_;

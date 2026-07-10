@@ -99,6 +99,12 @@ int main(int argc, char **argv) {
     const int64_t eos          = atoll(opt(argc, argv, "--eos", "151643"));
     bool          kvLink       = !flagSet(argc, argv, "--no-kv-link"); // may drop to the host loop mid-stream on a link failure
     cfg.timing                 = flagSet(argc, argv, "--timing");      // per-run pack/submit/unpack walls
+    cfg.timingSummary          = flagSet(argc, argv, "--timing-summary"); // silent per-segment submit/sync accumulators, one line at teardown
+    const int maxSubmitNodes   = atoi(opt(argc, argv, "--max-submit-nodes", "0")); // >0 overrides Config::maxSubmitNodes (command-buffer chunking)
+    if (maxSubmitNodes > 0)
+    {
+        cfg.maxSubmitNodes = maxSubmitNodes;
+    }
     if (flagSet(argc, argv, "--no-matmul-view-fold"))
     {
         cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
@@ -789,7 +795,7 @@ int main(int argc, char **argv) {
             }
             ++p;
         }
-        if (cfg.timing && tmSteps > 0)
+        if ((cfg.timing || cfg.timingSummary) && tmSteps > 0)
         {
             fprintf(stderr, "[chat] step phases avg over %d step(s): prep=%.3fms links=%.3fms run=%.3fms sample=%.3fms\n",
                     tmSteps, tmPrepMs / tmSteps, tmLinkMs / tmSteps, tmRunMs / tmSteps, tmSampleMs / tmSteps);
