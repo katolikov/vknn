@@ -275,6 +275,17 @@ int main(int argc, char **argv) {
     // in the cache's element size; the prefill logits row is converted to fp32 for host sampling.
     const size_t kvElemBytes = dtypeSize(ins[(size_t) pastKey[0]].dtype);
     const bool   logitsFp16  = outs[(size_t) logitsIdx].dtype == DType::Float16;
+    // A host present-row fold (the no-kv-link decode loop and token-by-token prefill) copies the
+    // present output straight into the past buffer, so it needs the two to share an element size.
+    // The engine-resident KV link never host-folds and is unaffected, so this only gates the host
+    // fold paths rather than rejecting the model.
+    const bool hostFoldDtypeOk = presKey[0] < 0 || dtypeSize(outs[(size_t) presKey[0]].dtype) == kvElemBytes;
+    if (!kvLink && !hostFoldDtypeOk)
+    {
+        fprintf(stderr, "--no-kv-link needs the present and past KV outputs to share an element size (%zu vs %zu bytes); rerun with the engine-resident cache\n",
+                dtypeSize(outs[(size_t) presKey[0]].dtype), kvElemBytes);
+        return 2;
+    }
     fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d present_rows=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, presRows, (long long) vocab);
     // chat only COMPARES --eos against generated ids (it is never fed to the model), so a negative
     // id is a valid "never matches" sentinel that disables early stop (timing harnesses use it). A
@@ -464,7 +475,7 @@ int main(int argc, char **argv) {
                 IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
                 if (hostPast.data.empty())
                 {
-                    hostPast.data.assign((size_t) ins[(size_t) (part ? pastVal[l] : pastKey[l])].elems * sizeof(float), 0);
+                    hostPast.data.assign((size_t) ins[(size_t) (part ? pastVal[l] : pastKey[l])].elems * kvElemBytes, 0);
                 }
                 IOTensor resident;
                 if (sess->readResident(hostPast.name, resident) != Status::Ok || resident.data.size() != hostPast.data.size())
@@ -503,8 +514,9 @@ int main(int argc, char **argv) {
     // The last forward's logits row and its provenance. A decode step under engine argmax returns
     // the logits entry with no data (lastLogits stays null; readOutputArgMax serves the token); a
     // prefill pass always yields a full host row (its bucket is never argmax-registered).
-    const float *lastLogits     = nullptr;
-    bool         lastFromDecode = false;
+    const float       *lastLogits     = nullptr;
+    bool               lastFromDecode = false;
+    std::vector<float> decodeLogitsF32; // fp32 copy of an fp16 decode logits row for host sampling
 
     // Feed one token at the current position; false on error.
     auto step = [&](int64_t tok) -> bool {
@@ -636,8 +648,21 @@ int main(int argc, char **argv) {
             }
         }
         const IOTensor &logitsOut = outputs[(size_t) outIdxByInfo[logitsIdx]];
-        lastLogits                = logitsOut.data.empty() ? nullptr : reinterpret_cast<const float *>(logitsOut.data.data());
-        lastFromDecode            = true;
+        // An fp16-declared logits output downloads as raw fp16; convert the row to fp32 so the host
+        // sampler reads real values (the engine-argmax greedy path leaves this null and is unaffected).
+        if (logitsOut.data.empty())
+        {
+            lastLogits = nullptr;
+        } else if (logitsFp16)
+        {
+            decodeLogitsF32.resize((size_t) vocab);
+            halfToFloatBulk(reinterpret_cast<const fp16_t *>(logitsOut.data.data()), decodeLogitsF32.data(), vocab);
+            lastLogits = decodeLogitsF32.data();
+        } else
+        {
+            lastLogits = reinterpret_cast<const float *>(logitsOut.data.data());
+        }
+        lastFromDecode = true;
         return true;
     };
 
