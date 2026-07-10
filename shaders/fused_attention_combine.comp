@@ -1,0 +1,41 @@
+#version 450
+#define VKNN_NO_RTE 1 // matmul-family kernel: avoids the float-controls execution mode (miscompiled by some drivers)
+#include "precision.glsl"
+#include "common.glsl"
+// Fused decode attention, combine pass: folds the per-chunk partials fused_attention.comp wrote —
+// {chunk max m, chunk weight sum l, unnormalized context acc[hd]} per (attention row, chunk) —
+// into the final context row with the standard flash rescale:
+//   M = max_c m_c;  L = sum_c l_c * exp(m_c - M);  out[n] = sum_c acc_c[n] * exp(m_c - M) / L
+// One workgroup per attention row; the per-chunk rescale factors stage through shared memory so
+// each is computed once. Only this pass stores to the output (fp16 via TO_STORE).
+#define WG 256
+#define FA_MAX_CHUNKS 64
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer P { float part[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
+layout(push_constant) uniform PC { int rows, hd, chunks; } pc;
+
+shared float sFactor[FA_MAX_CHUNKS];
+
+void main() {
+  uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (row >= uint(pc.rows)) return;
+  int tid = int(gl_LocalInvocationID.x);
+  int base = int(row) * pc.chunks;
+
+  // Global max and rescaled weight sum over the chunks (small count; every lane computes both).
+  float gM = -3.4e38;
+  for (int c = 0; c < pc.chunks; ++c) gM = max(gM, part[(base + c) * (pc.hd + 2)]);
+  float gL = 0.0;
+  for (int c = 0; c < pc.chunks; ++c) gL += part[(base + c) * (pc.hd + 2) + 1] * exp(part[(base + c) * (pc.hd + 2)] - gM);
+  if (tid < pc.chunks) sFactor[tid] = exp(part[(base + tid) * (pc.hd + 2)] - gM);
+  barrier();
+
+  float rL = 1.0 / gL;
+  for (int n = tid; n < pc.hd; n += WG) {
+    float context = 0.0;
+    for (int c = 0; c < pc.chunks; ++c)
+      context += part[(base + c) * (pc.hd + 2) + 2 + n] * sFactor[c];
+    d[int(row) * pc.hd + n] = TO_STORE(context * rL);
+  }
+}
