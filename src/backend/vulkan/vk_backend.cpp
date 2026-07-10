@@ -164,7 +164,26 @@ namespace vknn {
             if (nd.type == OpType::FusedAttention && ctx_)
             {
                 const auto &caps = ctx_->caps();
-                if (caps.maxSharedMemory < (uint32_t) kFaSharedBytes)
+                // Per-node shared usage: sQ[G*hd] + sScores[G*chunk] + sRed[256] + sAcc[hd] fp32,
+                // with the op's own chunk = min(4096/G, 256). Refuse only when THIS node's staging
+                // exceeds the device budget (the kFaMax* caps bound it, but a device with a small
+                // shared budget can still run a small-group model).
+                const auto      &dims = nd.attr.getints(kFaDims);
+                const auto      &ks   = nd.attr.getints(kFaKStride);
+                const auto      &vs   = nd.attr.getints(kFaVStride);
+                int64_t          groupSize = 1;
+                for (size_t d = 0; d < dims.size(); ++d)
+                {
+                    if (dims[d] > 1 && d < ks.size() && ks[d] == 0 && d < vs.size() && vs[d] == 0)
+                    {
+                        groupSize = dims[d];
+                        break;
+                    }
+                }
+                const int64_t hd    = nd.attr.geti(kFaHd);
+                const int64_t chunk = std::min<int64_t>(4096 / std::max<int64_t>(groupSize, 1), 256);
+                const int64_t sharedBytes = (groupSize * hd + groupSize * chunk + 256 + hd) * 4;
+                if ((int64_t) caps.maxSharedMemory < sharedBytes)
                 {
                     if (whyNot)
                     {
@@ -1031,11 +1050,21 @@ namespace vknn {
             // uploaded weight payloads as the ops consume them. Session frees whatever survives.
             env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g](TensorId t) {
                 auto it = g.initializers.find(t);
-                if (it != g.initializers.end())
+                if (it == g.initializers.end())
                 {
-                    it->second.bytes.clear();
-                    it->second.bytes.shrink_to_fit();
+                    return;
                 }
+                // A mmap-backed view costs no heap — clearing it frees nothing but drops the ability
+                // to re-read the blob. In a multi-bucket .vxm several buckets view the SAME mapped
+                // blob (a weight shared by the prefill and decode plans), and each bucket's segment
+                // build re-uploads it; clearing bucket 0's view would leave a later bucket's flat
+                // upload with no bytes. Only OWNED (heap) payloads are worth reclaiming here.
+                if (it->second.bytes.viewed())
+                {
+                    return;
+                }
+                it->second.bytes.clear();
+                it->second.bytes.shrink_to_fit();
             }) :
                                                                    nullptr;
             // Memo scoped to this segment's graph; the ops themselves own the buffers, so a weak handle

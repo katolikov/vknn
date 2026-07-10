@@ -32,7 +32,7 @@ namespace vknn {
         bool        matmulViewFold = true; // Config::matmulViewFold()
         bool        ropeFusion     = true; // Config::ropeFusion()
         bool        fusedAttention = true; // Config::fusedAttention()
-        bool        kvConcatFold   = true; // Config::kvConcatFold()
+        bool        kvConcatFold   = false; // Config::kvConcatFold()
         std::string fp32Tensors;           // Config::fp32Tensors
         int         winograd        = 0;   // Hint::Winograd
         int         winogradVariant = 0;   // Hint::WinogradVariant

@@ -1467,6 +1467,7 @@ namespace {
         std::vector<float>                  intrinsics;  // views*9 normalized K
         int                                 views = 0, height = 0, width = 0;
         float                               pivotDepth = 1.0f; // median view-0 camera-space depth
+        int                                 fogPermille = 0;   // last encode: permille of gaussians above opacity 0.1
     };
 
     // The encoder's predicted camera pose is an internal tensor, not a declared output; these names
@@ -1529,12 +1530,15 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env
     }
 }
 
-// int[4] = {gaussians, views, height, width}. gaussians is 0 until an encode succeeds.
+// int[5] = {gaussians, views, height, width, fogPermille}. gaussians is 0 until an encode
+// succeeds; fogPermille is the last encode's fraction (permille) of gaussians above opacity 0.1 —
+// a coherent scene concentrates opacity in few splats, a degenerate capture spreads mid-opacity
+// fog everywhere, so a high value flags a capture the viewer will show as haze.
 JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatInfo(JNIEnv *env, jobject, jlong ptr) {
     auto     *splat   = reinterpret_cast<Splat *>(ptr);
-    jint      info[4] = {splat->rasterizer ? splat->rasterizer->gaussians() : 0, splat->views, splat->height, splat->width};
-    jintArray out     = env->NewIntArray(4);
-    env->SetIntArrayRegion(out, 0, 4, info);
+    jint      info[5] = {splat->rasterizer ? splat->rasterizer->gaussians() : 0, splat->views, splat->height, splat->width, splat->fogPermille};
+    jintArray out     = env->NewIntArray(5);
+    env->SetIntArrayRegion(out, 0, 5, info);
     return out;
 }
 
@@ -1591,6 +1595,15 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
     for (size_t i = 0; i < colors.size(); ++i)
     {
         colors[i] = std::max(0.0f, raster::kC0 * harmonicValues[i] + 0.5f);
+    }
+    {
+        const float *opacityValues = opacities->f32();
+        int64_t      hazyCount     = 0;
+        for (int64_t i = 0; i < gaussianCount; ++i)
+        {
+            hazyCount += opacityValues[i] > 0.1f ? 1 : 0;
+        }
+        splat->fogPermille = gaussianCount > 0 ? (int) (hazyCount * 1000 / gaussianCount) : 0;
     }
     splat->rasterizer->setGaussians(means->f32(), covariances->f32(), colors.data(), opacities->f32(), gaussianCount);
 

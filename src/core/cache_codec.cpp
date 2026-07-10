@@ -203,7 +203,7 @@ namespace vknn {
                 v.matmulViewFold  = getBool(vo, "matmulViewFold", true);
                 v.ropeFusion      = getBool(vo, "ropeFusion", true);
                 v.fusedAttention  = getBool(vo, "fusedAttention", true);
-                v.kvConcatFold    = getBool(vo, "kvConcatFold", true);
+                v.kvConcatFold    = getBool(vo, "kvConcatFold", false);
                 v.fp32Tensors     = getStr(vo, "fp32Tensors");
                 v.winograd        = getI32(vo, "winograd");
                 v.winogradVariant = getI32(vo, "winogradVariant");
