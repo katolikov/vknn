@@ -1,0 +1,4 @@
+#version 450
+// Flat-vector argmax over fp32 elements. See argmax_flat_core.glsl.
+#define SRC_ELEM_T float
+#include "argmax_flat_core.glsl"

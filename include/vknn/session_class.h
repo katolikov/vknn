@@ -179,6 +179,25 @@ namespace vknn {
         /// previously linked inputs keep their engine-side values until rebound.
         void clearLinks();
 
+        // --- engine-side output reductions --------------------------------------------------------
+        // An output registered for argmax stays engine-resident like a linked output: run() returns
+        // its IOTensor with name/shape/dtype but NO data, and the engine reduces it to {index, value}
+        // instead — on the GPU backend a single dispatch appended to the segment's pre-recorded
+        // command stream with an 8-byte readback, replacing the full download of the vector plus the
+        // host-side scan (an autoregressive decoder's per-token greedy argmax over the logits). The
+        // selected index is the first occurrence of the maximum — identical to a left-to-right host
+        // scan with a strictly-greater test over the same values — so a greedy token stream is
+        // unchanged by registration.
+
+        /// Register the boundary output `outputName` of `bucket` for engine-side argmax. The output
+        /// must be float and effectively one-dimensional (every leading dim 1). On a backend without
+        /// a device reduction path the output keeps its host copy and readOutputArgMax() scans it —
+        /// same result, host cost. Registration is idempotent.
+        Status setOutputArgMax(size_t bucket, const std::string &outputName);
+        /// The argmax of a registered output as of the last completed run: first-occurrence index
+        /// and the value widened to fp32. NotFound when the name was never registered.
+        Status readOutputArgMax(const std::string &outputName, int64_t &index, float &value);
+
         /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
         /// The returned data is host-resident.
         const RtTensor *tensor(const std::string &name) const;
@@ -244,6 +263,18 @@ namespace vknn {
         /// The link record for (bucket, tensor id) on the given side, or nullptr when not linked.
         const ResidentLink *linkedOutput(size_t bucket, TensorId id) const;
         const ResidentLink *linkedInput(size_t bucket, TensorId id) const;
+
+        /// One registered engine-side argmax (see setOutputArgMax). `deviceSegment` set = the owning
+        /// GPU segment reduces on-device and suppresses the output's download; null = the host copy
+        /// stays and readOutputArgMax() scans it (the CPU backend's path).
+        struct OutputArgMax {
+            size_t      bucket = 0;
+            std::string outputName;
+            TensorId    outId         = kNoTensor;
+            Segment    *deviceSegment = nullptr;
+        };
+        /// The argmax record for (bucket, output tensor id), or nullptr when not registered.
+        const OutputArgMax *argMaxOutput(size_t bucket, TensorId id) const;
         /// Per-run link step: push dirty ranges to device segments and apply host-path copies.
         Status applyResidentLinks(size_t bucketIndex, PlanBucket &bucket);
 
@@ -269,6 +300,8 @@ namespace vknn {
         mutable bool   bucketsUniform_    = true;
         // Declared output->input links, applied at the start of each run of their bucket.
         std::vector<ResidentLink> links_;
+        // Registered engine-side output argmax reductions (see setOutputArgMax).
+        std::vector<OutputArgMax> argMaxOutputs_;
     };
 
 } // namespace vknn

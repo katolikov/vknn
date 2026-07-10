@@ -1310,6 +1310,24 @@ namespace vknn {
             {
                 vk::computeBarrier(cmd_);
             }
+            // Registered output argmax epilogues: one single-workgroup dispatch per output, reading
+            // the finished boundary buffer and writing {index, value} into its result buffer. Rides
+            // the same submission; the final barrier above makes the outputs visible to it.
+            for (TensorId argMaxTid: argMaxOutputs_)
+            {
+                struct ArgMaxPC {
+                    uint32_t elemCount;
+                };
+                const bool fp16 = boundaryElemBytes(argMaxTid) == 2;
+                auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
+                if (!pipe)
+                {
+                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
+                                                                 env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                }
+                ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape)};
+                pipe->dispatch(cmd_, {buffers_[argMaxTid]->handle(), argMaxResults_[argMaxTid]->handle()}, &pc, sizeof(pc), 1);
+            }
             // Declared-format zero-copy outputs: convert the device-native boundary buffer into each
             // caller dma-buf (declared layout/dtype), then a barrier before the host reads it.
             {
@@ -1489,6 +1507,12 @@ namespace vknn {
                     linksChanged_ = false;
                     reRecord      = true;
                 }
+                if (argMaxChanged_)
+                {
+                    // The registered reduction set changed; the recording must append its epilogue.
+                    argMaxChanged_ = false;
+                    reRecord       = true;
+                }
                 if (reRecord)
                 {
                     if (!cmds_.empty())
@@ -1614,6 +1638,13 @@ namespace vknn {
                 {
                     // A linked output stays device-resident: no download. The stale host copy is
                     // invalidated; readResident() unpacks on demand.
+                    rt.hostValid = false;
+                    continue;
+                }
+                if (argMaxOutputs_.count(tid))
+                {
+                    // Reduced on-device: the host reads the 8-byte result via readOutputArgMax();
+                    // the full vector never downloads and any stale host copy is invalid.
                     rt.hostValid = false;
                     continue;
                 }
@@ -1798,6 +1829,41 @@ namespace vknn {
             return true;
         }
 
+        Status setOutputArgMax(TensorId output, std::string &whyNot) override {
+            if (std::find(boundaryOutputs.begin(), boundaryOutputs.end(), output) == boundaryOutputs.end() || !buffers_.count(output))
+            {
+                whyNot = "'" + g_.tensors[output].name + "' is not a boundary output of this segment";
+                return Status::InvalidArgument;
+            }
+            if (!g_.desc(output).gpuFlat)
+            {
+                // The epilogue indexes flat elements; an NC4HW4 boundary would report block-order
+                // indices. The Session reduces the host copy instead.
+                whyNot = "'" + g_.tensors[output].name + "' is not flat on the device";
+                return Status::Unsupported;
+            }
+            if (argMaxOutputs_.insert(output).second)
+            {
+                argMaxResults_[output] = std::make_shared<vk::Buffer>(be_->ctx(), kArgMaxResultBytes, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                argMaxChanged_         = true; // the next run re-records with the epilogue dispatch
+            }
+            return Status::Ok;
+        }
+
+        bool readOutputArgMax(TensorId output, int64_t &index, float &value) override {
+            auto it = argMaxResults_.find(output);
+            if (it == argMaxResults_.end())
+            {
+                return false;
+            }
+            // {uint index, float value}, written by the epilogue dispatch of the last submitted run;
+            // the fence has signalled (submitAndWait), so the mapped read is coherent.
+            const uint32_t *words = reinterpret_cast<const uint32_t *>(it->second->host());
+            index                 = (int64_t) words[0];
+            std::memcpy(&value, &words[1], sizeof value);
+            return true;
+        }
+
       private:
         VulkanBackend                                  *be_;
         Graph                                          &g_;
@@ -1874,6 +1940,14 @@ namespace vknn {
         static constexpr uint32_t            kLinkRangeHeaderBytes     = 8;  // {rangeCount, totalElems}
         static constexpr uint32_t            kLinkInitialRangeCapacity = 16; // ranges; grows on demand
         static constexpr uint32_t            kLinkCopyGroups           = 4;  // fixed grid; the shader strides over totalElems
+        // Device-side output argmax (Session::setOutputArgMax): one 8-byte host-visible result
+        // buffer {uint index, float value} per registered output, written by the argmax_flat
+        // epilogue dispatch the recording appends after the graph's nodes.
+        std::set<TensorId>                              argMaxOutputs_;
+        std::map<TensorId, std::shared_ptr<vk::Buffer>> argMaxResults_;
+        bool                                            argMaxChanged_ = false; // registration set changed -> re-record
+        std::unique_ptr<vk::ComputePipeline>            argMaxPipeFp16_, argMaxPipeFp32_;
+        static constexpr uint32_t                       kArgMaxResultBytes = 8; // {index, value}
         // Device element width of a boundary tensor (2 for fp16 storage, 4 for fp32/storeFp32).
         int boundaryElemBytes(TensorId tid) const {
             return (useFp16_ && !g_.tensors[tid].storeFp32) ? 2 : 4;

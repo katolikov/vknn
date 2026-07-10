@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <fstream>
 #include <set>
 #include <sys/stat.h>
@@ -1424,6 +1425,124 @@ namespace vknn {
         links_.clear();
     }
 
+    // ---- engine-side output reductions -----------------------------------------------------------
+
+    const Session::OutputArgMax *Session::argMaxOutput(size_t bucket, TensorId id) const {
+        for (const OutputArgMax &reduction: argMaxOutputs_)
+        {
+            if (reduction.bucket == bucket && reduction.outId == id)
+            {
+                return &reduction;
+            }
+        }
+        return nullptr;
+    }
+
+    Status Session::setOutputArgMax(size_t bucket, const std::string &outputName) {
+        if (bucket >= buckets_.size())
+        {
+            VKNN_ERROR << "argmax: bucket " << bucket << " out of range (have " << buckets_.size() << ")";
+            return Status::InvalidArgument;
+        }
+        PlanBucket    &b     = buckets_[bucket];
+        const Graph   &g     = *b.graph;
+        const TensorId outId = g.find(outputName);
+        if (outId == kNoTensor || !idInList(g.outputs, outId))
+        {
+            VKNN_ERROR << "argmax: '" << outputName << "' is not a graph output of bucket " << bucket;
+            return Status::NotFound;
+        }
+        if (g.tensors[outId].dtype != DType::Float32 && g.tensors[outId].dtype != DType::Float16)
+        {
+            VKNN_ERROR << "argmax: '" << outputName << "' is " << dtypeStr(g.tensors[outId].dtype) << "; only float outputs reduce";
+            return Status::InvalidArgument;
+        }
+        // The reduction is over one flat vector: every leading dim must be 1 so the element index IS
+        // the last-axis index (a decoder's logits row [1,1,V]). Anything else is ambiguous.
+        const Shape  &shape = g.tensors[outId].shape;
+        const int64_t elems = shape.empty() ? 0 : numElements(shape);
+        if (elems <= 0 || elems != shape.back())
+        {
+            VKNN_ERROR << "argmax: '" << outputName << "' is not effectively one-dimensional";
+            return Status::InvalidArgument;
+        }
+        if (argMaxOutput(bucket, outId))
+        {
+            return Status::Ok; // idempotent
+        }
+        OutputArgMax reduction;
+        reduction.bucket     = bucket;
+        reduction.outputName = outputName;
+        reduction.outId      = outId;
+        if (cfg_.backend != BackendKind::Cpu)
+        {
+            for (const std::unique_ptr<Segment> &seg: b.segments)
+            {
+                if (!idInList(seg->boundaryOutputs, outId))
+                {
+                    continue;
+                }
+                std::string  whyNot;
+                const Status st = seg->setOutputArgMax(outId, whyNot);
+                if (st == Status::Ok)
+                {
+                    reduction.deviceSegment = seg.get();
+                } else if (st != Status::Unsupported)
+                {
+                    VKNN_ERROR << "argmax: '" << outputName << "': " << whyNot;
+                    return st;
+                }
+                break;
+            }
+        }
+        if (!reduction.deviceSegment)
+        {
+            VKNN_INFO << "argmax: '" << outputName << "' reduces on the host copy (no device reduction path)";
+        }
+        argMaxOutputs_.push_back(std::move(reduction));
+        return Status::Ok;
+    }
+
+    Status Session::readOutputArgMax(const std::string &outputName, int64_t &index, float &value) {
+        for (const OutputArgMax &reduction: argMaxOutputs_)
+        {
+            if (reduction.outputName != outputName)
+            {
+                continue;
+            }
+            if (reduction.deviceSegment && reduction.deviceSegment->readOutputArgMax(reduction.outId, index, value))
+            {
+                return Status::Ok;
+            }
+            // Host path: scan the internal fp32 copy with the shader's exact semantics — strictly
+            // greater replaces, so the first occurrence of the maximum wins and NaN never does.
+            PlanBucket &b  = buckets_[reduction.bucket];
+            RtTensor   &rt = b.pool[reduction.outId];
+            if (!rt.hostValid || rt.host.bytes.empty())
+            {
+                VKNN_ERROR << "argmax: '" << outputName << "' has no values to reduce (no completed run)";
+                return Status::RuntimeError;
+            }
+            const float  *data  = reinterpret_cast<const float *>(rt.host.bytes.data());
+            const int64_t elems = rt.shape.empty() ? (int64_t) (rt.host.bytes.size() / sizeof(float)) : numElements(rt.shape);
+            float         best   = -std::numeric_limits<float>::infinity();
+            int64_t       bestAt = -1;
+            for (int64_t i = 0; i < elems; ++i)
+            {
+                if (data[i] > best)
+                {
+                    best   = data[i];
+                    bestAt = i;
+                }
+            }
+            index = bestAt < 0 ? 0 : bestAt;
+            value = best;
+            return Status::Ok;
+        }
+        VKNN_ERROR << "argmax: '" << outputName << "' was never registered (setOutputArgMax)";
+        return Status::NotFound;
+    }
+
     Status Session::applyResidentLinks(size_t bucketIndex, PlanBucket &bucket) {
         for (ResidentLink &link: links_)
         {
@@ -1816,6 +1935,11 @@ namespace vknn {
             {
                 // A linked output stays engine-resident: the entry carries its metadata but no data
                 // (readResident() fetches the values when a caller needs them).
+                io.dtype = graph_.tensors[oid].dtype;
+            } else if (argMaxOutput(bucketIndex, oid))
+            {
+                // An argmax-registered output is served by readOutputArgMax(): metadata only, no
+                // declared-dtype readback (the device path never downloads the vector at all).
                 io.dtype = graph_.tensors[oid].dtype;
             } else if (rt.dmaBufFd < 0)
             {

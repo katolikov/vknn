@@ -1,0 +1,6 @@
+#version 450
+// Flat-vector argmax over fp16 elements, compared and reported in fp32. See argmax_flat_core.glsl.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define SRC_ELEM_T float16_t
+#include "argmax_flat_core.glsl"
