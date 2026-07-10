@@ -10,6 +10,7 @@
 #include "vknn/tensor.h"
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -206,6 +207,15 @@ namespace vknn {
         PlanBucket buildBucket(Graph &&g, const std::string &key);
         /// Reassign small CPU-bounded GPU runs in `bucket` to CPU (avoid round trips).
         void foldTinyGpuIslands(PlanBucket &bucket);
+        /// Zero-match accounting for the user-supplied name/op pattern debug knobs (dumpTensors,
+        /// disableVkOps): records which list entries matched this bucket's final graph and backend
+        /// assignment. Reads only — never changes the plan. Runs once per bucket, after the island
+        /// fold; fp32Tensors entries are accounted inside markFp32 the same way.
+        void accountDebugPatternMatches(const PlanBucket &bucket);
+        /// One WARN per pattern entry that matched nothing in ANY bucket, so a debug knob whose
+        /// tensor was renamed or fused/folded away (or a typo) never silently no-ops. Called once
+        /// per model load, after every bucket is built — never per inference.
+        void warnUnmatchedDebugPatterns() const;
         /// Checks a caller-provided input shape against `bucket`'s plan-frozen buffers; the single
         /// point every run() input shape passes through when a bucket is already selected.
         Status validateInputShape(const PlanBucket &bucket, TensorId id, const Shape &got) const;
@@ -262,6 +272,15 @@ namespace vknn {
         // bucketsShareInputNames() cache: valid while the bucket count equals uniformCheckedFor_.
         mutable size_t uniformCheckedFor_ = 0;
         mutable bool   bucketsUniform_    = true;
+        // Zero-match pattern accounting (see accountDebugPatternMatches): the entries of the
+        // corresponding Config list observed to match in at least one bucket, plus the op names
+        // present in the model (for disableVkOps). fp32PatternsAccounted_ marks that markFp32 ran
+        // with the caller's fp32Tensors list in at least one bucket, so the warning fires only
+        // where the pattern resolution actually happened.
+        std::set<std::string> matchedFp32Patterns_;
+        std::set<std::string> matchedDumpPatterns_;
+        std::set<std::string> presentOpNames_;
+        bool                  fp32PatternsAccounted_ = false;
         // Declared output->input links, applied at the start of each run of their bucket.
         std::vector<ResidentLink> links_;
     };

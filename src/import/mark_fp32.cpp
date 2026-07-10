@@ -42,13 +42,34 @@ namespace vknn {
         return false;
     }
 
+    // Split a comma-separated pattern list into its non-empty entries, as typed (an exclude entry
+    // keeps its leading '-'). The zero-match accounting below and the session's load-end warning
+    // both enumerate entries through this, so a warned entry is exactly what the caller wrote.
+    std::vector<std::string> splitPatternList(const std::string &patterns) {
+        std::vector<std::string> entries;
+        for (size_t p = 0, c;; p = c + 1)
+        {
+            c             = patterns.find(',', p);
+            std::string s = patterns.substr(p, c == std::string::npos ? c : c - p);
+            if (!s.empty())
+            {
+                entries.push_back(std::move(s));
+            }
+            if (c == std::string::npos)
+            {
+                break;
+            }
+        }
+        return entries;
+    }
+
     // Selective fp32: mark every activation tensor whose name contains one of the comma-separated
     // substrings (Config::fp32Tensors) so its buffer stays fp32 under fp16 compute, then bridge the
     // fp16/fp32 frontier with ConvertDtype nodes — for each node, any activation input whose storage
     // dtype differs from the node's (its output[0]) gets a convert, exactly mirroring insertLayoutConverts.
     // Initializers are skipped: ops upload them at the node's precision (env.useFp16). Runs at load, after
     // insertLayoutConverts, so it operates on the final flat names.
-    void markFp32(Graph &g, const std::string &substrs) {
+    void markFp32(Graph &g, const std::string &substrs, std::set<std::string> *matchedPatterns) {
         // Substring marks from Config::fp32Tensors are additive on top of any storage an earlier pass
         // already pinned to fp32 (pinGatherIndexFp32's index chains). Only flat tensors are eligible for a
         // substring mark: the flat transformer/geometry kernels all #include precision.glsl so an fp32
@@ -57,15 +78,40 @@ namespace vknn {
         int marked = 0;
         if (!substrs.empty())
         {
+            // Per-entry zero-match accounting (matchedPatterns non-null): an entry is matched when its
+            // substring occurs in an ELIGIBLE tensor's name — the same non-initializer flat set the
+            // marking consults — so the session's load-end warning names exactly the entries that
+            // cannot affect this model. Exclude entries account the same way (an exclude matching
+            // nothing is an inert knob too) and are recorded as typed, '-' included.
+            std::vector<std::string> entries, entryText;
+            if (matchedPatterns)
+            {
+                entries = splitPatternList(substrs);
+                for (const std::string &e: entries)
+                {
+                    entryText.push_back(e[0] == '-' ? e.substr(1) : e);
+                }
+            }
             auto matches = [&](const std::string &nm) {
                 return fp32NameMatch(nm, substrs);
             };
             for (auto &t: g.tensors)
             {
-                if (!t.isInitializer && t.gpuFlat && matches(t.name))
+                if (t.isInitializer || !t.gpuFlat)
+                {
+                    continue;
+                }
+                if (matches(t.name))
                 {
                     t.storeFp32 = true;
                     ++marked;
+                }
+                for (size_t e = 0; e < entries.size(); ++e)
+                {
+                    if (!entryText[e].empty() && t.name.find(entryText[e]) != std::string::npos)
+                    {
+                        matchedPatterns->insert(entries[e]);
+                    }
                 }
             }
             if (!marked)
