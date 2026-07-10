@@ -1,23 +1,25 @@
-// Post-pass INT4 weight quantization (vknn_compile -Os): packs eligible MatMul/Gemm/Conv weights to
-// 4-bit groups with fp16 scales, keeping the ~1% most activation-salient input columns in fp16
-// (outlier preservation) and calibrating each group's step against the activation second moment
-// (min-MSE with a diagonal-Hessian weighting — the output-MSE proxy for a linear layer). Weights the
-// quantized error would distort past a relative bar stay fp16 entirely, so numerically sensitive
-// layers opt themselves out (mixed precision). Runs after the standard passes, immediately before
-// the fp16 initializer sweep and saveGraphBin.
+// Post-pass weight quantization (vknn_compile -Os): packs eligible MatMul/Gemm/Conv weights to
+// narrow integer groups — 4-bit or 8-bit, selected by QuantOptions::bits — with fp16 scales,
+// keeping the ~1% most activation-salient input columns in fp16 (outlier preservation) and
+// calibrating each group's step against the activation second moment (min-MSE with a
+// diagonal-Hessian weighting — the output-MSE proxy for a linear layer). Weights the quantized
+// error would distort past a relative bar stay fp16 entirely, so numerically sensitive layers opt
+// themselves out (mixed precision). Runs after the standard passes, immediately before the fp16
+// initializer sweep and saveGraphBin.
 //
-// The packed layout, attribute names, and the dequantization contract live in core/quant_int4.h.
-// The quantized weight keeps its LOGICAL TensorDesc (original shape, dtype Float16); only the
-// payload bytes are packed. At load the session materializes fp16 bytes back for every consumer
-// without a native int4 kernel, so quantization is transparent to all backends except the Vulkan
-// MatMul, which reads the packed payload directly.
+// The packed layouts, attribute names, and the dequantization contracts live in
+// core/quant_weights.h (int4 authority: core/quant_int4.h). The quantized weight keeps its LOGICAL
+// TensorDesc (original shape, dtype Float16); only the payload bytes are packed. At load the
+// session materializes fp16 bytes back for every consumer without a native packed kernel, so
+// quantization is transparent to all backends except the Vulkan MatMul, which reads the packed
+// payload directly.
 //
 // Calibration runs the float graph on the CPU backend (linked into vknn_compile) over a small
 // deterministic input set: caller-provided samples (--calib) or synthetic ones from a fixed-seed
 // generator, so the same compile inputs always produce byte-identical .vxm output. A calibration
 // failure degrades to weight-only quantization (uniform column weighting) rather than failing the
 // compile.
-#include "core/quant_int4.h"
+#include "core/quant_weights.h"
 #include "import/passes.h"
 #include "vknn/config.h"
 #include "vknn/error.h"
@@ -516,7 +518,7 @@ namespace vknn {
         // (Conv/Gemm input[2], MatMul fusedBias); a bias-free node gets a fresh one only where that
         // cannot disturb fused-chain operand indexing.
         void applyBiasCorrection(Graph &g, Node &nd, const QuantSite &s, const std::vector<double> &delta,
-                                 const std::string &weightName) {
+                                 const std::string &weightName, const char *biasSuffix) {
             TensorId biasId = kNoTensor;
             if (nd.type == OpType::MatMul)
             {
@@ -563,7 +565,7 @@ namespace vknn {
             // chain-free Conv/Gemm can grow an input[2]; a MatMul takes the fusedBias edge instead
             // (never an inputs change).
             TensorDesc bd;
-            bd.name          = weightName + "#i4b";
+            bd.name          = weightName + biasSuffix;
             bd.shape         = {s.N};
             bd.dtype         = DType::Float32;
             bd.isInitializer = true;
@@ -586,9 +588,169 @@ namespace vknn {
             }
         }
 
+        // The NF4 quantile table (the 4-bit code matched to a normal weight distribution),
+        // reordered for the LUT4 contract: entry 0 is the exact zero, so the nonzero quantiles
+        // live at 1..15 ascending. The weighted Lloyd fit below starts from it and adapts the
+        // nonzero entries to the tensor's own normalized distribution.
+        constexpr double kNf4NonZero[15] = {
+            -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
+            -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.07958029955625534,
+            0.16093020141124725, 0.24611230194568634, 0.33791524171829224, 0.44070982933044434,
+            0.5626170039176941, 0.7229568362236023, 1.0};
+
+        // Nearest codebook entry to `v`, ties resolved to the lowest index (deterministic).
+        int nearestLutEntry(const double cb[16], double v) {
+            int    best     = 0;
+            double bestDist = std::fabs(v - cb[0]);
+            for (int i = 1; i < 16; ++i)
+            {
+                const double dist = std::fabs(v - cb[i]);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best     = i;
+                }
+            }
+            return best;
+        }
+
+        // Build the LUT4 grid for one site: per-(group, column) fp16 absmax scales, one 16-entry
+        // fp16 codebook (entry 0 pinned at exact zero — the padding/outlier contract in
+        // quant_weights.h) fitted to the activation-weighted normalized values by fixed-iteration
+        // weighted Lloyd descent from the NF4 table, and the nearest-entry index assignment into
+        // `q`. Accumulates the same weighted-SSE guard metric the integer path computes.
+        // Deterministic: fixed iteration count, stride subsampling, fp16-rounded sorted entries
+        // every round.
+        void quantizeLut4Grid(const std::vector<float> &w, const std::vector<double> &colW,
+                              const std::vector<char> &isOut, int64_t K, int64_t N, int64_t G,
+                              int64_t nGroups, std::vector<uint16_t> &scales, std::vector<int8_t> &q,
+                              std::vector<uint16_t> &codebook, double &errNum, double &errDen) {
+            // Per-(group, column) absmax scales, fp16-rounded like the integer path's steps. A
+            // degenerate group-column (absmax rounds to fp16 zero) keeps scale 1; its normalized
+            // values sit at the pinned zero entry, so it flushes to zero exactly like the integer
+            // path's subnormal groups.
+            std::vector<double> scaleValue((size_t) (nGroups * N), 1.0);
+            for (int64_t gp = 0; gp < nGroups; ++gp)
+            {
+                const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
+                for (int64_t n = 0; n < N; ++n)
+                {
+                    double maxAbs = 0, colEnergy = 0;
+                    for (int64_t k = k0; k < k1; ++k)
+                    {
+                        if (isOut[(size_t) k])
+                        {
+                            continue;
+                        }
+                        const double v = w[(size_t) (k * N + n)];
+                        maxAbs         = std::max(maxAbs, std::fabs(v));
+                        colEnergy += colW[(size_t) k] * v * v;
+                    }
+                    errDen += colEnergy;
+                    const float s = (float) halfToFloat(floatToHalfSat((float) maxAbs));
+                    if (s > 0)
+                    {
+                        scales[(size_t) (gp * N + n)]     = floatToHalfSat(s);
+                        scaleValue[(size_t) (gp * N + n)] = (double) s;
+                    }
+                }
+            }
+            // Codebook fit over a deterministic stride subsample of the normalized non-outlier
+            // values (the fit is a shape estimate; the assignment below still visits every value).
+            constexpr int64_t kLutFitSamples = 65536;
+            const int64_t     total          = K * N;
+            const int64_t     stride         = std::max<int64_t>(1, total / kLutFitSamples);
+            std::vector<std::pair<double, double>> samples; // (normalized value, column weight)
+            samples.reserve((size_t) std::min<int64_t>(total, kLutFitSamples + 1));
+            for (int64_t idx = 0; idx < total; idx += stride)
+            {
+                const int64_t k = idx / N, n = idx % N;
+                if (isOut[(size_t) k])
+                {
+                    continue;
+                }
+                const double s = scaleValue[(size_t) ((k / G) * N + n)];
+                samples.push_back({(double) w[(size_t) idx] / s, std::max(colW[(size_t) k], 0.0)});
+            }
+            double cb[16];
+            cb[0] = 0.0;
+            for (int i = 0; i < 15; ++i)
+            {
+                cb[i + 1] = halfToFloat(floatToHalfSat((float) kNf4NonZero[i]));
+            }
+            for (int iter = 0; iter < 20; ++iter)
+            {
+                double sum[16] = {}, weightSum[16] = {};
+                for (const auto &sample: samples)
+                {
+                    const int best = nearestLutEntry(cb, sample.first);
+                    sum[best] += sample.second * sample.first;
+                    weightSum[best] += sample.second;
+                }
+                for (int i = 1; i < 16; ++i)
+                {
+                    // An empty (or zero-weight) cluster keeps its entry; entry 0 stays pinned.
+                    if (weightSum[i] > 0)
+                    {
+                        cb[i] = halfToFloat(floatToHalfSat((float) (sum[i] / weightSum[i])));
+                    }
+                }
+                std::sort(cb + 1, cb + 16);
+            }
+            codebook.resize(16);
+            codebook[0] = floatToHalf(0.0f);
+            for (int i = 1; i < 16; ++i)
+            {
+                codebook[(size_t) i] = floatToHalfSat((float) cb[i]);
+            }
+            // Nearest-entry assignment over every value, and the guard metric on the exact grid
+            // values the runtime dequantizes (cb entries are already fp16-rounded).
+            for (int64_t gp = 0; gp < nGroups; ++gp)
+            {
+                const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
+                for (int64_t n = 0; n < N; ++n)
+                {
+                    const double s = scaleValue[(size_t) (gp * N + n)];
+                    for (int64_t k = k0; k < k1; ++k)
+                    {
+                        if (isOut[(size_t) k])
+                        {
+                            continue;
+                        }
+                        const double v    = w[(size_t) (k * N + n)];
+                        const int    best = nearestLutEntry(cb, v / s);
+                        q[(size_t) (k * N + n)] = (int8_t) best;
+                        const double e          = v - cb[best] * s;
+                        errNum += colW[(size_t) k] * e * e;
+                    }
+                }
+            }
+        }
+
     } // namespace
 
-    QuantStats quantizeWeightsInt4(Graph &g, const QuantOptions &opt) {
+    QuantStats quantizeWeights(Graph &g, const QuantOptions &opt) {
+        if (opt.bits != 4 && opt.bits != 8)
+        {
+            throw Error(Status::InvalidArgument, "quantizeWeights: bits must be 4 or 8, got " + std::to_string(opt.bits));
+        }
+        if (opt.lut4 && opt.bits != 4)
+        {
+            throw Error(Status::InvalidArgument, "quantizeWeights: the LUT4 codebook format is 4-bit (bits must stay 4)");
+        }
+        // Format-dependent surface: the integer alphabet (or codebook), the emitted format id, and
+        // the side-tensor name suffixes. The AWQ outlier / bias-correction / guard machinery below
+        // is format-blind — the integer paths read qMax everywhere, so bits == 4 reproduces the
+        // int4 pipeline's arithmetic exactly, and the LUT4 grid builder plugs in between the
+        // outlier selection and the shared emit.
+        const bool   lutFormat   = opt.lut4;
+        const bool   int8Width   = !lutFormat && opt.bits == 8;
+        const double qMax        = int8Width ? 127.0 : 7.0;
+        const int    format      = lutFormat ? kWqFormatLut4 : (int8Width ? kWqFormatInt8 : kWqFormatInt4);
+        const char  *scaleSuffix = lutFormat ? "#l4s" : (int8Width ? "#i8s" : "#i4s");
+        const char  *oidxSuffix  = lutFormat ? "#l4oi" : (int8Width ? "#i8oi" : "#i4oi");
+        const char  *ovalSuffix  = lutFormat ? "#l4ov" : (int8Width ? "#i8ov" : "#i4ov");
+        const char  *biasSuffix  = lutFormat ? "#l4b" : (int8Width ? "#i8b" : "#i4b");
         QuantStats stats;
         for (const auto &kv: g.initializers)
         {
@@ -658,14 +820,19 @@ namespace vknn {
                 }
             }
 
-            // Group-wise symmetric int4 with an activation-weighted min-MSE step search. The scale is
-            // rounded to fp16 BEFORE requantization so q is optimal for the exact step the runtime
-            // dequantizes with.
+            // Group-wise symmetric narrow-integer quantization ([-qMax, qMax]) with an
+            // activation-weighted min-MSE step search. The scale is rounded to fp16 BEFORE
+            // requantization so q is optimal for the exact step the runtime dequantizes with.
             const int64_t         G       = std::min<int64_t>(nd.type == OpType::MatMul ? opt.group : opt.convGroup, K);
             const int64_t         nGroups = int4GroupCount(K, G);
             std::vector<uint16_t> scales((size_t) (nGroups * N), floatToHalf(1.0f));
             std::vector<int8_t>   q((size_t) (K * N), 0);
+            std::vector<uint16_t> codebook; // LUT4 only: 16 fp16 entries, [0] pinned at exact zero
             double                errNum = 0, errDen = 0;
+            if (lutFormat)
+            {
+                quantizeLut4Grid(w, colW, isOut, K, N, G, nGroups, scales, q, codebook, errNum, errDen);
+            } else
             for (int64_t gp = 0; gp < nGroups; ++gp)
             {
                 const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
@@ -704,7 +871,7 @@ namespace vknn {
                         const double p = 1.0 - 0.03 * (double) cand;
                         // The candidate is evaluated at its fp16-rounded value (saturated to the
                         // finite range) — the exact step the runtime dequantizes with.
-                        const float s = (float) halfToFloat(floatToHalfSat((float) (maxAbs * p / 7.0)));
+                        const float s = (float) halfToFloat(floatToHalfSat((float) (maxAbs * p / qMax)));
                         if (s <= 0)
                         {
                             continue;
@@ -719,7 +886,7 @@ namespace vknn {
                             }
                             const double v  = w[(size_t) (k * N + n)];
                             double       qq = std::nearbyint(v / s);
-                            qq              = std::min(7.0, std::max(-7.0, qq));
+                            qq              = std::min(qMax, std::max(-qMax, qq));
                             const double e  = v - qq * (double) s;
                             cost += colW[(size_t) k] * e * e;
                         }
@@ -746,7 +913,7 @@ namespace vknn {
                             continue;
                         }
                         double qq = std::nearbyint((double) w[(size_t) (k * N + n)] / (double) bestS);
-                        qq        = std::min(7.0, std::max(-7.0, qq));
+                        qq        = std::min(qMax, std::max(-qMax, qq));
                         q[(size_t) (k * N + n)] = (int8_t) qq;
                     }
                     errNum += bestCost;
@@ -771,7 +938,7 @@ namespace vknn {
 
             // Emit: packed payload into the weight tensor (logical desc unchanged apart from the fp16
             // dtype stamp), scales/outliers as side initializers referenced from the node attributes.
-            std::vector<uint8_t> packed = int4Pack(q, K, N);
+            std::vector<uint8_t> packed = int8Width ? int8Pack(q, K, N) : int4Pack(q, K, N);
             std::vector<uint16_t> oval((size_t) (oidx.size() * (size_t) N));
             for (size_t j = 0; j < oidx.size(); ++j)
             {
@@ -794,12 +961,16 @@ namespace vknn {
                 g.initializers[id] = std::move(hb);
                 return id;
             };
-            const TensorId scaleId = addSide("#i4s", DType::Float16, nGroups * N, scales.data(), scales.size() * 2);
-            TensorId       oidxId = kNoTensor, ovalId = kNoTensor;
+            const TensorId scaleId = addSide(scaleSuffix, DType::Float16, nGroups * N, scales.data(), scales.size() * 2);
+            TensorId       oidxId = kNoTensor, ovalId = kNoTensor, lutId = kNoTensor;
             if (!oidx.empty())
             {
-                oidxId = addSide("#i4oi", DType::Int32, (int64_t) oidx.size(), oidx.data(), oidx.size() * 4);
-                ovalId = addSide("#i4ov", DType::Float16, (int64_t) oval.size(), oval.data(), oval.size() * 2);
+                oidxId = addSide(oidxSuffix, DType::Int32, (int64_t) oidx.size(), oidx.data(), oidx.size() * 4);
+                ovalId = addSide(ovalSuffix, DType::Float16, (int64_t) oval.size(), oval.data(), oval.size() * 2);
+            }
+            if (lutFormat)
+            {
+                lutId = addSide("#l4cb", DType::Float16, 16, codebook.data(), codebook.size() * 2);
             }
 
             {
@@ -818,7 +989,7 @@ namespace vknn {
                 a.i                = v;
                 nd.attr.map[key]   = a;
             };
-            seti(kWq, kWqVersion);
+            seti(kWq, format);
             seti(kWqK, K);
             seti(kWqN, N);
             seti(kWqGroup, G);
@@ -829,6 +1000,10 @@ namespace vknn {
             {
                 seti(kWqOidx, oidxId);
                 seti(kWqOval, ovalId);
+            }
+            if (lutId != kNoTensor)
+            {
+                seti(kWqLut, lutId);
             }
 
             // Bias correction from the calibration means: remove the systematic ΔW·E[x] output shift
@@ -848,13 +1023,20 @@ namespace vknn {
                         {
                             if (!isOut[(size_t) k])
                             {
-                                acc += ((double) q[(size_t) (k * N + n)] * s16 - (double) w[(size_t) (k * N + n)]) * colMean[(size_t) k];
+                                // The grid value the runtime dequantizes: q * scale for the integer
+                                // formats, codebook[q] * scale for LUT4.
+                                double gridValue = (double) q[(size_t) (k * N + n)] * s16;
+                                if (lutFormat)
+                                {
+                                    gridValue = (double) halfToFloat(codebook[(size_t) (uint8_t) q[(size_t) (k * N + n)]]) * s16;
+                                }
+                                acc += (gridValue - (double) w[(size_t) (k * N + n)]) * colMean[(size_t) k];
                             }
                         }
                         delta[(size_t) n] += acc;
                     }
                 }
-                applyBiasCorrection(g, nd, s, delta, wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name);
+                applyBiasCorrection(g, nd, s, delta, wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name, biasSuffix);
             }
             ++stats.quantized;
             stats.outlierCols += (int64_t) oidx.size();

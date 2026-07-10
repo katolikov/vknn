@@ -170,6 +170,12 @@ namespace vknn {
         /// Bucket-explicit form of linkOutputToInput() for multi-bucket sessions (bucket indices
         /// follow bucketKeys() order). The link applies only to runs that dispatch to `bucket`.
         Status linkOutputToInput(size_t bucket, const std::string &outputName, const std::string &inputName, const std::vector<LinkRange> &ranges = {});
+        /// Chain form of linkOutputToInput(): one range set per decode-chain iteration (set i
+        /// applies at the head of iteration i; see configureDecodeChain). Each set obeys the
+        /// single-set contract above. Requires a device-resident link (the Vulkan backend) when
+        /// more than one set is passed, and at most Config::decodeChainSteps sets. The single-set
+        /// overloads are equivalent to passing one set.
+        Status linkOutputToInputChain(size_t bucket, const std::string &outputName, const std::string &inputName, const std::vector<std::vector<LinkRange>> &rangeSets);
         /// Copy the CURRENT resident values of a linked tensor (input or output name) into `out`,
         /// in the engine's internal storage dtype (fp32, or int64 for integer tensors). Reads the
         /// state as of the last completed run: a linked input reflects every ranged copy applied so
@@ -198,6 +204,33 @@ namespace vknn {
         /// The argmax of a registered output as of the last completed run: first-occurrence index
         /// and the value widened to fp32. NotFound when the name was never registered.
         Status readOutputArgMax(const std::string &outputName, int64_t &index, float &value);
+        /// Per-iteration form for a decode chain: the argmax written by chain iteration `step` of
+        /// the last completed run (step 0 equals the overload above). Requires a device reduction
+        /// path; `step` must be inside [0, Config::decodeChainSteps).
+        Status readOutputArgMax(const std::string &outputName, int step, int64_t &index, float &value);
+
+        // --- device-resident decode chains (ADR-0015) ---------------------------------------------
+        // A configured decode bucket records Config::decodeChainSteps decode iterations as ONE
+        // pre-recorded command sequence: one submit + one fence per chain, with on-device state
+        // feedback between iterations (the previous iteration's argmax index becomes the next
+        // token id, the position advances by one, the newly valid mask slot is marked). Every
+        // per-iteration input is computed by the host pack's exact rules, so the greedy token
+        // stream is bit-identical to the single-step loop.
+
+        /// Configure the decode chain on `bucket`: `tokenInput`/`positionInput`/`maskInput` name
+        /// the [1,1] token id, [1,1] position, and [1, C+1] attention-mask graph inputs the
+        /// feedback dispatch advances; `outputName` names the logits output, which must already be
+        /// registered via setOutputArgMax() on a device reduction path. The chain length is
+        /// Config::decodeChainSteps. Per chain the caller provides iteration 0's inputs (and every
+        /// iteration's link range sets) as usual and calls setDecodeChainWindow(); after the run,
+        /// readOutputArgMax(name, step, ...) returns each iteration's token. Unsupported when the
+        /// backend has no device chain path.
+        Status configureDecodeChain(size_t bucket, const std::string &tokenInput, const std::string &positionInput, const std::string &maskInput, const std::string &outputName);
+        /// Set the next runs' chain window on a configured bucket: `basePosition` is iteration 0's
+        /// absolute decode position, `activeSteps` how many recorded iterations the next runs
+        /// execute (1..Config::decodeChainSteps; sticky until changed). The caller's link range
+        /// sets must cover every active iteration.
+        Status setDecodeChainWindow(size_t bucket, int64_t basePosition, int activeSteps);
 
         /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
         /// The returned data is host-resident.
@@ -261,12 +294,13 @@ namespace vknn {
         /// GPU segment applies the copies on-device; null = the Session copies host storage (the CPU
         /// backend's path).
         struct ResidentLink {
-            size_t                 bucket = 0;
-            std::string            outputName, inputName;
-            TensorId               outId = kNoTensor, inId = kNoTensor;
-            Segment               *deviceSegment = nullptr;
-            std::vector<LinkRange> ranges;
-            bool                   rangesDirty = false; ///< Ranges changed since last pushed to the device segment.
+            size_t      bucket = 0;
+            std::string outputName, inputName;
+            TensorId    outId = kNoTensor, inId = kNoTensor;
+            Segment    *deviceSegment = nullptr;
+            /// One range set per decode-chain iteration; single-step callers hold exactly one set.
+            std::vector<std::vector<LinkRange>> rangeSets;
+            bool                                rangesDirty = false; ///< Ranges changed since last pushed to the device segment.
         };
         /// Bounds/overlap validation for a link's ranges against both tensors' logical shapes.
         Status validateLinkRanges(const Graph &g, TensorId outId, TensorId inId, const std::vector<LinkRange> &ranges) const;
@@ -321,6 +355,13 @@ namespace vknn {
         std::vector<ResidentLink> links_;
         // Registered engine-side output argmax reductions (see setOutputArgMax).
         std::vector<OutputArgMax> argMaxOutputs_;
+        /// One configured decode chain per bucket (see configureDecodeChain).
+        struct DecodeChain {
+            size_t   bucket  = 0;
+            Segment *segment = nullptr;
+            int      steps   = 1;
+        };
+        std::vector<DecodeChain> decodeChains_;
     };
 
 } // namespace vknn

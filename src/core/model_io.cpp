@@ -8,7 +8,7 @@
 // shape) but share ONE content-deduped initializer pool because weights are shape-independent. A
 // single-bucket save writes the VXM3 container verbatim, so a fixed-shape model's on-disk bytes are
 // unchanged by the multi-bucket feature; the VXM4 container is written only for two or more buckets.
-#include "core/quant_int4.h"
+#include "core/quant_weights.h"
 #include "vknn/graph.h"
 #include "vknn/logging.h"
 #include "vknn/mapped_file.h"
@@ -41,18 +41,30 @@ namespace vknn {
         // rejects a packed-weight model with its "incompatible version -- reconvert" message instead
         // of misreading packed payloads as fp16; non-quantized compiles keep VXM3/VXM4 byte-identical.
         constexpr uint32_t kMagic5 = 0x354d5856; // "VXM5"
+        // Extended-format quantized container magic: the same [subtag u32: 3|4][body] wrapper as
+        // VXM5, stamped when ANY graph carries a weight-quantization format other than int4
+        // (core/quant_weights.h). VXM5 stays reserved for int4-only content, so every engine that
+        // reads VXM5 keeps reading those files; an engine without the extended formats rejects VXM6
+        // through the magic-prefix diagnostic ("incompatible version -- reconvert") instead of
+        // misreading a payload as int4.
+        constexpr uint32_t kMagic6 = 0x364d5856; // "VXM6"
 
-        // A graph whose nodes carry the int4 weight-quantization attribute stores packed payloads
-        // (core/quant_int4.h) and must be stamped VXM5.
-        bool graphHasInt4Weights(const Graph &g) {
+        // Weight-quantization content of a graph, for the container-magic choice above.
+        struct QuantContent {
+            bool anyQuantized = false; // some node carries a kWq packed weight
+            bool nonInt4      = false; // some packed weight is a format other than kWqFormatInt4
+        };
+        QuantContent graphQuantContent(const Graph &g) {
+            QuantContent content;
             for (const Node &n: g.nodes)
             {
                 if (n.attr.has(kWq))
                 {
-                    return true;
+                    content.anyQuantized = true;
+                    content.nonInt4      = content.nonInt4 || n.attr.geti(kWq, 0) != kWqFormatInt4;
                 }
             }
-            return false;
+            return content;
         }
 
         // Raw fixed-width serialization: every pod()/vec() writes host-endian bytes with no framing.
@@ -280,9 +292,10 @@ namespace vknn {
             return false;
         }
         Writer w {f};
-        if (graphHasInt4Weights(g))
+        const QuantContent content = graphQuantContent(g);
+        if (content.anyQuantized)
         {
-            w.u32(kMagic5);
+            w.u32(content.nonInt4 ? kMagic6 : kMagic5);
             w.u32(3); // subcontainer tag: the VXM3 single-graph body follows
         } else
         {
@@ -345,14 +358,16 @@ namespace vknn {
             return false;
         }
         Writer w {f};
-        bool anyQuantized = false;
+        QuantContent content;
         for (const Graph &b: buckets)
         {
-            anyQuantized = anyQuantized || graphHasInt4Weights(b);
+            const QuantContent bucketContent = graphQuantContent(b);
+            content.anyQuantized             = content.anyQuantized || bucketContent.anyQuantized;
+            content.nonInt4                  = content.nonInt4 || bucketContent.nonInt4;
         }
-        if (anyQuantized)
+        if (content.anyQuantized)
         {
-            w.u32(kMagic5);
+            w.u32(content.nonInt4 ? kMagic6 : kMagic5);
             w.u32(4); // subcontainer tag: the VXM4 multi-bucket body follows
         } else
         {
@@ -456,10 +471,11 @@ namespace vknn {
         std::shared_ptr<const MappedFile> mapping = MappedFile::open(path);
         Reader                            r {f};
         uint32_t                          magic = r.u32();
-        if (magic == kMagic5)
+        if (magic == kMagic5 || magic == kMagic6)
         {
-            // Quantized container: a subcontainer tag then the exact VXM3/VXM4 body. Remap and fall
-            // through to the matching reader; a foreign tag falls into the bad-magic diagnostics.
+            // Quantized container (VXM5 = int4-only, VXM6 = extended formats; core/quant_weights.h):
+            // a subcontainer tag then the exact VXM3/VXM4 body. Remap and fall through to the
+            // matching reader; a foreign tag falls into the bad-magic diagnostics.
             const uint32_t sub = r.u32();
             magic              = sub == 3 ? kMagic : (sub == 4 ? kMagic4 : 0);
         }
@@ -512,7 +528,7 @@ namespace vknn {
             if ((magic & 0x00ffffffu) == kVxmPrefix)
             {
                 VKNN_WARN << "loadGraph: " << path << " is a VXM" << (char) (magic >> 24)
-                          << " container from an incompatible vknn version (this build reads VXM3/VXM4/VXM5)"
+                          << " container from an incompatible vknn version (this build reads VXM3-VXM6)"
                           << " -- reconvert the model from its .onnx with the current vknn_compile";
             } else
             {

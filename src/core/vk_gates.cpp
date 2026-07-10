@@ -48,8 +48,8 @@ namespace vknn {
             case OpType::ConvInteger:
             case OpType::QGemm:
             // ORT contrib family: recognized at import for precise reporting; execution goes through
-            // the lowerOrtContribOps expansion. A survivor (a variant the expansion declines, or the
-            // not-yet-expanded GroupQueryAttention) has no kernel in either backend.
+            // the lowerOrtContribOps expansion. A survivor (a variant the expansion declines) has
+            // no kernel in either backend.
             case OpType::SimplifiedLayerNorm:
             case OpType::SkipSimplifiedLayerNorm:
             case OpType::SkipLayerNorm:

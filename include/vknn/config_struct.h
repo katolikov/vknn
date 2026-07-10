@@ -82,11 +82,12 @@ namespace vknn {
         bool freeWeightsAfterUpload = true;
 
         /// Split a GPU segment whose recorded node count exceeds this into chunks of this many nodes,
-        /// each its own command-buffer submit, so no single submit runs long enough to trip the GPU
-        /// watchdog (an over-long submit is silently reset by the driver, zeroing its unexecuted tail
-        /// and corrupting the output). The submit fence between chunks is a full barrier, so buffer
-        /// reuse stays correct and results are numerically identical. Small graphs (every CNN) stay a
-        /// single submit. 0 disables chunking. Vulkan exposes no watchdog limit to auto-detect, so this
+        /// each its own command buffer, so no single batch runs long enough to trip the GPU
+        /// watchdog (an over-long batch is silently reset by the driver, zeroing its unexecuted tail
+        /// and corrupting the output). A run submits all chunks in ONE vkQueueSubmit (one batch per
+        /// chunk) and waits on one fence; the explicit barrier at each chunk tail keeps buffer reuse
+        /// correct, so results are numerically identical. Small graphs (every CNN) stay a
+        /// single chunk. 0 disables chunking. Vulkan exposes no watchdog limit to auto-detect, so this
         /// is a tunable knob; the default is conservative and forward-safe (a faster GPU runs each
         /// chunk quicker, never slower). Only the very large YoNoSplat-class transformer needs it.
         int maxSubmitNodes = 500;
@@ -97,14 +98,30 @@ namespace vknn {
         /// kPwMaxOperands operands) versus ~2-4 for a plain op. A newer-driver device caps the descriptors
         /// one command buffer may hold, and silently corrupts the recording past it, so a long run of
         /// binding-dense fused dispatches must break into more submits than the node count alone implies
-        /// (a plain-op graph of the same node count binds far fewer and never trips it). The submit fence
-        /// between chunks is a full barrier, so results stay numerically identical. 0 disables this cap.
+        /// (a plain-op graph of the same node count binds far fewer and never trips it). The barrier
+        /// at each chunk tail keeps results numerically identical. 0 disables this cap.
         /// The default keeps a ~2x margin under the observed corruption point (binding-dense chains only
         /// approach it; a plain-op graph binds far too few to ever split on this).
         int maxSubmitBindings = 1024;
 
+        /// Decode iterations the decode bucket's GPU segment records as ONE command-buffer chain
+        /// (see Session::configureDecodeChain): one vkQueueSubmit + one fence per this many greedy
+        /// decode tokens, with on-device state feedback (argmax id -> input_ids, position + 1, mask
+        /// slot) between iterations. 1 (the default) records the single-step stream unchanged. The
+        /// chain applies only to a bucket a caller explicitly configures; every other segment always
+        /// records one iteration. Chained decode is argmax-only by construction (the logits row is
+        /// overwritten per iteration), and the token stream is bit-identical to the single-step loop.
+        int decodeChainSteps = 1;
+
         // Debug.
-        bool        timing        = false; ///< print pack/submit/unpack + per-stage timing
+        bool timing = false; ///< print pack/submit/unpack + per-stage timing
+        /// Accumulate per-segment submit/sync walls silently and print ONE summary line per GPU
+        /// segment at teardown: runs, chunk count, and per-run averages of pack, vkQueueSubmit call,
+        /// fence wait, GPU-busy (begin/end timestamps per chunk), GPU inter-chunk gap, and unpack.
+        /// Unlike `timing` this emits no per-run log lines, so the measured loop is not perturbed
+        /// by log I/O. GPU-busy/gap need timestamp support and are 0 when `profile` already owns
+        /// the query machinery.
+        bool        timingSummary = false;
         bool        debugSegments = false; ///< trace per-segment + per-CPU-op execution
         std::string disableVkOps;          ///< comma list of op types to force onto CPU
         std::string dumpTensors;           ///< comma list of tensor names to dump to disk
@@ -168,13 +185,13 @@ namespace vknn {
         bool fusedAttention() const noexcept {
             return hint(Hint::FusedAttention, (int) Mode::On) != (int) Mode::Off;
         }
-        /// True when the load-time KV-cache Concat fold is enabled. OFF by default: it rewrites the
-        /// present KV outputs to the rows-only convention, which the engine-resident KV link
-        /// (Session::linkOutputToInput) cannot drive (the new-row present is read by the fused
-        /// attention in the same step). Opt in with setHint(Hint::KvConcatFold, Mode::On) for a
-        /// host-cache decode loop that folds the present rows itself.
+        /// True when the load-time KV-cache Concat fold is enabled (On by default;
+        /// --no-kv-concat-fold sets it Off). The fold rewrites the present KV outputs to the
+        /// rows-only convention; the engine-resident KV link (Session::linkOutputToInput) and the
+        /// decode drivers read the fold source from the present output's OWN shape (io_link.h), so
+        /// both present conventions drive the same cache. Controlled through the hint mechanism.
         bool kvConcatFold() const noexcept {
-            return hint(Hint::KvConcatFold, (int) Mode::Off) == (int) Mode::On;
+            return hint(Hint::KvConcatFold, (int) Mode::On) != (int) Mode::Off;
         }
 
         static Config fromJsonFile(const std::string &path);

@@ -1,4 +1,4 @@
-// -Os INT4 weight quantization (quantizeWeightsInt4 + core/quant_int4.h): the packed-payload
+// -Os INT4 weight quantization (quantizeWeights + core/quant_int4.h): the packed-payload
 // layout round-trips, the pass quantizes exactly the eligible weights with calibrated group scales
 // and outlier columns, the mixed-precision guard keeps hostile layers fp16, the quantized graph
 // stamps VXM5 and round-trips through a .vxm, and the materialized CPU run tracks the fp32
@@ -176,7 +176,7 @@ TEST(QuantInt4, PassQuantizesEligibleMatMul) {
     Graph         g = matmulGraph(K, N);
     runStandardPasses(g);
     QuantOptions opt;
-    QuantStats   st = quantizeWeightsInt4(g, opt);
+    QuantStats   st = quantizeWeights(g, opt);
     EXPECT_EQ(st.sites, 1);
     EXPECT_EQ(st.quantized, 1);
     EXPECT_TRUE(st.calibrated);
@@ -220,7 +220,7 @@ TEST(QuantInt4, GuardKeepsHostileLayerFp16) {
     const size_t tensorsBefore = g.tensors.size();
     QuantOptions opt;
     opt.maxLayerRelErr = 1e-6; // int4 cannot meet this: the guard must keep the layer fp16
-    QuantStats st      = quantizeWeightsInt4(g, opt);
+    QuantStats st      = quantizeWeights(g, opt);
     EXPECT_EQ(st.quantized, 0);
     EXPECT_EQ(st.guardKept, 1);
     EXPECT_EQ(g.tensors.size(), tensorsBefore);
@@ -236,7 +236,7 @@ TEST(QuantInt4, IneligibleWeightsSkipped) {
     {
         Graph g = matmulGraph(128, 256); // K=128 < minK
         runStandardPasses(g);
-        QuantStats st = quantizeWeightsInt4(g, QuantOptions {});
+        QuantStats st = quantizeWeights(g, QuantOptions {});
         EXPECT_EQ(st.sites, 0);
     }
     {
@@ -256,7 +256,7 @@ TEST(QuantInt4, IneligibleWeightsSkipped) {
         g.nodes.push_back(mm2);
         g.outputs.push_back(y2);
         runStandardPasses(g);
-        QuantStats st = quantizeWeightsInt4(g, QuantOptions {});
+        QuantStats st = quantizeWeights(g, QuantOptions {});
         EXPECT_EQ(st.sites, 0);
     }
 }
@@ -270,7 +270,7 @@ TEST(QuantInt4, QuantizedVxmRoundTripsAndTracksFp32) {
     const auto    ref  = runCpu(matmulGraph(K, N), a, K);
     Graph         g    = matmulGraph(K, N);
     runStandardPasses(g);
-    QuantStats st = quantizeWeightsInt4(g, QuantOptions {});
+    QuantStats st = quantizeWeights(g, QuantOptions {});
     EXPECT_EQ(st.quantized, 1);
     convertInitializersFp16(g);
     const std::string path = testing::TempDir() + "vknn_quant_int4_e2e.vxm";
@@ -347,7 +347,7 @@ TEST(QuantInt4, ExactlyRepresentableWeightsRoundTripExactly) {
     const auto ref = runCpu(std::move(plain), a, K);
     Graph      g = buildExact();
     runStandardPasses(g);
-    ASSERT_EQ(quantizeWeightsInt4(g, QuantOptions {}).quantized, 1);
+    ASSERT_EQ(quantizeWeights(g, QuantOptions {}).quantized, 1);
     convertInitializersFp16(g);
     const auto got = runCpu(std::move(g), a, K);
     ASSERT_EQ(got.size(), ref.size());
@@ -364,7 +364,7 @@ TEST(QuantInt4, MaterializeReconstructsPlainFp16Weight) {
     const int64_t K = 256, N = 64;
     Graph         g = matmulGraph(K, N);
     runStandardPasses(g);
-    ASSERT_EQ(quantizeWeightsInt4(g, QuantOptions {}).quantized, 1);
+    ASSERT_EQ(quantizeWeights(g, QuantOptions {}).quantized, 1);
     const int64_t materialized = materializeInt4Weights(g, nullptr);
     EXPECT_EQ(materialized, 1);
     TensorId w = g.find("w");
@@ -421,7 +421,7 @@ TEST(QuantInt4, VxmInputRequantPreservesAllBuckets) {
     EXPECT_EQ(names, inNames);
     for (Graph &gb: buckets)
     {
-        QuantStats st = quantizeWeightsInt4(gb, opt);
+        QuantStats st = quantizeWeights(gb, opt);
         EXPECT_EQ(st.quantized, 1);
         EXPECT_FALSE(st.calibrated);
         convertInitializersFp16(gb);
@@ -529,7 +529,7 @@ TEST(QuantInt4, SubnormalGroupKeepsGuardMetricFinite) {
         }
     }
     runStandardPasses(g);
-    QuantStats st = quantizeWeightsInt4(g, QuantOptions {});
+    QuantStats st = quantizeWeights(g, QuantOptions {});
     EXPECT_EQ(st.sites, 1);
     EXPECT_EQ(st.quantized, 1) << "the flushed group must not veto the layer through the error metric";
     EXPECT_EQ(st.guardKept, 0);
@@ -580,7 +580,7 @@ TEST(QuantInt4, DegenerateWeightsQuantizeToZeros) {
             }
         }
         runStandardPasses(g);
-        QuantStats st = quantizeWeightsInt4(g, QuantOptions {});
+        QuantStats st = quantizeWeights(g, QuantOptions {});
         EXPECT_EQ(st.sites, 1) << "scale " << scale;
         EXPECT_EQ(st.quantized, 1) << "scale " << scale;
         EXPECT_EQ(st.guardKept, 0) << "scale " << scale;

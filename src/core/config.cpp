@@ -179,6 +179,7 @@ namespace vknn {
         }
         I("maxSubmitNodes", c.maxSubmitNodes);
         I("maxSubmitBindings", c.maxSubmitBindings);
+        I("decodeChainSteps", c.decodeChainSteps);
         S("cacheFile", c.cacheFile);
         S("cacheDir", c.cacheDir);
         B("noCache", c.noCache);
@@ -266,6 +267,7 @@ namespace vknn {
         os << "  \"priority\": \"" << priorityStr(priority) << "\",\n";
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
         os << "  \"maxSubmitBindings\": " << maxSubmitBindings << ",\n";
+        os << "  \"decodeChainSteps\": " << decodeChainSteps << ",\n";
         os << "  \"cacheFile\": \"" << cacheFile << "\",\n";
         os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
         os << "  \"noCache\": " << (noCache ? "true" : "false") << ",\n";

@@ -75,6 +75,78 @@ namespace {
         n.attr.map[k] = a;
     }
 
+    TensorId addInputI64(Graph &g, const char *name, Shape s) {
+        TensorDesc d;
+        d.name    = name;
+        d.shape   = std::move(s);
+        d.dtype   = DType::Int64;
+        d.isInput = true;
+        TensorId id = g.addTensor(d);
+        g.inputs.push_back(id);
+        return id;
+    }
+    TensorId addInitI32(Graph &g, const char *name, Shape s, const std::vector<int32_t> &v) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = std::move(s);
+        d.dtype         = DType::Int32;
+        d.isInitializer = true;
+        TensorId id     = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems((int64_t) v.size(), DType::Int32);
+        std::memcpy(hb.bytes.data(), v.data(), v.size() * 4);
+        g.initializers[id] = hb;
+        return id;
+    }
+    IOTensor mkFeedF32(const char *name, Shape s, const std::vector<float> &v) {
+        IOTensor t;
+        t.name  = name;
+        t.shape = std::move(s);
+        t.dtype = DType::Float32;
+        t.data.resize(v.size() * 4);
+        std::memcpy(t.data.data(), v.data(), t.data.size());
+        return t;
+    }
+    IOTensor mkFeedI64(const char *name, Shape s, const std::vector<int64_t> &v) {
+        IOTensor t;
+        t.name  = name;
+        t.shape = std::move(s);
+        t.dtype = DType::Int64;
+        t.data.resize(v.size() * 8);
+        std::memcpy(t.data.data(), v.data(), t.data.size());
+        return t;
+    }
+    // Run on the CPU backend with caller-built typed feeds; returns every output.
+    std::vector<IOTensor> runCpuAll(Graph g, const std::vector<IOTensor> &ins, bool kvConcatFold = true) {
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        // KvConcatFold rewrites a decode attention's present output to the rows-only convention; a
+        // test asserting the canonical Concat(past, new) present pins it off to read the unfolded form.
+        if (!kvConcatFold)
+        {
+            cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
+        }
+        auto sess = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        std::vector<IOTensor> outs;
+        if (sess)
+        {
+            EXPECT_EQ(sess->run(ins, outs), Status::Ok);
+        }
+        return outs;
+    }
+    const IOTensor *findOutput(const std::vector<IOTensor> &outs, const std::string &name) {
+        for (const IOTensor &o: outs)
+        {
+            if (o.name == name)
+            {
+                return &o;
+            }
+        }
+        ADD_FAILURE() << "no output " << name;
+        return nullptr;
+    }
+
     std::vector<float> runCpu(Graph g, const std::map<std::string, std::pair<Shape, std::vector<float>>> &feeds,
                               const std::string &outName) {
         Config cfg;
@@ -356,6 +428,322 @@ TEST(OrtContrib, RotaryEmbeddingExpands) {
             }
         }
     }
+}
+
+namespace {
+
+    // In-test GroupQueryAttention reference (the ORT contract, probe-validated: past_len =
+    // seqlens_k + 1 - S valid past rows, new token i rotates at position past_len + i and attends
+    // past rows [0, past_len) plus new tokens [0, i]) under the engine's Concat(past, new) present
+    // convention (new rows AFTER the full P-row past block).
+    struct GqaRef {
+        int64_t            B = 1, S, P, Hq, Hkv, hd;
+        float              scale;
+        std::vector<float> q, k, v, pastK, pastV; // q [S,Hq*hd]; k/v [S,Hkv*hd]; past [Hkv,P,hd]
+        std::vector<float> cosC, sinC;            // [maxPos, hd/2]
+        int64_t            seqlens;
+
+        std::vector<float> rot(const float *x, int64_t pos) const {
+            const int64_t      half = hd / 2;
+            std::vector<float> y((size_t) hd);
+            for (int64_t c = 0; c < half; ++c)
+            {
+                const float cv         = cosC[(size_t) (pos * half + c)];
+                const float sv         = sinC[(size_t) (pos * half + c)];
+                y[(size_t) c]          = x[c] * cv - x[half + c] * sv;
+                y[(size_t) (half + c)] = x[c] * sv + x[half + c] * cv;
+            }
+            return y;
+        }
+        // Key/value row j (concat order: past rows then new rows) for kv head kh; new keys rotated.
+        std::vector<float> keyRow(int64_t j, int64_t kh) const {
+            if (j < P)
+            {
+                return std::vector<float>(&pastK[(size_t) ((kh * P + j) * hd)], &pastK[(size_t) ((kh * P + j) * hd)] + hd);
+            }
+            const int64_t i = j - P;
+            return rot(&k[(size_t) (i * Hkv * hd + kh * hd)], seqlens + 1 - S + i);
+        }
+        std::vector<float> valueRow(int64_t j, int64_t kh) const {
+            if (j < P)
+            {
+                return std::vector<float>(&pastV[(size_t) ((kh * P + j) * hd)], &pastV[(size_t) ((kh * P + j) * hd)] + hd);
+            }
+            const int64_t i = j - P;
+            return std::vector<float>(&v[(size_t) (i * Hkv * hd + kh * hd)], &v[(size_t) (i * Hkv * hd + kh * hd)] + hd);
+        }
+        // Attention output [S, Hq*hd].
+        std::vector<float> attention() const {
+            const int64_t      T = P + S, grp = Hq / Hkv, pastLen = seqlens + 1 - S;
+            std::vector<float> out((size_t) (S * Hq * hd), 0.0f);
+            for (int64_t i = 0; i < S; ++i)
+            {
+                for (int64_t h = 0; h < Hq; ++h)
+                {
+                    const int64_t             kh = h / grp;
+                    const std::vector<float>  qr = rot(&q[(size_t) (i * Hq * hd + h * hd)], pastLen + i);
+                    std::vector<double>       logits((size_t) T, -1e30);
+                    double                    mx = -1e30;
+                    for (int64_t j = 0; j < T; ++j)
+                    {
+                        const bool valid = j < P ? (j < pastLen) : (j - P <= i);
+                        if (!valid)
+                        {
+                            continue;
+                        }
+                        const std::vector<float> kr = keyRow(j, kh);
+                        double                   d  = 0;
+                        for (int64_t c = 0; c < hd; ++c)
+                        {
+                            d += (double) qr[(size_t) c] * kr[(size_t) c];
+                        }
+                        logits[(size_t) j] = d * scale;
+                        mx                 = std::max(mx, logits[(size_t) j]);
+                    }
+                    double Z = 0;
+                    for (int64_t j = 0; j < T; ++j)
+                    {
+                        if (logits[(size_t) j] > -1e29)
+                        {
+                            Z += std::exp(logits[(size_t) j] - mx);
+                        }
+                    }
+                    for (int64_t j = 0; j < T; ++j)
+                    {
+                        if (logits[(size_t) j] <= -1e29)
+                        {
+                            continue;
+                        }
+                        const double             p  = std::exp(logits[(size_t) j] - mx) / Z;
+                        const std::vector<float> vr = valueRow(j, kh);
+                        for (int64_t c = 0; c < hd; ++c)
+                        {
+                            out[(size_t) (i * Hq * hd + h * hd + c)] += (float) (p * vr[(size_t) c]);
+                        }
+                    }
+                }
+            }
+            return out;
+        }
+    };
+
+    // Build the export-shaped GQA graph: attention_mask int64 input feeding the seqlens_k
+    // reformat chain (ReduceSum - 1 -> int32), a constant total_sequence_length, fp32 q/k/v and
+    // past inputs, cos/sin cache initializers, and the contrib node with do_rotary=1.
+    Graph buildGqaGraph(const GqaRef &r, int64_t maxPos) {
+        const int64_t T = r.P + r.S;
+        Graph         g;
+        TensorId      q  = addInput(g, "q", {r.B, r.S, r.Hq * r.hd});
+        TensorId      k  = addInput(g, "k", {r.B, r.S, r.Hkv * r.hd});
+        TensorId      v  = addInput(g, "v", {r.B, r.S, r.Hkv * r.hd});
+        TensorId      pk = addInput(g, "past_key", {r.B, r.Hkv, r.P, r.hd});
+        TensorId      pv = addInput(g, "past_value", {r.B, r.Hkv, r.P, r.hd});
+        TensorId      am = addInputI64(g, "attention_mask", {r.B, T});
+        TensorId      one = addInitI64(g, "one", {1}, {1});
+        TensorId      rs  = g.addTensor([] { TensorDesc d; d.name = "mask_sum"; d.dtype = DType::Int64; return d; }());
+        Node          red;
+        red.type    = OpType::Reduce;
+        red.subOp   = (int32_t) ReduceType::Sum;
+        red.name    = "mask_reduce";
+        red.inputs  = {am, one};
+        red.outputs = {rs};
+        setI(red, "keepdims", 1);
+        g.nodes.push_back(red);
+        TensorId sub = g.addTensor([] { TensorDesc d; d.name = "mask_sub"; d.dtype = DType::Int64; return d; }());
+        Node     sb;
+        sb.type    = OpType::Binary;
+        sb.subOp   = (int32_t) BinaryType::Sub;
+        sb.name    = "mask_sub_node";
+        sb.inputs  = {rs, one};
+        sb.outputs = {sub};
+        g.nodes.push_back(sb);
+        TensorId sl = g.addTensor([] { TensorDesc d; d.name = "seqlens_k"; d.dtype = DType::Int32; return d; }());
+        Node     cs;
+        cs.type    = OpType::Cast;
+        cs.name    = "mask_cast";
+        cs.inputs  = {sub};
+        cs.outputs = {sl};
+        setI(cs, "to", 6);
+        g.nodes.push_back(cs);
+        TensorId total = addInitI32(g, "total_seq_len", {}, {(int32_t) T});
+        TensorId cosT  = addInitF32(g, "cos_cache", {maxPos, r.hd / 2}, r.cosC);
+        TensorId sinT  = addInitF32(g, "sin_cache", {maxPos, r.hd / 2}, r.sinC);
+        TensorId y     = addOutput(g, "y");
+        TensorId prk   = addOutput(g, "present_key");
+        TensorId prv   = addOutput(g, "present_value");
+        Node     nd;
+        nd.type    = OpType::GroupQueryAttention;
+        nd.name    = "gqa";
+        nd.inputs  = {q, k, v, pk, pv, sl, total, cosT, sinT};
+        nd.outputs = {y, prk, prv};
+        setI(nd, "num_heads", r.Hq);
+        setI(nd, "kv_num_heads", r.Hkv);
+        setI(nd, "do_rotary", 1);
+        setI(nd, "rotary_interleaved", 0);
+        setI(nd, "local_window_size", -1);
+        setF(nd, "softcap", 0.0f);
+        setF(nd, "scale", r.scale);
+        g.nodes.push_back(nd);
+        return g;
+    }
+
+    std::vector<float> sinFill(int64_t n, float f, float a) {
+        std::vector<float> r((size_t) n);
+        for (int64_t i = 0; i < n; ++i)
+        {
+            r[(size_t) i] = std::sin(f * (float) i) * a;
+        }
+        return r;
+    }
+
+} // namespace
+
+// GroupQueryAttention (decode: S=1 over a partially valid past) expands to the primitive
+// rope/concat/attention subgraph: the seqlens_k-derived rotary position and past-row mask match
+// the ORT contract, and the present outputs carry the Concat(past, new) convention.
+TEST(OrtContrib, GroupQueryAttentionDecodeExpands) {
+    GqaRef r;
+    r.S = 1, r.P = 4, r.Hq = 4, r.Hkv = 2, r.hd = 4;
+    r.scale = 0.5f;
+    const int64_t maxPos = 8, T = r.P + r.S, half = r.hd / 2;
+    r.q     = sinFill(r.S * r.Hq * r.hd, 0.31f, 0.9f);
+    r.k     = sinFill(r.S * r.Hkv * r.hd, 0.57f, 0.8f);
+    r.v     = sinFill(r.S * r.Hkv * r.hd, 0.83f, 1.1f);
+    r.pastK = sinFill(r.Hkv * r.P * r.hd, 0.41f, 0.7f);
+    r.pastV = sinFill(r.Hkv * r.P * r.hd, 0.67f, 1.2f);
+    r.cosC.resize((size_t) (maxPos * half));
+    r.sinC.resize((size_t) (maxPos * half));
+    for (size_t i = 0; i < r.cosC.size(); ++i)
+    {
+        r.cosC[i] = std::cos(0.13f * (float) i);
+        r.sinC[i] = std::sin(0.13f * (float) i);
+    }
+    // 2 valid past rows + the new token: seqlens_k = 2, so the token rotates at position 2 and
+    // past rows 2..3 are masked out.
+    r.seqlens = 2;
+    std::vector<int64_t> mask((size_t) T, 0);
+    mask[0] = mask[1] = 1;
+    mask[(size_t) (T - 1)] = 1;
+
+    Graph g = buildGqaGraph(r, maxPos);
+
+    Graph structural = g;
+    runStandardPasses(structural);
+    for (const Node &n: structural.nodes)
+    {
+        EXPECT_NE(n.type, OpType::GroupQueryAttention);
+    }
+
+    auto outs = runCpuAll(std::move(g),
+                          {mkFeedF32("q", {r.B, r.S, r.Hq * r.hd}, r.q),
+                           mkFeedF32("k", {r.B, r.S, r.Hkv * r.hd}, r.k),
+                           mkFeedF32("v", {r.B, r.S, r.Hkv * r.hd}, r.v),
+                           mkFeedF32("past_key", {r.B, r.Hkv, r.P, r.hd}, r.pastK),
+                           mkFeedF32("past_value", {r.B, r.Hkv, r.P, r.hd}, r.pastV),
+                           mkFeedI64("attention_mask", {r.B, T}, mask)},
+                          /*kvConcatFold=*/false);
+    const IOTensor *y = findOutput(outs, "y");
+    ASSERT_TRUE(y);
+    const std::vector<float> want = r.attention();
+    ASSERT_EQ(numElements(y->shape), (int64_t) want.size());
+    for (size_t i = 0; i < want.size(); ++i)
+    {
+        EXPECT_NEAR(y->f32()[i], want[i], 1e-4) << "i=" << i;
+    }
+    // present = Concat(past, new): the past block passes through untouched, the last row is the
+    // position-2 rotated key (value row unrotated).
+    const IOTensor *prk = findOutput(outs, "present_key");
+    const IOTensor *prv = findOutput(outs, "present_value");
+    ASSERT_TRUE(prk && prv);
+    ASSERT_EQ(prk->shape, (Shape {r.B, r.Hkv, T, r.hd}));
+    for (int64_t kh = 0; kh < r.Hkv; ++kh)
+    {
+        for (int64_t j = 0; j < T; ++j)
+        {
+            const std::vector<float> wk = r.keyRow(j, kh), wv = r.valueRow(j, kh);
+            for (int64_t c = 0; c < r.hd; ++c)
+            {
+                EXPECT_NEAR(prk->f32()[(kh * T + j) * r.hd + c], wk[(size_t) c], 1e-5) << "key kh=" << kh << " j=" << j;
+                EXPECT_NEAR(prv->f32()[(kh * T + j) * r.hd + c], wv[(size_t) c], 1e-5) << "value kh=" << kh << " j=" << j;
+            }
+        }
+    }
+}
+
+// GroupQueryAttention (prefill: S=3 with one valid past row) applies the causal triangle to the
+// new-token block and the seqlens_k mask to the past block, with per-token rotary positions
+// past_len + i.
+TEST(OrtContrib, GroupQueryAttentionPrefillExpands) {
+    GqaRef r;
+    r.S = 3, r.P = 2, r.Hq = 2, r.Hkv = 1, r.hd = 4;
+    r.scale = 0.5f;
+    const int64_t maxPos = 8, T = r.P + r.S, half = r.hd / 2;
+    r.q     = sinFill(r.S * r.Hq * r.hd, 0.29f, 1.0f);
+    r.k     = sinFill(r.S * r.Hkv * r.hd, 0.53f, 0.9f);
+    r.v     = sinFill(r.S * r.Hkv * r.hd, 0.79f, 1.1f);
+    r.pastK = sinFill(r.Hkv * r.P * r.hd, 0.37f, 0.8f);
+    r.pastV = sinFill(r.Hkv * r.P * r.hd, 0.61f, 1.3f);
+    r.cosC.resize((size_t) (maxPos * half));
+    r.sinC.resize((size_t) (maxPos * half));
+    for (size_t i = 0; i < r.cosC.size(); ++i)
+    {
+        r.cosC[i] = std::cos(0.11f * (float) i);
+        r.sinC[i] = std::sin(0.11f * (float) i);
+    }
+    // 1 valid past row + 3 new tokens: seqlens_k = 3, past_len = 1, positions 1..3; past row 1 is
+    // masked out for every query.
+    r.seqlens = 3;
+    std::vector<int64_t> mask((size_t) T, 1);
+    mask[1] = 0;
+
+    Graph g    = buildGqaGraph(r, maxPos);
+    auto  outs = runCpuAll(std::move(g),
+                           {mkFeedF32("q", {r.B, r.S, r.Hq * r.hd}, r.q),
+                            mkFeedF32("k", {r.B, r.S, r.Hkv * r.hd}, r.k),
+                            mkFeedF32("v", {r.B, r.S, r.Hkv * r.hd}, r.v),
+                            mkFeedF32("past_key", {r.B, r.Hkv, r.P, r.hd}, r.pastK),
+                            mkFeedF32("past_value", {r.B, r.Hkv, r.P, r.hd}, r.pastV),
+                            mkFeedI64("attention_mask", {r.B, T}, mask)});
+    const IOTensor *y = findOutput(outs, "y");
+    ASSERT_TRUE(y);
+    const std::vector<float> want = r.attention();
+    ASSERT_EQ(numElements(y->shape), (int64_t) want.size());
+    for (size_t i = 0; i < want.size(); ++i)
+    {
+        EXPECT_NEAR(y->f32()[i], want[i], 1e-4) << "i=" << i;
+    }
+}
+
+// A GroupQueryAttention variant outside the expansion (softcap) keeps its node — loud at plan,
+// never silently miscomputed.
+TEST(OrtContrib, GroupQueryAttentionUnsupportedVariantKept) {
+    GqaRef r;
+    r.S = 1, r.P = 2, r.Hq = 2, r.Hkv = 1, r.hd = 4;
+    r.scale   = 0.5f;
+    r.seqlens = 2;
+    const int64_t maxPos = 4, half = r.hd / 2;
+    r.q     = sinFill(r.S * r.Hq * r.hd, 0.3f, 1.0f);
+    r.k     = sinFill(r.S * r.Hkv * r.hd, 0.5f, 1.0f);
+    r.v     = sinFill(r.S * r.Hkv * r.hd, 0.7f, 1.0f);
+    r.pastK = sinFill(r.Hkv * r.P * r.hd, 0.4f, 1.0f);
+    r.pastV = sinFill(r.Hkv * r.P * r.hd, 0.6f, 1.0f);
+    r.cosC.assign((size_t) (maxPos * half), 1.0f);
+    r.sinC.assign((size_t) (maxPos * half), 0.0f);
+    Graph g = buildGqaGraph(r, maxPos);
+    for (Node &n: g.nodes)
+    {
+        if (n.type == OpType::GroupQueryAttention)
+        {
+            setF(n, "softcap", 50.0f);
+        }
+    }
+    runStandardPasses(g);
+    bool kept = false;
+    for (const Node &n: g.nodes)
+    {
+        kept = kept || n.type == OpType::GroupQueryAttention;
+    }
+    EXPECT_TRUE(kept);
 }
 
 // MultiHeadAttention in the pure q/k/v(+additive bias) form expands to the primitive attention

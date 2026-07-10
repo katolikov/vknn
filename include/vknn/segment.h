@@ -38,11 +38,14 @@ namespace vknn {
             return Status::Unsupported;
         }
         /// Replace the copy ranges of a link registered by addResidentLink(). Offsets/counts are
-        /// canonical elements, already bounds-checked by the Session.
-        virtual void setResidentLinkRanges(TensorId sourceOutput, TensorId destInput, const std::vector<LinkRange> &ranges) {
+        /// canonical elements, already bounds-checked by the Session. `rangeSets` holds one set per
+        /// decode-chain iteration (set i is applied at the head of iteration i); a single-step
+        /// caller passes exactly one set. Sets beyond the segment's recorded chain length are
+        /// ignored; recorded iterations past the last provided set apply no copies.
+        virtual void setResidentLinkRangeSets(TensorId sourceOutput, TensorId destInput, const std::vector<std::vector<LinkRange>> &rangeSets) {
             (void) sourceOutput;
             (void) destInput;
-            (void) ranges;
+            (void) rangeSets;
         }
         /// Drop every link registered by addResidentLink() (linked outputs download again, linked
         /// inputs re-pack from host state on the next run).
@@ -71,13 +74,46 @@ namespace vknn {
             return Status::Unsupported;
         }
         /// The last run's argmax of an output registered by setOutputArgMax(): the first-occurrence
-        /// (lowest) index of the maximum element and its value widened to fp32. False when `output`
-        /// is not registered here.
-        virtual bool readOutputArgMax(TensorId output, int64_t &index, float &value) {
+        /// (lowest) index of the maximum element and its value widened to fp32. `step` selects a
+        /// decode-chain iteration's result slot (0 on the single-step path). False when `output` is
+        /// not registered here or `step` is outside the segment's result slots.
+        virtual bool readOutputArgMax(TensorId output, int step, int64_t &index, float &value) {
             (void) output;
+            (void) step;
             (void) index;
             (void) value;
             return false;
+        }
+
+        // ---- device-resident decode chains (Session::configureDecodeChain, ADR-0015) ----
+        // A backend that can record K decode iterations into one pre-recorded command stream (the
+        // Vulkan segment) overrides these; the default says "no device path".
+
+        /// Configure this segment to record `steps` decode iterations per run as one command-buffer
+        /// chain: between iterations a feedback dispatch writes the previous iteration's argmax
+        /// index into `tokenInput`, advances `positionInput` by one, and marks the newly valid
+        /// `maskInput` slot; resident-link copies apply their per-iteration range set and the
+        /// argmax epilogue lands in its per-iteration result slot. `argMaxOutput` must already be
+        /// registered via setOutputArgMax(). Unsupported = no device chain path; any other failure
+        /// fills `whyNot`.
+        virtual Status configureDecodeChain(TensorId tokenInput, TensorId positionInput, TensorId maskInput, TensorId argMaxOutput, int steps, std::string &whyNot) {
+            (void) tokenInput;
+            (void) positionInput;
+            (void) maskInput;
+            (void) argMaxOutput;
+            (void) steps;
+            (void) whyNot;
+            return Status::Unsupported;
+        }
+        /// Set the next runs' chain window: `basePosition` is iteration 0's absolute decode
+        /// position (the feedback dispatches derive iteration i's position as basePosition + i),
+        /// and `activeSteps` is how many recorded iterations the next runs execute (a prefix of
+        /// the chain; the host provides iteration 0's inputs and range set as usual). Sticky until
+        /// changed. Unsupported when no chain is configured.
+        virtual Status setDecodeChainWindow(int64_t basePosition, int activeSteps) {
+            (void) basePosition;
+            (void) activeSteps;
+            return Status::Unsupported;
         }
 
         /// Backend that compiled and owns this segment. Non-owning; the backend outlives the segment.

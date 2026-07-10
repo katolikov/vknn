@@ -172,10 +172,11 @@ These passes run at session load, each gated by its hint, and **never change the
   MatMul→scale/mask→Softmax→MatMul(→Transpose→Reshape) chain into one `FusedAttention` node,
   consuming the operand-view strides the fold above composed. Numerics-changing (fp32 scores /
   softmax), so it has its own cache-variant key.
-- **KV-cache Concat fold** (`Hint::KvConcatFold`, **off** by default) — folds the per-token
-  past‖new KV Concat into split-source `FusedAttention` reads and rewrites the present outputs to the
-  rows-only convention, removing a whole-cache copy per token. Bit-identical; off by default because
-  the rows-only present is incompatible with the engine-resident KV link.
+- **KV-cache Concat fold** (`Hint::KvConcatFold`) — folds the per-token past‖new KV Concat
+  into split-source `FusedAttention` reads and rewrites the present outputs to the rows-only
+  convention, removing a whole-cache copy per token. Bit-identical. The engine-resident KV link and
+  the decode drivers read the fold source from the present output's own shape (`io_link.h`), so the
+  rows-only present drives the linked cache exactly like the cache-concat present.
 
 ## Adding an operator
 

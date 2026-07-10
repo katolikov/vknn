@@ -9,15 +9,23 @@
 // for a flat tensor, the channel-block interleave for NC4HW4 (matching packToBuffer's index math). The
 // ranges SSBO is host-updated between runs, so the dispatch is recorded once: a fixed grid strides over
 // totalElems, and a zero header (no ranges yet) makes the dispatch a no-op.
+//
+// The SSBO holds one or more RANGE SETS, each {rangeCount, totalElems, 3 uints per range} at a fixed
+// per-set stride; pc.rangeWordBase selects this dispatch's set. A decode CHAIN records one copy per
+// iteration with the iteration's set baked into its push constants (set i = iteration i's fold slot),
+// so K host-precomputed folds ride one pre-recorded command stream. A single-iteration segment bakes
+// base 0 — the original one-set layout verbatim.
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer SRC { LINK_ELEM_T sourceData[]; };
 layout(std430, binding = 1) buffer DST { LINK_ELEM_T destData[]; };
-// spans holds 3 uints per range: {sourceOffset, destOffset, count} in canonical elements.
-layout(std430, binding = 2) readonly buffer RANGES { uint rangeCount; uint totalElems; uint spans[]; };
+// rangeWords per set: {rangeCount, totalElems}, then 3 uints per range {sourceOffset, destOffset,
+// count} in canonical elements.
+layout(std430, binding = 2) readonly buffer RANGES { uint rangeWords[]; };
 layout(push_constant) uniform PC {
   int srcC, srcH, srcW;
   int dstC, dstH, dstW;
   int srcFmt, dstFmt; // 0 = flat row-major, 2 = NC4HW4 (codes match boundary_convert.comp)
+  uint rangeWordBase; // word offset of this dispatch's range set
 } pc;
 
 // Buffer element index for canonical (NCHW row-major) position `canon` under layout `fmt`.
@@ -35,13 +43,16 @@ int deviceIndex(int fmt, int canon, int C, int H, int W) {
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint rangeCount = rangeWords[pc.rangeWordBase];
+  uint totalElems = rangeWords[pc.rangeWordBase + 1u];
+  uint spansAt = pc.rangeWordBase + 2u;
   for (uint i = gid; i < totalElems; i += stride) {
     uint base = 0;
     for (uint r = 0; r < rangeCount; ++r) {
-      uint len = spans[r * 3u + 2u];
+      uint len = rangeWords[spansAt + r * 3u + 2u];
       if (i - base < len) {
-        int srcCanon = int(spans[r * 3u + 0u] + (i - base));
-        int dstCanon = int(spans[r * 3u + 1u] + (i - base));
+        int srcCanon = int(rangeWords[spansAt + r * 3u + 0u] + (i - base));
+        int dstCanon = int(rangeWords[spansAt + r * 3u + 1u] + (i - base));
         destData[deviceIndex(pc.dstFmt, dstCanon, pc.dstC, pc.dstH, pc.dstW)] =
             sourceData[deviceIndex(pc.srcFmt, srcCanon, pc.srcC, pc.srcH, pc.srcW)];
         break;

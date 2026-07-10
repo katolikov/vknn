@@ -16,7 +16,7 @@ namespace vknn {
         MatMulViewFold  = 6, ///< Fold Transpose/Expand chains into MatMul operand views at load (On / Off, default On).
         RopeFusion      = 7, ///< Fuse rotate-half RoPE chains into one Rope dispatch at load (On / Off, default On).
         FusedAttention  = 8, ///< Fuse the M=1 decode-attention chain into one FusedAttention kernel at load (On / Off, default On).
-        KvConcatFold    = 9, ///< Fold the per-token KV-cache Concat into split-source FusedAttention reads at load (On / Off, default Off: the rows-only present output it produces is incompatible with the engine-resident KV link).
+        KvConcatFold    = 9, ///< Fold the per-token KV-cache Concat into split-source FusedAttention reads at load (On / Off, default On). The rows-only present output it produces drives the engine-resident KV link like the cache-concat present (the link fold source comes from the present shape; see io_link.h).
     };
 
     /// Every kernel/pass selection value, set uniformly via setHint(Hint, Mode). The value sets by

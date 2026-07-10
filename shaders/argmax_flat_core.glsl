@@ -10,10 +10,15 @@
 // index a host scan over the fp32-converted copy would pick, ties included. A NaN element never
 // replaces the running maximum (compares false, as on the host); an all-NaN vector resolves to
 // index 0.
+//
+// The result buffer holds one {uint index, float value} slot per decode-chain iteration;
+// pc.resultSlot (baked per recorded iteration) selects where this dispatch's reduction lands, so a
+// chained run returns every iteration's argmax. A single-iteration segment bakes slot 0 — the
+// original 8-byte result verbatim.
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer SRC { SRC_ELEM_T sourceData[]; };
-layout(std430, binding = 1) writeonly buffer RESULT { uint bestIndex; float bestValue; };
-layout(push_constant) uniform PC { uint elemCount; } pc;
+layout(std430, binding = 1) writeonly buffer RESULT { uvec2 results[]; }; // {index, floatBitsToUint(value)} per slot
+layout(push_constant) uniform PC { uint elemCount; uint resultSlot; } pc;
 
 shared float laneValue[256];
 shared uint  laneIndex[256];
@@ -43,7 +48,7 @@ void main() {
     barrier();
   }
   if (lane == 0u) {
-    bestIndex = laneIndex[0] == 0xFFFFFFFFu ? 0u : laneIndex[0];
-    bestValue = laneValue[0];
+    results[pc.resultSlot] = uvec2(laneIndex[0] == 0xFFFFFFFFu ? 0u : laneIndex[0],
+                                   floatBitsToUint(laneValue[0]));
   }
 }

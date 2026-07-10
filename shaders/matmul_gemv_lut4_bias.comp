@@ -1,0 +1,39 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 8
+#include "pw_epilogue.glsl"
+#endif
+// matmul_gemv_lut4.comp with a fused rank-1 [N] bias at binding 6 (WQ_BIAS in the shared
+// head/core), which moves the codebook to binding 7. The bias enters in the reducing lane, before
+// the store, so it is added exactly once regardless of WQ_KS. Structure and the codebook decode
+// are documented in matmul_gemv_lut4.comp and the head/core includes.
+#include "common.glsl"
+#define WQ_BIAS 1
+#include "matmul_gemv_wq_head.glsl"
+layout(std430, binding = 7) readonly buffer CB { STORE cb[]; };
+
+shared float lutValues[16];
+
+// Codebook values of index lanes 0..3 / 4..7 of a packed word.
+vec4 lutLo(uint w) {
+  return vec4(lutValues[bitfieldExtract(w, 0, 4)], lutValues[bitfieldExtract(w, 4, 4)],
+              lutValues[bitfieldExtract(w, 8, 4)], lutValues[bitfieldExtract(w, 12, 4)]);
+}
+vec4 lutHi(uint w) {
+  return vec4(lutValues[bitfieldExtract(w, 16, 4)], lutValues[bitfieldExtract(w, 20, 4)],
+              lutValues[bitfieldExtract(w, 24, 4)], lutValues[bitfieldExtract(w, 28, 4)]);
+}
+
+#define WQ_WORD_T uint
+#define WQ_LOAD_W(idx) bp[idx]
+#define WQ_DEC_LO lutLo
+#define WQ_DEC_HI lutHi
+#define WQ_BLOCK_COL(n) ((n) / 8) // one word per 8-output block
+// The codebook stages once, before any packed load, in uniform control flow.
+#define WQ_MAIN_INIT \
+  if (gl_LocalInvocationIndex < 16u) lutValues[gl_LocalInvocationIndex] = float(cb[gl_LocalInvocationIndex]); \
+  barrier();
+
+#include "matmul_gemv_wq_core.glsl"

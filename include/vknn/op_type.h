@@ -101,7 +101,8 @@ namespace vknn {
         SkipLayerNorm,           // residual add + LayerNorm: (input, skip, gamma[, beta][, bias])
         RotaryEmbedding,         // RoPE: (x, position_ids, cos_cache, sin_cache) + interleaved attr
         MultiHeadAttention,      // fused attention; expanded only in the pure q/k/v(+additive mask) form
-        GroupQueryAttention,     // fused GQA with in-op RoPE + KV cache; recognized, NOT yet expanded
+        GroupQueryAttention,     // fused GQA with in-op RoPE + KV cache; expanded to the primitive
+                                 // rope/concat/repeat_kv/attention subgraph (causal, seqlens_k-driven)
         MatMulNBits,             // blockwise 4-bit weight MatMul: repacked into the int4 wq format
         Rope,                    // fused rotate-half rotary embedding over (x, position_ids,
                                  // cos_table, sin_table) with a `half` attr:

@@ -1,4 +1,4 @@
-#include "core/quant_int4.h"
+#include "core/quant_weights.h"
 #include "passes_internal.h"
 
 namespace vknn {
@@ -40,12 +40,13 @@ namespace vknn {
             {
                 referenced.insert(nd.fusedBias);
             }
-            // An int4-quantized weight (vknn_compile -Os) references its scale/outlier side tensors
-            // from node attributes, never node inputs (core/quant_int4.h), so a pass re-run over a
-            // quantized graph (Session::create over an in-memory graph) must keep them live.
+            // A packed quantized weight (vknn_compile -Os) references its scale/outlier/codebook
+            // side tensors from node attributes, never node inputs (core/quant_weights.h), so a
+            // pass re-run over a quantized graph (Session::create over an in-memory graph) must
+            // keep them live.
             if (nd.attr.has(kWq))
             {
-                for (const char *key: {kWqScales, kWqOidx, kWqOval})
+                for (const char *key: {kWqScales, kWqOidx, kWqOval, kWqLut})
                 {
                     const TensorId side = (TensorId) nd.attr.geti(key, kNoTensor);
                     if (side != kNoTensor)

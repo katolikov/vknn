@@ -6,21 +6,21 @@
 #include "pw_epilogue.glsl"
 #endif
 #include "common.glsl"
-// matmul_tiled_i4.comp with a fused rank-1 [N] bias at binding 6 (WQ_BIAS in the shared head/core),
+// matmul_tiled_i8.comp with a fused rank-1 [N] bias at binding 6 (WQ_BIAS in the shared head/core),
 // added once per output in the store loop (after the packed and outlier accumulation). Structure,
 // weight addressing, and the block-granular B staging are documented in the head/core includes.
 #define WQ_BIAS 1
 #include "matmul_tiled_wq_head.glsl"
 
-// Sign-extended int4 at word `w`, lane `slot` (0..7).
-float nib(uint w, int slot) {
-  return float(bitfieldExtract(int(w), slot * 4, 4));
+// Sign-extended int8 at word pair `w`, lane `slot` (0..7): slots 0..3 read w.x, 4..7 read w.y.
+float packedByte(uvec2 w, int slot) {
+  return float(bitfieldExtract(int(slot < 4 ? w.x : w.y), (slot & 3) * 8, 8));
 }
 
-#define WQ_WORD_T uint
-#define WQ_ZERO 0u
-#define WQ_LOAD_W(idx) bp[idx]
-#define WQ_DEC(w, s) nib(w, s)
-#define WQ_BLOCK_COL(n) ((n) >> 3) // one word per 8-column block
+#define WQ_WORD_T uvec2
+#define WQ_ZERO uvec2(0u)
+#define WQ_LOAD_W(idx) uvec2(bp[idx], bp[(idx) + 1])
+#define WQ_DEC(w, s) packedByte(w, s)
+#define WQ_BLOCK_COL(n) ((n) >> 2) // two words per 8-column block; gn0 is 8-aligned so the pair is even
 
 #include "matmul_tiled_wq_core.glsl"

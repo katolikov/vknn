@@ -8,6 +8,7 @@
 #include "core/matmul_view.h"
 #include "import/passes.h"
 #include "vknn/graph.h"
+#include "vknn/io_link.h"
 #include "vknn/session.h"
 #include <cmath>
 #include <cstring>
@@ -636,5 +637,189 @@ TEST(FusedAttention, KvConcatFoldsToSplitSources) {
         const uint8_t *refRow  = refKey.data() + ((h * kTokens + (kTokens - 1)) * kHd) * 4;
         const uint8_t *foldRow = foldKey.data() + (h * kHd) * 4;
         EXPECT_EQ(std::memcmp(refRow, foldRow, (size_t) kHd * 4), 0) << "present head " << h;
+    }
+}
+
+namespace {
+
+    // A with-past decode step whose past K/V are the cache INPUTS (the linked-decoder shape class):
+    // present.{key,value} = past ‖ new (Concat outputs under the present names), attention reads the
+    // concats through repeat_kv views, and an additive mask marks the valid slots. The new rows are
+    // INTERNAL tensors (an identity-projection MatMul stands in for the production k/v projections),
+    // so the folded present output is a mid-graph tensor exactly like a real decoder's. The load
+    // passes (foldMatMulViews -> fuseDecodeAttention -> foldFusedAttentionKvConcat when enabled)
+    // turn this into the split-source FusedAttention with a rows-only present.
+    Graph withPastDecodeGraph() {
+        constexpr int64_t kSlots = kTokens - 1;
+        Graph             g;
+        TensorId          q      = addInput(g, "q", {kB, kHeads, 1, kHd});
+        TensorId          pastK  = addInput(g, "past_key", {kB, kKvHeads, kSlots, kHd});
+        TensorId          pastV  = addInput(g, "past_value", {kB, kKvHeads, kSlots, kHd});
+        TensorId          kNewIn = addInput(g, "knew", {kB, kKvHeads, 1, kHd});
+        TensorId          vNewIn = addInput(g, "vnew", {kB, kKvHeads, 1, kHd});
+        std::vector<float> eye((size_t) (kHd * kHd), 0.f);
+        for (int64_t d = 0; d < kHd; ++d)
+        {
+            eye[(size_t) (d * kHd + d)] = 1.f;
+        }
+        TensorId kNew = addTemp(g, "knew_rows");
+        TensorId vNew = addTemp(g, "vnew_rows");
+        addNode(g, OpType::MatMul, "k_proj", {kNewIn, addF32Init(g, "k_eye", {kHd, kHd}, eye)}, kNew);
+        addNode(g, OpType::MatMul, "v_proj", {vNewIn, addF32Init(g, "v_eye", {kHd, kHd}, eye)}, vNew);
+        TensorDesc kco;
+        kco.name     = "present_key";
+        kco.isOutput = true;
+        TensorId kc  = g.addTensor(kco);
+        TensorDesc vco;
+        vco.name     = "present_value";
+        vco.isOutput = true;
+        TensorId vc  = g.addTensor(vco);
+        Attr     axis;
+        axis.kind                                                                = Attr::Int;
+        axis.i                                                                   = 2;
+        addNode(g, OpType::Concat, "kcat", {pastK, kNew}, kc)->attr.map["axis"]  = axis;
+        addNode(g, OpType::Concat, "vcat", {pastV, vNew}, vc)->attr.map["axis"]  = axis;
+
+        TensorId kT     = repeatKv(g, kc, "k", true);
+        TensorId vR     = repeatKv(g, vc, "v", false);
+        TensorId scores = addTemp(g, "scores");
+        addNode(g, OpType::MatMul, "qk", {q, kT}, scores);
+        TensorId mask   = addInput(g, "mask", {1, 1, 1, kTokens});
+        TensorId scale  = addF32Init(g, "scalec", {1}, {kScaleValue});
+        TensorId scaled = addTemp(g, "scaled");
+        addNode(g, OpType::Binary, "scalemul", {scores, scale}, scaled)->subOp = (int32_t) BinaryType::Mul;
+        TensorId masked                                                        = addTemp(g, "masked");
+        addNode(g, OpType::Add, "maskadd", {scaled, mask}, masked);
+        TensorId probs       = addTemp(g, "probs");
+        Node    *sn          = addNode(g, OpType::Softmax, "softmax", {masked}, probs);
+        Attr     ax;
+        ax.kind              = Attr::Int;
+        ax.i                 = -1;
+        sn->attr.map["axis"] = ax;
+        TensorId ctx         = addTemp(g, "ctx");
+        addNode(g, OpType::MatMul, "pv", {probs, vR}, ctx);
+        TensorId ctxT        = addTemp(g, "ctxT");
+        Node    *tn          = addNode(g, OpType::Transpose, "ctx_transpose", {ctx}, ctxT);
+        Attr     perm;
+        perm.kind            = Attr::Ints;
+        perm.ints            = {0, 2, 1, 3};
+        tn->attr.map["perm"] = perm;
+        TensorDesc yo;
+        yo.name     = "out";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        addNode(g, OpType::Reshape, "ctx_reshape", {ctxT, addI64Init(g, "so", {kB, 1, kHeads * kHd})}, y);
+        g.outputs = {y, kc, vc};
+        return g;
+    }
+
+    IOTensor pseudoTensor(const std::string &name, const Shape &shape, unsigned seed) {
+        IOTensor io;
+        io.name       = name;
+        io.shape      = shape;
+        io.dtype      = DType::Float32;
+        int64_t elems = numElements(shape);
+        io.data.resize((size_t) elems * 4);
+        float   *f = reinterpret_cast<float *>(io.data.data());
+        unsigned s = seed;
+        for (int64_t i = 0; i < elems; ++i)
+        {
+            s    = s * 1664525u + 1013904223u;
+            f[i] = ((float) (s >> 8) / (float) (1 << 24)) - 0.5f;
+        }
+        return io;
+    }
+
+} // namespace
+
+// The folded rows-only present drives the engine-resident KV link: a fold-On session linking
+// present -> past (ranges from kvFoldRanges over the ACTUAL present shape) streams byte-identical
+// attention outputs to the fold-Off host-cache loop across a multi-step decode, and cache-concat
+// source offsets applied to the rows-only present stay rejected.
+TEST(FusedAttention, KvConcatFoldedPresentDrivesResidentLink) {
+    constexpr int64_t kSlots = kTokens - 1;
+    Config            cfgRef;
+    cfgRef.backend = BackendKind::Cpu;
+    cfgRef.setHint(Hint::KvConcatFold, (int) Mode::Off);
+    Config cfgFold;
+    cfgFold.backend = BackendKind::Cpu;
+    cfgFold.setHint(Hint::KvConcatFold, (int) Mode::On);
+    auto sRef  = Session::create(withPastDecodeGraph(), cfgRef);
+    auto sFold = Session::create(withPastDecodeGraph(), cfgFold);
+    ASSERT_TRUE(sRef);
+    ASSERT_TRUE(sFold);
+
+    // The fold rewrote the linked session's present outputs to rows-only; the reference keeps the
+    // cache-concat convention. Both row counts come from the plans' own output shapes, exactly like
+    // the decode drivers.
+    int64_t refRows = 0, foldRows = 0;
+    for (const IOInfo &out: sRef->outputInfo(0))
+    {
+        refRows = out.name == "present_key" ? out.shape[2] : refRows;
+    }
+    for (const IOInfo &out: sFold->outputInfo(0))
+    {
+        foldRows = out.name == "present_key" ? out.shape[2] : foldRows;
+    }
+    ASSERT_EQ(refRows, kTokens);
+    ASSERT_EQ(foldRows, 1);
+
+    // The rows-only present links; cache-concat source offsets against it stay rejected.
+    ASSERT_EQ(sFold->linkOutputToInput("present_key", "past_key", {}), Status::Ok);
+    ASSERT_EQ(sFold->linkOutputToInput("present_value", "past_value", {}), Status::Ok);
+    EXPECT_EQ(sFold->linkOutputToInput("present_key", "past_key", kvFoldRanges(kKvHeads, refRows, kSlots, kHd, 0)), Status::InvalidArgument);
+
+    std::vector<float> pastKeyRef((size_t) (kKvHeads * kSlots * kHd), 0.f);
+    std::vector<float> pastValueRef((size_t) (kKvHeads * kSlots * kHd), 0.f);
+    auto               outBytes = [](const std::vector<IOTensor> &outs, const std::string &name) {
+        for (const IOTensor &o: outs)
+        {
+            if (o.name == name)
+            {
+                return o.data;
+            }
+        }
+        ADD_FAILURE() << "missing output " << name;
+        return std::vector<uint8_t> {};
+    };
+    for (int64_t p = 0; p < kSlots; ++p)
+    {
+        // Additive decode mask: slots < p valid, empty slots masked, the current token (the last
+        // concat column) valid.
+        std::vector<float> mask((size_t) kTokens, -65504.f);
+        for (int64_t j = 0; j < p; ++j)
+        {
+            mask[(size_t) j] = 0.f;
+        }
+        mask[(size_t) kTokens - 1]  = 0.f;
+        const IOTensor     qT       = pseudoTensor("q", {kB, kHeads, 1, kHd}, (unsigned) (7 * p + 1));
+        const IOTensor     kNewT    = pseudoTensor("knew", {kB, kKvHeads, 1, kHd}, (unsigned) (7 * p + 2));
+        const IOTensor     vNewT    = pseudoTensor("vnew", {kB, kKvHeads, 1, kHd}, (unsigned) (7 * p + 3));
+        const IOTensor     maskT    = ioTensor("mask", {1, 1, 1, kTokens}, mask);
+
+        // Linked: fold the PREVIOUS step's present row into slot p-1 at the head of this run.
+        ASSERT_EQ(sFold->linkOutputToInput("present_key", "past_key", kvFoldRanges(kKvHeads, foldRows, kSlots, kHd, kvFoldSlot(p, kSlots))), Status::Ok);
+        ASSERT_EQ(sFold->linkOutputToInput("present_value", "past_value", kvFoldRanges(kKvHeads, foldRows, kSlots, kHd, kvFoldSlot(p, kSlots))), Status::Ok);
+        std::vector<IOTensor> foldOuts;
+        ASSERT_EQ(sFold->run({qT, kNewT, vNewT, maskT}, foldOuts), Status::Ok);
+
+        // Reference: bind the host cache, then fold the newest present row into slot p by hand.
+        std::vector<IOTensor> refOuts;
+        ASSERT_EQ(sRef->run({qT, ioTensor("past_key", {kB, kKvHeads, kSlots, kHd}, pastKeyRef), ioTensor("past_value", {kB, kKvHeads, kSlots, kHd}, pastValueRef), kNewT, vNewT, maskT}, refOuts),
+                  Status::Ok);
+        for (int part = 0; part < 2; ++part)
+        {
+            const std::vector<uint8_t> present = outBytes(refOuts, part ? "present_value" : "present_key");
+            std::vector<float>        &cache   = part ? pastValueRef : pastKeyRef;
+            const float               *rows    = reinterpret_cast<const float *>(present.data());
+            for (int64_t h = 0; h < kKvHeads; ++h)
+            {
+                std::memcpy(cache.data() + (size_t) ((h * kSlots + p) * kHd), rows + (h * refRows + (refRows - 1)) * kHd, (size_t) kHd * 4);
+            }
+        }
+
+        EXPECT_EQ(outBytes(foldOuts, "out"), outBytes(refOuts, "out")) << "step " << p;
+        // The linked present is engine-resident: metadata only, no payload.
+        EXPECT_TRUE(outBytes(foldOuts, "present_key").empty());
     }
 }

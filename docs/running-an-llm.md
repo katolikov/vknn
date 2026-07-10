@@ -113,7 +113,7 @@ temperature + top-k + top-p.
 ```
 vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
           [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
-          [--no-kv-link] [--no-prefill] [--no-gpu-argmax]
+          [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax]
           [--no-rope-fusion] [--no-fused-attention] [--no-matmul-view-fold]
 ```
 
@@ -130,6 +130,19 @@ registers the decode bucket's `logits` output for an engine-side argmax
 instead of downloading and scanning the full 151936-wide logits row — the token stream is
 identical (first-occurrence argmax). `--no-gpu-argmax` forces the host scan for A/B.
 Temperature sampling (`--temp > 0`) keeps the full-row readback.
+
+`--chain N` decodes in **device-resident chains** of N tokens
+(`Session::configureDecodeChain`, ADR-0015): the engine records N decode iterations into
+one command-buffer sequence — one `vkQueueSubmit` and one fence per N tokens — and feeds
+each iteration's token id / position / attention-mask slot forward on-GPU from the
+previous iteration's argmax, with the KV fold slots for all N iterations precomputed per
+chain. The per-token host tax (input pack, link update, submit call, fence wake)
+amortizes by N; the token stream is bit-identical to `--chain 1`. An EOS inside a chain
+trims the overshoot (the discarded iterations never print or count in tok/s), and near
+the context edge the chain shortens so the fold-slot clamp stays exactly the single-step
+loop's. Chaining needs the greedy path with linked KV and the engine argmax; any other
+combination (sampling, `--no-kv-link`, `--no-gpu-argmax`) keeps the single-step loop with
+one stderr notice.
 
 A one-shot completion, feeding token ids directly:
 
