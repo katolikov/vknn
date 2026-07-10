@@ -52,16 +52,25 @@ class ModelSelection(context: Context, private val store: ModelStore) {
                 spec = spec,
             )
         }
-        val adHoc = store.adHocModelFiles().map { file ->
-            ModelChoice(
-                key = LOCAL_PREFIX + file.name,
-                displayName = file.name,
-                variant = variantFromFileName(file.name),
-                sizeBytes = file.length(),
-                onDevice = true,
-                spec = null,
-            )
-        }
+        // Ad-hoc files are offered only in the mode their name identifies: a VLM tab must never list a
+        // Qwen text decoder (it has no vision bucket and its load fails), and the Chat tab must never
+        // list a SmolVLM file. A file whose family the name does not reveal falls to Chat — a generic
+        // text decoder is the safe default there, whereas VLM needs a specific vision model.
+        val adHoc = store.adHocModelFiles()
+            .filter { file ->
+                val inferred = modeFromFileName(file.name)
+                inferred == mode || (inferred == null && mode == ModelCatalog.QWEN.mode)
+            }
+            .map { file ->
+                ModelChoice(
+                    key = LOCAL_PREFIX + file.name,
+                    displayName = file.name,
+                    variant = variantFromFileName(file.name),
+                    sizeBytes = file.length(),
+                    onDevice = true,
+                    spec = null,
+                )
+            }
         return catalogue + adHoc
     }
 
@@ -113,13 +122,35 @@ class ModelSelection(context: Context, private val store: ModelStore) {
         fun variantFromFileName(name: String): String = if (name.contains("int4", ignoreCase = true)) "int4" else "fp16"
 
         /**
-         * A persisted selection key that is still meaningful: local keys resolve at use time (a
-         * missing file simply shows as not on device); a catalogue key must name an entry of the
-         * same mode as [fallback], else the mode's default takes over.
+         * The app mode an ad-hoc .vxm file's NAME identifies, or null when the name reveals no
+         * family. Used to keep a file out of the wrong tab's picker (a Qwen text model must never
+         * appear in the VLM tab). Matches the catalogue's own naming families.
+         */
+        fun modeFromFileName(name: String): String? {
+            val lower = name.lowercase()
+            return when {
+                lower.contains("smolvlm") || lower.contains("vlm") || lower.contains("idefics") -> ModelCatalog.SMOLVLM2.mode
+                // Splat before Chat: "encoder" contains the "coder" substring the chat match uses.
+                lower.contains("splat") || lower.contains("encoder") || lower.contains("yonosplat") -> ModelCatalog.DL3DV.mode
+                lower.contains("qwen") || lower.contains("coder") || lower.contains("instruct") ||
+                    lower.contains("decode") || lower.contains("chat") -> ModelCatalog.QWEN.mode
+                else -> null
+            }
+        }
+
+        /**
+         * A persisted selection key that is still meaningful for [fallback]'s mode: a catalogue key
+         * must name an entry of the same mode; a local key must name a file whose family matches (an
+         * unnamed-family local file is allowed only in the Chat mode, mirroring choicesFor). Anything
+         * else — including a stale cross-mode selection from before this filtering existed — reverts
+         * to the mode's default.
          */
         fun validKey(persisted: String?, fallback: ModelSpec): String = when {
             persisted == null -> fallback.id
-            persisted.startsWith(LOCAL_PREFIX) -> persisted
+            persisted.startsWith(LOCAL_PREFIX) -> {
+                val inferred = modeFromFileName(persisted.removePrefix(LOCAL_PREFIX))
+                if (inferred == fallback.mode || (inferred == null && fallback.mode == ModelCatalog.QWEN.mode)) persisted else fallback.id
+            }
             ModelCatalog.byId(persisted)?.mode == fallback.mode -> persisted
             else -> fallback.id
         }
