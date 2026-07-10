@@ -173,7 +173,7 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 | **Dynamic shapes** | Declared shape **plan buckets**: `vknn_compile --shape NAME=D0xD1x...` / `--bucket "..."` bakes one plan per shape set; at runtime `Session::prepareShapes()` compiles more, and `run()` selects a bucket by the bound input shapes. A fixed-shape model is one bucket (a single map lookup on the hot path). |
 | **Multi-graph `.vxm`** | `vknn_compile --graph "FILE[;shape/dim segments]"` (repeatable) compiles **several source graphs** — or one graph at several shapes — into one `.vxm` over a content-deduped weight pool; `run()` dispatches to the bucket matching the bound input names + shapes. Buckets stream at load (host peak = one bucket's weights) and share GPU weight copies by content, so a whole VLM (vision tower + embedding + decoder prefill/decode) is one file and one session. See [docs/running-a-vlm.md](docs/running-a-vlm.md). |
 | **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. `vknn_compile -Os` goes the other way and **produces** int4 — all fusion plus calibration-free int4 weight quantization (AWQ outlier columns kept fp16, per-layer error guard) over a native int4 GPU MatMul; the Qwen instruct weights come out ~2.4× smaller, and every bucket of a multi-graph `.vxm` is requantized. |
-| **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. |
+| **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. Tuning optimizes for **speed**: on a convolution-heavy model it may pick a Winograd variant whose fp16 rounding differs from the default direct/GEMM kernels, so the exact output — and its PSNR/SNR against an fp32 reference — shifts with the tuning level and can differ across devices (the argmax / detections do not). `--tuning none` runs the same kernel on every device (bit-identical GPU output) and, because the untuned kernels carry less transform rounding, often lands *closer* to the fp32 reference — trading some speed for the most reproducible and accurate result. |
 | **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/io/dmabuf_fd_io.cpp`](examples/io/dmabuf_fd_io.cpp). |
 | **Warm-start cache** | A self-validating, multi-variant per-model `.cache` (kernel hash + device + config) auto-heals across driver/model/code changes. |
 | **Tools** | `vknn_compile` (ONNX → `.vxm`, with `--support-report <out.json>` for the per-node backend assignment), `vknn_run_io` (any multi-input/multi-output model), plus the example runners below. |
@@ -199,6 +199,11 @@ The VKNN figure is the full `run()` wall (it includes the host↔device copies);
 Against MNN's absolute best (min over OpenCL-HEAVY, CPU-4-thread, Vulkan), VKNN is faster on **8 of 9**
 models and at **parity on ResNet-50**. Methodology, per-stage timings, and the OpenCL-tuned comparison:
 [docs/benchmark.md](docs/benchmark.md).
+
+The accuracy column is measured with autotuning on; because tuning selects kernels for speed, a
+convolution-heavy model's exact cosine/PSNR moves a little with the tuning level and across devices
+(see **Autotuned kernels** above). Pin `--tuning none` for a bit-identical, device-independent — and
+typically marginally more accurate — result.
 
 ## Supported operators
 
