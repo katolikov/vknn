@@ -36,12 +36,12 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `priority` | string | `"low"`, `"normal"`, `"high"` | `"normal"` | GPU queue scheduling priority (Vulkan `VK_KHR/EXT_global_priority`). `normal` reproduces the default device-creation path; `low`/`high` request the matching queue tier. Scheduling only — never changes numerical output; an inert no-op on a device without a global-priority extension. |
 | `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Per-model MessagePack cache holding the compiled pipelines, prepacked/Winograd weights, and conv autotune table. Empty resolves to `<model>.cache` next to the model. Caching is always on: a warm start reloads it (skipping shader compilation, weight prepacking, and autotuning), and it auto-heals when stale. See [Caching](#caching). |
-| `cacheDir` | string | filesystem path | `"/data/local/tmp/vxrt/cache"` | Fallback location for the cache when the session is built from an in-memory graph (no model path to anchor `cacheFile`). |
+| `cacheDir` | string | filesystem path | `"vknn_cache"` | Fallback location for the cache when the session is built from an in-memory graph (no model path to anchor `cacheFile`). |
 | `noCache` | bool | `true` / `false` | `false` | Debug: skip all cache read/write, recompiling + re-tuning on every load (for cold-compile measurement). |
 | `profile` | bool | `true` / `false` | `false` | Enable the per-op profiler (GPU timestamp queries + CPU timing); the table is available via `session.profiler()`. |
 | `verbosity` | int | `0`, `1`, `≥2` | `1` | Log level. `0` → Warn, `1` → Info, `≥2` → Debug. Applied by `Config::applyLogLevel()`. |
 | `layerDump` | bool | `true` / `false` | `false` | Dump every layer's output tensor to disk for debugging. |
-| `layerDumpDir` | string | filesystem path | `"/data/local/tmp/vxrt/dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
+| `layerDumpDir` | string | filesystem path | `"vknn_dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
 | `tuning` | string | `"none"`, `"fast"`, `"heavy"` (aliases `"off"`→none, `"thorough"`→heavy) | `"fast"` | Load-time conv autotune effort. `none` uses the default kernel (no per-shape measurement), `fast` does a quick candidate sweep, `heavy` an exhaustive one. Effort only — never changes numerical output beyond kernel-selection fp rounding (outputs stay cos ≈ 1.0, same argmax); the chosen kernels are cached and reused on a warm start. |
 | `cpuThreads` | int | ≥ 1 | `4` | Worker threads the CPU backend partitions its hot output loops across (Conv, ConvGemm, FusedDwPw, Gemm, MatMul, the elementwise family). Only loops with disjoint per-iteration outputs and no cross-iteration accumulation are split, so results are bit-identical for any thread count — the CPU backend stays the byte oracle for the GPU path. `1` runs every loop inline. A fixed default rather than a probe of the host, so a plan runs the same way on every machine. |
 | `flatLayout` | bool | `true` / `false` | `true` | Flat row-major GPU layout pass that keeps generic head ops (Transpose/Slice/Concat/Binary/Softmax) on the GPU. On by default (fastest). `false` (CLI `--no-flat`) forces NC4HW4 / CPU paths — advanced. Backed by `Hint::FlatLayout`. |
@@ -181,7 +181,7 @@ lists all of them, with non-default values where useful:
   "maxSubmitNodes": 500,
   "maxSubmitBindings": 1024,
   "cacheFile": "enc.cache",
-  "cacheDir": "/data/local/tmp/vxrt/cache",
+  "cacheDir": "vknn_cache",
   "noCache": false,
   "tuning": "fast",
   "freeWeightsAfterUpload": true,
@@ -191,7 +191,7 @@ lists all of them, with non-default values where useful:
   "profile": false,
   "verbosity": 1,
   "layerDump": false,
-  "layerDumpDir": "/data/local/tmp/vxrt/dump",
+  "layerDumpDir": "vknn_dump",
   "debugSegments": false,
   "disableVkOps": "",
   "dumpTensors": "",

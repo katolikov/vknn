@@ -638,7 +638,7 @@ namespace vknn {
                 }
             }
             // Debug: Config::dumpTensors="substr1,substr2" forces matching tensors to dedicated (un-aliased)
-            // readback buffers and dumps them to /data/local/tmp/vxrt/dump after the run — so intermediate
+            // readback buffers and dumps them to cfg.layerDumpDir after the run — so intermediate
             // activations can be diffed despite the liveness planner reusing buffers. A few tensors only.
             if (!cfg_.dumpTensors.empty())
             {
@@ -1700,7 +1700,7 @@ namespace vknn {
             // diffing.
             if (!dumpTids_.empty())
             {
-                ::mkdir("/data/local/tmp/vxrt/dump", 0755);
+                ::mkdir(cfg_.layerDumpDir.c_str(), 0755);
                 for (TensorId tid: dumpTids_)
                 {
                     auto bit = buffers_.find(tid);
@@ -1718,7 +1718,7 @@ namespace vknn {
                             c = '_';
                         }
                     }
-                    FILE *f = fopen(("/data/local/tmp/vxrt/dump/" + nm + ".bin").c_str(), "wb");
+                    FILE *f = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
                     if (f)
                     {
                         fwrite(rt.host.bytes.data(), 1, rt.host.bytes.size(), f);

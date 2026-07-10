@@ -59,7 +59,7 @@ namespace vknn {
         /// there -> "<model>.cache" next to the model); cacheDir is the fallback for a session built from an
         /// in-memory graph (no model path).
         std::string cacheFile;                               ///< unified cache path (resolved by Runtime::load; empty = no file cache)
-        std::string cacheDir = "/data/local/tmp/vxrt/cache"; ///< fallback cache directory for an in-memory graph with no model path
+        std::string cacheDir = "vknn_cache"; ///< fallback cache directory (working-directory-relative) for an in-memory graph with no model path
         bool        noCache  = false;                        ///< debug: skip all cache read/write (cold compile every load)
 
         /// Load-time conv-kernel autotune effort (None / Fast / Heavy). Effort only — never changes
@@ -120,7 +120,7 @@ namespace vknn {
         bool        profile      = false;                       ///< collect per-op timing into the Profiler and print the summary table
         int         verbosity    = 1;                           ///< log verbosity applied by applyLogLevel(): 0=Warn, 1=Info, >=2=Debug
         bool        layerDump    = false;                       ///< write every layer's output tensor to layerDumpDir for numeric debugging
-        std::string layerDumpDir = "/data/local/tmp/vxrt/dump"; ///< destination directory for the per-layer tensor dump
+        std::string layerDumpDir = "vknn_dump"; ///< destination directory (working-directory-relative by default) for tensor dumps
 
         /// Conv kernel selection + GPU-pass knobs, set via setHint(Hint, value) (see the Hint enum):
         /// Hint::Winograd (auto/on/off), the experimental Winograd variant hints, and FlatLayout /
