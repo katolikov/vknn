@@ -386,9 +386,17 @@ static bool writeSupportReports(const std::vector<Graph> &buckets, const std::ve
 /// fp16 sweep for the non-quantized weights runs at the caller (quantization implies --fp16).
 static void runQuantPass(Graph &g, const QuantOptions &opts) {
     QuantStats qs = quantizeWeights(g, opts);
-    printf("[compile] -Os int%d: quantized %lld/%lld eligible weights (%lld kept fp16 by the error guard, "
+    char       formatName[8];
+    if (opts.lut4)
+    {
+        snprintf(formatName, sizeof formatName, "lut4");
+    } else
+    {
+        snprintf(formatName, sizeof formatName, "int%d", opts.bits);
+    }
+    printf("[compile] -Os %s: quantized %lld/%lld eligible weights (%lld kept fp16 by the error guard, "
            "%lld outlier columns, %s calibration), weights %.0f MB -> %.0f MB\n",
-           opts.bits, (long long) qs.quantized, (long long) qs.sites, (long long) qs.guardKept, (long long) qs.outlierCols,
+           formatName, (long long) qs.quantized, (long long) qs.sites, (long long) qs.guardKept, (long long) qs.outlierCols,
            qs.calibrated ? (opts.calibFiles.empty() ? "synthetic" : "file") : "no", qs.bytesBefore / 1e6, qs.bytesAfter / 1e6);
 }
 
@@ -454,11 +462,19 @@ int main(int argc, char **argv) {
             supportReport = argv[i + 1];
         } else if (!strcmp(argv[i], "--quant-bits") && i + 1 < argc)
         {
-            quantOpts.bits = atoi(argv[i + 1]);
-            if (quantOpts.bits != 4 && quantOpts.bits != 8)
+            if (!strcmp(argv[i + 1], "lut4"))
             {
-                printf("[compile] bad --quant-bits '%s' (expected 4 or 8)\n", argv[i + 1]);
-                return 1;
+                quantOpts.bits = 4;
+                quantOpts.lut4 = true;
+            } else
+            {
+                quantOpts.bits = atoi(argv[i + 1]);
+                quantOpts.lut4 = false;
+                if (quantOpts.bits != 4 && quantOpts.bits != 8)
+                {
+                    printf("[compile] bad --quant-bits '%s' (expected 4, 8, or lut4)\n", argv[i + 1]);
+                    return 1;
+                }
             }
         } else if (!strcmp(argv[i], "--quant-group") && i + 1 < argc)
         {

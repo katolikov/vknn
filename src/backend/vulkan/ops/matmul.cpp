@@ -58,7 +58,7 @@ namespace vknn {
             // and this op must read it natively.
             bool                        useWq = false;
             MatMulWqPC                  wqPc {};
-            std::shared_ptr<vk::Buffer> wqPacked, wqScales, wqOidx, wqOval;
+            std::shared_ptr<vk::Buffer> wqPacked, wqScales, wqOidx, wqOval, wqLut;
 
             // Prepare the packed-weight dispatch: raw packed/index payloads upload unconverted, the
             // fp16 scale/outlier tensors upload at compute precision (uploadInit's passthrough), and
@@ -71,6 +71,7 @@ namespace vknn {
                 const int64_t M      = sa.size() >= 2 ? sa[sa.size() - 2] : 1;
                 const int     format = weightQuantFormat(node);
                 const bool    int8Fmt = format == kWqFormatInt8;
+                const bool    lutFmt  = format == kWqFormatLut4;
 
                 wqPc.total = (int) numElements(out);
                 wqPc.M     = (int) M;
@@ -114,7 +115,10 @@ namespace vknn {
 
                 useGemv = M == 1;
                 const char *base;
-                if (int8Fmt)
+                if (lutFmt)
+                {
+                    base = useGemv ? "matmul_gemv_lut4" : "matmul_tiled_lut4";
+                } else if (int8Fmt)
                 {
                     base = useGemv ? "matmul_gemv_i8" : "matmul_tiled_i8";
                 } else
@@ -129,6 +133,14 @@ namespace vknn {
                     name += "_bias";
                     nbuf = 7;
                 }
+                if (lutFmt)
+                {
+                    // The 16-entry codebook binds after the bias (matmul_*_lut4 declare it at 6, the
+                    // _bias twins at 7).
+                    const TensorId lutId = (TensorId) node.attr.geti(kWqLut, kNoTensor);
+                    wqLut                = uploadInit(env, lutId, g.desc(lutId).shape);
+                    nbuf += 1;
+                }
                 epi.prepare(node, env, /*flat=*/true, out);
                 name += epi.suffix();
                 nbuf += epi.extraBufs();
@@ -142,6 +154,10 @@ namespace vknn {
                 if (biasBuf)
                 {
                     bufs.push_back(biasBuf->handle());
+                }
+                if (wqLut)
+                {
+                    bufs.push_back(wqLut->handle());
                 }
                 epi.append(bufs, node, env, dstHandle);
                 if (useGemv)

@@ -517,6 +517,127 @@ TEST(QuantWeights, Int8GuardKeepsHostileLayerFp16) {
     }
 }
 
+// The -Os pass at --quant-bits lut4 quantizes to format kWqFormatLut4: nibble indices into a
+// fitted 16-entry fp16 codebook whose entry 0 is EXACT zero (the padding/outlier contract the GPU
+// kernels rely on), outlier rows packing index 0, and the e2e .vxm stamping VXM6 with a CPU run
+// inside the int4-class envelope.
+TEST(QuantWeights, Lut4PassQuantizesAndRoundTrips) {
+    const int64_t K = 512, N = 96;
+    const auto    a   = testInput(K);
+    const auto    ref = runCpu(matmulGraph(K, N), a, K);
+    Graph         g   = matmulGraph(K, N);
+    runStandardPasses(g);
+    QuantOptions opt;
+    opt.lut4      = true;
+    QuantStats st = quantizeWeights(g, opt);
+    EXPECT_EQ(st.quantized, 1);
+
+    const Node *mm = nullptr;
+    for (const Node &nd: g.nodes)
+    {
+        if (nd.type == OpType::MatMul)
+        {
+            mm = &nd;
+        }
+    }
+    ASSERT_TRUE(mm);
+    ASSERT_TRUE(mm->attr.has(kWq));
+    EXPECT_EQ(mm->attr.geti(kWq, 0), kWqFormatLut4);
+    const TensorId w = mm->inputs[1];
+    EXPECT_EQ((int64_t) g.initializers.at(w).bytes.size(), K * int4RowBytes(N));
+    const TensorId lutId = (TensorId) mm->attr.geti(kWqLut, kNoTensor);
+    ASSERT_NE(lutId, kNoTensor);
+    ASSERT_EQ(g.initializers.at(lutId).bytes.size(), 32u);
+    const uint16_t *codebook = reinterpret_cast<const uint16_t *>(g.initializers.at(lutId).bytes.data());
+    EXPECT_EQ(codebook[0], floatToHalf(0.0f)) << "codebook[0] must be the exact zero entry";
+
+    // Outlier rows pack index 0 (the zero entry): the GPU kernels never skip outlier k rows in the
+    // packed loop — they rely on the grid contribution being zero there.
+    const int64_t nOut = mm->attr.geti(kWqNOut, 0);
+    ASSERT_GT(nOut, 0);
+    const TensorId  oidxId = (TensorId) mm->attr.geti(kWqOidx, kNoTensor);
+    const int32_t  *oidx   = reinterpret_cast<const int32_t *>(g.initializers.at(oidxId).bytes.data());
+    const uint8_t  *packed = g.initializers.at(w).bytes.data();
+    for (int64_t j = 0; j < nOut; ++j)
+    {
+        for (int64_t n = 0; n < N; ++n)
+        {
+            ASSERT_EQ(int4At(packed, int4RowBytes(N), oidx[j], n) & 0xF, 0) << "outlier row " << oidx[j] << " n=" << n;
+        }
+    }
+
+    convertInitializersFp16(g);
+    const std::string path = testing::TempDir() + "vknn_quant_weights_lut4_e2e.vxm";
+    ASSERT_TRUE(saveGraphBin(g, path));
+    EXPECT_EQ(readMagic(path), "VXM6");
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::createFromVxm(path, cfg);
+    std::remove(path.c_str());
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "a";
+    in.shape = {1, K};
+    in.dtype = DType::Float32;
+    in.data.resize(a.size() * 4);
+    std::memcpy(in.data.data(), a.data(), a.size() * 4);
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    std::vector<float> got(outs[0].f32(), outs[0].f32() + numElements(outs[0].shape));
+    for (float v: got)
+    {
+        EXPECT_FALSE(std::isnan(v));
+    }
+    const double rel = relL2(got, ref);
+    printf("[QuantWeights] lut4 e2e relL2 = %.6f\n", rel);
+    EXPECT_LT(rel, 0.25) << "lut4 quantized CPU run drifted from the fp32 reference";
+}
+
+// The mixed-precision guard holds for LUT4: with an impossible error bar every layer stays fp16.
+TEST(QuantWeights, Lut4GuardKeepsHostileLayerFp16) {
+    const int64_t K = 256, N = 64;
+    Graph         g = matmulGraph(K, N);
+    runStandardPasses(g);
+    QuantOptions opt;
+    opt.lut4           = true;
+    opt.maxLayerRelErr = 1e-9;
+    QuantStats st      = quantizeWeights(g, opt);
+    EXPECT_EQ(st.quantized, 0);
+    EXPECT_EQ(st.guardKept, 1);
+    for (const Node &nd: g.nodes)
+    {
+        EXPECT_FALSE(nd.attr.has(kWq));
+    }
+}
+
+// materializeQuantWeights on a LUT4 graph reconstructs a plain fp16 weight, dropping the codebook
+// side tensor with the rest.
+TEST(QuantWeights, MaterializeReconstructsLut4Weight) {
+    const int64_t K = 256, N = 64;
+    Graph         g = matmulGraph(K, N);
+    runStandardPasses(g);
+    QuantOptions opt;
+    opt.lut4 = true;
+    ASSERT_EQ(quantizeWeights(g, opt).quantized, 1);
+    EXPECT_EQ(materializeQuantWeights(g, nullptr), 1);
+    TensorId w = g.find("w");
+    ASSERT_NE(w, kNoTensor);
+    EXPECT_EQ(g.desc(w).dtype, DType::Float16);
+    EXPECT_EQ((int64_t) g.initializers.at(w).bytes.size(), K * N * 2);
+    for (const Node &nd: g.nodes)
+    {
+        EXPECT_FALSE(nd.attr.has(kWq));
+    }
+    for (const auto &kv: g.initializers)
+    {
+        for (const char *suffix: {"#l4s", "#l4oi", "#l4ov", "#l4cb"})
+        {
+            EXPECT_EQ(g.desc(kv.first).name.find(suffix), std::string::npos) << "side tensor payload survived materialization";
+        }
+    }
+}
+
 // quantizeWeights rejects a width it does not implement instead of guessing.
 TEST(QuantWeights, UnsupportedBitsRejected) {
     Graph g = matmulGraph(256, 64);

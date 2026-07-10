@@ -152,6 +152,10 @@ namespace vknn {
         // int8 (kWqFormatInt8). One knob for every site; the AWQ outlier, min-MSE step, bias
         // correction, and guard machinery are shared across widths (core/quant_weights.h).
         int bits = 4;
+        // LUT4 codebook format (--quant-bits lut4): the 4-bit payload holds indices into one
+        // fitted 16-entry fp16 codebook per tensor (kWqFormatLut4) instead of a symmetric integer
+        // alphabet. Requires bits == 4.
+        bool lut4 = false;
         // Grouping/outlier defaults split by op CLASS (structural, never per-model): a MatMul weight
         // is read natively packed by the GPU (its bytes are decode traffic, and LLM residual streams
         // tolerate int4 well), so it takes the coarse traffic-optimal setting; Conv/Gemm weights are

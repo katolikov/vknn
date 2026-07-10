@@ -87,7 +87,7 @@ namespace vknn {
     }
 
     bool weightQuantHasNativeMatMulKernel(int format) {
-        return format == kWqFormatInt4 || format == kWqFormatInt8;
+        return format == kWqFormatInt4 || format == kWqFormatInt8 || format == kWqFormatLut4;
     }
 
     int64_t materializeQuantWeights(Graph &g, const std::function<bool(size_t nodeIdx, const Node &)> &keepPacked) {

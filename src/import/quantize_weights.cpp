@@ -588,6 +588,145 @@ namespace vknn {
             }
         }
 
+        // The NF4 quantile table (the 4-bit code matched to a normal weight distribution),
+        // reordered for the LUT4 contract: entry 0 is the exact zero, so the nonzero quantiles
+        // live at 1..15 ascending. The weighted Lloyd fit below starts from it and adapts the
+        // nonzero entries to the tensor's own normalized distribution.
+        constexpr double kNf4NonZero[15] = {
+            -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
+            -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.07958029955625534,
+            0.16093020141124725, 0.24611230194568634, 0.33791524171829224, 0.44070982933044434,
+            0.5626170039176941, 0.7229568362236023, 1.0};
+
+        // Nearest codebook entry to `v`, ties resolved to the lowest index (deterministic).
+        int nearestLutEntry(const double cb[16], double v) {
+            int    best     = 0;
+            double bestDist = std::fabs(v - cb[0]);
+            for (int i = 1; i < 16; ++i)
+            {
+                const double dist = std::fabs(v - cb[i]);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best     = i;
+                }
+            }
+            return best;
+        }
+
+        // Build the LUT4 grid for one site: per-(group, column) fp16 absmax scales, one 16-entry
+        // fp16 codebook (entry 0 pinned at exact zero — the padding/outlier contract in
+        // quant_weights.h) fitted to the activation-weighted normalized values by fixed-iteration
+        // weighted Lloyd descent from the NF4 table, and the nearest-entry index assignment into
+        // `q`. Accumulates the same weighted-SSE guard metric the integer path computes.
+        // Deterministic: fixed iteration count, stride subsampling, fp16-rounded sorted entries
+        // every round.
+        void quantizeLut4Grid(const std::vector<float> &w, const std::vector<double> &colW,
+                              const std::vector<char> &isOut, int64_t K, int64_t N, int64_t G,
+                              int64_t nGroups, std::vector<uint16_t> &scales, std::vector<int8_t> &q,
+                              std::vector<uint16_t> &codebook, double &errNum, double &errDen) {
+            // Per-(group, column) absmax scales, fp16-rounded like the integer path's steps. A
+            // degenerate group-column (absmax rounds to fp16 zero) keeps scale 1; its normalized
+            // values sit at the pinned zero entry, so it flushes to zero exactly like the integer
+            // path's subnormal groups.
+            std::vector<double> scaleValue((size_t) (nGroups * N), 1.0);
+            for (int64_t gp = 0; gp < nGroups; ++gp)
+            {
+                const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
+                for (int64_t n = 0; n < N; ++n)
+                {
+                    double maxAbs = 0, colEnergy = 0;
+                    for (int64_t k = k0; k < k1; ++k)
+                    {
+                        if (isOut[(size_t) k])
+                        {
+                            continue;
+                        }
+                        const double v = w[(size_t) (k * N + n)];
+                        maxAbs         = std::max(maxAbs, std::fabs(v));
+                        colEnergy += colW[(size_t) k] * v * v;
+                    }
+                    errDen += colEnergy;
+                    const float s = (float) halfToFloat(floatToHalfSat((float) maxAbs));
+                    if (s > 0)
+                    {
+                        scales[(size_t) (gp * N + n)]     = floatToHalfSat(s);
+                        scaleValue[(size_t) (gp * N + n)] = (double) s;
+                    }
+                }
+            }
+            // Codebook fit over a deterministic stride subsample of the normalized non-outlier
+            // values (the fit is a shape estimate; the assignment below still visits every value).
+            constexpr int64_t kLutFitSamples = 65536;
+            const int64_t     total          = K * N;
+            const int64_t     stride         = std::max<int64_t>(1, total / kLutFitSamples);
+            std::vector<std::pair<double, double>> samples; // (normalized value, column weight)
+            samples.reserve((size_t) std::min<int64_t>(total, kLutFitSamples + 1));
+            for (int64_t idx = 0; idx < total; idx += stride)
+            {
+                const int64_t k = idx / N, n = idx % N;
+                if (isOut[(size_t) k])
+                {
+                    continue;
+                }
+                const double s = scaleValue[(size_t) ((k / G) * N + n)];
+                samples.push_back({(double) w[(size_t) idx] / s, std::max(colW[(size_t) k], 0.0)});
+            }
+            double cb[16];
+            cb[0] = 0.0;
+            for (int i = 0; i < 15; ++i)
+            {
+                cb[i + 1] = halfToFloat(floatToHalfSat((float) kNf4NonZero[i]));
+            }
+            for (int iter = 0; iter < 20; ++iter)
+            {
+                double sum[16] = {}, weightSum[16] = {};
+                for (const auto &sample: samples)
+                {
+                    const int best = nearestLutEntry(cb, sample.first);
+                    sum[best] += sample.second * sample.first;
+                    weightSum[best] += sample.second;
+                }
+                for (int i = 1; i < 16; ++i)
+                {
+                    // An empty (or zero-weight) cluster keeps its entry; entry 0 stays pinned.
+                    if (weightSum[i] > 0)
+                    {
+                        cb[i] = halfToFloat(floatToHalfSat((float) (sum[i] / weightSum[i])));
+                    }
+                }
+                std::sort(cb + 1, cb + 16);
+            }
+            codebook.resize(16);
+            codebook[0] = floatToHalf(0.0f);
+            for (int i = 1; i < 16; ++i)
+            {
+                codebook[(size_t) i] = floatToHalfSat((float) cb[i]);
+            }
+            // Nearest-entry assignment over every value, and the guard metric on the exact grid
+            // values the runtime dequantizes (cb entries are already fp16-rounded).
+            for (int64_t gp = 0; gp < nGroups; ++gp)
+            {
+                const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
+                for (int64_t n = 0; n < N; ++n)
+                {
+                    const double s = scaleValue[(size_t) (gp * N + n)];
+                    for (int64_t k = k0; k < k1; ++k)
+                    {
+                        if (isOut[(size_t) k])
+                        {
+                            continue;
+                        }
+                        const double v    = w[(size_t) (k * N + n)];
+                        const int    best = nearestLutEntry(cb, v / s);
+                        q[(size_t) (k * N + n)] = (int8_t) best;
+                        const double e          = v - cb[best] * s;
+                        errNum += colW[(size_t) k] * e * e;
+                    }
+                }
+            }
+        }
+
     } // namespace
 
     QuantStats quantizeWeights(Graph &g, const QuantOptions &opt) {
@@ -595,17 +734,23 @@ namespace vknn {
         {
             throw Error(Status::InvalidArgument, "quantizeWeights: bits must be 4 or 8, got " + std::to_string(opt.bits));
         }
-        // Width-dependent surface: the integer alphabet, the emitted format id, and the side-tensor
-        // name suffixes. The AWQ outlier / min-MSE / bias-correction / guard machinery below is
-        // width-blind — every expression reads qMax, so bits == 4 reproduces the int4 pipeline's
-        // arithmetic exactly.
-        const bool   int8Width    = opt.bits == 8;
-        const double qMax         = int8Width ? 127.0 : 7.0;
-        const int    format       = int8Width ? kWqFormatInt8 : kWqFormatInt4;
-        const char  *scaleSuffix  = int8Width ? "#i8s" : "#i4s";
-        const char  *oidxSuffix   = int8Width ? "#i8oi" : "#i4oi";
-        const char  *ovalSuffix   = int8Width ? "#i8ov" : "#i4ov";
-        const char  *biasSuffix   = int8Width ? "#i8b" : "#i4b";
+        if (opt.lut4 && opt.bits != 4)
+        {
+            throw Error(Status::InvalidArgument, "quantizeWeights: the LUT4 codebook format is 4-bit (bits must stay 4)");
+        }
+        // Format-dependent surface: the integer alphabet (or codebook), the emitted format id, and
+        // the side-tensor name suffixes. The AWQ outlier / bias-correction / guard machinery below
+        // is format-blind — the integer paths read qMax everywhere, so bits == 4 reproduces the
+        // int4 pipeline's arithmetic exactly, and the LUT4 grid builder plugs in between the
+        // outlier selection and the shared emit.
+        const bool   lutFormat   = opt.lut4;
+        const bool   int8Width   = !lutFormat && opt.bits == 8;
+        const double qMax        = int8Width ? 127.0 : 7.0;
+        const int    format      = lutFormat ? kWqFormatLut4 : (int8Width ? kWqFormatInt8 : kWqFormatInt4);
+        const char  *scaleSuffix = lutFormat ? "#l4s" : (int8Width ? "#i8s" : "#i4s");
+        const char  *oidxSuffix  = lutFormat ? "#l4oi" : (int8Width ? "#i8oi" : "#i4oi");
+        const char  *ovalSuffix  = lutFormat ? "#l4ov" : (int8Width ? "#i8ov" : "#i4ov");
+        const char  *biasSuffix  = lutFormat ? "#l4b" : (int8Width ? "#i8b" : "#i4b");
         QuantStats stats;
         for (const auto &kv: g.initializers)
         {
@@ -682,7 +827,12 @@ namespace vknn {
             const int64_t         nGroups = int4GroupCount(K, G);
             std::vector<uint16_t> scales((size_t) (nGroups * N), floatToHalf(1.0f));
             std::vector<int8_t>   q((size_t) (K * N), 0);
+            std::vector<uint16_t> codebook; // LUT4 only: 16 fp16 entries, [0] pinned at exact zero
             double                errNum = 0, errDen = 0;
+            if (lutFormat)
+            {
+                quantizeLut4Grid(w, colW, isOut, K, N, G, nGroups, scales, q, codebook, errNum, errDen);
+            } else
             for (int64_t gp = 0; gp < nGroups; ++gp)
             {
                 const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
@@ -812,11 +962,15 @@ namespace vknn {
                 return id;
             };
             const TensorId scaleId = addSide(scaleSuffix, DType::Float16, nGroups * N, scales.data(), scales.size() * 2);
-            TensorId       oidxId = kNoTensor, ovalId = kNoTensor;
+            TensorId       oidxId = kNoTensor, ovalId = kNoTensor, lutId = kNoTensor;
             if (!oidx.empty())
             {
                 oidxId = addSide(oidxSuffix, DType::Int32, (int64_t) oidx.size(), oidx.data(), oidx.size() * 4);
                 ovalId = addSide(ovalSuffix, DType::Float16, (int64_t) oval.size(), oval.data(), oval.size() * 2);
+            }
+            if (lutFormat)
+            {
+                lutId = addSide("#l4cb", DType::Float16, 16, codebook.data(), codebook.size() * 2);
             }
 
             {
@@ -847,6 +1001,10 @@ namespace vknn {
                 seti(kWqOidx, oidxId);
                 seti(kWqOval, ovalId);
             }
+            if (lutId != kNoTensor)
+            {
+                seti(kWqLut, lutId);
+            }
 
             // Bias correction from the calibration means: remove the systematic ΔW·E[x] output shift
             // this layer's rounding introduces (outlier columns are exact, so they contribute none).
@@ -865,7 +1023,14 @@ namespace vknn {
                         {
                             if (!isOut[(size_t) k])
                             {
-                                acc += ((double) q[(size_t) (k * N + n)] * s16 - (double) w[(size_t) (k * N + n)]) * colMean[(size_t) k];
+                                // The grid value the runtime dequantizes: q * scale for the integer
+                                // formats, codebook[q] * scale for LUT4.
+                                double gridValue = (double) q[(size_t) (k * N + n)] * s16;
+                                if (lutFormat)
+                                {
+                                    gridValue = (double) halfToFloat(codebook[(size_t) (uint8_t) q[(size_t) (k * N + n)]]) * s16;
+                                }
+                                acc += (gridValue - (double) w[(size_t) (k * N + n)]) * colMean[(size_t) k];
                             }
                         }
                         delta[(size_t) n] += acc;

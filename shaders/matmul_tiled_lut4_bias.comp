@@ -1,0 +1,34 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 8
+#include "pw_epilogue.glsl"
+#endif
+#include "common.glsl"
+// matmul_tiled_lut4.comp with a fused rank-1 [N] bias at binding 6 (WQ_BIAS in the shared
+// head/core), which moves the codebook to binding 7; the bias adds once per output in the store
+// loop. Structure and the codebook decode are documented in matmul_tiled_lut4.comp and the
+// head/core includes.
+#define WQ_BIAS 1
+#include "matmul_tiled_wq_head.glsl"
+layout(std430, binding = 7) readonly buffer CB { STORE cb[]; };
+
+shared float lutValues[16];
+
+// Codebook value at word `w`, lane `slot` (0..7).
+float lutAt(uint w, int slot) {
+  return lutValues[bitfieldExtract(w, slot * 4, 4)];
+}
+
+#define WQ_WORD_T uint
+#define WQ_ZERO 0u
+#define WQ_LOAD_W(idx) bp[idx]
+#define WQ_DEC(w, s) lutAt(w, s)
+#define WQ_BLOCK_COL(n) ((n) >> 3) // one word per 8-column block
+// The codebook stages once, before any packed load, in uniform control flow.
+#define WQ_MAIN_INIT \
+  if (gl_LocalInvocationIndex < 16u) lutValues[gl_LocalInvocationIndex] = float(cb[gl_LocalInvocationIndex]); \
+  barrier();
+
+#include "matmul_tiled_wq_core.glsl"

@@ -20,10 +20,16 @@
 //   3 = LUT4  (kWqFormatLut4) — the int4 nibble payload reinterpreted as UNSIGNED indices (0..15)
 //       into one 16-entry fp16 codebook per tensor (side initializer kWqLut, Float16 [16]):
 //         value(k,n) = codebook[index] * scale[(k/group)*N + n]
+//       codebook[0] is EXACTLY 0.0: padding nibbles and outlier columns pack index 0, so they
+//       contribute zero through the packed grid — the same role int4's zero nibble plays (the GPU
+//       kernels never skip outlier k rows; they rely on the grid value being zero there). Entries
+//       1..15 are fitted, fp16 values in ascending order.
 //       The codebook is per tensor, not per group: a per-group table would multiply the side bank
 //       by 16x (32 bytes vs 2 per group-column) while the per-group dynamic range is already
-//       carried by the scale — on near-normal weight distributions the residual shape the codebook
-//       captures is tensor-wide.
+//       carried by the scale — measured on 1024x1024 near-normal weight populations (group 128,
+//       absmax scales), a per-group fitted table matches a per-tensor fitted one to three decimals
+//       of weight-space relative L2 (0.0919 vs 0.0918 Gaussian, 0.121 vs 0.119 heavy-tailed t(4))
+//       while plain int4 sits at 0.117 / 0.193 — the shape win is tensor-wide, not per-group.
 //
 // Shared across every format (identical to quant_int4.h):
 //   scales : Float16 [nGroups * N], nGroups = ceil(K/group) — n-minor, so the adjacent-n outputs a

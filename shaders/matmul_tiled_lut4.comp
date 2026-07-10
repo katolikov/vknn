@@ -1,0 +1,36 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 7
+#include "pw_epilogue.glsl"
+#endif
+#include "common.glsl"
+// {128,128,16} register-blocked GEMM over a LUT4-packed weight (vknn_compile -Os
+// --quant-bits lut4): the matmul_tiled_wq_core.glsl body with the codebook decode surface
+// (core/quant_weights.h). An 8-column block is ONE packed 32-bit word of 8 UNSIGNED nibble
+// indices into the tensor's 16-entry codebook (binding 6), staged into shared memory once per
+// workgroup; codebook[0] is exact zero, so padding nibbles and outlier columns contribute nothing
+// through the packed grid. Structure, B staging, and the outlier tiles are documented in the
+// head/core includes.
+#include "matmul_tiled_wq_head.glsl"
+layout(std430, binding = 6) readonly buffer CB { STORE cb[]; };
+
+shared float lutValues[16];
+
+// Codebook value at word `w`, lane `slot` (0..7).
+float lutAt(uint w, int slot) {
+  return lutValues[bitfieldExtract(w, slot * 4, 4)];
+}
+
+#define WQ_WORD_T uint
+#define WQ_ZERO 0u
+#define WQ_LOAD_W(idx) bp[idx]
+#define WQ_DEC(w, s) lutAt(w, s)
+#define WQ_BLOCK_COL(n) ((n) >> 3) // one word per 8-column block
+// The codebook stages once, before any packed load, in uniform control flow.
+#define WQ_MAIN_INIT \
+  if (gl_LocalInvocationIndex < 16u) lutValues[gl_LocalInvocationIndex] = float(cb[gl_LocalInvocationIndex]); \
+  barrier();
+
+#include "matmul_tiled_wq_core.glsl"
