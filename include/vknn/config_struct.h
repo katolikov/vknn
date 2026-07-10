@@ -168,6 +168,11 @@ namespace vknn {
         bool fusedAttention() const noexcept {
             return hint(Hint::FusedAttention, (int) Mode::On) != (int) Mode::Off;
         }
+        /// True when the load-time KV-cache Concat fold is enabled (On by default;
+        /// --no-kv-concat-fold sets it Off). Controlled through the hint mechanism.
+        bool kvConcatFold() const noexcept {
+            return hint(Hint::KvConcatFold, (int) Mode::On) != (int) Mode::Off;
+        }
 
         static Config fromJsonFile(const std::string &path);
         static Config fromJsonString(const std::string &json);

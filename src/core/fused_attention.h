@@ -51,6 +51,19 @@ namespace vknn {
     inline constexpr const char *kFaMaskScale = "fattn_mask_scale"; // float: mask scale factor (mask input only)
     inline constexpr const char *kFaOut       = "fattn_out";        // ints: output shape (shape-rule backup)
 
+    // Split-KV form (foldFusedAttentionKvConcat): the per-token cache Concat is folded away and the
+    // node reads token s < kFaPastLen from inputs[1]/inputs[2] (the past cache) and s >= kFaPastLen
+    // from inputs[4]/inputs[5] (the current rows), through their own stride sets. inputs[3] stays
+    // the mask slot (kNoTensor when absent). Values are bit-identical to the concatenated form —
+    // the fold moves no math, only the copy.
+    inline constexpr const char *kFaSplit      = "fattn_split";       // int: 1 = split-KV inputs present
+    inline constexpr const char *kFaPastLen    = "fattn_past_len";    // int: tokens served by the past source
+    inline constexpr const char *kFaKNewStride = "fattn_knew_stride"; // ints: new-rows k stride per row dim
+    inline constexpr const char *kFaKNewN      = "fattn_knew_n";      // int: new-rows k element stride per token step
+    inline constexpr const char *kFaKNewK      = "fattn_knew_k";      // int: new-rows k element stride per k step
+    inline constexpr const char *kFaVNewStride = "fattn_vnew_stride"; // ints: new-rows v stride per row dim
+    inline constexpr const char *kFaVNewN      = "fattn_vnew_n";      // int: new-rows v element stride per n step
+    inline constexpr const char *kFaVNewK      = "fattn_vnew_k";      // int: new-rows v element stride per token step
     inline constexpr int kFaVersion = 1;
 
     // The FusedAttention GPU kernel keeps q, the row's score vector, and the merged output row in

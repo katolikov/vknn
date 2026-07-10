@@ -33,11 +33,11 @@ namespace vknn {
         }
 
         // One row's context vector: out[n] = sum_s p[s] * v[s][n], fp32 over ascending s.
-        __attribute__((noinline)) void attentionContext(const float *p, const float *v, float *out, int64_t C, int64_t hd, int64_t vK, int64_t vN) {
+        __attribute__((noinline)) void attentionContext(const float *p, const float *v, float *out, int64_t C, int64_t hd, int64_t vK, int64_t vN, bool accumulate) {
 #pragma clang fp contract(off)
             for (int64_t n = 0; n < hd; ++n)
             {
-                float acc = 0.f;
+                float acc = accumulate ? out[n] : 0.f;
                 for (int64_t s = 0; s < C; ++s)
                 {
                     acc += p[s] * v[s * vK + n * vN];
@@ -64,11 +64,23 @@ namespace vknn {
                 const float                 scale     = node.attr.getf(kFaScale, 1.f);
                 const float                 maskScale = node.attr.getf(kFaMaskScale, 1.f);
                 const bool                  hasMask   = node.inputs.size() > 3 && node.inputs[3] != kNoTensor;
+                // Split-KV form (foldFusedAttentionKvConcat): token s < pastLen reads the past
+                // source, the rest the new-rows source. The score/context helpers run per segment
+                // in ascending s with the context accumulating across the boundary, so the fp32
+                // chains are the exact chains the concatenated form produces — bit-identical.
+                const bool                  split     = node.attr.geti(kFaSplit, 0) != 0 && node.inputs.size() >= 6;
+                const int64_t               pastLen   = split ? node.attr.geti(kFaPastLen) : C;
+                const std::vector<int64_t> &kNewStride = node.attr.getints(kFaKNewStride);
+                const std::vector<int64_t> &vNewStride = node.attr.getints(kFaVNewStride);
+                const int64_t               kNewN = node.attr.geti(kFaKNewN), kNewK = node.attr.geti(kFaKNewK);
+                const int64_t               vNewN = node.attr.geti(kFaVNewN), vNewK = node.attr.geti(kFaVNewK);
 
                 const float *q    = ctx.t(node.inputs[0]).host.f32();
                 const float *k    = ctx.t(node.inputs[1]).host.f32();
                 const float *v    = ctx.t(node.inputs[2]).host.f32();
                 const float *mask = hasMask ? ctx.t(node.inputs[3]).host.f32() : nullptr;
+                const float *kNew = split ? ctx.t(node.inputs[4]).host.f32() : nullptr;
+                const float *vNew = split ? ctx.t(node.inputs[5]).host.f32() : nullptr;
                 float       *out  = cpu::allocOut(ctx.t(node.outputs[0]), g.desc(node.outputs[0]).shape);
 
                 int64_t rows = 1;
@@ -83,7 +95,7 @@ namespace vknn {
                     std::vector<float> scores((size_t) C);
                     for (int64_t row = rowBegin; row < rowEnd; ++row)
                     {
-                        int64_t qBase = 0, kBase = 0, vBase = 0, mBase = 0, rem = row;
+                        int64_t qBase = 0, kBase = 0, vBase = 0, mBase = 0, kNewBase = 0, vNewBase = 0, rem = row;
                         for (int64_t i = rank - 1; i >= 0; --i)
                         {
                             const int64_t c = rem % dims[i];
@@ -95,8 +107,17 @@ namespace vknn {
                             {
                                 mBase += c * mStride[i];
                             }
+                            if (split)
+                            {
+                                kNewBase += c * kNewStride[i];
+                                vNewBase += c * vNewStride[i];
+                            }
                         }
-                        attentionScores(q + qBase, k + kBase, mask ? mask + mBase : nullptr, scores.data(), C, hd, qK, kN, kK, mN, scale, maskScale);
+                        attentionScores(q + qBase, k + kBase, mask ? mask + mBase : nullptr, scores.data(), pastLen, hd, qK, kN, kK, mN, scale, maskScale);
+                        if (split)
+                        {
+                            attentionScores(q + qBase, kNew + kNewBase, mask ? mask + mBase + pastLen * mN : nullptr, scores.data() + pastLen, C - pastLen, hd, qK, kNewN, kNewK, mN, scale, maskScale);
+                        }
                         // Max-subtract softmax in place: fp32 exponentials, fp32 sum over ascending s.
                         float mx = scores[0];
                         for (int64_t s = 1; s < C; ++s)
@@ -114,7 +135,11 @@ namespace vknn {
                         {
                             scores[(size_t) s] *= inv;
                         }
-                        attentionContext(scores.data(), v + vBase, out + row * hd, C, hd, vK, vN);
+                        attentionContext(scores.data(), v + vBase, out + row * hd, pastLen, hd, vK, vN, false);
+                        if (split)
+                        {
+                            attentionContext(scores.data() + pastLen, vNew + vNewBase, out + row * hd, C - pastLen, hd, vNewK, vNewN, true);
+                        }
                     }
                 });
             }

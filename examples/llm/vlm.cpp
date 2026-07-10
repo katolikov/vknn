@@ -151,6 +151,10 @@ int main(int argc, char **argv) {
         {
             cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
         }
+        if (!strcmp(argv[i], "--no-kv-concat-fold"))
+        {
+            cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
+        }
     }
     std::mt19937 rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));
 

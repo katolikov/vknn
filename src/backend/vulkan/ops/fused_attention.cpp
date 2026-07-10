@@ -22,6 +22,7 @@ namespace vknn {
             int   rank, kvRows, C, hd;
             int   qK, kN, kK, vN, vK, mN, hasMask, chunks;
             int   groupStrideQ, groupStrideM, groupStrideRow;
+            int   pastLen, kNewN, kNewK, vNewN, vNewK;
             float scale, maskScale;
         };
         // Mirrors fused_attention_combine.comp's push_constant block.
@@ -39,7 +40,7 @@ namespace vknn {
             FaCombinePC                          combinePc {};
             std::shared_ptr<vk::Buffer>          geom;      // dims + strides + row strides, deduped SSBO
             std::shared_ptr<vk::Buffer>          scratch;   // fp32 chunk partials, rows*chunks*(hd+2)
-            std::shared_ptr<vk::Buffer>          hold[4];   // per-operand, set when that operand is a constant initializer
+            std::shared_ptr<vk::Buffer>          hold[6];   // per-operand, set when that operand is a constant initializer
             std::shared_ptr<vk::Buffer>          maskDummy; // bound in the mask slot when the node has no mask
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -60,6 +61,14 @@ namespace vknn {
                 partialPc.vK      = (int) node.attr.geti(kFaVK);
                 partialPc.mN      = (int) node.attr.geti(kFaMN);
                 partialPc.hasMask = node.inputs.size() > 3 && node.inputs[3] != kNoTensor ? 1 : 0;
+                // Split-KV form: token s >= pastLen reads the new-rows sources (inputs 4/5) through
+                // their own strides; the unsplit form sets pastLen = C so the branch never fires.
+                const bool split   = node.attr.geti(kFaSplit, 0) != 0 && node.inputs.size() >= 6;
+                partialPc.pastLen  = split ? (int) node.attr.geti(kFaPastLen) : partialPc.C;
+                partialPc.kNewN    = (int) node.attr.geti(kFaKNewN);
+                partialPc.kNewK    = (int) node.attr.geti(kFaKNewK);
+                partialPc.vNewN    = (int) node.attr.geti(kFaVNewN);
+                partialPc.vNewK    = (int) node.attr.geti(kFaVNewK);
                 const float scale = node.attr.getf(kFaScale, 1.f);
                 const float mask  = node.attr.getf(kFaMaskScale, 1.f);
                 partialPc.scale     = scale;
@@ -114,7 +123,9 @@ namespace vknn {
 
                 // Geometry SSBO: the KV-row dims (group axis collapsed to 1) plus the four operand
                 // stride arrays and the row strides.
-                std::vector<int32_t> dimsKv(rank), qs(rank), ks(rank), vs(rank), ms(rank, 0), rs(rank);
+                const std::vector<int64_t> &kNewStride = node.attr.getints(kFaKNewStride);
+                const std::vector<int64_t> &vNewStride = node.attr.getints(kFaVNewStride);
+                std::vector<int32_t> dimsKv(rank), qs(rank), ks(rank), vs(rank), ms(rank, 0), rs(rank), kn2(rank, 0), vn2(rank, 0);
                 for (int i = 0; i < rank; ++i)
                 {
                     dimsKv[i] = (int32_t) (i == groupAxis ? 1 : dims[(size_t) i]);
@@ -126,16 +137,22 @@ namespace vknn {
                     {
                         ms[i] = (int32_t) mStride[(size_t) i];
                     }
+                    if (split && i < (int) kNewStride.size())
+                    {
+                        kn2[i] = (int32_t) kNewStride[(size_t) i];
+                        vn2[i] = (int32_t) vNewStride[(size_t) i];
+                    }
                 }
-                geom = flat::uploadFlatGeom(env, {dimsKv, qs, ks, vs, ms, rs});
+                geom = flat::uploadFlatGeom(env, {dimsKv, qs, ks, vs, ms, rs, kn2, vn2});
 
                 // fp32 chunk partials: {m, l, acc[hd]} per (row, chunk).
                 scratch = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) rows * (size_t) chunks * (size_t) (partialPc.hd + 2) * sizeof(float), 16), vk::MemPref::kDeviceOnly);
 
-                if (!partialPc.hasMask)
+                if (!partialPc.hasMask || !split)
                 {
                     // Descriptor sets bind every declared buffer; a maskless node binds a shared
-                    // dummy word the kernel's hasMask == 0 path never reads.
+                    // dummy word in the mask slot and an unsplit node binds it in the new-source
+                    // slots — paths the kernel never reads.
                     maskDummy = env.acquireWeight("fattn#dummy", env.useFp16, [&] {
                         const uint32_t zero[4] = {0, 0, 0, 0};
                         return env.uploadWeightDeviceOnly(zero, sizeof zero, sizeof zero);
@@ -146,19 +163,22 @@ namespace vknn {
                 // product cannot size an array in GLSL, so the host computes them).
                 const std::vector<uint32_t> spec = {(uint32_t) groupSize, (uint32_t) partialPc.hd, (uint32_t) chunkTokens,
                                                     (uint32_t) (groupSize * partialPc.hd), (uint32_t) (groupSize * chunkTokens)};
-                partialPipe                      = env.pipeline(shader("fused_attention", env.useFp16), 6, sizeof(FaPartialPC), spec);
+                partialPipe                      = env.pipeline(shader("fused_attention", env.useFp16), 8, sizeof(FaPartialPC), spec);
                 combinePipe                      = env.pipeline(shader("fused_attention_combine", env.useFp16), 2, sizeof(FaCombinePC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                const bool  split = partialPc.pastLen < partialPc.C;
                 vk::Buffer *q    = operandBuf(env, node.inputs[0], hold[0]);
                 vk::Buffer *k    = operandBuf(env, node.inputs[1], hold[1]);
                 vk::Buffer *v    = operandBuf(env, node.inputs[2], hold[2]);
                 vk::Buffer *mask = partialPc.hasMask ? operandBuf(env, node.inputs[3], hold[3]) : maskDummy.get();
+                vk::Buffer *kNew = split ? operandBuf(env, node.inputs[4], hold[4]) : maskDummy.get();
+                vk::Buffer *vNew = split ? operandBuf(env, node.inputs[5], hold[5]) : maskDummy.get();
                 vk::Buffer *dst  = env.devBuf(node.outputs[0]);
                 // Pass 1: one workgroup per (KV row, chunk); the 1-D grid spills into y and the
                 // kernel folds it back through gl_WorkGroupID.y.
-                partialPipe->dispatch(cmd, {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle()}, &partialPc, sizeof(partialPc),
+                partialPipe->dispatch(cmd, {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle(), kNew->handle(), vNew->handle()}, &partialPc, sizeof(partialPc),
                                       (uint32_t) ((int64_t) partialPc.kvRows * partialPc.chunks));
                 // Two dispatches in one record() are NOT auto-barriered; the combine reads the
                 // scratch pass 1 wrote (same pattern as reduce.cpp).

@@ -616,6 +616,16 @@ namespace vknn {
             fuseDecodeAttention(graph_, vulkanFlat ? fp32Marks : std::string());
         }
 
+        // --- KV-cache Concat fold: a fused decode-attention node reads the past cache and the new
+        //     rows directly (split sources), the present output becomes the rows-only tensor, and
+        //     the whole-cache-per-token Concat copy disappears. Bit-identical values; load-time
+        //     only, own hint + cache-variant key entry (it changes the present outputs' declared
+        //     shapes, which the example tools and the link fold read adaptively).
+        if (cfg_.fusedAttention() && cfg_.kvConcatFold())
+        {
+            foldFusedAttentionKvConcat(graph_);
+        }
+
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
         //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
         //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).

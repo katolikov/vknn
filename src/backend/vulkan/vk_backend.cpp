@@ -200,6 +200,7 @@ namespace vknn {
             k.matmulViewFold  = cfg.matmulViewFold();
             k.ropeFusion      = cfg.ropeFusion();
             k.fusedAttention  = cfg.fusedAttention();
+            k.kvConcatFold    = cfg.kvConcatFold();
             k.fp32Tensors     = cfg.fp32Tensors;
             k.winograd        = cfg.hint(Hint::Winograd, (int) Mode::Auto);
             k.winogradVariant = cfg.hint(Hint::WinogradVariant, 0);

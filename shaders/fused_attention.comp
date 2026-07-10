@@ -30,12 +30,18 @@ layout(std430, binding = 2) readonly buffer V { STORE v[]; };
 layout(std430, binding = 3) writeonly buffer P { float part[]; };
 layout(std430, binding = 4) readonly buffer M { STORE msk[]; };
 // Geometry: g[0..rank) = KV-row dims (group axis collapsed to 1), then per-dim strides of
-// q, k, v, mask, then the attention-row strides (row-major over the ORIGINAL dims) — 6 arrays.
+// q, k, v, mask, the attention-row strides (row-major over the ORIGINAL dims), and the split-KV
+// new-source strides for k and v — 8 arrays (the last two are zeros when pastLen == C).
 layout(std430, binding = 5) readonly buffer GEO { int g[]; } geom;
+// Split-KV sources (foldFusedAttentionKvConcat): token s >= pastLen reads the current rows from
+// these instead of the concatenated cache. Dummy-bound when pastLen == C (never read).
+layout(std430, binding = 6) readonly buffer KN2 { STORE kNew[]; };
+layout(std430, binding = 7) readonly buffer VN2 { STORE vNew[]; };
 layout(push_constant) uniform PC {
   int rank, kvRows, C, hd;
   int qK, kN, kK, vN, vK, mN, hasMask, chunks;
   int groupStrideQ, groupStrideM, groupStrideRow;
+  int pastLen, kNewN, kNewK, vNewN, vNewK;
   float scale, maskScale;
 } pc;
 
@@ -52,7 +58,7 @@ void main() {
   if (kvRow >= pc.kvRows) return; // uniform per workgroup: barriers below stay uniform
 
   // KV-row bases and the flat attention-row base from the per-axis strides.
-  int qB = 0, kB = 0, vB = 0, mB = 0, rowBase = 0;
+  int qB = 0, kB = 0, vB = 0, mB = 0, rowBase = 0, kNB = 0, vNB = 0;
   {
     int rem = kvRow;
     for (int i = pc.rank - 1; i >= 0; --i) {
@@ -63,6 +69,8 @@ void main() {
       vB += c * geom.g[3 * pc.rank + i];
       mB += c * geom.g[4 * pc.rank + i];
       rowBase += c * geom.g[5 * pc.rank + i];
+      kNB += c * geom.g[6 * pc.rank + i];
+      vNB += c * geom.g[7 * pc.rank + i];
     }
   }
 
@@ -74,14 +82,17 @@ void main() {
     sQ[i] = float(q[qB + (i / pc.hd) * pc.groupStrideQ + (i % pc.hd) * pc.qK]);
   barrier();
 
-  // Stage 1: one lane per token; each K element read once closes all G dots.
+  // Stage 1: one lane per token; each K element read once closes all G dots. Token s past the
+  // split boundary reads the new-rows source through its own strides.
   for (int t = tid; t < sLen; t += WG) {
     int s = s0 + t;
     float dot[G];
     for (int gi = 0; gi < G; ++gi) dot[gi] = 0.0;
-    int base = kB + s * pc.kN;
+    bool past = s < pc.pastLen;
+    int base = past ? kB + s * pc.kN : kNB + (s - pc.pastLen) * pc.kNewN;
+    int kkStep = past ? pc.kK : pc.kNewK;
     for (int kk = 0; kk < pc.hd; ++kk) {
-      float kv = float(k[base + kk * pc.kK]);
+      float kv = past ? float(k[base + kk * kkStep]) : float(kNew[base + kk * kkStep]);
       for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
     }
     for (int gi = 0; gi < G; ++gi) {
@@ -125,8 +136,11 @@ void main() {
     int prt = tid / pc.hd;
     float acc = 0.0;
     if (prt < parts) {
-      for (int t = prt; t < sLen; t += parts)
-        acc += sScores[gi * CHUNK + t] * float(v[vB + (s0 + t) * pc.vK + n * pc.vN]);
+      for (int t = prt; t < sLen; t += parts) {
+        int s = s0 + t;
+        float vv = s < pc.pastLen ? float(v[vB + s * pc.vK + n * pc.vN]) : float(vNew[vNB + (s - pc.pastLen) * pc.vNewK + n * pc.vNewN]);
+        acc += sScores[gi * CHUNK + t] * vv;
+      }
     }
     for (int i = tid; i < pc.hd; i += WG) sAcc[i] = 0.0;
     barrier();

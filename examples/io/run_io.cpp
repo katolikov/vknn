@@ -99,6 +99,10 @@ int main(int argc, char **argv) {
     {
         cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
     }
+    if (flag(argc, argv, "--no-kv-concat-fold"))
+    {
+        cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
+    }
     cfg.layerDump     = flag(argc, argv, "--layer-dump");
     cfg.debugSegments = flag(argc, argv, "--debug-segments");
     cfg.layerDumpDir  = opt(argc, argv, "--layer-dump-dir", cfg.layerDumpDir.c_str());

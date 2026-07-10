@@ -251,4 +251,13 @@ namespace vknn {
     // decomposed form. Runs at load only, gated by Hint::FusedAttention; never serialized.
     void fuseDecodeAttention(Graph &g, const std::string &fp32Pins = "");
 
+    // Fold the per-token KV-cache Concat feeding a FusedAttention node: the node reads the past
+    // cache and the current rows as separate stride-addressed sources (token s < pastLen from the
+    // past, the rest from the new rows), a present output that was the concat result is rewritten
+    // to the new-rows tensor under the same name (the rows-only convention of io_link.h), and the
+    // dead Concat falls to DCE — removing a whole-cache copy per decoded token. Values are
+    // bit-identical; only the copy disappears. Runs at load after fuseDecodeAttention, gated by
+    // Hint::KvConcatFold; never serialized. Returns the number of folded attention nodes.
+    int foldFusedAttentionKvConcat(Graph &g);
+
 } // namespace vknn

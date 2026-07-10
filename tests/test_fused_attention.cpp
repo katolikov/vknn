@@ -497,3 +497,144 @@ TEST(FusedAttention, CnnGraphUntouched) {
     EXPECT_EQ(g.nodes.size(), before);
     EXPECT_EQ(findNode(g, OpType::FusedAttention), nullptr);
 }
+
+// foldFusedAttentionKvConcat: with the caches produced by past‖new Concats (the with-past decoder
+// step), the fold rewires the fused node onto the two sources, rewrites the present outputs to the
+// new-rows tensors under the present names, and the attention output stays BYTE-identical — the
+// fold moves the copy, never the math.
+TEST(FusedAttention, KvConcatFoldsToSplitSources) {
+    auto buildConcatGraph = [&]() {
+        Graph    g;
+        TensorId q     = addInput(g, "q", {kB, kHeads, 1, kHd});
+        TensorId kPast = addInput(g, "kpast", {kB, kKvHeads, kTokens - 1, kHd});
+        TensorId kNew  = addInput(g, "knew", {kB, kKvHeads, 1, kHd});
+        TensorId vPast = addInput(g, "vpast", {kB, kKvHeads, kTokens - 1, kHd});
+        TensorId vNew  = addInput(g, "vnew", {kB, kKvHeads, 1, kHd});
+        TensorDesc kco;
+        kco.name     = "present_key";
+        kco.isOutput = true;
+        TensorId kc  = g.addTensor(kco);
+        TensorDesc vco;
+        vco.name     = "present_value";
+        vco.isOutput = true;
+        TensorId vc  = g.addTensor(vco);
+        Attr axis;
+        axis.kind = Attr::Int;
+        axis.i    = 2;
+        addNode(g, OpType::Concat, "kcat", {kPast, kNew}, kc)->attr.map["axis"] = axis;
+        addNode(g, OpType::Concat, "vcat", {vPast, vNew}, vc)->attr.map["axis"] = axis;
+
+        TensorId kT = repeatKv(g, kc, "k", true);
+        TensorId vR = repeatKv(g, vc, "v", false);
+        TensorId scores = addTemp(g, "scores");
+        addNode(g, OpType::MatMul, "qk", {q, kT}, scores);
+        TensorId probs = addTemp(g, "probs");
+        Node    *sn    = addNode(g, OpType::Softmax, "softmax", {scores}, probs);
+        Attr     ax;
+        ax.kind              = Attr::Int;
+        ax.i                 = -1;
+        sn->attr.map["axis"] = ax;
+        TensorId ctx = addTemp(g, "ctx");
+        addNode(g, OpType::MatMul, "pv", {probs, vR}, ctx);
+        TensorId ctxT = addTemp(g, "ctxT");
+        Node    *tn   = addNode(g, OpType::Transpose, "ctx_transpose", {ctx}, ctxT);
+        Attr     perm;
+        perm.kind            = Attr::Ints;
+        perm.ints            = {0, 2, 1, 3};
+        tn->attr.map["perm"] = perm;
+        TensorDesc yo;
+        yo.name     = "out";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        addNode(g, OpType::Reshape, "ctx_reshape", {ctxT, addI64Init(g, "so", {kB, 1, kHeads * kHd})}, y);
+        g.outputs = {y, kc, vc};
+        inferShapes(g);
+        foldMatMulViews(g);
+        fuseDecodeAttention(g);
+        return g;
+    };
+
+    auto randTensor = [](const std::string &name, const Shape &shape, unsigned seed) {
+        IOTensor io;
+        io.name  = name;
+        io.shape = shape;
+        io.dtype = DType::Float32;
+        int64_t elems = numElements(shape);
+        io.data.resize((size_t) elems * 4);
+        float *f = reinterpret_cast<float *>(io.data.data());
+        unsigned s = seed;
+        for (int64_t i = 0; i < elems; ++i)
+        {
+            s    = s * 1664525u + 1013904223u;
+            f[i] = ((float) (s >> 8) / (float) (1 << 24)) - 0.5f;
+        }
+        return io;
+    };
+    const std::vector<IOTensor> inputs = {
+        randTensor("q", {kB, kHeads, 1, kHd}, 1),
+        randTensor("kpast", {kB, kKvHeads, kTokens - 1, kHd}, 2),
+        randTensor("knew", {kB, kKvHeads, 1, kHd}, 3),
+        randTensor("vpast", {kB, kKvHeads, kTokens - 1, kHd}, 4),
+        randTensor("vnew", {kB, kKvHeads, 1, kHd}, 5),
+    };
+    auto outBytes = [](const std::vector<IOTensor> &outs, const std::string &name) {
+        for (const IOTensor &o: outs)
+        {
+            if (o.name == name)
+            {
+                return o.data;
+            }
+        }
+        ADD_FAILURE() << "missing output " << name;
+        return std::vector<uint8_t> {};
+    };
+
+    // Unsplit reference: the fused node reads the concatenated caches.
+    Graph gRef = buildConcatGraph();
+    // Folded: the fused node reads the two sources; the Concats die.
+    Graph gFold = buildConcatGraph();
+    EXPECT_EQ(foldFusedAttentionKvConcat(gFold), 1);
+    const Node *fa = findNode(gFold, OpType::FusedAttention);
+    ASSERT_NE(fa, nullptr);
+    EXPECT_EQ(fa->attr.geti(kFaSplit, 0), 1);
+    EXPECT_EQ(fa->attr.geti(kFaPastLen), kTokens - 1);
+    ASSERT_EQ(fa->inputs.size(), 6u);
+    EXPECT_EQ(findNode(gFold, OpType::Concat), nullptr); // dead concats removed
+    // The present outputs became the new-rows tensors under the present names.
+    bool foundKey = false, foundValue = false;
+    for (TensorId t: gFold.outputs)
+    {
+        foundKey   = foundKey || (gFold.desc(t).name == "present_key" && gFold.desc(t).shape == Shape {kB, kKvHeads, 1, kHd});
+        foundValue = foundValue || (gFold.desc(t).name == "present_value" && gFold.desc(t).shape == Shape {kB, kKvHeads, 1, kHd});
+    }
+    EXPECT_TRUE(foundKey);
+    EXPECT_TRUE(foundValue);
+
+    // Session::create re-runs the load passes, so the reference session must pin the fold OFF
+    // (the folded session leaves the default ON — either way the graph is already folded above).
+    Config cfgRef;
+    cfgRef.backend = BackendKind::Cpu;
+    cfgRef.setHint(Hint::KvConcatFold, (int) Mode::Off);
+    Config cfgFold;
+    cfgFold.backend = BackendKind::Cpu;
+    auto sRef  = Session::create(std::move(gRef), cfgRef);
+    auto sFold = Session::create(std::move(gFold), cfgFold);
+    ASSERT_TRUE(sRef);
+    ASSERT_TRUE(sFold);
+    std::vector<IOTensor> oRef, oFold;
+    ASSERT_EQ(sRef->run(inputs, oRef), Status::Ok);
+    ASSERT_EQ(sFold->run(inputs, oFold), Status::Ok);
+    // The attention output is byte-identical; the folded present is the last (new) row of the
+    // reference present.
+    EXPECT_EQ(outBytes(oRef, "out"), outBytes(oFold, "out"));
+    const std::vector<uint8_t> refKey  = outBytes(oRef, "present_key");
+    const std::vector<uint8_t> foldKey = outBytes(oFold, "present_key");
+    ASSERT_EQ(refKey.size(), (size_t) kB * kKvHeads * kTokens * kHd * 4);
+    ASSERT_EQ(foldKey.size(), (size_t) kB * kKvHeads * kHd * 4);
+    for (int64_t h = 0; h < kKvHeads; ++h)
+    {
+        const uint8_t *refRow  = refKey.data() + ((h * kTokens + (kTokens - 1)) * kHd) * 4;
+        const uint8_t *foldRow = foldKey.data() + (h * kHd) * 4;
+        EXPECT_EQ(std::memcmp(refRow, foldRow, (size_t) kHd * 4), 0) << "present head " << h;
+    }
+}
