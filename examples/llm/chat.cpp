@@ -33,6 +33,7 @@
 #include "vknn/runtime.h"
 #include "vknn/session.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -358,8 +359,16 @@ int main(int argc, char **argv) {
         return true;
     };
 
+    // Decode-loop phase walls (--timing): accumulated per decode step, reported per turn.
+    double tmLinkMs = 0, tmRunMs = 0, tmPrepMs = 0, tmSampleMs = 0;
+    int    tmSteps  = 0;
+    auto   nowMs    = [] {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
     // Feed one token at the current position; return the logits (vocab floats) or nullptr on error.
     auto step = [&](int64_t tok) -> const float * {
+        const double tPrep0 = nowMs();
         setI64(idIdx, {tok});
         setI64(posIdx, {(int64_t) p});
         std::vector<int64_t> am((size_t) C + 1, 0);
@@ -369,6 +378,9 @@ int main(int argc, char **argv) {
         }
         am[(size_t) C] = 1; // the current token (appended at index C)
         setI64(maskIdx, am);
+        const double tLink0 = nowMs();
+        tmPrepMs += tLink0 - tPrep0;
+        double tRun0 = tLink0;
 
         Status runStatus = Status::Ok;
         bool   ranLinked = false;
@@ -398,6 +410,8 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+            tRun0 = nowMs();
+            tmLinkMs += tRun0 - tLink0;
             if (linksOk)
             {
                 if (reseedCache)
@@ -430,6 +444,8 @@ int main(int argc, char **argv) {
         {
             runStatus = sess->run(inputs, outputs);
         }
+        tmRunMs += nowMs() - tRun0;
+        ++tmSteps;
         if (runStatus != Status::Ok)
         {
             fprintf(stderr, "[chat] run failed\n");
@@ -702,7 +718,9 @@ int main(int argc, char **argv) {
         }
         for (int n = 0; n < maxTokens; ++n)
         {
-            const int64_t next = sample(logits);
+            const double  tSample0 = nowMs();
+            const int64_t next     = sample(logits);
+            tmSampleMs += nowMs() - tSample0;
             if (next == eos)
             {
                 break;
@@ -715,6 +733,13 @@ int main(int argc, char **argv) {
                 return 3;
             }
             ++p;
+        }
+        if (cfg.timing && tmSteps > 0)
+        {
+            fprintf(stderr, "[chat] step phases avg over %d step(s): prep=%.3fms links=%.3fms run=%.3fms sample=%.3fms\n",
+                    tmSteps, tmPrepMs / tmSteps, tmLinkMs / tmSteps, tmRunMs / tmSteps, tmSampleMs / tmSteps);
+            tmPrepMs = tmLinkMs = tmRunMs = tmSampleMs = 0;
+            tmSteps  = 0;
         }
         printf("END\n");
         fflush(stdout);
