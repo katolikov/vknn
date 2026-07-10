@@ -13,7 +13,7 @@
 // subgroup variant (fused_attention_sg.comp) that replaces the shared-memory reduction trees with
 // subgroupMax/subgroupAdd, reads each V element once for the whole GQA group, and reads
 // element-contiguous 4-aligned K/V rows as vec4 words. prepare() picks the subgroup kernel when
-// the device and the node meet its requirements (see sgKernelFits below); the base kernel and its
+// the device and the node meet its requirements (see sgEligible below); the base kernel and its
 // dispatch are byte-unchanged otherwise.
 #include "core/fused_attention.h"
 #include "flat_ops.h"
@@ -39,6 +39,14 @@ namespace vknn {
 
         constexpr int kFaWorkgroupSize = 256;
         constexpr int kFaMaxChunks     = 64; // == FA_MAX_CHUNKS in fused_attention_combine.comp
+        // Subgroup-kernel tile: token chunk and workgroup-width target (the width widens to the
+        // head dim and rounds up to whole subgroups). A decode model exposes only kv-head-count KV
+        // rows, so parallelism comes from the chunk count: the half-width chunk doubles the
+        // (kvRows * chunks) grid over the base kernel's, and the full-width workgroup keeps every
+        // lane busy in the p.V sweep (measured best among chunk 64..256 x width 64..256 tiles on
+        // the reference decode; the differences past this pick are a few percent).
+        constexpr int kFaSgChunkTokens    = 128;
+        constexpr int kFaSgWorkgroupSize  = 256;
 
         struct FusedAttentionOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> partialPipe;
@@ -114,17 +122,53 @@ namespace vknn {
                 partialPc.groupStrideRow = groupAxis >= 0 ? (int) rowStride[(size_t) groupAxis] : 0;
                 partialPc.kvRows         = (int) (rows / groupSize);
 
-                // Chunking: one workgroup-size chunk keeps every lane on a token in pass 1, and the
-                // G*CHUNK score slab stays small enough (<= 16 KB shared) that several workgroups
-                // sit resident per core; the chunk count then scales the dispatch to the context so
-                // a low-KV-row model still fills the GPU. The combine pass caps the chunk count.
-                int64_t chunkTokens = std::min<int64_t>(4096 / groupSize, kFaWorkgroupSize);
-                chunkTokens         = std::max<int64_t>(chunkTokens, 1);
-                int64_t chunks      = (partialPc.C + chunkTokens - 1) / chunkTokens;
-                if (chunks > kFaMaxChunks)
+                // Subgroup-kernel eligibility (fused_attention_sg.comp; any miss keeps the base
+                // kernel, whose pipeline and dispatch are unchanged): subgroup arithmetic +
+                // shuffle, a workgroup of whole subgroups within the device invocation limit, a
+                // head dim that is a multiple of 4 and fits one workgroup (the fold assigns one
+                // lane per output element), a group small enough for the per-lane accumulator
+                // arrays, and a reduction slab of G * subgroup-count partials within the workgroup
+                // width. The shared-memory budget is checked below once the chunk size is final.
+                const auto   &cap          = env.ctx->caps();
+                const int64_t subgroupSize = (int64_t) cap.subgroupSize;
+                // The sg workgroup width: the tile target, widened to the head dim and rounded up
+                // to whole subgroups.
+                int64_t wgs = std::max<int64_t>(kFaSgWorkgroupSize, partialPc.hd);
+                if (subgroupSize > 0)
                 {
-                    chunks      = kFaMaxChunks;
-                    chunkTokens = (partialPc.C + chunks - 1) / chunks;
+                    wgs = (wgs + subgroupSize - 1) / subgroupSize * subgroupSize;
+                }
+                bool sgEligible = cap.subgroupArithmetic && cap.subgroupShuffle && subgroupSize > 0 && wgs % subgroupSize == 0 && wgs <= (int64_t) cap.maxWorkGroupInvocations &&
+                                  partialPc.hd % 4 == 0 && partialPc.hd <= wgs && groupSize <= 8 && groupSize * (wgs / subgroupSize) <= wgs;
+
+                // Chunking: the G*CHUNK score slab stays small enough (<= 16 KB shared) that
+                // several workgroups sit resident per core, and the chunk count scales the
+                // (kvRows * chunks) dispatch to the context so a low-KV-row model still fills the
+                // GPU. A decode model has only kv-head-count KV rows, so the grid IS the chunk
+                // count times that; the sg kernel takes smaller chunks (and a matching narrower
+                // workgroup) to widen the grid. The combine pass caps the chunk count.
+                const int64_t chunkCap = [&] {
+                    int64_t tokens = std::min<int64_t>(4096 / groupSize, sgEligible ? kFaSgChunkTokens : kFaWorkgroupSize);
+                    tokens         = std::max<int64_t>(tokens, 1);
+                    int64_t count  = (partialPc.C + tokens - 1) / tokens;
+                    return count > kFaMaxChunks ? (partialPc.C + kFaMaxChunks - 1) / kFaMaxChunks : tokens;
+                }();
+                int64_t chunkTokens = chunkCap;
+                int64_t chunks      = (partialPc.C + chunkTokens - 1) / chunkTokens;
+
+                // The sg kernel's shared arrays: sQ4 (G*hd floats as vec4s) + sScores (G*chunk) +
+                // sRed (wgs) + the vec4 sFold (G*wgs vec4s). Past the device budget the node falls
+                // back to the base kernel and re-derives the base chunking.
+                if (sgEligible && (int64_t) cap.maxSharedMemory < (groupSize * partialPc.hd + groupSize * chunkTokens + wgs) * 4 + groupSize * wgs * 16)
+                {
+                    sgEligible  = false;
+                    chunkTokens = std::max<int64_t>(std::min<int64_t>(4096 / groupSize, kFaWorkgroupSize), 1);
+                    chunks      = (partialPc.C + chunkTokens - 1) / chunkTokens;
+                    if (chunks > kFaMaxChunks)
+                    {
+                        chunks      = kFaMaxChunks;
+                        chunkTokens = (partialPc.C + chunks - 1) / chunks;
+                    }
                 }
                 partialPc.chunks = (int) chunks;
                 combinePc        = {(int) rows, partialPc.hd, (int) chunks};
@@ -167,19 +211,6 @@ namespace vknn {
                     });
                 }
 
-                // Subgroup-kernel requirements beyond the base kernel's (any miss keeps the base
-                // kernel, whose pipeline and dispatch are unchanged): subgroup arithmetic +
-                // shuffle, a workgroup of whole subgroups, a head dim that is a multiple of 4 and
-                // fits one workgroup (the fold assigns one lane per output element), a group small
-                // enough for the per-lane accumulator arrays, a reduction slab of G *
-                // subgroup-count partials within the workgroup width, and shared space for the
-                // extra vec4 fold staging.
-                const auto   &cap          = env.ctx->caps();
-                const int64_t subgroupSize = (int64_t) cap.subgroupSize;
-                const int64_t wgs          = kFaWorkgroupSize;
-                const bool    sgKernelFits = cap.subgroupArithmetic && cap.subgroupShuffle && subgroupSize > 0 && wgs % subgroupSize == 0 && partialPc.hd % 4 == 0 && partialPc.hd <= wgs && groupSize <= 8 &&
-                                             groupSize * (wgs / subgroupSize) <= wgs && (int64_t) cap.maxSharedMemory >= (groupSize * partialPc.hd + groupSize * chunkTokens + wgs + 4 * wgs) * 4;
-
                 // vec4 K/V fast paths: the row must be element-contiguous along the vectorized
                 // axis and every base-offset contribution a multiple of 4 elements, so each vec4
                 // word sits on a 4-element boundary of the buffer.
@@ -201,17 +232,20 @@ namespace vknn {
                     vVec4 = vVec4 && partialPc.vNewN == 1 && partialPc.vNewK % 4 == 0 && strides4Aligned(vn2);
                 }
 
-                useSgKernel = sgKernelFits;
-                VKNN_INFO << "fattn variant=" << (sgKernelFits ? "sg" : "base") << " kv4=" << kVec4 << " vv4=" << vVec4 << " g=" << groupSize << " hd=" << partialPc.hd << " chunk=" << chunkTokens
-                          << " kvRows=" << partialPc.kvRows; // TEMP: development diagnostic, removed before merge
+                useSgKernel = sgEligible;
+                // Kernel-choice record under Config::verbosity Debug: which pass-1 kernel the node
+                // runs and whether the vec4 K/V paths engaged.
+                VKNN_DEBUG << "FusedAttention pass 1: " << (sgEligible ? "subgroup" : "base") << " kernel, kv4=" << kVec4 << " vv4=" << vVec4 << " group=" << groupSize << " hd=" << partialPc.hd
+                           << " chunk=" << chunkTokens << " wgs=" << wgs << " kvRows=" << partialPc.kvRows;
                 if (useSgKernel)
                 {
-                    // Spec constants: G, HD, CHUNK, the two shared-array products QT4 == G*HD/4
-                    // and SCORETOTAL == G*CHUNK (a spec-constant product cannot size an array in
-                    // GLSL, so the host computes them), the workgroup width, and the vec4 path
-                    // selectors.
+                    // Spec constants: G, HD, CHUNK, the shared-array products QT4 == G*HD/4,
+                    // SCORETOTAL == G*CHUNK and FOLDTOTAL == G*WGS (a spec-constant product cannot
+                    // size an array in GLSL, so the host computes them), the workgroup width, and
+                    // the vec4 path selectors.
                     const std::vector<uint32_t> spec = {(uint32_t) groupSize,           (uint32_t) partialPc.hd, (uint32_t) chunkTokens, (uint32_t) (groupSize * partialPc.hd / 4),
-                                                        (uint32_t) (groupSize * chunkTokens), (uint32_t) wgs,          kVec4 ? 1u : 0u,        vVec4 ? 1u : 0u};
+                                                        (uint32_t) (groupSize * chunkTokens), (uint32_t) wgs,          kVec4 ? 1u : 0u,        vVec4 ? 1u : 0u,
+                                                        (uint32_t) (groupSize * wgs)};
                     partialPipe                      = env.pipeline(shader("fused_attention_sg", env.useFp16), 12, sizeof(FaPartialPC), spec);
                 } else
                 {
