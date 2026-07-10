@@ -1,0 +1,41 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 7
+#include "pw_epilogue.glsl"
+#endif
+// Split-K mat-vec over a LUT4-packed weight (vknn_compile -Os --quant-bits lut4): the
+// matmul_gemv_wq_core.glsl body with the codebook decode surface (core/quant_weights.h). A lane's
+// 8-output block is ONE packed 32-bit word of 8 UNSIGNED nibble indices into the tensor's 16-entry
+// codebook (binding 6), staged into shared memory once per workgroup; codebook[0] is exact zero,
+// so padding nibbles and outlier columns contribute nothing through the packed grid. Thread
+// layout, addressing, and the interior-lane / whole-group specializations are documented in the
+// head/core includes.
+#include "common.glsl"
+#include "matmul_gemv_wq_head.glsl"
+layout(std430, binding = 6) readonly buffer CB { STORE cb[]; };
+
+shared float lutValues[16];
+
+// Codebook values of index lanes 0..3 / 4..7 of a packed word.
+vec4 lutLo(uint w) {
+  return vec4(lutValues[bitfieldExtract(w, 0, 4)], lutValues[bitfieldExtract(w, 4, 4)],
+              lutValues[bitfieldExtract(w, 8, 4)], lutValues[bitfieldExtract(w, 12, 4)]);
+}
+vec4 lutHi(uint w) {
+  return vec4(lutValues[bitfieldExtract(w, 16, 4)], lutValues[bitfieldExtract(w, 20, 4)],
+              lutValues[bitfieldExtract(w, 24, 4)], lutValues[bitfieldExtract(w, 28, 4)]);
+}
+
+#define WQ_WORD_T uint
+#define WQ_LOAD_W(idx) bp[idx]
+#define WQ_DEC_LO lutLo
+#define WQ_DEC_HI lutHi
+#define WQ_BLOCK_COL(n) ((n) / 8) // one word per 8-output block
+// The codebook stages once, before any packed load, in uniform control flow.
+#define WQ_MAIN_INIT \
+  if (gl_LocalInvocationIndex < 16u) lutValues[gl_LocalInvocationIndex] = float(cb[gl_LocalInvocationIndex]); \
+  barrier();
+
+#include "matmul_gemv_wq_core.glsl"

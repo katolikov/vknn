@@ -1,6 +1,6 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
-#include "core/quant_int4.h"
+#include "core/quant_weights.h"
 #include "vknn/logging.h"
 #include <algorithm>
 #include <cctype>
@@ -713,14 +713,15 @@ namespace vknn {
         // built. Reads only — the plan is untouched.
         accountDebugPatternMatches(bucket);
 
-        // --- materialize int4-quantized weights (vknn_compile -Os) for non-native consumers ---
-        // The Vulkan MatMul dequantizes the packed payload in-kernel; every other consumer — a
-        // CPU-assigned node, or a GPU op without an int4 kernel (Conv/Gemm) — gets its fp16 bytes
+        // --- materialize packed quantized weights (vknn_compile -Os) for non-native consumers ---
+        // The Vulkan MatMul dequantizes the packed payload in-kernel for the formats it has kernels
+        // for (core/quant_weights.h); every other consumer — a CPU-assigned node, a GPU op without
+        // a packed kernel (Conv/Gemm), or a format without a native kernel — gets its fp16 bytes
         // reconstructed here, before the pool load and any GPU op prepare, so quantization is
         // invisible to it. Must run after the island fold: that pass reassigns nodes to the CPU,
         // and a reassigned MatMul needs its weight materialized like any other CPU node.
-        materializeInt4Weights(graph_, [&](size_t n, const Node &nd) {
-            return nd.type == OpType::MatMul && nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Vulkan;
+        materializeQuantWeights(graph_, [&](size_t n, const Node &nd) {
+            return nd.type == OpType::MatMul && weightQuantHasNativeMatMulKernel(weightQuantFormat(nd)) && nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Vulkan;
         });
 
         // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---

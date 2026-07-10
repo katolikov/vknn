@@ -219,10 +219,10 @@ namespace vknn {
             n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4)); // 0-D scalar
         }
         // initFloats materializes the payload at its declared dtype: a Float16 initializer must hold
-        // exactly n*2 bytes, an fp32/other exactly n*elemSize. An int4-PACKED weight keeps a Float16
-        // logical desc but a payload ~1/8 the size (the native MatMul reads it through uploadInitRaw,
-        // never here); reaching this flat path with such a weight would read out of bounds. Guard it
-        // as a clear error naming the tensor, not a segfault.
+        // exactly n*2 bytes, an fp32/other exactly n*elemSize. A PACKED quantized weight keeps a
+        // Float16 logical desc but a smaller payload (the native MatMul reads it through
+        // uploadInitRaw, never here); reaching this flat path with such a weight would read out of
+        // bounds. Guard it as a clear error naming the tensor, not a segfault.
         {
             const DType   dt       = g.desc(id).dtype;
             const int64_t elemSize = dt == DType::Float16 ? 2 : (dt == DType::Int64 ? 8 : 4);
@@ -230,7 +230,7 @@ namespace vknn {
             {
                 throw Error(Status::InvalidArgument, "uploadInit: '" + g.tensors[id].name + "' payload is " + std::to_string(hb.bytes.size()) + " bytes but its " + dtypeStr(dt) + " [" +
                                                          std::to_string(n) + "] shape needs " + std::to_string((size_t) n * (size_t) elemSize) +
-                                                         " (an int4-packed weight reached the flat upload path instead of the native kernel)");
+                                                         " (a packed quantized weight reached the flat upload path instead of the native kernel)");
             }
         }
         auto make = [&] {

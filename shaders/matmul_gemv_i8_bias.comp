@@ -1,0 +1,32 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 7
+#include "pw_epilogue.glsl"
+#endif
+// matmul_gemv_i8.comp with a fused rank-1 [N] bias at binding 6 (WQ_BIAS in the shared head/core):
+// out[r,n] = sum_k A*W + bias[n]. The bias enters in the reducing lane, before the store, so it is
+// added exactly once regardless of WQ_KS. Structure, weight addressing, and the interior-lane /
+// whole-group specializations are documented in the head/core includes.
+#include "common.glsl"
+#define WQ_BIAS 1
+#include "matmul_gemv_wq_head.glsl"
+
+// Sign-extended int8 lanes 0..3 / 4..7 of a packed word pair.
+vec4 byteQuadLo(uvec2 w) {
+  return vec4(bitfieldExtract(int(w.x), 0, 8), bitfieldExtract(int(w.x), 8, 8),
+              bitfieldExtract(int(w.x), 16, 8), bitfieldExtract(int(w.x), 24, 8));
+}
+vec4 byteQuadHi(uvec2 w) {
+  return vec4(bitfieldExtract(int(w.y), 0, 8), bitfieldExtract(int(w.y), 8, 8),
+              bitfieldExtract(int(w.y), 16, 8), bitfieldExtract(int(w.y), 24, 8));
+}
+
+#define WQ_WORD_T uvec2
+#define WQ_LOAD_W(idx) uvec2(bp[idx], bp[(idx) + 1])
+#define WQ_DEC_LO byteQuadLo
+#define WQ_DEC_HI byteQuadHi
+#define WQ_BLOCK_COL(n) ((n) / 4) // two words per 8-output block; n0 is 8-aligned so the pair is even
+
+#include "matmul_gemv_wq_core.glsl"
