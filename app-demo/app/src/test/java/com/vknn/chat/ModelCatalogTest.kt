@@ -49,7 +49,18 @@ class ModelCatalogTest {
         for (spec in ModelCatalog.ALL) {
             assertTrue(spec.approxBytes > 0)
             assertTrue(!spec.localFileName.contains('/'))
+            assertTrue(spec.variant == "fp16" || spec.variant == "int4")
         }
+    }
+
+    @Test
+    fun chatModeCarriesThreeVariants() {
+        val chat = ModelCatalog.forMode(ModelCatalog.QWEN.mode)
+        assertEquals(listOf(ModelCatalog.QWEN, ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.QWEN_FP16_PREFILL), chat)
+        assertEquals("int4", ModelCatalog.QWEN_INT4_PREFILL.variant)
+        assertEquals("fp16", ModelCatalog.QWEN_FP16_PREFILL.variant)
+        assertEquals(ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.byId("qwen_int4_prefill"))
+        assertNull(ModelCatalog.byId("no-such-model"))
     }
 
     @Test
@@ -57,6 +68,14 @@ class ModelCatalogTest {
         assertEquals(
             "https://huggingface.co/katolikov/qwen-vknn/resolve/main/qwen2.5-coder-0.5b-instruct-c1024.vxm",
             ModelCatalog.QWEN.url,
+        )
+        assertEquals(
+            "https://huggingface.co/katolikov/qwen-vknn/resolve/main/qwen2.5-coder-0.5b-instruct-c1024-prefill256-int4.vxm",
+            ModelCatalog.QWEN_INT4_PREFILL.url,
+        )
+        assertEquals(
+            "https://huggingface.co/katolikov/qwen-vknn/resolve/main/qwen2.5-coder-0.5b-instruct-c1024-prefill256.vxm",
+            ModelCatalog.QWEN_FP16_PREFILL.url,
         )
         assertEquals(
             "https://huggingface.co/katolikov/yonosplat-vknn/resolve/main/dl3dv/encoder8_fp16.vxm",

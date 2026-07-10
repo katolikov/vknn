@@ -12,15 +12,17 @@ import com.vknn.chat.model.BackendPolicy
 import com.vknn.chat.model.InferenceBackend
 import com.vknn.chat.model.ModelCatalog
 import com.vknn.chat.model.ModelResidency
-import com.vknn.chat.model.ModelState
+import com.vknn.chat.model.ModelSelection
+import com.vknn.chat.model.ModelSpec
 import com.vknn.chat.model.friendlyLoadError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -52,6 +54,7 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
     private val settings = (app as VknnApp).settings
     private val prompts = (app as VknnApp).prompts
     private val residency = (app as VknnApp).residency
+    private val selection = (app as VknnApp).modelSelection
     private var tokenizer: Tokenizer? = null
     private var handle: Long = 0L
     private var contextMax = 0
@@ -63,10 +66,13 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
 
     private val maxNew = 128
 
+    private fun currentSpec(): ModelSpec = selection.specFor(selection.vlmKey.value, ModelCatalog.SMOLVLM2)
+
     init {
+        // Follow the library and the variant selection: the coach is usable only while the CHOSEN
+        // model is on device.
         viewModelScope.launch {
-            store.states
-                .map { it[ModelCatalog.SMOLVLM2.id] is ModelState.Ready }
+            combine(store.states, selection.vlmKey) { _, key -> selection.isPresent(key) }
                 .distinctUntilChanged()
                 .collect { present ->
                     if (present) {
@@ -79,6 +85,25 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
                     }
                 }
         }
+        // A variant switch: any resident VLM session belongs to the previous choice — release it
+        // (deferred until an in-flight decode settles), then reflect the new choice's disk state.
+        viewModelScope.launch {
+            selection.vlmKey.drop(1).collect {
+                cancelRequested = true
+                residency.releaseResidentModel(this@VlmViewModel)
+                if (_ui.value.phase != VlmPhase.LOADING && handle == 0L) {
+                    _ui.value = VlmUiState(
+                        phase = if (selection.isPresent(selection.vlmKey.value)) VlmPhase.DOWNLOADED else VlmPhase.MISSING,
+                    )
+                }
+            }
+        }
+    }
+
+    /** The variant picker: persists the choice; the collector above swaps the session. */
+    fun selectModel(key: String) {
+        if (key == selection.vlmKey.value) return
+        selection.setVlmKey(key)
     }
 
     /** The vision bucket's square input side (pixels); valid once the model is loaded. */
@@ -102,9 +127,11 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
 
     fun loadModel() {
         if (_ui.value.phase != VlmPhase.DOWNLOADED) return
+        val spec = currentSpec()
+        val selectedKey = selection.vlmKey.value
         val chosenBackend = settings.current()
         if (chosenBackend == InferenceBackend.CPU) {
-            val verdict = BackendPolicy.cpuVerdict(ModelCatalog.SMOLVLM2, getApplication<VknnApp>().totalRamBytes())
+            val verdict = BackendPolicy.cpuVerdict(spec, getApplication<VknnApp>().totalRamBytes())
             if (verdict is BackendPolicy.CpuVerdict.Blocked) {
                 _ui.value = _ui.value.copy(status = "CPU backend: ${verdict.reason}")
                 return
@@ -118,13 +145,12 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
             cancelRequested = false
             try {
                 withContext(Dispatchers.Default) {
-                    val spec = ModelCatalog.SMOLVLM2
                     tokenizer = VlmTemplate.tokenizer(
                         store.auxFile(spec, "vocab.json").readText(),
                         store.auxFile(spec, "merges.txt").readText(),
                     )
                     val ctx = getApplication<Application>()
-                    val cache = File(ctx.filesDir, "smolvlm2.cache").absolutePath
+                    val cache = File(ctx.filesDir, ModelSelection.cacheFileName(spec)).absolutePath
                     val h = NativeLib.nativeVlmInit(store.file(spec).absolutePath, cache, "low", chosenBackend.engineName)
                     if (h == 0L) throw RuntimeException("model load failed (is the device Vulkan-capable?)")
                     handle = h
@@ -136,10 +162,10 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
                 }
                 residency.nativeCallSettled(this@VlmViewModel) // a release requested mid-load lands here
                 if (!residency.isResident(this@VlmViewModel)) return@launch // released: UI already reset
-                if (store.isReady(ModelCatalog.SMOLVLM2)) {
-                    store.clearLoadError(ModelCatalog.SMOLVLM2)
+                if (selection.isPresent(selectedKey) && selection.vlmKey.value == selectedKey) {
+                    store.clearLoadError(spec)
                     _ui.value = _ui.value.copy(phase = VlmPhase.CAMERA, backend = chosenBackend.engineName)
-                } else { // deleted from the Library while loading: free the fresh session, revert to MISSING
+                } else { // deleted or re-selected while loading: free the fresh session, reflect the current choice
                     residency.releaseResidentModel(this@VlmViewModel)
                 }
             } catch (e: Exception) {
@@ -147,9 +173,9 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
                 handle = 0L
                 if (abandonedHandle != 0L) withContext(NonCancellable + Dispatchers.Default) { NativeLib.nativeVlmFree(abandonedHandle) }
                 residency.dropResidency(this@VlmViewModel)
-                val friendly = friendlyLoadError(ModelCatalog.SMOLVLM2, e.message)
-                store.reportLoadError(ModelCatalog.SMOLVLM2, friendly)
-                val back = if (store.isReady(ModelCatalog.SMOLVLM2)) VlmPhase.DOWNLOADED else VlmPhase.MISSING
+                val friendly = friendlyLoadError(spec, e.message)
+                store.reportLoadError(spec, friendly)
+                val back = if (selection.isPresent(selectedKey)) VlmPhase.DOWNLOADED else VlmPhase.MISSING
                 _ui.value = _ui.value.copy(phase = back, status = friendly)
             }
         }
@@ -277,7 +303,7 @@ class VlmViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Hol
     override fun resetToUnloadedState() {
         contextMax = 0
         _ui.value = VlmUiState(
-            phase = if (store.isReady(ModelCatalog.SMOLVLM2)) VlmPhase.DOWNLOADED else VlmPhase.MISSING,
+            phase = if (selection.isPresent(selection.vlmKey.value)) VlmPhase.DOWNLOADED else VlmPhase.MISSING,
         )
     }
 

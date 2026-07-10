@@ -8,6 +8,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vknn.chat.model.BackendPolicy
+import com.vknn.chat.model.ModelCatalog
 import com.vknn.chat.splat.SplatViewModel
 import com.vknn.chat.ui.AppShell
 import com.vknn.chat.ui.VknnChatTheme
@@ -32,6 +33,8 @@ class MainActivity : ComponentActivity() {
                 val backend by app.settings.backend.collectAsState()
                 val chatPromptTemplate by app.prompts.chatPromptTemplate.collectAsState()
                 val vlmQuestion by app.prompts.vlmQuestion.collectAsState()
+                val chatModelKey by app.modelSelection.chatKey.collectAsState()
+                val vlmModelKey by app.modelSelection.vlmKey.collectAsState()
                 AppShell(
                     chatUi = chatUi,
                     vlmUi = vlmUi,
@@ -45,6 +48,10 @@ class MainActivity : ComponentActivity() {
                     onDownload = models::start,
                     onPause = models::pause,
                     onDelete = models::delete,
+                    chatModelName = app.modelSelection.specFor(chatModelKey, ModelCatalog.QWEN).displayName,
+                    chatModelChoices = { app.modelSelection.choicesFor(ModelCatalog.QWEN.mode) },
+                    chatSelectedModelKey = chatModelKey,
+                    onChatSelectModel = vm::selectModel,
                     onLoad = vm::loadModel,
                     onUnload = vm::unloadModel,
                     onSend = vm::send,
@@ -52,6 +59,10 @@ class MainActivity : ComponentActivity() {
                     onTemp = vm::setTemperature,
                     chatPromptTemplate = chatPromptTemplate,
                     onChatPromptTemplate = app.prompts::setChatPromptTemplate,
+                    vlmModelName = app.modelSelection.specFor(vlmModelKey, ModelCatalog.SMOLVLM2).displayName,
+                    vlmModelChoices = { app.modelSelection.choicesFor(ModelCatalog.SMOLVLM2.mode) },
+                    vlmSelectedModelKey = vlmModelKey,
+                    onVlmSelectModel = vlm::selectModel,
                     onVlmLoad = vlm::loadModel,
                     onVlmUnload = vlm::unloadModel,
                     onVlmCapture = vlm::onCapture,
