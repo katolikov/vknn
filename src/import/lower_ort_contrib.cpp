@@ -190,38 +190,17 @@ namespace vknn {
             return true;
         }
 
-        // RotaryEmbedding (x[B,S,H*head], position_ids[B,S] or [1,S], cos_cache/sin_cache
-        // [maxPos, head/2], interleaved=0) -> rotate-half subgraph:
+        // The rotate-half subgraph shared by the RotaryEmbedding and GroupQueryAttention expansions
+        // (x [B,S,H*head], positions with B*S elements, cos/sin caches [maxPos, head/2]):
         //   r4 = reshape(x, [B,S,H,head]); x1/x2 = last-axis halves
-        //   cosU/sinU = unsqueeze(gather(cache, position_ids), axis 2)   [B,S,1,head/2]
+        //   cosU/sinU = unsqueeze(gather(cache, positions), axis 2)   [.., 1, head/2]
         //   y = reshape(concat(x1*cos - x2*sin, x1*sin + x2*cos), [B,S,H*head])
-        // Declines interleaved=1, partial rotary_embedding_dim, and 4-D inputs (not in scope yet).
-        bool expandRotary(Graph &g, const Node &nd, std::vector<Node> &out) {
-            if (nd.inputs.size() < 4 || nd.attr.geti("interleaved", 0) != 0 || nd.attr.geti("rotary_embedding_dim", 0) != 0)
-            {
-                return false;
-            }
-            const TensorId x = nd.inputs[0], pos = nd.inputs[1], cosC = nd.inputs[2], sinC = nd.inputs[3];
-            if (!shapeKnown(g, x) || !shapeKnown(g, cosC))
-            {
-                return false;
-            }
-            const Shape &xs = g.desc(x).shape;
-            const Shape &cs = g.desc(cosC).shape;
-            if (xs.size() != 3 || cs.size() != 2)
-            {
-                return false;
-            }
-            const int64_t B = xs[0], S = xs[1], E = xs[2];
-            const int64_t half = cs[1], head = half * 2;
-            if (head <= 0 || E % head != 0)
-            {
-                return false;
-            }
-            const int64_t H = E / head;
-            const std::string base = nd.name;
-
-            TensorId r4 = newTensor(g, base + "#r4");
+        // This is exactly the primitive form fuseRope re-collapses into one Rope dispatch at load.
+        void emitRotateHalf(Graph &g, std::vector<Node> &out, const std::string &base, TensorId x,
+                            TensorId pos, TensorId cosC, TensorId sinC,
+                            int64_t B, int64_t S, int64_t H, int64_t head, TensorId y) {
+            const int64_t half = head / 2;
+            TensorId      r4   = newTensor(g, base + "#r4");
             out.push_back(mkNode(OpType::Reshape, base + "#reshape4",
                                  {x, addConstI64(g, base + "#s4", {B, S, H, head})}, {r4}));
             auto slice = [&](const char *tag, int64_t lo, int64_t hi) {
@@ -263,7 +242,35 @@ namespace vknn {
             setAttrI(cc, "axis", 3);
             out.push_back(std::move(cc));
             out.push_back(mkNode(OpType::Reshape, base + "#reshape3",
-                                 {cat, addConstI64(g, base + "#s3", {B, S, E})}, {nd.outputs[0]}));
+                                 {cat, addConstI64(g, base + "#s3", {B, S, H * head})}, {y}));
+        }
+
+        // RotaryEmbedding (x[B,S,H*head], position_ids[B,S] or [1,S], cos_cache/sin_cache
+        // [maxPos, head/2], interleaved=0) -> the emitRotateHalf subgraph.
+        // Declines interleaved=1, partial rotary_embedding_dim, and 4-D inputs (not in scope yet).
+        bool expandRotary(Graph &g, const Node &nd, std::vector<Node> &out) {
+            if (nd.inputs.size() < 4 || nd.attr.geti("interleaved", 0) != 0 || nd.attr.geti("rotary_embedding_dim", 0) != 0)
+            {
+                return false;
+            }
+            const TensorId x = nd.inputs[0], pos = nd.inputs[1], cosC = nd.inputs[2], sinC = nd.inputs[3];
+            if (!shapeKnown(g, x) || !shapeKnown(g, cosC))
+            {
+                return false;
+            }
+            const Shape &xs = g.desc(x).shape;
+            const Shape &cs = g.desc(cosC).shape;
+            if (xs.size() != 3 || cs.size() != 2)
+            {
+                return false;
+            }
+            const int64_t B = xs[0], S = xs[1], E = xs[2];
+            const int64_t half = cs[1], head = half * 2;
+            if (head <= 0 || E % head != 0)
+            {
+                return false;
+            }
+            emitRotateHalf(g, out, nd.name, x, pos, cosC, sinC, B, S, E / head, head, nd.outputs[0]);
             return true;
         }
 
