@@ -144,10 +144,14 @@ namespace vknn {
     // Run the standard pipeline used before backend planning.
     void runStandardPasses(Graph &g, const PassOptions &opt = {});
 
-    // Knobs for the -Os INT4 weight-quantization pass (quantize_weights.cpp). Structural defaults
-    // that hold for any model — never tuned per model. All thresholds are generic eligibility rules:
+    // Knobs for the -Os weight-quantization pass (quantize_weights.cpp). Structural defaults that
+    // hold for any model — never tuned per model. All thresholds are generic eligibility rules:
     // small weights and shallow reductions (depthwise convs, tiny heads) stay fp16 by construction.
     struct QuantOptions {
+        // Packed-weight bit width (--quant-bits): 4 = int4 (kWqFormatInt4, the -Os default), 8 =
+        // int8 (kWqFormatInt8). One knob for every site; the AWQ outlier, min-MSE step, bias
+        // correction, and guard machinery are shared across widths (core/quant_weights.h).
+        int bits = 4;
         // Grouping/outlier defaults split by op CLASS (structural, never per-model): a MatMul weight
         // is read natively packed by the GPU (its bytes are decode traffic, and LLM residual streams
         // tolerate int4 well), so it takes the coarse traffic-optimal setting; Conv/Gemm weights are
@@ -169,16 +173,17 @@ namespace vknn {
         // (the vknn_run_io convention). Empty = deterministic synthetic samples.
         std::vector<std::vector<std::string>> calibFiles;
     };
-    // Totals from quantizeWeightsInt4, for the compiler's summary line.
+    // Totals from quantizeWeights, for the compiler's summary line.
     struct QuantStats {
         int64_t sites = 0, quantized = 0, guardKept = 0, outlierCols = 0;
         int64_t bytesBefore = 0, bytesAfter = 0;
         bool    calibrated = false;
     };
-    // Quantize eligible MatMul/Gemm/Conv weights to packed int4 with fp16 group scales, fp16 outlier
-    // columns, and calibrated min-MSE steps (vknn_compile -Os). Layout/attribute contract in
-    // core/quant_int4.h. Runs after runStandardPasses, before convertInitializersFp16.
-    QuantStats quantizeWeightsInt4(Graph &g, const QuantOptions &opt);
+    // Quantize eligible MatMul/Gemm/Conv weights to the packed width opt.bits selects (int4 or
+    // int8) with fp16 group scales, fp16 outlier columns, and calibrated min-MSE steps
+    // (vknn_compile -Os). Layout/attribute contract in core/quant_weights.h (int4 authority:
+    // core/quant_int4.h). Runs after runStandardPasses, before convertInitializersFp16.
+    QuantStats quantizeWeights(Graph &g, const QuantOptions &opt);
 
     // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
     struct Fp16ConvertStats {

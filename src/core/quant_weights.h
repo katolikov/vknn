@@ -7,9 +7,12 @@
 //   1 = int4  (kWqFormatInt4, == kWqVersion) — the frozen quant_int4.h layout: nibble payload,
 //       rowBytes = 4*ceil(N/8), two's-complement [-7,7], value = nibble * scale.
 //   2 = int8  (kWqFormatInt8) — 1 byte per element, k-major/n-minor:
-//         rowBytes  = 4 * ceil(N/4)            (each k row padded to a whole 4-byte word, so the
-//                                               device reads the payload as a uint array and a
-//                                               4-adjacent-n byte quad is one coalesced word)
+//         rowBytes  = 8 * ceil(N/8)            (each k row padded to a whole 8-byte word PAIR: the
+//                                               device reads the payload as a uint array, and the
+//                                               GPU kernels load an 8-adjacent-n block as two
+//                                               words — row granularity == block granularity, so a
+//                                               tail block never reads past its row, exactly as
+//                                               int4's 8-nibble word never does)
 //         byte(k,n) = payload[k*rowBytes + n]  (two's-complement signed int8 in [-127,127];
 //                                               symmetric, -128 never produced)
 //         value(k,n) = q * scale[(k/group)*N + n]
@@ -55,9 +58,10 @@ namespace vknn {
     // with int4 (quant_int4.h).
     inline constexpr const char *kWqLut = "wq_lut"; // int: TensorId of the codebook initializer
 
-    // Bytes per packed int8 k row: N bytes, padded up to a whole 4-byte word.
+    // Bytes per packed int8 k row: N bytes, padded up to a whole 8-byte word pair (the kernels'
+    // 8-column block width).
     inline int64_t int8RowBytes(int64_t n) noexcept {
-        return 4 * ((n + 3) / 4);
+        return 8 * ((n + 7) / 8);
     }
 
     // Pack quantized values q[k*N+n] (each in [-127,127]) into the int8 payload layout above.

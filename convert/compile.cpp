@@ -382,13 +382,13 @@ static bool writeSupportReports(const std::vector<Graph> &buckets, const std::ve
     return true;
 }
 
-/// Run the -Os INT4 quantization pass over one compiled bucket and print its summary line. The fp16
-/// sweep for the non-quantized weights runs at the caller (quantization implies --fp16).
+/// Run the -Os weight-quantization pass over one compiled bucket and print its summary line. The
+/// fp16 sweep for the non-quantized weights runs at the caller (quantization implies --fp16).
 static void runQuantPass(Graph &g, const QuantOptions &opts) {
-    QuantStats qs = quantizeWeightsInt4(g, opts);
-    printf("[compile] -Os int4: quantized %lld/%lld eligible weights (%lld kept fp16 by the error guard, "
+    QuantStats qs = quantizeWeights(g, opts);
+    printf("[compile] -Os int%d: quantized %lld/%lld eligible weights (%lld kept fp16 by the error guard, "
            "%lld outlier columns, %s calibration), weights %.0f MB -> %.0f MB\n",
-           (long long) qs.quantized, (long long) qs.sites, (long long) qs.guardKept, (long long) qs.outlierCols,
+           opts.bits, (long long) qs.quantized, (long long) qs.sites, (long long) qs.guardKept, (long long) qs.outlierCols,
            qs.calibrated ? (opts.calibFiles.empty() ? "synthetic" : "file") : "no", qs.bytesBefore / 1e6, qs.bytesAfter / 1e6);
 }
 
@@ -407,7 +407,7 @@ int main(int argc, char **argv) {
     if (argc < (graphMode ? 2 : 3))
     {
         printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--dim NAME=VALUE] [--list-dims] [--shape NAME=D0xD1x...] [--bucket \"NAME=...;dim:NAME2=VALUE;...\"] [-O0..-O3 | --opt N | -Os] "
-               "[--calib F0[,F1,...]] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
+               "[--quant-bits 4|8] [--calib F0[,F1,...]] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
                "   or: %s <out.vxm> --graph \"FILE.onnx[;NAME=D0xD1x...;dim:NAME2=VALUE;...]\" [--graph ...] [shared flags as above]\n"
                "       each --graph occurrence compiles ONE bucket from its file (with its own shape/dim segments);\n"
                "       all buckets share one initializer pool in a single multi-graph .vxm\n",
@@ -452,6 +452,14 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--support-report") && i + 1 < argc)
         {
             supportReport = argv[i + 1];
+        } else if (!strcmp(argv[i], "--quant-bits") && i + 1 < argc)
+        {
+            quantOpts.bits = atoi(argv[i + 1]);
+            if (quantOpts.bits != 4 && quantOpts.bits != 8)
+            {
+                printf("[compile] bad --quant-bits '%s' (expected 4 or 8)\n", argv[i + 1]);
+                return 1;
+            }
         } else if (!strcmp(argv[i], "--quant-group") && i + 1 < argc)
         {
             quantOpts.group = atoll(argv[i + 1]);

@@ -363,6 +363,169 @@ TEST(QuantWeights, UnknownFormatIdFailsLoudly) {
     EXPECT_THROW(materializeQuantWeights(g, nullptr), Error);
 }
 
+// The -Os pass at --quant-bits 8 quantizes an eligible MatMul weight to format kWqFormatInt8: the
+// payload packs to K*int8RowBytes, the side initializers appear with the declared extents, and the
+// desc keeps its logical shape with an fp16 dtype stamp — the int4 pass contract at 8 bits.
+TEST(QuantWeights, PassQuantizesEligibleMatMulInt8) {
+    const int64_t K = 256, N = 64;
+    Graph         g = matmulGraph(K, N);
+    runStandardPasses(g);
+    QuantOptions opt;
+    opt.bits      = 8;
+    QuantStats st = quantizeWeights(g, opt);
+    EXPECT_EQ(st.sites, 1);
+    EXPECT_EQ(st.quantized, 1);
+    EXPECT_TRUE(st.calibrated);
+    const Node *mm = nullptr;
+    for (const Node &nd: g.nodes)
+    {
+        if (nd.type == OpType::MatMul)
+        {
+            mm = &nd;
+        }
+    }
+    ASSERT_TRUE(mm);
+    ASSERT_TRUE(mm->attr.has(kWq));
+    EXPECT_EQ(mm->attr.geti(kWq, 0), kWqFormatInt8);
+    EXPECT_EQ(mm->attr.geti(kWqK, 0), K);
+    EXPECT_EQ(mm->attr.geti(kWqN, 0), N);
+    EXPECT_EQ(mm->attr.geti(kWqLayout, -1), 0);
+    const int64_t nOut = mm->attr.geti(kWqNOut, -1);
+    EXPECT_EQ(nOut, (int64_t) ((double) K * opt.outlierFrac));
+    const TensorId w = mm->inputs[1];
+    EXPECT_EQ((int64_t) g.initializers.at(w).bytes.size(), K * int8RowBytes(N));
+    EXPECT_EQ(g.desc(w).dtype, DType::Float16);
+    EXPECT_EQ(g.desc(w).shape, (Shape {K, N}));
+    const TensorId scaleId = (TensorId) mm->attr.geti(kWqScales, kNoTensor);
+    ASSERT_NE(scaleId, kNoTensor);
+    EXPECT_EQ((int64_t) g.initializers.at(scaleId).bytes.size(), int4GroupCount(K, opt.group) * N * 2);
+    if (nOut > 0)
+    {
+        const TensorId oidxId = (TensorId) mm->attr.geti(kWqOidx, kNoTensor);
+        const TensorId ovalId = (TensorId) mm->attr.geti(kWqOval, kNoTensor);
+        EXPECT_EQ((int64_t) g.initializers.at(oidxId).bytes.size(), nOut * 4);
+        EXPECT_EQ((int64_t) g.initializers.at(ovalId).bytes.size(), nOut * N * 2);
+    }
+}
+
+// End-to-end through the exact compile pipeline at 8 bits (-Os --quant-bits 8 order: passes,
+// quantize, fp16 sweep, save): the .vxm stamps VXM6, loads back, and the materialized CPU run
+// tracks the fp32 reference inside the int8 error envelope — an order of magnitude tighter than
+// int4's 0.25 (the same low-rank sine fixture measures ~4e-3 at 8 bits vs ~1e-1 at 4; the 0.02
+// bound keeps 5x headroom while any packing/scale-indexing bug still lands near 1).
+TEST(QuantWeights, Int8PassVxmRoundTripsAndTracksFp32) {
+    const int64_t K = 512, N = 96;
+    const auto    a   = testInput(K);
+    const auto    ref = runCpu(matmulGraph(K, N), a, K);
+    Graph         g   = matmulGraph(K, N);
+    runStandardPasses(g);
+    QuantOptions opt;
+    opt.bits      = 8;
+    QuantStats st = quantizeWeights(g, opt);
+    EXPECT_EQ(st.quantized, 1);
+    convertInitializersFp16(g);
+    const std::string path = testing::TempDir() + "vknn_quant_weights_i8_e2e.vxm";
+    ASSERT_TRUE(saveGraphBin(g, path));
+    EXPECT_EQ(readMagic(path), "VXM6");
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::createFromVxm(path, cfg);
+    std::remove(path.c_str());
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "a";
+    in.shape = {1, K};
+    in.dtype = DType::Float32;
+    in.data.resize(a.size() * 4);
+    std::memcpy(in.data.data(), a.data(), a.size() * 4);
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    std::vector<float> got(outs[0].f32(), outs[0].f32() + numElements(outs[0].shape));
+    for (float v: got)
+    {
+        EXPECT_FALSE(std::isnan(v));
+    }
+    const double rel = relL2(got, ref);
+    printf("[QuantWeights] int8 e2e relL2 = %.6f\n", rel);
+    EXPECT_LT(rel, 0.02) << "int8 quantized CPU run drifted from the fp32 reference";
+}
+
+// A weight whose every value is an int8 multiple of a power-of-two step must survive 8-bit
+// quantization EXACTLY, mirroring the int4 bit gate: the min-MSE search finds the zero-cost step
+// (maxAbs/127 = the true step, exact in fp16), every value requantizes to itself, and the
+// materialized fp16 payload equals the fp16 sweep of the original — so the quantized CPU run is
+// bit-identical to the plain fp16 compile. Outliers are off: an outlier row is kept fp16 verbatim
+// (exact by construction), so the gate pins the quantized grid itself — and each group's anchor
+// row (k % group == 0, all +127*step) then pins maxAbs to exactly 127 steps in every group-column
+// (a 255-letter alphabet cannot cover a 128-row group the way int4's 15-letter one does).
+TEST(QuantWeights, Int8ExactlyRepresentableWeightsRoundTripExactly) {
+    const int64_t K = 256, N = 64;
+    const float   step = 0.125f; // 2^-3: exact in fp16, and q*step is exact for q in [-127,127]
+    QuantOptions  opt;
+    opt.bits        = 8;
+    opt.outlierFrac = 0.0;
+    auto buildExact = [&] {
+        Graph    g = matmulGraph(K, N);
+        TensorId w = g.find("w");
+        float   *v = g.initializers.at(w).f32();
+        for (int64_t k = 0; k < K; ++k)
+        {
+            for (int64_t n = 0; n < N; ++n)
+            {
+                const int64_t i = k * N + n;
+                v[i]            = k % opt.group == 0 ? 127.0f * step // the group's maxAbs anchor
+                                                     : (float) ((i * 7919) % 255 - 127) * step;
+            }
+        }
+        return g;
+    };
+    const auto a     = testInput(K);
+    Graph      plain = buildExact();
+    runStandardPasses(plain);
+    convertInitializersFp16(plain);
+    const auto ref = runCpu(std::move(plain), a, K);
+    Graph      g   = buildExact();
+    runStandardPasses(g);
+    ASSERT_EQ(quantizeWeights(g, opt).quantized, 1);
+    convertInitializersFp16(g);
+    const auto got = runCpu(std::move(g), a, K);
+    ASSERT_EQ(got.size(), ref.size());
+    for (size_t i = 0; i < got.size(); ++i)
+    {
+        EXPECT_EQ(got[i], ref[i]) << "output " << i << " not bit-identical on exactly representable weights";
+    }
+}
+
+// The mixed-precision guard holds at 8 bits: with an impossible error bar every layer stays fp16
+// and the graph is structurally untouched.
+TEST(QuantWeights, Int8GuardKeepsHostileLayerFp16) {
+    const int64_t K = 256, N = 64;
+    Graph         g = matmulGraph(K, N);
+    runStandardPasses(g);
+    const size_t tensorsBefore = g.tensors.size();
+    QuantOptions opt;
+    opt.bits           = 8;
+    opt.maxLayerRelErr = 1e-9; // below int8's floor: the guard must keep the layer fp16
+    QuantStats st      = quantizeWeights(g, opt);
+    EXPECT_EQ(st.quantized, 0);
+    EXPECT_EQ(st.guardKept, 1);
+    EXPECT_EQ(g.tensors.size(), tensorsBefore);
+    for (const Node &nd: g.nodes)
+    {
+        EXPECT_FALSE(nd.attr.has(kWq));
+    }
+}
+
+// quantizeWeights rejects a width it does not implement instead of guessing.
+TEST(QuantWeights, UnsupportedBitsRejected) {
+    Graph g = matmulGraph(256, 64);
+    runStandardPasses(g);
+    QuantOptions opt;
+    opt.bits = 5;
+    EXPECT_THROW(quantizeWeights(g, opt), Error);
+}
+
 // The VXM5/VXM6 subtag guard: a quantized container whose subcontainer tag is not 3 or 4 is
 // rejected at load (the tag remaps to the bad-magic diagnostics), and a foreign future VXM version
 // is rejected through the magic-prefix check — never parsed as some other container.

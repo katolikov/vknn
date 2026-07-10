@@ -9,7 +9,7 @@
 // other) and so agree only to fp32 rounding.
 #include "core/matmul_tile.h"
 #include "core/matmul_view.h"
-#include "core/quant_int4.h"
+#include "core/quant_weights.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
@@ -29,10 +29,12 @@ namespace vknn {
             int rank, total, M, N, K, aK, bK;
         };
 
-        // Push constant for the int4-packed-weight kernels (matmul_gemv_i4 / matmul_tiled_i4). The
-        // weight is always a 2-D constant, so there is no geometry SSBO: A/D batch offsets are dense
-        // whole-matrix steps, decoded in-kernel from the row/batch workgroup id.
-        struct MatMulI4PC {
+        // Push constant for the packed-quantized-weight kernels (matmul_gemv_i4/i8 /
+        // matmul_tiled_i4/i8). The weight is always a 2-D constant, so there is no geometry SSBO:
+        // A/D batch offsets are dense whole-matrix steps, decoded in-kernel from the row/batch
+        // workgroup id. rowWords is the packed row width in uint words — format-dependent
+        // (core/quant_weights.h) but always word-valued, so every kernel strides identically.
+        struct MatMulWqPC {
             int total, M, N, K, group, nOut, rowWords, nGroups;
         };
 
@@ -50,54 +52,75 @@ namespace vknn {
             // Set when a pointwise chain (fusePointwiseChains) is attached to this MatMul's store.
             PwEpi epi;
 
-            // int4-packed weight path (vknn_compile -Os; layout in core/quant_int4.h). The session's
-            // materialization keeps the kWq attrs only on Vulkan-assigned MatMuls, so their presence
-            // here guarantees the payload is packed and this op must read it natively.
-            bool                        useInt4 = false;
-            MatMulI4PC                  i4pc {};
-            std::shared_ptr<vk::Buffer> i4Packed, i4Scales, i4Oidx, i4Oval;
+            // Packed-quantized-weight path (vknn_compile -Os; scheme in core/quant_weights.h). The
+            // session's materialization keeps the kWq attrs only on Vulkan-assigned MatMuls whose
+            // format has a native kernel, so their presence here guarantees the payload is packed
+            // and this op must read it natively.
+            bool                        useWq = false;
+            MatMulWqPC                  wqPc {};
+            std::shared_ptr<vk::Buffer> wqPacked, wqScales, wqOidx, wqOval;
 
-            // Prepare the int4 dispatch: raw packed/index payloads upload unconverted, the fp16
-            // scale/outlier tensors upload at compute precision (uploadInit's passthrough), and the
-            // kernel is the split-K GEMV for a single output row or the {128,128,16} tile otherwise.
-            void prepareInt4(const Node &node, VkOpEnv &env) {
-                const Graph  &g   = *env.graph;
-                const Shape  &sa  = g.desc(node.inputs[0]).shape;
-                const Shape  &out = g.desc(node.outputs[0]).shape;
-                const int64_t M   = sa.size() >= 2 ? sa[sa.size() - 2] : 1;
+            // Prepare the packed-weight dispatch: raw packed/index payloads upload unconverted, the
+            // fp16 scale/outlier tensors upload at compute precision (uploadInit's passthrough), and
+            // the kernel is the split-K GEMV for a single output row or the {128,128,16} tile
+            // otherwise, in the wrapper variant matching the weight's format.
+            void prepareWq(const Node &node, VkOpEnv &env) {
+                const Graph  &g      = *env.graph;
+                const Shape  &sa     = g.desc(node.inputs[0]).shape;
+                const Shape  &out    = g.desc(node.outputs[0]).shape;
+                const int64_t M      = sa.size() >= 2 ? sa[sa.size() - 2] : 1;
+                const int     format = weightQuantFormat(node);
+                const bool    int8Fmt = format == kWqFormatInt8;
 
-                i4pc.total    = (int) numElements(out);
-                i4pc.M        = (int) M;
-                i4pc.N        = (int) node.attr.geti(kWqN, 0);
-                i4pc.K        = (int) node.attr.geti(kWqK, 0);
-                i4pc.group    = (int) node.attr.geti(kWqGroup, 1);
-                i4pc.nOut     = (int) node.attr.geti(kWqNOut, 0);
-                i4pc.rowWords = (int) ((i4pc.N + 7) / 8);
-                i4pc.nGroups  = (int) int4GroupCount(i4pc.K, i4pc.group);
-                numBatch      = i4pc.N > 0 && M > 0 ? i4pc.total / (int) (M * (int64_t) i4pc.N) : 1;
+                wqPc.total = (int) numElements(out);
+                wqPc.M     = (int) M;
+                wqPc.N     = (int) node.attr.geti(kWqN, 0);
+                wqPc.K     = (int) node.attr.geti(kWqK, 0);
+                wqPc.group = (int) node.attr.geti(kWqGroup, 1);
+                wqPc.nOut  = (int) node.attr.geti(kWqNOut, 0);
+                // Packed row width in uint words (int4RowBytes / int8RowBytes over 4): one word per
+                // 8-column block at 4 bits, two at 8 bits.
+                wqPc.rowWords = int8Fmt ? (int) (2 * ((wqPc.N + 7) / 8)) : (int) ((wqPc.N + 7) / 8);
+                wqPc.nGroups  = (int) int4GroupCount(wqPc.K, wqPc.group);
+                numBatch      = wqPc.N > 0 && M > 0 ? wqPc.total / (int) (M * (int64_t) wqPc.N) : 1;
 
                 const TensorId scaleId = (TensorId) node.attr.geti(kWqScales, kNoTensor);
                 const TensorId oidxId  = (TensorId) node.attr.geti(kWqOidx, kNoTensor);
                 const TensorId ovalId  = (TensorId) node.attr.geti(kWqOval, kNoTensor);
-                i4Packed               = uploadInitRaw(env, node.inputs[1], "i4w");
-                i4Scales               = uploadInit(env, scaleId, g.desc(scaleId).shape);
-                if (i4pc.nOut > 0)
+                // Weight-pool tags, per format so a raw upload never aliases across payload layouts.
+                const char *packedTag = "i4w";
+                const char *oidxTag   = "i4i";
+                if (int8Fmt)
                 {
-                    i4Oidx = uploadInitRaw(env, oidxId, "i4i");
-                    i4Oval = uploadInit(env, ovalId, g.desc(ovalId).shape);
+                    packedTag = "i8w";
+                    oidxTag   = "i8i";
+                }
+                wqPacked = uploadInitRaw(env, node.inputs[1], packedTag);
+                wqScales = uploadInit(env, scaleId, g.desc(scaleId).shape);
+                if (wqPc.nOut > 0)
+                {
+                    wqOidx = uploadInitRaw(env, oidxId, oidxTag);
+                    wqOval = uploadInit(env, ovalId, g.desc(ovalId).shape);
                 } else
                 {
                     // Descriptor sets bind every declared buffer; a zero-outlier weight binds a
                     // shared dummy word the kernel's nOut == 0 loop never reads.
-                    i4Oidx = env.acquireWeight("i4#dummy", env.useFp16, [&] {
+                    wqOidx = env.acquireWeight("i4#dummy", env.useFp16, [&] {
                         const uint32_t zero[4] = {0, 0, 0, 0};
                         return env.uploadWeightDeviceOnly(zero, sizeof zero, sizeof zero);
                     });
-                    i4Oval = i4Oidx;
+                    wqOval = wqOidx;
                 }
 
-                useGemv          = M == 1;
-                const char *base = useGemv ? "matmul_gemv_i4" : "matmul_tiled_i4";
+                useGemv = M == 1;
+                const char *base;
+                if (int8Fmt)
+                {
+                    base = useGemv ? "matmul_gemv_i8" : "matmul_tiled_i8";
+                } else
+                {
+                    base = useGemv ? "matmul_gemv_i4" : "matmul_tiled_i4";
+                }
                 std::string name = base;
                 uint32_t    nbuf = 6; // A, packed, D, scales, oidx, oval
                 if (node.fusedBias != kNoTensor)
@@ -109,13 +132,13 @@ namespace vknn {
                 epi.prepare(node, env, /*flat=*/true, out);
                 name += epi.suffix();
                 nbuf += epi.extraBufs();
-                pipe = env.pipeline(shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulI4PC), {});
+                pipe = env.pipeline(shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulWqPC), {});
             }
 
-            void recordInt4(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
+            void recordWq(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer           *src       = constBuf[0] ? constBuf[0].get() : env.devBuf(node.inputs[0]);
                 VkBuffer              dstHandle = env.devBuf(node.outputs[0])->handle();
-                std::vector<VkBuffer> bufs {src->handle(), i4Packed->handle(), dstHandle, i4Scales->handle(), i4Oidx->handle(), i4Oval->handle()};
+                std::vector<VkBuffer> bufs {src->handle(), wqPacked->handle(), dstHandle, wqScales->handle(), wqOidx->handle(), wqOval->handle()};
                 if (biasBuf)
                 {
                     bufs.push_back(biasBuf->handle());
@@ -123,15 +146,15 @@ namespace vknn {
                 epi.append(bufs, node, env, dstHandle);
                 if (useGemv)
                 {
-                    // (ceil(N/64) word blocks, one output row per y group): a lane's 8 outputs stay
-                    // word-aligned within their row, so a ragged N only pads the last block.
-                    const uint32_t rows = (uint32_t) (i4pc.N > 0 ? i4pc.total / i4pc.N : 1);
-                    pipe->dispatch(cmd, bufs, &i4pc, sizeof(i4pc), groups(i4pc.N, 64), rows);
+                    // (ceil(N/64) output blocks, one output row per y group): a lane's 8 outputs
+                    // stay word-aligned within their row, so a ragged N only pads the last block.
+                    const uint32_t rows = (uint32_t) (wqPc.N > 0 ? wqPc.total / wqPc.N : 1);
+                    pipe->dispatch(cmd, bufs, &wqPc, sizeof(wqPc), groups(wqPc.N, 64), rows);
                 } else
                 {
-                    const uint32_t gx = (uint32_t) ((i4pc.N + 127) / 128);
-                    const uint32_t gy = (uint32_t) ((i4pc.M + 127) / 128);
-                    pipe->dispatch(cmd, bufs, &i4pc, sizeof(i4pc), gx, gy, (uint32_t) numBatch);
+                    const uint32_t gx = (uint32_t) ((wqPc.N + 127) / 128);
+                    const uint32_t gy = (uint32_t) ((wqPc.M + 127) / 128);
+                    pipe->dispatch(cmd, bufs, &wqPc, sizeof(wqPc), gx, gy, (uint32_t) numBatch);
                 }
             }
 
@@ -256,14 +279,14 @@ namespace vknn {
                 const Graph &g = *env.graph;
                 if (node.attr.has(kWq))
                 {
-                    // An int4-packed weight takes its own kernels; the constant A operand (if any)
-                    // still uploads flat below the branch's needs.
+                    // A packed quantized weight takes its own kernels; the constant A operand (if
+                    // any) still uploads flat below the branch's needs.
                     if (g.isInitializer(node.inputs[0]))
                     {
                         constBuf[0] = uploadInit(env, node.inputs[0], g.desc(node.inputs[0]).shape);
                     }
-                    useInt4 = true;
-                    prepareInt4(node, env);
+                    useWq = true;
+                    prepareWq(node, env);
                     return;
                 }
                 Shape sa  = g.desc(node.inputs[0]).shape;
@@ -498,9 +521,9 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                if (useInt4)
+                if (useWq)
                 {
-                    recordInt4(cmd, node, env);
+                    recordWq(cmd, node, env);
                     return;
                 }
                 auto buf = [&](int e) {

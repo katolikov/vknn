@@ -1,23 +1,25 @@
-// Post-pass INT4 weight quantization (vknn_compile -Os): packs eligible MatMul/Gemm/Conv weights to
-// 4-bit groups with fp16 scales, keeping the ~1% most activation-salient input columns in fp16
-// (outlier preservation) and calibrating each group's step against the activation second moment
-// (min-MSE with a diagonal-Hessian weighting — the output-MSE proxy for a linear layer). Weights the
-// quantized error would distort past a relative bar stay fp16 entirely, so numerically sensitive
-// layers opt themselves out (mixed precision). Runs after the standard passes, immediately before
-// the fp16 initializer sweep and saveGraphBin.
+// Post-pass weight quantization (vknn_compile -Os): packs eligible MatMul/Gemm/Conv weights to
+// narrow integer groups — 4-bit or 8-bit, selected by QuantOptions::bits — with fp16 scales,
+// keeping the ~1% most activation-salient input columns in fp16 (outlier preservation) and
+// calibrating each group's step against the activation second moment (min-MSE with a
+// diagonal-Hessian weighting — the output-MSE proxy for a linear layer). Weights the quantized
+// error would distort past a relative bar stay fp16 entirely, so numerically sensitive layers opt
+// themselves out (mixed precision). Runs after the standard passes, immediately before the fp16
+// initializer sweep and saveGraphBin.
 //
-// The packed layout, attribute names, and the dequantization contract live in core/quant_int4.h.
-// The quantized weight keeps its LOGICAL TensorDesc (original shape, dtype Float16); only the
-// payload bytes are packed. At load the session materializes fp16 bytes back for every consumer
-// without a native int4 kernel, so quantization is transparent to all backends except the Vulkan
-// MatMul, which reads the packed payload directly.
+// The packed layouts, attribute names, and the dequantization contracts live in
+// core/quant_weights.h (int4 authority: core/quant_int4.h). The quantized weight keeps its LOGICAL
+// TensorDesc (original shape, dtype Float16); only the payload bytes are packed. At load the
+// session materializes fp16 bytes back for every consumer without a native packed kernel, so
+// quantization is transparent to all backends except the Vulkan MatMul, which reads the packed
+// payload directly.
 //
 // Calibration runs the float graph on the CPU backend (linked into vknn_compile) over a small
 // deterministic input set: caller-provided samples (--calib) or synthetic ones from a fixed-seed
 // generator, so the same compile inputs always produce byte-identical .vxm output. A calibration
 // failure degrades to weight-only quantization (uniform column weighting) rather than failing the
 // compile.
-#include "core/quant_int4.h"
+#include "core/quant_weights.h"
 #include "import/passes.h"
 #include "vknn/config.h"
 #include "vknn/error.h"
@@ -516,7 +518,7 @@ namespace vknn {
         // (Conv/Gemm input[2], MatMul fusedBias); a bias-free node gets a fresh one only where that
         // cannot disturb fused-chain operand indexing.
         void applyBiasCorrection(Graph &g, Node &nd, const QuantSite &s, const std::vector<double> &delta,
-                                 const std::string &weightName) {
+                                 const std::string &weightName, const char *biasSuffix) {
             TensorId biasId = kNoTensor;
             if (nd.type == OpType::MatMul)
             {
@@ -563,7 +565,7 @@ namespace vknn {
             // chain-free Conv/Gemm can grow an input[2]; a MatMul takes the fusedBias edge instead
             // (never an inputs change).
             TensorDesc bd;
-            bd.name          = weightName + "#i4b";
+            bd.name          = weightName + biasSuffix;
             bd.shape         = {s.N};
             bd.dtype         = DType::Float32;
             bd.isInitializer = true;
@@ -588,7 +590,22 @@ namespace vknn {
 
     } // namespace
 
-    QuantStats quantizeWeightsInt4(Graph &g, const QuantOptions &opt) {
+    QuantStats quantizeWeights(Graph &g, const QuantOptions &opt) {
+        if (opt.bits != 4 && opt.bits != 8)
+        {
+            throw Error(Status::InvalidArgument, "quantizeWeights: bits must be 4 or 8, got " + std::to_string(opt.bits));
+        }
+        // Width-dependent surface: the integer alphabet, the emitted format id, and the side-tensor
+        // name suffixes. The AWQ outlier / min-MSE / bias-correction / guard machinery below is
+        // width-blind — every expression reads qMax, so bits == 4 reproduces the int4 pipeline's
+        // arithmetic exactly.
+        const bool   int8Width    = opt.bits == 8;
+        const double qMax         = int8Width ? 127.0 : 7.0;
+        const int    format       = int8Width ? kWqFormatInt8 : kWqFormatInt4;
+        const char  *scaleSuffix  = int8Width ? "#i8s" : "#i4s";
+        const char  *oidxSuffix   = int8Width ? "#i8oi" : "#i4oi";
+        const char  *ovalSuffix   = int8Width ? "#i8ov" : "#i4ov";
+        const char  *biasSuffix   = int8Width ? "#i8b" : "#i4b";
         QuantStats stats;
         for (const auto &kv: g.initializers)
         {
@@ -658,9 +675,9 @@ namespace vknn {
                 }
             }
 
-            // Group-wise symmetric int4 with an activation-weighted min-MSE step search. The scale is
-            // rounded to fp16 BEFORE requantization so q is optimal for the exact step the runtime
-            // dequantizes with.
+            // Group-wise symmetric narrow-integer quantization ([-qMax, qMax]) with an
+            // activation-weighted min-MSE step search. The scale is rounded to fp16 BEFORE
+            // requantization so q is optimal for the exact step the runtime dequantizes with.
             const int64_t         G       = std::min<int64_t>(nd.type == OpType::MatMul ? opt.group : opt.convGroup, K);
             const int64_t         nGroups = int4GroupCount(K, G);
             std::vector<uint16_t> scales((size_t) (nGroups * N), floatToHalf(1.0f));
@@ -704,7 +721,7 @@ namespace vknn {
                         const double p = 1.0 - 0.03 * (double) cand;
                         // The candidate is evaluated at its fp16-rounded value (saturated to the
                         // finite range) — the exact step the runtime dequantizes with.
-                        const float s = (float) halfToFloat(floatToHalfSat((float) (maxAbs * p / 7.0)));
+                        const float s = (float) halfToFloat(floatToHalfSat((float) (maxAbs * p / qMax)));
                         if (s <= 0)
                         {
                             continue;
@@ -719,7 +736,7 @@ namespace vknn {
                             }
                             const double v  = w[(size_t) (k * N + n)];
                             double       qq = std::nearbyint(v / s);
-                            qq              = std::min(7.0, std::max(-7.0, qq));
+                            qq              = std::min(qMax, std::max(-qMax, qq));
                             const double e  = v - qq * (double) s;
                             cost += colW[(size_t) k] * e * e;
                         }
@@ -746,7 +763,7 @@ namespace vknn {
                             continue;
                         }
                         double qq = std::nearbyint((double) w[(size_t) (k * N + n)] / (double) bestS);
-                        qq        = std::min(7.0, std::max(-7.0, qq));
+                        qq        = std::min(qMax, std::max(-qMax, qq));
                         q[(size_t) (k * N + n)] = (int8_t) qq;
                     }
                     errNum += bestCost;
@@ -771,7 +788,7 @@ namespace vknn {
 
             // Emit: packed payload into the weight tensor (logical desc unchanged apart from the fp16
             // dtype stamp), scales/outliers as side initializers referenced from the node attributes.
-            std::vector<uint8_t> packed = int4Pack(q, K, N);
+            std::vector<uint8_t> packed = int8Width ? int8Pack(q, K, N) : int4Pack(q, K, N);
             std::vector<uint16_t> oval((size_t) (oidx.size() * (size_t) N));
             for (size_t j = 0; j < oidx.size(); ++j)
             {
@@ -794,12 +811,12 @@ namespace vknn {
                 g.initializers[id] = std::move(hb);
                 return id;
             };
-            const TensorId scaleId = addSide("#i4s", DType::Float16, nGroups * N, scales.data(), scales.size() * 2);
+            const TensorId scaleId = addSide(scaleSuffix, DType::Float16, nGroups * N, scales.data(), scales.size() * 2);
             TensorId       oidxId = kNoTensor, ovalId = kNoTensor;
             if (!oidx.empty())
             {
-                oidxId = addSide("#i4oi", DType::Int32, (int64_t) oidx.size(), oidx.data(), oidx.size() * 4);
-                ovalId = addSide("#i4ov", DType::Float16, (int64_t) oval.size(), oval.data(), oval.size() * 2);
+                oidxId = addSide(oidxSuffix, DType::Int32, (int64_t) oidx.size(), oidx.data(), oidx.size() * 4);
+                ovalId = addSide(ovalSuffix, DType::Float16, (int64_t) oval.size(), oval.data(), oval.size() * 2);
             }
 
             {
@@ -818,7 +835,7 @@ namespace vknn {
                 a.i                = v;
                 nd.attr.map[key]   = a;
             };
-            seti(kWq, kWqVersion);
+            seti(kWq, format);
             seti(kWqK, K);
             seti(kWqN, N);
             seti(kWqGroup, G);
@@ -854,7 +871,7 @@ namespace vknn {
                         delta[(size_t) n] += acc;
                     }
                 }
-                applyBiasCorrection(g, nd, s, delta, wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name);
+                applyBiasCorrection(g, nd, s, delta, wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name, biasSuffix);
             }
             ++stats.quantized;
             stats.outlierCols += (int64_t) oidx.size();
