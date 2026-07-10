@@ -365,6 +365,52 @@ TEST(ResidentLink, ValidationRejectsBadLinks) {
     EXPECT_EQ(castSession->linkOutputToInput("ids_i64", "ids", {{0, 0, 4}}), Status::Ok);
 }
 
+// kvFoldSlot is the single source of the decode fold-slot rule: slot position-1, clamped to the
+// last cache slot once the position runs past the compiled window, none at position 0. A decode
+// chain's per-iteration precompute (base position + i) therefore reproduces the single-step
+// loop's slot at every position, including across the context edge.
+TEST(ResidentLink, KvFoldSlotMatchesTheSingleStepRuleAcrossTheWindowEdge) {
+    const int64_t cacheSlots = 8;
+    EXPECT_EQ(kvFoldSlot(0, cacheSlots), -1);
+    EXPECT_EQ(kvFoldSlot(-3, cacheSlots), -1);
+    EXPECT_EQ(kvFoldSlot(1, cacheSlots), 0);
+    EXPECT_EQ(kvFoldSlot(8, cacheSlots), 7);
+    EXPECT_EQ(kvFoldSlot(9, cacheSlots), 7);   // clamped: the overrun keeps rewriting the newest slot
+    EXPECT_EQ(kvFoldSlot(100, cacheSlots), 7); // and stays clamped arbitrarily far past the edge
+    // A chain whose base position sits near the edge: iteration i's precomputed slot equals the
+    // slot the single-step loop computes at position base+i, for every iteration of the chain.
+    for (int64_t basePosition = 5; basePosition <= 10; ++basePosition)
+    {
+        for (int64_t iteration = 0; iteration < 4; ++iteration)
+        {
+            const int64_t stepPosition = basePosition + iteration;
+            const int64_t singleStep   = stepPosition - 1 < cacheSlots - 1 ? stepPosition - 1 : cacheSlots - 1;
+            EXPECT_EQ(kvFoldSlot(stepPosition, cacheSlots), singleStep);
+        }
+    }
+}
+
+// linkOutputToInputChain validation: the set count is bounded by 1..Config::decodeChainSteps,
+// every set is bounds-checked like the single-set form, and more than one set needs a
+// device-resident link (the CPU host path applies exactly one).
+TEST(ResidentLink, ChainRangeSetValidation) {
+    const int64_t elems = 8;
+    Config        cfg;
+    cfg.backend          = BackendKind::Cpu;
+    cfg.decodeChainSteps = 3;
+    auto s               = Session::create(makeAccumulatorGraph(elems), cfg);
+    ASSERT_TRUE(s);
+    EXPECT_EQ(s->linkOutputToInputChain(0, "state_next", "state", {}), Status::InvalidArgument); // no sets
+    std::vector<std::vector<LinkRange>> fourSets(4);
+    EXPECT_EQ(s->linkOutputToInputChain(0, "state_next", "state", fourSets), Status::InvalidArgument); // > decodeChainSteps
+    std::vector<std::vector<LinkRange>> badSecondSet {{{0, 0, 4}}, {{0, 0, elems + 1}}};
+    EXPECT_EQ(s->linkOutputToInputChain(0, "state_next", "state", badSecondSet), Status::InvalidArgument); // set 1 out of bounds
+    std::vector<std::vector<LinkRange>> twoSets {{{0, 0, 4}}, {{0, 4, 4}}};
+    EXPECT_EQ(s->linkOutputToInputChain(0, "state_next", "state", twoSets), Status::InvalidArgument); // host link: one set only
+    std::vector<std::vector<LinkRange>> oneSet {{{0, 0, elems}}};
+    EXPECT_EQ(s->linkOutputToInputChain(0, "state_next", "state", oneSet), Status::Ok); // == the single-set overload
+}
+
 // The int64 storage class round-trips through a link exactly (the host path copies 8-byte lanes).
 TEST(ResidentLink, Int64LinkCopiesExactly) {
     auto s = makeCpuSession(makeCastGraph(4));

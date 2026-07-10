@@ -10,12 +10,23 @@
 //
 //   vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
 //             [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
-//             [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]
+//             [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]
 //
 // Greedy decode (--temp 0, the default) registers the decode bucket's logits for the engine-side
 // argmax (Session::setOutputArgMax): per token the engine reduces the logits on the GPU and the
 // host reads back 8 bytes instead of the vocab row, with an identical token stream. A negative
 // --eos disables early stop (no generated id ever matches it).
+//
+// --chain N (greedy + linked KV + engine argmax only) decodes in device-resident chains of N
+// tokens (Session::configureDecodeChain, ADR-0015): the engine records N decode iterations into
+// one command-buffer sequence — one submit + one fence per N tokens — feeding each iteration's
+// token id / position / mask forward on-GPU from the previous iteration's argmax, with the KV fold
+// slots for all N iterations precomputed here per chain. The token stream is bit-identical to
+// --chain 1; EOS inside a chain trims the overshoot (the discarded iterations never print or count
+// in tok/s). A chain never runs past the context edge un-clamped: near the edge it shortens so the
+// fold-slot clamp semantics stay exactly the single-step loop's. Any ineligible combination
+// (sampling, --no-kv-link, --no-gpu-argmax, no device chain path) falls back to the single-step
+// loop with one stderr notice.
 //
 // A multi-bucket model whose second bucket takes input_ids [1,S] (S>1) prefills the prompt in
 // S-token forwards instead of token-by-token — TTFT then costs one batched pass per S prompt
@@ -81,7 +92,7 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "usage: %s model.vxm [--backend vulkan|cpu] [--precision low|normal|high]\n"
                 "        [--fp32-tensors CSV] [--max-tokens N] [--temp T] [--top-k K] [--top-p P]\n"
-                "        [--eos ID] [--seed S] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]\n",
+                "        [--eos ID] [--seed S] [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]\n",
                 argv[0]);
         return 1;
     }
@@ -121,6 +132,28 @@ int main(int argc, char **argv) {
     {
         cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
     }
+    // --chain N: device-resident decode chains of N tokens, greedy + linked KV + engine argmax
+    // only. Any ineligible combination drops to the single-step loop with one notice; the chain
+    // length reaches the engine through Config::decodeChainSteps (set before load, so the decode
+    // segment sizes its per-iteration buffers).
+    int  chainSteps  = atoi(opt(argc, argv, "--chain", "1"));
+    bool chainWanted = chainSteps > 1;
+    if (chainWanted && temp > 0.0f)
+    {
+        fprintf(stderr, "[chat] --chain needs greedy decode (--temp 0); using the single-step loop\n");
+        chainWanted = false;
+    }
+    if (chainWanted && !kvLink)
+    {
+        fprintf(stderr, "[chat] --chain needs the engine-resident KV cache (drop --no-kv-link); using the single-step loop\n");
+        chainWanted = false;
+    }
+    if (chainWanted && flagSet(argc, argv, "--no-gpu-argmax"))
+    {
+        fprintf(stderr, "[chat] --chain needs the engine argmax (drop --no-gpu-argmax); using the single-step loop\n");
+        chainWanted = false;
+    }
+    cfg.decodeChainSteps = chainWanted ? chainSteps : 1;
     std::mt19937 rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
 
     auto sess = Runtime::load(model, cfg);
@@ -346,6 +379,26 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[chat] KV cache engine-resident (%d links)\n", 2 * L);
     }
 
+    // Configure the device decode chain once the links and the engine argmax are in place. Any
+    // failure keeps the single-step loop with one notice; a chained run itself never falls back.
+    bool chainConfigured = false; // the decode segment records chains (window set per run)
+    bool chainActive     = false; // the decode loop drives chains (requires live KV links)
+    if (chainWanted)
+    {
+        if (!gpuArgmax)
+        {
+            fprintf(stderr, "[chat] --chain needs the engine argmax path; using the single-step loop\n");
+        } else if (sess->configureDecodeChain((size_t) decodeBucket, "input_ids", "position_ids", "attention_mask", "logits") != Status::Ok)
+        {
+            fprintf(stderr, "[chat] decode chain unavailable (see log); using the single-step loop\n");
+        } else
+        {
+            chainConfigured = true;
+            chainActive     = true;
+            fprintf(stderr, "[chat] decode chains of %d tokens\n", chainSteps);
+        }
+    }
+
     std::vector<IOTensor> outputs;
     // Map an output name to its index in the run() result vector (stable across runs).
     std::vector<int> outIdxByInfo(outs.size(), -1);
@@ -354,6 +407,10 @@ int main(int argc, char **argv) {
     int  p             = 0;     // absolute position across the whole conversation
     bool residentDirty = false; // linked decode ran: the engine cache is ahead of the host buffers
     bool reseedCache   = false; // next linked decode step re-seeds the resident cache from the host
+    // The last linked run's present rows still need their fold into slot p-1 (the single-step
+    // steady state). False only after an EOS-trimmed chain whose overshoot iteration already
+    // applied that fold on-device — folding again would move the OVERSHOOT row into a live slot.
+    bool pendingResidentFold = true;
 
     // Copy the engine-resident cache (plus the pending fold of the last present row into
     // `pendingSlot`, when >= 0) back into the host past buffers. Used at a prefill turn boundary
@@ -411,6 +468,13 @@ int main(int argc, char **argv) {
     // Feed one token at the current position; false on error.
     auto step = [&](int64_t tok) -> bool {
         const double tPrep0 = nowMs();
+        // A chain-configured decode segment stays chain-recorded; a single step runs its first
+        // iteration only (the prompt / fallback path).
+        if (chainConfigured && sess->setDecodeChainWindow((size_t) decodeBucket, p, 1) != Status::Ok)
+        {
+            fprintf(stderr, "[chat] decode chain window update failed (see log)\n");
+            return false;
+        }
         setI64(idIdx, {tok});
         setI64(posIdx, {(int64_t) p});
         std::vector<int64_t> am((size_t) C + 1, 0);
@@ -435,7 +499,7 @@ int main(int argc, char **argv) {
             // reinitializes its resident state — with no pending fold.
             bool linksOk = true;
             {
-                const int64_t                slot   = (!reseedCache && p > 0) ? std::min<int64_t>(p - 1, C - 1) : -1;
+                const int64_t                slot   = (!reseedCache && pendingResidentFold) ? kvFoldSlot(p, C) : -1;
                 const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRows, C, headDim, slot);
                 for (int l = 0; l < L && linksOk; ++l)
                 {
@@ -465,8 +529,9 @@ int main(int argc, char **argv) {
                     std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
                     runStatus = sess->run(bound, outputs);
                 }
-                ranLinked     = true;
-                residentDirty = true;
+                ranLinked           = true;
+                residentDirty       = true;
+                pendingResidentFold = true;
             } else
             {
                 // A mid-stream link failure: bring the engine-resident cache (device rows + the
@@ -474,7 +539,7 @@ int main(int argc, char **argv) {
                 // the links, and continue THIS and every later step on the host cache loop — same
                 // tokens, no lost state.
                 fprintf(stderr, "[chat] switching to the host KV loop at p=%d (resyncing the cache from the engine)\n", p);
-                if (!syncResidentToHost(p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1))
+                if (!syncResidentToHost(pendingResidentFold ? kvFoldSlot(p, C) : -1))
                 {
                     return false;
                 }
@@ -533,6 +598,92 @@ int main(int argc, char **argv) {
         lastLogits                = logitsOut.data.empty() ? nullptr : reinterpret_cast<const float *>(logitsOut.data.data());
         lastFromDecode            = true;
         return true;
+    };
+
+    // Run one device chain of `steps` decode iterations feeding `tok` at position p (iterations
+    // i > 0 feed the previous iteration's argmax forward on-GPU). Every iteration's KV fold ranges
+    // are precomputed here by the single-step rule (kvFoldSlot/kvFoldRanges — one source of truth)
+    // and indexed per iteration on-device. p itself is advanced by the caller, which may trim the
+    // logical advance below `steps` on a mid-chain EOS. Returns 1 on success, 0 on a fatal error,
+    // -1 after a link failure fell the stream back to the host loop (`tok` was not fed).
+    auto chainStep = [&](int64_t tok, int steps) -> int {
+        const double tPrep0 = nowMs();
+        setI64(idIdx, {tok});
+        setI64(posIdx, {(int64_t) p});
+        std::vector<int64_t> am((size_t) C + 1, 0);
+        for (int j = 0; j < p && j < C; ++j)
+        {
+            am[(size_t) j] = 1; // valid past slots
+        }
+        am[(size_t) C] = 1; // the current token (appended at index C)
+        setI64(maskIdx, am);
+        const double tLink0 = nowMs();
+        tmPrepMs += tLink0 - tPrep0;
+        // Iteration i folds the row iteration i-1 produced into slot p+i-1; iteration 0 folds the
+        // previous run's pending row (or nothing on a re-seed / no-pending step) — the single-step
+        // loop's exact rule per iteration.
+        std::vector<std::vector<LinkRange>> rangeSets((size_t) steps);
+        for (int i = 0; i < steps; ++i)
+        {
+            const int64_t slot    = i == 0 ? ((!reseedCache && pendingResidentFold) ? kvFoldSlot(p, C) : -1) : kvFoldSlot(p + i, C);
+            rangeSets[(size_t) i] = kvFoldRanges(kvHeads, presRows, C, headDim, slot);
+        }
+        bool linksOk = true;
+        for (int l = 0; l < L && linksOk; ++l)
+        {
+            for (int part = 0; part < 2 && linksOk; ++part)
+            {
+                const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                if (sess->linkOutputToInputChain((size_t) decodeBucket, pres, past, rangeSets) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] KV chain link update failed for %s -> %s (see log)\n", pres.c_str(), past.c_str());
+                    linksOk = false;
+                }
+            }
+        }
+        if (linksOk && sess->setDecodeChainWindow((size_t) decodeBucket, p, steps) != Status::Ok)
+        {
+            fprintf(stderr, "[chat] decode chain window update failed (see log)\n");
+            linksOk = false;
+        }
+        const double tRun0 = nowMs();
+        tmLinkMs += tRun0 - tLink0;
+        if (!linksOk)
+        {
+            // The single-step loop's recovery: resync the cache to the host, drop the links, and
+            // continue on the host KV loop — same tokens, no lost state.
+            fprintf(stderr, "[chat] switching to the host KV loop at p=%d (resyncing the cache from the engine)\n", p);
+            if (!syncResidentToHost(pendingResidentFold ? kvFoldSlot(p, C) : -1))
+            {
+                return 0;
+            }
+            sess->clearLinks();
+            kvLink = false;
+            return -1;
+        }
+        Status runStatus;
+        if (reseedCache)
+        {
+            runStatus   = sess->run(inputs, outputs); // full bind re-seeds the resident cache
+            reseedCache = false;
+        } else
+        {
+            std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+            runStatus = sess->run(bound, outputs);
+        }
+        residentDirty       = true;
+        pendingResidentFold = true;
+        tmRunMs += nowMs() - tRun0;
+        tmSteps += steps; // a chain of N counts as N decode steps
+        if (runStatus != Status::Ok)
+        {
+            fprintf(stderr, "[chat] run failed\n");
+            return 0;
+        }
+        lastLogits     = nullptr; // chained decode is argmax-only; no logits row exists
+        lastFromDecode = true;
+        return 1;
     };
 
     // One prefill pass: feed `len` prompt tokens (<= prefillS) starting at absolute position p in a
@@ -729,7 +880,7 @@ int main(int argc, char **argv) {
             // to the token-by-token loop below.
             if (kvLink && residentDirty)
             {
-                if (!syncResidentToHost(p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1))
+                if (!syncResidentToHost(pendingResidentFold ? kvFoldSlot(p, C) : -1))
                 {
                     return 3;
                 }
@@ -761,7 +912,122 @@ int main(int argc, char **argv) {
             }
             ++p;
         }
-        for (int n = 0; n < maxTokens; ++n)
+        int generated = 0;
+        if (chainActive && kvLink)
+        {
+            // Device-chained greedy decode: the same stream as the single-step loop below, one
+            // submit per chain. `next` is always the newest printed-or-pending token that has NOT
+            // been fed yet; each chain feeds it plus the chain's own on-GPU intermediate ids.
+            const double tSample0 = nowMs();
+            int64_t      next     = 0;
+            if (gpuArgmax && lastFromDecode)
+            {
+                float bestValue;
+                if (sess->readOutputArgMax("logits", next, bestValue) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] engine argmax readback failed\n");
+                    return 3;
+                }
+            } else if (lastLogits)
+            {
+                next = sample(lastLogits); // the prefill pass's host row (greedy scan)
+            } else
+            {
+                fprintf(stderr, "[chat] logits row unavailable for sampling\n");
+                return 3;
+            }
+            tmSampleMs += nowMs() - tSample0;
+            bool fellBack = false;
+            while (next != eos && generated < maxTokens)
+            {
+                printf("%lld\n", (long long) next);
+                fflush(stdout);
+                ++generated;
+                if (generated >= maxTokens)
+                {
+                    // The single-step loop also feeds the last printed token (its argmax is never
+                    // read), leaving the identical engine state for the next turn.
+                    const int fedLast = chainStep(next, 1);
+                    if (fedLast == 0 || (fedLast < 0 && !step(next)))
+                    {
+                        return 3;
+                    }
+                    ++p;
+                    break;
+                }
+                // Clamp the chain at the context edge: iterations stay below the fold-slot clamp,
+                // so a mid-chain EOS's discarded overshoot can never overwrite a live clamped
+                // slot; past the edge each chain is one iteration (single-step semantics).
+                const int64_t window   = p < C ? std::min<int64_t>((int64_t) chainSteps, (int64_t) C - p) : 1;
+                const int     steps    = (int) std::min<int64_t>(window, (int64_t) (maxTokens - generated));
+                const int     ranChain = chainStep(next, steps);
+                if (ranChain == 0)
+                {
+                    return 3;
+                }
+                if (ranChain < 0)
+                {
+                    fellBack = true; // `next` is printed but was never fed
+                    break;
+                }
+                const double         tIds0 = nowMs();
+                std::vector<int64_t> chainIds((size_t) steps, 0);
+                int                  firstEosAt = steps;
+                for (int i = 0; i < steps; ++i)
+                {
+                    float bestValue;
+                    if (sess->readOutputArgMax("logits", i, chainIds[(size_t) i], bestValue) != Status::Ok)
+                    {
+                        fprintf(stderr, "[chat] engine argmax readback failed\n");
+                        return 3;
+                    }
+                    if (firstEosAt == steps && chainIds[(size_t) i] == eos)
+                    {
+                        firstEosAt = i;
+                    }
+                }
+                tmSampleMs += nowMs() - tIds0;
+                if (firstEosAt < steps)
+                {
+                    // EOS inside the chain: print the ids before it and roll the position back to
+                    // the single-step loop's end state; the overshoot iterations never print or
+                    // count. Iteration firstEosAt's pending row was already folded on-device by
+                    // the first overshoot iteration — unless EOS was the chain's last id, which
+                    // leaves the standard pending fold.
+                    for (int i = 0; i < firstEosAt; ++i)
+                    {
+                        printf("%lld\n", (long long) chainIds[(size_t) i]);
+                        ++generated;
+                    }
+                    fflush(stdout);
+                    p += firstEosAt + 1;
+                    pendingResidentFold = firstEosAt == steps - 1;
+                    break;
+                }
+                for (int i = 0; i + 1 < steps; ++i)
+                {
+                    printf("%lld\n", (long long) chainIds[(size_t) i]);
+                    ++generated;
+                }
+                fflush(stdout);
+                p += steps;
+                next = chainIds[(size_t) steps - 1]; // printed by the next pass, fed by the next chain
+            }
+            if (fellBack)
+            {
+                // Mid-stream link failure: feed the printed-but-unfed token on the host loop, then
+                // continue single-step below.
+                if (!step(next))
+                {
+                    return 3;
+                }
+                ++p;
+            } else
+            {
+                generated = maxTokens; // the turn is complete; skip the single-step loop
+            }
+        }
+        for (int n = generated; n < maxTokens; ++n)
         {
             const double tSample0 = nowMs();
             int64_t      next;

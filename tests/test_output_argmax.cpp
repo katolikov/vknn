@@ -183,3 +183,45 @@ TEST(OutputArgMax, ValidationAndIdempotence) {
     ASSERT_TRUE(matrix);
     EXPECT_EQ(matrix->setOutputArgMax(0, "scores"), Status::InvalidArgument); // [2,8] is not a vector
 }
+
+// Decode-chain surface on the host reduction path: the step-indexed read validates its bounds
+// against Config::decodeChainSteps, step 0 equals the legacy read, and any later step needs the
+// device reduction path (the CPU backend holds one host-scanned result only).
+TEST(OutputArgMax, ChainStepReadBoundsOnTheHostPath) {
+    Config cfg;
+    cfg.backend          = BackendKind::Cpu;
+    cfg.decodeChainSteps = 4;
+    auto sess            = Session::create(makeVectorGraph(8), cfg);
+    ASSERT_TRUE(sess);
+    ASSERT_EQ(sess->setOutputArgMax(0, "scores"), Status::Ok);
+    std::vector<float> values(8, 0.5f);
+    values[5] = 3.0f;
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({f32Tensor("x", {1, 8}, values)}, outs), Status::Ok);
+
+    int64_t index = -1, stepIndex = -1;
+    float   value = 0.0f, stepValue = 0.0f;
+    ASSERT_EQ(sess->readOutputArgMax("scores", index, value), Status::Ok);
+    ASSERT_EQ(sess->readOutputArgMax("scores", 0, stepIndex, stepValue), Status::Ok);
+    EXPECT_EQ(stepIndex, index);
+    EXPECT_FLOAT_EQ(stepValue, value);
+    EXPECT_EQ(sess->readOutputArgMax("scores", -1, stepIndex, stepValue), Status::InvalidArgument);
+    EXPECT_EQ(sess->readOutputArgMax("scores", 4, stepIndex, stepValue), Status::InvalidArgument);
+    EXPECT_EQ(sess->readOutputArgMax("scores", 1, stepIndex, stepValue), Status::Unsupported); // no device slots on the host path
+}
+
+// configureDecodeChain validation: the output must be argmax-registered first, and the chain needs
+// the device reduction path — the CPU backend's host scan cannot chain. setDecodeChainWindow
+// without a configured chain is NotFound.
+TEST(OutputArgMax, ConfigureDecodeChainValidation) {
+    Config cfg;
+    cfg.backend          = BackendKind::Cpu;
+    cfg.decodeChainSteps = 4;
+    auto sess            = Session::create(makeVectorGraph(8), cfg);
+    ASSERT_TRUE(sess);
+    EXPECT_EQ(sess->configureDecodeChain(3, "x", "x", "x", "scores"), Status::InvalidArgument);  // bucket out of range
+    EXPECT_EQ(sess->configureDecodeChain(0, "x", "x", "x", "scores"), Status::InvalidArgument);  // not argmax-registered yet
+    ASSERT_EQ(sess->setOutputArgMax(0, "scores"), Status::Ok);
+    EXPECT_EQ(sess->configureDecodeChain(0, "x", "x", "x", "scores"), Status::Unsupported); // host reduction path: no device chain
+    EXPECT_EQ(sess->setDecodeChainWindow(0, 0, 1), Status::NotFound);                       // nothing configured
+}
