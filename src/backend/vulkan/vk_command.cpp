@@ -71,6 +71,26 @@ namespace vknn { namespace vk {
         return std::chrono::duration<double, std::milli>(t1 - t0).count();
     }
 
+    double CommandRunner::submitBatchAndWait(const VkCommandBuffer *cmds, uint32_t count, double *submitCallMs) {
+        VK_CHECK(vkResetFences(ctx_.device(), 1, &fence_));
+        std::vector<VkSubmitInfo> infos(count, VkSubmitInfo {VK_STRUCTURE_TYPE_SUBMIT_INFO});
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            infos[i].commandBufferCount = 1;
+            infos[i].pCommandBuffers    = &cmds[i];
+        }
+        auto t0 = std::chrono::high_resolution_clock::now();
+        VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), count, infos.data(), fence_));
+        auto tSubmitted = std::chrono::high_resolution_clock::now();
+        VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, kFenceWaitForever));
+        auto t1 = std::chrono::high_resolution_clock::now();
+        if (submitCallMs)
+        {
+            *submitCallMs = std::chrono::duration<double, std::milli>(tSubmitted - t0).count();
+        }
+        return std::chrono::duration<double, std::milli>(t1 - t0).count();
+    }
+
     void CommandRunner::oneShot(const std::function<void(VkCommandBuffer)> &fn) {
         VkCommandBuffer          cmd = allocate();
         VkCommandBufferBeginInfo bi {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};

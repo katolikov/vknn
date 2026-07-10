@@ -47,6 +47,12 @@ namespace vknn { namespace vk {
         /// so the caller can split queue-submission cost from the fence wait.
         double submitAndWait(VkCommandBuffer cmd, double *submitCallMs = nullptr);
 
+        /// Submit `count` pre-recorded buffers as one vkQueueSubmit (one batch each, in order) and
+        /// wait once on the fence. The GPU consumes the batches back-to-back with no host round
+        /// trip between them; ordering/visibility across buffers is the CALLER's contract (each
+        /// buffer must end with a barrier covering the next one's reads). @returns wall time in ms.
+        double submitBatchAndWait(const VkCommandBuffer *cmds, uint32_t count, double *submitCallMs = nullptr);
+
         VkCommandPool pool() const noexcept {
             return pool_;
         }

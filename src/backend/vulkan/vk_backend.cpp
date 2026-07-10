@@ -1376,12 +1376,12 @@ namespace vknn {
                 {
                     copySinceBarrier = true;
                 }
-                // Split the segment into multiple command buffers so no single submit (a) runs long
+                // Split the segment into multiple command buffers so no single batch (a) runs long
                 // enough to trip the GPU watchdog (a ~20s submit on this driver gets reset silently,
                 // zeroing the unexecuted tail) or (b) records more push-descriptor writes than the
                 // driver holds (maxSubmitBindings; a newer driver corrupts the recording past its cap).
-                // The submit fence between chunks is a full barrier, so buffer reuse stays correct across
-                // the boundary. Only when not profiling.
+                // The explicit barrier at each chunk tail keeps buffer reuse correct across the
+                // boundary (the chunks of one run are submitted together). Only when not profiling.
                 nodesSinceSplit++;
                 bindsSinceSplit += bindEstimate(node);
                 const int  chunkNodes = cfg_.maxSubmitNodes, chunkBinds = cfg_.maxSubmitBindings;
@@ -1389,6 +1389,12 @@ namespace vknn {
                 const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
                 if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
                 {
+                    // The chunks of one run are consumed by a single vkQueueSubmit (one batch per
+                    // chunk, no host round trip between them), so the chunk tail carries an explicit
+                    // barrier wide enough for both compute and copy consumers in later chunks. The
+                    // batches stay separate submissions from the watchdog's point of view; only the
+                    // fence at the end of the LAST chunk is waited on.
+                    vk::transferBarrier(cmd_);
                     chunkTsEnd();
                     be_->runner().end(cmd_);
                     cmds_.push_back(cmd_);
@@ -1711,16 +1717,14 @@ namespace vknn {
             }
             auto t1 = now();
 
+            // One vkQueueSubmit for all chunks + one fence wait: the GPU consumes the chunk
+            // batches back-to-back (each chunk tail carries the ordering barrier), instead of
+            // draining into an idle bubble at every chunk boundary while the host wakes from a
+            // fence just to submit the next chunk.
             const bool summarize   = cfg_.timingSummary;
-            double     wall        = 0;
             double     submitCalls = 0;
-            for (VkCommandBuffer c: cmds_)
-            {
-                double sc = 0;
-                wall += be_->runner().submitAndWait(c, summarize ? &sc : nullptr);
-                submitCalls += sc;
-            }
-            auto t2 = now();
+            double     wall        = be_->runner().submitBatchAndWait(cmds_.data(), (uint32_t) cmds_.size(), summarize ? &submitCalls : nullptr);
+            auto       t2          = now();
 
             // download boundary outputs to host.
             std::set<TensorId> graphOut(g_.outputs.begin(), g_.outputs.end());
