@@ -42,13 +42,34 @@ namespace vknn {
         return false;
     }
 
+    // Split a comma-separated pattern list into its non-empty entries, as typed (an exclude entry
+    // keeps its leading '-'). The zero-match accounting below and the session's load-end warning
+    // both enumerate entries through this, so a warned entry is exactly what the caller wrote.
+    std::vector<std::string> splitPatternList(const std::string &patterns) {
+        std::vector<std::string> entries;
+        for (size_t p = 0, c;; p = c + 1)
+        {
+            c             = patterns.find(',', p);
+            std::string s = patterns.substr(p, c == std::string::npos ? c : c - p);
+            if (!s.empty())
+            {
+                entries.push_back(std::move(s));
+            }
+            if (c == std::string::npos)
+            {
+                break;
+            }
+        }
+        return entries;
+    }
+
     // Selective fp32: mark every activation tensor whose name contains one of the comma-separated
     // substrings (Config::fp32Tensors) so its buffer stays fp32 under fp16 compute, then bridge the
     // fp16/fp32 frontier with ConvertDtype nodes — for each node, any activation input whose storage
     // dtype differs from the node's (its output[0]) gets a convert, exactly mirroring insertLayoutConverts.
     // Initializers are skipped: ops upload them at the node's precision (env.useFp16). Runs at load, after
     // insertLayoutConverts, so it operates on the final flat names.
-    void markFp32(Graph &g, const std::string &substrs) {
+    void markFp32(Graph &g, const std::string &substrs, std::set<std::string> *matchedPatterns) {
         // Substring marks from Config::fp32Tensors are additive on top of any storage an earlier pass
         // already pinned to fp32 (pinGatherIndexFp32's index chains). Only flat tensors are eligible for a
         // substring mark: the flat transformer/geometry kernels all #include precision.glsl so an fp32
@@ -57,15 +78,40 @@ namespace vknn {
         int marked = 0;
         if (!substrs.empty())
         {
+            // Per-entry zero-match accounting (matchedPatterns non-null): an entry is matched when its
+            // substring occurs in an ELIGIBLE tensor's name — the same non-initializer flat set the
+            // marking consults — so the session's load-end warning names exactly the entries that
+            // cannot affect this model. Exclude entries account the same way (an exclude matching
+            // nothing is an inert knob too) and are recorded as typed, '-' included.
+            std::vector<std::string> entries, entryText;
+            if (matchedPatterns)
+            {
+                entries = splitPatternList(substrs);
+                for (const std::string &e: entries)
+                {
+                    entryText.push_back(e[0] == '-' ? e.substr(1) : e);
+                }
+            }
             auto matches = [&](const std::string &nm) {
                 return fp32NameMatch(nm, substrs);
             };
             for (auto &t: g.tensors)
             {
-                if (!t.isInitializer && t.gpuFlat && matches(t.name))
+                if (t.isInitializer || !t.gpuFlat)
+                {
+                    continue;
+                }
+                if (matches(t.name))
                 {
                     t.storeFp32 = true;
                     ++marked;
+                }
+                for (size_t e = 0; e < entries.size(); ++e)
+                {
+                    if (!entryText[e].empty() && t.name.find(entryText[e]) != std::string::npos)
+                    {
+                        matchedPatterns->insert(entries[e]);
+                    }
                 }
             }
             if (!marked)
@@ -102,6 +148,38 @@ namespace vknn {
         // range-for below iterates it would invalidate that loop. They are spliced in after the walk.
         std::vector<Node>                             converts;
         int                                           n = 0;
+        // Route one tensor read through a ConvertDtype when its storage precision differs from the
+        // precision the reader's kernel runs in, reusing an already-converted copy from `cache`. `ref`
+        // is the reader's reference (a node input or a fused edge) and is rewired in place.
+        auto convertRead = [&](TensorId &ref, bool wantFp32) {
+            if (ref == kNoTensor || g.isInitializer(ref))
+            {
+                return; // initializers upload at the node's precision (env.useFp16)
+            }
+            if (g.desc(ref).storeFp32 == wantFp32)
+            {
+                return;
+            }
+            auto key = std::make_pair(ref, wantFp32);
+            auto it  = cache.find(key);
+            if (it == cache.end())
+            {
+                TensorDesc d    = g.desc(ref);
+                d.name          = g.desc(ref).name + (wantFp32 ? "#f32" : "#f16") + std::to_string(n);
+                d.isInitializer = d.isInput = d.isOutput = false;
+                d.storeFp32                              = wantFp32;
+                d.gpuFlat                                = g.desc(ref).gpuFlat; // dtype change only, same layout
+                TensorId t2                              = g.addTensor(d);
+                Node     cv;
+                cv.type    = OpType::ConvertDtype;
+                cv.name    = "cvtdt" + std::to_string(n++);
+                cv.inputs  = {ref};
+                cv.outputs = {t2};
+                converts.push_back(cv);
+                it = cache.emplace(key, t2).first;
+            }
+            ref = it->second;
+        };
         for (auto &nd: g.nodes)
         {
             if (nd.outputs.empty() || nd.outputs[0] == kNoTensor)
@@ -111,11 +189,6 @@ namespace vknn {
             bool nodeFp32 = g.desc(nd.outputs[0]).storeFp32; // the precision this node's kernel runs in
             for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
             {
-                TensorId &in = nd.inputs[inIdx];
-                if (in == kNoTensor || g.isInitializer(in))
-                {
-                    continue; // initializers upload at the node's precision (env.useFp16)
-                }
                 // A Gather reads its index (input 1) as fp32 no matter the kernel's compute precision
                 // (gather.comp binding 1 is float), so a pinned fp32 index must not be narrowed back to
                 // fp16 by a frontier convert -- that would re-overflow a large token id to +inf.
@@ -132,30 +205,15 @@ namespace vknn {
                 {
                     continue;
                 }
-                if (g.desc(in).storeFp32 == nodeFp32)
-                {
-                    continue;
-                }
-                auto key = std::make_pair(in, nodeFp32);
-                auto it  = cache.find(key);
-                if (it == cache.end())
-                {
-                    TensorDesc d    = g.desc(in);
-                    d.name          = g.desc(in).name + (nodeFp32 ? "#f32" : "#f16") + std::to_string(n);
-                    d.isInitializer = d.isInput = d.isOutput = false;
-                    d.storeFp32                              = nodeFp32;
-                    d.gpuFlat                                = g.desc(in).gpuFlat; // dtype change only, same layout
-                    TensorId t2                              = g.addTensor(d);
-                    Node     cv;
-                    cv.type    = OpType::ConvertDtype;
-                    cv.name    = "cvtdt" + std::to_string(n++);
-                    cv.inputs  = {in};
-                    cv.outputs = {t2};
-                    converts.push_back(cv);
-                    it = cache.emplace(key, t2).first;
-                }
-                in = it->second;
+                convertRead(nd.inputs[inIdx], nodeFp32);
             }
+            // Fused residual/bias edges are reads outside the inputs list (rewireTensor's contract)
+            // and the kernel decodes them at ITS storage precision, so they take the same bridges as
+            // any input. An edge mirrored into inputs (a conv residual doubling at the bias slot; the
+            // conv kernel tests inputs[2] != fusedResidual to tell the two apart) resolves through the
+            // same cache entry, so the mirrored entry and the edge stay one tensor.
+            convertRead(nd.fusedResidual, nodeFp32);
+            convertRead(nd.fusedBias, nodeFp32);
         }
         if (!converts.empty())
         {

@@ -22,10 +22,10 @@ namespace vknn {
     bool fp32NameMatch(const std::string &name, const std::string &substrs);
 
     // Redirect every reference to tensor `from` so it points at `to`: node inputs, the fused-residual
-    // edge (which is not in the inputs list on every op), and graph outputs. Fusion passes that delete a
-    // node and fold its output into a producer must use this; rewiring only node.inputs leaves a stale
-    // fusedResidual edge dangling at a dead tensor, which crashes a conv residual read (defined in
-    // fuse_dwpw.cpp).
+    // and fused-bias edges (which are not in the inputs list on every op), and graph outputs. Fusion
+    // passes that delete a node and fold its output into a producer must use this; rewiring only
+    // node.inputs leaves a stale fused edge dangling at a dead tensor, which crashes a conv residual
+    // (or matmul bias) read (defined in fuse_dwpw.cpp).
     void rewireTensor(Graph &g, TensorId from, TensorId to);
 
     // Passes used internally by runStandardPasses but not part of the public passes.h umbrella.

@@ -9,7 +9,9 @@
 #pragma once
 #include "vknn/graph.h"
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace vknn {
 
@@ -194,9 +196,17 @@ namespace vknn {
     // without such ops. Run after backend-agnostic passes, before backend planning.
     void insertLayoutConverts(Graph &g);
 
+    // Split a comma-separated pattern list into its non-empty entries, as typed (an exclude entry
+    // keeps its leading '-'). Shared by markFp32's per-entry match accounting and the session's
+    // zero-match warnings, so both enumerate the same entries.
+    std::vector<std::string> splitPatternList(const std::string &patterns);
+
     // Mark activation tensors named by `substrs` (comma list) as fp32 storage and insert ConvertDtype
     // nodes at the fp16/fp32 frontier (Config::fp32Tensors). Runs at load, after insertLayoutConverts.
-    void markFp32(Graph &g, const std::string &substrs);
+    // A non-null `matchedPatterns` collects every list entry (as typed, exclude '-' included) whose
+    // substring occurs in an eligible tensor's name — zero-match accounting for the session's
+    // load-end warning; the marking itself is unchanged.
+    void markFp32(Graph &g, const std::string &substrs, std::set<std::string> *matchedPatterns = nullptr);
 
     // Pin every GPU Gather's runtime index (and the pure producer chain feeding it) to fp32 storage.
     // An index is an integer (token id / position) whose value can exceed the fp16 range, so an fp16

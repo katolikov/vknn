@@ -3,6 +3,7 @@
 #include "core/quant_int4.h"
 #include "vknn/logging.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -296,7 +297,8 @@ namespace vknn {
             return nullptr;
         }
         s->planned_ = true;
-        auto t1     = std::chrono::high_resolution_clock::now();
+        s->warnUnmatchedDebugPatterns(); // all buckets built: name the pattern knobs that matched nothing
+        auto t1 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created from .vxm in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms (" << s->buckets_.size() << " bucket(s))";
         return s;
     }
@@ -324,7 +326,8 @@ namespace vknn {
         // the bucket by those resolved shapes so run() dispatch matches concrete caller shapes.
         s->buckets_.front().key = Session::shapeKey(*s->buckets_.front().graph);
         s->planned_             = true;
-        auto t1                 = std::chrono::high_resolution_clock::now();
+        s->warnUnmatchedDebugPatterns(); // the default bucket is built: name the pattern knobs that matched nothing
+        auto t1 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
         return s;
     }
@@ -588,7 +591,10 @@ namespace vknn {
             // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
             // the same way; the GridSample shader decodes the grid at its storage precision.
             pinGridSampleGridFp32(graph_);
-            markFp32(graph_, fp32Marks);
+            // Only a caller-supplied fp32Tensors list takes zero-match accounting; the built-in
+            // Precision::Normal preset is engine-owned and exempt from the load-end warning.
+            markFp32(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);
+            fp32PatternsAccounted_ = fp32PatternsAccounted_ || !cfg_.fp32Tensors.empty();
             graph_.topoSort();
         }
 
@@ -651,6 +657,12 @@ namespace vknn {
         {
             foldTinyGpuIslands(bucket);
         }
+
+        // Zero-match accounting for the dumpTensors/disableVkOps debug knobs, against this bucket's
+        // final graph and backend assignment (post island fold). Aggregated across buckets;
+        // warnUnmatchedDebugPatterns names the entries that matched nowhere once the whole model is
+        // built. Reads only — the plan is untouched.
+        accountDebugPatternMatches(bucket);
 
         // --- materialize int4-quantized weights (vknn_compile -Os) for non-native consumers ---
         // The Vulkan MatMul dequantizes the packed payload in-kernel; every other consumer — a
@@ -926,6 +938,131 @@ namespace vknn {
                       << (bucket.fallbackReasons.size() > kNamedNodes ? " ... (full list: Session::fallbackReasons(), vknn_compile --support-report)" : "");
         }
         return bucket;
+    }
+
+    // disableVkOps entries, comma-split and whitespace-trimmed exactly as Config::listContains
+    // treats them, so the zero-match warning enumerates the same entries the matcher accepts.
+    static std::vector<std::string> splitTrimmedEntries(const std::string &list) {
+        std::vector<std::string> entries;
+        size_t                   pos = 0;
+        while (pos <= list.size())
+        {
+            size_t comma    = list.find(',', pos);
+            size_t end      = comma == std::string::npos ? list.size() : comma;
+            size_t tokBegin = pos;
+            size_t tokEnd   = end;
+            while (tokBegin < tokEnd && std::isspace((unsigned char) list[tokBegin]))
+            {
+                ++tokBegin;
+            }
+            while (tokEnd > tokBegin && std::isspace((unsigned char) list[tokEnd - 1]))
+            {
+                --tokEnd;
+            }
+            if (tokEnd > tokBegin)
+            {
+                entries.push_back(list.substr(tokBegin, tokEnd - tokBegin));
+            }
+            if (comma == std::string::npos)
+            {
+                break;
+            }
+            pos = comma + 1;
+        }
+        return entries;
+    }
+
+    void Session::accountDebugPatternMatches(const PlanBucket &bucket) {
+        if (!byKind_.count(BackendKind::Vulkan))
+        {
+            return; // dumpTensors and disableVkOps act through the Vulkan backend only
+        }
+        const Graph &g = *bucket.graph;
+        if (!cfg_.dumpTensors.empty())
+        {
+            const std::vector<std::string> entries = splitPatternList(cfg_.dumpTensors);
+            // Mirrors the VulkanSegment activation set (vk_backend.cpp): the dump candidates are
+            // the non-initializer tensors a Vulkan-assigned node reads or writes, the fused
+            // residual edge included.
+            auto accountTensorName = [&](TensorId tid) {
+                if (tid == kNoTensor || g.isInitializer(tid))
+                {
+                    return;
+                }
+                const std::string &nm = g.desc(tid).name;
+                if (nm.empty())
+                {
+                    return;
+                }
+                for (const std::string &e: entries)
+                {
+                    if (nm.find(e) != std::string::npos)
+                    {
+                        matchedDumpPatterns_.insert(e);
+                    }
+                }
+            };
+            for (size_t n = 0; n < g.nodes.size(); ++n)
+            {
+                if (backends_[(size_t) bucket.nodeBackendIdx[n]]->kind() != BackendKind::Vulkan)
+                {
+                    continue;
+                }
+                const Node &nd = g.nodes[n];
+                for (TensorId in: nd.inputs)
+                {
+                    accountTensorName(in);
+                }
+                for (TensorId o: nd.outputs)
+                {
+                    accountTensorName(o);
+                }
+                accountTensorName(nd.fusedResidual);
+            }
+        }
+        if (!cfg_.disableVkOps.empty())
+        {
+            for (const Node &nd: g.nodes)
+            {
+                presentOpNames_.insert(opTypeName(nd.type));
+            }
+        }
+    }
+
+    void Session::warnUnmatchedDebugPatterns() const {
+        // One load-end sweep over the user-supplied pattern knobs: an entry that matched nothing in
+        // ANY bucket names a knob that silently does nothing — the tensor it targeted was renamed
+        // or fused/folded away by a pass, or the entry is a typo. Once per pattern per model load.
+        if (fp32PatternsAccounted_)
+        {
+            for (const std::string &e: splitPatternList(cfg_.fp32Tensors))
+            {
+                if (!matchedFp32Patterns_.count(e))
+                {
+                    VKNN_WARN << "fp32Tensors pattern '" << e << "' matched no eligible tensor in any bucket -- the fp32 pin does nothing (tensor renamed or fused away, or a typo?)";
+                }
+            }
+        }
+        if (byKind_.count(BackendKind::Vulkan))
+        {
+            if (!cfg_.dumpTensors.empty())
+            {
+                for (const std::string &e: splitPatternList(cfg_.dumpTensors))
+                {
+                    if (!matchedDumpPatterns_.count(e))
+                    {
+                        VKNN_WARN << "dumpTensors pattern '" << e << "' matched no GPU tensor in any bucket -- nothing will be dumped for it (tensor renamed or fused away, or a typo?)";
+                    }
+                }
+            }
+            for (const std::string &e: splitTrimmedEntries(cfg_.disableVkOps))
+            {
+                if (!presentOpNames_.count(e))
+                {
+                    VKNN_WARN << "disableVkOps entry '" << e << "' matches no op in the model";
+                }
+            }
+        }
     }
 
     bool Session::bucketsShareInputNames() const {
