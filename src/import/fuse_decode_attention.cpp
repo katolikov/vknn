@@ -496,7 +496,7 @@ namespace vknn {
             {
                 continue; // prefill (M > 1) keeps the primitive path
             }
-            if (pv.attr.geti(kMmViewK) != C || qk.attr.geti(kMmViewK) <= 0 || C <= 0 || hd <= 0 || hd > kFaMaxHeadDim)
+            if (pv.attr.geti(kMmViewK) != C || qk.attr.geti(kMmViewK) <= 0 || C <= 0 || C > kFaMaxContext || hd <= 0 || hd > kFaMaxHeadDim)
             {
                 continue;
             }

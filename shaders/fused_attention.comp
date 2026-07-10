@@ -2,23 +2,23 @@
 #define VKNN_NO_RTE 1 // matmul-family kernel: avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
 #include "precision.glsl"
 #include "common.glsl"
-#extension GL_KHR_shader_subgroup_basic : require
-#extension GL_KHR_shader_subgroup_arithmetic : require
 // Fused single-query decode attention (contract in src/core/fused_attention.h):
 //   out[row][n] = sum_s softmax_s(q.k^T * scale + mask * maskScale)[s] * v[s][n]
 // One workgroup per attention row; the row's q/k/v/mask bases come from the per-axis strides in
-// the geometry SSBO (a GQA head group is a zero stride, so K/V read the KV cache in place). Each
-// subgroup owns the tokens s = subgroupID (mod numSubgroups): the lanes cooperatively load one
-// K row along k — adjacent lanes read adjacent elements, the coalesced access the decomposed QK
-// MatMul's stride-64 operand view could not get — and subgroupAdd closes the dot. The softmax is
-// online (flash form): each subgroup keeps a running max m, weight sum l, and per-lane fp32
-// context accumulators, rescaling by exp(mOld - mNew) when the max advances, so scores and
-// probabilities never touch memory. Subgroup partials merge through shared memory at the end.
+// the geometry SSBO (a GQA head group is a zero stride, so K/V read the KV cache in place). The
+// row is processed in three token-parallel stages so no lane ever serializes over the context:
+//   1. scores: each lane owns whole tokens (256 in flight) and streams one K row contiguously
+//      (kK is 1 for the folded KV layout) into a shared score array — the score never leaves the
+//      workgroup.
+//   2. softmax: workgroup tree max/sum reductions over the shared scores, then an in-place
+//      exp(x - max) rewrite; the probabilities stay in shared memory.
+//   3. p.V: lane tid owns output n = tid % hd and partial part = tid / hd — adjacent lanes read
+//      adjacent V elements (vN is 1), and the WG/hd partials per output fold over a short
+//      barrier loop.
 // All arithmetic is fp32; only the final context vector is stored (fp16 via TO_STORE).
 #define WG 256
-#define FA_MAX_HD 256      // == vknn::kFaMaxHeadDim; bounds the q / merged-context shared arrays
-#define FA_ACC 8           // per-lane context accumulators; supports hd <= 8 * gl_SubgroupSize
-#define FA_MAX_SUBGROUPS 64
+#define FA_MAX_HD 256   // == vknn::kFaMaxHeadDim; bounds the q / context shared arrays
+#define FA_MAX_C 6144   // == vknn::kFaMaxContext; bounds the shared score array (24 KB)
 layout(local_size_x = WG) in;
 layout(std430, binding = 0) readonly buffer Q { STORE q[]; };
 layout(std430, binding = 1) readonly buffer K { STORE k[]; };
@@ -34,9 +34,9 @@ layout(push_constant) uniform PC {
 } pc;
 
 shared float sQ[FA_MAX_HD];
+shared float sScores[FA_MAX_C];
+shared float sRed[WG];
 shared float sAcc[FA_MAX_HD];
-shared float sM[FA_MAX_SUBGROUPS];
-shared float sL[FA_MAX_SUBGROUPS];
 
 void main() {
   // One workgroup per row; the 1-D grid spills into y past the per-dim workgroup-count limit.
@@ -57,59 +57,64 @@ void main() {
     }
   }
 
-  uint tid = gl_LocalInvocationID.x;
-  for (int n = int(tid); n < pc.hd; n += WG)
+  int tid = int(gl_LocalInvocationID.x);
+  for (int n = tid; n < pc.hd; n += WG)
     sQ[n] = float(q[qBase + n * pc.qK]);
   barrier();
 
-  // Flash loop: this subgroup's running softmax state and per-lane context accumulators. m/l are
-  // computed redundantly by every lane of the subgroup (subgroupAdd broadcasts the dot), keeping
-  // the rescale uniform.
-  uint lane = gl_SubgroupInvocationID;
-  uint sg   = gl_SubgroupSize;
-  float m = -3.4e38, l = 0.0;
-  float acc[FA_ACC];
-  for (int j = 0; j < FA_ACC; ++j) acc[j] = 0.0;
-
-  for (int s = int(gl_SubgroupID); s < pc.C; s += int(gl_NumSubgroups)) {
-    float part = 0.0;
-    for (int kk = int(lane); kk < pc.hd; kk += int(sg))
-      part += sQ[kk] * float(k[kBase + s * pc.kN + kk * pc.kK]);
-    float x = subgroupAdd(part) * pc.scale;
+  // Stage 1: one lane per token — the dot streams K contiguously; 256 tokens stay in flight.
+  for (int s = tid; s < pc.C; s += WG) {
+    float dot = 0.0;
+    int base = kBase + s * pc.kN;
+    for (int kk = 0; kk < pc.hd; ++kk)
+      dot += sQ[kk] * float(k[base + kk * pc.kK]);
+    float x = dot * pc.scale;
     if (pc.hasMask != 0) x += float(msk[mBase + s * pc.mN]) * pc.maskScale;
-
-    float mNew = max(m, x);
-    float w = exp(m - mNew); // 0 on the first token (m at the fp32 floor), the rescale after
-    float p = exp(x - mNew);
-    l = l * w + p;
-    for (int j = 0; j < FA_ACC; ++j) {
-      int n = int(lane) + j * int(sg);
-      if (n < pc.hd) acc[j] = acc[j] * w + p * float(v[vBase + s * pc.vK + n * pc.vN]);
-    }
-    m = mNew;
+    sScores[s] = x;
   }
-
-  // Merge the subgroup partials: global max, rescaled weight sum, then each subgroup folds its
-  // rescaled accumulators into the shared context vector one at a time (the barrier keeps the
-  // += racefree; the loop bound is workgroup-uniform).
-  if (lane == 0u) { sM[gl_SubgroupID] = m; sL[gl_SubgroupID] = l; }
-  for (int n = int(tid); n < pc.hd; n += WG) sAcc[n] = 0.0;
   barrier();
-  float gM = -3.4e38;
-  for (uint i = 0u; i < gl_NumSubgroups; ++i) gM = max(gM, sM[i]);
-  float gL = 0.0;
-  for (uint i = 0u; i < gl_NumSubgroups; ++i) gL += sL[i] * exp(sM[i] - gM);
-  for (uint i = 0u; i < gl_NumSubgroups; ++i) {
-    if (gl_SubgroupID == i) {
-      float w = exp(m - gM);
-      for (int j = 0; j < FA_ACC; ++j) {
-        int n = int(lane) + j * int(sg);
-        if (n < pc.hd) sAcc[n] += acc[j] * w;
-      }
-    }
+
+  // Stage 2: workgroup softmax over the shared scores. Tree max, in-place exp, tree sum.
+  float localMax = -3.4e38;
+  for (int s = tid; s < pc.C; s += WG) localMax = max(localMax, sScores[s]);
+  sRed[tid] = localMax;
+  barrier();
+  for (int step = WG / 2; step > 0; step >>= 1) {
+    if (tid < step) sRed[tid] = max(sRed[tid], sRed[tid + step]);
     barrier();
   }
-  float rL = 1.0 / gL;
-  for (int n = int(tid); n < pc.hd; n += WG)
-    d[int(row) * pc.hd + n] = TO_STORE(sAcc[n] * rL);
+  float gM = sRed[0];
+  barrier(); // sRed is reused for the sum below
+  float localSum = 0.0;
+  for (int s = tid; s < pc.C; s += WG) {
+    float p = exp(sScores[s] - gM);
+    sScores[s] = p;
+    localSum += p;
+  }
+  sRed[tid] = localSum;
+  barrier();
+  for (int step = WG / 2; step > 0; step >>= 1) {
+    if (tid < step) sRed[tid] += sRed[tid + step];
+    barrier();
+  }
+  float rL = 1.0 / sRed[0];
+
+  // Stage 3: p.V. Lane tid owns output n and context slice `part`; the WG/hd partials per output
+  // fold over a short barrier loop (parts is at least 1: hd <= WG).
+  int parts = WG / pc.hd > 0 ? WG / pc.hd : 1;
+  int n = tid % pc.hd;
+  int part = tid / pc.hd;
+  float acc = 0.0;
+  if (part < parts) {
+    for (int s = part; s < pc.C; s += parts)
+      acc += sScores[s] * float(v[vBase + s * pc.vK + n * pc.vN]);
+  }
+  for (int m = tid; m < pc.hd; m += WG) sAcc[m] = 0.0;
+  barrier();
+  for (int fold = 0; fold < parts; ++fold) {
+    if (part == fold) sAcc[n] += acc;
+    barrier();
+  }
+  for (int m = tid; m < pc.hd; m += WG)
+    d[int(row) * pc.hd + m] = TO_STORE(sAcc[m] * rL);
 }

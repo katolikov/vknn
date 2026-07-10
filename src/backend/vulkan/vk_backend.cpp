@@ -158,27 +158,17 @@ namespace vknn {
                 }
                 return false;
             }
-            // FusedAttention's device-dependent requirements: the kernel reduces each q.k dot with
-            // subgroupAdd, gives each lane up to 8 output accumulators (so the head dim must fit
-            // 8 lanes' worth of registers), and runs a 256-invocation workgroup. vkNodeGate holds
+            // FusedAttention's device-dependent requirements: the kernel stages the row's scores in
+            // shared memory (kFaSharedBytes) and runs a 256-invocation workgroup. vkNodeGate holds
             // the device-free checks; these need the live caps.
             if (nd.type == OpType::FusedAttention && ctx_)
             {
-                const auto   &caps = ctx_->caps();
-                const int64_t hd   = nd.attr.geti(kFaHd);
-                if (!caps.subgroupArithmetic)
+                const auto &caps = ctx_->caps();
+                if (caps.maxSharedMemory < (uint32_t) kFaSharedBytes)
                 {
                     if (whyNot)
                     {
-                        *whyNot = "FusedAttention: device lacks subgroup arithmetic";
-                    }
-                    return false;
-                }
-                if (caps.subgroupSize == 0 || hd > (int64_t) caps.subgroupSize * 8)
-                {
-                    if (whyNot)
-                    {
-                        *whyNot = "FusedAttention: head dim exceeds 8 accumulators per subgroup lane";
+                        *whyNot = "FusedAttention: device shared memory below the kernel's score staging";
                     }
                     return false;
                 }

@@ -53,8 +53,12 @@ namespace vknn {
 
     inline constexpr int kFaVersion = 1;
 
-    // The FusedAttention GPU kernel keeps q and the merged output row in fixed-size shared arrays;
-    // head dims above this cap are refused by the pass and the support gate.
+    // The FusedAttention GPU kernel keeps q, the row's score vector, and the merged output row in
+    // fixed-size shared arrays; head dims / token counts above these caps are refused by the pass
+    // and the support gates (the decomposed chain then stays in place).
     inline constexpr int kFaMaxHeadDim = 256;
+    inline constexpr int kFaMaxContext = 6144;
+    // Shared bytes the kernel's arrays occupy (sQ + sScores + sRed + sAcc), for the device gate.
+    inline constexpr int kFaSharedBytes = (kFaMaxHeadDim + kFaMaxContext + 256 + kFaMaxHeadDim) * 4;
 
 } // namespace vknn

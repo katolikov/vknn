@@ -291,7 +291,7 @@ namespace vknn {
                 return refuse(whyNot, "FusedAttention: missing geometry attrs");
             }
             const int64_t hd = nd.attr.geti(kFaHd), c = nd.attr.geti(kFaC);
-            if (hd <= 0 || hd > kFaMaxHeadDim || c <= 0)
+            if (hd <= 0 || hd > kFaMaxHeadDim || c <= 0 || c > kFaMaxContext)
             {
                 return refuse(whyNot, "FusedAttention: head dim / token count out of kernel range");
             }
