@@ -416,3 +416,26 @@ TEST(RopeFusion, CnnGraphUntouched) {
     EXPECT_EQ(g.nodes.size(), nodes);
     EXPECT_EQ(findType(g, OpType::Rope), nullptr);
 }
+
+// A fused Rope's position input keeps the bind-time index bound the removed Gather carried: a
+// position outside the cos/sin table's rows fails at bind with the offending value, never reads
+// outside the table (the crash class an unbounded conversation position would otherwise hit).
+TEST(RopeFusion, OutOfRangePositionFailsAtBind) {
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    Graph g = ropeGraph();
+    inferShapes(g);
+    auto sess = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+
+    std::vector<IOTensor> ins = ropeInputs();
+    std::vector<IOTensor> outs;
+    // The table's last row is the largest valid position.
+    std::vector<int64_t> edge = {kP - 1, 0, kP - 1};
+    std::memcpy(ins[1].data.data(), edge.data(), edge.size() * 8);
+    EXPECT_EQ(sess->run(ins, outs), Status::Ok);
+    // One past the table is out of range.
+    std::vector<int64_t> outOfRange = {kP, 0, 5};
+    std::memcpy(ins[1].data.data(), outOfRange.data(), outOfRange.size() * 8);
+    EXPECT_EQ(sess->run(ins, outs), Status::InvalidArgument);
+}

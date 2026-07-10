@@ -37,6 +37,12 @@ namespace vknn {
                 {
                     const int64_t posIdx = r / headsPerPos;
                     int64_t       p      = P.dtype == DType::Int64 ? P.host.i64()[posIdx] : (int64_t) P.host.f32()[posIdx];
+                    // The position indexes the cos/sin tables like a Gather index indexes its data:
+                    // out of range is a hard error, never an out-of-bounds table read.
+                    if (p < -tableRows || p >= tableRows)
+                    {
+                        throw Error(Status::InvalidArgument, "Rope '" + node.name + "': position " + std::to_string(p) + " at index " + std::to_string(posIdx) + " is out of range [" + std::to_string(-tableRows) + ", " + std::to_string(tableRows) + ") for a cos/sin table of " + std::to_string(tableRows) + " row(s)");
+                    }
                     if (p < 0)
                     {
                         p += tableRows;

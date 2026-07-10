@@ -163,9 +163,10 @@ namespace vknn {
         }
     }
 
-    // Graph inputs that reach a Gather node's index operand — directly, or through value-preserving
-    // hops (layout/dtype converts, metadata reshapes) — paired with the SMALLEST statically known axis
-    // size any of their Gathers selects from. Feeds PlanBucket::gatherIndexAxisSizes, which run()
+    // Graph inputs that reach an index-consuming operand — a Gather's index, or a fused Rope's
+    // position (the Gather the rope fusion removed) — directly or through value-preserving hops
+    // (layout/dtype converts, metadata reshapes), paired with the SMALLEST statically known axis
+    // size any of those lookups selects from. Feeds PlanBucket::gatherIndexAxisSizes, which run()
     // checks when the input is bound: an out-of-range index (an out-of-vocab token id against an
     // embedding table) then fails with its value and position instead of reading out of bounds inside
     // the op — the class of crash a caller-supplied id can otherwise trigger.
@@ -190,25 +191,39 @@ namespace vknn {
         std::vector<std::pair<TensorId, int64_t>> limits;
         for (const Node &nd: g.nodes)
         {
-            if (nd.type != OpType::Gather || nd.inputs.size() < 2 || nd.inputs[0] == kNoTensor || nd.inputs[1] == kNoTensor)
+            // Index-consuming ops with a statically bounded lookup: Gather (index operand 1 selects
+            // rows of the data's gather axis) and the fused Rope (position operand 1 selects rows of
+            // the cos/sin tables — the Gather the fusion removed, so the same bind-time bound holds).
+            int64_t axisSize = 0;
+            if (nd.type == OpType::Gather && nd.inputs.size() >= 2 && nd.inputs[0] != kNoTensor && nd.inputs[1] != kNoTensor)
+            {
+                // Axis normalization mirrors GatherCpu: negative counts from the back, then clamps.
+                const Shape &data = g.desc(nd.inputs[0]).shape;
+                int64_t      rank = (int64_t) data.size();
+                int64_t      axis = nd.attr.geti("axis", 0);
+                if (axis < 0)
+                {
+                    axis += rank;
+                }
+                axis = std::max<int64_t>(0, std::min<int64_t>(axis, rank > 0 ? rank - 1 : 0));
+                if (rank == 0 || data[axis] <= 0)
+                {
+                    continue; // axis size not statically known: nothing to validate against
+                }
+                axisSize = data[axis];
+            } else if (nd.type == OpType::Rope && nd.inputs.size() >= 3 && nd.inputs[1] != kNoTensor && nd.inputs[2] != kNoTensor)
+            {
+                const Shape &table = g.desc(nd.inputs[2]).shape;
+                if (table.empty() || table[0] <= 0)
+                {
+                    continue;
+                }
+                axisSize = table[0];
+            } else
             {
                 continue;
             }
-            // Axis normalization mirrors GatherCpu: negative counts from the back, then clamps.
-            const Shape &data = g.desc(nd.inputs[0]).shape;
-            int64_t      rank = (int64_t) data.size();
-            int64_t      axis = nd.attr.geti("axis", 0);
-            if (axis < 0)
-            {
-                axis += rank;
-            }
-            axis = std::max<int64_t>(0, std::min<int64_t>(axis, rank > 0 ? rank - 1 : 0));
-            if (rank == 0 || data[axis] <= 0)
-            {
-                continue; // axis size not statically known: nothing to validate against
-            }
-            const int64_t axisSize = data[axis];
-            TensorId      traced   = nd.inputs[1];
+            TensorId traced = nd.inputs[1];
             for (int hop = 0; traced != kNoTensor && hop < 64; ++hop)
             {
                 int pi = producer[(size_t) traced];
