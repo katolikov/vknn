@@ -62,6 +62,10 @@ int main(int argc, char **argv) {
         {
             cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
         }
+        if (!strcmp(argv[i], "--no-rope-fusion"))
+        {
+            cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+        }
     }
 
     auto sess = Runtime::load(model, cfg);

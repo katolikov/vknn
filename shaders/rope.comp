@@ -1,0 +1,35 @@
+#version 450
+#include "precision.glsl"
+// Rope: fused rotate-half rotary embedding, one thread per output element. The input is flat rows
+// of `head` elements ([.., headsPerPos, head] row-major); each row rotates by the cos/sin table row
+// of its position id:
+//   d[j]           = x[j] * cos[p, j] - x[j + halfDim] * sin[p, j]
+//   d[j + halfDim] = x[j] * sin[p, j] + x[j + halfDim] * cos[p, j]     for j in [0, halfDim)
+// Positions are ALWAYS fp32 (the gather.comp index convention: an integer position above 2048 is
+// not exact in fp16); the tables and data use STORE. A negative position wraps by the table height,
+// mirroring the gather index wrap. All arithmetic is fp32; the store rounds once via TO_STORE.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer X { STORE x[]; };
+layout(std430, binding = 1) readonly  buffer P { float pos[]; };
+layout(std430, binding = 2) readonly  buffer C { STORE cosTable[]; };
+layout(std430, binding = 3) readonly  buffer S { STORE sinTable[]; };
+layout(std430, binding = 4) writeonly buffer D { STORE d[]; };
+layout(push_constant) uniform PC { int total, head, halfDim, headsPerPos, tableRows; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int i = int(gid);
+  int row = i / pc.head;
+  int lane = i % pc.head;
+  int p = int(pos[row / pc.headsPerPos]);
+  if (p < 0) p += pc.tableRows;
+  int j = lane < pc.halfDim ? lane : lane - pc.halfDim;
+  float c = float(cosTable[p * pc.halfDim + j]);
+  float s = float(sinTable[p * pc.halfDim + j]);
+  float x1 = float(x[row * pc.head + j]);
+  float x2 = float(x[row * pc.head + j + pc.halfDim]);
+  float v = lane < pc.halfDim ? x1 * c - x2 * s : x1 * s + x2 * c;
+  d[i] = TO_STORE(v);
+}

@@ -174,6 +174,7 @@ namespace vknn {
             k.flatLayout      = cfg.flatLayout();
             k.gpuIslandFold   = cfg.gpuIslandFold();
             k.matmulViewFold  = cfg.matmulViewFold();
+            k.ropeFusion      = cfg.ropeFusion();
             k.fp32Tensors     = cfg.fp32Tensors;
             k.winograd        = cfg.hint(Hint::Winograd, (int) Mode::Auto);
             k.winogradVariant = cfg.hint(Hint::WinogradVariant, 0);

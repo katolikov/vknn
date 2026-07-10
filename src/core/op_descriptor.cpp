@@ -18,8 +18,8 @@ namespace vknn {
     namespace {
         using L = LayoutClass;
 
-        // The largest enum value (append-only; RMSNorm is last). The table is sized to cover it.
-        constexpr int kMaxOp = (int) OpType::RMSNorm;
+        // The largest enum value (append-only; Rope is last). The table is sized to cover it.
+        constexpr int kMaxOp = (int) OpType::Rope;
 
         struct Table {
             OpDescriptor d[kMaxOp + 1];
@@ -79,6 +79,9 @@ namespace vknn {
                 // Own flat kernels rather than fusion members: no pw step code is defined for them.
                 set(OpType::IsNaN, L::Flat, false, false);
                 set(OpType::And, L::Flat, false, false);
+                // Fused rotate-half rotary embedding (fuseRope, load-time): a flat row-major
+                // pointwise kernel with a cos/sin table row lookup; no fusion role of its own.
+                set(OpType::Rope, L::Flat, false, false);
                 // Everything not listed keeps the all-default row {Nc4, pwMember=false,
                 // pwEpilogue=false}: CPU-only / structural ops (Reshape, Flatten, Squeeze, Unsqueeze,
                 // Cast, Identity, Constant, Shape, BatchNorm, EyeLike, FusedSE, ConvertLayout,

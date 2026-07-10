@@ -480,6 +480,19 @@ namespace vknn {
             fp32Marks = mixedPrecisionFp32Tensors();
         }
 
+        // --- RoPE chain fusion: collapse each rotate-half chain (last-axis half Slices, cos/sin
+        //     table Gathers, the rotate products, Concat) into ONE Rope node reading the tables by
+        //     position, so an LLM decode step spends one dispatch per q/k rope site instead of ~7.
+        //     Runs BEFORE the MatMul view fold: the two passes claim disjoint node kinds (the view
+        //     fold absorbs Transpose/Expand movers, never Slice/Gather/Concat), and a MatMul chain
+        //     walk that stopped at the Concat output stops at the same tensor now produced by Rope.
+        //     Load-time only (never serialized); the fp32 pins apply only where markFp32 runs (the
+        //     Vulkan fp16-storage path below).
+        if (cfg_.ropeFusion())
+        {
+            fuseRope(graph_, vulkanFlat ? fp32Marks : std::string());
+        }
+
         // --- MatMul operand-view fold: absorb Transpose/Expand chains feeding non-tiled MatMuls into
         //     per-axis stride attrs (core/matmul_view.h), so a GQA decode reads its KV cache in place
         //     instead of materializing the repeat_kv broadcast and attention transposes every token.

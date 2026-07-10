@@ -103,6 +103,14 @@ namespace vknn {
         MultiHeadAttention,      // fused attention; expanded only in the pure q/k/v(+additive mask) form
         GroupQueryAttention,     // fused GQA with in-op RoPE + KV cache; recognized, NOT yet expanded
         MatMulNBits,             // blockwise 4-bit weight MatMul: repacked into the int4 wq format
+        Rope,                    // fused rotate-half rotary embedding over (x, position_ids,
+                                 // cos_table, sin_table) with a `half` attr:
+                                 //   y[..., :half]  = x1*cos[p] - x2*sin[p]
+                                 //   y[..., half:] = x1*sin[p] + x2*cos[p]   (x1/x2 = last-axis halves)
+                                 // ONE dispatch replacing the Slice/Gather/mul/Concat chain a lowered
+                                 // contrib RotaryEmbedding expands to. Created ONLY by the load-time
+                                 // fuseRope pass (Hint::RopeFusion) — never parsed from ONNX, never
+                                 // serialized to a .vxm.
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

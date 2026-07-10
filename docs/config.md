@@ -120,11 +120,13 @@ enum class Hint {
   DirectConv3x3   = 3,  // direct 3x3 kernel            (DirectAuto / RegisterTiled / LdsHalo)
   FlatLayout      = 4,  // flat-layout GPU pass         (On / Off, default On)
   GpuIslandFold   = 5,  // fold tiny GPU islands to CPU (On / Off, default On)
+  MatMulViewFold  = 6,  // MatMul operand-view fold at load  (On / Off, default On)
+  RopeFusion      = 7,  // rotate-half RoPE chain fusion at load (On / Off, default On)
 };
 // One Mode enum holds every value; the Hint picks the knob, the Mode the value. (Autotune effort is
 // a top-level Config::tuning field, not a Hint.)
 enum class Mode {
-  Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd, FlatLayout, GpuIslandFold
+  Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd, FlatLayout, GpuIslandFold, MatMulViewFold, RopeFusion
   TiledGemm = 0, Fused = 1, FusedSplit = 2, FullyFused = 3, SubgroupGemm = 4, // Hint::WinogradVariant
   F23 = 0, F43 = 4,                                                           // Hint::WinogradUnit
   DirectAuto = 0, RegisterTiled = 1, LdsHalo = 2,                             // Hint::DirectConv3x3

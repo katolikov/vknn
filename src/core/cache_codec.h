@@ -30,6 +30,7 @@ namespace vknn {
         bool        flatLayout     = true; // Config::flatLayout()
         bool        gpuIslandFold  = true; // Config::gpuIslandFold()
         bool        matmulViewFold = true; // Config::matmulViewFold()
+        bool        ropeFusion     = true; // Config::ropeFusion()
         std::string fp32Tensors;           // Config::fp32Tensors
         int         winograd        = 0;   // Hint::Winograd
         int         winogradVariant = 0;   // Hint::WinogradVariant
@@ -42,7 +43,7 @@ namespace vknn {
         std::map<std::string, int32_t>            tune;     // conv autotune table (op signature -> chosen value)
 
         bool sameKey(const CacheVariant &o) const {
-            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3;
+            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && ropeFusion == o.ropeFusion && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3;
         }
     };
 
