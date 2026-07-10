@@ -592,9 +592,10 @@ namespace vknn {
     class VulkanSegment: public Segment {
       public:
         VulkanSegment(const std::vector<int> &idx, Graph &g, const Config &cfg, VulkanBackend *be): be_(be), g_(g), cfg_(cfg) {
-            nodeIdx   = idx;
-            useFp16_  = be_->useFp16(cfg);
-            elemSize_ = useFp16_ ? 2 : 4;
+            nodeIdx        = idx;
+            useFp16_       = be_->useFp16(cfg);
+            elemSize_      = useFp16_ ? 2 : 4;
+            chainStepsMax_ = std::max(1, cfg.decodeChainSteps); // sizes the per-iteration link range sets + argmax result slots
             graphInputs_.insert(g.inputs.begin(), g.inputs.end());
 
             // 1) allocate device buffers for all activation tensors (non-initializers).
@@ -1187,14 +1188,61 @@ namespace vknn {
                 vkCmdResetQueryPool(cmd_, queryPool_, 0, (uint32_t) (nodeIdx.size() * 2));
             }
             chunkTsBegin();
-            // Device-resident links: fold each linked output's PREVIOUS-run values into its linked
-            // input, per the host-updated ranges SSBO, before anything else executes. The barrier
-            // orders the copies against both hazards below: nodes reading the destination (the fold
-            // must land first) and nodes rewriting the source (the copy must read the old values).
+            // A decode chain records chainSteps_ iterations of the whole body below into one
+            // command-buffer sequence; a forced chunk split at each iteration boundary lets a run
+            // submit any prefix of iterations (chainActiveSteps_). The single-iteration recording
+            // (no chain configured, or decodeChainSteps 1) is the degenerate one-pass loop.
+            const int recordedSteps = chainConfigured_ ? chainSteps_ : 1;
+            if (recordedSteps > 1)
+            {
+                for (const auto &kv: convert_)
+                {
+                    if (!kv.second.isInput)
+                    {
+                        // An output convert records once after the LAST iteration, which a chunk-
+                        // prefix run would skip; no chained caller binds declared-format outputs.
+                        throw Error(Status::Unsupported, "a decode-chained segment cannot bind a declared-format zero-copy output");
+                    }
+                }
+            }
+            iterationFirstChunk_.assign((size_t) recordedSteps, 0);
+            for (int step = 0; step < recordedSteps; ++step)
+            {
+            iterationFirstChunk_[(size_t) step] = (uint32_t) cmds_.size();
+            // Chain state feedback: iteration `step` consumes the previous iteration's argmax index
+            // as its token id, position basePosition + step, and a mask with one more valid slot —
+            // each computed by the host pack's exact rules, so the chained stream is bit-identical
+            // to the single-step loop. Iteration 0 consumes the host-provided inputs unchanged.
+            if (step > 0)
+            {
+                struct ChainFeedbackPC {
+                    uint32_t stepIndex, maskValidSlots, tokenElemFp16, positionElemFp16, maskElemFp16;
+                };
+                if (!chainFeedbackPipe_)
+                {
+                    chainFeedbackPipe_ = std::make_unique<vk::ComputePipeline>(be_->ctx(), "chain_feedback", 5, sizeof(ChainFeedbackPC), std::vector<uint32_t> {},
+                                                                               env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                }
+                ChainFeedbackPC pc {(uint32_t) step,
+                                    (uint32_t) (numElements(g_.tensors[chain_.maskInput].shape) - 1),
+                                    boundaryElemBytes(chain_.tokenInput) == 2 ? 1u : 0u,
+                                    boundaryElemBytes(chain_.positionInput) == 2 ? 1u : 0u,
+                                    boundaryElemBytes(chain_.maskInput) == 2 ? 1u : 0u};
+                chainFeedbackPipe_->dispatch(cmd_,
+                                             {argMaxResults_[chain_.argMaxOutput]->handle(), buffers_[chain_.tokenInput]->handle(), buffers_[chain_.positionInput]->handle(),
+                                              buffers_[chain_.maskInput]->handle(), chainStateBuf_->handle()},
+                                             &pc, sizeof(pc), 1);
+            }
+            // Device-resident links: fold each linked output's PREVIOUS-run (or previous-iteration)
+            // values into its linked input, per this iteration's range set in the host-updated
+            // ranges SSBO, before anything else executes. The barrier orders the copies against
+            // both hazards below: nodes reading the destination (the fold must land first) and
+            // nodes rewriting the source (the copy must read the old values).
             if (!residentLinks_.empty())
             {
                 struct LinkCopyPC {
-                    int srcC, srcH, srcW, dstC, dstH, dstW, srcFmt, dstFmt;
+                    int      srcC, srcH, srcW, dstC, dstH, dstW, srcFmt, dstFmt;
+                    uint32_t rangeWordBase;
                 };
                 for (const ResidentLink &link: residentLinks_)
                 {
@@ -1214,13 +1262,20 @@ namespace vknn {
                                    (int) dstShape.h,
                                    (int) dstShape.w,
                                    g_.desc(link.src).gpuFlat ? 0 : 2,
-                                   g_.desc(link.dst).gpuFlat ? 0 : 2};
+                                   g_.desc(link.dst).gpuFlat ? 0 : 2,
+                                   (uint32_t) step * (2u + link.capacity * 3u)};
                     pipe->dispatch(cmd_, {buffers_[link.src]->handle(), buffers_[link.dst]->handle(), link.rangesBuf->handle()}, &pc, sizeof(pc), kLinkCopyGroups);
                 }
+            }
+            if (step > 0 || !residentLinks_.empty())
+            {
                 vk::computeBarrier(cmd_);
             }
             // Declared-format zero-copy inputs: convert each caller dma-buf (declared layout/dtype) into
             // this segment's device-native boundary buffer, then a barrier before the ops read it.
+            // Iteration 0 only: later chain iterations take their inputs from the feedback dispatch,
+            // which a re-run convert would overwrite with the stale iteration-0 bytes.
+            if (step == 0)
             {
                 bool any = false;
                 for (const auto &kv: convert_)
@@ -1417,12 +1472,12 @@ namespace vknn {
                 vk::computeBarrier(cmd_);
             }
             // Registered output argmax epilogues: one single-workgroup dispatch per output, reading
-            // the finished boundary buffer and writing {index, value} into its result buffer. Rides
-            // the same submission; the final barrier above makes the outputs visible to it.
+            // the finished boundary buffer and writing {index, value} into its per-iteration result
+            // slot. Rides the same submission; the final barrier above makes the outputs visible to it.
             for (TensorId argMaxTid: argMaxOutputs_)
             {
                 struct ArgMaxPC {
-                    uint32_t elemCount;
+                    uint32_t elemCount, resultSlot;
                 };
                 const bool fp16 = boundaryElemBytes(argMaxTid) == 2;
                 auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
@@ -1431,8 +1486,23 @@ namespace vknn {
                     pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
                                                                  env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
                 }
-                ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape)};
+                ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape), (uint32_t) step};
                 pipe->dispatch(cmd_, {buffers_[argMaxTid]->handle(), argMaxResults_[argMaxTid]->handle()}, &pc, sizeof(pc), 1);
+            }
+            // Iteration boundary: end the chunk so a run can submit any iteration prefix, with the
+            // tail barrier ordering this iteration's argmax/node writes against the next
+            // iteration's feedback, link copies, and node reads (the same contract as a
+            // maxSubmitNodes split; all chunks of a run ride one vkQueueSubmit).
+            if (step + 1 < recordedSteps)
+            {
+                vk::transferBarrier(cmd_);
+                chunkTsEnd();
+                be_->runner().end(cmd_);
+                cmds_.push_back(cmd_);
+                cmd_ = be_->runner().allocate();
+                be_->runner().begin(cmd_);
+                chunkTsBegin();
+            }
             }
             // Declared-format zero-copy outputs: convert the device-native boundary buffer into each
             // caller dma-buf (declared layout/dtype), then a barrier before the host reads it.
@@ -1621,6 +1691,13 @@ namespace vknn {
                     argMaxChanged_ = false;
                     reRecord       = true;
                 }
+                if (chainChanged_)
+                {
+                    // The decode-chain configuration changed; the recording must carry the chained
+                    // iteration sequence (or drop back to the single-iteration stream).
+                    chainChanged_ = false;
+                    reRecord      = true;
+                }
                 if (reRecord)
                 {
                     if (!cmds_.empty())
@@ -1720,11 +1797,13 @@ namespace vknn {
             // One vkQueueSubmit for all chunks + one fence wait: the GPU consumes the chunk
             // batches back-to-back (each chunk tail carries the ordering barrier), instead of
             // draining into an idle bubble at every chunk boundary while the host wakes from a
-            // fence just to submit the next chunk.
-            const bool summarize   = cfg_.timingSummary;
-            double     submitCalls = 0;
-            double     wall        = be_->runner().submitBatchAndWait(cmds_.data(), (uint32_t) cmds_.size(), summarize ? &submitCalls : nullptr);
-            auto       t2          = now();
+            // fence just to submit the next chunk. A decode chain submits the chunk prefix
+            // covering its active iterations.
+            const bool     summarize    = cfg_.timingSummary;
+            double         submitCalls  = 0;
+            const uint32_t submitChunks = chunksForActiveSteps();
+            double         wall         = be_->runner().submitBatchAndWait(cmds_.data(), submitChunks, summarize ? &submitCalls : nullptr);
+            auto           t2           = now();
 
             // download boundary outputs to host.
             std::set<TensorId> graphOut(g_.outputs.begin(), g_.outputs.end());
@@ -1784,14 +1863,17 @@ namespace vknn {
                     stat_.submitCallMs += submitCalls;
                     stat_.fenceWaitMs += wall - submitCalls;
                     stat_.unpackMs += ms(t2, t3);
-                    // All fences above have signalled, so the chunk timestamps are available.
-                    if (chunkPool_ && timedChunks_ > 0)
+                    // All fences above have signalled, so the chunk timestamps are available. Only
+                    // the chunks this run actually submitted wrote their query pairs (a chain
+                    // prefix skips the tail chunks; their queries would wait forever).
+                    const uint32_t timedThisRun = std::min(timedChunks_, submitChunks);
+                    if (chunkPool_ && timedThisRun > 0)
                     {
-                        std::vector<uint64_t> ts((size_t) timedChunks_ * 2, 0);
+                        std::vector<uint64_t> ts((size_t) timedThisRun * 2, 0);
                         vkGetQueryPoolResults(be_->ctx().device(), chunkPool_, 0, (uint32_t) ts.size(), ts.size() * sizeof(uint64_t), ts.data(), sizeof(uint64_t),
                                               VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
                         const double period = be_->ctx().caps().timestampPeriod;
-                        for (uint32_t c = 0; c < timedChunks_; ++c)
+                        for (uint32_t c = 0; c < timedThisRun; ++c)
                         {
                             stat_.gpuBusyMs += (double) (ts[c * 2 + 1] - ts[c * 2]) * period / 1e6;
                             if (c > 0)
@@ -1903,10 +1985,10 @@ namespace vknn {
                 }
             }
             ResidentLink link;
-            link.src      = sourceOutput;
-            link.dst      = destInput;
-            link.capacity = kLinkInitialRangeCapacity;
-            link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), kLinkRangeHeaderBytes + (size_t) link.capacity * 12, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+            link.src       = sourceOutput;
+            link.dst       = destInput;
+            link.capacity  = kLinkInitialRangeCapacity;
+            link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), linkRangesBufferBytes(link.capacity), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
             residentLinks_.push_back(std::move(link));
             linkedInputs_.insert(destInput);
             linkedOutputs_.insert(sourceOutput);
@@ -1914,32 +1996,51 @@ namespace vknn {
             return Status::Ok;
         }
 
-        void setResidentLinkRanges(TensorId sourceOutput, TensorId destInput, const std::vector<LinkRange> &ranges) override {
+        void setResidentLinkRangeSets(TensorId sourceOutput, TensorId destInput, const std::vector<std::vector<LinkRange>> &rangeSets) override {
             for (ResidentLink &link: residentLinks_)
             {
                 if (link.src != sourceOutput || link.dst != destInput)
                 {
                     continue;
                 }
-                if ((uint32_t) ranges.size() > link.capacity)
+                uint32_t neededCapacity = 0;
+                for (const std::vector<LinkRange> &ranges: rangeSets)
                 {
-                    link.capacity = std::max<uint32_t>(link.capacity * 2, (uint32_t) ranges.size());
-                    link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), kLinkRangeHeaderBytes + (size_t) link.capacity * 12, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
-                    linksChanged_ = true; // buffer identity changed; the recorded dispatch binds the old one
+                    neededCapacity = std::max<uint32_t>(neededCapacity, (uint32_t) ranges.size());
                 }
-                // Header {rangeCount, totalElems} + 3 uint32 per range. The previous run's fence has
-                // signalled (submitAndWait), so the GPU is not reading this buffer here.
-                uint32_t *words = reinterpret_cast<uint32_t *>(link.rangesBuf->host());
-                uint32_t  total = 0;
-                for (size_t i = 0; i < ranges.size(); ++i)
+                if (neededCapacity > link.capacity)
                 {
-                    words[2 + i * 3 + 0] = (uint32_t) ranges[i].sourceElem;
-                    words[2 + i * 3 + 1] = (uint32_t) ranges[i].destElem;
-                    words[2 + i * 3 + 2] = (uint32_t) ranges[i].count;
-                    total += (uint32_t) ranges[i].count;
+                    link.capacity  = std::max<uint32_t>(link.capacity * 2, neededCapacity);
+                    link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), linkRangesBufferBytes(link.capacity), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                    linksChanged_ = true; // buffer identity (and the per-set stride) changed; the recording binds the old one
                 }
-                words[0] = (uint32_t) ranges.size();
-                words[1] = total;
+                // One set per chain iteration at a fixed stride of {rangeCount, totalElems} + 3
+                // uint32 per range slot. Iterations past the last provided set get a zero header, so
+                // their recorded copy dispatch is a no-op. The previous run's fence has signalled
+                // (submitBatchAndWait), so the GPU is not reading this buffer here.
+                const size_t strideWords = 2 + (size_t) link.capacity * 3;
+                uint32_t    *words       = reinterpret_cast<uint32_t *>(link.rangesBuf->host());
+                for (int setIdx = 0; setIdx < chainStepsMax_; ++setIdx)
+                {
+                    uint32_t *setWords = words + (size_t) setIdx * strideWords;
+                    if ((size_t) setIdx >= rangeSets.size())
+                    {
+                        setWords[0] = 0;
+                        setWords[1] = 0;
+                        continue;
+                    }
+                    const std::vector<LinkRange> &ranges = rangeSets[(size_t) setIdx];
+                    uint32_t                      total  = 0;
+                    for (size_t i = 0; i < ranges.size(); ++i)
+                    {
+                        setWords[2 + i * 3 + 0] = (uint32_t) ranges[i].sourceElem;
+                        setWords[2 + i * 3 + 1] = (uint32_t) ranges[i].destElem;
+                        setWords[2 + i * 3 + 2] = (uint32_t) ranges[i].count;
+                        total += (uint32_t) ranges[i].count;
+                    }
+                    setWords[0] = (uint32_t) ranges.size();
+                    setWords[1] = total;
+                }
                 return;
             }
         }
@@ -1981,24 +2082,109 @@ namespace vknn {
             }
             if (argMaxOutputs_.insert(output).second)
             {
-                argMaxResults_[output] = std::make_shared<vk::Buffer>(be_->ctx(), kArgMaxResultBytes, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                // One {uint index, float value} slot per decode-chain iteration; a single-step
+                // segment holds (and writes) slot 0 only.
+                argMaxResults_[output] = std::make_shared<vk::Buffer>(be_->ctx(), kArgMaxResultBytes * (size_t) chainStepsMax_, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
                 argMaxChanged_         = true; // the next run re-records with the epilogue dispatch
             }
             return Status::Ok;
         }
 
-        bool readOutputArgMax(TensorId output, int64_t &index, float &value) override {
+        bool readOutputArgMax(TensorId output, int step, int64_t &index, float &value) override {
             auto it = argMaxResults_.find(output);
-            if (it == argMaxResults_.end())
+            if (it == argMaxResults_.end() || step < 0 || step >= chainStepsMax_)
             {
                 return false;
             }
-            // {uint index, float value}, written by the epilogue dispatch of the last submitted run;
-            // the fence has signalled (submitAndWait), so the mapped read is coherent.
-            const uint32_t *words = reinterpret_cast<const uint32_t *>(it->second->host());
+            // {uint index, float value} per iteration slot, written by the epilogue dispatch of the
+            // last submitted run; the fence has signalled (submitBatchAndWait), so the mapped read
+            // is coherent.
+            const uint32_t *words = reinterpret_cast<const uint32_t *>(it->second->host()) + (size_t) step * 2;
             index                 = (int64_t) words[0];
             std::memcpy(&value, &words[1], sizeof value);
             return true;
+        }
+
+        Status configureDecodeChain(TensorId tokenInput, TensorId positionInput, TensorId maskInput, TensorId argMaxOutput, int steps, std::string &whyNot) override {
+            if (steps < 1 || steps > chainStepsMax_)
+            {
+                whyNot = "chain length " + std::to_string(steps) + " is outside [1, " + std::to_string(chainStepsMax_) + "] (Config::decodeChainSteps sizes the per-iteration buffers)";
+                return Status::InvalidArgument;
+            }
+            if (cfg_.profile)
+            {
+                // Profiling records per-node timestamps over a single-iteration stream (one query
+                // pair per node) and forces a single chunk; a chain would misindex both.
+                whyNot = "profiling and decode chains are mutually exclusive";
+                return Status::Unsupported;
+            }
+            if (!argMaxOutputs_.count(argMaxOutput))
+            {
+                whyNot = "'" + g_.tensors[argMaxOutput].name + "' is not registered for the on-device argmax (setOutputArgMax first)";
+                return Status::InvalidArgument;
+            }
+            const TensorId feedbackInputs[3] = {tokenInput, positionInput, maskInput};
+            for (TensorId feedbackInput: feedbackInputs)
+            {
+                if (std::find(boundaryInputs.begin(), boundaryInputs.end(), feedbackInput) == boundaryInputs.end() || !buffers_.count(feedbackInput))
+                {
+                    whyNot = "'" + g_.tensors[feedbackInput].name + "' is not a boundary input of the argmax segment";
+                    return Status::InvalidArgument;
+                }
+                if (!g_.desc(feedbackInput).gpuFlat)
+                {
+                    whyNot = "'" + g_.tensors[feedbackInput].name + "' is not flat on the device; the feedback dispatch writes flat elements";
+                    return Status::Unsupported;
+                }
+            }
+            if (numElements(g_.tensors[tokenInput].shape) != 1 || numElements(g_.tensors[positionInput].shape) != 1)
+            {
+                whyNot = "the token/position inputs must hold exactly one element (a [1,1] decode step)";
+                return Status::InvalidArgument;
+            }
+            if (numElements(g_.tensors[maskInput].shape) < 2)
+            {
+                whyNot = "the mask input must span the context window plus the current-token slot";
+                return Status::InvalidArgument;
+            }
+            chain_.tokenInput    = tokenInput;
+            chain_.positionInput = positionInput;
+            chain_.maskInput     = maskInput;
+            chain_.argMaxOutput  = argMaxOutput;
+            chainSteps_          = steps;
+            chainConfigured_     = true;
+            chainActiveSteps_    = 1; // widened per chain via setDecodeChainWindow
+            if (!chainStateBuf_)
+            {
+                chainStateBuf_ = std::make_shared<vk::Buffer>(be_->ctx(), sizeof(uint32_t), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+            }
+            chainChanged_ = true; // the next run re-records the chained command stream
+            return Status::Ok;
+        }
+
+        Status setDecodeChainWindow(int64_t basePosition, int activeSteps) override {
+            if (!chainConfigured_)
+            {
+                return Status::Unsupported;
+            }
+            if (activeSteps < 1 || activeSteps > chainSteps_)
+            {
+                VKNN_ERROR << "decode chain: active steps " << activeSteps << " outside [1, " << chainSteps_ << "]";
+                return Status::InvalidArgument;
+            }
+            // The feedback dispatch derives fp32 position values from basePosition + step with exact
+            // integer arithmetic; past 2^24 a float can no longer hold the integer exactly, matching
+            // the host pack's own limit.
+            if (basePosition < 0 || basePosition + chainSteps_ > (int64_t) 1 << 24)
+            {
+                VKNN_ERROR << "decode chain: base position " << basePosition << " outside the exactly-representable range";
+                return Status::InvalidArgument;
+            }
+            // The previous run's fence has signalled (submitBatchAndWait), so the GPU is not
+            // reading the chain-state buffer here.
+            *reinterpret_cast<uint32_t *>(chainStateBuf_->host()) = (uint32_t) basePosition;
+            chainActiveSteps_                                     = activeSteps;
+            return Status::Ok;
         }
 
       private:
@@ -2084,8 +2270,43 @@ namespace vknn {
         bool                                 linksChanged_ = false; // link set / ranges buffer identity changed -> re-record
         std::unique_ptr<vk::ComputePipeline> linkPipeFp16_, linkPipeFp32_;
         static constexpr uint32_t            kLinkRangeHeaderBytes     = 8;  // {rangeCount, totalElems}
-        static constexpr uint32_t            kLinkInitialRangeCapacity = 16; // ranges; grows on demand
+        static constexpr uint32_t            kLinkInitialRangeCapacity = 16; // ranges per set; grows on demand
         static constexpr uint32_t            kLinkCopyGroups           = 4;  // fixed grid; the shader strides over totalElems
+        // A link's ranges buffer holds one range set per chain iteration at a fixed stride; a
+        // single-step segment (chainStepsMax_ == 1) holds exactly the original one-set layout.
+        size_t linkRangesBufferBytes(uint32_t rangeCapacity) const {
+            return (size_t) chainStepsMax_ * (kLinkRangeHeaderBytes + (size_t) rangeCapacity * 12);
+        }
+        // Device-resident decode chain (Session::configureDecodeChain, ADR-0015): the segment
+        // records chainSteps_ decode iterations into one command-buffer sequence. Between
+        // iterations a chain_feedback dispatch writes the previous iteration's argmax index into
+        // the token input, advances the position input, and marks the newly valid mask slot; the
+        // link copies apply per-iteration range sets and the argmax epilogue lands in per-iteration
+        // result slots. A run submits the chunk prefix covering chainActiveSteps_ iterations, so
+        // one recording serves every chain length from 1 to chainSteps_ with no re-record.
+        struct DecodeChain {
+            TensorId tokenInput = kNoTensor, positionInput = kNoTensor, maskInput = kNoTensor;
+            TensorId argMaxOutput = kNoTensor;
+        };
+        DecodeChain                          chain_;
+        bool                                 chainConfigured_  = false;
+        int                                  chainStepsMax_    = 1; // Config::decodeChainSteps; sizes the per-iteration buffers
+        int                                  chainSteps_       = 1; // recorded iterations (<= chainStepsMax_)
+        int                                  chainActiveSteps_ = 1; // iterations the next runs submit (prefix of the recording)
+        std::shared_ptr<vk::Buffer>          chainStateBuf_;        // {uint basePosition}, host-written per chain
+        std::vector<uint32_t>                iterationFirstChunk_;  // cmds_ index of each recorded iteration's first chunk
+        std::unique_ptr<vk::ComputePipeline> chainFeedbackPipe_;
+        bool                                 chainChanged_ = false; // chain configuration changed -> re-record
+        // Command-buffer chunks a run submits: the whole recording, or the prefix covering the
+        // active chain steps (each iteration past the prefix starts a fresh chunk by construction).
+        uint32_t chunksForActiveSteps() const {
+            const int recordedSteps = chainConfigured_ ? chainSteps_ : 1;
+            if (chainActiveSteps_ >= recordedSteps || iterationFirstChunk_.size() < (size_t) recordedSteps)
+            {
+                return (uint32_t) cmds_.size();
+            }
+            return iterationFirstChunk_[(size_t) chainActiveSteps_];
+        }
         // Device-side output argmax (Session::setOutputArgMax): one 8-byte host-visible result
         // buffer {uint index, float value} per registered output, written by the argmax_flat
         // epilogue dispatch the recording appends after the graph's nodes.

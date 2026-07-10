@@ -1436,6 +1436,10 @@ namespace vknn {
     }
 
     Status Session::linkOutputToInput(size_t bucket, const std::string &outputName, const std::string &inputName, const std::vector<LinkRange> &ranges) {
+        return linkOutputToInputChain(bucket, outputName, inputName, std::vector<std::vector<LinkRange>> {ranges});
+    }
+
+    Status Session::linkOutputToInputChain(size_t bucket, const std::string &outputName, const std::string &inputName, const std::vector<std::vector<LinkRange>> &rangeSets) {
         if (bucket >= buckets_.size())
         {
             VKNN_ERROR << "link: bucket " << bucket << " out of range (have " << buckets_.size() << ")";
@@ -1467,16 +1471,30 @@ namespace vknn {
                        << dtypeStr(g.tensors[inId].dtype) << ")";
             return Status::InvalidArgument;
         }
-        if (Status rangeStatus = validateLinkRanges(g, outId, inId, ranges); rangeStatus != Status::Ok)
+        if (rangeSets.empty() || rangeSets.size() > (size_t) std::max(1, cfg_.decodeChainSteps))
         {
-            return rangeStatus;
+            VKNN_ERROR << "link: " << rangeSets.size() << " range set(s) for '" << outputName << "' -> '" << inputName << "'; a link carries 1.." << std::max(1, cfg_.decodeChainSteps)
+                       << " sets (Config::decodeChainSteps)";
+            return Status::InvalidArgument;
+        }
+        for (const std::vector<LinkRange> &ranges: rangeSets)
+        {
+            if (Status rangeStatus = validateLinkRanges(g, outId, inId, ranges); rangeStatus != Status::Ok)
+            {
+                return rangeStatus;
+            }
         }
         // Re-linking an existing pair replaces the ranges (the per-token update path).
         for (ResidentLink &link: links_)
         {
             if (link.bucket == bucket && link.outputName == outputName && link.inputName == inputName)
             {
-                link.ranges      = ranges;
+                if (rangeSets.size() > 1 && !link.deviceSegment)
+                {
+                    VKNN_ERROR << "link: per-iteration range sets need a device-resident link; '" << outputName << "' -> '" << inputName << "' links host storage";
+                    return Status::InvalidArgument;
+                }
+                link.rangeSets   = rangeSets;
                 link.rangesDirty = true;
                 return Status::Ok;
             }
@@ -1497,7 +1515,7 @@ namespace vknn {
         link.inputName   = inputName;
         link.outId       = outId;
         link.inId        = inId;
-        link.ranges      = ranges;
+        link.rangeSets   = rangeSets;
         link.rangesDirty = true;
         if (cfg_.backend != BackendKind::Cpu)
         {
@@ -1550,6 +1568,11 @@ namespace vknn {
                 return addStatus;
             }
             link.deviceSegment = owner;
+        }
+        if (rangeSets.size() > 1 && !link.deviceSegment)
+        {
+            VKNN_ERROR << "link: per-iteration range sets need a device-resident link; '" << outputName << "' -> '" << inputName << "' links host storage";
+            return Status::InvalidArgument;
         }
         links_.push_back(std::move(link));
         return Status::Ok;
@@ -1690,15 +1713,29 @@ namespace vknn {
     }
 
     Status Session::readOutputArgMax(const std::string &outputName, int64_t &index, float &value) {
+        return readOutputArgMax(outputName, 0, index, value);
+    }
+
+    Status Session::readOutputArgMax(const std::string &outputName, int step, int64_t &index, float &value) {
+        if (step < 0 || step >= std::max(1, cfg_.decodeChainSteps))
+        {
+            VKNN_ERROR << "argmax: step " << step << " outside [0, " << std::max(1, cfg_.decodeChainSteps) << ") (Config::decodeChainSteps)";
+            return Status::InvalidArgument;
+        }
         for (const OutputArgMax &reduction: argMaxOutputs_)
         {
             if (reduction.outputName != outputName)
             {
                 continue;
             }
-            if (reduction.deviceSegment && reduction.deviceSegment->readOutputArgMax(reduction.outId, index, value))
+            if (reduction.deviceSegment && reduction.deviceSegment->readOutputArgMax(reduction.outId, step, index, value))
             {
                 return Status::Ok;
+            }
+            if (step > 0)
+            {
+                VKNN_ERROR << "argmax: '" << outputName << "' has no device reduction path; only step 0 (the host scan) is readable";
+                return Status::Unsupported;
             }
             // Host path: scan the internal fp32 copy with the shader's exact semantics — strictly
             // greater replaces, so the first occurrence of the maximum wins and NaN never does.
@@ -1729,6 +1766,72 @@ namespace vknn {
         return Status::NotFound;
     }
 
+    // ---- device-resident decode chains (ADR-0015) --------------------------------------------------
+
+    Status Session::configureDecodeChain(size_t bucket, const std::string &tokenInput, const std::string &positionInput, const std::string &maskInput, const std::string &outputName) {
+        if (bucket >= buckets_.size())
+        {
+            VKNN_ERROR << "decode chain: bucket " << bucket << " out of range (have " << buckets_.size() << ")";
+            return Status::InvalidArgument;
+        }
+        PlanBucket         &b         = buckets_[bucket];
+        const Graph        &g         = *b.graph;
+        const TensorId      outId     = g.find(outputName);
+        const OutputArgMax *reduction = outId == kNoTensor ? nullptr : argMaxOutput(bucket, outId);
+        if (!reduction)
+        {
+            VKNN_ERROR << "decode chain: '" << outputName << "' is not argmax-registered on bucket " << bucket << " (setOutputArgMax first)";
+            return Status::InvalidArgument;
+        }
+        if (!reduction->deviceSegment)
+        {
+            VKNN_ERROR << "decode chain: '" << outputName << "' reduces on the host; the chain needs the device argmax path";
+            return Status::Unsupported;
+        }
+        const std::string *inputNames[3] = {&tokenInput, &positionInput, &maskInput};
+        TensorId           inputIds[3]   = {kNoTensor, kNoTensor, kNoTensor};
+        for (int i = 0; i < 3; ++i)
+        {
+            inputIds[i] = g.find(*inputNames[i]);
+            if (inputIds[i] == kNoTensor || !idInList(g.inputs, inputIds[i]))
+            {
+                VKNN_ERROR << "decode chain: '" << *inputNames[i] << "' is not a graph input of bucket " << bucket;
+                return Status::NotFound;
+            }
+        }
+        std::string  whyNot;
+        const int    steps = std::max(1, cfg_.decodeChainSteps);
+        const Status st    = reduction->deviceSegment->configureDecodeChain(inputIds[0], inputIds[1], inputIds[2], outId, steps, whyNot);
+        if (st != Status::Ok)
+        {
+            VKNN_ERROR << "decode chain: '" << outputName << "': " << (whyNot.empty() ? "backend has no device chain path" : whyNot);
+            return st;
+        }
+        for (DecodeChain &existing: decodeChains_)
+        {
+            if (existing.bucket == bucket)
+            {
+                existing.segment = reduction->deviceSegment;
+                existing.steps   = steps;
+                return Status::Ok;
+            }
+        }
+        decodeChains_.push_back({bucket, reduction->deviceSegment, steps});
+        return Status::Ok;
+    }
+
+    Status Session::setDecodeChainWindow(size_t bucket, int64_t basePosition, int activeSteps) {
+        for (DecodeChain &chain: decodeChains_)
+        {
+            if (chain.bucket == bucket)
+            {
+                return chain.segment->setDecodeChainWindow(basePosition, activeSteps);
+            }
+        }
+        VKNN_ERROR << "decode chain: bucket " << bucket << " has no configured chain (configureDecodeChain first)";
+        return Status::NotFound;
+    }
+
     Status Session::applyResidentLinks(size_t bucketIndex, PlanBucket &bucket) {
         for (ResidentLink &link: links_)
         {
@@ -1747,13 +1850,14 @@ namespace vknn {
             {
                 if (link.rangesDirty)
                 {
-                    link.deviceSegment->setResidentLinkRanges(link.outId, link.inId, link.ranges);
+                    link.deviceSegment->setResidentLinkRangeSets(link.outId, link.inId, link.rangeSets);
                     link.rangesDirty = false;
                 }
                 continue;
             }
             // Host path (CPU backend): the ranged copy moves the exact fp32/int64 storage bytes the
-            // caller's own fold would have, so values are identical to the unlinked loop.
+            // caller's own fold would have, so values are identical to the unlinked loop. A host
+            // link always carries exactly one range set (multi-set links are rejected at link time).
             const Graph &g = *bucket.graph;
             ensureResidentHostStorage(g, link.outId, src);
             ensureResidentHostStorage(g, link.inId, dst);
@@ -1763,9 +1867,12 @@ namespace vknn {
                 return Status::InvalidArgument;
             }
             const size_t elemBytes = dtypeSize(src.dtype);
-            for (const LinkRange &r: link.ranges)
+            if (!link.rangeSets.empty())
             {
-                std::memcpy(dst.host.bytes.data() + (size_t) r.destElem * elemBytes, src.host.bytes.data() + (size_t) r.sourceElem * elemBytes, (size_t) r.count * elemBytes);
+                for (const LinkRange &r: link.rangeSets.front())
+                {
+                    std::memcpy(dst.host.bytes.data() + (size_t) r.destElem * elemBytes, src.host.bytes.data() + (size_t) r.sourceElem * elemBytes, (size_t) r.count * elemBytes);
+                }
             }
         }
         return Status::Ok;

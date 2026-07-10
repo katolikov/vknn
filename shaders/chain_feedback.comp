@@ -1,0 +1,56 @@
+#version 450
+// Decode-chain state feedback: the head dispatch of chain iteration pc.stepIndex (>= 1), recorded
+// between iterations of a device-resident decode chain (see ADR-0015). Feeds the previous
+// iteration's argmax result forward on-GPU, computing each input by the host pack's exact rules so
+// the chained stream is bit-identical to the single-step loop:
+//   - input_ids[0]    = float(previous iteration's argmax index)
+//   - position_ids[0] = float(basePosition + stepIndex)   (exact integer arithmetic, no read-back
+//                       of the possibly-rounded stored value)
+//   - attention_mask[basePosition + stepIndex - 1] = 1 when that slot is inside the context window
+//                       (slots 0..maskValidSlots-1); the current-token slot (index maskValidSlots)
+//                       is 1 from the host's iteration-0 pack and is never touched. Past the
+//                       window edge the mask is already all-ones and nothing is written.
+// basePosition (the chain's iteration-0 absolute position) is host-written per chain into the
+// chain-state SSBO; stepIndex is baked per recorded iteration as a push constant.
+//
+// The target buffers are the segment's boundary INPUT buffers in their device storage: fp32 words,
+// or fp16 half-words for an unpinned input under fp16 storage. Every buffer binds as uint words and
+// an fp16 element is placed by half-word read-modify-write with vknnF32ToF16RteBits — the same bits
+// as the host's floatToHalfSat pack — so no 16-bit-type extension is required. The single
+// invocation is the only writer between barriers, so the read-modify-write cannot race.
+#include "f16bits.glsl"
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) readonly buffer ARGMAX { uvec2 argMaxResults[]; }; // {index, valueBits} per iteration
+layout(std430, binding = 1) buffer TOKEN { uint tokenWords[]; };
+layout(std430, binding = 2) buffer POSITION { uint positionWords[]; };
+layout(std430, binding = 3) buffer MASK { uint maskWords[]; };
+layout(std430, binding = 4) readonly buffer CHAIN { uint basePosition; };
+layout(push_constant) uniform PC {
+  uint stepIndex;        // chain iteration this dispatch feeds (1..steps-1)
+  uint maskValidSlots;   // past-slot count C; mask element C is the always-on current-token slot
+  uint tokenElemFp16;    // element width per target buffer: 1 = fp16 half-word, 0 = fp32 word
+  uint positionElemFp16;
+  uint maskElemFp16;
+} pc;
+
+// Store float `value` as element `elem` of the word buffer `words` under width flag `fp16Elem`.
+#define STORE_BOUNDARY_ELEM(words, elem, value, fp16Elem)                                   \
+  if ((fp16Elem) != 0u) {                                                                   \
+    uint word = (words)[(elem) >> 1u];                                                      \
+    uint bits = vknnF32ToF16RteBits(value);                                                 \
+    (words)[(elem) >> 1u] = ((elem) & 1u) == 0u ? (word & 0xFFFF0000u) | bits               \
+                                                : (word & 0x0000FFFFu) | (bits << 16u);     \
+  } else {                                                                                  \
+    (words)[elem] = floatBitsToUint(value);                                                 \
+  }
+
+void main() {
+  const uint tokenIndex = argMaxResults[pc.stepIndex - 1u].x;
+  STORE_BOUNDARY_ELEM(tokenWords, 0u, float(tokenIndex), pc.tokenElemFp16)
+  const uint position = basePosition + pc.stepIndex;
+  STORE_BOUNDARY_ELEM(positionWords, 0u, float(position), pc.positionElemFp16)
+  const uint newValidSlot = position - 1u;
+  if (newValidSlot < pc.maskValidSlots) {
+    STORE_BOUNDARY_ELEM(maskWords, newValidSlot, 1.0, pc.maskElemFp16)
+  }
+}
