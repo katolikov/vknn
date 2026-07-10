@@ -158,6 +158,8 @@ namespace vknn {
                 return "GroupQueryAttention";
             case OpType::MatMulNBits:
                 return "MatMulNBits";
+            case OpType::FusedAttention:
+                return "FusedAttention";
             default:
                 return "Unknown";
         }
