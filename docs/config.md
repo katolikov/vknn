@@ -128,7 +128,7 @@ enum class Hint {
   MatMulViewFold  = 6,  // MatMul operand-view fold at load  (On / Off, default On)
   RopeFusion      = 7,  // rotate-half RoPE chain fusion at load (On / Off, default On)
   FusedAttention  = 8,  // single-query decode-attention fusion at load (On / Off, default On)
-  KvConcatFold    = 9,  // per-token KV-cache Concat fold into split-source attention (On / Off, default Off — its rows-only present output is incompatible with the engine-resident KV link; opt in for a host-cache decode loop)
+  KvConcatFold    = 9,  // per-token KV-cache Concat fold into split-source attention (On / Off, default On)
 };
 // One Mode enum holds every value; the Hint picks the knob, the Mode the value. (Autotune effort is
 // a top-level Config::tuning field, not a Hint.)

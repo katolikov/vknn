@@ -185,13 +185,13 @@ namespace vknn {
         bool fusedAttention() const noexcept {
             return hint(Hint::FusedAttention, (int) Mode::On) != (int) Mode::Off;
         }
-        /// True when the load-time KV-cache Concat fold is enabled. OFF by default: it rewrites the
-        /// present KV outputs to the rows-only convention, which the engine-resident KV link
-        /// (Session::linkOutputToInput) cannot drive (the new-row present is read by the fused
-        /// attention in the same step). Opt in with setHint(Hint::KvConcatFold, Mode::On) for a
-        /// host-cache decode loop that folds the present rows itself.
+        /// True when the load-time KV-cache Concat fold is enabled (On by default;
+        /// --no-kv-concat-fold sets it Off). The fold rewrites the present KV outputs to the
+        /// rows-only convention; the engine-resident KV link (Session::linkOutputToInput) and the
+        /// decode drivers read the fold source from the present output's OWN shape (io_link.h), so
+        /// both present conventions drive the same cache. Controlled through the hint mechanism.
         bool kvConcatFold() const noexcept {
-            return hint(Hint::KvConcatFold, (int) Mode::Off) == (int) Mode::On;
+            return hint(Hint::KvConcatFold, (int) Mode::On) != (int) Mode::Off;
         }
 
         static Config fromJsonFile(const std::string &path);
