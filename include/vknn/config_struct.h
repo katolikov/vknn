@@ -153,6 +153,11 @@ namespace vknn {
         bool gpuIslandFold() const noexcept {
             return hint(Hint::GpuIslandFold, (int) Mode::On) != (int) Mode::Off;
         }
+        /// True when the load-time MatMul operand-view fold is enabled (On by default;
+        /// --no-matmul-view-fold sets it Off). Controlled through the hint mechanism.
+        bool matmulViewFold() const noexcept {
+            return hint(Hint::MatMulViewFold, (int) Mode::On) != (int) Mode::Off;
+        }
 
         static Config fromJsonFile(const std::string &path);
         static Config fromJsonString(const std::string &json);

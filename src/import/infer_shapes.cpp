@@ -1,3 +1,4 @@
+#include "core/matmul_view.h"
 #include "dim_expr.h"
 #include "passes_internal.h"
 
@@ -34,10 +35,9 @@ namespace vknn {
     /// their output unresolved and resolve on a subsequent call once the operand lands.
     ///
     /// Ops not listed (the `default` arm) are shape-path ops whose outputs are produced by constFold.
-    void inferShapes(Graph &g, int64_t batch, const std::map<std::string, Shape> *declared,
-                     const std::map<std::string, int64_t> *bindings) {
+    void inferShapes(Graph &g, int64_t batch, const std::map<std::string, Shape> *declared, const std::map<std::string, int64_t> *bindings) {
         static const std::map<std::string, int64_t> kNoBindings;
-        const std::map<std::string, int64_t>        &binds = bindings ? *bindings : kNoBindings;
+        const std::map<std::string, int64_t>       &binds = bindings ? *bindings : kNoBindings;
 
         // Symbols that no binding resolved, and dynamic axes with no recorded symbol at all: accumulated
         // across every input so one aggregated error lists them together (instead of failing on the first
@@ -186,6 +186,13 @@ namespace vknn {
             {
                 return;
             }
+            // A view-folded MatMul (core/matmul_view.h) reads its operands through attr strides;
+            // its operand shapes are the chain SOURCES, so the forward matmul rule would derive a
+            // wrong output shape. Every shape on such a node is already final.
+            if (nd.attr.has(kMmView))
+            {
+                return;
+            }
             TensorId o = nd.outputs[0];
             switch (nd.type)
             {
@@ -203,11 +210,10 @@ namespace vknn {
                         break;
                     }
                     int64_t     outC = w[0], kh = w[2], kw = w[3];
-                    const auto &st   = nd.attr.getints("strides");
-                    const auto &pad  = nd.attr.getints("pads");
-                    const auto &dil  = nd.attr.getints("dilations");
-                    if ((!st.empty() && st.size() < 2) || (!pad.empty() && pad.size() < 4) ||
-                        (!dil.empty() && dil.size() < 2))
+                    const auto &st  = nd.attr.getints("strides");
+                    const auto &pad = nd.attr.getints("pads");
+                    const auto &dil = nd.attr.getints("dilations");
+                    if ((!st.empty() && st.size() < 2) || (!pad.empty() && pad.size() < 4) || (!dil.empty() && dil.size() < 2))
                     {
                         break; // 1-spatial-dim attributes: normalizeConv1d has not run (runtime weight)
                     }
@@ -245,7 +251,7 @@ namespace vknn {
                 case OpType::InstanceNorm: // normalize over the spatial dims: same shape as input
                 case OpType::Identity:
                 case OpType::Unary:
-                case OpType::IsNaN:          // elementwise NaN test: bool output, same shape as input
+                case OpType::IsNaN: // elementwise NaN test: bool output, same shape as input
                 case OpType::Softmax:
                 case OpType::LayerNorm:
                 case OpType::RMSNorm: // y = x*rsqrt(mean(x^2)+eps)*gamma over the last axis: same shape as input
@@ -287,7 +293,7 @@ namespace vknn {
                     for (size_t i = 0; i < rank; ++i)
                     {
                         int64_t da = dimOf(a, i), db = dimOf(b, i);
-                        out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
+                        out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
                     SH(o) = out;
                     break;
@@ -449,9 +455,7 @@ namespace vknn {
                             SH(o) = {xs[0], xs[1], gs[2], gs[3]};
                         }
                     } else if (xs.size() == 4 && gs.size() == 4)
-                    {
-                        SH(o) = {xs[0], xs[1], gs[1], gs[2]};
-                    }
+                    { SH(o) = {xs[0], xs[1], gs[1], gs[2]}; }
                     break;
                 }
                 case OpType::Cast:
@@ -592,9 +596,9 @@ namespace vknn {
                     {
                         break; // k const-folds later; resolved on a subsequent pass
                     }
-                    Shape out = a;
-                    out[axis] = std::min(k, a[axis]); // an oversized k saturates at the axis length
-                    SH(o)     = out;
+                    Shape out       = a;
+                    out[axis]       = std::min(k, a[axis]); // an oversized k saturates at the axis length
+                    SH(o)           = out;
                     g.desc(o).dtype = g.desc(nd.inputs[0]).dtype;
                     if (nd.outputs.size() > 1 && nd.outputs[1] != kNoTensor)
                     {
@@ -857,7 +861,7 @@ namespace vknn {
                     for (size_t i = 0; i < rank; ++i)
                     {
                         int64_t da = dimOf(a, i), db = dimOf(b, i);
-                        out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
+                        out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
                     SH(o) = out;
                     break;

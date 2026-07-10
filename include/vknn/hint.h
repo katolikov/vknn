@@ -13,17 +13,29 @@ namespace vknn {
         DirectConv3x3   = 3, ///< Direct 3x3 kernel (DirectAuto / RegisterTiled / LdsHalo).
         FlatLayout      = 4, ///< Flat row-major GPU layout pass — keeps generic head ops on the GPU (On / Off, default On).
         GpuIslandFold   = 5, ///< Fold tiny GPU op-islands onto the CPU (On / Off, default On).
+        MatMulViewFold  = 6, ///< Fold Transpose/Expand chains into MatMul operand views at load (On / Off, default On).
     };
 
-    /// Every kernel/pass selection value, set uniformly via setHint(Hint, Mode). Each line is the set of
-    /// values valid for one Hint; the same underlying int recurs across groups (legal — the Hint picks the
-    /// knob, the Mode the value). Forcing Winograd On/Off skips per-shape timing, making the choice
-    /// deterministic run-to-run. FlatLayout/GpuIslandFold use On (default) / Off.
+    /// Every kernel/pass selection value, set uniformly via setHint(Hint, Mode). The value sets by
+    /// Hint: Auto/On/Off serve Winograd, FlatLayout, GpuIslandFold and MatMulViewFold;
+    /// TiledGemm..SubgroupGemm serve WinogradVariant; F23/F43 serve WinogradUnit;
+    /// DirectAuto..LdsHalo serve DirectConv3x3. The same underlying int recurs across groups
+    /// (legal — the Hint picks the knob, the Mode the value). Forcing Winograd On/Off skips
+    /// per-shape timing, making the choice deterministic run-to-run.
     enum class Mode {
-        Auto = 0, On = 1, Off = 2,                                                  ///< Hint::Winograd, FlatLayout, GpuIslandFold.
-        TiledGemm = 0, Fused = 1, FusedSplit = 2, FullyFused = 3, SubgroupGemm = 4, ///< Hint::WinogradVariant.
-        F23 = 0, F43 = 4,                                                           ///< Hint::WinogradUnit.
-        DirectAuto = 0, RegisterTiled = 1, LdsHalo = 2,                             ///< Hint::DirectConv3x3.
+        Auto          = 0,
+        On            = 1,
+        Off           = 2,
+        TiledGemm     = 0,
+        Fused         = 1,
+        FusedSplit    = 2,
+        FullyFused    = 3,
+        SubgroupGemm  = 4,
+        F23           = 0,
+        F43           = 4,
+        DirectAuto    = 0,
+        RegisterTiled = 1,
+        LdsHalo       = 2,
     };
 
     /// Parse the Winograd knob from a string. Forcing on or off makes the 3x3-conv kernel choice

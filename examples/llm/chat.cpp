@@ -93,6 +93,10 @@ int main(int argc, char **argv) {
     const int64_t eos          = atoll(opt(argc, argv, "--eos", "151643"));
     bool          kvLink       = !flagSet(argc, argv, "--no-kv-link"); // may drop to the host loop mid-stream on a link failure
     cfg.timing                 = flagSet(argc, argv, "--timing");      // per-run pack/submit/unpack walls
+    if (flagSet(argc, argv, "--no-matmul-view-fold"))
+    {
+        cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+    }
     std::mt19937 rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
 
     auto sess = Runtime::load(model, cfg);
@@ -469,7 +473,7 @@ int main(int argc, char **argv) {
     // p..p+len-1 — and return the last real token's logits row. Pad slots carry mask 0, so real
     // tokens never attend them and their (garbage) rows are simply not folded. Advances p.
     std::vector<IOTensor> prefillOutputs;
-    auto                  prefillPass = [&](const int64_t *toks, int len) -> const float * {
+    auto                  prefillPass = [&](const int64_t *toks, int len) -> const float                  *{
         std::vector<IOTensor> pin(inputs.size());
         for (size_t i = 0; i < ins.size(); ++i)
         {
@@ -549,9 +553,7 @@ int main(int argc, char **argv) {
                 {
                     for (int t = 0; t < len; ++t)
                     {
-                        std::memcpy(dst + ((size_t) h * C + p + t) * headDim,
-                                    src + ((size_t) h * prefillPresRows + newRowsAt + t) * headDim,
-                                    (size_t) headDim * sizeof(float));
+                        std::memcpy(dst + ((size_t) h * C + p + t) * headDim, src + ((size_t) h * prefillPresRows + newRowsAt + t) * headDim, (size_t) headDim * sizeof(float));
                     }
                 }
             }

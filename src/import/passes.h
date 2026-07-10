@@ -26,8 +26,7 @@ namespace vknn {
     // fallback (leading axis) > error. A declared entry's rank must match the input's rank and its dims
     // must be non-negative. The pass is idempotent: a dim resolved on an earlier call is already positive
     // and is left untouched (the lookups and the error fire only while a dim is still dynamic).
-    void inferShapes(Graph &g, int64_t batch = 1, const std::map<std::string, Shape> *declared = nullptr,
-                     const std::map<std::string, int64_t> *bindings = nullptr);
+    void inferShapes(Graph &g, int64_t batch = 1, const std::map<std::string, Shape> *declared = nullptr, const std::map<std::string, int64_t> *bindings = nullptr);
     // The per-node forward shape rule of inferShapes, callable on its own. constFold interleaves it
     // with value folding in one program-order walk so a folded Reshape/Slice/Expand target resolves
     // its consumer's shape (and everything behind it) within the SAME fold pass, instead of one
@@ -96,7 +95,7 @@ namespace vknn {
     void pruneDeadInitializers(Graph &g);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
-        int64_t batch               = 1;
+        int64_t batch = 1;
         // Declared concrete shapes for graph inputs, keyed by input tensor name. An input listed here
         // has its dynamic (negative) dims resolved from its declared shape; an input absent here falls
         // back to `batch` on its leading axis and errors on any other dynamic axis (see inferShapes).
@@ -107,22 +106,22 @@ namespace vknn {
         // automatically by inferShapes; `inputShapes` (per-tensor) overrides a binding for that tensor.
         // Empty = the batch-only path.
         std::map<std::string, int64_t> dimBindings;
-        bool    fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
-        bool    fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
-        bool    fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
-        bool    fuseGridSampleWarp  = true;  // fold a scaled-flow + base-grid coordinate chain into
-                                             // GridSample (bit-exact; default on, part of O1)
-        bool    strictFuse          = false; // rounded steps everywhere: fused == unfused byte-identical
-                                             // (the byte-gate mode; default fast mode fp32-chains each
-                                             // unit and rounds once per stored stream)
-        bool    lowerConv           = false; // non-Winograd KxK Conv -> ConvGemm (experimental: the
-                                             // v1 64x64x16 kernel loses to the direct conv on
-                                             // classifier-CNN shapes — opt in per model, measure)
-        bool    dequantize          = true;  // fold DequantizeLinear weights + collapse matching
-                                             // QDQ sandwiches so quantized checkpoints run as
-                                             // float graphs (--no-dequantize keeps the quantized
-                                             // ops; they have no kernel and fail planning)
-        bool    dumpBig             = false; // debug: log tensors > 50M elements after shape inference
+        bool                           fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
+        bool                           fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
+        bool                           fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
+        bool                           fuseGridSampleWarp  = true;  // fold a scaled-flow + base-grid coordinate chain into
+                                                                    // GridSample (bit-exact; default on, part of O1)
+        bool strictFuse = false;                                    // rounded steps everywhere: fused == unfused byte-identical
+                                                                    // (the byte-gate mode; default fast mode fp32-chains each
+                                                                    // unit and rounds once per stored stream)
+        bool lowerConv = false;                                     // non-Winograd KxK Conv -> ConvGemm (experimental: the
+                                                                    // v1 64x64x16 kernel loses to the direct conv on
+                                                                    // classifier-CNN shapes — opt in per model, measure)
+        bool dequantize = true;                                     // fold DequantizeLinear weights + collapse matching
+                                                                    // QDQ sandwiches so quantized checkpoints run as
+                                                                    // float graphs (--no-dequantize keeps the quantized
+                                                                    // ops; they have no kernel and fail planning)
+        bool dumpBig = false;                                       // debug: log tensors > 50M elements after shape inference
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
@@ -152,16 +151,16 @@ namespace vknn {
         // tolerate int4 well), so it takes the coarse traffic-optimal setting; Conv/Gemm weights are
         // dequantized to fp16 at load (file-size win only, zero runtime cost), so they take the fine
         // quality-optimal setting that deep conv stacks need.
-        int64_t group          = 128;  // MatMul scale group size along the reduction axis
-        double  outlierFrac    = 0.01; // MatMul fraction of activation-salient columns kept fp16 (AWQ)
-        int64_t convGroup      = 32;   // Conv/Gemm scale group size
+        int64_t group           = 128;  // MatMul scale group size along the reduction axis
+        double  outlierFrac     = 0.01; // MatMul fraction of activation-salient columns kept fp16 (AWQ)
+        int64_t convGroup       = 32;   // Conv/Gemm scale group size
         double  convOutlierFrac = 0.05; // Conv/Gemm outlier fraction
-        int     calibSamples   = 8;    // synthetic calibration samples when calibFiles is empty
+        int     calibSamples    = 8;    // synthetic calibration samples when calibFiles is empty
         // Per-layer weighted relative weight-error bar; above it the layer stays fp16. Symmetric
         // int4 with grouped scales sits at ~8-15% weight-space error by construction (the OUTPUT
         // error is far smaller — independent per-column errors average out across the reduction), so
         // the bar catches anomalously quantization-hostile layers, not typical ones.
-        double maxLayerRelErr = 0.25;
+        double  maxLayerRelErr = 0.25;
         int64_t minElems       = 16384; // weights smaller than this stay fp16 (no size win)
         int64_t minK           = 256;   // reductions shallower than this stay fp16 (excludes depthwise)
         // Caller calibration data: each entry is ONE sample — raw .bin files in graph-input order
@@ -210,5 +209,15 @@ namespace vknn {
     // decodes the grid at its storage precision via the GRID_FP32 spec constant. Runs at load, after
     // insertLayoutConverts, before markFp32.
     void pinGridSampleGridFp32(Graph &g);
+
+    // Fold Transpose/Expand/Reshape/Unsqueeze/Squeeze chains feeding a non-tiled-class MatMul
+    // operand into per-axis stride attrs on the node (core/matmul_view.h) and rewire the operand to
+    // the chain's source, so a GQA decode's repeat_kv broadcast and attention transposes never
+    // materialize. Bit-identical (same values, same ascending-k order, kernel class preserved).
+    // `fp32Pins` is the Config::fp32Tensors/mixedPrecisionFp32Tensors matcher the later markFp32
+    // pass will apply: a chain touching a pinned tensor keeps its materialized form, since removing
+    // the tensor would remove the fp32 store the pin exists for. Runs at load only, gated by
+    // Hint::MatMulViewFold, before insertLayoutConverts; never serialized.
+    void foldMatMulViews(Graph &g, const std::string &fp32Pins = "");
 
 } // namespace vknn

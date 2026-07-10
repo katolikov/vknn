@@ -173,6 +173,7 @@ namespace vknn {
             k.precision       = cfg.precision == Precision::High ? "high" : cfg.precision == Precision::Normal ? "normal" : "low";
             k.flatLayout      = cfg.flatLayout();
             k.gpuIslandFold   = cfg.gpuIslandFold();
+            k.matmulViewFold  = cfg.matmulViewFold();
             k.fp32Tensors     = cfg.fp32Tensors;
             k.winograd        = cfg.hint(Hint::Winograd, (int) Mode::Auto);
             k.winogradVariant = cfg.hint(Hint::WinogradVariant, 0);
