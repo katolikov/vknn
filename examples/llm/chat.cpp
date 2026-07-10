@@ -132,6 +132,10 @@ int main(int argc, char **argv) {
     {
         cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
     }
+    if (flagSet(argc, argv, "--kv-concat-fold"))
+    {
+        cfg.setHint(Hint::KvConcatFold, (int) Mode::On);
+    }
     // --chain N: device-resident decode chains of N tokens, greedy + linked KV + engine argmax
     // only. Any ineligible combination drops to the single-step loop with one notice; the chain
     // length reaches the engine through Config::decodeChainSteps (set before load, so the decode

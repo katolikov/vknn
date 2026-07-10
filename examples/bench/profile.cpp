@@ -74,6 +74,10 @@ int main(int argc, char **argv) {
         {
             cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
         }
+        if (!strcmp(argv[i], "--kv-concat-fold"))
+        {
+            cfg.setHint(Hint::KvConcatFold, (int) Mode::On);
+        }
     }
 
     auto sess = Runtime::load(model, cfg);
