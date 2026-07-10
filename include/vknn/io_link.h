@@ -26,6 +26,20 @@ namespace vknn {
     /// one convention breaks the other (a cache-concat offset applied to a rows-only present is out
     /// of bounds and rejected by the link validation). `slot` < 0 returns no ranges (the reset /
     /// first-step state with no pending fold).
+    /// The cache slot a decode step at absolute position `position` folds the PREVIOUS token's
+    /// present row into: slot position-1, clamped to the last slot once the position runs past the
+    /// compiled context window (the overrun then keeps overwriting the newest slot). Negative (no
+    /// pending fold) at position 0. The single source of the fold-slot rule shared by the
+    /// single-step decode loop and the per-iteration precompute of a decode chain.
+    inline int64_t kvFoldSlot(int64_t position, int64_t cacheSlots) {
+        if (position <= 0)
+        {
+            return -1;
+        }
+        const int64_t slot = position - 1;
+        return slot < cacheSlots ? slot : cacheSlots - 1;
+    }
+
     inline std::vector<LinkRange> kvFoldRanges(int64_t kvHeads, int64_t presentRows, int64_t cacheSlots, int64_t headDim, int64_t slot) {
         std::vector<LinkRange> ranges;
         if (slot < 0)

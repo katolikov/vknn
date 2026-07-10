@@ -33,6 +33,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `allowCpuFallback` | bool | `true` / `false` | `true` | If `false`, nodes that no listed backend accepts are an error instead of silently running on CPU. |
 | `precision` | string | `"low"`, `"normal"`, `"high"` (aliases `"fp16"`→low, `"mixed"`→normal, `"fp32"`→high; unknown → low) | `"low"` | Quality tier for the Vulkan backend. `low` = fp16 storage + fp32 accumulation everywhere. `normal` = fp16, but a built-in geometry-tail set (`mixedPrecisionFp32Tensors()`) is kept fp32 — selective fp32 (a no-op for models without those tensors). `high` = full fp32 storage. Under `low`/`normal` every fp16 narrowing store rounds to nearest even (the `RoundingModeRTE` SPIR-V execution mode), so per-store error is unbiased and does not accumulate a directional drift across depth. See `fp32Tensors` to override the `normal` set. |
 | `maxSubmitNodes` | int | ≥ 0 | `500` | Split a GPU segment larger than this into chunks of this many nodes, each its own submit, so no single submit trips the GPU watchdog. `0` disables chunking. Only the very large YoNoSplat-class transformer needs it; results are numerically identical. |
+| `decodeChainSteps` | int | ≥ 1 | `1` | Decode iterations the decode bucket's GPU segment records as one command-buffer chain (`Session::configureDecodeChain`): one submit + one fence per this many greedy tokens, with on-device feedback (argmax id → `input_ids`, position + 1, mask slot) between iterations. `1` records the single-step stream unchanged; only an explicitly configured bucket chains. The token stream is bit-identical to the single-step loop; chained decode is argmax-only. |
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `priority` | string | `"low"`, `"normal"`, `"high"` | `"normal"` | GPU queue scheduling priority (Vulkan `VK_KHR/EXT_global_priority`). `normal` reproduces the default device-creation path; `low`/`high` request the matching queue tier. Scheduling only — never changes numerical output; an inert no-op on a device without a global-priority extension. |
 | `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Per-model MessagePack cache holding the compiled pipelines, prepacked/Winograd weights, and conv autotune table. Empty resolves to `<model>.cache` next to the model. Caching is always on: a warm start reloads it (skipping shader compilation, weight prepacking, and autotuning), and it auto-heals when stale. See [Caching](#caching). |
@@ -192,6 +193,7 @@ lists all of them, with non-default values where useful:
   "priority": "normal",
   "maxSubmitNodes": 500,
   "maxSubmitBindings": 1024,
+  "decodeChainSteps": 1,
   "cacheFile": "enc.cache",
   "cacheDir": "vknn_cache",
   "noCache": false,

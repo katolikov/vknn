@@ -104,6 +104,15 @@ namespace vknn {
         /// approach it; a plain-op graph binds far too few to ever split on this).
         int maxSubmitBindings = 1024;
 
+        /// Decode iterations the decode bucket's GPU segment records as ONE command-buffer chain
+        /// (see Session::configureDecodeChain): one vkQueueSubmit + one fence per this many greedy
+        /// decode tokens, with on-device state feedback (argmax id -> input_ids, position + 1, mask
+        /// slot) between iterations. 1 (the default) records the single-step stream unchanged. The
+        /// chain applies only to a bucket a caller explicitly configures; every other segment always
+        /// records one iteration. Chained decode is argmax-only by construction (the logits row is
+        /// overwritten per iteration), and the token stream is bit-identical to the single-step loop.
+        int decodeChainSteps = 1;
+
         // Debug.
         bool timing = false; ///< print pack/submit/unpack + per-stage timing
         /// Accumulate per-segment submit/sync walls silently and print ONE summary line per GPU
