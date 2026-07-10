@@ -82,6 +82,30 @@ TEST(CacheCodec, RejectsLegacyAndGarbage) {
     EXPECT_FALSE(cacheDecode(truncated, sizeof(truncated), got));
 }
 
+// The load-time graph-rewrite hints are key fields: a variant compiled with a fold/fusion pass off
+// must never satisfy the default-on key (and vice versa), and the flag survives a round-trip — the
+// stale-cache guard for a hint flip between runs.
+TEST(CacheCodec, LoadTimePassHintsDistinguishVariants) {
+    CacheVariant off = makeVariant("low", true);
+    off.ropeFusion   = false;
+    CacheVariant on  = makeVariant("low", true);
+    EXPECT_FALSE(on.sameKey(off));
+
+    CacheVariant viewOff   = makeVariant("low", true);
+    viewOff.matmulViewFold = false;
+    EXPECT_FALSE(on.sameKey(viewOff));
+
+    CacheDoc doc;
+    doc.variants.push_back(off);
+    std::vector<uint8_t> bytes = cacheEncode(doc);
+    CacheDoc             got;
+    ASSERT_TRUE(cacheDecode(bytes.data(), bytes.size(), got));
+    ASSERT_EQ(got.variants.size(), 1u);
+    EXPECT_FALSE(got.variants[0].ropeFusion);
+    EXPECT_TRUE(got.variants[0].sameKey(off));
+    EXPECT_EQ(got.findVariant(on), nullptr);
+}
+
 // A document carrying zero variants round-trips: the variants array decodes empty and the scalar
 // guard fields are still preserved.
 TEST(CacheCodec, EmptyVariants) {

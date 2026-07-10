@@ -103,6 +103,10 @@ int main(int argc, char **argv) {
     {
         cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
     }
+    if (flagSet(argc, argv, "--no-rope-fusion"))
+    {
+        cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+    }
     std::mt19937 rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
 
     auto sess = Runtime::load(model, cfg);

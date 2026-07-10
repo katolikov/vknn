@@ -230,4 +230,15 @@ namespace vknn {
     // Hint::MatMulViewFold, before insertLayoutConverts; never serialized.
     void foldMatMulViews(Graph &g, const std::string &fp32Pins = "");
 
+    // Fuse each rotate-half RoPE chain — the primitive expansion a contrib RotaryEmbedding lowers to
+    // (Slice x1/x2 of the last-axis halves, Gather+Unsqueeze of a cos/sin table row by position, the
+    // x1*cos-x2*sin / x1*sin+x2*cos rotate products as Binary nodes or the FusedPointwise units the
+    // pointwise fusion built from them, Concat of the halves) — into ONE OpType::Rope node reading
+    // the table rows directly. Matches by structure/shape only; a chain node carrying fused work
+    // (pw epilogue, activation, bias/residual edge, extra outputs) or an attribute the fusion does
+    // not fold refuses the site. `fp32Pins` mirrors foldMatMulViews: a site whose internal tensors
+    // match a pin keeps its decomposed form. Runs at load only, gated by Hint::RopeFusion, before
+    // foldMatMulViews; never serialized. Returns the number of sites fused.
+    int fuseRope(Graph &g, const std::string &fp32Pins = "");
+
 } // namespace vknn

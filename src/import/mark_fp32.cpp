@@ -192,7 +192,9 @@ namespace vknn {
                 // A Gather reads its index (input 1) as fp32 no matter the kernel's compute precision
                 // (gather.comp binding 1 is float), so a pinned fp32 index must not be narrowed back to
                 // fp16 by a frontier convert -- that would re-overflow a large token id to +inf.
-                if (nd.type == OpType::Gather && inIdx == 1)
+                // Rope reads its position tensor at the same slot under the same contract (rope.comp
+                // binding 1 is float).
+                if ((nd.type == OpType::Gather || nd.type == OpType::Rope) && inIdx == 1)
                 {
                     continue;
                 }
@@ -244,7 +246,11 @@ namespace vknn {
         int pinned = 0;
         for (const auto &nd: g.nodes)
         {
-            if (nd.type != OpType::Gather || nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
+            // Rope (the fused rotate-half chain) reads its position tensor as input 1 exactly like
+            // Gather reads its index there, and its shader binds that buffer as fp32 for the same
+            // reason — an integer position must never round through fp16 storage.
+            const bool indexed = nd.type == OpType::Gather || nd.type == OpType::Rope;
+            if (!indexed || nd.inputs.size() < 2 || nd.inputs[1] == kNoTensor)
             {
                 continue;
             }

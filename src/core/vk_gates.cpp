@@ -263,6 +263,17 @@ namespace vknn {
             }
             return true;
         }
+        if (nd.type == OpType::Rope)
+        {
+            // Fused rotate-half rotary embedding: pointwise over the flat input plus a cos/sin
+            // table row lookup by position. Created only by fuseRope, which already validated the
+            // shapes; the four inputs (x, positions, cos table, sin table) are the only requirement.
+            if (nd.inputs.size() < 4 || nd.inputs[1] == kNoTensor || nd.inputs[2] == kNoTensor || nd.inputs[3] == kNoTensor)
+            {
+                return refuse(whyNot, "Rope: missing position/table input");
+            }
+            return true;
+        }
         if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And)
         {
             // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
