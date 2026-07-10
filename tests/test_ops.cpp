@@ -1005,6 +1005,134 @@ TEST(Ops, ConvTransposeBias) {
 }
 
 // --- Greater vs a scalar: strict >, ties are 0. ---
+// --- Gather axis 0 with positive, negative (Python-style wrap), and repeated indices. ---
+TEST(Ops, GatherAxis0NegativeWrap) {
+    auto out = runOp(OpType::Gather, 0, {}, {4}, {10, 20, 30, 40}, {{{3}, {3.f, -1.f, 0.f}}});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {3}));
+    EXPECT_EQ(out.data, (std::vector<float> {40, 40, 10}));
+}
+
+// --- Gather with an out-of-range constant index: a hard error, never an out-of-bounds read. ---
+TEST(Ops, GatherIndexOutOfRangeFails) {
+    // One-node graph: runtime data "x" [4], constant index [1] = {indexValue}, gather along axis 0.
+    auto runGatherWithIndex = [](float indexValue) -> Status {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {4};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+        TensorDesc ii;
+        ii.name          = "idx";
+        ii.shape         = {1};
+        ii.isInitializer = true;
+        TensorId   idx   = g.addTensor(ii);
+        HostBuffer hb;
+        hb.resizeElems(1, DType::Float32);
+        hb.f32()[0]         = indexValue;
+        g.initializers[idx] = hb;
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     n;
+        n.type    = OpType::Gather;
+        n.name    = "gather";
+        n.inputs  = {x, idx};
+        n.outputs = {y};
+        g.nodes.push_back(n);
+        g.outputs = {y};
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return Status::RuntimeError;
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {4};
+        in.dtype = DType::Float32;
+        in.data.resize(4 * sizeof(float));
+        const float values[4] = {10, 20, 30, 40};
+        std::memcpy(in.data.data(), values, sizeof values);
+        std::vector<IOTensor> outs;
+        return sess->run({in}, outs);
+    };
+    EXPECT_NE(runGatherWithIndex(4.f), Status::Ok);  // one past the last row
+    EXPECT_NE(runGatherWithIndex(-5.f), Status::Ok); // below the negative-wrap range
+    EXPECT_EQ(runGatherWithIndex(-4.f), Status::Ok); // -4 wraps to row 0: still valid
+}
+
+// --- An Int64 graph input feeding a Gather index operand is validated when it is bound: an
+// out-of-range id (an out-of-vocab token id against an embedding table) is InvalidArgument at
+// bind time, before any op runs. ---
+TEST(Ops, GatherInt64InputIndexValidatedAtBind) {
+    // Embedding-style graph: constant table [5,2], runtime Int64 index input "ids" [3].
+    auto runGatherIds = [](const std::vector<int64_t> &ids, std::vector<float> *outData) -> Status {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "ids";
+        xi.shape   = {3};
+        xi.dtype   = DType::Int64;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+        TensorDesc ti;
+        ti.name          = "table";
+        ti.shape         = {5, 2};
+        ti.isInitializer = true;
+        TensorId   tbl   = g.addTensor(ti);
+        HostBuffer hb;
+        hb.resizeElems(10, DType::Float32);
+        for (int i = 0; i < 10; ++i)
+        {
+            hb.f32()[i] = (float) i;
+        }
+        g.initializers[tbl] = hb;
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     n;
+        n.type    = OpType::Gather;
+        n.name    = "embed";
+        n.inputs  = {tbl, x};
+        n.outputs = {y};
+        g.nodes.push_back(n);
+        g.outputs = {y};
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return Status::RuntimeError;
+        }
+        IOTensor in;
+        in.name  = "ids";
+        in.shape = {3};
+        in.dtype = DType::Int64;
+        in.data.resize(ids.size() * sizeof(int64_t));
+        std::memcpy(in.data.data(), ids.data(), in.data.size());
+        std::vector<IOTensor> outs;
+        Status                st = sess->run({in}, outs);
+        if (st == Status::Ok && outData && !outs.empty())
+        {
+            const float *o = outs[0].f32();
+            outData->assign(o, o + numElements(outs[0].shape));
+        }
+        return st;
+    };
+    std::vector<float> out;
+    EXPECT_EQ(runGatherIds({0, 4, -5}, &out), Status::Ok); // -5 wraps to row 0
+    EXPECT_EQ(out, (std::vector<float> {0, 1, 8, 9, 0, 1}));
+    EXPECT_EQ(runGatherIds({0, 5, 1}, nullptr), Status::InvalidArgument);  // one past the last row
+    EXPECT_EQ(runGatherIds({0, -6, 1}, nullptr), Status::InvalidArgument); // below the wrap range
+}
+
 TEST(Ops, GreaterScalar) {
     auto out = runOp(OpType::Greater, 0, {}, {2, 3}, {1, 2, 3, 4, 5, 6}, {{{1}, {3.f}}});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {2, 3}));

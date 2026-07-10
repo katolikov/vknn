@@ -207,6 +207,13 @@ int main(int argc, char **argv) {
         return 2;
     }
     fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d present_rows=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, presRows, (long long) vocab);
+    // Every id fed to the model indexes the embedding table, so an out-of-range --eos must fail here
+    // with the value and the vocab size, never reach the engine as a lookup.
+    if (eos < 0 || eos >= vocab)
+    {
+        fprintf(stderr, "--eos %lld is out of range for this model (vocab %lld)\n", (long long) eos, (long long) vocab);
+        return 2;
+    }
 
     // Persistent boundary tensors, in model input order. Under --no-kv-link the past key/value
     // buffers ARE the KV cache (fp32 host boundary), retained across steps and turns; with linking
@@ -632,6 +639,23 @@ int main(int argc, char **argv) {
         }
         if (prompt.empty())
         {
+            continue;
+        }
+        // An out-of-vocab prompt id would index past the embedding table; fail THIS TURN with the
+        // value and the vocab size — never feed it to the model, never kill the persistent process.
+        bool promptValid = true;
+        for (size_t i = 0; i < prompt.size() && promptValid; ++i)
+        {
+            if (prompt[i] < 0 || prompt[i] >= vocab)
+            {
+                fprintf(stderr, "[chat] prompt token id %lld (position %zu) is out of range for this model (vocab %lld); turn skipped\n", (long long) prompt[i], i, (long long) vocab);
+                promptValid = false;
+            }
+        }
+        if (!promptValid)
+        {
+            printf("END\n");
+            fflush(stdout);
             continue;
         }
 

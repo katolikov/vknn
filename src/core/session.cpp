@@ -161,6 +161,89 @@ namespace vknn {
         }
     }
 
+    // Graph inputs that reach a Gather node's index operand — directly, or through value-preserving
+    // hops (layout/dtype converts, metadata reshapes) — paired with the SMALLEST statically known axis
+    // size any of their Gathers selects from. Feeds PlanBucket::gatherIndexAxisSizes, which run()
+    // checks when the input is bound: an out-of-range index (an out-of-vocab token id against an
+    // embedding table) then fails with its value and position instead of reading out of bounds inside
+    // the op — the class of crash a caller-supplied id can otherwise trigger.
+    static std::vector<std::pair<TensorId, int64_t>> collectGatherIndexAxisSizes(const Graph &g) {
+        // Last writer of each tensor, so an index can be traced back to its boundary source.
+        std::vector<int> producer(g.tensors.size(), -1);
+        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        {
+            for (TensorId out: g.nodes[ni].outputs)
+            {
+                if (out != kNoTensor)
+                {
+                    producer[(size_t) out] = ni;
+                }
+            }
+        }
+        // Ops whose output holds the same element values as inputs[0], so a bound the consumer's
+        // Gather imposes on its index applies unchanged to the traced tensor.
+        auto valuePreserving = [](OpType t) {
+            return t == OpType::ConvertLayout || t == OpType::ConvertDtype || t == OpType::Cast || t == OpType::Reshape || t == OpType::Squeeze || t == OpType::Unsqueeze || t == OpType::Flatten || t == OpType::Identity;
+        };
+        std::vector<std::pair<TensorId, int64_t>> limits;
+        for (const Node &nd: g.nodes)
+        {
+            if (nd.type != OpType::Gather || nd.inputs.size() < 2 || nd.inputs[0] == kNoTensor || nd.inputs[1] == kNoTensor)
+            {
+                continue;
+            }
+            // Axis normalization mirrors GatherCpu: negative counts from the back, then clamps.
+            const Shape &data = g.desc(nd.inputs[0]).shape;
+            int64_t      rank = (int64_t) data.size();
+            int64_t      axis = nd.attr.geti("axis", 0);
+            if (axis < 0)
+            {
+                axis += rank;
+            }
+            axis = std::max<int64_t>(0, std::min<int64_t>(axis, rank > 0 ? rank - 1 : 0));
+            if (rank == 0 || data[axis] <= 0)
+            {
+                continue; // axis size not statically known: nothing to validate against
+            }
+            const int64_t axisSize = data[axis];
+            TensorId      traced   = nd.inputs[1];
+            for (int hop = 0; traced != kNoTensor && hop < 64; ++hop)
+            {
+                int pi = producer[(size_t) traced];
+                if (pi < 0)
+                {
+                    break; // boundary: a graph input or an initializer
+                }
+                const Node &pn = g.nodes[(size_t) pi];
+                if (!valuePreserving(pn.type) || pn.inputs.empty() || pn.inputs[0] == kNoTensor)
+                {
+                    traced = kNoTensor; // a real op computes the index: its values are not the input's
+                    break;
+                }
+                traced = pn.inputs[0];
+            }
+            if (traced == kNoTensor || !g.desc(traced).isInput)
+            {
+                continue;
+            }
+            bool merged = false;
+            for (auto &lim: limits)
+            {
+                if (lim.first == traced)
+                {
+                    lim.second = std::min(lim.second, axisSize);
+                    merged     = true;
+                    break;
+                }
+            }
+            if (!merged)
+            {
+                limits.push_back({traced, axisSize});
+            }
+        }
+        return limits;
+    }
+
     Session::~Session() {
         updateCache(); // flush autotune/pipeline changes to the cache file if any
     }
@@ -808,6 +891,9 @@ namespace vknn {
             }
             VKNN_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
         }
+
+        // Bind-time index bounds: which graph inputs index a Gather, and how many rows it holds.
+        bucket.gatherIndexAxisSizes = collectGatherIndexAxisSizes(graph_);
 
         VKNN_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size() << " nodes [bucket '" << key << "']";
         // One un-throttled fallback summary per bucket: the per-node warnings above are throttled to
@@ -1580,6 +1666,32 @@ namespace vknn {
                 rt.hostValid = true;
             }
             rt.deviceValid = false;
+            // An Int64 input that indexes a Gather (an embedding lookup's token ids) is validated
+            // here against the smallest axis size collected at plan time, so a caller-supplied
+            // out-of-range id fails with its value and position before any op reads past the table.
+            // ONNX index semantics admit [-axisSize, axisSize): negatives wrap Python-style.
+            if (rt.hostValid && rt.dtype == DType::Int64)
+            {
+                for (const auto &indexLimit: bucket.gatherIndexAxisSizes)
+                {
+                    if (indexLimit.first != id)
+                    {
+                        continue;
+                    }
+                    const int64_t  axisSize = indexLimit.second;
+                    const int64_t  elems    = rt.shape.empty() ? 1 : numElements(rt.shape);
+                    const int64_t *values   = rt.host.i64();
+                    for (int64_t e = 0; e < elems; ++e)
+                    {
+                        if (values[e] < -axisSize || values[e] >= axisSize)
+                        {
+                            VKNN_ERROR << "run: input '" << graph_.tensors[id].name << "' element " << e << " = " << values[e] << " is out of range [" << -axisSize << ", " << axisSize << ") for the " << axisSize << "-row Gather axis it indexes";
+                            return Status::InvalidArgument;
+                        }
+                    }
+                    break;
+                }
+            }
         }
         // Read zero-copy output fd bindings from the incoming `outputs` (set before the segments run so
         // the GPU writes into them), before it is cleared and refilled with results below.

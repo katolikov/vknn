@@ -48,6 +48,11 @@ namespace vknn {
         std::vector<RtTensor>                 pool;                 ///< Runtime tensor pool for this bucket, indexed by TensorId.
         std::vector<FallbackReason>           fallbackReasons;      ///< Requested-backend refusals recorded while planning this bucket.
         bool                                  ioGpuConvert = false; ///< Whole graph on one GPU backend: 8-bit inputs upload raw + convert on the GPU.
+        /// Graph inputs that reach a Gather node's index operand, paired with the smallest statically
+        /// known axis size any of their Gathers selects from. Collected at plan time; run() validates a
+        /// bound Int64 input against [-axisSize, axisSize) so an out-of-range index (an out-of-vocab
+        /// token id against an embedding table) fails at bind time instead of reading out of bounds.
+        std::vector<std::pair<TensorId, int64_t>> gatherIndexAxisSizes;
     };
 
     /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.

@@ -3,7 +3,10 @@
 // Gather along one axis; data and output use STORE (fp16/fp32). The index is ALWAYS fp32: an index is
 // an integer (a token id up to the vocab size, a position), and fp16 cannot hold an integer above 2048
 // exactly or above 65504 at all (75698 would store as +inf), which would land the lookup on the wrong
-// row. Negative indices wrap by axisSize.
+// row. Negative indices wrap by axisSize. After the wrap the index clamps to [0, axisSize-1]: a compute
+// shader cannot raise an error, so a runtime index the host could not pre-validate (the CPU op and the
+// bind-time input check reject out-of-range indices where they can) reads the nearest edge row instead
+// of out-of-bounds device memory.
 #include "common.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
@@ -21,6 +24,7 @@ void main() {
   int outerC = t / pc.nIdx;
   int ix = int(idx[idxPart]);
   if (ix < 0) ix += pc.axisSize;
+  ix = clamp(ix, 0, pc.axisSize - 1); // out-of-range reads the edge row, never outside `s` (see header)
   int src = (outerC * pc.axisSize + ix) * pc.inner + innerC;
   d[gid] = s[src];
 }
