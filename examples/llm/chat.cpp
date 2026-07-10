@@ -270,6 +270,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "present outputs are missing or not [1,KV,rows,HD]; cannot drive the KV fold\n");
         return 2;
     }
+    // The KV cache and logits keep the model's declared boundary dtype on host readback (an fp16
+    // export downloads fp16, not fp32). The host-side present-row folds copy raw rows, so they work
+    // in the cache's element size; the prefill logits row is converted to fp32 for host sampling.
+    const size_t kvElemBytes = dtypeSize(ins[(size_t) pastKey[0]].dtype);
+    const bool   logitsFp16  = outs[(size_t) logitsIdx].dtype == DType::Float16;
     fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d present_rows=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, presRows, (long long) vocab);
     // chat only COMPARES --eos against generated ids (it is never fed to the model), so a negative
     // id is a valid "never matches" sentinel that disables early stop (timing harnesses use it). A
@@ -341,6 +346,15 @@ int main(int argc, char **argv) {
     // Prefill-bucket geometry, validated against the decode bucket: the past inputs must share the
     // decode shapes (one host cache serves both) and the mask must span past+S columns. Any
     // mismatch disables the fast prefill rather than miscomputing.
+    // The whole-window prefill folds the produced KV rows back into the cache from the host, keyed
+    // to the position_ids the driver feeds. A model that derives position internally from the mask
+    // (no position_ids input) is prefilled token-by-token instead: the batched-window path is only
+    // validated against the position_ids convention, and a mismatched prefill seeds a wrong cache.
+    if (prefillBucket >= 0 && posIdx < 0)
+    {
+        fprintf(stderr, "[chat] whole-window prefill needs a position_ids input; this model derives position internally, prefilling token-by-token\n");
+        prefillBucket = -1;
+    }
     int prefillMaskLen = 0, prefillPresRows = 0, prefillLogitsIdx = -1;
     if (prefillBucket >= 0)
     {
@@ -467,11 +481,11 @@ int main(int argc, char **argv) {
                         fprintf(stderr, "[chat] resident present readback failed\n");
                         return false;
                     }
-                    const float *src = reinterpret_cast<const float *>(present.data.data());
-                    float       *dst = reinterpret_cast<float *>(hostPast.data.data());
+                    const uint8_t *src = present.data.data();
+                    uint8_t       *dst = hostPast.data.data();
                     for (int h = 0; h < kvHeads; ++h)
                     {
-                        std::memcpy(dst + ((size_t) h * C + pendingSlot) * headDim, src + ((size_t) h * presRows + (presRows - 1)) * headDim, (size_t) headDim * sizeof(float));
+                        std::memcpy(dst + ((size_t) h * C + pendingSlot) * headDim * kvElemBytes, src + ((size_t) h * presRows + (presRows - 1)) * headDim * kvElemBytes, (size_t) headDim * kvElemBytes);
                     }
                 }
             }
@@ -610,13 +624,13 @@ int main(int argc, char **argv) {
                 {
                     const IOTensor &pres = outputs[(size_t) outIdxByInfo[part ? presVal[l] : presKey[l]]];
                     IOTensor       &past = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
-                    const float    *src  = reinterpret_cast<const float *>(pres.data.data());
-                    float          *dst  = reinterpret_cast<float *>(past.data.data());
+                    const uint8_t  *src  = pres.data.data();
+                    uint8_t        *dst  = past.data.data();
                     for (int h = 0; h < kvHeads; ++h)
                     {
-                        const float *s = src + ((size_t) h * presRows + (presRows - 1)) * headDim;
-                        float       *d = dst + ((size_t) h * C + slot) * headDim;
-                        std::memcpy(d, s, (size_t) headDim * sizeof(float));
+                        const uint8_t *s = src + ((size_t) h * presRows + (presRows - 1)) * headDim * kvElemBytes;
+                        uint8_t       *d = dst + ((size_t) h * C + slot) * headDim * kvElemBytes;
+                        std::memcpy(d, s, (size_t) headDim * kvElemBytes);
                     }
                 }
             }
@@ -719,6 +733,7 @@ int main(int argc, char **argv) {
     // p..p+len-1 — and return the last real token's logits row. Pad slots carry mask 0, so real
     // tokens never attend them and their (garbage) rows are simply not folded. Advances p.
     std::vector<IOTensor> prefillOutputs;
+    std::vector<float>    prefillLogitsF32; // fp32 copy of an fp16 logits row for host sampling
     auto                  prefillPass = [&](const int64_t *toks, int len) -> const float                  *{
         std::vector<IOTensor> pin(inputs.size());
         for (size_t i = 0; i < ins.size(); ++i)
@@ -793,19 +808,28 @@ int main(int argc, char **argv) {
                 {
                     return (const float *) nullptr;
                 }
-                const float *src = reinterpret_cast<const float *>(pres->data.data());
-                float       *dst = reinterpret_cast<float *>(inputs[(size_t) (part ? pastVal[l] : pastKey[l])].data.data());
+                const uint8_t *src = pres->data.data();
+                uint8_t       *dst = inputs[(size_t) (part ? pastVal[l] : pastKey[l])].data.data();
                 for (int h = 0; h < kvHeads; ++h)
                 {
                     for (int t = 0; t < len; ++t)
                     {
-                        std::memcpy(dst + ((size_t) h * C + p + t) * headDim, src + ((size_t) h * prefillPresRows + newRowsAt + t) * headDim, (size_t) headDim * sizeof(float));
+                        std::memcpy(dst + ((size_t) h * C + p + t) * headDim * kvElemBytes, src + ((size_t) h * prefillPresRows + newRowsAt + t) * headDim * kvElemBytes, (size_t) headDim * kvElemBytes);
                     }
                 }
             }
         }
         p += len;
-        return reinterpret_cast<const float *>(logitsOut->data.data()) + (size_t) (len - 1) * vocab;
+        // The last real token's logits row feeds the first decode token's host sampling. An fp16
+        // logits output is converted to fp32 into a persistent row so the sampler reads real values.
+        const size_t rowOffset = (size_t) (len - 1) * vocab;
+        if (logitsFp16)
+        {
+            prefillLogitsF32.resize((size_t) vocab);
+            halfToFloatBulk(reinterpret_cast<const fp16_t *>(logitsOut->data.data()) + rowOffset, prefillLogitsF32.data(), vocab);
+            return prefillLogitsF32.data();
+        }
+        return reinterpret_cast<const float *>(logitsOut->data.data()) + rowOffset;
     };
 
     // Pick the next token id from a logits row: greedy at temp<=0, else temperature + top-k + top-p.
