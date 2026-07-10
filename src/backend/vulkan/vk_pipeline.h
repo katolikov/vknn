@@ -21,6 +21,7 @@ namespace vknn {
         /// Owns one VkPipelineCache (RAII); not copyable or movable.
         class PipelineCache {
           public:
+            /// @param ctx         The Vulkan context whose device owns the cache (retained by reference).
             /// @param initialData Serialized cache bytes from a prior session, or empty for a cold cache.
             ///                    The driver validates them against its own UUID and ignores a mismatch.
             explicit PipelineCache(VulkanContext &ctx, const std::vector<char> &initialData = {});
@@ -51,6 +52,7 @@ namespace vknn {
         /// copyable or movable.
         class ComputePipeline {
           public:
+            /// @param ctx            The Vulkan context whose device creates and owns the pipeline (retained by reference).
             /// @param shaderName     Key into the embedded SPIR-V table (see embeddedShaders()).
             /// @param numBuffers     Storage buffers bound at descriptor bindings 0..numBuffers-1.
             /// @param pushConstBytes Size of the push-constant block (0 for none).

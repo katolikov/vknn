@@ -144,11 +144,15 @@ conversion on the GPU, would remove most of it. It is not optimized.
 
 ## 6. Quantized models run dequantized to float — not int-exact
 
-There is no int8 compute tier: the device advertises the capabilities for it
+There is no int8 *compute* tier: the device advertises the capabilities for it
 (`shaderInt8 = 1`, 8-bit storage, `VK_KHR_shader_integer_dot_product`) and
 `Config::precision` only exposes `Low | Normal | High` (fp16 / fp16 + selective
-fp32 / fp32), but no kernel computes in int8. Instead, a quantized checkpoint runs
-through the **import-time dequantize pass** (`src/import/dequantize_graph.cpp`,
+fp32 / fp32), but no kernel computes in int8. (There **is** an int4 *weight*
+path — `vknn_compile -Os` quantizes MatMul weights to int4 with a native GPU
+MatMul that dequantizes to fp16 on read; see [op-coverage.md §Quantization](op-coverage.md)
+and [running-an-llm.md](running-an-llm.md). It is weight-storage quantization for
+LLM/VLM footprint, separate from the QDQ path below.) A quantized ONNX checkpoint
+runs through the **import-time dequantize pass** (`src/import/dequantize_graph.cpp`,
 default on; `PassOptions::dequantize` / `--no-dequantize` disables it):
 
 - DequantizeLinear over an initializer folds the weight to fp32 (`(W_q − zp) · scale`,

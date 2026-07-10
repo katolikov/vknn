@@ -55,6 +55,8 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | LayerNorm | ✅ | ✅ | reduction over the last axes, affine |
 | Einsum | ✅ | ✅ | outer-product (RoPE) on GPU; batched mat-vec / matmul lowered to MatMul |
 | Gather | ✅ | ✅ | axis-aware (attention Q/K/V split on axis 2), const or runtime index |
+| Rope | ✅ | ✅ | fused rotate-half rotary embedding: one kernel computing `x1·cos − x2·sin` / `x1·sin + x2·cos` per position, reading the cos/sin table row directly; created only by the load-time `fuseRope` pass (`Hint::RopeFusion`) from the primitive Slice/Gather/Mul/Concat chain — never parsed from ONNX, never serialized to a `.vxm` |
+| FusedAttention | ✅ | ✅ | single-query (M=1) decode-attention core `softmax(q·Kᵀ·scale + mask)·V` in one kernel; operands read through per-axis operand-view strides so the GQA KV cache is read in place (no materialized repeat_kv); fp32 scores + softmax (numerically finer than the decomposed fp16 round-trips); created only by the load-time `fuseDecodeAttention` pass (`Hint::FusedAttention`) — never imported, never serialized |
 
 ## Shape / data movement
 
@@ -91,6 +93,14 @@ not bit-exactly. For dynamic quantization it matches the canonical
 float `MatMul` / `Conv` (weight to fp32, **no** output clamp — the integer matmul carries no output
 quant range). A dynamic-quant cluster that does not match this shape stays intact and fails at
 planning.
+
+`vknn_compile -Os` additionally quantizes MatMul weights to **int4** (calibration-free or
+calibrated; AWQ-style activation-salient outlier columns kept fp16; a per-layer error guard keeps
+hostile layers fp16), stored in a VXM5 container and executed by native int4 GPU MatMul kernels (a
+specialized GEMV for M=1 decode and a tiled kernel for prefill). This is separate from the
+QDQ / QLinear dequantize-at-import path documented above (which targets pre-quantized ONNX
+checkpoints). An ORT-contrib pre-quantized `MatMulNBits` (4-bit) checkpoint imports directly to the
+native int4 path.
 
 | Operator | GPU | CPU | Notes |
 |---|---|---|---|
@@ -145,6 +155,27 @@ flags override a single pass on top of the level:
   separate convs).
 - **Einsum lowering** to MatMul/Squeeze/Unsqueeze; **ConvTranspose → Conv + DepthToSpace**
   (subpixel rewrite).
+
+### Load-time LLM-decode fusions
+
+These passes run at session load, each gated by its hint, and **never change the compiled `.vxm`**
+(an old model speeds up on load). Each has a `--no-*` flag on the runners.
+
+- **MatMul operand-view fold** (`Hint::MatMulViewFold`) — folds Expand/Transpose "repeat_kv" and
+  attention-transpose chains into per-axis stride attributes on the consuming MatMul, so a GQA decode
+  reads its KV cache through strides instead of materializing the broadcast. Bit-identical; honored by
+  both backends.
+- **RoPE chain fusion** (`Hint::RopeFusion`) — collapses each rotate-half chain (last-axis half
+  Slices, cos/sin table Gathers, the rotate products, Concat) into one `Rope` node — ~7 dispatches
+  per site → 1.
+- **Decode-attention fusion** (`Hint::FusedAttention`) — collapses the M=1
+  MatMul→scale/mask→Softmax→MatMul(→Transpose→Reshape) chain into one `FusedAttention` node,
+  consuming the operand-view strides the fold above composed. Numerics-changing (fp32 scores /
+  softmax), so it has its own cache-variant key.
+- **KV-cache Concat fold** (`Hint::KvConcatFold`, **off** by default) — folds the per-token
+  past‖new KV Concat into split-source `FusedAttention` reads and rewrites the present outputs to the
+  rows-only convention, removing a whole-cache copy per token. Bit-identical; off by default because
+  the rows-only present is incompatible with the engine-resident KV link.
 
 ## Adding an operator
 

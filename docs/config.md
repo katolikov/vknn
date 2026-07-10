@@ -67,6 +67,10 @@ input model** — each `--graph` occurrence names its own source file (see the `
 |---------------------|---------|
 | `--fp16` | Store weights as fp16 in the `.vxm` (default fp32). Halves the file and the runtime host repack; the run-time compute precision is a separate `Config::precision` knob. |
 | `-O0` / `-O1` / `-O2` / `-O3` (or `--opt N`) | Optimization level, default `-O1`. `-O0` = no optional fusion (reference); `-O1` = the general pointwise fusion (the bit-exact production set); `-O2`/`-O3` = + the experimental Squeeze-Excite and depthwise+1×1 fusions. |
+| `-Os` | A superset of `-O3`: all of its fusion plus calibration-free int4 weight quantization. Per-op-class defaults quantize MatMul weights to int4 with a scale group and keep the activation-salient outlier columns fp16, while Conv/Gemm weights load-dequant to fp16; a per-layer relative-error guard keeps a hostile layer fp16, and native int4 GPU MatMul kernels run the quantized weights. Emits a **VXM5** container — a subtag over the exact VXM3/VXM4 body, so a non-quantized compile stays byte-identical VXM3/4. The Qwen instruct model is ≈2.4× smaller as int4. Accepts a `.vxm` as input to re-quantize an already-compiled model; a multi-bucket `.vxm` re-quantizes every bucket over the shared initializer pool. |
+| `--quant-samples N` | Calibration samples for the int4 min-MSE scale-group search + bias correction (`-Os`). `0` = weight-only (uniform column weighting, no calibration) — required for a multi-bucket compile so every bucket's scales stay identical and the payloads content-dedup. |
+| `--quant-group N` / `--quant-outliers N` / `--conv-group N` / `--conv-outliers N` | Int4 quantization tuning knobs over the per-op-class defaults (`-Os`): the scale-group width and the count of activation-salient outlier columns kept fp16, for MatMul weights (`--quant-*`) and Conv/Gemm weights (`--conv-*`). |
+| `--calib F0[,F1,...]` | Calibration sample files for the `-Os` min-MSE scale search + bias correction — one sample file per graph-input occurrence. |
 | `--[no-]fuse-pointwise` / `--[no-]fuse-se` / `--[no-]fuse-dwpw` / `--[no-]lower-conv` | Override a single fusion/lowering pass on top of the `-O` level. |
 | `--strict-fuse` | Round every fused step so `fused == unfused` byte-identical (the byte-verification mode). The default fast mode fp32-chains each fused unit and rounds once per stored stream — faster, and at least as accurate as the unfused graph. |
 | `--no-dequantize` | Keep `QuantizeLinear` / `DequantizeLinear` / QLinear ops instead of folding them to float. Default (off) compiles a quantized checkpoint to a plain float graph (see [limitations.md §6](limitations.md)). |
@@ -122,11 +126,13 @@ enum class Hint {
   GpuIslandFold   = 5,  // fold tiny GPU islands to CPU (On / Off, default On)
   MatMulViewFold  = 6,  // MatMul operand-view fold at load  (On / Off, default On)
   RopeFusion      = 7,  // rotate-half RoPE chain fusion at load (On / Off, default On)
+  FusedAttention  = 8,  // single-query decode-attention fusion at load (On / Off, default On)
+  KvConcatFold    = 9,  // per-token KV-cache Concat fold into split-source attention (On / Off, default Off — its rows-only present output is incompatible with the engine-resident KV link; opt in for a host-cache decode loop)
 };
 // One Mode enum holds every value; the Hint picks the knob, the Mode the value. (Autotune effort is
 // a top-level Config::tuning field, not a Hint.)
 enum class Mode {
-  Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd, FlatLayout, GpuIslandFold, MatMulViewFold, RopeFusion
+  Auto = 0, On = 1, Off = 2,                                                  // Hint::Winograd, FlatLayout, GpuIslandFold, MatMulViewFold, RopeFusion, FusedAttention, KvConcatFold
   TiledGemm = 0, Fused = 1, FusedSplit = 2, FullyFused = 3, SubgroupGemm = 4, // Hint::WinogradVariant
   F23 = 0, F43 = 4,                                                           // Hint::WinogradUnit
   DirectAuto = 0, RegisterTiled = 1, LdsHalo = 2,                             // Hint::DirectConv3x3
@@ -136,9 +142,15 @@ cfg.setHint(Hint::WinogradUnit, Mode::F43);   // force F(4,3) Winograd
 int v = cfg.hint(Hint::WinogradUnit);         // read back (0 if unset)
 ```
 
+`MatMulViewFold`, `RopeFusion`, and `FusedAttention` are load-time graph-fusion passes that never change a
+compiled `.vxm`; each is keyed into the plan-cache variant, so flipping the hint reselects (or recomputes) a
+variant instead of ever serving a stale plan.
+
 In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "heavy"`, `"flatLayout": false`);
-the raw hint form is an array indexed by the `Hint` value, `"hints": [2, 0, 0, 0, 2, 1]` (Winograd,
-WinogradVariant, WinogradUnit, DirectConv3x3, FlatLayout, GpuIslandFold).
+the raw hint form is an array indexed by the `Hint` value, one entry per hint in enum order
+(Winograd, WinogradVariant, WinogradUnit, DirectConv3x3, FlatLayout, GpuIslandFold, MatMulViewFold,
+RopeFusion, FusedAttention, KvConcatFold) — e.g. `"hints": [2, 0, 0, 0, 2, 1]` sets the first six and
+leaves the rest at their defaults.
 
 `NC4HW4` is the internal Vulkan packed layout (channels in vec4 blocks); the engine I/O is `NCHW`.
 

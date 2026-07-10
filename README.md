@@ -129,6 +129,19 @@ model> def is_prime(n):
            return True
 ```
 
+The autoregressive decode step is fused at load: the rotate-half RoPE chains collapse into one `Rope`
+dispatch per q/k site, and the single-query attention core (MatMul → scale/mask → Softmax → MatMul)
+fuses into one `FusedAttention` kernel per layer that reads the GQA KV cache through per-axis
+operand-view strides — no materialized `repeat_kv`. Both passes run at load only and never rewrite a
+compiled `.vxm`, so existing models speed up on load; each is gated by a `Config` hint with a `--no-*`
+flag. Greedy decode registers the logits output for an engine-side argmax (`Session::setOutputArgMax`
+/ `readOutputArgMax`), so the next-token id comes back as 8 bytes from a GPU reduction instead of a
+full download and scan of the 151936-wide logits row (the token stream is unchanged — first-occurrence
+argmax). Together they cut the engine host loop from ~9 ms to ~0.5 ms per token; the int4 Qwen instruct
+model decodes a token in a ~19.7 ms GPU span at a 1024-token context. Its
+[`qwen-vknn`](https://huggingface.co/katolikov/qwen-vknn) repo ships a 517 MB int4 build — with a
+256-token whole-window prefill bucket — next to the fp16 export.
+
 Full walkthrough (export → compile → run + more examples): [docs/running-an-llm.md](docs/running-an-llm.md)
 and the [Running an LLM on VKNN](https://github.com/katolikov/vknn/wiki/Running-an-LLM-on-VKNN) wiki page.
 
@@ -143,11 +156,12 @@ dispatches each `run()` to the right graph by its bound input names + shapes.
 embedding splice → prefill → streamed decode) with
 [`examples/llm/vlm_host.py`](examples/llm/vlm_host.py) as the host front-end. On a current flagship
 phone GPU it answers questions about a photo at 6–7.5 tokens/s with a 0.85 s prefill, matching the
-fp32 onnxruntime reference token-for-token. Walkthrough: [docs/running-a-vlm.md](docs/running-a-vlm.md).
+fp32 onnxruntime reference token-for-token. The repo publishes a 1.35 GB int4 build of the model
+alongside the 4.5 GB fp16 one. Walkthrough: [docs/running-a-vlm.md](docs/running-a-vlm.md).
 
-The same models power [`app-demo/`](app-demo/) — an Android app (Kotlin/Compose over JNI) with three
-on-device modes, **Chat**, **VLM camera coach**, and **3D Splat capture**, behind a model library
-that downloads each `.vxm` from HuggingFace.
+The same models power [`app-demo/`](app-demo/) — an Android app (Kotlin/Compose over JNI) with four
+tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** that downloads each
+`.vxm` from HuggingFace. The Chat and VLM tabs each carry a per-tab model-variant picker (fp16 / int4).
 
 ## Feature matrix
 
@@ -158,7 +172,7 @@ that downloads each `.vxm` from HuggingFace.
 | **Precision** | fp16 storage + fp32 accumulation (`low`), selective-fp32 geometry tail (`normal`), or full fp32 (`high`). Stores rounded to nearest even; every path checked against an onnxruntime golden. |
 | **Dynamic shapes** | Declared shape **plan buckets**: `vknn_compile --shape NAME=D0xD1x...` / `--bucket "..."` bakes one plan per shape set; at runtime `Session::prepareShapes()` compiles more, and `run()` selects a bucket by the bound input shapes. A fixed-shape model is one bucket (a single map lookup on the hot path). |
 | **Multi-graph `.vxm`** | `vknn_compile --graph "FILE[;shape/dim segments]"` (repeatable) compiles **several source graphs** — or one graph at several shapes — into one `.vxm` over a content-deduped weight pool; `run()` dispatches to the bucket matching the bound input names + shapes. Buckets stream at load (host peak = one bucket's weights) and share GPU weight copies by content, so a whole VLM (vision tower + embedding + decoder prefill/decode) is one file and one session. See [docs/running-a-vlm.md](docs/running-a-vlm.md). |
-| **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. |
+| **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. `vknn_compile -Os` goes the other way and **produces** int4 — all fusion plus calibration-free int4 weight quantization (AWQ outlier columns kept fp16, per-layer error guard) over a native int4 GPU MatMul; the Qwen instruct weights come out ~2.4× smaller, and every bucket of a multi-graph `.vxm` is requantized. |
 | **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. |
 | **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/io/dmabuf_fd_io.cpp`](examples/io/dmabuf_fd_io.cpp). |
 | **Warm-start cache** | A self-validating, multi-variant per-model `.cache` (kernel hash + device + config) auto-heals across driver/model/code changes. |
@@ -191,7 +205,9 @@ models and at **parity on ResNet-50**. Methodology, per-stage timings, and the O
 A broad ONNX op set: convolution/pooling, the elementwise unary/binary families, MatMul (batched N-D),
 Gemm, LayerNorm, Softmax, Einsum, RoPE, Gather/Scatter, Resize, Pad, GridSample, Range, the
 QDQ/QLinear quantization ops (dequantized at import), and the shape/data-movement ops — enough for
-CNNs, detection, and transformer/attention models. Per-op GPU/CPU coverage:
+CNNs, detection, and transformer/attention models. The load-time decode passes additionally synthesize
+a `Rope` and a fused single-query attention op that are created in-engine rather than parsed from ONNX.
+Per-op GPU/CPU coverage:
 [docs/op-coverage.md](docs/op-coverage.md). Adding an op is one new file via the self-registration
 macros: [docs/adding-an-operator.md](docs/adding-an-operator.md).
 
@@ -210,7 +226,7 @@ Runnable examples live in [`examples/`](examples/): `readme_quickstart` (load-se
 `zerocopy_simple` / `zerocopy_cache` and `dmabuf_fd_io` (caller-owned DMA-BUF I/O), `run_io` (generic
 multi-I/O), `classify` / `predict` (CNN classifiers), `chat` / `vlm` (LLM and VLM device loops), and
 `yonosplat` (the transformer encoder + rasterizer). [`app-demo/`](app-demo/) wraps the LLM, VLM, and
-splatting paths in a three-mode Android app.
+splatting paths in a four-tab Android app.
 
 ## License
 

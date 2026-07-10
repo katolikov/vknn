@@ -70,6 +70,16 @@ weight pool keys uploads by **payload content digest**, so the prefill and decod
 whose fused node lists differ — still deduplicate every unchanged tensor
 ([ADR-0014](adr/0014-multi-graph-vxm.md)).
 
+A calibration-free **int4** build sits next to the fp16 file. Re-quantizing the compiled fp16
+`.vxm` with `vknn_compile smolvlm2-2.2b-fp16.vxm smolvlm2-2.2b-i4.vxm -Os --quant-samples 0`
+rewrites every MatMul weight to int4 under a per-layer error guard — the fp16 embedding table is
+left as-is — across all five buckets over the shared initializer pool. The result,
+`smolvlm2-2.2b-i4.vxm` at ~1.35 GB (about a third of the 4.5 GB fp16 file), runs the same GPU
+pipeline with 0 CPU fallbacks and needs roughly **one-third the GPU-addressable memory** of the
+fp16 build. Answers stay grounded in the image, with slightly less detail than fp16 — the
+expected weight-only-int4 envelope. It is published alongside the fp16 file at
+[hf.co/katolikov/smolvlm2-vknn](https://huggingface.co/katolikov/smolvlm2-vknn).
+
 ## 3. Build the runner and push everything
 
 `examples/llm/vlm.cpp` builds as `vknn_vlm` (Android build — the host build has no Vulkan
@@ -97,6 +107,12 @@ vknn_vlm model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--max-t
          [--temp T] [--top-k K] [--top-p P] [--eos ID] [--image-token ID] [--seed S]
          [--debug-stats]
 ```
+
+The decoder picks up the same load-time decode fusions as the text-only LLM path — RoPE chain
+fusion, single-query fused attention that reads the KV cache through operand-view strides, and
+an engine-side greedy argmax. These are applied at load time and never change the compiled
+`.vxm`; `vknn_vlm` carries the matching `--no-rope-fusion` / `--no-fused-attention` flags to
+A/B them.
 
 **`examples/llm/vlm_host.py`** is the host front-end: it owns the HF processor (tokenizer +
 chat template, and the image-token expansion so the ids match the device splice exactly) and

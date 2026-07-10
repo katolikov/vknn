@@ -10,8 +10,10 @@ HuggingFace with pause/resume (HTTP Range, survives process death), sha256 verif
 the HF blobs API, free-space and metered-network guards, per-model delete, and a global
 inference-backend switch (Vulkan default; CPU allowed only where the fp32 working set fits RAM).
 The Chat and VLM tabs carry a **model-variant picker** (fp16 / int4, plus any ad-hoc `.vxm`
-already in app storage); the choice persists and switching swaps the resident session through the
-single-residency slot. Everything runs **on device** (Vulkan) with live latency metrics.
+already in app storage), filtered by mode so a tab only offers models of its own family — Chat
+lists the Qwen variants, VLM the SmolVLM2 variants (fp16 and int4). The choice persists and
+switching swaps the resident session through the single-residency slot. Everything runs **on
+device** (Vulkan) with live latency metrics.
 Native-style dark theme. Kotlin + Jetpack Compose over a JNI bridge; no cloud, no server.
 
 ## Layout
@@ -69,10 +71,11 @@ wall-clock around the native calls. The compiled `.vxm` reproduces the HuggingFa
 token-for-token (see the repo's `docs/running-an-llm.md`).
 
 **VLM** — SmolVLM2-2.2B as **one multi-graph `.vxm`** (vision encoder, token embedding, and decoder
-prefill + decode buckets over one shared weight pool; see the repo's `docs/running-a-vlm.md`). A photo
-runs the vision bucket once (81 image-embedding rows), the rows splice into the embedded prompt on
-device, the prompt prefills in a single 128-token pass, and decode streams token by token. The camera
-coach asks a pinned question about the current frame and shows the streamed answer.
+prefill + decode buckets over one shared weight pool; see the repo's `docs/running-a-vlm.md`),
+selectable in fp16 (4.5 GB) or **int4** (1.35 GB, ~1/3 the GPU-memory footprint). A photo runs the
+vision bucket once (81 image-embedding rows), the rows splice into the embedded prompt on device,
+the prompt prefills in a single 128-token pass, and decode streams token by token. The camera coach
+asks a pinned question about the current frame and shows the streamed answer.
 
 **3D Splat** — 8 guided capture frames feed the YoNoSplat encoder (one GPU pass → Gaussian splats),
 and the engine's Vulkan rasterizer (`examples/splatting/raster_core`, linked into the JNI bridge)
