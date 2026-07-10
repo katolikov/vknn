@@ -124,52 +124,69 @@ namespace vknn {
 
                 // Subgroup-kernel eligibility (fused_attention_sg.comp; any miss keeps the base
                 // kernel, whose pipeline and dispatch are unchanged): subgroup arithmetic +
-                // shuffle, a workgroup of whole subgroups within the device invocation limit, a
-                // head dim that is a multiple of 4 and fits one workgroup (the fold assigns one
-                // lane per output element), a group small enough for the per-lane accumulator
-                // arrays, and a reduction slab of G * subgroup-count partials within the workgroup
-                // width. The shared-memory budget is checked below once the chunk size is final.
+                // shuffle, a head dim that is a multiple of 4, a group small enough for the
+                // per-lane accumulator arrays, and a workgroup width — chosen against the device's
+                // shared-memory budget below — of whole subgroups within the invocation limit that
+                // covers the head dim and holds the G * subgroup-count reduction slab.
                 const auto   &cap          = env.ctx->caps();
                 const int64_t subgroupSize = (int64_t) cap.subgroupSize;
-                // The sg workgroup width: the tile target, widened to the head dim and rounded up
-                // to whole subgroups.
-                int64_t wgs = std::max<int64_t>(kFaSgWorkgroupSize, partialPc.hd);
-                if (subgroupSize > 0)
-                {
-                    wgs = (wgs + subgroupSize - 1) / subgroupSize * subgroupSize;
-                }
-                bool sgEligible = cap.subgroupArithmetic && cap.subgroupShuffle && subgroupSize > 0 && wgs % subgroupSize == 0 && wgs <= (int64_t) cap.maxWorkGroupInvocations &&
-                                  partialPc.hd % 4 == 0 && partialPc.hd <= wgs && groupSize <= 8 && groupSize * (wgs / subgroupSize) <= wgs;
+                bool          sgEligible   = cap.subgroupArithmetic && cap.subgroupShuffle && subgroupSize > 0 && partialPc.hd % 4 == 0 && groupSize <= 8;
 
-                // Chunking: the G*CHUNK score slab stays small enough (<= 16 KB shared) that
-                // several workgroups sit resident per core, and the chunk count scales the
-                // (kvRows * chunks) dispatch to the context so a low-KV-row model still fills the
-                // GPU. A decode model has only kv-head-count KV rows, so the grid IS the chunk
-                // count times that; the sg kernel takes smaller chunks (and a matching narrower
-                // workgroup) to widen the grid. The combine pass caps the chunk count.
-                const int64_t chunkCap = [&] {
-                    int64_t tokens = std::min<int64_t>(4096 / groupSize, sgEligible ? kFaSgChunkTokens : kFaWorkgroupSize);
-                    tokens         = std::max<int64_t>(tokens, 1);
+                // The sg token chunk, independent of the workgroup width: the G*CHUNK score slab
+                // stays small enough that several workgroups sit resident per core, and the chunk
+                // count scales the (kvRows * chunks) dispatch to the context so a low-KV-row model
+                // still fills the GPU — a decode model has only kv-head-count KV rows, so the grid
+                // IS the chunk count times that. The combine pass caps the chunk count.
+                const int64_t sgChunkTokens = [&] {
+                    int64_t tokens = std::max<int64_t>(std::min<int64_t>(4096 / groupSize, kFaSgChunkTokens), 1);
                     int64_t count  = (partialPc.C + tokens - 1) / tokens;
                     return count > kFaMaxChunks ? (partialPc.C + kFaMaxChunks - 1) / kFaMaxChunks : tokens;
                 }();
-                int64_t chunkTokens = chunkCap;
-                int64_t chunks      = (partialPc.C + chunkTokens - 1) / chunkTokens;
 
-                // The sg kernel's shared arrays: sQ4 (G*hd floats as vec4s) + sScores (G*chunk) +
-                // sRed (wgs) + the vec4 sFold (G*wgs vec4s). Past the device budget the node falls
-                // back to the base kernel and re-derives the base chunking.
-                if (sgEligible && (int64_t) cap.maxSharedMemory < (groupSize * partialPc.hd + groupSize * chunkTokens + wgs) * 4 + groupSize * wgs * 16)
+                // The sg workgroup width adapts to the reported shared-memory budget: the widest
+                // fitting width from the tile target down to the head-dim floor, halving per step
+                // (each candidate rounded up to whole subgroups), where fitting means the shared
+                // arrays — sQ4 (G*hd floats as vec4s) + sScores (G*chunk) + sRed (width) + the
+                // vec4 sFold (G*width vec4s) — stay within cap.maxSharedMemory. A device with a
+                // smaller budget runs a narrower workgroup instead of losing the kernel; only when
+                // the narrowest legal width still misses the budget does the node keep the base
+                // kernel. The step halves rather than walking subgroup-sized decrements: on the
+                // budget-constrained tier the in-between width (an odd subgroup count) measured
+                // ~35% slower than the next halved width.
+                int64_t wgs = 0;
+                if (sgEligible)
                 {
-                    sgEligible  = false;
-                    chunkTokens = std::max<int64_t>(std::min<int64_t>(4096 / groupSize, kFaWorkgroupSize), 1);
-                    chunks      = (partialPc.C + chunkTokens - 1) / chunkTokens;
-                    if (chunks > kFaMaxChunks)
+                    const int64_t widest    = (std::max<int64_t>(kFaSgWorkgroupSize, partialPc.hd) + subgroupSize - 1) / subgroupSize * subgroupSize;
+                    const int64_t narrowest = (std::max<int64_t>(partialPc.hd, subgroupSize) + subgroupSize - 1) / subgroupSize * subgroupSize;
+                    for (int64_t width = widest; width >= narrowest;)
                     {
-                        chunks      = kFaMaxChunks;
-                        chunkTokens = (partialPc.C + chunks - 1) / chunks;
+                        const int64_t sharedBytes = (groupSize * partialPc.hd + groupSize * sgChunkTokens + width) * 4 + groupSize * width * 16;
+                        if (width <= (int64_t) cap.maxWorkGroupInvocations && groupSize * (width / subgroupSize) <= width && sharedBytes <= (int64_t) cap.maxSharedMemory)
+                        {
+                            wgs = width;
+                            break;
+                        }
+                        if (width <= narrowest)
+                        {
+                            break;
+                        }
+                        const int64_t halved = (width / 2 + subgroupSize - 1) / subgroupSize * subgroupSize;
+                        width                = std::max<int64_t>(std::min<int64_t>(halved, width - subgroupSize), narrowest);
+                    }
+                    sgEligible = wgs > 0;
+                }
+
+                // Chunking: the sg chunk from above, or the base kernel's workgroup-size chunk.
+                int64_t chunkTokens = sgChunkTokens;
+                if (!sgEligible)
+                {
+                    chunkTokens = std::max<int64_t>(std::min<int64_t>(4096 / groupSize, kFaWorkgroupSize), 1);
+                    if ((partialPc.C + chunkTokens - 1) / chunkTokens > kFaMaxChunks)
+                    {
+                        chunkTokens = (partialPc.C + kFaMaxChunks - 1) / kFaMaxChunks;
                     }
                 }
+                int64_t chunks = (partialPc.C + chunkTokens - 1) / chunkTokens;
                 partialPc.chunks = (int) chunks;
                 combinePc        = {(int) rows, partialPc.hd, (int) chunks};
 
