@@ -629,6 +629,27 @@ namespace vknn {
                 std::vector<int64_t> ov(os.begin(), os.end());
                 setInts(kFaOut, std::move(ov));
             }
+            // The GPU kernel stages group*headDim q values in shared memory; a product past the
+            // staging cap cannot dispatch, so the site keeps its decomposed form. The group is the
+            // first row axis K and V do not advance along (the op's own detection rule).
+            {
+                const std::vector<int64_t> &fd = fa.attr.getints(kFaDims);
+                const std::vector<int64_t> &fk = fa.attr.getints(kFaKStride);
+                const std::vector<int64_t> &fv = fa.attr.getints(kFaVStride);
+                int64_t                     groupSize = 1;
+                for (size_t d = 0; d < fd.size(); ++d)
+                {
+                    if (fd[d] > 1 && fk[d] == 0 && fv[d] == 0)
+                    {
+                        groupSize = fd[d];
+                        break;
+                    }
+                }
+                if (groupSize * hd > kFaMaxStaging)
+                {
+                    continue;
+                }
+            }
             added.push_back(std::move(fa));
             remove.insert(qkIdx);
             for (const ChainStep &c: chainUp)

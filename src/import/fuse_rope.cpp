@@ -502,7 +502,10 @@ namespace vknn {
                     int64_t      axis = gn.attr.geti("axis", 0);
                     return axis == 0 && ts.size() == 2 && ts[1] == half && staticShape(ts);
                 };
-                if (!tableOk(gcos) || !tableOk(gsin) || gcos.inputs[1] != gsin.inputs[1])
+                // The kernel bounds positions by ONE table height (the wrap and the clamp use the
+                // cos table's rows), so both tables must have identical shapes — a shorter sin
+                // table would be read past its end for positions the cos table still covers.
+                if (!tableOk(gcos) || !tableOk(gsin) || gcos.inputs[1] != gsin.inputs[1] || g.desc(gcos.inputs[0]).shape != g.desc(gsin.inputs[0]).shape)
                 {
                     return false;
                 }

@@ -71,7 +71,11 @@ namespace vknn {
     // and the support gates (the decomposed chain then stays in place).
     inline constexpr int kFaMaxHeadDim = 256;
     inline constexpr int kFaMaxContext = 6144;
-    // Shared bytes the kernel's arrays occupy (sQ + sScores + sRed + sAcc), for the device gate.
-    inline constexpr int kFaSharedBytes = (kFaMaxHeadDim + kFaMaxContext + 256 + kFaMaxHeadDim) * 4;
+    // The partial kernel stages G*hd q values and a G*chunk score slab in shared memory; both
+    // products are capped so the specialized arrays never exceed the gated shared budget (the op
+    // sizes the chunk to 4096/G, and the pass refuses a group*headDim product past the cap).
+    inline constexpr int kFaMaxStaging  = 4096;
+    // Shared bytes the kernel's arrays can occupy at the caps (sQ + sScores + sRed + sAcc).
+    inline constexpr int kFaSharedBytes = (kFaMaxStaging + kFaMaxStaging + 256 + kFaMaxHeadDim) * 4;
 
 } // namespace vknn
