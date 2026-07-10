@@ -290,12 +290,17 @@ namespace vknn {
                 {
                     continue;
                 }
-                *it                                         = side.second;
-                const std::string presentName               = g.tensors[(size_t) side.first].name;
-                g.tensors[(size_t) side.first].name         = presentName + "#concat";
-                g.tensors[(size_t) side.second].name        = presentName;
-                g.tensors[(size_t) side.first].isOutput     = false;
-                g.tensors[(size_t) side.second].isOutput    = true;
+                *it                                      = side.second;
+                const std::string presentName            = g.tensors[(size_t) side.first].name;
+                const std::string retiredName            = presentName + "#concat";
+                g.tensors[(size_t) side.first].name      = retiredName;
+                g.tensors[(size_t) side.second].name     = presentName;
+                g.tensors[(size_t) side.first].isOutput  = false;
+                g.tensors[(size_t) side.second].isOutput = true;
+                // Keep the name index consistent: the present name must resolve to the new-rows
+                // tensor (the link and boundary paths look outputs up by name).
+                g.tensorByName[presentName]              = side.second;
+                g.tensorByName[retiredName]              = side.first;
             }
             ++folded;
         }

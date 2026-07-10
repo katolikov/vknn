@@ -83,17 +83,25 @@ void main() {
   barrier();
 
   // Stage 1: one lane per token; each K element read once closes all G dots. Token s past the
-  // split boundary reads the new-rows source through its own strides.
+  // split boundary reads the new-rows source through its own strides; a chunk entirely below the
+  // boundary (every chunk but the last under the fold) keeps the branch-free past loop.
+  bool chunkAllPast = s0 + sLen <= pc.pastLen;
   for (int t = tid; t < sLen; t += WG) {
     int s = s0 + t;
     float dot[G];
     for (int gi = 0; gi < G; ++gi) dot[gi] = 0.0;
-    bool past = s < pc.pastLen;
-    int base = past ? kB + s * pc.kN : kNB + (s - pc.pastLen) * pc.kNewN;
-    int kkStep = past ? pc.kK : pc.kNewK;
-    for (int kk = 0; kk < pc.hd; ++kk) {
-      float kv = past ? float(k[base + kk * kkStep]) : float(kNew[base + kk * kkStep]);
-      for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
+    if (chunkAllPast || s < pc.pastLen) {
+      int base = kB + s * pc.kN;
+      for (int kk = 0; kk < pc.hd; ++kk) {
+        float kv = float(k[base + kk * pc.kK]);
+        for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
+      }
+    } else {
+      int base = kNB + (s - pc.pastLen) * pc.kNewN;
+      for (int kk = 0; kk < pc.hd; ++kk) {
+        float kv = float(kNew[base + kk * pc.kNewK]);
+        for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
+      }
     }
     for (int gi = 0; gi < G; ++gi) {
       float x = dot[gi] * pc.scale;
@@ -136,10 +144,15 @@ void main() {
     int prt = tid / pc.hd;
     float acc = 0.0;
     if (prt < parts) {
-      for (int t = prt; t < sLen; t += parts) {
-        int s = s0 + t;
-        float vv = s < pc.pastLen ? float(v[vB + s * pc.vK + n * pc.vN]) : float(vNew[vNB + (s - pc.pastLen) * pc.vNewK + n * pc.vNewN]);
-        acc += sScores[gi * CHUNK + t] * vv;
+      if (chunkAllPast) {
+        for (int t = prt; t < sLen; t += parts)
+          acc += sScores[gi * CHUNK + t] * float(v[vB + (s0 + t) * pc.vK + n * pc.vN]);
+      } else {
+        for (int t = prt; t < sLen; t += parts) {
+          int s = s0 + t;
+          float vv = s < pc.pastLen ? float(v[vB + s * pc.vK + n * pc.vN]) : float(vNew[vNB + (s - pc.pastLen) * pc.vNewK + n * pc.vNewN]);
+          acc += sScores[gi * CHUNK + t] * vv;
+        }
       }
     }
     for (int i = tid; i < pc.hd; i += WG) sAcc[i] = 0.0;
