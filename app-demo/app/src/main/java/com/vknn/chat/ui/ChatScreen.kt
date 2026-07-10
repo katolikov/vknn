@@ -53,13 +53,17 @@ import com.vknn.chat.Msg
 import com.vknn.chat.Phase
 import com.vknn.chat.Role
 import com.vknn.chat.UiState
-import com.vknn.chat.model.ModelCatalog
+import com.vknn.chat.model.ModelChoice
 import kotlin.math.roundToInt
 
 // Window insets (status bar, ime, nav bar) are handled by the AppShell around this screen.
 @Composable
 fun ChatScreen(
     ui: UiState,
+    modelName: String,
+    modelChoices: () -> List<ModelChoice>,
+    selectedModelKey: String,
+    onSelectModel: (String) -> Unit,
     onLoad: () -> Unit,
     onUnload: () -> Unit,
     onSend: (String) -> Unit,
@@ -70,6 +74,17 @@ fun ChatScreen(
     onPromptTemplate: (String) -> Unit,
 ) {
     var editingTemplate by remember { mutableStateOf(false) }
+    var pickingModel by remember { mutableStateOf(false) }
+    if (pickingModel) {
+        ModelPickerDialog(
+            title = "Chat model",
+            choices = modelChoices(),
+            selectedKey = selectedModelKey,
+            onSelect = onSelectModel,
+            onOpenLibrary = onOpenLibrary,
+            onDismiss = { pickingModel = false },
+        )
+    }
     // The template needs no loaded model: it is text, validated by inspection, applied on the next send.
     if (editingTemplate) {
         PromptEditorDialog(
@@ -93,6 +108,8 @@ fun ChatScreen(
             .background(Bg)
     ) {
         TopBar(
+            modelName = modelName,
+            onPickModel = { pickingModel = true },
             onEditPromptTemplate = { editingTemplate = true },
             showUnload = ui.phase == Phase.READY,
             onUnload = onUnload,
@@ -103,7 +120,7 @@ fun ChatScreen(
             ui.status?.let { StatusLine(it) }
             InputBar(ui.generating, onSend, onReset)
         } else {
-            SetupPanel(Modifier.weight(1f), ui, onLoad, onOpenLibrary)
+            SetupPanel(Modifier.weight(1f), ui, modelName, onLoad, onOpenLibrary, onPickModel = { pickingModel = true })
         }
     }
 }
@@ -118,7 +135,7 @@ internal fun validatePromptTemplate(draft: String): PromptValidation = when {
 }
 
 @Composable
-private fun TopBar(onEditPromptTemplate: () -> Unit, showUnload: Boolean, onUnload: () -> Unit) {
+private fun TopBar(modelName: String, onPickModel: () -> Unit, onEditPromptTemplate: () -> Unit, showUnload: Boolean, onUnload: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -132,9 +149,9 @@ private fun TopBar(onEditPromptTemplate: () -> Unit, showUnload: Boolean, onUnlo
             contentAlignment = Alignment.Center,
         ) { Icon(Icons.Filled.Memory, null, tint = Accent, modifier = Modifier.size(18.dp)) }
         Spacer(Modifier.width(9.dp))
-        Column(Modifier.weight(1f)) {
-            Text(ModelCatalog.QWEN.displayName, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text("on-device", color = TextSecondary, fontSize = 11.sp)
+        Column(Modifier.weight(1f).clickableNoRipple(onPickModel)) {
+            Text(modelName, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            Text("on-device · tap to switch model", color = TextSecondary, fontSize = 11.sp)
         }
         if (showUnload) {
             TopBarIconButton(Icons.Filled.Eject, "unload model", onUnload)
@@ -341,7 +358,7 @@ private fun InputBar(generating: Boolean, onSend: (String) -> Unit, onReset: () 
 }
 
 @Composable
-private fun SetupPanel(mod: Modifier, ui: UiState, onLoad: () -> Unit, onOpenLibrary: () -> Unit) {
+private fun SetupPanel(mod: Modifier, ui: UiState, modelName: String, onLoad: () -> Unit, onOpenLibrary: () -> Unit, onPickModel: () -> Unit) {
     Column(
         mod.fillMaxWidth().padding(28.dp),
         verticalArrangement = Arrangement.Center,
@@ -351,16 +368,20 @@ private fun SetupPanel(mod: Modifier, ui: UiState, onLoad: () -> Unit, onOpenLib
             Phase.MISSING -> {
                 Text("Model not downloaded", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(6.dp))
-                Text("Get Qwen2.5-Coder 0.5B (~1.3 GB) from the Model Library to start chatting.", color = TextSecondary, fontSize = 13.sp)
+                Text("Get $modelName from the Model Library, or pick another variant.", color = TextSecondary, fontSize = 13.sp)
                 Spacer(Modifier.height(20.dp))
                 PrimaryButton("Open Library", onOpenLibrary)
+                Spacer(Modifier.height(10.dp))
+                PillButton("Switch model variant", accent = false, onClick = onPickModel)
             }
             Phase.DOWNLOADED -> {
                 Text("Model ready", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(6.dp))
-                Text("Load it onto the GPU to start chatting.", color = TextSecondary, fontSize = 13.sp)
+                Text("Load $modelName onto the GPU to start chatting.", color = TextSecondary, fontSize = 13.sp)
                 Spacer(Modifier.height(20.dp))
                 PrimaryButton("Load on GPU", onLoad)
+                Spacer(Modifier.height(10.dp))
+                PillButton("Switch model variant", accent = false, onClick = onPickModel)
             }
             Phase.LOADING -> {
                 CircularProgressIndicator(color = Accent)

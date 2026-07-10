@@ -9,8 +9,10 @@ Gaussian-splat scene) — plus a **Model Library** that downloads each mode's `.
 HuggingFace with pause/resume (HTTP Range, survives process death), sha256 verification against
 the HF blobs API, free-space and metered-network guards, per-model delete, and a global
 inference-backend switch (Vulkan default; CPU allowed only where the fp32 working set fits RAM).
-Everything runs **on device** (Vulkan) with live latency metrics. Native-style dark theme.
-Kotlin + Jetpack Compose over a JNI bridge; no cloud, no server.
+The Chat and VLM tabs carry a **model-variant picker** (fp16 / int4, plus any ad-hoc `.vxm`
+already in app storage); the choice persists and switching swaps the resident session through the
+single-residency slot. Everything runs **on device** (Vulkan) with live latency metrics.
+Native-style dark theme. Kotlin + Jetpack Compose over a JNI bridge; no cloud, no server.
 
 ## Layout
 ```
@@ -23,8 +25,9 @@ app-demo/
     src/main/java/com/vknn/chat/
       NativeLib.kt          JNI bindings (chat decoder + VLM)
       Tokenizer.kt          pure-Kotlin byte-level BPE (Qwen2 and SmolVLM2 pipelines)
-      model/                model library: catalogue + resumable sha256-verified HF downloads,
-                            backend setting + CPU-admission policy
+      model/                model library: catalogue (fp16/int4 variants) + resumable sha256-verified
+                            HF downloads, per-tab variant selection, backend setting + CPU-admission
+                            policy
       vlm/                  SmolVLM2 prompt template, pixel normalization, camera-coach view model
       splat/                YoNoSplat capture/orbit view model + pose math
       ChatViewModel.kt      encode -> prefill -> stream decode, with metrics
@@ -53,14 +56,17 @@ Run the tokenizer check on the JVM (no device needed): `./gradlew :app:testDebug
 
 ## How each mode works
 
-**Chat** — a with-past Qwen2 decoder compiled at a fixed context length **C = 256**: one plan serves
-prefill (fed token by token) and every decode step; the KV cache lives in the `past_key_values` boundary
-buffers. The app tokenizes your text (byte-level BPE), feeds the tokens through the native `Decoder`
-(each `step` runs the plan on the GPU and appends the new key/value into the cache), then samples the
-next token (greedy, or temperature + top-k/top-p) and streams it back. Every tensor-compute op runs on
-Vulkan; only argmax/sampling and tokenization are CPU. Metrics are wall-clock around the native calls.
-The compiled `.vxm` reproduces the HuggingFace greedy stream token-for-token (see the repo's
-`docs/running-an-llm.md`).
+**Chat** — a with-past Qwen2 decoder compiled at a fixed context length (**C = 1024** for the
+catalogue variants); the KV cache lives in the `past_key_values` boundary buffers. The app
+tokenizes your text (byte-level BPE) and hands the whole prompt to the native `Decoder`: a
+multi-bucket `.vxm` (the "fast prefill" variants) ingests it in 256-token batched forwards through
+its prefill bucket, a single-bucket model feeds it token by token; decode then streams one
+GPU step per token. Sampling is greedy or temperature + top-k/top-p — and a greedy session
+registers the decode logits for the engine-side argmax (`Session::setOutputArgMax`), so each token
+reads back 8 bytes instead of the vocab row (temperature sampling then applies after a reload).
+Every tensor-compute op runs on Vulkan; only argmax/sampling and tokenization are CPU. Metrics are
+wall-clock around the native calls. The compiled `.vxm` reproduces the HuggingFace greedy stream
+token-for-token (see the repo's `docs/running-an-llm.md`).
 
 **VLM** — SmolVLM2-2.2B as **one multi-graph `.vxm`** (vision encoder, token embedding, and decoder
 prefill + decode buckets over one shared weight pool; see the repo's `docs/running-a-vlm.md`). A photo
@@ -74,8 +80,9 @@ renders the orbit viewer from the reconstructed scene.
 
 ## Memory requirements
 
-arm64-v8a only; requires a Vulkan-capable device. Model downloads: Qwen 1.3 GB, SmolVLM2 4.5 GB,
-YoNoSplat encoder 2.3 GB. Running SmolVLM2 on Vulkan needs **~4.6 GB of GPU-addressable memory**.
+arm64-v8a only; requires a Vulkan-capable device. Model downloads: Qwen 1.3 GB fp16 (0.5 GB as
+int4), SmolVLM2 4.5 GB, YoNoSplat encoder 2.3 GB. Running SmolVLM2 on Vulkan needs **~4.6 GB of
+GPU-addressable memory**.
 The CPU backend decodes fp16 weights to fp32 host-side, so it needs roughly **2× the model file in
 RAM**; the app blocks the CPU choice when that working set exceeds half of device RAM (SmolVLM2's
 ~9 GB fp32 working set is blocked on current phones — the library shows the reason instead of

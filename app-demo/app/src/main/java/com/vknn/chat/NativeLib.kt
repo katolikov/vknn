@@ -8,10 +8,15 @@ object NativeLib {
         System.loadLibrary("vknnchat")
     }
 
-    /** Load a .vxm decoder; returns a native handle, or 0 on failure. */
-    external fun nativeInit(vxmPath: String, cacheFile: String, precision: String, backend: String): Long
+    /**
+     * Load a .vxm decoder; returns a native handle, or 0 on failure. [greedyArgMax] registers the
+     * decode logits for the engine-side argmax (an 8-byte per-token readback instead of the vocab
+     * row); the registration holds for the session's lifetime, so it is requested only when the
+     * decode is greedy — temperature sampling then needs a reload.
+     */
+    external fun nativeInit(vxmPath: String, cacheFile: String, precision: String, backend: String, greedyArgMax: Boolean): Long
 
-    /** {L, kv_heads, C, head_dim, vocab}. */
+    /** {L, kv_heads, C, head_dim, vocab, prefillS, engineArgMax}. */
     external fun nativeInfo(ptr: Long): IntArray
 
     /** Reset to position 0 with a cleared KV cache and reseed the sampler. */
@@ -20,7 +25,13 @@ object NativeLib {
     /** Feed one token at the current position (runs the plan). 0 ok, <0 error. */
     external fun nativeStep(ptr: Long, tok: Int): Int
 
-    /** Sample the next token from the last step's logits (greedy at temp<=0). */
+    /**
+     * Feed a whole prompt from the current position — one batched forward per prefill window when
+     * the model carries a prefill bucket, per-token steps otherwise. 0 ok, -1 error, -2 context full.
+     */
+    external fun nativePrefill(ptr: Long, promptIds: LongArray): Int
+
+    /** Sample the next token from the last forward's logits (greedy at temp<=0). */
     external fun nativeSample(ptr: Long, temp: Float, topK: Int, topP: Float): Int
 
     external fun nativeFree(ptr: Long)

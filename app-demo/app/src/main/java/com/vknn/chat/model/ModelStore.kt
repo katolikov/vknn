@@ -123,6 +123,21 @@ class ModelStore(private val app: Application) {
     /** A companion repo file on disk (tokenizer etc.), stored under a model-scoped name. */
     fun auxFile(spec: ModelSpec, name: String): File = File(root, spec.auxLocalName(name))
 
+    /**
+     * Ad-hoc .vxm files in the model directories that are not catalogue downloads — pre-seeded
+     * builds (e.g. pushed via run-as into the legacy files/ dir). Partial downloads (.part) never
+     * match; a name present in both directories resolves to the primary root's copy.
+     */
+    fun adHocModelFiles(): List<File> {
+        val catalogueNames = ModelCatalog.ALL.map { it.localFileName }.toSet()
+        return listOf(root, legacyRoot).distinct()
+            .flatMap { dir ->
+                dir.listFiles { f: File -> f.isFile && f.name.endsWith(".vxm") && f.name !in catalogueNames }
+                    ?.toList() ?: emptyList()
+            }
+            .distinctBy { it.name }
+    }
+
     // A file under its final name passed verification (the rename happens after the checksum check);
     // a legacy-location file is trusted at its exact catalogue length, matching the check the first
     // release applied before renaming.

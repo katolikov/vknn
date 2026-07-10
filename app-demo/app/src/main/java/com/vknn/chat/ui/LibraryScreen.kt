@@ -133,7 +133,7 @@ private fun ModelCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(spec.displayName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                Text("${spec.mode} mode", color = Accent, fontSize = 11.sp)
+                Text("${spec.mode} mode · ${spec.variant}", color = Accent, fontSize = 11.sp)
             }
             Text(formatBytes(spec.approxBytes), color = TextSecondary, fontSize = 12.sp)
         }

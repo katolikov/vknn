@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import com.vknn.chat.UiState
 import com.vknn.chat.model.BackendPolicy
 import com.vknn.chat.model.InferenceBackend
+import com.vknn.chat.model.ModelChoice
 import com.vknn.chat.model.ModelSpec
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.splat.OrbitCamera
@@ -66,6 +67,10 @@ fun AppShell(
     onDownload: (ModelSpec) -> Unit,
     onPause: (ModelSpec) -> Unit,
     onDelete: (ModelSpec) -> Unit,
+    chatModelName: String,
+    chatModelChoices: () -> List<ModelChoice>,
+    chatSelectedModelKey: String,
+    onChatSelectModel: (String) -> Unit,
     onLoad: () -> Unit,
     onUnload: () -> Unit,
     onSend: (String) -> Unit,
@@ -73,6 +78,10 @@ fun AppShell(
     onTemp: (Float) -> Unit,
     chatPromptTemplate: String,
     onChatPromptTemplate: (String) -> Unit,
+    vlmModelName: String,
+    vlmModelChoices: () -> List<ModelChoice>,
+    vlmSelectedModelKey: String,
+    onVlmSelectModel: (String) -> Unit,
     onVlmLoad: () -> Unit,
     onVlmUnload: () -> Unit,
     onVlmCapture: (Bitmap) -> Unit,
@@ -102,6 +111,10 @@ fun AppShell(
             when (AppTab.entries[tab]) {
                 AppTab.CHAT -> ChatScreen(
                     ui = chatUi,
+                    modelName = chatModelName,
+                    modelChoices = chatModelChoices,
+                    selectedModelKey = chatSelectedModelKey,
+                    onSelectModel = onChatSelectModel,
                     onLoad = onLoad,
                     onUnload = onUnload,
                     onSend = onSend,
@@ -113,6 +126,10 @@ fun AppShell(
                 )
                 AppTab.VLM -> VlmScreen(
                     ui = vlmUi,
+                    modelName = vlmModelName,
+                    modelChoices = vlmModelChoices,
+                    selectedModelKey = vlmSelectedModelKey,
+                    onSelectModel = onVlmSelectModel,
                     onLoad = onVlmLoad,
                     onUnload = onVlmUnload,
                     onCapture = onVlmCapture,
