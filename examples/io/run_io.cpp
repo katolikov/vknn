@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
-               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--no-rope-fusion] [--timing] [--cache DIR]"
+               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--no-rope-fusion] [--no-fused-attention] [--timing] [--cache DIR]"
                " [--winograd auto|on|off] [--max-submit-nodes N] [--bucket N] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
@@ -94,6 +94,10 @@ int main(int argc, char **argv) {
     if (flag(argc, argv, "--no-rope-fusion"))
     {
         cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+    }
+    if (flag(argc, argv, "--no-fused-attention"))
+    {
+        cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
     }
     cfg.layerDump     = flag(argc, argv, "--layer-dump");
     cfg.debugSegments = flag(argc, argv, "--debug-segments");

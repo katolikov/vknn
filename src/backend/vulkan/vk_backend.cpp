@@ -1,6 +1,7 @@
 #include "vk_backend.h"
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
+#include "core/fused_attention.h" // kFaHd (FusedAttention device-cap gate)
 #include "core/vk_gates.h"        // vkNodeGate/vkKernelDeclared (shared capability model)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
@@ -157,6 +158,39 @@ namespace vknn {
                 }
                 return false;
             }
+            // FusedAttention's device-dependent requirements: the kernel reduces each q.k dot with
+            // subgroupAdd, gives each lane up to 8 output accumulators (so the head dim must fit
+            // 8 lanes' worth of registers), and runs a 256-invocation workgroup. vkNodeGate holds
+            // the device-free checks; these need the live caps.
+            if (nd.type == OpType::FusedAttention && ctx_)
+            {
+                const auto   &caps = ctx_->caps();
+                const int64_t hd   = nd.attr.geti(kFaHd);
+                if (!caps.subgroupArithmetic)
+                {
+                    if (whyNot)
+                    {
+                        *whyNot = "FusedAttention: device lacks subgroup arithmetic";
+                    }
+                    return false;
+                }
+                if (caps.subgroupSize == 0 || hd > (int64_t) caps.subgroupSize * 8)
+                {
+                    if (whyNot)
+                    {
+                        *whyNot = "FusedAttention: head dim exceeds 8 accumulators per subgroup lane";
+                    }
+                    return false;
+                }
+                if (caps.maxWorkGroupInvocations < 256)
+                {
+                    if (whyNot)
+                    {
+                        *whyNot = "FusedAttention: device workgroup limit below 256 invocations";
+                    }
+                    return false;
+                }
+            }
             return vkNodeGate(g, nd, whyNot);
         }
 
@@ -175,6 +209,7 @@ namespace vknn {
             k.gpuIslandFold   = cfg.gpuIslandFold();
             k.matmulViewFold  = cfg.matmulViewFold();
             k.ropeFusion      = cfg.ropeFusion();
+            k.fusedAttention  = cfg.fusedAttention();
             k.fp32Tensors     = cfg.fp32Tensors;
             k.winograd        = cfg.hint(Hint::Winograd, (int) Mode::Auto);
             k.winogradVariant = cfg.hint(Hint::WinogradVariant, 0);

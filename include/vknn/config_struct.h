@@ -162,6 +162,10 @@ namespace vknn {
         /// --no-rope-fusion sets it Off). Controlled through the hint mechanism.
         bool ropeFusion() const noexcept {
             return hint(Hint::RopeFusion, (int) Mode::On) != (int) Mode::Off;
+        /// True when the load-time decode-attention fusion is enabled (On by default;
+        /// --no-fused-attention sets it Off). Controlled through the hint mechanism.
+        bool fusedAttention() const noexcept {
+            return hint(Hint::FusedAttention, (int) Mode::On) != (int) Mode::Off;
         }
 
         static Config fromJsonFile(const std::string &path);

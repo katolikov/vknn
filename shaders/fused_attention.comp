@@ -1,0 +1,115 @@
+#version 450
+#define VKNN_NO_RTE 1 // matmul-family kernel: avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "precision.glsl"
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// Fused single-query decode attention (contract in src/core/fused_attention.h):
+//   out[row][n] = sum_s softmax_s(q.k^T * scale + mask * maskScale)[s] * v[s][n]
+// One workgroup per attention row; the row's q/k/v/mask bases come from the per-axis strides in
+// the geometry SSBO (a GQA head group is a zero stride, so K/V read the KV cache in place). Each
+// subgroup owns the tokens s = subgroupID (mod numSubgroups): the lanes cooperatively load one
+// K row along k — adjacent lanes read adjacent elements, the coalesced access the decomposed QK
+// MatMul's stride-64 operand view could not get — and subgroupAdd closes the dot. The softmax is
+// online (flash form): each subgroup keeps a running max m, weight sum l, and per-lane fp32
+// context accumulators, rescaling by exp(mOld - mNew) when the max advances, so scores and
+// probabilities never touch memory. Subgroup partials merge through shared memory at the end.
+// All arithmetic is fp32; only the final context vector is stored (fp16 via TO_STORE).
+#define WG 256
+#define FA_MAX_HD 256      // == vknn::kFaMaxHeadDim; bounds the q / merged-context shared arrays
+#define FA_ACC 8           // per-lane context accumulators; supports hd <= 8 * gl_SubgroupSize
+#define FA_MAX_SUBGROUPS 64
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer Q { STORE q[]; };
+layout(std430, binding = 1) readonly buffer K { STORE k[]; };
+layout(std430, binding = 2) readonly buffer V { STORE v[]; };
+layout(std430, binding = 3) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 4) readonly buffer M { STORE msk[]; };
+// Geometry: g[0..rank) = row dims, then per-row-dim strides of q, k, v, mask (5 arrays total).
+layout(std430, binding = 5) readonly buffer G { int g[]; } geom;
+layout(push_constant) uniform PC {
+  int rank, rows, C, hd;
+  int qK, kN, kK, vN, vK, mN, hasMask;
+  float scale, maskScale;
+} pc;
+
+shared float sQ[FA_MAX_HD];
+shared float sAcc[FA_MAX_HD];
+shared float sM[FA_MAX_SUBGROUPS];
+shared float sL[FA_MAX_SUBGROUPS];
+
+void main() {
+  // One workgroup per row; the 1-D grid spills into y past the per-dim workgroup-count limit.
+  uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (row >= uint(pc.rows)) return; // uniform per workgroup, so the barriers below stay uniform
+
+  // Row bases from the per-axis strides (computed redundantly by every invocation).
+  int qBase = 0, kBase = 0, vBase = 0, mBase = 0;
+  {
+    int rem = int(row);
+    for (int i = pc.rank - 1; i >= 0; --i) {
+      int c = rem % geom.g[i];
+      rem /= geom.g[i];
+      qBase += c * geom.g[pc.rank + i];
+      kBase += c * geom.g[2 * pc.rank + i];
+      vBase += c * geom.g[3 * pc.rank + i];
+      mBase += c * geom.g[4 * pc.rank + i];
+    }
+  }
+
+  uint tid = gl_LocalInvocationID.x;
+  for (int n = int(tid); n < pc.hd; n += WG)
+    sQ[n] = float(q[qBase + n * pc.qK]);
+  barrier();
+
+  // Flash loop: this subgroup's running softmax state and per-lane context accumulators. m/l are
+  // computed redundantly by every lane of the subgroup (subgroupAdd broadcasts the dot), keeping
+  // the rescale uniform.
+  uint lane = gl_SubgroupInvocationID;
+  uint sg   = gl_SubgroupSize;
+  float m = -3.4e38, l = 0.0;
+  float acc[FA_ACC];
+  for (int j = 0; j < FA_ACC; ++j) acc[j] = 0.0;
+
+  for (int s = int(gl_SubgroupID); s < pc.C; s += int(gl_NumSubgroups)) {
+    float part = 0.0;
+    for (int kk = int(lane); kk < pc.hd; kk += int(sg))
+      part += sQ[kk] * float(k[kBase + s * pc.kN + kk * pc.kK]);
+    float x = subgroupAdd(part) * pc.scale;
+    if (pc.hasMask != 0) x += float(msk[mBase + s * pc.mN]) * pc.maskScale;
+
+    float mNew = max(m, x);
+    float w = exp(m - mNew); // 0 on the first token (m at the fp32 floor), the rescale after
+    float p = exp(x - mNew);
+    l = l * w + p;
+    for (int j = 0; j < FA_ACC; ++j) {
+      int n = int(lane) + j * int(sg);
+      if (n < pc.hd) acc[j] = acc[j] * w + p * float(v[vBase + s * pc.vK + n * pc.vN]);
+    }
+    m = mNew;
+  }
+
+  // Merge the subgroup partials: global max, rescaled weight sum, then each subgroup folds its
+  // rescaled accumulators into the shared context vector one at a time (the barrier keeps the
+  // += racefree; the loop bound is workgroup-uniform).
+  if (lane == 0u) { sM[gl_SubgroupID] = m; sL[gl_SubgroupID] = l; }
+  for (int n = int(tid); n < pc.hd; n += WG) sAcc[n] = 0.0;
+  barrier();
+  float gM = -3.4e38;
+  for (uint i = 0u; i < gl_NumSubgroups; ++i) gM = max(gM, sM[i]);
+  float gL = 0.0;
+  for (uint i = 0u; i < gl_NumSubgroups; ++i) gL += sL[i] * exp(sM[i] - gM);
+  for (uint i = 0u; i < gl_NumSubgroups; ++i) {
+    if (gl_SubgroupID == i) {
+      float w = exp(m - gM);
+      for (int j = 0; j < FA_ACC; ++j) {
+        int n = int(lane) + j * int(sg);
+        if (n < pc.hd) sAcc[n] += acc[j] * w;
+      }
+    }
+    barrier();
+  }
+  float rL = 1.0 / gL;
+  for (int n = int(tid); n < pc.hd; n += WG)
+    d[int(row) * pc.hd + n] = TO_STORE(sAcc[n] * rL);
+}

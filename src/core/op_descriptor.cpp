@@ -18,8 +18,8 @@ namespace vknn {
     namespace {
         using L = LayoutClass;
 
-        // The largest enum value (append-only; Rope is last). The table is sized to cover it.
-        constexpr int kMaxOp = (int) OpType::Rope;
+        // The largest enum value with a table entry (the enum is append-only, so this only grows).
+        constexpr int kMaxOp = (int) OpType::FusedAttention;
 
         struct Table {
             OpDescriptor d[kMaxOp + 1];
@@ -82,6 +82,10 @@ namespace vknn {
                 // Fused rotate-half rotary embedding (fuseRope, load-time): a flat row-major
                 // pointwise kernel with a cos/sin table row lookup; no fusion role of its own.
                 set(OpType::Rope, L::Flat, false, false);
+                // Load-time fused decode attention: operands and output are flat row-major
+                // activations addressed through per-axis strides; never a pointwise-fusion member
+                // or epilogue host (created after fusePointwiseChains has run).
+                set(OpType::FusedAttention, L::Flat, false, false);
                 // Everything not listed keeps the all-default row {Nc4, pwMember=false,
                 // pwEpilogue=false}: CPU-only / structural ops (Reshape, Flatten, Squeeze, Unsqueeze,
                 // Cast, Identity, Constant, Shape, BatchNorm, EyeLike, FusedSE, ConvertLayout,
@@ -93,7 +97,7 @@ namespace vknn {
 
     const OpDescriptor &opDescriptor(OpType t) {
         static const Table table;
-        int i = (int) t;
+        int                i = (int) t;
         if (i < 0 || i > kMaxOp)
         {
             static const OpDescriptor kDefault;

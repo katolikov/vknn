@@ -5,6 +5,7 @@
 // fallback diagnostics and the support report state WHY a node left the GPU.
 #include "core/vk_gates.h"
 #include "backend/cpu/cpu_backend.h"
+#include "core/fused_attention.h"
 #include "vknn/dtype.h"
 #include "vknn/node.h"
 
@@ -277,6 +278,27 @@ namespace vknn {
         if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And)
         {
             // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
+            return true;
+        }
+        if (nd.type == OpType::FusedAttention)
+        {
+            // Load-time fused decode attention (core/fused_attention.h). The fuseDecodeAttention
+            // pass only emits fully-formed nodes, so the structural checks here guard against a
+            // hand-built graph; the device-dependent subgroup checks live in
+            // VulkanBackend::supportsNode (this gate is device-free).
+            if (!nd.attr.has(kFa))
+            {
+                return refuse(whyNot, "FusedAttention: missing geometry attrs");
+            }
+            const int64_t hd = nd.attr.geti(kFaHd), c = nd.attr.geti(kFaC);
+            if (hd <= 0 || hd > kFaMaxHeadDim || c <= 0)
+            {
+                return refuse(whyNot, "FusedAttention: head dim / token count out of kernel range");
+            }
+            if (nd.inputs.size() < 3)
+            {
+                return refuse(whyNot, "FusedAttention: needs q, k, v inputs");
+            }
             return true;
         }
         if (nd.type == OpType::ConvTranspose)

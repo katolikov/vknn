@@ -146,6 +146,9 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--no-rope-fusion"))
         {
             cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+        if (!strcmp(argv[i], "--no-fused-attention"))
+        {
+            cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
         }
     }
     std::mt19937 rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));

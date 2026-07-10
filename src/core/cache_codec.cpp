@@ -51,7 +51,7 @@ namespace vknn {
         {
             // Per-variant map: the count must match the key/value pairs packed below (the 10 key fields
             // plus pipeline, weights, tune). Adding a field means bumping this literal in lockstep.
-            msgpack_pack_map(&pk, 13);
+            msgpack_pack_map(&pk, 14);
             packKey(&pk, "precision");
             packStr(&pk, v.precision);
             packKey(&pk, "flatLayout");
@@ -62,6 +62,8 @@ namespace vknn {
             v.matmulViewFold ? msgpack_pack_true(&pk) : msgpack_pack_false(&pk);
             packKey(&pk, "ropeFusion");
             v.ropeFusion ? msgpack_pack_true(&pk) : msgpack_pack_false(&pk);
+            packKey(&pk, "fusedAttention");
+            v.fusedAttention ? msgpack_pack_true(&pk) : msgpack_pack_false(&pk);
             packKey(&pk, "fp32Tensors");
             packStr(&pk, v.fp32Tensors);
             packKey(&pk, "winograd");
@@ -198,6 +200,7 @@ namespace vknn {
                 v.gpuIslandFold   = getBool(vo, "gpuIslandFold", true);
                 v.matmulViewFold  = getBool(vo, "matmulViewFold", true);
                 v.ropeFusion      = getBool(vo, "ropeFusion", true);
+                v.fusedAttention  = getBool(vo, "fusedAttention", true);
                 v.fp32Tensors     = getStr(vo, "fp32Tensors");
                 v.winograd        = getI32(vo, "winograd");
                 v.winogradVariant = getI32(vo, "winogradVariant");
