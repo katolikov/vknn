@@ -64,7 +64,8 @@
 //     --dump-big        log tensors > 50M elements after shape inference (debug)
 //
 // A ".vxm" input skips import + passes (they ran at its compile time) and serves the remaining
-// stages — the support report and the save — from the stored graph.
+// stages — quantization, the fp16 sweep, the support report, and the save — from the stored graphs,
+// processing EVERY bucket of a multi-bucket container and preserving bucket order and names.
 #include "core/vk_gates.h"
 #include "import/dim_expr.h"
 #include "import/passes.h"
@@ -757,39 +758,76 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    Graph g;
+    // A .vxm input skips import + passes (they ran at its compile time) and serves the remaining
+    // stages from the stored graphs. EVERY stored bucket is processed: the quantization and fp16
+    // sweeps run per bucket, and the save keeps the bucket order and names over one content-deduped
+    // initializer pool, so a multi-bucket model keeps all its shape buckets through a re-compile.
+    // Identical weights quantize identically (the pass is deterministic per payload), so the shared
+    // pool stays one copy per distinct payload. A single-bucket input writes the legacy single-graph
+    // container, exactly as before.
     if (vxmInput)
     {
         printf("[compile] loading %s (.vxm input: passes already applied at its compile time)\n", onnx.c_str());
-        if (!loadGraphBin(g, onnx))
+        std::vector<Graph>       buckets;
+        std::vector<std::string> names;
+        if (!loadGraphBinBuckets(buckets, names, onnx))
         {
             printf("[compile] load failed\n");
             return 2;
         }
-        printf("[compile] %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
-    } else
-    {
-        printf("[compile] importing %s ...\n", onnx.c_str());
-        try
+        for (size_t b = 0; b < buckets.size(); ++b)
         {
-            g = importOnnx(onnx);
-            printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d lower-conv=%d)\n", g.nodes.size(), g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw,
-                   opt.fusePointwiseChains, opt.lowerConv);
-            runStandardPasses(g, opt);
-        } catch (const Error &e)
+            Graph &gb = buckets[b];
+            printf("[compile] bucket %zu '%s': %zu nodes, %zu weights\n", b, names[b].c_str(), gb.nodes.size(), gb.initializers.size());
+            if (quantize)
+            {
+                // A .vxm bucket re-quantizes fine (its passes are already applied; the pass only
+                // reads concrete shapes and payloads). An already-quantized weight is skipped by its
+                // wq attr.
+                runQuantPass(gb, quantOpts);
+            }
+            if (fp16 || quantize)
+            {
+                Fp16ConvertStats st = convertInitializersFp16(gb);
+                printf("[compile] fp16: converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
+            }
+        }
+        if (!supportReport.empty())
         {
-            // A dynamic non-batch input axis with no --shape declaration lands here (as does any other
-            // import/pass failure). Report it and exit nonzero instead of aborting on the exception.
-            printf("[compile] %s\n", e.what());
+            std::vector<std::string> models(buckets.size(), onnx);
+            if (!writeSupportReports(buckets, models, supportReport))
+            {
+                return 2;
+            }
+        }
+        if (!saveGraphBinBuckets(buckets, names, out))
+        {
+            printf("[compile] save failed\n");
             return 2;
         }
-        printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
+        printf("[compile] wrote %s (%zu bucket(s))\n", out.c_str(), buckets.size());
+        return 0;
     }
+
+    Graph g;
+    printf("[compile] importing %s ...\n", onnx.c_str());
+    try
+    {
+        g = importOnnx(onnx);
+        printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d fuse-pointwise=%d lower-conv=%d)\n", g.nodes.size(), g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw,
+               opt.fusePointwiseChains, opt.lowerConv);
+        runStandardPasses(g, opt);
+    } catch (const Error &e)
+    {
+        // A dynamic non-batch input axis with no --shape declaration lands here (as does any other
+        // import/pass failure). Report it and exit nonzero instead of aborting on the exception.
+        printf("[compile] %s\n", e.what());
+        return 2;
+    }
+    printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
 
     if (quantize)
     {
-        // A .vxm input re-quantizes fine (its passes are already applied; the pass only reads
-        // concrete shapes and payloads). An already-quantized weight is skipped by its wq attr.
         runQuantPass(g, quantOpts);
     }
     if (fp16 || quantize)

@@ -143,6 +143,18 @@ int main(int argc, char **argv) {
         {
             cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
         }
+        if (!strcmp(argv[i], "--no-rope-fusion"))
+        {
+            cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+        }
+        if (!strcmp(argv[i], "--no-fused-attention"))
+        {
+            cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
+        }
+        if (!strcmp(argv[i], "--no-kv-concat-fold"))
+        {
+            cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
+        }
     }
     std::mt19937 rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));
 
@@ -240,6 +252,20 @@ int main(int argc, char **argv) {
         return 2;
     }
     fprintf(stderr, "[vlm] %s: layers=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imageRows=%d\n", argv[1], numLayers, kvHeads, cacheSlots, headDim, hiddenDim, (long long) vocabSize, prefillWindow, imageRowCount);
+    // Every id fed to the embedding bucket indexes its table: the prompt tokens, the --image-token
+    // rows (embedded before the splice overwrites them), and the --eos id (pads the prefill window
+    // and folds into the cache at end of turn). An out-of-range one must fail here with the value
+    // and the vocab size, never reach the engine as a lookup.
+    if (eosToken < 0 || eosToken >= vocabSize)
+    {
+        fprintf(stderr, "--eos %lld is out of range for this model (vocab %lld)\n", (long long) eosToken, (long long) vocabSize);
+        return 2;
+    }
+    if (imageToken < 0 || imageToken >= vocabSize)
+    {
+        fprintf(stderr, "--image-token %lld is out of range for this model (vocab %lld)\n", (long long) imageToken, (long long) vocabSize);
+        return 2;
+    }
 
     // --- persistent boundary tensors -------------------------------------------------------------
     // One input vector serves BOTH decoder buckets: the past entries hold the KV cache across the
@@ -633,6 +659,23 @@ int main(int argc, char **argv) {
         }
         if (prompt.empty())
         {
+            continue;
+        }
+        // An out-of-vocab prompt id would index past the embedding table; fail THIS TURN with the
+        // value and the vocab size — never feed it to the model, never kill the persistent process.
+        bool promptValid = true;
+        for (size_t i = 0; i < prompt.size() && promptValid; ++i)
+        {
+            if (prompt[i] < 0 || prompt[i] >= vocabSize)
+            {
+                fprintf(stderr, "[vlm] prompt token id %lld (position %zu) is out of range for this model (vocab %lld); turn skipped\n", (long long) prompt[i], i, (long long) vocabSize);
+                promptValid = false;
+            }
+        }
+        if (!promptValid)
+        {
+            printf("END\n");
+            fflush(stdout);
             continue;
         }
         const int promptLen = (int) prompt.size();

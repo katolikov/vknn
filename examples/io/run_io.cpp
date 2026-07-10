@@ -16,6 +16,9 @@
 //   --max-submit-nodes N   split the GPU command buffer every N nodes (watchdog/TDR mitigation)
 //   --max-submit-bindings N  split the command buffer once it accumulates N descriptor bindings
 //   --repeat N             re-run the same inputs N times; only the last run's outputs are written
+//   --bucket N             run plan bucket N of a multi-bucket model (default 0); the positional
+//                          inputs bind bucket N's declared inputs, so run() dispatches to that
+//                          bucket and the written outputs (and --dump tensors) are bucket N's
 //   --profile              print the per-op GPU profile table and the GPU total
 //   --dump NAMES           dump the named intermediate tensors (comma-separated) as fp32
 //   --fp32-tensors NAMES   force the named tensors to fp32 compute (comma-separated)
@@ -61,8 +64,8 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
-               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--timing] [--cache DIR]"
-               " [--winograd auto|on|off] [--max-submit-nodes N] in0.bin in1.bin ...\n",
+               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--no-rope-fusion] [--no-fused-attention] [--timing] [--cache DIR]"
+               " [--winograd auto|on|off] [--max-submit-nodes N] [--bucket N] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
     }
@@ -88,6 +91,18 @@ int main(int argc, char **argv) {
     {
         cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
     }
+    if (flag(argc, argv, "--no-rope-fusion"))
+    {
+        cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+    }
+    if (flag(argc, argv, "--no-fused-attention"))
+    {
+        cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
+    }
+    if (flag(argc, argv, "--no-kv-concat-fold"))
+    {
+        cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
+    }
     cfg.layerDump     = flag(argc, argv, "--layer-dump");
     cfg.debugSegments = flag(argc, argv, "--debug-segments");
     cfg.layerDumpDir  = opt(argc, argv, "--layer-dump-dir", cfg.layerDumpDir.c_str());
@@ -108,14 +123,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to load %s\n", model.c_str());
         return 1;
     }
-    auto infos = sess->inputInfo();
+    // --bucket selects which plan bucket the positional inputs describe (an LLM .vxm stores prefill
+    // and decode as separate buckets). Binding bucket N's declared input names/shapes makes run()
+    // dispatch to that bucket, so the written outputs (and any --dump tensors) are bucket N's.
+    const size_t bucket = (size_t) atoi(opt(argc, argv, "--bucket", "0"));
+    if (bucket >= sess->bucketCount())
+    {
+        fprintf(stderr, "bucket %zu is out of range: %s has %zu bucket(s)\n", bucket, model.c_str(), sess->bucketCount());
+        return 1;
+    }
+    auto infos = sess->inputInfo(bucket);
     // positional input files = args after argv[2] that aren't a flag (or a flag's value).
     std::vector<std::string> inFiles;
     for (int i = 3; i < argc; ++i)
     {
         if (argv[i][0] == '-')
         {
-            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") || !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads"))
+            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") || !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads") || !strcmp(argv[i], "--bucket"))
             {
                 ++i; // skip the flag's value
             }

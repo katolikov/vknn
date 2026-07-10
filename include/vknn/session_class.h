@@ -10,6 +10,7 @@
 #include "vknn/tensor.h"
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,11 @@ namespace vknn {
         std::vector<RtTensor>                 pool;                 ///< Runtime tensor pool for this bucket, indexed by TensorId.
         std::vector<FallbackReason>           fallbackReasons;      ///< Requested-backend refusals recorded while planning this bucket.
         bool                                  ioGpuConvert = false; ///< Whole graph on one GPU backend: 8-bit inputs upload raw + convert on the GPU.
+        /// Graph inputs that reach a Gather node's index operand, paired with the smallest statically
+        /// known axis size any of their Gathers selects from. Collected at plan time; run() validates a
+        /// bound Int64 input against [-axisSize, axisSize) so an out-of-range index (an out-of-vocab
+        /// token id against an embedding table) fails at bind time instead of reading out of bounds.
+        std::vector<std::pair<TensorId, int64_t>> gatherIndexAxisSizes;
     };
 
     /// Owns the planned graph, the chosen backend(s), caches, and the tensor pool.
@@ -174,6 +180,25 @@ namespace vknn {
         /// previously linked inputs keep their engine-side values until rebound.
         void clearLinks();
 
+        // --- engine-side output reductions --------------------------------------------------------
+        // An output registered for argmax stays engine-resident like a linked output: run() returns
+        // its IOTensor with name/shape/dtype but NO data, and the engine reduces it to {index, value}
+        // instead — on the GPU backend a single dispatch appended to the segment's pre-recorded
+        // command stream with an 8-byte readback, replacing the full download of the vector plus the
+        // host-side scan (an autoregressive decoder's per-token greedy argmax over the logits). The
+        // selected index is the first occurrence of the maximum — identical to a left-to-right host
+        // scan with a strictly-greater test over the same values — so a greedy token stream is
+        // unchanged by registration.
+
+        /// Register the boundary output `outputName` of `bucket` for engine-side argmax. The output
+        /// must be float and effectively one-dimensional (every leading dim 1). On a backend without
+        /// a device reduction path the output keeps its host copy and readOutputArgMax() scans it —
+        /// same result, host cost. Registration is idempotent.
+        Status setOutputArgMax(size_t bucket, const std::string &outputName);
+        /// The argmax of a registered output as of the last completed run: first-occurrence index
+        /// and the value widened to fp32. NotFound when the name was never registered.
+        Status readOutputArgMax(const std::string &outputName, int64_t &index, float &value);
+
         /// Runtime tensor by name for layer-dump / debugging, or nullptr if no such tensor exists.
         /// The returned data is host-resident.
         const RtTensor *tensor(const std::string &name) const;
@@ -206,6 +231,15 @@ namespace vknn {
         PlanBucket buildBucket(Graph &&g, const std::string &key);
         /// Reassign small CPU-bounded GPU runs in `bucket` to CPU (avoid round trips).
         void foldTinyGpuIslands(PlanBucket &bucket);
+        /// Zero-match accounting for the user-supplied name/op pattern debug knobs (dumpTensors,
+        /// disableVkOps): records which list entries matched this bucket's final graph and backend
+        /// assignment. Reads only — never changes the plan. Runs once per bucket, after the island
+        /// fold; fp32Tensors entries are accounted inside markFp32 the same way.
+        void accountDebugPatternMatches(const PlanBucket &bucket);
+        /// One WARN per pattern entry that matched nothing in ANY bucket, so a debug knob whose
+        /// tensor was renamed or fused/folded away (or a typo) never silently no-ops. Called once
+        /// per model load, after every bucket is built — never per inference.
+        void warnUnmatchedDebugPatterns() const;
         /// Checks a caller-provided input shape against `bucket`'s plan-frozen buffers; the single
         /// point every run() input shape passes through when a bucket is already selected.
         Status validateInputShape(const PlanBucket &bucket, TensorId id, const Shape &got) const;
@@ -239,6 +273,18 @@ namespace vknn {
         /// The link record for (bucket, tensor id) on the given side, or nullptr when not linked.
         const ResidentLink *linkedOutput(size_t bucket, TensorId id) const;
         const ResidentLink *linkedInput(size_t bucket, TensorId id) const;
+
+        /// One registered engine-side argmax (see setOutputArgMax). `deviceSegment` set = the owning
+        /// GPU segment reduces on-device and suppresses the output's download; null = the host copy
+        /// stays and readOutputArgMax() scans it (the CPU backend's path).
+        struct OutputArgMax {
+            size_t      bucket = 0;
+            std::string outputName;
+            TensorId    outId         = kNoTensor;
+            Segment    *deviceSegment = nullptr;
+        };
+        /// The argmax record for (bucket, output tensor id), or nullptr when not registered.
+        const OutputArgMax *argMaxOutput(size_t bucket, TensorId id) const;
         /// Per-run link step: push dirty ranges to device segments and apply host-path copies.
         Status applyResidentLinks(size_t bucketIndex, PlanBucket &bucket);
 
@@ -262,8 +308,19 @@ namespace vknn {
         // bucketsShareInputNames() cache: valid while the bucket count equals uniformCheckedFor_.
         mutable size_t uniformCheckedFor_ = 0;
         mutable bool   bucketsUniform_    = true;
+        // Zero-match pattern accounting (see accountDebugPatternMatches): the entries of the
+        // corresponding Config list observed to match in at least one bucket, plus the op names
+        // present in the model (for disableVkOps). fp32PatternsAccounted_ marks that markFp32 ran
+        // with the caller's fp32Tensors list in at least one bucket, so the warning fires only
+        // where the pattern resolution actually happened.
+        std::set<std::string> matchedFp32Patterns_;
+        std::set<std::string> matchedDumpPatterns_;
+        std::set<std::string> presentOpNames_;
+        bool                  fp32PatternsAccounted_ = false;
         // Declared output->input links, applied at the start of each run of their bucket.
         std::vector<ResidentLink> links_;
+        // Registered engine-side output argmax reductions (see setOutputArgMax).
+        std::vector<OutputArgMax> argMaxOutputs_;
     };
 
 } // namespace vknn

@@ -6,15 +6,17 @@ using namespace vknn;
 
 static CacheVariant makeVariant(const std::string &prec, bool flat) {
     CacheVariant v;
-    v.precision       = prec;
-    v.flatLayout      = flat;
-    v.gpuIslandFold   = true;
-    v.fp32Tensors     = "/enc/Foo,/enc/Bar";
-    v.winograd        = 1;
-    v.winogradVariant = 2;
-    v.winogradUnit    = 4;
-    v.directConv3x3   = 1;
-    v.pipeline        = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02};
+    v.precision               = prec;
+    v.flatLayout              = flat;
+    v.gpuIslandFold           = true;
+    v.matmulViewFold          = flat; // exercise a non-default value through the round-trip
+    v.fusedAttention          = flat;
+    v.fp32Tensors             = "/enc/Foo,/enc/Bar";
+    v.winograd                = 1;
+    v.winogradVariant         = 2;
+    v.winogradUnit            = 4;
+    v.directConv3x3           = 1;
+    v.pipeline                = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02};
     v.weights["conv1.weight"] = {1.5f, -2.25f, 3.0f, 0.0f};
     v.weights["conv2.bias"]   = {0.125f};
     v.tune["sig-a/64x3x3"]    = 128;
@@ -61,12 +63,17 @@ TEST(CacheCodec, RoundTrip) {
     }
 
     // findVariant keys on the cache-affecting config only.
-    CacheVariant key = makeVariant("high", false);
+    CacheVariant        key = makeVariant("high", false);
     const CacheVariant *hit = got.findVariant(key);
     ASSERT_NE(hit, nullptr);
     EXPECT_EQ(hit->precision, "high");
     CacheVariant miss = makeVariant("normal", false);
     EXPECT_EQ(got.findVariant(miss), nullptr);
+    // Flipping a single pass hint (the decode-attention fusion) is a distinct variant key: a
+    // fused-plan cache entry must never serve an unfused config or vice versa.
+    CacheVariant faFlip   = makeVariant("high", false);
+    faFlip.fusedAttention = !faFlip.fusedAttention;
+    EXPECT_EQ(got.findVariant(faFlip), nullptr);
 }
 
 // Input that is not a well-formed MessagePack top-level map is rejected: a legacy "VKNNCAC1" container,
@@ -82,13 +89,37 @@ TEST(CacheCodec, RejectsLegacyAndGarbage) {
     EXPECT_FALSE(cacheDecode(truncated, sizeof(truncated), got));
 }
 
+// The load-time graph-rewrite hints are key fields: a variant compiled with a fold/fusion pass off
+// must never satisfy the default-on key (and vice versa), and the flag survives a round-trip — the
+// stale-cache guard for a hint flip between runs.
+TEST(CacheCodec, LoadTimePassHintsDistinguishVariants) {
+    CacheVariant off = makeVariant("low", true);
+    off.ropeFusion   = false;
+    CacheVariant on  = makeVariant("low", true);
+    EXPECT_FALSE(on.sameKey(off));
+
+    CacheVariant viewOff   = makeVariant("low", true);
+    viewOff.matmulViewFold = false;
+    EXPECT_FALSE(on.sameKey(viewOff));
+
+    CacheDoc doc;
+    doc.variants.push_back(off);
+    std::vector<uint8_t> bytes = cacheEncode(doc);
+    CacheDoc             got;
+    ASSERT_TRUE(cacheDecode(bytes.data(), bytes.size(), got));
+    ASSERT_EQ(got.variants.size(), 1u);
+    EXPECT_FALSE(got.variants[0].ropeFusion);
+    EXPECT_TRUE(got.variants[0].sameKey(off));
+    EXPECT_EQ(got.findVariant(on), nullptr);
+}
+
 // A document carrying zero variants round-trips: the variants array decodes empty and the scalar
 // guard fields are still preserved.
 TEST(CacheCodec, EmptyVariants) {
     CacheDoc doc;
-    doc.format     = kCacheFormat;
-    doc.kernelHash = "k";
-    doc.model      = "m";
+    doc.format                 = kCacheFormat;
+    doc.kernelHash             = "k";
+    doc.model                  = "m";
     std::vector<uint8_t> bytes = cacheEncode(doc);
     CacheDoc             got;
     ASSERT_TRUE(cacheDecode(bytes.data(), bytes.size(), got));

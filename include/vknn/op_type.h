@@ -56,18 +56,18 @@ namespace vknn {
         ScatterND,       // copy data, then scatter update slices at N-D index rows
         FusedSE,         // fused Squeeze-Excite scale: GAP->FC->relu->FC->hardsigmoid (one kernel)
         FusedDwPw,       // fused depthwise-3x3 + 1x1-project (expanded intermediate stays on-chip)
-        FusedPointwise, // fused per-element chain (standalone); also the epilogue carried by producers
+        FusedPointwise,  // fused per-element chain (standalone); also the epilogue carried by producers
         // layout conversion nodes (inserted by the layout pass)
         ConvertLayout,
         // fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by markFp32)
         ConvertDtype,
-        Range,     // arange(start, limit, delta) -- scalar inputs, 1-D output
-        ConvGemm,  // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
-        Less,      // A <  B -> 1.0/0.0, elementwise with broadcasting (flat path)
-        LessEqual, // A <= B -> 1.0/0.0, elementwise with broadcasting (flat path)
-        Dropout,   // identity in inference mode; eliminated at import (eliminateDropout) -- a kept
-                   // training-mode / consumed-mask Dropout has no kernel and is unsupported
-        TopK,      // k largest/smallest along an axis -> (values, int64 indices); const k (CPU)
+        Range,        // arange(start, limit, delta) -- scalar inputs, 1-D output
+        ConvGemm,     // Conv lowered to an implicit-GEMM kernel (lowerConv); weights repacked [K][Cout]
+        Less,         // A <  B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        LessEqual,    // A <= B -> 1.0/0.0, elementwise with broadcasting (flat path)
+        Dropout,      // identity in inference mode; eliminated at import (eliminateDropout) -- a kept
+                      // training-mode / consumed-mask Dropout has no kernel and is unsupported
+        TopK,         // k largest/smallest along an axis -> (values, int64 indices); const k (CPU)
         InstanceNorm, // InstanceNormalization: per-channel normalize over the spatial dims; lowered
                       // at import to Reduce/Sub/Mul/Add/Sqrt/Div (lowerInstanceNorm) -- no kernel
         // ONNX quantized operator family (QDQ, QLinear, dynamic quantization). Recognized at
@@ -103,6 +103,18 @@ namespace vknn {
         MultiHeadAttention,      // fused attention; expanded only in the pure q/k/v(+additive mask) form
         GroupQueryAttention,     // fused GQA with in-op RoPE + KV cache; recognized, NOT yet expanded
         MatMulNBits,             // blockwise 4-bit weight MatMul: repacked into the int4 wq format
+        Rope,                    // fused rotate-half rotary embedding over (x, position_ids,
+                                 // cos_table, sin_table) with a `half` attr:
+                                 //   y[..., :half]  = x1*cos[p] - x2*sin[p]
+                                 //   y[..., half:] = x1*sin[p] + x2*cos[p]   (x1/x2 = last-axis halves)
+                                 // ONE dispatch replacing the Slice/Gather/mul/Concat chain a lowered
+                                 // contrib RotaryEmbedding expands to. Created ONLY by the load-time
+                                 // fuseRope pass (Hint::RopeFusion) — never parsed from ONNX, never
+                                 // serialized to a .vxm.
+        FusedAttention,          // single-query decode attention core: softmax(q.K^T * scale + mask).V
+                                 // in one kernel, operands read through per-axis strides
+                                 // (core/fused_attention.h). Created only by the load-time
+                                 // fuseDecodeAttention pass — never imported, never serialized.
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;
@@ -153,9 +165,9 @@ namespace vknn {
     /// single OpType with the specific op recovered separately).
     /// @param s ONNX op_type string (case-sensitive).
     /// @returns The matching OpType, or OpType::Unknown when `s` names no supported operator.
-    OpType      opTypeFromOnnx(const std::string &s);
+    OpType opTypeFromOnnx(const std::string &s);
     /// True for the ONNX quantized operator family (QuantizeLinear..QGemm) — the ops the
     /// import-time dequantize lowering rewrites; none has a backend kernel.
-    bool        opTypeIsQuantized(OpType t);
+    bool opTypeIsQuantized(OpType t);
 
 } // namespace vknn

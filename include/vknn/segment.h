@@ -56,6 +56,30 @@ namespace vknn {
             return false;
         }
 
+        // ---- device-side output reductions (Session::setOutputArgMax) ----
+        // A backend that can reduce a boundary output on-device (the Vulkan segment) overrides
+        // these; the default says "no device path" and the Session computes the reduction on the
+        // host copy instead.
+
+        /// Register `output` (one of this segment's boundary outputs, flat float storage) for an
+        /// on-device argmax epilogue: every run appends one reduction dispatch after the graph's
+        /// nodes into the same command stream and stops downloading the full output to host;
+        /// readOutputArgMax() returns the last run's result. Unsupported = no device path.
+        virtual Status setOutputArgMax(TensorId output, std::string &whyNot) {
+            (void) output;
+            (void) whyNot;
+            return Status::Unsupported;
+        }
+        /// The last run's argmax of an output registered by setOutputArgMax(): the first-occurrence
+        /// (lowest) index of the maximum element and its value widened to fp32. False when `output`
+        /// is not registered here.
+        virtual bool readOutputArgMax(TensorId output, int64_t &index, float &value) {
+            (void) output;
+            (void) index;
+            (void) value;
+            return false;
+        }
+
         /// Backend that compiled and owns this segment. Non-owning; the backend outlives the segment.
         Backend *backend = nullptr;
         /// The graph this segment was compiled against, recorded so the segment's captured `Graph &`

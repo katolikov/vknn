@@ -10,7 +10,12 @@
 //
 //   vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
 //             [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
-//             [--no-kv-link] [--no-prefill] [--timing]
+//             [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]
+//
+// Greedy decode (--temp 0, the default) registers the decode bucket's logits for the engine-side
+// argmax (Session::setOutputArgMax): per token the engine reduces the logits on the GPU and the
+// host reads back 8 bytes instead of the vocab row, with an identical token stream. A negative
+// --eos disables early stop (no generated id ever matches it).
 //
 // A multi-bucket model whose second bucket takes input_ids [1,S] (S>1) prefills the prompt in
 // S-token forwards instead of token-by-token — TTFT then costs one batched pass per S prompt
@@ -33,6 +38,7 @@
 #include "vknn/runtime.h"
 #include "vknn/session.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -75,7 +81,7 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "usage: %s model.vxm [--backend vulkan|cpu] [--precision low|normal|high]\n"
                 "        [--fp32-tensors CSV] [--max-tokens N] [--temp T] [--top-k K] [--top-p P]\n"
-                "        [--eos ID] [--seed S]\n",
+                "        [--eos ID] [--seed S] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]\n",
                 argv[0]);
         return 1;
     }
@@ -96,6 +102,18 @@ int main(int argc, char **argv) {
     if (flagSet(argc, argv, "--no-matmul-view-fold"))
     {
         cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+    }
+    if (flagSet(argc, argv, "--no-rope-fusion"))
+    {
+        cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+    }
+    if (flagSet(argc, argv, "--no-fused-attention"))
+    {
+        cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
+    }
+    if (flagSet(argc, argv, "--no-kv-concat-fold"))
+    {
+        cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
     }
     std::mt19937 rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
 
@@ -207,6 +225,26 @@ int main(int argc, char **argv) {
         return 2;
     }
     fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d present_rows=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, presRows, (long long) vocab);
+    // chat only COMPARES --eos against generated ids (it is never fed to the model), so a negative
+    // id is a valid "never matches" sentinel that disables early stop (timing harnesses use it). A
+    // non-negative id past the vocab can never be generated either, and only signals a caller
+    // mistake — fail with the value and the vocab size.
+    if (eos >= vocab)
+    {
+        fprintf(stderr, "--eos %lld is out of range for this model (vocab %lld)\n", (long long) eos, (long long) vocab);
+        return 2;
+    }
+    // Greedy decode reads back only the engine-side argmax of the logits (8 bytes on the GPU
+    // backend) instead of downloading and scanning the whole vocab row per token; the stream is
+    // unchanged (first-occurrence argmax, exactly this tool's host scan). Sampling (--temp > 0)
+    // needs the full distribution, so it keeps the row readback, as does --no-gpu-argmax (the A/B
+    // reference).
+    bool gpuArgmax = temp <= 0.0f && !flagSet(argc, argv, "--no-gpu-argmax");
+    if (gpuArgmax && sess->setOutputArgMax((size_t) decodeBucket, "logits") != Status::Ok)
+    {
+        fprintf(stderr, "[chat] engine argmax unavailable for 'logits'; using the host scan\n");
+        gpuArgmax = false;
+    }
 
     // Persistent boundary tensors, in model input order. Under --no-kv-link the past key/value
     // buffers ARE the KV cache (fp32 host boundary), retained across steps and turns; with linking
@@ -351,8 +389,22 @@ int main(int argc, char **argv) {
         return true;
     };
 
-    // Feed one token at the current position; return the logits (vocab floats) or nullptr on error.
-    auto step = [&](int64_t tok) -> const float * {
+    // Decode-loop phase walls (--timing): accumulated per decode step, reported per turn.
+    double tmLinkMs = 0, tmRunMs = 0, tmPrepMs = 0, tmSampleMs = 0;
+    int    tmSteps  = 0;
+    auto   nowMs    = [] {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    // The last forward's logits row and its provenance. A decode step under engine argmax returns
+    // the logits entry with no data (lastLogits stays null; readOutputArgMax serves the token); a
+    // prefill pass always yields a full host row (its bucket is never argmax-registered).
+    const float *lastLogits     = nullptr;
+    bool         lastFromDecode = false;
+
+    // Feed one token at the current position; false on error.
+    auto step = [&](int64_t tok) -> bool {
+        const double tPrep0 = nowMs();
         setI64(idIdx, {tok});
         setI64(posIdx, {(int64_t) p});
         std::vector<int64_t> am((size_t) C + 1, 0);
@@ -362,6 +414,9 @@ int main(int argc, char **argv) {
         }
         am[(size_t) C] = 1; // the current token (appended at index C)
         setI64(maskIdx, am);
+        const double tLink0 = nowMs();
+        tmPrepMs += tLink0 - tPrep0;
+        double tRun0 = tLink0;
 
         Status runStatus = Status::Ok;
         bool   ranLinked = false;
@@ -391,6 +446,8 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+            tRun0 = nowMs();
+            tmLinkMs += tRun0 - tLink0;
             if (linksOk)
             {
                 if (reseedCache)
@@ -413,7 +470,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "[chat] switching to the host KV loop at p=%d (resyncing the cache from the engine)\n", p);
                 if (!syncResidentToHost(p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1))
                 {
-                    return nullptr;
+                    return false;
                 }
                 sess->clearLinks();
                 kvLink = false;
@@ -423,10 +480,12 @@ int main(int argc, char **argv) {
         {
             runStatus = sess->run(inputs, outputs);
         }
+        tmRunMs += nowMs() - tRun0;
+        ++tmSteps;
         if (runStatus != Status::Ok)
         {
             fprintf(stderr, "[chat] run failed\n");
-            return nullptr;
+            return false;
         }
         if (!mapped)
         {
@@ -464,7 +523,10 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        return reinterpret_cast<const float *>(outputs[(size_t) outIdxByInfo[logitsIdx]].data.data());
+        const IOTensor &logitsOut = outputs[(size_t) outIdxByInfo[logitsIdx]];
+        lastLogits                = logitsOut.data.empty() ? nullptr : reinterpret_cast<const float *>(logitsOut.data.data());
+        lastFromDecode            = true;
+        return true;
     };
 
     // One prefill pass: feed `len` prompt tokens (<= prefillS) starting at absolute position p in a
@@ -634,9 +696,25 @@ int main(int argc, char **argv) {
         {
             continue;
         }
+        // An out-of-vocab prompt id would index past the embedding table; fail THIS TURN with the
+        // value and the vocab size — never feed it to the model, never kill the persistent process.
+        bool promptValid = true;
+        for (size_t i = 0; i < prompt.size() && promptValid; ++i)
+        {
+            if (prompt[i] < 0 || prompt[i] >= vocab)
+            {
+                fprintf(stderr, "[chat] prompt token id %lld (position %zu) is out of range for this model (vocab %lld); turn skipped\n", (long long) prompt[i], i, (long long) vocab);
+                promptValid = false;
+            }
+        }
+        if (!promptValid)
+        {
+            printf("END\n");
+            fflush(stdout);
+            continue;
+        }
 
-        const float *logits   = nullptr;
-        size_t       consumed = 0;
+        size_t consumed = 0;
         if (prefillBucket >= 0)
         {
             // Whole-window prefill: sync the engine-resident cache to the host once per turn (a
@@ -658,19 +736,20 @@ int main(int argc, char **argv) {
                 {
                     break;
                 }
-                logits = prefillPass(&prompt[consumed], len);
-                if (!logits)
+                const float *prefillLogits = prefillPass(&prompt[consumed], len);
+                if (!prefillLogits)
                 {
                     return 3;
                 }
+                lastLogits     = prefillLogits;
+                lastFromDecode = false;
                 consumed += (size_t) len;
             }
             reseedCache = kvLink && consumed > 0; // first decode step re-seeds the resident cache
         }
         for (; consumed < prompt.size(); ++consumed)
         {
-            logits = step(prompt[consumed]);
-            if (!logits)
+            if (!step(prompt[consumed]))
             {
                 return 3;
             }
@@ -678,19 +757,44 @@ int main(int argc, char **argv) {
         }
         for (int n = 0; n < maxTokens; ++n)
         {
-            const int64_t next = sample(logits);
+            const double tSample0 = nowMs();
+            int64_t      next;
+            if (gpuArgmax && lastFromDecode)
+            {
+                float bestValue;
+                if (sess->readOutputArgMax("logits", next, bestValue) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] engine argmax readback failed\n");
+                    return 3;
+                }
+            } else
+            {
+                if (!lastLogits)
+                {
+                    fprintf(stderr, "[chat] logits row unavailable for sampling\n");
+                    return 3;
+                }
+                next = sample(lastLogits);
+            }
+            tmSampleMs += nowMs() - tSample0;
             if (next == eos)
             {
                 break;
             }
             printf("%lld\n", (long long) next);
             fflush(stdout);
-            logits = step(next);
-            if (!logits)
+            if (!step(next))
             {
                 return 3;
             }
             ++p;
+        }
+        if (cfg.timing && tmSteps > 0)
+        {
+            fprintf(stderr, "[chat] step phases avg over %d step(s): prep=%.3fms links=%.3fms run=%.3fms sample=%.3fms\n",
+                    tmSteps, tmPrepMs / tmSteps, tmLinkMs / tmSteps, tmRunMs / tmSteps, tmSampleMs / tmSteps);
+            tmPrepMs = tmLinkMs = tmRunMs = tmSampleMs = 0;
+            tmSteps  = 0;
         }
         printf("END\n");
         fflush(stdout);

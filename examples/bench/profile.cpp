@@ -9,8 +9,8 @@
 //   --input PATH      raw float32 NCHW input blob; missing or short -> zero-filled (default assets/input.bin)
 //   --backend NAME    vulkan|cpu (default vulkan)
 //   --precision P     low|normal|high (default low)
-//   --trace PATH      chrome://tracing output (default /data/local/tmp/vxrt/trace.json)
-//   --json PATH       per-op records JSON output (default /data/local/tmp/vxrt/profile.json)
+//   --trace PATH      chrome://tracing output (default trace.json in the working directory)
+//   --json PATH       per-op records JSON output (default profile.json in the working directory)
 //   --bucket N        profile plan bucket N of a multi-bucket model (default 0); the run binds
 //                     bucket N's declared input shapes, so run() dispatches to that bucket
 #include "vknn/session.h"
@@ -42,8 +42,8 @@ static std::vector<uint8_t> readFile(const std::string &p) {
 int main(int argc, char **argv) {
     std::string model  = argval(argc, argv, "--model", "assets/mobilenetv2.onnx");
     std::string inpath = argval(argc, argv, "--input", "assets/input.bin");
-    std::string trace  = argval(argc, argv, "--trace", "/data/local/tmp/vxrt/trace.json");
-    std::string jsonp  = argval(argc, argv, "--json", "/data/local/tmp/vxrt/profile.json");
+    std::string trace  = argval(argc, argv, "--trace", "trace.json");
+    std::string jsonp  = argval(argc, argv, "--json", "profile.json");
 
     Config cfg;
     cfg.backend   = backendFromStr(argval(argc, argv, "--backend", "vulkan"));
@@ -61,6 +61,18 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--no-matmul-view-fold"))
         {
             cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+        }
+        if (!strcmp(argv[i], "--no-rope-fusion"))
+        {
+            cfg.setHint(Hint::RopeFusion, (int) Mode::Off);
+        }
+        if (!strcmp(argv[i], "--no-fused-attention"))
+        {
+            cfg.setHint(Hint::FusedAttention, (int) Mode::Off);
+        }
+        if (!strcmp(argv[i], "--no-kv-concat-fold"))
+        {
+            cfg.setHint(Hint::KvConcatFold, (int) Mode::Off);
         }
     }
 

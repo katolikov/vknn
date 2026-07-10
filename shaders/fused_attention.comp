@@ -1,0 +1,175 @@
+#version 450
+#define VKNN_NO_RTE 1 // matmul-family kernel: avoids the float-controls execution mode (miscompiled by some drivers)
+#include "precision.glsl"
+#include "common.glsl"
+// Fused single-query decode attention, partial pass (contract in src/core/fused_attention.h):
+//   out[row][n] = sum_s softmax_s(q.k^T * scale + mask * maskScale)[s] * v[s][n]
+// One workgroup per (KV row, token chunk). A KV row is the attention-row space with the GQA group
+// axis collapsed: the G group members (q heads) share one K/V row set, so each K element is loaded
+// ONCE and closes G dots — the group re-read the per-row kernel paid is gone (G x less K/V
+// traffic). Within the chunk each lane owns whole tokens (the dot streams K contiguously, kK is 1
+// for the folded KV layout), the chunk softmax runs per group member over the shared score slab,
+// and the p.V stage reads V coalesced. The workgroup writes one partial per (row, chunk):
+//   {chunk max m, chunk weight sum l, unnormalized context acc[hd]}  (fp32)
+// and fused_attention_combine.comp folds the chunks with the standard flash rescale. Scores and
+// probabilities never leave shared memory; all arithmetic is fp32.
+//
+// Specialization: G (group size), HD (head dim), CHUNK (tokens per workgroup), QTOTAL == G*HD and
+// SCORETOTAL == G*CHUNK size the shared arrays (the host computes the products; two spec constants
+// cannot multiply in an array size).
+#define WG 256
+layout(constant_id = 0) const int G = 1;
+layout(constant_id = 1) const int HD = 64;
+layout(constant_id = 2) const int CHUNK = 256;
+layout(constant_id = 3) const int QTOTAL = 64;
+layout(constant_id = 4) const int SCORETOTAL = 256;
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer Q { STORE q[]; };
+layout(std430, binding = 1) readonly buffer K { STORE k[]; };
+layout(std430, binding = 2) readonly buffer V { STORE v[]; };
+layout(std430, binding = 3) writeonly buffer P { float part[]; };
+layout(std430, binding = 4) readonly buffer M { STORE msk[]; };
+// Geometry: g[0..rank) = KV-row dims (group axis collapsed to 1), then per-dim strides of
+// q, k, v, mask, the attention-row strides (row-major over the ORIGINAL dims), and the split-KV
+// new-source strides for k and v — 8 arrays (the last two are zeros when pastLen == C).
+layout(std430, binding = 5) readonly buffer GEO { int g[]; } geom;
+// Split-KV sources (foldFusedAttentionKvConcat): token s >= pastLen reads the current rows from
+// these instead of the concatenated cache. Dummy-bound when pastLen == C (never read).
+layout(std430, binding = 6) readonly buffer KN2 { STORE kNew[]; };
+layout(std430, binding = 7) readonly buffer VN2 { STORE vNew[]; };
+layout(push_constant) uniform PC {
+  int rank, kvRows, C, hd;
+  int qK, kN, kK, vN, vK, mN, hasMask, chunks;
+  int groupStrideQ, groupStrideM, groupStrideRow;
+  int pastLen, kNewN, kNewK, vNewN, vNewK;
+  float scale, maskScale;
+} pc;
+
+shared float sQ[QTOTAL];
+shared float sScores[SCORETOTAL];
+shared float sRed[WG];
+shared float sAcc[HD];
+
+void main() {
+  // One workgroup per (kvRow, chunk); the 1-D grid spills into y past the per-dim limit.
+  uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  int kvRow = int(wg) / pc.chunks;
+  int chunk = int(wg) % pc.chunks;
+  if (kvRow >= pc.kvRows) return; // uniform per workgroup: barriers below stay uniform
+
+  // KV-row bases and the flat attention-row base from the per-axis strides.
+  int qB = 0, kB = 0, vB = 0, mB = 0, rowBase = 0, kNB = 0, vNB = 0;
+  {
+    int rem = kvRow;
+    for (int i = pc.rank - 1; i >= 0; --i) {
+      int c = rem % geom.g[i];
+      rem /= geom.g[i];
+      qB += c * geom.g[pc.rank + i];
+      kB += c * geom.g[2 * pc.rank + i];
+      vB += c * geom.g[3 * pc.rank + i];
+      mB += c * geom.g[4 * pc.rank + i];
+      rowBase += c * geom.g[5 * pc.rank + i];
+      kNB += c * geom.g[6 * pc.rank + i];
+      vNB += c * geom.g[7 * pc.rank + i];
+    }
+  }
+
+  int tid = int(gl_LocalInvocationID.x);
+  int s0 = chunk * CHUNK;
+  int sLen = min(CHUNK, pc.C - s0);
+
+  for (int i = tid; i < G * pc.hd; i += WG)
+    sQ[i] = float(q[qB + (i / pc.hd) * pc.groupStrideQ + (i % pc.hd) * pc.qK]);
+  barrier();
+
+  // Stage 1: one lane per token; each K element read once closes all G dots. Token s past the
+  // split boundary reads the new-rows source through its own strides; a chunk entirely below the
+  // boundary (every chunk but the last under the fold) keeps the branch-free past loop.
+  bool chunkAllPast = s0 + sLen <= pc.pastLen;
+  for (int t = tid; t < sLen; t += WG) {
+    int s = s0 + t;
+    float dot[G];
+    for (int gi = 0; gi < G; ++gi) dot[gi] = 0.0;
+    if (chunkAllPast || s < pc.pastLen) {
+      int base = kB + s * pc.kN;
+      for (int kk = 0; kk < pc.hd; ++kk) {
+        float kv = float(k[base + kk * pc.kK]);
+        for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
+      }
+    } else {
+      int base = kNB + (s - pc.pastLen) * pc.kNewN;
+      for (int kk = 0; kk < pc.hd; ++kk) {
+        float kv = float(kNew[base + kk * pc.kNewK]);
+        for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
+      }
+    }
+    for (int gi = 0; gi < G; ++gi) {
+      float x = dot[gi] * pc.scale;
+      if (pc.hasMask != 0) x += float(msk[mB + gi * pc.groupStrideM + s * pc.mN]) * pc.maskScale;
+      sScores[gi * CHUNK + t] = x;
+    }
+  }
+  barrier();
+
+  // Per group member: chunk softmax over the shared scores, then the p.V partial.
+  for (int gi = 0; gi < G; ++gi) {
+    float localMax = -3.4e38;
+    for (int t = tid; t < sLen; t += WG) localMax = max(localMax, sScores[gi * CHUNK + t]);
+    sRed[tid] = localMax;
+    barrier();
+    for (int step = WG / 2; step > 0; step >>= 1) {
+      if (tid < step) sRed[tid] = max(sRed[tid], sRed[tid + step]);
+      barrier();
+    }
+    float m = sRed[0];
+    barrier();
+    float localSum = 0.0;
+    for (int t = tid; t < sLen; t += WG) {
+      float p = exp(sScores[gi * CHUNK + t] - m);
+      sScores[gi * CHUNK + t] = p;
+      localSum += p;
+    }
+    sRed[tid] = localSum;
+    barrier();
+    for (int step = WG / 2; step > 0; step >>= 1) {
+      if (tid < step) sRed[tid] += sRed[tid + step];
+      barrier();
+    }
+    float l = sRed[0];
+    barrier();
+
+    // p.V: lane tid owns output n and token slice `prt`; adjacent lanes read adjacent V elements.
+    int parts = WG / pc.hd > 0 ? WG / pc.hd : 1;
+    int n = tid % pc.hd;
+    int prt = tid / pc.hd;
+    float acc = 0.0;
+    if (prt < parts) {
+      if (chunkAllPast) {
+        for (int t = prt; t < sLen; t += parts)
+          acc += sScores[gi * CHUNK + t] * float(v[vB + (s0 + t) * pc.vK + n * pc.vN]);
+      } else {
+        for (int t = prt; t < sLen; t += parts) {
+          int s = s0 + t;
+          float vv = s < pc.pastLen ? float(v[vB + s * pc.vK + n * pc.vN]) : float(vNew[vNB + (s - pc.pastLen) * pc.vNewK + n * pc.vNewN]);
+          acc += sScores[gi * CHUNK + t] * vv;
+        }
+      }
+    }
+    for (int i = tid; i < pc.hd; i += WG) sAcc[i] = 0.0;
+    barrier();
+    for (int fold = 0; fold < parts; ++fold) {
+      if (prt == fold) sAcc[n] += acc;
+      barrier();
+    }
+
+    // Partial slot for (attention row, chunk): {m, l, acc[hd]}.
+    int row = rowBase + gi * pc.groupStrideRow;
+    int pBase = (row * pc.chunks + chunk) * (pc.hd + 2);
+    if (tid == 0) {
+      part[pBase] = m;
+      part[pBase + 1] = l;
+    }
+    for (int i = tid; i < pc.hd; i += WG) part[pBase + 2 + i] = sAcc[i];
+    barrier(); // sScores/sRed/sAcc are reused by the next group member
+  }
+}

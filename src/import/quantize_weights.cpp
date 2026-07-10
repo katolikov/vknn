@@ -321,6 +321,14 @@ namespace vknn {
         // (the caller degrades to weight-only quantization).
         bool calibrate(const Graph &g, const std::vector<QuantSite> &sites, const QuantOptions &opt,
                        std::map<TensorId, ActStats> &stats) {
+            const int samples = opt.calibFiles.empty() ? opt.calibSamples : (int) opt.calibFiles.size();
+            if (samples <= 0)
+            {
+                // Weight-only quantization (--quant-samples 0): no statistics can be gathered, so the
+                // capture session is never built — on a multi-GB model that session alone costs the
+                // whole graph's CPU activation footprint.
+                return false;
+            }
             // The capture set: distinct activation tensors, and whether any consumer reads them with
             // conv channel semantics (a tensor feeding both a conv and a matmul is accumulated per
             // conv channel; the matmul view then falls back to uniform weighting for safety).
@@ -370,9 +378,8 @@ namespace vknn {
                 printf("[compile] -Os calibration: CPU session failed (%s)\n", e.what());
                 return false;
             }
-            DetRng    rng(0x76786d34u); // fixed seed: identical compiles produce identical bytes
-            const int samples = opt.calibFiles.empty() ? opt.calibSamples : (int) opt.calibFiles.size();
-            int       ran     = 0;
+            DetRng rng(0x76786d34u); // fixed seed: identical compiles produce identical bytes
+            int    ran = 0;
             for (int sIdx = 0; sIdx < samples; ++sIdx)
             {
                 std::vector<IOTensor> inputs;
@@ -672,13 +679,17 @@ namespace vknn {
                             maxAbs = std::max(maxAbs, (double) std::fabs(w[(size_t) (k * N + n)]));
                         }
                     }
+                    // The group-column's weighted energy: its errDen share, and — when no candidate
+                    // step survives fp16 rounding below — the exact cost of flushing it to zero.
+                    double colEnergy = 0;
                     for (int64_t k = k0; k < k1; ++k)
                     {
                         if (!isOut[(size_t) k])
                         {
-                            errDen += colW[(size_t) k] * (double) w[(size_t) (k * N + n)] * (double) w[(size_t) (k * N + n)];
+                            colEnergy += colW[(size_t) k] * (double) w[(size_t) (k * N + n)] * (double) w[(size_t) (k * N + n)];
                         }
                     }
+                    errDen += colEnergy;
                     if (maxAbs == 0)
                     {
                         continue; // all-zero (or all-outlier) group: q stays 0 at scale 1
@@ -687,6 +698,7 @@ namespace vknn {
                     // large-magnitude weights often buys the rest of the group a finer step.
                     double bestCost = 1e300;
                     float  bestS    = 1.0f;
+                    bool   anyStep  = false; // at least one candidate step survived fp16 rounding
                     for (int cand = 0; cand < 21; ++cand)
                     {
                         const double p = 1.0 - 0.03 * (double) cand;
@@ -697,6 +709,7 @@ namespace vknn {
                         {
                             continue;
                         }
+                        anyStep     = true;
                         double cost = 0;
                         for (int64_t k = k0; k < k1; ++k)
                         {
@@ -716,6 +729,15 @@ namespace vknn {
                             bestS    = s;
                         }
                     }
+                    if (!anyStep)
+                    {
+                        // Every candidate step (maxAbs * p / 7) rounds to fp16 zero: the group holds
+                        // only subnormal-magnitude weights. It keeps the initialization — q = 0 at
+                        // scale 1, flushed to zero — and its metric contribution is the flushed energy
+                        // itself; the untouched 1e300 search sentinel is a bound, not an error value.
+                        errNum += colEnergy;
+                        continue;
+                    }
                     scales[(size_t) (gp * N + n)] = floatToHalfSat(bestS);
                     for (int64_t k = k0; k < k1; ++k)
                     {
@@ -732,8 +754,13 @@ namespace vknn {
             }
 
             // Mixed-precision guard: a layer whose weighted relative error exceeds the bar keeps its
-            // fp16 weight — quality is never traded silently on a sensitive layer.
-            const double relErr = errDen > 0 ? std::sqrt(errNum / errDen) : 0.0;
+            // fp16 weight — quality is never traded silently on a sensitive layer. The baseline norm
+            // is floored so a degenerate weight (all zeros or all subnormals) yields a meaningful
+            // ratio — such a weight quantizes to zeros, which is exact at its own magnitude — instead
+            // of a near-zero-division explosion; any healthy weight sits far above the floor and its
+            // ratio is bit-identical to the unfloored one.
+            constexpr double kMinErrBaseline = 1e-30;
+            const double     relErr          = std::sqrt(errNum / std::max(errDen, kMinErrBaseline));
             if (relErr > opt.maxLayerRelErr)
             {
                 ++stats.guardKept;

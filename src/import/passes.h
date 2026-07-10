@@ -9,7 +9,9 @@
 #pragma once
 #include "vknn/graph.h"
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace vknn {
 
@@ -194,9 +196,17 @@ namespace vknn {
     // without such ops. Run after backend-agnostic passes, before backend planning.
     void insertLayoutConverts(Graph &g);
 
+    // Split a comma-separated pattern list into its non-empty entries, as typed (an exclude entry
+    // keeps its leading '-'). Shared by markFp32's per-entry match accounting and the session's
+    // zero-match warnings, so both enumerate the same entries.
+    std::vector<std::string> splitPatternList(const std::string &patterns);
+
     // Mark activation tensors named by `substrs` (comma list) as fp32 storage and insert ConvertDtype
     // nodes at the fp16/fp32 frontier (Config::fp32Tensors). Runs at load, after insertLayoutConverts.
-    void markFp32(Graph &g, const std::string &substrs);
+    // A non-null `matchedPatterns` collects every list entry (as typed, exclude '-' included) whose
+    // substring occurs in an eligible tensor's name — zero-match accounting for the session's
+    // load-end warning; the marking itself is unchanged.
+    void markFp32(Graph &g, const std::string &substrs, std::set<std::string> *matchedPatterns = nullptr);
 
     // Pin every GPU Gather's runtime index (and the pure producer chain feeding it) to fp32 storage.
     // An index is an integer (token id / position) whose value can exceed the fp16 range, so an fp16
@@ -219,5 +229,35 @@ namespace vknn {
     // the tensor would remove the fp32 store the pin exists for. Runs at load only, gated by
     // Hint::MatMulViewFold, before insertLayoutConverts; never serialized.
     void foldMatMulViews(Graph &g, const std::string &fp32Pins = "");
+
+    // Fuse each rotate-half RoPE chain — the primitive expansion a contrib RotaryEmbedding lowers to
+    // (Slice x1/x2 of the last-axis halves, Gather+Unsqueeze of a cos/sin table row by position, the
+    // x1*cos-x2*sin / x1*sin+x2*cos rotate products as Binary nodes or the FusedPointwise units the
+    // pointwise fusion built from them, Concat of the halves) — into ONE OpType::Rope node reading
+    // the table rows directly. Matches by structure/shape only; a chain node carrying fused work
+    // (pw epilogue, activation, bias/residual edge, extra outputs) or an attribute the fusion does
+    // not fold refuses the site. `fp32Pins` mirrors foldMatMulViews: a site whose internal tensors
+    // match a pin keeps its decomposed form. Runs at load only, gated by Hint::RopeFusion, before
+    // foldMatMulViews; never serialized. Returns the number of sites fused.
+    int fuseRope(Graph &g, const std::string &fp32Pins = "");
+    // Fuse the single-query decode-attention chain — MatMul(view) [-> scale/mask pointwise] ->
+    // Softmax -> MatMul(view) [-> Transpose -> Reshape] — into one FusedAttention node
+    // (core/fused_attention.h), so a decode step's attention core is one dispatch per layer and
+    // the score/probability intermediates never touch memory. Consumes the operand-view stride
+    // attrs foldMatMulViews composed, so it must run after that pass; only the M == 1 (query
+    // length 1) form matches, and prefill/CNN graphs are untouched. Numerics-changing (fp32
+    // scores + softmax without the decomposed chain's fp16 round-trips); `fp32Pins` mirrors
+    // foldMatMulViews — a chain whose erased tensors match the markFp32 set keeps its
+    // decomposed form. Runs at load only, gated by Hint::FusedAttention; never serialized.
+    void fuseDecodeAttention(Graph &g, const std::string &fp32Pins = "");
+
+    // Fold the per-token KV-cache Concat feeding a FusedAttention node: the node reads the past
+    // cache and the current rows as separate stride-addressed sources (token s < pastLen from the
+    // past, the rest from the new rows), a present output that was the concat result is rewritten
+    // to the new-rows tensor under the same name (the rows-only convention of io_link.h), and the
+    // dead Concat falls to DCE — removing a whole-cache copy per decoded token. Values are
+    // bit-identical; only the copy disappears. Runs at load after fuseDecodeAttention, gated by
+    // Hint::KvConcatFold; never serialized. Returns the number of folded attention nodes.
+    int foldFusedAttentionKvConcat(Graph &g);
 
 } // namespace vknn

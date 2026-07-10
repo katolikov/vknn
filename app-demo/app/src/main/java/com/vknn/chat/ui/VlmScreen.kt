@@ -71,8 +71,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.vknn.chat.Metrics
-import com.vknn.chat.model.ModelCatalog
-import com.vknn.chat.model.formatBytes
+import com.vknn.chat.model.ModelChoice
 import com.vknn.chat.vlm.PromptBudgetVerdict
 import com.vknn.chat.vlm.VlmPhase
 import com.vknn.chat.vlm.VlmPromptMeasurement
@@ -94,6 +93,10 @@ private const val SuggestionCardMaxHeightFraction = 0.35f
 @Composable
 fun VlmScreen(
     ui: VlmUiState,
+    modelName: String,
+    modelChoices: () -> List<ModelChoice>,
+    selectedModelKey: String,
+    onSelectModel: (String) -> Unit,
     onLoad: () -> Unit,
     onUnload: () -> Unit,
     onCapture: (Bitmap) -> Unit,
@@ -109,6 +112,17 @@ fun VlmScreen(
         onDispose { onCancel() }
     }
     var editingQuestion by remember { mutableStateOf(false) }
+    var pickingModel by remember { mutableStateOf(false) }
+    if (pickingModel) {
+        ModelPickerDialog(
+            title = "VLM model",
+            choices = modelChoices(),
+            selectedKey = selectedModelKey,
+            onSelect = onSelectModel,
+            onOpenLibrary = onOpenLibrary,
+            onDismiss = { pickingModel = false },
+        )
+    }
     // The coach prompt is editable in every phase, matching the Chat editor. Before the model is on the
     // GPU there is no tokenizer or prefill window to measure against, so the editor simply shows no token
     // counter then (validateCoachQuestion returns an empty verdict for an unmeasurable draft) and the
@@ -130,6 +144,8 @@ fun VlmScreen(
 
     Column(Modifier.fillMaxSize().background(Bg)) {
         VlmTopBar(
+            modelName = modelName,
+            onPickModel = { pickingModel = true },
             showEditPrompt = true,
             onEditPrompt = { editingQuestion = true },
             showUnload = ui.phase == VlmPhase.CAMERA || ui.phase == VlmPhase.ANSWERING,
@@ -138,17 +154,21 @@ fun VlmScreen(
         when (ui.phase) {
             VlmPhase.MISSING -> VlmSetup(
                 title = "Model not downloaded",
-                body = "Get ${ModelCatalog.SMOLVLM2.displayName} (~${formatBytes(ModelCatalog.SMOLVLM2.approxBytes)}) from the Model Library to use the camera coach.",
+                body = "Get $modelName from the Model Library, or pick another variant.",
                 button = "Open Library",
                 status = ui.status,
                 onClick = onOpenLibrary,
+                secondaryButton = "Switch model variant",
+                onSecondary = { pickingModel = true },
             )
             VlmPhase.DOWNLOADED -> VlmSetup(
                 title = "Model ready",
-                body = "Load it onto the GPU to start the camera coach.",
+                body = "Load $modelName onto the GPU to start the camera coach.",
                 button = "Load on GPU",
                 status = ui.status,
                 onClick = onLoad,
+                secondaryButton = "Switch model variant",
+                onSecondary = { pickingModel = true },
             )
             VlmPhase.LOADING -> Column(
                 Modifier.fillMaxSize().padding(28.dp),
@@ -186,7 +206,7 @@ internal fun validateCoachQuestion(
 }
 
 @Composable
-private fun VlmTopBar(showEditPrompt: Boolean, onEditPrompt: () -> Unit, showUnload: Boolean, onUnload: () -> Unit) {
+private fun VlmTopBar(modelName: String, onPickModel: () -> Unit, showEditPrompt: Boolean, onEditPrompt: () -> Unit, showUnload: Boolean, onUnload: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -196,9 +216,9 @@ private fun VlmTopBar(showEditPrompt: Boolean, onEditPrompt: () -> Unit, showUnl
             contentAlignment = Alignment.Center,
         ) { Icon(Icons.Filled.CameraAlt, null, tint = Accent, modifier = Modifier.size(18.dp)) }
         Spacer(Modifier.width(9.dp))
-        Column(Modifier.weight(1f)) {
-            Text("SmolVLM2 2.2B", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text("camera coach — on-device", color = TextSecondary, fontSize = 11.sp)
+        Column(Modifier.weight(1f).clickableNoRipple(onPickModel)) {
+            Text(modelName, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            Text("camera coach · tap to switch model", color = TextSecondary, fontSize = 11.sp)
         }
         if (showUnload) {
             TopBarIconButton(Icons.Filled.Eject, "unload model", onUnload)
@@ -223,7 +243,15 @@ private fun VlmTopBar(showEditPrompt: Boolean, onEditPrompt: () -> Unit, showUnl
 }
 
 @Composable
-private fun VlmSetup(title: String, body: String, button: String, status: String?, onClick: () -> Unit) {
+private fun VlmSetup(
+    title: String,
+    body: String,
+    button: String,
+    status: String?,
+    onClick: () -> Unit,
+    secondaryButton: String? = null,
+    onSecondary: () -> Unit = {},
+) {
     Column(
         Modifier.fillMaxSize().padding(28.dp),
         verticalArrangement = Arrangement.Center,
@@ -234,6 +262,10 @@ private fun VlmSetup(title: String, body: String, button: String, status: String
         Text(body, color = TextSecondary, fontSize = 13.sp, lineHeight = 19.sp)
         Spacer(Modifier.height(20.dp))
         PrimaryButton(button, onClick)
+        secondaryButton?.let {
+            Spacer(Modifier.height(10.dp))
+            PillButton(it, accent = false, onClick = onSecondary)
+        }
         status?.let {
             Spacer(Modifier.height(14.dp))
             Text(it, color = Err, fontSize = 12.sp)

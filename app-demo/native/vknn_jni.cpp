@@ -1,10 +1,15 @@
 // JNI bridge for the on-device Qwen chat demo: wraps a VKNN Session as an autoregressive decoder,
-// lifting the token loop from examples/chat.cpp into a handle the Kotlin app drives one step at a time.
+// lifting the token loop from examples/llm/chat.cpp into a handle the Kotlin app drives one step at
+// a time.
 //
-// The model is a with-past Qwen2 decoder compiled at a fixed context length C (one plan serves prefill,
-// token by token, and every decode step). The past key/value buffers ARE the KV cache: fp32 host
-// boundary tensors retained across steps; each step appends the new token's key/value (present slot C)
-// into cache slot p. Every tensor-compute op runs on the Vulkan backend; only argmax/sampling is here.
+// The model is a with-past Qwen2 decoder compiled at a fixed context length C. A single-bucket .vxm
+// serves prefill token by token and every decode step through one plan; a multi-bucket .vxm adds a
+// prefill bucket (input_ids [1,S], S>1) that feeds a whole prompt window in ONE forward — prefill()
+// dispatches to it when present. The past key/value buffers ARE the KV cache: fp32 host boundary
+// tensors retained across steps; each step appends the new token's key/value into cache slot p.
+// Every tensor-compute op runs on the Vulkan backend; only argmax/sampling is here — and greedy
+// decode registers the decode bucket's logits for the ENGINE-side argmax (Session::setOutputArgMax),
+// reading back 8 bytes per token instead of the vocab row.
 #include "raster_core.h"
 #include "vknn/runtime.h"
 #include "vknn/session.h"
@@ -85,9 +90,9 @@ namespace {
     // running absolute position, and the last logits row (so sampling is a separate call from stepping).
     struct Decoder {
         std::unique_ptr<Session> sess;
-        std::vector<IOTensor>    inputs;  // persistent, in model input order; KV buffers survive across steps
+        std::vector<IOTensor>    inputs;  // persistent, in decode-bucket input order; KV buffers survive across steps
         std::vector<IOTensor>    outputs; // last run()'s outputs
-        std::vector<IOInfo>      inInfo, outInfo;
+        std::vector<IOInfo>      inInfo, outInfo; // the DECODE bucket's IO (io info at S=1)
 
         int              idIdx = -1, maskIdx = -1, posIdx = -1, logitsIdx = -1;
         std::vector<int> pastKey, pastVal, presKey, presVal;
@@ -99,15 +104,37 @@ namespace {
         int64_t vocab    = 0;
         int     p        = 0; // absolute position across the whole conversation
 
+        // Bucket roles of a multi-bucket .vxm: the decode bucket feeds input_ids [1,1]; the prefill
+        // bucket (optional) feeds [1,S] with S>1 and processes a whole prompt window in one forward.
+        // A single-bucket model has decodeBucket 0 and no prefill bucket.
+        int decodeBucket    = 0;
+        int prefillBucket   = -1;
+        int prefillS        = 0; // the prefill bucket's window (tokens per forward)
+        int prefillMaskLen  = 0; // its attention_mask length (C + prefillS)
+        int prefillPresRows = 0; // rows its present outputs carry; the S new rows are the last
+
         // Engine-resident KV cache (Session::linkOutputToInput): every present output is linked to
         // its past input, the fold happens inside the engine (on-device on the GPU backend), and only
         // id/mask/position are bound per step. False = the host-side cache loop (link setup failed).
         bool kvLinked = false;
-        // The next step rebinds the (host-zeroed) past buffers with empty ranges — the reset path.
+        // The next step rebinds the host past buffers with empty ranges, re-seeding the engine cache
+        // — the reset path and the first decode step after a prefill pass.
         bool rebindPastNextStep = false;
+        // A linked decode step ran: the engine-resident cache is ahead of the host past buffers.
+        bool residentDirty = false;
 
-        std::vector<float> logits; // last step's logits row (vocab floats)
-        std::mt19937       rng {1234};
+        // Engine-side argmax over the decode bucket's logits (Session::setOutputArgMax): a decode
+        // run returns the logits entry with NO data and readOutputArgMax() serves the greedy token.
+        bool argMaxEngaged = false;
+        // `logits` holds the last forward's full row (a prefill pass, or a decode without argmax).
+        bool logitsValid = false;
+        // Provenance of the last forward's logits: a decode step (argmax serves the token when
+        // engaged) vs a prefill pass (always a full host row; its bucket is never registered).
+        bool lastFromDecode = false;
+
+        std::vector<float>    logits; // last forward's logits row (vocab floats), when logitsValid
+        std::vector<IOTensor> prefillOutputs;
+        std::mt19937          rng {1234};
 
         int findIn(const std::string &n) const {
             for (size_t i = 0; i < inInfo.size(); ++i)
@@ -132,15 +159,26 @@ namespace {
         void setI64(int idx, const std::vector<int64_t> &vals) {
             std::memcpy(inputs[(size_t) idx].data.data(), vals.data(), vals.size() * sizeof(int64_t));
         }
+        bool isPastInput(int idx) const {
+            for (int l = 0; l < L; ++l)
+            {
+                if (idx == pastKey[l] || idx == pastVal[l])
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
 
-        // Declare the KV links: every present output feeds its past input on the next run. Empty
-        // ranges to start (the cache begins as zeros); step() re-links per token with the fold
-        // ranges. On failure the decoder stays on the host-side cache loop.
+        // Declare the KV links on the DECODE bucket: every present output feeds its past input on
+        // the next run. Empty ranges to start (the cache begins as zeros); step() re-links per token
+        // with the fold ranges. The prefill bucket keeps the host cache flow (it runs once per
+        // prompt window). On failure the decoder stays on the host-side cache loop.
         void setupKvLinks() {
             for (int l = 0; l < L; ++l)
             {
-                if (sess->linkOutputToInput(outInfo[(size_t) presKey[l]].name, inInfo[(size_t) pastKey[l]].name, {}) != Status::Ok ||
-                    sess->linkOutputToInput(outInfo[(size_t) presVal[l]].name, inInfo[(size_t) pastVal[l]].name, {}) != Status::Ok)
+                if (sess->linkOutputToInput((size_t) decodeBucket, outInfo[(size_t) presKey[l]].name, inInfo[(size_t) pastKey[l]].name, {}) != Status::Ok ||
+                    sess->linkOutputToInput((size_t) decodeBucket, outInfo[(size_t) presVal[l]].name, inInfo[(size_t) pastVal[l]].name, {}) != Status::Ok)
                 {
                     LOGE("KV link setup failed at layer %d; using the host cache loop", l);
                     sess->clearLinks();
@@ -162,7 +200,7 @@ namespace {
                 {
                     const std::string &pres = outInfo[(size_t) (part ? presVal[l] : presKey[l])].name;
                     const std::string &past = inInfo[(size_t) (part ? pastVal[l] : pastKey[l])].name;
-                    const Status       st   = sess->linkOutputToInput(pres, past, ranges);
+                    const Status       st   = sess->linkOutputToInput((size_t) decodeBucket, pres, past, ranges);
                     if (st != Status::Ok)
                     {
                         LOGE("KV link update failed for %s -> %s at slot %lld: %s (engine log has the reason)", pres.c_str(), past.c_str(), (long long) slot, statusStr(st));
@@ -253,6 +291,7 @@ namespace {
                     runStatus          = sess->run(bound, outputs);
                     rebindPastNextStep = false;
                     ranLinked          = true;
+                    residentDirty      = true;
                 } else
                 {
                     // A mid-stream link failure: bring the engine-resident cache (device rows + the
@@ -267,6 +306,7 @@ namespace {
                     sess->clearLinks();
                     kvLinked           = false;
                     rebindPastNextStep = false;
+                    residentDirty      = false;
                 }
             }
             if (!ranLinked)
@@ -313,14 +353,189 @@ namespace {
                     }
                 }
             }
+            // Under the engine argmax the decode logits entry carries no data (readOutputArgMax
+            // serves the token); otherwise keep the full row for host sampling.
             const IOTensor &lo = outputs[(size_t) outIdxByInfo[(size_t) logitsIdx]];
-            const float    *lp = reinterpret_cast<const float *>(lo.data.data());
-            logits.assign(lp, lp + vocab);
+            if (!lo.data.empty())
+            {
+                const float *lp = reinterpret_cast<const float *>(lo.data.data());
+                logits.assign(lp, lp + vocab);
+                logitsValid = true;
+            } else
+            {
+                logitsValid = false;
+            }
+            lastFromDecode = true;
             return 0;
         }
 
-        // Next token from the stored logits: greedy at temp<=0, else temperature + top-k + top-p.
+        // One prefill forward: `len` (<= prefillS) prompt tokens at absolute positions p..p+len-1
+        // through the prefill bucket, on the HOST cache flow — bind the past buffers, fold the
+        // produced present rows (the len new rows after the past block) back into cache slots
+        // p..p+len-1 — leaving the last real token's logits row in `logits`. Pad slots carry mask 0,
+        // so real tokens never attend them and their rows are not folded. Advances p.
+        bool prefillPass(const int64_t *toks, int len) {
+            std::vector<IOTensor> bound(inInfo.size());
+            for (size_t i = 0; i < inInfo.size(); ++i)
+            {
+                bound[i].name  = inInfo[i].name;
+                bound[i].dtype = inInfo[i].dtype;
+                if (isPastInput((int) i))
+                {
+                    bound[i].shape = inInfo[i].shape; // shared shape with the decode bucket
+                    bound[i].data  = inputs[i].data;  // the host KV cache
+                    continue;
+                }
+                if ((int) i == idIdx || (int) i == posIdx)
+                {
+                    bound[i].shape = {1, (int64_t) prefillS};
+                    std::vector<int64_t> vals((size_t) prefillS, 0);
+                    for (int t = 0; t < prefillS; ++t)
+                    {
+                        vals[(size_t) t] = ((int) i == idIdx) ? (t < len ? toks[t] : 0) : (int64_t) (p + t);
+                    }
+                    bound[i].data.resize((size_t) prefillS * sizeof(int64_t));
+                    std::memcpy(bound[i].data.data(), vals.data(), bound[i].data.size());
+                } else if ((int) i == maskIdx)
+                {
+                    bound[i].shape = {1, (int64_t) prefillMaskLen};
+                    std::vector<int64_t> mask((size_t) prefillMaskLen, 0);
+                    for (int j = 0; j < p && j < C; ++j)
+                    {
+                        mask[(size_t) j] = 1; // valid past slots
+                    }
+                    for (int t = 0; t < len; ++t)
+                    {
+                        mask[(size_t) (C + t)] = 1; // the window's real tokens; pads stay masked
+                    }
+                    bound[i].data.resize((size_t) prefillMaskLen * sizeof(int64_t));
+                    std::memcpy(bound[i].data.data(), mask.data(), bound[i].data.size());
+                }
+            }
+            if (sess->run(bound, prefillOutputs) != Status::Ok)
+            {
+                LOGE("prefill run failed at p=%d", p);
+                return false;
+            }
+            auto prefillOutByName = [&](const std::string &n) -> const IOTensor * {
+                for (const IOTensor &o: prefillOutputs)
+                {
+                    if (o.name == n)
+                    {
+                        return &o;
+                    }
+                }
+                return nullptr;
+            };
+            const IOTensor *logitsOut = prefillOutByName("logits");
+            if (!logitsOut || logitsOut->data.empty())
+            {
+                LOGE("prefill logits missing");
+                return false;
+            }
+            const int newRowsAt = prefillPresRows - prefillS;
+            for (int l = 0; l < L; ++l)
+            {
+                for (int part = 0; part < 2; ++part)
+                {
+                    const IOTensor *pres = prefillOutByName(outInfo[(size_t) (part ? presVal[l] : presKey[l])].name);
+                    if (!pres)
+                    {
+                        LOGE("prefill present outputs missing");
+                        return false;
+                    }
+                    const float *src = reinterpret_cast<const float *>(pres->data.data());
+                    float       *dst = reinterpret_cast<float *>(inputs[(size_t) (part ? pastVal[l] : pastKey[l])].data.data());
+                    for (int h = 0; h < kvHeads; ++h)
+                    {
+                        for (int t = 0; t < len; ++t)
+                        {
+                            std::memcpy(dst + ((size_t) h * C + p + t) * headDim,
+                                        src + ((size_t) h * prefillPresRows + newRowsAt + t) * headDim,
+                                        (size_t) headDim * sizeof(float));
+                        }
+                    }
+                }
+            }
+            const float *lp = reinterpret_cast<const float *>(logitsOut->data.data()) + (size_t) (len - 1) * vocab;
+            logits.assign(lp, lp + vocab);
+            logitsValid    = true;
+            lastFromDecode = false;
+            p += len;
+            return true;
+        }
+
+        // Feed `count` prompt tokens from the current position: whole-window forwards through the
+        // prefill bucket when the model carries one, decode-bucket steps otherwise. The prefill
+        // passes run on the host cache flow, so the engine-resident decode cache syncs to the host
+        // first and re-seeds on the next decode step. Returns 0 ok, -1 error, -2 context full.
+        int prefill(const int64_t *ids, int count) {
+            if (count <= 0)
+            {
+                return 0;
+            }
+            if (p + count > C - 1) // no slot would remain for the reply's first decode step
+            {
+                return -2;
+            }
+            int consumed = 0;
+            if (prefillBucket >= 0)
+            {
+                if (kvLinked && residentDirty)
+                {
+                    if (!resyncHostCache())
+                    {
+                        LOGE("resident cache resync failed before prefill");
+                        return -1;
+                    }
+                    residentDirty = false;
+                }
+                while (consumed < count)
+                {
+                    const int len = (int) std::min<int64_t>((int64_t) (count - consumed), (int64_t) prefillS);
+                    if (!prefillPass(ids + consumed, len))
+                    {
+                        return -1;
+                    }
+                    consumed += len;
+                }
+                rebindPastNextStep = kvLinked && consumed > 0; // the next decode step re-seeds the engine cache
+            }
+            for (; consumed < count; ++consumed)
+            {
+                if (step(ids[consumed]) != 0)
+                {
+                    return -1;
+                }
+                ++p;
+            }
+            return 0;
+        }
+
+        // Next token: the engine-side argmax serves a greedy decode step (8-byte readback); the
+        // stored full logits row serves everything else (prefill logits, host-argmax fallback,
+        // temperature sampling). A decode row under the engine argmax is never downloaded, so a
+        // temp > 0 request then falls back to the greedy token with a log line.
         int64_t sample(float temp, int topK, float topP) {
+            if (argMaxEngaged && lastFromDecode)
+            {
+                int64_t index = 0;
+                float   best  = 0.0f;
+                if (sess->readOutputArgMax("logits", index, best) == Status::Ok)
+                {
+                    if (temp > 0.0f)
+                    {
+                        LOGE("temp=%.2f requested but the decode logits reduce engine-side; using the greedy token (reload to sample)", (double) temp);
+                    }
+                    return index;
+                }
+                LOGE("engine argmax readback failed");
+            }
+            if (!logitsValid)
+            {
+                LOGE("no logits row available to sample");
+                return -1;
+            }
             return sampleLogits(logits.data(), vocab, temp, topK, topP, rng);
         }
     };
@@ -786,8 +1001,11 @@ namespace {
 
 extern "C" {
 
-// Load the .vxm and build a Decoder. Returns a native handle (0 on failure).
-JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend) {
+// Load the .vxm and build a Decoder. `greedyArgMax` registers the decode bucket's logits for the
+// engine-side argmax reduction — the registration holds for the session's lifetime and the decode
+// logits row is then never downloaded, so it is requested only when the app decodes greedy.
+// Returns a native handle (0 on failure).
+JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, jobject, jstring jvxm, jstring jcache, jstring jprec, jstring jbackend, jboolean greedyArgMax) {
     auto *d = new Decoder();
     try
     {
@@ -802,8 +1020,36 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             delete d;
             return 0;
         }
-        d->inInfo  = d->sess->inputInfo();
-        d->outInfo = d->sess->outputInfo();
+        // Bucket roles (mirrors examples/llm/chat.cpp): the decode bucket feeds input_ids [1,1]; a
+        // prefill bucket (optional) feeds [1,S] with S>1 — the widest one wins. A single-bucket
+        // model is its own decode bucket.
+        int decodeB = -1, prefillB = -1, prefillS = 0;
+        for (size_t b = 0; b < d->sess->bucketCount(); ++b)
+        {
+            for (const IOInfo &in: d->sess->inputInfo(b))
+            {
+                if (in.name == "input_ids" && in.shape.size() == 2)
+                {
+                    if (in.shape[1] == 1 && decodeB < 0)
+                    {
+                        decodeB = (int) b;
+                    } else if (in.shape[1] > 1 && (int) in.shape[1] > prefillS)
+                    {
+                        prefillB = (int) b;
+                        prefillS = (int) in.shape[1];
+                    }
+                }
+            }
+        }
+        if (decodeB < 0)
+        {
+            LOGE("model has no input_ids [1,1] decode bucket");
+            delete d;
+            return 0;
+        }
+        d->decodeBucket = decodeB;
+        d->inInfo       = d->sess->inputInfo((size_t) decodeB);
+        d->outInfo      = d->sess->outputInfo((size_t) decodeB);
 
         d->idIdx     = d->findIn("input_ids");
         d->maskIdx   = d->findIn("attention_mask");
@@ -852,6 +1098,45 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             return 0;
         }
 
+        // Prefill-bucket geometry, validated against the decode bucket: the past inputs must share
+        // the decode shapes (one host cache serves both) and the mask must span past+S columns. Any
+        // mismatch disables the fast prefill rather than miscomputing.
+        if (prefillB >= 0)
+        {
+            bool geometryOk = true;
+            for (const IOInfo &in: d->sess->inputInfo((size_t) prefillB))
+            {
+                if (in.name == d->inInfo[(size_t) d->pastKey[0]].name)
+                {
+                    geometryOk = geometryOk && in.shape == d->inInfo[(size_t) d->pastKey[0]].shape;
+                }
+                if (in.name == "attention_mask" && in.shape.size() == 2)
+                {
+                    d->prefillMaskLen = (int) in.shape[1];
+                }
+            }
+            bool prefillHasLogits = false;
+            for (const IOInfo &out: d->sess->outputInfo((size_t) prefillB))
+            {
+                if (out.name == "logits")
+                {
+                    prefillHasLogits = true;
+                }
+                if (out.name == "present.0.key" && out.shape.size() == 4)
+                {
+                    d->prefillPresRows = (int) out.shape[2];
+                }
+            }
+            geometryOk = geometryOk && d->prefillMaskLen == d->C + prefillS && d->prefillPresRows >= prefillS && prefillHasLogits;
+            if (!geometryOk)
+            {
+                LOGE("prefill bucket geometry mismatch (mask %d vs C+S %d, present rows %d); using token-by-token prefill", d->prefillMaskLen, d->C + prefillS, d->prefillPresRows);
+                prefillB = -1;
+            }
+        }
+        d->prefillBucket = prefillB;
+        d->prefillS      = prefillB >= 0 ? prefillS : 0;
+
         d->inputs.resize(d->inInfo.size());
         for (size_t i = 0; i < d->inInfo.size(); ++i)
         {
@@ -861,7 +1146,21 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             d->inputs[i].data.assign((size_t) d->inInfo[i].elems * dtypeSize(d->inInfo[i].dtype), 0);
         }
         d->setupKvLinks();
-        LOGI("loaded: L=%d kv_heads=%d C=%d head_dim=%d vocab=%lld kv_linked=%d", d->L, d->kvHeads, d->C, d->headDim, (long long) d->vocab, d->kvLinked ? 1 : 0);
+        // Greedy decode reads back only the engine-side argmax of the logits (8 bytes on the GPU
+        // backend) instead of the whole vocab row per token; the token stream is unchanged
+        // (first-occurrence argmax, exactly the host scan). On refusal the host scan stays.
+        if (greedyArgMax)
+        {
+            if (d->sess->setOutputArgMax((size_t) d->decodeBucket, "logits") == Status::Ok)
+            {
+                d->argMaxEngaged = true;
+            } else
+            {
+                LOGE("engine argmax unavailable for 'logits'; using the host scan");
+            }
+        }
+        LOGI("loaded: L=%d kv_heads=%d C=%d head_dim=%d vocab=%lld kv_linked=%d prefillS=%d engine_argmax=%d", d->L, d->kvHeads, d->C, d->headDim, (long long) d->vocab, d->kvLinked ? 1 : 0,
+             d->prefillS, d->argMaxEngaged ? 1 : 0);
         return reinterpret_cast<jlong>(d);
     } catch (const std::exception &loadError)
     {
@@ -874,12 +1173,13 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
     }
 }
 
-// int[5] = {L, kv_heads, C, head_dim, vocab}.
+// int[7] = {L, kv_heads, C, head_dim, vocab, prefillS, engineArgMax}. prefillS is 0 for a model
+// without a usable prefill bucket; engineArgMax is 1 when the decode logits reduce engine-side.
 JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeInfo(JNIEnv *env, jobject, jlong ptr) {
     auto     *d    = reinterpret_cast<Decoder *>(ptr);
-    jint      v[5] = {d->L, d->kvHeads, d->C, d->headDim, (jint) d->vocab};
-    jintArray a    = env->NewIntArray(5);
-    env->SetIntArrayRegion(a, 0, 5, v);
+    jint      v[7] = {d->L, d->kvHeads, d->C, d->headDim, (jint) d->vocab, d->prefillS, d->argMaxEngaged ? 1 : 0};
+    jintArray a    = env->NewIntArray(7);
+    env->SetIntArrayRegion(a, 0, 7, v);
     return a;
 }
 
@@ -896,6 +1196,9 @@ JNIEXPORT void JNICALL Java_com_vknn_chat_NativeLib_nativeReset(JNIEnv *, jobjec
         std::fill(d->inputs[(size_t) d->pastVal[l]].data.begin(), d->inputs[(size_t) d->pastVal[l]].data.end(), (uint8_t) 0);
     }
     d->rebindPastNextStep = d->kvLinked;
+    d->residentDirty      = false;
+    d->logitsValid        = false;
+    d->lastFromDecode     = false;
 }
 
 // Feed one token at the current position (runs the plan on the GPU). Returns 0 ok, -1 error.
@@ -907,6 +1210,19 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeStep(JNIEnv *, jobject
     }
     ++d->p;
     return 0;
+}
+
+// Feed a whole prompt from the current position: one batched forward per prefill window when the
+// model carries a prefill bucket (whole-window TTFT), decode-bucket steps otherwise. The first
+// reply token then comes from nativeSample. Returns 0 ok, -1 error, -2 context full.
+JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativePrefill(JNIEnv *env, jobject, jlong ptr, jlongArray jids) {
+    auto       *d = reinterpret_cast<Decoder *>(ptr);
+    const jsize n = env->GetArrayLength(jids);
+    jlong      *ids = env->GetLongArrayElements(jids, nullptr);
+    static_assert(sizeof(jlong) == sizeof(int64_t), "jlong is int64");
+    const int rc = d->prefill(reinterpret_cast<const int64_t *>(ids), (int) n);
+    env->ReleaseLongArrayElements(jids, ids, JNI_ABORT);
+    return rc;
 }
 
 // Sample the next token from the last step's logits.
@@ -1151,6 +1467,7 @@ namespace {
         std::vector<float>                  intrinsics;  // views*9 normalized K
         int                                 views = 0, height = 0, width = 0;
         float                               pivotDepth = 1.0f; // median view-0 camera-space depth
+        int                                 fogPermille = 0;   // last encode: permille of gaussians above opacity 0.1
     };
 
     // The encoder's predicted camera pose is an internal tensor, not a declared output; these names
@@ -1213,12 +1530,15 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env
     }
 }
 
-// int[4] = {gaussians, views, height, width}. gaussians is 0 until an encode succeeds.
+// int[5] = {gaussians, views, height, width, fogPermille}. gaussians is 0 until an encode
+// succeeds; fogPermille is the last encode's fraction (permille) of gaussians above opacity 0.1 —
+// a coherent scene concentrates opacity in few splats, a degenerate capture spreads mid-opacity
+// fog everywhere, so a high value flags a capture the viewer will show as haze.
 JNIEXPORT jintArray JNICALL Java_com_vknn_chat_NativeLib_nativeSplatInfo(JNIEnv *env, jobject, jlong ptr) {
     auto     *splat   = reinterpret_cast<Splat *>(ptr);
-    jint      info[4] = {splat->rasterizer ? splat->rasterizer->gaussians() : 0, splat->views, splat->height, splat->width};
-    jintArray out     = env->NewIntArray(4);
-    env->SetIntArrayRegion(out, 0, 4, info);
+    jint      info[5] = {splat->rasterizer ? splat->rasterizer->gaussians() : 0, splat->views, splat->height, splat->width, splat->fogPermille};
+    jintArray out     = env->NewIntArray(5);
+    env->SetIntArrayRegion(out, 0, 5, info);
     return out;
 }
 
@@ -1275,6 +1595,15 @@ JNIEXPORT jint JNICALL Java_com_vknn_chat_NativeLib_nativeSplatEncode(JNIEnv *en
     for (size_t i = 0; i < colors.size(); ++i)
     {
         colors[i] = std::max(0.0f, raster::kC0 * harmonicValues[i] + 0.5f);
+    }
+    {
+        const float *opacityValues = opacities->f32();
+        int64_t      hazyCount     = 0;
+        for (int64_t i = 0; i < gaussianCount; ++i)
+        {
+            hazyCount += opacityValues[i] > 0.1f ? 1 : 0;
+        }
+        splat->fogPermille = gaussianCount > 0 ? (int) (hazyCount * 1000 / gaussianCount) : 0;
     }
     splat->rasterizer->setGaussians(means->f32(), covariances->f32(), colors.data(), opacities->f32(), gaussianCount);
 

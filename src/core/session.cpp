@@ -3,8 +3,10 @@
 #include "core/quant_int4.h"
 #include "vknn/logging.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <fstream>
 #include <set>
 #include <sys/stat.h>
@@ -161,6 +163,104 @@ namespace vknn {
         }
     }
 
+    // Graph inputs that reach an index-consuming operand — a Gather's index, or a fused Rope's
+    // position (the Gather the rope fusion removed) — directly or through value-preserving hops
+    // (layout/dtype converts, metadata reshapes), paired with the SMALLEST statically known axis
+    // size any of those lookups selects from. Feeds PlanBucket::gatherIndexAxisSizes, which run()
+    // checks when the input is bound: an out-of-range index (an out-of-vocab token id against an
+    // embedding table) then fails with its value and position instead of reading out of bounds inside
+    // the op — the class of crash a caller-supplied id can otherwise trigger.
+    static std::vector<std::pair<TensorId, int64_t>> collectGatherIndexAxisSizes(const Graph &g) {
+        // Last writer of each tensor, so an index can be traced back to its boundary source.
+        std::vector<int> producer(g.tensors.size(), -1);
+        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        {
+            for (TensorId out: g.nodes[ni].outputs)
+            {
+                if (out != kNoTensor)
+                {
+                    producer[(size_t) out] = ni;
+                }
+            }
+        }
+        // Ops whose output holds the same element values as inputs[0], so a bound the consumer's
+        // Gather imposes on its index applies unchanged to the traced tensor.
+        auto valuePreserving = [](OpType t) {
+            return t == OpType::ConvertLayout || t == OpType::ConvertDtype || t == OpType::Cast || t == OpType::Reshape || t == OpType::Squeeze || t == OpType::Unsqueeze || t == OpType::Flatten || t == OpType::Identity;
+        };
+        std::vector<std::pair<TensorId, int64_t>> limits;
+        for (const Node &nd: g.nodes)
+        {
+            // Index-consuming ops with a statically bounded lookup: Gather (index operand 1 selects
+            // rows of the data's gather axis) and the fused Rope (position operand 1 selects rows of
+            // the cos/sin tables — the Gather the fusion removed, so the same bind-time bound holds).
+            int64_t axisSize = 0;
+            if (nd.type == OpType::Gather && nd.inputs.size() >= 2 && nd.inputs[0] != kNoTensor && nd.inputs[1] != kNoTensor)
+            {
+                // Axis normalization mirrors GatherCpu: negative counts from the back, then clamps.
+                const Shape &data = g.desc(nd.inputs[0]).shape;
+                int64_t      rank = (int64_t) data.size();
+                int64_t      axis = nd.attr.geti("axis", 0);
+                if (axis < 0)
+                {
+                    axis += rank;
+                }
+                axis = std::max<int64_t>(0, std::min<int64_t>(axis, rank > 0 ? rank - 1 : 0));
+                if (rank == 0 || data[axis] <= 0)
+                {
+                    continue; // axis size not statically known: nothing to validate against
+                }
+                axisSize = data[axis];
+            } else if (nd.type == OpType::Rope && nd.inputs.size() >= 3 && nd.inputs[1] != kNoTensor && nd.inputs[2] != kNoTensor)
+            {
+                const Shape &table = g.desc(nd.inputs[2]).shape;
+                if (table.empty() || table[0] <= 0)
+                {
+                    continue;
+                }
+                axisSize = table[0];
+            } else
+            {
+                continue;
+            }
+            TensorId traced = nd.inputs[1];
+            for (int hop = 0; traced != kNoTensor && hop < 64; ++hop)
+            {
+                int pi = producer[(size_t) traced];
+                if (pi < 0)
+                {
+                    break; // boundary: a graph input or an initializer
+                }
+                const Node &pn = g.nodes[(size_t) pi];
+                if (!valuePreserving(pn.type) || pn.inputs.empty() || pn.inputs[0] == kNoTensor)
+                {
+                    traced = kNoTensor; // a real op computes the index: its values are not the input's
+                    break;
+                }
+                traced = pn.inputs[0];
+            }
+            if (traced == kNoTensor || !g.desc(traced).isInput)
+            {
+                continue;
+            }
+            bool merged = false;
+            for (auto &lim: limits)
+            {
+                if (lim.first == traced)
+                {
+                    lim.second = std::min(lim.second, axisSize);
+                    merged     = true;
+                    break;
+                }
+            }
+            if (!merged)
+            {
+                limits.push_back({traced, axisSize});
+            }
+        }
+        return limits;
+    }
+
     Session::~Session() {
         updateCache(); // flush autotune/pipeline changes to the cache file if any
     }
@@ -212,7 +312,8 @@ namespace vknn {
             return nullptr;
         }
         s->planned_ = true;
-        auto t1     = std::chrono::high_resolution_clock::now();
+        s->warnUnmatchedDebugPatterns(); // all buckets built: name the pattern knobs that matched nothing
+        auto t1 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created from .vxm in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms (" << s->buckets_.size() << " bucket(s))";
         return s;
     }
@@ -240,7 +341,8 @@ namespace vknn {
         // the bucket by those resolved shapes so run() dispatch matches concrete caller shapes.
         s->buckets_.front().key = Session::shapeKey(*s->buckets_.front().graph);
         s->planned_             = true;
-        auto t1                 = std::chrono::high_resolution_clock::now();
+        s->warnUnmatchedDebugPatterns(); // the default bucket is built: name the pattern knobs that matched nothing
+        auto t1 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
         return s;
     }
@@ -480,6 +582,19 @@ namespace vknn {
             fp32Marks = mixedPrecisionFp32Tensors();
         }
 
+        // --- RoPE chain fusion: collapse each rotate-half chain (last-axis half Slices, cos/sin
+        //     table Gathers, the rotate products, Concat) into ONE Rope node reading the tables by
+        //     position, so an LLM decode step spends one dispatch per q/k rope site instead of ~7.
+        //     Runs BEFORE the MatMul view fold: the two passes claim disjoint node kinds (the view
+        //     fold absorbs Transpose/Expand movers, never Slice/Gather/Concat), and a MatMul chain
+        //     walk that stopped at the Concat output stops at the same tensor now produced by Rope.
+        //     Load-time only (never serialized); the fp32 pins apply only where markFp32 runs (the
+        //     Vulkan fp16-storage path below).
+        if (cfg_.ropeFusion())
+        {
+            fuseRope(graph_, vulkanFlat ? fp32Marks : std::string());
+        }
+
         // --- MatMul operand-view fold: absorb Transpose/Expand chains feeding non-tiled MatMuls into
         //     per-axis stride attrs (core/matmul_view.h), so a GQA decode reads its KV cache in place
         //     instead of materializing the repeat_kv broadcast and attention transposes every token.
@@ -488,6 +603,27 @@ namespace vknn {
         if (cfg_.matmulViewFold())
         {
             foldMatMulViews(graph_, vulkanFlat ? fp32Marks : std::string());
+        }
+
+        // --- decode-attention fusion: collapse the M == 1 MatMul -> scale/mask -> Softmax -> MatMul
+        //     (-> Transpose -> Reshape) chain into one FusedAttention node, consuming the operand-view
+        //     strides the fold above composed, so a decode step's attention core is one dispatch per
+        //     layer and the score/probability intermediates never touch memory. Load-time only (never
+        //     serialized); numerics-changing (fp32 scores + softmax replace the decomposed chain's
+        //     fp16 round-trips), so it has its own hint and cache-variant key entry.
+        if (cfg_.fusedAttention())
+        {
+            fuseDecodeAttention(graph_, vulkanFlat ? fp32Marks : std::string());
+        }
+
+        // --- KV-cache Concat fold: a fused decode-attention node reads the past cache and the new
+        //     rows directly (split sources), the present output becomes the rows-only tensor, and
+        //     the whole-cache-per-token Concat copy disappears. Bit-identical values; load-time
+        //     only, own hint + cache-variant key entry (it changes the present outputs' declared
+        //     shapes, which the example tools and the link fold read adaptively).
+        if (cfg_.fusedAttention() && cfg_.kvConcatFold())
+        {
+            foldFusedAttentionKvConcat(graph_);
         }
 
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
@@ -504,7 +640,10 @@ namespace vknn {
             // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
             // the same way; the GridSample shader decodes the grid at its storage precision.
             pinGridSampleGridFp32(graph_);
-            markFp32(graph_, fp32Marks);
+            // Only a caller-supplied fp32Tensors list takes zero-match accounting; the built-in
+            // Precision::Normal preset is engine-owned and exempt from the load-end warning.
+            markFp32(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);
+            fp32PatternsAccounted_ = fp32PatternsAccounted_ || !cfg_.fp32Tensors.empty();
             graph_.topoSort();
         }
 
@@ -567,6 +706,12 @@ namespace vknn {
         {
             foldTinyGpuIslands(bucket);
         }
+
+        // Zero-match accounting for the dumpTensors/disableVkOps debug knobs, against this bucket's
+        // final graph and backend assignment (post island fold). Aggregated across buckets;
+        // warnUnmatchedDebugPatterns names the entries that matched nowhere once the whole model is
+        // built. Reads only — the plan is untouched.
+        accountDebugPatternMatches(bucket);
 
         // --- materialize int4-quantized weights (vknn_compile -Os) for non-native consumers ---
         // The Vulkan MatMul dequantizes the packed payload in-kernel; every other consumer — a
@@ -809,6 +954,9 @@ namespace vknn {
             VKNN_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
         }
 
+        // Bind-time index bounds: which graph inputs index a Gather, and how many rows it holds.
+        bucket.gatherIndexAxisSizes = collectGatherIndexAxisSizes(graph_);
+
         VKNN_INFO << "Planned " << segments_.size() << " segment(s) over " << graph_.nodes.size() << " nodes [bucket '" << key << "']";
         // One un-throttled fallback summary per bucket: the per-node warnings above are throttled to
         // 2 per op type, so a model with 50 CPU GridSamples prints 2 warnings — without this line a
@@ -839,6 +987,131 @@ namespace vknn {
                       << (bucket.fallbackReasons.size() > kNamedNodes ? " ... (full list: Session::fallbackReasons(), vknn_compile --support-report)" : "");
         }
         return bucket;
+    }
+
+    // disableVkOps entries, comma-split and whitespace-trimmed exactly as Config::listContains
+    // treats them, so the zero-match warning enumerates the same entries the matcher accepts.
+    static std::vector<std::string> splitTrimmedEntries(const std::string &list) {
+        std::vector<std::string> entries;
+        size_t                   pos = 0;
+        while (pos <= list.size())
+        {
+            size_t comma    = list.find(',', pos);
+            size_t end      = comma == std::string::npos ? list.size() : comma;
+            size_t tokBegin = pos;
+            size_t tokEnd   = end;
+            while (tokBegin < tokEnd && std::isspace((unsigned char) list[tokBegin]))
+            {
+                ++tokBegin;
+            }
+            while (tokEnd > tokBegin && std::isspace((unsigned char) list[tokEnd - 1]))
+            {
+                --tokEnd;
+            }
+            if (tokEnd > tokBegin)
+            {
+                entries.push_back(list.substr(tokBegin, tokEnd - tokBegin));
+            }
+            if (comma == std::string::npos)
+            {
+                break;
+            }
+            pos = comma + 1;
+        }
+        return entries;
+    }
+
+    void Session::accountDebugPatternMatches(const PlanBucket &bucket) {
+        if (!byKind_.count(BackendKind::Vulkan))
+        {
+            return; // dumpTensors and disableVkOps act through the Vulkan backend only
+        }
+        const Graph &g = *bucket.graph;
+        if (!cfg_.dumpTensors.empty())
+        {
+            const std::vector<std::string> entries = splitPatternList(cfg_.dumpTensors);
+            // Mirrors the VulkanSegment activation set (vk_backend.cpp): the dump candidates are
+            // the non-initializer tensors a Vulkan-assigned node reads or writes, the fused
+            // residual edge included.
+            auto accountTensorName = [&](TensorId tid) {
+                if (tid == kNoTensor || g.isInitializer(tid))
+                {
+                    return;
+                }
+                const std::string &nm = g.desc(tid).name;
+                if (nm.empty())
+                {
+                    return;
+                }
+                for (const std::string &e: entries)
+                {
+                    if (nm.find(e) != std::string::npos)
+                    {
+                        matchedDumpPatterns_.insert(e);
+                    }
+                }
+            };
+            for (size_t n = 0; n < g.nodes.size(); ++n)
+            {
+                if (backends_[(size_t) bucket.nodeBackendIdx[n]]->kind() != BackendKind::Vulkan)
+                {
+                    continue;
+                }
+                const Node &nd = g.nodes[n];
+                for (TensorId in: nd.inputs)
+                {
+                    accountTensorName(in);
+                }
+                for (TensorId o: nd.outputs)
+                {
+                    accountTensorName(o);
+                }
+                accountTensorName(nd.fusedResidual);
+            }
+        }
+        if (!cfg_.disableVkOps.empty())
+        {
+            for (const Node &nd: g.nodes)
+            {
+                presentOpNames_.insert(opTypeName(nd.type));
+            }
+        }
+    }
+
+    void Session::warnUnmatchedDebugPatterns() const {
+        // One load-end sweep over the user-supplied pattern knobs: an entry that matched nothing in
+        // ANY bucket names a knob that silently does nothing — the tensor it targeted was renamed
+        // or fused/folded away by a pass, or the entry is a typo. Once per pattern per model load.
+        if (fp32PatternsAccounted_)
+        {
+            for (const std::string &e: splitPatternList(cfg_.fp32Tensors))
+            {
+                if (!matchedFp32Patterns_.count(e))
+                {
+                    VKNN_WARN << "fp32Tensors pattern '" << e << "' matched no eligible tensor in any bucket -- the fp32 pin does nothing (tensor renamed or fused away, or a typo?)";
+                }
+            }
+        }
+        if (byKind_.count(BackendKind::Vulkan))
+        {
+            if (!cfg_.dumpTensors.empty())
+            {
+                for (const std::string &e: splitPatternList(cfg_.dumpTensors))
+                {
+                    if (!matchedDumpPatterns_.count(e))
+                    {
+                        VKNN_WARN << "dumpTensors pattern '" << e << "' matched no GPU tensor in any bucket -- nothing will be dumped for it (tensor renamed or fused away, or a typo?)";
+                    }
+                }
+            }
+            for (const std::string &e: splitTrimmedEntries(cfg_.disableVkOps))
+            {
+                if (!presentOpNames_.count(e))
+                {
+                    VKNN_WARN << "disableVkOps entry '" << e << "' matches no op in the model";
+                }
+            }
+        }
     }
 
     bool Session::bucketsShareInputNames() const {
@@ -1338,6 +1611,124 @@ namespace vknn {
         links_.clear();
     }
 
+    // ---- engine-side output reductions -----------------------------------------------------------
+
+    const Session::OutputArgMax *Session::argMaxOutput(size_t bucket, TensorId id) const {
+        for (const OutputArgMax &reduction: argMaxOutputs_)
+        {
+            if (reduction.bucket == bucket && reduction.outId == id)
+            {
+                return &reduction;
+            }
+        }
+        return nullptr;
+    }
+
+    Status Session::setOutputArgMax(size_t bucket, const std::string &outputName) {
+        if (bucket >= buckets_.size())
+        {
+            VKNN_ERROR << "argmax: bucket " << bucket << " out of range (have " << buckets_.size() << ")";
+            return Status::InvalidArgument;
+        }
+        PlanBucket    &b     = buckets_[bucket];
+        const Graph   &g     = *b.graph;
+        const TensorId outId = g.find(outputName);
+        if (outId == kNoTensor || !idInList(g.outputs, outId))
+        {
+            VKNN_ERROR << "argmax: '" << outputName << "' is not a graph output of bucket " << bucket;
+            return Status::NotFound;
+        }
+        if (g.tensors[outId].dtype != DType::Float32 && g.tensors[outId].dtype != DType::Float16)
+        {
+            VKNN_ERROR << "argmax: '" << outputName << "' is " << dtypeStr(g.tensors[outId].dtype) << "; only float outputs reduce";
+            return Status::InvalidArgument;
+        }
+        // The reduction is over one flat vector: every leading dim must be 1 so the element index IS
+        // the last-axis index (a decoder's logits row [1,1,V]). Anything else is ambiguous.
+        const Shape  &shape = g.tensors[outId].shape;
+        const int64_t elems = shape.empty() ? 0 : numElements(shape);
+        if (elems <= 0 || elems != shape.back())
+        {
+            VKNN_ERROR << "argmax: '" << outputName << "' is not effectively one-dimensional";
+            return Status::InvalidArgument;
+        }
+        if (argMaxOutput(bucket, outId))
+        {
+            return Status::Ok; // idempotent
+        }
+        OutputArgMax reduction;
+        reduction.bucket     = bucket;
+        reduction.outputName = outputName;
+        reduction.outId      = outId;
+        if (cfg_.backend != BackendKind::Cpu)
+        {
+            for (const std::unique_ptr<Segment> &seg: b.segments)
+            {
+                if (!idInList(seg->boundaryOutputs, outId))
+                {
+                    continue;
+                }
+                std::string  whyNot;
+                const Status st = seg->setOutputArgMax(outId, whyNot);
+                if (st == Status::Ok)
+                {
+                    reduction.deviceSegment = seg.get();
+                } else if (st != Status::Unsupported)
+                {
+                    VKNN_ERROR << "argmax: '" << outputName << "': " << whyNot;
+                    return st;
+                }
+                break;
+            }
+        }
+        if (!reduction.deviceSegment)
+        {
+            VKNN_INFO << "argmax: '" << outputName << "' reduces on the host copy (no device reduction path)";
+        }
+        argMaxOutputs_.push_back(std::move(reduction));
+        return Status::Ok;
+    }
+
+    Status Session::readOutputArgMax(const std::string &outputName, int64_t &index, float &value) {
+        for (const OutputArgMax &reduction: argMaxOutputs_)
+        {
+            if (reduction.outputName != outputName)
+            {
+                continue;
+            }
+            if (reduction.deviceSegment && reduction.deviceSegment->readOutputArgMax(reduction.outId, index, value))
+            {
+                return Status::Ok;
+            }
+            // Host path: scan the internal fp32 copy with the shader's exact semantics — strictly
+            // greater replaces, so the first occurrence of the maximum wins and NaN never does.
+            PlanBucket &b  = buckets_[reduction.bucket];
+            RtTensor   &rt = b.pool[reduction.outId];
+            if (!rt.hostValid || rt.host.bytes.empty())
+            {
+                VKNN_ERROR << "argmax: '" << outputName << "' has no values to reduce (no completed run)";
+                return Status::RuntimeError;
+            }
+            const float  *data  = reinterpret_cast<const float *>(rt.host.bytes.data());
+            const int64_t elems = rt.shape.empty() ? (int64_t) (rt.host.bytes.size() / sizeof(float)) : numElements(rt.shape);
+            float         best   = -std::numeric_limits<float>::infinity();
+            int64_t       bestAt = -1;
+            for (int64_t i = 0; i < elems; ++i)
+            {
+                if (data[i] > best)
+                {
+                    best   = data[i];
+                    bestAt = i;
+                }
+            }
+            index = bestAt < 0 ? 0 : bestAt;
+            value = best;
+            return Status::Ok;
+        }
+        VKNN_ERROR << "argmax: '" << outputName << "' was never registered (setOutputArgMax)";
+        return Status::NotFound;
+    }
+
     Status Session::applyResidentLinks(size_t bucketIndex, PlanBucket &bucket) {
         for (ResidentLink &link: links_)
         {
@@ -1580,6 +1971,32 @@ namespace vknn {
                 rt.hostValid = true;
             }
             rt.deviceValid = false;
+            // An Int64 input that indexes a Gather (an embedding lookup's token ids) is validated
+            // here against the smallest axis size collected at plan time, so a caller-supplied
+            // out-of-range id fails with its value and position before any op reads past the table.
+            // ONNX index semantics admit [-axisSize, axisSize): negatives wrap Python-style.
+            if (rt.hostValid && rt.dtype == DType::Int64)
+            {
+                for (const auto &indexLimit: bucket.gatherIndexAxisSizes)
+                {
+                    if (indexLimit.first != id)
+                    {
+                        continue;
+                    }
+                    const int64_t  axisSize = indexLimit.second;
+                    const int64_t  elems    = rt.shape.empty() ? 1 : numElements(rt.shape);
+                    const int64_t *values   = rt.host.i64();
+                    for (int64_t e = 0; e < elems; ++e)
+                    {
+                        if (values[e] < -axisSize || values[e] >= axisSize)
+                        {
+                            VKNN_ERROR << "run: input '" << graph_.tensors[id].name << "' element " << e << " = " << values[e] << " is out of range [" << -axisSize << ", " << axisSize << ") for the " << axisSize << "-row Gather axis it indexes";
+                            return Status::InvalidArgument;
+                        }
+                    }
+                    break;
+                }
+            }
         }
         // Read zero-copy output fd bindings from the incoming `outputs` (set before the segments run so
         // the GPU writes into them), before it is cleared and refilled with results below.
@@ -1704,6 +2121,11 @@ namespace vknn {
             {
                 // A linked output stays engine-resident: the entry carries its metadata but no data
                 // (readResident() fetches the values when a caller needs them).
+                io.dtype = graph_.tensors[oid].dtype;
+            } else if (argMaxOutput(bucketIndex, oid))
+            {
+                // An argmax-registered output is served by readOutputArgMax(): metadata only, no
+                // declared-dtype readback (the device path never downloads the vector at all).
                 io.dtype = graph_.tensors[oid].dtype;
             } else if (rt.dmaBufFd < 0)
             {

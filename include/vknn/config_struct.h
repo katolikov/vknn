@@ -59,7 +59,7 @@ namespace vknn {
         /// there -> "<model>.cache" next to the model); cacheDir is the fallback for a session built from an
         /// in-memory graph (no model path).
         std::string cacheFile;                               ///< unified cache path (resolved by Runtime::load; empty = no file cache)
-        std::string cacheDir = "/data/local/tmp/vxrt/cache"; ///< fallback cache directory for an in-memory graph with no model path
+        std::string cacheDir = "vknn_cache"; ///< fallback cache directory (working-directory-relative) for an in-memory graph with no model path
         bool        noCache  = false;                        ///< debug: skip all cache read/write (cold compile every load)
 
         /// Load-time conv-kernel autotune effort (None / Fast / Heavy). Effort only — never changes
@@ -120,7 +120,7 @@ namespace vknn {
         bool        profile      = false;                       ///< collect per-op timing into the Profiler and print the summary table
         int         verbosity    = 1;                           ///< log verbosity applied by applyLogLevel(): 0=Warn, 1=Info, >=2=Debug
         bool        layerDump    = false;                       ///< write every layer's output tensor to layerDumpDir for numeric debugging
-        std::string layerDumpDir = "/data/local/tmp/vxrt/dump"; ///< destination directory for the per-layer tensor dump
+        std::string layerDumpDir = "vknn_dump"; ///< destination directory (working-directory-relative by default) for tensor dumps
 
         /// Conv kernel selection + GPU-pass knobs, set via setHint(Hint, value) (see the Hint enum):
         /// Hint::Winograd (auto/on/off), the experimental Winograd variant hints, and FlatLayout /
@@ -157,6 +157,24 @@ namespace vknn {
         /// --no-matmul-view-fold sets it Off). Controlled through the hint mechanism.
         bool matmulViewFold() const noexcept {
             return hint(Hint::MatMulViewFold, (int) Mode::On) != (int) Mode::Off;
+        }
+        /// True when the load-time rotate-half RoPE chain fusion is enabled (On by default;
+        /// --no-rope-fusion sets it Off). Controlled through the hint mechanism.
+        bool ropeFusion() const noexcept {
+            return hint(Hint::RopeFusion, (int) Mode::On) != (int) Mode::Off;
+        }
+        /// True when the load-time decode-attention fusion is enabled (On by default;
+        /// --no-fused-attention sets it Off). Controlled through the hint mechanism.
+        bool fusedAttention() const noexcept {
+            return hint(Hint::FusedAttention, (int) Mode::On) != (int) Mode::Off;
+        }
+        /// True when the load-time KV-cache Concat fold is enabled. OFF by default: it rewrites the
+        /// present KV outputs to the rows-only convention, which the engine-resident KV link
+        /// (Session::linkOutputToInput) cannot drive (the new-row present is read by the fused
+        /// attention in the same step). Opt in with setHint(Hint::KvConcatFold, Mode::On) for a
+        /// host-cache decode loop that folds the present rows itself.
+        bool kvConcatFold() const noexcept {
+            return hint(Hint::KvConcatFold, (int) Mode::Off) == (int) Mode::On;
         }
 
         static Config fromJsonFile(const std::string &path);

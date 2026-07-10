@@ -160,18 +160,39 @@ class SplatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.H
         if (state.phase != SplatPhase.CAPTURING || !state.capturing || framesFilled >= views) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastFrameMs < FRAME_GAP_MS) return
-        lastFrameMs = now
 
         val side = captureSide()
         if (frameSlab.isEmpty()) frameSlab = FloatArray(views * 3 * side * side)
         val argb = IntArray(side * side)
         squareFrame.getPixels(argb, 0, side, 0, 0, side, side)
-        rgbToChw01(argb, side).copyInto(frameSlab, framesFilled * 3 * side * side)
+        val candidate = rgbToChw01(argb, side)
+        // Parallax gate: the encoder needs baseline between views — eight near-identical frames
+        // reconstruct as low-opacity fog. A frame too similar to the last accepted one is skipped
+        // (re-checked at the analyzer rate) until the user actually moves.
+        if (framesFilled > 0 && frameDifference(candidate, frameSlab, (framesFilled - 1) * 3 * side * side) < MIN_FRAME_DIFFERENCE) {
+            _ui.value = _ui.value.copy(status = "Keep moving \u2014 arc around your subject")
+            return
+        }
+        lastFrameMs = now
+        candidate.copyInto(frameSlab, framesFilled * 3 * side * side)
         focalXNormalized = fxNormalized
         focalYNormalized = fyNormalized
         framesFilled++
-        _ui.value = _ui.value.copy(framesCaptured = framesFilled, framesTotal = views)
+        _ui.value = _ui.value.copy(framesCaptured = framesFilled, framesTotal = views, status = null)
         if (framesFilled == views) encodeCapturedFrames()
+    }
+
+    /** Mean absolute difference between a candidate frame and the slab frame at [slabOffset], subsampled. */
+    private fun frameDifference(candidate: FloatArray, slab: FloatArray, slabOffset: Int): Float {
+        var sum = 0f
+        var count = 0
+        var i = 0
+        while (i < candidate.size) {
+            sum += kotlin.math.abs(candidate[i] - slab[slabOffset + i])
+            count++
+            i += 17 // prime stride: samples every channel/row phase without scanning all 150k floats
+        }
+        return if (count == 0) 0f else sum / count
     }
 
     fun recapture() {
@@ -223,9 +244,11 @@ class SplatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.H
                 val poses = NativeLib.nativeSplatPoses(loaded)
                 poses.copyInto(basePose, 0, 0, 16) // view 0 anchors the orbit
                 pivotDepth = NativeLib.nativeSplatPivotDepth(loaded)
-                val gaussians = NativeLib.nativeSplatInfo(loaded)[0]
+                val info = NativeLib.nativeSplatInfo(loaded)
+                val gaussians = info[0]
+                val fogPermille = if (info.size > 4) info[4] else 0
                 val pixels = NativeLib.nativeSplatRender(loaded, basePose) ?: return@withContext null
-                gaussians to Bitmap.createBitmap(pixels, RENDER_SIDE, RENDER_SIDE, Bitmap.Config.ARGB_8888)
+                Triple(gaussians, fogPermille, Bitmap.createBitmap(pixels, RENDER_SIDE, RENDER_SIDE, Bitmap.Config.ARGB_8888))
             }
             frameSlab = FloatArray(0)
             residency.nativeCallSettled(this@SplatViewModel) // a release requested mid-encode lands here
@@ -237,10 +260,14 @@ class SplatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.H
             }
             _ui.value = _ui.value.copy(
                 phase = SplatPhase.VIEWER,
-                render = outcome.second,
+                render = outcome.third,
                 gaussians = outcome.first,
                 renderMs = SystemClock.elapsedRealtime() - startedMs,
-                status = null,
+                // Fog signature: a degenerate capture spreads mid-opacity gaussians everywhere
+                // instead of concentrating opacity on surfaces — tell the user how to fix it.
+                status = if (outcome.second > FOG_WARNING_PERMILLE)
+                    "Low capture quality \u2014 arc slowly around a well-lit subject and recapture"
+                else null,
             )
         }
     }
@@ -303,6 +330,13 @@ class SplatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.H
 
     private companion object {
         const val FRAME_GAP_MS = 900L // pacing between grabs while the user arcs the phone
+        // Minimum subsampled mean-abs pixel difference vs the last accepted frame: static or
+        // rotation-free captures sit well below this; a real arc step sits well above.
+        const val MIN_FRAME_DIFFERENCE = 0.012f
+        // Fraction (permille) of gaussians above opacity 0.1: a coherent scene concentrates
+        // opacity in few splats (~40 permille); degenerate captures spread mid-opacity fog
+        // everywhere (~300 permille).
+        const val FOG_WARNING_PERMILLE = 150
 
         // Rasterizer output side; independent of the encoder input side (intrinsics are normalized).
         const val RENDER_SIDE = 512

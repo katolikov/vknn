@@ -1,3 +1,4 @@
+#include "core/fused_attention.h"
 #include "core/matmul_view.h"
 #include "dim_expr.h"
 #include "passes_internal.h"
@@ -188,8 +189,10 @@ namespace vknn {
             }
             // A view-folded MatMul (core/matmul_view.h) reads its operands through attr strides;
             // its operand shapes are the chain SOURCES, so the forward matmul rule would derive a
-            // wrong output shape. Every shape on such a node is already final.
-            if (nd.attr.has(kMmView))
+            // wrong output shape. Every shape on such a node is already final. The same holds for
+            // a FusedAttention node (core/fused_attention.h): the load-time fusion pass takes over
+            // the decomposed chain's final output tensor, whose shape kFaOut also records.
+            if (nd.attr.has(kMmView) || nd.attr.has(kFa))
             {
                 return;
             }
@@ -255,6 +258,7 @@ namespace vknn {
                 case OpType::Softmax:
                 case OpType::LayerNorm:
                 case OpType::RMSNorm: // y = x*rsqrt(mean(x^2)+eps)*gamma over the last axis: same shape as input
+                case OpType::Rope:    // rotate-half rotary embedding over the last axis: same shape as input
                 case OpType::PRelu:
                 case OpType::EyeLike:        // identity-like, same shape as input
                 case OpType::ScatterND:      // same shape as data (input[0])

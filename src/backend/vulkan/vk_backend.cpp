@@ -1,6 +1,7 @@
 #include "vk_backend.h"
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
+#include "core/fused_attention.h" // kFaHd (FusedAttention device-cap gate)
 #include "core/vk_gates.h"        // vkNodeGate/vkKernelDeclared (shared capability model)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
@@ -157,6 +158,48 @@ namespace vknn {
                 }
                 return false;
             }
+            // FusedAttention's device-dependent requirements: the kernel stages the row's scores in
+            // shared memory (kFaSharedBytes) and runs a 256-invocation workgroup. vkNodeGate holds
+            // the device-free checks; these need the live caps.
+            if (nd.type == OpType::FusedAttention && ctx_)
+            {
+                const auto &caps = ctx_->caps();
+                // Per-node shared usage: sQ[G*hd] + sScores[G*chunk] + sRed[256] + sAcc[hd] fp32,
+                // with the op's own chunk = min(4096/G, 256). Refuse only when THIS node's staging
+                // exceeds the device budget (the kFaMax* caps bound it, but a device with a small
+                // shared budget can still run a small-group model).
+                const auto      &dims = nd.attr.getints(kFaDims);
+                const auto      &ks   = nd.attr.getints(kFaKStride);
+                const auto      &vs   = nd.attr.getints(kFaVStride);
+                int64_t          groupSize = 1;
+                for (size_t d = 0; d < dims.size(); ++d)
+                {
+                    if (dims[d] > 1 && d < ks.size() && ks[d] == 0 && d < vs.size() && vs[d] == 0)
+                    {
+                        groupSize = dims[d];
+                        break;
+                    }
+                }
+                const int64_t hd    = nd.attr.geti(kFaHd);
+                const int64_t chunk = std::min<int64_t>(4096 / std::max<int64_t>(groupSize, 1), 256);
+                const int64_t sharedBytes = (groupSize * hd + groupSize * chunk + 256 + hd) * 4;
+                if ((int64_t) caps.maxSharedMemory < sharedBytes)
+                {
+                    if (whyNot)
+                    {
+                        *whyNot = "FusedAttention: device shared memory below the kernel's score staging";
+                    }
+                    return false;
+                }
+                if (caps.maxWorkGroupInvocations < 256)
+                {
+                    if (whyNot)
+                    {
+                        *whyNot = "FusedAttention: device workgroup limit below 256 invocations";
+                    }
+                    return false;
+                }
+            }
             return vkNodeGate(g, nd, whyNot);
         }
 
@@ -174,6 +217,9 @@ namespace vknn {
             k.flatLayout      = cfg.flatLayout();
             k.gpuIslandFold   = cfg.gpuIslandFold();
             k.matmulViewFold  = cfg.matmulViewFold();
+            k.ropeFusion      = cfg.ropeFusion();
+            k.fusedAttention  = cfg.fusedAttention();
+            k.kvConcatFold    = cfg.kvConcatFold();
             k.fp32Tensors     = cfg.fp32Tensors;
             k.winograd        = cfg.hint(Hint::Winograd, (int) Mode::Auto);
             k.winogradVariant = cfg.hint(Hint::WinogradVariant, 0);
@@ -612,7 +658,7 @@ namespace vknn {
                 }
             }
             // Debug: Config::dumpTensors="substr1,substr2" forces matching tensors to dedicated (un-aliased)
-            // readback buffers and dumps them to /data/local/tmp/vxrt/dump after the run — so intermediate
+            // readback buffers and dumps them to cfg.layerDumpDir after the run — so intermediate
             // activations can be diffed despite the liveness planner reusing buffers. A few tensors only.
             if (!cfg_.dumpTensors.empty())
             {
@@ -1004,11 +1050,21 @@ namespace vknn {
             // uploaded weight payloads as the ops consume them. Session frees whatever survives.
             env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g](TensorId t) {
                 auto it = g.initializers.find(t);
-                if (it != g.initializers.end())
+                if (it == g.initializers.end())
                 {
-                    it->second.bytes.clear();
-                    it->second.bytes.shrink_to_fit();
+                    return;
                 }
+                // A mmap-backed view costs no heap — clearing it frees nothing but drops the ability
+                // to re-read the blob. In a multi-bucket .vxm several buckets view the SAME mapped
+                // blob (a weight shared by the prefill and decode plans), and each bucket's segment
+                // build re-uploads it; clearing bucket 0's view would leave a later bucket's flat
+                // upload with no bytes. Only OWNED (heap) payloads are worth reclaiming here.
+                if (it->second.bytes.viewed())
+                {
+                    return;
+                }
+                it->second.bytes.clear();
+                it->second.bytes.shrink_to_fit();
             }) :
                                                                    nullptr;
             // Memo scoped to this segment's graph; the ops themselves own the buffers, so a weak handle
@@ -1310,6 +1366,24 @@ namespace vknn {
             {
                 vk::computeBarrier(cmd_);
             }
+            // Registered output argmax epilogues: one single-workgroup dispatch per output, reading
+            // the finished boundary buffer and writing {index, value} into its result buffer. Rides
+            // the same submission; the final barrier above makes the outputs visible to it.
+            for (TensorId argMaxTid: argMaxOutputs_)
+            {
+                struct ArgMaxPC {
+                    uint32_t elemCount;
+                };
+                const bool fp16 = boundaryElemBytes(argMaxTid) == 2;
+                auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
+                if (!pipe)
+                {
+                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
+                                                                 env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                }
+                ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape)};
+                pipe->dispatch(cmd_, {buffers_[argMaxTid]->handle(), argMaxResults_[argMaxTid]->handle()}, &pc, sizeof(pc), 1);
+            }
             // Declared-format zero-copy outputs: convert the device-native boundary buffer into each
             // caller dma-buf (declared layout/dtype), then a barrier before the host reads it.
             {
@@ -1489,6 +1563,12 @@ namespace vknn {
                     linksChanged_ = false;
                     reRecord      = true;
                 }
+                if (argMaxChanged_)
+                {
+                    // The registered reduction set changed; the recording must append its epilogue.
+                    argMaxChanged_ = false;
+                    reRecord       = true;
+                }
                 if (reRecord)
                 {
                     if (!cmds_.empty())
@@ -1617,6 +1697,13 @@ namespace vknn {
                     rt.hostValid = false;
                     continue;
                 }
+                if (argMaxOutputs_.count(tid))
+                {
+                    // Reduced on-device: the host reads the 8-byte result via readOutputArgMax();
+                    // the full vector never downloads and any stale host copy is invalid.
+                    rt.hostValid = false;
+                    continue;
+                }
                 if (rt.dmaBufFd < 0)
                 {
                     bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
@@ -1643,7 +1730,7 @@ namespace vknn {
             // diffing.
             if (!dumpTids_.empty())
             {
-                ::mkdir("/data/local/tmp/vxrt/dump", 0755);
+                ::mkdir(cfg_.layerDumpDir.c_str(), 0755);
                 for (TensorId tid: dumpTids_)
                 {
                     auto bit = buffers_.find(tid);
@@ -1661,7 +1748,7 @@ namespace vknn {
                             c = '_';
                         }
                     }
-                    FILE *f = fopen(("/data/local/tmp/vxrt/dump/" + nm + ".bin").c_str(), "wb");
+                    FILE *f = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
                     if (f)
                     {
                         fwrite(rt.host.bytes.data(), 1, rt.host.bytes.size(), f);
@@ -1798,6 +1885,41 @@ namespace vknn {
             return true;
         }
 
+        Status setOutputArgMax(TensorId output, std::string &whyNot) override {
+            if (std::find(boundaryOutputs.begin(), boundaryOutputs.end(), output) == boundaryOutputs.end() || !buffers_.count(output))
+            {
+                whyNot = "'" + g_.tensors[output].name + "' is not a boundary output of this segment";
+                return Status::InvalidArgument;
+            }
+            if (!g_.desc(output).gpuFlat)
+            {
+                // The epilogue indexes flat elements; an NC4HW4 boundary would report block-order
+                // indices. The Session reduces the host copy instead.
+                whyNot = "'" + g_.tensors[output].name + "' is not flat on the device";
+                return Status::Unsupported;
+            }
+            if (argMaxOutputs_.insert(output).second)
+            {
+                argMaxResults_[output] = std::make_shared<vk::Buffer>(be_->ctx(), kArgMaxResultBytes, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                argMaxChanged_         = true; // the next run re-records with the epilogue dispatch
+            }
+            return Status::Ok;
+        }
+
+        bool readOutputArgMax(TensorId output, int64_t &index, float &value) override {
+            auto it = argMaxResults_.find(output);
+            if (it == argMaxResults_.end())
+            {
+                return false;
+            }
+            // {uint index, float value}, written by the epilogue dispatch of the last submitted run;
+            // the fence has signalled (submitAndWait), so the mapped read is coherent.
+            const uint32_t *words = reinterpret_cast<const uint32_t *>(it->second->host());
+            index                 = (int64_t) words[0];
+            std::memcpy(&value, &words[1], sizeof value);
+            return true;
+        }
+
       private:
         VulkanBackend                                  *be_;
         Graph                                          &g_;
@@ -1874,6 +1996,14 @@ namespace vknn {
         static constexpr uint32_t            kLinkRangeHeaderBytes     = 8;  // {rangeCount, totalElems}
         static constexpr uint32_t            kLinkInitialRangeCapacity = 16; // ranges; grows on demand
         static constexpr uint32_t            kLinkCopyGroups           = 4;  // fixed grid; the shader strides over totalElems
+        // Device-side output argmax (Session::setOutputArgMax): one 8-byte host-visible result
+        // buffer {uint index, float value} per registered output, written by the argmax_flat
+        // epilogue dispatch the recording appends after the graph's nodes.
+        std::set<TensorId>                              argMaxOutputs_;
+        std::map<TensorId, std::shared_ptr<vk::Buffer>> argMaxResults_;
+        bool                                            argMaxChanged_ = false; // registration set changed -> re-record
+        std::unique_ptr<vk::ComputePipeline>            argMaxPipeFp16_, argMaxPipeFp32_;
+        static constexpr uint32_t                       kArgMaxResultBytes = 8; // {index, value}
         // Device element width of a boundary tensor (2 for fp16 storage, 4 for fp32/storeFp32).
         int boundaryElemBytes(TensorId tid) const {
             return (useFp16_ && !g_.tensors[tid].storeFp32) ? 2 : 4;
