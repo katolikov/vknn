@@ -67,6 +67,19 @@ namespace vknn {
                     outShape = {1};
                 }
 
+                // Validate the whole index tensor in one O(nidx) pass before any row copy, so the copy
+                // loops below stay free of per-row bounds checks. An out-of-range index (an out-of-vocab
+                // token id against an embedding table) is a hard error naming the value, its position,
+                // and the valid range — never an out-of-bounds read.
+                for (int64_t k = 0; k < nidx; ++k)
+                {
+                    int64_t ik = indexAt(k);
+                    if (ik < -axisSize || ik >= axisSize)
+                    {
+                        throw Error(Status::InvalidArgument, "Gather '" + node.name + "': index " + std::to_string(ik) + " at position " + std::to_string(k) + " is out of range [" + std::to_string(-axisSize) + ", " + std::to_string(axisSize) + ") for axis " + std::to_string(axis) + " of size " + std::to_string(axisSize));
+                    }
+                }
+
                 // Copy each gathered row into the output. Source row (o, src) starts at flat offset
                 // (o*axisSize + src)*inner; the k-th output row of block `o` at (o*nidx + k)*inner, since
                 // the output replaces `axisSize` with `nidx` along the collapsed axis. A negative index

@@ -79,6 +79,15 @@ namespace vknn {
                         {
                             iv[(size_t) i] = hb.f32()[i];
                         }
+                        // A constant index is fully known here: an out-of-range one is a hard error at
+                        // prepare time, matching GatherCpu's contract. The kernel's clamp only covers a
+                        // runtime index activation, which the host cannot see before dispatch. Guarded
+                        // on a statically known axis size (> 0); an unresolved dim has nothing to check.
+                        const int64_t rawIndex = idt == DType::Int64 ? hb.i64()[i] : (int64_t) iv[(size_t) i];
+                        if (axisSize > 0 && (rawIndex < -axisSize || rawIndex >= axisSize))
+                        {
+                            throw Error(Status::InvalidArgument, "Gather '" + node.name + "': constant index " + std::to_string(rawIndex) + " at position " + std::to_string(i) + " is out of range [" + std::to_string(-axisSize) + ", " + std::to_string(axisSize) + ") for axis " + std::to_string(axis) + " of size " + std::to_string(axisSize));
+                        }
                     }
                     idxBuf = upload(*env.ctx, iv, false); // index is always fp32 (gather.comp binding 1)
                 }
