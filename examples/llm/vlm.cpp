@@ -139,6 +139,10 @@ int main(int argc, char **argv) {
         {
             cfg.timing = true; // per-run pack/submit/unpack walls
         }
+        if (!strcmp(argv[i], "--no-matmul-view-fold"))
+        {
+            cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+        }
     }
     std::mt19937 rng((unsigned) atoi(argValue(argc, argv, "--seed", "1234")));
 

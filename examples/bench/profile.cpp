@@ -11,8 +11,12 @@
 //   --precision P     low|normal|high (default low)
 //   --trace PATH      chrome://tracing output (default /data/local/tmp/vxrt/trace.json)
 //   --json PATH       per-op records JSON output (default /data/local/tmp/vxrt/profile.json)
+//   --bucket N        profile plan bucket N of a multi-bucket model (default 0); the run binds
+//                     bucket N's declared input shapes, so run() dispatches to that bucket
 #include "vknn/session.h"
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -45,6 +49,20 @@ int main(int argc, char **argv) {
     cfg.backend   = backendFromStr(argval(argc, argv, "--backend", "vulkan"));
     cfg.precision = precisionFromStr(argval(argc, argv, "--precision", "low"));
     cfg.profile   = true;
+    // A kernel-isolation probe (a bare op chain) is exactly the shape the island fold reassigns to
+    // the CPU; profiling wants the GPU kernels, so keep the islands on the GPU like run_io's
+    // --no-fold-islands.
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!strcmp(argv[i], "--no-fold-islands"))
+        {
+            cfg.setHint(Hint::GpuIslandFold, (int) Mode::Off);
+        }
+        if (!strcmp(argv[i], "--no-matmul-view-fold"))
+        {
+            cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+        }
+    }
 
     auto sess = Runtime::load(model, cfg);
     if (!sess)
@@ -52,20 +70,39 @@ int main(int argc, char **argv) {
         fprintf(stderr, "load failed\n");
         return 1;
     }
-    IOTensor in;
-    in.name  = "input";
-    in.shape = {1, 3, 224, 224};
-    in.dtype = DType::Float32;
-    in.data  = readFile(inpath);
-    // Fall back to a zero-filled input when the file is missing or too short (4 bytes per fp32 element).
-    if (in.data.size() < numElements(in.shape) * 4)
+    // Inputs come from the model's own declaration: every input gets its declared name/shape/dtype;
+    // --input fills the FIRST input from a raw file (missing or short -> zero-filled). Extra inputs
+    // (a decoder's KV set) are zero-filled, which profiles fine. --bucket selects which plan
+    // bucket's shapes are bound (an LLM .vxm stores prefill and decode as separate buckets).
+    const size_t bucket = (size_t) atoi(argval(argc, argv, "--bucket", "0"));
+    const auto   infos  = sess->inputInfo(bucket);
+    if (infos.empty())
     {
-        in.data.assign(numElements(in.shape) * 4, 0);
+        fprintf(stderr, "bucket %zu has no inputs (out of range?)\n", bucket);
+        return 1;
+    }
+    std::vector<IOTensor> ins;
+    for (const IOInfo &info: infos)
+    {
+        IOTensor in;
+        in.name           = info.name;
+        in.shape          = info.shape;
+        in.dtype          = info.dtype == DType::Int64 || info.dtype == DType::Int32 ? info.dtype : DType::Float32;
+        const size_t need = (size_t) std::max<int64_t>(numElements(in.shape), 1) * dtypeSize(in.dtype);
+        if (ins.empty())
+        {
+            in.data = readFile(inpath);
+        }
+        if (in.data.size() < need)
+        {
+            in.data.assign(need, 0);
+        }
+        ins.push_back(std::move(in));
     }
 
     std::vector<IOTensor> outs;
-    sess->run({in}, outs); // warmup (fills caches)
-    sess->run({in}, outs); // profiled run
+    sess->run(ins, outs); // warmup (fills caches)
+    sess->run(ins, outs); // profiled run
 
     sess->profiler().printTable();
 

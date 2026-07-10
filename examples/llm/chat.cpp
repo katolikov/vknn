@@ -10,7 +10,13 @@
 //
 //   vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
 //             [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
-//             [--no-kv-link] [--timing]
+//             [--no-kv-link] [--no-prefill] [--timing]
+//
+// A multi-bucket model whose second bucket takes input_ids [1,S] (S>1) prefills the prompt in
+// S-token forwards instead of token-by-token — TTFT then costs one batched pass per S prompt
+// tokens. The prefill pass runs on the host cache flow (its present rows fold into the host past
+// buffers) and the first decode step re-seeds the engine-resident cache from them; --no-prefill
+// forces the token-by-token path for A/B. Single-bucket models are unaffected.
 //
 // The model is a with-past decoder compiled at a fixed past length C (read from the .vxm). Each step
 // feeds one token at absolute position p, the [1, kv_heads, C, head_dim] cache as the past key/value
@@ -87,6 +93,10 @@ int main(int argc, char **argv) {
     const int64_t eos          = atoll(opt(argc, argv, "--eos", "151643"));
     bool          kvLink       = !flagSet(argc, argv, "--no-kv-link"); // may drop to the host loop mid-stream on a link failure
     cfg.timing                 = flagSet(argc, argv, "--timing");      // per-run pack/submit/unpack walls
+    if (flagSet(argc, argv, "--no-matmul-view-fold"))
+    {
+        cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+    }
     std::mt19937 rng((unsigned) atoi(opt(argc, argv, "--seed", "1234")));
 
     auto sess = Runtime::load(model, cfg);
@@ -95,8 +105,40 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to load %s\n", model.c_str());
         return 1;
     }
-    const std::vector<IOInfo> ins  = sess->inputInfo();
-    const std::vector<IOInfo> outs = sess->outputInfo();
+    // Bucket roles for a multi-bucket .vxm: the decode bucket feeds input_ids [1,1]; a prefill
+    // bucket (optional) feeds [1,S] with S>1 and processes a whole prompt window in ONE forward —
+    // the difference between TTFT scaling as prompt-length decode steps and one batched pass. A
+    // single-bucket model keeps the token-by-token prefill below, byte-identically to before.
+    int decodeBucket = -1, prefillBucket = -1, prefillS = 0;
+    for (size_t b = 0; b < sess->bucketCount(); ++b)
+    {
+        const std::vector<IOInfo> bins = sess->inputInfo(b);
+        for (const IOInfo &in: bins)
+        {
+            if (in.name == "input_ids" && in.shape.size() == 2)
+            {
+                if (in.shape[1] == 1 && decodeBucket < 0)
+                {
+                    decodeBucket = (int) b;
+                } else if (in.shape[1] > 1 && (int) in.shape[1] > prefillS)
+                {
+                    prefillBucket = (int) b;
+                    prefillS      = (int) in.shape[1];
+                }
+            }
+        }
+    }
+    if (decodeBucket < 0)
+    {
+        fprintf(stderr, "model has no input_ids [1,1] decode bucket\n");
+        return 2;
+    }
+    if (flagSet(argc, argv, "--no-prefill"))
+    {
+        prefillBucket = -1; // token-by-token A/B reference
+    }
+    const std::vector<IOInfo> ins  = sess->inputInfo((size_t) decodeBucket);
+    const std::vector<IOInfo> outs = sess->outputInfo((size_t) decodeBucket);
 
     auto findIn = [&](const std::string &n) -> int {
         for (size_t i = 0; i < ins.size(); ++i)
@@ -180,13 +222,16 @@ int main(int argc, char **argv) {
         }
         return false;
     };
+    // With a prefill bucket the host past buffers are needed even in linked mode: the prefill pass
+    // runs on the host cache flow (bind past, fold present rows back), and the first decode step
+    // re-seeds the engine-resident cache from them.
     std::vector<IOTensor> inputs(ins.size());
     for (size_t i = 0; i < ins.size(); ++i)
     {
         inputs[i].name  = ins[i].name;
         inputs[i].shape = ins[i].shape;
         inputs[i].dtype = ins[i].dtype;
-        if (!(kvLink && isPastInput(i)))
+        if (!(kvLink && isPastInput(i) && prefillBucket < 0))
         {
             inputs[i].data.assign((size_t) ins[i].elems * dtypeSize(ins[i].dtype), 0);
         }
@@ -195,15 +240,60 @@ int main(int argc, char **argv) {
         std::memcpy(inputs[idx].data.data(), vals.data(), vals.size() * sizeof(int64_t));
     };
 
+    // Prefill-bucket geometry, validated against the decode bucket: the past inputs must share the
+    // decode shapes (one host cache serves both) and the mask must span past+S columns. Any
+    // mismatch disables the fast prefill rather than miscomputing.
+    int prefillMaskLen = 0, prefillPresRows = 0, prefillLogitsIdx = -1;
+    if (prefillBucket >= 0)
+    {
+        const std::vector<IOInfo> pin  = sess->inputInfo((size_t) prefillBucket);
+        const std::vector<IOInfo> pout = sess->outputInfo((size_t) prefillBucket);
+        bool                      ok   = true;
+        for (const IOInfo &in: pin)
+        {
+            if (in.name == ins[(size_t) pastKey[0]].name)
+            {
+                ok = ok && in.shape == ins[(size_t) pastKey[0]].shape;
+            }
+            if (in.name == "attention_mask" && in.shape.size() == 2)
+            {
+                prefillMaskLen = (int) in.shape[1];
+            }
+        }
+        for (size_t i = 0; i < pout.size(); ++i)
+        {
+            if (pout[i].name == "logits")
+            {
+                prefillLogitsIdx = (int) i;
+            }
+            if (pout[i].name == "present.0.key" && pout[i].shape.size() == 4)
+            {
+                prefillPresRows = (int) pout[i].shape[2];
+            }
+        }
+        ok = ok && prefillMaskLen == C + prefillS && prefillPresRows >= prefillS && prefillLogitsIdx >= 0;
+        if (!ok)
+        {
+            fprintf(stderr, "[chat] prefill bucket geometry mismatch (mask %d vs C+S %d, present rows %d); using token-by-token prefill\n", prefillMaskLen, C + prefillS, prefillPresRows);
+            prefillBucket = -1;
+        } else
+        {
+            fprintf(stderr, "[chat] prefill bucket: S=%d, one forward per %d prompt tokens\n", prefillS, prefillS);
+        }
+    }
+
     // Declare the KV links up front: every present output feeds its past input on the next run. The
     // ranges start empty (the cache starts as zeros, matching the host loop's zero-filled buffers);
     // each step from p=1 on re-links with the ranges that fold the previous token's row into its slot.
     if (kvLink)
     {
+        // Bucket-explicit links: a multi-bucket model carries the present/past pair in every
+        // bucket, and only the decode bucket's cache is engine-resident (the prefill pass uses the
+        // host cache flow). The overload is also correct for a single-bucket model (bucket 0).
         for (int l = 0; l < L; ++l)
         {
-            if (sess->linkOutputToInput(outs[(size_t) presKey[l]].name, ins[(size_t) pastKey[l]].name, {}) != Status::Ok ||
-                sess->linkOutputToInput(outs[(size_t) presVal[l]].name, ins[(size_t) pastVal[l]].name, {}) != Status::Ok)
+            if (sess->linkOutputToInput((size_t) decodeBucket, outs[(size_t) presKey[l]].name, ins[(size_t) pastKey[l]].name, {}) != Status::Ok ||
+                sess->linkOutputToInput((size_t) decodeBucket, outs[(size_t) presVal[l]].name, ins[(size_t) pastVal[l]].name, {}) != Status::Ok)
             {
                 fprintf(stderr, "[chat] KV link failed (see log); rerun with --no-kv-link\n");
                 return 2;
@@ -217,7 +307,49 @@ int main(int argc, char **argv) {
     std::vector<int> outIdxByInfo(outs.size(), -1);
     bool             mapped = false;
 
-    int p = 0; // absolute position across the whole conversation
+    int  p             = 0;     // absolute position across the whole conversation
+    bool residentDirty = false; // linked decode ran: the engine cache is ahead of the host buffers
+    bool reseedCache   = false; // next linked decode step re-seeds the resident cache from the host
+
+    // Copy the engine-resident cache (plus the pending fold of the last present row into
+    // `pendingSlot`, when >= 0) back into the host past buffers. Used at a prefill turn boundary
+    // and by the link-failure fallback — the host cache then holds the full conversation state.
+    auto syncResidentToHost = [&](int64_t pendingSlot) -> bool {
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
+                if (hostPast.data.empty())
+                {
+                    hostPast.data.assign((size_t) ins[(size_t) (part ? pastVal[l] : pastKey[l])].elems * sizeof(float), 0);
+                }
+                IOTensor resident;
+                if (sess->readResident(hostPast.name, resident) != Status::Ok || resident.data.size() != hostPast.data.size())
+                {
+                    fprintf(stderr, "[chat] resident cache readback failed for %s\n", hostPast.name.c_str());
+                    return false;
+                }
+                std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                if (pendingSlot >= 0)
+                {
+                    IOTensor present;
+                    if (sess->readResident(outs[(size_t) (part ? presVal[l] : presKey[l])].name, present) != Status::Ok)
+                    {
+                        fprintf(stderr, "[chat] resident present readback failed\n");
+                        return false;
+                    }
+                    const float *src = reinterpret_cast<const float *>(present.data.data());
+                    float       *dst = reinterpret_cast<float *>(hostPast.data.data());
+                    for (int h = 0; h < kvHeads; ++h)
+                    {
+                        std::memcpy(dst + ((size_t) h * C + pendingSlot) * headDim, src + ((size_t) h * presRows + (presRows - 1)) * headDim, (size_t) headDim * sizeof(float));
+                    }
+                }
+            }
+        }
+        return true;
+    };
 
     // Feed one token at the current position; return the logits (vocab floats) or nullptr on error.
     auto step = [&](int64_t tok) -> const float * {
@@ -237,10 +369,12 @@ int main(int argc, char **argv) {
         {
             // The engine folds the PREVIOUS token's present row (the last row of each head) into
             // cache slot p-1 at the start of this run (min guards the overrun past the compiled
-            // context, like the host loop's slot clamp).
+            // context, like the host loop's slot clamp). A re-seed step (the first decode after a
+            // prefill pass) instead binds the FULL host past buffers — binding a linked input
+            // reinitializes its resident state — with no pending fold.
             bool linksOk = true;
             {
-                const int64_t                slot   = p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1;
+                const int64_t                slot   = (!reseedCache && p > 0) ? std::min<int64_t>(p - 1, C - 1) : -1;
                 const std::vector<LinkRange> ranges = kvFoldRanges(kvHeads, presRows, C, headDim, slot);
                 for (int l = 0; l < L && linksOk; ++l)
                 {
@@ -248,7 +382,7 @@ int main(int argc, char **argv) {
                     {
                         const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
                         const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
-                        const Status       st   = sess->linkOutputToInput(pres, past, ranges);
+                        const Status       st   = sess->linkOutputToInput((size_t) decodeBucket, pres, past, ranges);
                         if (st != Status::Ok)
                         {
                             fprintf(stderr, "[chat] KV link update failed for %s -> %s at slot %lld: %s (see log)\n", pres.c_str(), past.c_str(), (long long) slot, statusStr(st));
@@ -259,46 +393,27 @@ int main(int argc, char **argv) {
             }
             if (linksOk)
             {
-                std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
-                runStatus = sess->run(bound, outputs);
-                ranLinked = true;
+                if (reseedCache)
+                {
+                    runStatus   = sess->run(inputs, outputs); // full bind re-seeds the resident cache
+                    reseedCache = false;
+                } else
+                {
+                    std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+                    runStatus = sess->run(bound, outputs);
+                }
+                ranLinked     = true;
+                residentDirty = true;
             } else
             {
                 // A mid-stream link failure: bring the engine-resident cache (device rows + the
-                // pending fold from the last run's present) back into freshly allocated host past
-                // buffers, drop the links, and continue THIS and every later step on the host cache
-                // loop — same tokens, no lost state.
+                // pending fold from the last run's present) back into the host past buffers, drop
+                // the links, and continue THIS and every later step on the host cache loop — same
+                // tokens, no lost state.
                 fprintf(stderr, "[chat] switching to the host KV loop at p=%d (resyncing the cache from the engine)\n", p);
-                const int64_t pendingSlot = p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1;
-                for (int l = 0; l < L; ++l)
+                if (!syncResidentToHost(p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1))
                 {
-                    for (int part = 0; part < 2; ++part)
-                    {
-                        IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
-                        hostPast.data.assign((size_t) ins[(size_t) (part ? pastVal[l] : pastKey[l])].elems * sizeof(float), 0);
-                        IOTensor resident;
-                        if (sess->readResident(hostPast.name, resident) != Status::Ok || resident.data.size() != hostPast.data.size())
-                        {
-                            fprintf(stderr, "[chat] host cache resync failed for %s; cannot continue\n", hostPast.name.c_str());
-                            return nullptr;
-                        }
-                        std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
-                        if (pendingSlot >= 0)
-                        {
-                            IOTensor present;
-                            if (sess->readResident(outs[(size_t) (part ? presVal[l] : presKey[l])].name, present) != Status::Ok)
-                            {
-                                fprintf(stderr, "[chat] host cache resync failed; cannot continue\n");
-                                return nullptr;
-                            }
-                            const float *src = reinterpret_cast<const float *>(present.data.data());
-                            float       *dst = reinterpret_cast<float *>(hostPast.data.data());
-                            for (int h = 0; h < kvHeads; ++h)
-                            {
-                                std::memcpy(dst + ((size_t) h * C + pendingSlot) * headDim, src + ((size_t) h * presRows + (presRows - 1)) * headDim, (size_t) headDim * sizeof(float));
-                            }
-                        }
-                    }
+                    return nullptr;
                 }
                 sess->clearLinks();
                 kvLink = false;
@@ -350,6 +465,101 @@ int main(int argc, char **argv) {
             }
         }
         return reinterpret_cast<const float *>(outputs[(size_t) outIdxByInfo[logitsIdx]].data.data());
+    };
+
+    // One prefill pass: feed `len` prompt tokens (<= prefillS) starting at absolute position p in a
+    // single forward through the prefill bucket, on the HOST cache flow — bind the past buffers,
+    // fold the produced present rows (the S new rows after the past block) back into cache slots
+    // p..p+len-1 — and return the last real token's logits row. Pad slots carry mask 0, so real
+    // tokens never attend them and their (garbage) rows are simply not folded. Advances p.
+    std::vector<IOTensor> prefillOutputs;
+    auto                  prefillPass = [&](const int64_t *toks, int len) -> const float                  *{
+        std::vector<IOTensor> pin(inputs.size());
+        for (size_t i = 0; i < ins.size(); ++i)
+        {
+            pin[i].name  = ins[i].name;
+            pin[i].dtype = ins[i].dtype;
+            if (isPastInput(i))
+            {
+                pin[i].shape = ins[i].shape;
+                pin[i].data  = inputs[i].data; // the host KV cache, shared shape with the decode bucket
+                continue;
+            }
+            if ((int) i == idIdx || (int) i == posIdx)
+            {
+                pin[i].shape = {1, (int64_t) prefillS};
+                std::vector<int64_t> v((size_t) prefillS, 0);
+                for (int t = 0; t < prefillS; ++t)
+                {
+                    v[(size_t) t] = ((int) i == idIdx) ? (t < len ? toks[t] : 0) : (int64_t) (p + t);
+                }
+                pin[i].data.resize((size_t) prefillS * 8);
+                std::memcpy(pin[i].data.data(), v.data(), v.size() * 8);
+            } else if ((int) i == maskIdx)
+            {
+                pin[i].shape = {1, (int64_t) prefillMaskLen};
+                std::vector<int64_t> m((size_t) prefillMaskLen, 0);
+                for (int j = 0; j < p && j < C; ++j)
+                {
+                    m[(size_t) j] = 1; // valid past slots
+                }
+                for (int t = 0; t < len; ++t)
+                {
+                    m[(size_t) (C + t)] = 1; // the chunk's real tokens; pads stay masked
+                }
+                pin[i].data.resize((size_t) prefillMaskLen * 8);
+                std::memcpy(pin[i].data.data(), m.data(), m.size() * 8);
+            }
+        }
+        if (sess->run(pin, prefillOutputs) != Status::Ok)
+        {
+            fprintf(stderr, "[chat] prefill run failed\n");
+            return (const float *) nullptr;
+        }
+        const IOTensor *logitsOut = nullptr;
+        for (const IOTensor &o: prefillOutputs)
+        {
+            if (o.name == "logits")
+            {
+                logitsOut = &o;
+            }
+        }
+        if (!logitsOut)
+        {
+            return (const float *) nullptr;
+        }
+        // Fold the chunk's present rows (after the past block) into the host cache.
+        const int newRowsAt = prefillPresRows - prefillS;
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                const std::string &presName = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                const IOTensor    *pres     = nullptr;
+                for (const IOTensor &o: prefillOutputs)
+                {
+                    if (o.name == presName)
+                    {
+                        pres = &o;
+                    }
+                }
+                if (!pres)
+                {
+                    return (const float *) nullptr;
+                }
+                const float *src = reinterpret_cast<const float *>(pres->data.data());
+                float       *dst = reinterpret_cast<float *>(inputs[(size_t) (part ? pastVal[l] : pastKey[l])].data.data());
+                for (int h = 0; h < kvHeads; ++h)
+                {
+                    for (int t = 0; t < len; ++t)
+                    {
+                        std::memcpy(dst + ((size_t) h * C + p + t) * headDim, src + ((size_t) h * prefillPresRows + newRowsAt + t) * headDim, (size_t) headDim * sizeof(float));
+                    }
+                }
+            }
+        }
+        p += len;
+        return reinterpret_cast<const float *>(logitsOut->data.data()) + (size_t) (len - 1) * vocab;
     };
 
     // Pick the next token id from a logits row: greedy at temp<=0, else temperature + top-k + top-p.
@@ -425,10 +635,41 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        const float *logits = nullptr;
-        for (int64_t tk: prompt)
+        const float *logits   = nullptr;
+        size_t       consumed = 0;
+        if (prefillBucket >= 0)
         {
-            logits = step(tk);
+            // Whole-window prefill: sync the engine-resident cache to the host once per turn (a
+            // linked decode from the previous turn leaves a pending fold at slot p-1), then feed
+            // the prompt in prefillS-sized forwards. A remainder past the compiled context falls
+            // to the token-by-token loop below.
+            if (kvLink && residentDirty)
+            {
+                if (!syncResidentToHost(p > 0 ? std::min<int64_t>(p - 1, C - 1) : -1))
+                {
+                    return 3;
+                }
+                residentDirty = false;
+            }
+            while (consumed < prompt.size())
+            {
+                const int len = (int) std::min<size_t>(prompt.size() - consumed, (size_t) prefillS);
+                if (p + len > C)
+                {
+                    break;
+                }
+                logits = prefillPass(&prompt[consumed], len);
+                if (!logits)
+                {
+                    return 3;
+                }
+                consumed += (size_t) len;
+            }
+            reseedCache = kvLink && consumed > 0; // first decode step re-seeds the resident cache
+        }
+        for (; consumed < prompt.size(); ++consumed)
+        {
+            logits = step(prompt[consumed]);
             if (!logits)
             {
                 return 3;

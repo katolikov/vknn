@@ -8,6 +8,8 @@
 // math byte-for-byte; the split-K kernels regroup the k chain (deterministically, identically to each
 // other) and so agree only to fp32 rounding.
 #include "core/matmul_tile.h"
+#include "core/matmul_view.h"
+#include "core/quant_int4.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
@@ -27,6 +29,13 @@ namespace vknn {
             int rank, total, M, N, K, aK, bK;
         };
 
+        // Push constant for the int4-packed-weight kernels (matmul_gemv_i4 / matmul_tiled_i4). The
+        // weight is always a 2-D constant, so there is no geometry SSBO: A/D batch offsets are dense
+        // whole-matrix steps, decoded in-kernel from the row/batch workgroup id.
+        struct MatMulI4PC {
+            int total, M, N, K, group, nOut, rowWords, nGroups;
+        };
+
         struct MatMulOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             MatMulPC                             pc {};
@@ -40,6 +49,91 @@ namespace vknn {
 
             // Set when a pointwise chain (fusePointwiseChains) is attached to this MatMul's store.
             PwEpi epi;
+
+            // int4-packed weight path (vknn_compile -Os; layout in core/quant_int4.h). The session's
+            // materialization keeps the kWq attrs only on Vulkan-assigned MatMuls, so their presence
+            // here guarantees the payload is packed and this op must read it natively.
+            bool                        useInt4 = false;
+            MatMulI4PC                  i4pc {};
+            std::shared_ptr<vk::Buffer> i4Packed, i4Scales, i4Oidx, i4Oval;
+
+            // Prepare the int4 dispatch: raw packed/index payloads upload unconverted, the fp16
+            // scale/outlier tensors upload at compute precision (uploadInit's passthrough), and the
+            // kernel is the split-K GEMV for a single output row or the {128,128,16} tile otherwise.
+            void prepareInt4(const Node &node, VkOpEnv &env) {
+                const Graph  &g   = *env.graph;
+                const Shape  &sa  = g.desc(node.inputs[0]).shape;
+                const Shape  &out = g.desc(node.outputs[0]).shape;
+                const int64_t M   = sa.size() >= 2 ? sa[sa.size() - 2] : 1;
+
+                i4pc.total    = (int) numElements(out);
+                i4pc.M        = (int) M;
+                i4pc.N        = (int) node.attr.geti(kWqN, 0);
+                i4pc.K        = (int) node.attr.geti(kWqK, 0);
+                i4pc.group    = (int) node.attr.geti(kWqGroup, 1);
+                i4pc.nOut     = (int) node.attr.geti(kWqNOut, 0);
+                i4pc.rowWords = (int) ((i4pc.N + 7) / 8);
+                i4pc.nGroups  = (int) int4GroupCount(i4pc.K, i4pc.group);
+                numBatch      = i4pc.N > 0 && M > 0 ? i4pc.total / (int) (M * (int64_t) i4pc.N) : 1;
+
+                const TensorId scaleId = (TensorId) node.attr.geti(kWqScales, kNoTensor);
+                const TensorId oidxId  = (TensorId) node.attr.geti(kWqOidx, kNoTensor);
+                const TensorId ovalId  = (TensorId) node.attr.geti(kWqOval, kNoTensor);
+                i4Packed               = uploadInitRaw(env, node.inputs[1], "i4w");
+                i4Scales               = uploadInit(env, scaleId, g.desc(scaleId).shape);
+                if (i4pc.nOut > 0)
+                {
+                    i4Oidx = uploadInitRaw(env, oidxId, "i4i");
+                    i4Oval = uploadInit(env, ovalId, g.desc(ovalId).shape);
+                } else
+                {
+                    // Descriptor sets bind every declared buffer; a zero-outlier weight binds a
+                    // shared dummy word the kernel's nOut == 0 loop never reads.
+                    i4Oidx = env.acquireWeight("i4#dummy", env.useFp16, [&] {
+                        const uint32_t zero[4] = {0, 0, 0, 0};
+                        return env.uploadWeightDeviceOnly(zero, sizeof zero, sizeof zero);
+                    });
+                    i4Oval = i4Oidx;
+                }
+
+                useGemv          = M == 1;
+                const char *base = useGemv ? "matmul_gemv_i4" : "matmul_tiled_i4";
+                std::string name = base;
+                uint32_t    nbuf = 6; // A, packed, D, scales, oidx, oval
+                if (node.fusedBias != kNoTensor)
+                {
+                    biasBuf = uploadInit(env, node.fusedBias, g.desc(node.fusedBias).shape);
+                    name += "_bias";
+                    nbuf = 7;
+                }
+                epi.prepare(node, env, /*flat=*/true, out);
+                name += epi.suffix();
+                nbuf += epi.extraBufs();
+                pipe = env.pipeline(shader(name.c_str(), env.useFp16), nbuf, sizeof(MatMulI4PC), {});
+            }
+
+            void recordInt4(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
+                vk::Buffer           *src       = constBuf[0] ? constBuf[0].get() : env.devBuf(node.inputs[0]);
+                VkBuffer              dstHandle = env.devBuf(node.outputs[0])->handle();
+                std::vector<VkBuffer> bufs {src->handle(), i4Packed->handle(), dstHandle, i4Scales->handle(), i4Oidx->handle(), i4Oval->handle()};
+                if (biasBuf)
+                {
+                    bufs.push_back(biasBuf->handle());
+                }
+                epi.append(bufs, node, env, dstHandle);
+                if (useGemv)
+                {
+                    // (ceil(N/64) word blocks, one output row per y group): a lane's 8 outputs stay
+                    // word-aligned within their row, so a ragged N only pads the last block.
+                    const uint32_t rows = (uint32_t) (i4pc.N > 0 ? i4pc.total / i4pc.N : 1);
+                    pipe->dispatch(cmd, bufs, &i4pc, sizeof(i4pc), groups(i4pc.N, 64), rows);
+                } else
+                {
+                    const uint32_t gx = (uint32_t) ((i4pc.N + 127) / 128);
+                    const uint32_t gy = (uint32_t) ((i4pc.M + 127) / 128);
+                    pipe->dispatch(cmd, bufs, &i4pc, sizeof(i4pc), gx, gy, (uint32_t) numBatch);
+                }
+            }
 
             // The tiled dispatch is 3-D, so it gets no runtime X-overflow rescue (the 1-D split in
             // ComputePipeline::dispatch only applies when gy==gz==1); a tile whose group counts
@@ -159,100 +253,157 @@ namespace vknn {
             }
 
             void prepare(const Node &node, VkOpEnv &env) override {
-                const Graph &g   = *env.graph;
-                Shape        sa  = g.desc(node.inputs[0]).shape;
-                Shape        sb  = g.desc(node.inputs[1]).shape;
-                Shape        out = g.desc(node.outputs[0]).shape;
-
-                // Promote 1-D operands (A[K]->[1,K], B[K]->[K,1]) to find M/N/K; the output rank already had
-                // the promoted dim stripped by inferShapes, so we work the strides against `out` directly
-                // below.
-                bool aWas1D = sa.size() == 1, bWas1D = sb.size() == 1;
-                if (aWas1D)
+                const Graph &g = *env.graph;
+                if (node.attr.has(kWq))
                 {
-                    sa = {1, sa[0]};
+                    // An int4-packed weight takes its own kernels; the constant A operand (if any)
+                    // still uploads flat below the branch's needs.
+                    if (g.isInitializer(node.inputs[0]))
+                    {
+                        constBuf[0] = uploadInit(env, node.inputs[0], g.desc(node.inputs[0]).shape);
+                    }
+                    useInt4 = true;
+                    prepareInt4(node, env);
+                    return;
                 }
-                if (bWas1D)
+                Shape sa  = g.desc(node.inputs[0]).shape;
+                Shape sb  = g.desc(node.inputs[1]).shape;
+                Shape out = g.desc(node.outputs[0]).shape;
+
+                const bool hasView = node.attr.has(kMmView);
+                bool       aWas1D = false, bWas1D = false;
+                int64_t    M, N, K;
+                int        rank;
+                // gemv4 loads B as vec4 along n; a view keeps that legal only when its n stride is 1
+                // and every other B offset term is 4-aligned.
+                bool                 viewGemv4Ok = false;
+                std::vector<int32_t> outDim, aStride, bStride;
+                if (hasView)
                 {
-                    sb = {sb[0], 1};
+                    // View-addressed operands (core/matmul_view.h): the foldMatMulViews pass rewired
+                    // the inputs to their chain sources and precomputed the whole geometry — dims may
+                    // split a batch axis (GQA head groups), so every array below is authoritative and
+                    // the dense derivation in the else-branch does not apply.
+                    const std::vector<int64_t> &dims = node.attr.getints(kMmViewDims);
+                    const std::vector<int64_t> &vas  = node.attr.getints(kMmViewAStride);
+                    const std::vector<int64_t> &vbs  = node.attr.getints(kMmViewBStride);
+                    rank                             = (int) dims.size();
+                    M                                = node.attr.geti(kMmViewM);
+                    N                                = node.attr.geti(kMmViewN);
+                    K                                = node.attr.geti(kMmViewK);
+                    pc.aK                            = (int) node.attr.geti(kMmViewAK);
+                    pc.bK                            = (int) node.attr.geti(kMmViewBK);
+                    outDim.resize(rank);
+                    aStride.resize(rank);
+                    bStride.resize(rank);
+                    viewGemv4Ok = pc.bK % kGemvVec == 0;
+                    for (int i = 0; i < rank; ++i)
+                    {
+                        outDim[i]  = (int) dims[i];
+                        aStride[i] = (int) vas[i];
+                        bStride[i] = (int) vbs[i];
+                        if (i < rank - 1 && bStride[i] % kGemvVec != 0)
+                        {
+                            viewGemv4Ok = false;
+                        }
+                    }
+                    viewGemv4Ok = viewGemv4Ok && bStride[rank - 1] == 1;
+                } else
+                {
+                    // Promote 1-D operands (A[K]->[1,K], B[K]->[K,1]) to find M/N/K; the output rank already had
+                    // the promoted dim stripped by inferShapes, so we work the strides against `out` directly
+                    // below.
+                    aWas1D = sa.size() == 1;
+                    bWas1D = sb.size() == 1;
+                    if (aWas1D)
+                    {
+                        sa = {1, sa[0]};
+                    }
+                    if (bWas1D)
+                    {
+                        sb = {sb[0], 1};
+                    }
+
+                    M = sa[sa.size() - 2];
+                    K = sa[sa.size() - 1];
+                    N = sb[sb.size() - 1];
+
+                    rank  = (int) out.size();
+                    pc.aK = 1;       // A is [...,M,K] row-major -> stepping K moves by 1
+                    pc.bK = (int) N; // B is [...,K,N] row-major -> stepping K moves by N
+                    outDim.assign(rank, 0);
+                    aStride.assign(rank, 0);
+                    bStride.assign(rank, 0);
+                    for (int k = 0; k < rank; ++k)
+                    {
+                        outDim[k] = (int) out[k];
+                    }
+
+                    // The trailing output dims are the matrix dims. With 1-D promotion an axis may be absent:
+                    //   A 1-D  -> the M axis was dropped from the output; B 1-D -> the N axis was dropped.
+                    // Identify which output index (if any) is the M axis and which is the N axis.
+                    int nAxis = rank - 1; // N is the last output dim, unless B was 1-D (then absent)
+                    int mAxis = aWas1D ? -1 : (bWas1D ? rank - 1 : rank - 2);
+                    if (bWas1D)
+                    {
+                        nAxis = -1; // N axis was stripped
+                    }
+                    // batch dims occupy output indices [0, firstMatAxis)
+                    int firstMatAxis = rank;
+                    if (mAxis >= 0)
+                    {
+                        firstMatAxis = std::min(firstMatAxis, mAxis);
+                    }
+                    if (nAxis >= 0)
+                    {
+                        firstMatAxis = std::min(firstMatAxis, nAxis);
+                    }
+                    int batchRank = firstMatAxis;
+
+                    // Per-operand batch shapes (everything before the trailing matrix dims), left-padded to
+                    // batchRank.
+                    int64_t aBatchRank = (int64_t) sa.size() - 2, bBatchRank = (int64_t) sb.size() - 2;
+                    auto    aDim = [&](int i) -> int64_t {
+                        int off = batchRank - (int) aBatchRank;
+                        return i < off ? 1 : sa[i - off];
+                    };
+                    auto bDim = [&](int i) -> int64_t {
+                        int off = batchRank - (int) bBatchRank;
+                        return i < off ? 1 : sb[i - off];
+                    };
+                    std::vector<int64_t> aBatchStride(batchRank, 0), bBatchStride(batchRank, 0);
+                    int64_t              sAcc = M * K, sBcc = K * N;
+                    for (int i = batchRank - 1; i >= 0; --i)
+                    {
+                        aBatchStride[i] = (aDim(i) == 1) ? 0 : sAcc;
+                        bBatchStride[i] = (bDim(i) == 1) ? 0 : sBcc;
+                        sAcc *= aDim(i);
+                        sBcc *= bDim(i);
+                    }
+                    for (int i = 0; i < batchRank; ++i)
+                    {
+                        aStride[i] = (int) aBatchStride[i];
+                        bStride[i] = (int) bBatchStride[i];
+                    }
+                    // Matrix-axis strides: A depends on m (row stride K) not n; B depends on n (col stride 1) not
+                    // m.
+                    if (mAxis >= 0)
+                    {
+                        aStride[mAxis] = (int) K;
+                        bStride[mAxis] = 0;
+                    }
+                    if (nAxis >= 0)
+                    {
+                        aStride[nAxis] = 0;
+                        bStride[nAxis] = 1;
+                    }
                 }
-
-                int64_t M = sa[sa.size() - 2], K = sa[sa.size() - 1];
-                int64_t N = sb[sb.size() - 1];
-
-                int rank = (int) out.size();
                 pc.rank  = rank;
                 pc.total = (int) numElements(out);
                 pc.M     = (int) M;
                 pc.N     = (int) N;
                 pc.K     = (int) K;
-                pc.aK    = 1;       // A is [...,M,K] row-major -> stepping K moves by 1
-                pc.bK    = (int) N; // B is [...,K,N] row-major -> stepping K moves by N
-                std::vector<int32_t> outDim(rank), aStride(rank, 0), bStride(rank, 0);
-                for (int k = 0; k < rank; ++k)
-                {
-                    outDim[k] = (int) out[k];
-                }
-
-                // The trailing output dims are the matrix dims. With 1-D promotion an axis may be absent:
-                //   A 1-D  -> the M axis was dropped from the output; B 1-D -> the N axis was dropped.
-                // Identify which output index (if any) is the M axis and which is the N axis.
-                int nAxis = rank - 1; // N is the last output dim, unless B was 1-D (then absent)
-                int mAxis = aWas1D ? -1 : (bWas1D ? rank - 1 : rank - 2);
-                if (bWas1D)
-                {
-                    nAxis = -1; // N axis was stripped
-                }
-                // batch dims occupy output indices [0, firstMatAxis)
-                int firstMatAxis = rank;
-                if (mAxis >= 0)
-                {
-                    firstMatAxis = std::min(firstMatAxis, mAxis);
-                }
-                if (nAxis >= 0)
-                {
-                    firstMatAxis = std::min(firstMatAxis, nAxis);
-                }
-                int batchRank = firstMatAxis;
-
-                // Per-operand batch shapes (everything before the trailing matrix dims), left-padded to
-                // batchRank.
-                int64_t aBatchRank = (int64_t) sa.size() - 2, bBatchRank = (int64_t) sb.size() - 2;
-                auto    aDim = [&](int i) -> int64_t {
-                    int off = batchRank - (int) aBatchRank;
-                    return i < off ? 1 : sa[i - off];
-                };
-                auto bDim = [&](int i) -> int64_t {
-                    int off = batchRank - (int) bBatchRank;
-                    return i < off ? 1 : sb[i - off];
-                };
-                std::vector<int64_t> aBatchStride(batchRank, 0), bBatchStride(batchRank, 0);
-                int64_t              sAcc = M * K, sBcc = K * N;
-                for (int i = batchRank - 1; i >= 0; --i)
-                {
-                    aBatchStride[i] = (aDim(i) == 1) ? 0 : sAcc;
-                    bBatchStride[i] = (bDim(i) == 1) ? 0 : sBcc;
-                    sAcc *= aDim(i);
-                    sBcc *= bDim(i);
-                }
-                for (int i = 0; i < batchRank; ++i)
-                {
-                    aStride[i] = (int) aBatchStride[i];
-                    bStride[i] = (int) bBatchStride[i];
-                }
-                // Matrix-axis strides: A depends on m (row stride K) not n; B depends on n (col stride 1) not
-                // m.
-                if (mAxis >= 0)
-                {
-                    aStride[mAxis] = (int) K;
-                    bStride[mAxis] = 0;
-                }
-                if (nAxis >= 0)
-                {
-                    aStride[nAxis] = 0;
-                    bStride[nAxis] = 1;
-                }
-                geom = flat::uploadFlatGeom(env, {outDim, aStride, bStride});
+                geom     = flat::uploadFlatGeom(env, {outDim, aStride, bStride});
 
                 // Upload a constant operand flat (row-major NCHW fp32 -> device, fp16 when half precision).
                 // Direct fp16->fp16 passthrough when the stored weight already matches compute precision.
@@ -270,8 +421,9 @@ namespace vknn {
                 // enough matrices; it assumes M at out[rank-2], N at out[rank-1], so the batch dims are
                 // exactly out[0..rank-3] (true when neither operand was 1-D). Tiny / mat-vec / 1-D cases
                 // keep the naive 1-thread/output kernel. fusePointwiseChains mirrors this predicate via
-                // the same constant (core/matmul_tile.h).
-                useTiled = !aWas1D && !bWas1D && M >= kTiledMatMulMin && N >= kTiledMatMulMin && K >= kTiledMatMulMin;
+                // the same constant (core/matmul_tile.h). A view never tiles: the tiled kernels hardcode
+                // dense row-major panels, and the fold pass only claims non-tiled-class shapes anyway.
+                useTiled = !hasView && !aWas1D && !bWas1D && M >= kTiledMatMulMin && N >= kTiledMatMulMin && K >= kTiledMatMulMin;
                 numBatch = (M > 0 && N > 0) ? pc.total / (int) (M * N) : 1;
                 if (useTiled && !tileFits(env, kMatMulTiles[0]))
                 {
@@ -302,8 +454,9 @@ namespace vknn {
                 // An N divisible by kGemvVec lets a mat-vec lane pull its kGemvVec adjacent n as one
                 // vector element of B (a quarter of the lanes, four times the bytes per load
                 // instruction, same kGemvNx outputs per workgroup). The two mat-vec kernels are
-                // bit-identical, so an indivisible N simply falls back to the scalar one.
-                bool useGemvVec = gemvShape && N % kGemvVec == 0 && maxInv >= (uint32_t) (kGemvNx / kGemvVec * kGemvKs);
+                // bit-identical, so an indivisible N simply falls back to the scalar one. A view keeps
+                // the vector loads only when its B addressing stays contiguous and 4-aligned along n.
+                bool useGemvVec = gemvShape && N % kGemvVec == 0 && maxInv >= (uint32_t) (kGemvNx / kGemvVec * kGemvKs) && (!hasView || viewGemv4Ok);
 
                 useGemv = useGemvVec || (gemvShape && maxInv >= (uint32_t) (kGemvNx * kGemvKs));
 
@@ -318,8 +471,8 @@ namespace vknn {
                 // operands (and the bias when present): binding 3 without bias, binding 4 with it.
                 const char *gemvBase = useGemvVec ? "matmul_gemv4" : "matmul_gemv";
                 const char *base     = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : (useGemv ? gemvBase : "matmul"));
-                std::string name = base;
-                uint32_t    nbuf = 4; // A, B, D, geometry
+                std::string name     = base;
+                uint32_t    nbuf     = 4; // A, B, D, geometry
                 if (node.fusedBias != kNoTensor)
                 {
                     biasBuf = uploadInit(env, node.fusedBias, g.desc(node.fusedBias).shape);
@@ -345,6 +498,11 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                if (useInt4)
+                {
+                    recordInt4(cmd, node, env);
+                    return;
+                }
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };

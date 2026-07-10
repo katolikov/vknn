@@ -5,6 +5,7 @@
 // canonical NCHW fp32, so this is the oracle the host tests validate against.
 #include "backend/cpu/cpu_backend.h"
 #include "backend/cpu/parallel.h"
+#include "core/matmul_view.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <vector>
@@ -12,8 +13,77 @@
 namespace vknn {
     namespace {
 
+        // One output row of one batch matrix, with per-operand element strides: the dense path
+        // passes (aK=1, bK=N, bN=1), the view path its attr strides. One routine with FP
+        // contraction pinned OFF: contract(on) merely permits fusion, and the optimizer clones
+        // this function per call-site constants and fuses a*b+acc in some clones but not others —
+        // two calls reading the same values in the same order then round differently. Only the
+        // strict IEEE mul+add chain is bit-stable across every specialization (and across
+        // compilers), so that is the oracle contract: fp32 products summed over ascending k.
+        __attribute__((noinline)) void matmulRow(const float *am, const float *bm, float *ym, const float *bias, int64_t N, int64_t K, int64_t aK, int64_t bK, int64_t bN) {
+#pragma clang fp contract(off)
+            for (int64_t n = 0; n < N; ++n)
+            {
+                float acc = 0.f;
+                for (int64_t k = 0; k < K; ++k)
+                {
+                    acc += am[k * aK] * bm[k * bK + n * bN];
+                }
+                ym[n] = bias ? acc + bias[n] : acc;
+            }
+        }
+
         struct MatMulCpu: CpuOp {
+            // View-addressed variant (core/matmul_view.h): the foldMatMulViews pass rewired the
+            // operands to their chain sources and the attrs carry the per-axis element strides, so
+            // the operands are read through those strides instead of dense row-major. The same
+            // ascending-k fp32 accumulation makes this bit-identical to the materialized chain.
+            void runView(const Node &node, ExecContext &ctx) {
+                const float *a = ctx.t(node.inputs[0]).host.f32();
+                const float *b = ctx.t(node.inputs[1]).host.f32();
+                RtTensor    &Y = ctx.t(node.outputs[0]);
+
+                const std::vector<int64_t> &dims    = node.attr.getints(kMmViewDims);
+                const std::vector<int64_t> &aStride = node.attr.getints(kMmViewAStride);
+                const std::vector<int64_t> &bStride = node.attr.getints(kMmViewBStride);
+                const int64_t               aK = node.attr.geti(kMmViewAK), bK = node.attr.geti(kMmViewBK);
+                const int64_t               M = node.attr.geti(kMmViewM), N = node.attr.geti(kMmViewN), K = node.attr.geti(kMmViewK);
+                const int64_t               batchRank = (int64_t) dims.size() - 2;
+
+                float       *y    = cpu::allocOut(Y, ctx.graph->desc(node.outputs[0]).shape);
+                const float *bias = node.fusedBias != kNoTensor ? ctx.t(node.fusedBias).host.f32() : nullptr;
+
+                int64_t batchElems = 1;
+                for (int64_t i = 0; i < batchRank; ++i)
+                {
+                    batchElems *= dims[i];
+                }
+                // Same row partitioning and ascending-k order as the dense path below; only the
+                // operand addressing differs (attr strides for the batch/m axes, aK/bK per k step).
+                cpu::parallelFor(cpu::threadCount(ctx.config), 0, batchElems * M, cpu::minChunkForWork(N * K), [&](int64_t rowBegin, int64_t rowEnd) {
+                    for (int64_t row = rowBegin; row < rowEnd; ++row)
+                    {
+                        int64_t bi    = row / M;
+                        int64_t m     = row % M;
+                        int64_t aBase = m * aStride[batchRank], bBase = 0, rem = bi;
+                        for (int64_t i = batchRank - 1; i >= 0; --i)
+                        {
+                            int64_t c = rem % dims[i];
+                            rem /= dims[i];
+                            aBase += c * aStride[i];
+                            bBase += c * bStride[i];
+                        }
+                        matmulRow(a + aBase, b + bBase, y + (bi * M + m) * N, bias, N, K, aK, bK, bStride[batchRank + 1]);
+                    }
+                });
+            }
+
             void run(const Node &node, ExecContext &ctx) override {
+                if (node.attr.has(kMmView))
+                {
+                    runView(node, ctx);
+                    return;
+                }
                 const RtTensor &A = ctx.t(node.inputs[0]);
                 const RtTensor &B = ctx.t(node.inputs[1]);
                 RtTensor       &Y = ctx.t(node.outputs[0]);
@@ -107,22 +177,11 @@ namespace vknn {
                             aBase += c * aBatchStride[i];
                             bBase += c * bBatchStride[i];
                         }
-                        const float *am = a + aBase;
-                        const float *bm = b + bBase;
-                        float       *ym = y + bi * M * N;
-                        // Row-major single-matrix product: A[m,k] is am[m*K+k], B[k,n] is bm[k*N+n], and
-                        // the result Y[m,n] is ym[m*N+n]. acc sums over k in ascending order in fp32;
-                        // that accumulation order is the observable reference the host byte-compare
-                        // validates.
-                        for (int64_t n = 0; n < N; ++n)
-                        {
-                            float acc = 0.f;
-                            for (int64_t k = 0; k < K; ++k)
-                            {
-                                acc += am[m * K + k] * bm[k * N + n];
-                            }
-                            ym[m * N + n] = bias ? acc + bias[n] : acc;
-                        }
+                        // Row-major single-matrix product through the shared row routine: A[m,k] is
+                        // am[m*K+k], B[k,n] is bm[k*N+n], the result Y[m,n] is ym[m*N+n]. acc sums
+                        // over k in ascending order in fp32; that accumulation order is the
+                        // observable reference the host byte-compare validates.
+                        matmulRow(a + aBase + m * K, b + bBase, y + (bi * M + m) * N, bias, N, K, 1, N, 1);
                     }
                 });
             }

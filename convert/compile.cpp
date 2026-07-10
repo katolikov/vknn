@@ -38,6 +38,18 @@
 //     -O0..-O3 / --opt N  optimization level (default -O1):
 //                         O0 = no optional fusion (reference), O1 = the general pointwise
 //                         fusion (bit-exact production set), O2/O3 = + experimental SE and dwpw
+//     -Os               the MAX preset: every -O3 fusion PLUS INT4 weight quantization — eligible
+//                       MatMul/Gemm/Conv weights pack to 4-bit groups with fp16 scales, ~1% of
+//                       activation-salient columns kept fp16 (outlier preservation), the step per
+//                       group calibrated to minimize activation-weighted MSE, and any layer the
+//                       quantized error would distort kept fp16 entirely (mixed precision). The
+//                       remaining weights store fp16 (--fp16 is implied). Quantization statistics
+//                       come from a small CPU calibration run: --calib samples, or deterministic
+//                       synthetic inputs when none are given. -O0..-O3 outputs are byte-identical
+//                       with or without this flag existing; quantization is -Os-only.
+//     --calib F0[,F1,...]  one calibration sample per occurrence (repeatable): raw .bin files in
+//                       graph-input order, each numElements*dtypeSize bytes (the vknn_run_io input
+//                       convention). Only meaningful with -Os.
 //     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise / --[no-]fuse-gridsample-warp / --[no-]lower-conv
 //     --no-dequantize   keep QuantizeLinear/DequantizeLinear ops instead of folding DQ weights and
 //                       collapsing matching QDQ sandwiches (default: quantized checkpoints compile
@@ -369,6 +381,16 @@ static bool writeSupportReports(const std::vector<Graph> &buckets, const std::ve
     return true;
 }
 
+/// Run the -Os INT4 quantization pass over one compiled bucket and print its summary line. The fp16
+/// sweep for the non-quantized weights runs at the caller (quantization implies --fp16).
+static void runQuantPass(Graph &g, const QuantOptions &opts) {
+    QuantStats qs = quantizeWeightsInt4(g, opts);
+    printf("[compile] -Os int4: quantized %lld/%lld eligible weights (%lld kept fp16 by the error guard, "
+           "%lld outlier columns, %s calibration), weights %.0f MB -> %.0f MB\n",
+           (long long) qs.quantized, (long long) qs.sites, (long long) qs.guardKept, (long long) qs.outlierCols,
+           qs.calibrated ? (opts.calibFiles.empty() ? "synthetic" : "file") : "no", qs.bytesBefore / 1e6, qs.bytesAfter / 1e6);
+}
+
 int main(int argc, char **argv) {
     // `--graph` selects the multi-graph form: no positional input model, one source graph per
     // occurrence, all compiled into one multi-bucket .vxm over a shared initializer pool.
@@ -383,8 +405,8 @@ int main(int argc, char **argv) {
     }
     if (argc < (graphMode ? 2 : 3))
     {
-        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--dim NAME=VALUE] [--list-dims] [--shape NAME=D0xD1x...] [--bucket \"NAME=...;dim:NAME2=VALUE;...\"] [-O0..-O3 | --opt N] "
-               "[--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
+        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--dim NAME=VALUE] [--list-dims] [--shape NAME=D0xD1x...] [--bucket \"NAME=...;dim:NAME2=VALUE;...\"] [-O0..-O3 | --opt N | -Os] "
+               "[--calib F0[,F1,...]] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
                "   or: %s <out.vxm> --graph \"FILE.onnx[;NAME=D0xD1x...;dim:NAME2=VALUE;...]\" [--graph ...] [shared flags as above]\n"
                "       each --graph occurrence compiles ONE bucket from its file (with its own shape/dim segments);\n"
                "       all buckets share one initializer pool in a single multi-graph .vxm\n",
@@ -408,11 +430,19 @@ int main(int argc, char **argv) {
     }
     bool fp16 = has(argc, argv, "--fp16", flagStart);
 
-    int         optLevel = 1;
-    std::string supportReport;
+    int          optLevel = 1;
+    bool         quantize = false; // -Os: all -O3 fusion + INT4 weight quantization
+    QuantOptions quantOpts;
+    std::string  supportReport;
     for (int i = flagStart; i < argc; ++i)
     {
-        if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] >= '0' && argv[i][2] <= '3' && argv[i][3] == 0)
+        // -Os is its own case: the numeric branch below reads a '0'..'3' DIGIT, so without this it
+        // would be silently ignored, never a garbage level.
+        if (!strcmp(argv[i], "-Os") || !strcmp(argv[i], "-OMAX"))
+        {
+            optLevel = 3;
+            quantize = true;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] >= '0' && argv[i][2] <= '3' && argv[i][3] == 0)
         {
             optLevel = argv[i][2] - '0';
         } else if (!strcmp(argv[i], "--opt") && i + 1 < argc)
@@ -421,6 +451,41 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--support-report") && i + 1 < argc)
         {
             supportReport = argv[i + 1];
+        } else if (!strcmp(argv[i], "--quant-group") && i + 1 < argc)
+        {
+            quantOpts.group = atoll(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-outliers") && i + 1 < argc)
+        {
+            quantOpts.outlierFrac = atof(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-conv-group") && i + 1 < argc)
+        {
+            quantOpts.convGroup = atoll(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-conv-outliers") && i + 1 < argc)
+        {
+            quantOpts.convOutlierFrac = atof(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-samples") && i + 1 < argc)
+        {
+            quantOpts.calibSamples = atoi(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--quant-err") && i + 1 < argc)
+        {
+            quantOpts.maxLayerRelErr = atof(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--calib") && i + 1 < argc)
+        {
+            // One sample per occurrence: comma-separated raw .bin files in graph-input order.
+            std::vector<std::string> files;
+            const char              *p = argv[i + 1];
+            while (*p)
+            {
+                const char *comma = strchr(p, ',');
+                files.emplace_back(p, comma ? (size_t) (comma - p) : strlen(p));
+                p = comma ? comma + 1 : p + strlen(p);
+            }
+            if (files.empty() || files.back().empty())
+            {
+                printf("[compile] bad --calib '%s' (expected FILE0[,FILE1,...])\n", argv[i + 1]);
+                return 1;
+            }
+            quantOpts.calibFiles.push_back(std::move(files));
         }
     }
     PassOptions opt = PassOptions::forOptLevel(optLevel);
@@ -601,7 +666,11 @@ int main(int argc, char **argv) {
                 printf("[compile] graph %zu '%s': %s\n", b, graphLabels[b].c_str(), e.what());
                 return 2;
             }
-            if (fp16)
+            if (quantize)
+            {
+                runQuantPass(gb, quantOpts);
+            }
+            if (fp16 || quantize)
             {
                 convertInitializersFp16(gb);
             }
@@ -657,7 +726,11 @@ int main(int argc, char **argv) {
                 printf("[compile] bucket %zu '%s': %s\n", b, bucketLabels[b].c_str(), e.what());
                 return 2;
             }
-            if (fp16)
+            if (quantize)
+            {
+                runQuantPass(gb, quantOpts);
+            }
+            if (fp16 || quantize)
             {
                 convertInitializersFp16(gb);
             }
@@ -713,7 +786,13 @@ int main(int argc, char **argv) {
         printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
     }
 
-    if (fp16)
+    if (quantize)
+    {
+        // A .vxm input re-quantizes fine (its passes are already applied; the pass only reads
+        // concrete shapes and payloads). An already-quantized weight is skipped by its wq attr.
+        runQuantPass(g, quantOpts);
+    }
+    if (fp16 || quantize)
     {
         Fp16ConvertStats st = convertInitializersFp16(g);
         printf("[compile] fp16: converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);

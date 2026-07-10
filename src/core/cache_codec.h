@@ -27,8 +27,9 @@ namespace vknn {
     struct CacheVariant {
         // The cache-affecting configuration (the variant key).
         std::string precision;             // "low" / "normal" / "high"
-        bool        flatLayout    = true;  // Config::flatLayout()
-        bool        gpuIslandFold = true;  // Config::gpuIslandFold()
+        bool        flatLayout     = true; // Config::flatLayout()
+        bool        gpuIslandFold  = true; // Config::gpuIslandFold()
+        bool        matmulViewFold = true; // Config::matmulViewFold()
         std::string fp32Tensors;           // Config::fp32Tensors
         int         winograd        = 0;   // Hint::Winograd
         int         winogradVariant = 0;   // Hint::WinogradVariant
@@ -41,9 +42,7 @@ namespace vknn {
         std::map<std::string, int32_t>            tune;     // conv autotune table (op signature -> chosen value)
 
         bool sameKey(const CacheVariant &o) const {
-            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold &&
-                   fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant &&
-                   winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3;
+            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3;
         }
     };
 
@@ -52,13 +51,13 @@ namespace vknn {
     // not compare these guards against the running engine, so the call site checks them and recomputes on
     // any mismatch (see kCacheFormat).
     struct CacheDoc {
-        uint32_t             format        = kCacheFormat;
-        std::string          kernelHash;    // md5 of all embedded SPIR-V (embeddedShadersHash())
-        uint32_t             vendorId      = 0;
-        uint32_t             deviceId      = 0;
-        uint32_t             driverVersion = 0;
-        std::vector<uint8_t> pipelineCacheUUID;
-        std::string          model;         // hash of the compiled graph
+        uint32_t                  format = kCacheFormat;
+        std::string               kernelHash; // md5 of all embedded SPIR-V (embeddedShadersHash())
+        uint32_t                  vendorId      = 0;
+        uint32_t                  deviceId      = 0;
+        uint32_t                  driverVersion = 0;
+        std::vector<uint8_t>      pipelineCacheUUID;
+        std::string               model; // hash of the compiled graph
         std::vector<CacheVariant> variants;
 
         // The variant matching key `k`, or nullptr if none is cached yet.

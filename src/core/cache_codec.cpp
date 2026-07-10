@@ -49,15 +49,17 @@ namespace vknn {
         msgpack_pack_array(&pk, doc.variants.size());
         for (const auto &v: doc.variants)
         {
-            // Per-variant map: the count must match the key/value pairs packed below (the 8 key fields
+            // Per-variant map: the count must match the key/value pairs packed below (the 9 key fields
             // plus pipeline, weights, tune). Adding a field means bumping this literal in lockstep.
-            msgpack_pack_map(&pk, 11);
+            msgpack_pack_map(&pk, 12);
             packKey(&pk, "precision");
             packStr(&pk, v.precision);
             packKey(&pk, "flatLayout");
             v.flatLayout ? msgpack_pack_true(&pk) : msgpack_pack_false(&pk);
             packKey(&pk, "gpuIslandFold");
             v.gpuIslandFold ? msgpack_pack_true(&pk) : msgpack_pack_false(&pk);
+            packKey(&pk, "matmulViewFold");
+            v.matmulViewFold ? msgpack_pack_true(&pk) : msgpack_pack_false(&pk);
             packKey(&pk, "fp32Tensors");
             packStr(&pk, v.fp32Tensors);
             packKey(&pk, "winograd");
@@ -103,8 +105,7 @@ namespace vknn {
         for (uint32_t i = 0; i < m.via.map.size; ++i)
         {
             const msgpack_object_kv &kv = m.via.map.ptr[i];
-            if (kv.key.type == MSGPACK_OBJECT_STR && kv.key.via.str.size == klen &&
-                std::memcmp(kv.key.via.str.ptr, key, klen) == 0)
+            if (kv.key.type == MSGPACK_OBJECT_STR && kv.key.via.str.size == klen && std::memcmp(kv.key.via.str.ptr, key, klen) == 0)
             {
                 return &kv.val;
             }
@@ -193,6 +194,7 @@ namespace vknn {
                 v.precision       = getStr(vo, "precision");
                 v.flatLayout      = getBool(vo, "flatLayout", true);
                 v.gpuIslandFold   = getBool(vo, "gpuIslandFold", true);
+                v.matmulViewFold  = getBool(vo, "matmulViewFold", true);
                 v.fp32Tensors     = getStr(vo, "fp32Tensors");
                 v.winograd        = getI32(vo, "winograd");
                 v.winogradVariant = getI32(vo, "winogradVariant");

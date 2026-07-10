@@ -47,6 +47,11 @@ CPU_KERNEL_EXEMPT = {
     "MatMulInteger", "ConvInteger", "DynamicQuantizeLinear",
     "Dropout",       # eliminated in inference mode at import
     "InstanceNorm",  # decomposed into existing ops at import
+    # ORT contrib family — expanded to primitive ops by lowerOrtContribOps at import; a variant
+    # the expansion declines (and GroupQueryAttention, recognized but not yet expanded) surfaces
+    # through the support report under its real name and has no kernel by design.
+    "SimplifiedLayerNorm", "SkipSimplifiedLayerNorm", "SkipLayerNorm",
+    "RotaryEmbedding", "MultiHeadAttention", "GroupQueryAttention", "MatMulNBits",
 }
 
 

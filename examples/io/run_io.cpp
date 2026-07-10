@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
-               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--timing] [--cache DIR]"
+               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--timing] [--cache DIR]"
                " [--winograd auto|on|off] [--max-submit-nodes N] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
@@ -84,14 +84,18 @@ int main(int argc, char **argv) {
     {
         cfg.setHint(Hint::GpuIslandFold, (int) Mode::Off);
     }
-    cfg.layerDump              = flag(argc, argv, "--layer-dump");
-    cfg.debugSegments          = flag(argc, argv, "--debug-segments");
-    cfg.layerDumpDir           = opt(argc, argv, "--layer-dump-dir", cfg.layerDumpDir.c_str());
-    cfg.timing                 = flag(argc, argv, "--timing");
-    cfg.cacheDir               = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
-    cfg.dumpTensors            = opt(argc, argv, "--dump", "");
-    cfg.fp32Tensors            = opt(argc, argv, "--fp32-tensors", "");
-    cfg.profile                = flag(argc, argv, "--profile");
+    if (flag(argc, argv, "--no-matmul-view-fold"))
+    {
+        cfg.setHint(Hint::MatMulViewFold, (int) Mode::Off);
+    }
+    cfg.layerDump     = flag(argc, argv, "--layer-dump");
+    cfg.debugSegments = flag(argc, argv, "--debug-segments");
+    cfg.layerDumpDir  = opt(argc, argv, "--layer-dump-dir", cfg.layerDumpDir.c_str());
+    cfg.timing        = flag(argc, argv, "--timing");
+    cfg.cacheDir      = opt(argc, argv, "--cache", cfg.cacheDir.c_str());
+    cfg.dumpTensors   = opt(argc, argv, "--dump", "");
+    cfg.fp32Tensors   = opt(argc, argv, "--fp32-tensors", "");
+    cfg.profile       = flag(argc, argv, "--profile");
     cfg.setHint(Hint::Winograd, winogradFromStr(opt(argc, argv, "--winograd", "auto")));
     cfg.maxSubmitNodes    = atoi(opt(argc, argv, "--max-submit-nodes", std::to_string(cfg.maxSubmitNodes).c_str()));
     cfg.maxSubmitBindings = atoi(opt(argc, argv, "--max-submit-bindings", std::to_string(cfg.maxSubmitBindings).c_str()));
@@ -111,8 +115,7 @@ int main(int argc, char **argv) {
     {
         if (argv[i][0] == '-')
         {
-            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") ||
-                !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads"))
+            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") || !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads"))
             {
                 ++i; // skip the flag's value
             }
@@ -125,7 +128,7 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < infos.size(); ++i)
     {
         IOTensor in;
-        in.name = infos[i].name;
+        in.name  = infos[i].name;
         in.shape = infos[i].shape;
         // Feed the model's DECLARED input dtype: a UINT8/FLOAT16 .bin is read as native bytes and the
         // Session converts at the boundary. The Session also accepts fp32 (it converts either way).
@@ -149,7 +152,8 @@ int main(int argc, char **argv) {
             f.seekg(0, std::ios::beg);
             if (fileBytes != need)
             {
-                fprintf(stderr, "input file '%s' for '%s' holds %lld bytes but the declared %s %s input needs %lld\n", inFiles[i].c_str(), in.name.c_str(), (long long) fileBytes, shapeStr(in.shape).c_str(), dtypeStr(in.dtype), (long long) need);
+                fprintf(stderr, "input file '%s' for '%s' holds %lld bytes but the declared %s %s input needs %lld\n", inFiles[i].c_str(), in.name.c_str(), (long long) fileBytes,
+                        shapeStr(in.shape).c_str(), dtypeStr(in.dtype), (long long) need);
                 return 1;
             }
             f.read(reinterpret_cast<char *>(in.data.data()), need);

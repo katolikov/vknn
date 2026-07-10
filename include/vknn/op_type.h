@@ -89,8 +89,20 @@ namespace vknn {
         IsNaN,                    // elementwise NaN test: float -> bool (1.0/0.0), same shape (flat path)
         And,                      // elementwise boolean AND with NumPy broadcasting -> 1.0/0.0 (flat path)
         RMSNorm,                  // root-mean-square norm: y = x*rsqrt(mean(x^2,last-axis)+eps)*gamma.
-                                  // Created by lowerRMSNorm (a Pow/ReduceMean/Add/Sqrt/rsqrt/Mul chain),
-                                  // never parsed from ONNX; fp32 sum-of-squares in a fused flat kernel.
+                                  // Created by lowerRMSNorm (a Pow/ReduceMean/Add/Sqrt/rsqrt/Mul chain)
+                                  // or mapped from SimplifiedLayerNormalization by lowerOrtContribOps;
+                                  // fp32 sum-of-squares in a fused flat kernel.
+        // ORT contrib operators (com.microsoft domain; ORT transformer exports). Recognized at
+        // import and expanded to primitive ops by lowerOrtContribOps — none has a backend kernel,
+        // so a variant the expansion declines (an exotic optional input, a non-last axis) surfaces
+        // through the support report under its real name instead of "Unknown".
+        SimplifiedLayerNorm,     // RMSNorm spelling: (x, gamma) + epsilon/axis -> OpType::RMSNorm
+        SkipSimplifiedLayerNorm, // residual add + RMSNorm: (input, skip, gamma[, bias]); output 3 = the sum
+        SkipLayerNorm,           // residual add + LayerNorm: (input, skip, gamma[, beta][, bias])
+        RotaryEmbedding,         // RoPE: (x, position_ids, cos_cache, sin_cache) + interleaved attr
+        MultiHeadAttention,      // fused attention; expanded only in the pure q/k/v(+additive mask) form
+        GroupQueryAttention,     // fused GQA with in-op RoPE + KV cache; recognized, NOT yet expanded
+        MatMulNBits,             // blockwise 4-bit weight MatMul: repacked into the int4 wq format
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

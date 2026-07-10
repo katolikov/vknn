@@ -19,7 +19,7 @@ namespace vknn {
         bool               changed = true;
         // Reverse map tensor -> producing node. Built but not consulted by the fixpoint below; it holds
         // the last writer of each tensor for callers/diagnostics that share this producer convention.
-        std::vector<int>   producer(g.tensors.size(), -1);
+        std::vector<int> producer(g.tensors.size(), -1);
         for (size_t i = 0; i < g.nodes.size(); ++i)
         {
             for (TensorId o: g.nodes[i].outputs)
@@ -56,6 +56,16 @@ namespace vknn {
                     if (in != kNoTensor && !live.count(in))
                     {
                         live.insert(in);
+                        changed = true;
+                    }
+                }
+                // Fused edges live outside the inputs list (rewireTensor's contract): a residual or
+                // bias reference keeps its producer alive even when no input edge names it.
+                for (TensorId t: {nd.fusedResidual, nd.fusedBias})
+                {
+                    if (t != kNoTensor && !live.count(t))
+                    {
+                        live.insert(t);
                         changed = true;
                     }
                 }

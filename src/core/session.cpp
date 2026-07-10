@@ -1,5 +1,6 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
+#include "core/quant_int4.h"
 #include "vknn/logging.h"
 #include <algorithm>
 #include <chrono>
@@ -469,10 +470,30 @@ namespace vknn {
         }
         graph_.topoSort();
 
+        // Selective fp32 storage set. Precision::Normal ("normal") uses the built-in geometry-tail
+        // preset when fp32Tensors is empty; an explicit fp32Tensors always wins. Resolved before the
+        // view fold: a chain tensor markFp32 would pin must keep its materialized form.
+        const bool  vulkanFlat = byKind_.count(BackendKind::Vulkan) && cfg_.flatLayout();
+        std::string fp32Marks  = cfg_.fp32Tensors;
+        if (fp32Marks.empty() && cfg_.precision == Precision::Normal)
+        {
+            fp32Marks = mixedPrecisionFp32Tensors();
+        }
+
+        // --- MatMul operand-view fold: absorb Transpose/Expand chains feeding non-tiled MatMuls into
+        //     per-axis stride attrs (core/matmul_view.h), so a GQA decode reads its KV cache in place
+        //     instead of materializing the repeat_kv broadcast and attention transposes every token.
+        //     Load-time only (never serialized), bit-identical, honored by both backends. The fp32
+        //     pins apply only where markFp32 runs (the Vulkan fp16-storage path below).
+        if (cfg_.matmulViewFold())
+        {
+            foldMatMulViews(graph_, vulkanFlat ? fp32Marks : std::string());
+        }
+
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
         //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
         //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).
-        if (byKind_.count(BackendKind::Vulkan) && cfg_.flatLayout())
+        if (vulkanFlat)
         {
             insertLayoutConverts(graph_);
             // Integer index tensors (token ids / positions) must survive to the GPU without an fp16 store
@@ -483,13 +504,6 @@ namespace vknn {
             // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
             // the same way; the GridSample shader decodes the grid at its storage precision.
             pinGridSampleGridFp32(graph_);
-            // Selective fp32 storage. Precision::Normal ("normal") uses the built-in geometry-tail preset
-            // when fp32Tensors is empty; an explicit fp32Tensors always wins.
-            std::string fp32Marks = cfg_.fp32Tensors;
-            if (fp32Marks.empty() && cfg_.precision == Precision::Normal)
-            {
-                fp32Marks = mixedPrecisionFp32Tensors();
-            }
             markFp32(graph_, fp32Marks);
             graph_.topoSort();
         }
@@ -553,6 +567,16 @@ namespace vknn {
         {
             foldTinyGpuIslands(bucket);
         }
+
+        // --- materialize int4-quantized weights (vknn_compile -Os) for non-native consumers ---
+        // The Vulkan MatMul dequantizes the packed payload in-kernel; every other consumer — a
+        // CPU-assigned node, or a GPU op without an int4 kernel (Conv/Gemm) — gets its fp16 bytes
+        // reconstructed here, before the pool load and any GPU op prepare, so quantization is
+        // invisible to it. Must run after the island fold: that pass reassigns nodes to the CPU,
+        // and a reassigned MatMul needs its weight materialized like any other CPU node.
+        materializeInt4Weights(graph_, [&](size_t n, const Node &nd) {
+            return nd.type == OpType::MatMul && nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Vulkan;
+        });
 
         // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---
         // Only weights a CPU-assigned node reads need a host copy; GPU ops upload from
@@ -804,8 +828,8 @@ namespace vknn {
             {
                 ops += (ops.empty() ? "" : ", ") + kv.first + " x" + std::to_string(kv.second);
             }
-            std::string    first;
-            constexpr int  kNamedNodes = 3;
+            std::string   first;
+            constexpr int kNamedNodes = 3;
             for (int i = 0; i < kNamedNodes && i < (int) bucket.fallbackReasons.size(); ++i)
             {
                 const FallbackReason &fr = bucket.fallbackReasons[(size_t) i];
@@ -1399,8 +1423,7 @@ namespace vknn {
         }
         if (!boundShapeCompatible(got, d.shape, d.gpuFlat, gpuConsumed))
         {
-            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not " << (gpuConsumed ? "pack like" : "fit") << " the planned shape " << shapeStr(d.shape)
-                       << (gpuConsumed ? " (a GPU-consumed input must bind the planned shape, or an N/C/spatial-product-preserving reshape of it)" : "");
+            VKNN_ERROR << "run: input '" << d.name << "' shape " << shapeStr(got) << " does not " << (gpuConsumed ? "pack like" : "fit") << " the planned shape " << shapeStr(d.shape) << (gpuConsumed ? " (a GPU-consumed input must bind the planned shape, or an N/C/spatial-product-preserving reshape of it)" : "");
             return Status::InvalidArgument;
         }
         return Status::Ok;

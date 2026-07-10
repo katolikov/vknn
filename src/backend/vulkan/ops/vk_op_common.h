@@ -257,6 +257,38 @@ namespace vknn {
         return deviceBuffer;
     }
 
+    // Upload an initializer's RAW payload bytes to a device-only buffer, unconverted — for payloads
+    // whose bytes are not element-typed by the desc (an int4-packed weight, an int32 index table).
+    // Pooled by content digest like uploadInit, with `tag` namespacing the key so a raw upload never
+    // aliases a flat element-typed upload of identical bytes; the same host-release rule applies.
+    inline std::shared_ptr<vk::Buffer> uploadInitRaw(VkOpEnv &env, TensorId id, const char *tag) {
+        const HostBuffer &hb = env.graph->initializers.at(id);
+        if (env.lookupFlatWeight)
+        {
+            if (std::shared_ptr<vk::Buffer> memo = env.lookupFlatWeight(id))
+            {
+                return memo;
+            }
+        }
+        uint64_t d[2];
+        contentDigest(hb.bytes.data(), hb.bytes.size(), d);
+        char key[64];
+        snprintf(key, sizeof key, "%s#%016llx%016llx", tag, (unsigned long long) d[0], (unsigned long long) d[1]);
+        std::shared_ptr<vk::Buffer> deviceBuffer = env.acquireWeight(key, env.useFp16, [&] {
+            return env.uploadWeightDeviceOnly(hb.bytes.data(), hb.bytes.size(), std::max<size_t>(hb.bytes.size(), 16));
+        });
+        if (env.rememberFlatWeight)
+        {
+            env.rememberFlatWeight(id, deviceBuffer);
+        }
+        constexpr size_t kReleaseThresholdBytes = 1u << 20;
+        if (env.releaseInitializer && hb.bytes.size() >= kReleaseThresholdBytes)
+        {
+            env.releaseInitializer(id);
+        }
+        return deviceBuffer;
+    }
+
     // Resolve an op's DATA operand to a GPU buffer. An activation has a device buffer (env.devBuf); a
     // constant initializer has none, so upload it flat (decoding fp16) into `hold` on first use. Lets
     // any elementwise/data-movement op accept a constant operand (e.g. the RoPE freq tables computed
