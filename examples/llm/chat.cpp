@@ -246,10 +246,13 @@ int main(int argc, char **argv) {
         presVal.push_back(findOut(pv));
     }
     const int L = (int) pastKey.size();
-    if (idIdx < 0 || maskIdx < 0 || posIdx < 0 || logitsIdx < 0 || L == 0)
+    // position_ids is optional: a GroupQueryAttention-style export derives each token's rotary
+    // position internally from the attention mask, so it exposes no position_ids input. When absent
+    // (posIdx < 0) the driver simply binds no position tensor; the mask and KV cache are enough.
+    if (idIdx < 0 || maskIdx < 0 || logitsIdx < 0 || L == 0)
     {
-        fprintf(stderr, "model is not a qwen2 with-past decoder (missing input_ids/attention_mask/"
-                        "position_ids/logits/past_key_values.*)\n");
+        fprintf(stderr, "model is not a with-past decoder (missing input_ids/attention_mask/"
+                        "logits/past_key_values.*)\n");
         return 2;
     }
     // Geometry from past_key_values.0.key = [1, kv_heads, C, head_dim]; logits = [1, seq, vocab].
@@ -318,7 +321,21 @@ int main(int argc, char **argv) {
         }
     }
     auto setI64 = [&](int idx, const std::vector<int64_t> &vals) {
+        if (idx < 0)
+        {
+            return; // an optional input the model does not expose (e.g. a GQA export's position_ids)
+        }
         std::memcpy(inputs[idx].data.data(), vals.data(), vals.size() * sizeof(int64_t));
+    };
+    // The bound-input set for a linked/chained run: input_ids + attention_mask, plus position_ids
+    // only when the model exposes it (a GQA export derives position internally, so posIdx < 0).
+    auto boundInputs = [&]() {
+        std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx]};
+        if (posIdx >= 0)
+        {
+            bound.push_back(inputs[(size_t) posIdx]);
+        }
+        return bound;
     };
 
     // Prefill-bucket geometry, validated against the decode bucket: the past inputs must share the
@@ -392,6 +409,12 @@ int main(int argc, char **argv) {
         if (!gpuArgmax)
         {
             fprintf(stderr, "[chat] --chain needs the engine argmax path; using the single-step loop\n");
+        } else if (posIdx < 0)
+        {
+            // The chain feeds each iteration's position forward by writing position_ids on-device;
+            // a model that derives position internally (no position_ids input) has no tensor to
+            // drive, so it stays on the single-step loop.
+            fprintf(stderr, "[chat] --chain needs a position_ids input; this model derives position internally, using the single-step loop\n");
         } else if (sess->configureDecodeChain((size_t) decodeBucket, "input_ids", "position_ids", "attention_mask", "logits") != Status::Ok)
         {
             fprintf(stderr, "[chat] decode chain unavailable (see log); using the single-step loop\n");
@@ -530,7 +553,7 @@ int main(int argc, char **argv) {
                     reseedCache = false;
                 } else
                 {
-                    std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+                    std::vector<IOTensor> bound = boundInputs();
                     runStatus = sess->run(bound, outputs);
                 }
                 ranLinked           = true;
@@ -673,7 +696,7 @@ int main(int argc, char **argv) {
             reseedCache = false;
         } else
         {
-            std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+            std::vector<IOTensor> bound = boundInputs();
             runStatus = sess->run(bound, outputs);
         }
         residentDirty       = true;
