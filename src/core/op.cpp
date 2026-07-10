@@ -311,7 +311,7 @@ namespace vknn {
             // ORT contrib operators (com.microsoft; the wire parser drops the domain, so name
             // matching covers them). lowerOrtContribOps expands each to primitive ops right after
             // the first shape-inference round; a variant it declines keeps its real name through
-            // the support report. GroupQueryAttention is recognized but not yet expanded.
+            // the support report.
             {"SimplifiedLayerNormalization", OpType::SimplifiedLayerNorm},
             {"SkipSimplifiedLayerNormalization", OpType::SkipSimplifiedLayerNorm},
             {"SkipLayerNormalization", OpType::SkipLayerNorm},

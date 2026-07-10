@@ -1,4 +1,5 @@
-// Reduce family (Mean/Sum/Max/Min/Prod/L2), generic N-D fp32. `node.subOp` selects the ReduceType.
+// Reduce family (Mean/Sum/Max/Min/Prod/L2), generic N-D fp32 plus int64 inputs read through the
+// integer view (Sum/Max/Min/Prod keep int64 storage). `node.subOp` selects the ReduceType.
 // The reduced `axes` come from the `axes` attribute, else from a runtime int64 input[1], else (when
 // neither is present) every axis. The output shape is derived from the RUNTIME input shape plus the
 // `keepdims` attribute (reduced axes become 1 or are dropped), mirroring the Reduce arm of
@@ -96,7 +97,13 @@ namespace vknn {
                                                                      0.f;
                 std::vector<float>   acc(outElems, init);
                 std::vector<int64_t> cnt(outElems, 0); // element count per output bin, for the Mean divide
-                const float         *x = X.host.f32();
+                // The input may be an int64 mask/shape tensor (a with-past decoder reduces its
+                // attention_mask to a valid-length count at runtime); read each element through its
+                // own dtype so the integer values are not reinterpreted as float bits. The count
+                // magnitudes these reductions produce are exact in the fp32 accumulator.
+                const bool           inI64 = X.dtype == DType::Int64;
+                const float         *xf    = inI64 ? nullptr : X.host.f32();
+                const int64_t       *xi    = inI64 ? X.host.i64() : nullptr;
                 // Single pass over the flat input. For each element, project its kept-axis coordinates
                 // to the output bin `oi` and fold the value in; the reduced axes contribute nothing to
                 // `oi`, so every input touching the same bin accumulates there.
@@ -108,7 +115,7 @@ namespace vknn {
                         int64_t c = (i / inStride[kept[k]]) % X.shape[kept[k]];
                         oi += c * outStrideK[k];
                     }
-                    float v = x[i];
+                    float v = inI64 ? (float) xi[i] : xf[i];
                     if (op == ReduceType::Max)
                     {
                         acc[oi] = std::max(acc[oi], v);
@@ -131,6 +138,18 @@ namespace vknn {
                 // Finalize each bin: Mean divides the accumulated sum by its element count (guarded so
                 // an empty bin stays at its 0 init rather than dividing by zero); L2 takes the square
                 // root of the accumulated sum of squares; all other ops emit the accumulator as-is.
+                // An int64 input keeps int64 storage for the integer-exact ops (Sum/Max/Min/Prod, the
+                // ONNX result type), so a downstream consumer reading the integer view (a Sub in a
+                // seqlens chain, a Reshape target) sees exact values; Mean/L2 are float-typed results.
+                if (inI64 && op != ReduceType::Mean && op != ReduceType::L2)
+                {
+                    int64_t *y = cpu::allocOutI64(Y, out);
+                    for (int64_t i = 0; i < outElems; ++i)
+                    {
+                        y[i] = (int64_t) acc[i];
+                    }
+                    return;
+                }
                 float *y = cpu::allocOut(Y, out);
                 for (int64_t i = 0; i < outElems; ++i)
                 {
