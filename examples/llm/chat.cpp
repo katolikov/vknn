@@ -208,9 +208,11 @@ int main(int argc, char **argv) {
         return 2;
     }
     fprintf(stderr, "[chat] %s: layers=%d kv_heads=%d C=%d head_dim=%d present_rows=%d vocab=%lld\n", model.c_str(), L, kvHeads, C, headDim, presRows, (long long) vocab);
-    // Every id fed to the model indexes the embedding table, so an out-of-range --eos must fail here
-    // with the value and the vocab size, never reach the engine as a lookup.
-    if (eos < 0 || eos >= vocab)
+    // chat only COMPARES --eos against generated ids (it is never fed to the model), so a negative
+    // id is a valid "never matches" sentinel that disables early stop (timing harnesses use it). A
+    // non-negative id past the vocab can never be generated either, and only signals a caller
+    // mistake — fail with the value and the vocab size.
+    if (eos >= vocab)
     {
         fprintf(stderr, "--eos %lld is out of range for this model (vocab %lld)\n", (long long) eos, (long long) vocab);
         return 2;
