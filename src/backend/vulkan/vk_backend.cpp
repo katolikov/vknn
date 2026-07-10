@@ -2131,9 +2131,14 @@ namespace vknn {
                     whyNot = "'" + g_.tensors[feedbackInput].name + "' is not a boundary input of the argmax segment";
                     return Status::InvalidArgument;
                 }
-                if (!g_.desc(feedbackInput).gpuFlat)
+                // The feedback dispatch writes flat element positions. A flat buffer is trivially
+                // fine; so is an NC4HW4 buffer whose NCHW view has H == W == 1 (a [1,1] id/position
+                // or a [1, C+1] mask), where the channel-block interleave maps every canonical
+                // element to its own index — the identity, exactly like packNc4.
+                const NCHW deviceView = NCHW::from(g_.tensors[feedbackInput].shape);
+                if (!g_.desc(feedbackInput).gpuFlat && (deviceView.h != 1 || deviceView.w != 1))
                 {
-                    whyNot = "'" + g_.tensors[feedbackInput].name + "' is not flat on the device; the feedback dispatch writes flat elements";
+                    whyNot = "'" + g_.tensors[feedbackInput].name + "' has a non-identity device layout; the feedback dispatch writes flat elements";
                     return Status::Unsupported;
                 }
             }
