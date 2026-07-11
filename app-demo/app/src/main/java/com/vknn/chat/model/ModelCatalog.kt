@@ -76,6 +76,20 @@ object ModelCatalog {
         chatDialectId = ChatPromptTemplate.LLAMA3.id,
     )
 
+    val LLAMA31_8B = ModelSpec(
+        id = "llama31_8b",
+        displayName = "Llama 3.1 8B Instruct (int4)",
+        mode = "Chat",
+        variant = "int4",
+        description = "Meta's instruction-tuned Llama 3.1 8B with int4-quantized weights: decodes entirely on the GPU (Vulkan). The largest model here — ~5.3 GB, ~6.4 GB peak GPU. Shares the Llama-3 tokenizer, which downloads alongside the model.",
+        repoId = "katolikov/Llama-3.1-8B-vknn",
+        repoFile = "llama-3.1-8b-instruct-int4.vxm",
+        approxBytes = 5_306_875_173L,
+        sha256 = "7a8ba6e8ca050660b97bc27f56d7612c6997c41e4ad90184e186d1bed943a035",
+        auxFiles = listOf("vocab.json", "merges.txt"), // the Llama-3 tokenizer rides along with the model
+        chatDialectId = ChatPromptTemplate.LLAMA3.id,
+    )
+
     val SMOLVLM2 = ModelSpec(
         id = "smolvlm2",
         displayName = "SmolVLM2 2.2B",
@@ -114,7 +128,7 @@ object ModelCatalog {
         sha256 = "406dfebef5f9135af2085ec586f10ff7efbe8eb76c919242f64c464b13144835",
     )
 
-    val ALL = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, LLAMA, SMOLVLM2, SMOLVLM2_INT4, DL3DV)
+    val ALL = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, LLAMA, LLAMA31_8B, SMOLVLM2, SMOLVLM2_INT4, DL3DV)
 
     fun byId(id: String): ModelSpec? = ALL.firstOrNull { it.id == id }
 

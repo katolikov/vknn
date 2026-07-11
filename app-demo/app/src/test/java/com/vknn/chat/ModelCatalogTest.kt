@@ -57,7 +57,10 @@ class ModelCatalogTest {
     fun chatModeCarriesQwenVariantsThenLlama() {
         val chat = ModelCatalog.forMode(ModelCatalog.QWEN.mode)
         assertEquals(
-            listOf(ModelCatalog.QWEN, ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.QWEN_FP16_PREFILL, ModelCatalog.LLAMA),
+            listOf(
+                ModelCatalog.QWEN, ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.QWEN_FP16_PREFILL,
+                ModelCatalog.LLAMA, ModelCatalog.LLAMA31_8B,
+            ),
             chat,
         )
         assertEquals("int4", ModelCatalog.QWEN_INT4_PREFILL.variant)
