@@ -2,10 +2,13 @@ package com.vknn.chat
 
 import com.vknn.chat.model.CatalogManifest
 import com.vknn.chat.model.ModelSpec
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 // Unit tests for the pure catalog manifest parser + merge. No Android / no network.
 class CatalogManifestTest {
@@ -95,5 +98,28 @@ class CatalogManifestTest {
         val merged = CatalogManifest.merge(listOf(spec("a", repoId = "old")), listOf(spec("a", repoId = "new")))
         assertEquals(1, merged.size)
         assertEquals("new", merged[0].repoId)
+    }
+
+    // The committed seed manifest (served via GitHub raw) must be well-formed: every entry parses (none
+    // silently dropped as malformed / unknown-dialect), so the app never ships a catalog.json a build
+    // would partly ignore. Content is intentionally NOT pinned to BUILTIN — the remote may diverge.
+    @Test fun seedCatalogJsonIsWellFormed() {
+        val file = findUp("catalog.json")
+        assertNotNull("catalog.json not found relative to the test working dir", file)
+        val text = file!!.readText()
+        val rawCount = JSONObject(text).getJSONArray("models").length()
+        val parsed = CatalogManifest.parse(text, known)
+        assertTrue("catalog.json must list at least one model", parsed.isNotEmpty())
+        assertEquals("every catalog.json entry must be well-formed (none skipped)", rawCount, parsed.size)
+        assertEquals("ids must be unique", parsed.size, parsed.map { it.id }.toSet().size)
+    }
+
+    private fun findUp(name: String): File? {
+        var dir: File? = File(".").absoluteFile
+        repeat(8) {
+            File(dir, name).takeIf { it.exists() }?.let { return it }
+            dir = dir?.parentFile
+        }
+        return null
     }
 }

@@ -36,7 +36,7 @@ sealed interface ModelState {
 // verification, pause/delete, and a per-model state flow the mode screens key off. Lives on the
 // Application so downloads keep running across activity recreation; partial files (.part) survive
 // process death and resume from their byte offset.
-class ModelStore(private val app: Application) {
+class ModelStore(private val app: Application, private val catalog: StateFlow<List<ModelSpec>>) {
 
     // Model files live in getExternalFilesDir(null): app-scoped external storage, so no runtime
     // permission on any supported API level, removed by the OS on uninstall (no orphaned multi-GB
@@ -54,8 +54,19 @@ class ModelStore(private val app: Application) {
     private val jobs = HashMap<String, Job>()                 // touched from the main thread only
     private val totals = ConcurrentHashMap<String, Long>()    // exact lengths learned this session
 
-    private val _states = MutableStateFlow(ModelCatalog.ALL.associate { it.id to scanState(it) })
+    private val _states = MutableStateFlow(catalog.value.associate { it.id to scanState(it) })
     val states: StateFlow<Map<String, ModelState>> = _states.asStateFlow()
+
+    init {
+        // Track the effective catalogue: a remote-manifest update adds newly-appeared models to the
+        // state map at their on-disk state and drops entries that vanished, keeping the state of models
+        // already tracked. The flow replays its current value, so this also seeds correctly on start.
+        scope.launch {
+            catalog.collect { list ->
+                _states.update { cur -> list.associate { spec -> spec.id to (cur[spec.id] ?: scanState(spec)) } }
+            }
+        }
+    }
 
     // Last failed-load reason per model (user-facing copy), shown on the Library card until the
     // model loads successfully or is deleted. Set by the mode view models.
@@ -129,7 +140,7 @@ class ModelStore(private val app: Application) {
      * match; a name present in both directories resolves to the primary root's copy.
      */
     fun adHocModelFiles(): List<File> {
-        val catalogueNames = ModelCatalog.ALL.map { it.localFileName }.toSet()
+        val catalogueNames = catalog.value.map { it.localFileName }.toSet()
         return listOf(root, legacyRoot).distinct()
             .flatMap { dir ->
                 dir.listFiles { f: File -> f.isFile && f.name.endsWith(".vxm") && f.name !in catalogueNames }

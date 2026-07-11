@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
                 val chatUi by vm.ui.collectAsState()
                 val vlmUi by vlm.ui.collectAsState()
                 val splatUi by splat.ui.collectAsState()
+                val catalog by app.catalog.catalog.collectAsState()
                 val modelStates by models.states.collectAsState()
                 val modelLoadErrors by models.loadErrors.collectAsState()
                 val backend by app.settings.backend.collectAsState()
@@ -43,6 +44,7 @@ class MainActivity : ComponentActivity() {
                 AppShell(
                     chatUi = chatUi,
                     vlmUi = vlmUi,
+                    catalog = catalog,
                     modelStates = modelStates,
                     modelLoadErrors = modelLoadErrors,
                     freeBytes = models::freeBytes,
