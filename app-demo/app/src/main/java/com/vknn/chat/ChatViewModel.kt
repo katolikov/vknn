@@ -56,6 +56,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
     private val residency = (app as VknnApp).residency
     private val selection = (app as VknnApp).modelSelection
     private var tokenizer: Tokenizer? = null
+    // The loaded model's chat family, fixed at load: it picks the tokenizer regex + source, the prompt
+    // template, the control-token ids spliced into it, and the stop tokens. Defaults to the ChatML
+    // (Qwen) dialect until a model loads.
+    private var dialect: ChatPromptTemplate.Dialect = ChatPromptTemplate.QWEN
     private var handle: Long = 0L
     private var position = 0
     private var contextMax = 0
@@ -147,10 +151,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
             try {
                 withContext(Dispatchers.Default) {
                     val ctx = getApplication<Application>()
-                    tokenizer = Tokenizer(
-                        ctx.assets.open("vocab.json").bufferedReader().use { it.readText() },
-                        ctx.assets.open("merges.txt").bufferedReader().use { it.readText() },
-                    )
+                    val chatDialect = ChatPromptTemplate.dialect(spec.chatDialectId)
+                    // Qwen ships its vocab/merges in the app assets; Llama downloads them beside the
+                    // model, read from the model's companion files like the VLM tokenizer.
+                    tokenizer = if (chatDialect.tokenizerFromAssets) {
+                        Tokenizer(
+                            ctx.assets.open("vocab.json").bufferedReader().use { it.readText() },
+                            ctx.assets.open("merges.txt").bufferedReader().use { it.readText() },
+                            chatDialect.pattern,
+                        )
+                    } else {
+                        Tokenizer(
+                            store.auxFile(spec, "vocab.json").readText(),
+                            store.auxFile(spec, "merges.txt").readText(),
+                            chatDialect.pattern,
+                        )
+                    }
+                    dialect = chatDialect
                     val vxm = store.file(spec).absolutePath
                     val cache = File(ctx.filesDir, ModelSelection.cacheFileName(spec)).absolutePath
                     val h = NativeLib.nativeInit(vxm, cache, "low", chosenBackend.engineName, greedyArgMax)
@@ -201,8 +218,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
         val h = handle
         val tk = tokenizer ?: return
         if (h == 0L || _ui.value.generating || text.isBlank()) return
-        // Pinned for the whole turn, so editing the template mid-reply cannot change the prompt in flight.
-        val template = prompts.chatPromptTemplate.value
+        // Pinned for the whole turn, so editing the template mid-reply cannot change the prompt in
+        // flight. The loaded dialect's template — a Qwen ChatML string would tokenize to garbage under
+        // Llama-3 ids, so the two are read together.
+        val template = prompts.chatTemplate(dialect)
         // An engine-argmax session never downloads the decode logits row, so temperature sampling
         // has nothing to sample from: the turn pins to greedy and the status names the way out.
         val requestedTemp = _ui.value.temperature
@@ -224,7 +243,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
                     NativeLib.nativeReset(h, 1234)
                     position = 0
                 }
-                val prompt = ChatPromptTemplate.encodeTurn(tk, template, text, continuingContext = position > 0)
+                val prompt = ChatPromptTemplate.encodeTurn(tk, template, text, continuingContext = position > 0, dialect)
                 // Control-token ids sit above the bundled vocab.json; a decoder whose embedding table stops
                 // short of them would index out of range rather than fail.
                 if (vocabSize > 0 && prompt.any { it >= vocabSize }) {
@@ -244,7 +263,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
                 // A templated turn ends on the template's own stop token; the base model's end-of-stream
                 // never arrives inside a ChatML turn. A negative sample is a native-side failure
                 // (no logits row / argmax readback), never a token id.
-                val stopTokens = ChatPromptTemplate.stopTokensFor(template)
+                val stopTokens = ChatPromptTemplate.stopTokensFor(template, dialect)
                 val dec = Tokenizer.StreamDecoder(tk)
                 val sb = StringBuilder()
                 var next = NativeLib.nativeSample(h, temp, if (temp > 0) topK else 0, topP)
@@ -301,6 +320,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ModelResidency.Ho
         contextMax = 0
         vocabSize = 0
         engineArgMax = false
+        dialect = ChatPromptTemplate.QWEN
         _ui.value = UiState(
             phase = if (selection.isPresent(selection.chatKey.value)) Phase.DOWNLOADED else Phase.MISSING,
             temperature = _ui.value.temperature,

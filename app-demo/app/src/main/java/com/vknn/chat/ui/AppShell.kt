@@ -77,6 +77,8 @@ fun AppShell(
     onReset: () -> Unit,
     onTemp: (Float) -> Unit,
     chatPromptTemplate: String,
+    chatPromptTemplateDefault: String,
+    chatPromptPresetLabel: String,
     onChatPromptTemplate: (String) -> Unit,
     vlmModelName: String,
     vlmModelChoices: () -> List<ModelChoice>,
@@ -122,6 +124,8 @@ fun AppShell(
                     onTemp = onTemp,
                     onOpenLibrary = openLibrary,
                     promptTemplate = chatPromptTemplate,
+                    promptTemplateDefault = chatPromptTemplateDefault,
+                    promptPresetLabel = chatPromptPresetLabel,
                     onPromptTemplate = onChatPromptTemplate,
                 )
                 AppTab.VLM -> VlmScreen(
