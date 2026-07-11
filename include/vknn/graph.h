@@ -77,8 +77,8 @@ namespace vknn {
         int64_t           n  = numElements(g.desc(id).shape);
         if (n <= 0)
         {
-            int64_t es = dt == DType::Float16 ? 2 : (dt == DType::Int64 ? 8 : 4);
-            n          = (int64_t) (hb.bytes.size() / es);
+            const int64_t es = (int64_t) dtypeSize(dt); // native byte width of the stored payload (1 for int8/uint8)
+            n                = es > 0 ? (int64_t) (hb.bytes.size() / es) : 0;
         }
         std::vector<float> out((size_t) std::max<int64_t>(n, 0));
         if (dt == DType::Float16)
@@ -99,10 +99,27 @@ namespace vknn {
             {
                 out[i] = (float) v[i];
             }
+        } else if (dt == DType::UInt8)
+        {
+            // Native 1-byte quant lanes (a packed int4 / uint8 weight kept at its on-disk size by
+            // materializeInitializers, never widened to fp32) decode to integer-valued fp32 -- the same
+            // values the earlier fp32-widened storage held, so every reader is unaffected.
+            const uint8_t *v = hb.bytes.data();
+            for (int64_t i = 0; i < n; ++i)
+            {
+                out[i] = (float) v[i];
+            }
+        } else if (dt == DType::Int8)
+        {
+            const int8_t *v = reinterpret_cast<const int8_t *>(hb.bytes.data());
+            for (int64_t i = 0; i < n; ++i)
+            {
+                out[i] = (float) v[i];
+            }
         } else
         {
-            // FLOAT / DOUBLE and the widened INT8 / UINT8 / INT32 quant payloads all materialize to fp32
-            // host bytes at import, so a plain fp32 read recovers the value.
+            // FLOAT / DOUBLE / INT32 materialize to fp32 host bytes at import, so a plain fp32 read recovers
+            // the value.
             const float *f = hb.f32();
             for (int64_t i = 0; i < n; ++i)
             {

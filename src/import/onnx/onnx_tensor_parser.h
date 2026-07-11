@@ -270,6 +270,29 @@ namespace vknn {
                 }
             }
 
+            // Materialize an INT8 / UINT8 TensorProto into NATIVE 1-byte-per-element host storage, without
+            // the fp32 widening fillHostFloat does. A pre-quantized weight (a QDQ model's int8 weights, a
+            // MatMulNBits packed int4 payload) keeps its on-disk size in host memory -- an 8B int4 model's
+            // ~4.3 GB of packed weights would otherwise quadruple to ~17 GB and exhaust host RAM at import.
+            // initFloats() decodes these lanes back to fp32 on demand, so every downstream reader still sees
+            // integer-valued fp32. Copies are clamped to the payload the same way as fillHostFloat, leaving a
+            // truncated or shape-mismatched tail zero.
+            static void fillHostBytes(const TensorProto &t, HostBuffer &hb, int64_t elems, DType dt) {
+                hb.resizeElems(elems, dt); // 1 byte/elem for INT8 / UINT8
+                uint8_t *dst = hb.bytes.data();
+                if (!t.raw.empty())
+                {
+                    std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t) std::max<int64_t>(elems, 0)));
+                } else if (!t.int32Data.empty())
+                { // a narrow integer type can ride in int32_data (one value per tag); keep its low byte
+                    int64_t avail = (int64_t) t.int32Data.size();
+                    for (int64_t i = 0; i < elems && i < avail; ++i)
+                    {
+                        dst[i] = (uint8_t) t.int32Data[i];
+                    }
+                }
+            }
+
             // Materialize as int64 (shape / index tensors that must stay exact). Only the two lossless
             // int64 sources are honored: raw_data of dtype INT64, or the typed int64_data array; any
             // other dtype leaves the buffer zero-filled. Copies are clamped to the payload the same way

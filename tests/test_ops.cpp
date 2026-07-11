@@ -4415,9 +4415,23 @@ namespace {
     // Registers a quantize zero_point initializer: fp32 host storage (as the importer widens int8/
     // uint8 payloads) but a descriptor labeled Int8/UInt8, so the dequantize pass can recover the
     // quantize dtype's saturation range from it -- exactly what the ONNX importer produces.
+    // A native int8/uint8 initializer: one byte per element, exactly as the ONNX importer stores a
+    // pre-quantized weight or zero_point (materializeInitializers -> fillHostBytes). initFloats decodes
+    // the lanes back to integer-valued fp32, so a reader is unaffected by the native storage.
     TensorId addZeroPointInit(Graph &g, const char *name, const Shape &shape, const std::vector<float> &v, DType quantDt) {
-        TensorId id      = addFloatInit(g, name, shape, v);
-        g.desc(id).dtype = quantDt;
+        TensorDesc d;
+        d.name           = name;
+        d.shape          = shape;
+        d.isInitializer  = true;
+        TensorId id      = g.addTensor(d);
+        g.desc(id).dtype = quantDt; // Int8 / UInt8
+        HostBuffer hb;
+        hb.resizeElems((int64_t) v.size(), quantDt); // 1 byte/elem
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            hb.bytes.data()[i] = (uint8_t) (int64_t) v[i]; // low byte; two's-complement for negative int8
+        }
+        g.initializers[id] = hb;
         return id;
     }
 
@@ -5651,8 +5665,7 @@ TEST(Passes, DynamicQuantBareMatMulIntegerNotLowered) {
     xi.isInput = true;
     TensorId xq = g.addTensor(xi);
     g.inputs    = {xq};
-    TensorId wI = addFloatInit(g, "w", {3, 2}, {1, 2, 3, 4, 5, 6});
-    g.desc(wI).dtype = DType::Int8;
+    TensorId wI = addZeroPointInit(g, "w", {3, 2}, {1, 2, 3, 4, 5, 6}, DType::Int8); // native int8 weight
     TensorId y  = addUnshaped(g, "y");
     g.desc(y).isOutput = true;
     g.desc(y).dtype    = DType::Int32;
