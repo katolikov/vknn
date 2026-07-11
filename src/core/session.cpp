@@ -760,18 +760,24 @@ namespace vknn {
             }
             for (TensorId id: cpuNeeded)
             {
-                RtTensor &rt = pool_[id];
-                rt.shape     = graph_.tensors[id].shape;
-                if (graph_.tensors[id].dtype == DType::Float16)
+                RtTensor   &rt  = pool_[id];
+                const DType idt = graph_.tensors[id].dtype;
+                rt.shape        = graph_.tensors[id].shape;
+                if (idt == DType::Float16 || idt == DType::Int8 || idt == DType::UInt8)
                 {
+                    // Decode the payload to integer-valued fp32 so every CPU op keeps reading host.f32():
+                    // an fp16 weight converts per element, and a native int8/uint8 quant initializer (kept
+                    // at 1 byte/elem by the importer to bound host memory at import) widens back to fp32
+                    // here. The int8/uint8 dtype LABEL is preserved -- an op that recovers the quant
+                    // saturation range from it still can; only fp16 relabels to fp32.
                     std::vector<float> f = initFloats(graph_, id);
                     rt.host.bytes.resize(f.size() * 4);
                     std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);
-                    rt.dtype = DType::Float32;
+                    rt.dtype = idt == DType::Float16 ? DType::Float32 : idt;
                 } else
                 {
                     rt.host  = graph_.initializers[id];
-                    rt.dtype = graph_.tensors[id].dtype;
+                    rt.dtype = idt;
                 }
                 rt.hostValid = true;
             }

@@ -43,6 +43,25 @@ namespace {
         g.initializers[id] = hb;
         return id;
     }
+    // A native uint8 initializer (one byte per element), exactly as the importer stores a MatMulNBits
+    // packed int4 payload (materializeInitializers -> fillHostBytes). `bytes` carries the byte values as
+    // integer-valued floats; initFloats decodes the lanes back to fp32 for the repack.
+    TensorId addInitU8(Graph &g, const char *name, Shape s, const std::vector<float> &bytes) {
+        TensorDesc d;
+        d.name           = name;
+        d.shape          = std::move(s);
+        d.isInitializer  = true;
+        TensorId id      = g.addTensor(d);
+        g.desc(id).dtype = DType::UInt8;
+        HostBuffer hb;
+        hb.resizeElems((int64_t) bytes.size(), DType::UInt8);
+        for (size_t i = 0; i < bytes.size(); ++i)
+        {
+            hb.bytes.data()[i] = (uint8_t) bytes[i];
+        }
+        g.initializers[id] = hb;
+        return id;
+    }
     TensorId addInitI64(Graph &g, const char *name, Shape s, const std::vector<int64_t> &v) {
         TensorDesc d;
         d.name          = name;
@@ -327,8 +346,7 @@ TEST(OrtContrib, MatMulNBitsRepacksToWqMatMul) {
     }
     Graph    g;
     TensorId a  = addInput(g, "a", {2, K});
-    TensorId bq = addInitF32(g, "bq", {N, kb, BS / 2}, packedAsF32);
-    g.desc(bq).dtype = DType::UInt8; // as the importer stamps a widened uint8 initializer
+    TensorId bq = addInitU8(g, "bq", {N, kb, BS / 2}, packedAsF32); // native uint8, as the importer stores it
     TensorId sc = addInitF32(g, "sc", {N * kb}, scales);
     TensorId y  = addOutput(g, "y");
     Node     nd;
