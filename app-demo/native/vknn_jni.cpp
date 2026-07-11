@@ -157,6 +157,10 @@ namespace {
             return -1;
         }
         void setI64(int idx, const std::vector<int64_t> &vals) {
+            if (idx < 0)
+            {
+                return; // an optional input the model does not expose (e.g. a GQA export's position_ids)
+            }
             std::memcpy(inputs[(size_t) idx].data.data(), vals.data(), vals.size() * sizeof(int64_t));
         }
         bool isPastInput(int idx) const {
@@ -279,7 +283,11 @@ namespace {
                 const bool rebind = rebindPastNextStep;
                 if (setKvFoldSlot(rebind || p == 0 ? -1 : std::min<int64_t>(p - 1, C - 1)))
                 {
-                    std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx], inputs[(size_t) posIdx]};
+                    std::vector<IOTensor> bound {inputs[(size_t) idIdx], inputs[(size_t) maskIdx]};
+                    if (posIdx >= 0)
+                    {
+                        bound.push_back(inputs[(size_t) posIdx]); // position_ids only when the model exposes it
+                    }
                     if (rebind)
                     {
                         for (int l = 0; l < L; ++l)
@@ -1073,12 +1081,15 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             d->presVal.push_back(d->findOut(pv));
         }
         d->L = (int) d->pastKey.size();
-        if (d->idIdx < 0 || d->maskIdx < 0 || d->posIdx < 0 || d->logitsIdx < 0 || d->L == 0)
+        if (d->idIdx < 0 || d->maskIdx < 0 || d->logitsIdx < 0 || d->L == 0)
         {
-            LOGE("model is not a qwen2 with-past decoder");
+            LOGE("model is not a with-past decoder (needs input_ids, attention_mask, logits, past_key_values.*)");
             delete d;
             return 0;
         }
+        // position_ids is optional: a GQA export (e.g. Llama-3.2) derives position from the mask
+        // internally and exposes no position_ids input, so posIdx < 0 is valid — the decode step just
+        // skips binding it.
         const Shape &ks = d->inInfo[(size_t) d->pastKey[0]].shape; // [1, kv_heads, C, head_dim]
         d->kvHeads      = (int) ks[1];
         d->C            = (int) ks[2];
@@ -1098,6 +1109,13 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeInit(JNIEnv *env, job
             return 0;
         }
 
+        // The whole-window prefill fold is keyed to position_ids; a model that derives position
+        // internally (no position_ids input) prefills token-by-token through the decode bucket instead
+        // — the same fallback examples/llm/chat.cpp takes.
+        if (d->posIdx < 0)
+        {
+            prefillB = -1;
+        }
         // Prefill-bucket geometry, validated against the decode bucket: the past inputs must share
         // the decode shapes (one host cache serves both) and the mask must span past+S columns. Any
         // mismatch disables the fast prefill rather than miscomputing.
