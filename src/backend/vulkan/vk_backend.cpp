@@ -1444,12 +1444,14 @@ namespace vknn {
                 const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
                 if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
                 {
-                    // The chunks of one run are consumed by a single vkQueueSubmit (one batch per
-                    // chunk, no host round trip between them), so the chunk tail carries an explicit
-                    // barrier wide enough for both compute and copy consumers in later chunks. The
-                    // batches stay separate submissions from the watchdog's point of view; only the
-                    // fence at the end of the LAST chunk is waited on.
-                    vk::transferBarrier(cmd_);
+                    // Each chunk is its own vkQueueSubmit + fence wait (see run()). The fence is a
+                    // full barrier, so a chunk's writes are complete and visible before the next chunk
+                    // is submitted and buffer reuse stays correct across the boundary. Batching the
+                    // chunks into one submit and ordering them with a vkCmdPipelineBarrier at the
+                    // chunk tail is faster but unsafe: a submit spanning several chunks runs long
+                    // enough for the driver to reset it and zero the tail (the watchdog the chunking
+                    // exists to avoid), so a heavily-chunked model then produces nondeterministic
+                    // output. Keeping chunks as separate submits keeps every submit short.
                     chunkTsEnd();
                     be_->runner().end(cmd_);
                     cmds_.push_back(cmd_);
@@ -1794,16 +1796,22 @@ namespace vknn {
             }
             auto t1 = now();
 
-            // One vkQueueSubmit for all chunks + one fence wait: the GPU consumes the chunk
-            // batches back-to-back (each chunk tail carries the ordering barrier), instead of
-            // draining into an idle bubble at every chunk boundary while the host wakes from a
-            // fence just to submit the next chunk. A decode chain submits the chunk prefix
-            // covering its active iterations.
+            // One submit + fence wait per chunk. The fence fully orders each chunk against the next,
+            // so results are deterministic even on a driver that does not honor a vkCmdPipelineBarrier
+            // across command-buffer boundaries within one submission, and no submit runs long enough
+            // to trip the GPU watchdog. A decode chain submits the chunk prefix covering its active
+            // iterations.
             const bool     summarize    = cfg_.timingSummary;
             double         submitCalls  = 0;
             const uint32_t submitChunks = chunksForActiveSteps();
-            double         wall         = be_->runner().submitBatchAndWait(cmds_.data(), submitChunks, summarize ? &submitCalls : nullptr);
-            auto           t2           = now();
+            double         wall         = 0;
+            for (uint32_t ci = 0; ci < submitChunks; ++ci)
+            {
+                double sc = 0;
+                wall += be_->runner().submitAndWait(cmds_[ci], summarize ? &sc : nullptr);
+                submitCalls += sc;
+            }
+            auto t2 = now();
 
             // download boundary outputs to host.
             std::set<TensorId> graphOut(g_.outputs.begin(), g_.outputs.end());
