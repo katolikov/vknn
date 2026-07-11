@@ -1649,9 +1649,26 @@ namespace vknn {
                         {
                             continue; // zero-copy dma-buf (direct or its own convert) takes precedence
                         }
-                        if (rt.dtype != DType::UInt8 && rt.dtype != DType::Int8)
+                        // A raw 8-bit image input (session-stashed as its declared dtype) and a rank-4
+                        // fp32 input both convert on the GPU here: the declared bytes upload to a staging
+                        // buffer and boundary_convert produces the device-native boundary, skipping the host
+                        // pack (uint8->fp32->fp16 for images, fp32->fp16+NC4HW4 for the rank-4 float case).
+                        // boundary_convert mirrors packToBuffer's index math and RTE fp16 rounding, so a
+                        // converted input is byte-identical to the host pack. The rank-4 gate keeps the win
+                        // on the large image inputs it targets (a [N,C,H,W] feature map) and off the tiny
+                        // per-token fp32 boundaries (inputs_embeds [1,S,H], 1-D/2-D masks and index vectors,
+                        // scalars) where it is a no-win; Int8/Int32/Int64 have no boundary_convert variant.
+                        const std::vector<int64_t> &inShape   = rt.shape.empty() ? g_.tensors[tid].shape : rt.shape;
+                        const bool                  fp32Image = rt.dtype == DType::Float32 && inShape.size() == 4;
+                        if (rt.dtype != DType::UInt8 && rt.dtype != DType::Int8 && !fp32Image)
                         {
-                            continue; // only the raw 8-bit image inputs the session stashed as declared dtype
+                            continue;
+                        }
+                        if (linkedInputs_.count(tid))
+                        {
+                            // A linked input's device buffer IS its resident state (updated in place across
+                            // runs); a per-submit staging convert would overwrite it. Keep the host path.
+                            continue;
                         }
                         bool         flat    = g_.desc(tid).gpuFlat;
                         TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
