@@ -85,6 +85,18 @@ namespace vknn {
             return false;
         }
 
+        /// Read back only row `row` of a flat 2-D boundary `output` ([.., R, V]) on the next runs,
+        /// copying V elements from device offset row*V instead of the whole [R, V] buffer — the
+        /// prefill logits case, where only the last real token's row feeds the first decode token.
+        /// `row` < 0 clears the selection (full readback resumes). Unsupported = no device path
+        /// (the Session then downloads the full output and the caller slices the host copy).
+        virtual Status setOutputRow(TensorId output, int64_t row, std::string &whyNot) {
+            (void) output;
+            (void) row;
+            (void) whyNot;
+            return Status::Unsupported;
+        }
+
         // ---- device-resident decode chains (Session::configureDecodeChain, ADR-0015) ----
         // A backend that can record K decode iterations into one pre-recorded command stream (the
         // Vulkan segment) overrides these; the default says "no device path".

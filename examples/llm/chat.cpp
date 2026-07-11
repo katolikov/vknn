@@ -797,6 +797,11 @@ int main(int argc, char **argv) {
                 std::memcpy(pin[i].data.data(), m.data(), m.size() * 8);
             }
         }
+        // Ask the engine to read back only the last real token's logits row (the one this pass
+        // returns) instead of the whole [S, vocab] matrix — the other rows never feed a token, so
+        // downloading them is pure TTFT cost. Ok => "logits" arrives as a single [1,1,vocab] row
+        // (offset 0); Unsupported (CPU backend / non-flat) keeps the full matrix and the row offset.
+        const bool rowSliced = sess->setOutputRow((size_t) prefillBucket, "logits", len - 1) == Status::Ok;
         if (sess->run(pin, prefillOutputs) != Status::Ok)
         {
             fprintf(stderr, "[chat] prefill run failed\n");
@@ -847,7 +852,7 @@ int main(int argc, char **argv) {
         p += len;
         // The last real token's logits row feeds the first decode token's host sampling. An fp16
         // logits output is converted to fp32 into a persistent row so the sampler reads real values.
-        const size_t rowOffset = (size_t) (len - 1) * vocab;
+        const size_t rowOffset = rowSliced ? 0 : (size_t) (len - 1) * vocab;
         if (logitsFp16)
         {
             prefillLogitsF32.resize((size_t) vocab);
