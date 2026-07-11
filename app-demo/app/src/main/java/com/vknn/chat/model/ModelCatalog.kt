@@ -1,5 +1,6 @@
 package com.vknn.chat.model
 
+import com.vknn.chat.ChatPromptTemplate
 import java.util.Locale
 
 // The downloadable .vxm catalogue, one or more variants per app mode. A ModelSpec is the single
@@ -16,6 +17,7 @@ data class ModelSpec(
     val approxBytes: Long,      // display + storage-guard size until the HF API reports the exact length
     val sha256: String?,        // pinned digest, used when the HF API is unreachable (null = API only)
     val auxFiles: List<String> = emptyList(), // small companion repo files (tokenizer etc.), fetched with the model
+    val chatDialectId: String? = null, // Chat models: the ChatPromptTemplate.Dialect id; null is the ChatML (Qwen) default
 ) {
     val url: String get() = "https://huggingface.co/$repoId/resolve/main/$repoFile"
     val localFileName: String get() = repoFile.substringAfterLast('/')
@@ -60,6 +62,20 @@ object ModelCatalog {
         sha256 = "d76e51ec1d84bf123b2bbf00de73558c22cd5df82a4e088b05ec5e7c187107b0",
     )
 
+    val LLAMA = ModelSpec(
+        id = "llama",
+        displayName = "Llama 3.2 1B Instruct (int4)",
+        mode = "Chat",
+        variant = "int4",
+        description = "Meta's instruction-tuned Llama 3.2 1B with int4-quantized weights: decodes entirely on the GPU (Vulkan). Its byte-level tokenizer downloads alongside the model.",
+        repoId = "katolikov/Llama-3.2-1B-vknn",
+        repoFile = "llama-3.2-1b-instruct-int4.vxm",
+        approxBytes = 1_205_062_047L,
+        sha256 = "cc6f4eb18479647a8cea7678e538a33bc8e0a1b3772fcc02aaecc63a98c60309",
+        auxFiles = listOf("vocab.json", "merges.txt"), // the Llama-3 tokenizer rides along with the model
+        chatDialectId = ChatPromptTemplate.LLAMA3.id,
+    )
+
     val SMOLVLM2 = ModelSpec(
         id = "smolvlm2",
         displayName = "SmolVLM2 2.2B",
@@ -98,7 +114,7 @@ object ModelCatalog {
         sha256 = "406dfebef5f9135af2085ec586f10ff7efbe8eb76c919242f64c464b13144835",
     )
 
-    val ALL = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, SMOLVLM2, SMOLVLM2_INT4, DL3DV)
+    val ALL = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, LLAMA, SMOLVLM2, SMOLVLM2_INT4, DL3DV)
 
     fun byId(id: String): ModelSpec? = ALL.firstOrNull { it.id == id }
 

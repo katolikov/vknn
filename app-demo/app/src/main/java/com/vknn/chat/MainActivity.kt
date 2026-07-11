@@ -31,10 +31,15 @@ class MainActivity : ComponentActivity() {
                 val modelStates by models.states.collectAsState()
                 val modelLoadErrors by models.loadErrors.collectAsState()
                 val backend by app.settings.backend.collectAsState()
-                val chatPromptTemplate by app.prompts.chatPromptTemplate.collectAsState()
+                val chatTemplateOverrides by app.prompts.chatTemplateOverrides.collectAsState()
                 val vlmQuestion by app.prompts.vlmQuestion.collectAsState()
                 val chatModelKey by app.modelSelection.chatKey.collectAsState()
                 val vlmModelKey by app.modelSelection.vlmKey.collectAsState()
+                // The prompt template follows the selected chat model's family: its default preset, and
+                // any saved override, are per dialect (a Qwen ChatML template has no meaning under Llama-3).
+                val chatSpec = app.modelSelection.specFor(chatModelKey, ModelCatalog.QWEN)
+                val chatDialect = ChatPromptTemplate.dialect(chatSpec.chatDialectId)
+                val chatPromptTemplate = chatTemplateOverrides[chatDialect.id] ?: chatDialect.instructPreset
                 AppShell(
                     chatUi = chatUi,
                     vlmUi = vlmUi,
@@ -48,7 +53,7 @@ class MainActivity : ComponentActivity() {
                     onDownload = models::start,
                     onPause = models::pause,
                     onDelete = models::delete,
-                    chatModelName = app.modelSelection.specFor(chatModelKey, ModelCatalog.QWEN).displayName,
+                    chatModelName = chatSpec.displayName,
                     chatModelChoices = { app.modelSelection.choicesFor(ModelCatalog.QWEN.mode) },
                     chatSelectedModelKey = chatModelKey,
                     onChatSelectModel = vm::selectModel,
@@ -58,7 +63,9 @@ class MainActivity : ComponentActivity() {
                     onReset = vm::reset,
                     onTemp = vm::setTemperature,
                     chatPromptTemplate = chatPromptTemplate,
-                    onChatPromptTemplate = app.prompts::setChatPromptTemplate,
+                    chatPromptTemplateDefault = chatDialect.instructPreset,
+                    chatPromptPresetLabel = chatDialect.presetLabel,
+                    onChatPromptTemplate = { app.prompts.setChatTemplate(chatDialect, it) },
                     vlmModelName = app.modelSelection.specFor(vlmModelKey, ModelCatalog.SMOLVLM2).displayName,
                     vlmModelChoices = { app.modelSelection.choicesFor(ModelCatalog.SMOLVLM2.mode) },
                     vlmSelectedModelKey = vlmModelKey,

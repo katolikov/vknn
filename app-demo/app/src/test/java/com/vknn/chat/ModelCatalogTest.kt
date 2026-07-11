@@ -54,13 +54,33 @@ class ModelCatalogTest {
     }
 
     @Test
-    fun chatModeCarriesThreeVariants() {
+    fun chatModeCarriesQwenVariantsThenLlama() {
         val chat = ModelCatalog.forMode(ModelCatalog.QWEN.mode)
-        assertEquals(listOf(ModelCatalog.QWEN, ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.QWEN_FP16_PREFILL), chat)
+        assertEquals(
+            listOf(ModelCatalog.QWEN, ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.QWEN_FP16_PREFILL, ModelCatalog.LLAMA),
+            chat,
+        )
         assertEquals("int4", ModelCatalog.QWEN_INT4_PREFILL.variant)
         assertEquals("fp16", ModelCatalog.QWEN_FP16_PREFILL.variant)
         assertEquals(ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.byId("qwen_int4_prefill"))
         assertNull(ModelCatalog.byId("no-such-model"))
+    }
+
+    // The Llama chat entry downloads its byte-level tokenizer beside the model and names the Llama-3
+    // dialect; the Qwen entries carry no dialect id and fall to the ChatML default.
+    @Test
+    fun llamaEntryDownloadsTokenizerAndNamesTheLlamaDialect() {
+        assertEquals("int4", ModelCatalog.LLAMA.variant)
+        assertEquals(ModelCatalog.QWEN.mode, ModelCatalog.LLAMA.mode)
+        assertEquals(listOf("vocab.json", "merges.txt"), ModelCatalog.LLAMA.auxFiles)
+        assertEquals("llama3", ModelCatalog.LLAMA.chatDialectId)
+        assertNull(ModelCatalog.QWEN.chatDialectId)
+        assertEquals(
+            "https://huggingface.co/katolikov/Llama-3.2-1B-vknn/resolve/main/llama-3.2-1b-instruct-int4.vxm",
+            ModelCatalog.LLAMA.url,
+        )
+        // The companion files land under a model-scoped name so they never collide with another model's.
+        assertEquals("llama.vocab.json", ModelCatalog.LLAMA.auxLocalName("vocab.json"))
     }
 
     @Test

@@ -71,6 +71,8 @@ fun ChatScreen(
     onTemp: (Float) -> Unit,
     onOpenLibrary: () -> Unit,
     promptTemplate: String,
+    promptTemplateDefault: String,
+    promptPresetLabel: String,
     onPromptTemplate: (String) -> Unit,
 ) {
     var editingTemplate by remember { mutableStateOf(false) }
@@ -93,9 +95,9 @@ fun ChatScreen(
                 "Wrap the message in an instruct template and the same weights answer instead. Leave it empty " +
                 "for raw completion. A templated message is sent as one fresh turn.",
             initialPrompt = promptTemplate,
-            defaultPrompt = ChatPromptTemplate.DEFAULT,
+            defaultPrompt = promptTemplateDefault,
             fieldPlaceholder = "Empty — the model continues your message",
-            presets = listOf(PromptPreset("Instruct (ChatML)", ChatPromptTemplate.INSTRUCT_PRESET)),
+            presets = listOf(PromptPreset(promptPresetLabel, promptTemplateDefault)),
             monospaceField = true,
             validate = ::validatePromptTemplate,
             onSave = onPromptTemplate,
