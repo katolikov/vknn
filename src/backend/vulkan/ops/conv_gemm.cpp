@@ -60,20 +60,17 @@ namespace vknn {
             // buffers, and persist the winner so warm runs skip the measurement.
             int pickVariant(VkOpEnv &env, NCHW x, NCHW y, int64_t M, int64_t K, int64_t Cout) {
                 int heur = convGemmTileM(M);
-                if (env.tuning == Tuning::None || !env.runner)
-                {
-                    return heur;
-                }
                 char buf[112];
                 snprintf(buf, sizeof(buf), "cgemm_%d_%d_%d", (int) M, (int) K, (int) Cout);
                 std::string sig = env.gpuTag + "/" + buf;
-                if (env.weights)
+                int         reuse;
+                if (env.reuseTuned(sig, reuse) && reuse > 0)
                 {
-                    int cached = env.weights->tuned(sig, 0);
-                    if (cached > 0)
-                    {
-                        return cached;
-                    }
+                    return reuse;
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return heur;
                 }
                 int64_t Cinb = cBlocks(x.c), Coutb = cBlocks(Cout);
                 int     es   = env.useFp16 ? 2 : 4;
@@ -155,7 +152,7 @@ namespace vknn {
                 VKNN_DEBUG << "autotune " << sig << " -> " << (best == 1 ? "ksplit" : "tm") << "=" << best;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, best);
+                    env.weights->setTuned(sig, best, (int) env.tuning);
                 }
                 return best;
             }

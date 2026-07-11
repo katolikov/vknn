@@ -42,7 +42,8 @@ namespace vknn {
         // The compiled artifacts.
         std::vector<uint8_t>                      pipeline; // serialized VkPipelineCache blob
         std::map<std::string, std::vector<float>> weights;  // prepacked / Winograd-transformed weights by name
-        std::map<std::string, int32_t>            tune;     // conv autotune table (op signature -> chosen value)
+        std::map<std::string, int32_t>            tune;      // conv autotune table (op signature -> chosen value)
+        std::map<std::string, int32_t>            tuneLevel; // append-only "tunelvl": op signature -> Tuning level it was measured at
 
         bool sameKey(const CacheVariant &o) const {
             return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && ropeFusion == o.ropeFusion && fusedAttention == o.fusedAttention && kvConcatFold == o.kvConcatFold && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3;

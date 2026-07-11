@@ -212,23 +212,29 @@ namespace vknn {
             // run on dedicated scratch buffers, never the real activation buffers, or they race and
             // corrupt the data path.
             uint32_t pickLocalSize(VkOpEnv &env) {
-                if (env.tuning == Tuning::None)
-                {
-                    return 64;
-                }
                 char buf[96];
                 snprintf(buf, sizeof(buf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.SH);
-                std::string sig = env.gpuTag + "/" + buf;
+                std::string sig      = env.gpuTag + "/" + buf;
+                const int   reqLevel = (int) env.tuning;
+                // Consult the cache first. A cached pick is reused under --tuning none (none runs no new
+                // sweep but honors a stored measurement) and whenever its measured level is at least the
+                // requested one; a lower-level entry (fast cached, heavy requested) is re-swept so the
+                // heavier candidate set is explored.
                 if (env.weights)
                 {
-                    int cached = env.weights->tuned(sig, 0);
-                    if (cached > 0)
+                    int cachedLevel = -1;
+                    int cached      = env.weights->tuned(sig, 0, &cachedLevel);
+                    if (cached > 0 && (reqLevel == (int) Tuning::None || cachedLevel >= reqLevel))
                     {
                         return (uint32_t) cached;
                     }
                 }
+                if (env.tuning == Tuning::None)
+                {
+                    return 64; // no cached pick and no new sweep -> the deterministic default kernel
+                }
                 uint32_t best = 64;
-                if (env.tuning != Tuning::None && env.runner)
+                if (env.runner)
                 {
                     int    es       = env.useFp16 ? 2 : 4;
                     size_t srcBytes = (size_t) pc.N * cBlocks(pc.Cin) * pc.H * pc.W * 4 * es;
@@ -259,7 +265,7 @@ namespace vknn {
                 }
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, (int) best);
+                    env.weights->setTuned(sig, (int) best, reqLevel);
                 }
                 return best;
             }
@@ -269,20 +275,17 @@ namespace vknn {
             // the choice never affects output bits, unlike the direct-vs-Winograd choice. Measured on
             // scratch buffers and cached like the local-size tune.
             uint32_t pickWTile(VkOpEnv &env, bool s2, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
-                if (env.tuning == Tuning::None || !env.runner)
-                {
-                    return 4;
-                }
                 char buf[96];
                 snprintf(buf, sizeof(buf), "c1x1%s_%d_%d_%d_%d_%d", s2 ? "s2" : "", (int) x.c, (int) Cout, (int) y.h, (int) y.w, hasRes ? 1 : 0);
                 std::string sig = env.gpuTag + "/" + buf;
-                if (env.weights)
+                int         reuse;
+                if (env.reuseTuned(sig, reuse) && reuse > 0)
                 {
-                    int cached = env.weights->tuned(sig, 0);
-                    if (cached > 0)
-                    {
-                        return (uint32_t) cached;
-                    }
+                    return (uint32_t) reuse;
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return 4;
                 }
                 int    es       = env.useFp16 ? 2 : 4;
                 size_t srcBytes = (size_t) x.n * cBlocks(x.c) * x.h * x.w * 4 * es;
@@ -319,7 +322,7 @@ namespace vknn {
                 VKNN_DEBUG << "autotune " << sig << " -> wtile=" << best;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, (int) best);
+                    env.weights->setTuned(sig, (int) best, (int) env.tuning);
                 }
                 return best;
             }
@@ -334,27 +337,25 @@ namespace vknn {
             // re-tune stays deterministic. Measured on scratch buffers + cached like pickWTile.
             static constexpr int kChoiceLds3x3 = 9; // pickOcb result: the LDS input-halo 3x3 kernel won
             int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, bool lds3x3) {
-                if (env.tuning == Tuning::None || !env.runner)
-                {
-                    return 0;
-                }
                 // The LDS-halo kernel decodes a flat gl_WorkGroupID.x with no split spill, so its
-                // group count must fit the device X limit outright.
+                // group count must fit the device X limit outright. (Computed before the cache consult
+                // because the reuse gate below needs it.)
                 int64_t ldsG = x.n * Coutb * ((y.h + 7) / 8) * ((y.w + 7) / 8);
                 lds3x3       = lds3x3 && ldsG <= (int64_t) env.ctx->caps().maxWorkGroupCount[0];
                 char buf[112];
                 snprintf(buf, sizeof(buf), "convocb_%d_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
                 std::string sig = env.gpuTag + "/" + buf;
-                if (env.weights)
+                int         reuse;
+                // The sig omits pads/dilations (the direct and OCB kernels are pad/dilation-agnostic),
+                // but choice kChoiceLds3x3 is only valid for the gated 3x3/s1/p1/d1 shape — an ineligible
+                // node with the same sig fields must re-race without it.
+                if (env.reuseTuned(sig, reuse) && (reuse != kChoiceLds3x3 || lds3x3))
                 {
-                    int cached = env.weights->tuned(sig, -1);
-                    // The sig omits pads/dilations (the direct and OCB kernels are pad/dilation-
-                    // agnostic), but choice kChoiceLds3x3 is only valid for the gated 3x3/s1/p1/d1
-                    // shape — an ineligible node with the same sig fields must re-race without it.
-                    if (cached >= 0 && (cached != kChoiceLds3x3 || lds3x3))
-                    {
-                        return cached;
-                    }
+                    return reuse;
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return 0;
                 }
                 int    es       = env.useFp16 ? 2 : 4;
                 size_t srcBytes = (size_t) pc.N * cBlocks(pc.Cin) * pc.H * pc.W * 4 * es;
@@ -402,7 +403,7 @@ namespace vknn {
                 VKNN_DEBUG << "autotune " << sig << " -> ocb=" << best;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, best);
+                    env.weights->setTuned(sig, best, (int) env.tuning);
                 }
                 return best;
             }
@@ -417,14 +418,16 @@ namespace vknn {
             // conv_reg's OCB, or kChoiceLds3x3), so the gemm kernel is timed against the
             // configuration that would actually run.
             int tuneConvGemm(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, int64_t KH, int64_t KW, int dchoice) {
-                if (env.tuning == Tuning::None || !env.runner || hasRes)
+                // A residual add never takes the gemm path (regardless of any cache).
+                if (hasRes)
                 {
                     return 0;
                 }
                 int64_t M = y.h * y.w, K = x.c * KH * KW;
                 int     tm = convGemmTileM(M);
                 // The gemm kernel tiles M on dispatch Y and batch on Z; neither survives the device
-                // group-count limit (the runtime 1-D split only rescues X).
+                // group-count limit (the runtime 1-D split only rescues X). An overflowing node keeps
+                // the direct kernels, cache or not.
                 if ((M + tm - 1) / tm > 65535 || (Cout + kConvGemmTileN - 1) / kConvGemmTileN > 65535 || x.n > 65535)
                 {
                     return 0;
@@ -432,13 +435,14 @@ namespace vknn {
                 char buf[128];
                 snprintf(buf, sizeof(buf), "cgemm_direct_%d_%d_%d_%d_%d%d%d", pc.Cin, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
                 std::string sig = env.gpuTag + "/" + buf;
-                if (env.weights)
+                int         reuse;
+                if (env.reuseTuned(sig, reuse))
                 {
-                    int cached = env.weights->tuned(sig, -1);
-                    if (cached >= 0)
-                    {
-                        return cached;
-                    }
+                    return reuse;
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return 0; // no cached choice and no new race -> the legacy direct kernels
                 }
                 int  es = env.useFp16 ? 2 : 4;
                 auto mk = [&](size_t bytes) {
@@ -509,7 +513,7 @@ namespace vknn {
                 VKNN_DEBUG << "tuneConvGemm " << sig << " direct=" << dms << " gemm=" << gms << " -> " << choice;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, choice);
+                    env.weights->setTuned(sig, choice, (int) env.tuning);
                 }
                 return choice;
             }
@@ -530,6 +534,17 @@ namespace vknn {
                     return 2; // force F(4,3) (numerically fine but register-heavy transforms)
                 }
                 bool forceOn = (env.winograd == Mode::On);
+                // The sig depends only on the conv shape, so consult the cache before the deterministic
+                // tile-edge pick and the Winograd-vs-direct race below. A cached choice is reused under
+                // --tuning none, which otherwise keeps the direct (or forced-on) default kernel.
+                char        buf[128];
+                snprintf(buf, sizeof(buf), "wino2_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
+                std::string sig = env.gpuTag + "/" + buf;
+                int         reuse;
+                if (env.reuseTuned(sig, reuse))
+                {
+                    return reuse;
+                }
                 if (env.tuning == Tuning::None || !env.runner)
                 {
                     return forceOn ? 1 : 0;
@@ -549,19 +564,8 @@ namespace vknn {
                 int     U_ = (winoCostPerOut(4) < winoCostPerOut(2)) ? 4 : 2;
                 int     nPos = (U_ + 2) * (U_ + 2);
                 int64_t nTH = (y.h + U_ - 1) / U_, nTW = (y.w + U_ - 1) / U_, nT = x.n * nTH * nTW;
-                // "wino2": the value is now the bitfield above (unit + RM + ACC16); a fresh sig name
-                // keeps stale entries from the plain-unit encoding from decoding as variant bits.
-                char    buf[128];
-                snprintf(buf, sizeof(buf), "wino2_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
-                std::string sig = env.gpuTag + "/" + buf;
-                if (env.weights)
-                {
-                    int c = env.weights->tuned(sig, -1);
-                    if (c >= 0)
-                    {
-                        return c;
-                    }
-                }
+                // "wino2": the tuned value is the bitfield (unit + RM + ACC16); the shape-only sig and its
+                // cache consult are above, before the deterministic tile-edge pick.
                 auto mk = [&](size_t bytes) {
                     return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
                 };
@@ -652,7 +656,7 @@ namespace vknn {
                 VKNN_DEBUG << "tuneWino " << sig << " U=" << U_ << " rm=" << bestRm << " acc16=" << bestAcc << " direct=" << dms << " wino=" << wms << " -> " << choice;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, choice);
+                    env.weights->setTuned(sig, choice, (int) env.tuning);
                 }
                 return choice;
             }
