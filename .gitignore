@@ -25,3 +25,6 @@ benchmark/results/
 benchmark/result/
 benchmark/*.result.json
 .claude/
+
+# local design specs/plans (kept out of the repo)
+docs/superpowers/
