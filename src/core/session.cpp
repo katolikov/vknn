@@ -2289,13 +2289,23 @@ namespace vknn {
             RtTensor &rt = pool_[oid];
             IOTensor  io;
             io.name = graph_.tensors[oid].name;
-            // setOutputRow: the backend read back only one row (V elements from rt.shape.back()), so the
-            // caller sees a single-row shape [.., 1, V] rather than the full [.., R, V] the pool records.
-            Shape outShape = rt.shape;
-            if (rowSelectOutputs_.count({bucketIndex, oid}) && !outShape.empty())
+            // setOutputRow: when the backend read back a single row it holds V elements, so the caller
+            // sees a single-row shape [.., 1, V] rather than the full [.., R, V] the pool records. The
+            // backend slices only when the registered row is in range for THIS run's resolved shape and
+            // otherwise falls back to a full readback (a dynamic-row output whose row count only lands at
+            // run time); mirror that exact per-run range check here so io.shape can never claim one row
+            // while rt.host holds the full [R, V] buffer.
+            Shape    outShape = rt.shape;
+            auto     rowSel   = rowSelectOutputs_.find({bucketIndex, oid});
+            if (rowSel != rowSelectOutputs_.end() && !outShape.empty())
             {
-                outShape.assign(rt.shape.size(), 1);
-                outShape.back() = rt.shape.back();
+                const int64_t rowElems = outShape.back();
+                const int64_t nRows    = rowElems > 0 ? numElements(rt.shape) / rowElems : 0;
+                if (rowSel->second >= 0 && rowSel->second < nRows)
+                {
+                    outShape.assign(rt.shape.size(), 1);
+                    outShape.back() = rowElems;
+                }
             }
             io.shape        = outShape;
             io.dmaBufFd     = rt.dmaBufFd;

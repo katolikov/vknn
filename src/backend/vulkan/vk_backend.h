@@ -30,6 +30,7 @@ namespace vknn {
         void reset(bool enabled) {
             weights_.clear();
             tune_.clear();
+            tuneLevel_.clear();
             enabled_ = enabled;
             dirty_   = false;
         }
