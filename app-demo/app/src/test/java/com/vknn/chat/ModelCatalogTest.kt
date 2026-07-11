@@ -2,6 +2,8 @@ package com.vknn.chat
 
 import com.vknn.chat.model.HfApi
 import com.vknn.chat.model.ModelCatalog
+import com.vknn.chat.model.byId
+import com.vknn.chat.model.forMode
 import com.vknn.chat.model.formatBytes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -44,9 +46,9 @@ class ModelCatalogTest {
 
     @Test
     fun catalogueIdsAndLocalNamesAreUnique() {
-        assertEquals(ModelCatalog.ALL.size, ModelCatalog.ALL.map { it.id }.toSet().size)
-        assertEquals(ModelCatalog.ALL.size, ModelCatalog.ALL.map { it.localFileName }.toSet().size)
-        for (spec in ModelCatalog.ALL) {
+        assertEquals(ModelCatalog.BUILTIN.size, ModelCatalog.BUILTIN.map { it.id }.toSet().size)
+        assertEquals(ModelCatalog.BUILTIN.size, ModelCatalog.BUILTIN.map { it.localFileName }.toSet().size)
+        for (spec in ModelCatalog.BUILTIN) {
             assertTrue(spec.approxBytes > 0)
             assertTrue(!spec.localFileName.contains('/'))
             assertTrue(spec.variant == "fp16" || spec.variant == "int4")
@@ -55,7 +57,7 @@ class ModelCatalogTest {
 
     @Test
     fun chatModeCarriesQwenVariantsThenLlama() {
-        val chat = ModelCatalog.forMode(ModelCatalog.QWEN.mode)
+        val chat = ModelCatalog.BUILTIN.forMode(ModelCatalog.QWEN.mode)
         assertEquals(
             listOf(
                 ModelCatalog.QWEN, ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.QWEN_FP16_PREFILL,
@@ -65,8 +67,8 @@ class ModelCatalogTest {
         )
         assertEquals("int4", ModelCatalog.QWEN_INT4_PREFILL.variant)
         assertEquals("fp16", ModelCatalog.QWEN_FP16_PREFILL.variant)
-        assertEquals(ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.byId("qwen_int4_prefill"))
-        assertNull(ModelCatalog.byId("no-such-model"))
+        assertEquals(ModelCatalog.QWEN_INT4_PREFILL, ModelCatalog.BUILTIN.byId("qwen_int4_prefill"))
+        assertNull(ModelCatalog.BUILTIN.byId("no-such-model"))
     }
 
     // The Llama chat entry downloads its byte-level tokenizer beside the model and names the Llama-3

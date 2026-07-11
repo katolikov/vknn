@@ -26,14 +26,18 @@ data class ModelChoice(
 // ad-hoc .vxm sitting in the app's model directories (ModelStore scans both the primary external
 // dir and the legacy files/ dir, so run-as pre-seeded files are selectable too). A persisted
 // catalogue key whose entry no longer exists (or moved modes) falls back to the mode's default.
-class ModelSelection(context: Context, private val store: ModelStore) {
+class ModelSelection(
+    context: Context,
+    private val store: ModelStore,
+    private val catalog: StateFlow<List<ModelSpec>>,
+) {
     private val preferences: SharedPreferences =
         context.getSharedPreferences("vknn_settings", Context.MODE_PRIVATE)
 
-    private val _chatKey = MutableStateFlow(validKey(preferences.getString(KEY_CHAT_MODEL, null), ModelCatalog.QWEN))
+    private val _chatKey = MutableStateFlow(validKey(preferences.getString(KEY_CHAT_MODEL, null), ModelCatalog.QWEN, catalog.value))
     val chatKey: StateFlow<String> = _chatKey.asStateFlow()
 
-    private val _vlmKey = MutableStateFlow(validKey(preferences.getString(KEY_VLM_MODEL, null), ModelCatalog.SMOLVLM2))
+    private val _vlmKey = MutableStateFlow(validKey(preferences.getString(KEY_VLM_MODEL, null), ModelCatalog.SMOLVLM2, catalog.value))
     val vlmKey: StateFlow<String> = _vlmKey.asStateFlow()
 
     fun setChatKey(key: String) = put(KEY_CHAT_MODEL, key, _chatKey)
@@ -42,7 +46,7 @@ class ModelSelection(context: Context, private val store: ModelStore) {
 
     /** Every selectable .vxm for [mode]: the catalogue variants plus ad-hoc files on disk. */
     fun choicesFor(mode: String): List<ModelChoice> {
-        val catalogue = ModelCatalog.forMode(mode).map { spec ->
+        val catalogue = catalog.value.forMode(mode).map { spec ->
             ModelChoice(
                 key = spec.id,
                 displayName = spec.displayName,
@@ -96,7 +100,7 @@ class ModelSelection(context: Context, private val store: ModelStore) {
                 sha256 = null,
             )
         }
-        return ModelCatalog.byId(key) ?: fallback
+        return catalog.value.byId(key) ?: fallback
     }
 
     /** True when [key]'s file is on disk right now (catalogue state, or ad-hoc file presence). */
@@ -105,7 +109,7 @@ class ModelSelection(context: Context, private val store: ModelStore) {
             val fileName = key.removePrefix(LOCAL_PREFIX)
             return store.adHocModelFiles().any { it.name == fileName }
         }
-        return ModelCatalog.byId(key)?.let(store::isReady) == true
+        return catalog.value.byId(key)?.let(store::isReady) == true
     }
 
     private fun put(prefKey: String, value: String, target: MutableStateFlow<String>) {
@@ -145,13 +149,13 @@ class ModelSelection(context: Context, private val store: ModelStore) {
          * else — including a stale cross-mode selection from before this filtering existed — reverts
          * to the mode's default.
          */
-        fun validKey(persisted: String?, fallback: ModelSpec): String = when {
+        fun validKey(persisted: String?, fallback: ModelSpec, catalog: List<ModelSpec>): String = when {
             persisted == null -> fallback.id
             persisted.startsWith(LOCAL_PREFIX) -> {
                 val inferred = modeFromFileName(persisted.removePrefix(LOCAL_PREFIX))
                 if (inferred == fallback.mode || (inferred == null && fallback.mode == ModelCatalog.QWEN.mode)) persisted else fallback.id
             }
-            ModelCatalog.byId(persisted)?.mode == fallback.mode -> persisted
+            catalog.byId(persisted)?.mode == fallback.mode -> persisted
             else -> fallback.id
         }
 

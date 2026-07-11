@@ -14,23 +14,23 @@ class ModelSelectionTest {
     fun persistedCatalogueKeyOfTheSameModeIsKept() {
         assertEquals(
             ModelCatalog.QWEN_INT4_PREFILL.id,
-            ModelSelection.validKey(ModelCatalog.QWEN_INT4_PREFILL.id, ModelCatalog.QWEN),
+            ModelSelection.validKey(ModelCatalog.QWEN_INT4_PREFILL.id, ModelCatalog.QWEN, ModelCatalog.BUILTIN),
         )
     }
 
     @Test
     fun missingOrForeignKeysFallBackToTheModeDefault() {
-        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey(null, ModelCatalog.QWEN))
-        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey("removed_model", ModelCatalog.QWEN))
+        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey(null, ModelCatalog.QWEN, ModelCatalog.BUILTIN))
+        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey("removed_model", ModelCatalog.QWEN, ModelCatalog.BUILTIN))
         // A VLM catalogue id persisted under the chat mode never selects a VLM model for Chat.
-        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey(ModelCatalog.SMOLVLM2.id, ModelCatalog.QWEN))
+        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey(ModelCatalog.SMOLVLM2.id, ModelCatalog.QWEN, ModelCatalog.BUILTIN))
     }
 
     @Test
     fun unnamedLocalKeysPassThroughUnderChat() {
         // A file whose name reveals no family is a generic text decoder: allowed in Chat.
         val key = ModelSelection.LOCAL_PREFIX + "fresh-build.vxm"
-        assertEquals(key, ModelSelection.validKey(key, ModelCatalog.QWEN))
+        assertEquals(key, ModelSelection.validKey(key, ModelCatalog.QWEN, ModelCatalog.BUILTIN))
     }
 
     @Test
@@ -39,13 +39,13 @@ class ModelSelectionTest {
         // VLM tab's model, where it has no vision bucket and its load fails. It must fall back to the
         // VLM default instead.
         val qwenLocal = ModelSelection.LOCAL_PREFIX + "qwen2.5-coder-0.5b-decode-c1024.vxm"
-        assertEquals(ModelCatalog.SMOLVLM2.id, ModelSelection.validKey(qwenLocal, ModelCatalog.SMOLVLM2))
+        assertEquals(ModelCatalog.SMOLVLM2.id, ModelSelection.validKey(qwenLocal, ModelCatalog.SMOLVLM2, ModelCatalog.BUILTIN))
         // ...but the same file is a valid Chat selection.
-        assertEquals(qwenLocal, ModelSelection.validKey(qwenLocal, ModelCatalog.QWEN))
+        assertEquals(qwenLocal, ModelSelection.validKey(qwenLocal, ModelCatalog.QWEN, ModelCatalog.BUILTIN))
         // A SmolVLM local file is valid for VLM and rejected for Chat.
         val vlmLocal = ModelSelection.LOCAL_PREFIX + "smolvlm2-2.2b-fp16.vxm"
-        assertEquals(vlmLocal, ModelSelection.validKey(vlmLocal, ModelCatalog.SMOLVLM2))
-        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey(vlmLocal, ModelCatalog.QWEN))
+        assertEquals(vlmLocal, ModelSelection.validKey(vlmLocal, ModelCatalog.SMOLVLM2, ModelCatalog.BUILTIN))
+        assertEquals(ModelCatalog.QWEN.id, ModelSelection.validKey(vlmLocal, ModelCatalog.QWEN, ModelCatalog.BUILTIN))
     }
 
     @Test

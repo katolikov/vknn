@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vknn.chat.model.BackendPolicy
 import com.vknn.chat.model.InferenceBackend
-import com.vknn.chat.model.ModelCatalog
 import com.vknn.chat.model.ModelSpec
 import com.vknn.chat.model.ModelState
 import com.vknn.chat.model.formatBytes
@@ -41,6 +40,7 @@ import com.vknn.chat.model.formatBytes
 // (start, pause/resume across process death, verify, delete-to-free-space).
 @Composable
 fun LibraryScreen(
+    catalog: List<ModelSpec>,
     states: Map<String, ModelState>,
     loadErrors: Map<String, String>,
     freeBytes: Long,
@@ -83,7 +83,7 @@ fun LibraryScreen(
         Spacer(Modifier.height(14.dp))
         BackendSelectorRow(backend, onBackend)
         Spacer(Modifier.height(14.dp))
-        for (spec in ModelCatalog.ALL) {
+        for (spec in catalog) {
             ModelCard(spec, states[spec.id] ?: ModelState.Missing, loadErrors[spec.id], metered, backend, cpuVerdictFor, onDownload, onPause, onDelete)
             Spacer(Modifier.height(12.dp))
         }

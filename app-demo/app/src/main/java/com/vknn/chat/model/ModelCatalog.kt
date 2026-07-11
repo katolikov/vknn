@@ -128,13 +128,17 @@ object ModelCatalog {
         sha256 = "406dfebef5f9135af2085ec586f10ff7efbe8eb76c919242f64c464b13144835",
     )
 
-    val ALL = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, LLAMA, LLAMA31_8B, SMOLVLM2, SMOLVLM2_INT4, DL3DV)
-
-    fun byId(id: String): ModelSpec? = ALL.firstOrNull { it.id == id }
-
-    /** The catalogue variants powering one app mode, in catalogue order. */
-    fun forMode(mode: String): List<ModelSpec> = ALL.filter { it.mode == mode }
+    // The models compiled into the app: the offline / first-launch seed. The effective catalogue at
+    // runtime is this list merged with a remote manifest (CatalogRepository), so a new model ships as a
+    // catalog.json edit rather than an APK rebuild.
+    val BUILTIN = listOf(QWEN, QWEN_INT4_PREFILL, QWEN_FP16_PREFILL, LLAMA, LLAMA31_8B, SMOLVLM2, SMOLVLM2_INT4, DL3DV)
 }
+
+/** The entry with this stable id, or null. Operates on the effective catalogue a caller holds. */
+fun List<ModelSpec>.byId(id: String): ModelSpec? = firstOrNull { it.id == id }
+
+/** The catalogue variants powering one app mode, in catalogue order. */
+fun List<ModelSpec>.forMode(mode: String): List<ModelSpec> = filter { it.mode == mode }
 
 // Decimal units, matching how the model cards quote sizes ("1.3 GB", "450 MB").
 fun formatBytes(bytes: Long): String = when {

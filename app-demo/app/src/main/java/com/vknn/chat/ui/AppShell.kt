@@ -57,6 +57,7 @@ enum class AppTab(val label: String, val icon: ImageVector) {
 fun AppShell(
     chatUi: UiState,
     vlmUi: VlmUiState,
+    catalog: List<ModelSpec>,
     modelStates: Map<String, ModelState>,
     modelLoadErrors: Map<String, String>,
     freeBytes: () -> Long,
@@ -155,6 +156,7 @@ fun AppShell(
                     onOpenLibrary = openLibrary,
                 )
                 AppTab.LIBRARY -> LibraryScreen(
+                    catalog = catalog,
                     states = modelStates,
                     loadErrors = modelLoadErrors,
                     freeBytes = freeBytes(),
