@@ -209,6 +209,16 @@ namespace vknn {
         /// path; `step` must be inside [0, Config::decodeChainSteps).
         Status readOutputArgMax(const std::string &outputName, int step, int64_t &index, float &value);
 
+        /// Read back only row `row` of the flat 2-D boundary output `outputName` of `bucket` on the
+        /// next runs: the engine copies V elements from device offset row*V (V = the output's last
+        /// dim) instead of the whole [R, V] matrix, and run() returns that output with a single-row
+        /// shape ([.., 1, V]). The prefill logits case — only the last real token's row feeds the
+        /// first decode token, so the other R-1 rows never leave the device. `row` < 0 clears the
+        /// selection. Ok only on a backend that can slice a flat output on the device; Unsupported
+        /// (CPU backend, non-flat output) leaves the full readback in place so the caller can slice
+        /// the host copy itself.
+        Status setOutputRow(size_t bucket, const std::string &outputName, int64_t row);
+
         // --- device-resident decode chains (ADR-0015) ---------------------------------------------
         // A configured decode bucket records Config::decodeChainSteps decode iterations as ONE
         // pre-recorded command sequence: one submit + one fence per chain, with on-device state
@@ -355,6 +365,10 @@ namespace vknn {
         std::vector<ResidentLink> links_;
         // Registered engine-side output argmax reductions (see setOutputArgMax).
         std::vector<OutputArgMax> argMaxOutputs_;
+        // Active per-(bucket, output) single-row readbacks (see setOutputRow); keyed by bucket then
+        // TensorId. Present only for a backend that accepted the device slice; run() emits the sliced
+        // io.shape for these outputs.
+        std::map<std::pair<size_t, TensorId>, int64_t> rowSelectOutputs_;
         /// One configured decode chain per bucket (see configureDecodeChain).
         struct DecodeChain {
             size_t   bucket  = 0;

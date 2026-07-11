@@ -225,3 +225,31 @@ TEST(OutputArgMax, ConfigureDecodeChainValidation) {
     EXPECT_EQ(sess->configureDecodeChain(0, "x", "x", "x", "scores"), Status::Unsupported); // host reduction path: no device chain
     EXPECT_EQ(sess->setDecodeChainWindow(0, 0, 1), Status::NotFound);                       // nothing configured
 }
+
+// Session::setOutputRow — the prefill logits single-row readback. On the CPU backend there is no
+// device slice, so it reports Unsupported and leaves the full output in place; validation still
+// rejects a bad bucket, an unknown output, and a row past a concrete [R, V] output, and a negative
+// row clears. (The device slice itself is exercised by the on-device qwen stream gate.)
+TEST(OutputRow, ValidationAndCpuUnsupported) {
+    auto matrix = cpuSession(makeMatrixGraph(2, 8)); // "scores" is [2, 8]: 2 rows of 8
+    ASSERT_TRUE(matrix);
+    EXPECT_EQ(matrix->setOutputRow(3, "scores", 0), Status::InvalidArgument);  // bucket out of range
+    EXPECT_EQ(matrix->setOutputRow(0, "no_such_output", 0), Status::NotFound);
+    EXPECT_EQ(matrix->setOutputRow(0, "x", 0), Status::NotFound);              // an input is not an output
+    EXPECT_EQ(matrix->setOutputRow(0, "scores", 2), Status::InvalidArgument);  // row 2 past the 2 rows
+    EXPECT_EQ(matrix->setOutputRow(0, "scores", 1), Status::Unsupported);      // valid row, but CPU has no device slice
+    EXPECT_EQ(matrix->setOutputRow(0, "scores", -1), Status::Ok);             // negative clears
+
+    // Unsupported leaves the full [2, 8] output intact — the caller slices the host copy itself.
+    std::vector<float> values(16, 0.0f);
+    for (int i = 0; i < 16; ++i)
+    {
+        values[(size_t) i] = (float) i;
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(matrix->run({f32Tensor("x", {2, 8}, values)}, outs), Status::Ok);
+    const IOTensor *scores = outByName(outs, "scores");
+    ASSERT_NE(scores, nullptr);
+    EXPECT_EQ(scores->shape, (Shape {2, 8}));
+    EXPECT_EQ(scores->data.size(), 16 * sizeof(float));
+}
