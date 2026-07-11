@@ -21,6 +21,8 @@ static CacheVariant makeVariant(const std::string &prec, bool flat) {
     v.weights["conv2.bias"]   = {0.125f};
     v.tune["sig-a/64x3x3"]    = 128;
     v.tune["sig-b/1x1"]       = -1;
+    v.tuneLevel["sig-a/64x3x3"] = 2; // measured at Heavy
+    v.tuneLevel["sig-b/1x1"]    = 1; // measured at Fast
     return v;
 }
 
@@ -60,6 +62,7 @@ TEST(CacheCodec, RoundTrip) {
         EXPECT_EQ(a.pipeline, b.pipeline);
         EXPECT_EQ(a.weights, b.weights); // exact float bytes preserved
         EXPECT_EQ(a.tune, b.tune);
+        EXPECT_EQ(a.tuneLevel, b.tuneLevel); // append-only "tunelvl" companion survives the round trip
     }
 
     // findVariant keys on the cache-affecting config only.

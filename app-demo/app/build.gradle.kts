@@ -12,8 +12,8 @@ android {
         applicationId = "com.vknn.chat"
         minSdk = 28
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2.2"
         ndk {
             // Only ship the arm64 native lib (the only ABI vknn is built for here).
             abiFilters += "arm64-v8a"

@@ -1713,6 +1713,74 @@ namespace vknn {
         return Status::Ok;
     }
 
+    Status Session::setOutputRow(size_t bucket, const std::string &outputName, int64_t row) {
+        if (bucket >= buckets_.size())
+        {
+            VKNN_ERROR << "setOutputRow: bucket " << bucket << " out of range (have " << buckets_.size() << ")";
+            return Status::InvalidArgument;
+        }
+        PlanBucket    &b     = buckets_[bucket];
+        const Graph   &g     = *b.graph;
+        const TensorId outId = g.find(outputName);
+        if (outId == kNoTensor || !idInList(g.outputs, outId))
+        {
+            VKNN_ERROR << "setOutputRow: '" << outputName << "' is not a graph output of bucket " << bucket;
+            return Status::NotFound;
+        }
+        auto forEachOwningSegment = [&](int64_t r) -> Status {
+            for (const std::unique_ptr<Segment> &seg: b.segments)
+            {
+                if (!idInList(seg->boundaryOutputs, outId))
+                {
+                    continue;
+                }
+                std::string whyNot;
+                return seg->setOutputRow(outId, r, whyNot);
+            }
+            return Status::Unsupported; // a host-only output has no device slice
+        };
+        if (row < 0)
+        { // clear
+            rowSelectOutputs_.erase({bucket, outId});
+            if (cfg_.backend != BackendKind::Cpu)
+            {
+                forEachOwningSegment(-1);
+            }
+            return Status::Ok;
+        }
+        // Reject a row past a concrete [.., R, V] output up front (a dynamic-shape output is trusted;
+        // the backend still range-checks each run and falls back to a full readback if it slips through).
+        const Shape &shape = g.tensors[outId].shape;
+        if (!shape.empty() && shape.back() > 0)
+        {
+            int64_t total = 1, allPositive = 1;
+            for (int64_t d: shape)
+            {
+                allPositive = allPositive && d > 0;
+                total *= d > 0 ? d : 1;
+            }
+            const int64_t nRows = total / shape.back();
+            if (allPositive && row >= nRows)
+            {
+                VKNN_ERROR << "setOutputRow: row " << row << " out of range for '" << outputName << "' with " << nRows << " row(s)";
+                return Status::InvalidArgument;
+            }
+        }
+        if (cfg_.backend == BackendKind::Cpu)
+        {
+            return Status::Unsupported; // no device slice; caller keeps the full readback + host slice
+        }
+        const Status st = forEachOwningSegment(row);
+        if (st == Status::Ok)
+        {
+            rowSelectOutputs_[{bucket, outId}] = row;
+        } else
+        {
+            rowSelectOutputs_.erase({bucket, outId});
+        }
+        return st;
+    }
+
     Status Session::readOutputArgMax(const std::string &outputName, int64_t &index, float &value) {
         return readOutputArgMax(outputName, 0, index, value);
     }
@@ -2220,8 +2288,26 @@ namespace vknn {
         {
             RtTensor &rt = pool_[oid];
             IOTensor  io;
-            io.name         = graph_.tensors[oid].name;
-            io.shape        = rt.shape;
+            io.name = graph_.tensors[oid].name;
+            // setOutputRow: when the backend read back a single row it holds V elements, so the caller
+            // sees a single-row shape [.., 1, V] rather than the full [.., R, V] the pool records. The
+            // backend slices only when the registered row is in range for THIS run's resolved shape and
+            // otherwise falls back to a full readback (a dynamic-row output whose row count only lands at
+            // run time); mirror that exact per-run range check here so io.shape can never claim one row
+            // while rt.host holds the full [R, V] buffer.
+            Shape    outShape = rt.shape;
+            auto     rowSel   = rowSelectOutputs_.find({bucketIndex, oid});
+            if (rowSel != rowSelectOutputs_.end() && !outShape.empty())
+            {
+                const int64_t rowElems = outShape.back();
+                const int64_t nRows    = rowElems > 0 ? numElements(rt.shape) / rowElems : 0;
+                if (rowSel->second >= 0 && rowSel->second < nRows)
+                {
+                    outShape.assign(rt.shape.size(), 1);
+                    outShape.back() = rowElems;
+                }
+            }
+            io.shape        = outShape;
             io.dmaBufFd     = rt.dmaBufFd;
             io.dmaBufFormat = rt.dmaBufFormat;
             io.dmaBufDtype  = rt.dmaBufDtype;
@@ -2241,7 +2327,7 @@ namespace vknn {
                 // converting from the internal fp32/int64 storage. Matches the ONNX output contract. A
                 // rank-0 scalar output (shape [], numElements() 0) counts its one element so the dtype
                 // conversion emits the value rather than an empty buffer.
-                int64_t outElems = rt.shape.empty() ? 1 : numElements(rt.shape);
+                int64_t outElems = outShape.empty() ? 1 : numElements(outShape);
                 readbackOutput(graph_.tensors[oid].dtype, rt, outElems, io);
             } else
             {

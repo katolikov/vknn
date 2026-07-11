@@ -189,22 +189,19 @@ namespace vknn {
             // ascending-k sequence for any tile), so the race needs no anti-noise margin and the
             // choice never affects output bits.
             MatMulTile pickTile(VkOpEnv &env, bool hasBias) {
-                if (env.tuning == Tuning::None || !env.runner)
-                {
-                    return kMatMulTiles[0];
-                }
                 char buf[112];
                 snprintf(buf, sizeof(buf), "mm_%d_%d_%d_%d_%d", pc.M, pc.N, pc.K, numBatch, hasBias ? 1 : 0);
                 std::string sig = env.gpuTag + "/" + buf;
-                if (env.weights)
+                int         reuse;
+                // Decode guard: a stale/foreign index, or a cached tile whose dispatch no longer fits the
+                // device limits, re-races instead of decoding as garbage.
+                if (env.reuseTuned(sig, reuse) && reuse >= 0 && reuse < kMatMulTileCount && tileFits(env, kMatMulTiles[reuse]))
                 {
-                    // Decode guard: a stale/foreign index, or a cached tile whose dispatch no
-                    // longer fits the device limits, re-races instead of decoding as garbage.
-                    int cached = env.weights->tuned(sig, -1);
-                    if (cached >= 0 && cached < kMatMulTileCount && tileFits(env, kMatMulTiles[cached]))
-                    {
-                        return kMatMulTiles[cached];
-                    }
+                    return kMatMulTiles[reuse];
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return kMatMulTiles[0];
                 }
                 // Dedicated scratch operands sized like the real tensors (never the live
                 // activation buffers). The timing batch is clamped: per-batch work is identical
@@ -286,7 +283,7 @@ namespace vknn {
                 VKNN_DEBUG << "autotune " << sig << " -> tile " << kMatMulTiles[best].tm << "x" << kMatMulTiles[best].tn << "x" << kMatMulTiles[best].tk;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, best);
+                    env.weights->setTuned(sig, best, (int) env.tuning);
                 }
                 return kMatMulTiles[best];
             }

@@ -48,9 +48,15 @@ namespace vknn {
     void WeightCache::loadFrom(const CacheVariant &v) {
         weights_ = v.weights;
         tune_.clear();
+        tuneLevel_.clear();
         for (const auto &kv: v.tune)
         {
             tune_[kv.first] = (int) kv.second;
+            // A cache written before the level field carries no tunelvl entry; treat it as Fast (the
+            // production default nearly every legacy cache was measured at) so a warm Fast load reuses
+            // it, while a Heavy request still re-sweeps it once and upgrades the stored level.
+            auto lit             = v.tuneLevel.find(kv.first);
+            tuneLevel_[kv.first] = lit != v.tuneLevel.end() ? (int) lit->second : (int) Tuning::Fast;
         }
         enabled_ = true;
         dirty_   = false;
@@ -59,9 +65,15 @@ namespace vknn {
     void WeightCache::writeInto(CacheVariant &v) const {
         v.weights = weights_;
         v.tune.clear();
+        v.tuneLevel.clear();
         for (const auto &kv: tune_)
         {
             v.tune[kv.first] = (int32_t) kv.second;
+            auto lit         = tuneLevel_.find(kv.first);
+            if (lit != tuneLevel_.end())
+            {
+                v.tuneLevel[kv.first] = (int32_t) lit->second;
+            }
         }
     }
     bool WeightCache::get(const std::string &key, std::vector<float> &out) const {
@@ -77,13 +89,27 @@ namespace vknn {
         weights_[key] = data;
         dirty_        = true;
     }
-    int WeightCache::tuned(const std::string &sig, int dflt) const {
+    int WeightCache::tuned(const std::string &sig, int dflt, int *level) const {
         auto it = tune_.find(sig);
-        return it == tune_.end() ? dflt : it->second;
+        if (it == tune_.end())
+        {
+            if (level)
+            {
+                *level = -1;
+            }
+            return dflt;
+        }
+        if (level)
+        {
+            auto lit = tuneLevel_.find(sig);
+            *level   = lit != tuneLevel_.end() ? lit->second : (int) Tuning::Fast;
+        }
+        return it->second;
     }
-    void WeightCache::setTuned(const std::string &sig, int val) {
-        tune_[sig] = val;
-        dirty_     = true;
+    void WeightCache::setTuned(const std::string &sig, int val, int level) {
+        tune_[sig]      = val;
+        tuneLevel_[sig] = level;
+        dirty_          = true;
     }
 
     // ============================ VulkanBackend ============================
@@ -505,22 +531,26 @@ namespace vknn {
         // readbackOutput would do. Only valid for terminal graph outputs: inter-segment boundaries are
         // re-uploaded by packToBuffer, which reads rt.host as fp32, so they keep the fp32 unpack. rt.dtype
         // is set to what rt.host now holds so readbackOutput takes its dst==rt.dtype memcpy fast path.
-        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared, int threads = 1) {
-            int64_t n = numElements(rt.shape);
+        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared, int threads = 1, int64_t srcElemOffset = 0, int64_t elemCount = -1) {
+            // Full output when elemCount < 0; a single flat row (elemCount elements from srcElemOffset)
+            // when the caller sliced it (setOutputRow — prefill logits). rt.shape is left unchanged; the
+            // Session emits the sliced io.shape and reads exactly `n` elements from rt.host.
+            int64_t        n   = elemCount >= 0 ? elemCount : numElements(rt.shape);
+            const uint8_t *src = reinterpret_cast<const uint8_t *>(buf->host()) + (size_t) srcElemOffset * (deviceFp16 ? 2 : 4);
             if (deviceFp16 && declared == DType::Float16)
             { // fp16 device -> fp16 output: straight copy, no conversion
                 rt.host.resizeElems(n, DType::Float16);
-                std::memcpy(rt.host.bytes.data(), buf->host(), (size_t) n * 2);
+                std::memcpy(rt.host.bytes.data(), src, (size_t) n * 2);
                 rt.dtype = DType::Float16;
             } else if (!deviceFp16 && declared == DType::Float32)
             { // fp32 device -> fp32 output: straight copy
                 rt.host.resizeElems(n, DType::Float32);
-                std::memcpy(rt.host.bytes.data(), buf->host(), (size_t) n * 4);
+                std::memcpy(rt.host.bytes.data(), src, (size_t) n * 4);
                 rt.dtype = DType::Float32;
             } else if (declared == DType::Float16)
             { // fp32 device -> fp16 output
                 rt.host.resizeElems(n, DType::Float16);
-                boundary::packFlatFp16(reinterpret_cast<const float *>(buf->host()), reinterpret_cast<fp16_t *>(rt.host.bytes.data()), n, threads);
+                boundary::packFlatFp16(reinterpret_cast<const float *>(src), reinterpret_cast<fp16_t *>(rt.host.bytes.data()), n, threads);
                 rt.dtype = DType::Float16;
             } else
             { // integer / other declared dtype: decode to fp32, readbackOutput does the final convert
@@ -528,10 +558,10 @@ namespace vknn {
                 float *d = rt.host.f32();
                 if (deviceFp16)
                 {
-                    boundary::unpackFlatFp16(reinterpret_cast<const fp16_t *>(buf->host()), d, n, threads);
+                    boundary::unpackFlatFp16(reinterpret_cast<const fp16_t *>(src), d, n, threads);
                 } else
                 {
-                    std::memcpy(d, buf->host(), (size_t) n * 4);
+                    std::memcpy(d, src, (size_t) n * 4);
                 }
                 rt.dtype = DType::Float32;
             }
@@ -1649,9 +1679,26 @@ namespace vknn {
                         {
                             continue; // zero-copy dma-buf (direct or its own convert) takes precedence
                         }
-                        if (rt.dtype != DType::UInt8 && rt.dtype != DType::Int8)
+                        // A raw 8-bit image input (session-stashed as its declared dtype) and a rank-4
+                        // fp32 input both convert on the GPU here: the declared bytes upload to a staging
+                        // buffer and boundary_convert produces the device-native boundary, skipping the host
+                        // pack (uint8->fp32->fp16 for images, fp32->fp16+NC4HW4 for the rank-4 float case).
+                        // boundary_convert mirrors packToBuffer's index math and RTE fp16 rounding, so a
+                        // converted input is byte-identical to the host pack. The rank-4 gate keeps the win
+                        // on the large image inputs it targets (a [N,C,H,W] feature map) and off the tiny
+                        // per-token fp32 boundaries (inputs_embeds [1,S,H], 1-D/2-D masks and index vectors,
+                        // scalars) where it is a no-win; Int8/Int32/Int64 have no boundary_convert variant.
+                        const std::vector<int64_t> &inShape   = rt.shape.empty() ? g_.tensors[tid].shape : rt.shape;
+                        const bool                  fp32Image = rt.dtype == DType::Float32 && inShape.size() == 4;
+                        if (rt.dtype != DType::UInt8 && rt.dtype != DType::Int8 && !fp32Image)
                         {
-                            continue; // only the raw 8-bit image inputs the session stashed as declared dtype
+                            continue;
+                        }
+                        if (linkedInputs_.count(tid))
+                        {
+                            // A linked input's device buffer IS its resident state (updated in place across
+                            // runs); a per-submit staging convert would overwrite it. Keep the host path.
+                            continue;
                         }
                         bool         flat    = g_.desc(tid).gpuFlat;
                         TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
@@ -1848,7 +1895,25 @@ namespace vknn {
                 if (rt.dmaBufFd < 0)
                 {
                     bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
-                    if (flat && graphOut.count(tid))
+                    auto rowIt      = rowSelectOutputs_.find(tid);
+                    if (rowIt != rowSelectOutputs_.end() && flat && graphOut.count(tid))
+                    {
+                        // setOutputRow: download only row `rowIt->second` of the flat [.., R, V] output
+                        // (V elements from offset row*V), skipping the R-1 unread rows — the prefill logits
+                        // case (one 256xV logits matrix, only the last real token's row consumed). rt.shape
+                        // stays [.., R, V]; the Session emits the sliced io.shape from its own record.
+                        const int64_t V     = rt.shape.empty() ? 0 : rt.shape.back();
+                        const int64_t total = numElements(rt.shape);
+                        const int64_t nRows = V > 0 ? total / V : 0;
+                        const int64_t row   = rowIt->second;
+                        if (V > 0 && row >= 0 && row < nRows)
+                        {
+                            VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_), row * V, V);
+                        } else
+                        { // out-of-range selection: fall back to the full readback rather than miscopy
+                            VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
+                        }
+                    } else if (flat && graphOut.count(tid))
                     { // terminal graph output: convert straight to the declared dtype (skip fp32 round trip)
                         VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
                     } else
@@ -2098,6 +2163,27 @@ namespace vknn {
             return Status::Ok;
         }
 
+        Status setOutputRow(TensorId output, int64_t row, std::string &whyNot) override {
+            if (row < 0)
+            {
+                rowSelectOutputs_.erase(output); // clear -> full readback resumes
+                return Status::Ok;
+            }
+            if (std::find(boundaryOutputs.begin(), boundaryOutputs.end(), output) == boundaryOutputs.end() || !buffers_.count(output))
+            {
+                whyNot = "'" + g_.tensors[output].name + "' is not a boundary output of this segment";
+                return Status::InvalidArgument;
+            }
+            if (!g_.desc(output).gpuFlat)
+            {
+                // The slice copies a contiguous flat row; an NC4HW4 boundary interleaves rows.
+                whyNot = "'" + g_.tensors[output].name + "' is not flat on the device";
+                return Status::Unsupported;
+            }
+            rowSelectOutputs_[output] = row; // consulted in the boundary-output download loop
+            return Status::Ok;
+        }
+
         bool readOutputArgMax(TensorId output, int step, int64_t &index, float &value) override {
             auto it = argMaxResults_.find(output);
             if (it == argMaxResults_.end() || step < 0 || step >= chainStepsMax_)
@@ -2326,6 +2412,7 @@ namespace vknn {
         std::set<TensorId>                              argMaxOutputs_;
         std::map<TensorId, std::shared_ptr<vk::Buffer>> argMaxResults_;
         bool                                            argMaxChanged_ = false; // registration set changed -> re-record
+        std::map<TensorId, int64_t>                     rowSelectOutputs_;      // output -> the single flat row to read back (setOutputRow)
         std::unique_ptr<vk::ComputePipeline>            argMaxPipeFp16_, argMaxPipeFp32_;
         static constexpr uint32_t                       kArgMaxResultBytes = 8; // {index, value}
         // Device element width of a boundary tensor (2 for fp16 storage, 4 for fp32/storeFp32).

@@ -50,8 +50,8 @@ namespace vknn {
         for (const auto &v: doc.variants)
         {
             // Per-variant map: the count must match the key/value pairs packed below (the 10 key fields
-            // plus pipeline, weights, tune). Adding a field means bumping this literal in lockstep.
-            msgpack_pack_map(&pk, 15);
+            // plus pipeline, weights, tune, tunelvl). Adding a field means bumping this literal in lockstep.
+            msgpack_pack_map(&pk, 16);
             packKey(&pk, "precision");
             packStr(&pk, v.precision);
             packKey(&pk, "flatLayout");
@@ -90,6 +90,15 @@ namespace vknn {
             packKey(&pk, "tune");
             msgpack_pack_map(&pk, v.tune.size());
             for (const auto &kv: v.tune)
+            {
+                packStr(&pk, kv.first);
+                msgpack_pack_int32(&pk, kv.second);
+            }
+            // Append-only companion to "tune": the Tuning level each entry was measured at. An older
+            // reader ignores this key; an older cache omits it and the decoder leaves tuneLevel empty.
+            packKey(&pk, "tunelvl");
+            msgpack_pack_map(&pk, v.tuneLevel.size());
+            for (const auto &kv: v.tuneLevel)
             {
                 packStr(&pk, kv.first);
                 msgpack_pack_int32(&pk, kv.second);
@@ -246,6 +255,18 @@ namespace vknn {
                             continue;
                         }
                         v.tune.emplace(std::string(kv.key.via.str.ptr, kv.key.via.str.size), asI32(kv.val));
+                    }
+                }
+                if (const msgpack_object *t = mapGet(vo, "tunelvl"); t && t->type == MSGPACK_OBJECT_MAP)
+                {
+                    for (uint32_t k = 0; k < t->via.map.size; ++k)
+                    {
+                        const msgpack_object_kv &kv = t->via.map.ptr[k];
+                        if (kv.key.type != MSGPACK_OBJECT_STR)
+                        {
+                            continue;
+                        }
+                        v.tuneLevel.emplace(std::string(kv.key.via.str.ptr, kv.key.via.str.size), asI32(kv.val));
                     }
                 }
                 out.variants.push_back(std::move(v));

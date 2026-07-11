@@ -30,6 +30,7 @@ namespace vknn {
         void reset(bool enabled) {
             weights_.clear();
             tune_.clear();
+            tuneLevel_.clear();
             enabled_ = enabled;
             dirty_   = false;
         }
@@ -45,13 +46,18 @@ namespace vknn {
         }
         bool get(const std::string &key, std::vector<float> &out) const;
         void put(const std::string &key, const std::vector<float> &data);
-        // autotune table: op-signature -> chosen local_size_x
-        int  tuned(const std::string &sig, int dflt) const;
-        void setTuned(const std::string &sig, int val);
+        // autotune table: op-signature -> chosen kernel value, plus the Tuning level each entry was
+        // measured at. `level` (when non-null) receives the cached entry's level, or -1 on a miss —
+        // the pick sites re-sweep when the requested level exceeds it (a fast entry does not serve a
+        // heavy request) and reuse it under Tuning::None (none runs no new sweep but honors a cached
+        // one). A legacy entry with no stored level reads back as Fast.
+        int  tuned(const std::string &sig, int dflt, int *level = nullptr) const;
+        void setTuned(const std::string &sig, int val, int level);
 
       private:
         std::map<std::string, std::vector<float>> weights_;
         std::map<std::string, int>                tune_;
+        std::map<std::string, int>                tuneLevel_; // op-signature -> Tuning level it was measured at
         bool                                      enabled_ = false; // retain prepacked weights for saving
         mutable bool                              dirty_   = false;
     };
@@ -90,6 +96,27 @@ namespace vknn {
         // tuned on one device must not apply its choices on another; keying the autotune signature by this
         // tag keeps a separate set of tuned entries per device in the same cache file.
         std::string gpuTag;
+
+        // Cache-first autotune reuse decision for a pick site. On a cached entry for `sig`, writes its
+        // chosen value to `out` and returns true when it may be reused: always under Tuning::None (none
+        // runs no new sweep but honors a stored measurement) and otherwise only when the entry was
+        // measured at a level >= the requested one (a fast entry is re-swept for a heavy request). A
+        // miss, a lower cached level, or a null weight cache returns false and the site sweeps (or, under
+        // None, falls back to its default kernel). The site applies any value-specific validity gate.
+        bool reuseTuned(const std::string &sig, int &out) const {
+            if (!weights)
+            {
+                return false;
+            }
+            int level  = -1;
+            int cached = weights->tuned(sig, 0, &level);
+            if (level >= 0 && (tuning == Tuning::None || level >= (int) tuning))
+            {
+                out = cached;
+                return true;
+            }
+            return false;
+        }
 
         // Session-shared compute pipeline, keyed by (shader, buffer count, push-constant size, spec
         // constants). Nodes with the same kernel configuration share one VkPipeline + shader module
