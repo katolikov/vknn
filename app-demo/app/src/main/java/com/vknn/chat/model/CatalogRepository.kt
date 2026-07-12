@@ -1,6 +1,7 @@
 package com.vknn.chat.model
 
 import android.app.Application
+import android.util.Log
 import com.vknn.chat.ChatPromptTemplate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,11 +40,18 @@ class CatalogRepository(private val app: Application) {
         }
 
     private fun refresh() {
-        val json = runCatching { fetch(CATALOG_URL) }.getOrNull() ?: return
+        val json = runCatching { fetch(CATALOG_URL) }.getOrElse {
+            Log.i(TAG, "refresh: fetch failed (${it.javaClass.simpleName}); keeping the current list")
+            return
+        }
         val remote = CatalogManifest.parse(json, knownDialectIds)
-        if (remote.isEmpty()) return // malformed or empty: keep the current effective list
+        if (remote.isEmpty()) {
+            Log.i(TAG, "refresh: manifest empty or malformed; keeping the current list")
+            return // keep the current effective list
+        }
         runCatching { cacheFile.writeText(json) }
         _catalog.value = CatalogManifest.merge(ModelCatalog.BUILTIN, remote)
+        Log.i(TAG, "refresh: ${remote.size} model(s) from remote, effective catalogue ${_catalog.value.size}")
     }
 
     private fun fetch(url: String): String {
@@ -63,5 +71,6 @@ class CatalogRepository(private val app: Application) {
     companion object {
         const val CATALOG_URL = "https://raw.githubusercontent.com/katolikov/vknn/main/app-demo/catalog.json"
         private const val CACHE_NAME = "catalog-cache.json"
+        private const val TAG = "CatalogRepository"
     }
 }
