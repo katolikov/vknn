@@ -83,10 +83,10 @@ namespace vknn {
         std::vector<float> out((size_t) std::max<int64_t>(n, 0));
         if (dt == DType::Float16)
         {
-            const fp16_t *h = reinterpret_cast<const fp16_t *>(hb.bytes.data());
+            const uint8_t *h = hb.bytes.data(); // viewed .vxm payload: unaligned, byte-copy only
             for (int64_t i = 0; i < n; ++i)
             {
-                out[i] = halfToFloat(h[i]);
+                out[i] = halfToFloatAt(h, i);
             }
         } else if (dt == DType::Int64)
         {

@@ -64,8 +64,11 @@ static DmaBuffer allocDmaBuf(size_t bytes) noexcept
     }
     if (::ioctl(heap, kIoctlAlloc, &request) == 0)
     {
-        buffer.fd         = (int) request.fd;
-        buffer.cpuMapping = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, buffer.fd, 0);
+        buffer.fd = (int) request.fd;
+        // mmap reports failure as MAP_FAILED ((void*)-1), not nullptr; normalize it so the caller's
+        // `!cpuMapping` check detects a failed mapping instead of dereferencing (void*)-1.
+        void *mapped      = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, buffer.fd, 0);
+        buffer.cpuMapping = mapped == MAP_FAILED ? nullptr : mapped;
     }
     ::close(heap);
     return buffer;

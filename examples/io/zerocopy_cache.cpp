@@ -213,6 +213,19 @@ struct Decl {
 static bool runMode(Model &net, const Decl &decl, bool zcIn, bool zcOut, const std::vector<IOInfo> &inInfo, const std::vector<IOInfo> &outInfo, const std::vector<std::vector<float>> &refIn, const std::vector<Tensor> &hostOut) {
     std::vector<UserBuf> inBufs, outBufs;
     std::vector<Tensor>  inputs, outputs;
+    // Release every DMA-BUF fd/mmap acquired this call. Used on the success path and on every early
+    // return, so a failed allocation partway through does not leak the buffers already acquired -- this
+    // harness runs many configurations in one process, where such leaks accumulate.
+    auto freeAll = [&]() {
+        for (auto &x: inBufs)
+        {
+            freeDmaBuf(x);
+        }
+        for (auto &x: outBufs)
+        {
+            freeDmaBuf(x);
+        }
+    };
     for (size_t i = 0; i < inInfo.size(); ++i)
     {
         if (zcIn)
@@ -221,6 +234,8 @@ static bool runMode(Model &net, const Decl &decl, bool zcIn, bool zcOut, const s
             if (b.fd < 0 || !b.map)
             {
                 fprintf(stderr, "DMA-BUF alloc failed (need /dev/dma_heap/system; Android only)\n");
+                freeDmaBuf(b); // frees the just-allocated fd if only the mmap failed
+                freeAll();
                 return false;
             }
             packDecl(inInfo[i].shape, decl.fmt, decl.dt, refIn[i].data(), b.map);
@@ -237,6 +252,8 @@ static bool runMode(Model &net, const Decl &decl, bool zcIn, bool zcOut, const s
         if (b.fd < 0 || !b.map)
         {
             fprintf(stderr, "DMA-BUF alloc failed\n");
+            freeDmaBuf(b);
+            freeAll();
             return false;
         }
         outBufs.push_back(b);
@@ -303,14 +320,7 @@ static bool runMode(Model &net, const Decl &decl, bool zcIn, bool zcOut, const s
         }
     }
     printf("    %-8s %s cos=%.5f maxAbsErr=%.3e\n", zcIn && zcOut ? "in+out" : zcIn ? "in-only" : "out-only", ok ? "OK" : "FAIL", worstCos, worstAbs);
-    for (auto &b: inBufs)
-    {
-        freeDmaBuf(b);
-    }
-    for (auto &b: outBufs)
-    {
-        freeDmaBuf(b);
-    }
+    freeAll();
     return ok;
 }
 

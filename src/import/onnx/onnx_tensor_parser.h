@@ -162,9 +162,13 @@ namespace vknn {
                     it = cache.emplace(path, std::move(buf)).first;
                 }
                 const std::vector<uint8_t> &file = it->second;
+                const int64_t               fsz  = (int64_t) file.size();
                 int64_t                     off  = t.extOffset;
-                int64_t                     len  = t.extLength >= 0 ? t.extLength : (int64_t) file.size() - off;
-                if (off < 0 || len < 0 || off + len > (int64_t) file.size())
+                int64_t                     len  = t.extLength >= 0 ? t.extLength : fsz - off;
+                // Compare without forming off+len: a crafted offset/length (both near INT64_MAX) would
+                // overflow that sum to a negative value and slip past a `> fsz` test. off <= fsz makes
+                // `fsz - off` non-negative, so the length test cannot overflow either.
+                if (off < 0 || len < 0 || off > fsz || len > fsz - off)
                 {
                     VKNN_ERROR << "external data range [" << off << "," << off + len << ") out of bounds for '" << t.name << "' (file " << file.size() << " bytes)";
                     return;
@@ -185,7 +189,10 @@ namespace vknn {
                 {
                     if (isType(t.dataType, OnnxType::Float))
                     {
-                        std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t) elems * 4));
+                        // Clamp to the destination byte size, not (size_t)elems*4: a negative elems from an
+                        // overflowed dims product sizes the buffer to 0 (resizeElems) yet casts to a huge
+                        // size_t, so raw bytes would be memcpy'd into an empty destination.
+                        std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), hb.bytes.size()));
                     } else if (isType(t.dataType, OnnxType::Float16))
                     { // decode to fp32 (2 bytes/elem)
                         const uint16_t *s     = reinterpret_cast<const uint16_t *>(t.raw.data());
@@ -302,7 +309,9 @@ namespace vknn {
                 int64_t *dst = hb.i64();
                 if (!t.raw.empty() && isType(t.dataType, OnnxType::Int64))
                 {
-                    std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), (size_t) elems * 8));
+                    // Clamp to the destination byte size (see fillHostFloat): a negative elems must not
+                    // widen the copy length past the 0-byte buffer resizeElems produced.
+                    std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), hb.bytes.size()));
                 } else if (!t.int64Data.empty())
                 {
                     for (int64_t i = 0; i < elems && i < (int64_t) t.int64Data.size(); ++i)

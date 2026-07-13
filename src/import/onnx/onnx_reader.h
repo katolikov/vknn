@@ -13,9 +13,9 @@ namespace vknn {
         /// nested messages). Every accessor advances the internal cursor `p_` past the bytes it
         /// consumes; the caller drives the message by reading a tag() and then either decoding the
         /// value for a field it wants or skip()-ping it. `end_` is one past the last valid byte, so
-        /// `p_ == end_` marks a fully consumed region. No bounds checking is done on value reads: the
-        /// caller is expected to only decode fields whose length the surrounding message vouches for,
-        /// which holds for the well-formed .onnx files this importer targets.
+        /// `p_ == end_` marks a fully consumed region. Every length- or width-consuming read clamps to
+        /// the bytes that remain, so a corrupt or truncated field length reads only what is in range and
+        /// leaves the cursor at `end_` rather than walking past the buffer.
         class Reader {
           public:
             /// Wrap the half-open byte range [p, p + n).
@@ -24,6 +24,11 @@ namespace vknn {
             /// True once the cursor has reached (or passed) the end of the wrapped range.
             bool eof() const {
                 return p_ >= end_;
+            }
+            /// Bytes still readable ahead of the cursor. Clamped at 0 so a cursor already at `end_`
+            /// never yields a wrapped (huge) count from `end_ - p_`.
+            size_t remaining() const {
+                return p_ < end_ ? (size_t) (end_ - p_) : 0;
             }
 
             /// Decode a base-128 varint (protobuf's variable-length integer): 7 payload bits per byte,
@@ -48,6 +53,11 @@ namespace vknn {
             /// unaligned-load UB trap since `p_` is not guaranteed 4-byte aligned within the buffer.
             uint32_t fixed32() {
                 uint32_t v = 0;
+                if (remaining() < 4)
+                {
+                    p_ = end_;
+                    return 0;
+                }
                 std::memcpy(&v, p_, 4);
                 p_ += 4;
                 return v;
@@ -56,6 +66,11 @@ namespace vknn {
             /// fixed32().
             uint64_t fixed64() {
                 uint64_t v = 0;
+                if (remaining() < 8)
+                {
+                    p_ = end_;
+                    return 0;
+                }
                 std::memcpy(&v, p_, 8);
                 p_ += 8;
                 return v;
@@ -79,20 +94,32 @@ namespace vknn {
             /// nested messages (graph, node, tensor) while the parent continues where it left off.
             Reader sub() {
                 uint64_t len = varint();
-                Reader   r(p_, (size_t) len);
+                if (len > remaining())
+                {
+                    len = remaining();
+                }
+                Reader r(p_, (size_t) len);
                 p_ += len;
                 return r;
             }
             /// Read a length-delimited field as a UTF-8 string (names, op types, attribute strings).
             std::string str() {
-                uint64_t    len = varint();
+                uint64_t len = varint();
+                if (len > remaining())
+                {
+                    len = remaining();
+                }
                 std::string s((const char *) p_, (size_t) len);
                 p_ += len;
                 return s;
             }
             /// Read a length-delimited field as raw bytes (packed numeric arrays, raw tensor data).
             std::vector<uint8_t> bytes() {
-                uint64_t             len = varint();
+                uint64_t len = varint();
+                if (len > remaining())
+                {
+                    len = remaining();
+                }
                 std::vector<uint8_t> b(p_, p_ + len);
                 p_ += len;
                 return b;
@@ -108,13 +135,17 @@ namespace vknn {
                         varint();
                         break;
                     case 1:
-                        p_ += 8;
+                        p_ += remaining() < 8 ? remaining() : 8;
                         break;
                     case 5:
-                        p_ += 4;
+                        p_ += remaining() < 4 ? remaining() : 4;
                         break;
                     case 2: {
                         uint64_t l = varint();
+                        if (l > remaining())
+                        {
+                            l = remaining();
+                        }
                         p_ += l;
                         break;
                     }

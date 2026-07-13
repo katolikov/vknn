@@ -32,7 +32,10 @@ namespace vknn {
                     const float       *s = sv.data();
                     for (int64_t c = 0; c < x.c; ++c)
                     {
-                        sp[c] = ns == 1 ? s[0] : s[c];
+                        // A valid per-channel slope has x.c elements (ns==1 is the scalar broadcast); a
+                        // slope tensor shorter than x.c is malformed -- read s[c] only in range and leave
+                        // the rest at the 0 the buffer already holds, rather than read past sv.
+                        sp[c] = ns == 1 ? s[0] : (c < ns ? s[c] : 0.f);
                     }
                     return sp;
                 });

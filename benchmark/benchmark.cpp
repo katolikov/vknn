@@ -892,14 +892,18 @@ int main(int argc, char **argv) {
                 allOk = false;
                 continue;
             }
-            Tensor      g;
-            std::string err;
-            if (!loadNpy(resolve(base, kv.second.asStr("")), g, err))
+            Tensor             g;
+            std::string        err;
+            std::vector<float> of32  = ioToF32(*o);
+            std::string        gpath = resolve(base, kv.second.asStr(""));
+            // A golden may be a .npy or a raw .bin (matching the input loader above); a raw file carries
+            // no shape, so it is read to the output's element count.
+            bool gok = endsWith(gpath, ".npy") ? loadNpy(gpath, g, err) : loadRaw(gpath, (int64_t) of32.size(), g, err);
+            if (!gok)
             {
                 fprintf(stderr, "missing/unreadable golden: %s\n", err.c_str());
                 return 4; // a broken golden must stop the stage, not silently skip the check
             }
-            std::vector<float> of32 = ioToF32(*o);
             Metrics            m    = compareAll(of32.data(), of32.size(), g.data.data(), g.data.size());
             results[kv.first + (sets.size() > 1 ? "_set" + std::to_string(si) : "")] = m;
             bool ok           = m.sizeOk && m.nan == 0 && m.cosine >= tol;

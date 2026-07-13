@@ -102,6 +102,17 @@ namespace vknn {
         return out;
     }
 
+    /// Widen the half at element index `index` of a byte source that carries no alignment guarantee
+    /// (a mapped ".vxm" blob's element offsets are not 2-byte aligned) to float. A plain
+    /// `reinterpret_cast<const fp16_t *>(base)[index]` is a misaligned typed load -- undefined
+    /// behavior, and a fault on strict-alignment targets -- so the two payload bytes are copied into
+    /// an aligned local first, matching the "byte copies only on a viewed payload" ByteStorage contract.
+    inline float halfToFloatAt(const void *base, int64_t index) noexcept {
+        fp16_t h;
+        std::memcpy(&h, static_cast<const uint8_t *>(base) + index * (int64_t) sizeof(fp16_t), sizeof(fp16_t));
+        return halfToFloat(h);
+    }
+
 // Bulk fp16 -> fp32 for contiguous buffers (the flat-output download path, e.g. YOLO's 705K-element
 // detection tensor). AArch64 NEON has a hardware half->single convert (vcvt_f32_f16, baseline
 // ARMv8 - no fp16-arithmetic feature needed), 4 lanes/instr, ~6x the scalar bit-twiddle. Falls back

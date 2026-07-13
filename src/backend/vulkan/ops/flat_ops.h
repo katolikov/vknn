@@ -149,7 +149,7 @@ namespace vknn {
                     {
                         if (hb.bytes.size() >= sizeof(fp16_t))
                         {
-                            cval = halfToFloat(*reinterpret_cast<const fp16_t *>(hb.bytes.data()));
+                            cval = halfToFloatAt(hb.bytes.data(), 0);
                         }
                     } else if (hb.bytes.size() >= sizeof(float))
                     { cval = hb.f32()[0]; }

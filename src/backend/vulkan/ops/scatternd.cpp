@@ -95,7 +95,7 @@ namespace vknn {
                             idxf[(size_t) i] = (float) ib.i64()[i];
                         } else if (idt == DType::Float16)
                         {
-                            idxf[(size_t) i] = halfToFloat(reinterpret_cast<const fp16_t *>(ib.bytes.data())[i]);
+                            idxf[(size_t) i] = halfToFloatAt(ib.bytes.data(), i);
                         } else
                         {
                             idxf[(size_t) i] = ib.f32()[i];
