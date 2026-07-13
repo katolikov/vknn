@@ -352,13 +352,33 @@ namespace vknn {
             {
                 return; // unchanged
             }
-            std::ofstream f(cacheFile_, std::ios::binary | std::ios::trunc);
-            if (!f)
+            // Write a per-process temp file and atomically rename it over the target, so a crash or a
+            // second concurrent writer mid-write leaves the existing cache intact instead of a truncated
+            // (corrupt) file. loadedBytes_ advances only after the write is confirmed and the rename lands.
+            const std::string tmp = cacheFile_ + ".tmp." + std::to_string((long) getpid());
             {
-                VKNN_WARN << "cannot write cache file " << cacheFile_;
+                std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+                if (!f)
+                {
+                    VKNN_WARN << "cannot write cache file " << tmp;
+                    return;
+                }
+                f.write((const char *) out.data(), (std::streamsize) out.size());
+                f.flush();
+                if (!f)
+                {
+                    VKNN_WARN << "failed writing cache file " << tmp;
+                    f.close();
+                    std::remove(tmp.c_str());
+                    return;
+                }
+            }
+            if (std::rename(tmp.c_str(), cacheFile_.c_str()) != 0)
+            {
+                VKNN_WARN << "cannot replace cache file " << cacheFile_;
+                std::remove(tmp.c_str());
                 return;
             }
-            f.write((const char *) out.data(), (std::streamsize) out.size());
             loadedBytes_ = out;
             VKNN_INFO << "Saved cache (" << out.size() << " bytes, " << cacheDoc_.variants.size() << " variant(s)) -> " << cacheFile_;
         }
@@ -1176,6 +1196,15 @@ namespace vknn {
                           << " run(s)) avg ms/run: pack=" << stat_.packMs / n << " submitCall=" << stat_.submitCallMs / n
                           << " fenceWait=" << stat_.fenceWaitMs / n << " gpuBusy=" << stat_.gpuBusyMs / n
                           << " gpuGap=" << stat_.gpuGapMs / n << " unpack=" << stat_.unpackMs / n;
+            }
+            if (!cmds_.empty())
+            {
+                // Command buffers were allocated from the backend's shared runner pool (not owned per
+                // segment), so destroying the segment must free them back or a re-planned/dynamic-shape
+                // run leaks one buffer per chunk into that pool for the backend's life. be_ (and thus the
+                // pool) outlives the segment -- the query-pool destroys below rely on the same fact.
+                vkFreeCommandBuffers(be_->ctx().device(), be_->runner().pool(), (uint32_t) cmds_.size(), cmds_.data());
+                cmds_.clear();
             }
             if (chunkPool_)
             {

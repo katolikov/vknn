@@ -53,7 +53,7 @@ namespace vknn {
                             pv[(size_t) i] = (float) hb.i64()[i];
                         } else if (pdt == DType::Float16)
                         {
-                            pv[(size_t) i] = halfToFloat(reinterpret_cast<const fp16_t *>(hb.bytes.data())[i]);
+                            pv[(size_t) i] = halfToFloatAt(hb.bytes.data(), i);
                         } else
                         {
                             pv[(size_t) i] = hb.f32()[i];

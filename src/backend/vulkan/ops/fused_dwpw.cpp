@@ -92,8 +92,12 @@ namespace vknn {
                     if (node.inputs[2] != kNoTensor)
                     {
                         std::vector<float> sv = initFloats(g, node.inputs[2]);
+                        const int64_t      n  = (int64_t) sv.size();
                         const float       *s  = sv.data();
-                        for (int64_t i = 0; i < E; ++i)
+                        // A well-formed depthwise bias has E elements; clamp to what the payload holds so
+                        // a short (malformed) bias leaves the tail at the zero the buffer already carries
+                        // instead of reading past sv.
+                        for (int64_t i = 0; i < E && i < n; ++i)
                         {
                             b[i] = s[i];
                         }
@@ -105,8 +109,10 @@ namespace vknn {
                     if (node.inputs[4] != kNoTensor)
                     {
                         std::vector<float> sv = initFloats(g, node.inputs[4]);
+                        const int64_t      n  = (int64_t) sv.size();
                         const float       *s  = sv.data();
-                        for (int64_t i = 0; i < Cout; ++i)
+                        // As above: a pointwise bias has Cout elements; clamp to the payload length.
+                        for (int64_t i = 0; i < Cout && i < n; ++i)
                         {
                             b[i] = s[i];
                         }

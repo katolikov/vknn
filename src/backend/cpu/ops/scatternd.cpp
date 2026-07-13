@@ -55,18 +55,30 @@ namespace vknn {
                     for (int64_t r = 0; r < rows; ++r)
                     {
                         // Resolve one q-tuple index row to a flat element offset into data. Each
-                        // component ix<0 wraps by +ds[c] (ONNX per-dim negative indexing).
-                        int64_t off = 0;
-                        for (int c = 0; c < q; ++c)
+                        // component ix<0 wraps by +ds[c] (ONNX per-dim negative indexing). A q wider than
+                        // data's rank, or a component still out of [0,ds[c]) after the wrap, addresses no
+                        // valid element -- skip the row rather than read stride[]/ds[] past their ends or
+                        // write the slice outside the output buffer.
+                        int64_t off     = 0;
+                        bool    inRange = q <= dataRank;
+                        for (int c = 0; c < q && inRange; ++c)
                         {
                             int64_t ix = idx[r * q + c];
                             if (ix < 0)
                             {
                                 ix += ds[c];
                             }
+                            if (ix < 0 || ix >= ds[c])
+                            {
+                                inRange = false;
+                                break;
+                            }
                             off += ix * stride[c];
                         }
-                        std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * sizeof(int64_t));
+                        if (inRange)
+                        {
+                            std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * sizeof(int64_t));
+                        }
                     }
                 } else
                 {
@@ -76,18 +88,30 @@ namespace vknn {
                     for (int64_t r = 0; r < rows; ++r)
                     {
                         // Resolve one q-tuple index row to a flat element offset into data. Each
-                        // component ix<0 wraps by +ds[c] (ONNX per-dim negative indexing).
-                        int64_t off = 0;
-                        for (int c = 0; c < q; ++c)
+                        // component ix<0 wraps by +ds[c] (ONNX per-dim negative indexing). A q wider than
+                        // data's rank, or a component still out of [0,ds[c]) after the wrap, addresses no
+                        // valid element -- skip the row rather than read stride[]/ds[] past their ends or
+                        // write the slice outside the output buffer.
+                        int64_t off     = 0;
+                        bool    inRange = q <= dataRank;
+                        for (int c = 0; c < q && inRange; ++c)
                         {
                             int64_t ix = idx[r * q + c];
                             if (ix < 0)
                             {
                                 ix += ds[c];
                             }
+                            if (ix < 0 || ix >= ds[c])
+                            {
+                                inRange = false;
+                                break;
+                            }
                             off += ix * stride[c];
                         }
-                        std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * sizeof(float));
+                        if (inRange)
+                        {
+                            std::memcpy(y + off, u + r * sliceSize, (size_t) sliceSize * sizeof(float));
+                        }
                     }
                 }
             }

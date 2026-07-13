@@ -92,13 +92,23 @@ namespace vknn { namespace vk {
     }
 
     void CommandRunner::oneShot(const std::function<void(VkCommandBuffer)> &fn) {
-        VkCommandBuffer          cmd = allocate();
-        VkCommandBufferBeginInfo bi {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
-        fn(cmd);
-        VK_CHECK(vkEndCommandBuffer(cmd));
-        submitAndWait(cmd);
+        VkCommandBuffer cmd = allocate();
+        try
+        {
+            VkCommandBufferBeginInfo bi {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
+            fn(cmd);
+            VK_CHECK(vkEndCommandBuffer(cmd));
+            submitAndWait(cmd);
+        } catch (...)
+        {
+            // begin/record/submit can throw (a VK_CHECK on device-lost/OOM, or fn itself). Free the
+            // buffer back to the pool on the exception path too, or a caught-and-retried load-time
+            // error leaks one buffer per call for the runner's life. Mirrors the ctor's cleanup.
+            vkFreeCommandBuffers(ctx_.device(), pool_, 1, &cmd);
+            throw;
+        }
         vkFreeCommandBuffers(ctx_.device(), pool_, 1, &cmd);
     }
 

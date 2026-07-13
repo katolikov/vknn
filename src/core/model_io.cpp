@@ -107,11 +107,40 @@ namespace vknn {
             }
         };
         struct Reader {
-            FILE                   *f;
+            FILE                   *f = nullptr;
             // Sticky short-read flag. Once any fread returns fewer elements than requested it latches
             // false and every later read is skipped, so a truncated file yields zero/default-filled
             // fields instead of reading past EOF; callers gate on this after the whole graph is read.
             bool                    ok = true;
+            off_t                   fsize = -1; // total file size, cached on first remaining() call
+            // Bytes readable from the current position to EOF (0 past end or on error). A length prefix
+            // is validated against this before it sizes an allocation, so a corrupt count field yields a
+            // graceful ok=false rather than a std::bad_alloc/length_error thrown out of the reader.
+            size_t remaining() {
+                if (!f)
+                {
+                    return 0;
+                }
+                off_t cur = ftello(f);
+                if (cur < 0)
+                {
+                    return 0;
+                }
+                if (fsize < 0)
+                {
+                    if (fseeko(f, 0, SEEK_END) != 0)
+                    {
+                        return 0;
+                    }
+                    fsize = ftello(f);
+                    if (fseeko(f, cur, SEEK_SET) != 0)
+                    {
+                        fsize = -1;
+                        return 0;
+                    }
+                }
+                return fsize > cur ? (size_t) (fsize - cur) : 0;
+            }
             template <typename T> T pod() {
                 T v {};
                 ok = ok && fread(&v, sizeof(T), 1, f) == 1;
@@ -127,7 +156,12 @@ namespace vknn {
                 return pod<float>();
             }
             std::string str() {
-                uint32_t    n = u32();
+                uint32_t n = u32();
+                if (n > remaining())
+                { // more chars claimed than the file holds: corrupt length, not a real string
+                    ok = false;
+                    return std::string();
+                }
                 std::string s(n, 0);
                 if (n)
                 {
@@ -136,7 +170,12 @@ namespace vknn {
                 return s;
             }
             template <typename T> std::vector<T> vec() {
-                uint32_t       n = u32();
+                uint32_t n = u32();
+                if ((size_t) n * sizeof(T) > remaining())
+                { // more bytes claimed than remain in the file: corrupt count, allocate nothing
+                    ok = false;
+                    return std::vector<T>();
+                }
                 std::vector<T> v(n);
                 if (n)
                 {
@@ -211,6 +250,11 @@ namespace vknn {
         // rebuild the derived name index. Initializers are read separately by the caller.
         void readGraphStructure(Reader &r, Graph &g) {
             uint32_t nt = r.u32();
+            if (nt > r.remaining())
+            { // each tensor serializes to >= 1 byte, so a count past the file's byte budget is corrupt
+                r.ok = false;
+                return;
+            }
             g.tensors.resize(nt);
             for (uint32_t i = 0; i < nt; ++i)
             {
@@ -231,6 +275,11 @@ namespace vknn {
                 }
             }
             uint32_t nn = r.u32();
+            if (nn > r.remaining())
+            { // likewise bound the node count by the bytes that remain
+                r.ok = false;
+                return;
+            }
             g.nodes.resize(nn);
             for (uint32_t i = 0; i < nn; ++i)
             {
@@ -246,7 +295,12 @@ namespace vknn {
                 n.fusedResidual = (TensorId) r.i64();
                 n.fusedBias     = (TensorId) r.i64();
                 uint32_t na     = r.u32();
-                for (uint32_t a = 0; a < na; ++a)
+                if (na > r.remaining())
+                { // each attribute is >= 1 byte; a wild count would otherwise spin or over-allocate
+                    r.ok = false;
+                    return;
+                }
+                for (uint32_t a = 0; a < na && r.ok; ++a)
                 {
                     std::string k = r.str();
                     n.attr.map[k] = readAttr(r);
@@ -485,7 +539,12 @@ namespace vknn {
             Graph g;
             readGraphStructure(r, g);
             uint32_t ni = r.u32();
-            for (uint32_t i = 0; i < ni; ++i)
+            if (ni > r.remaining())
+            { // each initializer record is >= 1 byte; a count past the file is corrupt
+                r.ok = false;
+                ni   = 0;
+            }
+            for (uint32_t i = 0; i < ni && r.ok; ++i)
             {
                 TensorId   id = (TensorId) r.i64();
                 HostBuffer hb;
@@ -543,6 +602,10 @@ namespace vknn {
         // resident memory peaks at one bucket, never at pool + all buckets.
         uint32_t nb = r.u32();
         uint32_t np = r.u32();
+        if (np > r.remaining())
+        { // each pool blob writes at least its 4-byte size field; a count past the file is corrupt
+            return false;
+        }
         std::vector<std::pair<int64_t, uint32_t>> blobs(np); // file offset + byte size per pool blob
         for (uint32_t i = 0; r.ok && i < np; ++i)
         {
@@ -558,9 +621,14 @@ namespace vknn {
             std::string name = r.str();
             Graph       g;
             readGraphStructure(r, g);
-            uint32_t                                   ni = r.u32();
+            uint32_t ni = r.u32();
+            if (ni > r.remaining())
+            { // each ref record is 12 bytes on disk; a count past the file is corrupt
+                r.ok = false;
+                break;
+            }
             std::vector<std::pair<TensorId, uint32_t>> refs(ni);
-            for (uint32_t i = 0; i < ni; ++i)
+            for (uint32_t i = 0; i < ni && r.ok; ++i)
             {
                 TensorId id = (TensorId) r.i64();
                 uint32_t ix = r.u32();

@@ -83,10 +83,16 @@ namespace vknn { namespace vk {
             // Push descriptors bind buffers inline at dispatch time (no descriptor pool/sets to manage),
             // which is why dispatch() can take raw VkBuffers. Requires VK_KHR_push_descriptor.
             const bool usePush = ctx_.caps().pushDescriptor && ctx_.cmdPushDescriptorSet;
-            if (usePush)
+            if (!usePush)
             {
-                slci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+                // dispatch() binds inputs exclusively through vkCmdPushDescriptorSetKHR; there is no
+                // descriptor-pool/allocate fallback, so a device without VK_KHR_push_descriptor cannot
+                // run this pipeline. Reject it here with the shader named rather than null-calling the
+                // missing function pointer on the first dispatch().
+                VKNN_ERROR << "shader " << shaderName << " requires VK_KHR_push_descriptor, which this device does not expose";
+                throw Error(Status::Unsupported, "shader " + shaderName + " requires VK_KHR_push_descriptor (not available on this device)");
             }
+            slci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
             VK_CHECK(vkCreateDescriptorSetLayout(ctx_.device(), &slci, nullptr, &setLayout_));
 
             // Several kernel PC blocks exceed the 128-byte Vulkan-guaranteed minimum; a range

@@ -9,6 +9,15 @@
 
 namespace vknn {
 
+    // Copy a typed side tensor (scales / oidx / oval / codebook) out of a possibly-unaligned .vxm
+    // initializer view, clamped to the bytes the payload actually holds. A corrupt quantized model
+    // whose K/N/group/nOut attributes imply a larger side tensor than the buffer it stored would
+    // otherwise memcpy past the source view; the clamp copies only the bytes that are present.
+    static void copyQuantSide(void *dst, size_t wantBytes, const HostBuffer &src) {
+        const size_t have = src.bytes.size();
+        std::memcpy(dst, src.bytes.data(), wantBytes < have ? wantBytes : have);
+    }
+
     std::vector<uint8_t> int8Pack(const std::vector<int8_t> &q, int64_t K, int64_t N) {
         const int64_t        rowBytes = int8RowBytes(N);
         std::vector<uint8_t> packed((size_t) (K * rowBytes), 0);
@@ -127,13 +136,13 @@ namespace vknn {
             // Payloads may be unaligned .vxm mmap views; copy the typed side tensors out before the
             // element reads (the packed payload is read byte-wise, which needs no copy).
             std::vector<uint16_t> scales((size_t) (int4GroupCount(K, group) * N));
-            std::memcpy(scales.data(), scaleHb.bytes.data(), scales.size() * 2);
+            copyQuantSide(scales.data(), scales.size() * 2, scaleHb);
             std::vector<int32_t>  oidx((size_t) nOut);
             std::vector<uint16_t> oval((size_t) (nOut * N));
             if (nOut > 0)
             {
-                std::memcpy(oidx.data(), g.initializers.at(oidxId).bytes.data(), oidx.size() * 4);
-                std::memcpy(oval.data(), g.initializers.at(ovalId).bytes.data(), oval.size() * 2);
+                copyQuantSide(oidx.data(), oidx.size() * 4, g.initializers.at(oidxId));
+                copyQuantSide(oval.data(), oval.size() * 2, g.initializers.at(ovalId));
             }
             std::vector<float> w;
             if (format == kWqFormatInt4)
@@ -147,7 +156,7 @@ namespace vknn {
             } else // kWqFormatLut4
             {
                 std::vector<uint16_t> codebook(16);
-                std::memcpy(codebook.data(), g.initializers.at(lutId).bytes.data(), codebook.size() * 2);
+                copyQuantSide(codebook.data(), codebook.size() * 2, g.initializers.at(lutId));
                 w = lut4Dequant(packedHb.bytes.data(), codebook.data(), scales.data(),
                                 nOut > 0 ? oidx.data() : nullptr, nOut > 0 ? oval.data() : nullptr, K, N,
                                 group, nOut);
