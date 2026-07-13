@@ -51,6 +51,10 @@ namespace vknn {
         for (int64_t j = 0; j < nOut; ++j)
         {
             const int64_t k = oidx[j];
+            if (k < 0 || k >= K)
+            {
+                continue; // outlier row index from an untrusted .vxm: w[k*N+n] would be an OOB write
+            }
             for (int64_t n = 0; n < N; ++n)
             {
                 w[(size_t) (k * N + n)] = halfToFloat(oval[(size_t) (j * N + n)]);
@@ -83,6 +87,10 @@ namespace vknn {
         for (int64_t j = 0; j < nOut; ++j)
         {
             const int64_t k = oidx[j];
+            if (k < 0 || k >= K)
+            {
+                continue; // outlier row index from an untrusted .vxm: w[k*N+n] would be an OOB write
+            }
             for (int64_t n = 0; n < N; ++n)
             {
                 w[(size_t) (k * N + n)] = halfToFloat(oval[(size_t) (j * N + n)]);
@@ -117,6 +125,13 @@ namespace vknn {
                                                      " on node " + nd.name +
                                                      " is not supported by this build — reconvert the model or upgrade vknn");
             }
+            // Validate the quant dimensions (from an untrusted .vxm) for EVERY quant node, including the
+            // GPU-native kept-packed ones below: their shader reads `group` directly (vulkan/ops/matmul)
+            // and would divide by zero on group==0; a negative K/N/nOut sizes a bogus alloc / inverted loop.
+            if (nd.attr.geti(kWqGroup, 1) < 1 || nd.attr.geti(kWqK, 0) < 0 || nd.attr.geti(kWqN, 0) < 0 || nd.attr.geti(kWqNOut, 0) < 0)
+            {
+                throw Error(Status::Unsupported, "corrupt weight-quant dimensions (K/N/group/nOut) on node " + nd.name + " — reconvert the model");
+            }
             if (keepPacked && keepPacked(i, nd))
             {
                 continue;
@@ -143,6 +158,14 @@ namespace vknn {
             {
                 copyQuantSide(oidx.data(), oidx.size() * 4, g.initializers.at(oidxId));
                 copyQuantSide(oval.data(), oval.size() * 2, g.initializers.at(ovalId));
+            }
+            // The packed payload length is decoupled from K/N (both come from node attrs), so a short
+            // payload from a crafted .vxm would make int4At/int8At read past the buffer. Require the
+            // full K*rowBytes before any dequant reads it.
+            const int64_t packedRowBytes = (format == kWqFormatInt8) ? int8RowBytes(N) : int4RowBytes(N);
+            if ((int64_t) packedHb.bytes.size() < K * packedRowBytes)
+            {
+                throw Error(Status::Unsupported, "corrupt model: packed weight payload on node " + nd.name + " is shorter than K*rowBytes — reconvert the model");
             }
             std::vector<float> w;
             if (format == kWqFormatInt4)
