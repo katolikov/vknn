@@ -5,6 +5,7 @@
 #   ./build.sh --android        Android arm64-v8a build (Vulkan backend, NDK toolchain)
 #   ./build.sh --clean          remove build-host + build-android and stop (clean only, no build)
 #   ./build.sh --convert        build only the model compiler (vknn_compile) for the chosen target
+#   ./build.sh --test           build and run the host unit tests only (fast; skips examples/tools)
 #   ./build.sh --docs           build the static documentation site (open docs/site/index.html)
 #   ./build.sh --leakcheck      instrument the whole codebase and run the tests under memory-leak
 #                               detection (Linux: ASan+LeakSanitizer+UBSan; macOS: the `leaks` tool)
@@ -16,20 +17,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-android=0 clean=0 convert_only=0 docs=0 leakcheck=0
+android=0 clean=0 convert_only=0 docs=0 leakcheck=0 test=0
 for a in "$@"; do
   case "$a" in
     --android)   android=1 ;;
     --clean)     clean=1 ;;
     --convert)   convert_only=1 ;;
+    --test)      test=1 ;;
     --docs)      docs=1 ;;
     --leakcheck) leakcheck=1 ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "build.sh: unknown flag '$a' (try --help)" >&2; exit 1 ;;
   esac
 done
 
-if [[ $clean -eq 1 && $android -eq 0 && $convert_only -eq 0 && $docs -eq 0 ]]; then
+if [[ $clean -eq 1 && $android -eq 0 && $convert_only -eq 0 && $docs -eq 0 && $test -eq 0 && $leakcheck -eq 0 ]]; then
   echo ">> clean: removing build-host and build-android"
   rm -rf build-host build-android
   exit 0
@@ -51,6 +53,19 @@ if [[ $docs -eq 1 ]]; then
 fi
 
 jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+
+# --test: build and run just the host unit tests (the vknn_tests target, which pulls in the vknn
+# library). Skips the examples/tools/convert targets, so it is the fast inner loop for test work.
+if [[ $test -eq 1 ]]; then
+  build_dir=build-host
+  [[ $clean -eq 1 ]] && { echo ">> clean: removing $build_dir"; rm -rf "$build_dir"; }
+  echo ">> VKNN host unit tests (build + run)"
+  cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=Release >/dev/null
+  cmake --build "$build_dir" -j"$jobs" --target vknn_tests
+  echo ">> running vknn_tests"
+  "$build_dir/vknn_tests"
+  exit 0
+fi
 
 # --leakcheck: instrument the whole host codebase and run the unit tests under memory-leak detection.
 # Linux: AddressSanitizer + LeakSanitizer + UBSan (leaks AND use-after-free / overflow / UB). macOS has
