@@ -1,6 +1,8 @@
 build/
 build-android/
 build-host/
+build-host-leakcheck/
+leakcheck.log
 *.o
 *.spv
 .DS_Store

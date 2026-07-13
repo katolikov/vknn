@@ -19,10 +19,20 @@ option(VKNN_ENABLE_VULKAN "Build the Vulkan compute backend" ${ANDROID})
 option(VKNN_ENABLE_NEON    "Build NEON-optimized CPU kernels" ${ANDROID})
 option(VKNN_BUILD_TESTS    "Build unit tests" ON)
 option(VKNN_BUILD_EXAMPLES "Build example executables" ON)
+option(VKNN_SANITIZE       "Build with AddressSanitizer + UndefinedBehaviorSanitizer for host memory-safety checking (see build.sh --leakcheck)" OFF)
 
 if(ANDROID)
   message(STATUS "vknn: Android build, ABI=${ANDROID_ABI}, API=${ANDROID_PLATFORM}")
   add_compile_definitions(VKNN_ANDROID=1)
+endif()
+
+# Host memory-safety instrumentation for build.sh --leakcheck. Catches use-after-free, double-free,
+# heap/stack overflow, and undefined behaviour; on Linux, ASan additionally reports leaks (LeakSanitizer).
+# Applied to every target (library, tests, examples) so the whole codebase is instrumented. Host-only.
+if(VKNN_SANITIZE)
+  message(STATUS "vknn: sanitizers ON (address, undefined)")
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=address,undefined)
 endif()
 
 # --- shader compiler (build-time GLSL -> SPIR-V) ---------------------------
