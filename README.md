@@ -51,6 +51,9 @@ Build the engine and tools:
 ```sh
 ./build.sh             # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
 ./build.sh --android   # full engine incl. the Vulkan backend (NDK r27 arm64-v8a)
+./build.sh --convert   # only the model compiler (vknn_compile), for the chosen target
+./build.sh --test      # build + run the host unit tests (fast; skips examples/tools)
+./build.sh --leakcheck # run the tests under memory-leak detection (Linux: ASan+LeakSanitizer+UBSan; macOS: the `leaks` tool)
 ./build.sh --docs      # the static documentation site -> docs/site/index.html
 ```
 

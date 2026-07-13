@@ -103,9 +103,12 @@ output. A naive matmul (1-thread-per-output, memory-bound) is what makes Winogra
 is sound, GEMM quality is the determinant.
 
 Winograd helps deep / square 3×3 (ResNet, DenseNet) but loses on small-channel or spatially-large 3×3,
-so `tuneWino` measures the tiled-GEMM Winograd against the direct kernel **per shape** on scratch buffers
-and caches the winner (like the local-size tune; default `fast` tuning, `setHint(Hint::Winograd,
-Mode::On/Off)` — the runner's `--winograd on|off` — forces it). Effect vs direct-only: DenseNet 15.5→13.9 (flips a tie to a win), Inception 16.0→15.5,
+so `tuneWino` picks Winograd vs the direct kernel by a **deterministic shape rule** (`Cin·Cout ≤ 32768`
+— Winograd's fp16 transform-domain intermediates grow with `Cin·Cout` and go memory-bound above that).
+The rule is applied identically at every `--tuning` level, so the choice (and the output bits) never
+depends on thermal state or measurement noise — only the bit-neutral tile (`RM`) is still timing-raced
+and cached. `setHint(Hint::Winograd, Mode::On/Off)` — the runner's `--winograd on|off` — forces it.
+Effect vs direct-only: DenseNet 15.5→13.9 (flips a tie to a win), Inception 16.0→15.5,
 YOLOv8n 25.8→20.0, ResNet-50 12.6→12.1 (and ~10.5 cool). cosine ≥ 0.9995 throughout.
 
 Several alternative GEMM/Winograd variants regress; they are kept as documented negative results
@@ -172,8 +175,10 @@ The thermal A/B discipline and the byte gates below are committed as scripts, no
 
 - **`benchmark/scripts/gate_op.sh`** — the reusable per-op **device byte gate**. Given a probe ONNX
   (or an `op_test.py`-style `--builder`) it compiles fused vs `--no-fuse-pointwise`, runs both on
-  device with a pinned deterministic config (`--tuning none`, forced `--winograd`), and asserts
-  fused==unfused byte-identity with zero CPU fallback. Pass `--ref-binary <fresh-main vknn_run_io>`
+  device with a pinned config (`--tuning none`, forced `--winograd`), and asserts fused==unfused
+  byte-identity with zero CPU fallback. (The autotuner's output-affecting kernel choices are now
+  deterministic shape rules at every `--tuning` level, so `none`/`fast`/`heavy` are byte-identical;
+  the pin is belt-and-suspenders.) Pass `--ref-binary <fresh-main vknn_run_io>`
   to also cross-compare against main for a no-regression verdict.
   ```bash
   benchmark/scripts/gate_op.sh --onnx probe.onnx --inputs "in0.bin" --device <device-serial>
