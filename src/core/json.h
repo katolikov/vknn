@@ -210,15 +210,32 @@ namespace vknn {
                 i_ += 5;
                 return false;
             }
+            // Malformed bareword (e.g. an unquoted `fast`): consume the token so the enclosing
+            // object()/array() makes forward progress instead of spinning forever on the same char.
+            while (i_ < s_.size() && isalpha((unsigned char) s_[i_]))
+            {
+                ++i_;
+            }
             return false;
         }
         double number() {
             size_t start = i_;
-            while (i_ < s_.size() && (isdigit(s_[i_]) || s_[i_] == '-' || s_[i_] == '+' || s_[i_] == '.' || s_[i_] == 'e' || s_[i_] == 'E'))
+            while (i_ < s_.size() && (isdigit((unsigned char) s_[i_]) || s_[i_] == '-' || s_[i_] == '+' || s_[i_] == '.' || s_[i_] == 'e' || s_[i_] == 'E'))
             {
                 ++i_;
             }
-            return std::stod(s_.substr(start, i_ - start));
+            if (i_ == start)
+            {
+                ++i_; // no numeric character available (malformed) -> guarantee forward progress
+                return 0.0;
+            }
+            try
+            {
+                return std::stod(s_.substr(start, i_ - start));
+            } catch (...)
+            {
+                return 0.0; // empty / non-numeric / overflowing span -> permissive 0, never abort config load
+            }
         }
     };
 

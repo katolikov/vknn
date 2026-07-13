@@ -40,9 +40,9 @@ namespace vknn {
                 // refers to axis `axes[k]` (or axis k when `axes` is absent, per ONNX default).
                 std::vector<int64_t> begin(rank, 0), step(rank, 1);
                 Shape                out = X.shape;
-                for (size_t k = 0; k < starts.size(); ++k)
+                for (size_t k = 0; k < starts.size() && k < ends.size(); ++k)
                 {
-                    int ax = (int) (axes.empty() ? (int64_t) k : axes[k]);
+                    int ax = (int) ((axes.empty() || k >= axes.size()) ? (int64_t) k : axes[k]);
                     if (ax < 0)
                     {
                         ax += rank; // negative axis counts from the end
