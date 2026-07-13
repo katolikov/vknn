@@ -12,10 +12,20 @@
 namespace vknn {
     namespace {
 
-        // Winograd is selected over the direct kernel only when it is at least this much faster. A near-tie
-        // keeps the direct kernel so cross-build timing noise can't flip the choice; the two kernels round
-        // fp16 differently, so a flipped choice would change the output bits run-to-run.
-        constexpr double kWinoMargin = 0.97;
+        // Deterministic Winograd-vs-direct threshold: Winograd is chosen for a fp16 3x3 conv when
+        // Cin*Cout <= this, otherwise the direct kernel. The two kernels round fp16 differently, so the
+        // choice is made from the shape (not a timing race) to keep the output bits identical across
+        // runs and tuning levels; Winograd's fp16 transform-domain intermediates grow with Cin*Cout and
+        // make it memory-bound above this point. Calibrated against the measured conv-suite winners.
+        constexpr int64_t kWinoMaxCinCout = 32768;
+
+        // Deterministic implicit-GEMM-vs-direct threshold: the conv_gemm kernel is chosen only when the
+        // GEMM tiling has enough parallelism to amortize its setup - at least kGemmMinCoutTiles output-
+        // channel tiles (of kConvGemmTileN each) on the N axis and kGemmMinM output rows on the M axis.
+        // Same rationale as Winograd: a deterministic shape rule replaces a timing race so the K-reduction
+        // order (and thus the output bits) never changes with thermal state or tuning level.
+        constexpr int64_t kGemmMinCoutTiles = 8;
+        constexpr int64_t kGemmMinM         = 128;
 
         // Read an advanced kernel hint from the session Config (see include/vknn/config.h).
         inline int cfgHint(const VkOpEnv &env, Hint h) {
@@ -408,114 +418,43 @@ namespace vknn {
                 return best;
             }
 
-            // Race the implicit-GEMM kernel (conv_gemm.comp, at its heuristic M tile) against the
-            // best direct configuration for this shape: 0 = direct, else the winning M tile. This is
-            // how ConvGemm serves a shape without the opt-in convert-time lowering. The two kernels
-            // reduce K in different orders (fp16-floor equivalent, not byte-identical), so the race
-            // runs only under Tuning::Fast/Heavy — Tuning::None keeps the legacy direct kernels —
-            // with the same anti-noise margin as Winograd, and the winner persists in the tune cache
-            // so warm runs are stable. `dchoice` is the direct race's winner (0 = plain direct,
-            // conv_reg's OCB, or kChoiceLds3x3), so the gemm kernel is timed against the
-            // configuration that would actually run.
+            // Decide the implicit-GEMM kernel (conv_gemm.comp, at its heuristic M tile) vs the direct
+            // kernel for this shape: 0 = direct, else the M tile. This is how ConvGemm serves a shape
+            // without the opt-in convert-time lowering. The two kernels reduce K in different orders
+            // (fp16-floor equivalent, not byte-identical), so the choice is made by a deterministic
+            // shape rule, NOT a timing race: a timing race lets thermal/DVFS noise flip the winner
+            // between cold sweeps, which would change the output bits run-to-run and make --tuning
+            // alter the result. The rule holds at every tuning level (None included), independent of
+            // thermal and cache, so the output is byte-identical across runs and tuning levels.
+            // `dchoice` is the direct race's winner (0 = plain direct, conv_reg's OCB, or kChoiceLds3x3),
+            // still used to configure the direct kernel when this returns 0.
             int tuneConvGemm(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, int64_t KH, int64_t KW, int dchoice) {
-                // A residual add never takes the gemm path (regardless of any cache).
+                (void) node;
+                (void) env;
+                (void) Coutb;
+                (void) dchoice;
+                // A residual add never takes the gemm path.
                 if (hasRes)
                 {
                     return 0;
                 }
-                int64_t M = y.h * y.w, K = x.c * KH * KW;
+                int64_t M  = y.h * y.w, K = x.c * KH * KW;
                 int     tm = convGemmTileM(M);
+                (void) K;
                 // The gemm kernel tiles M on dispatch Y and batch on Z; neither survives the device
                 // group-count limit (the runtime 1-D split only rescues X). An overflowing node keeps
-                // the direct kernels, cache or not.
+                // the direct kernels.
                 if ((M + tm - 1) / tm > 65535 || (Cout + kConvGemmTileN - 1) / kConvGemmTileN > 65535 || x.n > 65535)
                 {
                     return 0;
                 }
-                char buf[128];
-                snprintf(buf, sizeof(buf), "cgemm_direct_%d_%d_%d_%d_%d%d%d", pc.Cin, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
-                std::string sig = env.gpuTag + "/" + buf;
-                int         reuse;
-                if (env.reuseTuned(sig, reuse))
-                {
-                    return reuse;
-                }
-                if (env.tuning == Tuning::None || !env.runner)
-                {
-                    return 0; // no cached choice and no new race -> the legacy direct kernels
-                }
-                int  es = env.useFp16 ? 2 : 4;
-                auto mk = [&](size_t bytes) {
-                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
-                };
-                auto sSrc = mk((size_t) x.n * cBlocks(x.c) * x.h * x.w * 4 * es);
-                auto sDst = mk((size_t) x.n * Coutb * y.h * y.w * 4 * es);
-                auto sWt  = mk((size_t) K * Cout * es); // timing only: the gemm repack happens after a win
-                auto timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int r = 0; r < 8; ++r)
-                    {
-                        rec(cmd);
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
-                };
-                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    double m = 1e30;
-                    for (int k = 0; k < 5; ++k)
-                    {
-                        m = std::min(m, timeIt(rec));
-                    }
-                    return m;
-                };
-                double dms = 1e30;
-                if (dchoice == kChoiceLds3x3)
-                { // the direct race already picked the LDS input-halo 3x3 kernel
-                    int64_t g = x.n * Coutb * ((y.h + 7) / 8) * ((y.w + 7) / 8);
-                    auto    p = env.pipeline("conv3x3_lds_fp16", 4, sizeof(ConvPC));
-                    dms       = bestOf([&](VkCommandBuffer cmd) {
-                        p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), (uint32_t) g);
-                        vk::computeBarrier(cmd);
-                    });
-                } else if (dchoice > 0)
-                { // the direct race already picked conv_reg at this OCB
-                    int64_t HW = y.h * y.w, ocbGroups = (Coutb + dchoice - 1) / dchoice;
-                    auto    p  = env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), {(uint32_t) dchoice});
-                    int64_t tot = x.n * ocbGroups * ((HW + kTile - 1) / kTile);
-                    dms         = bestOf([&](VkCommandBuffer cmd) {
-                        p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(tot, 64));
-                        vk::computeBarrier(cmd);
-                    });
-                } else
-                {
-                    for (uint32_t ls: {64u, 128u, 256u})
-                    {
-                        auto     p  = env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {ls});
-                        uint32_t dg = groups(x.n * Coutb * y.h * y.w, ls);
-                        dms         = std::min(dms, bestOf([&](VkCommandBuffer cmd) {
-                                          p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), dg);
-                                          vk::computeBarrier(cmd);
-                                      }));
-                    }
-                }
-                ConvGemmPC tgpc = {pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, pc.act, 1, pc.actLo, pc.actHi};
-                auto       gp   = env.pipeline(shader("conv_gemm", env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm});
-                uint32_t   ggxT = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
-                uint32_t   ggyT = (uint32_t) ((M + tm - 1) / tm);
-                double     gms  = bestOf([&](VkCommandBuffer cmd) {
-                    gp->dispatch(cmd, {sSrc->handle(), sWt->handle(), bbuf->handle(), sDst->handle()}, &tgpc, sizeof(tgpc), ggxT, ggyT, (uint32_t) x.n);
-                    vk::computeBarrier(cmd);
-                });
-                int choice = (gms < dms * kWinoMargin) ? tm : 0;
-                VKNN_DEBUG << "tuneConvGemm " << sig << " direct=" << dms << " gemm=" << gms << " -> " << choice;
-                if (env.weights)
-                {
-                    env.weights->setTuned(sig, choice, (int) env.tuning);
-                }
-                return choice;
+                // Implicit-GEMM wins only when its M x N tiling has enough parallelism to amortize the
+                // tiled-GEMM setup: at least kGemmMinCoutTiles output-channel tiles (N axis) and
+                // kGemmMinM output rows (M axis). Below that the direct kernel is faster. Measured
+                // winners on the conv suite: every CNN conv stays direct; the wide patch-embed convs
+                // (Cout >= 1024) take implicit-GEMM.
+                const bool useGemm = Cout >= (int64_t) kGemmMinCoutTiles * kConvGemmTileN && M >= kGemmMinM;
+                return useGemm ? tm : 0;
             }
 
             // Autotune the 3x3 conv kernel for THIS shape. Returns 0 = direct, else a Winograd
@@ -534,20 +473,17 @@ namespace vknn {
                     return 2; // force F(4,3) (numerically fine but register-heavy transforms)
                 }
                 bool forceOn = (env.winograd == Mode::On);
-                // The sig depends only on the conv shape, so consult the cache before the deterministic
-                // tile-edge pick and the Winograd-vs-direct race below. A cached choice is reused under
-                // --tuning none, which otherwise keeps the direct (or forced-on) default kernel.
-                char        buf[128];
-                snprintf(buf, sizeof(buf), "wino2_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
-                std::string sig = env.gpuTag + "/" + buf;
-                int         reuse;
-                if (env.reuseTuned(sig, reuse))
+                // Winograd-vs-direct is decided by a DETERMINISTIC shape rule, not a timing race: the
+                // Winograd transform rounds fp16 differently from the direct kernel, so a timing race
+                // lets thermal/DVFS noise flip the winner between cold sweeps, changing the output bits
+                // run-to-run and making --tuning alter the result. Winograd's fp16 transform-domain
+                // intermediates (V, M) grow with Cin*Cout and keep it memory-bound, so it loses to the
+                // direct kernel once Cin*Cout exceeds kWinoMaxCinCout. The rule holds at every tuning
+                // level, independent of thermal and cache. Measured winners on the conv suite:
+                // Cin*Cout <= 32768 takes Winograd, above it stays direct.
+                if (!(forceOn || Cin * Cout <= kWinoMaxCinCout))
                 {
-                    return reuse;
-                }
-                if (env.tuning == Tuning::None || !env.runner)
-                {
-                    return forceOn ? 1 : 0;
+                    return 0;
                 }
                 int64_t Cinb = cBlocks(Cin), Coutb = cBlocks(Cout);
                 // Pick the Winograd output-tile edge (2=F(2,3), 4=F(4,3)) DETERMINISTICALLY from the shape,
@@ -555,79 +491,69 @@ namespace vknn {
                 // F(2,3)/F(4,3) round fp16 differently, so a timing-raced tile breaks bit-exactness (identical
                 // per run and across cache rebuilds). Research cost model C(n) = 2i(n+k-1) + io(n+k-1) +
                 // n(n+k-1)(2n+k-1), k=3, normalized per output tile (n*n): F(4,3)'s 4x FLOP / 0.56x V-M-traffic
-                // saving wins on deep channels, F(2,3)'s smaller transform wins on shallow. Only the (stable)
-                // Winograd-vs-direct decision is left to timing.
+                // saving wins on deep channels, F(2,3)'s smaller transform wins on shallow.
                 auto winoCostPerOut = [&](int n) {
                     double i = (double) Cin, o = (double) Cout, e = n + 2; // n + k - 1, k = 3
                     return (2.0 * i * e + i * o * e + (double) n * e * (2.0 * n + 2.0)) / (double) (n * n);
                 };
-                int     U_ = (winoCostPerOut(4) < winoCostPerOut(2)) ? 4 : 2;
-                int     nPos = (U_ + 2) * (U_ + 2);
-                int64_t nTH = (y.h + U_ - 1) / U_, nTW = (y.w + U_ - 1) / U_, nT = x.n * nTH * nTW;
-                // "wino2": the tuned value is the bitfield (unit + RM + ACC16); the shape-only sig and its
-                // cache consult are above, before the deterministic tile-edge pick.
-                auto mk = [&](size_t bytes) {
-                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
-                };
-                auto                sSrc  = mk((size_t) x.n * Cinb * x.h * x.w * 8);
-                auto                sU    = mk((size_t) nPos * Cout * Cinb * 8);
-                auto                sV    = mk((size_t) nPos * Cinb * nT * 8);
-                auto                sM    = mk((size_t) nPos * nT * Coutb * 8);
-                auto                sBias = mk((size_t) Coutb * 8);
-                auto                sWt   = mk((size_t) Cout * Cinb * 9 * 8);
-                auto                sDst  = mk((size_t) x.n * Coutb * y.h * y.w * 8);
-                ConvPC              dpc = {(int) x.n, (int) Cin, (int) x.h, (int) x.w, (int) Cout, (int) y.h, (int) y.w, 3, 3, 1, 1, 1, 1, 1, 1, act, 0.f, 0.f};
-                WinoInPC            ipc = {(int) x.n, (int) Cin, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
-                WinoGemmPC          gpc = {(int) Cin, (int) Cout, (int) nT};
-                WinoFusedPC         opc = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, act, 0.f, 0.f};
-                auto                inPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC));
-                auto                oPipe  = env.pipeline(U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC));
-                uint32_t            gy     = groups(Coutb, kWinoGemmTileNB);
-                auto                timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int r = 0; r < 8; ++r)
-                    {
-                        rec(cmd);
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
-                };
-                // Min over repeats: the fastest observed time is the least OS-perturbed estimate, so the
-                // direct-vs-Winograd ratio is stable across cold builds instead of flipping on measurement
-                // noise (which would change the selected kernel, and the two round fp16 differently).
-                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    double m = 1e30;
-                    for (int k = 0; k < 5; ++k)
-                    {
-                        m = std::min(m, timeIt(rec));
-                    }
-                    return m;
-                };
-                double dms = 1e30;
-                for (uint32_t ls: {64u, 128u, 256u})
-                { // compare against the direct kernel's best local size
-                    auto     dPipe = env.pipeline("conv_fp16", 4, sizeof(ConvPC), {ls});
-                    uint32_t dg    = groups(x.n * Coutb * y.h * y.w, ls);
-                    dms            = std::min(dms, bestOf([&](VkCommandBuffer cmd) {
-                                       dPipe->dispatch(cmd, {sSrc->handle(), sWt->handle(), sBias->handle(), sDst->handle()}, &dpc, sizeof(dpc), dg);
-                                       vk::computeBarrier(cmd);
-                                                      }));
-                }
-                // Race the {RM, ACC16} wino_gemm variants inside the wino timing (the whole 3-pass
-                // chain per variant, so occupancy interactions with the transforms are captured).
-                // RM is bit-neutral (it only remaps threads to outputs); ACC16 changes the numerics
-                // (fp16-floor legal), so it can only ever be picked by this Fast/Heavy race — the
-                // Tuning::None default stays {RM=4, ACC16=0}.
-                double wms = 1e30;
-                int    bestRm = 4, bestAcc = 0;
-                for (int rm: {4, 8})
+                int U_ = (winoCostPerOut(4) < winoCostPerOut(2)) ? 4 : 2;
+                // RM (wino_gemm tiles/thread) is bit-neutral - it only remaps threads to outputs, so any
+                // choice yields identical output bits; it stays timing-raced for throughput under
+                // Fast/Heavy and is cached, and defaults to 4 under None. ACC16 (fp16 accumulation) is
+                // pinned OFF: the fp16-accumulate variant changes the output bits, so it must never be
+                // selectable or it would reintroduce tuning/thermal-dependent output.
+                char        buf[128];
+                snprintf(buf, sizeof(buf), "winorm_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
+                std::string sig    = env.gpuTag + "/" + buf;
+                int         bestRm = 4;
+                int         reuse;
+                if (env.reuseTuned(sig, reuse) && (reuse == 4 || reuse == 8))
                 {
-                    for (int a16: {0, 1})
+                    bestRm = reuse;
+                } else if (env.tuning != Tuning::None && env.runner)
+                {
+                    int     nPos = (U_ + 2) * (U_ + 2);
+                    int64_t nTH = (y.h + U_ - 1) / U_, nTW = (y.w + U_ - 1) / U_, nT = x.n * nTH * nTW;
+                    auto    mk = [&](size_t bytes) {
+                        return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                    };
+                    auto        sSrc  = mk((size_t) x.n * Cinb * x.h * x.w * 8);
+                    auto        sU    = mk((size_t) nPos * Cout * Cinb * 8);
+                    auto        sV    = mk((size_t) nPos * Cinb * nT * 8);
+                    auto        sM    = mk((size_t) nPos * nT * Coutb * 8);
+                    auto        sBias = mk((size_t) Coutb * 8);
+                    auto        sDst  = mk((size_t) x.n * Coutb * y.h * y.w * 8);
+                    WinoInPC    ipc = {(int) x.n, (int) Cin, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
+                    WinoGemmPC  gpc = {(int) Cin, (int) Cout, (int) nT};
+                    WinoFusedPC opc = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, act, 0.f, 0.f};
+                    auto        inPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC));
+                    auto        oPipe  = env.pipeline(U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC));
+                    uint32_t    gy     = groups(Coutb, kWinoGemmTileNB);
+                    auto        timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                        VkCommandBuffer cmd = env.runner->allocate();
+                        env.runner->begin(cmd);
+                        for (int r = 0; r < 8; ++r)
+                        {
+                            rec(cmd);
+                        }
+                        env.runner->end(cmd);
+                        double ms = env.runner->submitAndWait(cmd);
+                        vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
+                        return ms;
+                    };
+                    auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
+                        double m = 1e30;
+                        for (int k = 0; k < 5; ++k)
+                        {
+                            m = std::min(m, timeIt(rec));
+                        }
+                        return m;
+                    };
+                    // Race only the bit-neutral RM tile; ACC16 is fixed to 0 (fp32 accumulate).
+                    double wms = 1e30;
+                    for (int rm: {4, 8})
                     {
-                        auto     gPipe = env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {(uint32_t) rm, (uint32_t) a16});
+                        auto     gPipe = env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {(uint32_t) rm, 0u});
                         uint32_t gx    = groups(nT, winoGemmTileM(rm));
                         double   ms    = bestOf([&](VkCommandBuffer cmd) {
                             inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
@@ -639,26 +565,18 @@ namespace vknn {
                         });
                         if (ms < wms)
                         {
-                            wms     = ms;
-                            bestRm  = rm;
-                            bestAcc = a16;
+                            wms    = ms;
+                            bestRm = rm;
                         }
                     }
+                    if (env.weights)
+                    {
+                        env.weights->setTuned(sig, bestRm, (int) env.tuning);
+                    }
                 }
-                // Only the cost-model-chosen tile is timed against direct (a timing-raced F-unit would
-                // flip on noise, and the units round fp16 differently). With a persisted tune cache the
-                // wino-vs-direct choice is measured once and reused, so the anti-noise margin would only
-                // cost wins near the tie — drop it to 1.0 there; a cache-less run re-races every load
-                // and keeps kWinoMargin (a noise-flipped choice would change output bits run-to-run).
-                double margin     = (env.weights && env.weights->enabled()) ? 1.0 : kWinoMargin;
-                int    winoChoice = ((U_ == 2) ? 1 : 2) | (bestRm == 8 ? 4 : 0) | (bestAcc != 0 ? 8 : 0);
-                int    choice     = (forceOn || wms < dms * margin) ? winoChoice : 0;
-                VKNN_DEBUG << "tuneWino " << sig << " U=" << U_ << " rm=" << bestRm << " acc16=" << bestAcc << " direct=" << dms << " wino=" << wms << " -> " << choice;
-                if (env.weights)
-                {
-                    env.weights->setTuned(sig, choice, (int) env.tuning);
-                }
-                return choice;
+                int winoChoice = ((U_ == 2) ? 1 : 2) | (bestRm == 8 ? 4 : 0); // ACC16 bit (8) never set
+                VKNN_DEBUG << "tuneWino Cin=" << Cin << " Cout=" << Cout << " U=" << U_ << " rm=" << bestRm << " -> " << winoChoice;
+                return winoChoice;
             }
 
             void prepare(const Node &node, VkOpEnv &env) override {

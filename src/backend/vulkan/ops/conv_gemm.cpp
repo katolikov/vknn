@@ -20,10 +20,9 @@
 namespace vknn {
     namespace {
 
-        // Split-K is selected over the best single-pass tile only when it is at least this much
-        // faster: it reorders the fp32 summation (fp16-floor legal), so a near-tie must keep the
-        // single-pass kernel or timing noise would flip the output bits across cold builds.
-        constexpr double kKsplitMargin = 0.97;
+        // Split-K reorders the fp32 summation (fp16-floor legal, not byte-identical), so it is never
+        // auto-selected by a timing race - that would let thermal state change the output bits. The
+        // split-K kernels stay available for an explicit request; pickVariant never chooses them.
 
         // Local workgroup size along x for the split-K reduce pass; matches local_size_x in
         // shaders/conv_gemm_kreduce.comp.
@@ -54,17 +53,19 @@ namespace vknn {
                 chunk     = (int) c;
             }
 
-            // Pick the kernel variant for this shape: returns the M tile (16/32/64), or 1 for
-            // split-K. Tuning::None takes the shape heuristic (bit-neutral); Fast/Heavy race the
-            // tile variants — and split-K on tiny-M/deep-K shapes — min-of-5 x 8 reps on scratch
-            // buffers, and persist the winner so warm runs skip the measurement.
+            // Pick the M tile (16/32/64) for this shape. The M tile is bit-neutral (it only remaps
+            // threads to outputs), so Fast/Heavy race it for throughput and cache the winner; None takes
+            // the shape heuristic. Split-K (value 1) is NEVER auto-selected: it reorders the K summation
+            // (fp16-floor, not byte-identical), so letting a timing race pick it would make the output
+            // depend on thermal state and tuning level. A stale cached split-K value is ignored.
             int pickVariant(VkOpEnv &env, NCHW x, NCHW y, int64_t M, int64_t K, int64_t Cout) {
-                int heur = convGemmTileM(M);
+                (void) K;
+                int  heur = convGemmTileM(M);
                 char buf[112];
                 snprintf(buf, sizeof(buf), "cgemm_%d_%d_%d", (int) M, (int) K, (int) Cout);
                 std::string sig = env.gpuTag + "/" + buf;
                 int         reuse;
-                if (env.reuseTuned(sig, reuse) && reuse > 0)
+                if (env.reuseTuned(sig, reuse) && (reuse == 16 || reuse == 32 || reuse == 64))
                 {
                     return reuse;
                 }
@@ -92,7 +93,7 @@ namespace vknn {
                     return ms;
                 };
                 // Min over repeats: the fastest observed time is the least OS-perturbed estimate,
-                // keeping the cold-run choice stable across builds (see tuneWino).
+                // keeping the cold-run choice stable across builds (bit-neutral, so it never affects output).
                 auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
                     double m = 1e30;
                     for (int k = 0; k < 5; ++k)
@@ -101,9 +102,9 @@ namespace vknn {
                     }
                     return m;
                 };
-                int    best   = heur;
-                double bestMs = 1e30;
-                uint32_t gxT = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
+                int      best   = heur;
+                double   bestMs = 1e30;
+                uint32_t gxT    = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
                 for (int tm: {16, 32, 64})
                 {
                     int64_t gyT = (M + tm - 1) / tm;
@@ -122,34 +123,7 @@ namespace vknn {
                         best   = tm;
                     }
                 }
-                // Split-K candidate: only tiny-M/deep-K shapes (too few M/N tiles to fill the GPU),
-                // and only with the stability margin — it reorders the summation.
-                if (M <= 64 && K >= 1024)
-                {
-                    int S = 0, chunk = 0;
-                    splitGeom(K, S, chunk);
-                    int          tm    = convGemmTileM(M);
-                    auto         sPart = mk((size_t) x.n * S * Coutb * M * 4 * 4);
-                    ConvGemmKsPC tksp  = {pc.C,  pc.H,  pc.W,  pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW,
-                                          pc.SH, pc.SW, pc.PT, pc.PL,   pc.DH, pc.DW, S,     chunk};
-                    ConvGemmKrPC tkrp  = {(int) x.n, pc.Cout, (int) M, S, pc.act, pc.hasBias, pc.actLo, pc.actHi};
-                    auto         pk    = env.pipeline(shader("conv_gemm_ksplit", env.useFp16), 3, sizeof(ConvGemmKsPC), {(uint32_t) tm});
-                    auto         pr    = env.pipeline(shader("conv_gemm_kreduce", env.useFp16), 3, sizeof(ConvGemmKrPC));
-                    uint32_t     gyT   = (uint32_t) ((M + tm - 1) / tm);
-                    uint32_t     rg    = groups(x.n * Coutb * M, kKreduceLocalSize);
-                    double       ms    = bestOf([&](VkCommandBuffer cmd) {
-                        pk->dispatch(cmd, {sSrc->handle(), wt->handle(), sPart->handle()}, &tksp, sizeof(tksp), gxT, gyT, (uint32_t) (x.n * S));
-                        vk::computeBarrier(cmd);
-                        pr->dispatch(cmd, {sPart->handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()}, &tkrp, sizeof(tkrp), rg);
-                        vk::computeBarrier(cmd);
-                    });
-                    if (ms < bestMs * kKsplitMargin)
-                    {
-                        bestMs = ms;
-                        best   = 1;
-                    }
-                }
-                VKNN_DEBUG << "autotune " << sig << " -> " << (best == 1 ? "ksplit" : "tm") << "=" << best;
+                VKNN_DEBUG << "autotune " << sig << " -> tm=" << best;
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, best, (int) env.tuning);
