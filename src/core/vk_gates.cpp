@@ -110,6 +110,19 @@ namespace vknn {
             }
             return true;
         }
+        if (nd.type == OpType::Gemm)
+        {
+            // The GPU Gemm kernel computes only Y = op_transB(B)-form A*B with unit alpha/beta and no
+            // transA. A Gemm carrying alpha/beta != 1 or transA=1 has no GPU path, so refuse it to the
+            // CPU Gemm op (which honors all of alpha/beta/transA/transB) instead of silently dropping
+            // those attributes and returning a wrong result. The common nn.Linear Gemm (alpha=beta=1,
+            // transA=0, transB=1) is unaffected and stays on the GPU.
+            if (nd.attr.getf("alpha", 1.f) != 1.f || nd.attr.getf("beta", 1.f) != 1.f || nd.attr.geti("transA", 0) != 0)
+            {
+                return refuse(whyNot, "Gemm: alpha/beta != 1 or transA set (GPU kernel handles only unit alpha/beta with transA=0)");
+            }
+            return true;
+        }
         if (nd.type == OpType::DepthToSpace)
         {
             // [N,C,H,W] -> [N,C/b^2,H*b,W*b]; flat index-remap kernel. Need 4D and C divisible by b^2.
