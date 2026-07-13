@@ -592,6 +592,9 @@ Vulkan/CPU segments while keeping the output bit-comparable).
       `#include "pw_epilogue.glsl"` under `#ifdef PW_EPI` in the shader (auto-derives the
       `_epi` variants), `PwEpi` wiring in the op, and set the descriptor row's `pwEpilogue`.
       `tools/check_epi_sync.py` enforces the three agree — no CMake stem list to edit.
-- [ ] Add a gtest under `tests/` and run it; diff Vulkan output against the CPU reference
-      (and against `scripts/get_golden.py` for an external check). Confirm the node lands
-      on the GPU with `vknn_compile <model>.onnx out.vxm --support-report r.json`.
+- [ ] Add a gtest under `tests/` and run it with `./build.sh --test` (builds + runs the host unit
+      tests only); diff Vulkan output against the CPU reference (and against `scripts/get_golden.py`
+      for an external check). Confirm the node lands on the GPU with
+      `vknn_compile <model>.onnx out.vxm --support-report r.json`. Before opening a PR,
+      `./build.sh --leakcheck` runs the suite under memory-leak detection (ASan+LeakSanitizer on
+      Linux; the `leaks` tool on macOS).
