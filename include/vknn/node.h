@@ -49,7 +49,10 @@ namespace vknn {
             return n.inputs.size();
         }
         int64_t base = n.attr.geti("pw_opbase", (int64_t) n.inputs.size());
-        return (size_t) (base < 0 ? 0 : base);
+        // Clamp both ends: an out-of-range pw_opbase from a crafted/bit-flipped .vxm must not let a
+        // caller iterate n.inputs past its end (e.g. concat's range-ctor) or before its begin.
+        base = base < 0 ? 0 : base;
+        return (size_t) base < n.inputs.size() ? (size_t) base : n.inputs.size();
     }
 
 } // namespace vknn

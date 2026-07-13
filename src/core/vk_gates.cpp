@@ -103,7 +103,7 @@ namespace vknn {
             // (geometry in a plan SSBO). Two operands, or three when a rank-1 bias is fused in (the
             // _bias kernel binds it as a 4th buffer). Inputs from pw_opbase on are fused
             // pointwise-epilogue operands (bound after the core buffers), not matmul operands.
-            size_t core = nd.attr.has("pw_steps") ? (size_t) nd.attr.geti("pw_opbase", (int64_t) nd.inputs.size()) : nd.inputs.size();
+            size_t core = pwCoreInputs(nd); // hardened: clamps pw_opbase to [0, inputs.size()]
             if (!(core == 2 || (core == 3 && nd.fusedBias != kNoTensor)))
             {
                 return refuse(whyNot, "MatMul: operand count not 2 (or 3 with fused bias)");

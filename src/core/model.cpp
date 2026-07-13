@@ -178,11 +178,10 @@ namespace vknn {
                 result.emplace_back(std::vector<float> {}, o.shape, o.name); // delivered to the caller's fd
             } else
             {
-                // Element count comes from the shape; when the engine returns no shape, derive it from
-                // the raw byte length of the result buffer instead.
-                int64_t      n = o.shape.empty() ? (int64_t) (o.data.size() / sizeof(float)) : elemCount(o.shape);
-                const float *f = o.f32();
-                result.emplace_back(std::vector<float>(f, f + n), o.shape, o.name);
+                // Widen by the declared dtype: a non-fp32 output (fp16 logits, uint8/int64) read as raw
+                // fp32 would 2x/4x-OOB-read its buffer or return garbage. toFloat32 sizes from the
+                // payload length, so it also preserves a rank-0 scalar; the fp32 path stays bit-exact.
+                result.emplace_back(o.toFloat32(), o.shape, o.name);
             }
         }
         return result;

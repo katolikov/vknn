@@ -1737,6 +1737,10 @@ namespace vknn {
                         NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
                         auto        &st      = stagingIn_[tid];
                         size_t       need    = (size_t) (formatElems(declFmt, x) * dtypeSize(declDt));
+                        if (need == 0)
+                        {
+                            continue; // a zero-dim boundary input has no bytes to stage; vkCreateBuffer(size=0) is invalid -> keep the host path
+                        }
                         if (!st || st->bytes() != need)
                         {
                             st = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kAuto);
