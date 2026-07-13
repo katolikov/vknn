@@ -13,8 +13,9 @@
 namespace vknn {
     namespace {
         std::mutex                           g_mu;
-        LogLevel                             g_level = LogLevel::Info;
-        bool                                 g_color = true;
+        LogLevel                             g_level  = LogLevel::Info;
+        bool                                 g_pinned = false; // when set, setLevel() is ignored
+        bool                                 g_color  = true;
         std::unordered_map<std::string, int> g_counts;
         bool                                 g_init = false;
 
@@ -57,8 +58,18 @@ namespace vknn {
 
     void Log::setLevel(LogLevel l) {
         std::lock_guard<std::mutex> g(g_mu);
-        g_init  = true;
+        g_init = true;
+        if (g_pinned)
+        {
+            return; // a pinned threshold overrides programmatic changes (e.g. Config::applyLogLevel)
+        }
         g_level = l;
+    }
+    void Log::pinLevel(LogLevel l) {
+        std::lock_guard<std::mutex> g(g_mu);
+        g_init   = true;
+        g_level  = l;
+        g_pinned = true;
     }
     LogLevel Log::level() {
         std::lock_guard<std::mutex> g(g_mu);

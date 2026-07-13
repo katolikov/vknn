@@ -11,8 +11,13 @@ namespace vknn {
     /// messages below the current level() are dropped.
     class Log {
       public:
-        /// Set the minimum level that emit() will print. Messages below `l` are discarded.
+        /// Set the minimum level that emit() will print. Messages below `l` are discarded. Ignored
+        /// once pinLevel() has fixed the threshold.
         static void setLevel(LogLevel l);
+        /// Fix the threshold to `l` and make every later setLevel() a no-op, so a caller can force a
+        /// level that model-driven Config::applyLogLevel() calls cannot raise back (used by the test
+        /// runner to keep engine diagnostics muted). Process-scoped; there is no unpin.
+        static void pinLevel(LogLevel l);
         /// Current threshold level. Defaults to LogLevel::Info until setLevel() is called.
         static LogLevel level();
         /// Enable or disable ANSI color escapes on the stderr output.
