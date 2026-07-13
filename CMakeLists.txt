@@ -414,5 +414,6 @@ if(VKNN_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletes
   add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
   file(GLOB VKNN_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
   add_executable(vknn_tests ${VKNN_TEST_SRC})
-  target_link_libraries(vknn_tests PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>" gtest gtest_main)
+  # tests/test_main.cpp provides main() (it mutes engine logging by default), so gtest_main is not linked.
+  target_link_libraries(vknn_tests PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>" gtest)
 endif()
