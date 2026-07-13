@@ -68,7 +68,17 @@ namespace vknn {
             // position_ids, attention_mask) are int64: their int->float Cast is a genuine conversion and
             // must survive, or the raw integer bytes reach a float consumer (e.g. the RoPE position feeding
             // the rotary MatMul) and read back as a near-zero denormal.
-            setk(id, g.tensors[id].dtype);
+            DType d = g.tensors[id].dtype;
+            // A uint8/int8 image input is converted to compute-precision float at the device boundary
+            // (its device buffer is float), so a Cast(uint8/int8 -> float) reading it is a redundant
+            // same-data copy (CastOp = vkCmdCopyBuffer over the C=4-padded plane). Seed it as float so
+            // that cast is dropped; int64/int32 index inputs keep their type (their int->float cast is a
+            // genuine conversion).
+            if (d == DType::UInt8 || d == DType::Int8)
+            {
+                d = DType::Float32;
+            }
+            setk(id, d);
         }
         // Forward pass (nodes are topo-ordered after import): assign each output a dtype.
         for (const Node &nd: g.nodes)
