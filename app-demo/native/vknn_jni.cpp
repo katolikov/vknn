@@ -561,12 +561,13 @@ namespace {
         std::unique_ptr<Session> sess;
         std::vector<IOInfo>      visIn, visOut, decIn, decOut;
         std::vector<IOTensor>    dec;     // persistent decoder inputs, re-shaped per call (S=prefill / S=1)
-        std::vector<IOTensor>    embedIn; // single "input_ids" tensor
         std::vector<IOTensor>    visInT;  // single "pixel_values" tensor
         std::vector<IOTensor>    outs;    // last run()'s outputs
+        IOTensor                 imgHidden, imgPos; // image-turn extras: vision features + their row positions
 
         std::vector<int> pastKey, pastVal;
-        int              embIdx = -1, maskIdx = -1, posIdx = -1;
+        int              idsIdx = -1, maskIdx = -1, posIdx = -1;
+        int              imgPrefillBucket = -1; // -1 when the model has no image-prefill bucket
         int              L = 0, kvHeads = 0, C = 0, headDim = 0, H = 0;
         int              prefillS = 0, imgRows = 0, imgSide = 0;
         int64_t          vocab = 0;
@@ -756,9 +757,11 @@ namespace {
             return 0;
         }
 
-        // Prefill one prompt: embed the padded ids, splice image rows over image-token rows, build the
-        // additive mask + clamped positions, run the prefill bucket, and fold the real present rows.
-        // Pad rows are masked causally anyway but are NEVER folded into the cache.
+        // Prefill one prompt: bind the padded ids straight to the decoder (the embedding lookup is fused
+        // in), build the additive mask + clamped positions, run the prefill bucket, and fold the real
+        // present rows. For an image turn the vision features and their row positions are bound too, which
+        // selects the image bucket where an on-GPU ScatterND splices them in. Pad rows are masked causally
+        // anyway but are NEVER folded into the cache.
         int prefill(const int64_t *ids, int nReal, const float *imgEmb, int imgRowsGiven, int64_t imageToken, int64_t padId) {
             if (nReal <= 0 || nReal > prefillS)
             {
@@ -785,37 +788,24 @@ namespace {
             }
             std::vector<int64_t> padded(ids, ids + nReal);
             padded.resize((size_t) prefillS, padId);
-            embedIn[0].shape = {1, (int64_t) prefillS};
-            embedIn[0].data.resize((size_t) prefillS * sizeof(int64_t));
-            std::memcpy(embedIn[0].data.data(), padded.data(), embedIn[0].data.size());
-            if (sess->run(embedIn, outs) != Status::Ok || !outByName("inputs_embeds"))
-            {
-                LOGE("embed run failed");
-                return -1;
-            }
-            const IOTensor *emb = outByName("inputs_embeds");
-            setDecShape(embIdx, {1, (int64_t) prefillS, (int64_t) H}, DType::Float32);
-            std::memcpy(dec[(size_t) embIdx].data.data(), emb->data.data(), (size_t) prefillS * H * sizeof(float));
+            setDecShape(idsIdx, {1, (int64_t) prefillS}, DType::Int64);
+            std::memcpy(dec[(size_t) idsIdx].data.data(), padded.data(), (size_t) prefillS * sizeof(int64_t));
 
-            // Splice: each image-token row takes the next image-embedding row, in order.
-            float *rows   = reinterpret_cast<float *>(dec[(size_t) embIdx].data.data());
-            int    imgRow = 0;
+            // Image turn: the prompt rows holding image tokens. The decoder's on-GPU ScatterND overwrites
+            // those rows of the internally computed token embeddings with the vision feature rows.
+            std::vector<int> imageRows;
             for (int q = 0; q < nReal; ++q)
             {
                 if (ids[q] == imageToken)
                 {
-                    if (!imgEmb || imgRow >= imgRowsGiven)
-                    {
-                        LOGE("prompt has image tokens but no (or too few) image rows (row %d of %d)", imgRow, imgRowsGiven);
-                        return -1;
-                    }
-                    std::memcpy(rows + (size_t) q * H, imgEmb + (size_t) imgRow * H, (size_t) H * sizeof(float));
-                    ++imgRow;
+                    imageRows.push_back(q);
                 }
             }
-            if (imgRow != 0 && imgRow != imgRowsGiven)
+            const bool imageTurn = !imageRows.empty();
+            if (imageTurn && (!imgEmb || (int) imageRows.size() != imgRows || imgRowsGiven < imgRows || imgPrefillBucket < 0))
             {
-                LOGE("prompt consumed %d of %d image rows -- id stream and tile disagree", imgRow, imgRowsGiven);
+                LOGE("image prompt needs %d image rows and an image bucket (have %d tokens / %d given, bucket %d)", imgRows, (int) imageRows.size(), imgRowsGiven, imgPrefillBucket);
+                return -1;
             }
 
             // Additive mask [1,1,S,C+S]: past slots < p visible to every row, new tokens causal.
@@ -840,7 +830,29 @@ namespace {
                 pos[q] = p + (q < nReal ? q : nReal - 1); // pad rows clamp; they are never folded
             }
 
-            if (sess->run(dec, outs) != Status::Ok)
+            // An image turn also binds the vision features and their row positions, landing run() on the
+            // image bucket (the on-GPU ScatterND does the splice); a text turn lands on the plain bucket.
+            std::vector<IOTensor> bound(dec);
+            if (imageTurn)
+            {
+                imgHidden.name  = "image_hidden_states";
+                imgHidden.shape = {1, (int64_t) imgRows, (int64_t) H};
+                imgHidden.dtype = DType::Float32;
+                imgHidden.data.assign(reinterpret_cast<const uint8_t *>(imgEmb), reinterpret_cast<const uint8_t *>(imgEmb) + (size_t) imgRows * H * sizeof(float));
+                imgPos.name  = "image_positions";
+                imgPos.shape = {1, (int64_t) imgRows, 2};
+                imgPos.dtype = DType::Float32;
+                imgPos.data.assign((size_t) imgRows * 2 * sizeof(float), 0);
+                float *positions2d = reinterpret_cast<float *>(imgPos.data.data());
+                for (int i = 0; i < imgRows; ++i)
+                {
+                    positions2d[i * 2 + 0] = 0.0f;                          // batch
+                    positions2d[i * 2 + 1] = (float) imageRows[(size_t) i]; // sequence row overwritten
+                }
+                bound.push_back(imgHidden);
+                bound.push_back(imgPos);
+            }
+            if (sess->run(bound, outs) != Status::Ok)
             {
                 LOGE("prefill run failed");
                 return -1;
@@ -861,27 +873,15 @@ namespace {
             return 0;
         }
 
-        // One decode step: token id -> embedding bucket at S=1 -> decoder S=1 bucket -> logits row.
+        // One decode step: token id -> decoder S=1 bucket (embedding lookup fused in) -> logits row.
         int step(int64_t tok) {
             if (p + 1 > C - 1)
             {
                 LOGE("context full at p=%d", p);
                 return -2;
             }
-            embedIn[0].shape = {1, 1};
-            embedIn[0].data.resize(sizeof(int64_t));
-            std::memcpy(embedIn[0].data.data(), &tok, sizeof(int64_t));
-            if (sess->run(embedIn, outs) != Status::Ok)
-            {
-                return -1;
-            }
-            const IOTensor *emb = outByName("inputs_embeds");
-            if (!emb)
-            {
-                return -1;
-            }
-            setDecShape(embIdx, {1, 1, (int64_t) H}, DType::Float32);
-            std::memcpy(dec[(size_t) embIdx].data.data(), emb->data.data(), (size_t) H * sizeof(float));
+            setDecShape(idsIdx, {1, 1}, DType::Int64);
+            std::memcpy(dec[(size_t) idsIdx].data.data(), &tok, sizeof(int64_t));
             setDecShape(maskIdx, {1, 1, 1, (int64_t) C + 1}, DType::Float32);
             float *m = reinterpret_cast<float *>(dec[(size_t) maskIdx].data.data());
             for (int c = 0; c < C + 1; ++c)
@@ -901,7 +901,7 @@ namespace {
                 const bool rebind = rebindPastNextStep || !cacheOnDevice;
                 if (setDecodeFoldSlot(rebind ? -1 : pendingSlot))
                 {
-                    std::vector<IOTensor> bound {dec[(size_t) embIdx], dec[(size_t) maskIdx], dec[(size_t) posIdx]};
+                    std::vector<IOTensor> bound {dec[(size_t) idsIdx], dec[(size_t) maskIdx], dec[(size_t) posIdx]};
                     if (rebind)
                     {
                         for (int l = 0; l < L; ++l)
@@ -1272,44 +1272,48 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
             return 0;
         }
 
-        // Discover the bucket roles by input names/shapes (see examples/llm/vlm.cpp):
-        // vision "pixel_values" [1,3,IMG,IMG]; embed "input_ids" [1,S] at S=prefill and S=1;
-        // decoder "inputs_embeds" [1,S,H] + mask/positions/past at the same two S values.
-        int          visionB = -1, embedPreB = -1, embedDecB = -1, decPreB = -1, decDecB = -1;
+        // Discover the bucket roles by input names/shapes (see examples/llm/vlm.cpp). The embedding
+        // lookup is fused into the decoders, so a decoder takes input_ids directly; an image turn also
+        // binds image_hidden_states + image_positions, landing run() on the image bucket where an on-GPU
+        // ScatterND does the splice.
+        //   vision "pixel_values"; text-prefill "input_ids"[1,S]; image-prefill = text-prefill's inputs +
+        //   image_hidden_states + image_positions; decode "input_ids"[1,1].
+        int          visionB = -1, textPreB = -1, imgPreB = -1, decDecB = -1;
         const size_t nb = m->sess->bucketCount();
         for (size_t b = 0; b < nb; ++b)
         {
-            std::vector<IOInfo> in = m->sess->inputInfo(b);
+            std::vector<IOInfo> in    = m->sess->inputInfo(b);
+            const int           idsAt = findByName(in, "input_ids");
             if (findByName(in, "pixel_values") >= 0)
             {
                 visionB = (int) b;
-            } else if (in.size() == 1 && in[0].name == "input_ids")
+            } else if (idsAt >= 0)
             {
-                (in[0].shape.back() == 1 ? embedDecB : embedPreB) = (int) b;
-            } else if (findByName(in, "inputs_embeds") >= 0)
-            {
-                const int     ie = findByName(in, "inputs_embeds");
-                const int64_t S  = in[(size_t) ie].shape[1];
+                const int64_t S = in[(size_t) idsAt].shape.back();
                 if (S == 1)
                 {
                     decDecB = (int) b;
+                } else if (findByName(in, "image_hidden_states") >= 0)
+                {
+                    imgPreB     = (int) b;
+                    m->prefillS = (int) S;
                 } else
                 {
-                    decPreB     = (int) b;
+                    textPreB    = (int) b;
                     m->prefillS = (int) S;
                 }
             }
         }
-        if (visionB < 0 || embedPreB < 0 || embedDecB < 0 || decPreB < 0 || decDecB < 0)
+        if (visionB < 0 || textPreB < 0 || decDecB < 0)
         {
-            LOGE("not a vision-decoder multi-graph .vxm (%zu buckets)", nb);
+            LOGE("not a fused vision-decoder .vxm (%zu buckets)", nb);
             delete m;
             return 0;
         }
         m->visIn  = m->sess->inputInfo((size_t) visionB);
         m->visOut = m->sess->outputInfo((size_t) visionB);
-        m->decIn  = m->sess->inputInfo((size_t) decPreB);
-        m->decOut = m->sess->outputInfo((size_t) decPreB);
+        m->decIn  = m->sess->inputInfo((size_t) textPreB);
+        m->decOut = m->sess->outputInfo((size_t) textPreB);
 
         for (int l = 0;; ++l)
         {
@@ -1325,13 +1329,13 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
             m->pastVal.push_back(iv);
         }
         m->L                = (int) m->pastKey.size();
-        m->embIdx           = findByName(m->decIn, "inputs_embeds");
+        m->idsIdx           = findByName(m->decIn, "input_ids");
         m->maskIdx          = findByName(m->decIn, "attention_mask");
         m->posIdx           = findByName(m->decIn, "position_ids");
         const int logitsIdx = findByName(m->decOut, "logits");
-        if (m->L == 0 || m->embIdx < 0 || m->maskIdx < 0 || m->posIdx < 0 || logitsIdx < 0)
+        if (m->L == 0 || m->idsIdx < 0 || m->maskIdx < 0 || m->posIdx < 0 || logitsIdx < 0)
         {
-            LOGE("decoder bucket misses inputs_embeds/attention_mask/position_ids/logits/past");
+            LOGE("decoder bucket misses input_ids/attention_mask/position_ids/logits/past");
             delete m;
             return 0;
         }
@@ -1339,11 +1343,12 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
         m->kvHeads      = (int) ks[1];
         m->C            = (int) ks[2];
         m->headDim      = (int) ks[3];
-        m->H            = (int) m->decIn[(size_t) m->embIdx].shape[2];
-        m->vocab        = m->decOut[(size_t) logitsIdx].shape.back();
         const Shape &vs = m->visOut[0].shape; // [1, imageRows, H]
         m->imgRows      = (int) vs[1];
+        m->H            = (int) vs.back(); // decoder splices the vision features in, so H is the vision width
+        m->vocab        = m->decOut[(size_t) logitsIdx].shape.back();
         m->imgSide      = (int) m->visIn[0].shape.back();
+        m->imgPrefillBucket = imgPreB;
         m->logits.assign((size_t) m->vocab, 0.0f);
 
         m->dec.resize(m->decIn.size());
@@ -1354,9 +1359,6 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeVlmInit(JNIEnv *env, 
             m->dec[i].dtype = m->decIn[i].dtype;
             m->dec[i].data.assign((size_t) m->decIn[i].elems * dtypeSize(m->decIn[i].dtype), 0);
         }
-        m->embedIn.resize(1);
-        m->embedIn[0].name  = "input_ids";
-        m->embedIn[0].dtype = DType::Int64;
         m->visInT.resize(1);
         m->visInT[0].name  = "pixel_values";
         m->visInT[0].shape = m->visIn[0].shape;
