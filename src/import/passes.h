@@ -95,6 +95,12 @@ namespace vknn {
     // Drop initializer payloads no node/output references (folded-chain intermediates, Cast-copied
     // weights' originals) so they are neither serialized to the .vxm nor uploaded at load.
     void pruneDeadInitializers(Graph &g);
+    // Fuse cross-bucket hand-offs in a multi-graph model: when bucket A's graph OUTPUT feeds bucket B's
+    // graph INPUT of the same name, copy A's subgraph into B so the value stays inside one graph on the
+    // GPU (instead of a host round-trip that folds the producer op to the CPU); a fully-absorbed A is
+    // deleted. Model-agnostic (VLM embed->decoder or any chained export); non-chained buckets and
+    // differently-named recurrences (KV cache: present.* vs past_key_values.*) are left untouched.
+    void fuseBucketBoundaries(std::vector<Graph> &buckets, std::vector<std::string> &names);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch = 1;

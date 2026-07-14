@@ -706,6 +706,7 @@ int main(int argc, char **argv) {
         {
             return 2;
         }
+        fuseBucketBoundaries(buckets, graphLabels); // fuse producer->consumer bucket hand-offs onto the GPU
         if (!saveGraphBinBuckets(buckets, graphLabels, out))
         {
             printf("[compile] save failed\n");
@@ -773,6 +774,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        fuseBucketBoundaries(buckets, names); // fuse producer->consumer bucket hand-offs onto the GPU
         if (!saveGraphBinBuckets(buckets, names, out))
         {
             printf("[compile] save failed\n");
@@ -824,6 +826,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        fuseBucketBoundaries(buckets, names); // fuse producer->consumer bucket hand-offs onto the GPU
         if (!saveGraphBinBuckets(buckets, names, out))
         {
             printf("[compile] save failed\n");
