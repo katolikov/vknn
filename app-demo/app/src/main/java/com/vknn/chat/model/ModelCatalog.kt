@@ -92,27 +92,27 @@ object ModelCatalog {
 
     val SMOLVLM2 = ModelSpec(
         id = "smolvlm2",
-        displayName = "SmolVLM2 2.2B",
+        displayName = "SmolVLM2-2.2B-vknn",
         mode = "VLM",
         variant = "fp16",
-        description = "Vision-language model behind the camera coach: describes and reasons about what the camera sees, on the GPU.",
-        repoId = "katolikov/smolvlm2-vknn",
+        description = "Vision-language model behind the camera coach: describes and reasons about what the camera sees, fully on the GPU.",
+        repoId = "katolikov/SmolVLM2-2.2B-vknn",
         repoFile = "smolvlm2-2.2b-fp16.vxm",
-        approxBytes = 4_494_762_454L,
-        sha256 = "8253752554ba36629bea5c0c7868c35cfcd73609eb02090f52bcaceaaf83fe3d",
+        approxBytes = 4_495_215_775L,
+        sha256 = "c977ffdbc83ef3f13b9a66782d0dc15b44ae75849d75e566d3db5db71299dcab",
         auxFiles = listOf("vocab.json", "merges.txt"), // the SmolVLM2 tokenizer rides along with the model
     )
 
     val SMOLVLM2_INT4 = ModelSpec(
         id = "smolvlm2_int4",
-        displayName = "SmolVLM2 2.2B (int4)",
+        displayName = "SmolVLM2-2.2B-vknn (int4)",
         mode = "VLM",
         variant = "int4",
-        description = "Int4-weight SmolVLM2 (calibration-free -Os quantization): the camera coach at ~1/3 the size, same GPU pipeline.",
-        repoId = "katolikov/smolvlm2-vknn",
+        description = "Int4-weight SmolVLM2 (calibration-free -Os quantization): the camera coach at ~1/3 the size, same full-GPU pipeline.",
+        repoId = "katolikov/SmolVLM2-2.2B-vknn",
         repoFile = "smolvlm2-2.2b-i4.vxm",
-        approxBytes = 1_353_832_261L,
-        sha256 = "b2701e53217f3a996f4ff061824ed8b795c2cae3c2935cf99509edaf291f7903",
+        approxBytes = 1_354_375_152L,
+        sha256 = "d8086425dcdde1dacf3173b45d1c7d50e1d241fd878593fd385125bc38c0bbad",
         auxFiles = listOf("vocab.json", "merges.txt"), // shares the SmolVLM2 tokenizer
     )
 
