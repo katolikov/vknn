@@ -1,15 +1,16 @@
 // Device-side GPU loop for a vision-language decoder shipped as ONE multi-graph .vxm: a vision
-// encoder bucket (pixel_values -> image embeddings), token-embedding buckets, and a text-decoder
-// graph at a prefill shape (S tokens in one pass) and a decode shape (S=1), all dispatched by bound
-// input names+shapes over one shared weight pool.
+// encoder bucket (pixel_values -> image features) and text-decoder graphs at a prefill shape (S
+// tokens in one pass) and a decode shape (S=1), all dispatched by bound input names+shapes over one
+// shared weight pool. The token-embedding lookup is fused into the decoders (vknn_compile), so a
+// decoder takes input_ids directly; an image turn also binds the vision features and their row
+// positions, selecting an image-prefill bucket whose on-GPU ScatterND splices the features in.
 //
 // Reads simple commands on stdin, one per line:
 //   i <path>          load a raw fp32 [1,3,IMG,IMG] pixel file and run the vision bucket; the
-//                     resulting image embeddings splice into the next prompt at its image tokens
-//   <id id id ...>    prompt token ids for one turn: token rows come from the embedding bucket,
-//                     each image-token row is replaced by the next image-embedding row, the whole
-//                     prompt prefills in one pass, then greedy/sampled decode streams token ids to
-//                     stdout (one per line) and "END" when the turn finishes
+//                     resulting image features wait for the next prompt's image tokens
+//   <id id id ...>    prompt token ids for one turn: the whole prompt prefills in one pass (image
+//                     tokens get their feature rows spliced in on the GPU), then greedy/sampled
+//                     decode streams token ids to stdout (one per line) and "END" at end of turn
 // The KV cache and the absolute position persist across turns; a host front-end (vlm_host.py)
 // supplies token ids and detokenizes the stream.
 //
@@ -18,8 +19,8 @@
 //            [--no-kv-link]
 //
 // During decode the KV cache is ENGINE-RESIDENT on the S=1 decoder bucket by default
-// (Session::linkOutputToInput): each step binds only embeds/mask/positions and the engine folds the
-// new row in place. The prefill bucket keeps the host cache flow (once per turn), so at each turn
+// (Session::linkOutputToInput): each step binds only input_ids/mask/positions and the engine folds
+// the new row in place. The prefill bucket keeps the host cache flow (once per turn), so at each turn
 // boundary the device state materializes back into the host cache via readResident(). --no-kv-link
 // keeps the host loop everywhere; both paths produce the same token stream.
 //
@@ -165,48 +166,52 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // --- discover the bucket roles by input names/shapes ---------------------------------------
-    // vision:  single input "pixel_values"  [1,3,IMG,IMG]
-    // embed:   single input "input_ids"     [1,S] at S = prefill length and S = 1
-    // decoder: "inputs_embeds" [1,S,H] + "attention_mask" [1,1,S,C+S] + "position_ids" [1,S] +
-    //          past_key_values.<l>.{key,value} [1,KV,C,HD]; S = prefill length and S = 1
-    int          prefillWindow = 0; // sequence length of the widest decoder bucket
-    int          visionBucket = -1, embedPrefillBucket = -1, embedDecodeBucket = -1;
-    int          decoderPrefillBucket = -1, decoderDecodeBucket = -1;
+    // --- discover the bucket roles by input names/shapes -----------------------------------------
+    // The token-embedding lookup is fused into the decoder graphs (vknn_compile), so a decoder takes
+    // input_ids directly and, for an image turn, an on-GPU ScatterND splices the vision features in.
+    //   vision:        single input "pixel_values"    [1,3,IMG,IMG]
+    //   text-prefill:  "input_ids" [1,S] + "attention_mask" + "position_ids" + past_key_values.*
+    //   image-prefill: text-prefill's inputs + "image_hidden_states" [1,K,H] + "image_positions" [1,K,2]
+    //   decode:        "input_ids" [1,1] + mask + positions + past_key_values.*
+    // run() dispatches by the bound input names+shapes: an image turn binds the two image inputs and
+    // lands on the image bucket; a text turn binds neither and lands on the plain text bucket.
+    int          prefillWindow = 0; // sequence length of the prefill decoder buckets
+    int          visionBucket = -1, textPrefillBucket = -1, imagePrefillBucket = -1, decodeBucket = -1;
     const size_t bucketTotal = session->bucketCount();
     for (size_t bucket = 0; bucket < bucketTotal; ++bucket)
     {
         std::vector<IOInfo> inputs = session->inputInfo(bucket);
+        const int           idsAt  = indexOfName(inputs, "input_ids");
         if (indexOfName(inputs, "pixel_values") >= 0)
         {
             visionBucket = (int) bucket;
-        } else if (inputs.size() == 1 && inputs[0].name == "input_ids")
+        } else if (idsAt >= 0)
         {
-            (inputs[0].shape.back() == 1 ? embedDecodeBucket : embedPrefillBucket) = (int) bucket;
-        } else if (indexOfName(inputs, "inputs_embeds") >= 0)
-        {
-            const int     embedsAt = indexOfName(inputs, "inputs_embeds");
-            const int64_t seqLen   = inputs[(size_t) embedsAt].shape[1];
+            const int64_t seqLen = inputs[(size_t) idsAt].shape.back();
             if (seqLen == 1)
             {
-                decoderDecodeBucket = (int) bucket;
+                decodeBucket = (int) bucket;
+            } else if (indexOfName(inputs, "image_hidden_states") >= 0)
+            {
+                imagePrefillBucket = (int) bucket;
+                prefillWindow      = (int) seqLen;
             } else
             {
-                decoderPrefillBucket = (int) bucket;
-                prefillWindow        = (int) seqLen;
+                textPrefillBucket = (int) bucket;
+                prefillWindow     = (int) seqLen;
             }
         }
     }
-    if (visionBucket < 0 || embedPrefillBucket < 0 || embedDecodeBucket < 0 || decoderPrefillBucket < 0 || decoderDecodeBucket < 0)
+    if (visionBucket < 0 || textPrefillBucket < 0 || decodeBucket < 0)
     {
-        fprintf(stderr, "model is not a vision-decoder multi-graph .vxm (need pixel_values / input_ids[1,S]+[1,1] / inputs_embeds prefill+decode buckets; have %zu buckets)\n", bucketTotal);
+        fprintf(stderr, "model is not a fused vision-decoder .vxm (need pixel_values / input_ids[1,S] text-prefill / input_ids[1,1] decode buckets; have %zu buckets)\n", bucketTotal);
         return 2;
     }
 
     const std::vector<IOInfo> visionInputInfo   = session->inputInfo((size_t) visionBucket);
     const std::vector<IOInfo> visionOutputInfo  = session->outputInfo((size_t) visionBucket);
-    const std::vector<IOInfo> decoderInputInfo  = session->inputInfo((size_t) decoderPrefillBucket);
-    const std::vector<IOInfo> decoderOutputInfo = session->outputInfo((size_t) decoderPrefillBucket);
+    const std::vector<IOInfo> decoderInputInfo  = session->inputInfo((size_t) textPrefillBucket);
+    const std::vector<IOInfo> decoderOutputInfo = session->outputInfo((size_t) textPrefillBucket);
 
     // Decoder geometry from the past/present tensors and logits.
     std::vector<int> pastKeyInputIdx, pastValueInputIdx;
@@ -225,37 +230,27 @@ int main(int argc, char **argv) {
         pastValueInputIdx.push_back(valueAt);
     }
     const int numLayers        = (int) pastKeyInputIdx.size();
-    const int embedsInputIdx   = indexOfName(decoderInputInfo, "inputs_embeds");
+    const int inputIdsInputIdx = indexOfName(decoderInputInfo, "input_ids");
     const int maskInputIdx     = indexOfName(decoderInputInfo, "attention_mask");
     const int positionInputIdx = indexOfName(decoderInputInfo, "position_ids");
     const int logitsOutputIdx  = indexOfName(decoderOutputInfo, "logits");
-    if (numLayers == 0 || embedsInputIdx < 0 || maskInputIdx < 0 || positionInputIdx < 0 || logitsOutputIdx < 0)
+    if (numLayers == 0 || inputIdsInputIdx < 0 || maskInputIdx < 0 || positionInputIdx < 0 || logitsOutputIdx < 0)
     {
-        fprintf(stderr, "decoder bucket misses inputs_embeds/attention_mask/position_ids/logits/past\n");
+        fprintf(stderr, "decoder bucket misses input_ids/attention_mask/position_ids/logits/past\n");
         return 2;
     }
     const Shape  &pastShape      = decoderInputInfo[(size_t) pastKeyInputIdx[0]].shape; // [1, KV, C, HD]
     const int     kvHeads        = (int) pastShape[1];
     const int     cacheSlots     = (int) pastShape[2];
     const int     headDim        = (int) pastShape[3];
-    const int     hiddenDim      = (int) decoderInputInfo[(size_t) embedsInputIdx].shape[2];
     const int64_t vocabSize      = decoderOutputInfo[(size_t) logitsOutputIdx].shape.back();
-    const Shape  &visionOutShape = visionOutputInfo[0].shape; // [1, imageRowCount, hiddenDim]
+    const Shape  &visionOutShape = visionOutputInfo[0].shape; // [1, imageRowCount, H]
     const int     imageRowCount  = (int) visionOutShape[1];
-    // The vision and embedding buckets feed rows straight into the decoder's inputs_embeds buffer;
-    // their hidden dim must equal the decoder's or the row copies would over-read their outputs.
-    const std::vector<IOInfo> embedOutputInfo = session->outputInfo((size_t) embedPrefillBucket);
-    if (visionOutShape.back() != hiddenDim || embedOutputInfo.empty() || embedOutputInfo[0].shape.back() != hiddenDim)
-    {
-        fprintf(stderr, "[vlm] hidden-dim mismatch: vision %lld / embed %lld / decoder %d\n", (long long) visionOutShape.back(),
-                (long long) (embedOutputInfo.empty() ? -1 : embedOutputInfo[0].shape.back()), hiddenDim);
-        return 2;
-    }
-    fprintf(stderr, "[vlm] %s: layers=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imageRows=%d\n", argv[1], numLayers, kvHeads, cacheSlots, headDim, hiddenDim, (long long) vocabSize, prefillWindow, imageRowCount);
-    // Every id fed to the embedding bucket indexes its table: the prompt tokens, the --image-token
-    // rows (embedded before the splice overwrites them), and the --eos id (pads the prefill window
-    // and folds into the cache at end of turn). An out-of-range one must fail here with the value
-    // and the vocab size, never reach the engine as a lookup.
+    const int     hiddenDim      = (int) visionOutShape.back(); // decoder splices the vision features in, so H is the vision width
+    fprintf(stderr, "[vlm] %s: layers=%d kv_heads=%d C=%d head_dim=%d H=%d vocab=%lld prefillS=%d imageRows=%d image-prefill=%s\n", argv[1], numLayers, kvHeads, cacheSlots, headDim, hiddenDim, (long long) vocabSize, prefillWindow, imageRowCount, imagePrefillBucket >= 0 ? "yes" : "no");
+    // Every prompt id indexes the fused embedding table (prompt tokens, the --image-token rows whose
+    // embedding the on-GPU splice overwrites, and the --eos pad id). An out-of-range one must fail
+    // here with the value and the vocab size, never reach the engine as a lookup.
     if (eosToken < 0 || eosToken >= vocabSize)
     {
         fprintf(stderr, "--eos %lld is out of range for this model (vocab %lld)\n", (long long) eosToken, (long long) vocabSize);
@@ -287,12 +282,22 @@ int main(int argc, char **argv) {
         decoderInputs[(size_t) inputIdx].data.assign((size_t) numElements(shape) * dtypeSize(dtype), 0);
     };
 
-    std::vector<IOTensor> embedInputs(1), visionInputs(1);
-    embedInputs[0].name   = "input_ids";
-    embedInputs[0].dtype  = DType::Int64;
+    std::vector<IOTensor> visionInputs(1);
     visionInputs[0].name  = "pixel_values";
     visionInputs[0].shape = visionInputInfo[0].shape;
     visionInputs[0].dtype = DType::Float32;
+
+    // Image-turn extras, bound only for a prompt that carries image tokens (which selects the image
+    // bucket). image_hidden_states = the vision features passed straight across; image_positions = the
+    // prompt row each feature overwrites, float [1,K,2] = (batch=0, seq=row) matching the graph's
+    // ScatterND index convention.
+    IOTensor imageHidden, imagePositions;
+    imageHidden.name     = "image_hidden_states";
+    imageHidden.shape    = {1, (int64_t) imageRowCount, (int64_t) hiddenDim};
+    imageHidden.dtype    = DType::Float32;
+    imagePositions.name  = "image_positions";
+    imagePositions.shape = {1, (int64_t) imageRowCount, 2};
+    imagePositions.dtype = DType::Float32;
 
     std::vector<float> imageEmbeddings; // imageRowCount*hiddenDim floats once an image is loaded
     int                absolutePos = 0; // token position across the whole conversation
@@ -312,7 +317,7 @@ int main(int argc, char **argv) {
     // the fold source is always the LAST present row, so both conventions drive the same code.
     int presRowsDecode = 0;
     {
-        const std::vector<IOInfo> decodeOut = session->outputInfo((size_t) decoderDecodeBucket);
+        const std::vector<IOInfo> decodeOut = session->outputInfo((size_t) decodeBucket);
         const int                 presAt    = indexOfName(decodeOut, "present.0.key");
         if (presAt >= 0 && decodeOut[(size_t) presAt].shape.size() == 4)
         {
@@ -330,7 +335,7 @@ int main(int argc, char **argv) {
                 char pastBuf[64], presentBuf[64];
                 pastNameOf(layer, part, pastBuf);
                 presentNameOf(layer, part, presentBuf);
-                if (session->linkOutputToInput((size_t) decoderDecodeBucket, presentBuf, pastBuf, {}) != Status::Ok)
+                if (session->linkOutputToInput((size_t) decodeBucket, presentBuf, pastBuf, {}) != Status::Ok)
                 {
                     fprintf(stderr, "[vlm] KV link setup failed (layer %d); using the host cache loop\n", layer);
                     session->clearLinks();
@@ -359,7 +364,7 @@ int main(int argc, char **argv) {
                 char pastBuf[64], presentBuf[64];
                 pastNameOf(layer, part, pastBuf);
                 presentNameOf(layer, part, presentBuf);
-                const Status st = session->linkOutputToInput((size_t) decoderDecodeBucket, presentBuf, pastBuf, ranges);
+                const Status st = session->linkOutputToInput((size_t) decodeBucket, presentBuf, pastBuf, ranges);
                 if (st != Status::Ok)
                 {
                     fprintf(stderr, "[vlm] KV link update failed for %s -> %s at slot %lld: %s (engine log has the reason)\n", presentBuf, pastBuf, (long long) slot, statusStr(st));
@@ -513,22 +518,10 @@ int main(int argc, char **argv) {
         return scored[nucleus - 1].second;
     };
 
-    // One decode step: token id -> embedding bucket -> decoder S=1 bucket -> logits row.
+    // One decode step: token id -> decoder S=1 bucket (embedding lookup fused in) -> logits row.
     auto decodeOneToken = [&](int64_t tokenId) -> const float * {
-        embedInputs[0].shape = {1, 1};
-        embedInputs[0].data.resize(sizeof(int64_t));
-        std::memcpy(embedInputs[0].data.data(), &tokenId, sizeof(int64_t));
-        if (session->run(embedInputs, outputs) != Status::Ok)
-        {
-            return nullptr;
-        }
-        const IOTensor *embeds = findOutput("inputs_embeds");
-        if (!embeds)
-        {
-            return nullptr;
-        }
-        resizeDecoderInput(embedsInputIdx, {1, 1, hiddenDim}, DType::Float32);
-        std::memcpy(decoderInputs[(size_t) embedsInputIdx].data.data(), embeds->data.data(), (size_t) hiddenDim * sizeof(float));
+        resizeDecoderInput(inputIdsInputIdx, {1, 1}, DType::Int64);
+        std::memcpy(decoderInputs[(size_t) inputIdsInputIdx].data.data(), &tokenId, sizeof(int64_t));
 
         // The token at absolutePos sees the populated cache slots plus itself (appended at column
         // cacheSlots by the in-graph concat).
@@ -552,7 +545,7 @@ int main(int argc, char **argv) {
             const bool rebind = rebindPastNextStep || !cacheOnDevice;
             if (setDecodeFoldSlot(rebind ? -1 : pendingFoldSlot))
             {
-                std::vector<IOTensor> bound {decoderInputs[(size_t) embedsInputIdx], decoderInputs[(size_t) maskInputIdx], decoderInputs[(size_t) positionInputIdx]};
+                std::vector<IOTensor> bound {decoderInputs[(size_t) inputIdsInputIdx], decoderInputs[(size_t) maskInputIdx], decoderInputs[(size_t) positionInputIdx]};
                 if (rebind)
                 {
                     for (int layer = 0; layer < numLayers; ++layer)
@@ -709,52 +702,30 @@ int main(int argc, char **argv) {
 
         std::vector<int64_t> padded(prompt);
         padded.resize((size_t) prefillWindow, eosToken); // pad rows are masked out and never folded
-        embedInputs[0].shape = {1, (int64_t) prefillWindow};
-        embedInputs[0].data.resize((size_t) prefillWindow * sizeof(int64_t));
-        std::memcpy(embedInputs[0].data.data(), padded.data(), embedInputs[0].data.size());
-        if (session->run(embedInputs, outputs) != Status::Ok || !findOutput("inputs_embeds"))
-        {
-            fprintf(stderr, "[vlm] embed run failed\n");
-            return 3;
-        }
-        const IOTensor *promptEmbeds = findOutput("inputs_embeds");
-        resizeDecoderInput(embedsInputIdx, {1, (int64_t) prefillWindow, hiddenDim}, DType::Float32);
-        std::memcpy(decoderInputs[(size_t) embedsInputIdx].data.data(), promptEmbeds->data.data(), (size_t) prefillWindow * hiddenDim * sizeof(float));
-        if (debugStats)
-        {
-            printStats("embed-out", promptEmbeds->f32(), (size_t) prefillWindow * hiddenDim);
-        }
+        resizeDecoderInput(inputIdsInputIdx, {1, (int64_t) prefillWindow}, DType::Int64);
+        std::memcpy(decoderInputs[(size_t) inputIdsInputIdx].data.data(), padded.data(), (size_t) prefillWindow * sizeof(int64_t));
 
-        // Splice: each image-token row takes the next image-embedding row. A prompt whose image
-        // tokens have no (or too few) image rows fails THIS TURN only — like every other turn-level
-        // input error here, it must not kill the persistent process and the conversation's cache.
-        float *embedRows     = reinterpret_cast<float *>(decoderInputs[(size_t) embedsInputIdx].data.data());
-        int    imageRowsUsed = 0;
-        bool   spliceFailed  = false;
+        // Image turn: collect the prompt rows holding image tokens. The decoder's on-GPU ScatterND
+        // overwrites those rows of the (internally computed) token embeddings with the vision feature
+        // rows, so the host only supplies the feature rows and their positions — no host-side splice. A
+        // prompt whose image tokens have no (or the wrong number of) image rows fails THIS TURN only.
+        std::vector<int> imageRows;
         for (int row = 0; row < promptLen; ++row)
         {
             if (prompt[(size_t) row] == imageToken)
             {
-                if (imageEmbeddings.empty() || imageRowsUsed >= imageRowCount)
-                {
-                    fprintf(stderr, "[vlm] prompt has image tokens but no (or too few) image rows (row %d of %d)\n", imageRowsUsed, imageRowCount);
-                    spliceFailed = true;
-                    break;
-                }
-                std::memcpy(embedRows + (size_t) row * hiddenDim, imageEmbeddings.data() + (size_t) imageRowsUsed * hiddenDim, (size_t) hiddenDim * sizeof(float));
-                ++imageRowsUsed;
+                imageRows.push_back(row);
             }
         }
-        if (spliceFailed)
+        const bool imageTurn = !imageRows.empty();
+        if (imageTurn && (imageEmbeddings.empty() || (int) imageRows.size() != imageRowCount || imagePrefillBucket < 0))
         {
+            fprintf(stderr, "[vlm] image prompt needs %d image rows and an image bucket (have %d rows, image bucket %s); turn skipped\n",
+                    imageRowCount, imageEmbeddings.empty() ? 0 : (int) imageRows.size(), imagePrefillBucket >= 0 ? "yes" : "no");
             imageEmbeddings.clear();
             printf("END\n");
             fflush(stdout);
             continue;
-        }
-        if (imageRowsUsed != 0 && imageRowsUsed != imageRowCount)
-        {
-            fprintf(stderr, "[vlm] prompt consumed %d of %d image rows -- id stream and tile disagree\n", imageRowsUsed, imageRowCount);
         }
 
         // Additive mask [1,1,S,C+S]: populated cache slots visible to every row, new tokens causal.
@@ -782,7 +753,24 @@ int main(int argc, char **argv) {
                 positions[row] = absolutePos + (row < promptLen ? row : promptLen - 1); // pad rows clamp; never folded
             }
         }
-        if (session->run(decoderInputs, outputs) != Status::Ok)
+        // Bind the shared decoder inputs; an image turn also binds the vision features and their row
+        // positions, which lands run() on the image bucket where the on-GPU ScatterND does the splice.
+        std::vector<IOTensor> bound(decoderInputs);
+        if (imageTurn)
+        {
+            const uint8_t *featBytes = reinterpret_cast<const uint8_t *>(imageEmbeddings.data());
+            imageHidden.data.assign(featBytes, featBytes + (size_t) imageRowCount * hiddenDim * sizeof(float));
+            imagePositions.data.assign((size_t) imageRowCount * 2 * sizeof(float), 0);
+            float *positions2d = reinterpret_cast<float *>(imagePositions.data.data());
+            for (int i = 0; i < imageRowCount; ++i)
+            {
+                positions2d[i * 2 + 0] = 0.0f;                          // batch
+                positions2d[i * 2 + 1] = (float) imageRows[(size_t) i]; // sequence row overwritten
+            }
+            bound.push_back(imageHidden);
+            bound.push_back(imagePositions);
+        }
+        if (session->run(bound, outputs) != Status::Ok)
         {
             fprintf(stderr, "[vlm] prefill run failed\n");
             return 3;
@@ -801,7 +789,6 @@ int main(int argc, char **argv) {
         const float *logits = logitsOut->f32() + (size_t) (promptLen - 1) * vocabSize;
         if (debugStats)
         {
-            printStats("spliced-embeds", reinterpret_cast<const float *>(decoderInputs[(size_t) embedsInputIdx].data.data()), (size_t) prefillWindow * hiddenDim);
             printStats("prefill-logits", logitsOut->f32(), (size_t) prefillWindow * vocabSize);
             printStats("last-row-logits", logits, (size_t) vocabSize);
             const IOTensor *present0 = findOutput("present.0.key");
