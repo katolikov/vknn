@@ -15,11 +15,17 @@
 // outputs are consumed by other buckets) is deleted. Buckets that are not chained by a matching
 // output/input name — independent dispatch targets, or a recurrence like the KV cache whose names differ
 // (`present.*` out vs `past_key_values.*` in) — are left exactly as they were.
+//
+// A vision-language model has one further hand-off that is NOT a name match: the image encoder's feature
+// rows are written into the token embeddings at the image-placeholder positions. Which rows to overwrite
+// is a run-time fact (it depends on the prompt), so that one is wired as an on-GPU ScatterND — see
+// spliceImageFeatures — into an extra, image-capable copy of the decoder, leaving the original as the
+// text-only path.
 #include "import/passes.h"
 #include "vknn/graph.h"
+#include "vknn/logging.h"
 #include "vknn/node.h"
 #include <algorithm>
-#include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
@@ -58,10 +64,19 @@ namespace vknn {
             }
             std::map<TensorId, TensorId> remap; // src tensor id -> dst tensor id
 
-            // The boundary tensor: dst's existing input tensor, now produced internally by the copy.
+            // The boundary tensor: dst's existing input tensor, now produced internally by the copy. Map
+            // the producer's boundary output onto it — and any other producer tensor sharing that name
+            // (some exports carry an unused value-info placeholder of the same name), so no stray duplicate
+            // is copied in and dst keeps exactly one tensor by that name.
             dst.desc(dstIn).isInput = false;
             dropFromList(dst.inputs, dstIn);
-            remap[srcOut] = dstIn;
+            for (TensorId t = 0; t < (TensorId) src.tensors.size(); ++t)
+            {
+                if (src.desc(t).name == boundary)
+                {
+                    remap[t] = dstIn;
+                }
+            }
 
             // src's graph inputs become dst graph inputs (reuse dst's tensor if it already has that name,
             // e.g. a shared `attention_mask`, so we never add a duplicate boundary input).
@@ -129,6 +144,76 @@ namespace vknn {
             }
             dst.nodes.insert(dst.nodes.begin(), copied.begin(), copied.end());
         }
+
+        // A vision-language model has one more cross-graph hand-off that is NOT a plain name match: the
+        // image encoder's feature rows are written into the token-embedding sequence at the positions of
+        // the image placeholder tokens. Which rows to overwrite is known only at run time (from the
+        // prompt), so this is a scatter, not a name fusion like the embedding lookup above. This helper
+        // wires it as an on-GPU ScatterND inside the decoder: after the merged embedding lookup produces
+        // the token embeddings, ScatterND overwrites the image-token rows with the image features. Two new
+        // graph inputs carry the run-time data — `featureName` (the encoder's feature output, bound across
+        // from the vision graph) and "image_positions" (the row each feature overwrites, computed by the
+        // caller). `embeds` is the decoder's internal token-embedding tensor.
+        void spliceImageFeatures(Graph &dec, TensorId embeds, const std::string &featureName,
+                                 const Shape &featureShape, DType featureDtype) {
+            // Route the embedding lookup's output into a private tensor so ScatterND can read it as its
+            // `data` operand and write the spliced result back into the original `embeds` the decoder body
+            // already consumes (so no downstream node needs rewiring).
+            TensorDesc preDesc    = dec.desc(embeds);
+            preDesc.name          = dec.desc(embeds).name + ".pre_image_splice";
+            preDesc.isInput       = false;
+            preDesc.isOutput      = false;
+            preDesc.isInitializer = false;
+            const TensorId preEmbeds = dec.addTensor(preDesc);
+
+            size_t producerIndex = (size_t) -1;
+            for (size_t i = 0; i < dec.nodes.size(); ++i)
+            {
+                for (TensorId &out: dec.nodes[i].outputs)
+                {
+                    if (out == embeds)
+                    {
+                        out           = preEmbeds;
+                        producerIndex = i;
+                    }
+                }
+            }
+            if (producerIndex == (size_t) -1)
+            {
+                return; // `embeds` is not produced internally; nothing to splice
+            }
+
+            // New graph input 1: the image feature rows, shaped exactly like the vision graph's output so
+            // the caller binds that output straight across.
+            TensorDesc featDesc;
+            featDesc.name          = featureName;
+            featDesc.shape         = featureShape;
+            featDesc.dtype         = featureDtype;
+            featDesc.isInput       = true;
+            const TensorId features = dec.addTensor(featDesc);
+            dec.inputs.push_back(features);
+
+            // New graph input 2: for each feature row, the (batch, sequence) index it overwrites. Shape
+            // [1, K, 2] matches ScatterND's index convention (the last axis addresses the first two axes of
+            // the embeddings). Carried as float: the GPU ScatterND reads a float index activation and
+            // truncates to int, and the caller fills in the image-token row positions (small, exact).
+            const int64_t imageRows = featureShape[1];
+            TensorDesc     posDesc;
+            posDesc.name    = "image_positions";
+            posDesc.shape   = {1, imageRows, 2};
+            posDesc.dtype   = DType::Float32;
+            posDesc.isInput = true;
+            const TensorId positions = dec.addTensor(posDesc);
+            dec.inputs.push_back(positions);
+
+            // out = copy(preEmbeds) with the image-token rows replaced by the feature rows.
+            Node scatter;
+            scatter.type    = OpType::ScatterND;
+            scatter.name    = "image_splice/ScatterND";
+            scatter.inputs  = {preEmbeds, positions, features};
+            scatter.outputs = {embeds};
+            dec.nodes.insert(dec.nodes.begin() + (long) producerIndex + 1, scatter);
+        }
     } // namespace
 
     // Fuse every producer->consumer name hand-off across buckets; delete fully-absorbed producers.
@@ -172,7 +257,7 @@ namespace vknn {
                         continue;
                     }
                     // Copy A into B across this boundary. (A snapshot is taken because merging reads A.)
-                    printf("[fuse] merged bucket %zu into bucket %zu on hand-off '%s'\n", a, b, boundary.c_str());
+                    VKNN_INFO << "fuse: merged bucket " << a << " into bucket " << b << " on hand-off '" << boundary << "'";
                     Graph producer = buckets[a];
                     mergeProducerInto(producer, buckets[b], boundary);
 
@@ -209,6 +294,87 @@ namespace vknn {
                     break;
                 }
             }
+        }
+
+        // Second hand-off class: the vision-language image-feature splice (see spliceImageFeatures). It is
+        // a scatter, not a name match, so it is wired after the name-hand-off merges above. A decoder that
+        // now produces `inputs_embeds` internally (one the embedding lookup was just merged into) and whose
+        // sequence is long enough to hold the image tokens gets an ADDITIONAL, image-capable copy; the
+        // original stays as the text-only decoder. The two are told apart at run time by which inputs the
+        // caller binds — only an image prompt binds the feature and position inputs — so a text-only prompt
+        // dispatches to the plain copy and is byte-identical to the merge, paying nothing for the splice.
+        for (size_t d = 0; d < buckets.size(); ++d)
+        {
+            Graph         &decoder = buckets[d];
+            const TensorId embeds  = decoder.find("inputs_embeds");
+            if (embeds == kNoTensor || inList(decoder.inputs, embeds))
+            {
+                continue; // not a fused decoder: no internal token-embedding tensor to splice into
+            }
+            const Shape &embedsShape = decoder.desc(embeds).shape;
+            if (embedsShape.size() != 3)
+            {
+                continue;
+            }
+            const int64_t seqLen = embedsShape[1];
+            const int64_t hidden = embedsShape[2];
+
+            // Find the image encoder's feature output: another bucket's graph OUTPUT shaped [1, K, hidden]
+            // with K <= seqLen that no bucket consumes as an input. An unconsumed cross-graph output of the
+            // right width is exactly the encoder feature the host used to splice in by hand.
+            std::string featureName;
+            Shape       featureShape;
+            DType       featureDtype = DType::Float32;
+            bool        found        = false;
+            for (size_t v = 0; v < buckets.size() && !found; ++v)
+            {
+                if (v == d)
+                {
+                    continue;
+                }
+                for (const TensorId candidate: buckets[v].outputs)
+                {
+                    const TensorDesc &cd = buckets[v].desc(candidate);
+                    if (cd.shape.size() != 3 || cd.shape[0] != 1 || cd.shape[2] != hidden || cd.shape[1] > seqLen)
+                    {
+                        continue;
+                    }
+                    bool consumedElsewhere = false;
+                    for (size_t c = 0; c < buckets.size() && !consumedElsewhere; ++c)
+                    {
+                        if (c == v)
+                        {
+                            continue;
+                        }
+                        const TensorId cid = buckets[c].find(cd.name);
+                        if (cid != kNoTensor && inList(buckets[c].inputs, cid))
+                        {
+                            consumedElsewhere = true;
+                        }
+                    }
+                    if (consumedElsewhere)
+                    {
+                        continue;
+                    }
+                    featureName  = cd.name;
+                    featureShape = cd.shape;
+                    featureDtype = cd.dtype;
+                    found        = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                continue;
+            }
+
+            // Keep `decoder` as the text-only path; add an image-capable copy right after it.
+            Graph imageDecoder = decoder;
+            spliceImageFeatures(imageDecoder, imageDecoder.find("inputs_embeds"), featureName, featureShape, featureDtype);
+            VKNN_INFO << "fuse: added on-GPU image-feature splice (ScatterND on '" << featureName << "') as an image copy of bucket " << d;
+            buckets.insert(buckets.begin() + (long) d + 1, std::move(imageDecoder));
+            names.insert(names.begin() + (long) d + 1, names[d] + " (image)");
+            ++d; // skip the copy just inserted
         }
     }
 

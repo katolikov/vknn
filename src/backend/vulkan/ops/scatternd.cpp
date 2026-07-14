@@ -1,6 +1,8 @@
 // ScatterND on the FLAT row-major GPU path. Two dispatches: (1) copy data -> out, (2) scatter the
-// updates into out at each index row. The indices operand is a constant int64 initializer here
-// (uploaded as a raw int32 buffer); runtime indices fall back to the CPU op (see supportsNode).
+// updates into out at each index row. The indices operand feeds one float IDX binding either way: a
+// constant int64/float initializer is converted to float and uploaded here, and a runtime float index
+// activation is read straight from its device buffer (the kernel truncates each element to int). Both run
+// on the GPU — nothing falls back for a runtime index (see the gate in vk_gates.cpp).
 #include "flat_ops.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"

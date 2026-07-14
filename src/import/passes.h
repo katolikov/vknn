@@ -99,7 +99,10 @@ namespace vknn {
     // graph INPUT of the same name, copy A's subgraph into B so the value stays inside one graph on the
     // GPU (instead of a host round-trip that folds the producer op to the CPU); a fully-absorbed A is
     // deleted. Model-agnostic (VLM embed->decoder or any chained export); non-chained buckets and
-    // differently-named recurrences (KV cache: present.* vs past_key_values.*) are left untouched.
+    // differently-named recurrences (KV cache: present.* vs past_key_values.*) are left untouched. For a
+    // vision-language model it also adds an image-capable copy of the decoder whose image-token rows are
+    // filled from the encoder features by an on-GPU ScatterND (the position-dependent splice the host used
+    // to do); the original decoder stays as the text-only path.
     void fuseBucketBoundaries(std::vector<Graph> &buckets, std::vector<std::string> &names);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
