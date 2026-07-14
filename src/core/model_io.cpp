@@ -308,6 +308,37 @@ namespace vknn {
             }
             g.inputs  = r.vec<TensorId>();
             g.outputs = r.vec<TensorId>();
+            // Validate every serialized TensorId against the tensor table. createFromVxm marks the
+            // graph pre-optimized, so no later validateGraph runs; an out-of-range id from a crafted or
+            // bit-flipped .vxm (e.g. a node output of 0x40000000) would otherwise be an OOB index into
+            // g.tensors or a derived producer map (a heap write in collectGatherIndexAxisSizes).
+            {
+                const int64_t nt64 = (int64_t) g.tensors.size();
+                auto validId = [&](TensorId id) { return id == kNoTensor || ((int64_t) id >= 0 && (int64_t) id < nt64); };
+                auto validVec = [&](const std::vector<TensorId> &v) {
+                    for (TensorId id: v)
+                    {
+                        if (!validId(id))
+                        {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                for (const Node &n: g.nodes)
+                {
+                    if (!validVec(n.inputs) || !validVec(n.outputs) || !validId(n.fusedResidual) || !validId(n.fusedBias))
+                    {
+                        r.ok = false;
+                        return;
+                    }
+                }
+                if (!validVec(g.inputs) || !validVec(g.outputs))
+                {
+                    r.ok = false;
+                    return;
+                }
+            }
         }
 
         // Atomic publish: a writer opens a sibling ".tmp" path in the same directory and only a fully
@@ -549,6 +580,11 @@ namespace vknn {
                 TensorId   id = (TensorId) r.i64();
                 HostBuffer hb;
                 const uint32_t blobBytes = r.u32();
+                if (blobBytes > r.remaining())
+                {
+                    r.ok = false; // corrupt length: the owned path would allocate up to ~4GB before fread bounds it
+                    break;
+                }
                 const int64_t  blobAt    = (int64_t) ftello(f);
                 if (mapping && blobAt >= 0 && (size_t) blobAt + blobBytes <= mapping->size())
                 {
@@ -610,6 +646,11 @@ namespace vknn {
         for (uint32_t i = 0; r.ok && i < np; ++i)
         {
             uint32_t sz = r.u32();
+            if (sz > r.remaining())
+            {
+                r.ok = false; // corrupt pool-blob size: bound it before it drives an owned-buffer alloc
+                break;
+            }
             blobs[i]    = {(int64_t) ftello(f), sz};
             if (fseeko(f, (off_t) sz, SEEK_CUR) != 0)
             {
@@ -649,7 +690,7 @@ namespace vknn {
                     const uint32_t blobBytes = blobs[ref.second].second;
                     // Every bucket referencing this blob views the SAME mapped bytes: a weight shared by
                     // the prefill and decode plans of one model is materialized zero times, not twice.
-                    if (mapping && (size_t) blobAt + blobBytes <= mapping->size())
+                    if (mapping && blobAt >= 0 && (size_t) blobAt + blobBytes <= mapping->size())
                     {
                         hb.bytes.setView(mapping, mapping->data() + blobAt, blobBytes);
                     } else

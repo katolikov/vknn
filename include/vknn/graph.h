@@ -81,10 +81,18 @@ namespace vknn {
             n                = es > 0 ? (int64_t) (hb.bytes.size() / es) : 0;
         }
         std::vector<float> out((size_t) std::max<int64_t>(n, 0));
+        // Never decode more lanes than the stored blob actually holds: a .vxm / initializer whose
+        // declared shape count exceeds its payload would otherwise read past hb.bytes (heap end, or a
+        // mapped view's end -> SIGBUS). Each branch bounds its loop by the lanes its own read width
+        // covers; any tail beyond the payload stays zero. A well-formed file has lanes(w) == n, so this
+        // is a no-op there. (The else branch reads fp32 because FLOAT/DOUBLE/INT32 all materialize to
+        // fp32 host bytes at import, so its width is 4 regardless of the declared dtype.)
+        const size_t blobBytes = hb.bytes.size();
+        auto         lanes     = [&](size_t w) -> int64_t { return w ? std::min<int64_t>(std::max<int64_t>(n, 0), (int64_t) (blobBytes / w)) : 0; };
         if (dt == DType::Float16)
         {
             const uint8_t *h = hb.bytes.data(); // viewed .vxm payload: unaligned, byte-copy only
-            for (int64_t i = 0; i < n; ++i)
+            for (int64_t i = 0, lim = lanes(2); i < lim; ++i)
             {
                 out[i] = halfToFloatAt(h, i);
             }
@@ -95,7 +103,7 @@ namespace vknn {
             // the flat GPU ops (And / Equal / Where cond) as Int64 -- decode the lanes to fp32 the same way
             // the CPU oracle reads them, so an Int64 constant operand loads its true 0/1 (or index) value.
             const int64_t *v = hb.i64();
-            for (int64_t i = 0; i < n; ++i)
+            for (int64_t i = 0, lim = lanes(8); i < lim; ++i)
             {
                 out[i] = (float) v[i];
             }
@@ -105,14 +113,14 @@ namespace vknn {
             // materializeInitializers, never widened to fp32) decode to integer-valued fp32 -- the same
             // values the earlier fp32-widened storage held, so every reader is unaffected.
             const uint8_t *v = hb.bytes.data();
-            for (int64_t i = 0; i < n; ++i)
+            for (int64_t i = 0, lim = lanes(1); i < lim; ++i)
             {
                 out[i] = (float) v[i];
             }
         } else if (dt == DType::Int8)
         {
             const int8_t *v = reinterpret_cast<const int8_t *>(hb.bytes.data());
-            for (int64_t i = 0; i < n; ++i)
+            for (int64_t i = 0, lim = lanes(1); i < lim; ++i)
             {
                 out[i] = (float) v[i];
             }
@@ -121,7 +129,7 @@ namespace vknn {
             // FLOAT / DOUBLE / INT32 materialize to fp32 host bytes at import, so a plain fp32 read recovers
             // the value.
             const float *f = hb.f32();
-            for (int64_t i = 0; i < n; ++i)
+            for (int64_t i = 0, lim = lanes(4); i < lim; ++i)
             {
                 out[i] = f[i];
             }

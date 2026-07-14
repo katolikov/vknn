@@ -925,7 +925,7 @@ namespace vknn {
                 {
                     continue;
                 }
-                int opbase = (int) nd.attr.geti("pw_opbase", (int64_t) nd.inputs.size());
+                int opbase = (int) pwCoreInputs(nd); // clamped to [0, inputs.size()]; a raw pw_opbase could be negative -> OOB
                 for (int k = opbase; k < (int) nd.inputs.size(); ++k)
                 {
                     if (nd.inputs[k] != kNoTensor)
@@ -2474,8 +2474,9 @@ namespace vknn {
         {
             return {};
         }
-        const float *o = outs[0].f32();
-        return std::vector<float>(o, o + numElements(outs[0].shape));
+        // Widen by declared dtype (fp16/int outputs must not be reinterpreted as raw fp32) and size from
+        // the payload, which also returns the single element of a rank-0 scalar instead of dropping it.
+        return outs[0].toFloat32();
     }
 
 } // namespace vknn

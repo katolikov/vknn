@@ -141,7 +141,11 @@ namespace vknn {
                         // float_data / int32_data arrays; truncated payloads leave a zero tail).
                         HostBuffer hb;
                         TensorProtoParser::fillHostFloat(tp, hb, n);
-                        a.floats.assign(hb.f32(), hb.f32() + n);
+                        // Size the range from the buffer's real length, not the unvalidated `n`: a
+                        // crafted tensor attribute with a negative dims product yields n < 0, and
+                        // hb.f32() + n would form an inverted (last < first) range -> length_error.
+                        // fillHostFloat already sized hb to max(n,0) fp32 elements.
+                        a.floats.assign(hb.f32(), hb.f32() + hb.bytes.size() / sizeof(float));
                     }
                 }
                 node.attr.map[name] = a;

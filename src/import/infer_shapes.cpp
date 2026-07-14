@@ -542,6 +542,10 @@ namespace vknn {
                     {
                         axis += rank;
                     }
+                    if (axis < 0 || axis >= rank)
+                    {
+                        break; // out-of-range axis (untrusted graph): a[axis]/os[axis] would be OOB
+                    }
                     std::vector<int64_t> sp   = readI64Param(g, nd, "split", 1);
                     int64_t              nout = (int64_t) nd.outputs.size();
                     if (sp.empty() && nout > 0)
@@ -956,6 +960,10 @@ namespace vknn {
                         break;
                     }
                     int64_t axis = nd.attr.geti("axis", 1), d0 = 1, d1 = 1;
+                    if (axis < 0)
+                    {
+                        axis += (int64_t) a.size(); // ONNX allows a negative Flatten axis; match cpu/ops/flatten.cpp
+                    }
                     for (int64_t i = 0; i < (int64_t) a.size(); ++i)
                     {
                         (i < axis ? d0 : d1) *= a[i];
@@ -979,9 +987,9 @@ namespace vknn {
                         for (int64_t e = 0; e < parts && e < (int64_t) nd.inputs.size(); ++e)
                         {
                             const Shape &si = SH(nd.inputs[e]);
-                            if (si.empty())
+                            if (si.empty() || axis < 0 || axis >= (int64_t) si.size())
                             {
-                                sum = -1;
+                                sum = -1; // out-of-range axis (untrusted graph): si[axis]/s[axis] would be OOB
                                 break;
                             }
                             sum += si[axis];

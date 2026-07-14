@@ -31,6 +31,9 @@ namespace vknn {
                 {
                     axis += rank;
                 }
+                // Clamp an out-of-range axis (axis < -rank stays negative after the wrap; axis >= rank
+                // from a malformed graph) so X.shape[i] stays in bounds and inner never collapses to 0.
+                axis = std::max<int64_t>(0, std::min(axis, rank > 0 ? rank - 1 : 0));
                 // inner = product of the normalized axes [axis, rank); outer = the
                 // count of independent rows formed by the leading axes [0, axis).
                 int64_t inner = 1;

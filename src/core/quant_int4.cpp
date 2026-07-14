@@ -46,6 +46,10 @@ namespace vknn {
         for (int64_t j = 0; j < nOut; ++j)
         {
             const int64_t k = oidx[j];
+            if (k < 0 || k >= K)
+            {
+                continue; // outlier row index from an untrusted .vxm: w[k*N+n] would be an OOB write
+            }
             for (int64_t n = 0; n < N; ++n)
             {
                 w[(size_t) (k * N + n)] = halfToFloat(oval[(size_t) (j * N + n)]);

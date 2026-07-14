@@ -680,7 +680,9 @@ namespace vknn {
         bool expandMatMulNBits(Graph &g, Node &nd) {
             const int64_t K = nd.attr.geti("K", 0), N = nd.attr.geti("N", 0);
             const int64_t bs = nd.attr.geti("block_size", 0);
-            if (nd.attr.geti("bits", 4) != 4 || K <= 0 || N <= 0 || bs <= 0)
+            // An odd block_size makes blobBytes = bs/2 truncate while (k % bs)/2 reaches blobBytes,
+            // reading one byte past the B_Q4 initializer. ORT only emits power-of-two blocks.
+            if (nd.attr.geti("bits", 4) != 4 || K <= 0 || N <= 0 || bs <= 0 || (bs & 1))
             {
                 return false;
             }

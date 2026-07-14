@@ -2,6 +2,7 @@
 #pragma once
 #include "vknn/tensor.h"
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,64 @@ namespace vknn {
         /// Read-only typed view of `data` as fp32. Same validity requirements as the mutable overload.
         const float *f32() const noexcept {
             return reinterpret_cast<const float *>(data.data());
+        }
+        /// Widen `data` to fp32 host values honoring the declared `dtype`: fp32 is a bit-exact copy;
+        /// fp16 and integer dtypes are widened. The element count is derived from the payload length, so
+        /// a non-fp32 output is neither over-read (as reinterpreting through f32() would 2x/4x-read it)
+        /// nor dropped for a rank-0 scalar. Used at the public output boundary, where callers get fp32.
+        std::vector<float> toFloat32() const {
+            const size_t       es = dtypeSize(dtype);
+            const int64_t      n  = es ? (int64_t) (data.size() / es) : 0;
+            std::vector<float> out((size_t) n);
+            switch (dtype)
+            {
+                case DType::Float16:
+                    halfToFloatBulk(reinterpret_cast<const fp16_t *>(data.data()), out.data(), n);
+                    break;
+                case DType::Int64:
+                {
+                    const int64_t *v = reinterpret_cast<const int64_t *>(data.data());
+                    for (int64_t i = 0; i < n; ++i)
+                    {
+                        out[(size_t) i] = (float) v[i];
+                    }
+                    break;
+                }
+                case DType::Int32:
+                {
+                    const int32_t *v = reinterpret_cast<const int32_t *>(data.data());
+                    for (int64_t i = 0; i < n; ++i)
+                    {
+                        out[(size_t) i] = (float) v[i];
+                    }
+                    break;
+                }
+                case DType::UInt8:
+                {
+                    const uint8_t *v = data.data();
+                    for (int64_t i = 0; i < n; ++i)
+                    {
+                        out[(size_t) i] = (float) v[i];
+                    }
+                    break;
+                }
+                case DType::Int8:
+                {
+                    const int8_t *v = reinterpret_cast<const int8_t *>(data.data());
+                    for (int64_t i = 0; i < n; ++i)
+                    {
+                        out[(size_t) i] = (float) v[i];
+                    }
+                    break;
+                }
+                default: // Float32 (and any dtype materialized to fp32 bytes): bounded bit-exact copy.
+                    if (n > 0)
+                    {
+                        std::memcpy(out.data(), data.data(), (size_t) n * sizeof(float));
+                    }
+                    break;
+            }
+            return out;
         }
     };
 
