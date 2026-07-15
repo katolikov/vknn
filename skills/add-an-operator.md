@@ -6,10 +6,14 @@ optional GPU kernel. The convention is **one operator per file**. Full writeup:
 
 ## The five touch points
 
-1. **`include/vknn/op.h`** — add an `OpType::kFoo` enumerator.
-2. **`src/core/op.cpp`** — map the ONNX op name to `OpType::kFoo` in `opTypeFromOnnx` (and back, if you
-   serialize). List/scalar attributes are read via the helpers there.
-3. **`src/import/passes.cpp`** — add a shape rule for `kFoo` in `inferShapes` so the planner can size
+1. **`include/vknn/op_type.h`** — add an `OpType::Foo` enumerator at the END of the enum (values
+   serialize as raw integers into `.vxm`, so the enum is append-only; a mid-enum insert shifts every
+   later op and corrupts existing compiled models).
+2. **`src/core/op.cpp`** — map the ONNX op name to `OpType::Foo` in `opTypeFromOnnx` and add the
+   `opTypeName` string (logs and the support tools parse it). The importer fills the node's attribute
+   bag generically; ops read attributes with `node.attr.geti()` / `node.attr.getints()`
+   (`include/vknn/attributes.h`).
+3. **`src/import/infer_shapes.cpp`** — add a shape rule for `OpType::Foo` in `inferShapes` so the planner can size
    buffers. (`readI64Param` reads a param from an attribute *or* an initializer.) The Vulkan path
    requires concrete shapes at plan time. The rule must reproduce ONNX's output size for **every**
    shape-affecting attribute, not just the common ones — a conv-family op reads `auto_pad`,
@@ -40,7 +44,7 @@ struct FooCpu : CpuOp {
   }
 };
 }  // namespace
-VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpu);
+VKNN_REGISTER_CPU_OP(OpType::Foo, FooCpu);
 }  // namespace vknn
 ```
 
@@ -50,19 +54,23 @@ VKNN_REGISTER_CPU_OP(OpType::kFoo, FooCpu);
 `record()` (hot path: bind buffers, dispatch). `shader("foo", env.useFp16)` resolves to `foo.spv` /
 `foo_fp16.spv`.
 
+A new `shaders/foo.comp` is picked up by the CMake glob and embedded into the binary — nothing to
+register. Include `precision.glsl` and declare buffers with the `STORE` element type (read with
+`float(buf[i])`, write with `TO_STORE(x)`): that include is what makes the build emit the
+`foo_fp16.spv` variant (`-DUSE_FP16=1`), and the fp16-store contract (`store16.glsl` explicit
+round-to-nearest-even stores) is enforced at configure time by `tools/check_shader_contracts.py`.
+
 ```cpp
 #include "vk_op_common.h"
 
 namespace vknn {
 namespace {
 struct FooOp : VulkanOp {
-  std::unique_ptr<vk::ComputePipeline> pipe;
+  std::shared_ptr<vk::ComputePipeline> pipe;
   uint32_t count = 0;
   void prepare(const Node& node, VkOpEnv& env) override {
     count = (uint32_t)packedElems(env.graph->desc(node.outputs[0]).shape);
-    pipe = std::make_unique<vk::ComputePipeline>(*env.ctx, shader("foo", env.useFp16), 2,
-                                                 sizeof(uint32_t), std::vector<uint32_t>{},
-                                                 env.cache->handle());
+    pipe = env.pipeline(shader("foo", env.useFp16), 2, sizeof(uint32_t), std::vector<uint32_t>{});
   }
   void record(VkCommandBuffer cmd, const Node& node, VkOpEnv& env) override {
     vk::Buffer* src = env.devBuf(node.inputs[0]);   // use operandBuf(...) if an input can be a constant
@@ -71,7 +79,7 @@ struct FooOp : VulkanOp {
   }
 };
 }  // namespace
-VKNN_REGISTER_VK_OP(OpType::kFoo, FooOp);
+VKNN_REGISTER_VK_OP(OpType::Foo, FooOp);
 }  // namespace vknn
 ```
 
@@ -97,6 +105,10 @@ Cross-check the shape rule against `onnx.shape_inference` and the values against
 op's **attribute matrix** (strides, kernels, `auto_pad`, `output_shape`, `output_padding`, dilation,
 group), not a single config — a one-config test passes even when a variant is unhandled. Add a
 self-contained CPU case to `tests/test_ops.cpp` (build a graph, run, assert against a reference).
+
+`scripts/yonosplat/op_validate.py` automates the per-op ORT-vs-VKNN-CPU compare.
+`tools/check_support_consistency.py` (run by `scripts/ci_host.sh`) fails when an OpType mapped in
+`opTypeFromOnnx` has no `VKNN_REGISTER_CPU_OP` registration.
 
 ```sh
 ./build.sh && ./build-host/vknn_tests        # host: passes

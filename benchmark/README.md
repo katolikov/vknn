@@ -14,6 +14,9 @@ that fell back off the requested backend (a release run prints `fallbacks: 0`). 
 model/input/golden stops the run loudly. `--clean` wipes the device work dir first; `--run NAME`
 names the result directory.
 
+`run` rebuilds the Android binaries automatically first (incremental; `--no-build` skips it) and
+converts `.onnx` models on the host — `--convert-on device` compiles on the phone instead.
+
 ## Model files (HuggingFace)
 
 The YoNoSplat encoder is too large for git, so the ONNX + weights + compiled `.vxm` live in a
@@ -36,16 +39,19 @@ the artifacts is a one-time step via `upload_model.py`.
   per-operator profiling.
 - `configs/` — JSON configs (`example.json` two-stage sample, `yonosplat*.json`, …).
 - `scripts/` — helper scripts: `make_golden.py` (golden `.npy` via onnxruntime + a config from an
-  ONNX), `fetch_model.py`, `upload_model.py`, and the pointwise-fusion device gate
-  (`make_pw_probes.py` builds one probe model per producer family; `gate_pw_probes.sh` compiles
-  fused + nofuse, runs both on the device, and byte-compares every output).
+  ONNX), `fetch_model.py`, `upload_model.py`, the device byte gates — `gate_op.sh` (per-op: compiles a probe
+  fused + `--no-fuse-pointwise`, runs both on the device, byte-compares every output, asserts zero
+  CPU fallback), `gate_pw_probes.sh` (the same gate over the pointwise-fusion probe suite;
+  `make_pw_probes.py` builds one probe model per producer family), `gate_lib.sh` (shared gate
+  helpers, sourced) — and `dev_perfab.sh` (cooled, interleaved min-of-N perf A/B of two
+  `vknn_run_io` binaries).
 - **[USAGE.md](USAGE.md)** — full how-to: results layout, the `.npy` mechanism, every config field.
 
 ## Commands
 | command | does |
 |---|---|
-| `run CONFIG.json [--run NAME] [--clean] [-v] [--no-build]` | run every stage on the device |
-| `convert ONNX OUT.vxm [-O 0..3] [--fp32] [--fuse-se] [--fuse-dwpw] [--no-fuse-swish] [--on host\|device]` | standalone convert |
+| `run CONFIG.json [--run NAME] [--clean] [-v] [--no-build] [--convert-on host\|device]` | run every stage on the device |
+| `convert ONNX OUT.vxm [-O 0..3] [--fp32] [--fuse-se] [--fuse-dwpw] [--on host\|device] [--serial S] [--no-build] [-v]` | standalone convert |
 
 A config is a list of independent **stages** (each: `model`, `convert`, `device`, `run`, `inputs`,
 `golden`, `metrics`, `save`, `pull`) plus an optional `defaults` block. See [USAGE.md](USAGE.md).

@@ -45,6 +45,13 @@ drops occupancy.
 The heavy tiling that makes MNN fast pays off only with texture-cached reads. In SSBO the
 register/occupancy wall is hit first.
 
+VKNN ships Winograd as a production 3x3 path: `Hint::Winograd` (default auto) selects a 3-pass
+tiled-GEMM kernel (`wino_input` → `wino_gemm` → `wino_out`, output tile F(2,3) or F(4,3) picked by
+a cost model) for deep, square 3x3/s1/p1 group-1 fp16 convs, via a deterministic shape rule
+(Cin·Cout ≤ 32768, Cin ≥ 32, Cout ≥ 32); shallow or spatially-large 3x3 stays on the direct kernel.
+The fused and other Winograd variants are gated behind `Hint::WinogradVariant` as documented
+negatives (`src/backend/vulkan/ops/conv.cpp`).
+
 ## Image-backend evaluation
 `vknn_image_bench` runs the same 1×1 conv three ways: SSBO, storage-image (`imageLoad`), and
 sampler2D (`texelFetch`, the texture-cache path MNN uses). On the target GPU:

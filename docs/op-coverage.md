@@ -4,7 +4,7 @@ VKNN imports ONNX and lowers it to its IR. Each operator has a **CPU oracle** (t
 reference and automatic fallback) and, for every op that carries compute, a **Vulkan kernel**.
 CNN-shaped tensors default to the NC4HW4
 GPU layout (channels packed in vec4 blocks); transformer-shaped tensors (attention, RoPE, geometry)
-use a **flat row-major GPU path** (rank up to 8), and the layout pass splices NC4HW4&harr;flat
+use a **flat row-major GPU path** (any rank — per-axis kernel geometry rides a content-deduped SSBO, not the push constant), and the layout pass splices NC4HW4&harr;flat
 converts in at the boundaries. Every operator is checked against onnxruntime (cosine ≥ 0.999 on the
 GPU fp16 path, 1.0 on the CPU fp32 path).
 
@@ -29,7 +29,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 
 | Operator | GPU | CPU | Notes |
 |---|---|---|---|
-| Conv (group=1, depthwise, 1×1 pointwise) | ✅ | ✅ | NC4HW4; direct 3×3, split-K deep 1×1, fused activation + residual-Add + Relu in the epilogue |
+| Conv (group=1, depthwise, 1×1 pointwise, general grouped via lowering) | ✅ | ✅ | NC4HW4; direct 3×3, split-K deep 1×1, fused activation + residual-Add + Relu in the epilogue; a general grouped Conv (1 < group < Cin) lowers at import (`lowerGroupedConv`) into group-1 Convs over channel slices + Concat and runs on the same kernels |
 | ConvTranspose | ✅ | ✅ | `auto_pad` + `output_shape` handled (shared `src/core/conv_geom.h` geometry) |
 | GlobalAveragePool | ✅ | ✅ | one workgroup / channel-block, LDS tree-reduce |
 | AvgPool / MaxPool | ✅ | ✅ | windowed |
@@ -39,11 +39,12 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 
 | Operator | GPU | CPU | Notes |
 |---|---|---|---|
-| Unary family | ✅ | ✅ | Sigmoid, Tanh, HardSwish, HardSigmoid, LeakyRelu, Elu, Abs, Neg, Exp, Log, Sqrt, Floor, Ceil, Relu, SiLU, Erf, Cos, Sin, Reciprocal, Softplus, Round |
+| Unary family | ✅ | ✅ | Sigmoid, Tanh, HardSwish, HardSigmoid, LeakyRelu, Elu, Abs, Neg, Exp, Log, Sqrt, Floor, Ceil, Relu, SiLU, Erf, Cos, Sin, Reciprocal, Softplus, Round, and an internal Trunc (created only by the float→int→float Cast fold `foldIntRoundtripCast`, not parsed from ONNX) |
 | Binary family | ✅ | ✅ | Mul, Sub, Div, Max, Min, Pow, Add — same-shape, channel-broadcast (SE), and general NumPy broadcast on the flat path |
 | Relu / Relu6 / Clip | ✅ | ✅ | standalone, and fused into the producing Conv/Gemm |
 | PRelu | ✅ | ✅ | per-channel slope |
 | Where / Equal / Greater / GreaterEqual / Less / LessOrEqual | ✅ | ✅ | flat broadcast (fp32 + int64) |
+| And / IsNaN | ✅ | ✅ | boolean AND with NumPy broadcast / elementwise NaN test — bool results as 1.0/0.0, own flat kernels (not pointwise-fusion members) |
 
 ## Transformer / attention
 
@@ -53,10 +54,12 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Gemm / FC | ✅ | ✅ | M rows (per-row strides for the multi-view camera head) |
 | Softmax | ✅ | ✅ | channel-axis (NC4HW4) and arbitrary last-axis (flat) |
 | LayerNorm | ✅ | ✅ | reduction over the last axes, affine |
+| RMSNorm | ✅ | ✅ | root-mean-square norm `y = x·rsqrt(mean(x², last axis) + ε)·γ`, fp32 sum-of-squares in one fused flat kernel; created by `lowerRMSNorm` from the primitive Pow/ReduceMean/Add/Sqrt/Mul chain or mapped from an ORT `SimplifiedLayerNormalization` |
 | Einsum | ✅ | ✅ | outer-product (RoPE) on GPU; batched mat-vec / matmul lowered to MatMul |
 | Gather | ✅ | ✅ | axis-aware (attention Q/K/V split on axis 2), const or runtime index |
 | Rope | ✅ | ✅ | fused rotate-half rotary embedding: one kernel computing `x1·cos − x2·sin` / `x1·sin + x2·cos` per position, reading the cos/sin table row directly; created only by the load-time `fuseRope` pass (`Hint::RopeFusion`) from the primitive Slice/Gather/Mul/Concat chain — never parsed from ONNX, never serialized to a `.vxm` |
 | FusedAttention | ✅ | ✅ | single-query (M=1) decode-attention core `softmax(q·Kᵀ·scale + mask)·V` in one kernel; operands read through per-axis operand-view strides so the GQA KV cache is read in place (no materialized repeat_kv); fp32 scores + softmax (numerically finer than the decomposed fp16 round-trips); created only by the load-time `fuseDecodeAttention` pass (`Hint::FusedAttention`) — never imported, never serialized |
+| SimplifiedLayerNormalization / SkipSimplifiedLayerNormalization / SkipLayerNormalization / RotaryEmbedding / MultiHeadAttention / GroupQueryAttention | lowered | lowered | ORT contrib transformer ops (com.microsoft), expanded to primitive ops at import by `lowerOrtContribOps` (SimplifiedLayerNorm → RMSNorm; GroupQueryAttention → the rope/concat/repeat_kv/attention subgraph; MultiHeadAttention only in the pure q/k/v + additive-mask form); no backend kernel — a variant the expansion declines surfaces in the support report under its real name |
 
 ## Shape / data movement
 
@@ -72,7 +75,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Resize / Upsample | ✅ | ✅ | nearest + bilinear, 4 coord modes |
 | GridSample | ✅ | ✅ | bilinear/nearest/cubic; constant or runtime grid (optical-flow warps); under fp16 the grid coordinates are fp16-stored, which bounds sampling accuracy near discontinuities |
 | Reduce (Mean/Sum/Max/Min/Prod/L2) | ✅ | ✅ | arbitrary axes |
-| Cast | ✅ | ✅ | float ↔ float, and int → float on the GPU; an int64 input to a narrow-integer target (INT16/UINT16/BOOL/32–64-bit unsigned) keeps the exact CPU op |
+| Cast | ✅ | ✅ | float ↔ float, int → float, and an int64 input to float/INT32/INT64/INT8/UINT8/BOOL on the GPU (the INT8/UINT8/BOOL narrowing matches the CPU op bit-for-bit); an int64 input to INT16/UINT16 or a 32/64-bit unsigned target keeps the exact CPU op |
 | Pad | ✅ | ✅ | constant / edge / reflect; GPU = flat row-major, static pads (a runtime pad *value* runs on the GPU; a runtime pads *geometry* falls back to CPU) |
 | Shape / Constant / EyeLike | const-fold / ✅ | ✅ | resolved at compile time (const-folded away on the GPU path) |
 | ConstantOfShape | ✅ | ✅ | resolved output size fills on the GPU (int fill carried in compute float, repacked to the declared dtype on readback); an unresolved (data-dependent) output size keeps the CPU op |
@@ -94,18 +97,21 @@ float `MatMul` / `Conv` (weight to fp32, **no** output clamp — the integer mat
 quant range). A dynamic-quant cluster that does not match this shape stays intact and fails at
 planning.
 
-`vknn_compile -Os` additionally quantizes MatMul weights to **int4** (calibration-free or
+`vknn_compile -Os` additionally quantizes MatMul/Gemm/Conv weights to **int4** by default
+(`--quant-bits 8|lut4` selects the int8 / 16-entry-codebook formats; calibration-free or
 calibrated; AWQ-style activation-salient outlier columns kept fp16; a per-layer error guard keeps
-hostile layers fp16), stored in a VXM5 container and executed by native int4 GPU MatMul kernels (a
-specialized GEMV for M=1 decode and a tiled kernel for prefill). This is separate from the
+hostile layers fp16), stored in a VXM5 container (VXM6 when any packed weight is int8/lut4).
+MatMul weights execute on native packed GPU kernels for all three formats (a specialized GEMV for
+M=1 decode and a tiled kernel for prefill); quantized Conv/Gemm weights are rebuilt to fp16 at
+load (`materializeQuantWeights`). This is separate from the
 QDQ / QLinear dequantize-at-import path documented above (which targets pre-quantized ONNX
 checkpoints). An ORT-contrib pre-quantized `MatMulNBits` (4-bit) checkpoint imports directly to the
 native int4 path.
 
 | Operator | GPU | CPU | Notes |
 |---|---|---|---|
-| DequantizeLinear | lowered / ✅ | ✅ | over an initializer, folds the weight to fp32 `(W_q − zp)·scale` (per-tensor + per-axis); over an already-float edge inside a collapsed sandwich, drops; a genuine int-graph-boundary DQ stays as the CPU kernel |
-| QuantizeLinear | lowered / ✅ | ✅ | an activation Q→DQ sandwich collapses to a `Clip` over the quant range `[(qmin−zp)·scale, (qmax−zp)·scale]`; a graph-boundary Q runs on the CPU kernel (`saturate(round_half_even(x/scale) + zp)`) |
+| DequantizeLinear | lowered / ✅ | ✅ | over an initializer, folds the weight to fp32 `(W_q − zp)·scale` (per-tensor + per-axis); over an already-float edge inside a collapsed sandwich, drops; a genuine int-graph-boundary DQ runs the flat GPU kernel when scale/zero_point are constant initializers (per-axis decoded via one inner-stride scalar, any rank); a runtime scale/zp falls back to the exact CPU op |
+| QuantizeLinear | lowered / ✅ | ✅ | an activation Q→DQ sandwich collapses to a `Clip` over the quant range `[(qmin−zp)·scale, (qmax−zp)·scale]`; a graph-boundary Q (`saturate(round_half_even(x/scale) + zp)`) runs the flat GPU kernel when scale/zero_point are constant initializers; a runtime scale/zp falls back to the exact CPU op |
 | QLinearConv | lowered | — | → Conv + `Clip` to the output quant range; weights fold fp32, int32 bias rescales by `x_s·w_s` |
 | QLinearMatMul | lowered | — | → MatMul + output-range `Clip` |
 | QGemm | lowered | — | → Gemm + output-range `Clip` (com.microsoft) |
@@ -125,7 +131,7 @@ flags override a single pass on top of the level:
 - **General pointwise fusion** — the one fusion pass. It grows each maximal same-shape
   per-element region (Binary/Add/Unary/Clip/Relu/PRelu/Where/Greater/GreaterEqual/Less/LessEqual/Equal, fanout
   included) and emits it as a single fused unit: folded into the producing kernel's store epilogue
-  (MatMul, Gemm, Conv family, ConvGemm, Softmax, LayerNorm, Reduce, GridSample, Resize,
+  (MatMul, Gemm, Conv family, ConvGemm, Softmax, LayerNorm, RMSNorm, Reduce, GridSample, Resize,
   ConvTranspose, pooling, Transpose/Slice, Concat) or one standalone `FusedPointwise` kernel.
   Internal fanout rides the unit's registers; values consumed outside the region export as extra
   output streams. Residual Adds, swish diamonds (`x · sigmoid(x)`), MatMul bias-Adds, and lone
@@ -134,6 +140,12 @@ flags override a single pass on top of the level:
   bias patterns use the kernels' fast fp32-accumulator epilogues (old-main speed; not byte-equal to
   unfused); `--strict-fuse` keeps every step rounded, making fused == unfused byte-identical — the
   byte-verification mode. Enabled at `-O1` (default); opt out with `--no-fuse-pointwise`.
+- **GridSample warp fusion** — folds a scaled-flow + base-grid coordinate chain into the
+  GridSample itself, which then computes each sample coordinate `base + scale·flow` inside the
+  sampler (warp form: 4D NC4HW4 data + an NCHW flow `[N,2,Hout,Wout]` + the constant base grid as
+  extra inputs; the base grid uploads fp32, and the fp16 variant reproduces the standalone Mul's
+  fp16 store, keeping the fusion bit-exact with the materialized-grid path). Enabled at `-O1`
+  (default); opt out with `--no-fuse-gridsample-warp`.
 - **BatchNorm lowering** — a BatchNorm the conv fold cannot absorb (pre-activation BN, BN after
   Concat) lowers unconditionally to a per-channel Mul+Add with host-folded scale/shift, which the
   pointwise fusion then merges into the neighboring kernels.
@@ -187,6 +199,5 @@ an ONNX name in `src/core/op.cpp` (`opTypeName` + `opTypeFromOnnx`), a shape rul
 `src/backend/cpu/ops/`. A GPU kernel additionally needs a Vulkan op + GLSL shader in
 `src/backend/vulkan/ops/` + `shaders/`, a capability gate row in `src/core/vk_gates.cpp`
 (`vkKernelDeclared` + `vkNodeGate` — the shape/attribute gate the device and `--support-report`
-share), and, for a flat row-major op, a case in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`)
-so the layout pass marks it flat. See [adding-an-operator.md](adding-an-operator.md) and
+share), and a row in the OpDescriptor table (`src/core/op_descriptor.cpp`: `LayoutClass` Flat/Nc4/ShapeDependent plus the `pwMember`/`pwEpilogue` fusion flags) so the layout pass marks it flat; a shape-dependent layout additionally needs a case in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`). See [adding-an-operator.md](adding-an-operator.md) and
 [../skills/add-an-operator.md](../skills/add-an-operator.md).

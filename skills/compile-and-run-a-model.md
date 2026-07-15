@@ -19,10 +19,19 @@ Convert-time flags are **separate** from the runtime `Config`:
 | Flag | Effect |
 |---|---|
 | `--fp16` | store weights as fp16 (≈half the file size; the GPU path is fp16 anyway) |
-| `--no-fuse-swish` | disable folding `x * sigmoid(x)` into the producing Conv |
+| `--no-fuse-pointwise` | disable the pointwise-chain fusion (on at `-O1`+; folds swish `x * sigmoid(x)` diamonds into one SiLU step, plus general pointwise chains) |
 | `--fuse-se` | fuse the squeeze-excite tail (experimental; off by default) |
 | `--fuse-dwpw` | fuse depthwise + pointwise (experimental; off by default) |
 | `--dump-big` | log tensors larger than 50M elements after shape inference (diagnostic) |
+| `-O0`..`-O3` / `--opt N` | optimization level (default `-O1`); `-O2`+ additionally enables the experimental SE and dw+pw fusions |
+| `-Os` | maximum preset: `-O3` + INT4 weight quantization (AWQ + min-MSE + bias correction; implies `--fp16`). Knobs: `--quant-bits 4\|8\|lut4`, `--quant-group N`, `--quant-outliers F`, `--quant-err F`, `--calib in0.bin,in1.bin` (one calibration sample per occurrence, raw files in graph-input order; absent -> synthetic samples) |
+| `--batch N` | bind a dynamic batch-named leading axis (default 1) |
+| `--dim NAME=VALUE` | bind an ONNX symbolic dimension (repeatable); an unbound non-batch dynamic axis is a hard error, never a silent 1 |
+| `--shape NAME=D0xD1x...` | declare one input's full concrete shape (repeatable; overrides `--dim` for that tensor) |
+| `--list-dims` | import, print each input's shape and the free dim symbols to bind with `--dim`, then exit without compiling |
+| `--bucket "SEG;..."` | one shape bucket per occurrence (segments: `NAME=D0xD1x...` or `dim:NAME=VALUE`, `;`-separated); buckets share one initializer pool in the `.vxm` and the runtime dispatches each run to the matching bucket |
+| `--graph "FILE.onnx[;SEG;...]"` | multi-graph form (single positional = the output: `vknn_compile out.vxm --graph ...`); each occurrence compiles one bucket from its own ONNX file into a single multi-bucket `.vxm` (e.g. vision tower + prefill + decoder) |
+| `--support-report out.json` | write per-node backend assignment (GPU vs CPU + reason), computed by the same gate the device engine evaluates |
 
 This step is optional: load the `.onnx` directly and `Model::load` / `Runtime::load`
 auto-detects `.onnx` vs `.vxm`.
@@ -43,8 +52,14 @@ adb shell mkdir -p /data/local/tmp/vxrt/out
 adb shell /data/local/tmp/vxrt/vknn_run_io model.vxm /data/local/tmp/vxrt/out in0.bin in1.bin
 ```
 
-`vknn_run_io` flags: `--backend vulkan|cpu`, `--precision low|normal|high`, `--no-cache`,
-`--keep-weights`, `--no-flat`, `--timing`, `--winograd auto|on|off`, `--tuning none|fast|heavy`.
+`vknn_run_io` flags: `--backend vulkan|cpu`, `--precision low|normal|high`, `--priority low|normal|high`,
+`--tuning none|fast|heavy`, `--winograd auto|on|off`, `--no-cache`, `--cache DIR`, `--keep-weights`,
+`--timing`, `--profile`, `--repeat N`, `--bucket N` (run plan bucket N of a multi-bucket model, default 0),
+`--cpu-threads N`, `--fp32-tensors NAMES`, `--dump NAMES`, `--disable-vk-ops NAMES`,
+`--max-submit-nodes N` / `--max-submit-bindings N` (watchdog/TDR mitigation), `--layer-dump` /
+`--layer-dump-dir DIR`, `--debug-segments`, plus the GPU-pass off switches `--no-flat`,
+`--no-fold-islands`, `--no-matmul-view-fold`, `--no-rope-fusion`, `--no-fused-attention`,
+`--no-kv-concat-fold`.
 
 ## 3. Run from C++
 
@@ -78,7 +93,7 @@ int main() {
   vknn::Config cfg;
   cfg.backend   = vknn::BackendKind::Vulkan;     // run on the GPU (CPU is the implicit fallback)
   cfg.precision = vknn::Precision::Low;         // fp16 storage, fp32 accumulation
-  cfg.setHint(vknn::Hint::Tuning, vknn::Mode::Thorough); // maximum autotuning (cached to the model cache)
+  cfg.tuning    = vknn::Tuning::Heavy;          // maximum autotuning (cached to the model cache)
 
   vknn::Model net = vknn::Model::load("model.vxm", cfg);  // auto-detects .vxm vs .onnx
   if (!net) { fprintf(stderr, "failed to load model\n"); return 1; }
@@ -107,5 +122,5 @@ same `Config` and exposes per-tensor residency and DMA-BUF zero-copy.
 
 Compare against an **onnxruntime golden** (cosine ≥ 0.999 for fp16, 1.0 for fp32/CPU). Generate
 goldens with `scripts/get_golden.py` (CNNs) or `scripts/yonosplat/gen_golden.py` (YoNoSplat). On any
-perf-sensitive change, record runtime too (`--bench` / `VKNN_TIMING=1`) — holding cosine but slowing
+perf-sensitive change, record runtime too (`--bench` / `--timing`) — holding cosine but slowing
 the GPU is a regression. Methodology and cooldown protocol: [../docs/benchmark.md](../docs/benchmark.md).

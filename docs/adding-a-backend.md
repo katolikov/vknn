@@ -54,11 +54,18 @@ public:
   virtual const char* name() const = 0;
   /// Whether the backend is usable on this device (false => skip in selection).
   virtual bool available() const = 0;
+  /// Apply session Config to the backend before planning (e.g. the debug op-disable list).
+  /// Default no-op. Called once per session create, before supportsNode() is used for assignment.
+  virtual void configure(const Config& cfg) {}
   /// Capability query used for per-op backend assignment / fallback decisions.
   virtual bool supports(OpType t, DType dt) const = 0;
-  /// Shape-aware capability query; defaults to the type-only check.
-  virtual bool supportsNode(const Graph& g, const Node& nd, DType dt) const {
-    return supports(nd.type, dt);
+  /// Shape-aware capability query; defaults to the type-only check. On refusal, fills
+  /// `*whyNot` (when non-null) with a short stable reason for the fallback diagnostics.
+  virtual bool supportsNode(const Graph& g, const Node& nd, DType dt,
+                            std::string* whyNot = nullptr) const {
+    if (supports(nd.type, dt)) return true;
+    if (whyNot) *whyNot = std::string("no ") + name() + " kernel registered";
+    return false;
   }
 
   /// Ensure tensor `rt` has valid host data (NCHW canonical). Default: assume host already valid.
@@ -78,7 +85,8 @@ public:
 ### `kind()` — `BackendKind`
 
 Returns the enum tag identifying this backend. `BackendKind` is declared in
-`include/vknn/config.h` (the values are `Vulkan` and `Cpu`). This tag is the key
+`include/vknn/backend_kind.h` (re-exported by the `config.h` umbrella; the values are
+`Vulkan` and `Cpu`). This tag is the key
 the backend registers under and the value `config.backend` selects. A new backend
 means a new `BackendKind` enumerator there.
 
@@ -104,6 +112,14 @@ returns `true` only after it creates a Vulkan instance/device and finds a
 compute queue. A backend probes its dependencies here (or in the
 constructor) and returns `true` only if it can run.
 
+### `configure(const Config&)` — apply session Config before planning
+
+Called once per session create, after the availability check and before any capability
+query. Default no-op. `VulkanBackend` stores `cfg.disableVkOps` here so `supports()`
+can refuse the disabled ops. Settings that must be known even earlier (the Vulkan queue
+priority, applied at device/queue creation) are honored by the factory instead, which
+receives the session `Config`.
+
 ### `supports(OpType, DType)` / `supportsNode(...)` — per-op capability
 
 The `Session` calls these for every node when assigning backends. Return `true`
@@ -112,11 +128,13 @@ runs of consecutive nodes that the same backend supports into one segment; nodes
 you decline are handed to the next backend in the fallback list (typically
 `VulkanBackend`, then `CpuBackend`).
 
-`supports()` is the coarse, type-only check. Override `supportsNode(graph, node, dt)`
-when support depends on the node's attributes or shapes — `VulkanBackend` uses it to
-accept a `Concat` only on a 4-aligned channel axis, or a `Binary` only for layouts its
-kernels can broadcast. `OpType` lives in `include/vknn/op.h` and `DType` in
-`include/vknn/tensor.h`. This is where a backend encodes "Conv and Gemm in fp16 but
+`supports()` is the coarse, type-only check. Override `supportsNode(graph, node, dt, whyNot)`
+when support depends on the node's attributes or shapes — `VulkanBackend` routes it through a
+single shape-aware gate (`vkNodeGate`, `src/core/vk_gates.cpp`): constant-operand requirements
+keep runtime-parameter variants on the always-correct CPU op, and a grouped `Conv` whose
+import-time lowering could not fire falls back to the group-aware CPU op. On refusal, fill
+`*whyNot` with a short stable reason; it feeds the fallback diagnostics and the support report. `OpType` lives in `include/vknn/op_type.h` and `DType` in
+`include/vknn/dtype.h` (re-exported by the `op.h` / `tensor.h` umbrellas). This is where a backend encodes "Conv and Gemm in fp16 but
 not Softmax", which shapes how the graph is partitioned.
 
 ### `compileSegment(...)` — turn nodes into a `Segment`
@@ -128,8 +146,10 @@ a `std::unique_ptr<Segment>` whose `run()` is invoked at inference time.
 This is where backends do their expensive, one-time work:
 
 - **VulkanBackend** builds pipelines, pre-packs weights to NC4HW4, plans an
-  activation-liveness buffer layout, and pre-records *one* command buffer for the whole
-  (static) segment.
+  activation-liveness buffer layout, and pre-records the segment's command buffers
+  (one, unless the segment is split into chunks — `Config::maxSubmitNodes` keeps each
+  submit under the GPU watchdog, `Config::maxSubmitBindings` under the driver's
+  per-command-buffer descriptor cap).
 - **CpuBackend** instantiates the per-node ops.
 
 ### `toHost` / `toDevice` — tensor residency at boundaries
@@ -153,8 +173,9 @@ leaves both at their defaults, as `CpuBackend` does.
 
 ### `finalize()` — flush caches
 
-Called once after all segments are compiled. Use it to persist anything to
-reuse on the next cold start. The Vulkan backend bundles its `VkPipelineCache`,
+Called once per backend from `Session::updateCache()` — automatically at session
+teardown (`~Session`) — so autotune/pipeline results from the whole session land in the
+cache. Use it to persist anything to reuse on the next cold start. The Vulkan backend bundles its `VkPipelineCache`,
 the prepacked-weights cache, and the autotune cache into the unified `config.cacheFile`
 here, which turns a cold start into a faster warm start. A backend leaves it
 empty until it has something worth caching.
@@ -171,7 +192,12 @@ class Segment {
 public:
   virtual ~Segment() = default;
   virtual void run(ExecContext& ctx) = 0;
+  // Optional device-path hooks (resident output->input links, on-device argmax,
+  // row-selective readback, decode chains) default to Unsupported / "no device path";
+  // a backend without device-resident state leaves them alone.
   Backend* backend = nullptr;
+  const Graph* compiledGraph = nullptr;  // graph this segment was compiled against;
+                                         // set by the backend's compileSegment()
   bool isFallback = false;   // true if this CPU segment exists because the primary backend
                              // could not run these ops (drives the fallback warning + profiler tag)
   std::vector<int> nodeIdx;
@@ -184,18 +210,24 @@ public:
 `compileSegment` returns a subclass of `Segment` and fills in:
 
 - `backend` — pointer back to the owning backend (used for boundary `toHost`/`toDevice`).
+- `compiledGraph` — `&g` as handed to `compileSegment`; records the graph the segment
+  was compiled against so the session can check the captured `Graph&` is still the live
+  bucket graph (`Session::segmentGraphsLive()`).
 - `nodeIdx` — the nodes this segment covers (usually just the `nodeIdx` you were handed).
-- `boundaryInputs` / `boundaryOutputs` — the tensor ids consumed from / produced
-  for the outside world. The runtime uses these to drive residency reconciliation
-  at segment edges, so only the tensors that actually cross a backend boundary
-  get moved.
-- `isFallback` — set by the CPU backend when a segment only exists because the
-  primary backend declined those ops; it drives the fallback warning and the
-  profiler tag. A normal backend leaves it `false`.
+
+The `Session` fills the rest after `compileSegment` returns:
+
+- `boundaryInputs` / `boundaryOutputs` — computed by the Session from `nodeIdx`: the
+  tensor ids consumed from / produced for the outside world. The runtime uses these to
+  drive residency reconciliation at segment edges, so only the tensors that actually
+  cross a backend boundary get moved.
+- `isFallback` — set by the Session on a CPU segment when the configured primary
+  backend is not CPU; it drives the fallback warning and the profiler tag.
 
 `run(ExecContext&)` is the hot path and does as little per-call work as
 possible — all setup belongs in `compileSegment`. The Vulkan backend's `run()`
-submits one pre-recorded command buffer and not much else.
+submits its pre-recorded command buffers (one unless the segment was chunked for the
+GPU watchdog) and not much else.
 
 ### `ExecContext`
 
@@ -227,10 +259,10 @@ struct BackendRegistrar {
     BackendRegistry::instance().registerBackend(k, std::move(f));
   }
 };
-#define VKNN_REGISTER_BACKEND(KIND, TYPE)                    \
-  static ::vknn::BackendRegistrar _vx_backend_reg_##TYPE(    \
-      KIND, []() -> std::unique_ptr<::vknn::Backend> {       \
-        return std::unique_ptr<::vknn::Backend>(new TYPE()); \
+#define VKNN_REGISTER_BACKEND(KIND, TYPE)                                       \
+  static ::vknn::BackendRegistrar _vx_backend_reg_##TYPE(                       \
+      KIND, [](const ::vknn::Config& cfg) -> std::unique_ptr<::vknn::Backend> { \
+        return std::unique_ptr<::vknn::Backend>(new TYPE(cfg));                 \
       })
 ```
 
@@ -242,7 +274,9 @@ VKNN_REGISTER_BACKEND(BackendKind::Cpu, CpuBackend);
 
 `VKNN_REGISTER_BACKEND(KIND, TYPE)` defines a file-static `BackendRegistrar` whose
 constructor runs before `main()` and inserts a factory lambda under `KIND`. When
-the `Session` needs a backend, it calls `BackendRegistry::instance().create(k)`.
+the `Session` needs a backend, it calls `BackendRegistry::instance().create(k, cfg)`,
+forwarding the session `Config` to the factory (creation-time settings such as the Vulkan
+queue priority apply at device/queue creation, before `configure()` runs).
 
 > **Why the static initializer runs.** VKNN is a static library, so the
 > linker would normally drop object files that hold only unreferenced static
@@ -267,11 +301,15 @@ A backend is chosen through `vknn::Config` (JSON-backed; see `include/vknn/confi
 
 At session creation the `Session`:
 
-1. instantiates the primary backend via the registry and checks `available()`;
-2. for each node, asks `supportsNode(...)` of the primary, then walks the
+1. instantiates each backend in `backend` + `fallback` order via the registry
+   (forwarding the session `Config` to its factory) and drops any whose `available()`
+   is false;
+2. calls `configure(cfg)` once per backend, before any capability query;
+3. for each node, asks `supportsNode(...)` of the primary, then walks the
    `fallback` list;
-3. partitions the topo-ordered nodes into maximal same-backend segments;
-4. calls `compileSegment` per segment and `finalize` once at the end.
+4. partitions the topo-ordered nodes into maximal same-backend segments;
+5. calls `compileSegment` per segment; `finalize` runs later, from
+   `Session::updateCache()` at teardown.
 
 Selecting Vulkan with a CPU fallback is purely config:
 
@@ -311,7 +349,7 @@ public:
 
 class MyBackend : public Backend {
 public:
-  MyBackend() { /* probe device / driver here */ }
+  explicit MyBackend(const Config& cfg) { /* probe device / driver here; the factory passes the session Config */ }
 
   BackendKind kind() const override { return BackendKind::MyBackend; }  // add to config.h
   const char* name() const override { return "MyBackend"; }
@@ -333,8 +371,10 @@ public:
                                           Graph& g, const Config& cfg) override {
     auto seg = std::make_unique<MySegment>();
     seg->backend = this;
+    seg->compiledGraph = &g;
     seg->nodeIdx = nodeIdx;
-    // Compute boundaryInputs / boundaryOutputs; build pipelines / pack weights here.
+    // Build pipelines / pack weights here. The Session computes
+    // boundaryInputs / boundaryOutputs (and isFallback) after this returns.
     return seg;
   }
 
@@ -347,8 +387,9 @@ VKNN_REGISTER_BACKEND(BackendKind::MyBackend, MyBackend);
 }  // namespace vknn
 ```
 
-Add the source to the `vknn` CMake target, add the `BackendKind` enumerator and
-its JSON spelling in `include/vknn/config.h`, and the backend is selectable with no
+Add the source to the `vknn` CMake target, add the `BackendKind` enumerator in
+`include/vknn/backend_kind.h` and its string spelling in `backendName()` /
+`backendFromStr()` (`src/core/config.cpp`), and the backend is selectable with no
 other changes.
 
 ---
@@ -389,10 +430,10 @@ backend — JIT or offline-compiled — drops in as a single `.cpp`.
 
 ## 8. Checklist
 
-- [ ] Add a `BackendKind` enumerator (and its JSON spelling) in `include/vknn/config.h`.
+- [ ] Add a `BackendKind` enumerator in `include/vknn/backend_kind.h` and its string spelling in `backendName()` / `backendFromStr()` (`src/core/config.cpp`).
 - [ ] Subclass `vknn::Backend`; implement `kind`, `name`, `available`, `supports` (and `supportsNode` if shape-dependent), `compileSegment`.
 - [ ] Override `toHost` / `toDevice` if your native layout is not host NCHW.
-- [ ] Subclass `vknn::Segment`; do all setup in `compileSegment`, keep `run()` lean; fill `backend`, `nodeIdx`, `boundaryInputs`, `boundaryOutputs`.
+- [ ] Subclass `vknn::Segment`; do all setup in `compileSegment`, keep `run()` lean; fill `backend`, `compiledGraph`, `nodeIdx` (the Session computes `boundaryInputs` / `boundaryOutputs` and `isFallback`).
 - [ ] Override `finalize()` if you have caches to bundle into `config.cacheFile`.
 - [ ] `VKNN_REGISTER_BACKEND(BackendKind::Yours, YourBackend);` at file scope.
 - [ ] Add the `.cpp` to the `vknn` CMake target (whole-archive linking does the rest).

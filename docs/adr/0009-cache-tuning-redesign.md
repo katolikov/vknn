@@ -2,6 +2,10 @@
 
 ## Status
 Accepted (2026-07-05). Supersedes [ADR-0008](0008-caches-and-autotuning.md).
+Amended 2026-07-15: every numerics-affecting kernel choice (Winograd vs direct, F(2,3) vs F(4,3),
+implicit GEMM vs direct) is now a deterministic shape rule at every tuning level; `tuning` races
+only bit-neutral launch parameters, so `none`/`fast`/`heavy` produce byte-identical output and the
+one-fp16-ULP caveat under Consequences no longer applies.
 
 ## Context
 ADR-0008 bundled the pipeline / prepacked-weight / autotune caches into a hand-rolled `VKNNCAC1`

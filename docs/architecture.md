@@ -5,10 +5,11 @@ that loads an ONNX model — image CNNs, detection nets, and transformer/attenti
 models, including statically-quantized checkpoints — lowers it to a backend-agnostic
 NCHW IR, optimizes it with graph passes, partitions it into backend-specific
 *segments*, and executes those segments — primarily on a Vulkan compute backend tuned
-for an AMD RDNA-class mobile GPU, with a CPU backend that doubles as the reference path
-and the fallback. Every executable op has a Vulkan kernel; only data-dependent control
-flow (`Loop` / `If` / `NonMaxSuppression`) and the const-folded import-time shape ops
-stay off the GPU.
+for a mobile integrated GPU, with a CPU backend that doubles as the reference path
+and the fallback. Nearly every executable op has a Vulkan kernel; the const-fold / import-time ops
+(`Identity` / `Constant` / `Shape` / `EyeLike`) fall to the CPU, and data-dependent control flow
+(`Loop` / `If` / `NonMaxSuppression`) has no `OpType` at all — a model containing one fails at
+planning rather than falling back.
 
 This document covers the end-to-end pipeline, the core abstractions, the internal
 `NC4HW4` tensor layout, the segment execution model (which provides both pre-recorded
@@ -50,7 +51,7 @@ references source under `include/vknn/` and `src/`.
        │   optimized Graph, then Graph::topoSort()
        ▼
  ┌───────────────────────────────────────────────────────────────────────┐
- │ SESSION::plan()   src/core/session.cpp                                  │
+ │ SESSION::ensureBackends() + buildBucket()   src/core/session.cpp        │
  │   1. instantiate backends in priority order:                           │
  │        cfg.backend, cfg.fallback..., (CPU if allowCpuFallback)         │
  │      (skip unregistered / !available())                                 │
@@ -59,7 +60,8 @@ references source under `include/vknn/` and `src/`.
  │   4. partition topo-ordered nodes into maximal same-backend SEGMENTS   │
  │   5. backend->compileSegment(nodeIdx, g, cfg) for each segment         │
  │   6. compute per-segment boundaryInputs / boundaryOutputs              │
- │   7. backend->finalize()  (flush caches to disk)                       │
+ │   (cache flush deferred to teardown:                                   │
+ │     ~Session → updateCache → backend->finalize())                      │
  └───────────────────────────────────────────────────────────────────────┘
        │   std::vector<std::unique_ptr<Segment>> segments_
        ▼
@@ -75,7 +77,7 @@ references source under `include/vknn/` and `src/`.
        ▼
  Session::run(inputs, outputs):
    bind inputs → run segments in order → residency reconciled at boundaries
-   → collect graph outputs (host, NCHW, fp32)
+   → collect graph outputs (host, NCHW, declared dtype)
 ```
 
 The canonical IR layout is **NCHW** throughout (`graph.h` header comment, and
@@ -151,14 +153,14 @@ struct Node {
   Attributes attr;
   ActType fusedAct = ActType::None;        // set by the pointwise fusion's inline-act path
   float   actLo = 0, actHi = 0;             // Clip bounds when fusedAct == Clip
-  int64_t subOp = 0;                        // Unary/Binary/Reduce sub-code
+  int32_t subOp = 0;                        // Unary/Binary/Reduce sub-code
   TensorId fusedResidual = kNoTensor;       // residual epilogue (runtime keeps support for older .vxm)
   TensorId fusedBias = kNoTensor;           // MatMul bias epilogue (runtime keeps support for older .vxm)
 };
 ```
 
 `OpType` (`include/vknn/op_type.h`, append-only — `.vxm` files store the raw
-integer) enumerates the full supported set (~67 ops, per-op coverage in
+integer) enumerates the full supported set (~80 ops, per-op coverage in
 [op-coverage.md](op-coverage.md)): the conv family (`Conv`, `ConvTranspose`),
 `Gemm`/`MatMul`/`Einsum`, pooling, normalization (`BatchNorm`, `LayerNorm`,
 `Softmax`), the elementwise `Unary`/`Binary` families, data movement
@@ -166,7 +168,10 @@ integer) enumerates the full supported set (~67 ops, per-op coverage in
 generator ops `ConstantOfShape` / `Range` (which run on the GPU once their output
 size resolves), the quantized family the dequantize pass lowers (`QuantizeLinear`,
 `DequantizeLinear`, `QLinearConv`, `MatMulInteger`, ...), and the fused ops the
-passes synthesize (`FusedSE`, `FusedDwPw`, `FusedPointwise`). The pure shape ops
+passes synthesize (`FusedSE`, `FusedDwPw`, `FusedPointwise`), the ORT contrib family lowered at
+import (`SkipLayerNorm`, `RotaryEmbedding`, `GroupQueryAttention`, `MatMulNBits`, ...), and the
+load-time-only fused ops (`Rope`, `FusedAttention`) created at session build and never
+serialized. The pure shape ops
 `Shape` / `Constant` const-fold away before planning. `ActType`
 (`None`/`Relu`/`Relu6`/`Clip`/`HardSwish`/`SiLU`) is kept in sync with
 `shaders/common.glsl`; the last two are set by the swish self-gating fusion. `Attributes` is a typed `name → Attr` map with `geti` /
@@ -212,7 +217,7 @@ class Segment {
 pool (with `RtTensor& t(TensorId)`), the `Graph`, the `Config`, and the `Profiler`.
 
 Backends self-register via `VKNN_REGISTER_BACKEND(KIND, TYPE)` into the
-`BackendRegistry` singleton; `Session::plan()` calls `BackendRegistry::create(kind)`.
+`BackendRegistry` singleton; `Session::ensureBackends()` calls `BackendRegistry::create(kind, cfg)`.
 This requires the static lib to be linked whole-archive
 (`$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>`), which keeps the registrar globals from being stripped.
 
@@ -225,25 +230,38 @@ This requires the static lib to be linked whole-archive
   (CPU is the implicit final fallback).
 - `precision` (`Low`/`Normal`/`High` quality tiers; default `Low` = fp16), `maxSubmitNodes`,
   `freeWeightsAfterUpload`.
+- `cpuThreads` (CPU-backend worker threads, default 4), `maxSubmitBindings` (second
+  command-buffer split trigger by recorded push-descriptor writes, default 1024),
+  `decodeChainSteps` (decode iterations recorded as one command-buffer chain with on-device
+  token feedback, default 1).
 - Cache controls: `cacheFile` (the per-model cache, §7), `cacheDir` (the graph-only fallback location),
   `noCache` (skip caching), and `tuning` (`None`/`Fast`/`Heavy` autotune effort).
 - Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
 - Conv kernel + GPU-pass knobs via `setHint(Hint, Mode)`: `Hint::Winograd` (`Auto`/`On`/`Off`),
-  `Hint::FlatLayout` / `Hint::GpuIslandFold` (`On`/`Off`), and the experimental variant hints.
+  `Hint::FlatLayout` / `Hint::GpuIslandFold` / `Hint::MatMulViewFold` / `Hint::RopeFusion` /
+  `Hint::FusedAttention` / `Hint::KvConcatFold` (`On`/`Off`, all default On), and the
+  Winograd/direct-conv variant hints (`WinogradVariant`, `WinogradUnit`, `DirectConv3x3`).
 
 ### 2.5 Session / Runtime (`include/vknn/session.h`, `src/core/session.cpp`)
 
-`Session` owns the planned graph, the active backends, the segments, the caches
-(via the backends), and the `RtTensor` pool. `Runtime` is a thin façade:
+`Session` owns the active backends, the caches (via the backends), and one `PlanBucket` per
+compiled input-shape set; each bucket holds its planned graph, segments, `RtTensor` pool, and
+fallback records. `run()` dispatches to the bucket whose bound input shapes match, and
+`prepareShapes()` compiles an additional bucket (ONNX-built sessions only — `.vxm` buckets are
+fixed at compile time). `Runtime` is a thin façade:
 `Runtime::load(path, cfg, cacheFile)` dispatches on extension — a `.vxm`
 (pre-optimized offline by `vknn_compile`) loads via `Session::createFromVxm`
 and skips the parser and passes; an `.onnx` goes through
 `Session::createFromOnnx`. `cacheFile` defaults to `<model>.cache`, see §7.
 
 The build flow is `createFromOnnx` → `importOnnx` → `create(Graph&&, cfg)` →
-`plan()`. `plan()` runs the passes, instantiates backends, builds the pool, assigns
-per-node backends, partitions into segments, and compiles them (all in `session.cpp`).
+`ensureBackends()` + `buildBucket()`. `ensureBackends()` instantiates the backends once per
+session; `buildBucket()` runs the passes (ONNX path — a `.vxm` arrives pre-optimized), applies
+the load-time-only graph rewrites (`fuseRope` → `foldMatMulViews` → `fuseDecodeAttention` →
+`foldFusedAttentionKvConcat`; hint-gated, never serialized) and the Vulkan flat-layout pass,
+builds the pool, assigns per-node backends, folds tiny GPU islands onto the CPU
+(`Hint::GpuIslandFold`), partitions into segments, and compiles them (all in `session.cpp`).
 The unified cache is flushed at teardown via `Session::updateCache()` (called from
 `~Session()`), not at `plan()` time, and only when it actually changed during the
 session. Member **declaration order is load-bearing for teardown**:
@@ -254,8 +272,17 @@ session. Member **declaration order is load-bearing for teardown**:
 `IOTensor` is the host-side I/O struct (name, shape, dtype, raw bytes) handed to
 `Session::run(inputs, outputs)`, which binds inputs into the pool, runs segments in
 order, optionally dumps layers, and copies graph outputs back out (host, NCHW,
-fp32). `Session::tensor(name)` and `nodeBackends()` exist for debugging and
-fallback reporting.
+each output's declared dtype — an fp16-declared output returns raw fp16 bytes). `Session::tensor(name)`, `nodeBackends()`, `fallbackOps()`, and `fallbackReasons()` exist for
+debugging and fallback reporting (`vknn_compile --support-report` writes the same per-node
+assignment offline).
+
+Engine-resident state and decode acceleration also live on `Session`: `linkOutputToInput()`
+keeps an output→input pair device-resident across runs (the KV-cache path — ranged copies of the
+previous run's output apply at the start of each run, no host round-trip), `setOutputArgMax()`
+replaces a full output download with an on-device argmax (8-byte readback), `setOutputRow()`
+downloads a single row of a flat output (the prefill-logits case), and `configureDecodeChain()`
+records `Config::decodeChainSteps` decode iterations into one command-buffer sequence with on-GPU
+token feedback — each bit-identical to its unlinked / single-step equivalent.
 
 ### 2.6 Profiler (`include/vknn/profiler.h`)
 
@@ -285,11 +312,11 @@ inline int64_t packedElems(const Shape& shape) {
 
 Why pack this way:
 
-- **vec4 = the GPU's natural width.** RDNA-class compute lanes load and ALU
+- **vec4 = the GPU's natural width.** Mobile-GPU compute lanes load and ALU
   `vec4`s efficiently; packing 4 channels per element keeps memory accesses
-  coalesced and lets every kernel work in `vec4` granularity. The device exposes
-  **no `VK_KHR_cooperative_matrix`**, so GEMM and conv run on subgroup + `vec4`
-  math rather than tensor-core-style matrix ops.
+  coalesced and lets every kernel work in `vec4` granularity. The backend never uses
+  `VK_KHR_cooperative_matrix` (the capability is queried but no kernel consumes it), so GEMM and
+  conv run on subgroup + `vec4` math rather than tensor-core-style matrix ops.
 - **Channel-major-in-blocks suits CNN access patterns.** Conv accumulates over
   input channels; grouping channels into blocks of 4 makes the inner loop a tidy
   `vec4` reduction.
@@ -344,7 +371,7 @@ reconcile residency.
 
 ### 4.2 Boundary sets
 
-For each segment, `plan()` computes `boundaryInputs` (tensors consumed by the
+For each segment, `buildBucket()` computes `boundaryInputs` (tensors consumed by the
 segment but produced *outside* it — graph inputs, initializers, or another
 segment's output) and `boundaryOutputs` (tensors produced here and consumed by
 another segment or that are graph outputs). These two sets are the *only* places
@@ -366,14 +393,16 @@ void run(ExecContext& ctx) override {
   for (TensorId tid : boundaryInputs) {
     RtTensor& rt = ctx.t(tid);
     ... rt.device->buffer = buffers_[tid];
-    if (rt.hostValid && !rt.deviceValid) {
+    bool alreadyHere = rt.deviceValid && rt.device->buffer == buffers_[tid];
+    if (rt.hostValid && !alreadyHere) {   // repack unless THIS segment's buffer holds it
       VulkanBackend::packToBuffer(buffers_[tid].get(), rt, useFp16_);  // NCHW→NC4HW4
       rt.deviceValid  = true;
       rt.deviceFormat = TensorFormat::NC4HW4;
     }
   }
 
-  double wall = be_->runner().submitAndWait(cmd_);   // submit the PRE-RECORDED cmd buf
+  for (VkCommandBuffer cmd : cmds_)                  // one PRE-RECORDED cmd buf per CHUNK
+    wall += be_->runner().submitAndWait(cmd);        // one vkQueueSubmit + full fence wait per chunk
 
   // boundary OUTPUTS: unpack device→host so the next (possibly CPU) segment can read
   for (TensorId tid : boundaryOutputs) {
@@ -385,8 +414,9 @@ void run(ExecContext& ctx) override {
 }
 ```
 
-The `hostValid && !deviceValid` guard is the residency check: a tensor is
-packed only if the host is its sole valid copy. Internal activations never touch the
+The `hostValid && !alreadyHere` guard is the residency check: a tensor is packed unless this
+segment's own buffer already holds the current values (a tensor produced by an earlier GPU
+segment is `deviceValid` but points at that segment's buffer, so it is repacked here). Internal activations never touch the
 host. A CPU segment in the middle of a Vulkan model therefore requires no special
 handling: the Vulkan segment before it unpacks its outputs to host, the CPU segment
 reads and writes host, and the next Vulkan segment packs them back.
@@ -398,7 +428,10 @@ shape / bucket — see [limitations.md §1](limitations.md)) and the graph is fu
 planned, a `VulkanSegment`
 allocates device buffers for all its activation tensors, calls `op->prepare()` on
 each op (which builds pipelines and prepacks+uploads weights), and then
-**records the command buffer once, at compile time**, in `VulkanSegment::record()`:
+**records its command buffers once, at load time**, in `VulkanSegment::record()` — the recording
+splits into a new command buffer (chunk) every `maxSubmitNodes` (default 500) nodes or
+`maxSubmitBindings` (default 1024) recorded push-descriptor writes, so no single submission runs
+long enough to trip the GPU watchdog:
 
 ```cpp
 void record() {
@@ -406,17 +439,25 @@ void record() {
   be_->runner().begin(cmd_);
   vkCmdResetQueryPool(cmd_, queryPool_, ...);
   for (size_t k = 0; k < nodeIdx.size(); ++k) {
-    vkCmdWriteTimestamp(cmd_, ..._TOP_OF_PIPE_..., queryPool_, k*2);
-    ops_[k]->record(cmd_, node, env_);          // bind pipeline + push descriptors + dispatch
-    vkCmdWriteTimestamp(cmd_, ..._BOTTOM_OF_PIPE_..., queryPool_, k*2 + 1);
-    vk::computeBarrier(cmd_);
+    if (needBarrier)                          // buffer-level hazard tracking (RAW/WAW/WAR):
+      vk::computeBarrier(cmd_);               // a barrier only when required, so independent
+                                              // branches overlap on the GPU
+    if (queryPool_)                           // per-node timestamps only while profiling
+      vkCmdWriteTimestamp(cmd_, ..._TOP_OF_PIPE_..., queryPool_, k*2);
+    ops_[k]->record(cmd_, node, env_);        // bind pipeline + push descriptors + dispatch
+    if (queryPool_)
+      vkCmdWriteTimestamp(cmd_, ..._BOTTOM_OF_PIPE_..., queryPool_, k*2 + 1);
   }
   be_->runner().end(cmd_);
 }
 ```
 
-At run time `run()` only re-submits `cmd_` (`submitAndWait`): no re-recording, no
-per-op host round-trips. Ops bind their data with **push descriptors** (no
+At run time `run()` re-submits the pre-recorded chunks — one `vkQueueSubmit` + full fence wait
+per chunk (batching every chunk into one submit lets the driver watchdog reset a long submission
+and zero its unexecuted tail) — with no per-op host round-trips; re-recording happens only when
+the recorded stream must change: a boundary buffer rebind (dma-buf imports, GPU-convert
+bindings) or a change to the resident links, registered argmax reductions, or the decode-chain
+configuration. Ops bind their data with **push descriptors** (no
 descriptor-set allocation churn), and each segment owns a timestamp `VkQueryPool`
 (2 queries per node) for the profiler. The `VulkanOp` interface
 (`prepare()` / `record()`) and the `VkOpEnv` (context, pipeline cache, weight cache,
@@ -435,7 +476,7 @@ propagating `isFallback`.
 
 ## 5. Shaders
 
-Kernels are GLSL compute shaders in `shaders/` (~100 files): the layout kernels
+Kernels are GLSL compute shaders in `shaders/` (~150 files): the layout kernels
 (`pack`/`unpack`/`convert_layout`/`boundary_convert`), the conv family (below),
 `matmul`/`matmul_tiled`, the `flat_*` row-major generic ops, softmax/layernorm
 reductions, and the raster kernels — most precision-templated via
@@ -448,7 +489,9 @@ so the runtime ships no loose shader files.
 Conv selects among several strategies per shape: the general kernel (with a
 register-blocked variant), the 1×1 pointwise family (`conv1x1`, strided
 `conv1x1_s2`, split-K deep 1×1 — WTILE autotuned per shape), a 3×3 LDS kernel,
-the tiled-GEMM Winograd (`tuneWino` measures it per shape), and a specialized
+the tiled-GEMM Winograd (`tuneWino` decides Winograd-vs-direct and the F(2,3)/F(4,3) tile by
+deterministic shape rules — numerics-affecting choices are never timing-raced — and times only
+the bit-neutral tiles-per-thread parameter), and a specialized
 depthwise kernel (`dwconv`). The general
 conv exposes its `local_size_x` as a spec constant so the autotuner can pick a
 workgroup size per conv signature.
@@ -471,10 +514,15 @@ std::vector<Tensor>& outputs = {})` reads each fd-bound input straight from the 
 each fd-bound output straight into the fd. A bound output's returned `Tensor` carries no host
 copy (its data is empty); unbound outputs come back as host tensors.
 
-The low-level Vulkan import primitive `vk::Buffer::importDmaBufFd`
+The Vulkan import primitive `vk::Buffer::importDmaBufFd`
 (`VkImportMemoryFdInfoKHR`, handle type `DMA_BUF_BIT_EXT`, allowed types queried with
-`vkGetMemoryFdPropertiesKHR`) still exists for advanced / true-GPU use: the GPU reads the
-dma-buf directly. Because the platform is UMA (all memory types are
+`vkGetMemoryFdPropertiesKHR`) is the mechanism behind `fromDmaBuf`/`toDmaBuf`: the GPU reads and
+writes the dma-buf directly. A `layout`/`dtype` declared on `fromDmaBuf`/`toDmaBuf` that matches
+the device-native boundary (or `TensorFormat::Auto`) binds the fd directly as the boundary
+buffer; any other declaration keeps the pooled boundary buffer and a recorded `boundary_convert`
+dispatch converts on the GPU. `Session::inputInfo()`/`outputInfo()` report the exact
+device-native block to allocate (`deviceBytes`/`deviceFormat`/`deviceDtype`). A failed import
+warns loudly (zero-copy unavailable) rather than reading undefined memory. Because the platform is UMA (all memory types are
 `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) there are no staging copies, and the path is
 bit-exact against the staged path (`maxAbsErr 0`).
 
@@ -493,15 +541,19 @@ shader compilation, conv autotuning, and the Winograd weight transform; caching 
 The document is guarded as a whole by a format version, a **kernel hash** (md5 of all embedded SPIR-V,
 `embeddedShadersHash()`), the device (vendor/device/driver + pipeline-cache UUID), and a model hash — any
 mismatch discards and recomputes it. It holds one **variant** per cache-affecting configuration
-(precision, `flatLayout`, `gpuIslandFold`, `fp32Tensors`, conv-kernel hints); a matching variant is
+(precision, `flatLayout`, `gpuIslandFold`, `matmulViewFold`, `ropeFusion`, `fusedAttention`,
+`kvConcatFold`, `fp32Tensors`, and the Winograd/direct-conv hints); a matching variant is
 reused and a new configuration appends one. Each variant bundles three blobs:
 
 - **Vulkan pipeline cache** — the `VkPipelineCache` blob (`vk::PipelineCache`, created in
   `VulkanBackend`). Skips driver shader recompilation.
 - **Prepacked-weights cache** — `WeightCache` (`vk_backend.h`): the weights already repacked into
   `NC4HW4`, keyed by op + role + shape (106 entries on MobileNetV2); warm runs skip the host repacking.
-- **Autotune cache** — in the same `WeightCache`, an op-signature → chosen `local_size_x` table
-  (`tuned()` / `setTuned()`); measured for entries not yet present, gated by the `tuning` effort.
+- **Autotune cache** — in the same `WeightCache`, an op-signature → chosen kernel-parameter
+  table (`local_size_x`, WTILE, register blocking, Winograd tiles-per-thread) plus the `Tuning`
+  level each entry was measured at (`tuned()` / `setTuned()`); a cached entry is reused when its
+  recorded level ≥ the requested level and re-swept otherwise. Only bit-neutral parameters are
+  ever timed — numerics-affecting choices are deterministic shape rules.
 
 `Session::updateCache()` writes the file, but only when the cache changed during the session —
 an unchanged warm run leaves the file untouched. It is called automatically from `~Session()`
@@ -539,7 +591,7 @@ on the whole-archive link of the static lib:
 | Graph passes | `src/import/` (`passes.h`; one `.cpp` per pass: `run_standard_passes.cpp`, `infer_shapes.cpp`, `const_fold.cpp`, `fuse_pointwise_chains.cpp`, `prune_dead_initializers.cpp`, …) |
 | Session / planning | `src/core/session.cpp` |
 | Core support | `src/core/` (`graph.cpp`, `op.cpp`, `config.cpp`, `profiler.cpp`, `backend_registry.cpp`, `ion.cpp`, `json.h`, `logging.cpp`) |
-| Vulkan backend | `src/backend/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `vk_ops.cpp`) |
+| Vulkan backend | `src/backend/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `ops/` — one `.cpp` per operator (Transpose and Slice share one)) |
 | CPU backend | `src/backend/cpu/` (`cpu_backend.cpp`, `ops/` — one file per operator) |
-| Shaders | `shaders/` (compiled by `glslc`, embedded via `tools/embed_spirv.py`) |
-| Examples | `examples/` (`probe`, `classify`, `profile`, `zerocopy_cache`, `backend_switch`, `op_check`) |
+| Shaders | `shaders/` (compiled by the vendored glslang — `third_party/glslang` — or a system `glslc` fallback, embedded via `tools/embed_spirv.py`) |
+| Examples | `examples/` (`basics/` — `probe`, `backend_switch`, `op_check`, `readme_quickstart`; `vision/` — `classify`, `predict`, `predict_cache`, `image_bench`; `bench/` — `profile`, `microbench`; `io/` — `run_io`, `dmabuf_fd_io`, `zerocopy_simple`, `zerocopy_cache`; `llm/` — `chat`, `vlm`; `splatting/` — `yonosplat`) |

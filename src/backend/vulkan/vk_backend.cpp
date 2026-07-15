@@ -1553,7 +1553,7 @@ namespace vknn {
             // Iteration boundary: end the chunk so a run can submit any iteration prefix, with the
             // tail barrier ordering this iteration's argmax/node writes against the next
             // iteration's feedback, link copies, and node reads (the same contract as a
-            // maxSubmitNodes split; all chunks of a run ride one vkQueueSubmit).
+            // maxSubmitNodes split; each chunk submits with its own fence).
             if (step + 1 < recordedSteps)
             {
                 vk::transferBarrier(cmd_);
@@ -2123,7 +2123,7 @@ namespace vknn {
                 // One set per chain iteration at a fixed stride of {rangeCount, totalElems} + 3
                 // uint32 per range slot. Iterations past the last provided set get a zero header, so
                 // their recorded copy dispatch is a no-op. The previous run's fence has signalled
-                // (submitBatchAndWait), so the GPU is not reading this buffer here.
+                // (submitAndWait), so the GPU is not reading this buffer here.
                 const size_t strideWords = 2 + (size_t) link.capacity * 3;
                 uint32_t    *words       = reinterpret_cast<uint32_t *>(link.rangesBuf->host());
                 for (int setIdx = 0; setIdx < chainStepsMax_; ++setIdx)
@@ -2224,7 +2224,7 @@ namespace vknn {
                 return false;
             }
             // {uint index, float value} per iteration slot, written by the epilogue dispatch of the
-            // last submitted run; the fence has signalled (submitBatchAndWait), so the mapped read
+            // last submitted run; the fence has signalled (submitAndWait), so the mapped read
             // is coherent.
             const uint32_t *words = reinterpret_cast<const uint32_t *>(it->second->host()) + (size_t) step * 2;
             index                 = (int64_t) words[0];
@@ -2312,7 +2312,7 @@ namespace vknn {
                 VKNN_ERROR << "decode chain: base position " << basePosition << " outside the exactly-representable range";
                 return Status::InvalidArgument;
             }
-            // The previous run's fence has signalled (submitBatchAndWait), so the GPU is not
+            // The previous run's fence has signalled (submitAndWait), so the GPU is not
             // reading the chain-state buffer here.
             *reinterpret_cast<uint32_t *>(chainStateBuf_->host()) = (uint32_t) basePosition;
             chainActiveSteps_                                     = activeSteps;

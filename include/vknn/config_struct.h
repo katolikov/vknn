@@ -84,8 +84,9 @@ namespace vknn {
         /// Split a GPU segment whose recorded node count exceeds this into chunks of this many nodes,
         /// each its own command buffer, so no single batch runs long enough to trip the GPU
         /// watchdog (an over-long batch is silently reset by the driver, zeroing its unexecuted tail
-        /// and corrupting the output). A run submits all chunks in ONE vkQueueSubmit (one batch per
-        /// chunk) and waits on one fence; the explicit barrier at each chunk tail keeps buffer reuse
+        /// and corrupting the output). A run submits each chunk with its own vkQueueSubmit + fence
+        /// wait (one submit spanning chunks can still run long enough to be reset); the explicit
+        /// barrier at each chunk tail keeps buffer reuse
         /// correct, so results are numerically identical. Small graphs (every CNN) stay a
         /// single chunk. 0 disables chunking. Vulkan exposes no watchdog limit to auto-detect, so this
         /// is a tunable knob; the default is conservative and forward-safe (a faster GPU runs each
@@ -105,9 +106,10 @@ namespace vknn {
         int maxSubmitBindings = 1024;
 
         /// Decode iterations the decode bucket's GPU segment records as ONE command-buffer chain
-        /// (see Session::configureDecodeChain): one vkQueueSubmit + one fence per this many greedy
-        /// decode tokens, with on-device state feedback (argmax id -> input_ids, position + 1, mask
-        /// slot) between iterations. 1 (the default) records the single-step stream unchanged. The
+        /// (see Session::configureDecodeChain): this many greedy decode tokens run with no per-token
+        /// host work — on-device state feedback (argmax id -> input_ids, position + 1, mask slot)
+        /// between iterations; chunks still submit one-per-fence. 1 (the default) records the
+        /// single-step stream unchanged. The
         /// chain applies only to a bucket a caller explicitly configures; every other segment always
         /// records one iteration. Chained decode is argmax-only by construction (the logits row is
         /// overwritten per iteration), and the token stream is bit-identical to the single-step loop.

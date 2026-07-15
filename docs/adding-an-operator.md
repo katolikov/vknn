@@ -44,7 +44,7 @@ enum class OpType {
   Relu,
   Add,
   // ...
-  ConvertDtype,
+  FusedAttention,  // <-- the current last value
   LeakyRelu,       // <-- new values go at the END: y = x>=0 ? x : alpha*x
 };
 ```
@@ -86,8 +86,13 @@ attributes still attach to the `Node` (`LeakyRelu` carries a float `alpha`,
 default `0.01`), retrievable via `node.attr.getf("alpha", 0.01f)`.
 
 This is the entire core-side change. The op flows through the import →
-IR → graph-pass → partition pipeline; the remaining work is a kernel on at
-least one backend.
+IR → graph-pass → partition pipeline; the remaining work is the kernels. The CPU
+kernel is mandatory: `tools/check_support_consistency.py` (run by `scripts/ci_host.sh`)
+fails when an OpType mapped in `opTypeFromOnnx()` has no `VKNN_REGISTER_CPU_OP` under
+`src/backend/cpu/ops/` — a recognized op with no CPU kernel cannot run even as a
+fallback. (Its `CPU_KERNEL_EXEMPT` list excuses only ops an import pass lowers away
+before planning — the quantized family, `Dropout`, `InstanceNorm`, the ORT contrib
+family.) The Vulkan kernel is the optional half.
 
 ---
 
@@ -105,10 +110,6 @@ class CpuOp {
  public:
   virtual ~CpuOp() = default;
   virtual void run(const Node& node, ExecContext& ctx) = 0;
-  // Which dtypes this op supports (capability/fallback). Default: fp32 + int64.
-  virtual bool supportsDType(DType dt) const {
-    return dt == DType::Float32 || dt == DType::Int64;
-  }
 };
 ```
 
@@ -187,21 +188,25 @@ it on `shaders/add.comp`:
 
 ```glsl
 #version 450
+#define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
+#include "precision.glsl"
 // Elementwise LeakyRelu over the NC4HW4-packed buffer: y = x>=0 ? x : alpha*x.
 #include "common.glsl"
 
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) readonly  buffer BufX { float x[]; };
-layout(std430, binding = 1) writeonly buffer BufY { float y[]; };
+layout(std430, binding = 0) readonly  buffer BufX { STORE x[]; };
+layout(std430, binding = 1) writeonly buffer BufY { STORE y[]; };
 
 layout(push_constant) uniform PC { uint count; float alpha; } pc;
 
 void main() {
-  uint i = gl_GlobalInvocationID.x;
+  // 2-term flat-id recovery: dispatch() spills a group count past the device's
+  // x-limit into y, so a bare gl_GlobalInvocationID.x drops the tail.
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (i >= pc.count) return;
-  float v = x[i];
-  y[i] = v >= 0.0 ? v : pc.alpha * v;
+  float v = float(x[i]);
+  y[i] = TO_STORE(v >= 0.0 ? v : pc.alpha * v);
 }
 ```
 
@@ -219,9 +224,10 @@ fp32 and `_fp16` variants from one source.
 
 `glslc` is discovered by CMake (`find_program(GLSLC glslc ...)`). Any `*.comp`
 under `shaders/` is picked up automatically by the `file(GLOB ...)` in
-`CMakeLists.txt`; adding a shader needs no build-file edit. On a host build
-without `glslc`, `embeddedShaders()` is a stub and the Vulkan path is compiled
-out; the CPU kernel runs.
+`CMakeLists.txt`; adding a shader needs no build-file edit. On a host build the Vulkan
+backend is compiled out by default (`VKNN_ENABLE_VULKAN` defaults to on only for
+Android) and `embeddedShaders()` is a stub; the CPU kernel runs. With Vulkan enabled
+but no shader compiler found, the shader build is skipped and the same stub is used.
 
 ### 3b. The op: subclass `vknn::VulkanOp`
 
@@ -334,9 +340,10 @@ exact gate the device engine runs, with no chance of the two drifting.
 
 - **`vkKernelDeclared(OpType)`** — a `switch` that mirrors the `VKNN_REGISTER_VK_OP`
   set. It returns `true` by default, and lists (as `return false`) the ops that have
-  *no* GPU kernel: the const-folded / import-lowered ops (`Shape`, `Constant`,
-  `Identity`, `Dropout`, `InstanceNorm`) and the quantized family lowered by the
-  dequantize pass. A new op with a Vulkan kernel is already covered by the `default:
+  *no* GPU kernel: the const-folded / import-lowered ops (`Unknown`, `Identity`,
+  `Constant`, `Shape`, `EyeLike`, `Dropout`, `InstanceNorm`), the quantized family
+  lowered by the dequantize pass, and the ORT contrib family expanded by
+  `lowerOrtContribOps` (`SimplifiedLayerNorm` … `MatMulNBits`). A new op with a Vulkan kernel is already covered by the `default:
   return true` — leave it alone unless the op has no kernel.
 
 - **`vkNodeGate(const Graph&, const Node&, std::string* whyNot)`** — the shape/attribute
@@ -466,14 +473,16 @@ static lib **whole-archive** everywhere it is consumed
 (`CMakeLists.txt`):
 
 ```cmake
-target_link_libraries(vknn_${ex}  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
-target_link_libraries(vknn_tests  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>" gtest gtest_main)
+target_link_libraries(vknn_${_name} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>")
+# tests/test_main.cpp provides main(), so gtest_main is not linked.
+target_link_libraries(vknn_tests    PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vknn>" gtest)
 ```
 
 This pulls in every object file (and therefore every registrar) whether or not
 the symbol is directly referenced. As long as the new op lives in a
-source file already globbed into the `vknn` target — `src/backend/cpu/*.cpp` and
-`src/backend/vulkan/*.cpp` both are — registration requires no further
+source file already globbed into the `vknn` target — the `file(GLOB_RECURSE ...)`
+patterns cover everything under `src/backend/cpu/` and `src/backend/vulkan/`,
+including the `ops/` subdirectories — registration requires no further
 build wiring.
 
 ---
@@ -496,7 +505,8 @@ registries:
   bool supports(OpType t, DType dt) const override {
     if (!available()) return false;
     // Debug/fallback hook: Config::disableVkOps="Add,Conv" forces those ops to fall back.
-    if (!disabledOps_.empty() && disabledOps_.find(opTypeName(t)) != std::string::npos)
+    // Entries match whole op-type names ("Conv" leaves ConvTranspose on the GPU).
+    if (!disabledOps_.empty() && Config::listContains(disabledOps_, opTypeName(t)))
       return false;
     return VkOpRegistry::instance().has(t);
   }
@@ -514,9 +524,9 @@ registries:
 
 Registering the op (step 2 / step 3) is what makes
 `supports()` return true — there is no separate capability list to maintain. The
-per-op `CpuOp::supportsDType()` hook lets a CPU op narrow the dtypes it accepts
-(e.g. the shape ops accept all dtypes by returning `true`); the default is
-fp32 + int64.
+dtype gate is central, not per-op: `CpuBackend::supports()` accepts fp32, int64, and
+int32 for any registered op (`src/backend/cpu/cpu_backend.cpp`); `CpuOp` has no
+per-op dtype hook.
 
 ### Backend selection and fallback
 

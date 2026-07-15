@@ -1,6 +1,12 @@
 # 0015. Device-resident decode chains
 
-Date: 2026-07-10. Status: accepted.
+Date: 2026-07-10. Status: accepted. Amended 2026-07-15: submission is per-chunk — each chunk
+(and so each chain iteration) gets its own vkQueueSubmit + fence wait, because one submit spanning
+chunks can run long enough for the GPU watchdog to reset it and zero the unexecuted tail. The rest
+of the decision stands: the recorded K-iteration chain, the on-device state feedback, the
+per-iteration argmax slots, and prefix submission via `setDecodeChainWindow` are all current; the
+win is the eliminated per-token host work (bind/collect, KV-link update, argmax readback), not a
+reduced submit count.
 
 ## Context
 

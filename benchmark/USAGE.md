@@ -12,6 +12,7 @@ python benchmark/run.py run benchmark/configs/example.json --run baseline   # na
 python benchmark/run.py run benchmark/configs/example.json --clean          # wipe the device dir first
 python benchmark/run.py run benchmark/configs/example.json -v               # + device stdout/stderr
 python benchmark/run.py run benchmark/configs/example.json --no-build       # reuse build-android/
+python benchmark/run.py run benchmark/configs/example.json --convert-on device  # compile .onnx models on the phone
 ```
 
 Per stage, the host prints:
@@ -45,8 +46,9 @@ then fed in the model input's declared dtype — a uint8 or fp16 input stays nat
 C-order.
 
 ### raw `.bin` / `.raw`
-A headerless little-endian **fp32** dump. Because it has no shape, the file must contain exactly the
-model input's element count (the shape comes from the model).
+A headerless little-endian **fp32** dump. Because it has no shape, it is read as exactly the model
+input's element count (the shape comes from the model); a shorter file zero-fills the remainder and
+extra trailing bytes are ignored.
 
 ### Input forms
 ```jsonc
@@ -104,8 +106,8 @@ into every stage. A single-stage config may drop `stages` and put the fields at 
       "convert": {                             // only used for an .onnx model
         "fp16": true,                          // store weights fp16 (default true)
         "opt": 1,                              // optimization level -O0..-O3 (default 1), or "s" for -Os (all fusion + INT4 weight quantization)
-        "no_fuse_swish": false, "fuse_se": false,
-        "fuse_dwpw": false, "no_fuse_pointwise": false,   // per-fusion overrides
+        "fuse_se": false, "fuse_dwpw": false,
+        "no_fuse_pointwise": false,            // per-fusion overrides (swish folding is part of the pointwise-chain pass)
         "out": "resnet50_fp16.vxm"             // device .vxm name (default: <onnx-stem>.vxm)
       },
 
@@ -128,6 +130,8 @@ into every stage. A single-stage config may drop `stages` and put the fields at 
         "max_submit_nodes": 500,               // GPU-watchdog submit chunking (0 = single submit)
         "winograd": "auto",                    // auto | on | off (deterministic kernel choice)
         "tuning": "fast",                      // none | fast | heavy (autotune effort)
+        "fp32_tensors": "",                    // comma-separated tensor-name substrings kept fp32
+        "winogradVariant": 0, "winogradUnit": 0, "directConv3x3": 0,  // conv-kernel hint overrides (unset = auto)
         "tolerance": 0.999                     // cosine pass threshold
       },
 
@@ -145,7 +149,7 @@ into every stage. A single-stage config may drop `stages` and put the fields at 
 
 ```sh
 python benchmark/run.py convert model.onnx model.vxm [-O 0..3] [--fp32] \
-    [--fuse-se] [--fuse-dwpw] [--no-fuse-swish] [--on host|device]
+    [--fuse-se] [--fuse-dwpw] [--on host|device] [--serial S] [--no-build]
 ```
 `-O` is the optimization level (see `docs/op-coverage.md` § Fusions); `--on device` runs
 `vknn_compile` on the phone for models too big to convert on the host.
@@ -160,15 +164,16 @@ leaves the previous file intact rather than a truncated one.
 
 ## 6. Making goldens
 
-`scripts/make_golden.py` runs an ONNX model with onnxruntime on given inputs and writes
+`benchmark/scripts/make_golden.py` runs an ONNX model with onnxruntime on given inputs and writes
 `<output>_gold.npy` files + a starter config.
 
 ## 7. Troubleshooting
 
 **`bad magic` / `incompatible vknn version` when loading a `.vxm`.** The `.vxm` container format
-carries a version word (`VXM3` / `VXM4`). A ready `.vxm` used **as-is** (a fetched or leftover file,
+carries a version word (`VXM3`–`VXM6`; `VXM5`/`VXM6` wrap `-Os`-quantized models). A ready `.vxm` used **as-is** (a fetched or leftover file,
 not reconverted) can be stale relative to the runner you built, so the runner refuses it. The `.onnx`
-path never hits this — `run.py` rebuilds the host and device binaries and reconverts each run, so the
-compiler and runner always match. Fix: point the config at the `.onnx` (drop the ready `.vxm`), or
+path avoids this when both binaries are current — `run.py` rebuilds the device binaries and reconverts
+each run, but a host convert uses `build-host/vknn_compile` as-is: rebuild the host (`./build.sh`) when
+the tree changed, or convert on the phone with `--convert-on device`. Fix: point the config at the `.onnx` (drop the ready `.vxm`), or
 delete the stale `<model>.vxm` and `<model>.cache` on the device and let it recompile. Always convert
 and run with the same build.

@@ -51,6 +51,8 @@ namespace vknn { namespace vk {
         /// wait once on the fence. The GPU consumes the batches back-to-back with no host round
         /// trip between them; ordering/visibility across buffers is the CALLER's contract (each
         /// buffer must end with a barrier covering the next one's reads). @returns wall time in ms.
+        /// Unused by the engine: a single submit spanning watchdog chunks can run long enough for
+        /// the driver to reset it and zero the tail, so segments submit per-chunk via submitAndWait.
         double submitBatchAndWait(const VkCommandBuffer *cmds, uint32_t count, double *submitCallMs = nullptr);
 
         VkCommandPool pool() const noexcept {

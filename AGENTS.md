@@ -12,8 +12,9 @@ inference, BatchNorm folding, activation/residual fusion, pointwise-chain fusion
 epilogues, constant folding to convergence, dead-node and dead-initializer elimination),
 partitions into maximal same-backend **segments**, and runs each segment on a backend: **Vulkan**
 (NC4HW4 packed layout, one pre-recorded command buffer per static segment, fp16 storage + fp32
-accumulation) or **CPU** (scalar + NEON reference and automatic fallback). It runs image CNNs,
-YOLOv8n detection, and a 965M-parameter transformer encoder (YoNoSplat) plus a from-scratch Vulkan
+accumulation) or **CPU** (scalar + NEON reference and automatic fallback). It runs image CNNs, YOLOv8n detection, autoregressive
+LLMs and a 2.2B vision-language model (int4/int8 weight quantization, engine-resident KV cache, one
+multi-graph `.vxm`), and a 965M-parameter transformer encoder (YoNoSplat) plus a from-scratch Vulkan
 3D Gaussian Splatting rasterizer. See [README.md](README.md) and [docs/architecture.md](docs/architecture.md).
 
 ## Build & test
@@ -23,9 +24,11 @@ YOLOv8n detection, and a 965M-parameter transformer encoder (YoNoSplat) plus a f
 ```sh
 ./build.sh                 # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
 ./build.sh --android       # Android arm64-v8a build (Vulkan backend, NDK toolchain)
-./build.sh --clean         # wipe the build dir first (clean build); combines with the others
+./build.sh --clean         # alone: wipe both build dirs and exit; with another flag: clean that target, then build
 ./build.sh --convert       # build only the model compiler (vknn_compile)
 ./build.sh --docs          # build the static documentation site -> docs/site/index.html
+./build.sh --test          # fast inner loop: build only vknn_tests, then run it
+./build.sh --leakcheck     # leak gate: macOS `leaks --atExit` -> leakcheck.log; Linux ASan+LSan+UBSan
 ./build-host/vknn_tests    # run the host unit/integration tests
 ```
 
@@ -33,9 +36,9 @@ Host artifacts land in `build-host/`, Android in `build-android/`. Override the 
 `ANDROID_NDK=...` and the API level with `ANDROID_API=...`.
 
 **Before you push, run `scripts/ci_host.sh`** — the host-only gate: host build + `vknn_tests` +
-`--android` + `--docs` + op-support self-consistency + clang-format drift + CPU determinism. It
+`--android` + `--docs` + op-support / epilogue-sync / shader-contract checks + clang-format drift + CPU determinism. It
 needs no device; the on-device byte and perf gates (`benchmark/scripts/gate_op.sh`,
-`gate_pw_probes.sh`, `dev_perfab.sh`) run separately. See [docs/BENCHMARK.md](docs/BENCHMARK.md).
+`gate_pw_probes.sh`, `dev_perfab.sh`) run separately. See [docs/benchmark.md](docs/benchmark.md).
 
 ## Repo layout
 
@@ -46,13 +49,18 @@ src/import/onnx/       dependency-free ONNX protobuf parser
 src/import/            graph passes, ONE PASS PER FILE (infer_shapes, const_fold, fuse_pointwise_chains, ...); run_standard_passes.cpp orders them, passes.h declares them
 src/backend/cpu/ops/  CPU operators — ONE OP PER FILE
 src/backend/vulkan/   Vulkan backend: context/buffers/command/pipeline + ops/ (ONE OP PER FILE)
-shaders/               GLSL compute (.comp) + common.glsl / precision.glsl; compiled by glslc, embedded
+shaders/               GLSL compute (.comp) + shared .glsl includes; compiled by vendored glslang (glslc fallback), embedded; experimental/ never built
 convert/compile.cpp    vknn_compile — the ONNX -> .vxm model compiler
 examples/              tool/example binaries (built as vknn_*)
 tests/                 GoogleTest -> vknn_tests
-scripts/               build_android shim, run_on_device, bench, get_golden, yonosplat/
-tools/                 embed_spirv.py, compare_layers.py
+scripts/               ci_host, format, check_determinism, bench + bench_vs_mnn, run/profile_on_device,
+                       get_golden / export_tv, gen_site, build_android shim, yonosplat/
+tools/                 embed_spirv, check_{epi_sync,shader_contracts,support_consistency,model_support},
+                       scan_unsupported_ops, onnx_dump / rebuild_onnx_from_dump, cache_to_json, compare_layers
 docs/ , skills/        reference docs + focused how-to guides
+benchmark/             vknn_benchmark + run.py driver; scripts/ = the on-device byte & perf gates
+app-demo/              Android demo app (Kotlin/Compose; native lib via app-demo/native/build_native.sh)
+third_party/           vendored submodules: glslang (shader build), googletest, msgpack-c (cache codec)
 ```
 
 ## The operator framework (and the one rule)
@@ -94,7 +102,7 @@ GPU is a regression. See [skills/compile-and-run-a-model.md](skills/compile-and-
 
 ## Conventions
 
-- **Formatting:** clang-format, Google base, 100-column, sorted + regrouped includes
+- **Formatting:** clang-format, explicit rule set (no base style), 160-column, sorted + merged include blocks
   (`.clang-format`). Run `scripts/format.sh` (or `clang-format -i`) before committing.
 - **Naming:** types `PascalCase`; methods stay `camelCase` (PascalCasing them collides with the
   standard library — `size`/`data`/`empty`/`max`).
@@ -117,7 +125,7 @@ committing.
   the device silently invalidates a change.
 - **Thermal throttling is fast.** Before each benchmark run, `adb shell sleep 12-14` to cool
   the GPU; never A/B two builds back-to-back. Use `--timing` (`Config::timing`) for real submit+GPU time — the
-  profiler's per-op sum is inflated by forced per-op barriers. `rm -rf` the model's cache dir before
+  profiler's per-op sum is inflated by forced per-op barriers. delete the model's `.cache` file (written next to the model) or pass `--no-cache` before
   timing it.
 - **Validate non-classifier / non-image models with `vknn_run_io`**, not `vknn_classify` (the latter
   assumes an image-classifier I/O shape).

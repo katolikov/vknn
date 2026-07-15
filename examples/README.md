@@ -6,12 +6,12 @@ group folder). Build them with the host or Android build (`./build.sh` / `./buil
 | Group | Example | Binary | What it shows |
 |-------|---------|--------|---------------|
 | `basics/` | `readme_quickstart.cpp` | `vknn_readme_quickstart` | Minimal load → run → read-back. |
-| `basics/` | `probe.cpp` | `vknn_probe` | Report a model's inputs/outputs and per-node backend assignment. |
+| `basics/` | `probe.cpp` | `vknn_probe` | Print the Vulkan device, driver, compute limits, feature flags, and memory heaps (no model, no arguments). |
 | `basics/` | `backend_switch.cpp` | `vknn_backend_switch` | Run the same model on the Vulkan and CPU backends. |
 | `basics/` | `op_check.cpp` | `vknn_op_check` | Single-op CPU-vs-GPU numeric check. |
 | `vision/` | `classify.cpp` | `vknn_classify` | Image classification with config-file + CLI flag layering. |
 | `vision/` | `predict.cpp` / `predict_cache.cpp` | `vknn_predict` / `vknn_predict_cache` | Predict, and predict with a warm cache. |
-| `vision/` | `image_bench.cpp` | `vknn_image_bench` | Image-model latency benchmark. |
+| `vision/` | `image_bench.cpp` | `vknn_image_bench` | Compare SSBO vs storage-image vs sampler kernels on a 1×1 conv, each verified against a CPU reference. |
 | `llm/` | `chat.cpp` | `vknn_chat` | On-device autoregressive decode loop for a Qwen2 with-past decoder. |
 | `llm/` | `chat_host.py` | — | Terminal front-end that tokenizes and drives `vknn_chat` over adb. |
 | `llm/` | `vlm.cpp` | `vknn_vlm` | Vision-language chat (SmolVLM2) over a one-file multi-graph `.vxm`: image encode → on-device embedding splice → prefill → streamed decode. |

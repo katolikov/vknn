@@ -72,7 +72,9 @@ compile a **multi-bucket** plan whose second bucket takes `input_ids [1, S]` wit
 `S > 1`. `vknn_chat` selects that prefill bucket automatically and folds the entire
 prompt in a single `S`-token pass, cutting time-to-first-token by an order of magnitude;
 `--no-prefill` forces the token-by-token path for A/B. Compile a decode bucket (`S = 1`)
-and a prefill bucket (`S = 256`) with the `--graph` multi-bucket form:
+and a prefill bucket (`S = 256`) with the `--graph` multi-graph form — or, from a single
+source file, with one `--bucket "dim:NAME=VALUE;..."` per bucket (the same segment
+syntax; mutually exclusive with `--graph`):
 
 ```sh
 vknn_compile out.vxm --fp16 \
@@ -80,7 +82,7 @@ vknn_compile out.vxm --fp16 \
   --graph "model.onnx;dim:sequence_length=1;dim:past_sequence_length=1024;dim:total_sequence_length=1025"
 ```
 
-`-Os` compiles the same fusion set plus **calibration-free int4 weight quantization** (a
+`-Os` compiles every `-O3` fusion plus **calibration-free int4 weight quantization** (a
 native int4 GPU MatMul) in place of `--fp16`: the instruct model is ~2.4x smaller and
 stays coherent. `--quant-samples 0` selects weight-only quantization, which a multi-bucket
 compile requires — pair it with the `--graph` form above for an int4 prefill model. The
@@ -114,7 +116,8 @@ temperature + top-k + top-p.
 vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
           [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
           [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax]
-          [--no-rope-fusion] [--no-fused-attention] [--no-matmul-view-fold]
+          [--no-rope-fusion] [--no-fused-attention] [--no-matmul-view-fold] [--no-kv-concat-fold]
+          [--max-submit-nodes N] [--timing] [--timing-summary]
 ```
 
 The KV cache is engine-resident by default: `vknn_chat` links every `present.*` output to
@@ -182,6 +185,13 @@ model simply runs faster once it loads. Each is on by default.
 Both kernels compute scores and softmax in fp32, so they are **numerically finer** than
 the decomposed chain rather than byte-identical — the greedy token stream is unchanged.
 
+A third load-time pass, the **KV-cache Concat fold** (on by default, and only when the
+fused attention runs), removes the whole-cache-per-token `Concat` copy: the
+`FusedAttention` kernel reads the past cache and the new key/value rows as split
+sources, and each `present.*` output shrinks to the rows-only tensor — the values are
+bit-identical. `--no-kv-concat-fold` restores the full-cache `Concat`;
+`--kv-concat-fold` forces the fold back on.
+
 ## 5. Precision
 
 The plan is compiled `--fp16`, so weights are stored fp16; every kernel **accumulates in
@@ -191,7 +201,9 @@ that accumulates the variance reduction in fp32, so the fp16-activation path (`-
 low`) stays numerically faithful through the norm — the prefill-logits argmax matches the
 HuggingFace reference.
 
-`--precision low` stores activations fp16; `--precision high` stores them fp32. Because a
+`--precision low` stores activations fp16; `--precision high` stores them fp32;
+`--precision normal` is fp16 storage plus a preset fp32 pin list whose name patterns
+match nothing in this decoder, so it behaves like `low` here. Because a
 greedy token is the argmax over a 151936-wide logits row, two near-tied top logits can flip
 under fp16 rounding at a close decision, so a long greedy stream may diverge from an fp32
 reference even when each individual forward is correct. Pin the fragile tail to fp32 with

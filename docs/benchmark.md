@@ -126,8 +126,10 @@ traffic to 0.56× and the multiplies to 4× (vs F(2,3)'s 2.25×), and it is nume
 (ResNet cosine 0.999999 — the larger transform coefficients do *not* break half precision here). It is
 **slower** on this GPU (~11.5 vs F(2,3)'s 10.5 ms): the 6×6 transforms hold `d[6][6]`+`t[6][6]` = 72
 `vec4` per thread (register pressure) and the GEMM has 4× fewer tiles (less parallelism). The traffic
-saving is real but the register-heavy transforms eat it — F(2,3) is the default; F(4,3) is a hint for
-research / future transform-LDS work.
+saving is real but the register-heavy transforms can eat it. The output tile is picked per shape by
+a deterministic cost model (F(4,3) wins on deep channels, F(2,3)'s smaller transform wins on
+shallow); `setHint(Hint::WinogradUnit, 4)` forces F(4,3) on every 3×3, bypassing even the
+Winograd-vs-direct shape rule.
 
 ## YoNoSplat encoder (965M-param transformer)
 
@@ -155,6 +157,12 @@ this driver); the rasterizer that consumes the 6 Gaussian outputs is a separate 
   cache-build cost is excluded from `timing_ms`.
 - VKNN's latency is very consistent (the whole static graph is one pre-recorded command buffer);
   MNN-Vulkan has higher cold-loop variance.
+- `scripts/profile_on_device.sh <adb-serial> <model.vxm|.onnx> [inputs...] [-- extra run_io flags]`
+  captures a full single-pass profile of one model on one device: GPU identity/capabilities, the
+  per-op GPU profile table + GPU total, cold vs warm session and steady-state timing, fp16 vs fp32,
+  high queue priority, and per-op-type CPU-fallback isolation. Compiles `.onnx` via the host
+  `vknn_compile` first; runs zero-filled inputs when none are supplied; env `OUTDIR` / `REPEAT` /
+  `BUILD_DIR`; writes per-run logs plus a `summary.txt`.
 
 ## Gates and scripts
 
@@ -162,8 +170,9 @@ The thermal A/B discipline and the byte gates below are committed as scripts, no
 
 - **`scripts/ci_host.sh`** — the host-only "before you push" gate. Runs the host build,
   `vknn_tests`, the `--android` and `--docs` builds, the op-support self-consistency check
-  (`tools/check_support_consistency.py`), a clang-format drift report (advisory; `--strict-format`
-  to enforce), and the CPU determinism check. No device needed; exits non-zero on any hard failure.
+  (`tools/check_support_consistency.py`), the epilogue-sync and shader-contract checks
+  (`tools/check_epi_sync.py`, `tools/check_shader_contracts.py`), a clang-format drift report
+  (advisory; `--strict-format` to enforce), and the CPU determinism check. No device needed; exits non-zero on any hard failure.
   ```bash
   scripts/ci_host.sh                 # full host gate
   scripts/ci_host.sh --no-android    # skip the NDK build (host-logic-only change)

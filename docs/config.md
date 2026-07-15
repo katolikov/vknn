@@ -28,12 +28,13 @@ All defaults below are the C++ member initializers in `struct Config`.
 
 | Field | JSON type | Accepted values | Default | Meaning |
 |---|---|---|---|---|
-| `backend` | string | `"VULKAN"`, `"CPU"` (case-insensitive: `vulkan`/`cpu` also accepted) | `"VULKAN"` | Primary backend the planner prefers for each node. Unrecognized strings fall back to `CPU`. |
+| `backend` | string | `"VULKAN"`, `"CPU"` (lowercase `vulkan`/`cpu` also accepted; any other spelling, including mixed case, falls back to `CPU`) | `"VULKAN"` | Primary backend the planner prefers for each node. Unrecognized strings fall back to `CPU`. |
 | `fallback` | array of string | same tokens as `backend` | `["CPU"]` | Ordered list of backends to try when the primary declines a node. CPU is always an implicit final fallback regardless of this list. Providing the key replaces the whole list. |
 | `allowCpuFallback` | bool | `true` / `false` | `true` | If `false`, nodes that no listed backend accepts are an error instead of silently running on CPU. |
 | `precision` | string | `"low"`, `"normal"`, `"high"` (aliases `"fp16"`→low, `"mixed"`→normal, `"fp32"`→high; unknown → low) | `"low"` | Quality tier for the Vulkan backend. `low` = fp16 storage + fp32 accumulation everywhere. `normal` = fp16, but a built-in geometry-tail set (`mixedPrecisionFp32Tensors()`) is kept fp32 — selective fp32 (a no-op for models without those tensors). `high` = full fp32 storage. Under `low`/`normal` every fp16 narrowing store rounds to nearest even (the `RoundingModeRTE` SPIR-V execution mode), so per-store error is unbiased and does not accumulate a directional drift across depth. See `fp32Tensors` to override the `normal` set. |
 | `maxSubmitNodes` | int | ≥ 0 | `500` | Split a GPU segment larger than this into chunks of this many nodes, each its own submit, so no single submit trips the GPU watchdog. `0` disables chunking. Only the very large YoNoSplat-class transformer needs it; results are numerically identical. |
-| `decodeChainSteps` | int | ≥ 1 | `1` | Decode iterations the decode bucket's GPU segment records as one command-buffer chain (`Session::configureDecodeChain`): one submit + one fence per this many greedy tokens, with on-device feedback (argmax id → `input_ids`, position + 1, mask slot) between iterations. `1` records the single-step stream unchanged; only an explicitly configured bucket chains. The token stream is bit-identical to the single-step loop; chained decode is argmax-only. |
+| `maxSubmitBindings` | int | ≥ 0 | `1024` | Also split a GPU segment's command buffer once its recorded push-descriptor writes reach this count, independent of the node count — a binding-dense fused dispatch pushes ~9–11 descriptors versus ~2–4 for a plain op, and a driver that caps the descriptors one command buffer may hold silently corrupts the recording past the cap. `0` disables this cap; the default keeps a ~2× margin under the observed corruption point. Results are numerically identical. |
+| `decodeChainSteps` | int | ≥ 1 | `1` | Decode iterations the decode bucket's GPU segment records as one command-buffer chain (`Session::configureDecodeChain`): this many greedy tokens per `run()` with on-device feedback (argmax id → `input_ids`, position + 1, mask slot) between iterations — no host readback or re-bind between tokens; each iteration's command buffer still submits with its own fence, so every submit stays watchdog-short. `1` records the single-step stream unchanged; only an explicitly configured bucket chains. The token stream is bit-identical to the single-step loop; chained decode is argmax-only. |
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `priority` | string | `"low"`, `"normal"`, `"high"` | `"normal"` | GPU queue scheduling priority (Vulkan `VK_KHR/EXT_global_priority`). `normal` reproduces the default device-creation path; `low`/`high` request the matching queue tier. Scheduling only — never changes numerical output; an inert no-op on a device without a global-priority extension. |
 | `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Per-model MessagePack cache holding the compiled pipelines, prepacked/Winograd weights, and conv autotune table. Empty resolves to `<model>.cache` next to the model. Caching is always on: a warm start reloads it (skipping shader compilation, weight prepacking, and autotuning), and it auto-heals when stale. See [Caching](#caching). |
@@ -43,11 +44,12 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `verbosity` | int | `0`, `1`, `≥2` | `1` | Log level. `0` → Warn, `1` → Info, `≥2` → Debug. Applied by `Config::applyLogLevel()`. |
 | `layerDump` | bool | `true` / `false` | `false` | Dump every layer's output tensor to disk for debugging. |
 | `layerDumpDir` | string | filesystem path | `"vknn_dump"` | Destination directory for layer dumps (used only when `layerDump` is `true`). |
-| `tuning` | string | `"none"`, `"fast"`, `"heavy"` (aliases `"off"`→none, `"thorough"`→heavy) | `"fast"` | Load-time conv autotune effort. `none` uses the default kernel (no per-shape measurement), `fast` does a quick candidate sweep, `heavy` an exhaustive one. Effort only — never changes numerical output beyond kernel-selection fp rounding (outputs stay cos ≈ 1.0, same argmax); the chosen kernels are cached and reused on a warm start. |
+| `tuning` | string | `"none"`, `"fast"`, `"heavy"` (aliases `"off"`→none, `"thorough"`→heavy) | `"fast"` | Load-time conv autotune effort. `none` runs no per-shape measurement (a cached pick is reused at any level, else the deterministic default kernel), `fast` does a quick candidate sweep, `heavy` an exhaustive one. Effort only — never changes numerical output beyond kernel-selection fp rounding (outputs stay cos ≈ 1.0, same argmax); the chosen kernels are cached and reused on a warm start. |
 | `cpuThreads` | int | ≥ 1 | `4` | Worker threads the CPU backend partitions its hot output loops across (Conv, ConvGemm, FusedDwPw, Gemm, MatMul, the elementwise family). Only loops with disjoint per-iteration outputs and no cross-iteration accumulation are split, so results are bit-identical for any thread count — the CPU backend stays the byte oracle for the GPU path. `1` runs every loop inline. A fixed default rather than a probe of the host, so a plan runs the same way on every machine. |
 | `flatLayout` | bool | `true` / `false` | `true` | Flat row-major GPU layout pass that keeps generic head ops (Transpose/Slice/Concat/Binary/Softmax) on the GPU. On by default (fastest). `false` (CLI `--no-flat`) forces NC4HW4 / CPU paths — advanced. Backed by `Hint::FlatLayout`. |
 | `gpuIslandFold` | bool | `true` / `false` | `true` | Fold tiny GPU op-islands between CPU segments onto the CPU (fewer boundary round-trips). On by default (fastest). `false` (CLI `--no-fold-islands`) keeps every supported op on the GPU — verification runs use it so the fallback count is meaningful. Backed by `Hint::GpuIslandFold`. |
 | `timing` | bool | `true` / `false` | `false` | Print per-stage timing (pack / submit+gpu / unpack, plus `Session::run` bind/segments/collect). |
+| `timingSummary` | bool (C++ only, not a JSON key) | `true` / `false` | `false` | Accumulate per-segment submit/sync walls silently and print one summary line per GPU segment at teardown: runs, chunk count, and per-run averages of pack, `vkQueueSubmit` call, fence wait, GPU-busy, GPU inter-chunk gap, and unpack. Unlike `timing` it emits no per-run log lines, so the measured loop is not perturbed by log I/O. GPU-busy/gap need timestamp support and read `0` when `profile` owns the query machinery. |
 | `debugSegments` | bool | `true` / `false` | `false` | Trace per-segment and per-CPU-op execution. |
 | `disableVkOps` | string | e.g. `"Add,Conv"` | `""` | Comma list of op types forced onto the CPU backend (exercises the CPU-fallback path). Entries match whole op-type names: `"Conv"` does not disable `ConvTranspose`. |
 | `dumpTensors` | string | e.g. `"layer3"` | `""` | Comma list of tensor-name substrings to dump to disk after a run. |
@@ -67,13 +69,14 @@ input model** — each `--graph` occurrence names its own source file (see the `
 | `vknn_compile` flag | Meaning |
 |---------------------|---------|
 | `--fp16` | Store weights as fp16 in the `.vxm` (default fp32). Halves the file and the runtime host repack; the run-time compute precision is a separate `Config::precision` knob. |
-| `-O0` / `-O1` / `-O2` / `-O3` (or `--opt N`) | Optimization level, default `-O1`. `-O0` = no optional fusion (reference); `-O1` = the general pointwise fusion (the bit-exact production set); `-O2`/`-O3` = + the experimental Squeeze-Excite and depthwise+1×1 fusions. |
+| `-O0` / `-O1` / `-O2` / `-O3` (or `--opt N`) | Optimization level, default `-O1`. `-O0` = no optional fusion (reference); `-O1` = the general pointwise fusion + the GridSample warp-chain fold (both bit-exact, the production set); `-O2`/`-O3` = + the experimental Squeeze-Excite and depthwise+1×1 fusions. |
 | `-Os` | A superset of `-O3`: all of its fusion plus calibration-free weight quantization (int4 by default; see `--quant-bits`). Per-op-class defaults quantize MatMul weights with a scale group and keep the activation-salient outlier columns fp16, while Conv/Gemm weights load-dequant to fp16; a per-layer relative-error guard keeps a hostile layer fp16, and native packed GPU MatMul kernels run the quantized weights. Emits a **VXM5** container for int4-only content or **VXM6** for any other format — the same subtag over the exact VXM3/VXM4 body, so a non-quantized compile stays byte-identical VXM3/4 and an engine without the extended formats rejects VXM6 cleanly instead of misreading it. The Qwen instruct model is ≈2.4× smaller as int4. Accepts a `.vxm` as input to re-quantize an already-compiled model; a multi-bucket `.vxm` re-quantizes every bucket over the shared initializer pool. |
 | `--quant-bits 4\|8\|lut4` | Packed-weight format for `-Os` (default `4` = symmetric int4). `8` trades half the weight-traffic saving for ~an order of magnitude lower quantization error; `lut4` keeps the 4-bit payload but decodes through one fitted 16-entry fp16 codebook per tensor (NF4-class, better on normal/heavy-tailed weight distributions than the uniform int4 grid). All formats run the same outlier/bias-correction/guard pipeline and their own native GPU MatMul kernels. |
 | `--quant-samples N` | Calibration samples for the min-MSE scale-group search + bias correction (`-Os`). `0` = weight-only (uniform column weighting, no calibration) — required for a multi-bucket compile so every bucket's scales stay identical and the payloads content-dedup. |
 | `--quant-group N` / `--quant-outliers N` / `--quant-conv-group N` / `--quant-conv-outliers N` | Quantization tuning knobs over the per-op-class defaults (`-Os`): the scale-group width and the fraction of activation-salient outlier columns kept fp16, for MatMul weights (`--quant-group`/`--quant-outliers`) and Conv/Gemm weights (`--quant-conv-*`). |
-| `--calib F0[,F1,...]` | Calibration sample files for the `-Os` min-MSE scale search + bias correction — one sample file per graph-input occurrence. |
-| `--[no-]fuse-pointwise` / `--[no-]fuse-se` / `--[no-]fuse-dwpw` / `--[no-]lower-conv` | Override a single fusion/lowering pass on top of the `-O` level. |
+| `--quant-err F` | Per-layer weighted relative weight-error bar for `-Os` (default `0.25`): a layer whose quantized weight error exceeds it stays fp16 entirely (the mixed-precision guard). |
+| `--calib F0[,F1,...]` | One calibration sample per occurrence (repeatable) for the `-Os` min-MSE scale search + bias correction: comma-separated raw `.bin` files in graph-input order, each `numElements*dtypeSize` bytes (the `vknn_run_io` input convention). |
+| `--[no-]fuse-pointwise` / `--[no-]fuse-gridsample-warp` / `--[no-]fuse-se` / `--[no-]fuse-dwpw` / `--[no-]lower-conv` | Override a single fusion/lowering pass on top of the `-O` level. |
 | `--strict-fuse` | Round every fused step so `fused == unfused` byte-identical (the byte-verification mode). The default fast mode fp32-chains each fused unit and rounds once per stored stream — faster, and at least as accurate as the unfused graph. |
 | `--no-dequantize` | Keep `QuantizeLinear` / `DequantizeLinear` / QLinear ops instead of folding them to float. Default (off) compiles a quantized checkpoint to a plain float graph (see [limitations.md §6](limitations.md)). |
 | `--batch N` | Leading-axis (batch) fallback for a dynamic batch dim. Default `1`. |
@@ -83,6 +86,7 @@ input model** — each `--graph` occurrence names its own source file (see the `
 | `--bucket "NAME=D0x...;dim:NAME2=VALUE;..."` (repeatable) | Declare **one plan bucket** per occurrence: the model is compiled once per bucket over a fresh import, and the buckets share one content-deduped initializer pool in a multi-bucket `.vxm`. A bucket segment is either a per-tensor `NAME=D0xD1x...` shape or a `dim:NAME=VALUE` symbolic binding (so prefill vs decode plans differ only by their bound `sequence_length` / `past_sequence_length`). `--batch` / `--shape` / `--dim` are the shared fallback under every bucket. With no `--bucket`, exactly one bucket is written (a legacy single-graph `.vxm`, byte-identical to before). `--bucket` requires an ONNX input. |
 | `--graph "FILE.onnx[;NAME=D0x...;dim:NAME2=VALUE;...]"` (repeatable) | **Multi-graph form**: each occurrence compiles **one bucket from its own source file**, with its own shape/dim segments (the `--bucket` segment syntax) over the shared `--batch`/`--shape`/`--dim` fallback. Occurrences may repeat a file at different shapes (a decoder's prefill + decode plans) or name different files (a vision tower + its decoder); every bucket lands in one `.vxm` over a content-deduped initializer pool, and the device weight pool shares GPU copies by payload content, so N buckets over one weight set cost one copy ([ADR-0014](adr/0014-multi-graph-vxm.md)). The only positional argument is the output `.vxm`; mutually exclusive with `--bucket`; a `.vxm` cannot be a graph source. See [running-a-vlm.md](running-a-vlm.md) for a five-bucket VLM compile. |
 | `--support-report <out.json>` | Write the per-node backend assignment (node, op, backend, and the refusal reason for every CPU node) from the engine's own capability model (`vkSupportSurvey` — the exact gate the device runs), then continue the compile. Consumed by `tools/check_model_support.py --engine-report`. On a multi-bucket/multi-graph compile, one report per bucket: `out.json` for bucket 0, then `out.bucketN.json`. |
+| `--dump-big` | Debug: log tensors > 50M elements after shape inference. |
 
 A multi-bucket `.vxm` streams its buckets at load (host memory peaks at one bucket's
 weights, not the file total); `Session::run()` selects the bucket by the bound input
@@ -99,7 +103,8 @@ are in the field table above and reach the CLI through the runner examples. `vkn
 exposes `--precision`, `--tuning`, `--winograd`, `--profile`, and `--layer-dump`
 ([below](#how-the-classify-example-exposes-config-flags)); `vknn_run_io` adds
 `--disable-vk-ops`, `--no-fold-islands`, and `--no-flat` for exercising the fallback and
-layout paths.
+layout paths, plus `--no-matmul-view-fold`, `--no-rope-fusion`, `--no-fused-attention`, and
+`--no-kv-concat-fold` for the load-time fusion hints.
 
 ### Enum reference
 
@@ -144,7 +149,7 @@ cfg.setHint(Hint::WinogradUnit, Mode::F43);   // force F(4,3) Winograd
 int v = cfg.hint(Hint::WinogradUnit);         // read back (0 if unset)
 ```
 
-`MatMulViewFold`, `RopeFusion`, and `FusedAttention` are load-time graph-fusion passes that never change a
+`MatMulViewFold`, `RopeFusion`, `FusedAttention`, and `KvConcatFold` are load-time graph-fusion passes that never change a
 compiled `.vxm`; each is keyed into the plan-cache variant, so flipping the hint reselects (or recomputes) a
 variant instead of ever serving a stale plan.
 
@@ -170,10 +175,13 @@ compilation, conv autotuning, and weight prepacking. Caching is always on — it
   a shader change, a different GPU, a different model) the whole file is discarded and recomputed — there
   is nothing to invalidate by hand.
 - **Multi-variant** — one file holds an independent entry per cache-affecting configuration (`precision`,
-  `flatLayout`, `gpuIslandFold`, `fp32Tensors`, and the conv-kernel hints). Switching precision back and
+  `flatLayout`, `gpuIslandFold`, `matmulViewFold`, `ropeFusion`, `fusedAttention`, `kvConcatFold`, `fp32Tensors`, and the conv-kernel hints). Switching precision back and
   forth reuses each variant instead of recompiling; a new configuration appends a new variant.
-- **`tuning`** sets only the load-time autotune effort for entries not yet measured; the chosen kernels
-  are stored in the variant and reused. To re-tune at a higher effort, delete the cache (or use `noCache`).
+- **`tuning`** sets the load-time autotune effort. Each chosen kernel is stored in the variant with the
+  effort level it was measured at: a warm start reuses an entry measured at the requested level or higher,
+  a higher-effort request re-sweeps lower-level entries once and upgrades their stored level, and `none`
+  reuses any cached entry at any level — no cache deletion is needed to re-tune
+  ([ADR-0016](adr/0016-per-entry-tuning-level-and-none-reuse.md)).
 - **`noCache`** (CLI `--no-cache`) skips all cache I/O for cold-compile measurement.
 
 `run()` performs no compilation or tuning — every one-time cost is paid at load.
@@ -199,6 +207,7 @@ lists all of them, with non-default values where useful:
   "cacheDir": "vknn_cache",
   "noCache": false,
   "tuning": "fast",
+  "cpuThreads": 4,
   "freeWeightsAfterUpload": true,
   "flatLayout": true,
   "gpuIslandFold": true,
@@ -286,6 +295,10 @@ The CLI flags and the config fields they touch:
 | `--layer-dump DIR` | `layerDump = true`, `layerDumpDir = DIR` | off |
 | `--winograd MODE` | `setHint(Hint::Winograd)` (`auto`/`on`/`off`) | `auto` |
 | `--tuning LEVEL` | `tuning` (`none`/`fast`/`heavy`) | `fast` |
+| `--timing` | `timing = true` | off |
+| `--debug-seg` | `debugSegments = true` | off |
+| `--wino-unit N` | `setHint(Hint::WinogradUnit, N)` when `N` ≠ 0 (`4` = force F(4,3)) | `0` (auto) |
+| `--wino-variant N` | `setHint(Hint::WinogradVariant, N)` when `N` ≠ 0 | `0` (tiled-GEMM) |
 
 Flags that are not config fields (model/input handling and benchmarking):
 `--model PATH`, `--input PATH`, `--shape N,C,H,W`, `--golden PATH`,

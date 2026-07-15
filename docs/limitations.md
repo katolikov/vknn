@@ -14,8 +14,10 @@ does **not** do.
 
 ## 1. Shapes are resolved at plan time; dynamic shapes need declared buckets
 
-The engine plans a graph for a **fixed, fully-static shape**. `Session::plan()`
-runs the import passes' shape inference to a fixed point at construction; every
+The engine plans a graph for a **fixed, fully-static shape**. Session construction
+(`Session::createFromOnnx` / `createFromVxm` → `buildBucket`)
+runs the import passes' shape inference to a fixed point (a `.vxm` loads shapes already resolved at
+compile); every
 segment, every Vulkan command buffer, and every prepacked weight is specialized to
 those shapes. The Vulkan backend **pre-records the segment's `VkCommandBuffer`s**
 (`Segment` in `include/vknn/segment.h`; a segment above `Config::maxSubmitNodes`
@@ -107,11 +109,15 @@ VKNN beats MNN's Vulkan backend on every benchmarked model (often ~4×). Against
 the 3×3-conv bulk there.
 
 - **Winograd F(2,3) via a tiled GEMM** is the default for deep/square 3×3 convs
-  (`setHint(Hint::Winograd, Mode::Auto)`, autotuned vs the direct kernel per shape).
+  (`setHint(Hint::Winograd, Mode::Auto)`; Winograd-vs-direct is a **deterministic shape rule** —
+  Winograd when `Cin*Cout <= 32768` — never a timing race, so the choice and the output bits are
+  identical run-to-run and across tuning levels).
 - **No cooperative-matrix / matrix-core path.** `VK_KHR_cooperative_matrix` is **absent on the
   target driver**, so that avenue is closed.
-- **F(4,3) Winograd** is implemented (numerically fine at fp16) but slower here — its 6×6 transforms
-  are register-heavy; available via `setHint(Hint::WinogradUnit, 4)` for research.
+- **F(4,3) Winograd** is implemented (numerically fine at fp16); an analytic per-shape cost model
+  picks the F(2,3) / F(4,3) output tile deterministically (F(4,3)'s 4× FLOP saving wins on deep
+  channels, F(2,3)'s smaller transforms on shallow — never timed, so the tile choice is bit-stable);
+  `setHint(Hint::WinogradUnit, Mode::F43)` forces F(4,3).
 
 The proven kernels are the tiled-GEMM Winograd 3×3, a direct 3×3, a register-tiled (WTILE=4) 1×1,
 an untiled depthwise, and **split-K** for deep low-parallelism 1×1 convs. Other restructurings that add
@@ -131,14 +137,20 @@ small CNNs where GPU compute is only a few milliseconds, this boundary work is a
 the wall time.
 
 The device is UMA (memory types are `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`, so there are **no
-staging copies**), but the pack/unpack itself is CPU work. Feeding NC4HW4 directly, or doing the
-conversion on the GPU, would remove most of it. It is not optimized.
+staging copies** at the I/O boundary), but the pack/unpack itself is CPU work. A **whole-GPU plan**
+(zero CPU segments) converts on the GPU instead: 8-bit image inputs and rank-4 fp32 inputs upload
+raw and a recorded `boundary_convert` dispatch produces the device-native layout, byte-identical to
+the host pack; a terminal flat output downloads straight to its declared dtype, skipping the fp32
+round trip. A plan with a CPU segment — or a small non-image input — still takes the host
+pack/unpack path.
 
 > Caller-owned DMA-BUF I/O (`Tensor::fromDmaBuf` / `Tensor::toDmaBuf`, binding model I/O to
 > a caller-provided dma-buf fd that `vknn::IonBuffer::wrapFd` mmaps) removes the caller-side
-> *I/O buffer / copy*, and is verified bit-identical to the staged path (maxAbsErr 0). It does
-> **not** remove vknn's internal layout pack/unpack (NCHW fp32 ↔ device NC4HW4/fp16), which is
-> the dominant host cost above.
+> *I/O buffer / copy*, and is verified bit-identical to the staged path (maxAbsErr 0). It also
+> skips the internal layout pack/unpack: a dma-buf declared at the device-native format/dtype
+> (`IOInfo::deviceFormat` / `deviceDtype`) binds directly, and any other declared layout converts
+> on the GPU via a recorded `BoundaryConvert` dispatch. `AHardwareBuffer` import is **not**
+> implemented — a dma-buf fd is the only zero-copy handle.
 
 ---
 
@@ -147,9 +159,10 @@ conversion on the GPU, would remove most of it. It is not optimized.
 There is no int8 *compute* tier: the device advertises the capabilities for it
 (`shaderInt8 = 1`, 8-bit storage, `VK_KHR_shader_integer_dot_product`) and
 `Config::precision` only exposes `Low | Normal | High` (fp16 / fp16 + selective
-fp32 / fp32), but no kernel computes in int8. (There **is** an int4 *weight*
-path — `vknn_compile -Os` quantizes MatMul weights to int4 with a native GPU
-MatMul that dequantizes to fp16 on read; see [op-coverage.md §Quantization](op-coverage.md)
+fp32 / fp32), but no kernel computes in int8. (There **is** a quantized-*weight*
+path — `vknn_compile -Os` quantizes MatMul/Gemm/Conv weights, int4 by default (`--quant-bits
+4|8|lut4`); MatMul runs a native GPU kernel for each packed format, dequantizing to fp16 on read,
+and any other consumer rebuilds fp16 weights at load; see [op-coverage.md §Quantization](op-coverage.md)
 and [running-an-llm.md](running-an-llm.md). It is weight-storage quantization for
 LLM/VLM footprint, separate from the QDQ path below.) A quantized ONNX checkpoint
 runs through the **import-time dequantize pass** (`src/import/dequantize_graph.cpp`,
@@ -242,6 +255,10 @@ GPU and this driver**. On other hardware the correctness holds (the CPU
 reference is the ground truth and is bit-exact), but the **performance numbers and
 the zero-copy / capability assumptions do not transfer** and are not retested.
 
+One capability requirement holds on every device: `VK_KHR_push_descriptor` is **mandatory** — the
+pipeline layer has no descriptor-pool fallback, and a device that does not expose it fails the load
+with `Status::Unsupported`.
+
 ---
 
 ## Summary table
@@ -252,7 +269,7 @@ the zero-copy / capability assumptions do not transfer** and are not retested.
 | NPU / accelerator | None; Vulkan + CPU only (pluggable — see adding-a-backend.md) |
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
-| Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs) |
+| Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs); a whole-GPU plan converts 8-bit / rank-4 fp32 inputs on the GPU and downloads flat outputs at declared dtype |
 | Quantized models | Static QDQ / QLinear **and** the canonical dynamic-quant cluster run dequantized to float (static: clamps preserved, rounding dropped — not int-exact; dynamic: folded to float MatMul/Conv, no output clamp); a non-canonical dynamic-quant cluster fails at planning; no int8 compute tier |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |
 | ONNX ops | See op-coverage.md |

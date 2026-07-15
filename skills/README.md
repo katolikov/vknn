@@ -16,3 +16,5 @@ Companion reference docs: [ARCHITECTURE](../docs/architecture.md) ·
 [ADDING_AN_OPERATOR](../docs/adding-an-operator.md) · [ADDING_A_BACKEND](../docs/adding-a-backend.md) ·
 [CONFIG](../docs/config.md) · [OP_COVERAGE](../docs/op-coverage.md) · [BENCHMARK](../docs/benchmark.md) ·
 [LIMITATIONS](../docs/limitations.md).
+
+Two further task guides live in [`../docs/`](../docs/): [running-an-llm.md](../docs/running-an-llm.md) (run an LLM end to end on the GPU) and [running-a-vlm.md](../docs/running-a-vlm.md) (run a VLM end to end on the GPU).
