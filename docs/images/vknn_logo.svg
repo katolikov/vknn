@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 136" width="560" height="136" role="img" aria-label="VKNN — Vulkan Neural Network">
+  <!-- Self-contained lockup: everything sits on its own tile, so one file works on light and dark
+       backgrounds (GitHub, the docs site, and forced themes). -->
+  <rect x="2" y="2" width="556" height="132" rx="24" fill="#1f2933"/>
+  <path d="M42 40 L74 98 L106 40" fill="none" stroke="#e8590c" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="150" y="82" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+        font-size="58" font-weight="800" letter-spacing="1" fill="#f4f6f8">VKNN</text>
+  <text x="153" y="108" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+        font-size="15" font-weight="600" letter-spacing="5" fill="#9aa4b0">VULKAN NEURAL NETWORK</text>
+</svg>

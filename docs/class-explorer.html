@@ -1,0 +1,534 @@
+<!-- "Neural brain" — interactive drill-down class explorer. This file is an article-body fragment:
+     scripts/gen_site.py wraps it in the site template and publishes it as
+     docs/site/class-explorer.html. One root class is shown; clicking a class reveals the classes it
+     owns or uses, one level at a time, with a plain-English panel for the selected class.
+     Everything below is scoped with the .nb- prefix and uses the site's CSS variables. -->
+<style>
+.nb-toolbar{display:flex;gap:8px;align-items:center;margin:1em 0 .6em}
+.nb-toolbar button{font:inherit;font-size:13px;font-weight:600;padding:6px 14px;border-radius:7px;cursor:pointer;
+  border:1px solid var(--line-strong);background:var(--surface);color:var(--head)}
+.nb-toolbar button:hover{border-color:var(--link);color:var(--link)}
+.nb-toolbar .nb-count{font-size:12.5px;color:var(--muted);margin-left:auto}
+.nb-canvas{position:relative;overflow:auto;border:1px solid var(--line);border-radius:10px;
+  background:var(--bg);min-height:300px;max-height:66vh;margin:0 0 1.2em}
+.nb-world{position:relative}
+.nb-edges{position:absolute;inset:0;pointer-events:none}
+.nb-edges path{stroke:var(--line-strong);stroke-width:1.4;fill:none}
+.nb-edges text{font-size:10px;fill:var(--muted)}
+.nb-node{position:absolute;width:212px;box-sizing:border-box;border:1.2px solid var(--line-strong);
+  border-radius:9px;background:var(--surface);padding:13px 14px 12px;cursor:pointer;outline:none;
+  transition:left .18s ease,top .18s ease,border-color .12s;user-select:none}
+@media (prefers-reduced-motion: reduce){.nb-node{transition:none}}
+.nb-node:hover,.nb-node:focus-visible{border-color:var(--link)}
+.nb-node.nb-selected{border-color:var(--accent);border-width:2px;padding:12.2px 13.2px 11.2px}
+.nb-node .nb-name{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:13.5px;
+  font-weight:650;color:var(--head);display:flex;align-items:center;gap:6px}
+.nb-node .nb-kind{font-size:10px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.nb-node .nb-sub{font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.4}
+.nb-node .nb-more{position:absolute;right:8px;top:8px;width:18px;height:18px;border:1px solid var(--line-strong);
+  border-radius:50%;font-size:12px;line-height:16px;text-align:center;color:var(--muted);background:var(--bg)}
+.nb-node.nb-open .nb-more{background:var(--accent);border-color:var(--accent);color:#fff}
+.nb-node.nb-leaf .nb-more{display:none}
+.nb-hint{font-size:12.5px;color:var(--muted);margin:.3em 0 1em}
+.nb-panel{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
+  background:var(--quote-bg);padding:14px 18px;margin:0 0 1.4em;min-height:72px}
+.nb-panel h4{margin:.1em 0 .35em;font-size:1.02rem}
+.nb-panel h4 code{background:none;padding:0}
+.nb-panel ul{margin:.4em 0 .2em}
+.nb-panel .nb-where{font-size:.85em;color:var(--muted);margin-top:.6em}
+/* Full-screen: the whole explorer (toolbar + map + panel) fills the display; the map takes the
+   spare height. .nb-max is the fixed-position fallback when the Fullscreen API is unavailable. */
+.nb-root:fullscreen,.nb-root.nb-max{background:var(--bg);padding:18px 22px;overflow:auto;
+  display:flex;flex-direction:column}
+.nb-root.nb-max{position:fixed;inset:0;z-index:100}
+.nb-root:fullscreen .nb-canvas,.nb-root.nb-max .nb-canvas{max-height:none;flex:1;min-height:0}
+.nb-root:fullscreen .nb-panel,.nb-root.nb-max .nb-panel{margin-bottom:0;max-height:32vh;overflow-y:auto}
+</style>
+
+<h1>Neural brain</h1>
+<p class="ag-lede">The engine's class graph as an explorable map. Start from the one class an
+application touches and <strong>click any square to unfold the classes it owns or uses</strong> —
+one level at a time, the way you'd actually read the code. Click a square again to fold it back.
+The panel below the map explains the selected class in plain words. Prefer prose? The
+<a href="architecture.html">architecture reference</a> covers the same ground linearly, and
+<a href="architecture-guide.html">How VKNN works</a> tells the story end to end.</p>
+
+<div class="nb-root" id="nb-root">
+<div class="nb-toolbar">
+  <button type="button" id="nb-reset">Fold everything</button>
+  <button type="button" id="nb-unfold">Unfold two levels</button>
+  <button type="button" id="nb-fullscreen">Full screen</button>
+  <span class="nb-count" id="nb-count"></span>
+</div>
+
+<div class="nb-canvas" id="nb-canvas" role="tree" aria-label="VKNN class graph explorer">
+  <div class="nb-world" id="nb-world">
+    <svg class="nb-edges" id="nb-edges"></svg>
+  </div>
+</div>
+<p class="nb-hint">Solid connectors mean "owns / creates"; dotted means "uses at run time". Every
+class appears once — when a second owner reaches it, a faded connector links back to the same
+square.</p>
+
+<div class="nb-panel" id="nb-panel" aria-live="polite"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* One entry per class. children: [id, relation, dotted?]. Descriptions are the reference truth
+     from include/vknn/ and src/ — keep them in sync with the headers when the API changes. */
+  var NB = {
+    model: {
+      name: 'Model', kind: 'class', sub: 'the whole public API: load, run, read back',
+      children: [['runtime', 'loads via', true], ['tensor', 'exchanges', true], ['session', 'shares one']],
+      plain: 'What an application touches. Load a file, ask it what inputs it wants, hand over data, ' +
+        'get tensors back — three lines of C++. Copies of a Model share the same engine underneath.',
+      eng: ['<code>Model::load(path, cfg)</code> accepts .vxm or .onnx',
+        '<code>run(inputs)</code> → all outputs; <code>inputs()</code>/<code>outputs()</code> describe the IO',
+        '<code>save(path)</code> writes the optimized graph back out as .vxm'],
+      where: 'include/vknn/model_class.h'
+    },
+    runtime: {
+      name: 'Runtime', kind: 'facade', sub: 'static loader: routes .vxm vs .onnx',
+      children: [['session', 'creates']],
+      plain: 'A tiny front door with no state of its own. It looks at the file extension, picks the ' +
+        'right loading path, and resolves where the warm-start cache lives.',
+      eng: ['<code>Runtime::load(path, cfg, cacheFile)</code> → <code>unique_ptr&lt;Session&gt;</code>',
+        'Empty cache path becomes <code>&lt;model&gt;.cache</code> next to the model'],
+      where: 'include/vknn/runtime.h'
+    },
+    tensor: {
+      name: 'Tensor', kind: 'class', sub: 'public IO: fp32 host data or a DMA-BUF fd',
+      children: [],
+      plain: 'The data envelope applications use. Host mode owns a plain float vector; zero-copy mode ' +
+        'carries a DMA-BUF file descriptor instead, so a camera frame can reach the GPU without a copy.',
+      eng: ['<code>Tensor(values, shape, name)</code> for host data; <code>argmax()</code>/<code>max()</code> conveniences',
+        '<code>Tensor::fromDmaBuf(fd, shape, …)</code> / <code>toDmaBuf(…)</code> bind caller-owned buffers',
+        'Declared layout/dtype matching the device-native boundary binds the fd directly; otherwise the GPU converts'],
+      where: 'include/vknn/tensor_class.h'
+    },
+    session: {
+      name: 'Session', kind: 'class', sub: 'plans, owns, and runs everything',
+      children: [['config', 'owns a copy'], ['bucket', 'owns, 1 per shape'], ['backendvk', 'owns'],
+        ['backendcpu', 'owns'], ['profiler', 'owns'], ['cachefile', 'reads + writes']],
+      plain: 'The conductor. It builds the plan (which op runs where, in what order), owns every ' +
+        'long-lived object, dispatches each run() to the right bucket, and flushes the warm-start ' +
+        'cache when it shuts down.',
+      eng: ['<code>createFromVxm</code> skips all graph passes; <code>createFromOnnx</code> runs them at load',
+        'LLM machinery: <code>linkOutputToInput</code> (KV cache), <code>setOutputArgMax</code>, <code>setOutputRow</code>, <code>configureDecodeChain</code>',
+        'Member order is load-bearing: backends are declared first so they are destroyed last, after segments and pool release device buffers'],
+      where: 'src/core/session.cpp · include/vknn/session_class.h'
+    },
+    config: {
+      name: 'Config', kind: 'struct', sub: 'every knob: backend, precision, tuning, hints',
+      children: [],
+      plain: 'The single place behavior is configured — the engine reads no environment variables. ' +
+        'Defaults are the recommended fast path: Vulkan backend, fp16 storage, fast autotune.',
+      eng: ['JSON round-trip: <code>fromJsonFile</code>/<code>fromJsonString</code>/<code>toJson</code>; absent fields keep struct defaults',
+        'Research knobs go through <code>setHint(Hint, Mode)</code> — RoPE fusion, fused attention, flat layout, … (all on by default)',
+        'Key defaults: precision Low (fp16), tuning Fast, maxSubmitNodes 500, cpuThreads 4'],
+      where: 'include/vknn/config_struct.h · docs: config.html'
+    },
+    bucket: {
+      name: 'PlanBucket', kind: 'struct', sub: 'one compiled plan per input-shape set',
+      children: [['graph', 'owns'], ['pool', 'owns'], ['segment', 'owns, in topo order']],
+      plain: 'Everything specific to one set of input shapes: the optimized graph, the runtime tensor ' +
+        'pool, and the executable segments. A VLM file yields several buckets (vision encode, prefill, ' +
+        'decode); run() picks the one matching the shapes you passed.',
+      eng: ['<code>key</code> = canonical "name=shape;…" string matched at run()',
+        '<code>ioGpuConvert</code> set only when the whole graph is GPU (8-bit inputs then convert on-device)',
+        '<code>gatherIndexAxisSizes</code> range-checks token-id inputs at bind time'],
+      where: 'include/vknn/session_class.h (struct PlanBucket)'
+    },
+    graph: {
+      name: 'Graph', kind: 'IR', sub: 'the network as data: tensors + nodes',
+      children: [['node', 'lists'], ['tensordesc', 'lists'], ['hostbuffer', 'holds weights in']],
+      plain: 'The intermediate representation: a table of tensor descriptions and a topologically ' +
+        'sorted list of nodes referencing them by index. Always NCHW, always backend-agnostic — the ' +
+        'compiler optimizes this exact structure and the .vxm stores it.',
+      eng: ['Tensors addressed by <code>TensorId</code> (int32 index), never by pointer',
+        '<code>topoSort()</code> is stable and throws on cycles',
+        '<code>initializers</code>: weight payloads, zero-copy views into the mmapped .vxm'],
+      where: 'include/vknn/graph.h'
+    },
+    node: {
+      name: 'Node', kind: 'struct', sub: 'one operation + its fusion metadata',
+      children: [],
+      plain: 'One instruction: which operation, which tensors in and out, and the decisions the ' +
+        'compiler already made for it — fused activation, epilogue steps, quantization attributes.',
+      eng: ['<code>OpType</code> is append-only; .vxm stores the raw integer',
+        'Fusion fields: <code>fusedAct</code>, <code>pw_steps</code> register-DAG epilogues, <code>subOp</code> for Unary/Binary/Reduce',
+        'Quantized weights ride attributes (<code>kWq*</code>): format, scales, outliers, layout'],
+      where: 'include/vknn/op.h · op_type.h'
+    },
+    tensordesc: {
+      name: 'TensorDesc', kind: 'struct', sub: 'compile-time tensor: shape, dtype, role',
+      children: [],
+      plain: 'The static description of a tensor — its logical shape, element type, and whether it is ' +
+        'an input, an output, or a weight. No data lives here; it is the schema the runtime allocates from.',
+      eng: ['Logical shape is NCHW; dynamic dims resolve before planning (unbound = hard error)',
+        'Load-time marks (<code>gpuFlat</code>, <code>storeFp32</code>) exist only in memory, never in the file'],
+      where: 'include/vknn/tensor_desc.h'
+    },
+    pool: {
+      name: 'RtTensor pool', kind: 'runtime', sub: 'per-tensor host + device residency',
+      children: [['hostbuffer', 'host side'], ['devicestorage', 'device side']],
+      plain: 'The live tensors. Each one can have a host copy, a GPU copy, or both, with validity ' +
+        'flags saying which is current — that single idea makes CPU↔GPU handoffs automatic and ' +
+        'keeps them off the hot path.',
+      eng: ['<code>hostValid</code>/<code>deviceValid</code> drive residency reconciliation at segment boundaries',
+        'Host side is canonical NCHW fp32; device side is tagged with its own format (NC4HW4 / flat) and dtype (fp16/fp32)',
+        'Internal activations of a GPU segment never touch the host'],
+      where: 'include/vknn/rt_tensor.h'
+    },
+    hostbuffer: {
+      name: 'HostBuffer', kind: 'struct', sub: 'raw host bytes, possibly a file view',
+      children: [],
+      plain: 'A byte buffer that either owns its memory or is a zero-copy window into the memory-mapped ' +
+        'model file. Weights load as views, so opening a 5 GB model does not copy 5 GB.',
+      eng: ['<code>setView</code>: non-owning pointer into the <code>MappedFile</code>',
+        'Views shared across buckets are never freed by weight release paths'],
+      where: 'include/vknn/host_buffer.h · mapped_file.h'
+    },
+    devicestorage: {
+      name: 'DeviceStorage', kind: 'opaque', sub: 'a backend-owned GPU buffer handle',
+      children: [['vkbuffer', 'Vulkan impl']],
+      plain: 'The core never knows what GPU memory looks like — it holds an opaque handle the backend ' +
+        'defines. For Vulkan that is a reference-counted GPU buffer.',
+      eng: ['Forward-declared in the core; defined by the backend (<code>shared_ptr&lt;vk::Buffer&gt;</code>)'],
+      where: 'include/vknn/device_storage.h'
+    },
+    segment: {
+      name: 'Segment', kind: 'class', sub: 'a maximal same-backend run of nodes',
+      children: [['vksegment', 'GPU form'], ['cpusegment', 'CPU form'], ['execcontext', 'receives at run()', true]],
+      plain: 'The unit of execution: the longest stretch of consecutive ops that all run on one ' +
+        'backend. A fully-GPU model is one segment. The core loop is just "run the segments in order" ' +
+        '— all the cleverness lives inside.',
+      eng: ['<code>boundaryInputs</code>/<code>boundaryOutputs</code>: the only places host↔device traffic can happen',
+        '<code>isFallback</code> marks CPU segments that exist because the GPU declined an op'],
+      where: 'include/vknn/segment.h'
+    },
+    vksegment: {
+      name: 'VulkanSegment', kind: 'class', sub: 'pre-records its command buffer once',
+      children: [['commandrunner', 'submits via'], ['vkops', 'records']],
+      plain: 'Does all the thinking at build time: plans buffers with liveness-based reuse, prepares ' +
+        'every op, and records the GPU commands once. A run() afterwards just replays the recording — ' +
+        'no per-op decisions remain.',
+      eng: ['Chunked ≤ 500 nodes / ≤ 1024 descriptor writes; one <code>vkQueueSubmit</code> + fence per chunk (GPU watchdog stays happy)',
+        'Barriers from buffer-level hazard tracking, so independent branches overlap',
+        'Re-records only when bindings genuinely change (dma-buf set, resident links, argmax, decode chain)'],
+      where: 'src/backend/vulkan/vk_backend.cpp'
+    },
+    cpusegment: {
+      name: 'CpuSegment', kind: 'class', sub: 'straight-line host dispatch',
+      children: [['cpuops', 'runs']],
+      plain: 'The simple twin: walk the nodes, call each op’s run function against host memory, ' +
+        'time it for the profiler. Boring on purpose — it is the reference everything else is checked against.',
+      eng: ['Ops read fp32/int64 pool payloads directly', 'Propagates <code>isFallback</code> into profiler rows'],
+      where: 'src/backend/cpu/cpu_backend.cpp'
+    },
+    execcontext: {
+      name: 'ExecContext', kind: 'struct', sub: 'per-run bundle handed to every op',
+      children: [],
+      plain: 'A small package: here is the tensor pool, the graph, the config, the profiler. It is how ' +
+        'ops reach their data without global state.',
+      eng: ['<code>RtTensor&amp; t(TensorId)</code> is the accessor every kernel uses'],
+      where: 'include/vknn/exec_context.h'
+    },
+    backendvk: {
+      name: 'VulkanBackend', kind: 'backend', sub: 'primary: a compute kernel for every op',
+      children: [['vkcontext', 'owns'], ['pipelinecache', 'owns'], ['weightpool', 'owns'],
+        ['vkops', 'dispatches to'], ['vksegment', 'compiles']],
+      plain: 'The engine proper. It answers "can I run this op?" during planning (almost always yes), ' +
+        'compiles segments into recorded command buffers, and owns the GPU-side caches and memory strategy.',
+      eng: ['<code>supportsNode</code> = registered kernel + shape/attr gate + live device-caps checks; refusals carry a reason',
+        'Load-time autotune races only bit-neutral parameters; numerics-affecting choices are deterministic shape rules',
+        'Self-registers via <code>VKNN_REGISTER_BACKEND</code> — the core never names it'],
+      where: 'src/backend/vulkan/'
+    },
+    backendcpu: {
+      name: 'CpuBackend', kind: 'backend', sub: 'reference oracle + loud fallback',
+      children: [['cpuops', 'owns registry'], ['cpusegment', 'compiles'], ['workers', 'parallelizes via']],
+      plain: 'A complete, obviously-correct CPU implementation of every op. It exists so the GPU has ' +
+        'something to be verified against, and so a model with an op the GPU cannot take still runs — ' +
+        'with a clear warning, never silently.',
+      eng: ['Scalar kernels one-file-per-op + NEON where it pays; fp32 throughout',
+        'Supports Float32/Int64/Int32 payloads',
+        'Also executes data-dependent control flow (Loop / If / NonMaxSuppression) by design'],
+      where: 'src/backend/cpu/'
+    },
+    vkcontext: {
+      name: 'VulkanContext', kind: 'class', sub: 'instance, device, compute queue, caps',
+      children: [['vkbuffer', 'allocates']],
+      plain: 'One object owns the connection to the GPU: the Vulkan device, a compute queue (a ' +
+        'dedicated compute family when available), and the capability flags every kernel consults.',
+      eng: ['Vulkan 1.3; <code>VK_KHR_push_descriptor</code> is mandatory (no descriptor-pool fallback)',
+        'Queue priority Low/High via global-priority extensions — scheduling only, never numerics',
+        'Caps queried once: fp16 shader, 8/16-bit storage, subgroup ops, timestamps, dma-buf import, …'],
+      where: 'src/backend/vulkan/vk_context.cpp'
+    },
+    pipelinecache: {
+      name: 'ComputePipeline pool', kind: 'cache', sub: 'shared pipelines from embedded SPIR-V',
+      children: [],
+      plain: 'GPU programs are expensive to create, so they are shared: ops using the same kernel with ' +
+        'the same configuration reuse one pipeline. The shader binaries themselves ship inside the ' +
+        'engine binary — never inside the model file.',
+      eng: ['Keyed by shader | binding count | push-constant size | spec constants',
+        'Backed by a driver <code>VkPipelineCache</code> whose blob persists in the <code>.cache</code> file',
+        'SPIR-V embedded at build time by <code>tools/embed_spirv.py</code>'],
+      where: 'src/backend/vulkan/vk_pipeline.cpp'
+    },
+    weightpool: {
+      name: 'WeightCache / DeviceWeightPool', kind: 'cache', sub: 'prepacked weights, shared on device',
+      children: [],
+      plain: 'Weights are repacked once into the layout the kernels want, uploaded through a staging ' +
+        'ring into device-only memory, and shared: two buckets using the same weight get one GPU copy.',
+      eng: ['Content-addressed, weak-held pools keyed (cache key, fp16)',
+        'Prepacked/Winograd-transformed arrays persist in the <code>.cache</code> for warm loads',
+        'Upload: persistent 64 MiB staging buffer, fenced copies (avoids UMA host-visible allocation caps)'],
+      where: 'src/backend/vulkan/vk_weight_pool.h · vk_backend.h'
+    },
+    vkops: {
+      name: 'VulkanOp kernels', kind: 'registry', sub: 'one op = one file = prepare() + record()',
+      children: [],
+      plain: 'Each operation is a self-contained kernel class: prepare() builds its pipeline and ' +
+        'uploads its weights, record() writes its dispatch into the command buffer. Adding an op ' +
+        'touches no core code — a registration macro wires it in.',
+      eng: ['<code>VKNN_REGISTER_VK_OP(OpType, Class)</code> + a <code>.comp</code> shader in <code>shaders/</code>',
+        'Registry cross-checked against declared support at startup (mismatch warns)',
+        'Kernels are precision-templated: one GLSL source emits fp32 and fp16 variants'],
+      where: 'src/backend/vulkan/ops/ · docs: adding-an-operator.html'
+    },
+    cpuops: {
+      name: 'CpuOp kernels', kind: 'registry', sub: 'scalar reference, one file per op',
+      children: [],
+      plain: 'The CPU mirror of the kernel registry: small, readable implementations meant to be ' +
+        'trivially correct. When a GPU kernel is in doubt, this is the referee.',
+      eng: ['<code>VKNN_REGISTER_CPU_OP(OpType, Class)</code>; implement <code>run(node, ctx)</code>'],
+      where: 'src/backend/cpu/ops/'
+    },
+    workers: {
+      name: 'Worker pool', kind: 'runtime', sub: 'persistent threads for hot CPU loops',
+      children: [],
+      plain: 'A process-wide thread pool for the heavy CPU loops (convolution, matrix multiply). ' +
+        'Sized by Config, not by probing the host, and written so any thread count produces ' +
+        'bit-identical results.',
+      eng: ['<code>Config::cpuThreads</code> (default 4); nested parallel regions run inline',
+        'Chunking floor keeps tiny loops single-threaded'],
+      where: 'src/backend/cpu/parallel.cpp'
+    },
+    commandrunner: {
+      name: 'CommandRunner', kind: 'class', sub: 'allocate, submit, fence-wait',
+      children: [],
+      plain: 'The thin layer that talks to the queue: it hands out command buffers, submits one chunk ' +
+        'at a time, and waits on the fence. One submit per chunk is a deliberate rule — batching ' +
+        'chunks together is how you meet the GPU watchdog.',
+      eng: ['<code>submitAndWait(cmd)</code>: one <code>vkQueueSubmit</code> + infinite-timeout fence per chunk',
+        'Also times submit-wall for the profiler'],
+      where: 'src/backend/vulkan/vk_command.cpp'
+    },
+    profiler: {
+      name: 'Profiler', kind: 'class', sub: 'per-op timings, tables, Chrome traces',
+      children: [],
+      plain: 'Off by default; when enabled it records one row per executed op — GPU time from device ' +
+        'timestamps, CPU time from the wall clock — and can print a table or write a trace you open in ' +
+        'a browser.',
+      eng: ['GPU timing: 2 timestamps per node in a <code>VkQueryPool</code>',
+        '<code>printTable()</code> / <code>toJson()</code> / <code>writeChromeTrace(path)</code>; fallback rows tagged <code>[FALLBACK]</code>',
+        'Profiling forces per-op barriers and a single chunk — use it for attribution, not absolute wall time'],
+      where: 'src/core/profiler.cpp · include/vknn/profiler_class.h'
+    },
+    cachefile: {
+      name: '.cache file', kind: 'sidecar', sub: 'warm starts: pipelines, prepack, autotune',
+      children: [],
+      plain: 'Everything expensive about the first load on a device — driver shader compilation, ' +
+        'weight repacking, kernel tuning — is remembered here so the second load is fast. It validates ' +
+        'itself against the driver, the engine build, and the model, and rebuilds when anything changed.',
+      eng: ['MessagePack, multi-variant (one entry per cache-affecting config)',
+        'Guards: kernel hash, vendor/device/driver ids, pipeline-cache UUID, model hash',
+        'Written atomically at session teardown, only when contents changed'],
+      where: 'src/core/cache_codec.cpp'
+    },
+    vkbuffer: {
+      name: 'vk::Buffer', kind: 'class', sub: 'pooled GPU memory, UMA-aware',
+      children: [],
+      plain: 'The GPU memory primitive. On phones, CPU and GPU share one physical memory, so buffers ' +
+        'are visible to both by default and true copies are rare; weight buffers opt into device-only ' +
+        'memory, and readback buffers into CPU-cached memory.',
+      eng: ['<code>MemPref</code>: kAuto (device-local + host-visible), kReadback (+ host-cached), kDeviceOnly',
+        'Imports caller DMA-BUF fds (<code>importDmaBufFd</code>) — identity keyed by (st_dev, st_ino), not the fd number',
+        'Process-wide live/peak accounting; OOM messages include the driver’s heap budget'],
+      where: 'src/backend/vulkan/vk_buffer.cpp'
+    }
+  };
+
+  var COL_W = 250, NODE_W = 212, NODE_H = 76, V_GAP = 18, PAD = 30;
+  var world = document.getElementById('nb-world');
+  var svg = document.getElementById('nb-edges');
+  var panel = document.getElementById('nb-panel');
+  var countEl = document.getElementById('nb-count');
+  var expanded = {};     // id -> true
+  var selected = 'model';
+  var elems = {};        // id -> node element (reused across renders)
+
+  function children(id) { return (NB[id].children || []); }
+
+  /* Every class renders exactly once. A breadth-first walk over the expanded nodes gives each
+     visible class its primary (shallowest-first) owner for the tree layout; any further owner that
+     also reaches it draws a faded cross-link back to the SAME square instead of a duplicate. */
+  function layout() {
+    var prim = { model: { depth: 0, kids: [] } };
+    var queue = ['model'];
+    var edges = [];
+    while (queue.length) {
+      var id = queue.shift();
+      if (!expanded[id]) continue;
+      children(id).forEach(function (k) {
+        var cid = k[0];
+        var cross = cid in prim;
+        edges.push({ from: id, to: cid, label: k[1], dotted: !!k[2], cross: cross });
+        if (!cross) {
+          prim[cid] = { depth: prim[id].depth + 1, kids: [] };
+          prim[id].kids.push(cid);
+          queue.push(cid);
+        }
+      });
+    }
+    var nextY = PAD, maxDepth = 0, pos = {};
+    (function place(id) {
+      var p = prim[id];
+      maxDepth = Math.max(maxDepth, p.depth);
+      if (p.kids.length) {
+        var ys = p.kids.map(place);
+        pos[id] = (ys[0] + ys[ys.length - 1]) / 2;
+      } else {
+        pos[id] = nextY;
+        nextY += NODE_H + V_GAP;
+      }
+      return pos[id];
+    })('model');
+    var nodes = Object.keys(prim).map(function (id) {
+      return { id: id, depth: prim[id].depth, y: pos[id],
+               open: !!expanded[id] && children(id).length > 0, leaf: children(id).length === 0 };
+    });
+    return { nodes: nodes, edges: edges, prim: prim, pos: pos,
+             w: PAD * 2 + maxDepth * COL_W + NODE_W, h: Math.max(nextY + PAD, 300) };
+  }
+
+  function nodeEl(n) {
+    var el = elems[n.id];
+    if (!el) {
+      var d = NB[n.id];
+      el = document.createElement('div');
+      el.className = 'nb-node';
+      el.tabIndex = 0;
+      el.setAttribute('role', 'treeitem');
+      el.innerHTML = '<div class="nb-name">' + d.name + ' <span class="nb-kind">' + d.kind + '</span></div>' +
+        '<div class="nb-sub">' + d.sub + '</div><span class="nb-more">+</span>';
+      el.addEventListener('click', function () { toggle(n.id); });
+      el.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(n.id); }
+      });
+      elems[n.id] = el;
+      world.appendChild(el);
+    }
+    return el;
+  }
+
+  function render() {
+    var L = layout();
+    world.style.width = L.w + 'px';
+    world.style.height = L.h + 'px';
+    svg.setAttribute('width', L.w);
+    svg.setAttribute('height', L.h);
+    svg.setAttribute('viewBox', '0 0 ' + L.w + ' ' + L.h);
+
+    var live = {};
+    L.nodes.forEach(function (n) {
+      live[n.id] = true;
+      var el = nodeEl(n);
+      el.style.left = (PAD + n.depth * COL_W) + 'px';
+      el.style.top = n.y + 'px';
+      el.classList.toggle('nb-open', !!n.open);
+      el.classList.toggle('nb-leaf', n.leaf);
+      el.classList.toggle('nb-selected', n.id === selected);
+      el.querySelector('.nb-more').textContent = n.open ? '−' : '+';
+      el.setAttribute('aria-expanded', n.leaf ? 'false' : String(!!n.open));
+    });
+    Object.keys(elems).forEach(function (id) {
+      if (!live[id]) { world.removeChild(elems[id]); delete elems[id]; }
+    });
+
+    var h = '';
+    L.edges.forEach(function (e) {
+      var f = L.prim[e.from], t = L.prim[e.to];
+      var x1 = PAD + f.depth * COL_W + NODE_W, y1 = L.pos[e.from] + NODE_H / 2;
+      var x2 = PAD + t.depth * COL_W, y2 = L.pos[e.to] + NODE_H / 2;
+      if (x2 < x1) {  // cross-link pointing left or same-column: leave the owner's left edge instead
+        x1 = PAD + f.depth * COL_W;
+        x2 = PAD + t.depth * COL_W + NODE_W;
+      }
+      var mx = (x1 + x2) / 2;
+      h += '<path d="M' + x1 + ' ' + y1 + ' C' + mx + ' ' + y1 + ' ' + mx + ' ' + y2 + ' ' + x2 + ' ' + y2 + '"' +
+        (e.dotted || e.cross ? ' stroke-dasharray="4 4"' : '') + (e.cross ? ' opacity="0.45"' : '') + '/>';
+      h += '<text x="' + (mx - 4) + '" y="' + ((y1 + y2) / 2 - 5) + '" text-anchor="middle"' +
+        (e.cross ? ' opacity="0.6"' : '') + '>' + e.label + '</text>';
+    });
+    svg.innerHTML = h;
+
+    var total = Object.keys(NB).length;
+    countEl.textContent = L.nodes.length + ' of ' + total + ' classes visible';
+  }
+
+  function showPanel(id) {
+    var d = NB[id];
+    var h = '<h4><code>' + d.name + '</code> — ' + d.sub + '</h4><p>' + d.plain + '</p>';
+    if (d.eng.length) { h += '<ul>'; d.eng.forEach(function (b) { h += '<li>' + b + '</li>'; }); h += '</ul>'; }
+    h += '<p class="nb-where">In the code: <code>' + d.where + '</code></p>';
+    panel.innerHTML = h;
+  }
+
+  function toggle(id) {
+    selected = id;
+    if (children(id).length) expanded[id] = !expanded[id];
+    showPanel(id);
+    render();
+  }
+
+  document.getElementById('nb-reset').addEventListener('click', function () {
+    expanded = {}; selected = 'model'; showPanel('model'); render();
+  });
+  document.getElementById('nb-unfold').addEventListener('click', function () {
+    expanded['model'] = true;
+    children('model').forEach(function (k) { expanded[k[0]] = true; });
+    render();
+  });
+
+  /* Full-screen toggle: the Fullscreen API when available, a fixed-position fallback otherwise. */
+  var root = document.getElementById('nb-root');
+  var fsBtn = document.getElementById('nb-fullscreen');
+  function fsActive() { return document.fullscreenElement === root || root.classList.contains('nb-max'); }
+  function fsLabel() { fsBtn.textContent = fsActive() ? 'Exit full screen' : 'Full screen'; }
+  fsBtn.addEventListener('click', function () {
+    if (fsActive()) {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else root.classList.remove('nb-max');
+    } else if (root.requestFullscreen) {
+      root.requestFullscreen().catch(function () { root.classList.add('nb-max'); fsLabel(); });
+    } else {
+      root.classList.add('nb-max');
+    }
+    fsLabel();
+  });
+  document.addEventListener('fullscreenchange', fsLabel);
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && root.classList.contains('nb-max')) { root.classList.remove('nb-max'); fsLabel(); }
+  });
+
+  showPanel('model');
+  render();
+})();
+</script>

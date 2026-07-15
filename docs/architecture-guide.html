@@ -1,0 +1,687 @@
+<!-- Interactive architecture guide. This file is an article-body fragment: scripts/gen_site.py
+     wraps it in the site template (sidebar, theme, ToC) and publishes it as
+     docs/site/architecture-guide.html. Styles/script below are scoped with the .ag- prefix and
+     use the site's CSS variables, so both themes work without extra rules. -->
+<style>
+.ag-lede{font-size:1.06em;color:var(--fg)}
+.ag-scroll{overflow-x:auto;margin:1.2em 0;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
+.ag-scroll svg{display:block;min-width:820px;width:100%;height:auto}
+.ag-svg text{font-family:inherit;fill:var(--fg)}
+.ag-svg .ag-zone{fill:color-mix(in srgb,var(--line) 16%,transparent);stroke:var(--line);stroke-dasharray:5 4;rx:12}
+.ag-svg .ag-zone-label{font-size:11px;font-weight:650;letter-spacing:.09em;text-transform:uppercase;fill:var(--muted)}
+.ag-svg .ag-node rect{fill:var(--surface);stroke:var(--line-strong);stroke-width:1.2;rx:8}
+.ag-svg .ag-node .ag-title{font-size:14.5px;font-weight:650;fill:var(--head)}
+.ag-svg .ag-node .ag-sub{font-size:11px;fill:var(--muted)}
+.ag-svg .ag-node .ag-mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.ag-svg .ag-node{cursor:pointer;outline:none}
+.ag-svg .ag-node:hover rect,.ag-svg .ag-node:focus-visible rect{stroke:var(--link);stroke-width:1.6}
+.ag-svg .ag-node.ag-active rect{stroke:var(--accent);stroke-width:2}
+.ag-svg .ag-edge{stroke:var(--line-strong);stroke-width:1.4;fill:none}
+.ag-svg .ag-edge.ag-dashed{stroke-dasharray:4 4}
+.ag-svg .ag-edge-label{font-size:10.5px;fill:var(--muted)}
+.ag-svg .ag-chip rect{fill:color-mix(in srgb,var(--accent) 7%,var(--surface));stroke:var(--line)}
+.ag-svg .ag-chip text{font-size:10.5px;fill:var(--fg)}
+.ag-panel{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
+  background:var(--quote-bg);padding:14px 18px;margin:0 0 1.4em;min-height:72px}
+.ag-panel h4{margin:.1em 0 .35em;font-size:1.02rem}
+.ag-panel .ag-hint{color:var(--muted);font-size:.92em;margin:.2em 0}
+.ag-panel ul{margin:.4em 0 .2em}
+.ag-panel .ag-where{font-size:.85em;color:var(--muted);margin-top:.6em}
+.ag-panel .ag-where code{font-size:.95em}
+.ag-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--muted);margin:.4em 0 0}
+.ag-legend span{display:inline-flex;align-items:center;gap:6px}
+.ag-legend i{display:inline-block;width:18px;border-top:1.6px solid var(--line-strong)}
+.ag-legend i.ag-dash{border-top-style:dashed}
+.ag-anatomy{border:1px solid var(--line-strong);border-radius:10px;overflow:hidden;margin:1.2em 0;
+  font-size:14px}
+.ag-anatomy>button{display:block;width:100%;text-align:left;font:inherit;color:var(--fg);
+  background:var(--surface);border:0;border-bottom:1px solid var(--line);padding:10px 16px;cursor:pointer}
+.ag-anatomy>button:last-child{border-bottom:0}
+.ag-anatomy>button:hover{background:color-mix(in srgb,var(--line) 40%,var(--surface))}
+.ag-anatomy>button.ag-active{background:color-mix(in srgb,var(--accent) 8%,var(--surface));
+  box-shadow:inset 3px 0 0 var(--accent)}
+.ag-anatomy .ag-row-title{font-weight:650;color:var(--head)}
+.ag-anatomy .ag-row-title code{background:none;padding:0}
+.ag-anatomy .ag-row-sub{color:var(--muted);font-size:12.5px;margin-top:1px}
+.ag-steps{list-style:none;counter-reset:agstep;margin:1.2em 0 .8em;padding:0;display:grid;gap:8px}
+.ag-steps li{counter-increment:agstep;border:1px solid var(--line);border-radius:8px;padding:9px 14px 9px 46px;
+  position:relative;cursor:pointer;color:var(--muted)}
+.ag-steps li::before{content:counter(agstep);position:absolute;left:14px;top:9px;width:22px;height:22px;
+  border:1px solid var(--line-strong);border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:650;color:var(--muted);background:var(--surface)}
+.ag-steps li.ag-on{border-color:var(--accent);color:var(--fg);background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.ag-steps li.ag-on::before{background:var(--accent);border-color:var(--accent);color:#fff}
+.ag-steps li strong{color:var(--head)}
+.ag-steps li .ag-step-detail{display:none;margin-top:4px;font-size:.93em}
+.ag-steps li.ag-on .ag-step-detail{display:block}
+.ag-stepbtns{display:flex;gap:8px;margin:.4em 0 1.6em}
+.ag-stepbtns button{font:inherit;font-size:13px;font-weight:600;padding:6px 14px;border-radius:7px;cursor:pointer;
+  border:1px solid var(--line-strong);background:var(--surface);color:var(--head)}
+.ag-stepbtns button:hover{border-color:var(--link);color:var(--link)}
+.ag-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:1.2em 0}
+.ag-cards div{border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.ag-cards h4{margin:.1em 0 .3em;font-size:.98rem}
+.ag-cards p{margin:.2em 0;font-size:.92em;color:var(--fg)}
+.ag-brain-btn{display:inline-block;border:1px solid var(--line-strong);border-radius:9px;padding:10px 16px;
+  font-weight:600;color:var(--head);background:color-mix(in srgb,var(--accent) 7%,var(--surface))}
+.ag-brain-btn:hover{text-decoration:none;border-color:var(--accent)}
+.ag-brain-btn code{background:none;padding:0}
+</style>
+
+<h1>How VKNN works</h1>
+<p class="ag-lede">VKNN turns an ONNX neural network into a compact plan file on your workstation, then
+executes that plan on a phone's GPU through Vulkan compute — with the CPU kept out of the hot path.
+This page is an interactive tour of that journey. <strong>Click any block in a diagram</strong> (or use
+<kbd>Tab</kbd> + <kbd>Enter</kbd>) for a plain-English explanation of what it does and why it exists;
+the <a href="architecture.html">architecture reference</a> has the full detail.</p>
+
+<h2 id="big-picture">The big picture</h2>
+<p>There are two halves. <strong>Compile once</strong>: <code>vknn_compile</code> reads the ONNX model,
+optimizes the graph, and writes a <code>.vxm</code> plan. <strong>Run many times</strong>: on the phone,
+the engine memory-maps that plan, builds GPU pipelines for it, and replays pre-recorded command buffers
+for every inference.</p>
+
+<div class="ag-scroll"><svg class="ag-svg" id="ag-pipeline" viewBox="0 0 960 552" role="group" aria-label="VKNN compilation and runtime pipeline diagram">
+  <defs>
+    <marker id="ag-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="var(--line-strong)"/>
+    </marker>
+  </defs>
+
+  <!-- workstation zone -->
+  <rect class="ag-zone" x="16" y="34" width="600" height="188"/>
+  <text class="ag-zone-label" x="32" y="58">Workstation — compile once</text>
+
+  <!-- phone zone -->
+  <rect class="ag-zone" x="16" y="304" width="928" height="232"/>
+  <text class="ag-zone-label" x="32" y="328">Phone — run every time</text>
+
+  <!-- A: ONNX model -->
+  <g class="ag-node" data-info="onnx" tabindex="0" role="button" aria-label="Input model, ONNX format">
+    <rect x="36" y="88" width="150" height="86"/>
+    <text class="ag-title" x="111" y="122" text-anchor="middle">ONNX model</text>
+    <text class="ag-sub" x="111" y="141" text-anchor="middle">exported from PyTorch,</text>
+    <text class="ag-sub" x="111" y="156" text-anchor="middle">HF Optimum, …</text>
+  </g>
+
+  <!-- B: vknn_compile -->
+  <g class="ag-node" data-info="compile" tabindex="0" role="button" aria-label="vknn_compile, the model compiler">
+    <rect x="240" y="80" width="190" height="102"/>
+    <text class="ag-title ag-mono" x="335" y="108" text-anchor="middle">vknn_compile</text>
+    <text class="ag-sub" x="335" y="127" text-anchor="middle">graph passes · fusion (-O1)</text>
+    <text class="ag-sub" x="335" y="142" text-anchor="middle">shapes: --dim / --shape</text>
+    <text class="ag-sub" x="335" y="157" text-anchor="middle">--fp16 · int4 quant (-Os)</text>
+  </g>
+
+  <!-- C: .vxm plan -->
+  <g class="ag-node" data-info="vxm" tabindex="0" role="button" aria-label="The .vxm plan file">
+    <rect x="482" y="74" width="112" height="114"/>
+    <text class="ag-title ag-mono" x="538" y="104" text-anchor="middle">.vxm</text>
+    <text class="ag-sub" x="538" y="123" text-anchor="middle">the plan:</text>
+    <text class="ag-sub" x="538" y="138" text-anchor="middle">optimized graphs</text>
+    <text class="ag-sub" x="538" y="153" text-anchor="middle">+ weight pool</text>
+    <text class="ag-sub" x="538" y="168" text-anchor="middle">(fp16 / int4 / …)</text>
+  </g>
+
+  <!-- ship arrow -->
+  <path class="ag-edge ag-dashed" d="M538 188 L538 302" marker-end="url(#ag-arr)"/>
+  <text class="ag-edge-label" x="552" y="242">ship it: adb push, or the</text>
+  <text class="ag-edge-label" x="552" y="257">app downloads it once</text>
+
+  <!-- D: loaded plan -->
+  <g class="ag-node" data-info="load" tabindex="0" role="button" aria-label="Loaded .vxm plan">
+    <rect x="36" y="366" width="168" height="102"/>
+    <text class="ag-title" x="120" y="398" text-anchor="middle">Loaded plan</text>
+    <text class="ag-sub" x="120" y="417" text-anchor="middle">whole file memory-mapped;</text>
+    <text class="ag-sub" x="120" y="432" text-anchor="middle">weights stay zero-copy</text>
+    <text class="ag-sub" x="120" y="447" text-anchor="middle">views into the file</text>
+  </g>
+
+  <!-- E: engine -->
+  <g class="ag-node" data-info="engine" tabindex="0" role="button" aria-label="VKNN Vulkan backend">
+    <rect x="268" y="352" width="240" height="130"/>
+    <text class="ag-title" x="388" y="380" text-anchor="middle">VKNN engine (Vulkan)</text>
+    <text class="ag-sub" x="388" y="399" text-anchor="middle">assigns every op a backend,</text>
+    <text class="ag-sub" x="388" y="414" text-anchor="middle">packs weights, builds compute</text>
+    <text class="ag-sub" x="388" y="429" text-anchor="middle">pipelines from embedded SPIR-V,</text>
+    <text class="ag-sub" x="388" y="444" text-anchor="middle">pre-records command buffers,</text>
+    <text class="ag-sub" x="388" y="459" text-anchor="middle">autotunes kernels once</text>
+  </g>
+
+  <!-- F: GPU -->
+  <g class="ag-node" data-info="gpu" tabindex="0" role="button" aria-label="Mobile GPU execution">
+    <rect x="572" y="352" width="212" height="130"/>
+    <text class="ag-title" x="678" y="380" text-anchor="middle">Mobile GPU</text>
+    <text class="ag-sub" x="678" y="399" text-anchor="middle">every compute op runs here:</text>
+    <text class="ag-sub" x="678" y="414" text-anchor="middle">custom compute kernels,</text>
+    <text class="ag-sub" x="678" y="429" text-anchor="middle">fp16 storage + fp32 math,</text>
+    <text class="ag-sub" x="678" y="444" text-anchor="middle">replayed command buffers,</text>
+    <text class="ag-sub" x="678" y="459" text-anchor="middle">0 CPU fallbacks on shipped models</text>
+  </g>
+
+  <!-- cache chip -->
+  <g class="ag-node ag-chip" data-info="cache" tabindex="0" role="button" aria-label="Warm-start cache file">
+    <rect x="300" y="502" width="176" height="26" rx="13"/>
+    <text x="388" y="519" text-anchor="middle" class="ag-mono">.cache — warm starts</text>
+  </g>
+  <path class="ag-edge ag-dashed" d="M388 500 L388 484" marker-end="url(#ag-arr)"/>
+
+  <!-- cpu chip -->
+  <g class="ag-node ag-chip" data-info="cpu" tabindex="0" role="button" aria-label="CPU reference backend">
+    <rect x="588" y="502" width="180" height="26" rx="13"/>
+    <text x="678" y="519" text-anchor="middle">CPU — oracle &amp; loud fallback</text>
+  </g>
+  <path class="ag-edge ag-dashed" d="M678 500 L678 484" marker-end="url(#ag-arr)"/>
+
+  <!-- main arrows -->
+  <path class="ag-edge" d="M186 131 L238 131" marker-end="url(#ag-arr)"/>
+  <path class="ag-edge" d="M430 131 L480 131" marker-end="url(#ag-arr)"/>
+  <path class="ag-edge" d="M204 417 L266 417" marker-end="url(#ag-arr)"/>
+  <path class="ag-edge" d="M508 417 L570 417" marker-end="url(#ag-arr)"/>
+
+  <!-- results arrow back -->
+  <path class="ag-edge ag-dashed" d="M784 417 L900 417" marker-end="url(#ag-arr)"/>
+  <text class="ag-edge-label" x="796" y="404">results</text>
+</svg></div>
+<div class="ag-legend"><span><i></i> data flow</span><span><i class="ag-dash"></i> once / on demand</span><span>▢ click a block for details</span></div>
+
+<div class="ag-panel" id="ag-panel-pipeline" aria-live="polite">
+  <p class="ag-hint">Click a block above — this panel explains it without the jargon.</p>
+</div>
+
+<h2 id="inside-vxm">Inside a <code>.vxm</code> plan</h2>
+<p>A <code>.vxm</code> is a single flat file — no archive, no compression — laid out so the phone can
+memory-map it and start executing without unpacking anything. It stores <em>what</em> to compute
+(the optimized graphs) and the numbers to compute with (the weights). It deliberately stores
+<strong>no</strong> GPU-specific state: shaders live inside the engine binary and pipelines are built on
+the device, so one <code>.vxm</code> runs on any device the engine supports. Click a section:</p>
+
+<div class="ag-anatomy" id="ag-anatomy" role="group" aria-label="vxm file sections">
+  <button type="button" data-info="magic">
+    <div class="ag-row-title">Header — magic <code>VXM3…VXM6</code></div>
+    <div class="ag-row-sub">4 bytes that say what kind of plan this is</div>
+  </button>
+  <button type="button" data-info="buckets">
+    <div class="ag-row-title">Bucket table — one compiled graph per input shape</div>
+    <div class="ag-row-sub">a fixed-shape CNN is 1 bucket; a VLM is vision tower + prefill + decode in one file</div>
+  </button>
+  <button type="button" data-info="pool">
+    <div class="ag-row-title">Shared weight pool — content-deduplicated blobs</div>
+    <div class="ag-row-sub">fp32, fp16, or quantized int4 / int8 / lut4 payloads (+ scales and outlier rows)</div>
+  </button>
+  <button type="button" data-info="graphbody">
+    <div class="ag-row-title">Per-bucket graph body — tensors, nodes, fusion metadata</div>
+    <div class="ag-row-sub">the optimized instruction list the engine walks at load</div>
+  </button>
+  <button type="button" data-info="notinside">
+    <div class="ag-row-title">Not in the file: shaders, pipelines, layouts, tuning</div>
+    <div class="ag-row-sub">everything device-specific is (re)built on the phone — that's the design</div>
+  </button>
+</div>
+<div class="ag-panel" id="ag-panel-anatomy" aria-live="polite">
+  <p class="ag-hint">Click a section of the file above.</p>
+</div>
+
+<h2 id="run-call">What happens on <code>run()</code></h2>
+<p>Loading already did the expensive work (pipelines, weight packing, autotune). A steady-state
+<code>run()</code> is deliberately boring — click through the steps:</p>
+
+<ol class="ag-steps" id="ag-steps">
+  <li class="ag-on"><strong>Bind inputs.</strong>
+    <span class="ag-step-detail">You hand over plain fp32 arrays (or DMA-BUF file descriptors for
+    zero-copy camera frames). Shapes are validated against the plan; token-index inputs are
+    range-checked so a corrupt id can't read out of bounds.</span></li>
+  <li><strong>Pick the bucket.</strong>
+    <span class="ag-step-detail">The session matches your bound input names + shapes against each
+    compiled bucket and dispatches to the right one — that's how one VLM file serves image encode,
+    prefill, and decode from the same <code>run()</code> call. A fixed-shape model skips the lookup.</span></li>
+  <li><strong>Move inputs to the GPU.</strong>
+    <span class="ag-step-detail">Boundary inputs are packed into the GPU's native layout. On a
+    whole-graph-GPU model, 8-bit image inputs upload raw and convert <em>on</em> the GPU; DMA-BUF
+    inputs are already there (zero copies on a unified-memory phone).</span></li>
+  <li><strong>Replay the pre-recorded commands.</strong>
+    <span class="ag-step-detail">No per-op decisions happen now: the engine submits the command
+    buffers it recorded at load, one <code>vkQueueSubmit</code> + fence per chunk (chunks of ≤500
+    nodes keep the GPU watchdog happy on second-long workloads).</span></li>
+  <li><strong>Read back only what you need.</strong>
+    <span class="ag-step-detail">Outputs unpack to plain fp32. An LLM can skip the download entirely:
+    an on-GPU argmax turns the 150k-wide logits row into an 8-byte answer, and KV-cache tensors never
+    leave the device — resident links copy them in place for the next token.</span></li>
+</ol>
+<div class="ag-stepbtns">
+  <button type="button" id="ag-step-next">Next step →</button>
+  <button type="button" id="ag-step-reset">Restart</button>
+</div>
+
+<h2 id="code-map">The moving parts in the code</h2>
+<p><a class="ag-brain-btn" href="class-explorer.html">Open the Neural brain — start from
+<code>Model</code> and unfold the class graph one level at a time</a></p>
+<p>Or take in the overview below: the same story, seen from the C++ side. Arrows point from owner to
+owned (solid) or user to used (dashed). Click a class:</p>
+
+<div class="ag-scroll"><svg class="ag-svg" id="ag-classes" viewBox="0 0 960 470" role="group" aria-label="Core class relationships diagram">
+  <defs>
+    <marker id="ag-arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="var(--line-strong)"/>
+    </marker>
+  </defs>
+
+  <g class="ag-node" data-info="c-model" tabindex="0" role="button" aria-label="Model and Runtime facade">
+    <rect x="30" y="30" width="180" height="72"/>
+    <text class="ag-title ag-mono" x="120" y="60" text-anchor="middle">Model / Runtime</text>
+    <text class="ag-sub" x="120" y="79" text-anchor="middle">the 3-line public API</text>
+  </g>
+
+  <g class="ag-node" data-info="c-session" tabindex="0" role="button" aria-label="Session">
+    <rect x="290" y="30" width="190" height="72"/>
+    <text class="ag-title ag-mono" x="385" y="60" text-anchor="middle">Session</text>
+    <text class="ag-sub" x="385" y="79" text-anchor="middle">plans, owns, and runs everything</text>
+  </g>
+
+  <g class="ag-node" data-info="c-bucket" tabindex="0" role="button" aria-label="PlanBucket">
+    <rect x="560" y="30" width="190" height="72"/>
+    <text class="ag-title ag-mono" x="655" y="60" text-anchor="middle">PlanBucket</text>
+    <text class="ag-sub" x="655" y="79" text-anchor="middle">one compiled plan per shape</text>
+  </g>
+
+  <g class="ag-node" data-info="c-graph" tabindex="0" role="button" aria-label="Graph IR">
+    <rect x="500" y="160" width="150" height="72"/>
+    <text class="ag-title ag-mono" x="575" y="190" text-anchor="middle">Graph</text>
+    <text class="ag-sub" x="575" y="209" text-anchor="middle">NCHW IR: nodes + tensors</text>
+  </g>
+
+  <g class="ag-node" data-info="c-pool" tabindex="0" role="button" aria-label="RtTensor pool">
+    <rect x="680" y="160" width="170" height="72"/>
+    <text class="ag-title ag-mono" x="765" y="190" text-anchor="middle">RtTensor pool</text>
+    <text class="ag-sub" x="765" y="209" text-anchor="middle">host + device residency</text>
+  </g>
+
+  <g class="ag-node" data-info="c-segment" tabindex="0" role="button" aria-label="Segment">
+    <rect x="300" y="160" width="160" height="72"/>
+    <text class="ag-title ag-mono" x="380" y="190" text-anchor="middle">Segment</text>
+    <text class="ag-sub" x="380" y="209" text-anchor="middle">a same-backend node run</text>
+  </g>
+
+  <g class="ag-node" data-info="c-vk" tabindex="0" role="button" aria-label="VulkanBackend">
+    <rect x="160" y="290" width="200" height="72"/>
+    <text class="ag-title ag-mono" x="260" y="320" text-anchor="middle">VulkanBackend</text>
+    <text class="ag-sub" x="260" y="339" text-anchor="middle">primary: kernels for every op</text>
+  </g>
+
+  <g class="ag-node" data-info="c-cpu" tabindex="0" role="button" aria-label="CpuBackend">
+    <rect x="420" y="290" width="190" height="72"/>
+    <text class="ag-title ag-mono" x="515" y="320" text-anchor="middle">CpuBackend</text>
+    <text class="ag-sub" x="515" y="339" text-anchor="middle">reference oracle + fallback</text>
+  </g>
+
+  <g class="ag-node" data-info="c-ctx" tabindex="0" role="button" aria-label="VulkanContext and pipelines">
+    <rect x="60" y="392" width="420" height="58"/>
+    <text class="ag-title ag-mono" x="270" y="416" text-anchor="middle">VulkanContext · ComputePipeline · vk::Buffer</text>
+    <text class="ag-sub" x="270" y="434" text-anchor="middle">device + queue · shared pipelines from embedded SPIR-V · pooled memory</text>
+  </g>
+
+  <g class="ag-node" data-info="c-exec" tabindex="0" role="button" aria-label="ExecContext">
+    <rect x="700" y="290" width="180" height="72"/>
+    <text class="ag-title ag-mono" x="790" y="320" text-anchor="middle">ExecContext</text>
+    <text class="ag-sub" x="790" y="339" text-anchor="middle">per-run bundle handed to ops</text>
+  </g>
+
+  <path class="ag-edge" d="M210 66 L288 66" marker-end="url(#ag-arr2)"/>
+  <text class="ag-edge-label" x="222" y="58">creates</text>
+  <path class="ag-edge" d="M480 66 L558 66" marker-end="url(#ag-arr2)"/>
+  <text class="ag-edge-label" x="495" y="58">owns 1..N</text>
+  <path class="ag-edge" d="M628 102 L586 158" marker-end="url(#ag-arr2)"/>
+  <path class="ag-edge" d="M690 102 L744 158" marker-end="url(#ag-arr2)"/>
+  <path class="ag-edge" d="M598 102 L410 160" marker-end="url(#ag-arr2)"/>
+  <text class="ag-edge-label" x="452" y="140">owns segments</text>
+  <path class="ag-edge ag-dashed" d="M355 232 L286 288" marker-end="url(#ag-arr2)"/>
+  <text class="ag-edge-label" x="212" y="264">compiled by</text>
+  <path class="ag-edge ag-dashed" d="M420 232 L492 288" marker-end="url(#ag-arr2)"/>
+  <path class="ag-edge" d="M260 362 L260 390" marker-end="url(#ag-arr2)"/>
+  <path class="ag-edge ag-dashed" d="M790 232 L790 288" marker-end="url(#ag-arr2)"/>
+  <text class="ag-edge-label" x="800" y="264">wraps at run()</text>
+  <path class="ag-edge ag-dashed" d="M700 326 L612 326" marker-end="url(#ag-arr2)"/>
+</svg></div>
+
+<div class="ag-panel" id="ag-panel-classes" aria-live="polite">
+  <p class="ag-hint">Click a class above.</p>
+</div>
+
+<h2 id="design-rules">The rules the design keeps</h2>
+<div class="ag-cards">
+  <div><h4>Compile once, run anywhere</h4><p>A <code>.vxm</code> carries nothing device-specific.
+    Pipelines, layouts, and tuning are rebuilt per device — and cached, so only the first load pays.</p></div>
+  <div><h4>The GPU is the engine</h4><p>Every executable op has a Vulkan kernel. The CPU backend is the
+    correctness oracle and a fallback that announces itself — never a silent slow path.</p></div>
+  <div><h4>fp16 storage, fp32 math</h4><p>Activations and weights live in fp16 to halve bandwidth;
+    every kernel accumulates in fp32, and results are checked against an onnxruntime golden.</p></div>
+  <div><h4>No hidden knobs</h4><p>The engine reads no environment variables. Everything is a
+    <code>vknn::Config</code> field or a <code>setHint</code> — see <a href="config.html">Config</a>.</p></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var INFO = {
+    /* ---- pipeline blocks ---- */
+    onnx: {
+      t: 'ONNX model — the input',
+      plain: 'ONNX is the standard file format models are exported to from training frameworks. ' +
+        'It describes the network as a graph of operations (convolutions, matrix multiplies, …) plus ' +
+        'the learned weights. VKNN reads it directly with its own small parser — no protobuf library, ' +
+        'no Python, no conversion service.',
+      eng: ['Hand-written protobuf wire parser: <code>src/import/onnx/onnx_parser.cpp</code>',
+        'External-data weights resolve relative to the model file',
+        'Quantized (QDQ / QLinear) checkpoints and ORT contrib ops (MatMulNBits, GQA, RotaryEmbedding) import too'],
+      where: 'src/import/onnx/onnx_parser.cpp',
+      link: ['howto-compile-run.html', 'Guide: compile &amp; run a model']
+    },
+    compile: {
+      t: 'vknn_compile — the compiler',
+      plain: 'This tool does the slow thinking ahead of time so the phone never has to. It cleans up ' +
+        'the graph, fuses runs of small operations into bigger ones, resolves every tensor shape, and ' +
+        'can shrink weights (fp16 with --fp16, or 4-bit with -Os) — then writes the result as a .vxm plan.',
+      eng: ['Optimization presets: <code>-O0</code>…<code>-O3</code> (default <code>-O1</code>: pointwise-chain + GridSample-warp fusion, bit-exact); <code>-Os</code> = <code>-O3</code> + int4 weight quantization (AWQ outliers, min-MSE, per-layer error guard)',
+        'Dynamic dims must be bound — <code>--dim NAME=V</code>, <code>--shape NAME=DxD</code>, <code>--batch N</code>; unbound is a hard error, never a silent guess (<code>--list-dims</code> shows what to bind)',
+        'One plan can hold several shapes (<code>--bucket</code>) or several source graphs (<code>--graph</code>) — how the whole VLM becomes one file'],
+      where: 'convert/compile.cpp · src/import/run_standard_passes.cpp',
+      link: ['config.html', 'Reference: every compile flag']
+    },
+    vxm: {
+      t: '.vxm — the plan file',
+      plain: 'Everything the phone needs, in one file: the optimized graph(s) and the weights. ' +
+        'Think of it as the difference between a recipe you have to read and interpret (ONNX) and a ' +
+        'prepped mise en place (vxm) — loading one skips parsing and optimization entirely.',
+      eng: ['Flat binary, memory-map friendly; atomic save (<code>.tmp</code> + rename)',
+        'Weights stored per-tensor as fp32, fp16, or packed int4 / int8 / lut4 with scales + fp16 outlier rows',
+        'Multi-bucket files share one content-deduplicated weight pool; loading streams one bucket at a time',
+        'Untrusted-input hardened: every length and tensor id is validated, so a corrupt file fails the load instead of reading out of bounds'],
+      where: 'src/core/model_io.cpp',
+      link: ['#inside-vxm', 'See the file anatomy below']
+    },
+    load: {
+      t: 'Loading the plan',
+      plain: 'The engine maps the file into memory instead of reading it into buffers — the operating ' +
+        'system pages weights in as they are first touched, and identical weights shared by several ' +
+        'graphs exist only once. Load is where the last graph tweaks happen (fusing the attention ' +
+        'pattern for LLM decode, for example), because they depend on hints, not on the file.',
+      eng: ['<code>MappedFile</code>: read-only mmap; initializer payloads are zero-copy views',
+        'Load-time-only passes, all on by default via hints: RoPE fusion → MatMul view fold → fused decode attention → KV-concat fold',
+        '<code>graphOptimized_ = true</code>: the standard pass pipeline never re-runs for a .vxm'],
+      where: 'src/core/session.cpp (createFromVxm → buildBucket)',
+      link: ['architecture.html', 'Architecture reference']
+    },
+    engine: {
+      t: 'The engine — planning and pipelines',
+      plain: 'Before the first run, the engine decides where every operation executes (GPU, with the ' +
+        'CPU only as a loud fallback), converts weights into the GPU’s preferred memory layout, and ' +
+        'builds the actual GPU programs. Then it records the whole execution once, like writing a ' +
+        'macro — later runs just press play.',
+      eng: ['Per-node backend assignment → maximal same-backend <em>segments</em>; one pre-recorded command buffer per GPU segment (chunked ≤ 500 nodes / ≤ 1024 descriptor writes)',
+        'Pipelines built from SPIR-V embedded in the engine binary, shared by kernel config — never stored in the .vxm',
+        'Load-time autotune (<code>--tuning none/fast/heavy</code>) races only bit-neutral parameters; numerics-affecting kernel choices are deterministic shape rules',
+        'Weights upload through a persistent 64 MiB staging ring into device-only memory'],
+      where: 'src/backend/vulkan/vk_backend.cpp',
+      link: ['architecture.html#4-segments-pre-recorded-vulkan-command-buffers-and-cpu-fallback', 'Segments in depth']
+    },
+    gpu: {
+      t: 'Mobile GPU — where inference happens',
+      plain: 'The GPU executes the recorded commands: one custom compute kernel per operation, tensors ' +
+        'packed four-channels-at-a-time (or flat for transformers) in fp16, with all arithmetic done in ' +
+        'fp32 so accuracy holds up. On the shipped models nothing falls back to the CPU — the whole ' +
+        'network is a handful of GPU submissions.',
+      eng: ['NC4HW4 vec4 packing for CNNs; flat row-major for transformer/attention ops',
+        'fp16 storage + fp32 accumulation; explicit round-to-nearest-even stores',
+        'Push descriptors only (no descriptor-set churn); per-chunk submit + fence sidesteps the ~2 s GPU watchdog',
+        'LLM decode extras: on-GPU argmax (8-byte readback), device-resident KV cache links, optional multi-token decode chains'],
+      where: 'shaders/ · src/backend/vulkan/ops/',
+      link: ['op-coverage.html', 'Per-op GPU coverage']
+    },
+    cache: {
+      t: '.cache — warm starts',
+      plain: 'The first load on a device compiles shaders, repacks weights, and autotunes. All of that ' +
+        'is remembered in a sidecar .cache file next to the model, so the second load is fast. If ' +
+        'anything it depends on changes — driver, engine build, the model itself — it notices and ' +
+        'rebuilds instead of serving stale state.',
+      eng: ['MessagePack, self-validating: kernel hash, vendor/device/driver ids, pipeline-cache UUID, model hash',
+        'Multi-variant: one entry per cache-affecting config (precision, layout, fusion hints, …)',
+        'Holds the driver pipeline-cache blob, prepacked/Winograd weights, and the autotune table (with the tuning level each entry was measured at)',
+        'Written at session teardown, atomically, only when something changed'],
+      where: 'src/core/cache_codec.cpp · vk_backend.cpp loadCache/saveCaches',
+      link: ['config.html#caching', 'Caching in the Config reference']
+    },
+    cpu: {
+      t: 'CPU backend — oracle and fallback',
+      plain: 'The CPU implementation exists to answer "is the GPU right?" — every kernel is checked ' +
+        'against it — and to keep a model runnable if the GPU genuinely cannot execute an op. When ' +
+        'that happens, VKNN says so plainly in the log and in the API; a silent 10× slowdown is treated ' +
+        'as a bug.',
+      eng: ['Scalar reference kernels for every op + NEON for the hot ones; fp32 host math',
+        'Fallback is throttled-warned per op type and summarized per plan; <code>Session::fallbackOps()</code> / <code>--support-report</code> expose it',
+        'Data-dependent control flow (<code>Loop</code>/<code>If</code>/<code>NonMaxSuppression</code>) is the by-design CPU set'],
+      where: 'src/backend/cpu/',
+      link: ['limitations.html', 'Known limitations']
+    },
+    /* ---- vxm anatomy rows ---- */
+    magic: {
+      t: 'Header magic — VXM3…VXM6',
+      plain: 'The first four bytes tell the engine what dialect the file speaks. Newer engines read ' +
+        'all four; an older engine refuses a newer file with a clear "reconvert" message instead of ' +
+        'crashing or, worse, misreading it.',
+      eng: ['<code>VXM3</code> single graph · <code>VXM4</code> multi-bucket + shared pool',
+        '<code>VXM5</code>/<code>VXM6</code> wrap a VXM3/4 body when quantized weights are present (VXM6 = formats beyond int4, so pre-int8/lut4 engines reject rather than misread)',
+        'Unknown <code>VXM&lt;n&gt;</code> → "incompatible version — reconvert"; anything else → "not a valid .vxm"'],
+      where: 'src/core/model_io.cpp',
+      link: null
+    },
+    buckets: {
+      t: 'Bucket table — one plan per shape',
+      plain: 'GPU plans are fastest when every tensor size is known ahead of time, so VKNN compiles one ' +
+        'complete plan per input-shape set and stores them side by side. At run time the engine picks ' +
+        'the bucket matching the shapes you actually passed. One file, several entry points.',
+      eng: ['Bucket = label + graph body + (tensor id → pool index) table',
+        'Created with repeated <code>--bucket</code> (one graph, several shapes) or <code>--graph</code> (several source graphs)',
+        'Producer→consumer bucket boundaries are fused at compile time (a VLM’s image features splice into the decoder on the GPU)',
+        'run() dispatch key: input names + shapes; a fixed-shape model has exactly one bucket'],
+      where: 'src/core/model_io.cpp · session.cpp shapeKey',
+      link: ['running-a-vlm.html', 'The VLM guide shows multi-graph in action']
+    },
+    pool: {
+      t: 'Weight pool — deduplicated payloads',
+      plain: 'All weights live in one pool of binary blobs, and identical blobs are stored once even if ' +
+        'several graphs use them — which is exactly what happens when a prefill and a decode graph share ' +
+        'a transformer. Quantized tensors keep their small helper data (scales, the few full-precision ' +
+        '"outlier" rows) right beside them.',
+      eng: ['Dedup at save: FNV-1a-64 + size digest, exact byte-compare on collision',
+        'Payload formats: fp32, fp16 (saturating clamp ±65504), packed int4 nibbles, int8, lut4 (4-bit indices into a 16-entry fp16 codebook)',
+        'Quant metadata rides node attributes (<code>kWq*</code>): scales (fp16, grouped), outlier indices + rows, layout flag',
+        'MatMul on Vulkan reads int4/int8/lut4 natively; every other consumer gets fp16 rebuilt at load'],
+      where: 'src/core/model_io.cpp · src/core/quant_weights.h',
+      link: ['running-an-llm.html', 'Quantization in the LLM guide']
+    },
+    graphbody: {
+      t: 'Graph body — the instruction list',
+      plain: 'Each bucket stores the network as two tables: tensors (name, shape, type, role) and nodes ' +
+        '(operation, which tensors in, which out, plus the fusion decisions the compiler already made). ' +
+        'The engine walks this list top to bottom — order is baked in, no scheduler needed.',
+      eng: ['Tensor table: name, i64 shape, dtype, format, input/output/initializer role bits',
+        'Node table: op type, io tensor ids, attributes, fused-activation + epilogue metadata (<code>pw_steps</code> register-DAG records)',
+        'Every length prefix and tensor id is validated on read (sticky-error Reader) — crafted files fail cleanly',
+        'Load-time state (flat-layout marks, fp32 pins) is never serialized'],
+      where: 'src/core/model_io.cpp writeGraphStructure',
+      link: null
+    },
+    notinside: {
+      t: 'What is deliberately NOT in the file',
+      plain: 'No shader binaries, no GPU pipeline state, no memory layouts, no tuning results. Those ' +
+        'depend on the exact device and driver, so baking them in would chain the file to one phone. ' +
+        'Instead the engine rebuilds them on first load — and remembers them in the sidecar .cache so ' +
+        'it only happens once per device.',
+      eng: ['SPIR-V is compiled at build time and embedded in the engine binary (<code>tools/embed_spirv.py</code>)',
+        'VkPipelines are created at load through a driver pipeline cache; shared per kernel config',
+        'The NC4HW4 / flat layout pass and fp32 pinning run at load, per target',
+        'Autotune choices are per-device (keyed by vendor/device/driver) and live in the .cache'],
+      where: 'CMakeLists.txt shader rules · vk_pipeline.cpp',
+      link: null
+    },
+    /* ---- class diagram ---- */
+    'c-model': {
+      t: 'Model / Runtime — the front door',
+      plain: 'What an app touches: load a file, ask what inputs it wants, hand over data, get tensors ' +
+        'back. Three lines of C++. Runtime is the loader (it routes .vxm vs .onnx and resolves the ' +
+        'cache path); Model is a copyable handle you can pass around.',
+      eng: ['<code>Model::load(path, cfg)</code> → <code>run(inputs)</code> → <code>argmax()</code>',
+        '<code>Runtime::load</code> stamps <code>cfg.cacheFile</code> (default <code>&lt;model&gt;.cache</code>)',
+        'Copies share one underlying Session'],
+      where: 'include/vknn/model_class.h · runtime.h',
+      link: ['index.html#quickstart', 'The quickstart uses exactly this API']
+    },
+    'c-session': {
+      t: 'Session — the conductor',
+      plain: 'Owns everything with a lifetime: the compiled buckets, the backends, the caches. It ' +
+        'assigns ops to backends, builds segments, dispatches each run() to the right bucket, and ' +
+        'flushes the cache on shutdown.',
+      eng: ['<code>createFromVxm</code> / <code>createFromOnnx</code> / <code>create(Graph&amp;&amp;)</code>',
+        'LLM machinery lives here: <code>linkOutputToInput</code> (KV cache), <code>setOutputArgMax</code>, <code>setOutputRow</code>, <code>configureDecodeChain</code>',
+        'Member declaration order is load-bearing: backends are destroyed last, after segments and pool release device buffers'],
+      where: 'src/core/session.cpp · include/vknn/session_class.h',
+      link: ['architecture.html#2-5-session-runtime-include-vknn-session-h-src-core-session-cpp', 'Session in the reference']
+    },
+    'c-bucket': {
+      t: 'PlanBucket — one shape, one plan',
+      plain: 'Everything specific to one input-shape set: its graph, its tensor pool, its segments, and ' +
+        'the record of anything that fell back to CPU. Multiple buckets is how one session serves an ' +
+        'image encoder and a text decoder from the same file.',
+      eng: ['<code>key</code> = canonical "name=shape;…" string; run() matches against it',
+        '<code>ioGpuConvert</code> only when the whole graph is GPU (8-bit inputs convert on-device)',
+        '<code>gatherIndexAxisSizes</code>: bind-time bounds for token-id inputs'],
+      where: 'include/vknn/session_class.h (struct PlanBucket)',
+      link: null
+    },
+    'c-graph': {
+      t: 'Graph — the IR',
+      plain: 'The network as data: a table of tensors and a topologically-sorted list of nodes that ' +
+        'reference them by index. Always NCHW, always backend-agnostic — the same IR the compiler ' +
+        'optimized is what the runtime walks.',
+      eng: ['<code>tensors</code> / <code>nodes</code> / <code>initializers</code> keyed by <code>TensorId</code> (int32)',
+        '<code>topoSort()</code> is stable and throws on cycles',
+        'OpType is append-only — .vxm stores the raw integers'],
+      where: 'include/vknn/graph.h · op_type.h',
+      link: ['architecture.html#2-2-graph-ir-graph-node-attributes-include-vknn-graph-h-include-vknn-op-h', 'Graph IR in the reference']
+    },
+    'c-pool': {
+      t: 'RtTensor pool — dual residency',
+      plain: 'Each runtime tensor can have a host copy, a GPU copy, or both, with validity flags saying ' +
+        'which is current. That one idea makes CPU↔GPU handoffs automatic: data moves only at segment ' +
+        'boundaries, and only when the other side actually needs it.',
+      eng: ['<code>hostValid</code> / <code>deviceValid</code> drive residency reconciliation',
+        'Host side is canonical NCHW fp32; device side is opaque <code>DeviceStorage</code> tagged with its own format/dtype',
+        'Internal activations of a GPU segment never touch the host'],
+      where: 'include/vknn/rt_tensor.h',
+      link: null
+    },
+    'c-segment': {
+      t: 'Segment — the unit of execution',
+      plain: 'A maximal stretch of consecutive ops that all run on the same backend. A fully-GPU model ' +
+        'is one segment; if one op must run on CPU, the plan splits around it and the boundaries handle ' +
+        'the data movement. The core loop just runs segments in order.',
+      eng: ['<code>boundaryInputs</code>/<code>boundaryOutputs</code> = the only places host↔device traffic can happen',
+        'VulkanSegment pre-records its command buffer at build; run() replays it',
+        '<code>isFallback</code> marks CPU segments that exist only because the GPU declined'],
+      where: 'include/vknn/segment.h · vk_backend.cpp (VulkanSegment)',
+      link: null
+    },
+    'c-vk': {
+      t: 'VulkanBackend — the primary engine',
+      plain: 'Implements every op as a compute kernel, owns the GPU memory strategy, the pipeline and ' +
+        'weight caches, and the autotuner. If this backend says yes to an op — and it almost always ' +
+        'does — the op never leaves the GPU.',
+      eng: ['<code>supportsNode</code> = registered kernel + shape/attr gate (<code>vkNodeGate</code>) + live-caps checks',
+        'Weight prepack + upload at <code>prepare()</code>; content-addressed device weight pools shared across buckets',
+        'Registered via <code>VKNN_REGISTER_BACKEND</code> — the core never names it'],
+      where: 'src/backend/vulkan/',
+      link: ['adding-a-backend.html', 'How a backend plugs in']
+    },
+    'c-cpu': {
+      t: 'CpuBackend — the oracle',
+      plain: 'A complete, boring, obviously-correct implementation of every op on the CPU. It exists so ' +
+        'the GPU has something to be checked against, and so a model with an unsupported op still runs — ' +
+        'loudly — instead of failing.',
+      eng: ['Scalar kernels (one file per op) + NEON where it pays; fp32 throughout',
+        'Persistent worker pool, fixed <code>cpuThreads</code> (default 4), bit-identical at any thread count',
+        'Also the executor for data-dependent control flow (Loop/If/NMS)'],
+      where: 'src/backend/cpu/',
+      link: null
+    },
+    'c-ctx': {
+      t: 'VulkanContext, pipelines, buffers',
+      plain: 'The plumbing layer: one object owns the Vulkan device and compute queue; pipelines are ' +
+        'compiled GPU programs shared across ops that use the same kernel; buffers are pooled GPU ' +
+        'memory with liveness-based reuse so activations recycle each other’s space.',
+      eng: ['Vulkan 1.3, dedicated-compute queue preferred; push descriptors are mandatory',
+        '<code>sharedPipeline</code> keyed by shader|bindings|push-const|spec-constants',
+        'Unified-memory aware: DEVICE_LOCAL+HOST_VISIBLE by default, HOST_CACHED for readback, device-only for weights'],
+      where: 'src/backend/vulkan/vk_context.cpp · vk_pipeline.cpp · vk_buffer.cpp',
+      link: null
+    },
+    'c-exec': {
+      t: 'ExecContext — the per-run bundle',
+      plain: 'A small package handed to every executing segment: here is the tensor pool, the graph, ' +
+        'the config, the profiler. It is how ops reach their data without anyone owning global state.',
+      eng: ['<code>RtTensor&amp; t(TensorId)</code> is the accessor every op uses',
+        'Profiler records one row per op when enabled'],
+      where: 'include/vknn/exec_context.h',
+      link: null
+    }
+  };
+
+  function renderInfo(panel, key) {
+    var d = INFO[key];
+    if (!d) return;
+    var h = '<h4>' + d.t + '</h4><p>' + d.plain + '</p>';
+    if (d.eng && d.eng.length) {
+      h += '<ul>';
+      for (var i = 0; i < d.eng.length; i++) h += '<li>' + d.eng[i] + '</li>';
+      h += '</ul>';
+    }
+    h += '<p class="ag-where">In the code: <code>' + d.where + '</code>';
+    if (d.link) h += ' &nbsp;·&nbsp; <a href="' + d.link[0] + '">' + d.link[1] + '</a>';
+    h += '</p>';
+    panel.innerHTML = h;
+  }
+
+  function wire(containerId, panelId) {
+    var box = document.getElementById(containerId);
+    var panel = document.getElementById(panelId);
+    if (!box || !panel) return;
+    var nodes = box.querySelectorAll('[data-info]');
+    function select(el) {
+      nodes.forEach(function (n) { n.classList.remove('ag-active'); });
+      el.classList.add('ag-active');
+      renderInfo(panel, el.getAttribute('data-info'));
+    }
+    nodes.forEach(function (el) {
+      el.addEventListener('click', function () { select(el); });
+      el.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); select(el); }
+      });
+    });
+  }
+  wire('ag-pipeline', 'ag-panel-pipeline');
+  wire('ag-anatomy', 'ag-panel-anatomy');
+  wire('ag-classes', 'ag-panel-classes');
+
+  /* run() stepper */
+  var steps = Array.prototype.slice.call(document.querySelectorAll('#ag-steps li'));
+  var cur = 0;
+  function show(i) {
+    cur = ((i % steps.length) + steps.length) % steps.length;
+    steps.forEach(function (li, k) { li.classList.toggle('ag-on', k === cur); });
+  }
+  steps.forEach(function (li, k) { li.addEventListener('click', function () { show(k); }); });
+  var next = document.getElementById('ag-step-next');
+  var reset = document.getElementById('ag-step-reset');
+  if (next) next.addEventListener('click', function () { show(cur + 1); });
+  if (reset) reset.addEventListener('click', function () { show(0); });
+})();
+</script>

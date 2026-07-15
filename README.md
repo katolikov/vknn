@@ -1,7 +1,10 @@
-<h1 align="center">VKNN</h1>
+<p align="center">
+  <img src="docs/images/vknn_logo.svg" width="440" alt="VKNN — Vulkan Neural Network">
+</p>
 
 <p align="center">
-  <b>Vulkan Neural Network</b> — a small, dependency-free C++17 inference engine that runs ONNX models on Android GPUs.
+  <b>A small, dependency-free C++17 inference engine that runs ONNX models — CNNs, YOLO, LLMs,
+  vision-language models, 3D Gaussian Splatting — entirely on the Android GPU.</b>
 </p>
 
 <p align="center">
@@ -9,40 +12,69 @@
   <img alt="Vulkan compute" src="https://img.shields.io/badge/Vulkan-compute-A41E22?logo=vulkan&logoColor=white">
   <img alt="Android arm64-v8a" src="https://img.shields.io/badge/Android-arm64--v8a-3DDC84?logo=android&logoColor=white">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue">
-  <img alt="no runtime deps" src="https://img.shields.io/badge/deps-none-success">
+  <img alt="no external runtime deps" src="https://img.shields.io/badge/external%20deps-none-success">
 </p>
 
 <p align="center">
-  <a href="#what-it-does">What it does</a> ·
+  <a href="#why-vknn">Why VKNN</a> ·
+  <a href="#what-it-runs">What it runs</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#feature-matrix">Features</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="#documentation">Docs</a>
 </p>
 
-## What it does
+## Why VKNN
 
-**VKNN** (namespace `vknn`) is an on-device inference engine: you give it an ONNX model, and it runs
-on the **Android GPU** (Vulkan compute) with a scalar + NEON
-**CPU backend** as the reference path and automatic fallback. It imports the model with a hand-rolled
-protobuf parser, lowers it to an NCHW IR, runs graph passes (shape inference, BatchNorm folding,
-activation/residual fusion, pointwise-chain fusion into producer epilogues, quantized-node
-dequantization, constant folding), partitions the graph into maximal same-backend segments, and
-executes each on a pluggable backend. The Vulkan path uses an NC4HW4 packed layout, pre-recorded
-command buffers per segment, fp16 storage with fp32 accumulation, and caller-owned DMA-BUF I/O. There
-are **no third-party runtime dependencies** — only Vulkan and the C++ standard library — and every
-result is checked against an onnxruntime golden.
+- **The GPU is the engine.** Every executable operator has a Vulkan compute kernel; the shipped
+  models run with **0 CPU fallbacks**. The scalar + NEON CPU backend exists as the reference oracle
+  and a fallback that announces itself.
+- **Compile once, run many times.** `vknn_compile` bakes an ONNX model into an optimized `.vxm`
+  plan; loading one skips ONNX parsing and graph passes entirely, and the plan is memory-mapped, not
+  copied.
+- **Nothing to install.** C++17, the Vulkan loader, and a vendored statically linked MessagePack
+  library (warm-start-cache serialization) — no protobuf, no Python, no framework at run time. The
+  ONNX importer is a hand-rolled protobuf wire parser.
+- **Quantization built in.** `vknn_compile -Os` produces int4 (or int8 / lut4) weights with AWQ
+  outlier columns kept fp16 and a per-layer error guard, executed by native quantized GPU MatMul
+  kernels.
+- **Verified, deterministic.** Every path is checked against an onnxruntime golden; autotuning races
+  only bit-neutral launch parameters, so `--tuning none/fast/heavy` produce byte-identical output.
+- **Fast.** Faster than [MNN](https://github.com/alibaba/MNN)'s best backend on 8 of 9 benchmark
+  models, at parity on ResNet-50 ([benchmarks](#benchmarks)).
 
-It runs image CNNs (ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet),
-detection (YOLOv8n), an autoregressive LLM (Qwen2.5-Coder-0.5B), a 2.2B vision-language model
-(SmolVLM2 — vision tower + decoder prefill/decode shipped as **one multi-graph `.vxm`**), and a
-965M-parameter transformer encoder (the YoNoSplat feed-forward 3D Gaussian Splatting model) plus a
-from-scratch Vulkan 3DGS rasterizer — all on the GPU.
+## What it runs
+
+All of these run on the Android GPU today, from this repo:
+
+- **Image CNNs** — ResNet-50, MobileNetV2/V3, EfficientNet, Inception, DenseNet, ShuffleNet.
+- **Detection** — YOLOv8n.
+- **LLMs** — Qwen2.5-Coder-0.5B; int4 Llama-3.2-1B and Llama-3.1-8B ([chat demo](#chat-with-an-llm)).
+- **A vision-language model** — SmolVLM2-2.2B, vision tower + decoder prefill/decode shipped as
+  **one multi-graph `.vxm`** ([VLM demo](#show-it-a-picture)).
+- **3D Gaussian Splatting** — the 965M-parameter YoNoSplat feed-forward encoder plus a from-scratch
+  Vulkan 3DGS rasterizer.
 
 <p align="center">
   <img src="docs/images/vknn_gpu_outputs.png" alt="VKNN classifying a real photo on the Vulkan GPU" width="780">
 </p>
 <p align="center"><sub>The benchmark CNNs classifying a real photo on the Vulkan GPU (fp16), with top-5 ImageNet labels.</sub></p>
+
+## How it works, in one minute
+
+1. **Import** — a hand-rolled protobuf parser reads the ONNX file into a backend-agnostic NCHW IR.
+2. **Optimize** — graph passes run: shape inference, BatchNorm folding, activation/residual fusion,
+   pointwise-chain fusion into producer epilogues, quantized-node dequantization, constant folding.
+3. **Plan** — the graph is partitioned into maximal same-backend segments; each op is assigned to
+   the first backend that supports it (Vulkan first, CPU as the loud fallback).
+4. **Execute** — the Vulkan backend packs tensors into an NC4HW4 layout (flat row-major for
+   transformers), stores fp16 / accumulates fp32, pre-records one command buffer per segment, and
+   replays it every run. I/O can bind caller-owned DMA-BUF fds with zero copies.
+
+Steps 1–2 happen once, offline, in `vknn_compile`. The documentation site
+(`./build.sh --docs` → `docs/site/index.html`) walks this pipeline interactively: **How VKNN works**
+is a clickable tour of the compile → `.vxm` → runtime flow, and **Neural brain** is a drill-down
+explorer of the engine's class graph.
 
 ## Quickstart
 
@@ -132,16 +164,20 @@ model> def is_prime(n):
            return True
 ```
 
-The autoregressive decode step is fused at load: the rotate-half RoPE chains collapse into one `Rope`
-dispatch per q/k site, and the single-query attention core (MatMul → scale/mask → Softmax → MatMul)
-fuses into one `FusedAttention` kernel per layer that reads the GQA KV cache through per-axis
-operand-view strides — no materialized `repeat_kv`. Both passes run at load only and never rewrite a
-compiled `.vxm`, so existing models speed up on load; each is gated by a `Config` hint with a `--no-*`
-flag. Greedy decode registers the logits output for an engine-side argmax (`Session::setOutputArgMax`
-/ `readOutputArgMax`), so the next-token id comes back as 8 bytes from a GPU reduction instead of a
-full download and scan of the 151936-wide logits row (the token stream is unchanged — first-occurrence
-argmax). Together they cut the engine host loop from ~9 ms to ~0.5 ms per token; the int4 Qwen instruct
-model decodes a token in a ~19.7 ms GPU span at a 1024-token context. Its
+What makes the decode loop fast — all applied at load, never rewriting a compiled `.vxm`, each gated
+by a `Config` hint with a `--no-*` flag:
+
+- **RoPE fusion** — the rotate-half chains collapse into one `Rope` dispatch per q/k site.
+- **Fused attention** — the single-query attention core (MatMul → scale/mask → Softmax → MatMul)
+  fuses into one `FusedAttention` kernel per layer, reading the GQA KV cache through per-axis
+  operand-view strides; `repeat_kv` is never materialized.
+- **On-GPU argmax** — greedy decode registers the logits output for an engine-side argmax
+  (`Session::setOutputArgMax` / `readOutputArgMax`), so the next-token id comes back as 8 bytes from
+  a GPU reduction instead of a download of the 151936-wide logits row (the token stream is
+  unchanged — first-occurrence argmax).
+
+Together they cut the engine host loop from ~9 ms to ~0.5 ms per token; the int4 Qwen instruct model
+decodes a token in a ~19.7 ms GPU span at a 1024-token context. Its
 [`qwen-vknn`](https://huggingface.co/katolikov/qwen-vknn) repo ships a 517 MB int4 build — with a
 256-token whole-window prefill bucket — next to the fp16 export.
 
@@ -153,7 +189,7 @@ and the [Running an LLM on VKNN](https://github.com/katolikov/vknn/wiki/Running-
 **SmolVLM2-2.2B** vision-language chat runs full-GPU from **one multi-graph `.vxm`**: the SigLIP
 vision tower, the token embedding, and the text decoder's prefill + decode plans compile into a
 single file over a content-deduped weight pool
-([hf.co/katolikov/smolvlm2-vknn](https://huggingface.co/katolikov/smolvlm2-vknn)), and the session
+([hf.co/katolikov/SmolVLM2-2.2B-vknn](https://huggingface.co/katolikov/SmolVLM2-2.2B-vknn)), and the session
 dispatches each `run()` to the right graph by its bound input names + shapes.
 [`examples/llm/vlm.cpp`](examples/llm/vlm.cpp) drives the device loop (image encode → on-device
 embedding splice → prefill → streamed decode) with
@@ -164,7 +200,7 @@ alongside the 4.5 GB fp16 one. Walkthrough: [docs/running-a-vlm.md](docs/running
 
 The same models power [`app-demo/`](app-demo/) — an Android app (Kotlin/Compose over JNI) with four
 tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** that downloads each
-`.vxm` from HuggingFace. The Chat and VLM tabs each carry a per-tab model-variant picker (fp16 / int4).
+`.vxm` from HuggingFace. The Chat and VLM tabs each carry a per-tab model picker (Chat: Qwen fp16 / int4 and int4 Llama 3.2 1B / 3.1 8B; VLM: SmolVLM2 fp16 / int4).
 
 ## Feature matrix
 
@@ -173,10 +209,10 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 | **Backends** | Vulkan compute GPU (primary) + scalar/NEON CPU (reference & automatic fallback), selected per segment. |
 | **Full-GPU op coverage** | Every *executable* operator has a Vulkan kernel; a whole benchmark model runs on the GPU with **0 CPU fallbacks**. Only data-dependent control flow (`Loop` / `If` / `NonMaxSuppression`) and const-folded import ops stay off the GPU. See [docs/op-coverage.md](docs/op-coverage.md). |
 | **Precision** | fp16 storage + fp32 accumulation (`low`), selective-fp32 geometry tail (`normal`), or full fp32 (`high`). Stores rounded to nearest even; every path checked against an onnxruntime golden. |
-| **Dynamic shapes** | Declared shape **plan buckets**: `vknn_compile --shape NAME=D0xD1x...` / `--bucket "..."` bakes one plan per shape set; at runtime `Session::prepareShapes()` compiles more, and `run()` selects a bucket by the bound input shapes. A fixed-shape model is one bucket (a single map lookup on the hot path). |
+| **Dynamic shapes** | Declared shape **plan buckets**: `vknn_compile --shape NAME=D0xD1x...` / `--dim NAME=VALUE` (binds a symbolic axis; `--list-dims` prints a model's free symbols) / `--bucket "..."` bakes one plan per shape set; at runtime `Session::prepareShapes()` compiles more, and `run()` selects a bucket by the bound input shapes. A fixed-shape model is one bucket (a single map lookup on the hot path). |
 | **Multi-graph `.vxm`** | `vknn_compile --graph "FILE[;shape/dim segments]"` (repeatable) compiles **several source graphs** — or one graph at several shapes — into one `.vxm` over a content-deduped weight pool; `run()` dispatches to the bucket matching the bound input names + shapes. Buckets stream at load (host peak = one bucket's weights) and share GPU weight copies by content, so a whole VLM (vision tower + embedding + decoder prefill/decode) is one file and one session. See [docs/running-a-vlm.md](docs/running-a-vlm.md). |
-| **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. `vknn_compile -Os` goes the other way and **produces** int4 — all fusion plus calibration-free int4 weight quantization (AWQ outlier columns kept fp16, per-layer error guard) over a native int4 GPU MatMul; the Qwen instruct weights come out ~2.4× smaller, and every bucket of a multi-graph `.vxm` is requantized. |
-| **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. Tuning optimizes for **speed**: on a convolution-heavy model it may pick a Winograd variant whose fp16 rounding differs from the default direct/GEMM kernels, so the exact output — and its PSNR/SNR against an fp32 reference — shifts with the tuning level and can differ across devices (the argmax / detections do not). `--tuning none --no-cache` runs the default kernel on every device (bit-identical GPU output) and, because the untuned kernels carry less transform rounding, often lands *closer* to the fp32 reference — trading some speed for the most reproducible and accurate result. (`--tuning none` on its own still *reuses* a cached fast/heavy tune when one is present — it means "run no new sweep", not "ignore a stored one" — so pin `--no-cache` too for the bit-identical guarantee.) |
+| **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. `vknn_compile -Os` goes the other way and **produces** quantized weights — all fusion plus calibration-free weight quantization (`--quant-bits 4|8|lut4`, default int4; AWQ outlier columns kept fp16, per-layer error guard; `--calib` supplies real calibration samples) over native int4 / int8 / lut4 GPU MatMul kernels; the Qwen instruct weights come out ~2.4× smaller, and every bucket of a multi-graph `.vxm` is requantized. |
+| **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. Tuning affects **speed only**: the timing races cover just bit-neutral launch parameters (workgroup size, tile width, registers per thread), and every kernel choice that changes fp16 rounding — Winograd vs direct, F(2,3) vs F(4,3), implicit-GEMM vs direct — is a deterministic shape rule that holds at every tuning level, so `none` / `fast` / `heavy` produce byte-identical output. `--tuning none` runs no new sweep (a cached pick, also bit-neutral, is still reused); add `--no-cache` to force a fully cold compile. |
 | **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/io/dmabuf_fd_io.cpp`](examples/io/dmabuf_fd_io.cpp). |
 | **Warm-start cache** | A self-validating, multi-variant per-model `.cache` (kernel hash + device + config) auto-heals across driver/model/code changes. |
 | **Tools** | `vknn_compile` (ONNX → `.vxm`, with `--support-report <out.json>` for the per-node backend assignment), `vknn_run_io` (any multi-input/multi-output model), plus the example runners below. |
@@ -203,10 +239,9 @@ Against MNN's absolute best (min over OpenCL-HEAVY, CPU-4-thread, Vulkan), VKNN 
 models and at **parity on ResNet-50**. Methodology, per-stage timings, and the OpenCL-tuned comparison:
 [docs/benchmark.md](docs/benchmark.md).
 
-The accuracy column is measured with autotuning on; because tuning selects kernels for speed, a
-convolution-heavy model's exact cosine/PSNR moves a little with the tuning level and across devices
-(see **Autotuned kernels** above). Pin `--tuning none --no-cache` for a bit-identical, device-independent
-— and typically marginally more accurate — result.
+The accuracy column does not depend on the tuning level: kernel choices that change fp16 rounding
+are deterministic shape rules (see **Autotuned kernels** above), so `none` / `fast` / `heavy` produce
+byte-identical output for a given model and device.
 
 ## Supported operators
 
@@ -221,8 +256,13 @@ macros: [docs/adding-an-operator.md](docs/adding-an-operator.md).
 
 ## Documentation
 
+`./build.sh --docs` builds the full documentation site at `docs/site/index.html` — every page below,
+plus two interactive ones: **How VKNN works** (a clickable tour of the compile → `.vxm` → runtime
+pipeline) and **Neural brain** (a drill-down explorer of the engine's class graph).
+
 - [docs/architecture.md](docs/architecture.md) — import → IR → passes → segments → backends, and the NC4HW4 compute path.
 - [docs/config.md](docs/config.md) — every `vknn::Config` field, the `setHint` API, and the JSON form.
+- [docs/running-an-llm.md](docs/running-an-llm.md) · [docs/running-a-vlm.md](docs/running-a-vlm.md) — export, compile, and drive an LLM / VLM on the device.
 - [docs/op-coverage.md](docs/op-coverage.md) — the operator set and its backend coverage.
 - [docs/benchmark.md](docs/benchmark.md) — on-device VKNN vs MNN numbers and methodology.
 - [docs/limitations.md](docs/limitations.md) — known gaps, dynamic-shape buckets, quantization, and the single-device caveat.
@@ -232,9 +272,22 @@ macros: [docs/adding-an-operator.md](docs/adding-an-operator.md).
 
 Runnable examples live in [`examples/`](examples/): `readme_quickstart` (load-set-run-read),
 `zerocopy_simple` / `zerocopy_cache` and `dmabuf_fd_io` (caller-owned DMA-BUF I/O), `run_io` (generic
-multi-I/O), `classify` / `predict` (CNN classifiers), `chat` / `vlm` (LLM and VLM device loops), and
+multi-I/O), `classify` / `predict` / `predict_cache` (CNN classifiers), `probe` (Vulkan device/feature report), `backend_switch` (per-backend routing), `op_check` (kernel + pipeline-cache smoke test), `profile` (per-op timings + chrome trace), `chat` / `vlm` (LLM and VLM device loops), and
 `yonosplat` (the transformer encoder + rasterizer). [`app-demo/`](app-demo/) wraps the LLM, VLM, and
 splatting paths in a four-tab Android app.
+
+## Where VKNN fits
+
+VKNN is an **on-device / edge AI inference engine** for **Android GPU acceleration** via **Vulkan
+compute**. If you are searching for a way to run **ONNX models on Android**, do **on-device LLM
+inference**, run a **vision-language model on a phone**, apply **int4 weight quantization**, or
+render **3D Gaussian Splatting on mobile**, that is exactly this project. Compared with
+[MNN](https://github.com/alibaba/MNN), [ncnn](https://github.com/Tencent/ncnn),
+[TensorFlow Lite / LiteRT](https://ai.google.dev/edge/litert),
+[ONNX Runtime Mobile](https://onnxruntime.ai/), or [llama.cpp](https://github.com/ggml-org/llama.cpp),
+VKNN is smaller and GPU-first: one Vulkan backend that runs the *whole* model — CNN, transformer, or
+both in one file — with the CPU reserved for verification, and a compiler that bakes optimization
+into the model file instead of the app.
 
 ## License
 
