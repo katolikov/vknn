@@ -159,7 +159,7 @@ def convert_flags(conv):
     # weight quantization; --fp16 is implied by the compiler there). Per-fusion keys override below.
     opt = conv.get("opt", 1)
     f.append("-Os" if str(opt).lower() == "s" else f"-O{int(opt)}")
-    for key, flag_ in (("no_fuse_swish", "--no-fuse-swish"), ("fuse_se", "--fuse-se"),
+    for key, flag_ in (("fuse_se", "--fuse-se"),
                        ("fuse_dwpw", "--fuse-dwpw"), ("no_fuse_pointwise", "--no-fuse-pointwise")):
         if conv.get(key):
             f.append(flag_)
@@ -510,7 +510,6 @@ def main():
     convert_parser.add_argument("-O", "--opt", type=int, default=1, choices=[0, 1, 2, 3], help="optimization level (default 1)")
     convert_parser.add_argument("--fuse-se", action="store_true")
     convert_parser.add_argument("--fuse-dwpw", action="store_true")
-    convert_parser.add_argument("--no-fuse-swish", action="store_true")
     convert_parser.add_argument("--on", choices=["host", "device"], default="host")
     convert_parser.add_argument("--serial", default=None, help="adb device serial (for --on device with multiple devices)")
     convert_parser.add_argument("--no-build", action="store_true", help="skip the automatic ./build.sh --android before a device convert")
@@ -528,7 +527,7 @@ def main():
         if args.on == "device" and BUILD:
             build_android()
         convert(args.onnx, args.out, {"fp16": args.fp16, "opt": args.opt, "fuse_se": args.fuse_se,
-                                      "fuse_dwpw": args.fuse_dwpw, "no_fuse_swish": args.no_fuse_swish}, args.on)
+                                      "fuse_dwpw": args.fuse_dwpw}, args.on)
         log("done.")
         return
 
