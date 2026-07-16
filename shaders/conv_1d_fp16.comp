@@ -1,0 +1,119 @@
+#version 450
+// One-dimensional-kernel conv (1xK or Kx1, group=1, stride 1, dilation 1), NC4HW4, fp16, with a
+// sliding register window along the kernel axis. A thread computes WTILE consecutive outputs
+// along that axis for OCB output channel-blocks: the (WTILE + K - 1) input vec4s of the window
+// are loaded into registers once per input channel-block and reused by every tap that overlaps
+// them, cutting the input traffic per output by ~K/((WTILE+K-1)/WTILE)x versus the one-tap-load
+// direct kernels - the asymmetric Inception branches (7x1/1x7 at 17x17, 3x1/1x3 at 8x8) are
+// latency/traffic-bound there. Out-of-range taps are skipped by a per-tap guard on the ADD (not
+// folded in as zero loads), so each output's fp32 accumulation sequence is identical to the
+// direct kernel's icb -> tap order: the kernel is a member of the bit-exact direct race.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+layout(constant_id = 0) const int OCB = 1;   // output channel-blocks (of 4 oc) per thread
+layout(constant_id = 1) const int WTILE = 4; // outputs per thread along the kernel axis
+layout(constant_id = 2) const int KAXIS = 0; // 0 = kernel runs along x (1xK), 1 = along y (Kx1)
+layout(constant_id = 3) const int KLEN = 3;  // kernel taps along that axis
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+} pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  // The kernel axis is tiled by WTILE; the cross axis stays 1 output per thread.
+  int alen = (KAXIS == 0) ? pc.OW : pc.OH;   // outputs along the kernel axis
+  int clen = (KAXIS == 0) ? pc.OH : pc.OW;   // outputs across it
+  int nTiles = (alen + WTILE - 1) / WTILE;
+  int ocbGroups = (Coutb + OCB - 1) / OCB;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * ocbGroups * clen * nTiles)) return;
+  int tile = int(gid) % nTiles;
+  int cc = (int(gid) / nTiles) % clen;
+  int ocbg = (int(gid) / (nTiles * clen)) % ocbGroups;
+  int n = int(gid) / (nTiles * clen * ocbGroups);
+  int ocb0 = ocbg * OCB;
+  int a0 = tile * WTILE;                     // first output coordinate along the kernel axis
+
+  // Input geometry along/across the kernel axis (stride 1, dilation 1).
+  int ilen = (KAXIS == 0) ? pc.W : pc.H;     // input extent along the kernel axis
+  int istep = (KAXIS == 0) ? 1 : pc.W;       // element step along the kernel axis
+  int ic = cc;                               // cross coordinate maps 1:1 (stride 1, no cross taps)
+  int pbeg = (KAXIS == 0) ? pc.PL : pc.PT;   // pad at the start of the kernel axis
+
+  // The register window covers inputs [a0 - pbeg, a0 - pbeg + WTILE + KLEN - 2] along the axis.
+  int wbase0 = a0 - pbeg;
+  f16vec4 win[WTILE + KLEN - 1];
+
+  vec4 acc[OCB][WTILE];
+  int wrowj[OCB];
+  int ocStride = Cinb * pc.KH * pc.KW;
+  for (int j = 0; j < OCB; ++j) {
+    // clamp: the last block group can overhang Coutb; the overhanging accumulator is never stored.
+    wrowj[j] = min(ocb0 + j, Coutb - 1) * 4 * ocStride;
+    vec4 b = vec4(bias[min(ocb0 + j, Coutb - 1)]);
+    for (int p = 0; p < WTILE; ++p) acc[j][p] = b;
+  }
+
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int rowBase = (n * Cinb + icb) * pc.H * pc.W + ((KAXIS == 0) ? ic * pc.W : ic);
+    for (int wi = 0; wi < WTILE + KLEN - 1; ++wi) {
+      int ax = wbase0 + wi;
+      // clamped load: out-of-range slots hold a valid neighbour's data, never read by a
+      // guarded tap below (the guard skips the ADD, keeping the accumulation chain exact).
+      win[wi] = src[rowBase + clamp(ax, 0, ilen - 1) * istep];
+    }
+    for (int k = 0; k < KLEN; ++k) {
+      for (int j = 0; j < OCB; ++j) {
+        int wtap = icb * pc.KH * pc.KW + k;
+        vec4 w0 = vec4(wt[wrowj[j] + 0 * ocStride + wtap]);
+        vec4 w1 = vec4(wt[wrowj[j] + 1 * ocStride + wtap]);
+        vec4 w2 = vec4(wt[wrowj[j] + 2 * ocStride + wtap]);
+        vec4 w3 = vec4(wt[wrowj[j] + 3 * ocStride + wtap]);
+        for (int p = 0; p < WTILE; ++p) {
+          int ax = wbase0 + p + k;
+          if (uint(ax) < uint(ilen)) {
+            vec4 inv = vec4(win[p + k]);
+            acc[j][p].x += dot(inv, w0);
+            acc[j][p].y += dot(inv, w1);
+            acc[j][p].z += dot(inv, w2);
+            acc[j][p].w += dot(inv, w3);
+          }
+        }
+      }
+    }
+  }
+  for (int j = 0; j < OCB; ++j) {
+    int ocb = ocb0 + j;
+    if (ocb >= Coutb) break;
+    for (int p = 0; p < WTILE; ++p) {
+      int a = a0 + p;
+      if (a < alen) {
+        int oy = (KAXIS == 0) ? cc : a;
+        int ox = (KAXIS == 0) ? a : cc;
+        int d = ((n * Coutb + ocb) * pc.OH + oy) * pc.OW + ox;
+        vec4 v = vec4(vx_act(acc[j][p].x, pc.act, pc.actLo, pc.actHi),
+                      vx_act(acc[j][p].y, pc.act, pc.actLo, pc.actHi),
+                      vx_act(acc[j][p].z, pc.act, pc.actLo, pc.actHi),
+                      vx_act(acc[j][p].w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+        v = pw_apply4(v, d);
+#endif
+        dst[d] = TO_STORE4(v);
+      }
+    }
+  }
+}

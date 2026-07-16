@@ -251,6 +251,7 @@ namespace vknn {
             k.winogradVariant = cfg.hint(Hint::WinogradVariant, 0);
             k.winogradUnit    = cfg.hint(Hint::WinogradUnit, 0);
             k.directConv3x3   = cfg.hint(Hint::DirectConv3x3, 0);
+            k.splitKConv      = cfg.hint(Hint::SplitKConv, (int) Mode::Auto);
             return k;
         }
         // Load + validate the model cache once, selecting the variant for this config. Caching is

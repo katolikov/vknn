@@ -239,6 +239,14 @@ Against MNN's absolute best (min over OpenCL-HEAVY, CPU-4-thread, Vulkan), VKNN 
 models and at **parity on ResNet-50**. Methodology, per-stage timings, and the OpenCL-tuned comparison:
 [docs/benchmark.md](docs/benchmark.md).
 
+v1.4.0 adds an autotuned OCB×WTILE register-tile axis, a general split-K conv for
+parallelism-starved shapes (`setHint(Hint::SplitKConv, ...)` overrides its shape rule), a
+sliding-window 1xK/Kx1 kernel, a raced 16×16 LDS-halo tile, and a small-axis softmax mapping:
+measured per-model gains over v1.3.1 of up to **23%** (Inception-v3), **16%** (ResNet-50), **13%**
+(DenseNet-121) and **9%** (YOLOv8n) at `--tuning fast`, cooled paired A/B on two devices, with
+run-to-run and cross-tuning byte-identical outputs — see
+[docs/benchmark.md](docs/benchmark.md) § Conv register tiles.
+
 The accuracy column does not depend on the tuning level: kernel choices that change fp16 rounding
 are deterministic shape rules (see **Autotuned kernels** above), so `none` / `fast` / `heavy` produce
 byte-identical output for a given model and device.

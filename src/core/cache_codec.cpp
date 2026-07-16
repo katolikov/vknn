@@ -49,9 +49,9 @@ namespace vknn {
         msgpack_pack_array(&pk, doc.variants.size());
         for (const auto &v: doc.variants)
         {
-            // Per-variant map: the count must match the key/value pairs packed below (the 10 key fields
+            // Per-variant map: the count must match the key/value pairs packed below (the key fields
             // plus pipeline, weights, tune, tunelvl). Adding a field means bumping this literal in lockstep.
-            msgpack_pack_map(&pk, 16);
+            msgpack_pack_map(&pk, 17);
             packKey(&pk, "precision");
             packStr(&pk, v.precision);
             packKey(&pk, "flatLayout");
@@ -76,6 +76,8 @@ namespace vknn {
             msgpack_pack_int32(&pk, v.winogradUnit);
             packKey(&pk, "directConv3x3");
             msgpack_pack_int32(&pk, v.directConv3x3);
+            packKey(&pk, "splitKConv");
+            msgpack_pack_int32(&pk, v.splitKConv);
             packKey(&pk, "pipeline");
             packBin(&pk, v.pipeline.data(), v.pipeline.size());
             packKey(&pk, "weights");
@@ -218,6 +220,7 @@ namespace vknn {
                 v.winogradVariant = getI32(vo, "winogradVariant");
                 v.winogradUnit    = getI32(vo, "winogradUnit");
                 v.directConv3x3   = getI32(vo, "directConv3x3");
+                v.splitKConv      = getI32(vo, "splitKConv");
                 v.pipeline        = getBin(vo, "pipeline");
 
                 if (const msgpack_object *w = mapGet(vo, "weights"); w && w->type == MSGPACK_OBJECT_MAP)

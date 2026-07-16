@@ -17,6 +17,12 @@ namespace vknn {
         RopeFusion      = 7, ///< Fuse rotate-half RoPE chains into one Rope dispatch at load (On / Off, default On).
         FusedAttention  = 8, ///< Fuse the M=1 decode-attention chain into one FusedAttention kernel at load (On / Off, default On).
         KvConcatFold    = 9, ///< Fold the per-token KV-cache Concat into split-source FusedAttention reads at load (On / Off, default On). The rows-only present output it produces drives the engine-resident KV link like the cache-concat present (the link fold source comes from the present shape; see io_link.h).
+        SplitKConv      = 10, ///< Split-K conv routing (Auto / On / Off, default Auto). Auto applies the
+                              ///< calibrated deterministic shape rules (deep-reduction small-map convs run
+                              ///< the split-K partial+reduce pair); On forces the general split-K on every
+                              ///< structurally eligible KxK conv (fp16, batch 1, group 1, non-pointwise; an
+                              ///< explicit DirectConv3x3 kernel force still wins); Off disables both the
+                              ///< general and the 1x1 split-K paths.
     };
 
     /// Every kernel/pass selection value, set uniformly via setHint(Hint, Mode). The value sets by

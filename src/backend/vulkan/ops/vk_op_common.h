@@ -43,6 +43,11 @@ namespace vknn {
     struct SplitKPC {
         int Cin, Cout, HW, KPARTS, chunk;
     };
+    // Split-K general direct conv (conv_splitk.comp): same partial/reduce scheme with the full
+    // KxK/stride/pad/dilation geometry.
+    struct SplitKGenPC {
+        int Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, KPARTS, chunk;
+    };
     struct ReducePC {
         int   Cout, HW, KPARTS, act;
         float actLo, actHi;
