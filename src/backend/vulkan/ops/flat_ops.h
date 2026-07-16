@@ -351,9 +351,16 @@ namespace vknn {
 
         // ---- Softmax over an arbitrary axis ----
         struct Softmax {
+            // Deterministic row-mapping rule: a row this narrow leaves most of a 128-lane workgroup
+            // idle and pays ~14 barrier rounds for a 16-element reduction (a detection head's DFL
+            // distribution), so it runs one THREAD per row instead. The per-row reduction order
+            // differs between the mappings, so the choice is a shape rule, never a timing race.
+            // Attention rows (axis >= a context length) stay on the workgroup mapping.
+            static constexpr int kThreadRowMaxAxis = 32;
             struct PC {
                 int outer, axis, inner;
             } pc {};
+            bool                                 threadRow = false;
             std::shared_ptr<vk::ComputePipeline> pipe;
             PwEpi                                epi;
             void                                 prepare(const Node &node, VkOpEnv &env) {
@@ -373,16 +380,21 @@ namespace vknn {
                 {
                     inner *= s[k];
                 }
-                pc = {(int) outer, (int) s[axis], (int) inner};
+                pc        = {(int) outer, (int) s[axis], (int) inner};
+                threadRow = s[axis] <= kThreadRowMaxAxis;
                 epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC),
+                                    std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0)});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
-                // One workgroup per row (flat_softmax does the LDS reduction across the workgroup).
+                // ROW_MODE 0: one workgroup per row (LDS reduction across the workgroup).
+                // ROW_MODE 1: one thread per row (rows packed 128 to a workgroup).
                 VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst};
                 epi.append(bufs, node, env, dst);
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t) ((int64_t) pc.outer * pc.inner));
+                int64_t rows   = (int64_t) pc.outer * pc.inner;
+                int64_t groups = threadRow ? (rows + 127) / 128 : rows;
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t) groups);
             }
         };
 

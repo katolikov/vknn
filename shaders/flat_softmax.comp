@@ -5,12 +5,17 @@
 #include "pw_epilogue.glsl"
 #endif
 #include "common.glsl"
-// Softmax over one axis. One workgroup per row (the `axis` elements at stride `inner`); the threads
-// cooperatively reduce max + sum through LDS, so a wide attention row (axis up to a few thousand) is
-// parallelised across the workgroup instead of walked by a single thread. The row index spans a 2D
-// workgroup grid (ComputePipeline::dispatch spills the count into y past the per-dim limit), so the
-// >65535-row upscaled-decoder attention works too.
+// Softmax over one axis, two row mappings picked by a deterministic shape rule (spec constant):
+//   ROW_MODE 0 - one workgroup per row: the threads cooperatively reduce max + sum through LDS,
+//     so a wide attention row (axis up to a few thousand) is parallelised across the workgroup.
+//   ROW_MODE 1 - one THREAD per row: a small axis (a detection head's 16-bin distribution) walks
+//     the row serially in registers - no LDS, no barriers, and no idle lanes; the many rows supply
+//     the parallelism instead. With WG threads per row a 16-wide axis would idle 7/8 of every
+//     workgroup and serialize ~14 barrier rounds per row.
+// The row index spans a 2D workgroup grid (ComputePipeline::dispatch spills the count into y past
+// the per-dim limit), so >65535-row shapes work in both modes.
 #define WG 128
+layout(constant_id = 0) const int ROW_MODE = 0;
 layout(local_size_x = WG) in;
 layout(std430, binding = 0) readonly buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
@@ -19,6 +24,29 @@ layout(push_constant) uniform PC { int outer, axis, inner; } pc;
 shared float red[WG];
 
 void main() {
+  if (ROW_MODE == 1) {
+    uint row = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (row >= uint(pc.outer * pc.inner)) return;
+    int o = int(row) / pc.inner, i = int(row) % pc.inner;
+    int base = o * pc.axis * pc.inner + i;
+
+    float m = -3.4e38;
+    for (int a = 0; a < pc.axis; ++a)
+      m = max(m, float(s[base + a * pc.inner]));
+    float sum = 0.0;
+    for (int a = 0; a < pc.axis; ++a)
+      sum += exp(float(s[base + a * pc.inner]) - m);
+    float rsum = 1.0 / sum;
+    for (int a = 0; a < pc.axis; ++a) {
+      float v = exp(float(s[base + a * pc.inner]) - m) * rsum;
+#ifdef PW_EPI
+      v = pw_apply(v, base + a * pc.inner);
+#endif
+      d[base + a * pc.inner] = STORE(v);
+    }
+    return;
+  }
+
   uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
   if (row >= uint(pc.outer * pc.inner)) return;
   int o = int(row) / pc.inner, i = int(row) % pc.inner;
