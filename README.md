@@ -237,7 +237,7 @@ across runs and tuning levels.
 | DenseNet-121 | 15.84 / 14.89 ms | −3 / −13% | 0.999997 | 70.8 dB |
 | Inception-v3 | 17.44 / 16.62 ms | −21 / −23% | 0.999994 | 64.3 dB |
 | YOLOv8n (640×640) | 20.30 / 18.08 ms | −9 / −6% | 1.000000 | 86.9 dB |
-| YoNoSplat encoder (965M params) | 17.0 s | ±0 (bit-identical) | 6 outputs ≥ 0.999993 | 65–81 dB |
+| YoNoSplat encoder (965M params, 8 views) | 8.72 s | ±0 (bit-identical) | 6 outputs ≥ 0.999993 | 65–81 dB |
 
 Same-day head-to-head against [MNN](https://github.com/alibaba/MNN) (Alibaba's production engine)
 at its strongest backend per model (OpenCL with HEAVY autotuning, or CPU-4-thread where that wins;
