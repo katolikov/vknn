@@ -140,25 +140,50 @@ one suite model regressed 19% from exactly such a mis-pick; barriered, the same 
 New-class candidates also carry a 3% anti-noise margin over the classic tile, so a single noisy
 race sample cannot displace the proven default.
 
-Measured effect, cooled interleaved A/B vs v1.3.1 (`benchmark/scripts/dev_perfab.sh`, min over 5
+Beyond the register tiles, the release adds four deterministic-rule/kernel changes (all
+run-to-run and cross-tuning byte-identical; accuracy within 0.04 dB of the previous release with
+cosine unchanged, and BETTER on DenseNet-121 (+2.4 dB) and YOLOv8n (+0.9 dB)):
+
+- **General split-K conv** (`conv_splitk` partial + `conv1x1_reduce`): a deep-reduction conv into a
+  small output map (a stride-2 3x3 into 7x7, an 8x8-map Inception branch) is parallelism-starved on
+  the register-tiled kernels; the split-K pair reaches 22-39% faster on those shapes. The routing is
+  a calibrated shape rule (`taps >= 320` — or `>= 256` for multi-tap kernels — `OHW <= 64`), with
+  Kahan-compensated fp32 partials so the two-pass sum tracks the true value tighter than the
+  single-pass chain. `setHint(Hint::SplitKConv, Mode::Auto|On|Off)` overrides the rule (Auto is the
+  default and the rule is active out of the box); the hint is a cache-variant key field.
+- **Sliding-window 1-D conv** (`conv_1d`): 1xK/Kx1 kernels (Inception's 7x1/1x7, 3x1/1x3) load the
+  input window into registers once per channel-block and reuse it across every overlapping tap;
+  joins the bit-exact direct race.
+- **16x16 LDS-halo tile**: the 3x3 halo kernel's tile edge is now raced (8 or 16); the 16 tile cuts
+  halo overhead from 1.56x to 1.27x of the tile's input reads.
+- **Winograd needs Cout >= 64**: below two `wino_gemm` N-tiles the transform-domain GEMM starves
+  (DenseNet's 58 128->32 growth convs ran at ~365 GF/s on it); those shapes take the direct race.
+- **Small-axis softmax**: a softmax row narrower than 32 (a detection head's 16-bin DFL
+  distribution) runs one thread per row instead of a 128-lane workgroup per row — YOLOv8n's DFL
+  head dropped from 13x its copy floor to near it.
+
+Measured, cooled interleaved A/B vs v1.3.1 (`benchmark/scripts/dev_perfab.sh`, min over 5-8
 paired iterations, `--tuning fast`, fp16, per-model `submit+gpu` wall; primary benchmark device /
 second smaller-GPU device):
 
 | Model | primary device | second device |
 |---|---|---|
-| Inception-v3 | **-27%** | **-24%** |
-| EfficientNet-B0 | -3% | **-19%** |
-| ResNet-50 | **-7%** | **-10%** |
-| MnasNet 1.0 | **-9%** | -4% |
-| MobileNetV3-Large | **-9%** | -2% |
-| DenseNet-121 | -5% | 0% |
-| MobileNetV2 / SqueezeNet / ShuffleNetV2 / YOLOv8n | 0 to -3% | 0 to -3% |
+| Inception-v3 | **-21%** | **-23%** |
+| ResNet-50 | **-5%** | **-16%** |
+| DenseNet-121 | **-3%** | **-13%** |
+| YOLOv8n | **-9%** | **-6%** |
+| MnasNet 1.0 | **-8%** | **-4%** |
+| MobileNetV3-Large | **-5%** | **-9%** |
+| MobileNetV2 | -3% | -4% |
+| ShuffleNetV2 | -4% | -3% |
+| SqueezeNet / EfficientNet-B0 | within the 3% gate | within the 3% gate |
 
-No model regresses at any tuning level on either device (3% gate). At `--tuning none` the new
-tiles are inert (the deterministic defaults are unchanged), so `none` runs match v1.3.1 exactly.
-The gains carry to `heavy` (spot-checked: ResNet-50 -17%, Inception-v3 -24%, EfficientNet-B0 -13%
-on the second device). LLM and VLM token streams and the YoNoSplat encoder outputs are unchanged
-(the decode path shares no touched kernel; the vision convs are bit-identical).
+No model regresses beyond the 3% gate at none/fast/heavy on either device (the sub-2.5 ms models
+are judged by the cached-tune protocol — tune once, time from the cache — because a fresh
+`--no-cache` race right before the timed window heats the GPU in proportion to the candidate
+count). Run-to-run determinism is gate-verified per model: two fresh `fast` runs, a `none` run and
+a `heavy` run produce byte-identical outputs. LLM and VLM token streams and the YoNoSplat encoder
+outputs are unchanged.
 
 **F(4×4,3×3)** is also implemented (`setHint(Hint::WinogradUnit, 4)`): it cuts the transform-domain V/M
 traffic to 0.56× and the multiplies to 4× (vs F(2,3)'s 2.25×), and it is numerically fine at fp16
