@@ -219,37 +219,54 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 
 ## Benchmarks
 
-VKNN vs [MNN](https://github.com/alibaba/MNN) (Alibaba's production engine), same model, same device,
-fp16, thermal-controlled medians — against both of MNN's GPU backends (Vulkan, and OpenCL with HEAVY
-autotuning, its strongest path here):
+VKNN v1.4.0, whole CNN suite, fp16, `--tuning fast`, thermal-controlled (cooldown before every
+run), same device and same day for every number below. The VKNN figure is the full `run()` wall
+(it includes the host↔device copies). "vs v1.3.1" is the cooled interleaved paired A/B delta
+(min-of-N, two devices); accuracy is against fp32 onnxruntime references and is byte-identical
+across runs and tuning levels.
 
-| Model (fp16) | VKNN | MNN-Vulkan | MNN-OpenCL (HEAVY) | VKNN vs ORT |
+| Model (fp16) | VKNN v1.4.0 median/min | vs v1.3.1 | cosine | PSNR |
 |---|---|---|---|---|
-| MobileNetV2 | 2.3 ms | 13.8 ms | 3.1 ms | cosine 0.99997 |
-| MobileNetV3-Large | 2.8 ms | 17.0 ms | 6.4 ms | cosine 0.99954 |
-| SqueezeNet 1.1 | 1.7 ms | 10.9 ms | 2.6 ms | cosine 0.99998 |
-| EfficientNet-B0 | 4.3 ms | 19.9 ms | 9.3 ms | cosine 0.99983 |
-| ResNet-50 | 10.3 ms | 18.3 ms | 10.3 ms | cosine 1.000000 |
-| Inception-v3 | 15.5 ms | 25.6 ms | 19.6 ms | cosine 0.99998 |
-| YOLOv8n (640×640) | 20.0 ms | ~73 ms | 24.5 ms | cosine 1.000000 |
-| YoNoSplat encoder (965M params) | 17.0 s | cannot convert | cannot convert | 6 outputs, cosine 0.99999 |
+| SqueezeNet 1.1 | 1.98 / 1.83 ms | ±0 | 1.000000 | 71.5 dB |
+| MobileNetV2 | 2.26 / 1.98 ms | −3 / −4% | 0.999989 | 64.4 dB |
+| MnasNet 1.0 | 2.42 / 2.18 ms | −8 / −4% | 0.999989 | 63.6 dB |
+| ShuffleNetV2 x1.0 | 2.56 / 2.25 ms | −4 / −3% | 0.999998 | 67.5 dB |
+| MobileNetV3-Large | 2.94 / 2.69 ms | −5 / −9% | 0.999991 | 63.5 dB |
+| EfficientNet-B0 | 5.51 / 4.33 ms | ±0 | 0.999987 | 61.7 dB |
+| ResNet-50 | 11.34 / 10.98 ms | −5 / −16% | 1.000000 | 82.9 dB |
+| DenseNet-121 | 15.84 / 14.89 ms | −3 / −13% | 0.999997 | 70.8 dB |
+| Inception-v3 | 17.44 / 16.62 ms | −21 / −23% | 0.999994 | 64.3 dB |
+| YOLOv8n (640×640) | 20.30 / 18.08 ms | −9 / −6% | 1.000000 | 86.9 dB |
+| YoNoSplat encoder (965M params) | 17.0 s | ±0 (bit-identical) | 6 outputs ≥ 0.999993 | 65–81 dB |
 
-The VKNN figure is the full `run()` wall (it includes the host↔device copies); MNN's is inference-only.
-Against MNN's absolute best (min over OpenCL-HEAVY, CPU-4-thread, Vulkan), VKNN is faster on **8 of 9**
-models and at **parity on ResNet-50**. Methodology, per-stage timings, and the OpenCL-tuned comparison:
+Same-day head-to-head against [MNN](https://github.com/alibaba/MNN) (Alibaba's production engine)
+at its strongest backend per model (OpenCL with HEAVY autotuning, or CPU-4-thread where that wins;
+MNN times inference only, input set once outside the loop):
+
+| Model (fp16) | VKNN v1.4.0 | MNN best (same day) | result |
+|---|---|---|---|
+| SqueezeNet 1.1 | 1.98 ms | 3.07 ms (OpenCL-HEAVY) | **VKNN −36%** |
+| MobileNetV2 | 2.26 ms | 3.11 ms (OpenCL-HEAVY) | **VKNN −27%** |
+| MobileNetV3-Large | 2.94 ms | 4.86 ms (CPU-4t) | **VKNN −40%** |
+| Inception-v3 | 17.44 ms | 18.38 ms (CPU-4t) | **VKNN −5%** |
+| ResNet-50 | 11.34 ms | 9.00 ms (OpenCL-HEAVY, buffer) | MNN ahead on a hot device¹ |
+
+¹ ResNet-50 is the one conv net where MNN's HEAVY-tuned buffer GEMM keeps an edge when the device
+is deep-warm (its inference-only loop also rides DVFS clocks that VKNN's per-run wall does not);
+from a cool device the previous sweep measured parity, and v1.4.0 is 5–16% faster than that build.
+MNN cannot convert the YoNoSplat encoder at all. The previous full sweep (VKNN faster on **8 of 9**
+models against MNN's best-of-three-backends) plus methodology and per-stage timings:
 [docs/benchmark.md](docs/benchmark.md).
 
-v1.4.0 adds an autotuned OCB×WTILE register-tile axis, a general split-K conv for
+v1.4.0's speedups come from an autotuned OCB×WTILE register-tile axis, a general split-K conv for
 parallelism-starved shapes (`setHint(Hint::SplitKConv, ...)` overrides its shape rule), a
-sliding-window 1xK/Kx1 kernel, a raced 16×16 LDS-halo tile, and a small-axis softmax mapping:
-measured per-model gains over v1.3.1 of up to **23%** (Inception-v3), **16%** (ResNet-50), **13%**
-(DenseNet-121) and **9%** (YOLOv8n) at `--tuning fast`, cooled paired A/B on two devices, with
-run-to-run and cross-tuning byte-identical outputs — see
+sliding-window 1xK/Kx1 kernel, a raced 16×16 LDS-halo tile, and a small-axis softmax mapping — see
 [docs/benchmark.md](docs/benchmark.md) § Conv register tiles.
 
-The accuracy column does not depend on the tuning level: kernel choices that change fp16 rounding
+The accuracy columns do not depend on the tuning level: kernel choices that change fp16 rounding
 are deterministic shape rules (see **Autotuned kernels** above), so `none` / `fast` / `heavy` produce
-byte-identical output for a given model and device.
+byte-identical output for a given model and device — verified per model, along with run-to-run
+byte-identity, on both test devices.
 
 ## Supported operators
 
