@@ -35,7 +35,6 @@ namespace vknn {
         struct ConvOp: VulkanOp {
             static constexpr int                 kTile     = 4; // 1x1 threshold math default; the real per-shape tile is wTile
             uint32_t                             wTile     = 4; // output pixels per thread in the 1x1 kernels (autotuned spec constant)
-            uint32_t                             ocbTile   = 1; // output channel-blocks per thread in the 1x1 kernels (autotuned spec constant)
             // wino_gemm workgroup output tile, in lockstep with shaders/wino_gemm_fp16.comp: N is
             // NDIM=8 channel-blocks; M is MDIM=8 threads x the RM spec constant (4 or 8, raced by
             // tuneWino), so the real dispatch and the timing dispatch derive the tile from one
@@ -281,22 +280,16 @@ namespace vknn {
                 return best;
             }
 
-            // Autotune the register tile of the 1x1 kernels: WTILE (output pixels per thread) and OCB
-            // (output channel-blocks per thread), encoded as WTILE | OCB<<8. Per-output arithmetic is
-            // identical for every tile — only the thread<->output mapping changes — so the choice never
-            // affects output bits, unlike the direct-vs-Winograd choice. Measured on scratch buffers and
-            // cached like the local-size tune. A plain cached value (2/4/8, from before OCB existed)
-            // decodes as OCB=1.
-            static bool valid1x1Tile(int v) {
-                int wt = v & 0xff, ocb = v >> 8;
-                return (wt == 2 || wt == 4 || wt == 8) && (ocb == 0 || ocb == 1 || ocb == 2);
-            }
+            // Autotune WTILE (output pixels per thread) for the register-tiled 1x1 kernels. Per-output
+            // arithmetic is identical for every tile size — only the thread<->pixel mapping changes — so
+            // the choice never affects output bits, unlike the direct-vs-Winograd choice. Measured on
+            // scratch buffers and cached like the local-size tune.
             uint32_t pickWTile(VkOpEnv &env, bool s2, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
                 char buf[96];
                 snprintf(buf, sizeof(buf), "c1x1%s_%d_%d_%d_%d_%d", s2 ? "s2" : "", (int) x.c, (int) Cout, (int) y.h, (int) y.w, hasRes ? 1 : 0);
                 std::string sig = env.gpuTag + "/" + buf;
                 int         reuse;
-                if (env.reuseTuned(sig, reuse) && reuse > 0 && valid1x1Tile(reuse))
+                if (env.reuseTuned(sig, reuse) && reuse > 0)
                 {
                     return (uint32_t) reuse;
                 }
@@ -311,13 +304,11 @@ namespace vknn {
                 auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
                 uint32_t best   = 4;
                 double   bestMs = 1e30;
-                for (uint32_t cand: {2u, 4u, 8u, 4u | (2u << 8), 8u | (2u << 8)})
+                for (uint32_t wt: {2u, 4u, 8u})
                 {
-                    uint32_t wt = cand & 0xffu, ocb = std::max(1u, cand >> 8);
-                    auto     p  = env.pipeline(shader(s2 ? "conv1x1_s2" : "conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC),
-                                               std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb});
-                    int64_t HW  = y.h * y.w;
-                    int64_t tot = x.n * ((Coutb + ocb - 1) / ocb) * ((HW + wt - 1) / wt);
+                    auto    p     = env.pipeline(shader(s2 ? "conv1x1_s2" : "conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt});
+                    int64_t HW    = y.h * y.w;
+                    int64_t tot   = x.n * Coutb * ((HW + wt - 1) / wt);
                     VkCommandBuffer cmd = env.runner->allocate();
                     env.runner->begin(cmd);
                     std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
@@ -327,27 +318,18 @@ namespace vknn {
                     }
                     for (int rep = 0; rep < 8; ++rep)
                     {
-                        // Barrier between reps: unbarriered reps overlap on the GPU, which rewards
-                        // low-workgroup-count tiles the real (op-barriered) command buffer does not.
-                        if (rep > 0)
-                        {
-                            vk::computeBarrier(cmd);
-                        }
                         p->dispatch(cmd, bufs, &pc, sizeof(pc), groups(tot, 64));
                     }
                     env.runner->end(cmd);
                     double ms = env.runner->submitAndWait(cmd);
                     vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    // OCB>1 candidates carry an anti-noise margin: a single raced sample is noisy
-                    // enough to mis-pick, and the classic tiles are the proven safe default.
-                    double need = (cand >> 8) > 0 ? bestMs * 0.97 : bestMs;
-                    if (ms < need)
+                    if (ms < bestMs)
                     {
                         bestMs = ms;
-                        best   = cand;
+                        best   = wt;
                     }
                 }
-                VKNN_DEBUG << "autotune " << sig << " -> wtile=" << (best & 0xffu) << " ocb=" << std::max(1u, best >> 8);
+                VKNN_DEBUG << "autotune " << sig << " -> wtile=" << best;
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, (int) best, (int) env.tuning);
@@ -364,16 +346,6 @@ namespace vknn {
             // affects output bits (no anti-noise margin needed, unlike Winograd) and a cache-off
             // re-tune stays deterministic. Measured on scratch buffers + cached like pickWTile.
             static constexpr int kChoiceLds3x3 = 9; // pickOcb result: the LDS input-halo 3x3 kernel won
-            // pickOcb results encode conv_reg's tile as OCB | WTILE<<8 (WTILE 0 = the classic 4); a
-            // plain cached value from before the WTILE axis existed decodes unchanged.
-            static bool validOcbChoice(int v) {
-                if (v == kChoiceLds3x3)
-                {
-                    return true;
-                }
-                int ocb = v & 0xff, wt = v >> 8;
-                return ocb >= 0 && ocb <= 3 && (wt == 0 || wt == 8);
-            }
             int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, bool lds3x3) {
                 // The LDS-halo kernel decodes a flat gl_WorkGroupID.x with no split spill, so its
                 // group count must fit the device X limit outright. (Computed before the cache consult
@@ -387,7 +359,7 @@ namespace vknn {
                 // The sig omits pads/dilations (the direct and OCB kernels are pad/dilation-agnostic),
                 // but choice kChoiceLds3x3 is only valid for the gated 3x3/s1/p1/d1 shape — an ineligible
                 // node with the same sig fields must re-race without it.
-                if (env.reuseTuned(sig, reuse) && validOcbChoice(reuse) && (reuse != kChoiceLds3x3 || lds3x3))
+                if (env.reuseTuned(sig, reuse) && (reuse != kChoiceLds3x3 || lds3x3))
                 {
                     return reuse;
                 }
@@ -406,12 +378,6 @@ namespace vknn {
                     env.runner->begin(cmd);
                     for (int rep = 0; rep < 8; ++rep)
                     {
-                        // Barrier between reps: see pickWTile — unbarriered reps overlap and bias
-                        // the race toward low-workgroup-count tiles.
-                        if (rep > 0)
-                        {
-                            vk::computeBarrier(cmd);
-                        }
                         p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(tot, ls));
                     }
                     env.runner->end(cmd);
@@ -421,20 +387,15 @@ namespace vknn {
                 };
                 int    best   = 0;
                 double bestMs = timeIt(env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
-                std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {2, 3, 2 | (8u << 8), 3 | (8u << 8), 1 | (8u << 8)}
-                                                                            : std::vector<uint32_t> {2, 2 | (8u << 8)};
-                for (uint32_t cand: cands)
+                std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {2, 3} : std::vector<uint32_t> {2};
+                for (uint32_t ocb: cands)
                 {
-                    uint32_t ocb = cand & 0xffu, wt = std::max(4u, cand >> 8);
-                    int64_t  ocbGroups = (Coutb + ocb - 1) / ocb;
-                    double   ms = timeIt(env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), {ocb, wt}), x.n * ocbGroups * ((HW + wt - 1) / wt), 64);
-                    // WTILE=8 candidates carry an anti-noise margin (single-sample race; the
-                    // classic tiles are the proven safe default).
-                    double need = (cand >> 8) > 0 ? bestMs * 0.97 : bestMs;
-                    if (ms < need)
+                    int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
+                    double  ms        = timeIt(env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), {ocb}), x.n * ocbGroups * ((HW + kTile - 1) / kTile), 64);
+                    if (ms < bestMs)
                     {
                         bestMs = ms;
-                        best   = (int) cand;
+                        best   = (int) ocb;
                     }
                 }
                 // The LDS input-halo 3x3 joins the same bit-exact race when eligible: its
@@ -488,10 +449,10 @@ namespace vknn {
                     return 0;
                 }
                 // Implicit-GEMM wins only when its M x N tiling has enough parallelism to amortize the
-                // tiled-GEMM setup: at least kGemmMinCoutTiles output-channel tiles (N axis, so
-                // Cout >= 8*64 = 512) and kGemmMinM output rows (M axis). Below that the direct
-                // kernel is faster. Measured winners on the conv suite: every CNN conv stays direct;
-                // the wide patch-embed convs take implicit-GEMM.
+                // tiled-GEMM setup: at least kGemmMinCoutTiles output-channel tiles (N axis) and
+                // kGemmMinM output rows (M axis). Below that the direct kernel is faster. Measured
+                // winners on the conv suite: every CNN conv stays direct; the wide patch-embed convs
+                // (Cout >= 1024) take implicit-GEMM.
                 const bool useGemm = Cout >= (int64_t) kGemmMinCoutTiles * kConvGemmTileN && M >= kGemmMinM;
                 return useGemm ? tm : 0;
             }
@@ -704,10 +665,8 @@ namespace vknn {
                              (int) st[0], (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) node.fusedAct, node.actLo, node.actHi};
                     total = x.n * Coutb * y.h * y.w;
                     wbuf  = uploadCached(env, node.name + "#w", [&] {
-                        // [Cout,Cin,KH,KW] -> [Cout][Cinb][KH][KW][4], with the output-channel rows
-                        // padded out to whole blocks (Coutb*4): the kernels read all 4 rows of a block,
-                        // so a partial last block must resolve to zero rows, not out-of-bounds loads.
-                        std::vector<float> wp((size_t) Coutb * 4 * Cinb * KH * KW * 4, 0.f);
+                        // [Cout,Cin,KH,KW] -> [Cout][Cinb][KH][KW][4]
+                        std::vector<float> wp((size_t) Cout * Cinb * KH * KW * 4, 0.f);
                         for (int64_t oc = 0; oc < Cout; ++oc)
                         {
                             for (int64_t ic = 0; ic < x.c; ++ic)
@@ -736,27 +695,21 @@ namespace vknn {
                             prepareSplitK(node, env, x, y, Cout, Coutb);
                         } else
                         {
-                            uint32_t pick     = pickWTile(env, false, x, y, Cout, Coutb);
-                            wTile             = pick & 0xffu;
-                            ocbTile           = std::max(1u, pick >> 8);
-                            int64_t nTiles    = (HW + wTile - 1) / wTile;
-                            int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
-                            total             = x.n * ocbGroups * nTiles;
+                            wTile          = pickWTile(env, false, x, y, Cout, Coutb);
+                            int64_t nTiles = (HW + wTile - 1) / wTile;
+                            total          = x.n * Coutb * nTiles;
                             pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC),
-                                                std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile});
+                                                std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile});
                         }
                     } else if (pwS2)
                     {
                         // strided 1x1 (downsample): register-tiled kernel that gathers the input at the
                         // stride; reuses weights across WTILE output pixels (the general direct kernel does 1).
-                        int64_t  HW       = y.h * y.w;
-                        uint32_t pick     = pickWTile(env, true, x, y, Cout, Coutb);
-                        wTile             = pick & 0xffu;
-                        ocbTile           = std::max(1u, pick >> 8);
-                        int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
-                        total             = x.n * ocbGroups * ((HW + wTile - 1) / wTile);
+                        int64_t HW = y.h * y.w;
+                        wTile      = pickWTile(env, true, x, y, Cout, Coutb);
+                        total      = x.n * Coutb * ((HW + wTile - 1) / wTile);
                         pipe = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC),
-                                            std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile});
+                                            std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile});
                     } else if (cfgHint(env, Hint::DirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
                     {
                         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
@@ -777,8 +730,8 @@ namespace vknn {
                     {
                         // DirectAuto: the bit-exact direct race picks the baseline (1-pixel direct,
                         // conv_reg OCB tiling, or the LDS-halo 3x3 when eligible), then the
-                        // implicit-GEMM shape rule (fp16-floor, deterministic at every tuning
-                        // level) may take the shape from that baseline.
+                        // implicit-GEMM race (fp16-floor, Fast/Heavy only) may take the shape from
+                        // that baseline.
                         bool lds3x3 = env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14;
                         int  ocb    = env.useFp16 ? pickOcb(env, x, y, Cout, Coutb, lds3x3) : 0;
                         int  gtm    = (env.useFp16 && group == 1 && KH * KW > 1) ? tuneConvGemm(node, env, x, y, Cout, Coutb, KH, KW, ocb) : 0;
@@ -820,16 +773,13 @@ namespace vknn {
                             pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {});
                         } else if (ocb > 0)
                         {
-                            // register-tiled conv computing OCB output channel-blocks per thread for WTILE
-                            // pixels (autotuned; won over the direct kernel for this shape). Byte-identical
-                            // to the direct kernel.
-                            reg                = true;
-                            int64_t  HW        = y.h * y.w;
-                            uint32_t regOcb    = (uint32_t) (ocb & 0xff);
-                            uint32_t regWt     = std::max(4u, (uint32_t) ocb >> 8);
-                            int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
-                            total              = x.n * ocbGroups * ((HW + regWt - 1) / regWt);
-                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt});
+                            // register-tiled conv computing OCB output channel-blocks per thread (autotuned; won
+                            // over the direct kernel for this shape). Byte-identical to the direct kernel.
+                            reg               = true;
+                            int64_t HW        = y.h * y.w;
+                            int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
+                            total             = x.n * ocbGroups * ((HW + kTile - 1) / kTile);
+                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) ocb});
                         } else
                         {
                             // autotuned 1-pixel-per-thread direct kernel (the fallback when OCB tiling didn't win)

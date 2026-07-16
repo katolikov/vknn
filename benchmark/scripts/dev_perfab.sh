@@ -30,8 +30,6 @@
 #   --repeat R          --repeat passed to the runner to warm steady state (default 3)
 #   --precision P       low|normal|high                            (default low)
 #   --winograd W        auto|on|off                                (default auto)
-#   --tuning T          none|fast|heavy                            (default none; fast/heavy
-#                       re-race per run — untimed at session build, the timed metric is steady state)
 #   --threshold PCT     flag B slower than A by more than PCT      (default 3)
 #   --dev-dir DIR       on-device working dir     (default /data/local/tmp/pw/perfab)
 #   -h, --help          this text
@@ -43,7 +41,7 @@ set -euo pipefail
 DEFAULT_DEVICE=""
 
 A="" B="" MODELS="" DEVICE="${DEVICE:-$DEFAULT_DEVICE}"
-N=5 COOLDOWN=12 REPEAT=3 PRECISION="low" WINO="auto" TUNING="none" THRESHOLD=3
+N=5 COOLDOWN=12 REPEAT=3 PRECISION="low" WINO="auto" THRESHOLD=3
 DEV_DIR="/data/local/tmp/pw/perfab"
 
 usage() { sed -n '2,37p' "$0"; exit "${1:-0}"; }
@@ -59,7 +57,6 @@ while [ $# -gt 0 ]; do
     --repeat)    REPEAT="$2"; shift 2 ;;
     --precision) PRECISION="$2"; shift 2 ;;
     --winograd)  WINO="$2"; shift 2 ;;
-    --tuning)    TUNING="$2"; shift 2 ;;
     --threshold) THRESHOLD="$2"; shift 2 ;;
     --dev-dir)   DEV_DIR="$2"; shift 2 ;;
     -h|--help)   usage 0 ;;
@@ -91,13 +88,10 @@ while read -r model rest; do
   [ -z "$model" ] && continue
   case "$model" in \#*) continue ;; esac
   [ -f "$model" ] || die "model not found: $model"
-  # </dev/null: adb inside a `while read` loop otherwise swallows the rest of the model list.
-  $ADB push "$model" "$DEV_DIR/" >/dev/null </dev/null
-  # an ONNX with external weights needs its .data sidecar next to it or every tensor reads as zeros
-  [ -f "$model.data" ] && $ADB push "$model.data" "$DEV_DIR/" >/dev/null </dev/null
+  $ADB push "$model" "$DEV_DIR/" >/dev/null
   for inp in $rest; do
     [ -f "$inp" ] || die "input not found: $inp"
-    $ADB push "$inp" "$DEV_DIR/" >/dev/null </dev/null
+    $ADB push "$inp" "$DEV_DIR/" >/dev/null
   done
 done < "$MODELS"
 
@@ -109,9 +103,8 @@ run_one() { # <a_run_io|b_run_io> <model-basename> <in-basenames> <precflag>
   local bin="$1" mb="$2" ins="$3" pf="$4" log
   # cool BEFORE the run (thermal protocol); ADPF/DVFS settle during idle.
   sleep "$COOLDOWN"
-  # </dev/null: adb inside the caller's `while read` loop otherwise swallows the model list.
   log=$($ADB shell "cd $DEV_DIR && ./$bin $mb out_$bin --backend vulkan --precision $pf \
-    --winograd $WINO --tuning $TUNING --no-cache --timing --repeat $REPEAT --cache . $ins 2>&1" </dev/null)
+    --winograd $WINO --tuning none --no-cache --timing --repeat $REPEAT --cache . $ins 2>&1")
   echo "$log" | parse_submit
 }
 

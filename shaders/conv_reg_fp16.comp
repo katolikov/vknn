@@ -14,8 +14,8 @@
 #define PW_EPI_BASE 4
 #include "pw_epilogue.glsl"
 #endif
+#define WTILE 4
 layout(constant_id = 0) const int OCB_BLK = 1; // output channel-blocks (of 4 oc) computed per thread
-layout(constant_id = 1) const int WTILE = 4;   // output pixels per thread (autotuned per shape)
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
@@ -49,16 +49,12 @@ void main() {
 
   // acc[p][j] = pixel p, channel-block j.
   vec4 acc[WTILE][OCB_BLK];
-  // Weight-row bases hoisted out of the tap loop. clamp: the last thread's block group can
-  // overhang Coutb; re-read a valid block (the overhanging accumulator is never stored).
-  int ocStride = Cinb * pc.KH * pc.KW;
-  int wbj[OCB_BLK];
   for (int j = 0; j < OCB_BLK; ++j) {
-    wbj[j] = min(ocb0 + j, Coutb - 1) * 4 * ocStride;
     vec4 b = (ocb0 + j < Coutb) ? vec4(bias[ocb0 + j]) : vec4(0.0);
     for (int p = 0; p < WTILE; ++p) acc[p][j] = b;
   }
 
+  int ocStride = Cinb * pc.KH * pc.KW;
   for (int icb = 0; icb < Cinb; ++icb) {
     int sb = (n * Cinb + icb) * pc.H * pc.W;
     for (int ky = 0; ky < pc.KH; ++ky) {
@@ -67,10 +63,11 @@ void main() {
         // weights for the OCB_BLK blocks (4 oc each), loaded once, reused across WTILE pixels.
         vec4 w[OCB_BLK][4];
         for (int j = 0; j < OCB_BLK; ++j) {
-          w[j][0] = vec4(wt[wbj[j] + 0 * ocStride + wtap]);
-          w[j][1] = vec4(wt[wbj[j] + 1 * ocStride + wtap]);
-          w[j][2] = vec4(wt[wbj[j] + 2 * ocStride + wtap]);
-          w[j][3] = vec4(wt[wbj[j] + 3 * ocStride + wtap]);
+          int wb = (ocb0 + j) * 4 * ocStride;
+          w[j][0] = vec4(wt[wb + 0 * ocStride + wtap]);
+          w[j][1] = vec4(wt[wb + 1 * ocStride + wtap]);
+          w[j][2] = vec4(wt[wb + 2 * ocStride + wtap]);
+          w[j][3] = vec4(wt[wb + 3 * ocStride + wtap]);
         }
         for (int p = 0; p < WTILE; ++p) {
           int iy = oyv[p] * pc.SH - pc.PT + ky * pc.DH;

@@ -1,9 +1,9 @@
 #version 450
 // Strided pointwise 1x1 conv (group=1, stride>1, no pad), NC4HW4, fp32 — the ResNet downsample
-// projection. Register-tiled like the fp16 variant: one thread computes OCB output channel-blocks
-// for WTILE output pixels, with the input pixel gathered at the stride (output (oh,ow) reads
-// input (oh*SH, ow*SW)). OCB == 1 keeps the classic single-block body (specialization branch
-// resolved at pipeline build); OCB == 2 halves the strided-gather input traffic per output.
+// projection. Register-tiled like the fp16 variant: one thread computes one output channel-block for
+// WTILE output pixels, the weight vec4 is reused across the WTILE pixels and the input vec4 across the
+// 4 output channels, and the input pixel is gathered at the stride (output (oh,ow) reads input
+// (oh*SH, ow*SW)).
 #include "common.glsl"
 #ifdef PW_EPI
 #define PW_EPI_BASE 5
@@ -11,7 +11,7 @@
 #endif
 layout(constant_id = 0) const int HAS_RES = 0;  // fused residual add (out = act(conv + res))
 layout(constant_id = 1) const int WTILE = 4;    // output pixels per thread (autotuned per shape)
-layout(constant_id = 2) const int OCB = 1;      // output channel-blocks per thread (autotuned per shape)
+#define WTILE_MAX 8 // fused residual add (out = act(conv + res))
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { vec4 wt[]; };
@@ -24,13 +24,6 @@ layout(push_constant) uniform PC {
 }
 pc;
 
-vec4 applyAct(vec4 v) {
-  return vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi),
-              vx_act(v.y, pc.act, pc.actLo, pc.actHi),
-              vx_act(v.z, pc.act, pc.actLo, pc.actHi),
-              vx_act(v.w, pc.act, pc.actLo, pc.actHi));
-}
-
 void main() {
   int Cinb = (pc.Cin + 3) / 4;
   int Coutb = (pc.Cout + 3) / 4;
@@ -38,107 +31,46 @@ void main() {
   int OHW = pc.OH * pc.OW;      // output spatial
   int nTiles = (OHW + WTILE - 1) / WTILE;
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-
-  if (OCB == 1) {
-    // classic body: one output channel-block per thread.
-    if (gid >= uint(pc.N * Coutb * nTiles)) return;
-    int tile = int(gid) % nTiles;
-    int ocb = (int(gid) / nTiles) % Coutb;
-    int n = int(gid) / (nTiles * Coutb);
-    int p0 = tile * WTILE;
-
-    vec4 acc[WTILE];
-    for (int p = 0; p < WTILE; ++p) acc[p] = bias[ocb];
-
-    int wrow = ocb * 4 * Cinb;
-    int sbaseN = n * Cinb * IHW;
-    for (int icb = 0; icb < Cinb; ++icb) {
-      vec4 w0 = wt[wrow + 0 * Cinb + icb];
-      vec4 w1 = wt[wrow + 1 * Cinb + icb];
-      vec4 w2 = wt[wrow + 2 * Cinb + icb];
-      vec4 w3 = wt[wrow + 3 * Cinb + icb];
-      int sbase = sbaseN + icb * IHW;
-      for (int p = 0; p < WTILE; ++p) {
-        int opix = min(p0 + p, OHW - 1);
-        int oh = opix / pc.OW, ow = opix % pc.OW;
-        int ipix = (oh * pc.SH) * pc.W + (ow * pc.SW);
-        vec4 inv = src[sbase + ipix];
-        acc[p].x += dot(inv, w0);
-        acc[p].y += dot(inv, w1);
-        acc[p].z += dot(inv, w2);
-        acc[p].w += dot(inv, w3);
-      }
-    }
-    int dbase = (n * Coutb + ocb) * OHW;
-    for (int p = 0; p < WTILE; ++p) {
-      int opix = p0 + p;
-      if (opix < OHW) {
-        vec4 v = acc[p];
-        if (HAS_RES != 0) v += res[dbase + opix];
-        v = applyAct(v);
-#ifdef PW_EPI
-        v = pw_apply4(v, dbase + opix);
-#endif
-        dst[dbase + opix] = v;
-      }
-    }
-    return;
-  }
-
-  // OCB > 1: tiled body. Weight-row offsets are hoisted out of the K loop.
-  int ocbGroups = (Coutb + OCB - 1) / OCB;
-  if (gid >= uint(pc.N * ocbGroups * nTiles)) return;
+  if (gid >= uint(pc.N * Coutb * nTiles)) return;
   int tile = int(gid) % nTiles;
-  int og = (int(gid) / nTiles) % ocbGroups;
-  int n = int(gid) / (nTiles * ocbGroups);
+  int ocb = (int(gid) / nTiles) % Coutb;
+  int n = int(gid) / (nTiles * Coutb);
   int p0 = tile * WTILE;
-  int ocb0 = og * OCB;
 
-  vec4 acc[OCB][WTILE];
-  int wrowj[OCB];
-  for (int j = 0; j < OCB; ++j) {
-    // clamp: the last thread's block group can overhang Coutb; re-read a valid block
-    // (the overhanging accumulator is never stored).
-    wrowj[j] = min(ocb0 + j, Coutb - 1) * 4 * Cinb;
-    vec4 b = bias[min(ocb0 + j, Coutb - 1)];
-    for (int p = 0; p < WTILE; ++p) acc[j][p] = b;
-  }
+  vec4 acc[WTILE_MAX];
+  for (int p = 0; p < WTILE; ++p) acc[p] = bias[ocb];
 
+  int wrow = ocb * 4 * Cinb;
   int sbaseN = n * Cinb * IHW;
   for (int icb = 0; icb < Cinb; ++icb) {
+    vec4 w0 = wt[wrow + 0 * Cinb + icb];
+    vec4 w1 = wt[wrow + 1 * Cinb + icb];
+    vec4 w2 = wt[wrow + 2 * Cinb + icb];
+    vec4 w3 = wt[wrow + 3 * Cinb + icb];
     int sbase = sbaseN + icb * IHW;
-    for (int j = 0; j < OCB; ++j) {
-      vec4 w0 = wt[wrowj[j] + 0 * Cinb + icb];
-      vec4 w1 = wt[wrowj[j] + 1 * Cinb + icb];
-      vec4 w2 = wt[wrowj[j] + 2 * Cinb + icb];
-      vec4 w3 = wt[wrowj[j] + 3 * Cinb + icb];
-      for (int p = 0; p < WTILE; ++p) {
-        int opix = min(p0 + p, OHW - 1);
-        int oh = opix / pc.OW, ow = opix % pc.OW;
-        int ipix = (oh * pc.SH) * pc.W + (ow * pc.SW);
-        vec4 inv = src[sbase + ipix];
-        acc[j][p].x += dot(inv, w0);
-        acc[j][p].y += dot(inv, w1);
-        acc[j][p].z += dot(inv, w2);
-        acc[j][p].w += dot(inv, w3);
-      }
+    for (int p = 0; p < WTILE; ++p) {
+      int opix = min(p0 + p, OHW - 1);
+      int oh = opix / pc.OW, ow = opix % pc.OW;
+      int ipix = (oh * pc.SH) * pc.W + (ow * pc.SW);
+      vec4 inv = src[sbase + ipix];
+      acc[p].x += dot(inv, w0);
+      acc[p].y += dot(inv, w1);
+      acc[p].z += dot(inv, w2);
+      acc[p].w += dot(inv, w3);
     }
   }
-  for (int j = 0; j < OCB; ++j) {
-    int ocb = ocb0 + j;
-    if (ocb >= Coutb) break;
-    int dbase = (n * Coutb + ocb) * OHW;
-    for (int p = 0; p < WTILE; ++p) {
-      int opix = p0 + p;
-      if (opix < OHW) {
-        vec4 v = acc[j][p];
-        if (HAS_RES != 0) v += res[dbase + opix];
-        v = applyAct(v);
+  int dbase = (n * Coutb + ocb) * OHW;
+  for (int p = 0; p < WTILE; ++p) {
+    int opix = p0 + p;
+    if (opix < OHW) {
+      vec4 v = acc[p];
+      if (HAS_RES != 0) v += res[dbase + opix];
+      v = vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi), vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+               vx_act(v.z, pc.act, pc.actLo, pc.actHi), vx_act(v.w, pc.act, pc.actLo, pc.actHi));
 #ifdef PW_EPI
-        v = pw_apply4(v, dbase + opix);
+      v = pw_apply4(v, dbase + opix);
 #endif
-        dst[dbase + opix] = v;
-      }
+      dst[dbase + opix] = v;
     }
   }
 }
