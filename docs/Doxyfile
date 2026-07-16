@@ -20,7 +20,11 @@ SOURCE_BROWSER         = YES
 # (scripts/gen_site.py), so feeding them here only produced spurious \ref warnings for their links.
 WARN_IF_DOC_ERROR      = NO
 
-# Stock Doxygen theme. The hand-built site (docs/site, via ./build.sh --docs) is the primary docs;
+# Stock Doxygen theme, default color style (HTML_COLORSTYLE stays unset: doxygen older than 1.9.5
+# rejects the tag). The hand-built site (docs/site, via ./build.sh --docs) is the primary docs;
 # this C++ API reference is secondary and linked from it.
 GENERATE_TREEVIEW      = YES
-HTML_COLORSTYLE        = LIGHT
+
+# Include graphs render only where Graphviz dot is installed; the widest included-by graph
+# (op.h) reaches ~72 nodes, above the default cap of 50.
+DOT_GRAPH_MAX_NODES    = 100
