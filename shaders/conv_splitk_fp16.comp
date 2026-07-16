@@ -1,0 +1,66 @@
+#version 450
+// Split-K partial pass for the general direct Conv2D (group=1, any KxK/stride/pad/dilation),
+// NC4HW4, fp16, N=1. Deep-K convs with small output extents (a stride-2 3x3 into a 7x7 map, a
+// strided 1x1 downsample) launch too few threads for the register-tiled kernels to hide the
+// K-loop's memory latency. This pass splits the input-channel reduction across KPARTS thread
+// groups so total threads = KPARTS x Coutb x OH*OW; each thread sums its icb slice over every
+// kernel tap into an fp32 partial, and conv1x1_reduce adds the partials (+bias [+residual] +act).
+// partial layout: [KPARTS][Coutb][OH*OW] vec4(4 oc).  weight: [Cout][Cinb][KH][KW][4ic] (the
+// direct-conv pack). Per-slice tap order matches the direct kernel (icb -> ky -> kx).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) writeonly buffer Part { vec4 part[]; }; // fp32 partials (each is a full icb-slice sum)
+layout(push_constant) uniform PC {
+  int Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, KPARTS, chunk;
+}
+pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int OHW = pc.OH * pc.OW;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.KPARTS * Coutb * OHW)) return;
+  int pix = int(gid) % OHW;
+  int ocb = (int(gid) / OHW) % Coutb;
+  int kpart = int(gid) / (OHW * Coutb);
+  int ox = pix % pc.OW;
+  int oy = pix / pc.OW;
+
+  int istart = kpart * pc.chunk;
+  int iend = min(istart + pc.chunk, Cinb);
+  int wstride = Cinb * pc.KH * pc.KW; // step between output channels
+  // Kahan-compensated fp32 accumulation: the per-slice sum is near-exact, so the two-pass
+  // result tracks the true fp32 sum closer than the single-pass sequential chain does - the
+  // final fp16 rounding then lands on the nearest representable of the TRUE value, keeping
+  // PSNR/SNR same-or-better than the direct kernels this pass replaces. The extra adds hide
+  // under the K-loop's memory latency on the starved shapes this pass is routed to.
+  vec4 acc = vec4(0.0);
+  vec4 comp = vec4(0.0);
+  for (int icb = istart; icb < iend; ++icb) {
+    for (int ky = 0; ky < pc.KH; ++ky) {
+      int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+      if (iy < 0 || iy >= pc.H) continue;
+      for (int kx = 0; kx < pc.KW; ++kx) {
+        int ix = ox * pc.SW - pc.PL + kx * pc.DW;
+        if (ix < 0 || ix >= pc.W) continue;
+        vec4 inv = vec4(src[(icb * pc.H + iy) * pc.W + ix]);
+        int wbase = (((ocb * 4 + 0) * Cinb + icb) * pc.KH + ky) * pc.KW + kx;
+        vec4 term = vec4(dot(inv, vec4(wt[wbase])),
+                         dot(inv, vec4(wt[wbase + wstride])),
+                         dot(inv, vec4(wt[wbase + 2 * wstride])),
+                         dot(inv, vec4(wt[wbase + 3 * wstride])));
+        vec4 y = term - comp;
+        vec4 t = acc + y;
+        comp = (t - acc) - y;
+        acc = t;
+      }
+    }
+  }
+  part[(kpart * Coutb + ocb) * OHW + pix] = acc;
+}

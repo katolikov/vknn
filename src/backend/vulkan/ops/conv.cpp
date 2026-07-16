@@ -27,6 +27,19 @@ namespace vknn {
         constexpr int64_t kGemmMinCoutTiles = 8;
         constexpr int64_t kGemmMinM         = 128;
 
+        // Deterministic general-split-K rule: a non-pointwise conv whose standard dispatch is too
+        // small to hide its K-loop latency (deep reduction, small output extent - a stride-2 3x3
+        // into a 7x7 map, an 8x8-map Inception branch conv) runs the split-K partial+reduce pair
+        // instead of the register-tiled kernels. Splitting the K sum changes the fp32 summation
+        // order, so like the Winograd and implicit-GEMM choices this is a shape rule, never a
+        // timing race. Calibrated against per-shape cooled A/B winners with the compensated
+        // partial pass: deep-tap tiny-map convs gain 22-32%; larger maps and shallow-tap strided
+        // 1x1 downsamples LOSE (the extra partial traffic and compensation adds outweigh the
+        // latency win), hence the taps floor and the output-extent ceiling.
+        constexpr int64_t kSplitKGenMinTaps    = 320;   // Cinb*KH*KW: minimum per-thread reduction depth
+        constexpr int64_t kSplitKGenMaxOHW     = 64;    // output pixels: above this the standard kernels win
+        constexpr int64_t kSplitKGenMaxThreads = 16384; // Coutb*ceil(OHW/4): below this the GPU is starved
+
         // Read an advanced kernel hint from the session Config (see include/vknn/config.h).
         inline int cfgHint(const VkOpEnv &env, Hint h) {
             return env.config ? env.config->hint(h) : 0;
@@ -78,23 +91,44 @@ namespace vknn {
             std::shared_ptr<vk::ComputePipeline> skPipe, skRed;
             std::shared_ptr<vk::Buffer>          partBuf;
             SplitKPC                             skPC {};
+            SplitKGenPC                          skGenPC {};
             ReducePC                             skRedPC {};
             int64_t                              skGroups = 0, skRedGroups = 0;
+            bool                                 splitkGen = false; // general KxK/strided split-K (conv_splitk.comp)
+
+            // Shared split-K geometry: KPARTS targets ~8192 partial-pass threads, capped by Cinb.
+            static int64_t splitKParts(int64_t Cinb, int64_t Coutb, int64_t OHW) {
+                int64_t kparts = (8192 + Coutb * OHW - 1) / (Coutb * OHW);
+                return std::max<int64_t>(2, std::min<int64_t>({kparts, Cinb, 16}));
+            }
+
+            void prepareSplitKShared(const Node &node, VkOpEnv &env, int64_t Cout, int64_t Coutb, int64_t OHW, int64_t kparts) {
+                skRedPC     = {(int) Cout, (int) OHW, (int) kparts, (int) node.fusedAct, node.actLo, node.actHi};
+                partBuf     = std::make_shared<vk::Buffer>(*env.ctx, (size_t) kparts * Coutb * OHW * 4 * 4, vk::MemPref::kDeviceOnly); // fp32 partials (vec4)
+                skGroups    = groups(kparts * Coutb * OHW, 64);
+                skRedGroups = groups(Coutb * OHW, 64);
+                skRed = env.pipeline((std::string("conv1x1_reduce") + epi.suffix() + "_fp16").c_str(), epi.active ? 4 + epi.extraBufs() : (hasRes ? 4u : 3u), sizeof(ReducePC),
+                                     std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
+            }
 
             void prepareSplitK(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
                 int64_t Cinb = cBlocks(x.c), HW = y.h * y.w;
-                // pick KPARTS so the partial pass has enough threads to fill the GPU (~8192), capped by Cinb.
-                int64_t kparts = (8192 + Coutb * HW - 1) / (Coutb * HW);
-                kparts         = std::max<int64_t>(2, std::min<int64_t>({kparts, Cinb, 16}));
+                int64_t kparts = splitKParts(Cinb, Coutb, HW);
                 int64_t chunk  = (Cinb + kparts - 1) / kparts;
                 skPC           = {(int) x.c, (int) Cout, (int) HW, (int) kparts, (int) chunk};
-                skRedPC        = {(int) Cout, (int) HW, (int) kparts, (int) node.fusedAct, node.actLo, node.actHi};
-                partBuf        = std::make_shared<vk::Buffer>(*env.ctx, (size_t) kparts * Coutb * HW * 4 * 4, vk::MemPref::kDeviceOnly); // fp32 partials (vec4)
-                skGroups       = groups(kparts * Coutb * HW, 64);
-                skRedGroups    = groups(Coutb * HW, 64);
+                prepareSplitKShared(node, env, Cout, Coutb, HW, kparts);
                 skPipe = env.pipeline("conv1x1_splitk_fp16", 3, sizeof(SplitKPC), std::vector<uint32_t> {});
-                skRed = env.pipeline((std::string("conv1x1_reduce") + epi.suffix() + "_fp16").c_str(), epi.active ? 4 + epi.extraBufs() : (hasRes ? 4u : 3u), sizeof(ReducePC),
-                                     std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
+            }
+
+            void prepareSplitKGeneral(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, int64_t KH, int64_t KW, const std::vector<int64_t> &st,
+                                      const std::vector<int64_t> &pad, const std::vector<int64_t> &dil) {
+                int64_t Cinb = cBlocks(x.c), OHW = y.h * y.w;
+                int64_t kparts = splitKParts(Cinb, Coutb, OHW);
+                int64_t chunk  = (Cinb + kparts - 1) / kparts;
+                skGenPC        = {(int) x.c,   (int) x.h,   (int) x.w,    (int) Cout,   (int) y.h,    (int) y.w,    (int) KH,     (int) KW,
+                                  (int) st[0], (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) kparts, (int) chunk};
+                prepareSplitKShared(node, env, Cout, Coutb, OHW, kparts);
+                skPipe = env.pipeline("conv_splitk_fp16", 3, sizeof(SplitKGenPC), std::vector<uint32_t> {});
             }
 
             // --- Winograd F(2x2,3x3) state (3x3, stride 1, pad 1, group 1, fp16) ---
@@ -724,6 +758,13 @@ namespace vknn {
                         }
                         return wp;
                     });
+                    // General split-K shape rule (non-pointwise): deep reduction + starved standard
+                    // dispatch. Skipped when a DirectConv3x3 hint forces a specific kernel.
+                    int64_t skOHW        = y.h * y.w;
+                    int64_t skTaps       = Cinb * KH * KW;
+                    int64_t skStdThreads = Coutb * ((skOHW + kTile - 1) / kTile);
+                    bool starvedDeep = env.useFp16 && x.n == 1 && group == 1 && !pointwise && skTaps >= kSplitKGenMinTaps && skOHW <= kSplitKGenMaxOHW &&
+                                       skStdThreads < kSplitKGenMaxThreads && cfgHint(env, Hint::DirectConv3x3) == 0;
                     if (pointwise)
                     {
                         // Deep, small-spatial 1x1 convs have too few threads for the register-tiled kernel; use
@@ -745,6 +786,13 @@ namespace vknn {
                             pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC),
                                                 std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile});
                         }
+                    } else if (starvedDeep)
+                    {
+                        // split-K partial + reduce for the starved deep shapes (strided 1x1 downsamples,
+                        // small-map KxK); the reduce pass carries bias/residual/act/epilogue.
+                        splitk    = true;
+                        splitkGen = true;
+                        prepareSplitKGeneral(node, env, x, y, Cout, Coutb, KH, KW, st, pad, dil);
                     } else if (pwS2)
                     {
                         // strided 1x1 (downsample): register-tiled kernel that gathers the input at the
@@ -881,7 +929,13 @@ namespace vknn {
                 if (splitk)
                 {
                     // partial pass (K-parallel) -> reduce pass (+bias [+residual] +act).
-                    skPipe->dispatch(cmd, {src->handle(), wbuf->handle(), partBuf->handle()}, &skPC, sizeof(skPC), (uint32_t) skGroups);
+                    if (splitkGen)
+                    {
+                        skPipe->dispatch(cmd, {src->handle(), wbuf->handle(), partBuf->handle()}, &skGenPC, sizeof(skGenPC), (uint32_t) skGroups);
+                    } else
+                    {
+                        skPipe->dispatch(cmd, {src->handle(), wbuf->handle(), partBuf->handle()}, &skPC, sizeof(skPC), (uint32_t) skGroups);
+                    }
                     vk::computeBarrier(cmd);
                     std::vector<VkBuffer> rb = {partBuf->handle(), bbuf->handle(), dst->handle()};
                     if (hasRes)
