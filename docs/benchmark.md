@@ -121,45 +121,6 @@ swap doesn't touch the bottleneck). Packed fp16 in the GEMM inner loop is neutra
 not ALU-bound). int8 weight-only on the deep 1×1 has a bandwidth ceiling (~0.2 ms; RDNA-pre-4 gives
 int8 == fp16 compute), so it cannot close ResNet alone.
 
-### Conv register tiles: an autotuned OCB x WTILE axis (v1.4.0)
-
-The register-tiled conv kernels expose a second tile axis: `conv1x1`/`conv1x1_s2` tile OCB output
-channel-blocks per thread (1 or 2) on top of the WTILE pixel axis, and the general `conv_reg`
-kernel's WTILE (4 or 8) joins its OCB spec constant. An OCB=2 thread reuses every input vec4
-across 8 output channels instead of 4 — up to twice the arithmetic per loaded operand — at higher
-register pressure, so which tile wins is shape- and device-dependent and is raced per shape by the
-existing bit-neutral autotune (`--tuning fast`/`heavy`). Every candidate computes each output with
-the identical fp32 accumulation sequence, so the choice never affects output bits: `none`, `fast`
-and `heavy` stay byte-identical, and a v1.4.0 build is output-byte-identical to v1.3.1 on the whole
-CNN suite (verified per model at `none` and `fast`).
-
-Two autotuner fixes make the wider candidate set safe. The race now issues a compute barrier
-between its timing reps: unbarriered reps overlap on the GPU, which systematically favors
-low-workgroup-count tiles that lose in the real (op-barriered) command buffer — with the old race
-one suite model regressed 19% from exactly such a mis-pick; barriered, the same model gains 7%.
-New-class candidates also carry a 3% anti-noise margin over the classic tile, so a single noisy
-race sample cannot displace the proven default.
-
-Measured effect, cooled interleaved A/B vs v1.3.1 (`benchmark/scripts/dev_perfab.sh`, min over 5
-paired iterations, `--tuning fast`, fp16, per-model `submit+gpu` wall; primary benchmark device /
-second smaller-GPU device):
-
-| Model | primary device | second device |
-|---|---|---|
-| Inception-v3 | **-27%** | **-24%** |
-| EfficientNet-B0 | -3% | **-19%** |
-| ResNet-50 | **-7%** | **-10%** |
-| MnasNet 1.0 | **-9%** | -4% |
-| MobileNetV3-Large | **-9%** | -2% |
-| DenseNet-121 | -5% | 0% |
-| MobileNetV2 / SqueezeNet / ShuffleNetV2 / YOLOv8n | 0 to -3% | 0 to -3% |
-
-No model regresses at any tuning level on either device (3% gate). At `--tuning none` the new
-tiles are inert (the deterministic defaults are unchanged), so `none` runs match v1.3.1 exactly.
-The gains carry to `heavy` (spot-checked: ResNet-50 -17%, Inception-v3 -24%, EfficientNet-B0 -13%
-on the second device). LLM and VLM token streams and the YoNoSplat encoder outputs are unchanged
-(the decode path shares no touched kernel; the vision convs are bit-identical).
-
 **F(4×4,3×3)** is also implemented (`setHint(Hint::WinogradUnit, 4)`): it cuts the transform-domain V/M
 traffic to 0.56× and the multiplies to 4× (vs F(2,3)'s 2.25×), and it is numerically fine at fp16
 (ResNet cosine 0.999999 — the larger transform coefficients do *not* break half precision here). It is
