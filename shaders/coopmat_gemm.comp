@@ -1,0 +1,64 @@
+#version 450
+#define VKNN_NO_RTE 1 // gemm family avoids the float-controls execution mode (miscompiled by some drivers)
+// Cooperative-matrix GEMM: D[M,N] = A[M,K] * B[K,N], all row-major flat fp16 storage, fp32
+// accumulation on the matrix units. One workgroup is one 32-wide subgroup (the host pins the
+// subgroup size via VK_EXT_subgroup_size_control) and owns a 32x32 output tile as a 2x2 grid of
+// 16x16x16 fragments; K advances 16 per step. The host routing rule guarantees M % 32 == 0,
+// N % 32 == 0, K % 16 == 0, so no edge masking exists in this kernel.
+//
+// The fragment-to-lane mapping is opaque here by design: loads and stores go through
+// coopMatLoad/coopMatStore with explicit RowMajor layouts, so a driver whose lane distribution is
+// column-major (the gfx12 documented mapping) still loads and stores correctly. The one-time
+// backend self-check (coopmat_check.cpp) runs an asymmetric exact-integer GEMM against a host
+// reference and disables this path on any device where the result mismatches.
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// store16.glsl satisfies the fp16-store contract; the fp32 -> fp16 narrowing here happens inside
+// the fragment conversion (coopmat constructor), which rounds to nearest even on conformant
+// drivers - the RTZ-store workaround targets a driver that never runs this capability-gated path.
+#include "store16.glsl"
+layout(local_size_x = 32) in;
+
+layout(std430, binding = 0) readonly buffer ABuf { float16_t aBuf[]; };
+layout(std430, binding = 1) readonly buffer BBuf { float16_t bBuf[]; };
+layout(std430, binding = 2) writeonly buffer DBuf { float16_t dBuf[]; };
+layout(push_constant) uniform PC { int M, N, K; }
+pc;
+
+void main() {
+  const uint colTile = gl_WorkGroupID.x * 32u; // first output column of this workgroup
+  const uint rowTile = gl_WorkGroupID.y * 32u; // first output row of this workgroup
+  const uint lda = uint(pc.K);
+  const uint ldb = uint(pc.N);
+
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc00 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc01 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc10 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc11 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+
+  for (uint k = 0u; k < uint(pc.K); k += 16u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a0, a1;
+    coopMatLoad(a0, aBuf, rowTile * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(a1, aBuf, (rowTile + 16u) * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b0, b1;
+    coopMatLoad(b0, bBuf, k * ldb + colTile, ldb, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(b1, bBuf, k * ldb + colTile + 16u, ldb, gl_CooperativeMatrixLayoutRowMajor);
+    acc00 = coopMatMulAdd(a0, b0, acc00);
+    acc01 = coopMatMulAdd(a0, b1, acc01);
+    acc10 = coopMatMulAdd(a1, b0, acc10);
+    acc11 = coopMatMulAdd(a1, b1, acc11);
+  }
+
+  const uint ldd = uint(pc.N);
+  coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> h;
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc00);
+  coopMatStore(h, dBuf, rowTile * ldd + colTile, ldd, gl_CooperativeMatrixLayoutRowMajor);
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc01);
+  coopMatStore(h, dBuf, rowTile * ldd + colTile + 16u, ldd, gl_CooperativeMatrixLayoutRowMajor);
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc10);
+  coopMatStore(h, dBuf, (rowTile + 16u) * ldd + colTile, ldd, gl_CooperativeMatrixLayoutRowMajor);
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc11);
+  coopMatStore(h, dBuf, (rowTile + 16u) * ldd + colTile + 16u, ldd, gl_CooperativeMatrixLayoutRowMajor);
+}

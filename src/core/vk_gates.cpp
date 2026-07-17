@@ -333,6 +333,24 @@ namespace vknn {
         {
             return true; // metadata copy on the flat path
         }
+        if (nd.type == OpType::ChannelShuffle)
+        {
+            // Group-interleave channel permutation; kernels exist in both layouts (flat / NC4HW4).
+            // fuseChannelShuffle only emits valid nodes, so this gate guards a hand-built graph:
+            // the shape must be resolved (the static plan sizes the dispatch from it) and the
+            // channel count must split evenly into `groups`.
+            const Shape &in = g.desc(nd.inputs[0]).shape;
+            if (in.size() < 2)
+            {
+                return refuse(whyNot, "ChannelShuffle: input shape unresolved or rank < 2");
+            }
+            int64_t groupCount = nd.attr.geti("groups", 1);
+            if (groupCount < 1 || in[1] % groupCount != 0)
+            {
+                return refuse(whyNot, "ChannelShuffle: groups must be >= 1 and divide the channel count");
+            }
+            return true;
+        }
         if (nd.type == OpType::Cast)
         {
             // float->float is a no-op copy; float->int truncates+narrows on the flat path (cast.comp),

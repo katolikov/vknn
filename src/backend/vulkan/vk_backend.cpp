@@ -252,6 +252,7 @@ namespace vknn {
             k.winogradUnit    = cfg.hint(Hint::WinogradUnit, 0);
             k.directConv3x3   = cfg.hint(Hint::DirectConv3x3, 0);
             k.splitKConv      = cfg.hint(Hint::SplitKConv, (int) Mode::Auto);
+            k.coopmatGemm     = cfg.hint(Hint::CoopmatGemm, (int) Mode::Auto);
             return k;
         }
         // Load + validate the model cache once, selecting the variant for this config. Caching is
@@ -398,7 +399,7 @@ namespace vknn {
         // node that requests it. Driver pipeline memory and creation time then scale with the number of
         // DISTINCT kernels in the model, not the node count (a transformer has hundreds of MatMul nodes
         // but a handful of matmul kernel configs).
-        std::shared_ptr<vk::ComputePipeline> sharedPipeline(const std::string &name, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &spec, VkPipelineCache cache) {
+        std::shared_ptr<vk::ComputePipeline> sharedPipeline(const std::string &name, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &spec, VkPipelineCache cache, uint32_t requiredSubgroupSize = 0) {
             std::string key = name;
             key += '|';
             key += std::to_string(numBuffers);
@@ -409,12 +410,17 @@ namespace vknn {
                 key += ',';
                 key += std::to_string(s);
             }
+            if (requiredSubgroupSize > 0)
+            {
+                key += "|sg";
+                key += std::to_string(requiredSubgroupSize);
+            }
             auto it = pipePool_.find(key);
             if (it != pipePool_.end())
             {
                 return it->second;
             }
-            auto p         = std::make_shared<vk::ComputePipeline>(*ctx_, name, numBuffers, pushConstBytes, spec, cache);
+            auto p         = std::make_shared<vk::ComputePipeline>(*ctx_, name, numBuffers, pushConstBytes, spec, cache, requiredSubgroupSize);
             pipePool_[key] = p;
             return p;
         }
@@ -616,8 +622,8 @@ namespace vknn {
         std::unique_ptr<vk::Buffer> weightStaging_;
     };
 
-    std::shared_ptr<vk::ComputePipeline> VkOpEnv::pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData) const {
-        return backend->sharedPipeline(shaderName, numBuffers, pushConstBytes, specData, cache ? cache->handle() : VK_NULL_HANDLE);
+    std::shared_ptr<vk::ComputePipeline> VkOpEnv::pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData, uint32_t requiredSubgroupSize) const {
+        return backend->sharedPipeline(shaderName, numBuffers, pushConstBytes, specData, cache ? cache->handle() : VK_NULL_HANDLE, requiredSubgroupSize);
     }
 
     std::shared_ptr<vk::Buffer> VkOpEnv::uploadPooled(const void *data, size_t bytes) const {
@@ -1329,7 +1335,7 @@ namespace vknn {
             }
             if (step > 0 || !residentLinks_.empty())
             {
-                vk::computeBarrier(cmd_);
+                vk::computeBarrier(*env_.ctx, cmd_);
             }
             // Declared-format zero-copy inputs: convert each caller dma-buf (declared layout/dtype) into
             // this segment's device-native boundary buffer, then a barrier before the ops read it.
@@ -1354,7 +1360,7 @@ namespace vknn {
                 }
                 if (any)
                 {
-                    vk::computeBarrier(cmd_);
+                    vk::computeBarrier(*env_.ctx, cmd_);
                 }
             }
             auto isCopy = [&](int idx) {
@@ -1407,7 +1413,8 @@ namespace vknn {
             for (size_t k = 0; k < nodeIdx.size(); ++k)
             {
                 const Node &node        = g_.nodes[nodeIdx[k]];
-                bool        needBarrier = perOpBarrier;
+                bool        needBarrier = perOpBarrier; // full memory barrier (RAW/WAW: data must become visible)
+                bool        needWarOnly = false;        // execution-only barrier (WAR on a reused pool slot: order, no data)
                 if (!needBarrier)
                 {
                     for (TensorId in: node.inputs) // read-after-write
@@ -1433,31 +1440,47 @@ namespace vknn {
                     }
                     if (!needBarrier)
                     {
-                        for (TensorId o: node.outputs) // write-after-write / write-after-read (reused buffer)
+                        for (TensorId o: node.outputs) // write-after-write (unflushed writer) / write-after-read (reused buffer)
                         {
                             if (vk::Buffer *b = bufOf(o))
                             {
-                                if (writtenBufs.count(b) || readBufs.count(b))
+                                if (writtenBufs.count(b))
                                 {
                                     needBarrier = true;
                                     break;
                                 }
+                                if (readBufs.count(b))
+                                {
+                                    needWarOnly = true; // upgrade to full below if a copy is involved
+                                }
                             }
                         }
+                    }
+                    // A WAR against a vkCmdCopyBuffer read (or ahead of a copy write) crosses the
+                    // transfer stage, which the compute-only execution barrier does not order.
+                    if (needWarOnly && (copySinceBarrier || isCopy(nodeIdx[k])))
+                    {
+                        needBarrier = true;
                     }
                 }
                 if (needBarrier)
                 {
                     if (copySinceBarrier || isCopy(nodeIdx[k]))
                     {
-                        vk::transferBarrier(cmd_);
+                        vk::transferBarrier(*env_.ctx, cmd_);
                     } else
                     {
-                        vk::computeBarrier(cmd_);
+                        vk::computeBarrier(*env_.ctx, cmd_);
                     }
                     writtenBufs.clear();
                     readBufs.clear();
                     copySinceBarrier = false;
+                } else if (needWarOnly)
+                {
+                    // Orders this node's write after every recorded read; earlier writes stay in
+                    // writtenBufs because nothing here made them available or visible.
+                    vk::executionBarrier(*env_.ctx, cmd_);
+                    readBufs.clear();
                 }
                 if (queryPool_)
                 {
@@ -1528,10 +1551,10 @@ namespace vknn {
             // Final barrier so the segment outputs are complete + visible before the host reads them.
             if (copySinceBarrier)
             {
-                vk::transferBarrier(cmd_);
+                vk::transferBarrier(*env_.ctx, cmd_);
             } else
             {
-                vk::computeBarrier(cmd_);
+                vk::computeBarrier(*env_.ctx, cmd_);
             }
             // Registered output argmax epilogues: one single-workgroup dispatch per output, reading
             // the finished boundary buffer and writing {index, value} into its per-iteration result
@@ -1557,7 +1580,7 @@ namespace vknn {
             // maxSubmitNodes split; each chunk submits with its own fence).
             if (step + 1 < recordedSteps)
             {
-                vk::transferBarrier(cmd_);
+                vk::transferBarrier(*env_.ctx, cmd_);
                 chunkTsEnd();
                 be_->runner().end(cmd_);
                 cmds_.push_back(cmd_);
@@ -1586,7 +1609,7 @@ namespace vknn {
                 }
                 if (any)
                 {
-                    vk::computeBarrier(cmd_);
+                    vk::computeBarrier(*env_.ctx, cmd_);
                 }
             }
             chunkTsEnd();

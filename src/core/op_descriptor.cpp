@@ -19,7 +19,7 @@ namespace vknn {
         using L = LayoutClass;
 
         // The largest enum value with a table entry (the enum is append-only, so this only grows).
-        constexpr int kMaxOp = (int) OpType::FusedAttention;
+        constexpr int kMaxOp = (int) OpType::ChannelShuffle;
 
         struct Table {
             OpDescriptor d[kMaxOp + 1];
@@ -86,6 +86,11 @@ namespace vknn {
                 // activations addressed through per-axis strides; never a pointwise-fusion member
                 // or epilogue host (created after fusePointwiseChains has run).
                 set(OpType::FusedAttention, L::Flat, false, false);
+                // Group-interleave channel permutation (fuseChannelShuffle, import-time). Has a
+                // kernel in BOTH layouts, so its layout is per-node: it adopts the input tensor's
+                // assigned layout (the Agnostic arm in globalLayoutAssign) and never forces a
+                // convert. Pure data movement; no fusion role.
+                set(OpType::ChannelShuffle, L::ShapeDependent, false, false);
                 // Everything not listed keeps the all-default row {Nc4, pwMember=false,
                 // pwEpilogue=false}: CPU-only / structural ops (Reshape, Flatten, Squeeze, Unsqueeze,
                 // Cast, Identity, Constant, Shape, BatchNorm, EyeLike, FusedSE, ConvertLayout,

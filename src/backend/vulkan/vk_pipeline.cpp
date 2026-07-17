@@ -51,7 +51,7 @@ namespace vknn { namespace vk {
     }
 
     // ----------------------------- ComputePipeline -----------------------------
-    ComputePipeline::ComputePipeline(VulkanContext &ctx, const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData, VkPipelineCache cache):
+    ComputePipeline::ComputePipeline(VulkanContext &ctx, const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData, VkPipelineCache cache, uint32_t requiredSubgroupSize):
         ctx_(ctx), numBuffers_(numBuffers), name_(shaderName) {
         // A throwing constructor does not run the destructor, so reclaim any handle already created
         // before letting the exception propagate.
@@ -136,6 +136,16 @@ namespace vknn { namespace vk {
             if (!specData.empty())
             {
                 stage.pSpecializationInfo = &specInfo;
+            }
+            // Pinned subgroup width (cooperative-matrix kernels are written for one exact width;
+            // a driver free to pick another would compute wrong lane mappings). The caller gates
+            // on caps().subgroupSizeControl + requiredSubgroupSizeCompute and the [min,max] range,
+            // so an unsupported request never reaches pipeline creation.
+            VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSize {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
+            if (requiredSubgroupSize > 0)
+            {
+                requiredSize.requiredSubgroupSize = requiredSubgroupSize;
+                stage.pNext                       = &requiredSize;
             }
 
             VkComputePipelineCreateInfo cpci {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};

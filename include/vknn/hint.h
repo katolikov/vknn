@@ -23,6 +23,17 @@ namespace vknn {
                               ///< structurally eligible KxK conv (fp16, batch 1, group 1, non-pointwise; an
                               ///< explicit DirectConv3x3 kernel force still wins); Off disables both the
                               ///< general and the 1x1 split-K paths.
+        CoopmatGemm     = 11, ///< Cooperative-matrix MatMul routing (Auto / On / Off / Fp8 / Int8Coop,
+                              ///< default Auto). Requires VK_KHR_cooperative_matrix with an enumerated
+                              ///< subgroup-scope 16x16x16 row, pinnable 32-wide subgroups and the Vulkan
+                              ///< memory model; a device without them runs the SSBO kernels unchanged at
+                              ///< every value. Auto/On route eligible fp16 GEMMs (dense 2-D, batch 1,
+                              ///< M,N multiples of 32, K multiple of 16, no view/bias/epilogue) through
+                              ///< the fp16-operand fp32-accumulator coopmat kernel after a one-time
+                              ///< on-device exact self-check. Fp8 / Int8Coop additionally quantize the
+                              ///< A operand per-dispatch (per-tensor absmax scale) against a host-
+                              ///< quantized weight operand - opt-in low-precision fast paths, never a
+                              ///< default, numerics differ from the fp16 path by construction.
     };
 
     /// Every kernel/pass selection value, set uniformly via setHint(Hint, Mode). The value sets by
@@ -46,6 +57,8 @@ namespace vknn {
         DirectAuto    = 0,
         RegisterTiled = 1,
         LdsHalo       = 2,
+        Fp8           = 3, ///< CoopmatGemm: e4m3 operands, fp32 accumulation (opt-in).
+        Int8Coop      = 4, ///< CoopmatGemm: int8 operands, int32 accumulation (opt-in).
     };
 
     /// Parse the Winograd knob from a string. Forcing on or off makes the 3x3-conv kernel choice

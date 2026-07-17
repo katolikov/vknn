@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < iters; ++i)
         {
             pipe.dispatch(cmd, {inB.handle(), wB.handle(), bB.handle(), outB.handle()}, &pc, sizeof(pc), (uint32_t) ((total + 63) / 64));
-            vk::computeBarrier(cmd);
+            vk::computeBarrier(ctx, cmd);
         }
         runner.end(cmd);
         runner.submitAndWait(cmd); // warm
@@ -248,7 +248,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < iters; ++i)
         {
             rec(cmd);
-            vk::computeBarrier(cmd);
+            vk::computeBarrier(ctx, cmd);
         }
         runner.end(cmd);
         runner.submitAndWait(cmd); // warm submit primes caches/clocks; the second, timed run is the measurement
@@ -341,7 +341,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < iters; ++i)
         {
             recT(tc);
-            vk::computeBarrier(tc);
+            vk::computeBarrier(ctx, tc);
         }
         runner.end(tc);
         runner.submitAndWait(tc); // warm submit; the second, timed run is the measurement

@@ -214,6 +214,7 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 | **Quantized models** | QDQ / QLinear / dynamic-quant checkpoints load and run: quantized nodes are **dequantized to float** at import (saturation clamps preserved), so a quantized export runs without a separate float model. `--no-dequantize` opts out. `vknn_compile -Os` goes the other way and **produces** quantized weights — all fusion plus calibration-free weight quantization (`--quant-bits 4|8|lut4`, default int4; AWQ outlier columns kept fp16, per-layer error guard; `--calib` supplies real calibration samples) over native int4 / int8 / lut4 GPU MatMul kernels; the Qwen instruct weights come out ~2.4× smaller, and every bucket of a multi-graph `.vxm` is requantized. |
 | **Autotuned kernels** | Load-time GEMM/conv-kernel autotuning (`--tuning none`/`fast`/`heavy`); the chosen kernels + prepacked/Winograd weights are cached per model, so a warm load skips shader compilation, prepacking, and tuning. Tuning affects **speed only**: the timing races cover just bit-neutral launch parameters (workgroup size, tile width, registers per thread), and every kernel choice that changes fp16 rounding — Winograd vs direct, F(2,3) vs F(4,3), implicit-GEMM vs direct — is a deterministic shape rule that holds at every tuning level, so `none` / `fast` / `heavy` produce byte-identical output. `--tuning none` runs no new sweep (a cached pick, also bit-neutral, is still reused); add `--no-cache` to force a fully cold compile. |
 | **Zero-copy I/O** | Caller-owned DMA-BUF fds bind straight to the GPU boundary buffer (no host copy) via `Tensor::fromDmaBuf` / `toDmaBuf`, with a declared layout/dtype the GPU converts on the fly when it differs from device-native. See [`examples/io/dmabuf_fd_io.cpp`](examples/io/dmabuf_fd_io.cpp). |
+| **Cooperative-matrix GEMM** | On a device exposing `VK_KHR_cooperative_matrix` (enumerated 16x16x16 subgroup rows, pinnable 32-wide subgroups, Vulkan memory model), eligible fp16 MatMuls route to hardware matrix tiles with fp32 accumulation — after a one-time on-device exact self-check against the CPU oracle, so a driver with a different fragment mapping falls back instead of corrupting. Opt-in fp8 (e4m3) and int8 kinds via `setHint(Hint::CoopmatGemm, ...)`. Devices without the capability run the SSBO kernels unchanged. This path is capability-complete but not yet validated on cooperative-matrix hardware. |
 | **Warm-start cache** | A self-validating, multi-variant per-model `.cache` (kernel hash + device + config) auto-heals across driver/model/code changes. |
 | **Tools** | `vknn_compile` (ONNX → `.vxm`, with `--support-report <out.json>` for the per-node backend assignment), `vknn_run_io` (any multi-input/multi-output model), plus the example runners below. |
 
@@ -262,6 +263,13 @@ v1.4.0's speedups come from an autotuned OCB×WTILE register-tile axis, a genera
 parallelism-starved shapes (`setHint(Hint::SplitKConv, ...)` overrides its shape rule), a
 sliding-window 1xK/Kx1 kernel, a raced 16×16 LDS-halo tile, and a small-axis softmax mapping — see
 [docs/benchmark.md](docs/benchmark.md) § Conv register tiles.
+
+Since v1.4.0, main adds synchronization2-scoped barriers with write-after-read elision, a
+one-dispatch ChannelShuffle operator (ShuffleNetV2 −11/−21% per device), a no-LDS register-tile
+Winograd GEMM that extends the Winograd shape rule to large-channel 3×3 convs on big output maps,
+and depthwise/output-channel tile candidates in the bit-neutral races — output bytes per model are
+unchanged from v1.4.0 at every tuning level; deltas in
+[docs/benchmark.md](docs/benchmark.md) § Barrier hygiene.
 
 The accuracy columns do not depend on the tuning level: kernel choices that change fp16 rounding
 are deterministic shape rules (see **Autotuned kernels** above), so `none` / `fast` / `heavy` produce

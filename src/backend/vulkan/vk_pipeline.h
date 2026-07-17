@@ -58,8 +58,12 @@ namespace vknn {
             /// @param pushConstBytes Size of the push-constant block (0 for none).
             /// @param specData       Specialization constants, one uint32 at ids 0..N-1.
             /// @param cache          Pipeline cache to accelerate creation, or VK_NULL_HANDLE.
+            /// @param requiredSubgroupSize  Exact subgroup width the pipeline must run at, or 0 for
+            ///                       the driver default. Non-zero requires the subgroupSizeControl
+            ///                       capability (cooperative-matrix kernels pin their wave width);
+            ///                       the caller gates on caps before requesting one.
             /// @throws Error if the shader is unknown or a Vulkan object cannot be created.
-            ComputePipeline(VulkanContext &ctx, const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData = {}, VkPipelineCache cache = VK_NULL_HANDLE);
+            ComputePipeline(VulkanContext &ctx, const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData = {}, VkPipelineCache cache = VK_NULL_HANDLE, uint32_t requiredSubgroupSize = 0);
             ~ComputePipeline();
             ComputePipeline(const ComputePipeline &)            = delete;
             ComputePipeline &operator=(const ComputePipeline &) = delete;

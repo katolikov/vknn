@@ -1,0 +1,26 @@
+#version 450
+#define VKNN_NO_RTE 1 // no fp16 stores here; the include satisfies the fp16-buffer shader contract
+// Elementwise fp16 -> int8 symmetric quantization against the per-tensor scale written by
+// lowp_absmax (scales[0] = absmax / 127): code = roundEven(x / scale) clamped to [-127, 127];
+// a zero scale (all-zero tensor) writes zero codes. Feeds the A operand of coopmat_gemm_i8.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#include "store16.glsl"
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Src { float16_t src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { int8_t dst[]; };
+layout(std430, binding = 2) readonly buffer Scales { float scales[]; };
+layout(push_constant) uniform PC { int total; }
+pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) {
+    return;
+  }
+  const float scale = scales[0];
+  const float code = scale > 0.0 ? roundEven(float(src[gid]) / scale) : 0.0;
+  dst[gid] = int8_t(int(clamp(code, -127.0, 127.0)));
+}

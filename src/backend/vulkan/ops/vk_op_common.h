@@ -15,6 +15,12 @@ namespace vknn {
     struct ConvPC {
         int   N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
         float actLo, actHi;
+        // Flat-gid base of this dispatch's slice for the OC-split multi-dispatch path (conv_reg
+        // kernels only; 0 for a whole-range dispatch). Tail field: conv_reg{,_fp16}.comp declare
+        // and consume it, every other ConvPC kernel declares only the shared 72-byte prefix (a
+        // pipeline's push range may exceed the shader's block). 76 bytes total, well under the
+        // 128-byte guaranteed push-constant minimum.
+        int   gidBase;
     };
     struct DwPC {
         // pad0 is a reserved slot present in dwconv.comp's push_constant block too: it pads the int run

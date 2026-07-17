@@ -180,6 +180,12 @@ namespace vknn {
             case OpType::FusedPointwise:
                 // The fusion pass records the chain's own layout (all steps agree) in pw_flat.
                 return n.attr.geti("pw_flat", 0) != 0;
+            case OpType::ChannelShuffle:
+                // Kernels exist in BOTH layouts (channel_shuffle_flat / channel_shuffle_nc4), so the
+                // node runs in whatever layout its input carries — globalLayoutAssign resolves it
+                // through the Agnostic arm (channel count is unchanged, so the output simply adopts
+                // the input's layout) and this predicate mirrors that assignment for direct callers.
+                return !n.inputs.empty() && n.inputs[0] != kNoTensor && g.desc(n.inputs[0]).gpuFlat;
             default:
                 // A ShapeDependent descriptor with no arm here (a mis-registration): fall back to the
                 // NC4HW4 default, matching a plain Nc4 op.
@@ -198,8 +204,11 @@ namespace vknn {
         enum class LKind { FixedFlat, FixedNC4, Flexible, Agnostic };
 
         bool layoutAgnostic(const Node &n) {
-            // metadata reshape / no-op copy: input and output bytes are identical, so it keeps its layout.
-            return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast;
+            // metadata reshape / no-op copy: input and output bytes are identical, so it keeps its
+            // layout. ChannelShuffle is not a byte copy but has a kernel in BOTH layouts (a pure
+            // index remap either way), so it equally adopts its input's layout — the channel count
+            // is unchanged, which keeps the NC4HW4 arm of the agnostic rule valid.
+            return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle;
         }
 
         LKind opLayoutKind(const Graph &g, const Node &n) {

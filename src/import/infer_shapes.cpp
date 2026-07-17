@@ -262,6 +262,7 @@ namespace vknn {
                 case OpType::PRelu:
                 case OpType::EyeLike:        // identity-like, same shape as input
                 case OpType::ScatterND:      // same shape as data (input[0])
+                case OpType::ChannelShuffle: // channel permutation: same shape as input
                 case OpType::FusedPointwise: // per-element chain: same shape/dtype as the primary input
                     SH(o)           = SH(nd.inputs[0]);
                     g.desc(o).dtype = g.desc(nd.inputs[0]).dtype;

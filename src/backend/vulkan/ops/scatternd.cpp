@@ -122,7 +122,7 @@ namespace vknn {
                 // inside one record() are NOT auto-barriered. Pass 2 scatters into the SAME `out` buffer pass 1
                 // wrote, so without this compute->compute barrier the dispatches can overlap and read stale
                 // data.
-                vk::computeBarrier(cmd);
+                vk::computeBarrier(*env.ctx, cmd);
                 // Pass 2: scatter updates into out at the index rows. scatternd.comp is local_size_x=256 ==
                 // flat::kFlatLocalSize.
                 if (pc.total > 0)

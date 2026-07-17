@@ -195,6 +195,51 @@ a deterministic cost model (F(4,3) wins on deep channels, F(2,3)'s smaller trans
 shallow); `setHint(Hint::WinogradUnit, 4)` forces F(4,3) on every 3×3, bypassing even the
 Winograd-vs-direct shape rule.
 
+### Barrier hygiene, ChannelShuffle, and the register-tile Winograd GEMM (current branch)
+
+Four further changes, all output-byte-identical to v1.4.0 per model at every tuning level
+(verified per model at `none` and `fast` on both devices; run-to-run determinism gate green):
+
+- **synchronization2 scoped barriers + write-after-read elision**: inter-dispatch barriers narrow
+  their access scopes to storage reads/writes (every operand is an SSBO), and a write-after-read
+  hazard on a reused liveness-pool slot emits an execution-only barrier instead of a full memory
+  barrier. One portability finding is baked into the fallback: the target mobile driver drops a
+  zero-memory-barrier sync1 `vkCmdPipelineBarrier` outright, so the elision only activates through
+  the honored sync2 form (`VK_ACCESS_2_NONE`), and sync1-only devices keep the full barrier.
+- **ChannelShuffle as one dispatch**: the Reshape(rank-5) + Transpose + Reshape group interleave
+  folds at import into a dedicated layout-agnostic operator that runs in NC4HW4 or the flat
+  layout without forcing converts. ShuffleNetV2's 16 shuffle blocks drop from 3 dispatches + 2
+  full-tensor layout round-trips each to 1 dispatch (graph: 173 -> 104 nodes).
+- **Register-tile Winograd GEMM** (`wino_gemm_reg`): a no-LDS twin of the tiled GEMM (direct
+  global reads through the cache hierarchy, same per-output fp32 chain — bit-exact) joins the
+  bit-neutral body race, and wins the ResNet-50 Winograd shapes on the primary device. With the
+  stronger GEMM the Winograd-vs-direct rule gains a second branch: a large-`Cin*Cout` 3x3 also
+  takes Winograd when the output map keeps the GEMM fed (`OHW >= 400`; probe-calibrated:
+  256x256 @ 20x20 -38%, 192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%, while the tile-starved
+  256x256 @ 14x14 stays direct). The rule is inert on this suite (no model sits in the admitted
+  region) and unlocks the class for larger models.
+- **Depthwise 2x2 output tile** (`dwconv_t2`) and **output-channel-sliced dispatch** for the
+  register-tiled conv join the bit-neutral races (the tile carries a 4096-thread occupancy floor).
+
+Measured, cooled interleaved A/B vs v1.4.0 (same protocol as above; sub-2.5 ms models by the
+cached-tune protocol, which now isolates a per-binary cache file and cools before each tune pass —
+a hot tune pass flips near-tie race picks and reads as a phantom several-percent delta):
+
+| Model | primary device | second device |
+|---|---|---|
+| ShuffleNetV2 | **-21%** | **-11%** |
+| SqueezeNet | **-5%** (kernel-parity `none` A/B) | **-12%** |
+| MnasNet 1.0 | **-9%** | **-8%** |
+| YOLOv8n | within the 3% gate | **-8%** |
+| ResNet-50 | parity | **-4%** |
+| Inception-v3 | within the 3% gate | **-3%** |
+| MobileNetV2 / V3, EfficientNet-B0, DenseNet-121 | within the 3% gate | within the 3% gate |
+
+The ShuffleNet win is the dispatch-count story (barrier elision + the shuffle fold on a net that
+was 60-80% dispatch-floor-bound); the deltas that read "within the gate" are dominated by
+tune-time pick variance on a heat-soaked device (branch-vs-branch control runs read parity), with
+no reproducible regression on either device at any tuning level.
+
 ## YoNoSplat encoder (965M-param transformer)
 
 The feed-forward 3D-Gaussian-Splatting encoder (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian /

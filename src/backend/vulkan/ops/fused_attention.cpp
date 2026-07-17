@@ -300,7 +300,7 @@ namespace vknn {
                 }
                 // Two dispatches in one record() are NOT auto-barriered; the combine reads the
                 // scratch pass 1 wrote (same pattern as reduce.cpp).
-                vk::computeBarrier(cmd);
+                vk::computeBarrier(*env.ctx, cmd);
                 combinePipe->dispatch(cmd, {scratch->handle(), dst->handle()}, &combinePc, sizeof(combinePc), (uint32_t) combinePc.rows);
             }
         };
