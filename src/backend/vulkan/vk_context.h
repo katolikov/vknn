@@ -96,16 +96,7 @@ namespace vknn { namespace vk {
 
         /// True when the driver enumerates a subgroup-scope coopmat row with exactly these
         /// dimensions and component types (A and B share `abType`; C and Result share `accType`).
-        bool hasCoopmatShape(uint32_t m, uint32_t n, uint32_t k, uint32_t abType, uint32_t accType) const noexcept {
-            for (const auto &s: coopmatShapes)
-            {
-                if (s.M == m && s.N == n && s.K == k && s.aType == abType && s.bType == abType && s.cType == accType && s.resultType == accType && s.scope == VK_SCOPE_SUBGROUP_KHR)
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
+        bool hasCoopmatShape(uint32_t m, uint32_t n, uint32_t k, uint32_t abType, uint32_t accType) const noexcept;
 
         std::set<std::string> deviceExtensions;
         /// True when the device advertises `ext` (queried once at startup).

@@ -1,216 +1,160 @@
-// Vulkan backend: device tensors (NC4HW4), op registry, pre-recorded segments.
+// Vulkan backend orchestrator: device context, op gate, shared pools, model cache.
 #pragma once
 #include "vk_buffer.h"
 #include "vk_command.h"
 #include "vk_context.h"
 #include "vk_pipeline.h"
+#include "vk_weight_cache.h"
 #include "vk_weight_pool.h"
 #include "core/cache_codec.h"
 #include "vknn/backend.h"
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace vknn {
 
-    /// Opaque (to core) device storage = a Vulkan buffer holding an NC4HW4 tensor.
-    struct DeviceStorage {
-        std::shared_ptr<vk::Buffer> buffer;
-    };
-
-    /// In-memory cache of prepacked weights (keyed by op+role+shape) and autotuned workgroup sizes.
-    /// Skips the host repacking + per-shape autotune on warm session creation. It maps to/from one
-    /// CacheVariant of the multi-variant model cache (see cache_codec.h).
-    class WeightCache {
+    /// The Vulkan backend orchestrator. Owns the device context + command runner, the op registry gate
+    /// (supports/supportsNode decide which nodes run on the GPU vs fall back to the CPU op), the shared
+    /// pipeline and content-addressed constant pools, and the multi-variant model cache. One instance
+    /// serves exactly one model (one Session): the loaded cache document and selected variant key stay
+    /// valid for its whole lifetime. Per-node execution and buffer planning live in VulkanSegment.
+    class VulkanBackend: public Backend {
       public:
-        // Clear and set whether prepacked weights are retained for saving. `enabled` is true when a
-        // persistent cache file is in use; without a file, weights are uploaded and freed (never
-        // retained) to avoid ballooning RAM (a 965M model would hold ~3.85GB of prepacked fp32).
-        void reset(bool enabled) {
-            weights_.clear();
-            tune_.clear();
-            tuneLevel_.clear();
-            enabled_ = enabled;
-            dirty_   = false;
+        // The queue priority is applied at device/queue creation, so it must be known here (before
+        // configure() runs) - the backend factory passes the session Config for exactly this.
+        explicit VulkanBackend(const Config &cfg = {});
+        BackendKind kind() const override {
+            return BackendKind::Vulkan;
         }
-        // Populate from a cached variant (warm start), then retain for the next save.
-        void loadFrom(const CacheVariant &v);
-        // Copy the retained weights + autotune table into a variant for serialization.
-        void writeInto(CacheVariant &v) const;
-        bool enabled() const {
-            return enabled_;
+        const char *name() const override {
+            return "Vulkan";
         }
-        bool dirty() const {
-            return dirty_;
+        bool available() const override {
+            return ctx_ && ctx_->initialized();
         }
-        bool get(const std::string &key, std::vector<float> &out) const;
-        void put(const std::string &key, const std::vector<float> &data);
-        // autotune table: op-signature -> chosen kernel value, plus the Tuning level each entry was
-        // measured at. `level` (when non-null) receives the cached entry's level, or -1 on a miss —
-        // the pick sites re-sweep when the requested level exceeds it (a fast entry does not serve a
-        // heavy request) and reuse it under Tuning::None (none runs no new sweep but honors a cached
-        // one). A legacy entry with no stored level reads back as Fast.
-        int  tuned(const std::string &sig, int dflt, int *level = nullptr) const;
-        void setTuned(const std::string &sig, int val, int level);
+        void configure(const Config &cfg) override;
+        bool supports(OpType t, DType dt) const override;
+
+        // Shape-aware gate behind per-node assignment. The shape/attribute logic is vkNodeGate
+        // (src/core/vk_gates.cpp) — a pure function shared with the host support report — behind
+        // the availability/disable/registry pre-checks, which name their refusal here.
+        bool supportsNode(const Graph &g, const Node &nd, DType dt, std::string *whyNot = nullptr) const override;
+
+        vk::VulkanContext &ctx() {
+            return *ctx_;
+        }
+        vk::CommandRunner &runner() {
+            return *runner_;
+        }
+        // The cache-affecting configuration that keys a cache variant (see cache_codec.h). Two configs
+        // with an equal key produce identical compiled artifacts and share a variant.
+        static CacheVariant variantKey(const Config &cfg);
+        // Load + validate the model cache once, selecting the variant for this config. Caching is
+        // always-on: a valid file's matching variant primes the pipeline + weight caches for a warm
+        // start; a missing/invalid file (or a config with no cached variant yet) starts empty and this
+        // variant is built at load and appended on save. Whole-file guards: format + kernel hash
+        // (embedded SPIR-V) + device (vendor/device/driver + pipeline-cache UUID) + model hash. An
+        // in-memory graph (empty cacheFile) or cfg.noCache stays memory-only.
+        void               loadCache(const Config &cfg, const std::string &modelHash);
+        vk::PipelineCache *pipelineCache() noexcept {
+            return cache_.get();
+        }
+        WeightCache *weightCache() noexcept {
+            return wcache_.get();
+        }
+        // Update this config's variant in the loaded document and rewrite the cache file, but only when
+        // the serialized bytes changed (an unchanged warm session leaves the file untouched). Called from
+        // Session::updateCache() at teardown.
+        void saveCaches();
+
+        bool useFp16(const Config &cfg) const;
+
+        std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) override;
+        void                     finalize() override {
+            saveCaches();
+        }
+
+        // One VkPipeline (+ shader module + layout) per distinct kernel configuration, shared by every
+        // node that requests it. Driver pipeline memory and creation time then scale with the number of
+        // DISTINCT kernels in the model, not the node count (a transformer has hundreds of MatMul nodes
+        // but a handful of matmul kernel configs).
+        std::shared_ptr<vk::ComputePipeline> sharedPipeline(const std::string &name, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &spec, VkPipelineCache cache, uint32_t requiredSubgroupSize = 0);
+
+        // Content-addressed device buffer for small parameter blocks: identical bytes share one
+        // allocation (weak-held, so it frees with its last user at segment teardown).
+        std::shared_ptr<vk::Buffer> uploadPooled(const void *data, size_t bytes);
+
+        // Device-weight pool: one uploaded copy of a weight/bias/transformed-weight buffer shared by
+        // every op instance (and every plan bucket) that references the same weight-cache key at the same
+        // precision. `make` runs on a miss (host-cache consult + prepack + upload); a hit returns the
+        // shared buffer with no upload. Weakly held (frees with its last user), so a single-bucket model
+        // keeps today's allocation count. See vk_weight_pool.h.
+        std::shared_ptr<vk::Buffer> acquireWeight(const std::string &key, bool fp16, const std::function<std::shared_ptr<vk::Buffer>()> &make);
+
+        // Fill a device-only buffer with a weight payload through the persistent staging buffer.
+        //
+        // Weights must not live in host-mapped memory: some UMA drivers cap per-process HOST_VISIBLE
+        // allocations far below the device budget (one mobile driver caps near ~4.4 GiB while the heap
+        // reports 7.8 GiB free), so a large-weight model whose weights are MemPref::kAuto
+        // (DEVICE_LOCAL + HOST_VISIBLE) exhausts that cap and vkAllocateMemory fails with
+        // VK_ERROR_OUT_OF_HOST_MEMORY long before the heap is full. Weight bytes are written once at
+        // upload and never host-read again, so the destination is kDeviceOnly (allocated from a
+        // non-host-visible type where one exists) and is filled by a bounded staged copy: memcpy into
+        // the reusable host-visible staging buffer, then one fenced one-shot vkCmdCopyBuffer per
+        // chunk of kWeightStagingBufferBytes. Synchronous by design — this is load-time code. A
+        // kDeviceOnly buffer is never mapped even on a UMA device whose every memory type is
+        // host-visible, so the staged copy is the only way its bytes arrive; the result is
+        // byte-identical to a direct host write.
+        std::shared_ptr<vk::Buffer> stageWeightToDevice(const void *src, size_t srcBytes, size_t bufferBytes);
+
+        // ---- host NCHW fp32  <->  device NC4HW4 (fp32 path; fp16 device buffers handled here) ----
+        // NC4HW4 groups channels into blocks of four laid out as [N, Cblock, H, W, 4]: the four channels
+        // of a block are the innermost contiguous axis, so one (n,cb,h,w) location owns a 4-lane vector at
+        // `base = (((n*Cb + cb)*H + h)*W + w) * 4` and lane l holds logical channel c = cb*4 + l. A channel
+        // count not divisible by four pads the final block's unused lanes with zero on pack, and those
+        // padding lanes are dropped on unpack. The flat path skips all of this: a gpuFlat tensor stores
+        // plain NCHW row-major, matching host layout byte-for-byte (fp16 conversion aside).
+        static void packToBuffer(vk::Buffer *buf, const RtTensor &rt, bool fp16, bool flat = false, int threads = 1);
+        // Inverse of packToBuffer: gather each logical channel c back out of NC4HW4 by its block cb = c/4
+        // and lane l = c%4, so the source index is `sidx = (((n*Cb + cb)*H + h)*W + w) * 4 + l`. Always
+        // produces fp32 host data (rt.dtype set to Float32); readbackOutput does any final dtype convert.
+        static void unpackFromBuffer(vk::Buffer *buf, RtTensor &rt, bool fp16, bool flat = false, int threads = 1);
+
+        // Download a FLAT (NCHW row-major) graph output straight into the model's declared output dtype,
+        // skipping the fp16->fp32->declared double-convert that unpackFromBuffer (always fp32) followed by
+        // readbackOutput would do. Only valid for terminal graph outputs: inter-segment boundaries are
+        // re-uploaded by packToBuffer, which reads rt.host as fp32, so they keep the fp32 unpack. rt.dtype
+        // is set to what rt.host now holds so readbackOutput takes its dst==rt.dtype memcpy fast path.
+        static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared, int threads = 1, int64_t srcElemOffset = 0, int64_t elemCount = -1);
 
       private:
-        std::map<std::string, std::vector<float>> weights_;
-        std::map<std::string, int>                tune_;
-        std::map<std::string, int>                tuneLevel_; // op-signature -> Tuning level it was measured at
-        bool                                      enabled_ = false; // retain prepacked weights for saving
-        mutable bool                              dirty_   = false;
+        std::unique_ptr<vk::VulkanContext> ctx_;
+        std::unique_ptr<vk::CommandRunner> runner_;
+        std::unique_ptr<vk::PipelineCache> cache_;
+        std::unique_ptr<WeightCache>       wcache_;
+        std::string                        disabledOps_; // Config::disableVkOps (debug op-fallback list)
+        // Multi-variant per-model cache file (cfg.cacheFile). loadCache() reads + validates it into
+        // cacheDoc_ and selects the variant matching curKey_; saveCaches() updates that variant and
+        // rewrites the file only when the serialized bytes (loadedBytes_) change. cacheLoaded_ makes
+        // loadCache idempotent across this model's segments: one VulkanBackend serves exactly one model
+        // (one Session), so the single loaded document + curKey_ stay valid for its whole lifetime.
+        std::string          cacheFile_;
+        CacheDoc             cacheDoc_;
+        CacheVariant         curKey_;
+        std::vector<uint8_t> loadedBytes_;
+        bool                 cacheLoaded_ = false;
+        bool                 noCache_     = false;
+
+        std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;   // sharedPipeline()
+        std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_;  // uploadPooled()
+        DeviceWeightPool<vk::Buffer>                                weightPool_; // acquireWeight() — shared across plan buckets
+        // stageWeightToDevice() staging buffer, bounded by kWeightStagingBufferBytes and kept for the
+        // backend's lifetime: constant operands also upload at RECORD time (operandBuf in ops'
+        // record()), and segments re-record when a boundary buffer changes, so uploads outlive load.
+        std::unique_ptr<vk::Buffer> weightStaging_;
     };
-
-    class VulkanBackend;
-
-    /// Environment passed to Vulkan operators during prepare/record.
-    struct VkOpEnv {
-        VulkanBackend                        *backend = nullptr;
-        vk::VulkanContext                    *ctx     = nullptr;
-        vk::PipelineCache                    *cache   = nullptr;
-        const Graph                          *graph   = nullptr;
-        const Config                         *config  = nullptr;
-        std::function<vk::Buffer *(TensorId)> devBuf; // resolves a tensor id to its (possibly pool-aliased) activation buffer
-        // Drops an initializer's HOST bytes the moment its device copy exists, so a large-weight model
-        // never holds the host and device copy of the same weight at once (the load-time peak would
-        // otherwise be twice the weight set, which exhausts phone RAM on a multi-GB model). Null when
-        // the session keeps its weights (Config::freeWeightsAfterUpload off). Only weights uploaded at
-        // prepare() time are released; record-time constant operands stay resident.
-        std::function<void(TensorId)>         releaseInitializer;
-        // Memo of the flat device buffer already uploaded for an initializer of THIS graph. A weight may
-        // feed several nodes; once its host bytes are released the content digest can no longer be
-        // recomputed, so every consumer after the first resolves through this memo instead.
-        std::function<std::shared_ptr<vk::Buffer>(TensorId)>       lookupFlatWeight;
-        std::function<void(TensorId, std::shared_ptr<vk::Buffer>)> rememberFlatWeight;
-        bool                                  useFp16  = false; // per-node: false for a storeFp32 node so it runs its fp32 kernel
-        bool                                  baseFp16 = false; // segment-wide precision (what a non-storeFp32 tensor is stored as)
-        WeightCache                          *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
-        vk::CommandRunner                    *runner   = nullptr; // for on-device autotuning benchmarks
-        Tuning                                tuning   = Tuning::Fast;
-        Mode                                  winograd = Mode::Auto;
-        // Per-model namespace for the weight cache, so reusing one cacheDir across different models can't
-        // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
-        std::string modelTag;
-        // Per-GPU namespace for the autotune table. The fastest kernel is GPU/driver-specific, so a cache
-        // tuned on one device must not apply its choices on another; keying the autotune signature by this
-        // tag keeps a separate set of tuned entries per device in the same cache file.
-        std::string gpuTag;
-
-        // Cache-first autotune reuse decision for a pick site. On a cached entry for `sig`, writes its
-        // chosen value to `out` and returns true when it may be reused: always under Tuning::None (none
-        // runs no new sweep but honors a stored measurement) and otherwise only when the entry was
-        // measured at a level >= the requested one (a fast entry is re-swept for a heavy request). A
-        // miss, a lower cached level, or a null weight cache returns false and the site sweeps (or, under
-        // None, falls back to its default kernel). The site applies any value-specific validity gate.
-        bool reuseTuned(const std::string &sig, int &out) const {
-            if (!weights)
-            {
-                return false;
-            }
-            int level  = -1;
-            int cached = weights->tuned(sig, 0, &level);
-            if (level >= 0 && (tuning == Tuning::None || level >= (int) tuning))
-            {
-                out = cached;
-                return true;
-            }
-            return false;
-        }
-
-        // Session-shared compute pipeline, keyed by (shader, buffer count, push-constant size, spec
-        // constants, pinned subgroup size). Nodes with the same kernel configuration share one
-        // VkPipeline + shader module instead of each building their own — the driver's per-pipeline
-        // host memory and creation time scale with the number of DISTINCT kernels, not the node count.
-        // `requiredSubgroupSize` 0 leaves the driver's width choice; non-zero pins it (coopmat kernels)
-        // and requires caps().subgroupSizeControl, which the requesting op gates on.
-        std::shared_ptr<vk::ComputePipeline> pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData = {}, uint32_t requiredSubgroupSize = 0) const;
-
-        // Content-addressed upload for small parameter blocks (e.g. pw_epilogue plans): identical bytes
-        // yield one shared device buffer, so per-node metadata does not multiply vkAllocateMemory count.
-        std::shared_ptr<vk::Buffer> uploadPooled(const void *data, size_t bytes) const;
-
-        // Upload a weight payload into device-only memory through the backend's persistent staging
-        // buffer (VulkanBackend::stageWeightToDevice): `srcBytes` are copied into a fresh buffer of
-        // `bufferBytes` (>= srcBytes; the tail is allocated padding, never read as data). The
-        // destination has no host mapping, so weights stay outside the driver's per-process
-        // host-mappable memory budget.
-        std::shared_ptr<vk::Buffer> uploadWeightDeviceOnly(const void *src, size_t srcBytes, size_t bufferBytes) const;
-
-        // Backend-level device-weight pool. Uploaded weight/bias/transformed-weight buffers are shared
-        // across plan buckets keyed by (weight-cache key, precision): the first op instance to acquire a
-        // key runs `make` (host-cache consult + prepack + upload); later instances — including a second
-        // shape bucket's re-prepare — get the same device buffer instead of a duplicate upload. Weakly
-        // held, so a fixed-shape model's single instance keeps today's allocation count exactly.
-        std::shared_ptr<vk::Buffer> acquireWeight(const std::string &key, bool fp16, std::function<std::shared_ptr<vk::Buffer>()> make) const;
-    };
-
-    /// One operator on the Vulkan backend. Adding an op: subclass + VKNN_REGISTER_VK_OP.
-    ///
-    /// The two phases run at distinct times: prepare() once at plan time (session build / warm start),
-    /// record() once per segment when the command buffer is pre-recorded. Any state an op computes in
-    /// prepare() and reads back in record() must be stored on the op instance, since the same instance
-    /// serves both calls.
-    class VulkanOp {
-      public:
-        virtual ~VulkanOp() = default;
-        /// Create pipeline(s), prepack + upload weights, allocate op-private buffers. Runs once at plan
-        /// time; may consult and populate the weight/tune cache in `env`.
-        virtual void prepare(const Node &node, VkOpEnv &env) = 0;
-        /// Record dispatch(es) into the command buffer. Runs at pre-record time and must not allocate or
-        /// upload (all device resources are already created in prepare()); it only binds and dispatches.
-        virtual void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) = 0;
-    };
-
-    /// Produces a fresh backend op instance for one node (each node gets its own instance so prepare()
-    /// state does not alias between nodes of the same OpType).
-    using VkOpFactory = std::function<std::unique_ptr<VulkanOp>()>;
-
-    /// Global OpType -> factory table. Populated at static-init time by the VKNN_REGISTER_VK_OP macro;
-    /// the planner queries has() to decide GPU-vs-fallback and calls create() to instantiate ops.
-    class VkOpRegistry {
-      public:
-        /// The process-wide singleton (constructed on first use, so registration order is irrelevant).
-        static VkOpRegistry &instance();
-        /// Register (or replace) the factory for an OpType.
-        void                 reg(OpType t, VkOpFactory f) {
-            factories_[t] = std::move(f);
-        }
-        /// True if a Vulkan implementation is registered for `t` (i.e. the op can run on the GPU).
-        bool has(OpType t) const {
-            return factories_.count(t) > 0;
-        }
-        /// Instantiate the op for `t`, or nullptr if none is registered.
-        std::unique_ptr<VulkanOp> create(OpType t) const {
-            auto it = factories_.find(t);
-            return it == factories_.end() ? nullptr : it->second();
-        }
-
-      private:
-        std::map<OpType, VkOpFactory> factories_;
-    };
-
-    /// Static-init helper: constructing one registers `f` for `t`. VKNN_REGISTER_VK_OP declares a file-
-    /// scope instance so each op source file self-registers when its translation unit is loaded.
-    struct VkOpRegistrar {
-        VkOpRegistrar(OpType t, VkOpFactory f) {
-            VkOpRegistry::instance().reg(t, std::move(f));
-        }
-    };
-#define VKNN_REGISTER_VK_OP(OPTYPE, CLASS)                           \
-    static ::vknn::VkOpRegistrar _vx_vkop_reg_##CLASS(OPTYPE, []() { \
-        return std::unique_ptr<::vknn::VulkanOp>(new CLASS());       \
-    })
-
-    /// Physically-stored element count for a logical shape in the NC4HW4 device layout. Channels are
-    /// grouped into blocks of four (cBlocks rounds the channel count up, so a partial final block still
-    /// costs a full four channels of padding), and the block width of four is the `* 4` factor. Matches
-    /// formatElems(TensorFormat::NC4HW4, ...) and is what device activation buffers are sized by.
-    /// @param shape Logical (NCHW-interpreted) tensor shape.
-    /// @returns The padded NC4HW4 element count `N * cBlocks(C) * 4 * H * W`.
-    inline int64_t packedElems(const Shape &shape) {
-        NCHW x = NCHW::from(shape);
-        return x.n * cBlocks(x.c) * 4 * x.h * x.w;
-    }
 
 } // namespace vknn

@@ -5,6 +5,17 @@
 
 namespace vknn { namespace vk {
 
+    bool VulkanCaps::hasCoopmatShape(uint32_t m, uint32_t n, uint32_t k, uint32_t abType, uint32_t accType) const noexcept {
+        for (const auto &s: coopmatShapes)
+        {
+            if (s.M == m && s.N == n && s.K == k && s.aType == abType && s.bType == abType && s.cType == accType && s.resultType == accType && s.scope == VK_SCOPE_SUBGROUP_KHR)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::string VulkanCaps::summary() const {
         std::ostringstream os;
         os << deviceName << " | " << driverName << " (" << driverInfo << ")"

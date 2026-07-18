@@ -2,7 +2,8 @@
 // with the matching shaders/*.comp) and a few small upload/dispatch helpers. Each operator
 // lives in its own .cpp next to this header.
 #pragma once
-#include "backend/vulkan/vk_backend.h"
+#include "backend/vulkan/vk_op_env.h"
+#include "backend/vulkan/vk_weight_cache.h"
 #include "vknn/dtype.h"
 #include <cstdio>
 #include <cstring>
