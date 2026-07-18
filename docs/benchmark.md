@@ -195,7 +195,7 @@ a deterministic cost model (F(4,3) wins on deep channels, F(2,3)'s smaller trans
 shallow); `setHint(Hint::WinogradUnit, 4)` forces F(4,3) on every 3×3, bypassing even the
 Winograd-vs-direct shape rule.
 
-### Barrier hygiene, ChannelShuffle, and the register-tile Winograd GEMM (current branch)
+### Barrier hygiene, ChannelShuffle, and the register-tile Winograd GEMM (v1.4.1)
 
 Four further changes, all output-byte-identical to v1.4.0 per model at every tuning level
 (verified per model at `none` and `fast` on both devices; run-to-run determinism gate green):

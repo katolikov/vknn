@@ -264,7 +264,7 @@ parallelism-starved shapes (`setHint(Hint::SplitKConv, ...)` overrides its shape
 sliding-window 1xK/Kx1 kernel, a raced 16×16 LDS-halo tile, and a small-axis softmax mapping — see
 [docs/benchmark.md](docs/benchmark.md) § Conv register tiles.
 
-Since v1.4.0, main adds synchronization2-scoped barriers with write-after-read elision, a
+v1.4.1 adds synchronization2-scoped barriers with write-after-read elision, a
 one-dispatch ChannelShuffle operator (ShuffleNetV2 −11/−21% per device), a no-LDS register-tile
 Winograd GEMM that extends the Winograd shape rule to large-channel 3×3 convs on big output maps,
 and depthwise/output-channel tile candidates in the bit-neutral races — output bytes per model are
