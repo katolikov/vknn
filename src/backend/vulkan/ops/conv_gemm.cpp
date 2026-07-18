@@ -115,7 +115,7 @@ namespace vknn {
                     auto   p  = env.pipeline(shader("conv_gemm", env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm});
                     double ms = bestOf([&](VkCommandBuffer cmd) {
                         p->dispatch(cmd, {sSrc->handle(), wt->handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()}, &pc, sizeof(pc), gxT, (uint32_t) gyT, (uint32_t) x.n);
-                        vk::computeBarrier(cmd);
+                        vk::computeBarrier(*env.ctx, cmd);
                     });
                     if (ms < bestMs)
                     {
@@ -193,7 +193,7 @@ namespace vknn {
                 {
                     // partial pass (no bias/act/epilogue) -> reduce pass (finish + epilogue).
                     ksPipe->dispatch(cmd, {env.devBuf(node.inputs[0])->handle(), wt->handle(), partBuf->handle()}, &kspc, sizeof(kspc), gx, gy, gz);
-                    vk::computeBarrier(cmd);
+                    vk::computeBarrier(*env.ctx, cmd);
                     std::vector<VkBuffer> rb {partBuf->handle(), pc.hasBias ? bs->handle() : dst->handle(), dst->handle()};
                     epi.append(rb, node, env, dst->handle());
                     krPipe->dispatch(cmd, rb, &krpc, sizeof(krpc), (uint32_t) krGroups);

@@ -1,0 +1,87 @@
+#version 450
+// Winograd transform-domain matmul as a register-tiled batched GEMM with NO shared-memory
+// staging: every thread reads its V and U operands straight from global memory through L1/L2
+// inside the K loop (MNN's mobile GEMM structure, SA=SB=0). Same logical output tile as
+// wino_gemm_fp16.comp — 64 threads (MDIM 8 x NDIM 8), RM tiles x 1 output channel-block per
+// thread, TILE_NB = 8 ocb per workgroup — and the SAME per-output accumulation: fp32 vec4
+// accumulators, one widened 4-lane dot per input channel-block, k ascending one channel-block at
+// a time over the whole Cinb range. The LDS kernel's KWG chunking keeps k contiguous and
+// ascending inside each chunk with chunks ascending, so this straight k loop reproduces its
+// per-output operation sequence exactly; only the operand staging differs, making the kernel a
+// bit-neutral member of tuneWino's GEMM-body race. fp32 accumulation only: the fp16-accumulate
+// (ACC16) variant stays LDS-only.
+//
+// Specialization constant RM (id 0) = 4 or 8 tiles per thread, exactly like the LDS kernel:
+// bit-neutral, it only remaps threads to outputs.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+
+layout(constant_id = 0) const int RM = 4; // tiles per thread (M micro-tile): 4 or 8
+
+#define MDIM 8      // threads in M
+#define NDIM 8      // threads in N   (MDIM*NDIM = 64)
+#define RM_MAX 8
+#define TILE_M (MDIM * RM)   // output tiles (M) per workgroup
+#define TILE_NB NDIM         // output channel-blocks (N) per workgroup
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer V { f16vec4 vbuf[]; };
+layout(std430, binding = 1) readonly buffer U { f16vec4 ubuf[]; };
+layout(std430, binding = 2) writeonly buffer M { f16vec4 mbuf[]; };
+layout(push_constant) uniform PC { int Cin, Cout, nT; } pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int p = int(gl_WorkGroupID.z);
+  int m0 = int(gl_WorkGroupID.x) * TILE_M;       // first tile
+  int nb0 = int(gl_WorkGroupID.y) * TILE_NB;     // first ocb
+
+  uint lid = gl_LocalInvocationID.x;
+  int tIdM = int(lid) % MDIM;   // 0..7
+  int tIdN = int(lid) / MDIM;   // 0..7
+
+  int ocb = nb0 + tIdN;         // this thread's output channel-block
+  if (ocb >= Coutb) return;     // no barriers here, so an out-of-range thread may exit early
+
+  // Per-lane U rows: ubuf[(p*Cout + oc)*Cinb + k]. oc0 = ocb*4 is always < Cout for ocb < Coutb;
+  // a lane past Cout reads nothing and contributes zeros, exactly like the LDS kernel's zero-
+  // padded sB entries, so a partial block's stored M lanes are the same zeros.
+  int oc0 = ocb * 4;
+  int uBase0 = (p * pc.Cout + oc0) * Cinb;
+  bool oc1In = oc0 + 1 < pc.Cout;
+  bool oc2In = oc0 + 2 < pc.Cout;
+  bool oc3In = oc0 + 3 < pc.Cout;
+
+  int vBaseP = p * Cinb * pc.nT;        // vbuf[(p*Cinb + k)*nT + m]
+
+  vec4 acc[RM_MAX];
+  for (int r = 0; r < RM; ++r) acc[r] = vec4(0.0);
+
+  // Straight k loop over the whole Cinb range: per k the 4 U lanes load once and stay in
+  // registers across the RM tiles; each tile then costs one V load + one widened 4-lane dot per
+  // lane, the same in-register multiply the LDS kernel runs on its staged copies.
+  for (int k = 0; k < Cinb; ++k) {
+    vec4 b0 = vec4(ubuf[uBase0 + k]);
+    vec4 b1 = oc1In ? vec4(ubuf[uBase0 + Cinb + k]) : vec4(0.0);
+    vec4 b2 = oc2In ? vec4(ubuf[uBase0 + 2 * Cinb + k]) : vec4(0.0);
+    vec4 b3 = oc3In ? vec4(ubuf[uBase0 + 3 * Cinb + k]) : vec4(0.0);
+    int vRow = vBaseP + k * pc.nT;
+    for (int r = 0; r < RM; ++r) {
+      int m = m0 + tIdM + r * MDIM;
+      // A tile past nT reads nothing (keeps the load in-bounds) and its accumulator is never
+      // stored; the LDS kernel zero-pads the same entries.
+      vec4 a = (m < pc.nT) ? vec4(vbuf[vRow + m]) : vec4(0.0);
+      acc[r] += vec4(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+    }
+  }
+
+  // ---- store M[p][ocb][tile] ----  mbuf[(p*Coutb + ocb)*nT + tile]; same coalesced layout and
+  // the same f16vec4 narrowing (RoundingModeRTE via store16.glsl) as the LDS kernel's store.
+  int cBase = (p * Coutb + ocb) * pc.nT;
+  int m = m0 + tIdM;
+  for (int r = 0; r < RM; ++r)
+    if (m + r * MDIM < pc.nT) mbuf[cBase + (m + r * MDIM)] = f16vec4(acc[r]);
+}

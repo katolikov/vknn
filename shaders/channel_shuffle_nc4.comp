@@ -1,0 +1,38 @@
+#version 450
+#include "precision.glsl"
+// ChannelShuffle, NC4HW4 path: out[n][c][s] = in[n][(c % g) * (C/g) + c / g][s] on the packed
+// layout. One thread per output vec4 lane-quad (N * ceil(C/4) * HW threads): each of the 4 lanes is
+// a logical output channel whose source lane lands in a different input block, so the input side
+// reads 4 scalars (binding 0, the scalar view) and the output side stores one STORE4 (binding 1,
+// the vec4 view of the destination) — the same split convert_layout.comp uses. Pure index remap:
+// lanes copy STORE-to-STORE with no narrowing conversion, bit-identical in both precisions.
+// total = N * Cb * HW with Cb = ceil(C/4); HW = the spatial element count per channel.
+#include "common.glsl"
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S  { STORE  s[];  };
+layout(std430, binding = 1) writeonly buffer D4 { STORE4 d4[]; };
+layout(push_constant) uniform PC { int total, C, HW, groups; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int Cb      = (pc.C + 3) / 4;
+  int spatial = int(gid) % pc.HW;
+  int cb      = (int(gid) / pc.HW) % Cb;
+  int n       = int(gid) / (pc.HW * Cb);
+  int groupWidth = pc.C / pc.groups;
+  STORE4 v = STORE4(0.0);
+  for (int lane = 0; lane < 4 && cb * 4 + lane < pc.C; ++lane) {
+    int c = cb * 4 + lane;
+    int sourceChannel = (c % pc.groups) * groupWidth + c / pc.groups;
+    // Scalar index into the NC4HW4 source: block (n, sourceChannel/4, spatial) times 4 lanes,
+    // plus the source lane within its block.
+    v[lane] = s[((n * Cb + sourceChannel / 4) * pc.HW + spatial) * 4 + sourceChannel % 4];
+  }
+  d4[gid] = v;
+}

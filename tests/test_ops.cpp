@@ -8,6 +8,7 @@
 #include "core/matmul_tile.h"
 #include "import/dim_expr.h"
 #include "import/passes.h"
+#include "import/passes_internal.h" // fuseChannelShuffle (ChannelShuffle fold tests)
 #include "vknn/graph.h"
 #include "vknn/session.h"
 #include <cmath>
@@ -5679,4 +5680,353 @@ TEST(Passes, DynamicQuantBareMatMulIntegerNotLowered) {
     dequantizeGraph(g);
     EXPECT_EQ(countDynQuant(g), 1) << "a bare MatMulInteger with an escaping int32 output is not lowered";
     EXPECT_EQ(g.nodes[0].type, OpType::MatMulInteger);
+}
+
+// --- ChannelShuffle: the group-interleave channel permutation (ShuffleNetV2), plus the import
+// fold that creates it from the Reshape/Transpose/Reshape chain. The reference below computes the
+// FORWARD scatter composition (split -> swap -> merge), independent of the gather form the kernels
+// use, so the two derivations cross-check each other. ---
+namespace {
+
+    // Forward reference: input channel i*(C/g)+j (group i, member j) lands at output channel j*g+i.
+    std::vector<float> channelShuffleRef(const std::vector<float> &in, int64_t N, int64_t C, int64_t HW, int64_t g) {
+        std::vector<float> out(in.size());
+        int64_t            width = C / g;
+        for (int64_t n = 0; n < N; ++n)
+        {
+            for (int64_t i = 0; i < g; ++i)
+            {
+                for (int64_t j = 0; j < width; ++j)
+                {
+                    for (int64_t s = 0; s < HW; ++s)
+                    {
+                        out[(n * C + (j * g + i)) * HW + s] = in[(n * C + (i * width + j)) * HW + s];
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    std::vector<float> iotaData(int64_t count) {
+        std::vector<float> v((size_t) count);
+        for (int64_t i = 0; i < count; ++i)
+        {
+            v[(size_t) i] = (float) i;
+        }
+        return v;
+    }
+
+    Attr intAttr(int64_t v) {
+        Attr a;
+        a.kind = Attr::Int;
+        a.i    = v;
+        return a;
+    }
+
+    // Build the ShuffleNetV2 idiom as a 3-node graph: Reshape [N,C,H,W] -> [N,g,C/g,H,W],
+    // Transpose perm {0,2,1,3,4} (or the supplied override), Reshape back to [N,C,H,W]. Every
+    // tensor carries its resolved shape, so fuseChannelShuffle can run on it directly; the int64
+    // shape initializers also let a Session resolve it through the normal import pipeline.
+    Graph buildShuffleChain(int64_t N, int64_t C, int64_t H, int64_t W, int64_t g, std::vector<int64_t> perm = {0, 2, 1, 3, 4}) {
+        Graph      graph;
+        TensorDesc xd;
+        xd.name    = "x";
+        xd.shape   = {N, C, H, W};
+        xd.isInput = true;
+        TensorId x = graph.addTensor(xd);
+        graph.inputs.push_back(x);
+        auto addShapeInit = [&](const char *name, const std::vector<int64_t> &dims) {
+            TensorDesc d;
+            d.name          = name;
+            d.shape         = {(int64_t) dims.size()};
+            d.dtype         = DType::Int64;
+            d.isInitializer = true;
+            TensorId   t    = graph.addTensor(d);
+            HostBuffer hb;
+            hb.resizeElems((int64_t) dims.size(), DType::Int64);
+            std::memcpy(hb.i64(), dims.data(), dims.size() * sizeof(int64_t));
+            graph.initializers[t] = hb;
+            return t;
+        };
+        auto addAct = [&](const char *name, Shape shape) {
+            TensorDesc d;
+            d.name  = name;
+            d.shape = std::move(shape);
+            return graph.addTensor(d);
+        };
+        TensorId splitOut = addAct("split_out", {N, g, C / g, H, W});
+        TensorId swapOut  = addAct("swap_out", {N, C / g, g, H, W});
+        TensorDesc yd;
+        yd.name     = "y";
+        yd.shape    = {N, C, H, W};
+        yd.isOutput = true;
+        TensorId y  = graph.addTensor(yd);
+        graph.outputs.push_back(y);
+        Node split;
+        split.type    = OpType::Reshape;
+        split.name    = "split";
+        split.inputs  = {x, addShapeInit("split_shape", {N, g, C / g, H, W})};
+        split.outputs = {splitOut};
+        graph.nodes.push_back(split);
+        Node swap;
+        swap.type            = OpType::Transpose;
+        swap.name            = "swap";
+        swap.inputs          = {splitOut};
+        swap.outputs         = {swapOut};
+        swap.attr.map["perm"] = ints(std::move(perm));
+        graph.nodes.push_back(swap);
+        Node merge;
+        merge.type    = OpType::Reshape;
+        merge.name    = "merge";
+        merge.inputs  = {swapOut, addShapeInit("merge_shape", {N, C, H, W})};
+        merge.outputs = {y};
+        graph.nodes.push_back(merge);
+        return graph;
+    }
+
+} // namespace
+
+// --- ChannelShuffle CPU op, g=2, asymmetric N/C/H/W: exact match (pure data movement) against the
+// forward scatter reference. ---
+TEST(Ops, ChannelShuffleGroups2) {
+    const int64_t N = 2, C = 8, H = 3, W = 2, g = 2;
+    Attributes attr;
+    attr.map["groups"] = intAttr(g);
+    std::vector<float> in = iotaData(N * C * H * W);
+    auto out              = runOp(OpType::ChannelShuffle, 0, attr, {N, C, H, W}, in, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {N, C, H, W}));
+    EXPECT_EQ(out.data, channelShuffleRef(in, N, C, H * W, g));
+}
+
+// --- ChannelShuffle CPU op, g=4, a different asymmetric geometry. ---
+TEST(Ops, ChannelShuffleGroups4) {
+    const int64_t N = 1, C = 12, H = 2, W = 5, g = 4;
+    Attributes attr;
+    attr.map["groups"] = intAttr(g);
+    std::vector<float> in = iotaData(N * C * H * W);
+    auto out              = runOp(OpType::ChannelShuffle, 0, attr, {N, C, H, W}, in, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {N, C, H, W}));
+    EXPECT_EQ(out.data, channelShuffleRef(in, N, C, H * W, g));
+}
+
+// --- fuseChannelShuffle folds the exact 3-node chain into one ChannelShuffle carrying groups,
+// reading the chain's source and writing its final output tensor. ---
+TEST(ChannelShuffleFold, FoldsExactChain) {
+    Graph graph = buildShuffleChain(1, 6, 2, 3, 2);
+    fuseChannelShuffle(graph);
+    ASSERT_EQ(graph.nodes.size(), 1u);
+    const Node &n = graph.nodes[0];
+    EXPECT_EQ(n.type, OpType::ChannelShuffle);
+    EXPECT_EQ(n.attr.geti("groups", 0), 2);
+    ASSERT_EQ(n.inputs.size(), 1u);
+    EXPECT_EQ(graph.desc(n.inputs[0]).name, "x");
+    ASSERT_EQ(n.outputs.size(), 1u);
+    EXPECT_EQ(n.outputs[0], graph.outputs[0]);
+}
+
+// --- A Transpose that is not the pure axes-1/2 swap (here it also flips the spatial dims) is NOT
+// a channel shuffle; the chain must be left alone. ---
+TEST(ChannelShuffleFold, RejectsNonSwapPerm) {
+    Graph graph = buildShuffleChain(1, 6, 2, 3, 2, {0, 2, 1, 4, 3});
+    fuseChannelShuffle(graph);
+    ASSERT_EQ(graph.nodes.size(), 3u);
+    for (const Node &n: graph.nodes)
+    {
+        EXPECT_NE(n.type, OpType::ChannelShuffle);
+    }
+}
+
+// --- An interior tensor with a second reader must stay materialized, so the chain is not folded. ---
+TEST(ChannelShuffleFold, KeepsChainWithSecondReader) {
+    Graph graph = buildShuffleChain(1, 6, 2, 3, 2);
+    // A Relu also consuming the Transpose output: folding would leave it reading a dead tensor.
+    TensorId   swapOut = graph.nodes[1].outputs[0];
+    TensorDesc td;
+    td.name     = "tap";
+    td.shape    = graph.desc(swapOut).shape;
+    TensorId tap = graph.addTensor(td);
+    Node     relu;
+    relu.type    = OpType::Relu;
+    relu.name    = "tap_relu";
+    relu.inputs  = {swapOut};
+    relu.outputs = {tap};
+    graph.nodes.push_back(relu);
+    fuseChannelShuffle(graph);
+    ASSERT_EQ(graph.nodes.size(), 4u);
+    for (const Node &n: graph.nodes)
+    {
+        EXPECT_NE(n.type, OpType::ChannelShuffle);
+    }
+}
+
+// --- End to end through Session (which runs the full import pipeline, including the fold): the
+// raw Reshape/Transpose/Reshape graph executes as the ChannelShuffle op and must reproduce the
+// forward reference exactly. ---
+TEST(ChannelShuffleFold, SessionOutputMatchesManualPermute) {
+    const int64_t N = 2, C = 6, H = 2, W = 3, g = 3;
+    Graph  graph = buildShuffleChain(N, C, H, W, g);
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(graph), cfg);
+    ASSERT_TRUE(sess);
+    std::vector<float> in = iotaData(N * C * H * W);
+    IOTensor           x;
+    x.name  = "x";
+    x.shape = {N, C, H, W};
+    x.dtype = DType::Float32;
+    x.data.resize(in.size() * sizeof(float));
+    std::memcpy(x.data.data(), in.data(), x.data.size());
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({x}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    ASSERT_EQ(outs[0].shape, (std::vector<int64_t> {N, C, H, W}));
+    const float       *o = outs[0].f32();
+    std::vector<float> got(o, o + N * C * H * W);
+    EXPECT_EQ(got, channelShuffleRef(in, N, C, H * W, g));
+}
+
+// --- Layout flexibility: ChannelShuffle adopts its input's layout, so the layout pass inserts NO
+// ConvertLayout around it in either neighborhood. In an NC4HW4 span (Conv -> shuffle -> Conv) it
+// stays packed; in a flat span (Transpose -> shuffle -> Transpose) it stays flat. The only convert
+// allowed in the NC4 graph is the trailing graph-output one (NC4HW4 -> flat readback). ---
+TEST(ChannelShuffleFold, LayoutAdoptsNc4Neighborhood) {
+    const int64_t N = 1, C = 8, H = 4, W = 4;
+    Graph         graph;
+    TensorDesc    xd;
+    xd.name    = "x";
+    xd.shape   = {N, C, H, W};
+    xd.isInput = true;
+    TensorId x = graph.addTensor(xd);
+    graph.inputs.push_back(x);
+    auto addWeight = [&](const char *name) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = {C, C, 1, 1};
+        d.isInitializer = true;
+        TensorId   t    = graph.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems(C * C, DType::Float32);
+        for (int64_t i = 0; i < C * C; ++i)
+        {
+            hb.f32()[i] = 1.f;
+        }
+        graph.initializers[t] = hb;
+        return t;
+    };
+    auto addAct = [&](const char *name) {
+        TensorDesc d;
+        d.name  = name;
+        d.shape = {N, C, H, W};
+        return graph.addTensor(d);
+    };
+    TensorId c1 = addAct("conv1_out"), sh = addAct("shuffle_out");
+    TensorDesc yd;
+    yd.name     = "y";
+    yd.shape    = {N, C, H, W};
+    yd.isOutput = true;
+    TensorId y  = graph.addTensor(yd);
+    graph.outputs.push_back(y);
+    Node conv1;
+    conv1.type    = OpType::Conv;
+    conv1.name    = "conv1";
+    conv1.inputs  = {x, addWeight("w1")};
+    conv1.outputs = {c1};
+    graph.nodes.push_back(conv1);
+    Node shuffle;
+    shuffle.type               = OpType::ChannelShuffle;
+    shuffle.name               = "shuffle";
+    shuffle.inputs             = {c1};
+    shuffle.outputs            = {sh};
+    shuffle.attr.map["groups"] = intAttr(2);
+    graph.nodes.push_back(shuffle);
+    Node conv2;
+    conv2.type    = OpType::Conv;
+    conv2.name    = "conv2";
+    conv2.inputs  = {sh, addWeight("w2")};
+    conv2.outputs = {y};
+    graph.nodes.push_back(conv2);
+
+    insertLayoutConverts(graph);
+    EXPECT_FALSE(graph.desc(sh).gpuFlat) << "shuffle between NC4HW4 convs must stay NC4HW4";
+    int converts = 0;
+    for (const Node &n: graph.nodes)
+    {
+        if (n.type == OpType::ConvertLayout)
+        {
+            converts++;
+            // The only permitted convert is the graph-output readback one.
+            EXPECT_EQ(n.inputs[0], y) << "unexpected interior ConvertLayout '" << n.name << "'";
+        }
+    }
+    EXPECT_EQ(converts, 1) << "exactly the trailing output convert, none around the shuffle";
+}
+
+TEST(ChannelShuffleFold, LayoutAdoptsFlatNeighborhood) {
+    const int64_t N = 1, C = 6, H = 2, W = 3;
+    Graph         graph;
+    TensorDesc    xd;
+    xd.name    = "x";
+    xd.shape   = {N, C, H, W};
+    xd.isInput = true;
+    TensorId x = graph.addTensor(xd);
+    graph.inputs.push_back(x);
+    auto addAct = [&](const char *name, Shape shape) {
+        TensorDesc d;
+        d.name  = name;
+        d.shape = std::move(shape);
+        return graph.addTensor(d);
+    };
+    TensorId t1 = addAct("nhwc", {N, H, W, C});
+    TensorId sh = addAct("shuffle_out", {N, H, W, C}); // shuffling axis 1 of the NHWC view
+    TensorDesc yd;
+    yd.name     = "y";
+    yd.shape    = {N, C, H, W};
+    yd.isOutput = true;
+    TensorId y  = graph.addTensor(yd);
+    graph.outputs.push_back(y);
+    Node toNhwc;
+    toNhwc.type             = OpType::Transpose;
+    toNhwc.name             = "to_nhwc";
+    toNhwc.inputs           = {x};
+    toNhwc.outputs          = {t1};
+    toNhwc.attr.map["perm"] = ints({0, 2, 3, 1});
+    graph.nodes.push_back(toNhwc);
+    Node shuffle;
+    shuffle.type               = OpType::ChannelShuffle;
+    shuffle.name               = "shuffle";
+    shuffle.inputs             = {t1};
+    shuffle.outputs            = {sh};
+    shuffle.attr.map["groups"] = intAttr(2);
+    graph.nodes.push_back(shuffle);
+    Node toNchw;
+    toNchw.type             = OpType::Transpose;
+    toNchw.name             = "to_nchw";
+    toNchw.inputs           = {sh};
+    toNchw.outputs          = {y};
+    toNchw.attr.map["perm"] = ints({0, 3, 1, 2});
+    graph.nodes.push_back(toNchw);
+
+    insertLayoutConverts(graph);
+    EXPECT_TRUE(graph.desc(sh).gpuFlat) << "shuffle inside a flat Transpose span must stay flat";
+    // The graph INPUT defaults to NC4HW4, so one convert at the x -> to_nhwc boundary is the layout
+    // pass working as designed; the shuffle's own edges must stay convert-free.
+    for (const Node &n: graph.nodes)
+    {
+        if (n.type == OpType::ConvertLayout)
+        {
+            EXPECT_EQ(n.inputs[0], x) << "unexpected ConvertLayout '" << n.name << "' inside the flat span";
+        }
+    }
+    for (const Node &n: graph.nodes)
+    {
+        if (n.type == OpType::ChannelShuffle)
+        {
+            EXPECT_EQ(n.inputs[0], t1) << "the shuffle must read the Transpose output directly (no convert spliced)";
+        }
+        if (n.type == OpType::Transpose && n.name == "to_nchw")
+        {
+            EXPECT_EQ(n.inputs[0], sh) << "the trailing Transpose must read the shuffle output directly";
+        }
+    }
 }

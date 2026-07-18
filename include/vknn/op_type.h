@@ -116,6 +116,13 @@ namespace vknn {
                                  // in one kernel, operands read through per-axis strides
                                  // (core/fused_attention.h). Created only by the load-time
                                  // fuseDecodeAttention pass — never imported, never serialized.
+        ChannelShuffle,          // group-interleave channel permutation (ShuffleNetV2):
+                                 //   out[n][c] = in[n][(c % g) * (C/g) + c / g], `groups` attr = g.
+                                 // Created by the import-time fuseChannelShuffle pass from the
+                                 // Reshape([N,g,C/g,...]) -> Transpose(0,2,1,...) -> Reshape chain;
+                                 // never parsed from ONNX (no standard op), but unlike
+                                 // Rope/FusedAttention it IS serialized to .vxm (the fold runs in
+                                 // runStandardPasses, which vknn_compile applies before saving).
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

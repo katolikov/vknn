@@ -69,7 +69,7 @@ namespace vknn {
                     partialPipe->dispatch(cmd, {src->handle(), scratch->handle()}, &pcg, sizeof(pcg), (uint32_t) (total * pcg.groups));
                     // Two dispatches in one record() are NOT auto-barriered; pass 2 reads the scratch pass 1
                     // wrote (see scatternd.cpp / reduce.cpp).
-                    vk::computeBarrier(cmd);
+                    vk::computeBarrier(*env.ctx, cmd);
                     // Pass 2: fold partials, divide, run the epilogue, store (one workgroup per block).
                     std::vector<VkBuffer> cbufs = {scratch->handle(), dst->handle()};
                     epi.append(cbufs, node, env, dst->handle());

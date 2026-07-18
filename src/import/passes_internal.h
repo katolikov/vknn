@@ -84,4 +84,12 @@ namespace vknn {
     // rank-4 input, a constant rank-4 weight, and channels that partition evenly by group; anything
     // else is left as a grouped Conv for the group-aware CPU op (defined in lower_grouped_conv.cpp).
     void lowerGroupedConv(Graph &g);
+    // Fold the group-interleave channel-shuffle idiom (ShuffleNetV2)
+    // Reshape([N,C,...] -> [N,g,C/g,...]) -> Transpose(swap axes 1,2) -> Reshape(back to [N,C,...])
+    // into one OpType::ChannelShuffle node with a `groups` attr, so the permutation runs as ONE
+    // dispatch in the surrounding layout instead of two Reshapes plus a flat gather with layout
+    // round-trips. Generic pattern match on resolved shapes (never model-specific); bit-identical
+    // (pure data movement). Runs after the const-fold/shape fixpoint (the Reshape targets are
+    // resolved), before fusePointwiseChains (defined in fuse_channel_shuffle.cpp).
+    void fuseChannelShuffle(Graph &g);
 }

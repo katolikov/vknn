@@ -8,7 +8,23 @@ namespace vknn { namespace vk {
 
     // The common case: dispatch N+1 reads what dispatch N wrote. Compute->compute only, which is
     // what the linear CNN graph almost always needs - cheaper than dragging the transfer stage in.
-    inline void computeBarrier(VkCommandBuffer cmd) {
+    // With synchronization2 the access scopes narrow to STORAGE reads/writes (every kernel operand
+    // is an SSBO), which spares the driver the sampled-image/uniform cache maintenance implied by
+    // the sync1 SHADER_READ class; without it the sync1 form below is emitted unchanged.
+    inline void computeBarrier(const VulkanContext &ctx, VkCommandBuffer cmd) {
+        if (ctx.cmdPipelineBarrier2)
+        {
+            VkMemoryBarrier2 b {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            b.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            VkDependencyInfo dep {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers    = &b;
+            ctx.cmdPipelineBarrier2(cmd, &dep);
+            return;
+        }
         VkMemoryBarrier b {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -16,12 +32,50 @@ namespace vknn { namespace vk {
     }
 
     // Wider barrier for the boundary around a vkCmdCopyBuffer (Reshape): covers transfer too.
-    inline void transferBarrier(VkCommandBuffer cmd) {
+    inline void transferBarrier(const VulkanContext &ctx, VkCommandBuffer cmd) {
+        if (ctx.cmdPipelineBarrier2)
+        {
+            VkMemoryBarrier2 b {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            b.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            VkDependencyInfo dep {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers    = &b;
+            ctx.cmdPipelineBarrier2(cmd, &dep);
+            return;
+        }
         VkMemoryBarrier b {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         b.srcAccessMask              = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
         b.dstAccessMask              = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
         const VkPipelineStageFlags s = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
         vkCmdPipelineBarrier(cmd, s, s, 0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+
+    // Execution-only ordering for a write-after-read hazard: the later dispatch's write must wait
+    // for the earlier dispatch's read, but no data moved, so no availability/visibility operation
+    // (cache flush or invalidate) is needed and prior unflushed writes stay tracked by the caller.
+    // The sync1 zero-memory-barrier form is spec-equivalent but the target mobile driver drops it
+    // entirely (measured: reused-buffer outputs corrupt on branchy graphs), while the sync2 form
+    // with explicit stage masks and VK_ACCESS_2_NONE is honored. Without synchronization2 this
+    // therefore emits the full compute barrier - a sync1-only device keeps the pre-elision
+    // behavior rather than trusting the empty-barrier form of an unknown driver.
+    inline void executionBarrier(const VulkanContext &ctx, VkCommandBuffer cmd) {
+        if (ctx.cmdPipelineBarrier2)
+        {
+            VkMemoryBarrier2 b {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_NONE;
+            b.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_NONE;
+            VkDependencyInfo dep {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers    = &b;
+            ctx.cmdPipelineBarrier2(cmd, &dep);
+            return;
+        }
+        computeBarrier(ctx, cmd);
     }
 
     /// Owns a command pool and a submission fence for the compute queue (RAII); not copyable or movable.

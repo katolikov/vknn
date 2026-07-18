@@ -58,6 +58,55 @@ namespace vknn { namespace vk {
         // VK_KHR/EXT_global_priority: the queue scheduling-priority tier the Config::priority knob drives.
         bool globalPriority       = false;
 
+        // VK_KHR_synchronization2 (feature enabled at device creation): scoped VkMemoryBarrier2
+        // between compute dispatches instead of the coarser sync1 access classes.
+        bool synchronization2 = false;
+        // VK_EXT_subgroup_size_control: a pipeline may pin its subgroup size (cooperative-matrix
+        // kernels require an exact width on drivers that vary it per pipeline).
+        bool     subgroupSizeControl         = false;
+        bool     computeFullSubgroups        = false;
+        uint32_t minSubgroupSize             = 0;
+        uint32_t maxSubgroupSize             = 0;
+        bool     requiredSubgroupSizeCompute = false; // requiredSubgroupSizeStages includes COMPUTE
+        // SPIR-V Vulkan memory model (core 1.2 feature). Cooperative-matrix GLSL compiles to
+        // "OpMemoryModel Logical Vulkan", so coopmat pipelines are gated on it.
+        bool vulkanMemoryModel            = false;
+        bool vulkanMemoryModelDeviceScope = false;
+        // VK_KHR_cooperative_matrix FEATURE bit (cooperativeMatrix above is extension presence).
+        bool cooperativeMatrixFeature = false;
+        // VK_EXT_shader_float8: fp8 (e4m3/e5m2) conversions, and fp8 coopmat mul-add when the
+        // second bit is set. Opt-in low-precision path; never a default.
+        bool shaderFloat8        = false;
+        bool shaderFloat8CoopMat = false;
+        // VkPhysicalDeviceShaderIntegerDotProductProperties acceleration bits. The feature bit
+        // (int8DotProduct) alone only promises the OpSDot* opcodes EXIST — a driver may emulate
+        // them slower than plain FMA, so int8-dot kernels gate on these instead.
+        bool int8DotAccel8Bit     = false; // integerDotProduct8BitSignedAccelerated
+        bool int8DotAccel4x8Packed = false; // integerDotProduct4x8BitPackedSignedAccelerated
+
+        /// One supported cooperative-matrix configuration row, as enumerated from the driver.
+        /// Types are VkComponentTypeKHR values; scope is a VkScopeKHR value.
+        struct CoopmatShape {
+            uint32_t M = 0, N = 0, K = 0;
+            uint32_t aType = 0, bType = 0, cType = 0, resultType = 0;
+            uint32_t scope                  = 0;
+            bool     saturatingAccumulation = false;
+        };
+        std::vector<CoopmatShape> coopmatShapes; // empty on a device without the extension
+
+        /// True when the driver enumerates a subgroup-scope coopmat row with exactly these
+        /// dimensions and component types (A and B share `abType`; C and Result share `accType`).
+        bool hasCoopmatShape(uint32_t m, uint32_t n, uint32_t k, uint32_t abType, uint32_t accType) const noexcept {
+            for (const auto &s: coopmatShapes)
+            {
+                if (s.M == m && s.N == n && s.K == k && s.aType == abType && s.bType == abType && s.cType == accType && s.resultType == accType && s.scope == VK_SCOPE_SUBGROUP_KHR)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         std::set<std::string> deviceExtensions;
         /// True when the device advertises `ext` (queried once at startup).
         bool has(const std::string &ext) const noexcept {
@@ -108,6 +157,9 @@ namespace vknn { namespace vk {
         // Extension function pointers (loaded if available).
         PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
         PFN_vkGetMemoryFdKHR          getMemoryFd          = nullptr;
+        // Non-null exactly when the synchronization2 feature is enabled on the device; barrier
+        // helpers fall back to the sync1 path when null (see vk_command.h).
+        PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2 = nullptr;
 
       private:
         void createInstance();

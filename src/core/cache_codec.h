@@ -39,6 +39,7 @@ namespace vknn {
         int         winogradUnit    = 0;   // Hint::WinogradUnit
         int         directConv3x3   = 0;   // Hint::DirectConv3x3
         int         splitKConv      = 0;   // Hint::SplitKConv
+        int         coopmatGemm     = 0;   // Hint::CoopmatGemm (default equals Auto so an older file keys identically)
 
         // The compiled artifacts.
         std::vector<uint8_t>                      pipeline; // serialized VkPipelineCache blob
@@ -47,7 +48,7 @@ namespace vknn {
         std::map<std::string, int32_t>            tuneLevel; // append-only "tunelvl": op signature -> Tuning level it was measured at
 
         bool sameKey(const CacheVariant &o) const {
-            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && ropeFusion == o.ropeFusion && fusedAttention == o.fusedAttention && kvConcatFold == o.kvConcatFold && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3 && splitKConv == o.splitKConv;
+            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && ropeFusion == o.ropeFusion && fusedAttention == o.fusedAttention && kvConcatFold == o.kvConcatFold && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3 && splitKConv == o.splitKConv && coopmatGemm == o.coopmatGemm;
         }
     };
 

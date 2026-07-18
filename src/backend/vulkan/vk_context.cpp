@@ -12,7 +12,8 @@ namespace vknn { namespace vk {
            << " tsPeriod=" << timestampPeriod << "ns\n"
            << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " int64=" << shaderInt64 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
            << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
-           << "  globalPriority=" << globalPriority;
+           << "  globalPriority=" << globalPriority << " sync2=" << synchronization2 << " sgCtl=" << subgroupSizeControl << " sgRange=[" << minSubgroupSize << "," << maxSubgroupSize << "]"
+           << " vkMemModel=" << vulkanMemoryModel << " coopmatRows=" << coopmatShapes.size() << " fp8=" << shaderFloat8 << " int8dotAccel=" << int8DotAccel8Bit << "/" << int8DotAccel4x8Packed;
         return os.str();
     }
 
@@ -89,10 +90,24 @@ namespace vknn { namespace vk {
             caps_.deviceExtensions.insert(e.extensionName);
         }
 
-        // --- properties (+ driver, subgroup) via pNext chain ---
+        // --- properties (+ driver, subgroup, subgroup-size-control, int-dot acceleration) ---
         VkPhysicalDeviceSubgroupProperties subgroup {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
         VkPhysicalDeviceDriverProperties   driver {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         driver.pNext = &subgroup;
+        VkPhysicalDeviceSubgroupSizeControlProperties     subgroupSizeProps {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+        VkPhysicalDeviceShaderIntegerDotProductProperties dotProps {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES};
+        // Extension-specific property structs join the chain only when the extension is present,
+        // so an older driver never sees an sType it does not know.
+        if (caps_.has("VK_EXT_subgroup_size_control"))
+        {
+            subgroupSizeProps.pNext = subgroup.pNext;
+            subgroup.pNext          = &subgroupSizeProps;
+        }
+        if (caps_.has("VK_KHR_shader_integer_dot_product"))
+        {
+            dotProps.pNext = subgroup.pNext;
+            subgroup.pNext = &dotProps;
+        }
         VkPhysicalDeviceProperties2 props2 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
         props2.pNext = &driver;
         vkGetPhysicalDeviceProperties2(phys_, &props2);
@@ -132,6 +147,26 @@ namespace vknn { namespace vk {
         s8.pNext = &dot;
         VkPhysicalDeviceTimelineSemaphoreFeatures tsem {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
         dot.pNext = &tsem;
+        // Extension-gated feature structs, appended to the chain only when the extension (or the
+        // owning core version) is present so an older driver never sees an unknown sType.
+        VkPhysicalDeviceSynchronization2Features     sync2Feat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+        VkPhysicalDeviceSubgroupSizeControlFeatures  subgroupSizeFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
+        VkPhysicalDeviceVulkanMemoryModelFeatures    memModelFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES};
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopmatFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+        VkPhysicalDeviceShaderFloat8FeaturesEXT      float8Feat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT};
+        VkBaseOutStructure *featureTail = reinterpret_cast<VkBaseOutStructure *>(&tsem);
+        auto                chainFeatureQuery = [&featureTail](bool present, void *featureStruct) {
+            if (present)
+            {
+                featureTail->pNext = reinterpret_cast<VkBaseOutStructure *>(featureStruct);
+                featureTail        = featureTail->pNext;
+            }
+        };
+        chainFeatureQuery(caps_.has("VK_KHR_synchronization2"), &sync2Feat);
+        chainFeatureQuery(caps_.has("VK_EXT_subgroup_size_control"), &subgroupSizeFeat);
+        chainFeatureQuery(caps_.apiVersion >= VK_API_VERSION_1_2 || caps_.has("VK_KHR_vulkan_memory_model"), &memModelFeat);
+        chainFeatureQuery(caps_.has("VK_KHR_cooperative_matrix"), &coopmatFeat);
+        chainFeatureQuery(caps_.has(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME), &float8Feat);
         VkPhysicalDeviceFeatures2 feats2 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         feats2.pNext = &f16i8;
         vkGetPhysicalDeviceProperties2(phys_, &props2); // refresh (harmless)
@@ -145,6 +180,20 @@ namespace vknn { namespace vk {
         caps_.int8DotProduct    = dot.shaderIntegerDotProduct;
         caps_.timelineSemaphore = tsem.timelineSemaphore;
 
+        caps_.synchronization2            = sync2Feat.synchronization2;
+        caps_.subgroupSizeControl         = subgroupSizeFeat.subgroupSizeControl;
+        caps_.computeFullSubgroups        = subgroupSizeFeat.computeFullSubgroups;
+        caps_.minSubgroupSize             = subgroupSizeProps.minSubgroupSize;
+        caps_.maxSubgroupSize             = subgroupSizeProps.maxSubgroupSize;
+        caps_.requiredSubgroupSizeCompute = (subgroupSizeProps.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+        caps_.vulkanMemoryModel           = memModelFeat.vulkanMemoryModel;
+        caps_.vulkanMemoryModelDeviceScope = memModelFeat.vulkanMemoryModelDeviceScope;
+        caps_.cooperativeMatrixFeature    = coopmatFeat.cooperativeMatrix;
+        caps_.shaderFloat8                = float8Feat.shaderFloat8;
+        caps_.shaderFloat8CoopMat         = float8Feat.shaderFloat8CooperativeMatrix;
+        caps_.int8DotAccel8Bit            = dotProps.integerDotProduct8BitSignedAccelerated;
+        caps_.int8DotAccel4x8Packed       = dotProps.integerDotProduct4x8BitPackedSignedAccelerated;
+
         caps_.pushDescriptor       = caps_.has("VK_KHR_push_descriptor");
         caps_.dedicatedAllocation  = caps_.has("VK_KHR_dedicated_allocation");
         caps_.externalMemoryFd     = caps_.has("VK_KHR_external_memory_fd");
@@ -153,6 +202,28 @@ namespace vknn { namespace vk {
         caps_.memoryBudget         = caps_.has("VK_EXT_memory_budget");
         caps_.cooperativeMatrix    = caps_.has("VK_KHR_cooperative_matrix");
         caps_.globalPriority       = caps_.has("VK_KHR_global_priority") || caps_.has("VK_EXT_global_priority");
+
+        // Cooperative-matrix configuration rows. The extension entry point resolves through the
+        // instance; a null pointer or an error leaves the row list empty, which downstream gates
+        // treat as "no coopmat" (the SSBO kernels remain the only path).
+        if (caps_.cooperativeMatrix && caps_.cooperativeMatrixFeature)
+        {
+            auto enumerateCoopmat = reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(vkGetInstanceProcAddr(instance_, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
+            uint32_t rowCount     = 0;
+            if (enumerateCoopmat && enumerateCoopmat(phys_, &rowCount, nullptr) == VK_SUCCESS && rowCount > 0)
+            {
+                std::vector<VkCooperativeMatrixPropertiesKHR> rows(rowCount, VkCooperativeMatrixPropertiesKHR {VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR});
+                if (enumerateCoopmat(phys_, &rowCount, rows.data()) == VK_SUCCESS)
+                {
+                    caps_.coopmatShapes.reserve(rowCount);
+                    for (uint32_t i = 0; i < rowCount; ++i)
+                    {
+                        const auto &r = rows[i];
+                        caps_.coopmatShapes.push_back({r.MSize, r.NSize, r.KSize, (uint32_t) r.AType, (uint32_t) r.BType, (uint32_t) r.CType, (uint32_t) r.ResultType, (uint32_t) r.scope, r.saturatingAccumulation == VK_TRUE});
+                    }
+                }
+            }
+        }
 
         vkGetPhysicalDeviceMemoryProperties(phys_, &memProps_);
     }
@@ -215,6 +286,26 @@ namespace vknn { namespace vk {
         addExt("VK_KHR_16bit_storage");
         addExt("VK_KHR_8bit_storage");
         addExt("VK_KHR_shader_integer_dot_product");
+        if (caps_.synchronization2)
+        {
+            addExt("VK_KHR_synchronization2");
+        }
+        if (caps_.subgroupSizeControl)
+        {
+            addExt("VK_EXT_subgroup_size_control");
+        }
+        if (caps_.vulkanMemoryModel)
+        {
+            addExt("VK_KHR_vulkan_memory_model"); // no-op when the feature is core (>= 1.2)
+        }
+        if (caps_.cooperativeMatrixFeature)
+        {
+            addExt("VK_KHR_cooperative_matrix");
+        }
+        if (caps_.shaderFloat8)
+        {
+            addExt(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+        }
 
         // Queue scheduling priority (Config::priority). Priority::Normal leaves everything below exactly
         // as the default path; Low/High request the matching queue global-priority tier. Capability-gated,
@@ -279,6 +370,34 @@ namespace vknn { namespace vk {
         VkPhysicalDeviceTimelineSemaphoreFeatures tsem {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
         tsem.timelineSemaphore = caps_.timelineSemaphore;
         dot.pNext              = &tsem;
+        // Feature structs below join the enable chain only when queryCaps() confirmed support, so
+        // the created device state matches the caps flags exactly.
+        VkPhysicalDeviceSynchronization2Features sync2Feat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+        sync2Feat.synchronization2 = VK_TRUE;
+        VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
+        subgroupSizeFeat.subgroupSizeControl  = VK_TRUE;
+        subgroupSizeFeat.computeFullSubgroups = caps_.computeFullSubgroups;
+        VkPhysicalDeviceVulkanMemoryModelFeatures memModelFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES};
+        memModelFeat.vulkanMemoryModel            = VK_TRUE;
+        memModelFeat.vulkanMemoryModelDeviceScope = caps_.vulkanMemoryModelDeviceScope;
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopmatFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+        coopmatFeat.cooperativeMatrix = VK_TRUE;
+        VkPhysicalDeviceShaderFloat8FeaturesEXT float8Feat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT};
+        float8Feat.shaderFloat8                  = VK_TRUE;
+        float8Feat.shaderFloat8CooperativeMatrix = caps_.shaderFloat8CoopMat;
+        VkBaseOutStructure *enableTail = reinterpret_cast<VkBaseOutStructure *>(&tsem);
+        auto                chainFeatureEnable = [&enableTail](bool enable, void *featureStruct) {
+            if (enable)
+            {
+                enableTail->pNext = reinterpret_cast<VkBaseOutStructure *>(featureStruct);
+                enableTail        = enableTail->pNext;
+            }
+        };
+        chainFeatureEnable(caps_.synchronization2, &sync2Feat);
+        chainFeatureEnable(caps_.subgroupSizeControl, &subgroupSizeFeat);
+        chainFeatureEnable(caps_.vulkanMemoryModel, &memModelFeat);
+        chainFeatureEnable(caps_.cooperativeMatrixFeature, &coopmatFeat);
+        chainFeatureEnable(caps_.shaderFloat8, &float8Feat);
 
         VkDeviceCreateInfo dci {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.pNext                   = &f16i8;
@@ -323,6 +442,16 @@ namespace vknn { namespace vk {
         if (caps_.externalMemoryFd)
         {
             getMemoryFd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device_, "vkGetMemoryFdKHR"));
+        }
+        if (caps_.synchronization2)
+        {
+            // The core 1.3 name resolves on newer drivers; the KHR alias covers 1.1/1.2 devices
+            // exposing only the extension. Barrier helpers use the sync1 path when both are null.
+            cmdPipelineBarrier2 = reinterpret_cast<PFN_vkCmdPipelineBarrier2KHR>(vkGetDeviceProcAddr(device_, "vkCmdPipelineBarrier2"));
+            if (!cmdPipelineBarrier2)
+            {
+                cmdPipelineBarrier2 = reinterpret_cast<PFN_vkCmdPipelineBarrier2KHR>(vkGetDeviceProcAddr(device_, "vkCmdPipelineBarrier2KHR"));
+            }
         }
     }
 

@@ -1,0 +1,64 @@
+#version 450
+#define VKNN_NO_RTE 1 // gemm family avoids the float-controls execution mode (miscompiled by some drivers)
+// Cooperative-matrix GEMM with e4m3 operands: D[M,N] = (A8[M,K] * B8[K,N]) * (sA * sB), fp32
+// accumulation, fp16 store. Opt-in via Hint::CoopmatGemm = Mode::Fp8 - numerics intentionally
+// differ from the fp16 kernels. A8 is the activation operand quantized on-device per dispatch
+// (lowp_absmax + lowp_quant_fp8); B8 is the weight operand quantized on the host at prepare time.
+// scales[0] = sA (device-written), scales[1] = sB (host-written); both are the per-tensor
+// dequantization factors (absmax / 448). Tile geometry matches coopmat_gemm.comp.
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_EXT_float_e4m3 : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+layout(local_size_x = 32) in;
+
+layout(std430, binding = 0) readonly buffer ABuf { floate4m3_t aBuf[]; };
+layout(std430, binding = 1) readonly buffer BBuf { floate4m3_t bBuf[]; };
+layout(std430, binding = 2) writeonly buffer DBuf { float16_t dBuf[]; };
+layout(std430, binding = 3) readonly buffer Scales { float scales[]; };
+layout(push_constant) uniform PC { int M, N, K; }
+pc;
+
+void main() {
+  const uint colTile = gl_WorkGroupID.x * 32u;
+  const uint rowTile = gl_WorkGroupID.y * 32u;
+  const uint lda = uint(pc.K);
+  const uint ldb = uint(pc.N);
+
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc00 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc01 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc10 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+  coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc11 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+
+  for (uint k = 0u; k < uint(pc.K); k += 16u) {
+    coopmat<floate4m3_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a0, a1;
+    coopMatLoad(a0, aBuf, rowTile * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(a1, aBuf, (rowTile + 16u) * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<floate4m3_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b0, b1;
+    coopMatLoad(b0, bBuf, k * ldb + colTile, ldb, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(b1, bBuf, k * ldb + colTile + 16u, ldb, gl_CooperativeMatrixLayoutRowMajor);
+    acc00 = coopMatMulAdd(a0, b0, acc00);
+    acc01 = coopMatMulAdd(a0, b1, acc01);
+    acc10 = coopMatMulAdd(a1, b0, acc10);
+    acc11 = coopMatMulAdd(a1, b1, acc11);
+  }
+
+  const float dequant = scales[0] * scales[1];
+  acc00 = acc00 * dequant;
+  acc01 = acc01 * dequant;
+  acc10 = acc10 * dequant;
+  acc11 = acc11 * dequant;
+
+  const uint ldd = uint(pc.N);
+  coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> h;
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc00);
+  coopMatStore(h, dBuf, rowTile * ldd + colTile, ldd, gl_CooperativeMatrixLayoutRowMajor);
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc01);
+  coopMatStore(h, dBuf, rowTile * ldd + colTile + 16u, ldd, gl_CooperativeMatrixLayoutRowMajor);
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc10);
+  coopMatStore(h, dBuf, (rowTile + 16u) * ldd + colTile, ldd, gl_CooperativeMatrixLayoutRowMajor);
+  h = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(acc11);
+  coopMatStore(h, dBuf, (rowTile + 16u) * ldd + colTile + 16u, ldd, gl_CooperativeMatrixLayoutRowMajor);
+}

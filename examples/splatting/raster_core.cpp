@@ -170,10 +170,10 @@ namespace raster {
         auto recordBinningPrelude = [&](VkCommandBuffer cmd) {
             preprocessPipe_->dispatch(
                 cmd, {meansBuffer_->handle(), covariancesBuffer_->handle(), colorsBuffer_->handle(), opacitiesBuffer_->handle(), geometryBuffer_->handle()}, &preprocessPush, sizeof(preprocessPush), (uint32_t) ((gaussianCount + 63) / 64));
-            vk::computeBarrier(cmd);
+            vk::computeBarrier(context_, cmd);
             DuplicatePush countMode {gaussianCount, tilesX_, tilesY_, depthBits_, 0, nearPlane_, invDepthRange_};
             duplicatePipe_->dispatch(cmd, {geometryBuffer_->handle(), gaussianOffsetsBuffer_->handle(), standInBuffer_->handle(), standInBuffer_->handle()}, &countMode, sizeof(countMode), (uint32_t) ((gaussianCount + 63) / 64));
-            vk::computeBarrier(cmd);
+            vk::computeBarrier(context_, cmd);
             RadixScanPush offsetsScan {(uint32_t) gaussianCount, 1u};
             radixScanPipe_->dispatch(cmd, {gaussianOffsetsBuffer_->handle(), counterBuffer_->handle()}, &offsetsScan, sizeof(offsetsScan), 1);
         };
@@ -190,11 +190,11 @@ namespace raster {
             if (includePrelude)
             {
                 recordBinningPrelude(cmd);
-                vk::computeBarrier(cmd);
+                vk::computeBarrier(context_, cmd);
             }
             DuplicatePush emit {gaussianCount, tilesX_, tilesY_, depthBits_, (int) sortCapacity_, nearPlane_, invDepthRange_};
             duplicatePipe_->dispatch(cmd, {geometryBuffer_->handle(), gaussianOffsetsBuffer_->handle(), sortKeysBuffer_->handle(), sortValuesBuffer_->handle()}, &emit, sizeof(emit), (uint32_t) ((gaussianCount + 63) / 64));
-            vk::computeBarrier(cmd);
+            vk::computeBarrier(context_, cmd);
             // Stable LSD radix sort, least-significant digit first: each 8-bit pass histograms
             // the digits per chunk, exclusive-scans the digit-major histogram into global scatter
             // bases, and stably scatters (key, value) pairs between the ping-pong buffer pairs.
@@ -207,19 +207,19 @@ namespace raster {
                 vk::Buffer &destValues   = (pass % 2 == 0) ? *sortValuesPingBuffer_ : *sortValuesBuffer_;
                 RadixPush   digitPass {pass * 8, radixGroups, (uint32_t) sortCapacity_};
                 radixCountPipe_->dispatch(cmd, {sourceKeys.handle(), counterBuffer_->handle(), radixHistogramBuffer_->handle()}, &digitPass, sizeof(digitPass), radixGroups);
-                vk::computeBarrier(cmd);
+                vk::computeBarrier(context_, cmd);
                 RadixScanPush histogramScan {radixGroups * kRadixDigitBins, 0u};
                 radixScanPipe_->dispatch(cmd, {radixHistogramBuffer_->handle(), standInBuffer_->handle()}, &histogramScan, sizeof(histogramScan), 1);
-                vk::computeBarrier(cmd);
+                vk::computeBarrier(context_, cmd);
                 radixScatterPipe_->dispatch(
                     cmd, {sourceKeys.handle(), sourceValues.handle(), counterBuffer_->handle(), radixHistogramBuffer_->handle(), destKeys.handle(), destValues.handle()}, &digitPass, sizeof(digitPass), radixGroups);
-                vk::computeBarrier(cmd);
+                vk::computeBarrier(context_, cmd);
             }
             RangesPush rangesClear {0, tileCount_, (int) sortCapacity_, depthBits_}, rangesAccumulate {1, tileCount_, (int) sortCapacity_, depthBits_};
             rangesPipe_->dispatch(cmd, {sortKeysBuffer_->handle(), tileRangesBuffer_->handle(), counterBuffer_->handle()}, &rangesClear, sizeof(rangesClear), (uint32_t) ((tileCount_ + 255) / 256));
-            vk::computeBarrier(cmd);
+            vk::computeBarrier(context_, cmd);
             rangesPipe_->dispatch(cmd, {sortKeysBuffer_->handle(), tileRangesBuffer_->handle(), counterBuffer_->handle()}, &rangesAccumulate, sizeof(rangesAccumulate), (uint32_t) ((sortCapacity_ + 255) / 256));
-            vk::computeBarrier(cmd);
+            vk::computeBarrier(context_, cmd);
             CompositePush compositePush {};
             compositePush.dims[0] = height_;
             compositePush.dims[1] = width_;

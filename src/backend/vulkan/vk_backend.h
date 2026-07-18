@@ -119,10 +119,12 @@ namespace vknn {
         }
 
         // Session-shared compute pipeline, keyed by (shader, buffer count, push-constant size, spec
-        // constants). Nodes with the same kernel configuration share one VkPipeline + shader module
-        // instead of each building their own — the driver's per-pipeline host memory and creation time
-        // scale with the number of DISTINCT kernels, not the node count.
-        std::shared_ptr<vk::ComputePipeline> pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData = {}) const;
+        // constants, pinned subgroup size). Nodes with the same kernel configuration share one
+        // VkPipeline + shader module instead of each building their own — the driver's per-pipeline
+        // host memory and creation time scale with the number of DISTINCT kernels, not the node count.
+        // `requiredSubgroupSize` 0 leaves the driver's width choice; non-zero pins it (coopmat kernels)
+        // and requires caps().subgroupSizeControl, which the requesting op gates on.
+        std::shared_ptr<vk::ComputePipeline> pipeline(const std::string &shaderName, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &specData = {}, uint32_t requiredSubgroupSize = 0) const;
 
         // Content-addressed upload for small parameter blocks (e.g. pw_epilogue plans): identical bytes
         // yield one shared device buffer, so per-node metadata does not multiply vkAllocateMemory count.

@@ -134,6 +134,9 @@ namespace vknn {
                                  // truncation joins the surrounding pointwise unit instead of splitting it
         eliminateDeadNodes(g);
         inferShapes(g, batch, declared, bindings);  // refresh shapes after fusion/folding
+        fuseChannelShuffle(g);  // Reshape/Transpose/Reshape group-interleave -> one ChannelShuffle
+                                // dispatch; needs the fixpoint-resolved Reshape shapes above, and
+                                // runs before the pointwise fusion so the chain is claimed whole
         lowerRMSNorm(g);        // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate
                                 // RMSNorm kernel; before pointwise fusion so a trailing residual Add can fold
         inferShapes(g, batch, declared, bindings);  // set the RMSNorm output shape (identity rule)

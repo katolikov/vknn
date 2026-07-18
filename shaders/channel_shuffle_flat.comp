@@ -1,0 +1,23 @@
+#version 450
+#include "precision.glsl"
+// ChannelShuffle, FLAT row-major path: out[n][c][s] = in[n][(c % g) * (C/g) + c / g][s].
+// One thread per output element; a pure index remap with no arithmetic, so the store is a direct
+// STORE-to-STORE copy (no narrowing conversion, bit-identical in both precisions). The push
+// constant carries the collapsed geometry: C channels, HW spatial elements per channel (the
+// product of every dim after the channel axis), total = N*C*HW.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
+layout(push_constant) uniform PC { int total, C, HW, groups; } pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int spatial = int(gid) % pc.HW;
+  int c       = (int(gid) / pc.HW) % pc.C;
+  int n       = int(gid) / (pc.HW * pc.C);
+  int groupWidth = pc.C / pc.groups;
+  int sourceChannel = (c % pc.groups) * groupWidth + c / pc.groups;
+  d[gid] = s[(n * pc.C + sourceChannel) * pc.HW + spatial];
+}

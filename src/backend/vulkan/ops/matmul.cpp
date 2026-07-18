@@ -7,12 +7,15 @@
 // uploaded flat in prepare(). The naive and tiled kernels mirror the CPU oracle's broadcast/stride
 // math byte-for-byte; the split-K kernels regroup the k chain (deterministically, identically to each
 // other) and so agree only to fp32 rounding.
+#include "backend/vulkan/coopmat_check.h"
+#include "core/lowp_gemm.h"
 #include "core/matmul_tile.h"
 #include "core/matmul_view.h"
 #include "core/quant_weights.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
+#include "vknn/hint.h"
 #include "vknn/logging.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -59,6 +62,108 @@ namespace vknn {
             bool                        useWq = false;
             MatMulWqPC                  wqPc {};
             std::shared_ptr<vk::Buffer> wqPacked, wqScales, wqOidx, wqOval, wqLut;
+
+            // Cooperative-matrix path (Hint::CoopmatGemm; routing rule in core/lowp_gemm.h).
+            // Fp16 binds the operands directly; the opt-in low-precision kinds add a per-run
+            // A-quantization prelude (absmax -> quant) and a host-quantized weight operand.
+            CoopmatGemmKind                      coopKind = CoopmatGemmKind::None;
+            std::shared_ptr<vk::ComputePipeline> coopAbsmaxPipe, coopQuantPipe;
+            std::shared_ptr<vk::Buffer>          coopWeights; // e4m3/int8 codes of the B initializer
+            std::shared_ptr<vk::Buffer>          coopScales;  // [0] sA (device-written), [1] sB (host-written)
+            std::shared_ptr<vk::Buffer>          coopQuantA;  // per-run quantized A operand
+            struct CoopAbsmaxPC {
+                int   total;
+                float divisor;
+            };
+            struct CoopGemmPC {
+                int M, N, K;
+            };
+            CoopGemmPC coopPc {};
+
+            // Build the coopmat pipelines and (for the opt-in low-precision kinds) the quantized
+            // weight + scale + scratch buffers. The routing rule already established: dense 2-D
+            // batch-1 fp16 GEMM, no bias/epilogue, M,N multiples of 32, K of 16, caps present and
+            // the self-check passed; for Fp8/Int8 the B operand is an initializer.
+            void prepareCoopmat(const Node &node, VkOpEnv &env) {
+                const Graph &g = *env.graph;
+                useTiled       = false;
+                useGemv        = false;
+                numBatch       = 1;
+                coopPc         = {pc.M, pc.N, pc.K};
+                if (coopKind == CoopmatGemmKind::Fp16)
+                {
+                    pipe = env.pipeline("coopmat_gemm", 3, sizeof(CoopGemmPC), {}, /*requiredSubgroupSize=*/32);
+                    return;
+                }
+                const bool  fp8     = coopKind == CoopmatGemmKind::Fp8;
+                const float divisor = fp8 ? 448.f : 127.f;
+
+                // Host-quantized weights: per-tensor symmetric scale sB = absmax / divisor, codes
+                // uploaded device-only. The dequantization factor sA * sB rides the scales SSBO.
+                std::vector<float> weightFloats = initFloats(g, node.inputs[1]);
+                float              absmax       = 0.f;
+                for (float w: weightFloats)
+                {
+                    absmax = std::max(absmax, std::fabs(w));
+                }
+                const float scaleB = absmax > 0.f ? absmax / divisor : 0.f;
+                coopWeights        = env.acquireWeight(node.name + (fp8 ? "#cmf8" : "#cmi8"), env.useFp16, [&] {
+                    std::vector<uint8_t> codes(weightFloats.size());
+                    for (size_t i = 0; i < weightFloats.size(); ++i)
+                    {
+                        if (fp8)
+                        {
+                            codes[i] = encodeFp8E4M3(scaleB > 0.f ? weightFloats[i] / scaleB : 0.f);
+                        } else
+                        {
+                            codes[i] = (uint8_t) encodeInt8Symmetric(weightFloats[i], scaleB);
+                        }
+                    }
+                    return env.uploadWeightDeviceOnly(codes.data(), codes.size(), codes.size());
+                });
+
+                // scales[0] = sA, written by the absmax dispatch each run; scales[1] = sB, host-set
+                // once. zeroInit keeps scales[0] deterministic before the first absmax write.
+                coopScales = std::make_shared<vk::Buffer>(*env.ctx, 2 * sizeof(float), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                coopScales->upload(&scaleB, sizeof(float), sizeof(float));
+                coopQuantA = std::make_shared<vk::Buffer>(*env.ctx, (size_t) pc.M * (size_t) pc.K, vk::MemPref::kDeviceOnly);
+
+                // No ternary composition here: these kernels host no pointwise epilogue, and the
+                // epi-sync checker treats literal-bearing ternaries in this file as epi stems.
+                const char *quantShader = "lowp_quant_i8";
+                const char *gemmShader  = "coopmat_gemm_i8";
+                if (fp8)
+                {
+                    quantShader = "lowp_quant_fp8";
+                    gemmShader  = "coopmat_gemm_fp8";
+                }
+                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC));
+                coopQuantPipe  = env.pipeline(quantShader, 3, sizeof(int));
+                pipe           = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {}, /*requiredSubgroupSize=*/32);
+            }
+
+            void recordCoopmat(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
+                vk::Buffer    *srcA      = constBuf[0] ? constBuf[0].get() : env.devBuf(node.inputs[0]);
+                VkBuffer       dstHandle = env.devBuf(node.outputs[0])->handle();
+                const uint32_t gx        = (uint32_t) (pc.N / 32);
+                const uint32_t gy        = (uint32_t) (pc.M / 32);
+                if (coopKind == CoopmatGemmKind::Fp16)
+                {
+                    vk::Buffer *srcB = constBuf[1] ? constBuf[1].get() : env.devBuf(node.inputs[1]);
+                    pipe->dispatch(cmd, {srcA->handle(), srcB->handle(), dstHandle}, &coopPc, sizeof(coopPc), gx, gy);
+                    return;
+                }
+                // Opt-in low-precision: per-tensor A absmax -> quantize A -> GEMM. The scales and
+                // quantized-A buffers are op-private, so the two internal barriers order only this
+                // node's prelude against its GEMM.
+                CoopAbsmaxPC absmaxPc {pc.M * pc.K, coopKind == CoopmatGemmKind::Fp8 ? 448.f : 127.f};
+                coopAbsmaxPipe->dispatch(cmd, {srcA->handle(), coopScales->handle()}, &absmaxPc, sizeof(absmaxPc), 1);
+                vk::computeBarrier(*env.ctx, cmd);
+                const int quantTotal = pc.M * pc.K;
+                coopQuantPipe->dispatch(cmd, {srcA->handle(), coopQuantA->handle(), coopScales->handle()}, &quantTotal, sizeof(quantTotal), groups(quantTotal, 256));
+                vk::computeBarrier(*env.ctx, cmd);
+                pipe->dispatch(cmd, {coopQuantA->handle(), coopWeights->handle(), dstHandle, coopScales->handle()}, &coopPc, sizeof(coopPc), gx, gy);
+            }
 
             // Prepare the packed-weight dispatch: raw packed/index payloads upload unconverted, the
             // fp16 scale/outlier tensors upload at compute precision (uploadInit's passthrough), and
@@ -272,7 +377,7 @@ namespace vknn {
                         }
                         bufs.push_back(geom->handle()); // geometry SSBO (matches the real dispatch's binding count)
                         p->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, gyT, (uint32_t) gzT);
-                        vk::computeBarrier(cmd);
+                        vk::computeBarrier(*env.ctx, cmd);
                     });
                     if (ms < bestMs)
                     {
@@ -441,8 +546,39 @@ namespace vknn {
                 pc.K     = (int) K;
                 geom     = flat::uploadFlatGeom(env, {outDim, aStride, bStride});
 
+                // ---- cooperative-matrix routing (deterministic capability + shape rule) ----
+                // The route never races: the coopmat kernels regroup the K reduction relative to
+                // the SSBO kernels, so the choice is a pure function of device caps, the
+                // Hint::CoopmatGemm value and the shape (core/lowp_gemm.h). A one-time on-device
+                // exact self-check guards the kernel's fragment mapping before the first use.
+                {
+                    const auto     &cap = env.ctx->caps();
+                    CoopmatGemmCaps cmCaps;
+                    cmCaps.coopmatFp16Fp32Row16 = cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_FLOAT16_KHR, (uint32_t) VK_COMPONENT_TYPE_FLOAT32_KHR);
+                    cmCaps.coopmatFp8Fp32Row16  = cap.shaderFloat8CoopMat && cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT, (uint32_t) VK_COMPONENT_TYPE_FLOAT32_KHR);
+                    cmCaps.coopmatI8I32Row16    = cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_SINT8_KHR, (uint32_t) VK_COMPONENT_TYPE_SINT32_KHR);
+                    cmCaps.wave32Pinnable       = cap.subgroupSizeControl && cap.requiredSubgroupSizeCompute && cap.minSubgroupSize <= 32u && 32u <= cap.maxSubgroupSize;
+                    cmCaps.vulkanMemoryModel    = cap.vulkanMemoryModel;
+                    cmCaps.selfCheckPassed      = true; // provisionally; the on-device check runs below only when the rule matches
+                    const bool denseRank2Batch1 = !hasView && !aWas1D && !bWas1D && M > 0 && N > 0 && pc.total == (int) (M * N);
+                    const bool hasBiasOrEpi     = node.fusedBias != kNoTensor || node.attr.has("pw_steps");
+                    const int  hintValue        = env.config ? env.config->hint(Hint::CoopmatGemm, (int) Mode::Auto) : (int) Mode::Auto;
+                    coopKind                    = coopmatGemmRoute(cmCaps, hintValue, env.useFp16, denseRank2Batch1, hasBiasOrEpi, M, N, K, g.isInitializer(node.inputs[1]));
+                    // The 2-D coopmat dispatch has no runtime X-overflow rescue; a grid past the
+                    // device limit keeps the SSBO kernels.
+                    if (coopKind != CoopmatGemmKind::None && ((uint32_t) (N / 32) > cap.maxWorkGroupCount[0] || (uint32_t) (M / 32) > cap.maxWorkGroupCount[1]))
+                    {
+                        coopKind = CoopmatGemmKind::None;
+                    }
+                    if (coopKind != CoopmatGemmKind::None && !coopmatGemmSelfCheckPassed(env))
+                    {
+                        coopKind = CoopmatGemmKind::None;
+                    }
+                }
+
                 // Upload a constant operand flat (row-major NCHW fp32 -> device, fp16 when half precision).
                 // Direct fp16->fp16 passthrough when the stored weight already matches compute precision.
+                // A low-precision coopmat route replaces the B upload with host-quantized codes below.
                 auto maybeUpload = [&](TensorId t, int which, const Shape &s) {
                     if (!g.isInitializer(t))
                     {
@@ -451,7 +587,16 @@ namespace vknn {
                     constBuf[which] = uploadInit(env, t, s);
                 };
                 maybeUpload(node.inputs[0], 0, g.desc(node.inputs[0]).shape);
-                maybeUpload(node.inputs[1], 1, g.desc(node.inputs[1]).shape);
+                if (coopKind != CoopmatGemmKind::Fp8 && coopKind != CoopmatGemmKind::Int8)
+                {
+                    maybeUpload(node.inputs[1], 1, g.desc(node.inputs[1]).shape);
+                }
+
+                if (coopKind != CoopmatGemmKind::None)
+                {
+                    prepareCoopmat(node, env);
+                    return;
+                }
 
                 // Use the register-blocked tiled GEMM for the standard (non-mat-vec) case with large
                 // enough matrices; it assumes M at out[rank-2], N at out[rank-1], so the batch dims are
@@ -537,6 +682,11 @@ namespace vknn {
                 if (useWq)
                 {
                     recordWq(cmd, node, env);
+                    return;
+                }
+                if (coopKind != CoopmatGemmKind::None)
+                {
+                    recordCoopmat(cmd, node, env);
                     return;
                 }
                 auto buf = [&](int e) {

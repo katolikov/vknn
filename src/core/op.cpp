@@ -162,6 +162,8 @@ namespace vknn {
                 return "Rope";
             case OpType::FusedAttention:
                 return "FusedAttention";
+            case OpType::ChannelShuffle:
+                return "ChannelShuffle";
             default:
                 return "Unknown";
         }

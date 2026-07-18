@@ -1,0 +1,91 @@
+#version 450
+// Depthwise Conv2D (group == channels), NC4HW4, fp16, 2x2 output tile: one thread computes the
+// (oy, oy+1) x (ox, ox+1) output pixels of one channel-block. Four independent fp32 vec4
+// accumulators are seeded from bias and walk the SAME ky,kx tap order as the 1-pixel dwconv
+// kernel, each output accumulating only its own in-range taps, so per-output arithmetic is
+// identical and the kernel is a member of the bit-exact depthwise race (pickDwTile): only the
+// thread->output mapping changes. Each weight vec4 is loaded once per tap and reused by all four
+// outputs; the overlapping 2x2 input windows raise input-cache reuse. Literal twin of
+// dwconv_t2.comp, not spec-constant-parameterized: the target driver spills registers on
+// spec-constant array bounds (src/core/matmul_tile.h).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act, pad0;
+  float actLo, actHi;
+}
+pc;
+
+// Activation + fused-epilogue finish of one output pixel, identical to the 1-pixel kernel's store
+// path (per-lane vx_act, then pw_apply4 at the destination index).
+vec4 finishPixel(vec4 acc, int d) {
+  vec4 v = vec4(vx_act(acc.x, pc.act, pc.actLo, pc.actHi),
+                vx_act(acc.y, pc.act, pc.actLo, pc.actHi),
+                vx_act(acc.z, pc.act, pc.actLo, pc.actHi),
+                vx_act(acc.w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+  v = pw_apply4(v, d);
+#endif
+  return v;
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int Cb = (pc.C + 3) / 4;
+  int tW = (pc.OW + 1) / 2;
+  int tH = (pc.OH + 1) / 2;
+  uint total = uint(pc.N * Cb * tH * tW);
+  if (gid >= total) return;
+  int tx = int(gid) % tW;
+  int ty = (int(gid) / tW) % tH;
+  int cb = (int(gid) / (tW * tH)) % Cb;
+  int n = int(gid) / (tW * tH * Cb);
+  int ox0 = tx * 2, oy0 = ty * 2;
+
+  vec4 b = vec4(bias[cb]);
+  vec4 acc00 = b, acc01 = b, acc10 = b, acc11 = b; // acc<dy><dx>: output (oy0+dy, ox0+dx)
+  int sRow = (n * Cb + cb) * pc.H;
+  for (int ky = 0; ky < pc.KH; ++ky) {
+    int iy0 = oy0 * pc.SH - pc.PT + ky * pc.DH;
+    int iy1 = iy0 + pc.SH; // row for oy0+1: (oy0+1)*SH - PT + ky*DH
+    bool y0 = (iy0 >= 0 && iy0 < pc.H);
+    bool y1 = (iy1 >= 0 && iy1 < pc.H);
+    if (!y0 && !y1) continue;
+    for (int kx = 0; kx < pc.KW; ++kx) {
+      int ix0 = ox0 * pc.SW - pc.PL + kx * pc.DW;
+      int ix1 = ix0 + pc.SW; // column for ox0+1
+      bool x0 = (ix0 >= 0 && ix0 < pc.W);
+      bool x1 = (ix1 >= 0 && ix1 < pc.W);
+      if (!x0 && !x1) continue;
+      vec4 w = vec4(wt[(cb * pc.KH + ky) * pc.KW + kx]);
+      if (y0 && x0) acc00 += vec4(src[(sRow + iy0) * pc.W + ix0]) * w;
+      if (y0 && x1) acc01 += vec4(src[(sRow + iy0) * pc.W + ix1]) * w;
+      if (y1 && x0) acc10 += vec4(src[(sRow + iy1) * pc.W + ix0]) * w;
+      if (y1 && x1) acc11 += vec4(src[(sRow + iy1) * pc.W + ix1]) * w;
+    }
+  }
+
+  // Store the in-range quadrant of the tile (the right/bottom edge tiles overhang OW/OH).
+  bool ox1In = ox0 + 1 < pc.OW;
+  bool oy1In = oy0 + 1 < pc.OH;
+  int d00 = ((n * Cb + cb) * pc.OH + oy0) * pc.OW + ox0;
+  dst[d00] = TO_STORE4(finishPixel(acc00, d00));
+  if (ox1In) dst[d00 + 1] = TO_STORE4(finishPixel(acc01, d00 + 1));
+  if (oy1In) {
+    int d10 = d00 + pc.OW;
+    dst[d10] = TO_STORE4(finishPixel(acc10, d10));
+    if (ox1In) dst[d10 + 1] = TO_STORE4(finishPixel(acc11, d10 + 1));
+  }
+}
