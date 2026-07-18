@@ -9,6 +9,64 @@ namespace vknn { namespace vk {
         constexpr uint64_t kFenceWaitForever = UINT64_MAX;
     } // namespace
 
+    void computeBarrier(const VulkanContext &ctx, VkCommandBuffer cmd) {
+        if (ctx.cmdPipelineBarrier2)
+        {
+            VkMemoryBarrier2 b {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            b.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            VkDependencyInfo dep {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers    = &b;
+            ctx.cmdPipelineBarrier2(cmd, &dep);
+            return;
+        }
+        VkMemoryBarrier b {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+
+    void transferBarrier(const VulkanContext &ctx, VkCommandBuffer cmd) {
+        if (ctx.cmdPipelineBarrier2)
+        {
+            VkMemoryBarrier2 b {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            b.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            VkDependencyInfo dep {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers    = &b;
+            ctx.cmdPipelineBarrier2(cmd, &dep);
+            return;
+        }
+        VkMemoryBarrier b {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        b.srcAccessMask              = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask              = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        const VkPipelineStageFlags s = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        vkCmdPipelineBarrier(cmd, s, s, 0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+
+    void executionBarrier(const VulkanContext &ctx, VkCommandBuffer cmd) {
+        if (ctx.cmdPipelineBarrier2)
+        {
+            VkMemoryBarrier2 b {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_NONE;
+            b.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_NONE;
+            VkDependencyInfo dep {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers    = &b;
+            ctx.cmdPipelineBarrier2(cmd, &dep);
+            return;
+        }
+        computeBarrier(ctx, cmd);
+    }
+
     CommandRunner::CommandRunner(VulkanContext &ctx): ctx_(ctx) {
         VkCommandPoolCreateInfo pci {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

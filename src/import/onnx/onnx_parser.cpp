@@ -38,15 +38,15 @@ namespace vknn {
         size_t      slash   = path.find_last_of("/\\");
         std::string baseDir = slash == std::string::npos ? std::string() : path.substr(0, slash);
         Graph       g;
-        // Scan the top-level ModelProto: field 7 is the graph (GraphProto), a length-delimited region
-        // (wire type 2). Every other field (ir_version, opset_import, metadata, ...) is skipped by wire
-        // type. A conformant model has exactly one graph; parse it in place and leave the rest untouched.
+        // Scan the top-level ModelProto for the graph, a length-delimited region. Every other field
+        // (ir_version, opset_import, metadata, ...) is skipped by wire type. A conformant model has
+        // exactly one graph; parse it in place and leave the rest untouched.
         onnx::Reader r(buf.data(), buf.size());
         uint32_t     fld, wire;
         bool         foundGraph = false;
         while (r.tag(fld, wire))
         {
-            if (fld == 7 && wire == 2)
+            if (fld == onnx::kModelGraph && wire == onnx::kWireBytes)
             {
                 onnx::parseGraph(r.sub(), g, baseDir);
                 foundGraph = true;

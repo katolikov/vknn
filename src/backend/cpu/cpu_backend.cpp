@@ -98,111 +98,115 @@ namespace vknn {
         }
     } // namespace cpu
 
-    // --------------------------- CpuSegment ---------------------------
-    /// A contiguous run of graph nodes executed on the CPU reference path. Construction eagerly
-    /// instantiates one CpuOp per node (parallel to `nodeIdx`), so run() is a straight-line dispatch
-    /// with no per-node lookup.
-    class CpuSegment: public Segment {
-      public:
-        CpuSegment(const std::vector<int> &idx, Graph &g): g_(g) {
-            nodeIdx = idx;
-            for (int i: idx)
-            {
-                auto op = CpuOpRegistry::instance().create(g.nodes[i].type);
-                ops_.push_back(std::move(op));
-            }
-        }
-        void run(ExecContext &ctx) override {
-            for (size_t k = 0; k < nodeIdx.size(); ++k)
-            {
-                const Node &node = ctx.graph->nodes[nodeIdx[k]];
-                if (ctx.config && ctx.config->debugSegments)
+    namespace {
+
+        // --------------------------- CpuSegment ---------------------------
+        /// A contiguous run of graph nodes executed on the CPU reference path. Construction eagerly
+        /// instantiates one CpuOp per node (parallel to `nodeIdx`), so run() is a straight-line dispatch
+        /// with no per-node lookup.
+        class CpuSegment: public Segment {
+          public:
+            CpuSegment(const std::vector<int> &idx, Graph &g): g_(g) {
+                nodeIdx = idx;
+                for (int i: idx)
                 {
-                    std::string sh;
-                    for (auto t: node.inputs)
+                    auto op = CpuOpRegistry::instance().create(g.nodes[i].type);
+                    ops_.push_back(std::move(op));
+                }
+            }
+            void run(ExecContext &ctx) override {
+                for (size_t k = 0; k < nodeIdx.size(); ++k)
+                {
+                    const Node &node = ctx.graph->nodes[nodeIdx[k]];
+                    if (ctx.config && ctx.config->debugSegments)
                     {
-                        sh += std::to_string(t) + ":[";
-                        if (t >= 0)
+                        std::string sh;
+                        for (auto t: node.inputs)
                         {
-                            const RtTensor &rt = ctx.t(t);
-                            for (auto d: rt.shape)
+                            sh += std::to_string(t) + ":[";
+                            if (t >= 0)
                             {
-                                sh += std::to_string(d) + ",";
+                                const RtTensor &rt = ctx.t(t);
+                                for (auto d: rt.shape)
+                                {
+                                    sh += std::to_string(d) + ",";
+                                }
+                                sh += rt.hostValid ? "]h " : "]NOHOST ";
+                            } else
+                            {
+                                sh += "?] ";
                             }
-                            sh += rt.hostValid ? "]h " : "]NOHOST ";
-                        } else
-                        {
-                            sh += "?] ";
                         }
+                        VKNN_INFO << "  cpuop " << opTypeName(node.type) << " '" << node.name << "' ins=" << sh;
                     }
-                    VKNN_INFO << "  cpuop " << opTypeName(node.type) << " '" << node.name << "' ins=" << sh;
-                }
-                CpuOp *op = ops_[k].get();
-                if (!op)
-                {
-                    throw Error(Status::Unsupported, std::string("no CPU kernel for op ") + opTypeName(node.type) + " (" + node.name + ")");
-                }
-                auto t0 = std::chrono::high_resolution_clock::now();
-                op->run(node, ctx);
-                // A producer may carry a fused pointwise-chain epilogue (attr pw_steps); apply it
-                // in-place after the op runs. FusedPointwise applies its own chain, so skip it here.
-                if (node.type != OpType::FusedPointwise && node.attr.has("pw_steps"))
-                {
-                    applyPwEpilogue(node, ctx);
-                }
-                auto t1 = std::chrono::high_resolution_clock::now();
-                if (ctx.profiler && ctx.profiler->enabled())
-                {
-                    OpRecord r;
-                    r.name     = node.name;
-                    r.type     = node.type;
-                    r.backend  = backend ? backend->name() : "CPU";
-                    r.cpuMs    = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                    r.fellBack = isFallback;
-                    ctx.profiler->add(r);
+                    CpuOp *op = ops_[k].get();
+                    if (!op)
+                    {
+                        throw Error(Status::Unsupported, std::string("no CPU kernel for op ") + opTypeName(node.type) + " (" + node.name + ")");
+                    }
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    op->run(node, ctx);
+                    // A producer may carry a fused pointwise-chain epilogue (attr pw_steps); apply it
+                    // in-place after the op runs. FusedPointwise applies its own chain, so skip it here.
+                    if (node.type != OpType::FusedPointwise && node.attr.has("pw_steps"))
+                    {
+                        applyPwEpilogue(node, ctx);
+                    }
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    if (ctx.profiler && ctx.profiler->enabled())
+                    {
+                        OpRecord r;
+                        r.name     = node.name;
+                        r.type     = node.type;
+                        r.backend  = backend ? backend->name() : "CPU";
+                        r.cpuMs    = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                        r.fellBack = isFallback;
+                        ctx.profiler->add(r);
+                    }
                 }
             }
-        }
 
-      private:
-        Graph                              &g_;
-        std::vector<std::unique_ptr<CpuOp>> ops_;
-    };
+          private:
+            Graph                              &g_;
+            std::vector<std::unique_ptr<CpuOp>> ops_;
+        };
 
-    // --------------------------- CpuBackend ---------------------------
-    class CpuBackend: public Backend {
-      public:
-        // Config is unused by the CPU backend (no creation-time device settings) but accepted to match
-        // the backend factory signature.
-        explicit CpuBackend(const Config & = {}) {
-        }
-        BackendKind kind() const override {
-            return BackendKind::Cpu;
-        }
-        const char *name() const override {
-            return "CPU";
-        }
-        bool available() const override {
-            return true;
-        }
-        bool supports(OpType t, DType dt) const override {
-            auto &r = CpuOpRegistry::instance();
-            if (!r.has(t))
-            {
-                return false;
+        // --------------------------- CpuBackend ---------------------------
+        class CpuBackend: public Backend {
+          public:
+            // Config is unused by the CPU backend (no creation-time device settings) but accepted to match
+            // the backend factory signature.
+            explicit CpuBackend(const Config & = {}) {
             }
-            // A registered kernel exists; the CPU reference path additionally requires the tensor to
-            // be one of the dtypes the kernels operate on (fp32 activations, int64/int32 index/shape
-            // tensors). Other dtypes fall through to no CPU support.
-            return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
-        }
-        std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &) override {
-            auto s           = std::make_unique<CpuSegment>(idx, g);
-            s->backend       = this;
-            s->compiledGraph = &g;
-            return s;
-        }
-    };
+            BackendKind kind() const override {
+                return BackendKind::Cpu;
+            }
+            const char *name() const override {
+                return "CPU";
+            }
+            bool available() const override {
+                return true;
+            }
+            bool supports(OpType t, DType dt) const override {
+                auto &r = CpuOpRegistry::instance();
+                if (!r.has(t))
+                {
+                    return false;
+                }
+                // A registered kernel exists; the CPU reference path additionally requires the tensor to
+                // be one of the dtypes the kernels operate on (fp32 activations, int64/int32 index/shape
+                // tensors). Other dtypes fall through to no CPU support.
+                return dt == DType::Float32 || dt == DType::Int64 || dt == DType::Int32;
+            }
+            std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &) override {
+                auto s           = std::make_unique<CpuSegment>(idx, g);
+                s->backend       = this;
+                s->compiledGraph = &g;
+                return s;
+            }
+        };
+
+    } // namespace
 
     VKNN_REGISTER_BACKEND(BackendKind::Cpu, CpuBackend);
 

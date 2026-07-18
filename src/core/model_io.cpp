@@ -48,6 +48,10 @@ namespace vknn {
         // through the magic-prefix diagnostic ("incompatible version -- reconvert") instead of
         // misreading a payload as int4.
         constexpr uint32_t kMagic6 = 0x364d5856; // "VXM6"
+        // Subcontainer tags inside a VXM5/VXM6 wrapper: which container body follows the tag word.
+        // Frozen wire values (the quantized-container format contract).
+        constexpr uint32_t kSubBodyVxm3 = 3; // VXM3 single-graph body
+        constexpr uint32_t kSubBodyVxm4 = 4; // VXM4 multi-bucket body
 
         // Weight-quantization content of a graph, for the container-magic choice above.
         struct QuantContent {
@@ -381,7 +385,7 @@ namespace vknn {
         if (content.anyQuantized)
         {
             w.u32(content.nonInt4 ? kMagic6 : kMagic5);
-            w.u32(3); // subcontainer tag: the VXM3 single-graph body follows
+            w.u32(kSubBodyVxm3);
         } else
         {
             w.u32(kMagic);
@@ -453,7 +457,7 @@ namespace vknn {
         if (content.anyQuantized)
         {
             w.u32(content.nonInt4 ? kMagic6 : kMagic5);
-            w.u32(4); // subcontainer tag: the VXM4 multi-bucket body follows
+            w.u32(kSubBodyVxm4);
         } else
         {
             w.u32(kMagic4);
@@ -562,7 +566,7 @@ namespace vknn {
             // a subcontainer tag then the exact VXM3/VXM4 body. Remap and fall through to the
             // matching reader; a foreign tag falls into the bad-magic diagnostics.
             const uint32_t sub = r.u32();
-            magic              = sub == 3 ? kMagic : (sub == 4 ? kMagic4 : 0);
+            magic              = sub == kSubBodyVxm3 ? kMagic : (sub == kSubBodyVxm4 ? kMagic4 : 0);
         }
         if (magic == kMagic)
         {
