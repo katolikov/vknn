@@ -19,7 +19,7 @@ namespace vknn {
 
         // Decodes a single ONNX TensorProto (field numbers per onnx_types.h) and, on demand, resolves
         // its external-data reference and materializes its payload into a HostBuffer. A repeated numeric
-        // field arrives either length-delimited (wire type `w == 2`, protobuf's packed encoding: all
+        // field arrives either length-delimited (kWireBytes, protobuf's packed encoding: all
         // values concatenated inside one sub-message) or as one value per tag; every such field below
         // branches on `w` to handle both, since exporters differ on which they emit.
         class TensorProtoParser {

@@ -15,26 +15,26 @@ namespace vknn {
             {
                 switch (f)
                 {
-                    case 1:
+                    case kAttrName:
                         name = r.str();
                         break;
-                    case 2: {
+                    case kAttrFloat: {
                         uint32_t b = r.fixed32();
                         std::memcpy(&a.f, &b, 4);
                         a.kind = Attr::Float;
                         break;
                     }
-                    case 3:
+                    case kAttrInt:
                         a.i    = (int64_t) r.varint();
                         a.kind = Attr::Int;
                         break;
-                    case 4: {
+                    case kAttrString: {
                         auto b = r.bytes();
                         a.str.assign((const char *) b.data(), b.size());
                         a.kind = Attr::String;
                         break;
                     }
-                    case 7: {
+                    case kAttrFloats: {
                         Reader s = r.sub();
                         while (!s.eof())
                         {
@@ -46,11 +46,11 @@ namespace vknn {
                         a.kind = Attr::Floats;
                         break;
                     }
-                    case 8: {
+                    case kAttrInts: {
                         // `ints` is a packed repeated field: exporters may emit it length-delimited
-                        // (wire type 2 = one blob of back-to-back varints) or, for a single element,
-                        // as a bare varint. Handle both so an attribute with one int is not dropped.
-                        if (w == 2)
+                        // (one blob of back-to-back varints) or, for a single element, as a bare
+                        // varint. Handle both so an attribute with one int is not dropped.
+                        if (w == kWireBytes)
                         {
                             Reader s = r.sub();
                             while (!s.eof())
@@ -64,7 +64,7 @@ namespace vknn {
                         a.kind = Attr::Ints;
                         break;
                     }
-                    case 5: {
+                    case kAttrTensor: {
                         tp    = TensorProtoParser::parse(r.sub());
                         hasTp = true;
                         break;
@@ -135,44 +135,44 @@ namespace vknn {
             uint32_t f, w;
             while (r.tag(f, w))
             {
-                if (f == 1)
+                if (f == kValueInfoName)
                 {
                     name = r.str();
-                } else if (f == 2)
-                { // TypeProto
+                } else if (f == kValueInfoType)
+                {
                     Reader   tp = r.sub();
                     uint32_t f2, w2;
                     while (tp.tag(f2, w2))
                     {
-                        if (f2 == 1)
-                        { // tensor_type
+                        if (f2 == kTypeTensorType)
+                        {
                             Reader   tt = tp.sub();
                             uint32_t f3, w3;
                             while (tt.tag(f3, w3))
                             {
-                                if (f3 == 1)
+                                if (f3 == kTensorTypeElemType)
                                 {
                                     elem = (int32_t) tt.varint();
-                                } else if (f3 == 2)
-                                { // shape
+                                } else if (f3 == kTensorTypeShape)
+                                {
                                     Reader   sh = tt.sub();
                                     uint32_t f4, w4;
                                     while (sh.tag(f4, w4))
                                     {
-                                        if (f4 == 1)
-                                        { // dim
+                                        if (f4 == kShapeDim)
+                                        {
                                             Reader      dim = sh.sub();
                                             uint32_t    f5, w5;
                                             int64_t     val = -1;
                                             std::string param; // dim_param symbol/expression, empty when concrete
                                             while (dim.tag(f5, w5))
                                             {
-                                                if (f5 == 1)
+                                                if (f5 == kDimValue)
                                                 {
-                                                    val = (int64_t) dim.varint(); // dim_value
-                                                } else if (f5 == 2)
+                                                    val = (int64_t) dim.varint();
+                                                } else if (f5 == kDimParam)
                                                 {
-                                                    param = dim.str(); // dim_param: retain the symbol name/expression
+                                                    param = dim.str(); // retain the symbol name/expression
                                                     val   = -1;
                                                 } else
                                                 {
@@ -215,19 +215,19 @@ namespace vknn {
             {
                 switch (f)
                 {
-                    case 1:
+                    case kNodeInput:
                         ins.push_back(r.str());
                         break;
-                    case 2:
+                    case kNodeOutput:
                         outs.push_back(r.str());
                         break;
-                    case 3:
+                    case kNodeName:
                         node.name = r.str();
                         break;
-                    case 4:
+                    case kNodeOpType:
                         opType = r.str();
                         break;
-                    case 5:
+                    case kNodeAttribute:
                         parseAttr(r.sub(), node, baseDir, extCache);
                         break;
                     default:

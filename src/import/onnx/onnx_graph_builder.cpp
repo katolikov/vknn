@@ -29,7 +29,7 @@ namespace vknn {
             {
                 switch (f)
                 {
-                    case 1: {
+                    case kGraphNode: {
                         Node                     n;
                         std::vector<std::string> ni, no;
                         NodeParser::parseNode(r.sub(), n, ni, no, baseDir, &extCache);
@@ -38,13 +38,13 @@ namespace vknn {
                         nodeOuts.push_back(std::move(no));
                         break;
                     }
-                    case 5: {
+                    case kGraphInitializer: {
                         TensorProto tp = TensorProtoParser::parse(r.sub());
                         std::string nm = tp.name;
                         inits.push_back({nm, std::move(tp)});
                         break;
                     }
-                    case 11: {
+                    case kGraphInput: {
                         std::string              nm;
                         Shape                    sh;
                         int32_t                  el = 1;
@@ -58,7 +58,7 @@ namespace vknn {
                         g.inputs.push_back(id);
                         break;
                     }
-                    case 12: {
+                    case kGraphOutput: {
                         std::string nm;
                         Shape       sh;
                         int32_t     el = 1;
@@ -73,7 +73,7 @@ namespace vknn {
                         g.outputs.push_back(id);
                         break;
                     }
-                    case 13: {
+                    case kGraphValueInfo: {
                         std::string nm;
                         Shape       sh;
                         int32_t     el = 1;

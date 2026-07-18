@@ -11,8 +11,8 @@ namespace vknn {
             {
                 switch (f)
                 {
-                    case 1: // dims: packed sub-message of varints, or a single varint
-                        if (w == 2)
+                    case kTensorDims: // packed blob of varints, or a single varint
+                        if (w == kWireBytes)
                         {
                             Reader s = r.sub();
                             while (!s.eof())
@@ -24,11 +24,11 @@ namespace vknn {
                             t.dims.push_back((int64_t) r.varint());
                         }
                         break;
-                    case 2:
+                    case kTensorDataType:
                         t.dataType = (int32_t) r.varint();
                         break;
-                    case 4: // float_data (packed or single)
-                        if (w == 2)
+                    case kTensorFloatData: // packed or single
+                        if (w == kWireBytes)
                         {
                             Reader s = r.sub();
                             while (!s.eof())
@@ -46,10 +46,11 @@ namespace vknn {
                             t.floatData.push_back(fv);
                         }
                         break;
-                    case 5: // int32_data (packed or single): typed payload for INT32 and every
-                            // narrower type. A negative int32 arrives as a 64-bit sign-extended
-                            // varint; truncating the decoded u64 to int32 recovers its value.
-                        if (w == 2)
+                    case kTensorInt32Data: // packed or single: typed payload for INT32 and every
+                                           // narrower type. A negative int32 arrives as a 64-bit
+                                           // sign-extended varint; truncating the decoded u64 to
+                                           // int32 recovers its value.
+                        if (w == kWireBytes)
                         {
                             Reader s = r.sub();
                             while (!s.eof())
@@ -61,8 +62,8 @@ namespace vknn {
                             t.int32Data.push_back((int32_t) r.varint());
                         }
                         break;
-                    case 7: // int64_data
-                        if (w == 2)
+                    case kTensorInt64Data:
+                        if (w == kWireBytes)
                         {
                             Reader s = r.sub();
                             while (!s.eof())
@@ -74,22 +75,22 @@ namespace vknn {
                             t.int64Data.push_back((int64_t) r.varint());
                         }
                         break;
-                    case 8:
+                    case kTensorName:
                         t.name = r.str();
                         break;
-                    case 9:
+                    case kTensorRawData:
                         t.raw = r.bytes();
                         break;
-                    case 13: { // external_data: StringStringEntryProto { 1=key, 2=value }
+                    case kTensorExternalData: {
                         Reader      s = r.sub();
                         std::string key, val;
                         uint32_t    ef, ew;
                         while (s.tag(ef, ew))
                         {
-                            if (ef == 1 && ew == 2)
+                            if (ef == kStringEntryKey && ew == kWireBytes)
                             {
                                 key = s.str();
-                            } else if (ef == 2 && ew == 2)
+                            } else if (ef == kStringEntryValue && ew == kWireBytes)
                             {
                                 val = s.str();
                             } else
@@ -107,7 +108,7 @@ namespace vknn {
                         { t.extLength = std::strtoll(val.c_str(), nullptr, 10); }
                         break;
                     }
-                    case 14: // data_location
+                    case kTensorDataLocation:
                         t.dataLocation = (int32_t) r.varint();
                         break;
                     default:
@@ -119,7 +120,7 @@ namespace vknn {
         }
 
         void TensorProtoParser::resolveExternal(const std::string &baseDir, TensorProto &t, std::map<std::string, std::vector<uint8_t>> &cache) {
-            if (t.dataLocation != 1 || t.extLoc.empty() || !t.raw.empty())
+            if (t.dataLocation != kDataLocationExternal || t.extLoc.empty() || !t.raw.empty())
             {
                 return;
             }

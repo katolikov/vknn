@@ -9,6 +9,15 @@
 namespace vknn {
     namespace onnx {
 
+        // Protobuf wire types: the low 3 bits of every field tag select how the payload is framed.
+        // Wire types 3/4 (deprecated group start/end) never appear in ONNX.
+        enum WireType : uint32_t {
+            kWireVarint  = 0, // int32/int64/bool/enum payload
+            kWireFixed64 = 1,
+            kWireBytes   = 2, // length-delimited: strings, sub-messages, packed repeated fields
+            kWireFixed32 = 5,
+        };
+
         /// Forward-only cursor over a protobuf-encoded byte range (an ONNX ModelProto or one of its
         /// nested messages). Every accessor advances the internal cursor `p_` past the bytes it
         /// consumes; the caller drives the message by reading a tag() and then either decoding the
@@ -131,16 +140,16 @@ namespace vknn {
             void skip(uint32_t wire) {
                 switch (wire)
                 {
-                    case 0:
+                    case kWireVarint:
                         varint();
                         break;
-                    case 1:
+                    case kWireFixed64:
                         p_ += remaining() < 8 ? remaining() : 8;
                         break;
-                    case 5:
+                    case kWireFixed32:
                         p_ += remaining() < 4 ? remaining() : 4;
                         break;
-                    case 2: {
+                    case kWireBytes: {
                         uint64_t l = varint();
                         if (l > remaining())
                         {
