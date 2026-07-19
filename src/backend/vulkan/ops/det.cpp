@@ -16,6 +16,7 @@ namespace vknn {
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when the input is a constant initializer
             DetPC                                pc {};
+            PwEpi                                epi; // fused pointwise unit applied at the store
             void                                 prepare(const Node &node, VkOpEnv &env) override {
                 const Shape &in   = env.graph->desc(node.inputs[0]).shape;
                 const int    rank = (int) in.size();
@@ -25,11 +26,15 @@ namespace vknn {
                 {
                     batches *= in[(size_t) k];
                 }
-                pc   = {(int) batches, (int) n};
-                pipe = env.pipeline(shader("det_flat", env.useFp16), 2, sizeof(DetPC), std::vector<uint32_t> {});
+                pc = {(int) batches, (int) n};
+                epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
+                pipe = env.pipeline(shader((std::string("det_flat") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(DetPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.batches, flat::kFlatLocalSize));
+                vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
+                std::vector<VkBuffer> bufs = {operandBuf(env, node.inputs[0], hold0)->handle(), dst->handle()};
+                epi.append(bufs, node, env, dst->handle());
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.batches, flat::kFlatLocalSize));
             }
         };
     } // namespace

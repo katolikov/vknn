@@ -1,5 +1,9 @@
 #version 450
 #include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
 // Det, FLAT row-major: one thread per matrix, [..., n, n] -> [...]. Loads the n*n elements at the
 // storage precision, evaluates the determinant in fp32 by FIXED-ORDER cofactor expansion (the SAME
 // expressions, in the SAME operation order, as the CPU oracle in backend/cpu/ops/det.cpp — any
@@ -82,5 +86,12 @@ void main() {
   } else {
     det = detLu(int(gid) * nn, pc.n);
   }
+#ifdef PW_EPI
+  // A fused pointwise unit (e.g. the camera head's Sign, plus any trailing chain) rides the store:
+  // one dispatch instead of Det + N elementwise kernels.
+  det = pw_apply(det, int(gid));
+  d[gid] = STORE(det);
+#else
   d[gid] = TO_STORE(det);
+#endif
 }

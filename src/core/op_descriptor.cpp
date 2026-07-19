@@ -91,7 +91,7 @@ namespace vknn {
                 // assigned layout (the Agnostic arm in globalLayoutAssign) and never forces a
                 // convert. Pure data movement; no fusion role.
                 set(OpType::ChannelShuffle, L::ShapeDependent, false, false);
-                set(OpType::Det, L::Flat, false, false);
+                set(OpType::Det, L::Flat, false, true);
                 // Everything not listed keeps the all-default row {Nc4, pwMember=false,
                 // pwEpilogue=false}: CPU-only / structural ops (Reshape, Flatten, Squeeze, Unsqueeze,
                 // Cast, Identity, Constant, Shape, BatchNorm, EyeLike, FusedSE, ConvertLayout,
