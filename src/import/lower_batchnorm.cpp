@@ -57,8 +57,8 @@ namespace vknn {
                 continue; // unresolved or channel-less data input
             }
             int64_t     C     = xs[1];
-            // dtype-safe reads: a native-fp64 BN parameter decodes to fp32 here (the lowered scale/shift
-            // initializers are fp32, so the runtime op stays fp32 -- an exotic case; ordinary BN is fp32).
+            // dtype-safe reads: a fp64 BN parameter decodes to fp32 here (the lowered scale/shift
+            // initializers are fp32, so the runtime op stays fp32).
             const std::vector<float> scale = initFloats(g, sc);
             const std::vector<float> beta  = initFloats(g, bi);
             const std::vector<float> mean  = initFloats(g, mn);

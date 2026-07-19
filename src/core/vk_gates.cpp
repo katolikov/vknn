@@ -64,11 +64,10 @@ namespace vknn {
     }
 
     bool vkNodeGate(const Graph &g, const Node &nd, std::string *whyNot) {
-        // Real fp64 has no GPU path: mobile Vulkan drivers expose no usable shaderFloat64, so any node
-        // that reads or writes a Float64 tensor runs on the CPU (double precision) by design. This is a
-        // PRECISION choice, not missing coverage -- legalizeFp64 confines fp64 to the ops whose CPU
-        // kernel computes in real double, and inserts explicit narrowing Casts elsewhere, so this refusal
-        // only fires on the numerically-sensitive SVD / camera-head path the user declared fp64.
+        // fp64 has no GPU path: mobile Vulkan drivers expose no usable shaderFloat64, so a node reading
+        // or writing a Float64 tensor runs on the CPU in double. This is a precision choice, not missing
+        // coverage -- legalizeFp64 confines fp64 to the ops with a CPU double kernel and narrows the rest
+        // with explicit Casts, so this refusal fires only on a declared-fp64 tensor.
         for (TensorId t: nd.inputs)
         {
             if (t != kNoTensor && g.desc(t).dtype == DType::Float64)

@@ -118,11 +118,10 @@ namespace vknn {
         return halfToFloat(h);
     }
 
-    /// Read the IEEE-754 double at element index `index` of a byte source that carries no alignment
-    /// guarantee (a mapped ".vxm" blob's fp64 payload is not 8-byte aligned). Like halfToFloatAt(), the
-    /// eight payload bytes are copied into an aligned local first -- a plain typed load at an unaligned
-    /// address is undefined behavior and a fault on strict-alignment targets. Returns the value as a
-    /// double; a caller that computes in fp32 narrows it, one that keeps fp64 storage copies it verbatim.
+    /// Read the IEEE-754 double at element index `index` of a byte source with no alignment guarantee
+    /// (a mapped ".vxm" blob's fp64 payload is not 8-byte aligned). As in halfToFloatAt(), the eight
+    /// bytes are copied into an aligned local first: an unaligned typed load is undefined behavior and
+    /// faults on strict-alignment targets.
     inline double doubleAt(const void *base, int64_t index) noexcept {
         double v;
         std::memcpy(&v, static_cast<const uint8_t *>(base) + index * (int64_t) sizeof(double), sizeof(double));

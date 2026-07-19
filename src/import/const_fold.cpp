@@ -43,9 +43,9 @@ namespace vknn {
 
         std::set<int> removeNodes;
         auto          foldable = [&](const Node &nd) {
-            // A node consuming a native-fp64 constant is left for the runtime fp64 path: const-folding
-            // evaluates it through the CPU ops, which read pool values at fp32 -- baking it here would
-            // narrow a real-fp64 constant. (Shape/Constant carry no fp64 tensor input, so they still fold.)
+            // Leave a node with a fp64 input for the runtime fp64 path: const-folding evaluates it through
+            // the CPU ops at fp32, which would narrow a fp64 constant. (Shape/Constant carry no fp64
+            // tensor input, so they still fold.)
             for (TensorId in: nd.inputs)
             {
                 if (in != kNoTensor && g.desc(in).dtype == DType::Float64)

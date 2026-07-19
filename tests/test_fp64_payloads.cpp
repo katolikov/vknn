@@ -1,10 +1,8 @@
-// Real IEEE-754 float64 tensors on the CPU path (Phase A: lossless storage / serialization / IO,
-// compute still fp32). A DOUBLE initializer keeps NATIVE 8-byte host storage -- never narrowed at
-// import -- so it round-trips byte-identically through a .vxm and a genuine fp64 reader (initDoubles)
-// recovers it at full precision, while the fp32 compute path decodes it through initFloats. A DOUBLE
-// graph input/output round-trips as real fp64 bytes at the session boundary. Phase B adds the fp64
-// COMPUTE path (see test_ops.cpp Det tests); here the value is only ever moved, so an fp32-exact
-// value round-trips exactly and a value beyond fp32 precision proves the STORAGE stays fp64.
+// float64 tensors on the CPU path. The Fp64Payloads cases cover storage / serialization / IO: a DOUBLE
+// initializer keeps native 8-byte storage (round-trips byte-identically through a .vxm; initDoubles
+// recovers it, initFloats narrows it), and a DOUBLE graph input/output round-trips as fp64 at the
+// session boundary. The Fp64Compute cases cover the fp64 compute path (Det/Sign/Cast/Binary), each with
+// a value where fp32 and fp64 diverge, so a value beyond fp32 precision distinguishes the two.
 #include "import/passes.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
@@ -22,10 +20,9 @@ namespace {
     // so it exposes any accidental fp32 round-trip. Exact in fp64.
     constexpr double kBeyondFp32 = 1.0 + 1.0 / 1099511627776.0; // 1 + 2^-40
 
-    // A 2x2 matrix whose true determinant is exactly -1: det = 1000001*999999 - 1000000*1000000 =
-    // (1e12 - 1) - 1e12 = -1. The entries are fp32-exact (all < 2^24), but the ~1e12 products overflow
-    // fp32's 24-bit mantissa and both round to the SAME value, so a fp32 determinant is exactly 0 while
-    // a real-fp64 determinant is exactly -1. The cleanest possible witness that Det computes in fp64.
+    // A 2x2 matrix whose determinant is exactly -1: 1000001*999999 - 1000000*1000000 = (1e12-1) - 1e12.
+    // The entries are fp32-exact (all < 2^24), but the ~1e12 products overflow fp32's 24-bit mantissa, so
+    // the fp32 determinant is rounding garbage while the fp64 determinant is -1.
     const double kDetMatrix[4] = {1000001.0, 1000000.0, 1000000.0, 999999.0};
 
     // Build "x"[2,2] (dtype dt) -> Det -> "y"[1] (dtype dt), run on the CPU backend feeding `m` (four
@@ -118,9 +115,8 @@ TEST(Fp64Payloads, DtypeSizeAndMnemonic) {
     EXPECT_STREQ(dtypeStr(DType::Float64), "f64");
 }
 
-// A native-fp64 initializer occupies 8 bytes/elem. initDoubles recovers every bit; initFloats
-// narrows to fp32 for the compute path. The beyond-fp32 value proves the storage is genuinely fp64,
-// not fp32 in disguise.
+// A fp64 initializer occupies 8 bytes/elem. initDoubles recovers every bit; initFloats narrows to
+// fp32. The beyond-fp32 value confirms the storage is fp64, not fp32.
 TEST(Fp64Payloads, NativeInitializerStorageAndDecode) {
     Graph    g;
     TensorId id = addF64Init(g, "c", {3}, {1.5, -2.25, kBeyondFp32});
@@ -194,9 +190,9 @@ TEST(Fp64Payloads, VxmRoundTripLossless) {
     EXPECT_EQ(std::memcmp(after.data(), before.data(), before.size()), 0); // byte-identical fp64
 }
 
-// A DOUBLE graph input/output round-trips as real fp64 bytes at the session boundary. The value is
-// only carried through an Identity, and the compute storage is fp32 in Phase A, so an fp32-exact
-// value round-trips exactly. The readback emits 8-byte fp64 (outs[0].dtype == Float64).
+// A DOUBLE graph input/output round-trips as fp64 at the session boundary. The value passes through an
+// Identity (a byte-mover), so an fp32-exact value round-trips exactly and the readback emits 8-byte
+// fp64 (outs[0].dtype == Float64).
 TEST(Fp64Payloads, IoReadbackEmitsDouble) {
     Graph      g;
     TensorDesc xi;
@@ -247,20 +243,16 @@ TEST(Fp64Payloads, IoReadbackEmitsDouble) {
 
 // ---- Phase B: real fp64 COMPUTE (the SVD / camera-head path) ----
 
-// Det computes in genuine double precision for a fp64 input matrix: the determinant of kDetMatrix is
-// exactly -1, which only fp64 recovers (the ~1e12 products overflow fp32's 24-bit mantissa, so the
-// fp32 path returns rounding garbage). The two paths differ by ~4096 -- the direct witness that the
-// fp64 one is real double precision, not fp32 relabeled.
+// Det of a fp64 input matrix computes in double: kDetMatrix's determinant is -1, which only fp64
+// recovers; the fp32 path returns rounding garbage far from -1.
 TEST(Fp64Compute, DetIsRealDoubleNotFp32) {
-    EXPECT_EQ(runDet(DType::Float64, kDetMatrix), -1.0);            // real fp64: exact
-    EXPECT_GT(std::abs(runDet(DType::Float32, kDetMatrix) + 1.0), 100.0); // fp32: far from the true -1
+    EXPECT_EQ(runDet(DType::Float64, kDetMatrix), -1.0);
+    EXPECT_GT(std::abs(runDet(DType::Float32, kDetMatrix) + 1.0), 100.0);
 }
 
-// Sign reads the true sign of the fp64 determinant. det(kDetMatrix) = -1 in fp64 -> Sign = -1 (the
-// correct sign); the fp32 path's determinant is rounding garbage (positive) -> Sign = +1, the WRONG
-// sign. Det and Sign stay two ops for fp64 (pointwise fusion excludes fp64), each in double, so the
-// sign reflects the real determinant -- a case where fp64 is required for a correct result, not just
-// a more accurate one.
+// Sign of the fp64 determinant. det(kDetMatrix) = -1 in fp64 -> Sign = -1; the fp32 determinant is
+// positive garbage -> Sign = +1. Det and Sign stay two ops for fp64 (pointwise fusion excludes it),
+// so the sign follows the fp64 determinant.
 TEST(Fp64Compute, SignOfFp64Determinant) {
     auto run = [](DType dt) {
         Graph      g;
@@ -324,12 +316,12 @@ TEST(Fp64Compute, SignOfFp64Determinant) {
         }
         return (double) outs[0].f32()[0];
     };
-    EXPECT_EQ(run(DType::Float64), -1.0); // correct sign of the real -1 determinant
-    EXPECT_EQ(run(DType::Float32), 1.0);  // WRONG sign: fp32's garbage determinant is positive
+    EXPECT_EQ(run(DType::Float64), -1.0); // sign of the fp64 determinant (-1)
+    EXPECT_EQ(run(DType::Float32), 1.0);  // fp32 determinant is positive garbage
 }
 
-// Cast is the fp32->fp64 bridge: fp32-exact entries cast up to fp64 and Det then computes the real
-// determinant. Proves a graph can enter the fp64 island from a fp32 input via Cast.
+// Cast is the fp32->fp64 bridge: fp32-exact entries cast up to fp64, then Det computes in double. A
+// graph enters the fp64 island from a fp32 input via Cast.
 TEST(Fp64Compute, CastFp32ToFp64ThenDet) {
     Graph      g;
     TensorDesc xi;
@@ -382,12 +374,11 @@ TEST(Fp64Compute, CastFp32ToFp64ThenDet) {
     ASSERT_EQ(sess->run({in}, outs), Status::Ok);
     ASSERT_FALSE(outs.empty());
     ASSERT_EQ(outs[0].dtype, DType::Float64);
-    EXPECT_EQ(reinterpret_cast<const double *>(outs[0].data.data())[0], -1.0); // real fp64 via the bridge
+    EXPECT_EQ(reinterpret_cast<const double *>(outs[0].data.data())[0], -1.0);
 }
 
-// legalizeFp64 inserts an explicit narrowing Cast(fp64->fp32) before a non-fp64-capable consumer
-// (Softmax), while a fp64-capable consumer (Det) keeps its fp64 input untouched. Proves the safety
-// net that stops any fp64 tensor from reaching an fp32-only kernel.
+// legalizeFp64 inserts a narrowing Cast(fp64->fp32) before a non-fp64-capable consumer (Softmax) while
+// a fp64-capable consumer (Det) keeps its fp64 input.
 TEST(Fp64Compute, LegalizeInsertsNarrowingCast) {
     Graph      g;
     TensorDesc xi;
@@ -445,9 +436,9 @@ TEST(Fp64Compute, LegalizeInsertsNarrowingCast) {
     EXPECT_EQ(g.desc(g.nodes[detIdx].inputs[0]).dtype, DType::Float64); // Det kept fp64
 }
 
-// Real-fp64 elementwise arithmetic: (a - b) in fp64 recovers a difference that fp32 cancels. With
-// a = 1 + 2^-40 and b = 1, the exact difference is 2^-40; fp32 rounds both operands to 1.0 so the
-// fp32 difference is 0, while the fp64 Binary computes 2^-40 exactly.
+// fp64 elementwise arithmetic: (a - b) in double recovers a difference fp32 cancels. With a = 1 + 2^-40
+// and b = 1 the exact difference is 2^-40; fp32 rounds both operands to 1.0 (difference 0), the fp64
+// Binary computes 2^-40.
 TEST(Fp64Compute, BinarySubIsRealDouble) {
     auto runSub = [](DType dt) {
         Graph      g;

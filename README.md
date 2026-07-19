@@ -38,10 +38,10 @@
 - **Quantization built in.** `vknn_compile -Os` produces int4 (or int8 / lut4) weights with AWQ
   outlier columns kept fp16 and a per-layer error guard, executed by native quantized GPU MatMul
   kernels.
-- **Real float64 where precision matters.** A tensor an exporter marks `double` (a camera-head SVD
-  determinant / sign) computes in genuine fp64 on the CPU oracle — lossless through the `.vxm` and the
-  I/O boundary, confined to the double-precision island by an explicit-narrowing pass so a fp32 model
-  stays byte-identical. See [ADR-0019](docs/adr/0019-float64-precision-path.md).
+- **float64 where precision matters.** A tensor an exporter marks `double` (a camera-head SVD
+  determinant / sign) computes in fp64 on the CPU oracle — lossless through the `.vxm` and the I/O
+  boundary, confined to the double-precision ops by an explicit-narrowing pass so a fp32 model stays
+  byte-identical. See [ADR-0019](docs/adr/0019-float64-precision-path.md).
 - **Verified, deterministic.** Every path is checked against an onnxruntime golden; autotuning races
   only bit-neutral launch parameters, so `--tuning none/fast/heavy` produce byte-identical output.
 - **Fast.** Faster than [MNN](https://github.com/alibaba/MNN)'s best backend on 8 of 9 benchmark

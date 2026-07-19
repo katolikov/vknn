@@ -96,8 +96,8 @@ namespace vknn {
                 // A Cast pins its output to the target's float-ness. Int64 here is a representative
                 // "some integer type" marker, not a width claim: the removal test below only asks
                 // isFloat(), so any non-float dtype is interchangeable. A Cast to DOUBLE is tracked as
-                // the distinct Float64 precision (isFloat() excludes it), so a real fp32<->fp64 narrowing
-                // or widening is never mistaken for a same-precision float->float no-op and removed.
+                // the distinct Float64 precision (isFloat() excludes it), so a fp32<->fp64 narrowing or
+                // widening is never mistaken for a same-precision float->float no-op and removed.
                 const int64_t to = nd.attr.geti("to", 1);
                 out              = to == kOnnxDouble ? DType::Float64 : (onnxToIsFloat(to) ? DType::Float32 : DType::Int64);
             } else if (nd.type == OpType::Equal)
@@ -156,7 +156,7 @@ namespace vknn {
             }
             if (c.attr.geti("to", 1) == kOnnxDouble)
             {
-                continue; // widening to real fp64 is a precision change, never a removable no-op
+                continue; // widening to fp64 is a precision change, not a removable no-op
             }
             if (in >= (TensorId) known.size() || !known[in] || !isFloat(dt[in]))
             {

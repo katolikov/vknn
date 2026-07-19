@@ -66,7 +66,7 @@ namespace vknn {
             DType  odt  = g.desc(out).dtype;
 
             // Copy the parameter payloads before any addTensor mutates the graph. dtype-safe reads: a
-            // native-fp64 scale/bias decodes to fp32 here (the lowered params are fp32 -- exotic case).
+            // fp64 scale/bias decodes to fp32 here (the lowered params are fp32).
             std::vector<float> scaleV = initFloats(g, sc);
             std::vector<float> biasV  = initFloats(g, bi);
 

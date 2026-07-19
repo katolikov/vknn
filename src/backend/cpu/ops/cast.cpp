@@ -1,7 +1,7 @@
-// Cast: change dtype. vknn computes in fp32, carries int64 for shape paths, and carries real fp64 on
-// the double-precision (SVD / camera-head) path, so we support float<->int64<->double conversions
-// (other integer widths map onto int64). Shape unchanged. Cast is the fp32<->fp64 bridge: a Cast to
-// DOUBLE widens to real fp64, a Cast off a fp64 input reads every bit before narrowing.
+// Cast: change dtype. vknn computes in fp32, carries int64 for shape paths, and carries fp64 on the
+// double-precision path, so this supports float<->int64<->double (other integer widths map onto int64).
+// Shape unchanged. Cast is the fp32<->fp64 bridge: a Cast to DOUBLE widens to fp64, a Cast off a fp64
+// input reads it at full width before narrowing.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 
@@ -15,8 +15,7 @@ namespace vknn {
                 int64_t         n     = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
                 bool            inI64 = X.dtype == DType::Int64;
                 bool            inF64 = X.dtype == DType::Float64;
-                // Read source element i as a double, exact for every storage the engine carries: int64
-                // lanes, native fp64 lanes, or the fp32 compute storage.
+                // Read source element i as a double: int64, fp64, or fp32 storage, all exact.
                 auto src = [&](int64_t i) -> double {
                     if (inI64)
                     {
@@ -46,14 +45,14 @@ namespace vknn {
                     double *y = cpu::allocOutF64(Y, X.shape);
                     for (int64_t i = 0; i < n; ++i)
                     {
-                        y[i] = src(i); // widen to real fp64 (or copy a fp64 source verbatim)
+                        y[i] = src(i); // widen to fp64, or copy a fp64 source through
                     }
                 } else
                 {
                     float *y = cpu::allocOut(Y, X.shape);
                     for (int64_t i = 0; i < n; ++i)
                     {
-                        y[i] = (float) src(i); // narrow to the fp32 compute storage
+                        y[i] = (float) src(i); // narrow to fp32
                     }
                 }
             }

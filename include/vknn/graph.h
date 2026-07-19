@@ -126,9 +126,8 @@ namespace vknn {
             }
         } else if (dt == DType::Float64)
         {
-            // Native 8-byte fp64 lanes (a DOUBLE initializer kept at full precision by the importer)
-            // narrow to fp32 for the fp32 compute path. Unaligned byte-copy read (a mapped .vxm payload's
-            // fp64 offsets are not 8-byte aligned); a real-fp64 reader takes initDoubles() instead.
+            // Native 8-byte fp64 lanes narrow to fp32 for the fp32 compute path; a fp64 reader takes
+            // initDoubles() instead. Unaligned byte-copy read (a mapped .vxm payload is not 8-byte aligned).
             const uint8_t *v = hb.bytes.data();
             for (int64_t i = 0, lim = lanes(8); i < lim; ++i)
             {
@@ -146,11 +145,10 @@ namespace vknn {
         return out;
     }
 
-    /// Decode initializer `id`'s payload to REAL fp64, honoring the stored dtype: a native Float64
-    /// payload (a DOUBLE .vxm / initializer) copies through at full precision via an unaligned byte read,
-    /// every other dtype widens through its initFloats() fp32 value. This is the real-fp64 counterpart of
-    /// initFloats() -- a genuine fp64 op (the camera-head SVD path) reads a constant operand exactly,
-    /// rather than round-tripping it through fp32. Element count and payload clamping match initFloats().
+    /// Decode initializer `id`'s payload to fp64, honoring the stored dtype: a Float64 payload copies
+    /// through via an unaligned byte read, every other dtype widens from its initFloats() fp32 value.
+    /// The fp64 counterpart of initFloats(), for an op that reads a constant operand in double rather
+    /// than through fp32. Element count and payload clamping match initFloats().
     /// @param g  Graph owning the initializer.
     /// @param id Initializer tensor id. Precondition: `g.isInitializer(id)`.
     /// @returns The payload as fp64 elements.

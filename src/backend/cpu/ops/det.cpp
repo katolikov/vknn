@@ -11,9 +11,8 @@ namespace vknn {
     namespace {
 
         // Fixed-order cofactor expansions shared (by transcription) with shaders/det_flat.comp.
-        // Any change here must be mirrored there, or CPU-vs-GPU byte parity breaks. Templated on the
-        // element/accumulation type: T=float reproduces the GPU shader's fp32 arithmetic bit-for-bit
-        // (byte parity), T=double computes a genuine fp64 determinant for a real-fp64 input matrix.
+        // Any change here must be mirrored there, or CPU-vs-GPU byte parity breaks. T=float matches the
+        // shader's fp32 arithmetic bit-for-bit; T=double is the fp64 path for a Float64 input.
         template<typename T>
         T det2(const T *m) {
             return m[0] * m[3] - m[1] * m[2];
@@ -39,8 +38,8 @@ namespace vknn {
         }
 
         // General n: LU with partial pivoting in double; the determinant is the pivot product with the
-        // permutation sign. Shared by the fp32 and fp64 paths (both accumulate in double for n > 4);
-        // the source is read at its own precision, so a real-fp64 matrix keeps every bit into the LU.
+        // permutation sign. Both paths accumulate in double for n > 4; the source is read at its own
+        // width, so a Float64 matrix loses no bits entering the LU.
         template<typename T>
         double detLu(const T *src, int64_t n) {
             std::vector<double> a(src, src + n * n);
@@ -80,8 +79,7 @@ namespace vknn {
             return (float) det;
         }
 
-        // Determinant of one n*n matrix in the element/accumulation type T (float = GPU-matched fp32,
-        // double = real fp64). Fixed-order cofactor for n <= 4, double LU beyond.
+        // Determinant of one n*n matrix in type T. Fixed-order cofactor for n <= 4, double LU beyond.
         template<typename T>
         T detOne(const T *m, int64_t n) {
             switch (n)
@@ -111,8 +109,7 @@ namespace vknn {
                     out.push_back(1); // the IR has no rank-0 activations
                 }
                 const int64_t batches = numElements(out);
-                // A real-fp64 input matrix produces a real-fp64 determinant, computed entirely in double;
-                // otherwise the fp32 path stays bit-identical to the GPU det_flat kernel.
+                // Float64 input: determinant in double. Otherwise fp32, matching the GPU det_flat kernel.
                 if (X.dtype == DType::Float64)
                 {
                     const double *x = X.host.f64();

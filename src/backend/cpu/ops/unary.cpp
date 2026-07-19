@@ -7,10 +7,9 @@
 namespace vknn {
     namespace {
 
-        /// Evaluate one elementwise unary activation in the element/accumulation type T. T=float
-        /// reproduces the GPU shader's fp32 arithmetic bit-for-bit (the CPU op is the GPU oracle);
-        /// T=double evaluates the same formula in real fp64 for a double-precision input (so, e.g.,
-        /// Sign reads the true sign of a fp64 value rather than one that narrowing to fp32 might flip).
+        /// Evaluate one elementwise unary activation in type T. T=float matches the GPU shader's fp32
+        /// arithmetic bit-for-bit (this op is the GPU oracle); T=double is the path for a Float64 input,
+        /// where narrowing to fp32 first could change the result (e.g. Sign of a value near zero).
         /// @param x  Input value.
         /// @param op UnaryType sub-code (Node::subOp).
         /// @param a  First parameter (Node::actLo): LeakyRelu/Elu alpha, HardSigmoid alpha. Ignored by
@@ -85,7 +84,7 @@ namespace vknn {
         struct UnaryCpu: CpuOp {
             // Apply the selected activation independently to each element; output keeps the input shape
             // and dtype. subOp selects the op and actLo/actHi carry its parameters (see unary()). A
-            // real-fp64 input is evaluated in double; otherwise the fp32 path stays the GPU oracle.
+            // Float64 input is evaluated in double, everything else in fp32.
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X  = ctx.t(node.inputs[0]);
                 RtTensor       &Y  = ctx.t(node.outputs[0]);

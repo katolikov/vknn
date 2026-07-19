@@ -37,9 +37,9 @@ namespace vknn {
         }
         if (src == DType::Float64)
         {
-            // A fp64 input keeps NATIVE 8-byte storage so a fp64-capable op (the SVD / camera-head path)
-            // reads it at full precision. legalizeFp64 inserts an explicit narrowing Cast before any op
-            // that is not fp64-capable, so this native fp64 never reaches an fp32-only kernel.
+            // A fp64 input keeps its 8-byte storage so a fp64-capable op reads it in double. legalizeFp64
+            // inserts a narrowing Cast before any op that is not fp64-capable, so it never reaches an
+            // fp32-only kernel.
             rt.dtype = DType::Float64;
             rt.host.resizeElems(elems, DType::Float64);
             int64_t avail = std::min<int64_t>(elems, (int64_t) (in.size() / 8));
@@ -174,9 +174,9 @@ namespace vknn {
                 }
                 break;
             case DType::Float64:
-                // A DOUBLE-declared output emits real fp64 bytes. In the fp32-compute path the source is
-                // the fp32 result widened to double (exact widening); a genuine fp64 op leaves rt.dtype
-                // Float64, which the fast path above moves through verbatim without reaching here.
+                // A DOUBLE-declared output emits fp64 bytes. When the producer is fp32 the source is the
+                // fp32 result widened to double; when it is fp64 (rt.dtype Float64) the fast path above
+                // already moved it through and this case is not reached.
                 for (int64_t i = 0; i < elems; ++i)
                 {
                     reinterpret_cast<double *>(io.data.data())[i] = (double) srcF32(i);
@@ -800,9 +800,8 @@ namespace vknn {
                     // converts per element, and a native int8/uint8 quant initializer (kept at 1 byte/elem
                     // by the importer to bound host memory) widens back to fp32. The int8/uint8 dtype LABEL
                     // is preserved -- an op that recovers the quant saturation range from it still can;
-                    // only fp16 relabels to fp32. A native fp64 initializer keeps its 8-byte storage (the
-                    // else branch): legalizeFp64 guarantees only fp64-capable ops read it, and they read
-                    // host.f64() at full precision -- narrowing here would defeat the real-fp64 path.
+                    // only fp16 relabels to fp32. A fp64 initializer keeps its 8-byte storage (the else
+                    // branch): legalizeFp64 ensures only fp64-capable ops read it, through host.f64().
                     std::vector<float> f = initFloats(graph_, id);
                     rt.host.bytes.resize(f.size() * 4);
                     std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);

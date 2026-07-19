@@ -62,7 +62,7 @@ namespace vknn {
             }
             const int64_t elems = numElements(out);
             // A pure gather relocates elements without touching their bytes, so it serves any dtype at
-            // its own width: fp64 (the SVD path) and int64 both take the 8-byte path, fp32 the 4-byte one.
+            // its own width: fp64 and int64 take the 8-byte path, fp32 the 4-byte one.
             const bool     i64 = X.dtype == DType::Int64;
             const bool     f64 = X.dtype == DType::Float64;
             const float   *xf  = (i64 || f64) ? nullptr : X.host.f32();

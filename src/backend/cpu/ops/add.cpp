@@ -67,10 +67,9 @@ namespace vknn {
                     return;
                 }
 
-                // Real-fp64 path (the SVD / camera-head arithmetic): either operand is native fp64, so
-                // the sum is fp64 and evaluated in double. A fp32/int64 sibling widens into the double
-                // add. A fp64 Add never carries a fused activation (fusion excludes fp64), so applyAct
-                // is not run here.
+                // fp64 path: either operand is Float64, so the sum is fp64 and evaluated in double; a
+                // fp32/int64 sibling widens into the add. A fp64 Add carries no fused activation (fusion
+                // excludes fp64), so applyAct is not run here.
                 if (A.dtype == DType::Float64 || B.dtype == DType::Float64)
                 {
                     size_t rankF = std::max(sa.size(), sb.size());

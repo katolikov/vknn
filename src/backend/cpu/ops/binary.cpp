@@ -9,10 +9,10 @@
 namespace vknn {
     namespace {
 
-        // Scalar kernel for one broadcast element pair, in the element/accumulation type T. Add is the
-        // fall-through default so any unlisted BinaryType degrades to addition rather than an undefined
-        // value; Div follows IEEE-754 (x/0 yields +/-inf or NaN), matching ONNX's float-division
-        // semantics. T=float is the fp32 path; T=double the real-fp64 (SVD / camera-head) path.
+        // Scalar kernel for one broadcast element pair, in type T. Add is the fall-through default so any
+        // unlisted BinaryType degrades to addition rather than an undefined value; Div follows IEEE-754
+        // (x/0 yields +/-inf or NaN), matching ONNX's float-division semantics. T=float for fp32,
+        // T=double for a Float64 operand.
         template<typename T>
         static T binary(T a, T b, BinaryType op) {
             switch (op)
@@ -117,10 +117,9 @@ namespace vknn {
                     }
                     return;
                 }
-                // Real-fp64 path (the SVD / camera-head arithmetic): either operand is native fp64, so
-                // the result is fp64 and every element is evaluated in double. Each operand is read as a
-                // double honoring its own storage (native fp64, or a fp32 sibling widened), so a fp64
-                // activation may combine with a fp32 constant without losing the fp64 operand's precision.
+                // fp64 path: either operand is Float64, so the result is fp64 and each element is
+                // evaluated in double. Operands are read as double at their own width, so a fp64 operand
+                // can combine with a fp32 sibling without losing precision.
                 if (A.dtype == DType::Float64 || B.dtype == DType::Float64)
                 {
                     double              *y = cpu::allocOutF64(Y, out);

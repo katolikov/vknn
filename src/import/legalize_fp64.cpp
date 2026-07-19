@@ -1,25 +1,21 @@
-// fp64 legalization: confine real double-precision tensors to the ops that compute in fp64, and
-// insert an explicit narrowing Cast(fp64->fp32) on every edge into an op that does not.
+// fp64 legalization: confine fp64 tensors to the ops that compute in double, and insert a narrowing
+// Cast(fp64->fp32) on every edge into an op that does not.
 //
-// The engine computes the numerically-sensitive SVD / camera-head path (Cast, Det, Unary, Transpose,
-// and the metadata reshapes) in genuine fp64; every other op computes in fp32. This pass runs after
-// shape/dtype inference and after the fusion passes (which already skip fp64 -- pwFloatDtype excludes
-// it), so an fp64 tensor that would otherwise reach an fp32-only kernel and be reinterpreted as fp32
-// gets a real Cast to fp32 in front of that consumer instead. The narrowing is therefore visible in
-// the graph (a Cast node), never a silent misread, and one Cast per fp64 tensor is shared by all its
-// fp32 consumers. A fp64 tensor consumed only by fp64-capable ops (and fp64 graph outputs) is left
-// untouched and keeps full precision end to end.
+// A fixed set of ops (Cast, Det, Unary, Binary, Add, Transpose, and the metadata reshapes) has a CPU
+// double kernel; every other op computes in fp32. This pass runs after shape/dtype inference and after
+// fusion (which already skips fp64 -- pwFloatDtype excludes it): an fp64 tensor reaching an fp32-only
+// kernel gets a Cast to fp32 in front of that consumer, so its bytes are never reinterpreted. One Cast
+// per fp64 tensor is shared by all its fp32 consumers; a tensor consumed only by fp64-capable ops (and
+// fp64 graph outputs) is left as fp64.
 #include "passes_internal.h"
 #include <map>
 
 namespace vknn {
 
     namespace {
-        // Ops whose CPU kernel computes in real fp64 for a Float64 input (so an fp64 tensor may flow
-        // straight into them). Kept in sync with the fp64 paths in the CPU backend: Cast (the
-        // fp32<->fp64 bridge), Det (fp64 determinant), Unary (fp64 activations incl. Sign), Binary
-        // (fp64 elementwise arithmetic), Transpose (dtype-preserving gather), and the metadata reshapes
-        // that copyAs relocates byte-for-byte. Every other op is narrowed to fp32 by an explicit Cast.
+        // Ops with a CPU double kernel, so a Float64 tensor may flow straight into them. Kept in sync
+        // with the fp64 paths in the CPU backend: Cast (the fp32<->fp64 bridge), Det, Unary (incl. Sign),
+        // Binary/Add arithmetic, Transpose, and the metadata reshapes copyAs relocates byte-for-byte.
         bool fp64CapableOp(OpType t) {
             switch (t)
             {

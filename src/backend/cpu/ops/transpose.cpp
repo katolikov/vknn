@@ -50,9 +50,8 @@ namespace vknn {
                 }
                 int64_t        elems = numElements(out);
                 // Data is copied verbatim (a pure gather), so the same permutation serves any dtype;
-                // only the element width differs. Int64 (shape/index math) and native fp64 (the SVD /
-                // camera-head path) take the 8-byte paths, everything else the f32 path, each with its
-                // own typed source pointer and output alloc.
+                // only the element width differs. Int64 and fp64 take the 8-byte paths, everything else
+                // the f32 path, each with its own typed source pointer and output alloc.
                 bool           i64   = X.dtype == DType::Int64;
                 bool           f64   = X.dtype == DType::Float64;
                 const float   *xf    = (i64 || f64) ? nullptr : X.host.f32();

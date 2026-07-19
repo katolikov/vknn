@@ -54,12 +54,11 @@ namespace vknn {
             // as fillHostFloat.
             static void fillHostI64(const TensorProto &t, HostBuffer &hb, int64_t elems);
 
-            // Materialize a DOUBLE TensorProto into NATIVE 8-byte fp64 host storage, at full precision --
-            // raw_data DOUBLE is copied verbatim, the typed double_data array is copied element-wise; no
-            // narrowing to fp32. initFloats() decodes these lanes to fp32 on demand for the fp32 compute
-            // path, while a real-fp64 op (and the declared-dtype output readback) reads them through
-            // f64() unchanged. Copies are clamped to the payload the same way as fillHostFloat, leaving a
-            // truncated or shape-mismatched tail zero.
+            // Materialize a DOUBLE TensorProto into native 8-byte fp64 host storage: raw_data DOUBLE is
+            // copied verbatim, the typed double_data array element-wise, with no narrowing to fp32.
+            // initFloats() decodes the lanes to fp32 for the fp32 compute path; a fp64 op and the
+            // declared-dtype output readback read them through f64(). Copies are clamped to the payload
+            // as in fillHostFloat, leaving a truncated or shape-mismatched tail zero.
             static void fillHostDouble(const TensorProto &t, HostBuffer &hb, int64_t elems);
         };
 

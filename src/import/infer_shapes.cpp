@@ -479,8 +479,8 @@ namespace vknn {
                 }
                 case OpType::Cast: {
                     SH(o) = SH(nd.inputs[0]);
-                    // A Cast to DOUBLE produces real fp64; the other targets keep the dtype the importer
-                    // recorded from the 'to' attribute (this pass leaves them untouched, as before).
+                    // A Cast to DOUBLE produces fp64; other targets keep the dtype the importer recorded
+                    // from the 'to' attribute (untouched here, as before).
                     if (nd.attr.geti("to", 1) == 11 /*ONNX DOUBLE*/)
                     {
                         g.desc(o).dtype = DType::Float64;
@@ -896,8 +896,8 @@ namespace vknn {
                         out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
                     SH(o) = out;
-                    // Real-fp64 arithmetic: if either operand is native fp64, the result is fp64 (the CPU
-                    // Binary op evaluates it in double). A fp32 sibling widens into the double kernel.
+                    // If either operand is fp64 the result is fp64 (the CPU op evaluates it in double);
+                    // a fp32 sibling widens into that kernel.
                     if (g.desc(nd.inputs[0]).dtype == DType::Float64 || g.desc(nd.inputs[1]).dtype == DType::Float64)
                     {
                         g.desc(o).dtype = DType::Float64;
