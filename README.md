@@ -93,8 +93,19 @@ Build the engine and tools:
 skips ONNX parsing and graph passes at load:
 
 ```sh
-# model.onnx -> model.vxm.  --fp16 halves the file + host upload; --shape resolves a dynamic input.
-vknn_compile model.onnx model.vxm --fp16 --shape input=1x3x224x224
+# model.onnx -> model.vxm.  --fp16 halves the file + host upload.
+vknn_compile model.onnx model.vxm --fp16
+```
+
+No shape flag is needed for a static model, and a dynamic **batch** (leading) axis resolves to 1
+automatically — every benchmark CNN above compiles exactly like this. Only a dynamic **non-batch**
+axis (height/width/sequence) needs resolving, and the compiler refuses to guess it (substituting a
+default into a spatial axis would silently compile a 1×1 plan): it stops with the unbound names so
+you can pass either form —
+
+```sh
+vknn_compile model.onnx model.vxm --fp16 --shape input=1x3x512x512   # per-tensor declared shape
+vknn_compile model.onnx model.vxm --fp16 --dim sequence_length=128   # by symbolic dim name, shared across inputs
 ```
 
 The default (`-O1`) is the fastest configuration: fused pointwise chains run fp32-chained, which is
@@ -105,7 +116,7 @@ standalone kernels it replaces at a small speed cost:
 
 ```sh
 # fastest configuration whose outputs are bit-exact vs the unoptimized (-O0) compile
-vknn_compile model.onnx model.vxm --fp16 --shape input=1x3x224x224 --strict-fuse
+vknn_compile model.onnx model.vxm --fp16 --strict-fuse
 ```
 
 Everything the runtime adds on top — zero-copy Concat/Split/Slice views, movement-chain folding,
