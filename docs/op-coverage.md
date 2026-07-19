@@ -25,6 +25,29 @@ from `vkSupportSurvey`, the same capability gate the device engine runs) and ins
 
 Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one op per file).
 
+## Element types
+
+Compute runs in **fp32** (activations) and **int64** (shape/index tensors); fp16, int8, and uint8 are
+storage precisions decoded to fp32 for the compute path. A model declared in any of these loads and
+runs unchanged.
+
+**float64** is a real element type (`DType::Float64`), for the numerically-sensitive double-precision
+path an exporter marks explicitly — the camera-head SVD determinant / sign, for example. It is
+lossless at the boundaries: a DOUBLE initializer keeps native 8-byte storage and round-trips
+byte-identically through the `.vxm`, and a DOUBLE graph input/output is read and written as real fp64.
+For compute, the ops that carry the double-precision path — **Cast** (the fp32↔fp64 bridge), **Det**,
+the **Unary** family (including `Sign`), **Binary**/**Add** arithmetic, **Transpose**, and the
+metadata reshapes (`Reshape`/`Flatten`/`Squeeze`/`Unsqueeze`/`Identity`) — evaluate in genuine
+`double` on the CPU oracle. Every other op computes in fp32: the import inserts an explicit narrowing
+`Cast(fp64→fp32)` before it (the `legalizeFp64` pass), so a fp64 tensor is never reinterpreted as fp32
+and the narrowing is visible in the graph.
+
+fp64 runs on the **CPU** by design: mobile Vulkan drivers expose no usable `shaderFloat64` (the engine
+probes and logs it as `fp64=0`), so a fp64 node takes the CPU double-precision kernel via a **named
+precision refusal** in the GPU gate — a precision choice for the path the model declared fp64, not
+missing coverage. A model with no fp64 tensors is unaffected: its plan and outputs are byte-identical
+to before, and it keeps `fallbacks: 0` on the GPU.
+
 ## Convolution & pooling
 
 | Operator | GPU | CPU | Notes |
