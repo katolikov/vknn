@@ -40,7 +40,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Operator | GPU | CPU | Notes |
 |---|---|---|---|
 | Unary family | ✅ | ✅ | Sigmoid, Tanh, HardSwish, HardSigmoid, LeakyRelu, Elu, Abs, Neg, Exp, Log, Sqrt, Floor, Ceil, Relu, SiLU, Erf, Cos, Sin, Reciprocal, Softplus, Round, Sign, and an internal Trunc (created only by the float→int→float Cast fold `foldIntRoundtripCast`, not parsed from ONNX) |
-| Det | ✅ | ✅ | Batched square-matrix determinant `[..., n, n] → [...]`; GPU covers n ≤ 4 by fixed-order cofactor expansion (bitwise-equal to the CPU oracle in fp32), larger n runs on the CPU via partial-pivot LU with a named gate |
+| Det | ✅ | ✅ | Batched square-matrix determinant `[..., n, n] → [...]`; GPU covers n ≤ 4 by fixed-order cofactor expansion (bitwise-equal to the CPU oracle in fp32) and 5 ≤ n ≤ 8 by in-register partial-pivot LU (deterministic fixed order, incl. the permutation sign); only n > 8 — no known real model — takes the CPU double-precision LU via a named gate |
 | Binary family | ✅ | ✅ | Mul, Sub, Div, Max, Min, Pow, Add — same-shape, channel-broadcast (SE), and general NumPy broadcast on the flat path |
 | Relu / Relu6 / Clip | ✅ | ✅ | standalone, and fused into the producing Conv/Gemm |
 | PRelu | ✅ | ✅ | per-channel slope |

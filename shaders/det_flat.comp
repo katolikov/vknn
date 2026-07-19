@@ -31,18 +31,56 @@ float det4(float m[16]) {
   return m[0] * c0 - m[1] * c1 + m[2] * c2 - m[3] * c3;
 }
 
+// In-register partial-pivot LU for kDetMaxAnalyticN < n <= kDetMaxGpuN (the array is sized to
+// kDetMaxGpuN^2 = 64). The determinant is the pivot product with the permutation sign; the
+// elimination order is fixed (column-major pivots, ascending rows), so the result is deterministic
+// run-to-run and across devices. fp32 arithmetic; the CPU oracle keeps double precision for these
+// sizes, so oracle agreement is cosine-level, like every accumulation-order difference.
+float detLu(int base, int n) {
+  float a[64];
+  for (int k = 0; k < n * n; ++k) {
+    a[k] = float(s[base + k]);
+  }
+  float det = 1.0;
+  for (int col = 0; col < n; ++col) {
+    int pivot = col;
+    for (int r = col + 1; r < n; ++r) {
+      if (abs(a[r * n + col]) > abs(a[pivot * n + col])) pivot = r;
+    }
+    if (a[pivot * n + col] == 0.0) return 0.0; // singular
+    if (pivot != col) {
+      for (int k = 0; k < n; ++k) {
+        float tmp = a[pivot * n + k]; a[pivot * n + k] = a[col * n + k]; a[col * n + k] = tmp;
+      }
+      det = -det; // one row swap flips the permutation sign
+    }
+    det *= a[col * n + col];
+    for (int r = col + 1; r < n; ++r) {
+      float f = a[r * n + col] / a[col * n + col];
+      for (int k = col + 1; k < n; ++k) {
+        a[r * n + k] -= f * a[col * n + k];
+      }
+    }
+  }
+  return det;
+}
+
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.batches)) return;
-  int   nn = pc.n * pc.n;
-  float m[16];
-  for (int k = 0; k < nn; ++k) {
-    m[k] = float(s[int(gid) * nn + k]);
-  }
+  int nn = pc.n * pc.n;
   float det;
-  if      (pc.n == 1) det = m[0];
-  else if (pc.n == 2) det = det2(m);
-  else if (pc.n == 3) det = det3(m);
-  else                det = det4(m);
+  if (pc.n <= 4) {
+    float m[16];
+    for (int k = 0; k < nn; ++k) {
+      m[k] = float(s[int(gid) * nn + k]);
+    }
+    if      (pc.n == 1) det = m[0];
+    else if (pc.n == 2) det = det2(m);
+    else if (pc.n == 3) det = det3(m);
+    else                det = det4(m);
+  } else {
+    det = detLu(int(gid) * nn, pc.n);
+  }
   d[gid] = TO_STORE(det);
 }

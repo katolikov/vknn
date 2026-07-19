@@ -134,10 +134,14 @@ namespace vknn {
     /// the shader plan layout (pw_plan.h) is sized from the same constants, so they are a shared
     /// contract between the importer and the kernel and cannot be changed independently.
     constexpr int kPwMaxSteps    = 16; ///< Elementwise steps per fused unit.
-    /// Largest square-matrix side the GPU Det kernel covers by fixed-order cofactor expansion
-    /// (det_flat.comp sizes its register array to this). Larger matrices run on the CPU's
-    /// partial-pivot LU via the named vkNodeGate refusal.
+    /// Largest square-matrix side the GPU Det kernel covers by fixed-order cofactor expansion —
+    /// the fast one-thread-per-matrix path every real camera/geometry head hits.
     constexpr int kDetMaxAnalyticN = 4;
+    /// Largest side the GPU covers overall: above kDetMaxAnalyticN and up to this bound the kernel
+    /// runs an in-register partial-pivot LU per matrix (fp32, deterministic fixed order). Only
+    /// n > kDetMaxGpuN — no known real model — takes the CPU's double-precision LU via the named
+    /// vkNodeGate refusal.
+    constexpr int kDetMaxGpuN = 8;
     constexpr int kPwMaxOperands = 6;  ///< Extra tensor operands per unit (the primary input is excluded).
     constexpr int kPwMaxRank     = 4;  ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
     constexpr int kPwMaxRegs     = 4;  ///< Named registers for step values reused by later steps.

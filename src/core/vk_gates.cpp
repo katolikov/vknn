@@ -348,9 +348,9 @@ namespace vknn {
             {
                 return refuse(whyNot, "Det: matrix must be square");
             }
-            if (cols > kDetMaxAnalyticN)
+            if (cols > kDetMaxGpuN)
             {
-                return refuse(whyNot, "Det: n > kDetMaxAnalyticN runs on the CPU (partial-pivot LU)");
+                return refuse(whyNot, "Det: n > kDetMaxGpuN runs on the CPU (double-precision LU)");
             }
             return true;
         }
