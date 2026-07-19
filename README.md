@@ -108,6 +108,19 @@ vknn_compile model.onnx model.vxm --fp16 --shape input=1x3x512x512   # per-tenso
 vknn_compile model.onnx model.vxm --fp16 --dim sequence_length=128   # by symbolic dim name, shared across inputs
 ```
 
+For a **multi-input** model, repeat `--shape` once per input that needs it (static inputs and
+dynamic-batch-only inputs still need nothing):
+
+```sh
+vknn_compile two_view.onnx two_view.vxm --fp16 \
+    --shape image=1x2x3x448x448 --shape intrinsics=1x2x3x3
+```
+
+One `--dim` binding is often the shorter form there — a symbol like `sequence_length` is resolved
+in every input that references it at once. At run time, tools take the inputs in the model's
+declared order (`vknn_run_io model.vxm out in0.bin in1.bin ...`), and the C++ API matches them by
+tensor name.
+
 The default (`-O1`) is the fastest configuration: fused pointwise chains run fp32-chained, which is
 at least as accurate as the unfused graph on every chain but not bit-identical to it. When the
 outputs must be **byte-identical to a compile with no fusion at all** (`-O0` — regression baselines,
@@ -247,7 +260,10 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 ## Benchmarks
 
 VKNN v1.4.2, whole CNN suite, fp16, `--tuning fast`, primary device, 20-iteration medians with a
-cooldown before every stage. The VKNN figure is the full `run()` wall (it includes the host↔device
+cooldown before every stage. Every number in this section uses the **default compile/run
+configuration** — the first quickstart command, no `--strict-fuse` (that flag exists for byte-
+comparing a fused compile against an unfused one; the determinism and accuracy guarantees below
+hold in the default configuration). The VKNN figure is the full `run()` wall (it includes the host↔device
 copies). "vs v1.4.1" is the cooled interleaved paired A/B delta (min-of-5, two devices, same day);
 accuracy is against fp32 onnxruntime references and is byte-identical across runs, tuning levels,
 and both devices.
