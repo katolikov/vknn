@@ -36,6 +36,13 @@ namespace vknn {
                     {
                         return; // identity slice with no epilogue: aliased onto its input, dispatch is a no-op
                     }
+                    // Zero-copy: a contiguous unit-step slice whose output the planner made a
+                    // sub-buffer view of the input at exactly pc.base elements — bytes already in place.
+                    const size_t elemBytes = env.useFp16 ? 2 : 4;
+                    if (src && dst && impl.contiguousSlice && dst->hazardRoot() == src->hazardRoot() && dst->rootOffset() == src->rootOffset() + (size_t) impl.pc.base * elemBytes)
+                    {
+                        return;
+                    }
                 }
                 impl.record(cmd, node, env);
             }

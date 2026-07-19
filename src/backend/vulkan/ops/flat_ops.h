@@ -61,6 +61,11 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>          geom;  // outDim/inStride, deduped SSBO (binding 2, before the epilogue)
             std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
             PwEpi                                epi;   // a pointwise chain folded into the gather's store
+            // Slice only: the sliced box is a contiguous flat sub-range of the input (unit steps;
+            // leading dims select one index, at most one partial axis, trailing dims full), so the
+            // gather reads exactly in[base .. base+total). SliceOp::record may then skip the dispatch
+            // when the output buffer is a sub-buffer view of the input at that byte offset.
+            bool contiguousSlice = false;
             void                                 prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g  = *env.graph;
                 Shape        in = g.desc(node.inputs[0]).shape, out = g.desc(node.outputs[0]).shape;
@@ -101,6 +106,27 @@ namespace vknn {
                         outDim[k] = (int) out[k];
                         inStr[k]  = (int) (inStride[k] * step[k]);
                         pc.base += (int) (start[k] * inStride[k]);
+                    }
+                    {
+                        int partial     = -1;
+                        contiguousSlice = rank == r;
+                        for (int d = 0; contiguousSlice && d < r; ++d)
+                        {
+                            if (step[d] != 1)
+                            {
+                                contiguousSlice = false;
+                            } else if (start[d] != 0 || out[d] != in[d])
+                            {
+                                partial = d;
+                            }
+                        }
+                        for (int d = 0; contiguousSlice && partial >= 0 && d < r; ++d)
+                        {
+                            if ((d < partial && out[d] != 1) || (d > partial && (start[d] != 0 || out[d] != in[d])))
+                            {
+                                contiguousSlice = false;
+                            }
+                        }
                     }
                 }
                 geom = uploadFlatGeom(env, {outDim, inStr});
@@ -235,7 +261,8 @@ namespace vknn {
             std::vector<std::shared_ptr<vk::Buffer>>          geoms; // per-part inDim/outStride, deduped SSBO (binding 2)
             std::vector<std::shared_ptr<vk::Buffer>>          holds; // per-input, set when that input is a constant
             PwEpi                                             epi;   // fused unit applied at each part's stores
-            void                                              prepare(const Node &node, VkOpEnv &env) {
+            bool contiguousParts = false; // every dim before the axis is 1: parts are contiguous slabs at pc.base
+            void prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g    = *env.graph;
                 Shape        out  = g.desc(node.outputs[0]).shape;
                 int          rank = (int) out.size();
@@ -243,6 +270,14 @@ namespace vknn {
                 if (axis < 0)
                 {
                     axis += rank;
+                }
+                {
+                    int64_t outer = 1;
+                    for (int d = 0; d < (int) axis && d < rank; ++d)
+                    {
+                        outer *= out[d];
+                    }
+                    contiguousParts = outer == 1;
                 }
                 epi.prepare(node, env, true, out);
                 auto    outStride = rowStrides(out);
@@ -280,9 +315,19 @@ namespace vknn {
                 {
                     holds.resize(pcs.size());
                 }
+                // A fused unit must run at the stores, so an epi-carrying Concat never skips a part.
+                const bool   mayAlias  = contiguousParts && !node.attr.has("pw_steps");
+                const size_t elemBytes = env.useFp16 ? 2 : 4;
                 for (size_t i = 0; i < pcs.size(); ++i)
                 {
-                    std::vector<VkBuffer> bufs {operandBuf(env, node.inputs[inIdx[i]], holds[i])->handle(), dst->handle(), geoms[i]->handle()};
+                    vk::Buffer *src = operandBuf(env, node.inputs[inIdx[i]], holds[i]);
+                    // Zero-copy: the planner made this part a sub-buffer view of the output at exactly
+                    // its slab offset (pc.base elements), so the producer already wrote it in place.
+                    if (mayAlias && src->hazardRoot() == dst->hazardRoot() && src->rootOffset() == dst->rootOffset() + (size_t) pcs[i].base * elemBytes)
+                    {
+                        continue;
+                    }
+                    std::vector<VkBuffer> bufs {src->handle(), dst->handle(), geoms[i]->handle()};
                     epi.append(bufs, node, env, dst->handle());
                     pipes[i]->dispatch(cmd, bufs, &pcs[i], sizeof(PC), groups(pcs[i].total, kFlatLocalSize));
                 }

@@ -76,6 +76,10 @@ namespace vknn {
             double   packMs = 0, submitCallMs = 0, fenceWaitMs = 0, gpuBusyMs = 0, gpuGapMs = 0, unpackMs = 0;
         } stat_;
         std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
+        // Zero-copy Concat/Split/Slice nodes whose EVERY slice the planner aliased as a sub-buffer
+        // view: their record() emits nothing, so the barrier loop skips their hazard bookkeeping
+        // (the data hazards ride the real producers/consumers through the shared arena ranges).
+        std::set<int> fullyElided_;
         // Zero-copy: each boundary tensor's pooled buffer (the fallback) and its imported dma-buf. The
         // import is kept per boundary tensor and refreshed when that tensor's dma-buf or required size
         // changes. Identity is the dma-buf's (device, inode) from fstat, not the fd: fd numbers are

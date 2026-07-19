@@ -240,6 +240,34 @@ was 60-80% dispatch-floor-bound); the deltas that read "within the gate" are dom
 tune-time pick variance on a heat-soaked device (branch-vs-branch control runs read parity), with
 no reproducible regression on either device at any tuning level.
 
+### Zero-copy Concat/Split/Slice sub-buffer views
+
+Concat, Split, and contiguous unit-step Slice move bytes without computing anything, yet each cost
+real GPU passes over the activation (one dispatch per concatenated part, one copy or gather per
+split output). Wherever the slices tile the whole contiguously in the stored byte layout, the
+planner now binds each slice as a sub-buffer VIEW into the whole's device memory: producers write
+their slice of the concatenation in place, split/slice consumers read theirs in place, and the
+node records nothing (ADR-0018). Always on, no knobs; a node that does real work at its stores (a
+Concat carrying a fused pointwise unit — DenseNet's BN+ReLU-riding concats) or whose slices
+interleave (a batch>1 channel concat, YOLO's axis-2 head concats) keeps the dispatching path,
+decided per node. Outputs are byte-identical to the copying path on every model at every tuning
+level — the transform touches addressing only, never arithmetic or rounding.
+
+Per-op effect at `--tuning none` on the primary device (per-op-type profile, ms): ShuffleNetV2
+Concat+Split 0.31 → 0.05, YOLOv8n Concat+Split+Slice 0.96 → 0.28, SqueezeNet Concat 0.13 → 0.01,
+Inception-v3 Concat 0.20 → 0.02. Activation-pool peak is unchanged (views allocate no memory of
+their own, and arenas reuse pool slots).
+
+End-to-end, cooled interleaved min-of-5 vs main (same protocol as above):
+
+| Model | primary, `none` | primary, `fast` | second, `fast` |
+|---|---|---|---|
+| ShuffleNetV2 | **-13.5%** | **-17.2%** | **-16.5%** |
+| SqueezeNet | **-6.4%** | **-13.3%** | **-9.8%** |
+| YOLOv8n | **-5.4%** | **-7.7%** | **-4.3%** |
+| Inception-v3 | **-4.4%** | -2.4% | within the 3% gate |
+| ResNet-50 / DenseNet-121 | parity (no eligible sites / epilogue-carrying concats) | within the 3% gate | within the 3% gate |
+
 ## YoNoSplat encoder (965M-param transformer)
 
 The feed-forward 3D-Gaussian-Splatting encoder (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian /

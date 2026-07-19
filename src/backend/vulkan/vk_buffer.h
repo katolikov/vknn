@@ -41,8 +41,26 @@ namespace vknn { namespace vk {
         ///                   buffers: the liveness planner aliases and reuses them, so a kernel that
         ///                   reads a lane its producer never wrote would otherwise observe stale device
         ///                   memory. Weight buffers are fully overwritten by upload() and skip the memset.
+        /// @param allowSubBufferViews Allocate WITHOUT the dedicated-allocation hint so sub-buffer
+        ///                   views may later bind into this memory (a dedicated allocation may legally
+        ///                   bind only its own buffer at offset 0). Set by the segment planner for
+        ///                   buffers that host zero-copy Concat/Split views.
         /// @throws Error if no compatible memory type exists or a Vulkan call fails.
-        Buffer(VulkanContext &ctx, size_t bytes, MemPref pref = MemPref::kAuto, VkBufferUsageFlags extraUsage = 0, bool zeroInit = false);
+        Buffer(VulkanContext &ctx, size_t bytes, MemPref pref = MemPref::kAuto, VkBufferUsageFlags extraUsage = 0, bool zeroInit = false, bool allowSubBufferViews = false);
+
+        /// Create a sub-buffer VIEW: a new VkBuffer of `bytes` bound into `parent`'s device memory at
+        /// `byteOffset` (relative to `parent`'s own start, which may itself be a view). The view owns
+        /// no memory — the resolved root is retained via shared_ptr, so the memory outlives every
+        /// view. Reads and writes through the view address the same bytes as the parent range, which
+        /// is what makes zero-copy Concat (producers write their slice of the concatenated buffer
+        /// directly) and zero-copy Split (each output is a slice of the input) exact: the bytes are
+        /// identical to the copied layout, only the copy disappears.
+        /// @throws Error when the root was not allocated with allowSubBufferViews, the offset violates
+        ///         the view's memory-requirement alignment, the root allocation cannot cover
+        ///         offset + the view's padded size, or the view's memory-type requirements exclude the
+        ///         root's memory type. The planner treats a throw as "this member keeps a plain
+        ///         buffer" and falls back to the dispatching path.
+        Buffer(VulkanContext &ctx, std::shared_ptr<Buffer> parent, size_t byteOffset, size_t bytes);
         ~Buffer();
         Buffer(const Buffer &)            = delete;
         Buffer &operator=(const Buffer &) = delete;
@@ -62,6 +80,22 @@ namespace vknn { namespace vk {
         /// Persistent host mapping, or nullptr for a device-only buffer.
         void *host() noexcept {
             return mapped_;
+        }
+
+        /// True when this buffer is a sub-buffer view into another buffer's memory.
+        bool isView() const noexcept {
+            return viewParent_ != nullptr;
+        }
+        /// The buffer whose memory ultimately backs this one: the view's root, or this buffer itself.
+        /// Barrier hazard tracking keys on this — a write through a view and a read through its root
+        /// touch the same memory, which per-handle tracking would miss.
+        Buffer *hazardRoot() noexcept {
+            return viewParent_ ? viewParent_.get() : this;
+        }
+        /// Byte offset of this buffer within hazardRoot()'s memory (0 for a non-view). Together with
+        /// bytes() this gives the range for overlap tests between views of one root.
+        size_t rootOffset() const noexcept {
+            return viewOffset_;
         }
 
         /// memcpy `n` bytes from `src` into the mapping at `offset`. Precondition: the buffer is
@@ -109,6 +143,11 @@ namespace vknn { namespace vk {
         void          *mapped_    = nullptr;
         bool           imported_  = false; ///< Backing memory came from an imported fd (not owned here).
         bool           accounted_ = false; ///< This allocation has been added to the live/peak totals.
+        bool           allowsViews_ = false;             ///< Allocated without the dedicated hint; views may bind in.
+        uint32_t       memTypeIndex_ = 0;                ///< Memory type of mem_ (view compatibility check).
+        VkDeviceSize   memSize_      = 0;                ///< Actual allocation size of mem_ (view fit check).
+        std::shared_ptr<Buffer> viewParent_;             ///< Root buffer whose memory backs this view (null = owns memory).
+        size_t                  viewOffset_ = 0;         ///< Byte offset within the root's memory (views only).
     };
 
 }} // namespace vknn::vk

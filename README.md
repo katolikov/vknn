@@ -271,6 +271,15 @@ and depthwise/output-channel tile candidates in the bit-neutral races — output
 unchanged from v1.4.0 at every tuning level; deltas in
 [docs/benchmark.md](docs/benchmark.md) § Barrier hygiene.
 
+The current branch makes Concat, Split, and contiguous Slice zero-copy wherever their slices tile
+the whole contiguously in the stored layout: each slice becomes a sub-buffer view into the whole's
+device memory, so producers write the concatenation in place and the copy dispatches disappear
+(ShuffleNetV2 −17% on both devices, SqueezeNet −13/−10%, YOLOv8n −8/−4%, Inception-v3 −4% at
+`none`). Automatic and structural — no flags, byte-identical output on every model at every tuning
+level; mechanism in
+[docs/adr/0018-zero-copy-concat-split-views.md](docs/adr/0018-zero-copy-concat-split-views.md),
+numbers in [docs/benchmark.md](docs/benchmark.md) § Zero-copy.
+
 The accuracy columns do not depend on the tuning level: kernel choices that change fp16 rounding
 are deterministic shape rules (see **Autotuned kernels** above), so `none` / `fast` / `heavy` produce
 byte-identical output for a given model and device — verified per model, along with run-to-run

@@ -111,8 +111,9 @@ namespace vknn { namespace vk {
     void Buffer::destroy() noexcept {
         // vkFreeMemory implicitly unmaps a mapped allocation, so owned host-visible memory is the only
         // case that needs an explicit unmap; imported dma-buf memory is left mapped and released in one
-        // step together with the driver-owned fd at vkFreeMemory.
-        if (mapped_ && !imported_)
+        // step together with the driver-owned fd at vkFreeMemory. A view's mapping is borrowed from its
+        // root (never unmapped here) and its mem_ stays null, so a view releases only its VkBuffer.
+        if (mapped_ && !imported_ && !viewParent_)
         {
             vkUnmapMemory(ctx_.device(), mem_);
         }
@@ -135,7 +136,7 @@ namespace vknn { namespace vk {
         }
     }
 
-    Buffer::Buffer(VulkanContext &ctx, size_t bytes, MemPref pref, VkBufferUsageFlags extraUsage, bool zeroInit): ctx_(ctx), bytes_(bytes) {
+    Buffer::Buffer(VulkanContext &ctx, size_t bytes, MemPref pref, VkBufferUsageFlags extraUsage, bool zeroInit, bool allowSubBufferViews): ctx_(ctx), bytes_(bytes), allowsViews_(allowSubBufferViews) {
         // A throwing constructor does not run the destructor, so any partially-created handle is
         // reclaimed here before the exception propagates.
         try
@@ -185,9 +186,10 @@ namespace vknn { namespace vk {
             ai.memoryTypeIndex = typeIdx;
             // A dedicated allocation backs the buffer with its own device memory instead of a
             // suballocation, which the driver can place and evict more freely — worthwhile for the
-            // large weight/activation buffers this allocator hands out.
+            // large weight/activation buffers this allocator hands out. A view-hosting buffer must
+            // skip the hint: dedicated memory may legally bind only the buffer it was dedicated to.
             VkMemoryDedicatedAllocateInfo dedicated {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-            if (ctx_.caps().dedicatedAllocation)
+            if (ctx_.caps().dedicatedAllocation && !allowSubBufferViews)
             {
                 dedicated.buffer = buf_;
                 ai.pNext         = &dedicated;
@@ -198,6 +200,8 @@ namespace vknn { namespace vk {
             {
                 throw Error(Status::RuntimeError, allocFailureDetail(req.size, typeIdx) + " -> " + vkResultStr(ar));
             }
+            memTypeIndex_ = typeIdx;
+            memSize_      = req.size;
             VK_CHECK(vkBindBufferMemory(ctx_.device(), buf_, mem_, 0));
 
             // A kDeviceOnly buffer is never mapped, even when the chosen type IS host-visible: on a UMA
@@ -219,6 +223,64 @@ namespace vknn { namespace vk {
                 throw Error(Status::InvalidArgument, "zeroInit requires a host-mapped buffer; kDeviceOnly cannot be memset from the host");
             }
             account();
+        } catch (...)
+        {
+            destroy();
+            throw;
+        }
+    }
+
+    Buffer::Buffer(VulkanContext &ctx, std::shared_ptr<Buffer> parent, size_t byteOffset, size_t bytes): ctx_(ctx), bytes_(bytes) {
+        try
+        {
+            if (!parent)
+            {
+                throw Error(Status::InvalidArgument, "sub-buffer view needs a parent buffer");
+            }
+            // Resolve to the memory-owning root: a view of a view binds into the same root memory at
+            // the accumulated offset, and retaining the root's shared_ptr keeps the memory alive for
+            // exactly as long as any view exists.
+            std::shared_ptr<Buffer> root = std::move(parent);
+            size_t                  off  = byteOffset;
+            while (root->viewParent_)
+            {
+                off += root->viewOffset_;
+                root = root->viewParent_;
+            }
+            if (!root->allowsViews_)
+            {
+                throw Error(Status::InvalidArgument, "sub-buffer view over a buffer not allocated with allowSubBufferViews");
+            }
+            viewParent_ = root;
+            viewOffset_ = off;
+
+            VkBufferCreateInfo bi {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bi.size        = bytes;
+            bi.usage       = kBaseBufferUsage;
+            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VK_CHECK(vkCreateBuffer(ctx_.device(), &bi, nullptr, &buf_));
+
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(ctx_.device(), buf_, &req);
+            if (req.alignment != 0 && off % req.alignment != 0)
+            {
+                throw Error(Status::Unsupported, "sub-buffer view offset " + std::to_string(off) + " violates alignment " + std::to_string(req.alignment));
+            }
+            if (off + req.size > root->memSize_)
+            {
+                throw Error(Status::Unsupported, "sub-buffer view [" + std::to_string(off) + ", +" + std::to_string(req.size) + ") exceeds the root allocation of " + std::to_string(root->memSize_) + " B");
+            }
+            if (!(req.memoryTypeBits & (1u << root->memTypeIndex_)))
+            {
+                throw Error(Status::Unsupported, "sub-buffer view memory-type requirements exclude the root's memory type");
+            }
+            VK_CHECK(vkBindBufferMemory(ctx_.device(), buf_, root->mem_, off));
+            if (root->mapped_)
+            {
+                mapped_ = static_cast<char *>(root->mapped_) + off;
+            }
+            // No account(): a view allocates no memory, so it must not inflate the live/peak byte and
+            // vkAllocateMemory-count totals those trackers exist to watch.
         } catch (...)
         {
             destroy();

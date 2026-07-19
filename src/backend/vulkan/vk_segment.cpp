@@ -142,18 +142,6 @@ namespace vknn {
                 }
             }
         }
-        for (TensorId tid: acts)
-        {
-            // storeFp32 tensors get a dedicated buffer (never pooled): the liveness pool aliases by
-            // byte size only, so a 4-byte tensor must not share a slot sized for 2-byte neighbours.
-            bool internal = producedHere.count(tid) && !readBack.count(tid) && !g.tensors[tid].storeFp32;
-            if (internal)
-            {
-                continue; // pooled below
-            }
-            auto pref     = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
-            buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref, 0, /*zeroInit=*/true);
-        }
         // Geometry-as-metadata: a pure-copy op copies its input verbatim, so alias the output onto the
         // input's buffer and skip the copy dispatch (record() checks src==dst). A Reshape/Squeeze/Unsqueeze
         // qualifies whenever input and output share layout + byte size (the layout pass guarantees this,
@@ -201,7 +189,7 @@ namespace vknn {
             const Node &nd = g.nodes[ni];
             // A geometry op carrying a fused pointwise epilogue (pw_steps) is NOT a pure copy — its
             // kernel must run to apply the chain, so it can't be aliased/skipped.
-            bool pureCopy = !nd.attr.has("pw_steps") && (nd.type == OpType::Reshape || nd.type == OpType::Squeeze || nd.type == OpType::Unsqueeze || isIdentitySlice(nd));
+            bool pureCopy = !nd.attr.has("pw_steps") && (nd.type == OpType::Reshape || nd.type == OpType::Flatten || nd.type == OpType::Squeeze || nd.type == OpType::Unsqueeze || isIdentitySlice(nd));
             if (!pureCopy || nd.inputs.empty() || nd.outputs.empty())
             {
                 continue;
@@ -221,10 +209,479 @@ namespace vknn {
             }
             aliasRoot[out] = resolveAlias(in);
         }
+        // Zero-copy Concat/Split: when a Concat's parts (or a Split's outputs) are contiguous slices
+        // of the whole in the STORED byte layout, each slice gets a sub-buffer VIEW into the whole's
+        // memory instead of its own buffer. Producers then write their slice of the concatenation in
+        // place and split consumers read theirs in place, so the Concat/Split node records nothing —
+        // record() skips a slice exactly when the buffer identity proves the planner created its view.
+        // Bit-exact by construction: the bytes and the arithmetic producing them are unchanged, only
+        // the copies disappear. Links compose: a Split of a Concat output views straight into the
+        // concat arena, and a concat-of-all-features chain (DenseNet) collapses to ONE arena per dense
+        // block because each smaller concat output re-links as a prefix view of the next. Contiguity:
+        // NC4HW4 tiles per channel block (rank 4, N==1, axis 1, every slice C%4==0); flat tiles
+        // whenever every dim before the axis is 1. Any ineligible node keeps the dispatching path.
+        std::map<TensorId, std::pair<TensorId, size_t>> viewOf; // member -> (parent, byte offset within parent)
+        auto                                            resolveView = [&](TensorId t) {
+            // A chain deeper than the cap resolves to kNoTensor rather than a mid-chain tensor: a
+            // truncated resolution would link against a non-root and silently re-parent its subtree.
+            // Every caller treats kNoTensor as "ineligible", so an absurdly deep chain only loses
+            // the optimization.
+            // Deeper than any real chain (a DenseNet-264 block links ~48 generations); named so the
+            // bound is visibly a guard, not a tuning value.
+            constexpr int kViewChainMaxHops = 4096;
+            size_t        off              = 0;
+            for (int hop = 0; hop < kViewChainMaxHops; ++hop)
+            {
+                auto it = viewOf.find(t);
+                if (it == viewOf.end())
+                {
+                    return std::make_pair(t, off);
+                }
+                off += it->second.second;
+                t = it->second.first;
+            }
+            return std::make_pair(kNoTensor, size_t(0));
+        };
+        // WRITE intervals committed into each arena: every concat part's producer writes its slice,
+        // and a re-rooted group's producers write the group's whole extent, so two links whose
+        // intervals overlap would let two writers race for the same bytes (schedule-dependent
+        // corruption). A link may only claim a range disjoint from every other claim on that arena;
+        // split/slice views claim nothing (they are read-only aliases of bytes the parent's own
+        // writers produce).
+        std::map<TensorId, std::vector<std::pair<size_t, size_t>>> writeClaims;
+        auto claimWrite = [&](TensorId parent, size_t begin, size_t end) {
+            auto &intervals = writeClaims[parent];
+            for (const auto &c: intervals)
+            {
+                if (begin < c.second && c.first < end)
+                {
+                    return false;
+                }
+            }
+            intervals.push_back({begin, end});
+            return true;
+        };
+        int viewSlices = 0, viewSites = 0;
+        {
+            // A tensor may hold a view only when its buffer is byte-for-byte the slice: same storage
+            // width (no fp32 pins), same layout world, produced by a GPU node of THIS segment, and not
+            // host-read (readback tensors keep their dedicated HOST_CACHED buffers).
+            auto memberOk = [&](TensorId t, bool wantFlat) {
+                return t != kNoTensor && !g.isInitializer(t) && producedHere.count(t) && !readBack.count(t) && !g.tensors[t].storeFp32 && g.tensors[t].gpuFlat == wantFlat;
+            };
+            // Execution-order positions for the liveness rescue below: the last position reading a
+            // tensor and the position producing it. Positions index into `idx` (the segment's
+            // execution order), so "reader < writer" compares real recording order.
+            std::map<TensorId, int> lastReadPos, producerPos;
+            for (int p = 0; p < (int) idx.size(); ++p)
+            {
+                const Node &pn = g.nodes[idx[p]];
+                for (TensorId in: pn.inputs)
+                {
+                    if (in != kNoTensor)
+                    {
+                        lastReadPos[in] = p;
+                    }
+                }
+                if (pn.fusedResidual != kNoTensor)
+                {
+                    lastReadPos[pn.fusedResidual] = p;
+                }
+                for (TensorId o: pn.outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producerPos[o] = p;
+                    }
+                }
+            }
+            for (int ni: idx)
+            {
+                const Node &nd = g.nodes[ni];
+                // Contiguous unit-step Slice: when the sliced box is a flat sub-range of the input
+                // (leading dims select one index, at most one axis is partial, trailing dims are
+                // full), the output is the input's bytes at a fixed offset — a sub-buffer view, and
+                // the gather dispatch disappears. SliceOp::record re-derives the same contiguity rule
+                // and skips only on a proven view identity.
+                if (nd.type == OpType::Slice)
+                {
+                    if (nd.attr.has("pw_steps") || nd.fusedResidual != kNoTensor || nd.inputs.empty() || nd.outputs.size() != 1)
+                    {
+                        continue;
+                    }
+                    TensorId in0 = nd.inputs[0], out = nd.outputs[0];
+                    if (in0 == kNoTensor || out == kNoTensor || g.isInitializer(in0) || g.tensors[in0].storeFp32 || !g.tensors[in0].gpuFlat || !memberOk(out, true))
+                    {
+                        continue;
+                    }
+                    const Shape &is = g.desc(in0).shape, &os = g.desc(out).shape;
+                    const int    r  = (int) is.size();
+                    if ((int) os.size() != r || r == 0 || numElements(os) <= 0 || numElements(is) <= 0)
+                    {
+                        continue;
+                    }
+                    auto startsP = readI64Param(g, nd, "starts", 1);
+                    auto axesP   = readI64Param(g, nd, "axes", 3);
+                    auto stepsP  = readI64Param(g, nd, "steps", 4);
+                    if (startsP.empty())
+                    {
+                        continue; // params must be static to prove the box
+                    }
+                    std::vector<int64_t> start(r, 0), step(r, 1);
+                    for (size_t a = 0; a < startsP.size(); ++a)
+                    {
+                        int ax = axesP.empty() ? (int) a : (int) (axesP[a] < 0 ? axesP[a] + r : axesP[a]);
+                        if (ax < 0 || ax >= r)
+                        {
+                            continue;
+                        }
+                        int64_t s0 = startsP[a] < 0 ? startsP[a] + is[ax] : startsP[a];
+                        start[ax]  = std::max<int64_t>(0, std::min<int64_t>(s0, is[ax]));
+                        step[ax]   = a < stepsP.size() ? stepsP[a] : 1;
+                    }
+                    bool boxOk   = true;
+                    int  partial = -1; // the last dim whose range is not the full axis
+                    for (int d = 0; d < r; ++d)
+                    {
+                        if (step[d] != 1 || start[d] + os[d] > is[d])
+                        {
+                            boxOk = false;
+                            break;
+                        }
+                        if (start[d] != 0 || os[d] != is[d])
+                        {
+                            partial = d;
+                        }
+                    }
+                    for (int d = 0; boxOk && partial >= 0 && d < r; ++d)
+                    {
+                        if ((d < partial && os[d] != 1) || (d > partial && (start[d] != 0 || os[d] != is[d])))
+                        {
+                            boxOk = false;
+                        }
+                    }
+                    if (!boxOk || partial < 0 || viewOf.count(out))
+                    {
+                        continue; // partial < 0 = identity slice, already aliased whole-buffer
+                    }
+                    size_t offElems = 0;
+                    {
+                        std::vector<int64_t> strides(r, 1);
+                        for (int d = r - 2; d >= 0; --d)
+                        {
+                            strides[d] = strides[d + 1] * is[d + 1];
+                        }
+                        for (int d = 0; d < r; ++d)
+                        {
+                            offElems += (size_t) start[d] * (size_t) strides[d];
+                        }
+                    }
+                    const TensorId parent = resolveAlias(in0);
+                    // Same session-input refusal as Split: a dma-buf rebind of a session input
+                    // would orphan views into the replaced allocation.
+                    if (resolveView(parent).first == out || graphInputs_.count(parent))
+                    {
+                        continue;
+                    }
+                    const size_t offBytes = offElems * elemSize_;
+                    if (offBytes + actBytes(out) > actBytes(parent))
+                    {
+                        continue;
+                    }
+                    viewOf[out] = {parent, offBytes};
+                    ++viewSlices;
+                    ++viewSites;
+                    fullyElided_.insert(ni); // the lone output aliased: record() emits nothing
+                    continue;
+                }
+                const bool isConcat = nd.type == OpType::Concat;
+                if ((!isConcat && nd.type != OpType::Split) || nd.attr.has("pw_steps") || nd.fusedResidual != kNoTensor)
+                {
+                    continue;
+                }
+                // whole = the concatenated output / the split input; slices = the parts / the outputs.
+                if (isConcat ? (nd.outputs.size() != 1 || nd.inputs.empty()) : (nd.inputs.empty() || nd.outputs.empty()))
+                {
+                    continue;
+                }
+                TensorId whole = isConcat ? nd.outputs[0] : nd.inputs[0];
+                if (whole == kNoTensor || g.isInitializer(whole) || g.tensors[whole].storeFp32)
+                {
+                    continue;
+                }
+                const std::vector<TensorId> &slices = isConcat ? nd.inputs : nd.outputs;
+                const Shape                 &ws     = g.desc(whole).shape;
+                const bool                   flat   = g.tensors[whole].gpuFlat;
+                const int                    rank   = (int) ws.size();
+                int64_t                      axis   = nd.attr.geti("axis", isConcat ? 1 : 0);
+                if (axis < 0)
+                {
+                    axis += rank;
+                }
+                if (axis < 0 || axis >= rank || numElements(ws) <= 0)
+                {
+                    continue;
+                }
+                if (flat)
+                {
+                    int64_t outer = 1;
+                    for (int d = 0; d < (int) axis; ++d)
+                    {
+                        outer *= ws[d];
+                    }
+                    if (outer != 1)
+                    {
+                        continue; // slices interleave along an inner axis: not contiguous slabs
+                    }
+                } else if (rank != 4 || ws[0] != 1 || axis != 1)
+                {
+                    continue;
+                }
+                // Byte offset and size of each slice within the whole, refusing any structural
+                // mismatch. All members store elemSize_ bytes per element (fp32 pins are refused
+                // above/below), so flat offsets count elements and NC4HW4 offsets count whole
+                // channel blocks.
+                std::vector<size_t> offs(slices.size()), sliceBytes(slices.size());
+                bool                shapeOk = true;
+                int64_t             axisSum = 0;
+                size_t              run     = 0;
+                for (size_t si = 0; si < slices.size() && shapeOk; ++si)
+                {
+                    TensorId t = slices[si];
+                    if (t == kNoTensor)
+                    {
+                        shapeOk = false;
+                        break;
+                    }
+                    const Shape &ss = g.desc(t).shape;
+                    shapeOk         = (int) ss.size() == rank && numElements(ss) > 0;
+                    for (int d = 0; shapeOk && d < rank; ++d)
+                    {
+                        shapeOk = d == (int) axis ? ss[d] >= 1 : ss[d] == ws[d];
+                    }
+                    if (!shapeOk)
+                    {
+                        break;
+                    }
+                    if (!flat && ss[1] % kNC4Block != 0)
+                    {
+                        shapeOk = false; // an unaligned slice straddles a channel block
+                        break;
+                    }
+                    offs[si]       = run;
+                    sliceBytes[si] = (size_t) (flat ? numElements(ss) : packedElems(ss)) * elemSize_;
+                    run += sliceBytes[si];
+                    axisSum += ss[axis];
+                }
+                if (!shapeOk || axisSum != ws[axis])
+                {
+                    continue;
+                }
+                const TensorId wholeRoot = resolveView(resolveAlias(whole)).first;
+                size_t         linked    = 0;
+                if (isConcat)
+                {
+                    // A slice's whole GROUP re-roots into the concat arena, so a root r may link
+                    // ONLY when this concat's slices with root r exactly TILE r's bytes with one
+                    // uniform delta — then every byte of the re-rooted group lands in the slot that
+                    // already holds the same tensor. A partially-tiled root (a lone split half, a
+                    // tensor shared with a different-partner concat) would drag unrelated live bytes
+                    // over other slices' slots, where the concat's remaining part dispatches (or the
+                    // other slices' producers) overwrite them — the plain single-tensor slice is the
+                    // trivial tile of itself.
+                    struct SliceRef {
+                        size_t off, bytes, delta, sliceIdx;
+                    };
+                    std::map<TensorId, std::vector<SliceRef>> byRoot;
+                    for (size_t si = 0; si < slices.size(); ++si)
+                    {
+                        auto ro = resolveView(resolveAlias(slices[si]));
+                        if (ro.first == kNoTensor || ro.first == wholeRoot || ro.first == whole || !memberOk(ro.first, flat) || offs[si] < ro.second)
+                        {
+                            continue;
+                        }
+                        byRoot[ro.first].push_back({ro.second, sliceBytes[si], offs[si] - ro.second, si});
+                    }
+                    for (auto &kv: byRoot)
+                    {
+                        const TensorId r     = kv.first;
+                        auto          &tiles = kv.second;
+                        const size_t   delta = tiles.front().delta;
+                        bool           ok    = true;
+                        for (const SliceRef &s: tiles)
+                        {
+                            ok = ok && s.delta == delta;
+                        }
+                        std::sort(tiles.begin(), tiles.end(), [](const SliceRef &a, const SliceRef &b) { return a.off < b.off; });
+                        // Tiles must be disjoint and in-range; fullTile = they cover r's every byte.
+                        size_t prevEnd  = 0;
+                        bool   fullTile = true;
+                        for (const SliceRef &s: tiles)
+                        {
+                            if (s.off < prevEnd)
+                            {
+                                ok = false;
+                                break;
+                            }
+                            fullTile = fullTile && s.off == prevEnd;
+                            prevEnd  = s.off + s.bytes;
+                        }
+                        ok       = ok && prevEnd <= actBytes(r);
+                        fullTile = fullTile && prevEnd == actBytes(r);
+                        ok       = ok && delta + actBytes(r) <= actBytes(whole);
+                        if (ok && !fullTile)
+                        {
+                            // Liveness rescue for a PARTIALLY tiled root: the uncovered ranges of r's
+                            // extent hold group members this concat does not re-demand, and the
+                            // arena slots covering those ranges belong to OTHER slices, whose
+                            // producers will overwrite the bytes. The re-root is still exact when
+                            // every such member is fully read BEFORE the earliest of those producers
+                            // runs (the classic ShuffleNet stride-1 block: the passthrough half is
+                            // consumed by the branch convs long before the branch output lands in
+                            // its slot). A member read at-or-after any overlapping writer refuses
+                            // the root — including the writer itself reading the member (an
+                            // intra-dispatch overlap can never be proven safe).
+                            std::vector<std::pair<size_t, size_t>> uncovered;
+                            {
+                                size_t cur = 0;
+                                for (const SliceRef &s: tiles)
+                                {
+                                    if (s.off > cur)
+                                    {
+                                        uncovered.push_back({cur, s.off});
+                                    }
+                                    cur = s.off + s.bytes;
+                                }
+                                if (cur < actBytes(r))
+                                {
+                                    uncovered.push_back({cur, actBytes(r)});
+                                }
+                            }
+                            std::set<size_t> tileIdx;
+                            for (const SliceRef &s: tiles)
+                            {
+                                tileIdx.insert(s.sliceIdx);
+                            }
+                            // Group members = r itself plus every linked tensor resolving to r.
+                            std::vector<std::pair<TensorId, std::pair<size_t, size_t>>> members;
+                            members.push_back({r, {0, actBytes(r)}});
+                            for (const auto &link: viewOf)
+                            {
+                                auto ro2 = resolveView(link.first);
+                                if (ro2.first == r)
+                                {
+                                    members.push_back({link.first, {ro2.second, ro2.second + actBytes(link.first)}});
+                                }
+                            }
+                            const int neverWrites = (int) idx.size(); // past every position
+                            for (const auto &m: members)
+                            {
+                                if (!ok)
+                                {
+                                    break;
+                                }
+                                const size_t mA = m.second.first, mB = m.second.second;
+                                bool         touchesUncovered = false;
+                                for (const auto &u: uncovered)
+                                {
+                                    if (mA < u.second && u.first < mB)
+                                    {
+                                        touchesUncovered = true;
+                                        break;
+                                    }
+                                }
+                                auto rd = lastReadPos.find(m.first);
+                                if (!touchesUncovered || rd == lastReadPos.end())
+                                {
+                                    continue; // outside every clobbered range, or never read at all
+                                }
+                                // Earliest producer among NON-TILE slices whose slots overlap the
+                                // member's arena range (a tile slot holds the member's own bytes and
+                                // is written by r's original producers, never a clobber).
+                                const size_t aA = delta + mA, aB = delta + mB;
+                                int          earliestWriter = neverWrites;
+                                for (size_t sj = 0; sj < slices.size(); ++sj)
+                                {
+                                    if (tileIdx.count(sj) || offs[sj] >= aB || aA >= offs[sj] + sliceBytes[sj])
+                                    {
+                                        continue;
+                                    }
+                                    auto pp        = producerPos.find(slices[sj]);
+                                    earliestWriter = std::min(earliestWriter, pp == producerPos.end() ? neverWrites : pp->second);
+                                }
+                                ok = rd->second < earliestWriter;
+                            }
+                        }
+                        // Claims cover exactly this concat's tiles: a rescued root's uncovered ranges
+                        // are legitimately overwritten by the other slices once the members there are
+                        // dead, so only the tile slots are exclusive-writer ranges.
+                        for (const SliceRef &s: tiles)
+                        {
+                            ok = ok && claimWrite(whole, delta + s.off, delta + s.off + s.bytes);
+                        }
+                        if (!ok)
+                        {
+                            continue;
+                        }
+                        viewOf[r] = {whole, delta};
+                        viewSlices += (int) tiles.size();
+                        linked += tiles.size();
+                    }
+                } else
+                {
+                    for (size_t si = 0; si < slices.size(); ++si)
+                    {
+                        // A split output is a read-only alias of bytes the parent's own writers
+                        // produce, so it claims no write interval. The parent must not be a session
+                        // input: dma-buf zero-copy IO may rebind a session input's buffer at run
+                        // time, which would orphan any views into the replaced allocation.
+                        TensorId       out    = slices[si];
+                        const TensorId parent = resolveAlias(whole);
+                        if (!memberOk(out, flat) || viewOf.count(out) || out == wholeRoot || graphInputs_.count(parent) || offs[si] + actBytes(out) > actBytes(parent))
+                        {
+                            continue;
+                        }
+                        viewOf[out] = {parent, offs[si]};
+                        ++viewSlices;
+                        ++linked;
+                    }
+                }
+                if (linked > 0)
+                {
+                    ++viewSites;
+                    if (linked == slices.size())
+                    {
+                        fullyElided_.insert(ni); // record() emits nothing: skip its hazard bookkeeping
+                    }
+                }
+            }
+        }
+        std::set<TensorId> viewRoots; // arena tensors whose buffer must accept sub-buffer views
+        for (auto &kv: viewOf)
+        {
+            viewRoots.insert(resolveView(kv.first).first);
+        }
+        if (!viewOf.empty())
+        {
+            VKNN_INFO << "zero-copy slices: " << viewSlices << " view(s) into " << viewRoots.size() << " arena(s) across " << viewSites << " Concat/Split node(s)";
+        }
+        for (TensorId tid: acts)
+        {
+            // storeFp32 tensors get a dedicated buffer (never pooled): the liveness pool aliases by
+            // byte size only, so a 4-byte tensor must not share a slot sized for 2-byte neighbours.
+            bool internal = producedHere.count(tid) && !readBack.count(tid) && !g.tensors[tid].storeFp32;
+            if (internal || viewOf.count(tid))
+            {
+                continue; // pooled below, or backed by a sub-buffer view created after the pool
+            }
+            auto pref     = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
+            buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref, 0, /*zeroInit=*/true, /*allowSubBufferViews=*/viewRoots.count(tid) != 0);
+        }
         // [firstPos,lastPos] of each internal tensor within this segment's execution order
         std::map<TensorId, int> firstPos, lastPos;
         auto                    touch = [&](TensorId t, int k) {
-            t = resolveAlias(t); // an aliased tensor lives in its root's buffer; extend the root's span
+            t = resolveAlias(t);      // an aliased tensor lives in its root's buffer; extend the root's span
+            t = resolveView(t).first; // a view member lives inside its arena; extend the ARENA's span
             if (t == kNoTensor || !producedHere.count(t) || readBack.count(t) || g.tensors[t].storeFp32)
             {
                 return; // dedicated (storeFp32) and boundary tensors are not pooled
@@ -261,6 +718,7 @@ namespace vknn {
             std::shared_ptr<vk::Buffer> buf;
             size_t                      cap;
             int                         deadAt;
+            bool                        viewable = false; // allocated without the dedicated hint; may host views
         };
         std::vector<Slot> busy, freeSlots;
         for (TensorId tid: order)
@@ -281,11 +739,15 @@ namespace vknn {
             // Best-fit: reuse the smallest freed slot that still fits, so a large freed buffer is kept
             // available for a later large tensor instead of being spent (and grown) on a small one. A
             // reused slot keeps its existing (larger-or-equal) capacity; only a miss allocates anew.
-            size_t need = actBytes(tid);
-            int    best = -1;
+            // A view-hosting arena may only reuse a VIEWABLE slot (one allocated without the
+            // dedicated-memory hint, which cannot legally bind sub-buffer views); other tensors reuse
+            // any slot. Arena slots re-enter the pool as viewable, so consecutive arenas share memory.
+            size_t     need       = actBytes(tid);
+            const bool hostsViews = viewRoots.count(tid) != 0;
+            int        best       = -1;
             for (size_t i = 0; i < freeSlots.size(); ++i)
             {
-                if (freeSlots[i].cap >= need && (best < 0 || freeSlots[i].cap < freeSlots[best].cap))
+                if ((!hostsViews || freeSlots[i].viewable) && freeSlots[i].cap >= need && (best < 0 || freeSlots[i].cap < freeSlots[best].cap))
                 {
                     best = (int) i;
                 }
@@ -298,12 +760,49 @@ namespace vknn {
                 freeSlots.pop_back();
             } else
             {
-                s.buf = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
-                s.cap = need;
+                s.buf      = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kAuto, 0, /*zeroInit=*/true, /*allowSubBufferViews=*/hostsViews);
+                s.cap      = need;
+                s.viewable = hostsViews;
             }
             s.deadAt      = lastPos[tid];
             buffers_[tid] = s.buf;
             busy.push_back(s);
+        }
+        // Materialize the zero-copy views now that every arena has its buffer. A member that cannot
+        // bind (a driver alignment/padding constraint — the target GPUs report 4-byte buffer
+        // alignment, so none in practice) falls back to a plain buffer of its own; record() then
+        // keeps the dispatching path for that slice, so a refused view is a lost optimization, never
+        // an error.
+        bool anyViewFallback = false;
+        for (auto &kv: viewOf)
+        {
+            const TensorId              member    = kv.first;
+            const auto                  rootAndOff = resolveView(member);
+            std::shared_ptr<vk::Buffer> made;
+            auto                        rit = rootAndOff.first == kNoTensor ? buffers_.end() : buffers_.find(rootAndOff.first);
+            if (rit != buffers_.end())
+            {
+                try
+                {
+                    made = std::make_shared<vk::Buffer>(be_->ctx(), rit->second, rootAndOff.second, actBytes(member));
+                } catch (const Error &e)
+                {
+                    VKNN_WARN << "zero-copy view fallback for '" << g.tensors[member].name << "': " << e.what();
+                }
+            }
+            if (!made)
+            {
+                made            = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(member), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+                anyViewFallback = true;
+            }
+            buffers_[member] = made;
+        }
+        if (anyViewFallback)
+        {
+            // A fallen-back member dispatches after all (its record()-side identity check fails), so
+            // its node must keep full hazard bookkeeping; dropping the whole elision set is the
+            // simple safe answer for a case the target devices never hit.
+            fullyElided_.clear();
         }
         // Point each aliased pure-copy output at its root's buffer (the root is dedicated- or pool-
         // allocated above); record() then skips the copy since src and dst resolve to the same buffer.
@@ -767,6 +1266,30 @@ namespace vknn {
             auto it = buffers_.find(t);
             return it == buffers_.end() ? nullptr : it->second.get();
         };
+        // With zero-copy sub-buffer views, two distinct buffer handles can address overlapping
+        // memory (a slice view and its arena, or two views of one arena), so hazard membership is a
+        // (root, byte-range) overlap test rather than a handle match. Non-view buffers keep the old
+        // exact semantics: their range is the whole buffer and distinct roots never overlap, so
+        // disjoint slices of one arena (parallel Inception branches writing their slots) still
+        // record no barrier between them.
+        auto hazard = [](const std::set<vk::Buffer *> &s, vk::Buffer *b) {
+            for (vk::Buffer *a: s)
+            {
+                if (a == b)
+                {
+                    return true;
+                }
+                if (a->hazardRoot() == b->hazardRoot())
+                {
+                    const size_t a0 = a->rootOffset(), b0 = b->rootOffset();
+                    if (a0 < b0 + b->bytes() && b0 < a0 + a->bytes())
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
         bool copySinceBarrier = false;
         // Push-descriptor writes a node records = one per bound storage buffer. A fused
         // pointwise/epilogue kernel always binds the plan SSBO plus the fixed kPwMaxOperands
@@ -783,18 +1306,24 @@ namespace vknn {
             return (int) nd.inputs.size() + (int) nd.outputs.size() + pwExtra;
         };
         int nodesSinceSplit = 0, bindsSinceSplit = 0;
+        int fullBarriers = 0, execBarriers = 0; // recorded-barrier tally for the segment INFO line
         for (size_t k = 0; k < nodeIdx.size(); ++k)
         {
             const Node &node        = g_.nodes[nodeIdx[k]];
-            bool        needBarrier = perOpBarrier; // full memory barrier (RAW/WAW: data must become visible)
-            bool        needWarOnly = false;        // execution-only barrier (WAR on a reused pool slot: order, no data)
-            if (!needBarrier)
+            // A fully-elided zero-copy node records no commands and touches no memory: its data
+            // hazards ride the real producers/consumers through the shared arena ranges, so it
+            // neither needs a barrier nor marks reads/writes (a phantom mark would insert a
+            // redundant pipeline drain at every elided site).
+            const bool elided      = fullyElided_.count(nodeIdx[k]) != 0;
+            bool       needBarrier = perOpBarrier && !elided; // full memory barrier (RAW/WAW: data must become visible)
+            bool       needWarOnly = false;                   // execution-only barrier (WAR on a reused pool slot: order, no data)
+            if (!needBarrier && !elided)
             {
                 for (TensorId in: node.inputs) // read-after-write
                 {
                     if (vk::Buffer *b = bufOf(in))
                     {
-                        if (writtenBufs.count(b))
+                        if (hazard(writtenBufs, b))
                         {
                             needBarrier = true;
                             break;
@@ -805,7 +1334,7 @@ namespace vknn {
                 {
                     if (vk::Buffer *b = bufOf(node.fusedResidual))
                     {
-                        if (writtenBufs.count(b))
+                        if (hazard(writtenBufs, b))
                         {
                             needBarrier = true;
                         }
@@ -817,12 +1346,12 @@ namespace vknn {
                     {
                         if (vk::Buffer *b = bufOf(o))
                         {
-                            if (writtenBufs.count(b))
+                            if (hazard(writtenBufs, b))
                             {
                                 needBarrier = true;
                                 break;
                             }
-                            if (readBufs.count(b))
+                            if (hazard(readBufs, b))
                             {
                                 needWarOnly = true; // upgrade to full below if a copy is involved
                             }
@@ -845,6 +1374,7 @@ namespace vknn {
                 {
                     vk::computeBarrier(*env_.ctx, cmd_);
                 }
+                ++fullBarriers;
                 writtenBufs.clear();
                 readBufs.clear();
                 copySinceBarrier = false;
@@ -853,6 +1383,7 @@ namespace vknn {
                 // Orders this node's write after every recorded read; earlier writes stay in
                 // writtenBufs because nothing here made them available or visible.
                 vk::executionBarrier(*env_.ctx, cmd_);
+                ++execBarriers;
                 readBufs.clear();
             }
             if (queryPool_)
@@ -865,27 +1396,30 @@ namespace vknn {
             {
                 vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2 + 1));
             }
-            for (TensorId in: node.inputs)
+            if (!elided)
             {
-                if (vk::Buffer *b = bufOf(in))
+                for (TensorId in: node.inputs)
+                {
+                    if (vk::Buffer *b = bufOf(in))
+                    {
+                        readBufs.insert(b);
+                    }
+                }
+                if (vk::Buffer *b = bufOf(node.fusedResidual))
                 {
                     readBufs.insert(b);
                 }
-            }
-            if (vk::Buffer *b = bufOf(node.fusedResidual))
-            {
-                readBufs.insert(b);
-            }
-            for (TensorId o: node.outputs)
-            {
-                if (vk::Buffer *b = bufOf(o))
+                for (TensorId o: node.outputs)
                 {
-                    writtenBufs.insert(b);
+                    if (vk::Buffer *b = bufOf(o))
+                    {
+                        writtenBufs.insert(b);
+                    }
                 }
-            }
-            if (isCopy(nodeIdx[k]))
-            {
-                copySinceBarrier = true;
+                if (isCopy(nodeIdx[k]))
+                {
+                    copySinceBarrier = true;
+                }
             }
             // Split the segment into multiple command buffers so no single batch (a) runs long
             // enough to trip the GPU watchdog (a ~20s submit on this driver gets reset silently,
@@ -920,6 +1454,10 @@ namespace vknn {
                 nodesSinceSplit  = 0;
                 bindsSinceSplit  = 0;
             }
+        }
+        if (fullBarriers + execBarriers > 0)
+        {
+            VKNN_INFO << "segment barriers: " << fullBarriers << " full + " << execBarriers << " execution-only over " << nodeIdx.size() << " node(s)";
         }
         // Final barrier so the segment outputs are complete + visible before the host reads them.
         if (copySinceBarrier)
