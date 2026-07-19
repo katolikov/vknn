@@ -48,6 +48,7 @@ float vx_unary(float x, int op, float a, float b) {
   if (op == 19) return max(x, 0.0) + log(1.0 + exp(-abs(x)));  // softplus
   if (op == 20) return roundEven(x);                   // round (ties to even, per ONNX Round)
   if (op == 21) return trunc(x);                       // trunc toward zero (folded float->int->float cast pair)
+  if (op == 22) return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : x);  // sign; +-0/NaN pass through (bitwise == CPU)
   if (op == 15) {                                      // erf (Abramowitz-Stegun 7.1.26, err<1.5e-7)
     float s = sign(x); float ax = abs(x);
     float t = 1.0 / (1.0 + 0.3275911 * ax);

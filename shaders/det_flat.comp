@@ -1,0 +1,48 @@
+#version 450
+#include "precision.glsl"
+// Det, FLAT row-major: one thread per matrix, [..., n, n] -> [...]. Loads the n*n elements at the
+// storage precision, evaluates the determinant in fp32 by FIXED-ORDER cofactor expansion (the SAME
+// expressions, in the SAME operation order, as the CPU oracle in backend/cpu/ops/det.cpp — any
+// change must be mirrored there or CPU-vs-GPU byte parity breaks), and rounds once at the store.
+// n is capped at kDetMaxAnalyticN by the plan-time gate; larger matrices run on the CPU.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
+layout(push_constant) uniform PC { int batches, n; } pc;
+
+float det2(float m[16]) {
+  return m[0] * m[3] - m[1] * m[2];
+}
+float det3(float m[16]) {
+  return m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+}
+float det4(float m[16]) {
+  float s0 = m[10] * m[15] - m[11] * m[14];
+  float s1 = m[9]  * m[15] - m[11] * m[13];
+  float s2 = m[9]  * m[14] - m[10] * m[13];
+  float s3 = m[8]  * m[15] - m[11] * m[12];
+  float s4 = m[8]  * m[14] - m[10] * m[12];
+  float s5 = m[8]  * m[13] - m[9]  * m[12];
+  float c0 = m[5] * s0 - m[6] * s1 + m[7] * s2;
+  float c1 = m[4] * s0 - m[6] * s3 + m[7] * s4;
+  float c2 = m[4] * s1 - m[5] * s3 + m[7] * s5;
+  float c3 = m[4] * s2 - m[5] * s4 + m[6] * s5;
+  return m[0] * c0 - m[1] * c1 + m[2] * c2 - m[3] * c3;
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.batches)) return;
+  int   nn = pc.n * pc.n;
+  float m[16];
+  for (int k = 0; k < nn; ++k) {
+    m[k] = float(s[int(gid) * nn + k]);
+  }
+  float det;
+  if      (pc.n == 1) det = m[0];
+  else if (pc.n == 2) det = det2(m);
+  else if (pc.n == 3) det = det3(m);
+  else                det = det4(m);
+  d[gid] = TO_STORE(det);
+}

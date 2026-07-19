@@ -333,6 +333,27 @@ namespace vknn {
         {
             return true; // metadata copy on the flat path
         }
+        if (nd.type == OpType::Det)
+        {
+            // Batched determinant: the GPU kernel is a fixed-order cofactor expansion whose
+            // register array covers n <= kDetMaxAnalyticN. The shape must be resolved and square;
+            // larger matrices take the CPU's general LU (a loud, named fallback).
+            const Shape &in = g.desc(nd.inputs[0]).shape;
+            if (in.size() < 2)
+            {
+                return refuse(whyNot, "Det: input shape unresolved or rank < 2");
+            }
+            const int64_t rows = in[in.size() - 2], cols = in[in.size() - 1];
+            if (rows != cols || cols < 1)
+            {
+                return refuse(whyNot, "Det: matrix must be square");
+            }
+            if (cols > kDetMaxAnalyticN)
+            {
+                return refuse(whyNot, "Det: n > kDetMaxAnalyticN runs on the CPU (partial-pivot LU)");
+            }
+            return true;
+        }
         if (nd.type == OpType::ChannelShuffle)
         {
             // Group-interleave channel permutation; kernels exist in both layouts (flat / NC4HW4).

@@ -5810,6 +5810,56 @@ TEST(Ops, ChannelShuffleGroups4) {
     EXPECT_EQ(out.data, channelShuffleRef(in, N, C, H * W, g));
 }
 
+// --- Det CPU op: fixed-order cofactor values for n=2/3 (hand-computed), a batched 3x3 pair, and
+// the n=5 LU path against a permutation-expansion reference. ---
+TEST(Ops, DetAnalyticAndBatched) {
+    Attributes none;
+    // det([[3,8],[4,6]]) = 3*6 - 8*4 = -14
+    auto d2 = runOp(OpType::Det, 0, none, {2, 2}, {3, 8, 4, 6}, {});
+    ASSERT_EQ(d2.shape, (std::vector<int64_t> {1}));
+    EXPECT_FLOAT_EQ(d2.data[0], -14.f);
+    // det([[6,1,1],[4,-2,5],[2,8,7]]) = -306; batched with an identity (det = 1)
+    auto d3 = runOp(OpType::Det, 0, none, {2, 3, 3},
+                    {6, 1, 1, 4, -2, 5, 2, 8, 7,
+                     1, 0, 0, 0, 1, 0, 0, 0, 1}, {});
+    ASSERT_EQ(d3.shape, (std::vector<int64_t> {2}));
+    EXPECT_FLOAT_EQ(d3.data[0], -306.f);
+    EXPECT_FLOAT_EQ(d3.data[1], 1.f);
+}
+
+TEST(Ops, DetLuLargeMatrix) {
+    // n=5 exceeds kDetMaxAnalyticN: the CPU takes the partial-pivot LU path. An upper-triangular
+    // matrix with a row swap makes the exact answer readable: det = -(1*2*3*4*5) = -120 after one
+    // permutation, computed here on the swapped-rows layout directly.
+    Attributes none;
+    std::vector<float> m = {
+        0, 2, 9, 9, 9,
+        1, 9, 9, 9, 9,
+        0, 0, 3, 9, 9,
+        0, 0, 0, 4, 9,
+        0, 0, 0, 0, 5};
+    auto d = runOp(OpType::Det, 0, none, {5, 5}, m, {});
+    ASSERT_EQ(d.shape, (std::vector<int64_t> {1}));
+    EXPECT_FLOAT_EQ(d.data[0], -120.f);
+}
+
+// --- Sign as a Unary member: 1/-1 for nonzero, +-0 and NaN pass through unchanged (the exact
+// expression both backends evaluate). ---
+TEST(Ops, UnarySign) {
+    Attributes none;
+    const float nanv = std::numeric_limits<float>::quiet_NaN();
+    auto out = runOp(OpType::Unary, (int) UnaryType::Sign, none, {6},
+                     {3.5f, -0.25f, 0.f, -0.f, 1e-30f, nanv}, {});
+    ASSERT_EQ(out.shape, (std::vector<int64_t> {6}));
+    EXPECT_FLOAT_EQ(out.data[0], 1.f);
+    EXPECT_FLOAT_EQ(out.data[1], -1.f);
+    EXPECT_EQ(std::signbit(out.data[2]), false);
+    EXPECT_FLOAT_EQ(out.data[2], 0.f);
+    EXPECT_EQ(std::signbit(out.data[3]), true); // -0 passes through with its sign
+    EXPECT_FLOAT_EQ(out.data[4], 1.f);
+    EXPECT_TRUE(std::isnan(out.data[5]));
+}
+
 // --- fuseChannelShuffle folds the exact 3-node chain into one ChannelShuffle carrying groups,
 // reading the chain's source and writing its final output tensor. ---
 TEST(ChannelShuffleFold, FoldsExactChain) {
