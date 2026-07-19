@@ -240,7 +240,7 @@ was 60-80% dispatch-floor-bound); the deltas that read "within the gate" are dom
 tune-time pick variance on a heat-soaked device (branch-vs-branch control runs read parity), with
 no reproducible regression on either device at any tuning level.
 
-### Zero-copy Concat/Split/Slice sub-buffer views
+### Zero-copy Concat/Split/Slice sub-buffer views (v1.4.2)
 
 Concat, Split, and contiguous unit-step Slice move bytes without computing anything, yet each cost
 real GPU passes over the activation (one dispatch per concatenated part, one copy or gather per
@@ -268,7 +268,7 @@ End-to-end, cooled interleaved min-of-5 vs main (same protocol as above):
 | Inception-v3 | **-4.4%** | -2.4% | within the 3% gate |
 | ResNet-50 / DenseNet-121 | parity (no eligible sites / epilogue-carrying concats) | within the 3% gate | within the 3% gate |
 
-### Zero-copy extensions: movement-chain folding and the Flexible layout vote
+### Zero-copy extensions: movement-chain folding and the Flexible layout vote (v1.4.2)
 
 Three further always-on, byte-exact reductions of data movement (same discipline as the section
 above: structural rules, per-node fallback, outputs byte-identical to the copying path on every

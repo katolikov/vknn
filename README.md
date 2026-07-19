@@ -271,7 +271,7 @@ and depthwise/output-channel tile candidates in the bit-neutral races — output
 unchanged from v1.4.0 at every tuning level; deltas in
 [docs/benchmark.md](docs/benchmark.md) § Barrier hygiene.
 
-The current branch makes Concat, Split, and contiguous Slice zero-copy wherever their slices tile
+v1.4.2 makes Concat, Split, and contiguous Slice zero-copy wherever their slices tile
 the whole contiguously in the stored layout: each slice becomes a sub-buffer view into the whole's
 device memory, so producers write the concatenation in place and the copy dispatches disappear
 (ShuffleNetV2 −17% on both devices, SqueezeNet −13/−10%, YOLOv8n −8/−4%, Inception-v3 −4% at
