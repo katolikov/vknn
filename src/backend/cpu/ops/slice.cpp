@@ -30,6 +30,11 @@ namespace vknn {
                 return {};
             }
             void run(const Node &node, ExecContext &ctx) override {
+                if (node.attr.has("view_stride"))
+                {
+                    cpu::runViewGather(node, ctx);
+                    return; // folded movement chain: the composed map replaces starts/steps entirely
+                }
                 const RtTensor      &X      = ctx.t(node.inputs[0]);
                 RtTensor            &Y      = ctx.t(node.outputs[0]);
                 int                  rank   = (int) X.shape.size();

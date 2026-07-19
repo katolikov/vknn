@@ -55,6 +55,12 @@ namespace vknn {
     // eliminateFloatCast gates it to a proven float source. Runs after eliminateFloatCast, before the
     // pointwise fusion (defined in fold_int_roundtrip_cast.cpp).
     void foldIntRoundtripCast(Graph &g);
+    // Fold a Gather whose constant rank-1 indices form a contiguous ascending unit run into the
+    // equivalent Slice (same elements, same order, byte-identical), so the runtime's slice
+    // optimizations apply: identity slices alias their input, leading-axis slices become zero-copy
+    // sub-buffer views. Scalar and rank>1 indices are untouched. Runs after the const-fold fixpoint
+    // (indices are resolved initializers), before layout/fusion (defined in fold_gather_slice.cpp).
+    void foldGatherToSlice(Graph &g);
     // Fuse the decomposed RMSNormalization chain (Pow(x,2) -> ReduceMean(last-axis) -> Add(eps) ->
     // Sqrt -> Reciprocal|Div(1,.) -> Mul(x,.) -> Mul(gamma,.)) into one OpType::RMSNorm node, so the
     // wide sum of squares accumulates in fp32 in a single kernel instead of losing precision across

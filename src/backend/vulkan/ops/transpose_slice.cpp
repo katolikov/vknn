@@ -14,6 +14,19 @@ namespace vknn {
                 impl.prepare(node, env);
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                // An identity-perm Transpose is aliased onto its input by the segment planner (the
+                // same geometry-as-metadata rule as Reshape); the gather is then a no-op. Same
+                // guards as Slice: a fused epilogue must run, and an initializer operand is never
+                // aliased.
+                if (!node.attr.has("pw_steps") && !node.inputs.empty() && node.inputs[0] != kNoTensor && !env.graph->isInitializer(node.inputs[0]))
+                {
+                    vk::Buffer *src = env.devBuf(node.inputs[0]);
+                    vk::Buffer *dst = env.devBuf(node.outputs[0]);
+                    if (src && dst && src->handle() == dst->handle())
+                    {
+                        return;
+                    }
+                }
                 impl.record(cmd, node, env);
             }
         };

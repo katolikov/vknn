@@ -256,7 +256,142 @@ namespace vknn {
                 }
             }
         }
-        // 2) (byte-weighted propagation for FLEXIBLE ops lands here in the next stage.)
+        // 2) FLEXIBLE re-vote: a standalone FusedPointwise whose plan is expressible in BOTH
+        //    layouts — a rank-4 run with no general-broadcast (class-2) operand, the exact
+        //    nc4Ok/flatOk rule the compile-time fuser applied — runs bit-identically through
+        //    fused_pw_flat and fused_pw_nc4 (same VM, same vknnRte16 stores), so its layout is a
+        //    pure placement choice. Each such node adopts the layout that minimizes the element
+        //    count crossing a convert on its full-size edges (entry, runtime operands, outputs read
+        //    by non-agnostic consumers); agnostic readers follow for free and fixed readers vote
+        //    with their classifier layout. Rounds alternate vote and re-seed until stable — the
+        //    result stays a deterministic pure function of the graph.
+        {
+            // A step record is 8 ints: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc; a bcast
+            // field of 2 marks the general-broadcast operand class that only the flat kernel
+            // addresses.
+            constexpr int     kPwStepInts        = 8;
+            constexpr int     kPwStepBcastField  = 6;
+            constexpr int64_t kPwBcastGeneral    = 2;
+            constexpr int     kFlexVoteMaxRounds = 8; // cycles are byte-weight monotone; this only caps oscillation
+            constexpr int64_t kNc4Rank           = 4;
+            std::vector<size_t> flexible;
+            for (size_t i = 0; i < g.nodes.size(); ++i)
+            {
+                const Node &nd = g.nodes[i];
+                if (nd.type != OpType::FusedPointwise || !nd.attr.has("pw_steps") || nd.outputs.empty() || nd.outputs[0] == kNoTensor)
+                {
+                    continue;
+                }
+                if ((int64_t) g.desc(nd.outputs[0]).shape.size() != kNc4Rank)
+                {
+                    continue; // rank != 4 has no NC4HW4 form: stays with the classifier
+                }
+                const auto &steps   = nd.attr.getints("pw_steps");
+                bool        nc4Ok   = steps.size() % kPwStepInts == 0;
+                for (size_t s = 0; nc4Ok && s + kPwStepBcastField < steps.size(); s += kPwStepInts)
+                {
+                    nc4Ok = steps[s + kPwStepBcastField] != kPwBcastGeneral;
+                }
+                if (nc4Ok)
+                {
+                    flexible.push_back(i);
+                }
+            }
+            if (!flexible.empty())
+            {
+                std::vector<std::vector<size_t>> readers(g.tensors.size());
+                for (size_t j = 0; j < g.nodes.size(); ++j)
+                {
+                    for (TensorId in: g.nodes[j].inputs)
+                    {
+                        if (in != kNoTensor && in < (TensorId) readers.size())
+                        {
+                            readers[(size_t) in].push_back(j);
+                        }
+                    }
+                }
+                std::set<size_t> flexSet(flexible.begin(), flexible.end());
+                for (int round = 0; round < kFlexVoteMaxRounds; ++round)
+                {
+                    bool changed = false;
+                    for (size_t i: flexible)
+                    {
+                        Node   &nd        = g.nodes[i];
+                        int64_t flatCost  = 0; // elements converted if this node runs FLAT
+                        int64_t nc4Cost   = 0; // ... if it runs NC4HW4
+                        auto    voteEdge  = [&](TensorId t, bool neighborFlat) {
+                            const int64_t w = numElements(g.desc(t).shape);
+                            (neighborFlat ? nc4Cost : flatCost) += w;
+                        };
+                        for (TensorId in: nd.inputs)
+                        {
+                            if (in != kNoTensor && !g.isInitializer(in))
+                            {
+                                voteEdge(in, g.desc(in).gpuFlat);
+                            }
+                        }
+                        for (TensorId o: nd.outputs)
+                        {
+                            if (o == kNoTensor)
+                            {
+                                continue;
+                            }
+                            for (size_t rj: readers[(size_t) o])
+                            {
+                                const Node &R = g.nodes[rj];
+                                if (layoutAgnostic(R))
+                                {
+                                    continue; // adopts whatever this node chooses: no convert either way
+                                }
+                                voteEdge(o, flexSet.count(rj) ? R.attr.geti("pw_flat", 0) != 0 : gpuFlatNode(g, R));
+                            }
+                        }
+                        // Ties keep the classifier's original choice (already in pw_flat): stability
+                        // and determinism over churn.
+                        const bool wantFlat = flatCost != nc4Cost ? flatCost < nc4Cost : nd.attr.geti("pw_flat", 0) != 0;
+                        if (wantFlat != (nd.attr.geti("pw_flat", 0) != 0))
+                        {
+                            Attr a;
+                            a.kind                  = Attr::Int;
+                            a.i                     = wantFlat ? 1 : 0;
+                            nd.attr.map["pw_flat"]  = a;
+                            changed                 = true;
+                        }
+                    }
+                    if (!changed)
+                    {
+                        break;
+                    }
+                    // Re-seed every tensor layout with the updated pw_flat facts so the next round's
+                    // (and the convert splicer's) view of neighbor layouts is consistent.
+                    for (auto &nd: g.nodes)
+                    {
+                        LKind k = opLayoutKind(g, nd);
+                        bool  f;
+                        if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
+                        {
+                            bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
+                            int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
+                            int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
+                            f              = inFlat || cin != cout;
+                        } else if (k == LKind::FixedNC4)
+                        {
+                            f = false;
+                        } else
+                        {
+                            f = gpuFlatNode(g, nd);
+                        }
+                        for (TensorId o: nd.outputs)
+                        {
+                            if (o != kNoTensor)
+                            {
+                                g.desc(o).gpuFlat = f;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // 3) NC4HW4 can only represent rank <= 4 (NCHW::from collapses rank>4 to (1,1,1,1)). Any tensor with
         //    rank > 4 MUST be a flat row-major buffer — including graph inputs with no producer (a multi-view
         //    image input [1,2,3,224,224], left NC4HW4, would be mis-packed and corrupt the graph).

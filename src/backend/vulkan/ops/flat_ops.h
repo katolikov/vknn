@@ -75,6 +75,25 @@ namespace vknn {
                 pc.total              = (int) numElements(out);
                 pc.base               = 0;
                 std::vector<int32_t> outDim(rank), inStr(rank);
+                // A folded movement chain (foldMovementChains) carries its composed per-axis map in
+                // view_stride/view_base — the gather geometry verbatim, overriding perm/starts.
+                if (node.attr.has("view_stride"))
+                {
+                    const auto &vs = node.attr.getints("view_stride");
+                    if ((int) vs.size() == rank)
+                    {
+                        for (int k = 0; k < rank; ++k)
+                        {
+                            outDim[k] = (int) out[k];
+                            inStr[k]  = (int) vs[(size_t) k];
+                        }
+                        pc.base = (int) node.attr.geti("view_base", 0);
+                        geom    = uploadFlatGeom(env, {outDim, inStr});
+                        epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
+                        pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
+                        return;
+                    }
+                }
                 if (node.type == OpType::Transpose)
                 {
                     const auto &perm = node.attr.getints("perm");
@@ -157,7 +176,13 @@ namespace vknn {
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          geom;  // outDim/inDim/inStride/padBegin, deduped SSBO
             std::shared_ptr<vk::Buffer>          hold0; // when input[0] is a constant initializer
-            void                                 prepare(const Node &node, VkOpEnv &env) {
+            // Zero-copy pad (mirrors the segment planner's rule): a constant-value pad along ONE
+            // axis with every dim before it equal to 1 places the data as a contiguous sub-range of
+            // the output at viewOffBytes_. When the planner made the data a view of the output at
+            // exactly that offset, record() emits only vkCmdFillBuffer for the two pad ranges.
+            bool   viewEligible_ = false;
+            size_t viewOffBytes_ = 0, dataBytes_ = 0, outBytes_ = 0;
+            void   prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g        = *env.graph;
                 Shape        in       = g.desc(node.inputs[0]).shape;
                 Shape        out      = g.desc(node.outputs[0]).shape;
@@ -196,10 +221,75 @@ namespace vknn {
                 geom = uploadFlatGeom(env, {outDim, inDim, inStr, padBegin});
                 pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {})
                                   : env.pipeline(shader("flat_pad", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
+                {
+                    const size_t es = env.useFp16 ? 2 : 4;
+                    int          padAxis = -1;
+                    bool         padOk   = pc.mode == 0 && !runtimeVal && (int) pads.size() >= 2 * rank;
+                    for (int d = 0; d < rank && padOk; ++d)
+                    {
+                        const int64_t b = pads[(size_t) d], e = pads[(size_t) (rank + d)];
+                        if (b < 0 || e < 0)
+                        {
+                            padOk = false;
+                        } else if (b > 0 || e > 0)
+                        {
+                            padOk   = padAxis < 0;
+                            padAxis = d;
+                        }
+                    }
+                    int64_t outer = 1;
+                    for (int d = 0; padOk && d < padAxis; ++d)
+                    {
+                        outer *= out[(size_t) d];
+                    }
+                    if (padOk && padAxis >= 0 && outer == 1)
+                    {
+                        size_t stride = 1;
+                        for (int d = padAxis + 1; d < rank; ++d)
+                        {
+                            stride *= (size_t) out[(size_t) d];
+                        }
+                        viewOffBytes_ = (size_t) pads[(size_t) padAxis] * stride * es;
+                        dataBytes_    = (size_t) numElements(in) * es;
+                        outBytes_     = (size_t) numElements(out) * es;
+                        viewEligible_ = viewOffBytes_ % sizeof(uint32_t) == 0 && (viewOffBytes_ + dataBytes_) % sizeof(uint32_t) == 0 && outBytes_ % sizeof(uint32_t) == 0;
+                    }
+                }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
-                VkBuffer src = operandBuf(env, node.inputs[0], hold0)->handle();
-                VkBuffer dst = env.devBuf(node.outputs[0])->handle();
+                vk::Buffer *srcB = operandBuf(env, node.inputs[0], hold0);
+                vk::Buffer *dstB = env.devBuf(node.outputs[0]);
+                // Zero-copy: the data already sits inside the output (the producer wrote through the
+                // planner's view), so only the pad ranges need bytes — two transfer fills with the
+                // constant value's bit pattern (an fp16 value repeated twice per 32-bit word). The
+                // gather dispatch MUST NOT run when the buffers alias: it would read the data range
+                // while other invocations overwrite it.
+                if (viewEligible_ && !node.attr.has("pw_steps") && srcB->hazardRoot() == dstB->hazardRoot() && srcB->rootOffset() == dstB->rootOffset() + viewOffBytes_)
+                {
+                    const bool fp16 = env.useFp16;
+                    uint32_t   pattern;
+                    if (fp16)
+                    {
+                        constexpr unsigned kHalfBits = 8 * sizeof(uint16_t); // fp16 lane width in the u32 fill word
+                        const uint16_t     h         = floatToHalf(pc.cval);
+                        pattern                      = (uint32_t) h | ((uint32_t) h << kHalfBits);
+                    } else
+                    {
+                        std::memcpy(&pattern, &pc.cval, sizeof(pattern));
+                    }
+                    if (viewOffBytes_ > 0)
+                    {
+                        vkCmdFillBuffer(cmd, dstB->handle(), 0, (VkDeviceSize) viewOffBytes_, pattern);
+                    }
+                    const size_t tailStart = viewOffBytes_ + dataBytes_;
+                    if (outBytes_ > tailStart)
+                    {
+                        vkCmdFillBuffer(cmd, dstB->handle(), (VkDeviceSize) tailStart, (VkDeviceSize) (outBytes_ - tailStart), pattern);
+                    }
+                    return;
+                }
+                VkBuffer src = srcB->handle();
+                VkBuffer dst = dstB->handle();
                 if (runtimeVal)
                 {
                     pipe->dispatch(cmd, {src, env.devBuf(node.inputs[2])->handle(), dst, geom->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
