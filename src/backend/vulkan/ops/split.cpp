@@ -31,6 +31,7 @@ namespace vknn {
             std::vector<std::shared_ptr<vk::ComputePipeline>> fpipes_;
             std::vector<std::shared_ptr<vk::Buffer>>          fgeom_;
             std::shared_ptr<vk::Buffer>                       hold0_;
+            bool contiguousParts_ = false; // every dim before the axis is 1: outputs are contiguous slabs at pc.base
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g = *env.graph;
@@ -43,6 +44,14 @@ namespace vknn {
                     if (axis < 0)
                     {
                         axis += rank;
+                    }
+                    {
+                        int64_t outer = 1;
+                        for (int d = 0; d < axis && d < rank; ++d)
+                        {
+                            outer *= in[d];
+                        }
+                        contiguousParts_ = outer == 1;
                     }
                     auto    inStride = flat::rowStrides(in);
                     int64_t offset   = 0; // running start of this output along the split axis, in axis elements
@@ -97,14 +106,22 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                const size_t elemBytes = env.useFp16 ? 2 : 4;
                 if (flat_)
                 {
                     vk::Buffer *src = operandBuf(env, node.inputs[0], hold0_);
                     for (size_t i = 0; i < fpcs_.size(); ++i)
                     {
+                        vk::Buffer *dst = env.devBuf(node.outputs[foutIdx_[i]]);
+                        // Zero-copy: the planner made this output a sub-buffer view of the input at
+                        // exactly its slab offset (pc.base elements) — the bytes are already in place.
+                        if (contiguousParts_ && dst->hazardRoot() == src->hazardRoot() && dst->rootOffset() == src->rootOffset() + (size_t) fpcs_[i].base * elemBytes)
+                        {
+                            continue;
+                        }
                         // One flat_gather invocation per output element (local_size_x = kFlatLocalSize),
                         // gathering the slice for this output straight out of the shared input buffer.
-                        fpipes_[i]->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[foutIdx_[i]])->handle(), fgeom_[i]->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, flat::kFlatLocalSize));
+                        fpipes_[i]->dispatch(cmd, {src->handle(), dst->handle(), fgeom_[i]->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, flat::kFlatLocalSize));
                     }
                     return;
                 }
@@ -116,6 +133,12 @@ namespace vknn {
                 for (const Part &p: parts_)
                 {
                     vk::Buffer *dst = env.devBuf(node.outputs[p.outIdx]);
+                    // Zero-copy: this output is a view of the input's channel-block slice (N==1 only —
+                    // batched sources interleave and cannot be a single view).
+                    if (x_.n == 1 && dst->hazardRoot() == src->hazardRoot() && dst->rootOffset() == src->rootOffset() + (size_t) p.blockOff * hw_ * kNC4Block * elemBytes)
+                    {
+                        continue;
+                    }
                     for (int64_t n = 0; n < x_.n; ++n)
                     {
                         VkBufferCopy c {};

@@ -62,10 +62,20 @@ namespace vknn {
                     return;
                 }
                 vk::Buffer *dst = env.devBuf(node.outputs[0]);
+                // A fused unit must run at the stores, so an epi-carrying Concat never skips a part.
+                const bool   mayAlias  = !node.attr.has("pw_steps");
+                const size_t elemBytes = env.useFp16 ? 2 : 4;
                 // Each input writes a disjoint channel-block range of the output, so no barriers between them.
                 for (size_t i = 0; i < parts.size(); ++i)
                 {
-                    vk::Buffer           *src = env.devBuf(node.inputs[i]);
+                    vk::Buffer *src = env.devBuf(node.inputs[i]);
+                    // Zero-copy: the planner made this part a sub-buffer view of the output at exactly
+                    // its channel-block slice, so the producer already wrote the bytes in place. Valid
+                    // only for the contiguous N==1 tiling the planner links.
+                    if (mayAlias && parts[i].N == 1 && src->hazardRoot() == dst->hazardRoot() && src->rootOffset() == dst->rootOffset() + (size_t) parts[i].cbOff * parts[i].HW * kNC4Block * elemBytes)
+                    {
+                        continue;
+                    }
                     std::vector<VkBuffer> bufs {src->handle(), dst->handle()};
                     epi.append(bufs, node, env, dst->handle());
                     pipe->dispatch(cmd, bufs, &parts[i], sizeof(ConcatPC), (uint32_t) partGroups[i]);

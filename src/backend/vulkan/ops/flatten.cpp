@@ -12,6 +12,10 @@ namespace vknn {
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *src = operandBuf(env, node.inputs[0], hold0);
                 vk::Buffer *dst = env.devBuf(node.outputs[0]);
+                if (src->handle() == dst->handle())
+                {
+                    return; // output aliases the input buffer (geometry-as-metadata): no copy needed
+                }
                 // Flatten preserves the element count and (per the layout pass) the layout, so src/dst are
                 // equal-sized: copy the whole buffer. Do NOT size the copy from packedElems(output): NCHW::from
                 // collapses a rank>4 shape to (1,1,1,1) -> 4 elements, which would copy only the first 4 and
