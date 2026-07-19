@@ -5843,6 +5843,51 @@ TEST(Ops, DetLuLargeMatrix) {
     EXPECT_FLOAT_EQ(d.data[0], -120.f);
 }
 
+// --- Det n=1 (the scalar itself) and n=4 (hand-verified cofactor value), cross-validated against
+// the LU path by embedding the same 4x4 in a 5x5 block-diagonal (det unchanged by the unit
+// corner), so the two implementations agree at their boundary. ---
+TEST(Ops, DetOneAndFourByFourCrossLu) {
+    Attributes none;
+    auto d1 = runOp(OpType::Det, 0, none, {1, 1}, {7.5f}, {});
+    ASSERT_EQ(d1.shape, (std::vector<int64_t> {1}));
+    EXPECT_FLOAT_EQ(d1.data[0], 7.5f);
+    // det of this 4x4 is 24 (block upper-triangular after one elimination; verified by hand)
+    std::vector<float> m4 = {
+        1, 0, 2, -1,
+        3, 0, 0, 5,
+        2, 1, 4, -3,
+        1, 0, 5, 0};
+    auto d4 = runOp(OpType::Det, 0, none, {4, 4}, m4, {});
+    EXPECT_FLOAT_EQ(d4.data[0], 30.f);
+    // 5x5 = diag(m4, 1): the LU path must reproduce the analytic 4x4 value
+    std::vector<float> m5(25, 0.f);
+    for (int r = 0; r < 4; ++r)
+    {
+        for (int c = 0; c < 4; ++c)
+        {
+            m5[(size_t) (r * 5 + c)] = m4[(size_t) (r * 4 + c)];
+        }
+    }
+    m5[24]  = 1.f;
+    auto d5 = runOp(OpType::Det, 0, none, {5, 5}, m5, {});
+    EXPECT_NEAR(d5.data[0], d4.data[0], 1e-4f);
+}
+
+// --- Singular inputs: duplicate rows (analytic path, exact zero by cancellation) and an all-zero
+// pivot column (the LU early return). ---
+TEST(Ops, DetSingular) {
+    Attributes none;
+    auto z3 = runOp(OpType::Det, 0, none, {3, 3}, {1, 2, 3, 1, 2, 3, 4, 5, 6}, {});
+    EXPECT_FLOAT_EQ(z3.data[0], 0.f);
+    std::vector<float> m5(25, 1.f);
+    for (int r = 0; r < 5; ++r)
+    {
+        m5[(size_t) (r * 5 + 2)] = 0.f; // column 2 identically zero
+    }
+    auto z5 = runOp(OpType::Det, 0, none, {5, 5}, m5, {});
+    EXPECT_FLOAT_EQ(z5.data[0], 0.f);
+}
+
 // --- Sign as a Unary member: 1/-1 for nonzero, +-0 and NaN pass through unchanged (the exact
 // expression both backends evaluate). ---
 TEST(Ops, UnarySign) {
@@ -5858,6 +5903,62 @@ TEST(Ops, UnarySign) {
     EXPECT_EQ(std::signbit(out.data[3]), true); // -0 passes through with its sign
     EXPECT_FLOAT_EQ(out.data[4], 1.f);
     EXPECT_TRUE(std::isnan(out.data[5]));
+}
+
+// --- Det hosts pointwise epilogues: a Sign consuming the determinant fuses into the Det node's
+// store (pw_steps lands on Det, the Sign node disappears), and the fused CPU run produces exactly
+// the unfused values — the camera-head Det -> Sign idiom as one kernel. ---
+TEST(Passes, DetHostsSignEpilogue) {
+    auto build = [] {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {1, 1, 2, 2};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorDesc dd;
+        dd.name     = "det";
+        TensorId dt = g.addTensor(dd);
+        TensorDesc sd;
+        sd.name     = "sign";
+        TensorId st = g.addTensor(sd);
+        Node det;
+        det.type    = OpType::Det;
+        det.name    = "det";
+        det.inputs  = {x};
+        det.outputs = {dt};
+        g.nodes.push_back(det);
+        Node sign;
+        sign.type    = OpType::Unary;
+        sign.subOp   = (int) UnaryType::Sign;
+        sign.name    = "sign";
+        sign.inputs  = {dt};
+        sign.outputs = {st};
+        g.nodes.push_back(sign);
+        g.outputs = {st};
+        return g;
+    };
+    std::vector<float> xd {3, 8, 4, 6}; // det = -14 -> sign = -1
+    auto               unfused = runGraphCpu(build(), xd);
+
+    Graph fg = build();
+    inferShapes(fg, 1);
+    ASSERT_EQ(fg.desc(fg.nodes[0].outputs[0]).shape, (Shape {1, 1}));
+    fusePointwiseChains(fg, false);
+    ASSERT_EQ(fg.nodes.size(), 1u);
+    EXPECT_EQ(fg.nodes[0].type, OpType::Det);
+    EXPECT_TRUE(fg.nodes[0].attr.has("pw_steps"));
+    EXPECT_EQ(fg.nodes[0].outputs[0], fg.outputs[0]);
+
+    auto got = runGraphCpu(std::move(fg), xd);
+    ASSERT_EQ(got.size(), unfused.size());
+    for (size_t i = 0; i < got.size(); ++i)
+    {
+        EXPECT_FLOAT_EQ(got[i], unfused[i]);
+    }
+    ASSERT_EQ(unfused.size(), 1u);
+    EXPECT_FLOAT_EQ(unfused[0], -1.f);
 }
 
 // --- fuseChannelShuffle folds the exact 3-node chain into one ChannelShuffle carrying groups,
