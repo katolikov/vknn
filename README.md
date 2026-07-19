@@ -220,29 +220,46 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 
 ## Benchmarks
 
-VKNN v1.4.0, whole CNN suite, fp16, `--tuning fast`, thermal-controlled (cooldown before every
-run), same device and same day for every number below. The VKNN figure is the full `run()` wall
-(it includes the host↔device copies). "vs v1.3.1" is the cooled interleaved paired A/B delta
-(min-of-N, two devices); accuracy is against fp32 onnxruntime references and is byte-identical
-across runs and tuning levels.
+VKNN v1.4.2, whole CNN suite, fp16, `--tuning fast`, primary device, 20-iteration medians with a
+cooldown before every stage. The VKNN figure is the full `run()` wall (it includes the host↔device
+copies). "vs v1.4.1" is the cooled interleaved paired A/B delta (min-of-5, two devices, same day);
+accuracy is against fp32 onnxruntime references and is byte-identical across runs, tuning levels,
+and both devices.
 
-| Model (fp16) | VKNN v1.4.0 median/min | vs v1.3.1 | cosine | PSNR |
+| Model (fp16) | VKNN v1.4.2 median/min | vs v1.4.1 | cosine | PSNR |
 |---|---|---|---|---|
-| SqueezeNet 1.1 | 1.98 / 1.83 ms | ±0 | 1.000000 | 71.5 dB |
-| MobileNetV2 | 2.26 / 1.98 ms | −3 / −4% | 0.999989 | 64.4 dB |
-| MnasNet 1.0 | 2.42 / 2.18 ms | −8 / −4% | 0.999989 | 63.6 dB |
-| ShuffleNetV2 x1.0 | 2.56 / 2.25 ms | −4 / −3% | 0.999998 | 67.5 dB |
-| MobileNetV3-Large | 2.94 / 2.69 ms | −5 / −9% | 0.999991 | 63.5 dB |
-| EfficientNet-B0 | 5.51 / 4.33 ms | ±0 | 0.999987 | 61.7 dB |
-| ResNet-50 | 11.34 / 10.98 ms | −5 / −16% | 1.000000 | 82.9 dB |
-| DenseNet-121 | 15.84 / 14.89 ms | −3 / −13% | 0.999997 | 70.8 dB |
-| Inception-v3 | 17.44 / 16.62 ms | −21 / −23% | 0.999994 | 64.3 dB |
-| YOLOv8n (640×640) | 20.30 / 18.08 ms | −9 / −6% | 1.000000 | 86.9 dB |
-| YoNoSplat encoder (965M params, 8 views) | 8.72 s | ±0 (bit-identical) | 6 outputs ≥ 0.999993 | 65–81 dB |
+| SqueezeNet 1.1 | 1.7 / 1.6 ms | **−13 / −10%** | 1.000000 | 71.5 dB |
+| ShuffleNetV2 x1.0 | 1.8 / 1.7 ms | **−17 / −17%** | 0.999998 | 67.5 dB |
+| MnasNet 1.0 | 2.2 / 2.0 ms | ±0 (no eligible sites) | 0.999989 | 63.6 dB |
+| MobileNetV2 | 2.4 / 2.0 ms | ±0 (no eligible sites) | 0.999989 | 64.4 dB |
+| MobileNetV3-Large | 3.1 / 2.7 ms | ±0 (no eligible sites) | 0.999991 | 63.5 dB |
+| EfficientNet-B0 | 6.4 / 5.5 ms | ±0 (no eligible sites) | 0.999987 | 61.7 dB |
+| ResNet-50 | 12.8 / 12.0 ms | within the 3% gate | 1.000000 | 82.9 dB |
+| DenseNet-121 | 15.9 / 14.1 ms | within the 3% gate | 0.999997 | 70.8 dB |
+| Inception-v3 | 16.8 / 16.0 ms | −2% (−4% at `none`) | 0.999994 | 64.3 dB |
+| YOLOv8n (640×640) | 19.4 / 16.3 ms | **−8 / −4%** | 1.000000 | 86.9 dB |
+| YoNoSplat encoder (965M params, 8 views) | 8.73 s | ±0 (bit-identical) | 6 outputs ≥ 0.999993 | 65–81 dB |
 
-Same-day head-to-head against [MNN](https://github.com/alibaba/MNN) (Alibaba's production engine)
-at its strongest backend per model (OpenCL with HEAVY autotuning, or CPU-4-thread where that wins;
-MNN times inference only, input set once outside the loop):
+Against MNN's **Vulkan** backend (same device class, both fp16; MNN-Vulkan figures from the
+recorded head-to-head sweep in [docs/benchmark.md](docs/benchmark.md) — MNN times inference only,
+input set once outside the loop, so the comparison is generous to MNN):
+
+| Model (Vulkan fp16) | VKNN v1.4.2 | MNN-Vulkan | speedup |
+|---|---|---|---|
+| SqueezeNet 1.1 | 1.7 ms | 10.9 ms | ~6.4× |
+| MobileNetV2 | 2.4 ms | 13.8 ms | ~5.8× |
+| MobileNetV3-Large | 3.1 ms | 17.0 ms | ~5.5× |
+| EfficientNet-B0 | 6.4 ms | 19.9 ms | ~3.1× |
+| ResNet-50 | 12.8 ms | 18.3 ms | ~1.4× |
+| Inception-v3 | 16.8 ms | 25.6 ms | ~1.5× |
+| YOLOv8n (640×640) | 19.4 ms | ~73 ms | ~3.8× |
+
+YOLOv8n and the YoNoSplat encoder run **100% on the GPU** (no CPU fallback); MNN cannot convert
+the encoder at all.
+
+Head-to-head against MNN's strongest backend per model (OpenCL with HEAVY autotuning, or
+CPU-4-thread where that wins) — a same-day paired sweep at v1.4.0; v1.4.2 is same-or-faster than
+the VKNN column on every row:
 
 | Model (fp16) | VKNN v1.4.0 | MNN best (same day) | result |
 |---|---|---|---|
