@@ -97,6 +97,21 @@ skips ONNX parsing and graph passes at load:
 vknn_compile model.onnx model.vxm --fp16 --shape input=1x3x224x224
 ```
 
+The default (`-O1`) is the fastest configuration: fused pointwise chains run fp32-chained, which is
+at least as accurate as the unfused graph on every chain but not bit-identical to it. When the
+outputs must be **byte-identical to a compile with no fusion at all** (`-O0` — regression baselines,
+cross-build byte gates), add `--strict-fuse`, which keeps every fused step rounded exactly like the
+standalone kernels it replaces at a small speed cost:
+
+```sh
+# fastest configuration whose outputs are bit-exact vs the unoptimized (-O0) compile
+vknn_compile model.onnx model.vxm --fp16 --shape input=1x3x224x224 --strict-fuse
+```
+
+Everything the runtime adds on top — zero-copy Concat/Split/Slice views, movement-chain folding,
+the layout vote, kernel autotuning — is automatic and byte-identical by construction at every
+tuning level, so neither command needs further flags for that.
+
 Push the model and run it on the device:
 
 ```sh
