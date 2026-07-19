@@ -43,6 +43,16 @@ namespace vknn {
 
         std::set<int> removeNodes;
         auto          foldable = [&](const Node &nd) {
+            // A node consuming a native-fp64 constant is left for the runtime fp64 path: const-folding
+            // evaluates it through the CPU ops, which read pool values at fp32 -- baking it here would
+            // narrow a real-fp64 constant. (Shape/Constant carry no fp64 tensor input, so they still fold.)
+            for (TensorId in: nd.inputs)
+            {
+                if (in != kNoTensor && g.desc(in).dtype == DType::Float64)
+                {
+                    return false;
+                }
+            }
             switch (nd.type)
             {
                 case OpType::Constant:
@@ -122,10 +132,11 @@ namespace vknn {
                         {
                             r = (int64_t) (hb.bytes.size() / (i64 ? 8 : 4));
                         }
-                        int64_t prod = 1;
+                        int64_t     prod = 1;
+                        const DType dt   = g.desc(nd.inputs[0]).dtype;
                         for (int64_t i = 0; i < r; ++i)
                         {
-                            int64_t dv = i64 ? hb.i64()[i] : (int64_t) hb.f32()[i];
+                            int64_t dv = i64 ? hb.i64()[i] : (int64_t) hostInitElem(hb, dt, i);
                             prod *= (dv > 0 ? dv : 1);
                         }
                         maxElems = prod;
@@ -154,7 +165,7 @@ namespace vknn {
                         {
                             return false;
                         }
-                        vals[i] = i64 ? (double) it->second.i64()[0] : (double) it->second.f32()[0];
+                        vals[i] = i64 ? (double) it->second.i64()[0] : hostInitElem(it->second, g.desc(t).dtype, 0);
                     }
                     if (vals[2] == 0.0)
                     {

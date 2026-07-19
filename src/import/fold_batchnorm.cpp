@@ -58,6 +58,13 @@ namespace vknn {
                 continue;
             }
 
+            // A fp64 Conv weight or BN parameter is left unfolded: this pass rewrites the Conv weight in
+            // place at fp32, which would misread native-fp64 storage. The BatchNorm then stays a runtime
+            // op on the real-fp64 path. (Exotic -- Conv/BN params are fp32 in every ordinary model.)
+            if (g.desc(conv.inputs[1]).dtype == DType::Float64 || g.desc(bn.inputs[1]).dtype == DType::Float64 || g.desc(bn.inputs[2]).dtype == DType::Float64 || g.desc(bn.inputs[3]).dtype == DType::Float64 || g.desc(bn.inputs[4]).dtype == DType::Float64)
+            {
+                continue;
+            }
             // ONNX BatchNormalization inputs are (X, scale, shift, mean, var); here `bias` is the affine
             // shift term, distinct from the Conv bias synthesized below. All four are constant at inference.
             const auto &scale = g.initializers[bn.inputs[1]].f32();

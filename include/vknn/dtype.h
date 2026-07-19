@@ -16,6 +16,7 @@ namespace vknn {
         Int8    = 3, ///< 8-bit signed integer.
         UInt8   = 4, ///< 8-bit unsigned integer (e.g. image graph-inputs).
         Int64   = 5, ///< 64-bit signed integer (shape/index tensors).
+        Float64 = 6, ///< 64-bit IEEE-754 double precision (lossless storage/IO; compute narrows to fp32 unless an op carries a native fp64 path).
     };
 
     /// Size in bytes of one element of type `d`; 0 for an unrecognized value.
@@ -33,6 +34,8 @@ namespace vknn {
             case DType::UInt8:
                 return 1;
             case DType::Int64:
+                return 8;
+            case DType::Float64:
                 return 8;
         }
         return 0;
@@ -55,6 +58,8 @@ namespace vknn {
                 return "u8";
             case DType::Int64:
                 return "i64";
+            case DType::Float64:
+                return "f64";
         }
         return "?";
     }
@@ -111,6 +116,17 @@ namespace vknn {
         fp16_t h;
         std::memcpy(&h, static_cast<const uint8_t *>(base) + index * (int64_t) sizeof(fp16_t), sizeof(fp16_t));
         return halfToFloat(h);
+    }
+
+    /// Read the IEEE-754 double at element index `index` of a byte source that carries no alignment
+    /// guarantee (a mapped ".vxm" blob's fp64 payload is not 8-byte aligned). Like halfToFloatAt(), the
+    /// eight payload bytes are copied into an aligned local first -- a plain typed load at an unaligned
+    /// address is undefined behavior and a fault on strict-alignment targets. Returns the value as a
+    /// double; a caller that computes in fp32 narrows it, one that keeps fp64 storage copies it verbatim.
+    inline double doubleAt(const void *base, int64_t index) noexcept {
+        double v;
+        std::memcpy(&v, static_cast<const uint8_t *>(base) + index * (int64_t) sizeof(double), sizeof(double));
+        return v;
     }
 
 // Bulk fp16 -> fp32 for contiguous buffers (the flat-output download path, e.g. YOLO's 705K-element

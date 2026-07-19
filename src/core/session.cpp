@@ -80,6 +80,15 @@ namespace vknn {
                     f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
                 }
                 break;
+            case DType::Float64:
+                // A caller-supplied fp64 input narrows to the fp32 compute storage. The eight-byte lanes
+                // carry no alignment guarantee, so each is read with a byte-copy (doubleAt) before narrowing.
+                filled = fitElems(8);
+                for (int64_t i = 0; i < filled; ++i)
+                {
+                    f[i] = (float) doubleAt(in.data(), i);
+                }
+                break;
             default: {
                 filled = fitElems(4);
                 std::memcpy(f, in.data(), (size_t) filled * 4);
@@ -155,6 +164,15 @@ namespace vknn {
                 for (int64_t i = 0; i < elems; ++i)
                 {
                     reinterpret_cast<int64_t *>(io.data.data())[i] = srcI(i);
+                }
+                break;
+            case DType::Float64:
+                // A DOUBLE-declared output emits real fp64 bytes. In the fp32-compute path the source is
+                // the fp32 result widened to double (exact widening); a genuine fp64 op leaves rt.dtype
+                // Float64, which the fast path above moves through verbatim without reaching here.
+                for (int64_t i = 0; i < elems; ++i)
+                {
+                    reinterpret_cast<double *>(io.data.data())[i] = (double) srcF32(i);
                 }
                 break;
             default:
@@ -769,17 +787,19 @@ namespace vknn {
                 RtTensor   &rt  = pool_[id];
                 const DType idt = graph_.tensors[id].dtype;
                 rt.shape        = graph_.tensors[id].shape;
-                if (idt == DType::Float16 || idt == DType::Int8 || idt == DType::UInt8)
+                if (idt == DType::Float16 || idt == DType::Int8 || idt == DType::UInt8 || idt == DType::Float64)
                 {
-                    // Decode the payload to integer-valued fp32 so every CPU op keeps reading host.f32():
-                    // an fp16 weight converts per element, and a native int8/uint8 quant initializer (kept
-                    // at 1 byte/elem by the importer to bound host memory at import) widens back to fp32
-                    // here. The int8/uint8 dtype LABEL is preserved -- an op that recovers the quant
-                    // saturation range from it still can; only fp16 relabels to fp32.
+                    // Decode the payload to fp32 so every CPU op keeps reading host.f32(): an fp16 weight
+                    // converts per element, a native int8/uint8 quant initializer (kept at 1 byte/elem by
+                    // the importer to bound host memory) widens back to fp32, and a native fp64 initializer
+                    // narrows to the fp32 compute storage (the value stays lossless in graph_.initializers,
+                    // so it still serializes to .vxm at full precision; a genuine fp64 op reads it through
+                    // initDoubles). The int8/uint8 dtype LABEL is preserved -- an op that recovers the quant
+                    // saturation range from it still can; fp16 and fp64 relabel to fp32.
                     std::vector<float> f = initFloats(graph_, id);
                     rt.host.bytes.resize(f.size() * 4);
                     std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);
-                    rt.dtype = idt == DType::Float16 ? DType::Float32 : idt;
+                    rt.dtype = (idt == DType::Float16 || idt == DType::Float64) ? DType::Float32 : idt;
                 } else
                 {
                     rt.host  = graph_.initializers[id];

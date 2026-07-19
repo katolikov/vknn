@@ -125,10 +125,18 @@ namespace vknn {
                     // normalized to 0/1 fp32 through fillHostFloat below and is never a quant parameter.)
                     d.dtype = isType(pi.tp.dataType, OnnxType::Int8) ? DType::Int8 : DType::UInt8;
                     TensorProtoParser::fillHostBytes(pi.tp, hb, n, d.dtype);
+                } else if (isType(pi.tp.dataType, OnnxType::Double))
+                {
+                    // A DOUBLE initializer keeps NATIVE 8-byte fp64 host storage at full precision, never
+                    // narrowed to fp32 -- so the value round-trips losslessly through .vxm and a real-fp64
+                    // op reads it exactly. initFloats decodes the lanes to fp32 on demand for the fp32
+                    // compute path, so every fp32 reader still sees the value.
+                    d.dtype = DType::Float64;
+                    TensorProtoParser::fillHostDouble(pi.tp, hb, n);
                 } else
                 {
-                    // FLOAT / FLOAT16 / DOUBLE (and INT32 / BOOL) materialize to fp32 host storage; a
-                    // plain fp32 read through initFloats recovers the value.
+                    // FLOAT / FLOAT16 (and INT32 / BOOL) materialize to fp32 host storage; a plain fp32
+                    // read through initFloats recovers the value.
                     d.dtype = DType::Float32;
                     TensorProtoParser::fillHostFloat(pi.tp, hb, n);
                 }

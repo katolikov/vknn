@@ -57,10 +57,12 @@ namespace vknn {
                 continue; // unresolved or channel-less data input
             }
             int64_t     C     = xs[1];
-            const auto &scale = g.initializers[sc].f32();
-            const auto &beta  = g.initializers[bi].f32();
-            const auto &mean  = g.initializers[mn].f32();
-            const auto &var   = g.initializers[vr].f32();
+            // dtype-safe reads: a native-fp64 BN parameter decodes to fp32 here (the lowered scale/shift
+            // initializers are fp32, so the runtime op stays fp32 -- an exotic case; ordinary BN is fp32).
+            const std::vector<float> scale = initFloats(g, sc);
+            const std::vector<float> beta  = initFloats(g, bi);
+            const std::vector<float> mean  = initFloats(g, mn);
+            const std::vector<float> var   = initFloats(g, vr);
             if (numElements(g.desc(sc).shape) != C || numElements(g.desc(bi).shape) != C || numElements(g.desc(mn).shape) != C || numElements(g.desc(vr).shape) != C)
             {
                 continue;

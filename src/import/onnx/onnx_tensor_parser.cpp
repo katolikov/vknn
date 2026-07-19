@@ -75,6 +75,25 @@ namespace vknn {
                             t.int64Data.push_back((int64_t) r.varint());
                         }
                         break;
+                    case kTensorDoubleData: // packed or single fixed64: real fp64, kept at full precision
+                        if (w == kWireBytes)
+                        {
+                            Reader s = r.sub();
+                            while (!s.eof())
+                            {
+                                uint64_t b = s.fixed64();
+                                double   dv;
+                                std::memcpy(&dv, &b, 8);
+                                t.doubleData.push_back(dv);
+                            }
+                        } else
+                        {
+                            uint64_t b = r.fixed64();
+                            double   dv;
+                            std::memcpy(&dv, &b, 8);
+                            t.doubleData.push_back(dv);
+                        }
+                        break;
                     case kTensorName:
                         t.name = r.str();
                         break;
@@ -261,6 +280,23 @@ namespace vknn {
                 for (int64_t i = 0; i < elems && i < avail; ++i)
                 {
                     dst[i] = (uint8_t) t.int32Data[i];
+                }
+            }
+        }
+
+        void TensorProtoParser::fillHostDouble(const TensorProto &t, HostBuffer &hb, int64_t elems) {
+            hb.resizeElems(elems, DType::Float64); // 8 bytes/elem, native fp64
+            double *dst = hb.f64();
+            if (!t.raw.empty() && isType(t.dataType, OnnxType::Double))
+            {
+                // raw_data DOUBLE: eight-byte lanes copied verbatim (clamp to the destination byte size,
+                // see fillHostFloat: a negative elems sizes the buffer to 0 yet casts to a huge size_t).
+                std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), hb.bytes.size()));
+            } else if (!t.doubleData.empty())
+            {
+                for (int64_t i = 0; i < elems && i < (int64_t) t.doubleData.size(); ++i)
+                {
+                    dst[i] = t.doubleData[i];
                 }
             }
         }

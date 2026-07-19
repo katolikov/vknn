@@ -65,6 +65,7 @@ namespace vknn {
             kTensorInt64Data    = 7,  // TensorProto.int64_data
             kTensorName         = 8,  // TensorProto.name
             kTensorRawData      = 9,  // TensorProto.raw_data (bytes)
+            kTensorDoubleData   = 10, // TensorProto.double_data (packed fixed64; the typed payload for DOUBLE)
             kTensorExternalData = 13, // TensorProto.external_data (repeated StringStringEntryProto)
             kTensorDataLocation = 14, // TensorProto.data_location (DataLocation value)
         };
@@ -119,8 +120,10 @@ namespace vknn {
                 case OnnxType::Uint8:
                 case OnnxType::Bool:
                     return DType::UInt8; // UINT8 / BOOL (0/1)
+                case OnnxType::Double:
+                    return DType::Float64; // native fp64: a DOUBLE graph input/output round-trips losslessly
                 default:
-                    return DType::Float32; // FLOAT / DOUBLE (narrowed) / anything else -> fp32 compute
+                    return DType::Float32; // FLOAT / anything else -> fp32 compute
             }
         }
 
@@ -136,6 +139,7 @@ namespace vknn {
             std::vector<float>   floatData;
             std::vector<int32_t> int32Data; // typed payload for INT32 and narrower (INT8/UINT8/INT16/UINT16/BOOL) plus FLOAT16 bit patterns
             std::vector<int64_t> int64Data;
+            std::vector<double>  doubleData; // typed payload for DOUBLE (kept as real fp64, never narrowed)
             int32_t              dataLocation = kDataLocationDefault;
             std::string          extLoc;           // external file (relative to the model dir)
             int64_t              extOffset = 0;

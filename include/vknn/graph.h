@@ -124,10 +124,19 @@ namespace vknn {
             {
                 out[i] = (float) v[i];
             }
+        } else if (dt == DType::Float64)
+        {
+            // Native 8-byte fp64 lanes (a DOUBLE initializer kept at full precision by the importer)
+            // narrow to fp32 for the fp32 compute path. Unaligned byte-copy read (a mapped .vxm payload's
+            // fp64 offsets are not 8-byte aligned); a real-fp64 reader takes initDoubles() instead.
+            const uint8_t *v = hb.bytes.data();
+            for (int64_t i = 0, lim = lanes(8); i < lim; ++i)
+            {
+                out[i] = (float) doubleAt(v, i);
+            }
         } else
         {
-            // FLOAT / DOUBLE / INT32 materialize to fp32 host bytes at import, so a plain fp32 read recovers
-            // the value.
+            // FLOAT / INT32 materialize to fp32 host bytes at import, so a plain fp32 read recovers the value.
             const float *f = hb.f32();
             for (int64_t i = 0, lim = lanes(4); i < lim; ++i)
             {
@@ -135,6 +144,70 @@ namespace vknn {
             }
         }
         return out;
+    }
+
+    /// Decode initializer `id`'s payload to REAL fp64, honoring the stored dtype: a native Float64
+    /// payload (a DOUBLE .vxm / initializer) copies through at full precision via an unaligned byte read,
+    /// every other dtype widens through its initFloats() fp32 value. This is the real-fp64 counterpart of
+    /// initFloats() -- a genuine fp64 op (the camera-head SVD path) reads a constant operand exactly,
+    /// rather than round-tripping it through fp32. Element count and payload clamping match initFloats().
+    /// @param g  Graph owning the initializer.
+    /// @param id Initializer tensor id. Precondition: `g.isInitializer(id)`.
+    /// @returns The payload as fp64 elements.
+    inline std::vector<double> initDoubles(const Graph &g, TensorId id) {
+        const HostBuffer &hb = g.initializers.at(id);
+        const DType       dt = g.desc(id).dtype;
+        int64_t           n  = numElements(g.desc(id).shape);
+        if (n <= 0)
+        {
+            const int64_t es = (int64_t) dtypeSize(dt);
+            n                = es > 0 ? (int64_t) (hb.bytes.size() / es) : 0;
+        }
+        if (dt == DType::Float64)
+        {
+            const int64_t lim = std::min<int64_t>(std::max<int64_t>(n, 0), (int64_t) (hb.bytes.size() / 8));
+            std::vector<double> out((size_t) std::max<int64_t>(n, 0));
+            const uint8_t      *v = hb.bytes.data(); // viewed .vxm payload: unaligned, byte-copy only
+            for (int64_t i = 0; i < lim; ++i)
+            {
+                out[i] = doubleAt(v, i);
+            }
+            return out;
+        }
+        // Every non-fp64 dtype has no more than fp32 precision to give, so widen its fp32 decode.
+        std::vector<float>  f = initFloats(g, id);
+        std::vector<double> out(f.size());
+        for (size_t i = 0; i < f.size(); ++i)
+        {
+            out[i] = (double) f[i];
+        }
+        return out;
+    }
+
+    /// Read element `i` of initializer host storage `hb` (declared dtype `dt`) as a double, honoring the
+    /// stored dtype -- a native Float64 lane via an unaligned byte read, an Int64 lane as its integer
+    /// value, everything else (Float32, and Int32 / Float16 which materialize to fp32 at import) as its
+    /// fp32 value. A single-element accessor for the import passes that read one scalar (a Range bound, a
+    /// ConstantOfShape dim), so a native-fp64 constant is never reinterpreted as fp32. Callers bound `i`
+    /// against the payload themselves.
+    inline double hostInitElem(const HostBuffer &hb, DType dt, int64_t i) noexcept {
+        if (dt == DType::Float64)
+        {
+            return doubleAt(hb.bytes.data(), i);
+        }
+        if (dt == DType::Int64)
+        {
+            return (double) hb.i64()[i];
+        }
+        if (dt == DType::Int8)
+        {
+            return (double) reinterpret_cast<const int8_t *>(hb.bytes.data())[i];
+        }
+        if (dt == DType::UInt8)
+        {
+            return (double) hb.bytes.data()[i];
+        }
+        return (double) hb.f32()[i];
     }
 
     /// Import an ONNX model file into the backend-agnostic IR (canonical NCHW).

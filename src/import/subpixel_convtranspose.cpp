@@ -96,6 +96,10 @@ namespace vknn {
             int64_t    Co = Cout * sh * sw;
             HostBuffer Kb;
             Kb.resizeElems(Co * Cin * KcY * KcX, DType::Float32);
+            if (g.desc(wId).dtype == DType::Float64 || (ct.inputs.size() > 2 && ct.inputs[2] != kNoTensor && g.desc(ct.inputs[2]).dtype == DType::Float64))
+            {
+                continue; // fp64 deconv weight/bias: this fp32 rewrite would misread it; keep the runtime deconv
+            }
             const float *Wp   = g.initializers[wId].f32();
             float       *Kp   = Kb.f32();
             auto         Widx = [&](int64_t ic, int64_t oc, int ky, int kx) { return ((ic * Cout + oc) * kH + ky) * kW + kx; };

@@ -39,7 +39,7 @@ namespace vknn {
             {
                 return false;
             }
-            lo = g.initializers.at(n.inputs[1]).f32()[0];
+            lo = initFloats(g, n.inputs[1])[0]; // dtype-safe read (a native-fp64 bound decodes here)
         }
         if (n.inputs.size() > 2 && n.inputs[2] != kNoTensor)
         {
@@ -47,7 +47,7 @@ namespace vknn {
             {
                 return false;
             }
-            hi = g.initializers.at(n.inputs[2]).f32()[0];
+            hi = initFloats(g, n.inputs[2])[0];
         }
         if (n.attr.has("min"))
         {

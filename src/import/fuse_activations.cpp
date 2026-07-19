@@ -87,11 +87,11 @@ namespace vknn {
                 // rather than dereferencing a null host pointer.
                 if (act.inputs.size() > 1 && act.inputs[1] != kNoTensor && g.isInitializer(act.inputs[1]) && !g.initializers[act.inputs[1]].bytes.empty())
                 {
-                    lo = g.initializers[act.inputs[1]].f32()[0];
+                    lo = initFloats(g, act.inputs[1])[0]; // dtype-safe read (a native-fp64 bound decodes here)
                 }
                 if (act.inputs.size() > 2 && act.inputs[2] != kNoTensor && g.isInitializer(act.inputs[2]) && !g.initializers[act.inputs[2]].bytes.empty())
                 {
-                    hi = g.initializers[act.inputs[2]].f32()[0];
+                    hi = initFloats(g, act.inputs[2])[0];
                 }
                 if (act.attr.has("min"))
                 {

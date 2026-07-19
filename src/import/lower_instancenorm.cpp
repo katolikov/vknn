@@ -65,9 +65,10 @@ namespace vknn {
             float  eps  = g.nodes[i].attr.getf("epsilon", 1e-5f);
             DType  odt  = g.desc(out).dtype;
 
-            // Copy the parameter payloads before any addTensor mutates the graph.
-            std::vector<float> scaleV(g.initializers[sc].f32(), g.initializers[sc].f32() + C);
-            std::vector<float> biasV(g.initializers[bi].f32(), g.initializers[bi].f32() + C);
+            // Copy the parameter payloads before any addTensor mutates the graph. dtype-safe reads: a
+            // native-fp64 scale/bias decodes to fp32 here (the lowered params are fp32 -- exotic case).
+            std::vector<float> scaleV = initFloats(g, sc);
+            std::vector<float> biasV  = initFloats(g, bi);
 
             // Stats shape: the input with every spatial dim reduced to 1 (keepdims), the
             // [N,C,1,..] channel-broadcast class the packed Binary kernel handles natively.

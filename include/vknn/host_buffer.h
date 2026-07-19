@@ -157,6 +157,13 @@ namespace vknn {
         const int64_t *i64() const {
             return reinterpret_cast<const int64_t *>(alignedBytes());
         }
+        /// View of the storage as fp64 elements. Valid only when the buffer holds Float64 data.
+        double *f64() {
+            return reinterpret_cast<double *>(bytes.data());
+        }
+        const double *f64() const {
+            return reinterpret_cast<const double *>(alignedBytes());
+        }
 
       private:
         /// A typed read needs natural alignment, which a mapped blob does not provide; materializing the
