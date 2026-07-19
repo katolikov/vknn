@@ -38,7 +38,7 @@ namespace vknn {
         constexpr int64_t kOnnxFloat = 1; // ONNX TensorProto.DataType FLOAT
     } // namespace
 
-    void legalizeFp64(Graph &g) {
+    bool legalizeFp64(Graph &g) {
         std::map<TensorId, TensorId> narrowed; // one fp32 narrowing per fp64 tensor, shared by consumers
         const size_t                 original = g.nodes.size();
         for (size_t ni = 0; ni < original; ++ni)
@@ -84,7 +84,9 @@ namespace vknn {
         if (!narrowed.empty())
         {
             g.topoSort();
+            return true;
         }
+        return false;
     }
 
 } // namespace vknn

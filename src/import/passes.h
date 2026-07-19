@@ -98,8 +98,9 @@ namespace vknn {
     // Confine real fp64 tensors to the fp64-capable ops (Cast/Det/Unary/Transpose + metadata reshapes)
     // by inserting an explicit narrowing Cast(fp64->fp32) before every other consumer, so an fp64
     // tensor never reaches an fp32-only kernel that would reinterpret its bytes. Runs after inference
-    // and fusion; re-run inferShapes afterward to shape the inserted Casts.
-    void legalizeFp64(Graph &g);
+    // and fusion. Returns true if it inserted any Cast (the caller re-runs inferShapes to shape them);
+    // a graph with no fp64 tensor is left untouched and returns false.
+    bool legalizeFp64(Graph &g);
     // Fuse cross-bucket hand-offs in a multi-graph model: when bucket A's graph OUTPUT feeds bucket B's
     // graph INPUT of the same name, copy A's subgraph into B so the value stays inside one graph on the
     // GPU (instead of a host round-trip that folds the producer op to the CPU); a fully-absorbed A is
