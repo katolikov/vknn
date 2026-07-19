@@ -278,6 +278,7 @@ namespace vknn {
                         }
                         SH(o) = out;
                     }
+                    g.desc(o).dtype = g.desc(nd.inputs[0]).dtype; // fp64 matrix -> fp64 determinant
                     break;
                 }
                 case OpType::Equal:
@@ -476,7 +477,16 @@ namespace vknn {
                     { SH(o) = {xs[0], xs[1], gs[1], gs[2]}; }
                     break;
                 }
-                case OpType::Cast:
+                case OpType::Cast: {
+                    SH(o) = SH(nd.inputs[0]);
+                    // A Cast to DOUBLE produces real fp64; the other targets keep the dtype the importer
+                    // recorded from the 'to' attribute (this pass leaves them untouched, as before).
+                    if (nd.attr.geti("to", 1) == 11 /*ONNX DOUBLE*/)
+                    {
+                        g.desc(o).dtype = DType::Float64;
+                    }
+                    break;
+                }
                 case OpType::ConvertLayout:
                 case OpType::ConvertDtype: {
                     SH(o) = SH(nd.inputs[0]);

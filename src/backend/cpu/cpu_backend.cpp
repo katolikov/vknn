@@ -30,6 +30,22 @@ namespace vknn {
             rt.deviceValid = false;
             return rt.host.i64();
         }
+        double *allocOutF64(RtTensor &rt, const Shape &shape) {
+            rt.shape = shape;
+            rt.dtype = DType::Float64;
+            rt.host.resizeElems(elemCount(shape), DType::Float64);
+            rt.hostValid   = true;
+            rt.deviceValid = false;
+            return rt.host.f64();
+        }
+        void *allocOutRaw(RtTensor &rt, const Shape &shape, DType dt) {
+            rt.shape = shape;
+            rt.dtype = dt;
+            rt.host.resizeElems(elemCount(shape), dt);
+            rt.hostValid   = true;
+            rt.deviceValid = false;
+            return rt.host.bytes.data();
+        }
         void runViewGather(const Node &node, ExecContext &ctx) {
             const RtTensor &X    = ctx.t(node.inputs[0]);
             RtTensor       &Y    = ctx.t(node.outputs[0]);
@@ -44,12 +60,17 @@ namespace vknn {
             {
                 outStride[(size_t) i] = outStride[(size_t) i + 1] * out[(size_t) i + 1];
             }
-            const int64_t  elems = numElements(out);
-            const bool     i64   = X.dtype == DType::Int64;
-            const float   *xf    = i64 ? nullptr : X.host.f32();
-            const int64_t *xi    = i64 ? X.host.i64() : nullptr;
-            float         *yf    = i64 ? nullptr : allocOut(Y, out);
-            int64_t       *yi    = i64 ? allocOutI64(Y, out) : nullptr;
+            const int64_t elems = numElements(out);
+            // A pure gather relocates elements without touching their bytes, so it serves any dtype at
+            // its own width: fp64 (the SVD path) and int64 both take the 8-byte path, fp32 the 4-byte one.
+            const bool     i64 = X.dtype == DType::Int64;
+            const bool     f64 = X.dtype == DType::Float64;
+            const float   *xf  = (i64 || f64) ? nullptr : X.host.f32();
+            const int64_t *xi  = i64 ? X.host.i64() : nullptr;
+            const double  *xd  = f64 ? X.host.f64() : nullptr;
+            float         *yf  = (i64 || f64) ? nullptr : allocOut(Y, out);
+            int64_t       *yi  = i64 ? allocOutI64(Y, out) : nullptr;
+            double        *yd  = f64 ? allocOutF64(Y, out) : nullptr;
             for (int64_t oi = 0; oi < elems; ++oi)
             {
                 int64_t rem = oi, inf = base;
@@ -62,6 +83,9 @@ namespace vknn {
                 if (i64)
                 {
                     yi[oi] = xi[inf];
+                } else if (f64)
+                {
+                    yd[oi] = xd[inf];
                 } else
                 {
                     yf[oi] = xf[inf];

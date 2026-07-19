@@ -85,6 +85,15 @@ namespace vknn {
         /// Int64 counterpart of `allocOut`, for ops emitting index/shape tensors (Shape, ArgMax,
         /// NonZero, …) rather than fp32 activations.
         int64_t *allocOutI64(RtTensor &rt, const Shape &shape);
+        /// fp64 counterpart of `allocOut`, for ops that compute in real double precision (the SVD /
+        /// camera-head path). Sizes `rt` to `shape` at 8 bytes/elem, labels it Float64, and returns a
+        /// typed double pointer.
+        double *allocOutF64(RtTensor &rt, const Shape &shape);
+        /// Size `rt` to `shape` at the given `dt` and return the raw element pointer as void*, labeling
+        /// the tensor `dt`. Used by dtype-preserving movement ops (Transpose/Gather/Slice/Concat) that
+        /// relocate elements of any width without touching their bytes, so an fp64 tensor keeps its
+        /// dtype through the op. The caller casts the pointer to the element type matching `dt`.
+        void *allocOutRaw(RtTensor &rt, const Shape &shape, DType dt);
         /// Fold a fused activation over `n` contiguous fp32 elements in place. `lo`/`hi` supply the
         /// runtime clamp bounds for ActType::Clip (ONNX Clip min/max); activations whose bounds are
         /// intrinsic (Relu, Relu6, HardSwish, SiLU) ignore them.

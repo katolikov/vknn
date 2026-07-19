@@ -172,6 +172,10 @@ namespace vknn {
             fusePointwiseChains(g, opt.strictFuse);
             inferShapes(g, batch, declared, bindings); // set the FusedPointwise output shapes
         }
+        // Legalize fp64 last, after every fusion has settled: confine real fp64 to the fp64-capable ops
+        // and insert explicit narrowing Casts before every other consumer, then re-infer to shape them.
+        legalizeFp64(g);
+        inferShapes(g, batch, declared, bindings);
         pruneDeadInitializers(g); // after all rewiring: orphaned fold intermediates + Cast-copied weights
         // Restore the declared output dtypes dropped by the output-rewiring passes above (see snapshot).
         for (size_t i = 0; i < g.outputs.size(); ++i)

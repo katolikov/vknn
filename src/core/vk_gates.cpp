@@ -64,6 +64,25 @@ namespace vknn {
     }
 
     bool vkNodeGate(const Graph &g, const Node &nd, std::string *whyNot) {
+        // Real fp64 has no GPU path: mobile Vulkan drivers expose no usable shaderFloat64, so any node
+        // that reads or writes a Float64 tensor runs on the CPU (double precision) by design. This is a
+        // PRECISION choice, not missing coverage -- legalizeFp64 confines fp64 to the ops whose CPU
+        // kernel computes in real double, and inserts explicit narrowing Casts elsewhere, so this refusal
+        // only fires on the numerically-sensitive SVD / camera-head path the user declared fp64.
+        for (TensorId t: nd.inputs)
+        {
+            if (t != kNoTensor && g.desc(t).dtype == DType::Float64)
+            {
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": fp64 tensor runs on the CPU (no GPU double precision)");
+            }
+        }
+        for (TensorId t: nd.outputs)
+        {
+            if (t != kNoTensor && g.desc(t).dtype == DType::Float64)
+            {
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": fp64 output runs on the CPU (no GPU double precision)");
+            }
+        }
         // Generic N-D ops the GPU runs flat (Transpose/Slice always; Concat/Softmax/Binary/Add either
         // NC4HW4 or flat per the layout pass). The flat row-major kernels decode any rank: the per-axis
         // geometry rides a plan SSBO (flat::uploadFlatGeom), not the push constant, so there is no

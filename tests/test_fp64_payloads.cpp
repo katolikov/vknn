@@ -5,9 +5,11 @@
 // graph input/output round-trips as real fp64 bytes at the session boundary. Phase B adds the fp64
 // COMPUTE path (see test_ops.cpp Det tests); here the value is only ever moved, so an fp32-exact
 // value round-trips exactly and a value beyond fp32 precision proves the STORAGE stays fp64.
+#include "import/passes.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -19,6 +21,76 @@ namespace {
     // A value that is NOT representable in fp32: its low mantissa bits are lost when narrowed to float,
     // so it exposes any accidental fp32 round-trip. Exact in fp64.
     constexpr double kBeyondFp32 = 1.0 + 1.0 / 1099511627776.0; // 1 + 2^-40
+
+    // A 2x2 matrix whose true determinant is exactly -1: det = 1000001*999999 - 1000000*1000000 =
+    // (1e12 - 1) - 1e12 = -1. The entries are fp32-exact (all < 2^24), but the ~1e12 products overflow
+    // fp32's 24-bit mantissa and both round to the SAME value, so a fp32 determinant is exactly 0 while
+    // a real-fp64 determinant is exactly -1. The cleanest possible witness that Det computes in fp64.
+    const double kDetMatrix[4] = {1000001.0, 1000000.0, 1000000.0, 999999.0};
+
+    // Build "x"[2,2] (dtype dt) -> Det -> "y"[1] (dtype dt), run on the CPU backend feeding `m` (four
+    // doubles, narrowed to the input dtype), and return the single determinant element as a double.
+    double runDet(DType dt, const double m[4]) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {2, 2};
+        xi.dtype   = dt;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.shape    = {1};
+        yo.dtype    = dt;
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     det;
+        det.type    = OpType::Det;
+        det.name    = "det";
+        det.inputs  = {x};
+        det.outputs = {y};
+        g.nodes.push_back(det);
+        g.outputs = {y};
+
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        if (!sess)
+        {
+            return 0;
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {2, 2};
+        in.dtype = dt;
+        if (dt == DType::Float64)
+        {
+            in.data.resize(4 * sizeof(double));
+            std::memcpy(in.data.data(), m, 4 * sizeof(double));
+        } else
+        {
+            in.data.resize(4 * sizeof(float));
+            for (int i = 0; i < 4; ++i)
+            {
+                reinterpret_cast<float *>(in.data.data())[i] = (float) m[i];
+            }
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        EXPECT_FALSE(outs.empty());
+        if (outs.empty())
+        {
+            return 0;
+        }
+        EXPECT_EQ(outs[0].dtype, dt);
+        if (dt == DType::Float64)
+        {
+            return reinterpret_cast<const double *>(outs[0].data.data())[0];
+        }
+        return (double) outs[0].f32()[0];
+    }
 
     // Add a native-fp64 initializer holding `vals` (8 bytes/elem), mirroring what the importer's
     // fillHostDouble does.
@@ -171,4 +243,205 @@ TEST(Fp64Payloads, IoReadbackEmitsDouble) {
     {
         EXPECT_EQ(o[i], xv[i]) << "i=" << i;             // exact round-trip for fp32-representable values
     }
+}
+
+// ---- Phase B: real fp64 COMPUTE (the SVD / camera-head path) ----
+
+// Det computes in genuine double precision for a fp64 input matrix: the determinant of kDetMatrix is
+// exactly -1, which only fp64 recovers (the ~1e12 products overflow fp32's 24-bit mantissa, so the
+// fp32 path returns rounding garbage). The two paths differ by ~4096 -- the direct witness that the
+// fp64 one is real double precision, not fp32 relabeled.
+TEST(Fp64Compute, DetIsRealDoubleNotFp32) {
+    EXPECT_EQ(runDet(DType::Float64, kDetMatrix), -1.0);            // real fp64: exact
+    EXPECT_GT(std::abs(runDet(DType::Float32, kDetMatrix) + 1.0), 100.0); // fp32: far from the true -1
+}
+
+// Sign reads the true sign of the fp64 determinant. det(kDetMatrix) = -1 in fp64 -> Sign = -1 (the
+// correct sign); the fp32 path's determinant is rounding garbage (positive) -> Sign = +1, the WRONG
+// sign. Det and Sign stay two ops for fp64 (pointwise fusion excludes fp64), each in double, so the
+// sign reflects the real determinant -- a case where fp64 is required for a correct result, not just
+// a more accurate one.
+TEST(Fp64Compute, SignOfFp64Determinant) {
+    auto run = [](DType dt) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {2, 2};
+        xi.dtype   = dt;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+        TensorDesc di;
+        di.name    = "d";
+        di.shape   = {1};
+        di.dtype   = dt;
+        TensorId d = g.addTensor(di);
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.shape    = {1};
+        yo.dtype    = dt;
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     det;
+        det.type    = OpType::Det;
+        det.name    = "det";
+        det.inputs  = {x};
+        det.outputs = {d};
+        g.nodes.push_back(det);
+        Node sign;
+        sign.type    = OpType::Unary;
+        sign.name    = "sign";
+        sign.subOp   = (int) UnaryType::Sign;
+        sign.inputs  = {d};
+        sign.outputs = {y};
+        g.nodes.push_back(sign);
+        g.outputs = {y};
+
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        IOTensor in;
+        in.name  = "x";
+        in.shape = {2, 2};
+        in.dtype = dt;
+        in.data.resize(4 * sizeof(double));
+        std::memcpy(in.data.data(), kDetMatrix, 4 * sizeof(double));
+        if (dt == DType::Float32)
+        {
+            in.data.resize(4 * sizeof(float));
+            for (int i = 0; i < 4; ++i)
+            {
+                reinterpret_cast<float *>(in.data.data())[i] = (float) kDetMatrix[i];
+            }
+        }
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        EXPECT_FALSE(outs.empty());
+        if (dt == DType::Float64)
+        {
+            return reinterpret_cast<const double *>(outs[0].data.data())[0];
+        }
+        return (double) outs[0].f32()[0];
+    };
+    EXPECT_EQ(run(DType::Float64), -1.0); // correct sign of the real -1 determinant
+    EXPECT_EQ(run(DType::Float32), 1.0);  // WRONG sign: fp32's garbage determinant is positive
+}
+
+// Cast is the fp32->fp64 bridge: fp32-exact entries cast up to fp64 and Det then computes the real
+// determinant. Proves a graph can enter the fp64 island from a fp32 input via Cast.
+TEST(Fp64Compute, CastFp32ToFp64ThenDet) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 2};
+    xi.dtype   = DType::Float32; // fp32-exact entries
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    TensorDesc ci;
+    ci.name    = "xd";
+    ci.shape   = {2, 2};
+    ci.dtype   = DType::Float64;
+    TensorId xd = g.addTensor(ci);
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.shape    = {1};
+    yo.dtype    = DType::Float64;
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     cast;
+    cast.type           = OpType::Cast;
+    cast.name           = "to_f64";
+    cast.inputs         = {x};
+    cast.outputs        = {xd};
+    cast.attr.map["to"] = [] { Attr a; a.kind = Attr::Int; a.i = 11 /*DOUBLE*/; return a; }();
+    g.nodes.push_back(cast);
+    Node det;
+    det.type    = OpType::Det;
+    det.name    = "det";
+    det.inputs  = {xd};
+    det.outputs = {y};
+    g.nodes.push_back(det);
+    g.outputs = {y};
+
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    auto sess   = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(sess);
+    IOTensor in;
+    in.name  = "x";
+    in.shape = {2, 2};
+    in.dtype = DType::Float32;
+    in.data.resize(4 * sizeof(float));
+    for (int i = 0; i < 4; ++i)
+    {
+        reinterpret_cast<float *>(in.data.data())[i] = (float) kDetMatrix[i];
+    }
+    std::vector<IOTensor> outs;
+    ASSERT_EQ(sess->run({in}, outs), Status::Ok);
+    ASSERT_FALSE(outs.empty());
+    ASSERT_EQ(outs[0].dtype, DType::Float64);
+    EXPECT_EQ(reinterpret_cast<const double *>(outs[0].data.data())[0], -1.0); // real fp64 via the bridge
+}
+
+// legalizeFp64 inserts an explicit narrowing Cast(fp64->fp32) before a non-fp64-capable consumer
+// (Binary), while a fp64-capable consumer (Det) keeps its fp64 input untouched. Proves the safety net
+// that stops any fp64 tensor from reaching an fp32-only kernel.
+TEST(Fp64Compute, LegalizeInsertsNarrowingCast) {
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = {2, 2};
+    xi.dtype   = DType::Float64;
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs.push_back(x);
+    // Det(x) -> d (fp64-capable, keeps fp64), and Binary Add(x, x) -> s (NOT fp64-capable, must narrow).
+    TensorDesc di;
+    di.name    = "d";
+    di.shape   = {1};
+    TensorId d = g.addTensor(di);
+    TensorDesc si;
+    si.name    = "s";
+    si.shape   = {2, 2};
+    TensorId s = g.addTensor(si);
+    Node     det;
+    det.type    = OpType::Det;
+    det.name    = "det";
+    det.inputs  = {x};
+    det.outputs = {d};
+    g.nodes.push_back(det);
+    Node add;
+    add.type    = OpType::Binary;
+    add.name    = "add";
+    add.subOp   = (int) BinaryType::Add;
+    add.inputs  = {x, x};
+    add.outputs = {s};
+    g.nodes.push_back(add);
+    // Two graph outputs so neither op is pruned.
+    g.desc(d).isOutput = true;
+    g.desc(s).isOutput = true;
+    g.outputs          = {d, s};
+
+    PassOptions opt;
+    runStandardPasses(g, opt);
+
+    // The Add now reads a fp32 tensor (a narrowing Cast was inserted); the Det still reads the fp64 x.
+    int  addIdx = -1, detIdx = -1;
+    for (size_t i = 0; i < g.nodes.size(); ++i)
+    {
+        if (g.nodes[i].type == OpType::Binary)
+        {
+            addIdx = (int) i;
+        }
+        if (g.nodes[i].type == OpType::Det)
+        {
+            detIdx = (int) i;
+        }
+    }
+    ASSERT_GE(addIdx, 0);
+    ASSERT_GE(detIdx, 0);
+    EXPECT_EQ(g.desc(g.nodes[addIdx].inputs[0]).dtype, DType::Float32); // Add narrowed
+    EXPECT_EQ(g.desc(g.nodes[detIdx].inputs[0]).dtype, DType::Float64); // Det kept fp64
 }

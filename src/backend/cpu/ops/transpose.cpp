@@ -50,13 +50,17 @@ namespace vknn {
                 }
                 int64_t        elems = numElements(out);
                 // Data is copied verbatim (a pure gather), so the same permutation serves any dtype;
-                // only the element width differs. Int64 tensors (shape/index math) take the i64 path,
-                // everything else the f32 path, each with its own typed source pointer and output alloc.
+                // only the element width differs. Int64 (shape/index math) and native fp64 (the SVD /
+                // camera-head path) take the 8-byte paths, everything else the f32 path, each with its
+                // own typed source pointer and output alloc.
                 bool           i64   = X.dtype == DType::Int64;
-                const float   *xf    = i64 ? nullptr : X.host.f32();
+                bool           f64   = X.dtype == DType::Float64;
+                const float   *xf    = (i64 || f64) ? nullptr : X.host.f32();
                 const int64_t *xi    = i64 ? X.host.i64() : nullptr;
-                float         *yf    = i64 ? nullptr : cpu::allocOut(Y, out);
+                const double  *xd    = f64 ? X.host.f64() : nullptr;
+                float         *yf    = (i64 || f64) ? nullptr : cpu::allocOut(Y, out);
                 int64_t       *yi    = i64 ? cpu::allocOutI64(Y, out) : nullptr;
+                double        *yd    = f64 ? cpu::allocOutF64(Y, out) : nullptr;
                 // For each output element, decode its flat index `oi` into per-axis coordinates via the
                 // output strides, then re-address the source: output axis i corresponds to input axis
                 // perm[i], so coordinate `c` contributes c * inStride[perm[i]] to the input offset `inf`.
@@ -72,6 +76,9 @@ namespace vknn {
                     if (i64)
                     {
                         yi[oi] = xi[inf];
+                    } else if (f64)
+                    {
+                        yd[oi] = xd[inf];
                     } else
                     {
                         yf[oi] = xf[inf];

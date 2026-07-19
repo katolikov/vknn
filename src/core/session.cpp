@@ -35,6 +35,21 @@ namespace vknn {
             }
             return;
         }
+        if (src == DType::Float64)
+        {
+            // A fp64 input keeps NATIVE 8-byte storage so a fp64-capable op (the SVD / camera-head path)
+            // reads it at full precision. legalizeFp64 inserts an explicit narrowing Cast before any op
+            // that is not fp64-capable, so this native fp64 never reaches an fp32-only kernel.
+            rt.dtype = DType::Float64;
+            rt.host.resizeElems(elems, DType::Float64);
+            int64_t avail = std::min<int64_t>(elems, (int64_t) (in.size() / 8));
+            std::memcpy(rt.host.bytes.data(), in.data(), (size_t) avail * 8);
+            if (avail < elems)
+            {
+                std::memset(rt.host.f64() + avail, 0, (size_t) (elems - avail) * 8);
+            }
+            return;
+        }
         rt.dtype = DType::Float32;
         rt.host.resizeElems(elems, DType::Float32);
         float *f = rt.host.f32();
@@ -80,15 +95,6 @@ namespace vknn {
                     f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
                 }
                 break;
-            case DType::Float64:
-                // A caller-supplied fp64 input narrows to the fp32 compute storage. The eight-byte lanes
-                // carry no alignment guarantee, so each is read with a byte-copy (doubleAt) before narrowing.
-                filled = fitElems(8);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = (float) doubleAt(in.data(), i);
-                }
-                break;
             default: {
                 filled = fitElems(4);
                 std::memcpy(f, in.data(), (size_t) filled * 4);
@@ -114,11 +120,12 @@ namespace vknn {
             return;
         }
         bool srcI64 = rt.dtype == DType::Int64;
+        bool srcF64 = rt.dtype == DType::Float64;
         auto srcF32 = [&](int64_t i) -> float {
-            return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i];
+            return srcI64 ? (float) rt.host.i64()[i] : (srcF64 ? (float) rt.host.f64()[i] : rt.host.f32()[i]);
         };
         auto srcI = [&](int64_t i) -> int64_t {
-            return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i];
+            return srcI64 ? rt.host.i64()[i] : (srcF64 ? (int64_t) rt.host.f64()[i] : (int64_t) rt.host.f32()[i]);
         };
         io.data.assign((size_t) elems * dtypeSize(dst), 0);
         switch (dst)
@@ -787,19 +794,19 @@ namespace vknn {
                 RtTensor   &rt  = pool_[id];
                 const DType idt = graph_.tensors[id].dtype;
                 rt.shape        = graph_.tensors[id].shape;
-                if (idt == DType::Float16 || idt == DType::Int8 || idt == DType::UInt8 || idt == DType::Float64)
+                if (idt == DType::Float16 || idt == DType::Int8 || idt == DType::UInt8)
                 {
                     // Decode the payload to fp32 so every CPU op keeps reading host.f32(): an fp16 weight
-                    // converts per element, a native int8/uint8 quant initializer (kept at 1 byte/elem by
-                    // the importer to bound host memory) widens back to fp32, and a native fp64 initializer
-                    // narrows to the fp32 compute storage (the value stays lossless in graph_.initializers,
-                    // so it still serializes to .vxm at full precision; a genuine fp64 op reads it through
-                    // initDoubles). The int8/uint8 dtype LABEL is preserved -- an op that recovers the quant
-                    // saturation range from it still can; fp16 and fp64 relabel to fp32.
+                    // converts per element, and a native int8/uint8 quant initializer (kept at 1 byte/elem
+                    // by the importer to bound host memory) widens back to fp32. The int8/uint8 dtype LABEL
+                    // is preserved -- an op that recovers the quant saturation range from it still can;
+                    // only fp16 relabels to fp32. A native fp64 initializer keeps its 8-byte storage (the
+                    // else branch): legalizeFp64 guarantees only fp64-capable ops read it, and they read
+                    // host.f64() at full precision -- narrowing here would defeat the real-fp64 path.
                     std::vector<float> f = initFloats(graph_, id);
                     rt.host.bytes.resize(f.size() * 4);
                     std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);
-                    rt.dtype = (idt == DType::Float16 || idt == DType::Float64) ? DType::Float32 : idt;
+                    rt.dtype = idt == DType::Float16 ? DType::Float32 : idt;
                 } else
                 {
                     rt.host  = graph_.initializers[id];
