@@ -80,6 +80,11 @@ namespace vknn {
         // view: their record() emits nothing, so the barrier loop skips their hazard bookkeeping
         // (the data hazards ride the real producers/consumers through the shared arena ranges).
         std::set<int> fullyElided_;
+        // Zero-copy Pad nodes: the data producer writes through a view into the padded buffer and
+        // record() emits only vkCmdFillBuffer for the pad ranges — TRANSFER-stage writes, so the
+        // barrier loop must treat these nodes like copies (a compute-only barrier does not order
+        // them). Cleared together with fullyElided_ on any view-creation fallback.
+        std::set<int> transferFillNodes_;
         // Zero-copy: each boundary tensor's pooled buffer (the fallback) and its imported dma-buf. The
         // import is kept per boundary tensor and refreshed when that tensor's dma-buf or required size
         // changes. Identity is the dma-buf's (device, inode) from fstat, not the fd: fd numbers are

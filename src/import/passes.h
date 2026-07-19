@@ -238,6 +238,16 @@ namespace vknn {
     // insertLayoutConverts, before markFp32.
     void pinGridSampleGridFp32(Graph &g);
 
+    // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into
+    // ONE strided gather: the consumer reads the chain's source through the composed per-axis map
+    // (stamped as view_stride/view_base attrs the CPU kernels and flat_gather geometry consume) and
+    // the producer disappears, along with its materialized intermediate. Byte-identical: movement
+    // kernels store loaded bytes verbatim, so the composed read yields exactly the bytes the
+    // intermediate held. `fp32Pins` mirrors foldMatMulViews — a pinned intermediate keeps its
+    // materialized form. Runs at load only, before insertLayoutConverts; never serialized. Returns
+    // the number of folded producers.
+    int foldMovementChains(Graph &g, const std::string &fp32Pins = "");
+
     // Fold Transpose/Expand/Reshape/Unsqueeze/Squeeze chains feeding a non-tiled-class MatMul
     // operand into per-axis stride attrs on the node (core/matmul_view.h) and rewire the operand to
     // the chain's source, so a GQA decode's repeat_kv broadcast and attention transposes never

@@ -132,6 +132,8 @@ namespace vknn {
         eliminateFloatCast(g);   // drop float->float casts left by transformer import (post-fold)
         foldIntRoundtripCast(g); // collapse float->wide-int->float cast pairs to Unary(Trunc) so the
                                  // truncation joins the surrounding pointwise unit instead of splitting it
+        foldGatherToSlice(g);    // constant-contiguous Gather -> Slice (byte-identical), so identity
+                                 // slices alias and leading-axis slices become zero-copy views
         eliminateDeadNodes(g);
         inferShapes(g, batch, declared, bindings);  // refresh shapes after fusion/folding
         fuseChannelShuffle(g);  // Reshape/Transpose/Reshape group-interleave -> one ChannelShuffle

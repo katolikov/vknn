@@ -30,6 +30,44 @@ namespace vknn {
             rt.deviceValid = false;
             return rt.host.i64();
         }
+        void runViewGather(const Node &node, ExecContext &ctx) {
+            const RtTensor &X    = ctx.t(node.inputs[0]);
+            RtTensor       &Y    = ctx.t(node.outputs[0]);
+            const Shape    &out  = ctx.graph->desc(node.outputs[0]).shape;
+            const auto     &vs   = node.attr.getints("view_stride");
+            const int64_t   base = node.attr.geti("view_base", 0);
+            const int       rank = (int) out.size();
+            // Row-major output strides decode each flat output index into per-axis coordinates;
+            // the composed map then re-addresses the source: inf = base + sum coord_k * vs[k].
+            std::vector<int64_t> outStride((size_t) rank, 1);
+            for (int i = rank - 2; i >= 0; --i)
+            {
+                outStride[(size_t) i] = outStride[(size_t) i + 1] * out[(size_t) i + 1];
+            }
+            const int64_t  elems = numElements(out);
+            const bool     i64   = X.dtype == DType::Int64;
+            const float   *xf    = i64 ? nullptr : X.host.f32();
+            const int64_t *xi    = i64 ? X.host.i64() : nullptr;
+            float         *yf    = i64 ? nullptr : allocOut(Y, out);
+            int64_t       *yi    = i64 ? allocOutI64(Y, out) : nullptr;
+            for (int64_t oi = 0; oi < elems; ++oi)
+            {
+                int64_t rem = oi, inf = base;
+                for (int i = 0; i < rank; ++i)
+                {
+                    const int64_t c = rem / outStride[(size_t) i];
+                    rem %= outStride[(size_t) i];
+                    inf += c * vs[(size_t) i];
+                }
+                if (i64)
+                {
+                    yi[oi] = xi[inf];
+                } else
+                {
+                    yf[oi] = xf[inf];
+                }
+            }
+        }
         /// Apply a fused activation to the `n` contiguous elements at `p` in place. `lo`/`hi` are the
         /// clamp bounds and are read only by ActType::Clip; the other cases carry their bounds in the
         /// formula. Unrecognized activations (default) leave the buffer untouched (identity).

@@ -268,6 +268,27 @@ End-to-end, cooled interleaved min-of-5 vs main (same protocol as above):
 | Inception-v3 | **-4.4%** | -2.4% | within the 3% gate |
 | ResNet-50 / DenseNet-121 | parity (no eligible sites / epilogue-carrying concats) | within the 3% gate | within the 3% gate |
 
+### Zero-copy extensions: movement-chain folding and the Flexible layout vote
+
+Three further always-on, byte-exact reductions of data movement (same discipline as the section
+above: structural rules, per-node fallback, outputs byte-identical to the copying path on every
+model at every tuning level):
+
+- **Identity-Transpose alias, leading-axis constant Pad write-through, and constant-contiguous
+  Gather -> Slice folding.** An iota-perm Transpose joins the pure-copy alias set; a single-axis
+  constant Pad becomes a producer write-through plus two transfer fills for the pad ranges; a
+  Gather whose constant indices form a contiguous run rewrites to Slice at import and rides the
+  slice-view machinery.
+- **Movement-chain folding**: consecutive Transpose/Slice ops compose into ONE strided gather
+  (`view_stride`/`view_base`, consumed by the flat_gather geometry and the CPU kernels alike), so
+  a chain's intermediate tensor and its full round-trip disappear. A ViT-style attention block
+  folds its K-slice+transpose chain; multi-consumer intermediates refuse.
+- **Flexible layout vote**: a standalone fused-pointwise unit whose plan is expressible in both
+  layouts (rank-4 run, no general-broadcast operand) is re-placed by element-weighted convert
+  cost instead of the fixed classifier. On a movement-heavy warp graph (the lens zoom-morph
+  class) this drops layout converts 44 -> 14 and the graph 16.5 -> 15.1 ms (-8.5%) at `none`,
+  byte-identical; the CNN suite is unaffected (its layouts were already optimal).
+
 ## YoNoSplat encoder (965M-param transformer)
 
 The feed-forward 3D-Gaussian-Splatting encoder (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian /

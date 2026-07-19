@@ -77,6 +77,11 @@ namespace vknn {
         /// Size `rt`'s host buffer to `shape`, mark its host copy valid, and hand back a typed
         /// fp32 pointer to element 0. The op writes its result straight through this pointer.
         float *allocOut(RtTensor &rt, const Shape &shape);
+        /// Run a folded movement chain (foldMovementChains): gather the node's input through the
+        /// composed per-axis map in view_stride/view_base into the output, whose shape comes from
+        /// the graph desc (the fold replaces perm/starts semantics entirely). Bytes are copied
+        /// verbatim (fp32 or int64 path by input dtype), matching the flat_gather GPU geometry.
+        void runViewGather(const Node &node, ExecContext &ctx);
         /// Int64 counterpart of `allocOut`, for ops emitting index/shape tensors (Shape, ArgMax,
         /// NonZero, …) rather than fp32 activations.
         int64_t *allocOutI64(RtTensor &rt, const Shape &shape);

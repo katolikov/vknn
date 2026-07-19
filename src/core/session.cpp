@@ -626,6 +626,12 @@ namespace vknn {
             foldFusedAttentionKvConcat(graph_);
         }
 
+        // --- movement-chain fold: consecutive Transpose/Slice ops compose into one strided gather
+        //     (view_stride/view_base attrs), erasing each chain's materialized intermediate and its
+        //     full read+write round-trip. Byte-identical (movement stores bytes verbatim) and
+        //     honored by both backends, so it runs unconditionally at load; never serialized.
+        foldMovementChains(graph_, vulkanFlat ? fp32Marks : std::string());
+
         // --- Vulkan flat-layout pass: route the generic head ops (Transpose/Slice/Concat/Binary/Softmax)
         //     through flat row-major GPU buffers, inserting ConvertLayout at NC4HW4 boundaries, so the
         //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).

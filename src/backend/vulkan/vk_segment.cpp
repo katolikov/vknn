@@ -158,10 +158,33 @@ namespace vknn {
             }
             return t;
         };
-        auto isIdentitySlice = [&](const Node &nd) {
-            if (nd.type != OpType::Slice)
+        // A Transpose whose perm is the identity permutes nothing: byte-for-byte copy. An ABSENT
+        // perm means full axis reversal (the ONNX default), so only an explicit iota perm (or a
+        // rank<=1 tensor, where reversal IS the identity) qualifies.
+        auto isIdentityTranspose = [&](const Node &nd) {
+            // A folded movement chain (view_stride) overrides the perm; its map is never identity-checkable here.
+            if (nd.type != OpType::Transpose || nd.inputs.empty() || nd.inputs[0] == kNoTensor || nd.attr.has("view_stride"))
             {
                 return false;
+            }
+            const auto &perm = nd.attr.getints("perm");
+            if (perm.empty())
+            {
+                return g.desc(nd.inputs[0]).shape.size() <= 1;
+            }
+            for (size_t d = 0; d < perm.size(); ++d)
+            {
+                if (perm[d] != (int64_t) d)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        auto isIdentitySlice = [&](const Node &nd) {
+            if (nd.type != OpType::Slice || nd.attr.has("view_stride"))
+            {
+                return false; // a folded chain's map overrides starts/steps
             }
             auto starts = readI64Param(g, nd, "starts", 1);
             if (starts.empty())
@@ -189,7 +212,7 @@ namespace vknn {
             const Node &nd = g.nodes[ni];
             // A geometry op carrying a fused pointwise epilogue (pw_steps) is NOT a pure copy — its
             // kernel must run to apply the chain, so it can't be aliased/skipped.
-            bool pureCopy = !nd.attr.has("pw_steps") && (nd.type == OpType::Reshape || nd.type == OpType::Flatten || nd.type == OpType::Squeeze || nd.type == OpType::Unsqueeze || isIdentitySlice(nd));
+            bool pureCopy = !nd.attr.has("pw_steps") && (nd.type == OpType::Reshape || nd.type == OpType::Flatten || nd.type == OpType::Squeeze || nd.type == OpType::Unsqueeze || isIdentitySlice(nd) || isIdentityTranspose(nd));
             if (!pureCopy || nd.inputs.empty() || nd.outputs.empty())
             {
                 continue;
@@ -298,6 +321,103 @@ namespace vknn {
             for (int ni: idx)
             {
                 const Node &nd = g.nodes[ni];
+                // Leading-axis constant Pad: pad(x) along one axis with every dim before it equal
+                // to 1 is structurally concat(fill, x, fill) — x is a contiguous sub-range of the
+                // output at the begin-pad offset. x's producer then writes through a view into the
+                // padded buffer and the Pad records only vkCmdFillBuffer for the pad ranges (a
+                // transfer-stage write; transferFillNodes_ routes the barrier kind). flat::Pad
+                // mirrors this rule and takes the fill path only on proven view identity.
+                if (nd.type == OpType::Pad)
+                {
+                    if (nd.attr.has("pw_steps") || nd.fusedResidual != kNoTensor || nd.inputs.empty() || nd.outputs.size() != 1)
+                    {
+                        continue;
+                    }
+                    TensorId data = nd.inputs[0], out = nd.outputs[0];
+                    if (data == kNoTensor || out == kNoTensor || g.isInitializer(data) || g.tensors[out].storeFp32 || !g.tensors[out].gpuFlat || !memberOk(data, true))
+                    {
+                        continue;
+                    }
+                    if (nd.attr.gets("mode", "constant") != std::string("constant"))
+                    {
+                        continue;
+                    }
+                    // A runtime pad VALUE cannot fill at record time (its bytes are not known when
+                    // the command buffer is recorded); an initializer or attribute value can.
+                    if (nd.inputs.size() > 2 && nd.inputs[2] != kNoTensor && !g.isInitializer(nd.inputs[2]))
+                    {
+                        continue;
+                    }
+                    const Shape &is = g.desc(data).shape, &os = g.desc(out).shape;
+                    const int    rank = (int) os.size();
+                    if ((int) is.size() != rank || rank == 0 || numElements(is) <= 0 || numElements(os) <= 0)
+                    {
+                        continue;
+                    }
+                    auto pads = readI64Param(g, nd, "pads", 1);
+                    if ((int) pads.size() < 2 * rank)
+                    {
+                        continue;
+                    }
+                    int padAxis = -1;
+                    bool padOk  = true;
+                    for (int d = 0; d < rank && padOk; ++d)
+                    {
+                        const int64_t b = pads[(size_t) d], e = pads[(size_t) (rank + d)];
+                        if (b < 0 || e < 0)
+                        {
+                            padOk = false; // negative pads crop, not pad
+                        } else if (b > 0 || e > 0)
+                        {
+                            padOk   = padAxis < 0;
+                            padAxis = d;
+                        }
+                    }
+                    if (!padOk || padAxis < 0)
+                    {
+                        continue; // multi-axis pads interleave; a no-pad Pad is an identity handled elsewhere
+                    }
+                    int64_t outer = 1;
+                    for (int d = 0; d < padAxis; ++d)
+                    {
+                        outer *= os[(size_t) d];
+                    }
+                    if (outer != 1)
+                    {
+                        continue;
+                    }
+                    size_t stride = 1;
+                    for (int d = padAxis + 1; d < rank; ++d)
+                    {
+                        stride *= (size_t) os[(size_t) d];
+                    }
+                    const size_t offBytes  = (size_t) pads[(size_t) padAxis] * stride * elemSize_;
+                    const size_t dataBytes = (size_t) numElements(is) * elemSize_;
+                    const size_t outBytes  = (size_t) numElements(os) * elemSize_;
+                    // vkCmdFillBuffer needs 4-byte-aligned offsets and sizes for both pad ranges.
+                    if (offBytes % sizeof(uint32_t) != 0 || (offBytes + dataBytes) % sizeof(uint32_t) != 0 || outBytes % sizeof(uint32_t) != 0)
+                    {
+                        continue;
+                    }
+                    // The data tensor must be its own group root (a bigger group would drag other
+                    // live bytes under the fill ranges); the pad output claims every byte — the
+                    // producer writes the data range, the fills write the rest.
+                    const TensorId dataRoot = resolveAlias(data);
+                    const auto     ro       = resolveView(dataRoot);
+                    if (ro.first != dataRoot || ro.second != 0 || actBytes(dataRoot) != dataBytes || dataRoot == out || offBytes + dataBytes > actBytes(out))
+                    {
+                        continue;
+                    }
+                    if (!claimWrite(out, 0, outBytes))
+                    {
+                        continue;
+                    }
+                    viewOf[dataRoot] = {out, offBytes};
+                    ++viewSlices;
+                    ++viewSites;
+                    transferFillNodes_.insert(ni);
+                    continue;
+                }
                 // Contiguous unit-step Slice: when the sliced box is a flat sub-range of the input
                 // (leading dims select one index, at most one axis is partial, trailing dims are
                 // full), the output is the input's bytes at a fixed offset — a sub-buffer view, and
@@ -305,9 +425,9 @@ namespace vknn {
                 // and skips only on a proven view identity.
                 if (nd.type == OpType::Slice)
                 {
-                    if (nd.attr.has("pw_steps") || nd.fusedResidual != kNoTensor || nd.inputs.empty() || nd.outputs.size() != 1)
+                    if (nd.attr.has("pw_steps") || nd.attr.has("view_stride") || nd.fusedResidual != kNoTensor || nd.inputs.empty() || nd.outputs.size() != 1)
                     {
-                        continue;
+                        continue; // view_stride: the composed map overrides starts/steps
                     }
                     TensorId in0 = nd.inputs[0], out = nd.outputs[0];
                     if (in0 == kNoTensor || out == kNoTensor || g.isInitializer(in0) || g.tensors[in0].storeFp32 || !g.tensors[in0].gpuFlat || !memberOk(out, true))
@@ -803,6 +923,7 @@ namespace vknn {
             // its node must keep full hazard bookkeeping; dropping the whole elision set is the
             // simple safe answer for a case the target devices never hit.
             fullyElided_.clear();
+            transferFillNodes_.clear();
         }
         // Point each aliased pure-copy output at its root's buffer (the root is dedicated- or pool-
         // allocated above); record() then skips the copy since src and dst resolve to the same buffer.
@@ -1242,6 +1363,11 @@ namespace vknn {
             if (t == OpType::Split)
             {
                 return nn.outputs.empty() || nn.outputs[0] == kNoTensor || !g_.desc(nn.outputs[0]).gpuFlat;
+            }
+            // A zero-copy Pad records vkCmdFillBuffer for its pad ranges — transfer-stage writes.
+            if (t == OpType::Pad)
+            {
+                return transferFillNodes_.count(idx) != 0;
             }
             // Reshape/Flatten/Squeeze/Unsqueeze/Cast are vkCmdCopyBuffer (transfer-stage writes).
             return t == OpType::Reshape || t == OpType::Flatten || t == OpType::Squeeze || t == OpType::Unsqueeze || t == OpType::Cast;
