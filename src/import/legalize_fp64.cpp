@@ -17,14 +17,17 @@ namespace vknn {
     namespace {
         // Ops whose CPU kernel computes in real fp64 for a Float64 input (so an fp64 tensor may flow
         // straight into them). Kept in sync with the fp64 paths in the CPU backend: Cast (the
-        // fp32<->fp64 bridge), Det (fp64 determinant), Unary (fp64 activations incl. Sign), Transpose
-        // (dtype-preserving gather), and the metadata reshapes that copyAs relocates byte-for-byte.
+        // fp32<->fp64 bridge), Det (fp64 determinant), Unary (fp64 activations incl. Sign), Binary
+        // (fp64 elementwise arithmetic), Transpose (dtype-preserving gather), and the metadata reshapes
+        // that copyAs relocates byte-for-byte. Every other op is narrowed to fp32 by an explicit Cast.
         bool fp64CapableOp(OpType t) {
             switch (t)
             {
                 case OpType::Cast:
                 case OpType::Det:
                 case OpType::Unary:
+                case OpType::Binary:
+                case OpType::Add:
                 case OpType::Identity:
                 case OpType::Reshape:
                 case OpType::Flatten:

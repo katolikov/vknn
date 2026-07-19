@@ -42,6 +42,11 @@ namespace vknn { namespace vk {
         // path does not require it (int64 shape/index tensors decode to compute-precision float at the
         // pack boundary, exact for their small magnitudes), so this is reported for diagnostics only.
         bool shaderInt64          = false;
+        // Core VkPhysicalDeviceFeatures::shaderFloat64 — 64-bit doubles in shader code. Real fp64 ops
+        // (the SVD / camera-head path) run on the CPU oracle today because mobile drivers expose no
+        // usable double precision; this is probed for diagnostics and as the gate a future fp64 GPU
+        // kernel would key on (no such kernel ships yet).
+        bool shaderFloat64        = false;
         bool storage16bit         = false;
         bool storage8bit          = false;
         bool int8DotProduct       = false;

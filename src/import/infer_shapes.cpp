@@ -896,6 +896,12 @@ namespace vknn {
                         out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
                     SH(o) = out;
+                    // Real-fp64 arithmetic: if either operand is native fp64, the result is fp64 (the CPU
+                    // Binary op evaluates it in double). A fp32 sibling widens into the double kernel.
+                    if (g.desc(nd.inputs[0]).dtype == DType::Float64 || g.desc(nd.inputs[1]).dtype == DType::Float64)
+                    {
+                        g.desc(o).dtype = DType::Float64;
+                    }
                     break;
                 }
                 case OpType::GlobalAvgPool: {

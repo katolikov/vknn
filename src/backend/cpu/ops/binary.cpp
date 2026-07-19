@@ -9,10 +9,12 @@
 namespace vknn {
     namespace {
 
-        // Scalar float kernel for one broadcast element pair. Add is the fall-through default so any
-        // unlisted BinaryType degrades to addition rather than an undefined value; Div follows IEEE-754
-        // (x/0 yields +/-inf or NaN), matching ONNX's float-division semantics.
-        static float binary(float a, float b, BinaryType op) {
+        // Scalar kernel for one broadcast element pair, in the element/accumulation type T. Add is the
+        // fall-through default so any unlisted BinaryType degrades to addition rather than an undefined
+        // value; Div follows IEEE-754 (x/0 yields +/-inf or NaN), matching ONNX's float-division
+        // semantics. T=float is the fp32 path; T=double the real-fp64 (SVD / camera-head) path.
+        template<typename T>
+        static T binary(T a, T b, BinaryType op) {
             switch (op)
             {
                 case BinaryType::Mul:
@@ -112,6 +114,26 @@ namespace vknn {
                                 y[lin] = av + bv;
                                 break;
                         }
+                    }
+                    return;
+                }
+                // Real-fp64 path (the SVD / camera-head arithmetic): either operand is native fp64, so
+                // the result is fp64 and every element is evaluated in double. Each operand is read as a
+                // double honoring its own storage (native fp64, or a fp32 sibling widened), so a fp64
+                // activation may combine with a fp32 constant without losing the fp64 operand's precision.
+                if (A.dtype == DType::Float64 || B.dtype == DType::Float64)
+                {
+                    double              *y = cpu::allocOutF64(Y, out);
+                    std::vector<int64_t> oa(rank), ob(rank);
+                    strides(oa, ob);
+                    auto val = [](const RtTensor &T, int64_t i) -> double {
+                        return T.dtype == DType::Float64 ? T.host.f64()[i] : (T.dtype == DType::Int64 ? (double) T.host.i64()[i] : (double) T.host.f32()[i]);
+                    };
+                    cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                    w.seek(0);
+                    for (int64_t lin = 0; lin < n; ++lin, w.next())
+                    {
+                        y[lin] = binary<double>(val(A, w.offset(0)), val(B, w.offset(1)), (BinaryType) node.subOp);
                     }
                     return;
                 }

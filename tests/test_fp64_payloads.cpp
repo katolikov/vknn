@@ -386,8 +386,8 @@ TEST(Fp64Compute, CastFp32ToFp64ThenDet) {
 }
 
 // legalizeFp64 inserts an explicit narrowing Cast(fp64->fp32) before a non-fp64-capable consumer
-// (Binary), while a fp64-capable consumer (Det) keeps its fp64 input untouched. Proves the safety net
-// that stops any fp64 tensor from reaching an fp32-only kernel.
+// (Softmax), while a fp64-capable consumer (Det) keeps its fp64 input untouched. Proves the safety
+// net that stops any fp64 tensor from reaching an fp32-only kernel.
 TEST(Fp64Compute, LegalizeInsertsNarrowingCast) {
     Graph      g;
     TensorDesc xi;
@@ -397,7 +397,7 @@ TEST(Fp64Compute, LegalizeInsertsNarrowingCast) {
     xi.isInput = true;
     TensorId x = g.addTensor(xi);
     g.inputs.push_back(x);
-    // Det(x) -> d (fp64-capable, keeps fp64), and Binary Add(x, x) -> s (NOT fp64-capable, must narrow).
+    // Det(x) -> d (fp64-capable, keeps fp64), and Softmax(x) -> s (NOT fp64-capable, must narrow).
     TensorDesc di;
     di.name    = "d";
     di.shape   = {1};
@@ -412,13 +412,12 @@ TEST(Fp64Compute, LegalizeInsertsNarrowingCast) {
     det.inputs  = {x};
     det.outputs = {d};
     g.nodes.push_back(det);
-    Node add;
-    add.type    = OpType::Binary;
-    add.name    = "add";
-    add.subOp   = (int) BinaryType::Add;
-    add.inputs  = {x, x};
-    add.outputs = {s};
-    g.nodes.push_back(add);
+    Node sm;
+    sm.type    = OpType::Softmax;
+    sm.name    = "softmax";
+    sm.inputs  = {x};
+    sm.outputs = {s};
+    g.nodes.push_back(sm);
     // Two graph outputs so neither op is pruned.
     g.desc(d).isOutput = true;
     g.desc(s).isOutput = true;
@@ -427,21 +426,88 @@ TEST(Fp64Compute, LegalizeInsertsNarrowingCast) {
     PassOptions opt;
     runStandardPasses(g, opt);
 
-    // The Add now reads a fp32 tensor (a narrowing Cast was inserted); the Det still reads the fp64 x.
-    int  addIdx = -1, detIdx = -1;
+    // The Softmax now reads a fp32 tensor (a narrowing Cast was inserted); Det still reads the fp64 x.
+    int  smIdx = -1, detIdx = -1;
     for (size_t i = 0; i < g.nodes.size(); ++i)
     {
-        if (g.nodes[i].type == OpType::Binary)
+        if (g.nodes[i].type == OpType::Softmax)
         {
-            addIdx = (int) i;
+            smIdx = (int) i;
         }
         if (g.nodes[i].type == OpType::Det)
         {
             detIdx = (int) i;
         }
     }
-    ASSERT_GE(addIdx, 0);
+    ASSERT_GE(smIdx, 0);
     ASSERT_GE(detIdx, 0);
-    EXPECT_EQ(g.desc(g.nodes[addIdx].inputs[0]).dtype, DType::Float32); // Add narrowed
+    EXPECT_EQ(g.desc(g.nodes[smIdx].inputs[0]).dtype, DType::Float32);  // Softmax narrowed
     EXPECT_EQ(g.desc(g.nodes[detIdx].inputs[0]).dtype, DType::Float64); // Det kept fp64
+}
+
+// Real-fp64 elementwise arithmetic: (a - b) in fp64 recovers a difference that fp32 cancels. With
+// a = 1 + 2^-40 and b = 1, the exact difference is 2^-40; fp32 rounds both operands to 1.0 so the
+// fp32 difference is 0, while the fp64 Binary computes 2^-40 exactly.
+TEST(Fp64Compute, BinarySubIsRealDouble) {
+    auto runSub = [](DType dt) {
+        Graph      g;
+        auto       mk = [&](const char *nm, bool input) {
+            TensorDesc d;
+            d.name    = nm;
+            d.shape   = {1};
+            d.dtype   = dt;
+            d.isInput = input;
+            return g.addTensor(d);
+        };
+        TensorId a = mk("a", true);
+        TensorId b = mk("b", true);
+        g.inputs.push_back(a);
+        g.inputs.push_back(b);
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.shape    = {1};
+        yo.dtype    = dt;
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     sub;
+        sub.type    = OpType::Binary;
+        sub.name    = "sub";
+        sub.subOp   = (int) BinaryType::Sub;
+        sub.inputs  = {a, b};
+        sub.outputs = {y};
+        g.nodes.push_back(sub);
+        g.outputs = {y};
+
+        Config cfg;
+        cfg.backend = BackendKind::Cpu;
+        auto sess   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(sess);
+        auto feed = [&](const char *nm, double v) {
+            IOTensor t;
+            t.name  = nm;
+            t.shape = {1};
+            t.dtype = dt;
+            if (dt == DType::Float64)
+            {
+                t.data.resize(sizeof(double));
+                std::memcpy(t.data.data(), &v, sizeof(double));
+            } else
+            {
+                t.data.resize(sizeof(float));
+                float f = (float) v;
+                std::memcpy(t.data.data(), &f, sizeof(float));
+            }
+            return t;
+        };
+        std::vector<IOTensor> outs;
+        EXPECT_EQ(sess->run({feed("a", kBeyondFp32), feed("b", 1.0)}, outs), Status::Ok);
+        EXPECT_FALSE(outs.empty());
+        if (dt == DType::Float64)
+        {
+            return reinterpret_cast<const double *>(outs[0].data.data())[0];
+        }
+        return (double) outs[0].f32()[0];
+    };
+    EXPECT_EQ(runSub(DType::Float64), kBeyondFp32 - 1.0); // real fp64: exactly 2^-40
+    EXPECT_EQ(runSub(DType::Float32), 0.0);               // fp32: both operands round to 1.0
 }

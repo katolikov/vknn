@@ -67,6 +67,46 @@ namespace vknn {
                     return;
                 }
 
+                // Real-fp64 path (the SVD / camera-head arithmetic): either operand is native fp64, so
+                // the sum is fp64 and evaluated in double. A fp32/int64 sibling widens into the double
+                // add. A fp64 Add never carries a fused activation (fusion excludes fp64), so applyAct
+                // is not run here.
+                if (A.dtype == DType::Float64 || B.dtype == DType::Float64)
+                {
+                    size_t rankF = std::max(sa.size(), sb.size());
+                    Shape  out(rankF, 1);
+                    auto   dimOf = [&](const Shape &s, size_t i) -> int64_t {
+                        size_t off = rankF - s.size();
+                        return i < off ? 1 : s[i - off];
+                    };
+                    for (size_t i = 0; i < rankF; ++i)
+                    {
+                        int64_t da = dimOf(sa, i), db = dimOf(sb, i);
+                        out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db);
+                    }
+                    int64_t              nF = cpu::elemCount(out);
+                    double              *y  = cpu::allocOutF64(Y, out);
+                    std::vector<int64_t> oa(rankF), ob(rankF);
+                    int64_t              sA = 1, sB = 1;
+                    for (int i = (int) rankF - 1; i >= 0; --i)
+                    {
+                        oa[i] = (dimOf(sa, i) == 1) ? 0 : sA;
+                        ob[i] = (dimOf(sb, i) == 1) ? 0 : sB;
+                        sA *= dimOf(sa, i);
+                        sB *= dimOf(sb, i);
+                    }
+                    auto val = [](const RtTensor &T, int64_t i) -> double {
+                        return T.dtype == DType::Float64 ? T.host.f64()[i] : (T.dtype == DType::Int64 ? (double) T.host.i64()[i] : (double) T.host.f32()[i]);
+                    };
+                    cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                    w.seek(0);
+                    for (int64_t lin = 0; lin < nF; ++lin, w.next())
+                    {
+                        y[lin] = val(A, w.offset(0)) + val(B, w.offset(1));
+                    }
+                    return;
+                }
+
                 if (sa == sb)
                 { // residual add: same shape, vectorizable
                     int64_t      n = cpu::elemCount(sa); // a rank-0 scalar result carries its one element
