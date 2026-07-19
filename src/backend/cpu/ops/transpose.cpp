@@ -1,5 +1,5 @@
-// Transpose / Permute (generic N-D, dtype-agnostic). CPU-only; channel-permuting layouts make a
-// packed NC4HW4 kernel a scatter, so this runs in canonical NCHW with boundary converts.
+// Transpose / Permute (generic N-D, dtype-agnostic) — the CPU ORACLE for the GPU flat_gather
+// kernel (transpose_slice.cpp); runs in canonical NCHW. Not a fallback in any real scenario.
 #include "backend/cpu/cpu_backend.h"
 #include "vknn/op.h"
 

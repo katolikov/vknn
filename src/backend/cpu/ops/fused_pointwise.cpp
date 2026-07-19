@@ -117,6 +117,10 @@ namespace vknn {
                     // Round toward zero (drop the fraction); agrees bitwise with GLSL trunc and with
                     // the float->wide-int->float Cast pair foldIntRoundtripCast collapses into it.
                     return std::trunc(x);
+                case UnaryType::Sign:
+                    // 1/-1 for nonzero, +-0 and NaN pass through — the same expression as the
+                    // standalone unary kernel and the GLSL evaluator (bitwise agreement).
+                    return x > 0.f ? 1.f : (x < 0.f ? -1.f : x);
                 case UnaryType::Invalid:
                     break;
             }

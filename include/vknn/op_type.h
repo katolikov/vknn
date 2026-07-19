@@ -123,12 +123,25 @@ namespace vknn {
                                  // never parsed from ONNX (no standard op), but unlike
                                  // Rope/FusedAttention it IS serialized to .vxm (the fold runs in
                                  // runStandardPasses, which vknn_compile applies before saving).
+        Det,                     // determinant of (batched) square matrices (ONNX "Det"):
+                                 // [..., n, n] -> [...]; a rank-2 input yields a 1-element tensor
+                                 // (the engine's IR has no rank-0 activations). The GPU kernel
+                                 // covers n <= kDetMaxAnalyticN by fixed-order cofactor expansion;
+                                 // larger n runs on the CPU (partial-pivot LU) via the named gate.
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;
     /// the shader plan layout (pw_plan.h) is sized from the same constants, so they are a shared
     /// contract between the importer and the kernel and cannot be changed independently.
     constexpr int kPwMaxSteps    = 16; ///< Elementwise steps per fused unit.
+    /// Largest square-matrix side the GPU Det kernel covers by fixed-order cofactor expansion —
+    /// the fast one-thread-per-matrix path every real camera/geometry head hits.
+    constexpr int kDetMaxAnalyticN = 4;
+    /// Largest side the GPU covers overall: above kDetMaxAnalyticN and up to this bound the kernel
+    /// runs an in-register partial-pivot LU per matrix (fp32, deterministic fixed order). Only
+    /// n > kDetMaxGpuN — no known real model — takes the CPU's double-precision LU via the named
+    /// vkNodeGate refusal.
+    constexpr int kDetMaxGpuN = 8;
     constexpr int kPwMaxOperands = 6;  ///< Extra tensor operands per unit (the primary input is excluded).
     constexpr int kPwMaxRank     = 4;  ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
     constexpr int kPwMaxRegs     = 4;  ///< Named registers for step values reused by later steps.

@@ -267,6 +267,19 @@ namespace vknn {
                     SH(o)           = SH(nd.inputs[0]);
                     g.desc(o).dtype = g.desc(nd.inputs[0]).dtype;
                     break;
+                case OpType::Det: { // [..., n, n] -> [...]; rank-2 -> {1} (no rank-0 activations)
+                    const Shape &in = g.desc(nd.inputs[0]).shape;
+                    if (in.size() >= 2)
+                    {
+                        Shape out(in.begin(), in.end() - 2);
+                        if (out.empty())
+                        {
+                            out.push_back(1);
+                        }
+                        SH(o) = out;
+                    }
+                    break;
+                }
                 case OpType::Equal:
                 case OpType::Greater:
                 case OpType::GreaterEqual:
