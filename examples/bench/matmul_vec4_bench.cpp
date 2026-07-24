@@ -11,10 +11,13 @@
 //
 // Timing mirrors matmul.cpp pickTile's candidate race: dedicated scratch operands (never live
 // activation buffers), kRepsPerSubmit dispatches per command buffer with a serializing compute
-// barrier after each, wall-clocked by CommandRunner::submitAndWait, min over kTimingSubmits
-// submissions. Per case it first runs each kernel once into host-readable buffers and byte-compares
-// the outputs — the v4 kernels change only the global load width (pad zeros match the scalar
-// kernel's column-guard value), so the outputs must be identical.
+// barrier after each, wall-clocked by CommandRunner::submitAndWait. The two entrants interleave one
+// submit at a time and swap who goes first each round, so the DVFS ramp and any thermal drift over
+// the case land on both equally; timing an entrant to completion before starting the other biases
+// the later one by whatever the clocks did in between. Each entrant reports both the min and the
+// median of its per-submit times. Per case it first runs each kernel once into host-readable
+// buffers and byte-compares the outputs — the v4 kernels change only the global load width (pad
+// zeros match the scalar kernel's column-guard value), so the outputs must be identical.
 //
 // Usage: vknn_matmul_vec4_bench [MxNxKxB ...]
 // Without arguments it runs the built-in shape set (bias pairs run on its flagged shapes; a
@@ -37,20 +40,20 @@ using namespace vknn::vk;
 
 namespace {
 
-    // pickTile's timing discipline: 8 dispatches per submit, min over 5 submits.
+    // pickTile's timing discipline: 8 dispatches per submit. kRepsPerSubmit stays low enough that
+    // one submit of the largest bench shape finishes well inside the ~2 s GPU watchdog. Rounds are
+    // interleaved between the entrants, so kTimingRounds submits each are spread over the case.
     constexpr int kRepsPerSubmit = 8;
-    constexpr int kTimingSubmits = 5;
+    constexpr int kTimingRounds  = 11;
 
     // matmul_tiled_fast / _v4 tile geometry ({128,128,16}; TM/TN in the shaders).
     constexpr int kTileM = 128;
     constexpr int kTileN = 128;
 
-    // Mirrors MatMulPC in src/backend/vulkan/ops/matmul.cpp. aKp/bNp are the operands' physical row
-    // strides: K and N for packed operands, roundUpVec4(N) for the padded B copy (only the v4
-    // kernels read them). The block must stay at least as wide as the shaders' declared block —
-    // a short push range is what a driver sees as an out-of-range push-constant read.
+    // Mirrors MatMulPC in src/backend/vulkan/ops/matmul.cpp. bNp is B's physical row stride: N for
+    // packed B, roundUpVec4(N) for the padded copy (only the v4 kernels read it).
     struct MatMulPC {
-        int32_t rank, total, M, N, K, aK, bK, bNp, aKp;
+        int32_t rank, total, M, N, K, aK, bK, bNp;
     };
 
     struct ShapeSpec {
@@ -62,19 +65,13 @@ namespace {
     // CNN/encoder class, small-M class; the two N % 4 != 0 entries exercise the padded-B layout.
     // The bias pairs run on one aligned and one padded shape.
     constexpr ShapeSpec kDefaultShapes[] = {
-        {1024, 1152, 1152, 1, true},
-        {4300, 1152, 1152, 1, false},
-        {256, 4096, 4096, 1, false},
-        {1, 4096, 4096, 1, false},
-        {784, 512, 512, 8, false},
-        {49, 2048, 512, 1, false},
-        {1024, 1150, 1152, 1, true},
-        {49, 2047, 512, 1, false},
+        {1024, 1152, 1152, 1, true}, {4300, 1152, 1152, 1, true}, {256, 4096, 4096, 1, true},  {1, 4096, 4096, 1, false},
+        {784, 512, 512, 8, true},    {49, 2048, 512, 1, false},   {1024, 1150, 1152, 1, true}, {49, 2047, 512, 1, true},
     };
 
     // float -> IEEE fp16 bit pattern (via the native __fp16 rounding).
     inline uint16_t f2h(float x) noexcept {
-        __fp16   h = (__fp16) x;
+        __fp16 h = (__fp16) x;
         uint16_t o;
         std::memcpy(&o, &h, 2);
         return o;
@@ -96,6 +93,21 @@ namespace {
         return halves;
     }
 
+    // One entrant of a scalar-vs-v4 race: its pipeline and bindings, plus one per-dispatch time per
+    // recorded round.
+    struct Entrant {
+        ComputePipeline      *pipe;
+        std::vector<VkBuffer> bufs;
+        std::vector<double>   perDispatchMs;
+    };
+
+    // Middle sample of a copy of `values` (mean of the two middle ones for an even count).
+    double median(std::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        const size_t mid = values.size() / 2;
+        return values.size() % 2 == 1 ? values[mid] : (values[mid - 1] + values[mid]) * 0.5;
+    }
+
     bool parseShape(const char *s, ShapeSpec &out) {
         out.bias = false;
         return sscanf(s, "%dx%dx%dx%d", &out.M, &out.N, &out.K, &out.batch) == 4;
@@ -105,8 +117,7 @@ namespace {
     // only in the B and geometry bindings (packed vs padded); slot 2 (D) is a placeholder swapped
     // for the readback/timing destination. `pc.bNp` carries the v4 kernel's row stride and is
     // ignored by the scalar kernel.
-    void runCase(VulkanContext &ctx, CommandRunner &runner, const ShapeSpec &s, const char *layout, bool bias, ComputePipeline &scalarPipe, ComputePipeline &v4Pipe, const std::vector<VkBuffer> &scalarBufs,
-                 const std::vector<VkBuffer> &v4Bufs, const MatMulPC &pc) {
+    void runCase(VulkanContext &ctx, CommandRunner &runner, const ShapeSpec &s, const char *layout, bool bias, ComputePipeline &scalarPipe, ComputePipeline &v4Pipe, const std::vector<VkBuffer> &scalarBufs, const std::vector<VkBuffer> &v4Bufs, const MatMulPC &pc) {
         const size_t   dHalfs = (size_t) pc.total;
         const uint32_t gx     = (uint32_t) ((pc.N + kTileN - 1) / kTileN);
         const uint32_t gy     = (uint32_t) ((pc.M + kTileM - 1) / kTileM);
@@ -133,31 +144,58 @@ namespace {
         const bool equal = std::memcmp(outScalar.data(), outV4.data(), dHalfs * 2) == 0;
 
         // Timing: device-only output scratch (pickTile's discipline), kRepsPerSubmit dispatches per
-        // submit with a serializing barrier after each, min over kTimingSubmits submits.
-        Buffer dTime(ctx, dHalfs * 2, MemPref::kDeviceOnly);
-        auto   timeKernel = [&](ComputePipeline &pipe, const std::vector<VkBuffer> &bufs) {
-            const std::vector<VkBuffer> timed = bufsWithDst(bufs, dTime);
-            double                      best  = 1e30;
-            for (int sub = 0; sub < kTimingSubmits; ++sub)
-            {
-                VkCommandBuffer cmd = runner.allocate();
-                runner.begin(cmd);
-                for (int r = 0; r < kRepsPerSubmit; ++r)
-                {
-                    pipe.dispatch(cmd, timed, &pc, sizeof(pc), gx, gy, gz);
-                    computeBarrier(ctx, cmd);
-                }
-                runner.end(cmd);
-                best = std::min(best, runner.submitAndWait(cmd));
-                vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &cmd);
-            }
-            return best / kRepsPerSubmit;
-        };
-        const double scalarMs = timeKernel(scalarPipe, scalarBufs);
-        const double v4Ms     = timeKernel(v4Pipe, v4Bufs);
+        // submit with a serializing barrier after each. The entrants alternate one submit at a time
+        // and swap who leads each round, so neither sits on a systematically warmer GPU.
+        Buffer  dTime(ctx, dHalfs * 2, MemPref::kDeviceOnly);
+        Entrant scalarRun {&scalarPipe, bufsWithDst(scalarBufs, dTime), {}};
+        Entrant v4Run {&v4Pipe, bufsWithDst(v4Bufs, dTime), {}};
 
-        printf("%d,%d,%d,%d,%s,%d,%d,%.4f,%.4f,%+.1f\n", s.M, s.N, s.K, s.batch, layout, bias ? 1 : 0, equal ? 1 : 0, scalarMs, v4Ms, (v4Ms - scalarMs) / scalarMs * 100.0);
+        auto oneSubmit = [&](Entrant &entrant) {
+            VkCommandBuffer cmd = runner.allocate();
+            runner.begin(cmd);
+            for (int r = 0; r < kRepsPerSubmit; ++r)
+            {
+                entrant.pipe->dispatch(cmd, entrant.bufs, &pc, sizeof(pc), gx, gy, gz);
+                computeBarrier(ctx, cmd);
+            }
+            runner.end(cmd);
+            const double ms = runner.submitAndWait(cmd);
+            vkFreeCommandBuffers(ctx.device(), runner.pool(), 1, &cmd);
+            return ms / kRepsPerSubmit;
+        };
+
+        // One discarded submit each: pays the pipeline/allocation warm-up and starts the clock ramp
+        // before either entrant's first recorded round.
+        oneSubmit(scalarRun);
+        oneSubmit(v4Run);
+        for (int round = 0; round < kTimingRounds; ++round)
+        {
+            Entrant &lead   = (round % 2 == 0) ? scalarRun : v4Run;
+            Entrant &follow = (round % 2 == 0) ? v4Run : scalarRun;
+            lead.perDispatchMs.push_back(oneSubmit(lead));
+            follow.perDispatchMs.push_back(oneSubmit(follow));
+        }
+
+        const double scalarMin = *std::min_element(scalarRun.perDispatchMs.begin(), scalarRun.perDispatchMs.end());
+        const double v4Min     = *std::min_element(v4Run.perDispatchMs.begin(), v4Run.perDispatchMs.end());
+        const double scalarMed = median(scalarRun.perDispatchMs);
+        const double v4Med     = median(v4Run.perDispatchMs);
+
+        printf("%d,%d,%d,%d,%s,%d,%d,%.4f,%.4f,%+.1f,%.4f,%.4f,%+.1f\n", s.M, s.N, s.K, s.batch, layout, bias ? 1 : 0, equal ? 1 : 0, scalarMin, v4Min, (v4Min - scalarMin) / scalarMin * 100.0, scalarMed, v4Med, (v4Med - scalarMed) / scalarMed * 100.0);
         fflush(stdout);
+
+        // Every recorded round, in submit order, on stderr: the raw spread behind the two summaries.
+        auto dumpRounds = [&](const char *tag, const Entrant &entrant) {
+            fprintf(stderr, "raw %dx%dx%dx%d %s bias=%d %s", s.M, s.N, s.K, s.batch, layout, bias ? 1 : 0, tag);
+            for (double ms: entrant.perDispatchMs)
+            {
+                fprintf(stderr, " %.4f", ms);
+            }
+            fprintf(stderr, "\n");
+        };
+        dumpRounds("scalar", scalarRun);
+        dumpRounds("v4", v4Run);
+        fflush(stderr);
     }
 
 } // namespace
@@ -193,7 +231,7 @@ int main(int argc, char **argv) {
     ComputePipeline fastBiasPipe(ctx, "matmul_tiled_fast_bias_fp16", 5, sizeof(MatMulPC));
     ComputePipeline v4BiasPipe(ctx, "matmul_tiled_fast_v4_bias_fp16", 5, sizeof(MatMulPC));
 
-    printf("M,N,K,batch,layout,bias,bytes_equal,scalar_ms,v4_ms,delta_pct\n");
+    printf("M,N,K,batch,layout,bias,bytes_equal,scalar_min_ms,v4_min_ms,delta_min_pct,scalar_med_ms,v4_med_ms,delta_med_pct\n");
     for (const ShapeSpec &s: shapes)
     {
         if (s.K % (int) kVec4Align != 0)
@@ -216,7 +254,6 @@ int main(int argc, char **argv) {
         pc.aK    = 1;
         pc.bK    = s.N;
         pc.bNp   = padded ? bNp : s.N;
-        pc.aKp   = s.K; // this bench pads only B; A is always the packed [M][K] layout
 
         // Geometry SSBO layout as flat::uploadFlatGeom: outDim | aStride | bStride, rank each. The
         // tiled kernels read only the leading batch axes (indices 0 .. rank-3); the padded-B
