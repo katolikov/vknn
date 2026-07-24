@@ -78,6 +78,7 @@
 #include "import/passes.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
+#include "vknn/io_link.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -420,6 +421,10 @@ static void runQuantPass(Graph &g, const QuantOptions &opts) {
 
 static void appendChunkPrefillBucket(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles,
                                      const PassOptions &sharedOpt, bool quantize, const QuantOptions &quantOpts, bool fp16) {
+    if (!kChunkPrefillEnabled)
+    {
+        return; // the chunked path is measured slower and incorrect; see kChunkPrefillEnabled
+    }
     ChunkPrefillPlan plan;
     if (!planChunkPrefillBucket(buckets, &plan))
     {

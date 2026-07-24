@@ -27,6 +27,15 @@ namespace vknn {
     /// pad-to-full-window forward.
     inline constexpr int64_t kChunkPrefillTokens = 64;
 
+    /// Whether vknn_compile emits the chunk-prefill bucket at all. Off: on-device measurement of a
+    /// 0.5B decoder found the chunked path both slower to first token than the whole-window prefill
+    /// it replaces (+52% at one chunk, +218% at four) and incorrect — a multi-chunk prompt decodes
+    /// as though only its last chunk were present, so earlier chunks' cache rows are not reaching
+    /// the later passes. With no bucket emitted, `planChunkPrefillBucket` refuses and every model
+    /// keeps the whole-window path; the planner, runtime, and host tests stay live behind this
+    /// switch so the defect can be fixed against them.
+    inline constexpr bool kChunkPrefillEnabled = false;
+
     /// The cache slot a decode step at absolute position `position` folds the PREVIOUS token's
     /// present row into: slot position-1, clamped to the last slot once the position runs past the
     /// compiled context window (the overrun then keeps overwriting the newest slot). Negative (no
