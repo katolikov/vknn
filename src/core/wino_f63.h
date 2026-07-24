@@ -82,10 +82,31 @@ namespace vknn {
     // The automatic Winograd output-tile pick: a DETERMINISTIC shape rule (ADR-0009 — the units
     // round fp16 differently, so a timing race would break run-to-run bit-exactness). F(4,3)'s
     // 4x FLOP / 0.56x traffic saving wins on deep channels; F(2,3)'s smaller transform wins on
-    // shallow. F(6,3) is NOT selectable here: it becomes an automatic candidate only after device
-    // measurement establishes real thresholds; until then it is reachable solely through the
-    // explicit setHint(Hint::WinogradUnit, 6). tests/test_wino_f63.cpp pins this rule's choices
-    // over a shape sweep.
+    // shallow. F(6,3) is NOT selectable here — it is reachable solely through the explicit
+    // setHint(Hint::WinogradUnit, 6), and the device measurement that would have promoted it
+    // REFUTED it instead (docs/benchmark.md "F(6,3) stays hint-only"):
+    //
+    //   - Accuracy regresses on every model that would use it, against the ORT goldens (PSNR dB,
+    //     identical at every tuning level). Promoting F(6,3) for exactly the class it wins in
+    //     isolation would have shipped: ResNet-50 82.92 -> 82.35, Inception-v3 64.32 -> 61.50,
+    //     YOLOv8n 86.86 -> 86.26. Forcing it on every eligible 3x3 through the hint costs more
+    //     still (75.59 / 61.50 / 85.97), because that also drags the shapes the Winograd-vs-direct
+    //     rule keeps on the direct kernel into the transform domain. The 8x8 transform carries A^T
+    //     entries up to 32 (F(4,3): 8), so the fp16-stored V/M intermediates lose relative
+    //     precision on every shape it runs on. Same-or-better accuracy is a hard gate, and no
+    //     shape rule buys it back.
+    //   - The speed win is not a function of the shape. Isolated single-shape probes put F(6,3)
+    //     ahead over a clean band (Cin*Cout per output pixel <= ~10 wins, >= ~21 loses), but
+    //     in-model at tuning=none the SAME shapes reverse: Inception-v3's 64->96 and 96->96 at
+    //     35x35 run +11% and +15%, ResNet-50's 64->64 at 56x56 +5..8%, while YOLOv8n's 64->64 at
+    //     40x40 and 80x80 stay ahead. Two models disagree on near-identical shapes, so the
+    //     discriminating variable is not (Cin, Cout, OH, OW) - it is the surrounding graph, which
+    //     a deterministic shape rule may not read.
+    //   - What win remains is conditional on the bit-neutral GEMM-body race: with the race
+    //     (tuning fast/heavy) F(6,3) took Inception's 35x35 shapes by ~30%, without it (tuning
+    //     none) it lost them by ~13%. A rule that only pays off at one tuning level is not one.
+    //
+    // tests/test_wino_f63.cpp pins this rule's choices over a shape sweep.
     inline int winoAutoUnit(int64_t cin, int64_t cout) {
         return (winoCostPerOutput(4, cin, cout) < winoCostPerOutput(2, cin, cout)) ? 4 : 2;
     }

@@ -5,7 +5,8 @@
 //   - the chosen point set beats-or-matches the classic set AND beats the condition-number-best
 //     fractional set on the shared fp16 pipeline scoring (the basis of the selection);
 //   - the CPU-backend conv oracle matches the host Winograd fp64 simulation;
-//   - the automatic F-unit rule is unchanged (F(2,3)/F(4,3) only — F(6,3) never auto-selected).
+//   - the automatic F-unit rule is unchanged (F(2,3)/F(4,3) only — F(6,3) never auto-selected) and
+//     is deterministic.
 #include "core/wino_construct.h"
 #include "core/wino_f63.h"
 #include "vknn/graph.h"
@@ -338,9 +339,10 @@ TEST(WinoF63, CpuOracleMatchesWinoSimulation) {
 
 // GATING: the automatic F-unit rule (core/wino_f63.h winoAutoUnit, consumed by tuneWino) is
 // BIT-IDENTICAL to the pre-F(6,3) rule over a shape sweep — F(6,3) must never be auto-selected;
-// it is reachable only through the explicit WinogradUnit hint until device measurement establishes
-// real thresholds. The frozen replica below is the exact expression tuneWino carried before the
-// rule moved into the shared header.
+// it is reachable only through the explicit WinogradUnit hint, and the device measurement that
+// would have promoted it refuted it instead (accuracy regresses on every model that would use it,
+// and the speed win is not a function of the shape — evidence at winoAutoUnit). The frozen replica
+// below is the exact expression tuneWino carried before the rule moved into the shared header.
 TEST(WinoF63, AutoUnitRuleUnchanged) {
     auto frozenRule = [](int64_t Cin, int64_t Cout) {
         auto winoCostPerOut = [&](int n) {
@@ -359,4 +361,28 @@ TEST(WinoF63, AutoUnitRuleUnchanged) {
             EXPECT_TRUE(unit == 2 || unit == 4) << "F(6,3) leaked into the automatic rule at Cin=" << cin << " Cout=" << cout;
         }
     }
+}
+
+// Determinism: the rule is a pure function of the shape, so repeated evaluation yields the same
+// unit — a timing-raced F-unit would break the byte-exactness the engine guarantees across runs
+// and tuning levels (ADR-0009). The shapes where isolated single-shape probes put F(6,3) ahead are
+// pinned here too: in-model those shapes reversed, so they must still resolve to F(4,3), and a
+// future F(6,3) promotion cannot slip in without this gate turning red.
+TEST(WinoF63, AutoUnitRuleIsDeterministicAndF63Free) {
+    const int64_t channels[] = {32, 64, 96, 128, 256, 512};
+    for (int64_t cin: channels)
+    {
+        for (int64_t cout: channels)
+        {
+            const int first = winoAutoUnit(cin, cout);
+            for (int repeat = 0; repeat < 4; ++repeat)
+            {
+                EXPECT_EQ(winoAutoUnit(cin, cout), first) << "Cin=" << cin << " Cout=" << cout;
+            }
+        }
+    }
+    EXPECT_EQ(winoAutoUnit(64, 64), 4);   // probed ahead on F(6,3) at 28x28 / 40x40 / 56x56 / 80x80
+    EXPECT_EQ(winoAutoUnit(96, 96), 4);   // probed ahead on F(6,3) at 35x35
+    EXPECT_EQ(winoAutoUnit(32, 64), 4);   // probed ahead on F(6,3) at 147x147
+    EXPECT_EQ(winoAutoUnit(128, 128), 4); // probed ahead on F(6,3) at 40x40 / 80x80
 }

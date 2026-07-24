@@ -195,6 +195,56 @@ a deterministic cost model (F(4,3) wins on deep channels, F(2,3)'s smaller trans
 shallow); `setHint(Hint::WinogradUnit, 4)` forces F(4,3) on every 3×3, bypassing even the
 Winograd-vs-direct shape rule.
 
+### F(6,3) stays hint-only (negative result)
+
+**F(6×6,3×3)** is implemented too (`setHint(Hint::WinogradUnit, 6)`, separable two-stage LDS
+transforms — `shaders/wino_input6_fp16.comp` / `wino_out6_fp16.comp`, points and derivation in
+`src/core/wino_f63.h`). It stays **explicit-hint only**: measured on the primary device against the
+ORT goldens, it is **refused promotion into the automatic F-unit rule** on three independent
+grounds. Protocol: cooled interleaved paired runs, min of 5, per model at `fast` and `none`, plus
+per-op GPU profiles and single-shape probes (a 3-conv chain per shape, min of 3 cooled rounds);
+DenseNet-121 carries the noise floor because it has *no* Winograd-eligible conv (every 3×3 is a
+128→32 growth conv, under the `Cout >= 64` gate), so any delta it shows is drift.
+
+- **Accuracy regresses wherever it runs.** Against the ORT goldens, PSNR / SNR in dB. Both F(6,3)
+  configurations are listed because they answer different questions, and each is identical at every
+  tuning level (the F-unit fixes the output bits; the GEMM-body race is bit-neutral):
+
+  | model | default rule (F(2,3)/F(4,3)) | F(6,3) on the candidate rule's class | F(6,3) forced on every eligible 3×3 |
+  |---|---|---|---|
+  | ResNet-50 | 82.92 / 65.42 | 82.35 / 64.85 | 75.59 / 58.08 |
+  | Inception-v3 | 64.32 / 47.82 | 61.50 / 45.00 | 61.50 / 45.00 |
+  | YOLOv8n | 86.86 / 66.36 | 86.26 / 65.76 | 85.97 / 65.46 |
+  | DenseNet-121 | 70.83 / 52.78 | unchanged | unchanged |
+
+  The middle column is what promoting F(6,3) into the automatic rule would have shipped; the right
+  column is what `setHint(Hint::WinogradUnit, 6)` costs today, and it is worse because forcing the
+  unit also drags shapes the Winograd-vs-direct rule keeps on the direct kernel (ResNet-50's
+  512×512 @ 7×7 and 256×256 @ 14×14) into the transform domain. Inception-v3's two F(6,3) columns
+  agree to 2 dp without being the same output (cosine 0.999988 vs 0.999986). The loss is
+  structural, not shape-dependent: the 8×8 transform carries A^T entries up to 32 against F(4,3)'s
+  8, so the fp16-stored V/M intermediates lose relative precision on every shape. Same-or-better
+  accuracy is a hard gate and no shape rule buys it back.
+- **The speed win is not a function of the shape.** Isolated probes separate cleanly on channel
+  work per output pixel — `Cin*Cout/(OH*OW)` ≤ ~10 wins (−19.5% at 64×64 @ 28×28, −12.5% at 64×64 @
+  40×40, −12.0% at 96×96 @ 35×35, −10.8% at 32→64 @ 147×147), ≥ ~21 loses (+3.5% at 128×128 @
+  28×28, +29.8% at 256×256 @ 28×28, +430% at 512×512 @ 7×7) — but **in-model the same shapes
+  reverse**: at `none`, Inception-v3's 64→96 and 96→96 @ 35×35 run **+11%** and **+15%**,
+  ResNet-50's 64→64 @ 56×56 **+5…8%**, while YOLOv8n's 64→64 @ 40×40 and 80×80 stay ahead
+  (−4.8% GPU total). Two models disagree on near-identical shapes, so the discriminating variable
+  is the surrounding graph, which a deterministic shape rule (ADR-0009) may not read.
+- **What win remains is conditional on the tuning race.** With the bit-neutral GEMM-body race
+  (`fast`/`heavy`) F(6,3) took Inception's 35×35 shapes by ~30%; without it (`none`) it lost the
+  same shapes by ~13%. F(6,3) needs the register-tile body to be competitive at all, so a rule
+  admitting it would pay off at one tuning level and regress at another.
+
+Two measurement lessons are worth keeping. Independently generated caches make an A/B lie: two
+tune passes race the *non*-Winograd kernels differently, and DenseNet-121 — which cannot change —
+read −6.7% at `fast` purely from that, while a per-op A/B attributed a 3.6% ResNet-50 "regression"
+to three **1×1** convs whose tile choice had flipped. And a forced-unit hint must run the same
+bit-neutral race the automatic path runs, or every forced measurement is handicapped against
+`auto` by the body it never got to choose (up to ~29% on these shapes).
+
 ### Barrier hygiene, ChannelShuffle, and the register-tile Winograd GEMM (v1.4.1)
 
 Four further changes, all output-byte-identical to v1.4.0 per model at every tuning level

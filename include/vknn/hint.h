@@ -67,8 +67,8 @@ namespace vknn {
         SubgroupGemm  = 4,
         F23           = 0,
         F43           = 4,
-        F63           = 6, ///< WinogradUnit: force F(6,3) (explicit-hint only; the automatic
-                           ///< F-unit rule stays F(2,3)/F(4,3) until device thresholds exist).
+        F63           = 6, ///< WinogradUnit: force F(6,3) (explicit-hint only; device measurement
+                           ///< refuted promoting it into the automatic F(2,3)/F(4,3) rule).
         DirectAuto    = 0,
         RegisterTiled = 1,
         LdsHalo       = 2,

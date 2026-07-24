@@ -173,7 +173,7 @@ namespace vknn {
             bool                                 winogemm     = false;
             bool                                 gemmSubgroup = false; // subgroup-shuffle GEMM (no LDS); U is [pos][icb][oc]
             // Output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic),
-            // 6 = F(6,3) (64 pts; explicit WinogradUnit hint only — see tuneWino).
+            // 6 = F(6,3) (64 pts, 2.25x fewer tiles; explicit WinogradUnit hint only — see tuneWino).
             int                                  winoUnit     = 2;
             std::shared_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
             std::shared_ptr<vk::Buffer>          mbuf;
@@ -793,18 +793,14 @@ namespace vknn {
                 {
                     return 0;
                 }
-                if (cfgHint(env, Hint::WinogradUnit) == 4)
-                {
-                    return 2; // force F(4,3) (numerically fine but register-heavy transforms)
-                }
-                if (cfgHint(env, Hint::WinogradUnit) == 6)
-                {
-                    // Force F(6,3) (separable two-stage LDS transforms; core/wino_f63.h). The
-                    // explicit hint is the ONLY route to F(6,3): the automatic rule below stays
-                    // F(2,3)/F(4,3) until device measurement establishes real thresholds.
-                    return 3;
-                }
-                bool forceOn = (env.winograd == Mode::On);
+                // An explicit WinogradUnit hint (4 = F(4,3), 6 = F(6,3), the separable two-stage LDS
+                // transforms of core/wino_f63.h) pins the F-unit and forces Winograd on every eligible
+                // shape, but it still runs the shared bit-neutral GEMM-body race below — a forced unit
+                // then executes in exactly the kernel configuration the automatic rule gives it, which
+                // is what makes a forced-unit measurement comparable to the automatic one.
+                const int  forcedUnit = cfgHint(env, Hint::WinogradUnit); // 0 = automatic, else the F-unit edge
+                const bool forceUnit  = (forcedUnit == 2 || forcedUnit == 4 || forcedUnit == 6);
+                bool       forceOn    = (env.winograd == Mode::On) || forceUnit;
                 // Winograd-vs-direct is decided by a DETERMINISTIC shape rule, not a timing race: the
                 // Winograd transform rounds fp16 differently from the direct kernel, so a timing race
                 // lets thermal/DVFS noise flip the winner between cold sweeps, changing the output bits
@@ -824,9 +820,9 @@ namespace vknn {
                 // per run and across cache rebuilds). The cost model (winoCostPerOutput) and the rule live in
                 // core/wino_f63.h so the host gating test pins the rule's choices over a shape sweep:
                 // F(4,3)'s 4x FLOP / 0.56x V-M-traffic saving wins on deep channels, F(2,3)'s smaller
-                // transform wins on shallow, and F(6,3) is never an automatic candidate here (explicit
-                // WinogradUnit hint only) until device measurement establishes real thresholds.
-                int U_ = winoAutoUnit(Cin, Cout);
+                // transform wins on shallow, and F(6,3) stays out of the automatic rule — device
+                // measurement refuted it (accuracy gate + no shape-only win; evidence at winoAutoUnit).
+                int U_ = forceUnit ? forcedUnit : winoAutoUnit(Cin, Cout);
                 // RM (wino_gemm tiles/thread) and the GEMM body (LDS-staged vs the no-LDS register
                 // twin wino_gemm_reg) are bit-neutral - they only remap threads to outputs / change
                 // the operand staging while the per-output K order is unchanged, so any choice yields
@@ -834,10 +830,12 @@ namespace vknn {
                 // are cached, defaulting to LDS RM4 under None. ACC16 (fp16 accumulation) is
                 // pinned OFF: the fp16-accumulate variant changes the output bits, so it must never be
                 // selectable or it would reintroduce tuning/thermal-dependent output.
-                // Cached value = RM (4|8) | 16 when the register body won. The stem is winorm2_
-                // (winorm_ entries encode RM alone and must never decode against the wider field).
+                // Cached value = RM (4|8) | 16 when the register body won. The stem is winorm3_ and
+                // carries the F-unit: the body race runs against THAT unit's tile count, so a winner
+                // raced for one unit must never be decoded for another (winorm_ entries encode RM alone
+                // and winorm2_ entries omit the unit; neither may decode against this key).
                 char        buf[128];
-                snprintf(buf, sizeof(buf), "winorm2_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w);
+                snprintf(buf, sizeof(buf), "winorm3_%d_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w, U_);
                 std::string sig         = env.gpuTag + "/" + buf;
                 int         bestRm      = 4;
                 bool        bestRegGemm = false;
@@ -862,9 +860,12 @@ namespace vknn {
                     WinoInPC    ipc = {(int) x.n, (int) Cin, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
                     WinoGemmPC  gpc = {(int) Cin, (int) Cout, (int) nT};
                     WinoFusedPC opc = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, act, 0.f, 0.f};
-                    auto        inPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC));
-                    auto        oPipe  = env.pipeline(U_ == 2 ? "wino_out_fp16" : "wino_out4_fp16", 3, sizeof(WinoFusedPC));
+                    auto        inPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : (U_ == 4 ? "wino_input4_fp16" : "wino_input6_fp16"), 2, sizeof(WinoInPC));
+                    auto        oPipe  = env.pipeline(U_ == 2 ? "wino_out_fp16" : (U_ == 4 ? "wino_out4_fp16" : "wino_out6_fp16"), 3, sizeof(WinoFusedPC));
                     uint32_t    gy     = groups(Coutb, kWinoGemmTileNB);
+                    // F(6,3)'s separable transforms run kWinoF63TransformLanes cooperating threads per
+                    // (channel-block, tile) unit, so the timed transform dispatches match record()'s.
+                    int64_t     lanes  = (U_ == 6) ? kWinoF63TransformLanes : 1;
                     auto        timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
                         VkCommandBuffer cmd = env.runner->allocate();
                         env.runner->begin(cmd);
@@ -890,11 +891,11 @@ namespace vknn {
                     // share of the pipeline is what is measured.
                     auto time3Pass = [&](std::shared_ptr<vk::ComputePipeline> gemmPipe, uint32_t gx) {
                         return bestOf([&](VkCommandBuffer cmd) {
-                            inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT, 64));
+                            inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT * lanes, 64));
                             vk::computeBarrier(*env.ctx, cmd);
                             gemmPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
                             vk::computeBarrier(*env.ctx, cmd);
-                            oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT, 64));
+                            oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT * lanes, 64));
                             vk::computeBarrier(*env.ctx, cmd);
                         });
                     };
@@ -934,7 +935,7 @@ namespace vknn {
                         env.weights->setTuned(sig, bestRm | (bestRegGemm ? 16 : 0), (int) env.tuning);
                     }
                 }
-                int winoChoice = ((U_ == 2) ? 1 : 2) | (bestRm == 8 ? 4 : 0) | (bestRegGemm ? 16 : 0); // ACC16 bit (8) never set
+                int winoChoice = ((U_ == 2) ? 1 : (U_ == 4) ? 2 : 3) | (bestRm == 8 ? 4 : 0) | (bestRegGemm ? 16 : 0); // ACC16 bit (8) never set
                 VKNN_DEBUG << "tuneWino Cin=" << Cin << " Cout=" << Cout << " U=" << U_ << " rm=" << bestRm << " body=" << (bestRegGemm ? "reg" : "lds") << " -> " << winoChoice;
                 return winoChoice;
             }
