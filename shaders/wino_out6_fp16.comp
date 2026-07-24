@@ -1,0 +1,93 @@
+#version 450
+// Winograd F(6x6,3x3) output transform: Y = At * M * A, a 6x6 output per tile from the 64
+// transform-domain values (M[p][ocb][tile], p = i*8 + j, matching wino_gemm's store). kAt stays
+// in lockstep with kWinoF63At (src/core/wino_f63.h).
+//
+// Same separable two-stage shared-memory structure as wino_input6_fp16.comp: 8 threads cooperate
+// on one (ocb, tile) unit. Stage 1: each thread owns M column c and writes the row pass
+// t[k][c] = sum_i At[k][i] * M[i][c] to shared fp32. Stage 2: each thread owns one OUTPUT row k
+// (lanes 6 and 7 idle — 6 of 8 rows exist) and stores y[k][j] = sum_c t[k][c] * At[j][c] + bias
+// with activation and the fused pointwise epilogue applied at the store. Peak per-thread
+// registers stay ~8 vec4; 6 KB of shared memory per 64-thread workgroup (8 units).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer M { f16vec4 mbuf[]; };
+layout(std430, binding = 1) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 2) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, Cout, OH, OW, nTH, nTW, act;
+  float actLo, actHi;
+}
+pc;
+
+// A^T rows (kWinoF63At). Zero entries fold away when the driver unrolls the constant-bound loops.
+const float kAt[6][8] = float[6][8](
+    float[8](1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0),
+    float[8](0.0, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, 0.0),
+    float[8](0.0, 0.25, 0.25, 1.0, 1.0, 4.0, 4.0, 0.0),
+    float[8](0.0, 0.125, -0.125, 1.0, -1.0, 8.0, -8.0, 0.0),
+    float[8](0.0, 0.0625, 0.0625, 1.0, 1.0, 16.0, 16.0, 0.0),
+    float[8](0.0, 0.03125, -0.03125, 1.0, -1.0, 32.0, -32.0, 1.0));
+
+shared vec4 sT[8][6][8]; // [unit][output row k][transform column c], fp32 row-pass staging
+
+void main() {
+  int Coutb = (pc.Cout + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint unitId = gid / 8u;  // one unit = one (ocb, tile)
+  int lane = int(gl_LocalInvocationID.x) % 8;
+  int unit = int(gl_LocalInvocationID.x) / 8;
+  bool unitLive = unitId < uint(Coutb * nT);
+  int tile = unitLive ? int(unitId) % nT : 0;
+  int ocb = unitLive ? int(unitId) / nT : 0;
+
+  if (unitLive) {
+    // Stage 1: this thread owns M column `lane`; t[k][lane] = sum_i At[k][i] * M[i][lane].
+    vec4 m[8];
+    for (int i = 0; i < 8; ++i)
+      m[i] = vec4(mbuf[((i * 8 + lane) * Coutb + ocb) * nT + tile]);
+    for (int k = 0; k < 6; ++k) {
+      vec4 acc = kAt[k][0] * m[0];
+      for (int i = 1; i < 8; ++i) acc += kAt[k][i] * m[i];
+      sT[unit][k][lane] = acc;
+    }
+  }
+  barrier();
+  if (!unitLive || lane >= 6) return;
+  // Stage 2: this thread owns output row `lane`; y[lane][j] = sum_c t[lane][c] * At[j][c] + bias.
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+  int oy = ty * 6 + lane;
+  if (oy >= pc.OH) return;
+  vec4 t[8];
+  for (int c = 0; c < 8; ++c) t[c] = sT[unit][lane][c];
+  vec4 b = vec4(bias[ocb]);
+  int rowBase = (n * Coutb + ocb) * pc.OH * pc.OW + oy * pc.OW;
+#define ACTF(v)                                                                                   \
+  vec4(vx_act((v).x, pc.act, pc.actLo, pc.actHi), vx_act((v).y, pc.act, pc.actLo, pc.actHi),      \
+       vx_act((v).z, pc.act, pc.actLo, pc.actHi), vx_act((v).w, pc.act, pc.actLo, pc.actHi))
+  for (int j = 0; j < 6; ++j) {
+    int ox = tx * 6 + j;
+    if (ox >= pc.OW) continue;
+    vec4 acc = kAt[j][0] * t[0];
+    for (int c = 1; c < 8; ++c) acc += kAt[j][c] * t[c];
+    acc += b;
+    int idx = rowBase + ox;
+#ifdef PW_EPI
+    dst[idx] = f16vec4(pw_apply4(ACTF(acc), idx));
+#else
+    dst[idx] = TO_STORE4(ACTF(acc));
+#endif
+  }
+#undef ACTF
+}

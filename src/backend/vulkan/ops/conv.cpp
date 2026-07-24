@@ -3,6 +3,7 @@
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
 #include "core/conv_geom.h"
+#include "core/wino_f63.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -170,17 +171,19 @@ namespace vknn {
             // 3-pass with a TILED batched GEMM for the transform-domain multiply (MNN's structure).
             bool                                 winogemm     = false;
             bool                                 gemmSubgroup = false; // subgroup-shuffle GEMM (no LDS); U is [pos][icb][oc]
-            int                                  winoUnit     = 2;     // output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic)
+            // Output-tile edge: 2 = F(2,3) (16 pts), 4 = F(4,3) (36 pts, 0.56x V/M traffic),
+            // 6 = F(6,3) (64 pts; explicit WinogradUnit hint only — see tuneWino).
+            int                                  winoUnit     = 2;
             std::shared_ptr<vk::ComputePipeline> wGemmPipe, wOutPipe;
             std::shared_ptr<vk::Buffer>          mbuf;
             WinoGemmPC                           wGemmPC {};
-            int64_t                              wGemmGX = 0, wGemmGY = 0, wGemmGZ = 0;
+            int64_t                              wGemmGX = 0, wGemmGY = 0, wGemmGZ = 0, wOutGroups = 0;
 
             void prepareWinograd(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
                 const Graph       &g   = *env.graph;
                 int64_t            Cin = x.c, Cinb = cBlocks(x.c);
-                const int          U_ = winoUnit, A_ = U_ + 2; // output edge, transform-domain edge (4 or 6)
-                const int          nPos = A_ * A_;             // 16 (F2,3) or 36 (F4,3)
+                const int          U_ = winoUnit, A_ = U_ + 2; // output edge, transform-domain edge (4, 6 or 8)
+                const int          nPos = A_ * A_;             // 16 (F2,3), 36 (F4,3) or 64 (F6,3)
                 int64_t            nTH = (y.h + U_ - 1) / U_, nTW = (y.w + U_ - 1) / U_, nT = x.n * nTH * nTW;
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
@@ -188,7 +191,8 @@ namespace vknn {
                 int wvar     = cfgHint(env, Hint::WinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
                 gemmSubgroup = (wvar == 4);
 
-                // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3).
+                // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3) inline; F(6,3) from
+                // core/wino_f63.h (kWinoF63G, derived + scored by tools/wino_f63_points.cpp).
                 static const float G2[4][3] = {{1, 0, 0}, {0.5f, 0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0, 0, 1}};
                 static const float G4[6][3] = {
                     {0.25f, 0, 0}, {-1.f / 6, -1.f / 6, -1.f / 6}, {-1.f / 6, 1.f / 6, -1.f / 6}, {1.f / 24, 1.f / 12, 1.f / 6}, {1.f / 24, -1.f / 12, 1.f / 6},
@@ -202,12 +206,12 @@ namespace vknn {
                         for (int64_t ic = 0; ic < Cin; ++ic)
                         {
                             const float *gk = wsrc + (oc * Cin + ic) * 9; // 3x3
-                            float        Gg[6][3];
+                            float        Gg[8][3];                        // A_ <= 8 rows across the F-unit family
                             for (int i = 0; i < A_; ++i)
                             {
                                 for (int j = 0; j < 3; ++j)
                                 {
-                                    const float *Gi = (U_ == 2) ? G2[i] : G4[i];
+                                    const float *Gi = (U_ == 2) ? G2[i] : (U_ == 4) ? G4[i] : kWinoF63G[i];
                                     Gg[i][j]        = Gi[0] * gk[j] + Gi[1] * gk[3 + j] + Gi[2] * gk[6 + j];
                                 }
                             }
@@ -216,7 +220,7 @@ namespace vknn {
                             {
                                 for (int j = 0; j < A_; ++j)
                                 {
-                                    const float *Gj    = (U_ == 2) ? G2[j] : G4[j];
+                                    const float *Gj    = (U_ == 2) ? G2[j] : (U_ == 4) ? G4[j] : kWinoF63G[j];
                                     float        u     = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
                                     int          pos   = i * A_ + j;
                                     int64_t      uidx  = gemmSubgroup ? ((pos * Cinb + icb) * Cout + oc) : ((pos * Cout + oc) * Cinb + icb);
@@ -244,7 +248,9 @@ namespace vknn {
                 // vec4s * el bytes/element.
                 vbuf      = std::make_shared<vk::Buffer>(*env.ctx, (size_t) nPos * Cinb * nT * 4 * el, vk::MemPref::kDeviceOnly);
                 wInPC     = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
-                wInGroups = groups(Cinb * nT, 64);
+                // wino_input / wino_input4 run one thread per (icb, tile); wino_input6's separable
+                // two-stage transform runs kWinoF63TransformLanes cooperating threads per unit.
+                wInGroups = groups(Cinb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), 64);
 
                 // The tiled-GEMM 3-pass is the default Winograd kernel (variant 0). Variant 4 is the same
                 // 3-pass with the subgroup-shuffle GEMM (no LDS). The fused / fused-split variants are
@@ -259,8 +265,8 @@ namespace vknn {
                     wGemmPC          = {(int) Cin, (int) Cout, (int) nT};
                     wGemmGX = groups(nT, gemmSubgroup ? kWinoSgTileM : winoGemmTileM(winoRm)); // workgroups over M (tiles)
                     wGemmGY = groups(Coutb, kWinoGemmTileNB);                                  // workgroups over N (ocb)
-                    wGemmGZ = nPos;                                                            // one GEMM per transform position (16 or 36)
-                    wInPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : "wino_input4_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {});
+                    wGemmGZ = nPos;                                                            // one GEMM per transform position (16, 36 or 64)
+                    wInPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : (U_ == 4 ? "wino_input4_fp16" : "wino_input6_fp16"), 2, sizeof(WinoInPC), std::vector<uint32_t> {});
                     // GEMM body: the LDS-staged kernel by default, the no-LDS register-tile twin
                     // when tuneWino's bit-neutral race picked it (bit 4), or the Hint-gated
                     // subgroup variant. The register kernel takes RM alone (no ACC16 body).
@@ -268,7 +274,15 @@ namespace vknn {
                                              gemmSubgroup ? std::vector<uint32_t> {}
                                                           : (winoRegGemm ? std::vector<uint32_t> {(uint32_t) winoRm}
                                                                          : std::vector<uint32_t> {(uint32_t) winoRm, (uint32_t) winoAcc16}));
-                    wOutPipe = env.pipeline((std::string(U_ == 2 ? "wino_out" : "wino_out4") + epi.suffix() + "_fp16").c_str(), 3 + epi.extraBufs(), sizeof(WinoFusedPC), std::vector<uint32_t> {});
+                    // wino_out / wino_out4 run one thread per (ocb, tile); wino_out6 runs
+                    // kWinoF63TransformLanes cooperating threads per unit (record() dispatches
+                    // wOutGroups). Each arm spells "<stem>" + epi.suffix() so the
+                    // tools/check_epi_sync.py stem derivation sees every hosting kernel.
+                    std::string outName = (U_ == 2)   ? std::string("wino_out") + epi.suffix()
+                                          : (U_ == 4) ? std::string("wino_out4") + epi.suffix()
+                                                      : std::string("wino_out6") + epi.suffix();
+                    wOutGroups          = groups(Coutb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), 64);
+                    wOutPipe = env.pipeline((outName + "_fp16").c_str(), 3 + epi.extraBufs(), sizeof(WinoFusedPC), std::vector<uint32_t> {});
                     return;
                 }
                 wino2 = (wvar == 2);
@@ -767,12 +781,12 @@ namespace vknn {
             }
 
             // Autotune the 3x3 conv kernel for THIS shape. Returns 0 = direct, else a Winograd
-            // bitfield: bits 0-1 = F-unit (1 = F(2,3), 2 = F(4,3)), bit 2 = wino_gemm RM 8 (else 4),
-            // bit 3 = wino_gemm fp16 accumulation, bit 4 = the no-LDS register-tile GEMM body
-            // (wino_gemm_reg). Winograd wins big on deep, square 3x3 but loses on small-channel /
-            // spatially-large 3x3, so the choice is measured per-shape on scratch buffers and cached
-            // like the local-size tune. F(4,3) (0.56x the V/M traffic, 4x FLOP saving) is only
-            // considered when fp16-safe (allowF4).
+            // bitfield: bits 0-1 = F-unit (1 = F(2,3), 2 = F(4,3), 3 = F(6,3)), bit 2 = wino_gemm
+            // RM 8 (else 4), bit 3 = wino_gemm fp16 accumulation, bit 4 = the no-LDS register-tile
+            // GEMM body (wino_gemm_reg). Winograd wins big on deep, square 3x3 but loses on
+            // small-channel / spatially-large 3x3, so the choice is measured per-shape on scratch
+            // buffers and cached like the local-size tune. F(4,3) (0.56x the V/M traffic, 4x FLOP
+            // saving) is only considered when fp16-safe (allowF4).
             int tuneWino(VkOpEnv &env, NCHW x, NCHW y, int64_t Cin, int64_t Cout, int act) {
                 if (env.winograd == Mode::Off)
                 {
@@ -781,6 +795,13 @@ namespace vknn {
                 if (cfgHint(env, Hint::WinogradUnit) == 4)
                 {
                     return 2; // force F(4,3) (numerically fine but register-heavy transforms)
+                }
+                if (cfgHint(env, Hint::WinogradUnit) == 6)
+                {
+                    // Force F(6,3) (separable two-stage LDS transforms; core/wino_f63.h). The
+                    // explicit hint is the ONLY route to F(6,3): the automatic rule below stays
+                    // F(2,3)/F(4,3) until device measurement establishes real thresholds.
+                    return 3;
                 }
                 bool forceOn = (env.winograd == Mode::On);
                 // Winograd-vs-direct is decided by a DETERMINISTIC shape rule, not a timing race: the
@@ -798,15 +819,13 @@ namespace vknn {
                 int64_t Cinb = cBlocks(Cin), Coutb = cBlocks(Cout);
                 // Pick the Winograd output-tile edge (2=F(2,3), 4=F(4,3)) DETERMINISTICALLY from the shape,
                 // NOT by timing: two candidate times within measurement noise flip the choice run-to-run, and
-                // F(2,3)/F(4,3) round fp16 differently, so a timing-raced tile breaks bit-exactness (identical
-                // per run and across cache rebuilds). Research cost model C(n) = 2i(n+k-1) + io(n+k-1) +
-                // n(n+k-1)(2n+k-1), k=3, normalized per output tile (n*n): F(4,3)'s 4x FLOP / 0.56x V-M-traffic
-                // saving wins on deep channels, F(2,3)'s smaller transform wins on shallow.
-                auto winoCostPerOut = [&](int n) {
-                    double i = (double) Cin, o = (double) Cout, e = n + 2; // n + k - 1, k = 3
-                    return (2.0 * i * e + i * o * e + (double) n * e * (2.0 * n + 2.0)) / (double) (n * n);
-                };
-                int U_ = (winoCostPerOut(4) < winoCostPerOut(2)) ? 4 : 2;
+                // the F-units round fp16 differently, so a timing-raced tile breaks bit-exactness (identical
+                // per run and across cache rebuilds). The cost model (winoCostPerOutput) and the rule live in
+                // core/wino_f63.h so the host gating test pins the rule's choices over a shape sweep:
+                // F(4,3)'s 4x FLOP / 0.56x V-M-traffic saving wins on deep channels, F(2,3)'s smaller
+                // transform wins on shallow, and F(6,3) is never an automatic candidate here (explicit
+                // WinogradUnit hint only) until device measurement establishes real thresholds.
+                int U_ = winoAutoUnit(Cin, Cout);
                 // RM (wino_gemm tiles/thread) and the GEMM body (LDS-staged vs the no-LDS register
                 // twin wino_gemm_reg) are bit-neutral - they only remap threads to outputs / change
                 // the operand staging while the per-output K order is unchanged, so any choice yields
@@ -946,7 +965,7 @@ namespace vknn {
                 bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && x.c >= 32 && Cout >= 64);
                 int wchoice = winoShape ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
                 winograd    = (wchoice > 0);
-                winoUnit    = ((wchoice & 3) == 2) ? 4 : 2;
+                winoUnit    = ((wchoice & 3) == 2) ? 4 : ((wchoice & 3) == 3) ? 6 : 2;
                 winoRm      = (wchoice & 4) != 0 ? 8 : 4;
                 winoAcc16   = (wchoice & 8) != 0 ? 1 : 0;
                 winoRegGemm = (wchoice & 16) != 0;
@@ -1212,8 +1231,7 @@ namespace vknn {
                         vk::computeBarrier(*env.ctx, cmd);
                         std::vector<VkBuffer> ob = {mbuf->handle(), bbuf->handle(), dst->handle()};
                         epi.append(ob, node, env, dst->handle());
-                        wOutPipe->dispatch(cmd, ob, &wFusedPC, sizeof(wFusedPC),
-                                           (uint32_t) groups(cBlocks(wFusedPC.Cout) * wInPC.nTH * wInPC.nTW * wFusedPC.N, 64));
+                        wOutPipe->dispatch(cmd, ob, &wFusedPC, sizeof(wFusedPC), (uint32_t) wOutGroups);
                         return;
                     }
                     // 2 stages: input transform -> V, then fused matmul + output transform -> dst.

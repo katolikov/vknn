@@ -27,7 +27,7 @@
 //   --precision P     low|normal|high (default low)
 //   --winograd MODE   auto|on|off  3x3 Winograd selection (default auto = best+fast per-shape pick)
 //   --tuning LEVEL    off|fast|thorough  kernel autotuning (default fast)
-//   --wino-unit N     0=auto (default), 4=force F(4,3) Winograd (research)
+//   --wino-unit N     0=auto (default), 4=force F(4,3), 6=force F(6,3) Winograd (research)
 //   --wino-variant N  0=tiled-GEMM (default), 1/2/3 = experimental fused variants
 //   --timing          print pack/submit/unpack + per-stage timing
 //   --debug-seg       trace per-segment execution
@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
         std::string tuningLevel = argval(argc, argv, "--tuning", "fast"); // none|fast|heavy
         cfg.tuning              = tuningFromStr(tuningLevel);
         // Advanced hints: force Winograd unit / variant for research.
-        int winogradUnit = atoi(argval(argc, argv, "--wino-unit", "0")); // 0=auto, 4=force F(4,3)
+        int winogradUnit = atoi(argval(argc, argv, "--wino-unit", "0")); // 0=auto, 4=force F(4,3), 6=force F(6,3)
         if (winogradUnit)
         {
             cfg.setHint(Hint::WinogradUnit, winogradUnit);
