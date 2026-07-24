@@ -1,0 +1,303 @@
+#version 450
+#define VKNN_NO_RTE 1 // matmul-family kernel: avoids the float-controls execution mode (miscompiled by some drivers)
+#include "precision.glsl"
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+// The fp16 scale buffers are declared in BOTH precision variants (the fp32 variant's precision.glsl
+// pulls in no 16-bit extensions of its own).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// Fused single-query decode attention, partial pass — int8 KV-cache twin of fused_attention_sg.comp
+// (Hint::KvCacheQuant; same contract, push constants, specialization scheme and partial layout —
+// see the subgroup kernel for the algorithm commentary). The op selects this kernel when the node
+// meets the subgroup requirements AND the segment allocated its past K/V sources as int8 payload +
+// fp16 per-(head, token)-row scales (src/core/kv_quant.h); the fp16 kernels stay byte-unchanged
+// otherwise.
+//
+// What differs from the subgroup kernel — the PAST-source reads only:
+//   * K/V past buffers hold int8 codes; the vec4 fast paths (KV4/VV4) rebind them as i8vec4 words
+//     at bindings 8..9 (4 codes per 4-byte word), the new-rows rebinds at 10..11 stay f16vec4.
+//   * One fp16 scale per (head, token) row at payloadRowElementBase / hd (bindings 12/13; the
+//     eligibility rule makes the division exact).
+//   * K-dot: the fp32 dot accumulates q . codes and the row scale multiplies the finished dot
+//     ONCE (dot * kScale[s] * scale). V-apply: the row's codes dequantize in place
+//     (score * (vScale[s] * v)).
+// Softmax, the subgroup reductions, the fold staging and all accumulation remain fp32.
+layout(constant_id = 0) const int G = 1;
+layout(constant_id = 1) const int HD = 64;
+layout(constant_id = 2) const int CHUNK = 256;
+layout(constant_id = 3) const int QT4 = 16;
+layout(constant_id = 4) const int SCORETOTAL = 256;
+layout(constant_id = 5) const int WGS = 256;
+layout(constant_id = 6) const int KV4 = 0;
+layout(constant_id = 7) const int VV4 = 0;
+layout(constant_id = 8) const int FOLDTOTAL = 256;
+layout(local_size_x_id = 5) in;
+// vec4-of-STORE view for the contiguous new-rows fast paths (8-byte words under fp16).
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+layout(std430, binding = 0) readonly buffer Q { STORE q[]; };
+layout(std430, binding = 1) readonly buffer K { int8_t k8[]; };
+layout(std430, binding = 2) readonly buffer V { int8_t v8[]; };
+layout(std430, binding = 3) writeonly buffer P { float part[]; };
+layout(std430, binding = 4) readonly buffer M { STORE msk[]; };
+// Geometry: g[0..rank) = KV-row dims (group axis collapsed to 1), then per-dim strides of
+// q, k, v, mask, the attention-row strides (row-major over the ORIGINAL dims), and the split-KV
+// new-source strides for k and v — 8 arrays (the last two are zeros when pastLen == C).
+layout(std430, binding = 5) readonly buffer GEO { int g[]; } geom;
+// Split-KV sources (foldFusedAttentionKvConcat): token s >= pastLen reads the current rows from
+// these instead of the cache — they stay fp16 (the current step's rows are not yet cached).
+layout(std430, binding = 6) readonly buffer KN2 { STORE kNew[]; };
+layout(std430, binding = 7) readonly buffer VN2 { STORE vNew[]; };
+// Bindings 8..11 rebind the buffers of bindings 1/2/6/7 as vec4 words; only the spec-selected
+// KV4/VV4 paths read them. The int8 payload's word is i8vec4 (4 codes, 4 bytes).
+layout(std430, binding = 8) readonly buffer KW { i8vec4 k48[]; };
+layout(std430, binding = 9) readonly buffer VW { i8vec4 v48[]; };
+layout(std430, binding = 10) readonly buffer KNW { STORE4 kNew4[]; };
+layout(std430, binding = 11) readonly buffer VNW { STORE4 vNew4[]; };
+// Per-(head, token)-row fp16 scales for the int8 past sources, [kvHeads, cacheSlots] token-minor:
+// index = payload row element base / hd (see src/core/kv_quant.h).
+layout(std430, binding = 12) readonly buffer KS { float16_t kScale[]; };
+layout(std430, binding = 13) readonly buffer VS { float16_t vScale[]; };
+layout(push_constant) uniform PC {
+  int rank, kvRows, C, hd;
+  int qK, kN, kK, vN, vK, mN, hasMask, chunks;
+  int groupStrideQ, groupStrideM, groupStrideRow;
+  int pastLen, kNewN, kNewK, vNewN, vNewK;
+  float scale, maskScale;
+} pc;
+
+shared vec4 sQ4[QT4];             // q rows, staged as vec4 (HD is a multiple of 4 here)
+shared float sScores[SCORETOTAL]; // raw scores, then softmax probabilities, per group member
+shared float sRed[WGS];           // cross-subgroup slab: G * gl_NumSubgroups reduction partials
+shared vec4 sFold[FOLDTOTAL];     // p.V fold staging, all group members at once (scalar path uses .x)
+
+void main() {
+  // One workgroup per (kvRow, chunk); the 1-D grid spills into y past the per-dim limit.
+  uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  int kvRow = int(wg) / pc.chunks;
+  int chunk = int(wg) % pc.chunks;
+  if (kvRow >= pc.kvRows) return; // uniform per workgroup: barriers below stay uniform
+
+  // KV-row bases and the flat attention-row base from the per-axis strides.
+  int qB = 0, kB = 0, vB = 0, mB = 0, rowBase = 0, kNB = 0, vNB = 0;
+  {
+    int rem = kvRow;
+    for (int i = pc.rank - 1; i >= 0; --i) {
+      int c = rem % geom.g[i];
+      rem /= geom.g[i];
+      qB += c * geom.g[pc.rank + i];
+      kB += c * geom.g[2 * pc.rank + i];
+      vB += c * geom.g[3 * pc.rank + i];
+      mB += c * geom.g[4 * pc.rank + i];
+      rowBase += c * geom.g[5 * pc.rank + i];
+      kNB += c * geom.g[6 * pc.rank + i];
+      vNB += c * geom.g[7 * pc.rank + i];
+    }
+  }
+
+  int tid = int(gl_LocalInvocationID.x);
+  int s0 = chunk * CHUNK;
+  int sLen = min(CHUNK, pc.C - s0);
+  const int HD4 = HD / 4;
+
+  for (int i = tid; i < G * HD4; i += WGS) {
+    int base = qB + (i / HD4) * pc.groupStrideQ + (i % HD4) * 4 * pc.qK;
+    sQ4[i] = vec4(float(q[base]), float(q[base + pc.qK]), float(q[base + 2 * pc.qK]), float(q[base + 3 * pc.qK]));
+  }
+  barrier();
+
+  // Stage 1: one lane per token; each K element read once closes all G dots. A past token
+  // accumulates q . codes and folds its row scale into the finished dot; a token past the split
+  // boundary reads the fp16 new-rows source exactly as the subgroup kernel does. Each lane tracks
+  // its own running score max, so the max reduction below never re-reads the score slab.
+  bool chunkAllPast = s0 + sLen <= pc.pastLen;
+  float laneMax[G];
+  for (int gi = 0; gi < G; ++gi) laneMax[gi] = -3.4e38;
+  for (int t = tid; t < sLen; t += WGS) {
+    int s = s0 + t;
+    float dotAcc[G];
+    for (int gi = 0; gi < G; ++gi) dotAcc[gi] = 0.0;
+    float tokScale = 1.0;
+    if (KV4 == 1) {
+      if (chunkAllPast || s < pc.pastLen) {
+        int base = kB + s * pc.kN;
+        tokScale = float(kScale[base / pc.hd]);
+        int base4 = base >> 2;
+        for (int kk = 0; kk < HD4; ++kk) {
+          vec4 kv = vec4(k48[base4 + kk]);
+          for (int gi = 0; gi < G; ++gi) dotAcc[gi] += dot(sQ4[gi * HD4 + kk], kv);
+        }
+      } else {
+        int base4 = (kNB + (s - pc.pastLen) * pc.kNewN) >> 2;
+        for (int kk = 0; kk < HD4; ++kk) {
+          vec4 kv = vec4(kNew4[base4 + kk]);
+          for (int gi = 0; gi < G; ++gi) dotAcc[gi] += dot(sQ4[gi * HD4 + kk], kv);
+        }
+      }
+    } else {
+      if (chunkAllPast || s < pc.pastLen) {
+        int base = kB + s * pc.kN;
+        tokScale = float(kScale[base / pc.hd]);
+        for (int kk = 0; kk < HD4; ++kk) {
+          int e = base + 4 * kk * pc.kK;
+          vec4 kv = vec4(float(k8[e]), float(k8[e + pc.kK]), float(k8[e + 2 * pc.kK]), float(k8[e + 3 * pc.kK]));
+          for (int gi = 0; gi < G; ++gi) dotAcc[gi] += dot(sQ4[gi * HD4 + kk], kv);
+        }
+      } else {
+        int base = kNB + (s - pc.pastLen) * pc.kNewN;
+        for (int kk = 0; kk < HD4; ++kk) {
+          int e = base + 4 * kk * pc.kNewK;
+          vec4 kv = vec4(float(kNew[e]), float(kNew[e + pc.kNewK]), float(kNew[e + 2 * pc.kNewK]), float(kNew[e + 3 * pc.kNewK]));
+          for (int gi = 0; gi < G; ++gi) dotAcc[gi] += dot(sQ4[gi * HD4 + kk], kv);
+        }
+      }
+    }
+    // A head-broadcast mask (group stride 0, the decode-mask shape) is read once per token.
+    float sharedMask = pc.hasMask != 0 && pc.groupStrideM == 0 ? float(msk[mB + s * pc.mN]) * pc.maskScale : 0.0;
+    for (int gi = 0; gi < G; ++gi) {
+      float x = dotAcc[gi] * tokScale * pc.scale + sharedMask;
+      if (pc.hasMask != 0 && pc.groupStrideM != 0) x += float(msk[mB + gi * pc.groupStrideM + s * pc.mN]) * pc.maskScale;
+      sScores[gi * CHUNK + t] = x;
+      laneMax[gi] = max(laneMax[gi], x);
+    }
+  }
+
+  // Chunk max per group member: subgroup reduce, one slab round-trip for all G members. Every lane
+  // folds the slab itself, so the result needs no broadcast pass.
+  for (int gi = 0; gi < G; ++gi) {
+    float sgMax = subgroupMax(laneMax[gi]);
+    if (gl_SubgroupInvocationID == 0u) sRed[uint(gi) * gl_NumSubgroups + gl_SubgroupID] = sgMax;
+  }
+  barrier(); // publishes the raw scores and the max slab
+  float rowMax[G];
+  for (int gi = 0; gi < G; ++gi) {
+    float m = -3.4e38;
+    for (uint sg = 0u; sg < gl_NumSubgroups; ++sg) m = max(m, sRed[uint(gi) * gl_NumSubgroups + sg]);
+    rowMax[gi] = m;
+  }
+  barrier(); // the sum pass below re-writes the slab
+
+  // exp in place, then the chunk weight sum through the same slab.
+  float laneSum[G];
+  for (int gi = 0; gi < G; ++gi) laneSum[gi] = 0.0;
+  for (int t = tid; t < sLen; t += WGS)
+    for (int gi = 0; gi < G; ++gi) {
+      float p = exp(sScores[gi * CHUNK + t] - rowMax[gi]);
+      sScores[gi * CHUNK + t] = p;
+      laneSum[gi] += p;
+    }
+  for (int gi = 0; gi < G; ++gi) {
+    float sgSum = subgroupAdd(laneSum[gi]);
+    if (gl_SubgroupInvocationID == 0u) sRed[uint(gi) * gl_NumSubgroups + gl_SubgroupID] = sgSum;
+  }
+  barrier(); // publishes the probabilities and the sum slab
+  float rowSum[G];
+  for (int gi = 0; gi < G; ++gi) {
+    float l = 0.0;
+    for (uint sg = 0u; sg < gl_NumSubgroups; ++sg) l += sRed[uint(gi) * gl_NumSubgroups + sg];
+    rowSum[gi] = l;
+  }
+
+  // p.V: every V element is read ONCE and feeds all G group accumulators; a past row's codes
+  // dequantize in place against its scale. Lane tid owns output element (vec4 word or scalar) n
+  // and token slice prt; the fold stages all lanes' partials in sFold and sums them with one lane
+  // per output element.
+  if (VV4 == 1) {
+    int n = tid % HD4;
+    int prt = tid / HD4;
+    int parts = WGS / HD4;
+    vec4 acc[G];
+    for (int gi = 0; gi < G; ++gi) acc[gi] = vec4(0.0);
+    if (prt < parts) {
+      if (chunkAllPast) {
+        for (int t = prt; t < sLen; t += parts) {
+          int rowBaseV = vB + (s0 + t) * pc.vK;
+          vec4 vv = float(vScale[rowBaseV / pc.hd]) * vec4(v48[(rowBaseV >> 2) + n]);
+          for (int gi = 0; gi < G; ++gi) acc[gi] += sScores[gi * CHUNK + t] * vv;
+        }
+      } else {
+        for (int t = prt; t < sLen; t += parts) {
+          int s = s0 + t;
+          vec4 vv;
+          if (s < pc.pastLen) {
+            int rowBaseV = vB + s * pc.vK;
+            vv = float(vScale[rowBaseV / pc.hd]) * vec4(v48[(rowBaseV >> 2) + n]);
+          } else {
+            vv = vec4(vNew4[((vNB + (s - pc.pastLen) * pc.vNewK) >> 2) + n]);
+          }
+          for (int gi = 0; gi < G; ++gi) acc[gi] += sScores[gi * CHUNK + t] * vv;
+        }
+      }
+    }
+    for (int gi = 0; gi < G; ++gi) sFold[gi * WGS + tid] = acc[gi];
+    barrier(); // the whole fold staging publishes at once
+    if (tid == 0) {
+      for (int gi = 0; gi < G; ++gi) {
+        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+        part[pBase] = rowMax[gi];
+        part[pBase + 1] = rowSum[gi];
+      }
+    }
+    for (int i = tid; i < G * HD4; i += WGS) {
+      int gi = i / HD4;
+      int nw = i % HD4;
+      vec4 outAcc = vec4(0.0);
+      for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD4 + nw];
+      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+      part[pBase + 2 + 4 * nw] = outAcc.x;
+      part[pBase + 2 + 4 * nw + 1] = outAcc.y;
+      part[pBase + 2 + 4 * nw + 2] = outAcc.z;
+      part[pBase + 2 + 4 * nw + 3] = outAcc.w;
+    }
+  } else {
+    int n = tid % HD;
+    int prt = tid / HD;
+    int parts = WGS / HD;
+    float acc[G];
+    for (int gi = 0; gi < G; ++gi) acc[gi] = 0.0;
+    if (prt < parts) {
+      if (chunkAllPast) {
+        for (int t = prt; t < sLen; t += parts) {
+          int rowBaseV = vB + (s0 + t) * pc.vK;
+          float vv = float(vScale[rowBaseV / pc.hd]) * float(v8[rowBaseV + n * pc.vN]);
+          for (int gi = 0; gi < G; ++gi) acc[gi] += sScores[gi * CHUNK + t] * vv;
+        }
+      } else {
+        for (int t = prt; t < sLen; t += parts) {
+          int s = s0 + t;
+          float vv;
+          if (s < pc.pastLen) {
+            int rowBaseV = vB + s * pc.vK;
+            vv = float(vScale[rowBaseV / pc.hd]) * float(v8[rowBaseV + n * pc.vN]);
+          } else {
+            vv = float(vNew[vNB + (s - pc.pastLen) * pc.vNewK + n * pc.vNewN]);
+          }
+          for (int gi = 0; gi < G; ++gi) acc[gi] += sScores[gi * CHUNK + t] * vv;
+        }
+      }
+    }
+    for (int gi = 0; gi < G; ++gi) sFold[gi * WGS + tid].x = acc[gi];
+    barrier(); // the whole fold staging publishes at once
+    if (tid == 0) {
+      for (int gi = 0; gi < G; ++gi) {
+        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+        part[pBase] = rowMax[gi];
+        part[pBase + 1] = rowSum[gi];
+      }
+    }
+    for (int i = tid; i < G * HD; i += WGS) {
+      int gi = i / HD;
+      int n = i % HD;
+      float outAcc = 0.0;
+      for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD + n].x;
+      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+      part[pBase + 2 + n] = outAcc;
+    }
+  }
+}

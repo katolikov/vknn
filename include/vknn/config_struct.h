@@ -195,6 +195,13 @@ namespace vknn {
         bool kvConcatFold() const noexcept {
             return hint(Hint::KvConcatFold, (int) Mode::On) != (int) Mode::Off;
         }
+        /// True when the int8 KV-cache scheme is requested (Hint::KvCacheQuant On). Auto — the
+        /// unset default — currently equals Off: the scheme changes numerics, so it stays an
+        /// explicit opt-in until a device-verified default flip. Controlled through the hint
+        /// mechanism.
+        bool kvCacheQuant() const noexcept {
+            return hint(Hint::KvCacheQuant, (int) Mode::Auto) == (int) Mode::On;
+        }
 
         static Config fromJsonFile(const std::string &path);
         static Config fromJsonString(const std::string &json);

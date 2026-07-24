@@ -140,6 +140,7 @@ namespace vknn {
         k.directConv3x3   = cfg.hint(Hint::DirectConv3x3, 0);
         k.splitKConv      = cfg.hint(Hint::SplitKConv, (int) Mode::Auto);
         k.coopmatGemm     = cfg.hint(Hint::CoopmatGemm, (int) Mode::Auto);
+        k.kvCacheQuant    = cfg.hint(Hint::KvCacheQuant, (int) Mode::Auto);
         return k;
     }
 

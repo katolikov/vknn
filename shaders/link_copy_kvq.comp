@@ -1,0 +1,70 @@
+#version 450
+#define VKNN_NO_RTE 1 // scale narrowing uses the explicit integer-math RTE (vknnRte16); no float-controls mode
+// Resident-link KV fold, quantizing variant (Hint::KvCacheQuant). Replaces the bit copy of
+// link_copy_fp16.comp for an int8-cached destination: each folded token row (headDim fp16
+// elements of the linked present output) is reduced to its absmax, encoded as symmetric int8
+// against scale = absmax / 127 rounded to fp16, and written into the int8 cache payload plus the
+// per-(head, token) fp16 scale buffer at destElem / headDim. The codec matches the host reference
+// (src/core/kv_quant.h) bit-for-bit: RTE fp16 scale (vknnRte16 integer math — some drivers round
+// float16_t() toward zero), roundEven codes clamped to [-127, 127], zero codes for a zero scale.
+//
+// The ranges SSBO layout and per-set addressing are exactly link_copy_core.glsl's; every range of
+// a kvq link is validated host-side to be whole token rows (source, dest and count all headDim
+// multiples), and both sides are flat (the kvq gate refuses NC4HW4 caches), so no deviceIndex
+// mapping applies. A fixed grid strides workgroups over ranges; a zero header (no ranges yet)
+// makes the dispatch a no-op.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#include "store16.glsl"
+#define KVQ_WG 64
+layout(local_size_x = KVQ_WG) in;
+layout(std430, binding = 0) readonly buffer SRC { float16_t sourceData[]; };
+layout(std430, binding = 1) writeonly buffer DST { int8_t payload[]; };
+// rangeWords per set: {rangeCount, totalElems}, then 3 uints per range {sourceOffset, destOffset,
+// count} in canonical elements (see link_copy_core.glsl).
+layout(std430, binding = 2) readonly buffer RANGES { uint rangeWords[]; };
+layout(std430, binding = 3) writeonly buffer SCALES { float16_t scales[]; };
+layout(push_constant) uniform PC {
+  int headDim;
+  uint rangeWordBase; // word offset of this dispatch's range set
+} pc;
+
+shared float sAbs[KVQ_WG];
+
+void main() {
+  uint rangeCount = rangeWords[pc.rangeWordBase];
+  uint spansAt = pc.rangeWordBase + 2u;
+  uint tid = gl_LocalInvocationID.x;
+  uint headDim = uint(pc.headDim);
+  // One workgroup per range (strided). rangeCount and the per-range words are uniform across the
+  // workgroup, so the barriers below sit in uniform control flow.
+  for (uint r = gl_WorkGroupID.x; r < rangeCount; r += gl_NumWorkGroups.x) {
+    uint srcBase = rangeWords[spansAt + r * 3u + 0u];
+    uint dstBase = rangeWords[spansAt + r * 3u + 1u];
+    uint count = rangeWords[spansAt + r * 3u + 2u];
+    for (uint row = 0u; row * headDim < count; ++row) {
+      uint srcRow = srcBase + row * headDim;
+      uint dstRow = dstBase + row * headDim;
+      float laneAbs = 0.0;
+      for (uint i = tid; i < headDim; i += uint(KVQ_WG))
+        laneAbs = max(laneAbs, abs(float(sourceData[srcRow + i])));
+      sAbs[tid] = laneAbs;
+      barrier();
+      for (uint step = uint(KVQ_WG) / 2u; step > 0u; step >>= 1) {
+        if (tid < step) sAbs[tid] = max(sAbs[tid], sAbs[tid + step]);
+        barrier();
+      }
+      // The STORED fp16 scale is the quantization divisor: the attention kernels multiply the
+      // stored value back, so dividing by the unrounded quotient would bake a per-row bias.
+      float16_t scale16 = vknnRte16(sAbs[0] / 127.0);
+      float scale = float(scale16);
+      barrier(); // sAbs is reused by the next row
+      for (uint i = tid; i < headDim; i += uint(KVQ_WG)) {
+        float code = scale > 0.0 ? roundEven(float(sourceData[srcRow + i]) / scale) : 0.0;
+        payload[dstRow + i] = int8_t(int(clamp(code, -127.0, 127.0)));
+      }
+      if (tid == 0u) scales[dstRow / headDim] = scale16;
+    }
+  }
+}

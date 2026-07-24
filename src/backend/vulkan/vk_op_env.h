@@ -29,6 +29,11 @@ namespace vknn {
         const Graph                          *graph   = nullptr;
         const Config                         *config  = nullptr;
         std::function<vk::Buffer *(TensorId)> devBuf; // resolves a tensor id to its (possibly pool-aliased) activation buffer
+        // Resolves a tensor id to its int8 KV-cache SCALE buffer (Hint::KvCacheQuant): non-null
+        // exactly for the cache tensors the owning segment allocated as int8 payload + fp16 scales
+        // (src/core/kv_quant.h), so FusedAttention derives its kernel variant from the segment's
+        // allocation and the two can never disagree. Null on a segment without the scheme.
+        std::function<vk::Buffer *(TensorId)> kvqScale;
         // Drops an initializer's HOST bytes the moment its device copy exists, so a large-weight model
         // never holds the host and device copy of the same weight at once (the load-time peak would
         // otherwise be twice the weight set, which exhausts phone RAM on a multi-GB model). Null when

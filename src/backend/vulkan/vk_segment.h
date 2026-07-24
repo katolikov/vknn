@@ -128,11 +128,34 @@ namespace vknn {
             TensorId                    src = kNoTensor, dst = kNoTensor;
             std::shared_ptr<vk::Buffer> rangesBuf;    // header {count,total} + 3 uints per range
             uint32_t                    capacity = 0; // ranges rangesBuf can hold
+            bool                        kvq = false;  // dst is an int8 KV cache: the fold quantizes (link_copy_kvq)
         };
         std::vector<ResidentLink>            residentLinks_;
         std::set<TensorId>                   linkedInputs_, linkedOutputs_;
         bool                                 linksChanged_ = false; // link set / ranges buffer identity changed -> re-record
         std::unique_ptr<vk::ComputePipeline> linkPipeFp16_, linkPipeFp32_;
+        // ---- int8 KV cache (Hint::KvCacheQuant; scheme + shared eligibility rule in core/kv_quant.h) ----
+        // Cache tensors this segment stores as int8 payload (in buffers_, 1 byte/elem, same
+        // [1, kvHeads, cacheSlots, headDim] geometry) plus an fp16 per-(head, token)-row scale side
+        // buffer, [kvHeads, cacheSlots] token-minor. Filled once in the constructor from
+        // kvQuantCacheTensors(); FusedAttention derives its kernel variant through env_.kvqScale,
+        // so payload buffers and kernels can never disagree. Empty with the hint Off — every
+        // allocation and recording is then byte-identical to the fp16 path.
+        struct KvqCache {
+            int64_t                     headDim = 0;
+            int64_t                     rows    = 0; // kvHeads * cacheSlots == payload elems / headDim
+            std::shared_ptr<vk::Buffer> scales;      // fp16, one per row
+        };
+        std::map<TensorId, KvqCache>         kvqCaches_;
+        std::unique_ptr<vk::ComputePipeline> linkPipeKvq_;
+        // Fixed fold grid: one workgroup per fold range (strided). The decode fold carries one
+        // range per KV head, so this covers a 32-head cache in one wave; extra ranges stride.
+        static constexpr uint32_t kKvqLinkCopyGroups = 32;
+        // Download inverse of the seed quantize: payload + scales -> rt's fp32 host mirror.
+        void dequantKvqToHost(TensorId id, RtTensor &rt);
+        // The prefill re-seed upload: quantize rt's fp32 host mirror (rounded through fp16 exactly
+        // like the pack it replaces) into the payload + scale buffers.
+        void seedKvqFromHost(TensorId id, const RtTensor &rt);
         static constexpr uint32_t            kLinkRangeHeaderBytes     = 8;  // {rangeCount, totalElems}
         static constexpr uint32_t            kLinkInitialRangeCapacity = 16; // ranges per set; grows on demand
         static constexpr uint32_t            kLinkCopyGroups           = 4;  // fixed grid; the shader strides over totalElems
