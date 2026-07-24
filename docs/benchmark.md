@@ -289,6 +289,36 @@ model at every tuning level):
   class) this drops layout converts 44 -> 14 and the graph 16.5 -> 15.1 ms (-8.5%) at `none`,
   byte-identical; the CNN suite is unaffected (its layouts were already optimal).
 
+### Depthwise + pointwise LDS fusion: byte-exact but a runtime regression (negative result)
+
+Fusing a depthwise conv and its 1x1 projection into one kernel keeps the expanded intermediate in
+LDS, so the block's largest activation never reaches global memory and one dispatch plus one
+barrier disappear. On this hardware that trade loses, and by a wide margin.
+
+Measured at `--precision low` against the unfused pair, cooled interleaved min-of-5, two devices,
+under both the pinned gate config and the shipping defaults:
+
+| Model | fused sites | device A | device B |
+|---|---|---|---|
+| MobileNetV2 | 17 | **+90%** | **+30%** |
+| MnasNet1.0 | 13 | **+145%** | **+68%** |
+| ShuffleNetV2 x1.0 | 19 | **+15%** | **+4%** |
+| EfficientNet-B0 (no eligible pairs) | 0 | +3% | -2% (noise floor) |
+
+Accuracy is unaffected: cosine, PSNR, and SNR are identical to the unfused pair on every model,
+because the fused projection reproduces the pointwise split-K summation order exactly (see
+`ops/pw_splitk_rule.h`) and the output is byte-identical.
+
+The cost is parallelism, not memory traffic. The projection stage gives each work item one
+(channel-block, tile pixel) pair, so a 64-thread workgroup runs only `Coutb * 4` items — 24 of 64
+for a 24-channel project — and each item re-reads the whole weight row. The standalone
+`conv1x1` kernel register-tiles WTILE pixels by OCB channel-blocks, reusing every weight `vec4`
+across WTILE pixels, and on exactly these deep small-plane shapes it also takes the split-K path
+for extra parallelism the fused kernel forfeits. Per-op, the first MobileNetV2 pair costs 0.477 ms
+fused against 0.052 + 0.045 ms unfused. The fusion therefore stays opt-in (`-O2` /
+`--fuse-dwpw`); shipping it by default would roughly double these models' runtime. A phase B that
+register-tiles like `conv1x1` is the prerequisite for revisiting it.
+
 ## YoNoSplat encoder (965M-param transformer)
 
 The feed-forward 3D-Gaussian-Splatting encoder (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian /
