@@ -1,0 +1,134 @@
+#version 450
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+#include "common.glsl"
+// vec4-load twin of matmul_tiled_fast.comp at the same {128,128,16} geometry: the cooperative LDS
+// panel loads fetch f16vec4 (four contiguous fp16, one 64-bit load) from the flat row-major A
+// [M][K] and B [K][bNp] buffers instead of four scalar 16-bit loads. Everything after the loads is
+// the matmul_tiled_fast body — same LDS layout, same ascending-k fp32 accumulation, same TO_STORE
+// rounding — so the output is byte-identical to matmul_tiled_fast_fp16. matmul.cpp routes the
+// default tile here when the alignment contract holds (matmulVec4Route, core/matmul_tile.h);
+// vknn_matmul_vec4_bench times the pair.
+//
+// Alignment contract (enforced by the host routing rule; there is no scalar tail path):
+//   K % 4 == 0, bNp % 4 == 0, and every batch base offset a multiple of 4 elements (for rank > 2:
+//   A/B batch strides divisible by 4). Each vec4 then sits in one row of its operand at a
+//   4-aligned element index, so the in-bounds guard per vec4 is exactly the scalar kernel's guard
+//   on its first element. Out-of-range loads (an M/K/N tile tail) fill the panel with zeros, as in
+//   the scalar kernel.
+//
+// pc.bNp is B's PHYSICAL row stride: N for a packed B (bNp == N requires N % 4 == 0), or the
+// zero-padded Np = roundUpVec4(N) of a repacked weight (matmul.cpp's "#wv4" upload) when
+// N % 4 != 0. A vec4 at a 4-aligned gn < N stays inside row gk; its lanes past column N read the
+// pad zeros — the same value the scalar kernel's gn-guard yields — so the LDS panels match the
+// scalar kernel's element-for-element. The scalar kernels ignore bNp and keep reading packed B.
+
+#define TM 128
+#define TN 128
+#define TK 16
+#define TILE 16        // threads per dim (16x16 = 256)
+#define RM (TM / TILE) // 8 output rows per thread
+#define RN (TN / TILE) // 8 output cols per thread
+
+layout(local_size_x = TILE, local_size_y = TILE) in;
+layout(std430, binding = 0) readonly buffer A { f16vec4 a4[]; };
+layout(std430, binding = 1) readonly buffer B { f16vec4 b4[]; };
+layout(std430, binding = 2) writeonly buffer D { float16_t d[]; };
+layout(std430, binding = 3) readonly buffer G { int g[]; } geom;
+layout(push_constant) uniform PC {
+  int rank, total, M, N, K, aK, bK, bNp;
+} pc;
+
+// LDS panels identical to matmul_tiled_fast (fp16 elements, A transposed k-major); only the fill
+// loops differ. Keeping the layout fixes the inner loop's LDS reads bit-for-bit.
+shared float16_t As[TK][TM];
+shared float16_t Bs[TK][TN];
+
+void main() {
+  int M = pc.M, N = pc.N, K = pc.K, bNp = pc.bNp;
+  // Batch base offsets: decompose the workgroup's batch index over the batch dims g[0..rank-3).
+  int batch = int(gl_WorkGroupID.z);
+  int aBase = 0, bBase = 0, rem = batch;
+  for (int k = pc.rank - 3; k >= 0; --k) {
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    aBase += c * geom.g[pc.rank + k];
+    bBase += c * geom.g[2 * pc.rank + k];
+  }
+  int dBase = batch * M * N;
+
+  int tileM = int(gl_WorkGroupID.y) * TM;
+  int tileN = int(gl_WorkGroupID.x) * TN;
+  int tx  = int(gl_LocalInvocationID.x);
+  int ty  = int(gl_LocalInvocationID.y);
+  int tid = ty * TILE + tx;
+
+  float acc[RM][RN];
+  for (int i = 0; i < RM; ++i)
+    for (int j = 0; j < RN; ++j)
+      acc[i][j] = 0.0;
+
+  for (int k0 = 0; k0 < K; k0 += TK) {
+    // Cooperative panel loads, one f16vec4 per thread per iteration (TM*TK/4 = 512 vec4s over 256
+    // threads = 2 iterations; likewise for B). The element layout matches the scalar kernel:
+    //   A panel: idx = m*TK + k  -> a vec4 is one m row, k .. k+3 (TK % 4 == 0 keeps it in-row)
+    //   B panel: idx = k*TN + n  -> a vec4 is one k row, n .. n+3 (TN % 4 == 0 keeps it in-row)
+    for (int t = 0; t < (TM * TK) / (TILE * TILE * 4); ++t) {
+      int v = tid + t * (TILE * TILE); // vec4 index 0 .. TM*TK/4-1
+      int m = v / (TK / 4), k = (v % (TK / 4)) * 4;
+      int gm = tileM + m, gk = k0 + k;
+      // gk is 4-aligned and K % 4 == 0, so gk < K bounds the whole vec4.
+      f16vec4 av = (gm < M && gk < K) ? a4[(aBase + gm * K + gk) >> 2] : f16vec4(0.0);
+      As[k + 0][m] = av.x;
+      As[k + 1][m] = av.y;
+      As[k + 2][m] = av.z;
+      As[k + 3][m] = av.w;
+    }
+    for (int t = 0; t < (TK * TN) / (TILE * TILE * 4); ++t) {
+      int v = tid + t * (TILE * TILE); // vec4 index 0 .. TK*TN/4-1
+      int k = v / (TN / 4), n = (v % (TN / 4)) * 4;
+      int gk = k0 + k, gn = tileN + n;
+      // gn is 4-aligned and gn < N, with N <= bNp and bNp % 4 == 0, so the vec4 stays inside
+      // row gk; lanes past column N (a padded B) read zeros, matching the scalar kernel's guard.
+      f16vec4 bv = (gk < K && gn < N) ? b4[(bBase + gk * bNp + gn) >> 2] : f16vec4(0.0);
+      Bs[k][n + 0] = bv.x;
+      Bs[k][n + 1] = bv.y;
+      Bs[k][n + 2] = bv.z;
+      Bs[k][n + 3] = bv.w;
+    }
+    barrier();
+    for (int kk = 0; kk < TK; ++kk) {
+      float av[RM], bv[RN];
+      for (int i = 0; i < RM; ++i)
+        av[i] = float(As[kk][ty * RM + i]);
+      for (int j = 0; j < RN; ++j)
+        bv[j] = float(Bs[kk][tx * RN + j]);
+      for (int i = 0; i < RM; ++i)
+        for (int j = 0; j < RN; ++j)
+          acc[i][j] += av[i] * bv[j];
+    }
+    barrier();
+  }
+
+  for (int i = 0; i < RM; ++i) {
+    int m = tileM + ty * RM + i;
+    if (m >= M) continue;
+    for (int j = 0; j < RN; ++j) {
+      int n = tileN + tx * RN + j;
+      if (n >= N) continue;
+      int idx = dBase + m * N + n;
+#ifdef PW_EPI
+      d[idx] = TO_STORE(pw_apply(acc[i][j], idx));
+#else
+      d[idx] = TO_STORE(acc[i][j]);
+#endif
+    }
+  }
+}

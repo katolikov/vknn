@@ -1,9 +1,12 @@
 // Shared matmul_tiled kernel-selection facts, consumed by the Vulkan MatMul op (kernel choice +
-// specialization constants + tune-table decode) and the pointwise-fusion pass (epilogue attach
-// refusal for tiled-shaped MatMuls). One definition keeps the op and the importer predicate in
-// lock-step.
+// specialization constants + tune-table decode), the pointwise-fusion pass (epilogue attach
+// refusal for tiled-shaped MatMuls), and the vec4-load twin routing (matmulVec4Route + the
+// zero-padded weight repack). One definition keeps the op, the importer predicate, and the host
+// tests in lock-step.
 #pragma once
+#include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace vknn {
 
@@ -74,5 +77,98 @@ namespace vknn {
         {128, 128, 8},  // half the LDS of the default -> potentially two concurrent workgroups/CU
     };
     constexpr int kMatMulTileCount = (int) (sizeof(kMatMulTiles) / sizeof(kMatMulTiles[0]));
+
+    /// Element alignment of the vec4-load GEMM twins (shaders/matmul_tiled_fast_v4*_fp16.comp).
+    /// Their cooperative panel loads fetch f16vec4 — four contiguous fp16 as one 64-bit load — so
+    /// every global element index they form must be a multiple of four: K % kVec4Align == 0 keeps
+    /// each A vec4 inside one A row, a kVec4Align-multiple physical B row stride keeps each B vec4
+    /// inside one B row, and kVec4Align-multiple batch strides keep both properties across the
+    /// batch decode.
+    constexpr int64_t kVec4Align = 4;
+
+    /// n rounded up to the next kVec4Align multiple: the physical row stride (bNp) a zero-padded B
+    /// repack presents to the vec4 kernels.
+    constexpr int64_t roundUpVec4(int64_t n) {
+        return (n + kVec4Align - 1) / kVec4Align * kVec4Align;
+    }
+
+    /// matmulVec4Route's verdict. bNp is the physical B row stride the v4 kernels consume
+    /// (MatMulPC::bNp): N for a naturally aligned packed B, roundUpVec4(N) for a repacked weight.
+    struct MatMulVec4Route {
+        bool    eligible = false; ///< the default {128,128,16} tile dispatches the v4 kernel
+        bool    padB     = false; ///< B repacks to a zero-padded copy with row stride bNp ("#wv4")
+        int64_t bNp      = 0;     ///< physical B row stride for the v4 kernel (== N unless padB)
+    };
+
+    /// Deterministic routing rule for the vec4-load GEMM twins — a pure shape/layout function so
+    /// the Vulkan MatMul op and the host tests share one definition. The twins are byte-identical
+    /// to the scalar fast kernels (same LDS layout, same ascending-k fp32 accumulation, same
+    /// rounding); this rule trades global-load width only, never bits, so it needs no race and no
+    /// accuracy gate. It holds when every global element index the kernel forms is 4-aligned:
+    ///   - useFp16: the twins are hand-written fp16 kernels; a precision-high (fp32) node keeps
+    ///     the scalar kernels.
+    ///   - K % kVec4Align == 0: bounds each A vec4 inside its row (A is the runtime activation and
+    ///     K a model dim, so the rule gates on it — no A repack, no tail path).
+    ///   - every A/B batch stride a kVec4Align multiple: keeps the per-batch base offsets aligned.
+    ///   - N % kVec4Align == 0, or B is a constant initializer whose rows can repack to a
+    ///     zero-padded bNp = roundUpVec4(N). The repack is restricted to an all-zero B batch
+    ///     stride (the broadcast Linear-weight case): a nonzero batch stride would need rescaling
+    ///     to the padded layout in the geometry SSBO. A runtime-activation B cannot repack, so it
+    ///     routes only when N is naturally aligned.
+    /// `bPayloadResident` reports whether the initializer's host payload is still readable: a cold
+    /// start computes the repack from it, and gating here (rather than on weight-cache warmth)
+    /// keeps the routing identical between cold and warm starts.
+    inline MatMulVec4Route matmulVec4Route(bool useFp16, int64_t N, int64_t K, const std::vector<int32_t> &aBatchStride, const std::vector<int32_t> &bBatchStride, bool bIsInitializer, bool bPayloadResident) {
+        MatMulVec4Route route;
+        route.bNp       = N;
+        auto allAligned = [](const std::vector<int32_t> &strides) {
+            for (int32_t stride: strides)
+            {
+                if (stride % kVec4Align != 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!useFp16 || N <= 0 || K <= 0 || K % kVec4Align != 0 || !allAligned(aBatchStride))
+        {
+            return route;
+        }
+        if (N % kVec4Align == 0)
+        {
+            route.eligible = allAligned(bBatchStride);
+            return route;
+        }
+        if (!bIsInitializer || !bPayloadResident)
+        {
+            return route;
+        }
+        for (int32_t stride: bBatchStride)
+        {
+            if (stride != 0)
+            {
+                return route;
+            }
+        }
+        route.eligible = true;
+        route.padB     = true;
+        route.bNp      = roundUpVec4(N);
+        return route;
+    }
+
+    /// Zero-padded row repack for the v4 route's "#wv4" weight upload: `rows` rows of `n` source
+    /// elements each copy into rows of `np` elements (np >= n, a kVec4Align multiple from
+    /// roundUpVec4); the tail np - n elements of every row are zero. The pad zeros contribute
+    /// nothing to the accumulator and mirror the value the scalar kernel's column guard yields, so
+    /// the repacked operand is output-byte-neutral. `src` holds at least rows * n elements.
+    inline std::vector<float> padMatMulRowsVec4(const std::vector<float> &src, int64_t rows, int64_t n, int64_t np) {
+        std::vector<float> padded((size_t) (rows * np), 0.0f);
+        for (int64_t row = 0; row < rows; ++row)
+        {
+            std::copy_n(src.data() + row * n, (size_t) n, padded.data() + row * np);
+        }
+        return padded;
+    }
 
 } // namespace vknn

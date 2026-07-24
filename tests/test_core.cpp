@@ -330,6 +330,92 @@ TEST(MatMulTile, DefaultTileRouting) {
     EXPECT_FALSE(isDefaultMatMulTile({128, 64, 16}));
 }
 
+// matmulVec4Route: the deterministic alignment rule that routes the default tile to the
+// f16vec4-load twin of matmul_tiled_fast. The twin is byte-identical to the scalar kernel, so the
+// rule is pure shape/layout: fp16 compute, K % kVec4Align == 0, 4-aligned batch strides, and a
+// 4-aligned physical B row stride (N itself, or the zero-padded Np of a repacked weight).
+TEST(MatMulTile, Vec4RouteAlignment) {
+    const std::vector<int32_t> noBatch;
+    // Naturally aligned N and K: eligible, no repack, bNp == N.
+    MatMulVec4Route route = matmulVec4Route(true, 1152, 1152, noBatch, noBatch, false, false);
+    EXPECT_TRUE(route.eligible);
+    EXPECT_FALSE(route.padB);
+    EXPECT_EQ(route.bNp, 1152);
+
+    // Precision-high (fp32) keeps the scalar kernels regardless of alignment.
+    EXPECT_FALSE(matmulVec4Route(false, 1152, 1152, noBatch, noBatch, true, true).eligible);
+
+    // K % 4 != 0 refuses (A has no repack and no tail path: K is the gate).
+    EXPECT_FALSE(matmulVec4Route(true, 1152, 1150, noBatch, noBatch, true, true).eligible);
+
+    // Batched shapes: 4-aligned batch strides on both operands pass; a misaligned stride on
+    // either operand refuses.
+    const std::vector<int32_t> aligned {512 * 1152, 0};
+    const std::vector<int32_t> misaligned {512 * 1152, 6};
+    EXPECT_TRUE(matmulVec4Route(true, 1152, 1152, aligned, aligned, false, false).eligible);
+    EXPECT_FALSE(matmulVec4Route(true, 1152, 1152, misaligned, aligned, false, false).eligible);
+    EXPECT_FALSE(matmulVec4Route(true, 1152, 1152, aligned, misaligned, false, false).eligible);
+
+    // Degenerate dims never route.
+    EXPECT_FALSE(matmulVec4Route(true, 0, 1152, noBatch, noBatch, true, true).eligible);
+    EXPECT_FALSE(matmulVec4Route(true, 1152, 0, noBatch, noBatch, true, true).eligible);
+}
+
+// The N-padding decision: an unaligned N routes only when B is a constant initializer whose rows
+// can repack to a zero-padded bNp = roundUpVec4(N) — a runtime activation cannot repack, a
+// released host payload cannot be read on a cold start, and a nonzero B batch stride would need
+// rescaling to the padded layout in the geometry SSBO.
+TEST(MatMulTile, Vec4RoutePadDecision) {
+    const std::vector<int32_t> noBatch;
+    // Initializer with a resident payload: repack to the rounded-up row stride.
+    MatMulVec4Route route = matmulVec4Route(true, 1150, 1152, noBatch, noBatch, true, true);
+    EXPECT_TRUE(route.eligible);
+    EXPECT_TRUE(route.padB);
+    EXPECT_EQ(route.bNp, 1152);
+    EXPECT_EQ(route.bNp, roundUpVec4(1150));
+
+    // Runtime activation: no repack is possible, so an unaligned N keeps the scalar kernel.
+    EXPECT_FALSE(matmulVec4Route(true, 1150, 1152, noBatch, noBatch, false, true).eligible);
+    // Initializer whose host payload was already released: the repack cannot be computed.
+    EXPECT_FALSE(matmulVec4Route(true, 1150, 1152, noBatch, noBatch, true, false).eligible);
+    // A nonzero B batch stride (a genuinely batched initializer) refuses the repack; only the
+    // broadcast (all-zero-stride) weight case pads.
+    const std::vector<int32_t> zero {0};
+    const std::vector<int32_t> batched {1152 * 1150};
+    EXPECT_TRUE(matmulVec4Route(true, 1150, 1152, zero, zero, true, true).eligible);
+    EXPECT_FALSE(matmulVec4Route(true, 1150, 1152, zero, batched, true, true).eligible);
+
+    // roundUpVec4 is identity on aligned values and rounds up otherwise.
+    EXPECT_EQ(roundUpVec4(8), 8);
+    EXPECT_EQ(roundUpVec4(9), 12);
+    EXPECT_EQ(roundUpVec4(11), 12);
+    EXPECT_EQ(roundUpVec4(12), 12);
+}
+
+// padMatMulRowsVec4: the "#wv4" repack helper. Every source row lands at its np-strided offset
+// with the original n values; the np - n tail of every row is zero.
+TEST(MatMulTile, Vec4PadRows) {
+    // 3 rows of 3 elements padded to a row stride of 4.
+    const std::vector<float> src {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    std::vector<float>       padded = padMatMulRowsVec4(src, 3, 3, 4);
+    ASSERT_EQ(padded.size(), 12u);
+    const std::vector<float> expected {1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0};
+    EXPECT_EQ(padded, expected);
+
+    // An already-aligned width copies through unchanged (np == n).
+    EXPECT_EQ(padMatMulRowsVec4(src, 3, 3, 3), src);
+
+    // A wider pad zero-fills every tail element, not just one.
+    padded = padMatMulRowsVec4({1, 2}, 1, 2, 8);
+    ASSERT_EQ(padded.size(), 8u);
+    EXPECT_EQ(padded[0], 1.f);
+    EXPECT_EQ(padded[1], 2.f);
+    for (size_t i = 2; i < padded.size(); ++i)
+    {
+        EXPECT_EQ(padded[i], 0.f) << "i=" << i;
+    }
+}
+
 // Ergonomic Tensor API: construct, shape/size accessors, argmax.
 TEST(Api, TensorHelpers) {
     Tensor t({1.f, 5.f, 2.f, 9.f, 3.f, 0.f}, {1, 6});
