@@ -17,10 +17,11 @@
 // matmul_tiled_fast_bias_fp16. matmul.cpp routes the default tile here when the alignment contract
 // holds (matmulVec4Route, core/matmul_tile.h).
 //
-// Alignment contract and the bNp (physical B row stride) semantics are those of
-// matmul_tiled_fast_v4_fp16.comp: K % 4 == 0, bNp % 4 == 0, 4-aligned batch base offsets; a
-// repacked weight presents the zero-padded Np = roundUpVec4(N) when N % 4 != 0. The bias reads
-// scalar (one element per output column), so it carries no alignment constraint.
+// Alignment contract and the aKp/bNp (physical row stride) semantics are those of
+// matmul_tiled_fast_v4_fp16.comp: aKp % 4 == 0, bNp % 4 == 0, 4-aligned batch base offsets; a
+// repacked weight presents the zero-padded Np = roundUpVec4(N) when N % 4 != 0, and a virtualized
+// activation presents its padded last axis. The bias reads scalar (one element per output column),
+// so it carries no alignment constraint.
 
 #define TM 128
 #define TN 128
@@ -36,7 +37,7 @@ layout(std430, binding = 2) writeonly buffer D { float16_t d[]; };
 layout(std430, binding = 3) readonly buffer Bs { float16_t bias[]; };
 layout(std430, binding = 4) readonly buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
-  int rank, total, M, N, K, aK, bK, bNp;
+  int rank, total, M, N, K, aK, bK, bNp, aKp;
 } pc;
 
 // LDS panels identical to matmul_tiled_fast_bias (fp16 elements, A transposed k-major); only the
@@ -45,7 +46,7 @@ shared float16_t As[TK][TM];
 shared float16_t Bs_[TK][TN];
 
 void main() {
-  int M = pc.M, N = pc.N, K = pc.K, bNp = pc.bNp;
+  int M = pc.M, N = pc.N, K = pc.K, bNp = pc.bNp, aKp = pc.aKp;
   // Batch base offsets: decompose the workgroup's batch index over the batch dims g[0..rank-3).
   int batch = int(gl_WorkGroupID.z);
   int aBase = 0, bBase = 0, rem = batch;
@@ -76,7 +77,7 @@ void main() {
       int m = v / (TK / 4), k = (v % (TK / 4)) * 4;
       int gm = tileM + m, gk = k0 + k;
       // gk is 4-aligned and K % 4 == 0, so gk < K bounds the whole vec4.
-      f16vec4 av = (gm < M && gk < K) ? a4[(aBase + gm * K + gk) >> 2] : f16vec4(0.0);
+      f16vec4 av = (gm < M && gk < K) ? a4[(aBase + gm * aKp + gk) >> 2] : f16vec4(0.0);
       As[k + 0][m] = av.x;
       As[k + 1][m] = av.y;
       As[k + 2][m] = av.z;

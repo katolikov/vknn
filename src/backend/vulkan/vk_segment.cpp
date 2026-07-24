@@ -3,6 +3,9 @@
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
 #include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
+#include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
+#include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
+#include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
 #include "vknn/dtype.h"
@@ -156,8 +159,155 @@ namespace vknn {
                           << " (device int8 storage: " << (int8Storage ? "yes" : "no") << ", fp16 storage: " << (useFp16_ ? "yes" : "no") << ")";
             }
         }
+        // Virtualized activation row stride: give an internal flat fp16 activation a buffer whose
+        // physical last axis is roundUpVec4(last) when that is exactly what unlocks the vec4-load
+        // GEMM route on every one of its consumers (core/matmul_tile.h). The attention batched
+        // MatMuls are the case that pays: a token count indivisible by 4 makes every row of the
+        // softmax probabilities (the A operand, last axis == K) and of the transposed keys (the B
+        // operand, last axis == N) start at an unaligned element index, which no partial-tail trick
+        // can rescue — only the physical stride can. Both sides of the contract come from the same
+        // rule, so the layout and the kernel that reads it are decided once.
+        // A padded store writes row o at o * padded rather than o * last, so it must never land in
+        // the buffer its own kernel is still reading: the liveness pool below frees a slot only once
+        // its occupant's last use is STRICTLY before the new tensor's first use, and a producer's
+        // input dies at the producing node itself — so a node's input and output never share a slot.
+        {
+            std::map<TensorId, int>              producerIn;  // tensor -> producing node index inside this segment
+            std::map<TensorId, std::vector<int>> consumersOf; // tensor -> every consuming node index, whole graph
+            for (int ni: idx)
+            {
+                for (TensorId o: g.nodes[ni].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producerIn[o] = ni;
+                    }
+                }
+            }
+            for (size_t q = 0; q < g.nodes.size(); ++q)
+            {
+                for (TensorId in: g.nodes[q].inputs)
+                {
+                    if (in != kNoTensor)
+                    {
+                        consumersOf[in].push_back((int) q);
+                    }
+                }
+                // A fused residual/bias is read by record() without appearing in node.inputs, so it
+                // counts as a consumer here too — a reader that indexes the logical layout must
+                // veto the padding just like any other.
+                for (TensorId fused: {g.nodes[q].fusedResidual, g.nodes[q].fusedBias})
+                {
+                    if (fused != kNoTensor)
+                    {
+                        consumersOf[fused].push_back((int) q);
+                    }
+                }
+            }
+            // A producer qualifies when its kernel can store at a padded last-axis stride: the flat
+            // gather (a Transpose that actually permutes; an identity one is aliased onto its input
+            // by the pure-copy rule below and never runs) and the flat last-axis Softmax.
+            auto producerStoresPadded = [&](const Node &nd, TensorId tid) {
+                if (nd.outputs.empty() || nd.outputs[0] != tid)
+                {
+                    return false; // only the primary store moves; a pw chain's extra output streams
+                                  // index the flat logical world and would miss the padded rows
+                }
+                if (nd.type == OpType::Transpose)
+                {
+                    if (nd.attr.has("view_stride"))
+                    {
+                        return true; // a folded movement chain always runs the gather
+                    }
+                    const auto &perm = nd.attr.getints("perm");
+                    if (perm.empty())
+                    {
+                        return false;
+                    }
+                    for (size_t d = 0; d < perm.size(); ++d)
+                    {
+                        if (perm[d] != (int64_t) d)
+                        {
+                            return true;
+                        }
+                    }
+                    return false; // identity perm: a pure copy, aliased rather than dispatched
+                }
+                if (nd.type != OpType::Softmax)
+                {
+                    return false;
+                }
+                const Shape &s    = g.desc(nd.inputs[0]).shape;
+                int64_t      axis = nd.attr.geti("axis", -1);
+                if (axis < 0)
+                {
+                    axis += (int64_t) s.size();
+                }
+                return axis == (int64_t) s.size() - 1; // padding moves the LAST axis; only a last-axis softmax fits
+            };
+            for (const auto &entry: producerIn)
+            {
+                const TensorId tid = entry.first;
+                const auto    &td  = g.tensors[tid];
+                if (!useFp16_ || !td.gpuFlat || td.storeFp32 || td.isInitializer || td.shape.size() < 2 || kvqCaches_.count(tid) || readBack.count(tid) || graphInputs_.count(tid))
+                {
+                    continue; // only an internal, flat, fp16 activation may change physical layout
+                }
+                if (!producerStoresPadded(g.nodes[entry.second], tid))
+                {
+                    continue;
+                }
+                auto consumers = consumersOf.find(tid);
+                if (consumers == consumersOf.end() || consumers->second.empty())
+                {
+                    continue;
+                }
+                int64_t padded = 0;
+                bool    ok     = true;
+                for (int ci: consumers->second)
+                {
+                    const Node &use = g.nodes[ci];
+                    // Every consumer must be a dense tiled MatMul in THIS segment reading the tensor
+                    // through the padded stride: a view-addressed or packed-quantized MatMul, a
+                    // fused-bias/residual read, or any other op would read the logical layout.
+                    if (!idxSet.count(ci) || use.type != OpType::MatMul || use.attr.has(kMmView) || use.attr.has(kWq) || use.inputs.size() < 2 || use.inputs[0] == use.inputs[1] || nodeFp32(use) || use.fusedResidual == tid || use.fusedBias == tid)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    const bool isA = use.inputs[0] == tid;
+                    const bool isB = use.inputs[1] == tid;
+                    if (!isA && !isB)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    int64_t want = 0;
+                    if (!matmulVec4PadUnlocks(useFp16_, isA ? MatMulOperand::A : MatMulOperand::B, g.desc(use.inputs[0]).shape, g.desc(use.inputs[1]).shape, g.desc(use.outputs[0]).shape, want) || (padded != 0 && want != padded))
+                    {
+                        ok = false;
+                        break;
+                    }
+                    padded = want;
+                }
+                if (ok && padded > td.shape.back())
+                {
+                    rowPad_[tid] = padded;
+                }
+            }
+            if (!rowPad_.empty())
+            {
+                VKNN_INFO << "vec4 activation padding: " << rowPad_.size() << " tensor(s) allocated with a 4-aligned physical row stride to unlock the vec4-load GEMM";
+            }
+        }
         auto actBytes = [&](TensorId tid) -> size_t {
             int64_t elems = g.tensors[tid].gpuFlat ? numElements(g.tensors[tid].shape) : packedElems(g.tensors[tid].shape);
+            auto    padIt = rowPad_.find(tid);
+            if (padIt != rowPad_.end())
+            {
+                // Physical extent: the same tensor with its last axis widened to the padded stride.
+                elems = elems / g.tensors[tid].shape.back() * padIt->second;
+            }
             if (kvqCaches_.count(tid))
             {
                 // int8 KV cache payload: 1 byte per element (the fp16 row scales live in the
@@ -1150,6 +1300,12 @@ namespace vknn {
         env_.devBuf  = [this](TensorId t) -> vk::Buffer  *{
             auto it = buffers_.find(t);
             return it == buffers_.end() ? nullptr : it->second.get();
+        };
+        // Non-zero exactly for the tensors this segment allocated with a virtualized row stride, so
+        // the producing and consuming kernels read the layout decision off the allocation itself.
+        env_.rowPad = [this](TensorId t) -> int64_t {
+            auto it = rowPad_.find(t);
+            return it == rowPad_.end() ? 0 : it->second;
         };
         // Non-null exactly for the int8 KV-cache tensors of THIS segment: FusedAttention keys its
         // kvq kernel choice off this resolver, so the kernels always agree with the allocation.

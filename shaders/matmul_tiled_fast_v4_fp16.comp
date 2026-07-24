@@ -18,17 +18,20 @@
 // vknn_matmul_vec4_bench times the pair.
 //
 // Alignment contract (enforced by the host routing rule; there is no scalar tail path):
-//   K % 4 == 0, bNp % 4 == 0, and every batch base offset a multiple of 4 elements (for rank > 2:
+//   aKp % 4 == 0, bNp % 4 == 0, and every batch base offset a multiple of 4 elements (for rank > 2:
 //   A/B batch strides divisible by 4). Each vec4 then sits in one row of its operand at a
 //   4-aligned element index, so the in-bounds guard per vec4 is exactly the scalar kernel's guard
 //   on its first element. Out-of-range loads (an M/K/N tile tail) fill the panel with zeros, as in
 //   the scalar kernel.
 //
-// pc.bNp is B's PHYSICAL row stride: N for a packed B (bNp == N requires N % 4 == 0), or the
-// zero-padded Np = roundUpVec4(N) of a repacked weight (matmul.cpp's "#wv4" upload) when
-// N % 4 != 0. A vec4 at a 4-aligned gn < N stays inside row gk; its lanes past column N read the
-// pad zeros — the same value the scalar kernel's gn-guard yields — so the LDS panels match the
-// scalar kernel's element-for-element. The scalar kernels ignore bNp and keep reading packed B.
+// pc.aKp / pc.bNp are the operands' PHYSICAL row strides: K and N for packed operands (which needs
+// K % 4 == 0 and N % 4 == 0), the zero-padded Np = roundUpVec4(N) of a repacked weight (matmul.cpp's
+// "#wv4" upload), or the padded last axis of a virtualized activation whose buffer the segment
+// allocated at roundUpVec4(last) with the pad zero-filled by the producing kernel. A vec4 at a
+// 4-aligned index below the logical extent stays inside its row and its lanes past that extent read
+// the pad. On the B side those lanes only reach accumulators for columns the store guard drops; on
+// the A side they multiply the k tail of the B panel, which this kernel's own gk guard zeroed. So
+// the accumulated columns match the scalar kernel's element for element.
 
 #define TM 128
 #define TN 128
@@ -43,7 +46,7 @@ layout(std430, binding = 1) readonly buffer B { f16vec4 b4[]; };
 layout(std430, binding = 2) writeonly buffer D { float16_t d[]; };
 layout(std430, binding = 3) readonly buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
-  int rank, total, M, N, K, aK, bK, bNp;
+  int rank, total, M, N, K, aK, bK, bNp, aKp;
 } pc;
 
 // LDS panels identical to matmul_tiled_fast (fp16 elements, A transposed k-major); only the fill
@@ -52,7 +55,7 @@ shared float16_t As[TK][TM];
 shared float16_t Bs[TK][TN];
 
 void main() {
-  int M = pc.M, N = pc.N, K = pc.K, bNp = pc.bNp;
+  int M = pc.M, N = pc.N, K = pc.K, bNp = pc.bNp, aKp = pc.aKp;
   // Batch base offsets: decompose the workgroup's batch index over the batch dims g[0..rank-3).
   int batch = int(gl_WorkGroupID.z);
   int aBase = 0, bBase = 0, rem = batch;
@@ -85,7 +88,7 @@ void main() {
       int m = v / (TK / 4), k = (v % (TK / 4)) * 4;
       int gm = tileM + m, gk = k0 + k;
       // gk is 4-aligned and K % 4 == 0, so gk < K bounds the whole vec4.
-      f16vec4 av = (gm < M && gk < K) ? a4[(aBase + gm * K + gk) >> 2] : f16vec4(0.0);
+      f16vec4 av = (gm < M && gk < K) ? a4[(aBase + gm * aKp + gk) >> 2] : f16vec4(0.0);
       As[k + 0][m] = av.x;
       As[k + 1][m] = av.y;
       As[k + 2][m] = av.z;

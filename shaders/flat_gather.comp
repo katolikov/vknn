@@ -16,20 +16,33 @@ layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
-layout(push_constant) uniform PC { int rank, total, base; } pc;
+// pc.outPad is the output buffer's PHYSICAL last-axis extent and pc.outLast its logical one, both
+// zero unless the segment allocated this output as a virtualized activation at roundUpVec4(last) so
+// its consuming tiled MatMul can take the vec4-load kernels (core/matmul_tile.h). The grid then
+// covers the PHYSICAL element count: a lane whose column falls in the pad stores zero, and every
+// other lane keeps the logical flat index — so the fused epilogue still indexes the flat row-major
+// output world it was planned against, and only the destination address moves. The pad is rewritten
+// every run because the liveness pool hands the same buffer to different tensors between runs.
+layout(push_constant) uniform PC { int rank, total, base, outPad, outLast; } pc;
 
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.total)) return;
-  int rem = int(gid), inIdx = pc.base;
+  int outIdx = int(gid), dstIdx = int(gid);
+  if (pc.outPad > 0) {
+    int row = int(gid) / pc.outPad, col = int(gid) % pc.outPad;
+    if (col >= pc.outLast) { d[dstIdx] = STORE(0.0); return; }
+    outIdx = row * pc.outLast + col;
+  }
+  int rem = outIdx, inIdx = pc.base;
   for (int k = pc.rank - 1; k >= 0; --k) {
     int c = rem % geom.g[k];
     rem /= geom.g[k];
     inIdx += c * geom.g[pc.rank + k];
   }
 #ifdef PW_EPI
-  d[gid] = STORE(pw_apply(float(s[inIdx]), int(gid)));
+  d[dstIdx] = STORE(pw_apply(float(s[inIdx]), outIdx));
 #else
-  d[gid] = s[inIdx];
+  d[dstIdx] = s[inIdx];
 #endif
 }

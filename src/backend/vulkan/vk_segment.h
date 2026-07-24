@@ -147,6 +147,15 @@ namespace vknn {
             std::shared_ptr<vk::Buffer> scales;      // fp16, one per row
         };
         std::map<TensorId, KvqCache>         kvqCaches_;
+        // ---- virtualized activation row stride (rule in core/matmul_tile.h) ----
+        // An internal flat fp16 activation whose logical last axis is not 4-aligned gets a buffer
+        // whose PHYSICAL last axis is roundUpVec4(last), zero-filled past the logical extent, when
+        // that padding is exactly what turns its consuming tiled MatMul's refused vec4-load route
+        // into an eligible one. Entry value = the physical last-axis extent. The producing kernel
+        // stores at that stride (and zeroes the pad); the consuming MatMul re-derives the same
+        // route from the same rule and reads at that stride. Empty unless the shape rule fires, in
+        // which case every allocation below is byte-identical to the unpadded path.
+        std::map<TensorId, int64_t>          rowPad_;
         std::unique_ptr<vk::ComputePipeline> linkPipeKvq_;
         // Fixed fold grid: one workgroup per fold range (strided). The decode fold carries one
         // range per KV head, so this covers a 32-head cache in one wave; extra ranges stride.

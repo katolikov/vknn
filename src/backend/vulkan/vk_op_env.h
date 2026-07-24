@@ -34,6 +34,13 @@ namespace vknn {
         // (src/core/kv_quant.h), so FusedAttention derives its kernel variant from the segment's
         // allocation and the two can never disagree. Null on a segment without the scheme.
         std::function<vk::Buffer *(TensorId)> kvqScale;
+        // Physical last-axis extent of a tensor's activation buffer, or 0 when the buffer is packed
+        // (the logical last axis). Non-zero exactly for the tensors the owning segment allocated
+        // with a virtualized row stride so a consuming tiled MatMul could take the vec4-load
+        // kernels (rule in core/matmul_tile.h): the producing kernel stores at this stride and
+        // zero-fills the pad, the consumer reads at it. Null on a segment without the scheme, so
+        // callers use `rowPad ? rowPad(t) : 0`.
+        std::function<int64_t(TensorId)>      rowPad;
         // Drops an initializer's HOST bytes the moment its device copy exists, so a large-weight model
         // never holds the host and device copy of the same weight at once (the load-time peak would
         // otherwise be twice the weight set, which exhausts phone RAM on a multi-GB model). Null when

@@ -54,8 +54,10 @@ namespace vknn {
 
         // ---- Transpose / Slice: out[i] = in[base + sum outCoord_k * inStride_k] ----
         struct Gather {
+            // outPad/outLast are the output's physical and logical last-axis extents, both 0 unless
+            // the segment allocated the output as a virtualized activation (VkOpEnv::rowPad).
             struct PC {
-                int rank, total, base;
+                int rank, total, base, outPad, outLast;
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          geom;  // outDim/inStride, deduped SSBO (binding 2, before the epilogue)
@@ -75,6 +77,21 @@ namespace vknn {
                 pc.total              = (int) numElements(out);
                 pc.base               = 0;
                 std::vector<int32_t> outDim(rank), inStr(rank);
+                // A virtualized output (the segment allocated its buffer with a padded physical last
+                // axis so a consuming tiled MatMul can take the vec4-load kernels): the grid covers
+                // the PHYSICAL element count and the kernel zero-fills the pad columns. The
+                // zero-copy slice shortcut cannot apply — the data bytes are no longer contiguous.
+                auto applyOutPad = [&] {
+                    const int64_t outPad = env.rowPad ? env.rowPad(node.outputs[0]) : 0;
+                    if (outPad <= 0 || out.empty())
+                    {
+                        return;
+                    }
+                    pc.outLast      = (int) out.back();
+                    pc.outPad       = (int) outPad;
+                    pc.total        = (int) (numElements(out) / out.back() * outPad);
+                    contiguousSlice = false;
+                };
                 // A folded movement chain (foldMovementChains) carries its composed per-axis map in
                 // view_stride/view_base — the gather geometry verbatim, overriding perm/starts.
                 if (node.attr.has("view_stride"))
@@ -88,7 +105,8 @@ namespace vknn {
                             inStr[k]  = (int) vs[(size_t) k];
                         }
                         pc.base = (int) node.attr.geti("view_base", 0);
-                        geom    = uploadFlatGeom(env, {outDim, inStr});
+                        applyOutPad();
+                        geom = uploadFlatGeom(env, {outDim, inStr});
                         epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
                         pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
                         return;
@@ -148,6 +166,7 @@ namespace vknn {
                         }
                     }
                 }
+                applyOutPad();
                 geom = uploadFlatGeom(env, {outDim, inStr});
                 epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
                 pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
@@ -492,8 +511,11 @@ namespace vknn {
             // differs between the mappings, so the choice is a shape rule, never a timing race.
             // Attention rows (axis >= a context length) stay on the workgroup mapping.
             static constexpr int kThreadRowMaxAxis = 32;
+            // outPad is the output's physical last-axis extent, 0 unless the segment allocated the
+            // output as a virtualized activation (VkOpEnv::rowPad). Only a LAST-axis softmax
+            // (inner == 1) can carry it: padding widens the last axis, which is the reduced one.
             struct PC {
-                int outer, axis, inner;
+                int outer, axis, inner, outPad;
             } pc {};
             bool                                 threadRow = false;
             std::shared_ptr<vk::ComputePipeline> pipe;
@@ -515,7 +537,12 @@ namespace vknn {
                 {
                     inner *= s[k];
                 }
-                pc        = {(int) outer, (int) s[axis], (int) inner};
+                pc                   = {(int) outer, (int) s[axis], (int) inner, 0};
+                const int64_t outPad = env.rowPad ? env.rowPad(node.outputs[0]) : 0;
+                if (outPad > 0 && inner == 1)
+                {
+                    pc.outPad = (int) outPad; // rows start at o * outPad; the kernel zeroes the pad
+                }
                 threadRow = s[axis] <= kThreadRowMaxAxis;
                 epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
                 pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC),

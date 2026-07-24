@@ -21,11 +21,12 @@ namespace vknn {
             int               elem_    = 4;
             int64_t           cbTotal_ = 0, hw_ = 0;
             // ---- flat path ----
-            // FPC mirrors flat_gather.comp's push constant (scalars only); the per-output outDim/inStride
-            // geometry rides a content-deduped SSBO (flat::uploadFlatGeom, binding 2), one per output.
-            struct FPC {
-                int rank, total, base;
-            };
+            // The flat path reuses flat::Gather's push-constant block verbatim rather than mirroring
+            // it: the block is the flat_gather.comp contract, and a private copy would silently
+            // under-declare the pipeline's push range whenever that contract grows. The per-output
+            // outDim/inStride geometry rides a content-deduped SSBO (flat::uploadFlatGeom, binding
+            // 2), one per output. A split output is never virtualized, so outPad/outLast stay 0.
+            using FPC = flat::Gather::PC;
             std::vector<FPC>                                  fpcs_;
             std::vector<int>                                  foutIdx_;
             std::vector<std::shared_ptr<vk::ComputePipeline>> fpipes_;

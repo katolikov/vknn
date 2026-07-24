@@ -29,14 +29,15 @@ namespace vknn {
 
         // Scalars only; the per-axis outDim/aStride/bStride geometry rides a content-deduped SSBO
         // (flat::uploadFlatGeom) bound after the operands (and after the fused bias when present), so
-        // the decodable batch rank is unbounded and the push constant stays small. bNp is B's
-        // physical row stride: N for the packed B every scalar kernel reads, or the zero-padded Np
-        // of a "#wv4" repacked weight. Tail field: only the vec4-load twins
-        // (matmul_tiled_fast_v4*_fp16.comp) declare and consume it; every other MatMulPC kernel
+        // the decodable batch rank is unbounded and the push constant stays small. aKp/bNp are the
+        // operands' physical row strides: K and N for the packed operands every scalar kernel reads,
+        // the zero-padded Np of a "#wv4" repacked weight, or the padded last axis of a virtualized
+        // activation (VkOpEnv::rowPad). Tail fields: only the vec4-load twins
+        // (matmul_tiled_fast_v4*_fp16.comp) declare and consume them; every other MatMulPC kernel
         // declares the shared 28-byte prefix (a pipeline's push range may exceed the shader's
-        // block). 32 bytes total, well under the 128-byte guaranteed push-constant minimum.
+        // block). 36 bytes total, well under the 128-byte guaranteed push-constant minimum.
         struct MatMulPC {
-            int rank, total, M, N, K, aK, bK, bNp;
+            int rank, total, M, N, K, aK, bK, bNp, aKp;
         };
 
         // Push constant for the packed-quantized-weight kernels (matmul_gemv_i4/i8 /
@@ -436,6 +437,10 @@ namespace vknn {
                 bool       aWas1D = false, bWas1D = false;
                 int64_t    M, N, K;
                 int        rank;
+                // Physical last-axis extents of the operand buffers (0 = packed) and the resolved
+                // row strides the kernels index with. A view-addressed MatMul carries its own
+                // geometry and is never handed a virtualized operand.
+                int64_t    aRowPad = 0, bRowPad = 0, aRow = 0, bRow = 0;
                 // gemv4 loads B as vec4 along n; a view keeps that legal only when its n stride is 1
                 // and every other B offset term is 4-aligned.
                 bool                 viewGemv4Ok = false;
@@ -470,95 +475,32 @@ namespace vknn {
                         }
                     }
                     viewGemv4Ok = viewGemv4Ok && bStride[rank - 1] == 1;
+                    aRow        = K;
+                    bRow        = N;
                 } else
                 {
-                    // Promote 1-D operands (A[K]->[1,K], B[K]->[K,1]) to find M/N/K; the output rank already had
-                    // the promoted dim stripped by inferShapes, so we work the strides against `out` directly
-                    // below.
-                    aWas1D = sa.size() == 1;
-                    bWas1D = sb.size() == 1;
-                    if (aWas1D)
-                    {
-                        sa = {1, sa[0]};
-                    }
-                    if (bWas1D)
-                    {
-                        sb = {sb[0], 1};
-                    }
-
-                    M = sa[sa.size() - 2];
-                    K = sa[sa.size() - 1];
-                    N = sb[sb.size() - 1];
-
-                    rank  = (int) out.size();
-                    pc.aK = 1;       // A is [...,M,K] row-major -> stepping K moves by 1
-                    pc.bK = (int) N; // B is [...,K,N] row-major -> stepping K moves by N
-                    outDim.assign(rank, 0);
-                    aStride.assign(rank, 0);
-                    bStride.assign(rank, 0);
-                    for (int k = 0; k < rank; ++k)
-                    {
-                        outDim[k] = (int) out[k];
-                    }
-
-                    // The trailing output dims are the matrix dims. With 1-D promotion an axis may be absent:
-                    //   A 1-D  -> the M axis was dropped from the output; B 1-D -> the N axis was dropped.
-                    // Identify which output index (if any) is the M axis and which is the N axis.
-                    int nAxis = rank - 1; // N is the last output dim, unless B was 1-D (then absent)
-                    int mAxis = aWas1D ? -1 : (bWas1D ? rank - 1 : rank - 2);
-                    if (bWas1D)
-                    {
-                        nAxis = -1; // N axis was stripped
-                    }
-                    // batch dims occupy output indices [0, firstMatAxis)
-                    int firstMatAxis = rank;
-                    if (mAxis >= 0)
-                    {
-                        firstMatAxis = std::min(firstMatAxis, mAxis);
-                    }
-                    if (nAxis >= 0)
-                    {
-                        firstMatAxis = std::min(firstMatAxis, nAxis);
-                    }
-                    int batchRank = firstMatAxis;
-
-                    // Per-operand batch shapes (everything before the trailing matrix dims), left-padded to
-                    // batchRank.
-                    int64_t aBatchRank = (int64_t) sa.size() - 2, bBatchRank = (int64_t) sb.size() - 2;
-                    auto    aDim = [&](int i) -> int64_t {
-                        int off = batchRank - (int) aBatchRank;
-                        return i < off ? 1 : sa[i - off];
-                    };
-                    auto bDim = [&](int i) -> int64_t {
-                        int off = batchRank - (int) bBatchRank;
-                        return i < off ? 1 : sb[i - off];
-                    };
-                    std::vector<int64_t> aBatchStride(batchRank, 0), bBatchStride(batchRank, 0);
-                    int64_t              sAcc = M * K, sBcc = K * N;
-                    for (int i = batchRank - 1; i >= 0; --i)
-                    {
-                        aBatchStride[i] = (aDim(i) == 1) ? 0 : sAcc;
-                        bBatchStride[i] = (bDim(i) == 1) ? 0 : sBcc;
-                        sAcc *= aDim(i);
-                        sBcc *= bDim(i);
-                    }
-                    for (int i = 0; i < batchRank; ++i)
-                    {
-                        aStride[i] = (int) aBatchStride[i];
-                        bStride[i] = (int) bBatchStride[i];
-                    }
-                    // Matrix-axis strides: A depends on m (row stride K) not n; B depends on n (col stride 1) not
-                    // m.
-                    if (mAxis >= 0)
-                    {
-                        aStride[mAxis] = (int) K;
-                        bStride[mAxis] = 0;
-                    }
-                    if (nAxis >= 0)
-                    {
-                        aStride[nAxis] = 0;
-                        bStride[nAxis] = 1;
-                    }
+                    // Dense derivation (core/matmul_tile.h): 1-D promotion, broadcast batch strides,
+                    // matrix-axis strides. An operand whose activation buffer the segment allocated
+                    // with a virtualized last axis (env.rowPad) enters with that PHYSICAL row
+                    // stride, which scales every batch stride stepping over a whole matrix — the
+                    // segment's padding rule predicted this same geometry before it sized the
+                    // buffer, so the layout and the kernel can never disagree.
+                    aRowPad          = env.rowPad ? env.rowPad(node.inputs[0]) : 0;
+                    bRowPad          = env.rowPad ? env.rowPad(node.inputs[1]) : 0;
+                    MatMulFlatGeom d = matmulFlatGeom(sa, sb, out, aRowPad, bRowPad);
+                    aWas1D           = d.aWas1D;
+                    bWas1D           = d.bWas1D;
+                    M                = d.M;
+                    N                = d.N;
+                    K                = d.K;
+                    aRow             = d.aRow;
+                    bRow             = d.bRow;
+                    rank             = d.rank;
+                    pc.aK            = 1;             // A is [...,M,K] row-major -> stepping K moves by 1
+                    pc.bK            = (int) d.bRow;  // B is [...,K,N] row-major -> stepping K moves by one physical row
+                    outDim           = d.outDim;
+                    aStride          = d.aStride;
+                    bStride          = d.bStride;
                 }
                 pc.rank  = rank;
                 pc.total = (int) numElements(out);
@@ -581,7 +523,9 @@ namespace vknn {
                     cmCaps.wave32Pinnable       = cap.subgroupSizeControl && cap.requiredSubgroupSizeCompute && cap.minSubgroupSize <= 32u && 32u <= cap.maxSubgroupSize;
                     cmCaps.vulkanMemoryModel    = cap.vulkanMemoryModel;
                     cmCaps.selfCheckPassed      = true; // provisionally; the on-device check runs below only when the rule matches
-                    const bool denseRank2Batch1 = !hasView && !aWas1D && !bWas1D && M > 0 && N > 0 && pc.total == (int) (M * N);
+                    // A virtualized operand keeps the SSBO kernels: the coopmat kernels load dense
+                    // packed panels and have no physical-row-stride parameter.
+                    const bool denseRank2Batch1 = !hasView && !aWas1D && !bWas1D && aRowPad == 0 && bRowPad == 0 && M > 0 && N > 0 && pc.total == (int) (M * N);
                     const bool hasBiasOrEpi     = node.fusedBias != kNoTensor || node.attr.has("pw_steps");
                     const int  hintValue        = env.config ? env.config->hint(Hint::CoopmatGemm, (int) Mode::Auto) : (int) Mode::Auto;
                     coopKind                    = coopmatGemmRoute(cmCaps, hintValue, env.useFp16, denseRank2Batch1, hasBiasOrEpi, M, N, K, g.isInitializer(node.inputs[1]));
@@ -641,12 +585,13 @@ namespace vknn {
                 // ---- vec4-load kernel routing (deterministic alignment rule) ----
                 // The default {128,128,16} tile dispatches the f16vec4-load twin of the fast kernel
                 // when every global element index it would form is 4-aligned (matmulVec4Route,
-                // core/matmul_tile.h): K % kVec4Align == 0, a 4-aligned physical B row stride (N
-                // itself, or the zero-padded Np of a repacked weight), and 4-aligned batch strides
-                // on both operands. The twin is byte-identical to the scalar kernel, so the route
-                // trades load width only, never bits. Precision-high (fp32) nodes and non-default
-                // raced tiles keep the scalar kernels. The rule runs after A's upload above, so a
-                // payload shared with A (already uploaded flat and released) refuses the repack.
+                // core/matmul_tile.h): a 4-aligned physical A row stride, a 4-aligned physical B row
+                // stride (N itself, the zero-padded Np of a repacked weight, or a virtualized
+                // activation's padded last axis), and 4-aligned batch strides on both operands. The
+                // twin is byte-identical to the scalar kernel, so the route trades load width only,
+                // never bits. Precision-high (fp32) nodes and non-default raced tiles keep the
+                // scalar kernels. The rule runs after A's upload above, so a payload shared with A
+                // (already uploaded flat and released) refuses the repack.
                 MatMulVec4Route v4Route;
                 if (useTiled)
                 {
@@ -661,14 +606,18 @@ namespace vknn {
                     const int            batchRank = rank - 2;
                     std::vector<int32_t> aBatch(aStride.begin(), aStride.begin() + batchRank);
                     std::vector<int32_t> bBatch(bStride.begin(), bStride.begin() + batchRank);
-                    v4Route = matmulVec4Route(env.useFp16, N, K, aBatch, bBatch, bIsInit, bPayloadResident);
+                    v4Route = matmulVec4Route(env.useFp16, N, K, aBatch, bBatch, bIsInit, bPayloadResident, aRow, bRow);
                 }
                 // Set before pickTile: the race times the v4 kernel for the default candidate when
-                // the route holds, and that kernel reads pc.bNp.
-                pc.bNp = (int) (v4Route.eligible ? v4Route.bNp : N);
+                // the route holds, and that kernel reads pc.aKp/pc.bNp.
+                pc.aKp = (int) (v4Route.eligible ? v4Route.aKp : aRow);
+                pc.bNp = (int) (v4Route.eligible ? v4Route.bNp : bRow);
                 if (useTiled)
                 {
-                    tile = pickTile(env, node.fusedBias != kNoTensor, v4Route.eligible);
+                    // A virtualized operand pins the default tile: its padded layout exists only so
+                    // the v4 twin can read it, and the segment's rule already proved the route
+                    // holds, so there is nothing left to race.
+                    tile = (aRowPad != 0 || bRowPad != 0) ? kMatMulTiles[0] : pickTile(env, node.fusedBias != kNoTensor, v4Route.eligible);
                 }
 
                 // A mat-vec too narrow to fill the naive grid takes the split-K kernel. B must keep its
@@ -701,6 +650,20 @@ namespace vknn {
                 // byte-identical at the default geometry (see core/matmul_tile.h).
                 bool useFastTiled = useTiled && isDefaultMatMulTile(tile);
                 bool useV4        = useFastTiled && v4Route.eligible;
+                if ((aRowPad != 0 || bRowPad != 0) && !useV4)
+                {
+                    // Contract backstop. A virtualized operand's buffer holds padded rows whatever
+                    // kernel runs, and only the v4 twin and the fully stride-driven naive kernel
+                    // read a physical row stride — the tiled scalar kernels and the split-K mat-vec
+                    // assume packed rows. The segment's rule and the routing above agree by
+                    // construction; if a future shape class ever splits them, drop to the naive
+                    // kernel (correct at any stride, merely slower) instead of reading the pad as
+                    // data.
+                    useTiled     = false;
+                    useFastTiled = false;
+                    useGemvVec   = false;
+                    useGemv      = false;
+                }
 
                 // B's upload, in the layout the chosen kernel reads. The vec4 route with an
                 // unaligned N repacks the weight to the zero-padded row stride bNp through the

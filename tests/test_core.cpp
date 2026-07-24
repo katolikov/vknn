@@ -417,6 +417,106 @@ TEST(MatMulTile, Vec4PadRows) {
     }
 }
 
+// matmulFlatGeom: the dense batched-MatMul geometry the flat kernels decode. A physical row stride
+// (a virtualized activation's padded last axis) scales every stride that steps over a whole matrix.
+TEST(MatMulTile, FlatGeomPhysicalRowStride) {
+    // [2,261,64] x [2,64,261] -> [2,261,261]: the attention Q@K^T shape class.
+    MatMulFlatGeom packed = matmulFlatGeom({2, 261, 64}, {2, 64, 261}, {2, 261, 261});
+    EXPECT_EQ(packed.M, 261);
+    EXPECT_EQ(packed.K, 64);
+    EXPECT_EQ(packed.N, 261);
+    EXPECT_EQ(packed.batchRank, 1);
+    EXPECT_EQ(packed.aRow, 64);
+    EXPECT_EQ(packed.bRow, 261);
+    EXPECT_EQ(packed.aStride[0], 261 * 64); // one whole A matrix per batch step
+    EXPECT_EQ(packed.bStride[0], 64 * 261);
+    EXPECT_EQ(packed.aStride[1], 64); // m axis: A's row stride
+    EXPECT_EQ(packed.bStride[2], 1);  // n axis: B's column stride
+
+    // Padding B's last axis to 264 widens B's row stride AND its batch stride; A is untouched.
+    MatMulFlatGeom padB = matmulFlatGeom({2, 261, 64}, {2, 64, 261}, {2, 261, 261}, 0, 264);
+    EXPECT_EQ(padB.N, 261); // the LOGICAL extent never moves
+    EXPECT_EQ(padB.bRow, 264);
+    EXPECT_EQ(padB.bStride[0], 64 * 264);
+    EXPECT_EQ(padB.aStride[0], 261 * 64);
+
+    // Padding A's last axis (== K) widens A's row and batch strides.
+    MatMulFlatGeom padA = matmulFlatGeom({2, 261, 261}, {2, 261, 64}, {2, 261, 64}, 264, 0);
+    EXPECT_EQ(padA.K, 261);
+    EXPECT_EQ(padA.aRow, 264);
+    EXPECT_EQ(padA.aStride[0], 261 * 264);
+    EXPECT_EQ(padA.aStride[1], 264);
+    EXPECT_EQ(padA.bStride[0], 261 * 64);
+
+    // A broadcast (size-1) batch dim keeps stride 0 whatever the row stride is.
+    MatMulFlatGeom bcast = matmulFlatGeom({2, 261, 261}, {1, 261, 64}, {2, 261, 64}, 264, 0);
+    EXPECT_EQ(bcast.bStride[0], 0);
+}
+
+// The row-stride arguments of matmulVec4Route: an indivisible K or N routes once the operand's
+// PHYSICAL row stride is 4-aligned, which is what a virtualized activation buffer provides.
+TEST(MatMulTile, Vec4RoutePhysicalRowStride) {
+    const std::vector<int32_t> noBatch;
+    // K = 261 packed: A's rows start at unaligned element indices, so the route refuses.
+    EXPECT_FALSE(matmulVec4Route(true, 64, 261, noBatch, noBatch, false, false).eligible);
+    // The same shape with A allocated at a 264-element physical row stride routes, and the kernel
+    // is told to index A at 264 while the k loop still bounds at the logical 261.
+    MatMulVec4Route padA = matmulVec4Route(true, 64, 261, noBatch, noBatch, false, false, 264, 0);
+    EXPECT_TRUE(padA.eligible);
+    EXPECT_FALSE(padA.padB);
+    EXPECT_EQ(padA.aKp, 264);
+    EXPECT_EQ(padA.bNp, 64);
+
+    // N = 261 on a runtime-activation B: refused packed, eligible at a 264 physical row stride.
+    EXPECT_FALSE(matmulVec4Route(true, 261, 64, noBatch, noBatch, false, false).eligible);
+    MatMulVec4Route padB = matmulVec4Route(true, 261, 64, noBatch, noBatch, false, false, 0, 264);
+    EXPECT_TRUE(padB.eligible);
+    EXPECT_FALSE(padB.padB); // a physically padded activation, not a "#wv4" weight repack
+    EXPECT_EQ(padB.bNp, 264);
+
+    // A physical stride BELOW the logical extent is nonsense and never routes.
+    EXPECT_FALSE(matmulVec4Route(true, 64, 261, noBatch, noBatch, false, false, 260, 0).eligible);
+    EXPECT_FALSE(matmulVec4Route(true, 261, 64, noBatch, noBatch, false, false, 0, 260).eligible);
+    // A padded row stride does not excuse a misaligned batch stride.
+    const std::vector<int32_t> misaligned {6};
+    EXPECT_FALSE(matmulVec4Route(true, 64, 261, misaligned, noBatch, false, false, 264, 0).eligible);
+}
+
+// matmulVec4PadUnlocks: the segment's allocation-time verdict. It fires exactly on the operand whose
+// indivisible last axis is the sole blocker of a tiled fp16 MatMul's vec4 route.
+TEST(MatMulTile, Vec4PadUnlocksVerdict) {
+    int64_t padded = 0;
+    // Q@K^T [.,261,64] x [.,64,261]: B's last axis (N = 261) blocks; padding it to 264 unlocks.
+    EXPECT_TRUE(matmulVec4PadUnlocks(true, MatMulOperand::B, {8, 261, 64}, {8, 64, 261}, {8, 261, 261}, padded));
+    EXPECT_EQ(padded, 264);
+    // A is already aligned (K = 64), so padding it is refused: nothing to unlock.
+    EXPECT_FALSE(matmulVec4PadUnlocks(true, MatMulOperand::A, {8, 261, 64}, {8, 64, 261}, {8, 261, 261}, padded));
+    EXPECT_EQ(padded, 0);
+
+    // probs@V [.,261,261] x [.,261,64]: A's last axis (K = 261) blocks; padding it to 264 unlocks.
+    EXPECT_TRUE(matmulVec4PadUnlocks(true, MatMulOperand::A, {8, 261, 261}, {8, 261, 64}, {8, 261, 64}, padded));
+    EXPECT_EQ(padded, 264);
+    EXPECT_FALSE(matmulVec4PadUnlocks(true, MatMulOperand::B, {8, 261, 261}, {8, 261, 64}, {8, 261, 64}, padded));
+
+    // The 1029-token decoder attention: same two verdicts at roundUpVec4(1029) = 1032.
+    EXPECT_TRUE(matmulVec4PadUnlocks(true, MatMulOperand::B, {8, 1029, 64}, {8, 64, 1029}, {8, 1029, 1029}, padded));
+    EXPECT_EQ(padded, 1032);
+    EXPECT_TRUE(matmulVec4PadUnlocks(true, MatMulOperand::A, {8, 1029, 1029}, {8, 1029, 64}, {8, 1029, 64}, padded));
+    EXPECT_EQ(padded, 1032);
+
+    // An already-aligned token count (2088) routes packed, so no operand is worth padding.
+    EXPECT_FALSE(matmulVec4PadUnlocks(true, MatMulOperand::B, {8, 2088, 64}, {8, 64, 2088}, {8, 2088, 2088}, padded));
+    EXPECT_FALSE(matmulVec4PadUnlocks(true, MatMulOperand::A, {8, 2088, 2088}, {8, 2088, 64}, {8, 2088, 64}, padded));
+
+    // fp32 compute keeps the scalar kernels, so padding buys nothing.
+    EXPECT_FALSE(matmulVec4PadUnlocks(false, MatMulOperand::B, {8, 261, 64}, {8, 64, 261}, {8, 261, 261}, padded));
+    // Below the tiled-GEMM shape class the vec4 twins never run.
+    EXPECT_FALSE(matmulVec4PadUnlocks(true, MatMulOperand::B, {8, 31, 64}, {8, 64, 261}, {8, 31, 261}, padded));
+    EXPECT_FALSE(matmulVec4PadUnlocks(true, MatMulOperand::A, {8, 261, 31}, {8, 31, 64}, {8, 261, 64}, padded));
+    // A mat-vec / 1-D operand is not a tiled shape either.
+    EXPECT_FALSE(matmulVec4PadUnlocks(true, MatMulOperand::A, {261}, {261, 64}, {64}, padded));
+}
+
 // convGemmWVec4Route: the deterministic alignment rule that routes the implicit-GEMM convolution to
 // the STORE4-weight twin conv_gemm_wv4. The twin is byte-identical to conv_gemm (it widens the
 // weight-panel load and nothing else), so the rule is pure layout: the panel's PHYSICAL row stride
@@ -474,6 +574,7 @@ TEST(ConvGemmRoute, WeightVec4PadRows) {
         EXPECT_EQ(padded[i], 0.f) << "i=" << i;
     }
 }
+
 
 // Ergonomic Tensor API: construct, shape/size accessors, argmax.
 TEST(Api, TensorHelpers) {

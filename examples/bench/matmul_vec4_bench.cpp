@@ -45,10 +45,12 @@ namespace {
     constexpr int kTileM = 128;
     constexpr int kTileN = 128;
 
-    // Mirrors MatMulPC in src/backend/vulkan/ops/matmul.cpp. bNp is B's physical row stride: N for
-    // packed B, roundUpVec4(N) for the padded copy (only the v4 kernels read it).
+    // Mirrors MatMulPC in src/backend/vulkan/ops/matmul.cpp. aKp/bNp are the operands' physical row
+    // strides: K and N for packed operands, roundUpVec4(N) for the padded B copy (only the v4
+    // kernels read them). The block must stay at least as wide as the shaders' declared block —
+    // a short push range is what a driver sees as an out-of-range push-constant read.
     struct MatMulPC {
-        int32_t rank, total, M, N, K, aK, bK, bNp;
+        int32_t rank, total, M, N, K, aK, bK, bNp, aKp;
     };
 
     struct ShapeSpec {
@@ -214,6 +216,7 @@ int main(int argc, char **argv) {
         pc.aK    = 1;
         pc.bK    = s.N;
         pc.bNp   = padded ? bNp : s.N;
+        pc.aKp   = s.K; // this bench pads only B; A is always the packed [M][K] layout
 
         // Geometry SSBO layout as flat::uploadFlatGeom: outDim | aStride | bStride, rank each. The
         // tiled kernels read only the leading batch axes (indices 0 .. rank-3); the padded-B

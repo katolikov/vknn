@@ -98,12 +98,15 @@ namespace vknn {
         return (n + kVec4Align - 1) / kVec4Align * kVec4Align;
     }
 
-    /// matmulVec4Route's verdict. bNp is the physical B row stride the v4 kernels consume
-    /// (MatMulPC::bNp): N for a naturally aligned packed B, roundUpVec4(N) for a repacked weight.
+    /// matmulVec4Route's verdict. aKp/bNp are the physical row strides the v4 kernels consume
+    /// (MatMulPC::aKp / MatMulPC::bNp): K and N for naturally aligned packed operands,
+    /// roundUpVec4(N) for a repacked weight, and the caller-supplied padded stride for an operand
+    /// whose buffer the segment allocated with a padded last axis.
     struct MatMulVec4Route {
         bool    eligible = false; ///< the default {128,128,16} tile dispatches the v4 kernel
         bool    padB     = false; ///< B repacks to a zero-padded copy with row stride bNp ("#wv4")
-        int64_t bNp      = 0;     ///< physical B row stride for the v4 kernel (== N unless padB)
+        int64_t aKp      = 0;     ///< physical A row stride for the v4 kernel (== K unless A is padded)
+        int64_t bNp      = 0;     ///< physical B row stride for the v4 kernel (== N unless padB / B is padded)
     };
 
     /// Deterministic routing rule for the vec4-load GEMM twins — a pure shape/layout function so
@@ -113,20 +116,27 @@ namespace vknn {
     /// accuracy gate. It holds when every global element index the kernel forms is 4-aligned:
     ///   - useFp16: the twins are hand-written fp16 kernels; a precision-high (fp32) node keeps
     ///     the scalar kernels.
-    ///   - K % kVec4Align == 0: bounds each A vec4 inside its row (A is the runtime activation and
-    ///     K a model dim, so the rule gates on it — no A repack, no tail path).
+    ///   - the PHYSICAL A row stride is a kVec4Align multiple: bounds each A vec4 inside its row.
+    ///     That stride is K for the packed default; `aRowStride` overrides it with the padded last
+    ///     axis the segment allocated for a virtualized activation (roundUpVec4(K)), which is what
+    ///     unlocks an indivisible K without repacking or a tail path.
     ///   - every A/B batch stride a kVec4Align multiple: keeps the per-batch base offsets aligned.
-    ///   - N % kVec4Align == 0, or B is a constant initializer whose rows can repack to a
+    ///     The caller derives those strides from the same physical row strides, so a padded operand
+    ///     aligns its whole batch decode at once.
+    ///   - the PHYSICAL B row stride (N, or `bRowStride` for a virtualized activation) is a
+    ///     kVec4Align multiple, or B is a constant initializer whose rows can repack to a
     ///     zero-padded bNp = roundUpVec4(N). The repack is restricted to an all-zero B batch
     ///     stride (the broadcast Linear-weight case): a nonzero batch stride would need rescaling
-    ///     to the padded layout in the geometry SSBO. A runtime-activation B cannot repack, so it
-    ///     routes only when N is naturally aligned.
+    ///     to the padded layout in the geometry SSBO.
     /// `bPayloadResident` reports whether the initializer's host payload is still readable: a cold
     /// start computes the repack from it, and gating here (rather than on weight-cache warmth)
     /// keeps the routing identical between cold and warm starts.
-    inline MatMulVec4Route matmulVec4Route(bool useFp16, int64_t N, int64_t K, const std::vector<int32_t> &aBatchStride, const std::vector<int32_t> &bBatchStride, bool bIsInitializer, bool bPayloadResident) {
+    /// `aRowStride`/`bRowStride` are the operands' physical last-axis extents; 0 means "packed"
+    /// (K and N respectively), which is what every caller without a virtualized operand passes.
+    inline MatMulVec4Route matmulVec4Route(bool useFp16, int64_t N, int64_t K, const std::vector<int32_t> &aBatchStride, const std::vector<int32_t> &bBatchStride, bool bIsInitializer, bool bPayloadResident, int64_t aRowStride = 0, int64_t bRowStride = 0) {
         MatMulVec4Route route;
-        route.bNp       = N;
+        route.aKp       = aRowStride > 0 ? aRowStride : K;
+        route.bNp       = bRowStride > 0 ? bRowStride : N;
         auto allAligned = [](const std::vector<int32_t> &strides) {
             for (int32_t stride: strides)
             {
@@ -137,11 +147,11 @@ namespace vknn {
             }
             return true;
         };
-        if (!useFp16 || N <= 0 || K <= 0 || K % kVec4Align != 0 || !allAligned(aBatchStride))
+        if (!useFp16 || N <= 0 || K <= 0 || route.aKp < K || route.bNp < N || route.aKp % kVec4Align != 0 || !allAligned(aBatchStride))
         {
             return route;
         }
-        if (N % kVec4Align == 0)
+        if (route.bNp % kVec4Align == 0)
         {
             route.eligible = allAligned(bBatchStride);
             return route;
@@ -161,6 +171,146 @@ namespace vknn {
         route.padB     = true;
         route.bNp      = roundUpVec4(N);
         return route;
+    }
+
+    /// Dense (non view-addressed) batched-MatMul geometry: what the flat kernels decode from the
+    /// operand and output shapes. `aRowStride`/`bRowStride` are the operands' PHYSICAL last-axis
+    /// extents — K and N for the packed default (pass 0), or the padded extent the segment
+    /// allocated for a virtualized activation, which scales every batch stride that steps over a
+    /// whole matrix. One definition serves the Vulkan MatMul op (which turns this into the geometry
+    /// SSBO) and the segment's padding pass (which must predict the op's routing exactly), so the
+    /// two can never disagree about what a padded operand's strides become.
+    struct MatMulFlatGeom {
+        bool                 aWas1D = false, bWas1D = false; ///< operand promoted from 1-D ([K] -> [1,K] / [K,1])
+        int64_t              M = 0, N = 0, K = 0;
+        int64_t              aRow = 0, bRow = 0; ///< resolved physical row strides (K / N unless padded)
+        int                  rank = 0;           ///< output rank; the geometry arrays are this long
+        int                  batchRank = 0;      ///< output axes [0, batchRank) are the batch dims
+        std::vector<int32_t> outDim, aStride, bStride;
+    };
+
+    /// Derive MatMulFlatGeom from the logical shapes. Mirrors the ONNX MatMul contract: 1-D operands
+    /// promote to [1,K] / [K,1] and lose their axis from the output, batch dims broadcast NumPy-style
+    /// (a size-1 operand dim gets stride 0), A depends on m (row stride aRow) not n, B on n (column
+    /// stride 1) not m.
+    inline MatMulFlatGeom matmulFlatGeom(std::vector<int64_t> sa, std::vector<int64_t> sb, const std::vector<int64_t> &out, int64_t aRowStride = 0, int64_t bRowStride = 0) {
+        MatMulFlatGeom geom;
+        geom.aWas1D = sa.size() == 1;
+        geom.bWas1D = sb.size() == 1;
+        if (geom.aWas1D)
+        {
+            sa = {1, sa[0]};
+        }
+        if (geom.bWas1D)
+        {
+            sb = {sb[0], 1};
+        }
+        geom.M    = sa[sa.size() - 2];
+        geom.K    = sa[sa.size() - 1];
+        geom.N    = sb[sb.size() - 1];
+        geom.aRow = aRowStride > 0 ? aRowStride : geom.K;
+        geom.bRow = bRowStride > 0 ? bRowStride : geom.N;
+        geom.rank = (int) out.size();
+        geom.outDim.assign(geom.rank, 0);
+        geom.aStride.assign(geom.rank, 0);
+        geom.bStride.assign(geom.rank, 0);
+        for (int k = 0; k < geom.rank; ++k)
+        {
+            geom.outDim[k] = (int) out[k];
+        }
+        // The trailing output dims are the matrix dims. With 1-D promotion an axis may be absent:
+        // A 1-D -> the M axis was dropped from the output; B 1-D -> the N axis was dropped.
+        int nAxis = geom.rank - 1;
+        int mAxis = geom.aWas1D ? -1 : (geom.bWas1D ? geom.rank - 1 : geom.rank - 2);
+        if (geom.bWas1D)
+        {
+            nAxis = -1;
+        }
+        int firstMatAxis = geom.rank;
+        if (mAxis >= 0)
+        {
+            firstMatAxis = std::min(firstMatAxis, mAxis);
+        }
+        if (nAxis >= 0)
+        {
+            firstMatAxis = std::min(firstMatAxis, nAxis);
+        }
+        geom.batchRank = firstMatAxis;
+        // Per-operand batch shapes (everything before the trailing matrix dims), left-padded to batchRank.
+        int64_t aBatchRank = (int64_t) sa.size() - 2, bBatchRank = (int64_t) sb.size() - 2;
+        auto    aDim       = [&](int i) -> int64_t {
+            int off = geom.batchRank - (int) aBatchRank;
+            return i < off ? 1 : sa[i - off];
+        };
+        auto bDim = [&](int i) -> int64_t {
+            int off = geom.batchRank - (int) bBatchRank;
+            return i < off ? 1 : sb[i - off];
+        };
+        int64_t sAcc = geom.M * geom.aRow, sBcc = geom.K * geom.bRow;
+        for (int i = geom.batchRank - 1; i >= 0; --i)
+        {
+            geom.aStride[i] = (int) ((aDim(i) == 1) ? 0 : sAcc);
+            geom.bStride[i] = (int) ((bDim(i) == 1) ? 0 : sBcc);
+            sAcc *= aDim(i);
+            sBcc *= bDim(i);
+        }
+        if (mAxis >= 0)
+        {
+            geom.aStride[mAxis] = (int) geom.aRow;
+            geom.bStride[mAxis] = 0;
+        }
+        if (nAxis >= 0)
+        {
+            geom.aStride[nAxis] = 0;
+            geom.bStride[nAxis] = 1;
+        }
+        return geom;
+    }
+
+    /// Which operand of a MatMul a padding verdict is about.
+    enum class MatMulOperand { A, B };
+
+    /// Deterministic verdict for virtualizing one dense MatMul operand: does giving that operand's
+    /// buffer a roundUpVec4-padded physical last axis turn a REFUSED vec4 route into an eligible
+    /// one? Pure shape arithmetic — the segment's allocator asks this before it sizes the buffer,
+    /// and the Vulkan MatMul op re-derives the same route from the same helpers when it prepares,
+    /// so the padded layout and the kernel that reads it are decided by one rule.
+    /// The padded operand's last axis is K for A and N for B; the other operand stays packed and the
+    /// verdict requires the tiled-GEMM shape class (the tiled kernels are the only ones that read a
+    /// physical row stride; every other kernel decodes the geometry SSBO or refuses).
+    inline bool matmulVec4PadUnlocks(bool useFp16, MatMulOperand which, const std::vector<int64_t> &sa, const std::vector<int64_t> &sb, const std::vector<int64_t> &out, int64_t &paddedLastDim) {
+        paddedLastDim = 0;
+        if (!useFp16 || sa.size() < 2 || sb.size() < 2 || out.size() < 2)
+        {
+            return false;
+        }
+        MatMulFlatGeom packed = matmulFlatGeom(sa, sb, out);
+        if (packed.aWas1D || packed.bWas1D || packed.M < kTiledMatMulMin || packed.N < kTiledMatMulMin || packed.K < kTiledMatMulMin)
+        {
+            return false;
+        }
+        const int64_t logical = which == MatMulOperand::A ? packed.K : packed.N;
+        if (logical <= 0 || logical % kVec4Align == 0)
+        {
+            return false; // already aligned: the route needs no help, and padding would only cost stores
+        }
+        const int64_t padded = roundUpVec4(logical);
+        auto          route  = [&](const MatMulFlatGeom &geometry) {
+            std::vector<int32_t> aBatch(geometry.aStride.begin(), geometry.aStride.begin() + geometry.batchRank);
+            std::vector<int32_t> bBatch(geometry.bStride.begin(), geometry.bStride.begin() + geometry.batchRank);
+            return matmulVec4Route(useFp16, geometry.N, geometry.K, aBatch, bBatch, /*bIsInitializer=*/false, /*bPayloadResident=*/false, geometry.aRow, geometry.bRow);
+        };
+        if (route(packed).eligible)
+        {
+            return false; // the packed layout already routes; padding would change nothing but bytes
+        }
+        MatMulFlatGeom virt = matmulFlatGeom(sa, sb, out, which == MatMulOperand::A ? padded : 0, which == MatMulOperand::B ? padded : 0);
+        if (!route(virt).eligible)
+        {
+            return false;
+        }
+        paddedLastDim = padded;
+        return true;
     }
 
     /// Zero-padded row repack for the v4 route's "#wv4" weight upload: `rows` rows of `n` source
