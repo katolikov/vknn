@@ -78,6 +78,12 @@ namespace vknn {
     };
     constexpr int kMatMulTileCount = (int) (sizeof(kMatMulTiles) / sizeof(kMatMulTiles[0]));
 
+    /// Fraction of the incumbent's time a raced challenger must beat to replace it. The device
+    /// throttles several-fold under sustained load, so a single timing sample carries noise well
+    /// above a percent; without a margin one noisy sample permanently displaces a proven pick in
+    /// the persisted tune table. The conv races use the same 3%.
+    constexpr double kTuneRaceMargin = 0.97;
+
     /// Element alignment of the vec4-load GEMM twins (shaders/matmul_tiled_fast_v4*_fp16.comp).
     /// Their cooperative panel loads fetch f16vec4 — four contiguous fp16 as one 64-bit load — so
     /// every global element index they form must be a multiple of four: K % kVec4Align == 0 keeps

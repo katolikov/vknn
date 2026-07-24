@@ -298,8 +298,11 @@ namespace vknn {
             // {128,128,16}). Tuning::None keeps the default; Fast/Heavy race the candidates
             // min-of-5 x 8 reps on scratch buffers and persist the winning index in the tune
             // table. Every candidate is bit-neutral (the per-output fp32 K chain is one
-            // ascending-k sequence for any tile), so the race needs no anti-noise margin and the
-            // choice never affects output bits.
+            // ascending-k sequence for any tile), so the choice never affects output bits.
+            // Bit-neutrality is numeric safety, not measurement safety: the device throttles
+            // several-fold under sustained load, so a challenger must still clear the incumbent by
+            // kTuneRaceMargin before it displaces a proven pick in the persisted tune table (the
+            // conv races carry the same margin for the same reason).
             MatMulTile pickTile(VkOpEnv &env, bool hasBias, bool v4Default) {
                 char buf[112];
                 snprintf(buf, sizeof(buf), "mm_%d_%d_%d_%d_%d", pc.M, pc.N, pc.K, numBatch, hasBias ? 1 : 0);
@@ -394,7 +397,10 @@ namespace vknn {
                         p->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, gyT, (uint32_t) gzT);
                         vk::computeBarrier(*env.ctx, cmd);
                     });
-                    if (ms < bestMs)
+                    // Candidate 0 (the default tile) seeds the race, so every later candidate is a
+                    // challenger and must clear the margin; a tie or a noise-width win keeps the
+                    // incumbent.
+                    if (ms < (ci == 0 ? bestMs : bestMs * kTuneRaceMargin))
                     {
                         bestMs = ms;
                         best   = ci;
