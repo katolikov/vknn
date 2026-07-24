@@ -126,7 +126,7 @@ native int4 path.
 
 The graph passes (and `vknn_compile`) apply the rewrites below. `vknn_compile` groups them behind
 an optimization level (`-O0` = none/reference, `-O1` = the default production set, `-O2`/`-O3` =
-+ the experimental SE fusion); the individual `--[no-]fuse-*` / `--[no-]lower-conv`
++ the experimental SE and dwpw fusions); the individual `--[no-]fuse-*` / `--[no-]lower-conv`
 flags override a single pass on top of the level:
 
 - **General pointwise fusion** — the one fusion pass. It grows each maximal same-shape
@@ -164,9 +164,10 @@ flags override a single pass on top of the level:
   tiles); opt in with `--lower-conv` and measure per model.
 - **Squeeze-Excite** chain folds to one kernel (`-O2` or `--fuse-se`, experimental).
 - **Depthwise + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip,
-  fp16-rounded exactly like the unfused store, so fused output is byte-identical to the unfused
-  graph (default on at `-O1`; `--no-fuse-dwpw` opts out; pairs wider than the kernels'
-  1152-channel LDS budget stay separate convs).
+  fp16-rounded like the unfused store. Byte-identical to the unfused graph on the CPU oracle and
+  on the fp32 GPU path; the fp16 GPU path still diverges, so the pass stays experimental
+  (`-O2` or `--fuse-dwpw`; pairs wider than the kernels' 1152-channel LDS budget stay separate
+  convs).
 - **Einsum lowering** to MatMul/Squeeze/Unsqueeze; **ConvTranspose → Conv + DepthToSpace**
   (subpixel rewrite).
 

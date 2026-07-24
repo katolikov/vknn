@@ -135,9 +135,11 @@ namespace vknn {
         // Empty = the batch-only path.
         std::map<std::string, int64_t> dimBindings;
         bool                           fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
-        bool                           fuseDwPw            = true;  // fuse depthwise KxK + 1x1-project into FusedDwPw
-                                                                    // (default on: the fp16-rounded LDS intermediate keeps
-                                                                    // fused == unfused byte-identical; --no-fuse-dwpw opts out)
+        bool                           fuseDwPw            = false; // fuse depthwise KxK + 1x1-project into FusedDwPw
+                                                                    // (experimental: the fp16-rounded LDS intermediate matches
+                                                                    // the unfused store bit-for-bit on the CPU oracle and at
+                                                                    // fp32, but the fp16 GPU path still diverges from the
+                                                                    // unfused graph — opt in with --fuse-dwpw and measure)
         bool                           fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
         bool                           fuseGridSampleWarp  = true;  // fold a scaled-flow + base-grid coordinate chain into
                                                                     // GridSample (bit-exact; default on, part of O1)
@@ -155,17 +157,17 @@ namespace vknn {
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
-        //   O1 = the default production set: the general pointwise fusion and the dwpw-pair
-        //        fusion (both bit-exact to the unfused graph)
-        //   O2/O3 = + the experimental squeeze-excite fusion (situational; can regress on some
-        //           models — measure before shipping a model with it).
+        //   O1 = the default production set: the general pointwise fusion (bit-exact)
+        //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; the
+        //           dwpw pair still diverges from the unfused graph on the fp16 GPU path —
+        //           measure before shipping a model with them).
         //   ConvGemm lowering stays opt-in (--lower-conv) at every level until its kernel is tuned.
         static PassOptions forOptLevel(int level) {
             PassOptions o;
             o.fusePointwiseChains = level >= 1;
             o.fuseGridSampleWarp  = level >= 1;
             o.fuseSqueezeExcite   = level >= 2;
-            o.fuseDwPw            = level >= 1;
+            o.fuseDwPw            = level >= 2;
             return o;
         }
     };
