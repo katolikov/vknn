@@ -373,6 +373,9 @@ if(VKNN_BUILD_EXAMPLES)
     # A/B microbench for the vec4-load GEMM kernel pair (matmul_tiled_fast_v4_fp16.comp vs the
     # scalar matmul_tiled_fast_fp16); like microbench it drives Vulkan kernels directly.
     list(APPEND _vknn_examples bench/matmul_vec4_bench)
+    # A/B microbench + byte gate for the implicit-GEMM conv's weight load width (conv_gemm_wv4.comp
+    # vs conv_gemm.comp); drives the Vulkan kernels directly like the pair above.
+    list(APPEND _vknn_examples bench/conv_gemm_wv4_bench)
   endif()
   foreach(ex ${_vknn_examples})
     get_filename_component(_name ${ex} NAME) # target name = basename, independent of the group dir

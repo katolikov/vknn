@@ -14,7 +14,11 @@ namespace vknn {
     /// Lower each eligible Conv to a ConvGemm node — one implicit-GEMM kernel over the receptive
     /// field — with the weights repacked to row-major [K][Cout] (K = Cin*KH*KW, k = (ky*KW+kx)*Cin+ic,
     /// channel-fastest so the kernel's A panel gathers whole NC4HW4 channel blocks per k quad)
-    /// as a new initializer. The repack is a pure permutation (no arithmetic), so it is exact for
+    /// as a new initializer. The panel's physical row stride is Cout here; the runtime widens the
+    /// weight load to STORE4 when that stride is 4-aligned and otherwise repacks the panel to a
+    /// zero-padded stride at plan time (convGemmWVec4Route, core/conv_gemm_route.h), so the lowered
+    /// initializer stays exactly [K][Cout] — the shape both the CPU reference and the split-K
+    /// partial pass read Cout from. The repack is a pure permutation (no arithmetic), so it is exact for
     /// fp32 and fp16 weights alike; the runtime kernel's fp32 K reduction runs in a fixed chunked
     /// order, making the result fp16-floor equivalent to the direct Conv kernel (the accumulation
     /// order shifts, exactly as Winograd's does) and deterministic run to run.

@@ -12,6 +12,7 @@
 // order, so it is only ever selected by the race, never by default. Winners persist in the tune
 // cache so warm runs are stable.
 #include "core/conv_geom.h"
+#include "core/conv_gemm_route.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -30,10 +31,14 @@ namespace vknn {
 
         struct ConvGemmOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
-            std::shared_ptr<vk::Buffer>          wt, bs;
+            // wt is the packed [K][Cout] panel the split-K partial pass reads; wtV4 is what the
+            // single-pass kernel binds — the same buffer when the panel is already 4-aligned on
+            // Cout, else the zero-padded [K][coutP] repack the vec4-weight twin needs.
+            std::shared_ptr<vk::Buffer>          wt, wtV4, bs;
             ConvGemmPC                           pc {};
             PwEpi                                epi;
             uint32_t                             gx = 0, gy = 0, gz = 0;
+            bool                                 wv4 = false; // the single pass runs conv_gemm_wv4
 
             // --- split-K state (partial pass + reduce pass) ---
             bool                                 ksplit = false;
@@ -58,11 +63,14 @@ namespace vknn {
             // the shape heuristic. Split-K (value 1) is NEVER auto-selected: it reorders the K summation
             // (fp16-floor, not byte-identical), so letting a timing race pick it would make the output
             // depend on thermal state and tuning level. A stale cached split-K value is ignored.
-            int pickVariant(VkOpEnv &env, NCHW x, NCHW y, int64_t M, int64_t K, int64_t Cout) {
+            int pickVariant(VkOpEnv &env, NCHW x, NCHW y, int64_t M, int64_t K, int64_t Cout, const char *raceStem, vk::Buffer &raceWeights) {
                 (void) K;
                 int  heur = convGemmTileM(M);
                 char buf[112];
-                snprintf(buf, sizeof(buf), "cgemm_%d_%d_%d", (int) M, (int) K, (int) Cout);
+                // The vec4-weight route gets its own signature namespace: a tile raced on one load
+                // width must never be reused for the other (bit-neutral either way, but the winner
+                // is a throughput measurement of the kernel it was raced on).
+                snprintf(buf, sizeof(buf), "cgemm%s_%d_%d_%d", wv4 ? "w" : "", (int) M, (int) K, (int) Cout);
                 std::string sig = env.gpuTag + "/" + buf;
                 int         reuse;
                 if (env.reuseTuned(sig, reuse) && (reuse == 16 || reuse == 32 || reuse == 64))
@@ -112,9 +120,9 @@ namespace vknn {
                     {
                         continue; // the Y axis has no runtime split
                     }
-                    auto   p  = env.pipeline(shader("conv_gemm", env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm});
+                    auto   p  = env.pipeline(shader(raceStem, env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm});
                     double ms = bestOf([&](VkCommandBuffer cmd) {
-                        p->dispatch(cmd, {sSrc->handle(), wt->handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()}, &pc, sizeof(pc), gxT, (uint32_t) gyT, (uint32_t) x.n);
+                        p->dispatch(cmd, {sSrc->handle(), raceWeights.handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()}, &pc, sizeof(pc), gxT, (uint32_t) gyT, (uint32_t) x.n);
                         vk::computeBarrier(*env.ctx, cmd);
                     });
                     if (ms < bestMs)
@@ -162,9 +170,41 @@ namespace vknn {
 
                 int64_t M = y.h * y.w;
                 int64_t K = x.c * k[0] * k[1];
-                int     choice = pickVariant(env, x, y, M, K, y.c);
-                ksplit         = (choice == 1);
-                int tm         = ksplit ? convGemmTileM(M) : choice;
+
+                // ---- vec4-weight kernel routing (deterministic alignment rule) ----
+                // The single-pass kernel dispatches the STORE4-load twin conv_gemm_wv4 when the
+                // weight panel's physical row stride is 4-aligned (convGemmWVec4Route,
+                // core/conv_gemm_route.h). A Cout indivisible by four routes only when the lowered
+                // [K][Cout] initializer's payload is still readable, since the twin then needs a
+                // zero-padded [K][coutP] repack. The twin is byte-identical to conv_gemm — it
+                // widens the weight load and nothing else — so the rule needs no race and no
+                // accuracy gate.
+                const TensorId wtId       = node.inputs[1];
+                const int64_t  wtElemSize = g.desc(wtId).dtype == DType::Float16 ? 2 : 4;
+                const bool     wtResident = (int64_t) g.initializers.at(wtId).bytes.size() >= numElements(g.desc(wtId).shape) * wtElemSize;
+                const ConvGemmWVec4Route wRoute = convGemmWVec4Route(y.c, wtResident);
+                pc.Coutp                        = (int) (wRoute.eligible ? wRoute.coutP : y.c);
+                wv4                             = wRoute.eligible;
+                // The padded repack goes through the weight cache (key suffix "#gemmwp", so a warm
+                // start reuses the packed blob and never collides with the flat upload's entry).
+                wtV4 = wt;
+                if (wRoute.padW)
+                {
+                    wtV4 = uploadCached(env, g.desc(wtId).name + "#gemmwp", [&] {
+                        return padConvGemmWeightVec4(initFloats(g, wtId), K, y.c, wRoute.coutP);
+                    });
+                }
+
+                // The M-tile race times the kernel this node will actually dispatch, so a routed
+                // node picks its tile under its own load width.
+                const char *raceStem = wv4 ? "conv_gemm_wv4" : "conv_gemm";
+                int         choice   = pickVariant(env, x, y, M, K, y.c, raceStem, wv4 ? *wtV4 : *wt);
+                ksplit               = (choice == 1);
+                int tm               = ksplit ? convGemmTileM(M) : choice;
+                if (ksplit)
+                {
+                    wv4 = false; // the split-K partial pass has no vec4-weight twin
+                }
 
                 gx = (uint32_t) ((y.c + kConvGemmTileN - 1) / kConvGemmTileN);
                 gy = (uint32_t) ((M + tm - 1) / tm);
@@ -183,7 +223,7 @@ namespace vknn {
                     krPipe = env.pipeline(shader((std::string("conv_gemm_kreduce") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(ConvGemmKrPC));
                 } else
                 {
-                    pipe = env.pipeline(shader((std::string("conv_gemm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), {(uint32_t) tm});
+                    pipe = env.pipeline(shader((std::string(wv4 ? "conv_gemm_wv4" : "conv_gemm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), {(uint32_t) tm});
                 }
             }
 
@@ -199,7 +239,7 @@ namespace vknn {
                     krPipe->dispatch(cmd, rb, &krpc, sizeof(krpc), (uint32_t) krGroups);
                     return;
                 }
-                std::vector<VkBuffer> bufs {env.devBuf(node.inputs[0])->handle(), wt->handle(), pc.hasBias ? bs->handle() : dst->handle(), dst->handle()};
+                std::vector<VkBuffer> bufs {env.devBuf(node.inputs[0])->handle(), (wv4 ? wtV4 : wt)->handle(), pc.hasBias ? bs->handle() : dst->handle(), dst->handle()};
                 epi.append(bufs, node, env, dst->handle());
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gx, gy, gz);
             }

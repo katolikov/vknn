@@ -2,6 +2,7 @@
 // covers 1x1 pointwise) and the depthwise case (the "dwconv" shader). Weights are repacked to
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
+#include "core/conv_gemm_route.h"
 #include "core/conv_geom.h"
 #include "core/wino_f63.h"
 #include "pw_plan.h"
@@ -1138,19 +1139,30 @@ namespace vknn {
                             // implicit-GEMM kernel at the raced M tile; binds Src/Wt/Bs/Dst exactly like
                             // the ConvGemm op, with the same epilogue plumbing as the direct path. The
                             // zero-padded bbuf keeps the unconditional bias add the direct kernel does.
-                            gemm  = true;
-                            gpc   = {pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, pc.act, 1, pc.actLo, pc.actHi};
-                            gwbuf = uploadCached(env, node.name + "#gemmw", [&] {
-                                // [Cout,Cin,KH,KW] -> [K][Cout], k = (ky*KW+kx)*Cin+ic (the kernel's
+                            gemm = true;
+                            // The weight panel is built here, so it can always present the
+                            // 4-aligned physical row stride the vec4-weight twin needs: the route
+                            // (convGemmWVec4Route, core/conv_gemm_route.h) is a pure alignment
+                            // decision and the twin is byte-identical to conv_gemm.
+                            const ConvGemmWVec4Route wRoute = convGemmWVec4Route(Cout, /*weightRepackable=*/true);
+                            const int64_t            coutP  = wRoute.eligible ? wRoute.coutP : Cout;
+                            gpc = {pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, pc.act, 1, pc.actLo, pc.actHi, (int) coutP};
+                            // A padded panel gets its own cache key: same node, different bytes at
+                            // the same length-per-row, so it must never alias the packed entry.
+                            gwbuf = uploadCached(env, node.name + (wRoute.padW ? "#gemmwp" : "#gemmw"), [&] {
+                                // [Cout,Cin,KH,KW] -> [K][coutP], k = (ky*KW+kx)*Cin+ic (the kernel's
                                 // channel-fastest k order; matches lowerConv's convert-time repack).
-                                std::vector<float> wp((size_t) x.c * KH * KW * Cout, 0.f);
+                                // coutP > Cout leaves each row's tail channels at the zero fill —
+                                // the value the kernel's own column guard yields, so the pad is
+                                // output-byte-neutral.
+                                std::vector<float> wp((size_t) x.c * KH * KW * coutP, 0.f);
                                 for (int64_t oc = 0; oc < Cout; ++oc)
                                 {
                                     for (int64_t ic = 0; ic < x.c; ++ic)
                                     {
                                         for (int64_t t = 0; t < KH * KW; ++t)
                                         {
-                                            wp[(size_t) ((t * x.c + ic) * Cout + oc)] = wsrc[(oc * x.c + ic) * KH * KW + t];
+                                            wp[(size_t) ((t * x.c + ic) * coutP + oc)] = wsrc[(oc * x.c + ic) * KH * KW + t];
                                         }
                                     }
                                 }
@@ -1161,7 +1173,8 @@ namespace vknn {
                             ggx       = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
                             ggy       = (uint32_t) ((M + gtm - 1) / gtm);
                             ggz       = (uint32_t) x.n;
-                            pipe = env.pipeline(shader((std::string("conv_gemm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), std::vector<uint32_t> {(uint32_t) gtm});
+                            pipe = env.pipeline(shader((std::string(wRoute.eligible ? "conv_gemm_wv4" : "conv_gemm") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC),
+                                                std::vector<uint32_t> {(uint32_t) gtm});
                         } else if (ocb == kChoiceLds3x3 || ocb == kChoiceLds16)
                         {
                             // LDS input-halo 3x3 at the autotuned tile edge (8x8 or 16x16; won the

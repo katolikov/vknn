@@ -1,0 +1,180 @@
+#version 450
+#define VKNN_NO_RTE 1 // avoids the float-controls execution mode (miscompiled on GEMM-shaped kernels); TO_STORE rounds explicitly
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+#include "common.glsl"
+// vec4-weight twin of conv_gemm.comp at the same {TM,64,16} geometry: the cooperative W-panel load
+// fetches a STORE4 (four contiguous output channels — one 64-bit fp16 or 128-bit fp32 load) from
+// the row-major [K][Coutp] weight panel instead of four scalar loads with four separate index
+// decodes. The A panel already gathered whole NC4HW4 channel blocks; this brings the weight side to
+// the same load width, the same treatment shaders/matmul_tiled_fast_v4_fp16.comp gave the GEMM
+// twins. Everything else is the conv_gemm body — same implicit im2col, same LDS layout, same fixed
+// chunked fp32 K reduction, same store — so the output is byte-identical to conv_gemm, and the host
+// routes here by a deterministic alignment rule (convGemmWVec4Route, core/conv_gemm_route.h) with
+// no timing race.
+//
+// Alignment contract (enforced by the routing rule; there is no scalar tail path):
+//   Coutp % 4 == 0, where pc.Coutp is the weight panel's PHYSICAL row stride — Cout itself for a
+//   naturally aligned panel, or the zero-padded roundUpConvGemmCout(Cout) of a repacked panel. The
+//   panel's column offset gc is a multiple of four by construction (the workgroup N tile is a
+//   multiple of TN = 64 and each thread owns four adjacent channels), so gk * Coutp + gc is
+//   4-aligned and each vec4 stays inside row gk. Lanes past column Cout read the pad zeros — the
+//   value the scalar kernel's `gc < Cout` guard yields — so the LDS panel matches element for
+//   element. conv_gemm.comp ignores Coutp and keeps reading the packed [K][Cout] panel.
+
+// M tile edge as a specialization constant: 16, 32, or 64 output pixels per workgroup (RM = TM/16
+// pixels per thread). A small-M shape picks a narrow tile so the M axis still spreads across
+// workgroups. TM is bit-neutral: it only remaps threads to outputs, never the per-output K order.
+layout(constant_id = 0) const int TM = 64;
+#define TM_MAX 64      // shared storage is sized for the widest variant (4 KB total; no occupancy cost)
+#define TN 64
+#define TK 16
+#define TILE 16        // threads per dim (16x16 = 256)
+#define RM (TM / TILE) // output pixels per thread: 1, 2, or 4
+#define RN (TN / TILE) // 4 output channels per thread = one NC4 block
+
+// Whole-channel-block element type of the NC4HW4 source and of the vec4 weight-panel load.
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+
+layout(local_size_x = TILE, local_size_y = TILE) in;
+layout(std430, binding = 0) readonly buffer Src { STORE4 s[]; };  // NC4HW4 activations, one channel block per element
+layout(std430, binding = 1) readonly buffer Wt { STORE4 w4[]; }; // [K][Coutp] repacked weights, four channels per element
+layout(std430, binding = 2) readonly buffer Bs { STORE bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { STORE d[]; }; // NC4HW4
+// ConvGemmPC, shared with conv_gemm.comp. Coutp is the TRAILING field: appending it leaves every
+// offset conv_gemm.comp declares unchanged, so the scalar kernel reads the same push-constant block
+// byte for byte and needs no edit.
+layout(push_constant) uniform PC {
+  int C, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_;
+  int act, hasBias;
+  float actLo, actHi;
+  int Coutp;
+} pc;
+
+shared STORE As[TK][TM_MAX]; // transposed (k-major): the inner loop reads As[kk][m] across threads
+shared STORE Ws[TK][TN];
+
+void main() {
+  int M = pc.OH * pc.OW;
+  int K = pc.C * pc.KH * pc.KW;
+  int Cinb = (pc.C + 3) / 4, Coutb = (pc.Cout + 3) / 4;
+  int n = int(gl_WorkGroupID.z);
+  int tileM = int(gl_WorkGroupID.y) * TM;
+  int tileN = int(gl_WorkGroupID.x) * TN;
+  int tx = int(gl_LocalInvocationID.x);
+  int ty = int(gl_LocalInvocationID.y);
+  int tid = ty * TILE + tx;
+
+  float acc[TM_MAX / TILE][RN];
+  for (int i = 0; i < RM; ++i)
+    for (int j = 0; j < RN; ++j)
+      acc[i][j] = 0.0;
+
+  for (int k0 = 0; k0 < K; k0 += TK) {
+    // A panel: gather TM patch rows for this K chunk from the NC4HW4 input (implicit im2col).
+    // Each iteration owns one k quad (4 consecutive k) of one row m; TM * TK/4 quads cover the
+    // panel. k0 is TK-aligned, so every quad is 4-aligned in k.
+    for (int q = tid; q < TM * (TK / 4); q += TILE * TILE) {
+      int m = q >> 2;
+      int k = (q & 3) << 2;
+      int gm = tileM + m, gk = k0 + k;
+      int ic = (gk < K) ? gk % pc.C : 0;
+      // Fast path: quad fully in range, all 4 k in one tap's aligned channel block. One block load
+      // (or one zero splat for a padded pixel) replaces 4 scalar decodes + loads.
+      if (gm < M && gk + 3 < K && (ic & 3) == 0 && ic + 3 < pc.C) {
+        int p = gk / pc.C;
+        int ky = p / pc.KW, kx = p - ky * pc.KW;
+        int oy = gm / pc.OW, ox = gm - oy * pc.OW;
+        int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+        int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+        vec4 v = vec4(0.0);
+        if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W)
+          v = vec4(s[((n * Cinb + (ic >> 2)) * pc.H + iy) * pc.W + ix]);
+        As[k + 0][m] = STORE(v.x);
+        As[k + 1][m] = STORE(v.y);
+        As[k + 2][m] = STORE(v.z);
+        As[k + 3][m] = STORE(v.w);
+      } else {
+        // Edge quad (K tail, or a quad straddling a channel block when C % 4 != 0): per-element decode.
+        for (int j = 0; j < 4; ++j) {
+          int gkj = gk + j;
+          float v = 0.0;
+          if (gm < M && gkj < K) {
+            int icj = gkj % pc.C, pj = gkj / pc.C;
+            int ky = pj / pc.KW, kx = pj - ky * pc.KW;
+            int oy = gm / pc.OW, ox = gm - oy * pc.OW;
+            int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+            int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+            if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W) {
+              STORE4 blk = s[((n * Cinb + (icj >> 2)) * pc.H + iy) * pc.W + ix];
+              v = float(blk[icj & 3]);
+            }
+          }
+          As[k + j][m] = STORE(v);
+        }
+      }
+    }
+    // W panel: contiguous [K][Coutp] rows, one STORE4 per thread per iteration (TK*TN/4 = 256
+    // vec4s over 256 threads = 1 iteration, a quarter of the scalar kernel's four). Each vec4 is
+    // one k row, channels gc .. gc+3; gc is 4-aligned and Coutp % 4 == 0, so it stays in-row and
+    // the guard on its first channel is exactly the scalar kernel's per-element guard.
+    for (int t = 0; t < (TK * TN) / (TILE * TILE * 4); ++t) {
+      int v = tid + t * (TILE * TILE); // vec4 index 0 .. TK*TN/4-1, laid out as k*(TN/4) + c/4
+      int k = v / (TN / 4), c = (v % (TN / 4)) * 4;
+      int gk = k0 + k, gc = tileN + c;
+      STORE4 wv = (gk < K && gc < pc.Cout) ? w4[(gk * pc.Coutp + gc) >> 2] : STORE4(0.0);
+      Ws[k][c + 0] = wv.x;
+      Ws[k][c + 1] = wv.y;
+      Ws[k][c + 2] = wv.z;
+      Ws[k][c + 3] = wv.w;
+    }
+    barrier();
+    for (int kk = 0; kk < TK; ++kk) {
+      float av[TM_MAX / TILE], wv[RN];
+      for (int i = 0; i < RM; ++i)
+        av[i] = float(As[kk][ty * RM + i]);
+      for (int j = 0; j < RN; ++j)
+        wv[j] = float(Ws[kk][tx * RN + j]);
+      for (int i = 0; i < RM; ++i)
+        for (int j = 0; j < RN; ++j)
+          acc[i][j] += av[i] * wv[j];
+    }
+    barrier();
+  }
+
+  // The thread's RN=4 channels are one aligned block: oc0 = tileN + tx*4, ocb = oc0/4. Lanes past
+  // Cout are pad lanes and store 0 (the buffer pool reuses memory; a pad lane must never carry a
+  // stale value).
+  int oc0 = tileN + tx * RN;
+  int ocb = oc0 >> 2;
+  vec4 b4 = vec4(0.0);
+  if (pc.hasBias != 0) {
+    b4 = vec4(oc0 + 0 < pc.Cout ? float(bias[oc0 + 0]) : 0.0, oc0 + 1 < pc.Cout ? float(bias[oc0 + 1]) : 0.0,
+              oc0 + 2 < pc.Cout ? float(bias[oc0 + 2]) : 0.0, oc0 + 3 < pc.Cout ? float(bias[oc0 + 3]) : 0.0);
+  }
+  for (int i = 0; i < RM; ++i) {
+    int m = tileM + ty * RM + i;
+    if (m >= M || ocb >= Coutb) continue;
+    int oy = m / pc.OW, ox = m % pc.OW;
+    vec4 v = vec4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]) + b4;
+    v = vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi), vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+             vx_act(v.z, pc.act, pc.actLo, pc.actHi), vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+    v = vec4(oc0 + 0 < pc.Cout ? v.x : 0.0, oc0 + 1 < pc.Cout ? v.y : 0.0,
+             oc0 + 2 < pc.Cout ? v.z : 0.0, oc0 + 3 < pc.Cout ? v.w : 0.0);
+    int di = ((n * Coutb + ocb) * pc.OH + oy) * pc.OW + ox;
+#ifdef PW_EPI
+    v = pw_apply4(v, di);
+#endif
+    d[(di << 2) + 0] = TO_STORE(v.x);
+    d[(di << 2) + 1] = TO_STORE(v.y);
+    d[(di << 2) + 2] = TO_STORE(v.z);
+    d[(di << 2) + 3] = TO_STORE(v.w);
+  }
+}

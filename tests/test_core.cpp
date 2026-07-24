@@ -1,6 +1,7 @@
 // vknn unit tests (host): dtype/fp16, config JSON, graph passes, layout packing math, and the
 // ergonomic Session API. Operator correctness lives in test_ops.cpp; Vulkan correctness is
 // validated on-device (see scripts).
+#include "core/conv_gemm_route.h"
 #include "core/matmul_tile.h"
 #include "vknn/config.h"
 #include "vknn/dtype.h"
@@ -407,6 +408,64 @@ TEST(MatMulTile, Vec4PadRows) {
 
     // A wider pad zero-fills every tail element, not just one.
     padded = padMatMulRowsVec4({1, 2}, 1, 2, 8);
+    ASSERT_EQ(padded.size(), 8u);
+    EXPECT_EQ(padded[0], 1.f);
+    EXPECT_EQ(padded[1], 2.f);
+    for (size_t i = 2; i < padded.size(); ++i)
+    {
+        EXPECT_EQ(padded[i], 0.f) << "i=" << i;
+    }
+}
+
+// convGemmWVec4Route: the deterministic alignment rule that routes the implicit-GEMM convolution to
+// the STORE4-weight twin conv_gemm_wv4. The twin is byte-identical to conv_gemm (it widens the
+// weight-panel load and nothing else), so the rule is pure layout: the panel's PHYSICAL row stride
+// must be 4-aligned, which the packed [K][Cout] panel already is whenever Cout is.
+TEST(ConvGemmRoute, WeightVec4Alignment) {
+    // A 4-aligned Cout routes on the packed panel, with no repack and Coutp == Cout.
+    ConvGemmWVec4Route route = convGemmWVec4Route(1152, /*weightRepackable=*/false);
+    EXPECT_TRUE(route.eligible);
+    EXPECT_FALSE(route.padW);
+    EXPECT_EQ(route.coutP, 1152);
+    // The Conv rule's floor (8 tiles of 64) is 4-aligned by construction, so the common case never
+    // needs the repack.
+    EXPECT_FALSE(convGemmWVec4Route(512, false).padW);
+
+    // Cout % 4 != 0 routes only when the panel can be repacked to the padded row stride.
+    route = convGemmWVec4Route(513, /*weightRepackable=*/true);
+    EXPECT_TRUE(route.eligible);
+    EXPECT_TRUE(route.padW);
+    EXPECT_EQ(route.coutP, 516);
+    EXPECT_EQ(route.coutP, roundUpConvGemmCout(513));
+    EXPECT_FALSE(convGemmWVec4Route(513, /*weightRepackable=*/false).eligible);
+
+    // Degenerate channel counts never route.
+    EXPECT_FALSE(convGemmWVec4Route(0, true).eligible);
+    EXPECT_FALSE(convGemmWVec4Route(-4, true).eligible);
+
+    // roundUpConvGemmCout is identity on aligned values and rounds up otherwise.
+    EXPECT_EQ(roundUpConvGemmCout(8), 8);
+    EXPECT_EQ(roundUpConvGemmCout(9), 12);
+    EXPECT_EQ(roundUpConvGemmCout(11), 12);
+    EXPECT_EQ(roundUpConvGemmCout(12), 12);
+}
+
+// padConvGemmWeightVec4: the "#gemmwp" repack helper. Every [K][Cout] row lands at its coutP-strided
+// offset with the original channels; the coutP - Cout tail of every row is zero, which is the value
+// the kernel's own `gc < Cout` column guard yields — that is what makes the pad output-byte-neutral.
+TEST(ConvGemmRoute, WeightVec4PadRows) {
+    // 3 k rows of 3 output channels padded to a row stride of 4.
+    const std::vector<float> src {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    std::vector<float>       padded = padConvGemmWeightVec4(src, 3, 3, 4);
+    ASSERT_EQ(padded.size(), 12u);
+    const std::vector<float> expected {1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0};
+    EXPECT_EQ(padded, expected);
+
+    // An already-aligned Cout copies through unchanged (coutP == Cout).
+    EXPECT_EQ(padConvGemmWeightVec4(src, 3, 3, 3), src);
+
+    // The full tail is zero-filled, not just the first pad channel.
+    padded = padConvGemmWeightVec4({1, 2}, 1, 2, 8);
     ASSERT_EQ(padded.size(), 8u);
     EXPECT_EQ(padded[0], 1.f);
     EXPECT_EQ(padded[1], 2.f);
