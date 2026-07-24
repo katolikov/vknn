@@ -63,9 +63,16 @@
 //                       Consumed by tools/check_model_support.py --engine-report
 //     --dump-big        log tensors > 50M elements after shape inference (debug)
 //
+// A with-past decoder compile (any ONNX-sourced mode) automatically appends a chunk-prefill
+// bucket — the same graph at input_ids [1, kChunkPrefillTokens] over the decode bucket's cache
+// shapes — so the chat driver prefills any prompt length as fixed-size chunk passes
+// (docs/running-an-llm.md); no flag, and models without a decode graph are unaffected.
+//
 // A ".vxm" input skips import + passes (they ran at its compile time) and serves the remaining
 // stages — quantization, the fp16 sweep, the support report, and the save — from the stored graphs,
 // processing EVERY bucket of a multi-bucket container and preserving bucket order and names.
+// (No chunk-prefill bucket is appended on this path: the stored graphs carry no re-importable
+// source, and each bucket's passes are baked at its own shape.)
 #include "core/vk_gates.h"
 #include "import/dim_expr.h"
 #include "import/passes.h"
@@ -382,6 +389,17 @@ static bool writeSupportReports(const std::vector<Graph> &buckets, const std::ve
     return true;
 }
 
+/// Append the automatic chunk-prefill bucket when the compiled buckets contain a with-past decode
+/// graph (planChunkPrefillBucket): a fresh import of the decode bucket's source file compiled at
+/// input_ids [1, kChunkPrefillTokens] over the same cache shapes, so any prompt length prefills as
+/// fixed-size chunk passes (docs/running-an-llm.md). The bucket lands at the END of the list —
+/// existing bucket indices, labels, and support-report paths are unchanged — and shares the
+/// content-deduped initializer pool, so the .vxm grows by the graph metadata, not the weights.
+/// `sourceFiles` holds each bucket's source model path (one entry per bucket, extended for the new
+/// bucket). A plan or compile failure only skips the bucket; the requested compile still succeeds.
+static void appendChunkPrefillBucket(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles,
+                                     const PassOptions &sharedOpt, bool quantize, const QuantOptions &quantOpts, bool fp16);
+
 /// Run the -Os weight-quantization pass over one compiled bucket and print its summary line. The
 /// fp16 sweep for the non-quantized weights runs at the caller (quantization implies --fp16).
 static void runQuantPass(Graph &g, const QuantOptions &opts) {
@@ -398,6 +416,47 @@ static void runQuantPass(Graph &g, const QuantOptions &opts) {
            "%lld outlier columns, %s calibration), weights %.0f MB -> %.0f MB\n",
            formatName, (long long) qs.quantized, (long long) qs.sites, (long long) qs.guardKept, (long long) qs.outlierCols,
            qs.calibrated ? (opts.calibFiles.empty() ? "synthetic" : "file") : "no", qs.bytesBefore / 1e6, qs.bytesAfter / 1e6);
+}
+
+static void appendChunkPrefillBucket(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles,
+                                     const PassOptions &sharedOpt, bool quantize, const QuantOptions &quantOpts, bool fp16) {
+    ChunkPrefillPlan plan;
+    if (!planChunkPrefillBucket(buckets, &plan))
+    {
+        return; // no with-past decode bucket (or a chunk-capable prefill bucket already exists)
+    }
+    const std::string &file = sourceFiles[plan.decodeBucket < sourceFiles.size() ? plan.decodeBucket : 0];
+    // The plan pins EVERY graph input to a full concrete shape (the strongest binding, overriding
+    // any shared --dim for those tensors), so the chunk bucket compiles from the same source with
+    // the same options as the decode bucket, at the chunk sequence length.
+    PassOptions bopt = sharedOpt;
+    for (const auto &kv: plan.shapes)
+    {
+        bopt.inputShapes[kv.first] = kv.second;
+    }
+    printf("[compile] chunk-prefill: appending automatic bucket '%s' from %s\n", plan.label.c_str(), file.c_str());
+    Graph gb;
+    try
+    {
+        gb = importOnnx(file);
+        runStandardPasses(gb, bopt);
+    } catch (const Error &e)
+    {
+        printf("[compile] chunk-prefill: bucket compile failed (%s); continuing without it\n", e.what());
+        return;
+    }
+    if (quantize)
+    {
+        runQuantPass(gb, quantOpts);
+    }
+    if (fp16 || quantize)
+    {
+        convertInitializersFp16(gb);
+    }
+    printf("[compile] chunk-prefill: post-passes %zu nodes, %zu weights\n", gb.nodes.size(), gb.initializers.size());
+    buckets.push_back(std::move(gb));
+    labels.push_back(plan.label);
+    sourceFiles.push_back(file);
 }
 
 int main(int argc, char **argv) {
@@ -702,6 +761,11 @@ int main(int argc, char **argv) {
             printf("[compile] graph %zu '%s': post-passes %zu nodes, %zu weights\n", b, graphLabels[b].c_str(), gb.nodes.size(), gb.initializers.size());
             buckets.push_back(std::move(gb));
         }
+        // Automatic chunk-prefill bucket (before the boundary fusion, which may merge/erase
+        // buckets and would desynchronize the bucket->source-file mapping). A split VLM export
+        // whose decode bucket only gains input_ids DURING the boundary fusion is not detected
+        // here; an explicit --graph occurrence at the chunk shape covers it.
+        appendChunkPrefillBucket(buckets, graphLabels, graphFiles, opt, quantize, quantOpts, fp16);
         if (!supportReport.empty() && !writeSupportReports(buckets, graphFiles, supportReport))
         {
             return 2;
@@ -764,11 +828,12 @@ int main(int argc, char **argv) {
             buckets.push_back(std::move(gb));
             names.push_back(bucketLabels[b]);
         }
+        std::vector<std::string> models(buckets.size(), onnx);
+        appendChunkPrefillBucket(buckets, names, models, opt, quantize, quantOpts, fp16); // automatic chunk-prefill bucket
         if (!supportReport.empty())
         {
             // One report per bucket: the backend assignment is shape-dependent, so every bucket is
             // checked, not just bucket 0.
-            std::vector<std::string> models(buckets.size(), onnx);
             if (!writeSupportReports(buckets, models, supportReport))
             {
                 return 2;
@@ -873,11 +938,31 @@ int main(int argc, char **argv) {
         printf("[compile] wrote support report %s\n", supportReport.c_str());
     }
 
-    if (!saveGraphBin(g, out))
+    // A single-graph compile of a with-past decoder gains the automatic chunk-prefill bucket and
+    // saves as a two-bucket .vxm over one shared weight pool; any other model (no decode-graph
+    // match) keeps the legacy single-graph container, byte-identical to before.
+    std::vector<Graph>       buckets;
+    std::vector<std::string> labels;
+    std::vector<std::string> sources;
+    buckets.push_back(std::move(g));
+    labels.emplace_back("default");
+    sources.push_back(onnx);
+    appendChunkPrefillBucket(buckets, labels, sources, opt, quantize, quantOpts, fp16);
+    if (buckets.size() == 1)
+    {
+        if (!saveGraphBin(buckets.front(), out))
+        {
+            printf("[compile] save failed\n");
+            return 2;
+        }
+        printf("[compile] wrote %s\n", out.c_str());
+        return 0;
+    }
+    if (!saveGraphBinBuckets(buckets, labels, out))
     {
         printf("[compile] save failed\n");
         return 2;
     }
-    printf("[compile] wrote %s\n", out.c_str());
+    printf("[compile] wrote %s (%zu bucket(s))\n", out.c_str(), buckets.size());
     return 0;
 }

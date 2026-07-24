@@ -82,6 +82,20 @@ vknn_compile out.vxm --fp16 \
   --graph "model.onnx;dim:sequence_length=1;dim:past_sequence_length=1024;dim:total_sequence_length=1025"
 ```
 
+Every ONNX-sourced compile of a with-past decoder additionally appends an automatic
+**chunk-prefill bucket** — the same graph at `input_ids [1, 64]` (`kChunkPrefillTokens`,
+`include/vknn/io_link.h`; 64 balances per-pass overhead amortization against the last
+chunk's padded waste) over the decode bucket's cache shapes — as the LAST bucket of the
+`.vxm`, so existing bucket indices, labels, and old readers are unchanged, and the shared
+weight pool keeps the size cost to the bucket's graph metadata. No flag is involved: a
+plain single-graph decode compile becomes a two-bucket file, a `--bucket`/`--graph`
+compile gains one more bucket, and a model with no decode graph — or one that already
+carries a prefill bucket at `S <= 64` — is untouched. A `.vxm`-input recompile keeps its
+stored buckets and appends nothing (the stored graphs carry no re-importable source); a
+split VLM export whose decode graph only gains `input_ids` during the bucket-boundary
+fusion is not auto-detected either — give it an explicit `--graph` occurrence at
+`sequence_length=64` instead.
+
 `-Os` compiles every `-O3` fusion plus **calibration-free int4 weight quantization** (a
 native int4 GPU MatMul) in place of `--fp16`: the instruct model is ~2.4x smaller and
 stays coherent. `--quant-samples 0` selects weight-only quantization, which a multi-bucket

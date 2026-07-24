@@ -301,18 +301,23 @@ namespace vknn {
 
     } // namespace
 
-    // Fuse the single-query decode-attention chain
+    // Fuse the decode-attention chain
     //   MatMul(view) [-> scale/mask pointwise] -> Softmax -> MatMul(view) [-> Transpose -> Reshape]
     // into one FusedAttention node (core/fused_attention.h), so a decode step's attention core is
     // one dispatch per layer and the score/probability intermediates never round-trip through
     // memory. Consumes the operand-view stride attrs foldMatMulViews composed — the fused kernel
     // reads q/k/v through those same strides, which is what makes the fusion work on the GQA cache
     // layout without materialization — so it must run after that pass; a chain the fold left
-    // materialized never matches here. Matches only the M == 1 (query length 1) decode form;
-    // prefill and every non-attention graph are untouched. Numerics: dot products and the softmax
-    // run in fp32 with no fp16 score store, so a fused graph is numerically finer than — not
-    // byte-identical to — the decomposed chain. Runs at session load only (Hint::FusedAttention);
-    // never serialized.
+    // materialized never matches here. Two query-length forms match:
+    //   - M == 1, the single-query decode step (attrs exactly as before);
+    //   - M > 1 with a mask whose values vary per query row (the with-past chunk-prefill form,
+    //     where the causal structure lives in the additive mask): the M axis is hosted as one more
+    //     row dim — the backends' per-row stride addressing cannot tell a query row from a head
+    //     row — so the same kernels serve the chunk bucket. A maskless or row-broadcast-mask M > 1
+    //     chain (an encoder's bidirectional attention) keeps the primitive path.
+    // Numerics: dot products and the softmax run in fp32 with no fp16 score store, so a fused
+    // graph is numerically finer than — not byte-identical to — the decomposed chain. Runs at
+    // session load only (Hint::FusedAttention); never serialized.
     void fuseDecodeAttention(Graph &g, const std::string &fp32Pins) {
         std::vector<int> producer(g.tensors.size(), -1);
         for (size_t i = 0; i < g.nodes.size(); ++i)
@@ -490,11 +495,19 @@ namespace vknn {
             {
                 continue;
             }
-            const int64_t C  = qk.attr.geti(kMmViewN);
+            const int64_t C = qk.attr.geti(kMmViewN);
             const int64_t hd = pv.attr.geti(kMmViewN);
-            if (qk.attr.geti(kMmViewM) != 1 || pv.attr.geti(kMmViewM) != 1)
+            const int64_t M = qk.attr.geti(kMmViewM);
+            if (M < 1 || pv.attr.geti(kMmViewM) != M)
             {
-                continue; // prefill (M > 1) keeps the primitive path
+                continue;
+            }
+            // The M > 1 form carries its causal structure in the mask: without a mask (or with one
+            // the addressing check below finds row-broadcast) the chain stays primitive, so an
+            // encoder's bidirectional attention is never rewritten.
+            if (M > 1 && smk.mask == kNoTensor)
+            {
+                continue;
             }
             if (pv.attr.geti(kMmViewK) != C || qk.attr.geti(kMmViewK) <= 0 || C <= 0 || C > kFaMaxContext || hd <= 0 || hd > kFaMaxHeadDim)
             {
@@ -505,18 +518,19 @@ namespace vknn {
             {
                 dimsMatch = dimsMatch && qkDims[d] == pvDims[d];
             }
-            if (!dimsMatch || qkDims[rank - 2] != 1 || pvDims[rank - 2] != 1 || qkDims[rank - 1] != C || pvDims[rank - 1] != hd)
+            if (!dimsMatch || qkDims[rank - 2] != M || pvDims[rank - 2] != M || qkDims[rank - 1] != C || pvDims[rank - 1] != hd)
             {
                 continue;
             }
             // The PV A operand must read the scores dense row-major over the refined dims — the
-            // exact layout the QK kernel writes — with the token axis as its k walk.
+            // exact layout the QK kernel writes — with the token axis as its k walk. The M axis
+            // (each query row's C-wide probability vector) is part of that dense layout.
             {
                 std::vector<int64_t> expect = denseStrides(qkDims);
                 bool                 denseA = pv.attr.geti(kMmViewAK) == 1 && pvA[rank - 1] == 0;
-                for (size_t d = 0; denseA && d + 2 < rank; ++d)
+                for (size_t d = 0; denseA && d + 1 < rank; ++d)
                 {
-                    denseA = pvDims[d] == 1 || pvA[d] == expect[d];
+                    denseA = qkDims[d] == 1 || pvA[d] == expect[d];
                 }
                 if (!denseA)
                 {
@@ -569,8 +583,18 @@ namespace vknn {
                 {
                     continue;
                 }
+                // The M > 1 form requires a per-query-row mask (the causal chunk structure); a
+                // mask broadcast over the query axis marks a bidirectional chain, kept primitive.
+                if (M > 1 && (*ms)[rank - 2] == 0)
+                {
+                    continue;
+                }
                 mN = (*ms)[rank - 1];
                 mStride.assign(ms->begin(), ms->end() - 2);
+                if (M > 1)
+                {
+                    mStride.push_back((*ms)[rank - 2]);
+                }
             }
 
             // --- emit the fused node ---
@@ -605,6 +629,16 @@ namespace vknn {
             std::vector<int64_t> qStride(qkA.begin(), qkA.end() - 2);
             std::vector<int64_t> kStride(qkB.begin(), qkB.end() - 2);
             std::vector<int64_t> vStride(pvB.begin(), pvB.end() - 2);
+            // M > 1: the query axis becomes the innermost row dim, carrying each operand's own
+            // stride along it (q advances per query row; K/V typically hold stride 0 there — the
+            // same shared-KV shape as a GQA head group). The M == 1 attrs are byte-unchanged.
+            if (M > 1)
+            {
+                rowDims.push_back(M);
+                qStride.push_back(qkA[rank - 2]);
+                kStride.push_back(qkB[rank - 2]);
+                vStride.push_back(pvB[rank - 2]);
+            }
             setInt(kFa, kFaVersion);
             setInts(kFaDims, std::move(rowDims));
             setInts(kFaQStride, std::move(qStride));

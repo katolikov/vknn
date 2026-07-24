@@ -34,6 +34,19 @@
 // buffers) and the first decode step re-seeds the engine-resident cache from them; --no-prefill
 // forces the token-by-token path for A/B. Single-bucket models are unaffected.
 //
+// A CHUNK-prefill bucket — input_ids [1,S] with S <= kChunkPrefillTokens (io_link.h), emitted
+// automatically by vknn_compile for a with-past decoder — upgrades that to the chunked-resident
+// flow (llm.npu, arXiv 2407.05858): the prompt runs as ceil(T/S) sequential fixed-shape chunk
+// passes whose KV cache stays ENGINE-RESIDENT inside the chunk bucket. Each pass's link ranges
+// fold the PREVIOUS chunk's produced rows into their absolute cache slots (kvFoldRowRanges), the
+// mask marks the cached past plus the chunk's real tokens (the graph's own causal mask orders the
+// intra-chunk columns), and the last chunk pads to S with masked-out ids. One host readback per
+// turn then materializes the built cache for the decode bucket's re-seed — per-chunk KV traffic is
+// zero, against the whole-window path's full cache bind + present download per pass. Requires the
+// engine-resident cache (linked mode), position_ids, and an fp32 KV boundary; anything else — and
+// any link failure — falls back to the whole-window host flow above, with the identical token
+// stream. --no-prefill disables both batched paths.
+//
 // The model is a with-past decoder compiled at a fixed past length C (read from the .vxm). Each step
 // feeds one token at absolute position p, the [1, kv_heads, C, head_dim] cache as the past key/value
 // inputs, and an attention mask marking the p valid past slots plus the current token, so a single
@@ -169,8 +182,12 @@ int main(int argc, char **argv) {
     // Bucket roles for a multi-bucket .vxm: the decode bucket feeds input_ids [1,1]; a prefill
     // bucket (optional) feeds [1,S] with S>1 and processes a whole prompt window in ONE forward —
     // the difference between TTFT scaling as prompt-length decode steps and one batched pass. A
-    // single-bucket model keeps the token-by-token prefill below, byte-identically to before.
+    // bucket with S <= kChunkPrefillTokens additionally drives the chunked-resident prefill (the
+    // largest such S wins: fewer passes per prompt); the whole-window role keeps the largest S
+    // overall as the fallback. A single-bucket model keeps the token-by-token prefill below,
+    // byte-identically to before.
     int decodeBucket = -1, prefillBucket = -1, prefillS = 0;
+    int chunkBucket = -1, chunkS = 0;
     for (size_t b = 0; b < sess->bucketCount(); ++b)
     {
         const std::vector<IOInfo> bins = sess->inputInfo(b);
@@ -181,10 +198,18 @@ int main(int argc, char **argv) {
                 if (in.shape[1] == 1 && decodeBucket < 0)
                 {
                     decodeBucket = (int) b;
-                } else if (in.shape[1] > 1 && (int) in.shape[1] > prefillS)
+                } else if (in.shape[1] > 1)
                 {
-                    prefillBucket = (int) b;
-                    prefillS      = (int) in.shape[1];
+                    if ((int) in.shape[1] > prefillS)
+                    {
+                        prefillBucket = (int) b;
+                        prefillS      = (int) in.shape[1];
+                    }
+                    if (in.shape[1] <= kChunkPrefillTokens && (int) in.shape[1] > chunkS)
+                    {
+                        chunkBucket = (int) b;
+                        chunkS      = (int) in.shape[1];
+                    }
                 }
             }
         }
@@ -197,6 +222,7 @@ int main(int argc, char **argv) {
     if (flagSet(argc, argv, "--no-prefill"))
     {
         prefillBucket = -1; // token-by-token A/B reference
+        chunkBucket   = -1;
     }
     const std::vector<IOInfo> ins  = sess->inputInfo((size_t) decodeBucket);
     const std::vector<IOInfo> outs = sess->outputInfo((size_t) decodeBucket);
@@ -322,16 +348,17 @@ int main(int argc, char **argv) {
         }
         return false;
     };
-    // With a prefill bucket the host past buffers are needed even in linked mode: the prefill pass
-    // runs on the host cache flow (bind past, fold present rows back), and the first decode step
-    // re-seeds the engine-resident cache from them.
+    // With a prefill (or chunk) bucket the host past buffers are needed even in linked mode: the
+    // whole-window pass runs on the host cache flow, the chunked flow materializes its resident
+    // cache into them once per turn, and the first decode step re-seeds the engine-resident cache
+    // from them.
     std::vector<IOTensor> inputs(ins.size());
     for (size_t i = 0; i < ins.size(); ++i)
     {
         inputs[i].name  = ins[i].name;
         inputs[i].shape = ins[i].shape;
         inputs[i].dtype = ins[i].dtype;
-        if (!(kvLink && isPastInput(i) && prefillBucket < 0))
+        if (!(kvLink && isPastInput(i) && prefillBucket < 0 && chunkBucket < 0))
         {
             inputs[i].data.assign((size_t) ins[i].elems * dtypeSize(ins[i].dtype), 0);
         }
@@ -354,24 +381,28 @@ int main(int argc, char **argv) {
         return bound;
     };
 
-    // Prefill-bucket geometry, validated against the decode bucket: the past inputs must share the
+    // Batched-prefill geometry, validated against the decode bucket: the past inputs must share the
     // decode shapes (one host cache serves both) and the mask must span past+S columns. Any
-    // mismatch disables the fast prefill rather than miscomputing.
-    // The whole-window prefill folds the produced KV rows back into the cache from the host, keyed
-    // to the position_ids the driver feeds. A model that derives position internally from the mask
-    // (no position_ids input) is prefilled token-by-token instead: the batched-window path is only
-    // validated against the position_ids convention, and a mismatched prefill seeds a wrong cache.
-    if (prefillBucket >= 0 && posIdx < 0)
+    // mismatch disables that batched path rather than miscomputing.
+    // Both batched paths fold the produced KV rows into the cache keyed to the position_ids the
+    // driver feeds. A model that derives position internally from the mask (no position_ids input)
+    // is prefilled token-by-token instead: the batched paths are only validated against the
+    // position_ids convention, and a mismatched prefill seeds a wrong cache.
+    if ((prefillBucket >= 0 || chunkBucket >= 0) && posIdx < 0)
     {
-        fprintf(stderr, "[chat] whole-window prefill needs a position_ids input; this model derives position internally, prefilling token-by-token\n");
+        fprintf(stderr, "[chat] batched prefill needs a position_ids input; this model derives position internally, prefilling token-by-token\n");
         prefillBucket = -1;
+        chunkBucket   = -1;
     }
-    int prefillMaskLen = 0, prefillPresRows = 0, prefillLogitsIdx = -1;
-    if (prefillBucket >= 0)
-    {
-        const std::vector<IOInfo> pin  = sess->inputInfo((size_t) prefillBucket);
-        const std::vector<IOInfo> pout = sess->outputInfo((size_t) prefillBucket);
+    // Validate one batched-prefill bucket of window S; fills the mask span, the present row count,
+    // and the logits output index. False (with the mismatch line) disables the bucket.
+    auto validateBatchedBucket = [&](int bucket, int windowS, const char *role, int *maskLen, int *presRows, int *logitsOutIdx) -> bool {
+        const std::vector<IOInfo> pin  = sess->inputInfo((size_t) bucket);
+        const std::vector<IOInfo> pout = sess->outputInfo((size_t) bucket);
         bool                      ok   = true;
+        *maskLen                       = 0;
+        *presRows                      = 0;
+        *logitsOutIdx                  = -1;
         for (const IOInfo &in: pin)
         {
             if (in.name == ins[(size_t) pastKey[0]].name)
@@ -380,28 +411,59 @@ int main(int argc, char **argv) {
             }
             if (in.name == "attention_mask" && in.shape.size() == 2)
             {
-                prefillMaskLen = (int) in.shape[1];
+                *maskLen = (int) in.shape[1];
             }
         }
         for (size_t i = 0; i < pout.size(); ++i)
         {
             if (pout[i].name == "logits")
             {
-                prefillLogitsIdx = (int) i;
+                *logitsOutIdx = (int) i;
             }
             if (pout[i].name == "present.0.key" && pout[i].shape.size() == 4)
             {
-                prefillPresRows = (int) pout[i].shape[2];
+                *presRows = (int) pout[i].shape[2];
             }
         }
-        ok = ok && prefillMaskLen == C + prefillS && prefillPresRows >= prefillS && prefillLogitsIdx >= 0;
+        ok = ok && *maskLen == C + windowS && *presRows >= windowS && *logitsOutIdx >= 0;
         if (!ok)
         {
-            fprintf(stderr, "[chat] prefill bucket geometry mismatch (mask %d vs C+S %d, present rows %d); using token-by-token prefill\n", prefillMaskLen, C + prefillS, prefillPresRows);
+            fprintf(stderr, "[chat] %s bucket geometry mismatch (mask %d vs C+S %d, present rows %d); path disabled\n", role, *maskLen, C + windowS, *presRows);
+        }
+        return ok;
+    };
+    int prefillMaskLen = 0, prefillPresRows = 0, prefillLogitsIdx = -1;
+    if (prefillBucket >= 0)
+    {
+        if (!validateBatchedBucket(prefillBucket, prefillS, "prefill", &prefillMaskLen, &prefillPresRows, &prefillLogitsIdx))
+        {
             prefillBucket = -1;
         } else
         {
             fprintf(stderr, "[chat] prefill bucket: S=%d, one forward per %d prompt tokens\n", prefillS, prefillS);
+        }
+    }
+    // The chunked-resident flow additionally needs linked mode (its cache lives inside the chunk
+    // bucket between passes) and an fp32 KV boundary (the once-per-turn readResident materializes
+    // the cache in the engine's fp32 storage, byte-compatible with an fp32 host buffer only).
+    int chunkMaskLen = 0, chunkPresRows = 0, chunkLogitsIdx = -1;
+    if (chunkBucket >= 0 && !kvLink)
+    {
+        chunkBucket = -1; // --no-kv-link: the whole-window host flow serves the A/B reference
+    }
+    if (chunkBucket >= 0 && kvElemBytes != 4)
+    {
+        fprintf(stderr, "[chat] chunked prefill needs an fp32 KV boundary (have %zu-byte); using the whole-window path\n", kvElemBytes);
+        chunkBucket = -1;
+    }
+    if (chunkBucket >= 0)
+    {
+        if (!validateBatchedBucket(chunkBucket, chunkS, "chunk-prefill", &chunkMaskLen, &chunkPresRows, &chunkLogitsIdx))
+        {
+            chunkBucket = -1;
+        } else
+        {
+            fprintf(stderr, "[chat] chunk-prefill bucket: S=%d, resident chunk passes\n", chunkS);
         }
     }
 
@@ -862,6 +924,262 @@ int main(int argc, char **argv) {
         return reinterpret_cast<const float *>(logitsOut->data.data()) + rowOffset;
     };
 
+    // --- chunked-resident prefill --------------------------------------------------------------
+    // The chunk bucket's KV cache is engine-resident BETWEEN chunk passes: pass i's link ranges
+    // fold pass i-1's produced rows (a contiguous row block per head, kvFoldRowRanges) into their
+    // absolute cache slots at the start of run i, so no cache bytes cross the host per chunk. The
+    // session holds one link set at a time, so a turn switches the links chunk-bucket-ward for its
+    // chunk passes and back to the decode bucket afterwards (readResident is name-keyed and stays
+    // unambiguous that way). Pad ids on the last chunk use the eos id (or 0 under a negative
+    // --eos sentinel): their mask stays 0, their rows never fold, their logits never feed a token.
+    const int64_t chunkPadId = (eos >= 0 && eos < vocab) ? eos : 0;
+
+    // Link every chunk-bucket present output to its past input (ranges re-armed per pass). False
+    // leaves the session's links cleared for the caller to restore.
+    auto linkChunkBucket = [&]() -> bool {
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                if (sess->linkOutputToInput((size_t) chunkBucket, pres, past, {}) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] chunk-prefill link failed for %s -> %s (see log)\n", pres.c_str(), past.c_str());
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    // Re-establish the decode bucket's links after a chunked turn (empty ranges; the per-step
+    // folds re-arm before each decode run).
+    auto relinkDecode = [&]() -> bool {
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                if (sess->linkOutputToInput((size_t) decodeBucket, pres, past, {}) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] decode re-link failed for %s -> %s (see log)\n", pres.c_str(), past.c_str());
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    // One chunk pass: feed `len` prompt tokens (<= chunkS) at absolute position p, with link
+    // ranges folding the PREVIOUS chunk's rows (slots prevStart..prevStart+prevLen-1) at run
+    // start. The first pass of a turn binds the host past buffers, reinitializing the chunk
+    // bucket's resident cache to the conversation state (empty ranges then — nothing pends).
+    // Leaves the last real token's logits row in lastLogits.
+    std::vector<IOTensor> chunkOutputs;
+    std::vector<float>    chunkLogitsF32; // fp32 copy of an fp16 logits row for host sampling
+    auto                  runChunk = [&](const int64_t *toks, int len, int prevStart, int prevLen, bool bindPast) -> bool {
+        const int                    newRowsAt = chunkPresRows - chunkS; // produced rows sit after any past block
+        const std::vector<LinkRange> ranges    = kvFoldRowRanges(kvHeads, chunkPresRows, C, headDim, newRowsAt, prevLen > 0 ? prevStart : -1, prevLen);
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                if (sess->linkOutputToInput((size_t) chunkBucket, pres, past, ranges) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] chunk-prefill link update failed for %s -> %s (see log)\n", pres.c_str(), past.c_str());
+                    return false;
+                }
+            }
+        }
+        IOTensor ids, mask, pos;
+        ids.name  = inputs[(size_t) idIdx].name;
+        ids.dtype = ins[(size_t) idIdx].dtype;
+        ids.shape = {1, (int64_t) chunkS};
+        pos.name  = inputs[(size_t) posIdx].name;
+        pos.dtype = ins[(size_t) posIdx].dtype;
+        pos.shape = {1, (int64_t) chunkS};
+        {
+            std::vector<int64_t> idVals((size_t) chunkS), posVals((size_t) chunkS);
+            for (int t = 0; t < chunkS; ++t)
+            {
+                idVals[(size_t) t]  = t < len ? toks[t] : chunkPadId;
+                posVals[(size_t) t] = (int64_t) (p + t);
+            }
+            ids.data.resize((size_t) chunkS * 8);
+            std::memcpy(ids.data.data(), idVals.data(), ids.data.size());
+            pos.data.resize((size_t) chunkS * 8);
+            std::memcpy(pos.data.data(), posVals.data(), pos.data.size());
+        }
+        mask.name  = inputs[(size_t) maskIdx].name;
+        mask.dtype = ins[(size_t) maskIdx].dtype;
+        mask.shape = {1, (int64_t) chunkMaskLen};
+        {
+            // Valid past slots (all previously folded rows, including earlier chunks of this
+            // turn) plus the chunk's real tokens; pads stay masked. The graph's own causal mask
+            // orders the intra-chunk columns.
+            std::vector<int64_t> maskVals((size_t) chunkMaskLen, 0);
+            for (int j = 0; j < p && j < C; ++j)
+            {
+                maskVals[(size_t) j] = 1;
+            }
+            for (int t = 0; t < len; ++t)
+            {
+                maskVals[(size_t) (C + t)] = 1;
+            }
+            mask.data.resize((size_t) chunkMaskLen * 8);
+            std::memcpy(mask.data.data(), maskVals.data(), mask.data.size());
+        }
+        const bool            rowSliced = sess->setOutputRow((size_t) chunkBucket, "logits", len - 1) == Status::Ok;
+        std::vector<IOTensor> bound {ids, mask, pos};
+        if (bindPast)
+        {
+            for (int l = 0; l < L; ++l)
+            {
+                bound.push_back(inputs[(size_t) pastKey[l]]);
+                bound.push_back(inputs[(size_t) pastVal[l]]);
+            }
+        }
+        if (sess->run(bound, chunkOutputs) != Status::Ok)
+        {
+            fprintf(stderr, "[chat] chunk-prefill run failed\n");
+            return false;
+        }
+        const IOTensor *logitsOut = nullptr;
+        for (const IOTensor &o: chunkOutputs)
+        {
+            if (o.name == "logits")
+            {
+                logitsOut = &o;
+            }
+        }
+        if (!logitsOut || logitsOut->data.empty())
+        {
+            fprintf(stderr, "[chat] chunk-prefill logits missing\n");
+            return false;
+        }
+        const size_t rowOffset = rowSliced ? 0 : (size_t) (len - 1) * vocab;
+        if (logitsFp16)
+        {
+            chunkLogitsF32.resize((size_t) vocab);
+            halfToFloatBulk(reinterpret_cast<const fp16_t *>(logitsOut->data.data()) + rowOffset, chunkLogitsF32.data(), vocab);
+            lastLogits = chunkLogitsF32.data();
+        } else
+        {
+            lastLogits = reinterpret_cast<const float *>(logitsOut->data.data()) + rowOffset;
+        }
+        lastFromDecode = false;
+        return true;
+    };
+
+    // Materialize the chunk bucket's resident cache into the host past buffers: the resident past
+    // (every fold applied through the last pass's ranges) plus the LAST chunk's still-pending rows
+    // read from the resident present outputs. The host cache then holds the full conversation
+    // state for the decode re-seed. Requires the chunk links to be the session's current set.
+    auto syncChunkResidentToHost = [&](int lastStart, int lastLen) -> bool {
+        const int    newRowsAt    = chunkPresRows - chunkS;
+        const size_t presentBytes = (size_t) kvHeads * chunkPresRows * headDim * kvElemBytes;
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
+                if (hostPast.data.empty())
+                {
+                    hostPast.data.assign((size_t) ins[(size_t) (part ? pastVal[l] : pastKey[l])].elems * kvElemBytes, 0);
+                }
+                IOTensor resident;
+                if (sess->readResident(hostPast.name, resident) != Status::Ok || resident.data.size() != hostPast.data.size())
+                {
+                    fprintf(stderr, "[chat] chunk resident cache readback failed for %s\n", hostPast.name.c_str());
+                    return false;
+                }
+                std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                IOTensor present;
+                if (sess->readResident(outs[(size_t) (part ? presVal[l] : presKey[l])].name, present) != Status::Ok || present.data.size() != presentBytes)
+                {
+                    fprintf(stderr, "[chat] chunk resident present readback failed\n");
+                    return false;
+                }
+                const uint8_t *src = present.data.data();
+                uint8_t       *dst = hostPast.data.data();
+                for (int h = 0; h < kvHeads; ++h)
+                {
+                    std::memcpy(dst + ((size_t) h * C + lastStart) * headDim * kvElemBytes, src + ((size_t) h * chunkPresRows + newRowsAt) * headDim * kvElemBytes, (size_t) lastLen * headDim * kvElemBytes);
+                }
+            }
+        }
+        return true;
+    };
+
+    // One turn's chunked prefill over `turnPrompt`. Returns 1 when at least one chunk ran
+    // (consumedOut advanced, host cache materialized, decode links restored), 0 when no chunk fits
+    // before the context edge (session state untouched), -1 on failure — p, consumedOut, and the
+    // host cache are back at the turn entry (chunk folds never touch host bytes), the links are
+    // back on the decode bucket when possible (else the stream drops to the host KV loop), and
+    // the caller re-prefills through the whole-window/token-by-token path.
+    auto chunkedPrefillTurn = [&](const std::vector<int64_t> &turnPrompt, size_t &consumedOut) -> int {
+        const int turnStartP = p;
+        {
+            const int firstLen = (int) std::min<size_t>(turnPrompt.size(), (size_t) chunkS);
+            if (p + firstLen > C)
+            {
+                return 0; // the token-by-token tail (with its slot clamp) owns the context edge
+            }
+        }
+        auto restoreDecodeLinks = [&]() {
+            sess->clearLinks();
+            if (!relinkDecode())
+            {
+                sess->clearLinks();
+                fprintf(stderr, "[chat] switching to the host KV loop (decode re-link failed)\n");
+                kvLink = false; // the host cache holds the conversation state
+            }
+        };
+        sess->clearLinks();
+        if (!linkChunkBucket())
+        {
+            restoreDecodeLinks();
+            return -1;
+        }
+        int  prevStart = -1, prevLen = 0;
+        bool first = true;
+        while (consumedOut < turnPrompt.size())
+        {
+            const int len = (int) std::min<size_t>(turnPrompt.size() - consumedOut, (size_t) chunkS);
+            if (p + len > C)
+            {
+                break;
+            }
+            if (!runChunk(&turnPrompt[consumedOut], len, prevStart, prevLen, first))
+            {
+                p           = turnStartP;
+                consumedOut = 0;
+                restoreDecodeLinks();
+                return -1;
+            }
+            prevStart = p;
+            prevLen   = len;
+            first     = false;
+            p += len;
+            consumedOut += (size_t) len;
+        }
+        if (prevLen > 0 && !syncChunkResidentToHost(prevStart, prevLen))
+        {
+            // A partial sync only rewrites slots this turn's re-prefill overwrites again; the
+            // earlier-turn slots it copied equal the host bytes they replaced.
+            p           = turnStartP;
+            consumedOut = 0;
+            restoreDecodeLinks();
+            return -1;
+        }
+        restoreDecodeLinks();
+        return prevLen > 0 ? 1 : 0;
+    };
+
     // Pick the next token id from a logits row: greedy at temp<=0, else temperature + top-k + top-p.
     auto sample = [&](const float *logits) -> int64_t {
         if (temp <= 0.0f)
@@ -952,8 +1270,35 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        size_t consumed = 0;
-        if (prefillBucket >= 0)
+        size_t consumed         = 0;
+        bool   chunkRanThisTurn = false;
+        if (chunkBucket >= 0 && kvLink)
+        {
+            // Chunked-resident prefill: sync the decode-resident cache to the host once per turn
+            // (a linked decode from the previous turn leaves a pending fold at slot p-1), then run
+            // the prompt as resident chunk passes. A failure restores the turn-entry state and
+            // falls through to the whole-window path below, permanently.
+            if (residentDirty)
+            {
+                if (!syncResidentToHost(pendingResidentFold ? kvFoldSlot(p, C) : -1))
+                {
+                    return 3;
+                }
+                residentDirty = false;
+            }
+            const int chunkStatus = chunkedPrefillTurn(prompt, consumed);
+            if (chunkStatus < 0)
+            {
+                fprintf(stderr, "[chat] chunked prefill unavailable; using the whole-window path\n");
+                chunkBucket = -1;
+                consumed    = 0;
+            } else
+            {
+                chunkRanThisTurn = true;
+                reseedCache      = kvLink && consumed > 0; // first decode step re-seeds the resident cache
+            }
+        }
+        if (!chunkRanThisTurn && prefillBucket >= 0)
         {
             // Whole-window prefill: sync the engine-resident cache to the host once per turn (a
             // linked decode from the previous turn leaves a pending fold at slot p-1), then feed

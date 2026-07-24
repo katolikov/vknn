@@ -175,9 +175,11 @@ int main(int argc, char **argv) {
     //   decode:        "input_ids" [1,1] + mask + positions + past_key_values.*
     // run() dispatches by the bound input names+shapes: an image turn binds the two image inputs and
     // lands on the image bucket; a text turn binds neither and lands on the plain text bucket.
-    int          prefillWindow = 0; // sequence length of the prefill decoder buckets
+    int          prefillWindow = 0; // sequence length of the whole-window prefill decoder buckets
+    int          chunkWindow   = 0; // sequence length of the chunked text-prefill bucket
     int          visionBucket = -1, textPrefillBucket = -1, imagePrefillBucket = -1, decodeBucket = -1;
-    const size_t bucketTotal = session->bucketCount();
+    int          chunkTextBucket = -1; // text bucket with S <= kChunkPrefillTokens: chunked text prefill
+    const size_t bucketTotal     = session->bucketCount();
     for (size_t bucket = 0; bucket < bucketTotal; ++bucket)
     {
         std::vector<IOInfo> inputs = session->inputInfo(bucket);
@@ -197,8 +199,16 @@ int main(int argc, char **argv) {
                 prefillWindow      = (int) seqLen;
             } else
             {
-                textPrefillBucket = (int) bucket;
-                prefillWindow     = (int) seqLen;
+                if ((int) seqLen > prefillWindow)
+                {
+                    textPrefillBucket = (int) bucket;
+                    prefillWindow     = (int) seqLen;
+                }
+                if (seqLen > 1 && seqLen <= kChunkPrefillTokens && (int) seqLen > chunkWindow)
+                {
+                    chunkTextBucket = (int) bucket;
+                    chunkWindow     = (int) seqLen;
+                }
             }
         }
     }
@@ -324,6 +334,38 @@ int main(int argc, char **argv) {
             presRowsDecode = (int) decodeOut[(size_t) presAt].shape[2];
         }
     }
+    // Chunked text prefill (host cache flow): a text-only prompt runs as ceil(T/chunk) fixed-shape
+    // passes through the chunk bucket — vknn_compile emits it automatically for the decoder — so
+    // the prompt length is bounded by the cache, not the prefill window, and a short prompt never
+    // pays a full-window forward. Validate the bucket's geometry against the decode cache; any
+    // mismatch keeps the whole-window path. Image turns always use the whole-window image bucket
+    // (the feature-splice rows are window-relative).
+    int chunkMaskCols = 0, chunkPresRows = 0;
+    if (chunkTextBucket >= 0)
+    {
+        const std::vector<IOInfo> chunkIn  = session->inputInfo((size_t) chunkTextBucket);
+        const std::vector<IOInfo> chunkOut = session->outputInfo((size_t) chunkTextBucket);
+        const int                 maskAt   = indexOfName(chunkIn, "attention_mask");
+        const int                 posAt    = indexOfName(chunkIn, "position_ids");
+        const int                 pastAt   = indexOfName(chunkIn, "past_key_values.0.key");
+        const int                 presAt   = indexOfName(chunkOut, "present.0.key");
+        const int                 logitsAt = indexOfName(chunkOut, "logits");
+        bool                      ok       = maskAt >= 0 && posAt >= 0 && pastAt >= 0 && presAt >= 0 && logitsAt >= 0;
+        ok                                 = ok && chunkIn[(size_t) pastAt].shape == pastShape;
+        ok                                 = ok && chunkIn[(size_t) maskAt].shape.size() == 4 && (int) chunkIn[(size_t) maskAt].shape[2] == chunkWindow && (int) chunkIn[(size_t) maskAt].shape.back() == cacheSlots + chunkWindow;
+        ok                                 = ok && chunkOut[(size_t) presAt].shape.size() == 4 && (int) chunkOut[(size_t) presAt].shape[2] >= chunkWindow;
+        if (ok)
+        {
+            chunkMaskCols = cacheSlots + chunkWindow;
+            chunkPresRows = (int) chunkOut[(size_t) presAt].shape[2];
+            fprintf(stderr, "[vlm] chunked text prefill: %d-token chunks\n", chunkWindow);
+        } else
+        {
+            fprintf(stderr, "[vlm] chunk-prefill bucket geometry mismatch; using the whole-window path\n");
+            chunkTextBucket = -1;
+        }
+    }
+
     bool decodeLinked = false;
     if (kvLink && presRowsDecode > 0)
     {
@@ -431,9 +473,11 @@ int main(int argc, char **argv) {
         return nullptr;
     };
 
-    // Copy present rows [1,KV,presentRows,HD] (rows 0..copyRows-1) into cache slots
-    // firstSlot..firstSlot+copyRows-1 of every layer's persistent past tensor.
-    auto foldPresentIntoCache = [&](int presentRows, int copyRows, int firstSlot) {
+    // Copy present rows [1,KV,presentRows,HD] (rows firstSrcRow..firstSrcRow+copyRows-1) into
+    // cache slots firstSlot..firstSlot+copyRows-1 of every layer's persistent past tensor.
+    // firstSrcRow is 0 for a rows-only present and presentRows - S for a cache-concat present
+    // (the produced rows sit after the past block).
+    auto foldPresentIntoCache = [&](int presentRows, int firstSrcRow, int copyRows, int firstSlot) {
         for (int layer = 0; layer < numLayers; ++layer)
         {
             char keyName[64], valueName[64];
@@ -452,7 +496,7 @@ int main(int argc, char **argv) {
                 {
                     for (int row = 0; row < copyRows; ++row)
                     {
-                        const float *srcRow   = src + ((size_t) head * presentRows + row) * headDim;
+                        const float *srcRow   = src + ((size_t) head * presentRows + firstSrcRow + row) * headDim;
                         float       *cacheRow = cache + ((size_t) head * cacheSlots + firstSlot + row) * headDim;
                         std::memcpy(cacheRow, srcRow, (size_t) headDim * sizeof(float));
                     }
@@ -460,6 +504,71 @@ int main(int argc, char **argv) {
             }
         }
         return true;
+    };
+
+    // Chunked text prefill on the host cache flow: each pass binds the full host cache, masks the
+    // populated slots plus the chunk's causal columns, folds the produced rows back into the
+    // cache, and leaves the last real token's logits row. Pads use the eos id, masked out and
+    // never folded. Advances absolutePos; returns the logits row (into `outputs`) or null.
+    auto chunkedTextPrefill = [&](const std::vector<int64_t> &prompt) -> const float * {
+        const int    promptLen = (int) prompt.size();
+        const float *logitsRow = nullptr;
+        for (int done = 0; done < promptLen;)
+        {
+            const int len      = std::min(promptLen - done, chunkWindow);
+            const int startPos = absolutePos + done;
+            resizeDecoderInput(inputIdsInputIdx, {1, (int64_t) chunkWindow}, DType::Int64);
+            {
+                std::vector<int64_t> padded((size_t) chunkWindow, eosToken);
+                std::copy(prompt.begin() + done, prompt.begin() + done + len, padded.begin());
+                std::memcpy(decoderInputs[(size_t) inputIdsInputIdx].data.data(), padded.data(), (size_t) chunkWindow * sizeof(int64_t));
+            }
+            // Additive mask [1,1,chunk,C+chunk]: populated cache slots (all rows folded so far,
+            // including this turn's earlier chunks) visible to every row, chunk tokens causal.
+            resizeDecoderInput(maskInputIdx, {1, 1, (int64_t) chunkWindow, (int64_t) chunkMaskCols}, DType::Float32);
+            {
+                float *mask = reinterpret_cast<float *>(decoderInputs[(size_t) maskInputIdx].data.data());
+                for (int row = 0; row < chunkWindow; ++row)
+                {
+                    float *maskRow = mask + (size_t) row * chunkMaskCols;
+                    for (int slot = 0; slot < cacheSlots; ++slot)
+                    {
+                        maskRow[slot] = slot < startPos ? 0.0f : kMaskFill;
+                    }
+                    for (int col = 0; col < chunkWindow; ++col)
+                    {
+                        maskRow[cacheSlots + col] = col <= row ? 0.0f : kMaskFill;
+                    }
+                }
+            }
+            resizeDecoderInput(positionInputIdx, {1, (int64_t) chunkWindow}, DType::Int64);
+            {
+                int64_t *positions = reinterpret_cast<int64_t *>(decoderInputs[(size_t) positionInputIdx].data.data());
+                for (int row = 0; row < chunkWindow; ++row)
+                {
+                    positions[row] = startPos + (row < len ? row : len - 1); // pad rows clamp; never folded
+                }
+            }
+            if (session->run(decoderInputs, outputs) != Status::Ok)
+            {
+                fprintf(stderr, "[vlm] chunk-prefill run failed\n");
+                return (const float *) nullptr;
+            }
+            if (!foldPresentIntoCache(chunkPresRows, chunkPresRows - chunkWindow, len, startPos))
+            {
+                fprintf(stderr, "[vlm] chunk-prefill present outputs missing\n");
+                return (const float *) nullptr;
+            }
+            const IOTensor *logitsOut = findOutput("logits");
+            if (!logitsOut)
+            {
+                return (const float *) nullptr;
+            }
+            logitsRow = logitsOut->f32() + (size_t) (len - 1) * vocabSize;
+            done += len;
+        }
+        absolutePos += promptLen;
+        return logitsRow;
     };
 
     // Pick the next token id from a logits row (greedy at temperature<=0, else temp+top-k+top-p).
@@ -585,7 +694,7 @@ int main(int argc, char **argv) {
             {
                 return nullptr;
             }
-            if (!foldPresentIntoCache(/*presentRows=*/1, /*copyRows=*/1, slot))
+            if (!foldPresentIntoCache(/*presentRows=*/1, /*firstSrcRow=*/0, /*copyRows=*/1, slot))
             {
                 return nullptr;
             }
@@ -672,7 +781,16 @@ int main(int argc, char **argv) {
             continue;
         }
         const int promptLen = (int) prompt.size();
-        if (promptLen > prefillWindow)
+        // A text-only prompt takes the chunked path (prompt length bounded by the cache, not the
+        // prefill window); an image prompt needs the whole-window image bucket for its
+        // window-relative feature-splice rows.
+        bool hasImageTokens = false;
+        for (int64_t id: prompt)
+        {
+            hasImageTokens = hasImageTokens || id == imageToken;
+        }
+        const bool chunkTurn = chunkTextBucket >= 0 && !hasImageTokens;
+        if (!chunkTurn && promptLen > prefillWindow)
         {
             fprintf(stderr, "[vlm] prompt %d tokens > prefill window %d\n", promptLen, prefillWindow);
             printf("END\n");
@@ -698,6 +816,46 @@ int main(int argc, char **argv) {
             }
             cacheOnDevice      = false;
             rebindPastNextStep = true;
+        }
+        if (chunkTurn)
+        {
+            const float *chunkLogits = chunkedTextPrefill(prompt);
+            if (!chunkLogits)
+            {
+                return 3;
+            }
+            imageEmbeddings.clear(); // the image belongs to its own (whole-window) turn only
+            for (int generated = 0; generated < maxTokens; ++generated)
+            {
+                const int64_t next = sampleNextToken(chunkLogits);
+                if (next == eosToken)
+                {
+                    // Fold the terminator into the cache too (its logits are discarded); see the
+                    // whole-window loop below.
+                    if (absolutePos + 1 <= cacheSlots - 1 && decodeOneToken(next))
+                    {
+                        ++absolutePos;
+                    }
+                    break;
+                }
+                printf("%lld\n", (long long) next);
+                fflush(stdout);
+                if (absolutePos + 1 > cacheSlots - 1)
+                {
+                    fprintf(stderr, "[vlm] context full mid-generation\n");
+                    break;
+                }
+                chunkLogits = decodeOneToken(next);
+                if (!chunkLogits)
+                {
+                    fprintf(stderr, "[vlm] decode step failed\n");
+                    return 3;
+                }
+                ++absolutePos;
+            }
+            printf("END\n");
+            fflush(stdout);
+            continue;
         }
 
         std::vector<int64_t> padded(prompt);
@@ -775,7 +933,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[vlm] prefill run failed\n");
             return 3;
         }
-        if (!foldPresentIntoCache(/*presentRows=*/prefillWindow, /*copyRows=*/promptLen, absolutePos))
+        if (!foldPresentIntoCache(/*presentRows=*/prefillWindow, /*firstSrcRow=*/0, /*copyRows=*/promptLen, absolutePos))
         {
             fprintf(stderr, "[vlm] prefill present outputs missing\n");
             return 3;

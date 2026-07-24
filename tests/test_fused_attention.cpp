@@ -823,3 +823,80 @@ TEST(FusedAttention, KvConcatFoldedPresentDrivesResidentLink) {
         EXPECT_TRUE(outBytes(foldOuts, "present_key").empty());
     }
 }
+
+// The chunk-prefill form — query length M > 1 with a mask that VARIES per query row (the causal
+// structure lives in the mask) — fuses with the query axis hosted as the innermost row dim, K/V
+// carrying stride 0 along it, and the mask addressed per row; the fused CPU op matches the
+// decomposed chain. A row-broadcast mask at M > 1 stays primitive (PrefillRefused above).
+TEST(FusedAttention, ChunkPrefillPerRowMaskFuses) {
+    const int64_t m = 3;
+    auto buildRowMaskGraph = [&]() {
+        Graph    g;
+        TensorId q  = addInput(g, "q", {kB, kHeads, m, kHd});
+        TensorId kc = addInput(g, "kcache", {kB, kKvHeads, kTokens, kHd});
+        TensorId vc = addInput(g, "vcache", {kB, kKvHeads, kTokens, kHd});
+        TensorId kT = repeatKv(g, kc, "k", true);
+        TensorId vR = repeatKv(g, vc, "v", false);
+        TensorId scores = addTemp(g, "scores");
+        addNode(g, OpType::MatMul, "qk", {q, kT}, scores);
+        TensorId mask   = addInput(g, "mask", {1, 1, m, kTokens});
+        TensorId scale  = addF32Init(g, "scalec", {1}, {kScaleValue});
+        TensorId scaled = addTemp(g, "scaled");
+        Node    *mn     = addNode(g, OpType::Binary, "scalemul", {scores, scale}, scaled);
+        mn->subOp       = (int32_t) BinaryType::Mul;
+        TensorId masked = addTemp(g, "masked");
+        addNode(g, OpType::Add, "maskadd", {scaled, mask}, masked);
+        TensorId probs = addTemp(g, "probs");
+        Node    *sn    = addNode(g, OpType::Softmax, "softmax", {masked}, probs);
+        Attr     ax;
+        ax.kind              = Attr::Int;
+        ax.i                 = -1;
+        sn->attr.map["axis"] = ax;
+        TensorDesc od;
+        od.name       = "out";
+        od.isOutput   = true;
+        TensorId out  = g.addTensor(od);
+        addNode(g, OpType::MatMul, "pv", {probs, vR}, out); // [1, H, m, hd], the dense row layout
+        g.outputs = {out};
+        return g;
+    };
+    // Per-row causal-style mask: row i sees tokens s <= i + 4, later columns masked out.
+    std::vector<float> rowMask((size_t) (m * kTokens), 0.f);
+    for (int64_t i = 0; i < m; ++i)
+    {
+        for (int64_t s = 0; s < kTokens; ++s)
+        {
+            rowMask[(size_t) (i * kTokens + s)] = s <= i + 4 ? 0.f : -65504.f;
+        }
+    }
+    std::vector<IOTensor> ins = {
+        ioTensor("q", {kB, kHeads, m, kHd}, ramp(kHeads * m * kHd, 1.f)),
+        ioTensor("kcache", {kB, kKvHeads, kTokens, kHd}, ramp(kKvHeads * kTokens * kHd, 0.7f, 0.9f)),
+        ioTensor("vcache", {kB, kKvHeads, kTokens, kHd}, ramp(kKvHeads * kTokens * kHd, 0.5f, 2.1f)),
+        ioTensor("mask", {1, 1, m, kTokens}, rowMask),
+    };
+
+    // Structure: the chain fuses, the query axis is the innermost row dim with the operands' own
+    // strides (q advances by hd per row, K/V stay put, the mask advances by its row pitch).
+    {
+        Graph g = buildRowMaskGraph();
+        runStandardPasses(g, PassOptions {});
+        foldMatMulViews(g);
+        fuseDecodeAttention(g);
+        const Node *fa = findNode(g, OpType::FusedAttention);
+        ASSERT_NE(fa, nullptr);
+        EXPECT_EQ(countNodes(g, OpType::Softmax), 0);
+        EXPECT_EQ(fa->attr.getints(kFaDims), (std::vector<int64_t> {1, kKvHeads, kGroup, m}));
+        EXPECT_EQ(fa->attr.getints(kFaQStride).back(), kHd);
+        EXPECT_EQ(fa->attr.getints(kFaKStride).back(), 0);
+        EXPECT_EQ(fa->attr.getints(kFaVStride).back(), 0);
+        EXPECT_EQ(fa->attr.getints(kFaMStride).back(), kTokens);
+        EXPECT_EQ(fa->attr.geti(kFaC), kTokens);
+    }
+
+    // Values: fused equals the decomposed chain to fp32 rounding, per query row.
+    std::vector<float> fused = runGraph(buildRowMaskGraph(), true, ins);
+    std::vector<float> plain = runGraph(buildRowMaskGraph(), false, ins);
+    ASSERT_EQ(fused.size(), (size_t) (kHeads * m * kHd));
+    EXPECT_LT(maxRelErr(fused, plain), 1e-3f);
+}
