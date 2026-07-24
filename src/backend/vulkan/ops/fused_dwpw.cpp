@@ -7,6 +7,7 @@
 #include "core/conv_geom.h"
 #include "core/fused_dwpw.h"
 #include "pw_plan.h"
+#include "pw_splitk_rule.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
@@ -14,6 +15,12 @@ namespace vknn {
     namespace {
         struct DwPwPC {
             int   N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DWd, dwAct, pwAct;
+            // Project-stage reduction partition, mirroring what the unfused 1x1 conv would do for
+            // this shape (pw_splitk_rule.h): pwKParts chunks of pwChunk expanded channel-blocks each,
+            // every chunk summed from zero into an fp32 partial that is then added onto the bias.
+            // pwKParts == 1 (pwChunk == Eb) is the single running sum conv1x1's register-tiled kernel
+            // keeps. Reproducing the partition keeps the fused output byte-identical to the pair.
+            int   pwKParts, pwChunk;
             float pwLo, pwHi;
         };
         struct FusedDwPwOp: VulkanOp {
@@ -41,12 +48,26 @@ namespace vknn {
                 // inherited auto_pad resolves into the same begin/end pads as the unfused Conv path.
                 auto pad = convGeom(x.h, x.w, KH, KW, node.attr).pads();
                 hasRes                    = (node.fusedResidual != kNoTensor);
+                // Project-stage reduction partition: read the standalone 1x1 conv's split-K shape rule
+                // for the shape this pair's projection has, so the fused sum is associated exactly like
+                // the kernel the unfused graph would have run (single running sum, or split-K's
+                // per-chunk fp32 partials). Off the split-K rule the partition is the whole reduction.
+                const int64_t OHW         = (int64_t) y.h * y.w;
+                const int     splitKHint  = env.config ? env.config->hint(Hint::SplitKConv) : 0;
+                int64_t       pwKParts    = 1;
+                int64_t       pwChunk     = Eb;
+                if (pwSplitKActive(env.useFp16, x.n, E, Coutb, OHW, splitKHint))
+                {
+                    pwKParts = pwSplitKParts(Eb, Coutb, OHW);
+                    pwChunk  = (Eb + pwKParts - 1) / pwKParts;
+                }
                 // Field order/types mirror fused_dwpw.comp's push_constant block: spatial/kernel geometry
                 // (N,E,H,W,Cout,OH,OW,KH,KW), then stride/pad/dilation (SH,SW,PT,PL,DH,DWd), then the fused
-                // depthwise + pointwise activation codes and clamp range. subOp carries the depthwise act.
-                pc                        = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,   (int) Cout,   (int) y.h,    (int) y.w,
-                                             (int) KH,     (int) KW,         (int) st[0],         (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0],
-                                             (int) dil[1], (int) node.subOp, (int) node.fusedAct, node.actLo,  node.actHi};
+                // depthwise + pointwise activation codes, the project-stage reduction partition, and the
+                // clamp range. subOp carries the depthwise act.
+                pc                        = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,        (int) Cout,      (int) y.h,    (int) y.w,
+                                             (int) KH,     (int) KW,         (int) st[0],         (int) st[1],      (int) pad[0],    (int) pad[1], (int) dil[0],
+                                             (int) dil[1], (int) node.subOp, (int) node.fusedAct, (int) pwKParts,   (int) pwChunk,   node.actLo,   node.actHi};
                 // vkNodeGate refuses E past the shared-array cap before this op is ever built; the check here
                 // guards a plan constructed around the gate (both kernels' LDS arrays are sized to the cap).
                 if (E > kDwPwMaxExpanded)
@@ -83,12 +104,14 @@ namespace vknn {
                     }
                     return wp;
                 });
-                // Pointwise (1x1 project) weights repacked to [Cout][Eb][4]: source [Cout,E,1,1] with the
+                // Pointwise (1x1 project) weights repacked to [Coutb*4][Eb][4]: source [Cout,E,1,1] with the
                 // *input* channel E as the contraction axis, so E is what gets vec4-packed (block icb = ic/4,
-                // lane l = ic%4) to align with the depthwise result's NC4HW4 lanes; Cout stays flat since it
-                // is the output axis. Trailing lanes of the last input block stay zero so they add nothing.
-                pww                       = uploadCached(env, node.name + "#pww", [&] { // [Cout][Eb][4]
-                    std::vector<float> wp((size_t) Cout * Eb * 4, 0.f);
+                // lane l = ic%4) to align with the depthwise result's NC4HW4 lanes; the output axis stays
+                // flat but is padded out to whole channel-blocks, because phase B reads all 4 rows of the
+                // last block. Trailing lanes of the last input block and the padded output rows stay zero,
+                // so a partial last block resolves to zero rows instead of reading past the buffer.
+                pww                       = uploadCached(env, node.name + "#pww", [&] { // [Coutb*4][Eb][4]
+                    std::vector<float> wp((size_t) Coutb * 4 * Eb * 4, 0.f);
                     for (int64_t oc = 0; oc < Cout; ++oc)
                     {
                         for (int64_t ic = 0; ic < E; ++ic)

@@ -5,6 +5,7 @@
 #include "core/conv_geom.h"
 #include "core/wino_f63.h"
 #include "pw_plan.h"
+#include "pw_splitk_rule.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
 #include <cstdlib>
@@ -118,10 +119,10 @@ namespace vknn {
             int64_t                              skGroups = 0, skRedGroups = 0;
             bool                                 splitkGen = false; // general KxK/strided split-K (conv_splitk.comp)
 
-            // Shared split-K geometry: KPARTS targets ~8192 partial-pass threads, capped by Cinb.
+            // Shared split-K geometry: KPARTS targets kPwSplitKTargetThreads partial-pass threads,
+            // capped by Cinb (pw_splitk_rule.h, shared with the fused depthwise+project op).
             static int64_t splitKParts(int64_t Cinb, int64_t Coutb, int64_t OHW) {
-                int64_t kparts = (8192 + Coutb * OHW - 1) / (Coutb * OHW);
-                return std::max<int64_t>(2, std::min<int64_t>({kparts, Cinb, 16}));
+                return pwSplitKParts(Cinb, Coutb, OHW);
             }
 
             void prepareSplitKShared(const Node &node, VkOpEnv &env, int64_t Cout, int64_t Coutb, int64_t OHW, int64_t kparts) {
@@ -1068,10 +1069,11 @@ namespace vknn {
                     if (pointwise)
                     {
                         // Deep, small-spatial 1x1 convs have too few threads for the register-tiled kernel; use
-                        // split-K there (parallelize the channel reduction). Threshold = standard thread count.
-                        int64_t HW         = y.h * y.w;
-                        int64_t stdThreads = Coutb * ((HW + kTile - 1) / kTile);
-                        splitk             = (env.useFp16 && x.n == 1 && x.c >= 32 && stdThreads < 2048 && skHint != (int) Mode::Off);
+                        // split-K there (parallelize the channel reduction). The rule lives in
+                        // pw_splitk_rule.h so the fused depthwise+project op reproduces the same
+                        // summation order for the pairs it swallows.
+                        int64_t HW = y.h * y.w;
+                        splitk     = pwSplitKActive(env.useFp16, x.n, x.c, Coutb, HW, skHint);
                         if (splitk)
                         {
                             prepareSplitK(node, env, x, y, Cout, Coutb);

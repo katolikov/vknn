@@ -7,8 +7,10 @@
 //
 // Each LDS lane is rounded through TO_STORE — the byte the unfused depthwise kernel
 // (dwconv_fp16.comp) stores to its fp16 output tensor — so the projection reads exactly the
-// values the unfused 1x1 conv would load and the fused output is byte-identical to the unfused
-// fp16 pipeline. Storing f16 also halves the LDS footprint against a float stage.
+// values the unfused 1x1 conv would load. Storing f16 also halves the LDS footprint against a
+// float stage. Phase B then sums in the same partition the unfused 1x1 conv would use for this
+// shape (pwKParts/pwChunk, from pw_splitk_rule.h), so the fused output is byte-identical to the
+// unfused fp16 pipeline whichever 1x1 kernel that shape selects.
 // Parallelism = N * ceil(OH/TILE) * ceil(OW/TILE) workgroups.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -30,6 +32,8 @@ layout(std430, binding = 5) writeonly buffer Dst { f16vec4 dst[]; };
 layout(std430, binding = 6) readonly  buffer Res { f16vec4 res[]; };
 layout(push_constant) uniform PC {
   int N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_, dwAct, pwAct;
+  // Project-stage reduction partition (see phase B): pwKParts chunks of pwChunk channel-blocks.
+  int pwKParts, pwChunk;
   float pwLo, pwHi;
 } pc;
 // TILE mirrors kDwPwTile and MAX_EB mirrors kDwPwMaxExpanded/4 (src/core/fused_dwpw.h); the host
@@ -92,12 +96,19 @@ void main() {
     if (oy >= pc.OH || ox >= pc.OW) continue;
     vec4 acc = vec4(pwb[ocb]);
     int wbase = ocb * 4 * Eb;
-    for (int eb = 0; eb < Eb; ++eb) {
-      vec4 d = vec4(comm[eb * TILE_PIX + p]);
-      acc.x += dot(d, vec4(pww[wbase + 0 * Eb + eb]));
-      acc.y += dot(d, vec4(pww[wbase + 1 * Eb + eb]));
-      acc.z += dot(d, vec4(pww[wbase + 2 * Eb + eb]));
-      acc.w += dot(d, vec4(pww[wbase + 3 * Eb + eb]));
+    bool split = pc.pwKParts > 1;
+    int chunk = split ? pc.pwChunk : Eb;
+    for (int k = 0; k < max(pc.pwKParts, 1); ++k) {
+      int e0 = k * chunk, e1 = min(e0 + chunk, Eb);
+      vec4 part = split ? vec4(0.0) : acc;
+      for (int eb = e0; eb < e1; ++eb) {
+        vec4 d = vec4(comm[eb * TILE_PIX + p]);
+        part.x += dot(d, vec4(pww[wbase + 0 * Eb + eb]));
+        part.y += dot(d, vec4(pww[wbase + 1 * Eb + eb]));
+        part.z += dot(d, vec4(pww[wbase + 2 * Eb + eb]));
+        part.w += dot(d, vec4(pww[wbase + 3 * Eb + eb]));
+      }
+      acc = split ? acc + part : part;
     }
     int dbase = (n * Coutb + ocb) * OHW + oy * pc.OW + ox;
     if (HAS_RES != 0) acc += vec4(res[dbase]);
