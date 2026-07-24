@@ -4073,91 +4073,482 @@ TEST(Passes, LowerConvSkipsAutoPadAndMatchesExplicit) {
     expectNear(outSame, outExpl, 0.f); // identical fp32 loop order: bit-equal
 }
 
-// --- fuseDwPw x auto_pad: the fused node inherits the depthwise conv's attrs, auto_pad included,
-// so the fused and unfused paths must resolve the SAME_UPPER pads identically. ---
-TEST(Passes, FuseDwPwAutoPadSameUpper) {
-    auto build = [] {
-        Graph      g;
-        TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = {1, 2, 5, 5};
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorDesc di;
-        di.name          = "dw";
-        di.shape         = {2, 1, 3, 3};
-        di.isInitializer = true;
-        TensorId   dw    = g.addTensor(di);
-        HostBuffer db;
-        db.resizeElems(18, DType::Float32);
-        for (int i = 0; i < 18; ++i)
+// --- FusedDwPw: the fused CPU oracle round-trips the depthwise intermediate through fp16
+// (halfToFloat(floatToHalfSat(v)) after the depthwise activation), mirroring the fp16 tensor the
+// unfused fp16 pipeline materializes between the two convs. The bitwise reference for a fused run
+// is therefore the fp16-intermediate SIMULATION: run the depthwise conv (and its activation) as a
+// standalone CPU graph, quantize its fp32 output to fp16 by hand, feed it to a standalone 1x1
+// conv graph, then apply any tail (residual add / pointwise epilogue) in fp32. The standalone CPU
+// convs themselves store fp32, so the plain unfused two-conv run is NOT the fused reference. ---
+namespace {
+
+    // Deterministic values on a 0.11 lattice, roughly [-2.2, 2.6]: virtually every conv product
+    // and sum is fp16-inexact, so the round-trip property is exercised on real rounding.
+    std::vector<float> dwpwData(int64_t n, uint32_t seed) {
+        std::vector<float> v((size_t) n);
+        uint32_t           s = seed * 2654435761u + 12345u;
+        for (auto &f: v)
         {
-            db.f32()[i] = (float) (i % 3) - 1.f;
+            s = s * 1664525u + 1013904223u;
+            f = (float) ((int) ((s >> 8) & 0x2Fu) - 20) * 0.11f;
         }
-        g.initializers[dw] = db;
-        TensorDesc pi;
-        pi.name          = "pw";
-        pi.shape         = {2, 2, 1, 1};
-        pi.isInitializer = true;
-        TensorId   pw    = g.addTensor(pi);
-        HostBuffer pb;
-        pb.resizeElems(4, DType::Float32);
-        for (int i = 0; i < 4; ++i)
-        {
-            pb.f32()[i] = (float) i - 1.5f;
-        }
-        g.initializers[pw] = pb;
-        TensorDesc t0;
-        t0.name     = "t";
-        TensorId t  = g.addTensor(t0);
-        TensorDesc yo;
-        yo.name     = "y";
-        yo.isOutput = true;
-        TensorId y  = g.addTensor(yo);
-        Node     d;
-        d.type    = OpType::Conv;
-        d.name    = "dconv";
-        d.inputs  = {x, dw};
-        d.outputs = {t};
-        d.attr.map["auto_pad"] = str("SAME_UPPER");
-        {
-            Attr a;
-            a.kind             = Attr::Int;
-            a.i                = 2;
-            d.attr.map["group"] = a;
-        }
-        Node p;
-        p.type    = OpType::Conv;
-        p.name    = "pconv";
-        p.inputs  = {t, pw};
-        p.outputs = {y};
-        g.nodes.push_back(d);
-        g.nodes.push_back(p);
-        g.outputs = {y};
-        return g;
-    };
-    auto run = [](Graph g) {
+        return v;
+    }
+
+    TensorId dwpwInit(Graph &g, const char *name, const Shape &shape, const std::vector<float> &vals) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = shape;
+        d.isInitializer = true;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems(vals.size(), DType::Float32);
+        std::memcpy(hb.f32(), vals.data(), vals.size() * sizeof(float));
+        g.initializers[id] = hb;
+        return id;
+    }
+
+    IOTensor dwpwIo(const char *name, const Shape &shape, const std::vector<float> &vals) {
+        IOTensor t;
+        t.name  = name;
+        t.shape = shape;
+        t.dtype = DType::Float32;
+        t.data.resize(vals.size() * sizeof(float));
+        std::memcpy(t.data.data(), vals.data(), t.data.size());
+        return t;
+    }
+
+    std::vector<float> runCpuGraph(Graph g, const std::vector<IOTensor> &ins) {
         Config cfg;
         cfg.backend = BackendKind::Cpu;
         auto sess   = Session::create(std::move(g), cfg);
         EXPECT_TRUE(sess);
-        IOTensor in;
-        in.name  = "x";
-        in.shape = {1, 2, 5, 5};
-        in.dtype = DType::Float32;
-        in.data.resize(50 * 4);
-        for (int i = 0; i < 50; ++i)
+        if (!sess)
         {
-            reinterpret_cast<float *>(in.data.data())[i] = (float) i * 0.5f - 12.f;
+            return {};
         }
         std::vector<IOTensor> outs;
-        EXPECT_EQ(sess->run({in}, outs), Status::Ok);
+        EXPECT_EQ(sess->run(ins, outs), Status::Ok);
+        if (outs.empty())
+        {
+            return {};
+        }
         const float *o = outs[0].f32();
         return std::vector<float>(o, o + numElements(outs[0].shape));
+    }
+
+    // The fp16 storage round-trip the fused oracle applies to its intermediate (and the value the
+    // unfused fp16 pipeline's intermediate tensor holds).
+    std::vector<float> dwpwQuantizeFp16(std::vector<float> v) {
+        for (auto &f: v)
+        {
+            f = halfToFloat(floatToHalfSat(f));
+        }
+        return v;
+    }
+
+    struct DwPwSpec {
+        int64_t n = 1, e = 8, h = 9, w = 9, cout = 6, k = 3, stride = 1;
+        bool    bias  = true;
+        bool    relu6 = false;   // Clip(0, 6) after the depthwise conv; folds onto the fused dw stage
+        bool    mulTail = false; // trailing Binary Mul by a scalar constant (pointwise epilogue)
+        bool    samePad = false; // auto_pad SAME_UPPER on the depthwise conv instead of explicit pads
+        int64_t outH() const {
+            return samePad ? (h + stride - 1) / stride : (h + 2 * (k / 2) - k) / stride + 1;
+        }
+        int64_t outW() const {
+            return samePad ? (w + stride - 1) / stride : (w + 2 * (k / 2) - k) / stride + 1;
+        }
+        float mulScale() const {
+            return 1.29f;
+        }
     };
 
-    Graph       gf = build();
+    // Shared depthwise-conv node body for the pair graph and the simulation's stage-1 graph.
+    Node dwpwDepthwiseNode(const DwPwSpec &s, TensorId x, TensorId w, TensorId b, TensorId out) {
+        Node d;
+        d.type    = OpType::Conv;
+        d.name    = "dconv";
+        d.inputs  = b != kNoTensor ? std::vector<TensorId> {x, w, b} : std::vector<TensorId> {x, w};
+        d.outputs = {out};
+        Attr grp;
+        grp.kind            = Attr::Int;
+        grp.i               = s.e;
+        d.attr.map["group"] = grp;
+        if (s.samePad)
+        {
+            d.attr.map["auto_pad"] = str("SAME_UPPER");
+        } else
+        {
+            int64_t p           = s.k / 2;
+            d.attr.map["pads"]  = ints({p, p, p, p});
+        }
+        d.attr.map["strides"] = ints({s.stride, s.stride});
+        return d;
+    }
+
+    // x -> depthwise conv (+ Clip(0,6)) -> 1x1 project (+ Mul by scalar) -> y.
+    Graph dwpwPairGraph(const DwPwSpec &s) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {s.n, s.e, s.h, s.w};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
+        TensorId dwB = s.bias ? dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102)) : kNoTensor;
+        TensorId pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
+        TensorId pwB = s.bias ? dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104)) : kNoTensor;
+        TensorDesc td;
+        td.name    = "t";
+        TensorId t = g.addTensor(td);
+        g.nodes.push_back(dwpwDepthwiseNode(s, x, dwW, dwB, t));
+        TensorId pwIn = t;
+        if (s.relu6)
+        {
+            TensorDesc cd;
+            cd.name     = "tc";
+            TensorId tc = g.addTensor(cd);
+            Node     c;
+            c.type    = OpType::Clip;
+            c.name    = "relu6";
+            c.inputs  = {t};
+            c.outputs = {tc};
+            Attr lo, hi;
+            lo.kind            = Attr::Float;
+            lo.f               = 0.f;
+            hi.kind            = Attr::Float;
+            hi.f               = 6.f;
+            c.attr.map["min"]  = lo;
+            c.attr.map["max"]  = hi;
+            g.nodes.push_back(c);
+            pwIn = tc;
+        }
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        if (s.mulTail)
+        {
+            TensorDesc md;
+            md.name     = "m";
+            TensorId m  = g.addTensor(md);
+            Node     p;
+            p.type    = OpType::Conv;
+            p.name    = "pconv";
+            p.inputs  = s.bias ? std::vector<TensorId> {pwIn, pwW, pwB} : std::vector<TensorId> {pwIn, pwW};
+            p.outputs = {m};
+            g.nodes.push_back(p);
+            TensorId c = dwpwInit(g, "scale", {1}, {s.mulScale()});
+            Node     mul;
+            mul.type    = OpType::Binary;
+            mul.subOp   = (int) BinaryType::Mul;
+            mul.name    = "scaleMul";
+            mul.inputs  = {m, c};
+            mul.outputs = {y};
+            g.nodes.push_back(mul);
+        } else
+        {
+            Node p;
+            p.type    = OpType::Conv;
+            p.name    = "pconv";
+            p.inputs  = s.bias ? std::vector<TensorId> {pwIn, pwW, pwB} : std::vector<TensorId> {pwIn, pwW};
+            p.outputs = {y};
+            g.nodes.push_back(p);
+        }
+        g.outputs = {y};
+        return g;
+    }
+
+    // Simulation stage 1: x -> depthwise conv (+ Clip) -> out, standalone (O0: no fusion passes).
+    Graph dwpwDepthwiseGraph(const DwPwSpec &s) {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {s.n, s.e, s.h, s.w};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+        TensorId dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
+        TensorId dwB = s.bias ? dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102)) : kNoTensor;
+        TensorDesc yo;
+        yo.name     = "t";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        if (s.relu6)
+        {
+            TensorDesc td;
+            td.name    = "traw";
+            TensorId t = g.addTensor(td);
+            g.nodes.push_back(dwpwDepthwiseNode(s, x, dwW, dwB, t));
+            Node c;
+            c.type    = OpType::Clip;
+            c.name    = "relu6";
+            c.inputs  = {t};
+            c.outputs = {y};
+            Attr lo, hi;
+            lo.kind           = Attr::Float;
+            lo.f              = 0.f;
+            hi.kind           = Attr::Float;
+            hi.f              = 6.f;
+            c.attr.map["min"] = lo;
+            c.attr.map["max"] = hi;
+            g.nodes.push_back(c);
+        } else
+        {
+            g.nodes.push_back(dwpwDepthwiseNode(s, x, dwW, dwB, y));
+        }
+        g.outputs = {y};
+        return g;
+    }
+
+    // Simulation stage 2: t -> 1x1 project -> y, standalone (O0).
+    Graph dwpwProjectGraph(const DwPwSpec &s) {
+        Graph      g;
+        TensorDesc ti;
+        ti.name    = "t";
+        ti.shape   = {s.n, s.e, s.outH(), s.outW()};
+        ti.isInput = true;
+        TensorId t = g.addTensor(ti);
+        g.inputs   = {t};
+        TensorId pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
+        TensorId pwB = s.bias ? dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104)) : kNoTensor;
+        TensorDesc yo;
+        yo.name     = "y";
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     p;
+        p.type    = OpType::Conv;
+        p.name    = "pconv";
+        p.inputs  = pwB != kNoTensor ? std::vector<TensorId> {t, pwW, pwB} : std::vector<TensorId> {t, pwW};
+        p.outputs = {y};
+        g.nodes.push_back(p);
+        g.outputs = {y};
+        return g;
+    }
+
+    // Runs the fused pair and the simulation with the intermediate either fp16-quantized or raw.
+    struct DwPwOutputs {
+        std::vector<float> fused, sim, simRaw;
+    };
+    DwPwOutputs runDwPwCase(const DwPwSpec &s) {
+        std::vector<float> x = dwpwData(s.n * s.e * s.h * s.w, 7);
+        Shape              xshape {s.n, s.e, s.h, s.w};
+
+        Graph       gf = dwpwPairGraph(s);
+        PassOptions opt;
+        opt.fuseDwPw = true;
+        runStandardPasses(gf, opt);
+        const Node *fusedNode = nullptr;
+        for (const Node &n: gf.nodes)
+        {
+            if (n.type == OpType::FusedDwPw)
+            {
+                fusedNode = &n;
+            }
+        }
+        EXPECT_NE(fusedNode, nullptr) << "the depthwise + 1x1 pair must fuse";
+        if (!fusedNode)
+        {
+            return {};
+        }
+        if (s.relu6)
+        {
+            EXPECT_EQ(fusedNode->subOp, (int32_t) ActType::Relu6) << "the Clip(0,6) must fold onto the fused depthwise stage";
+        }
+        if (s.mulTail)
+        {
+            EXPECT_TRUE(fusedNode->attr.has("pw_steps")) << "the trailing Mul must attach as the fused node's pointwise epilogue";
+        }
+        DwPwOutputs out;
+        out.fused = runCpuGraph(std::move(gf), {dwpwIo("x", xshape, x)});
+
+        PassOptions        o0 = PassOptions::forOptLevel(0);
+        Graph              gd = dwpwDepthwiseGraph(s);
+        runStandardPasses(gd, o0);
+        std::vector<float> inter = runCpuGraph(std::move(gd), {dwpwIo("x", xshape, x)});
+        Shape              tshape {s.n, s.e, s.outH(), s.outW()};
+        EXPECT_EQ((int64_t) inter.size(), numElements(tshape));
+        auto project = [&](const std::vector<float> &t) {
+            Graph gp = dwpwProjectGraph(s);
+            runStandardPasses(gp, o0);
+            std::vector<float> y = runCpuGraph(std::move(gp), {dwpwIo("t", tshape, t)});
+            if (s.mulTail)
+            {
+                // The epilogue chain runs in fp32 on the CPU (the CPU pointwise VM is the value
+                // oracle), so the tail is a plain fp32 multiply here.
+                for (auto &v: y)
+                {
+                    v *= s.mulScale();
+                }
+            }
+            return y;
+        };
+        out.sim    = project(dwpwQuantizeFp16(inter));
+        out.simRaw = project(inter);
+        return out;
+    }
+
+    // Bitwise equality, including the sign of zero.
+    void expectSameBits(const std::vector<float> &got, const std::vector<float> &ref) {
+        expectNear(got, ref, 0.f);
+        ASSERT_EQ(got.size(), ref.size());
+        EXPECT_EQ(0, std::memcmp(got.data(), ref.data(), got.size() * sizeof(float)));
+    }
+
+} // namespace
+
+// The core bitwise property, on a plane wide enough for the GPU's tiled kernel
+// (9x9 = 81 >= kDwPwTileMinPixels, odd extent so the tile grid has partial edge tiles). The raw
+// (unquantized) simulation must differ somewhere — proof the oracle's round-trip is live.
+TEST(FusedDwPw, Fp16IntermediateBitwise) {
+    DwPwSpec    s;
+    DwPwOutputs o = runDwPwCase(s);
+    ASSERT_EQ(o.fused.size(), (size_t) (s.n * s.cout * s.outH() * s.outW()));
+    expectSameBits(o.fused, o.sim);
+    EXPECT_NE(0, std::memcmp(o.fused.data(), o.simRaw.data(), o.fused.size() * sizeof(float))) << "the fp16 round-trip must actually change the intermediate on this data";
+}
+
+// Depthwise-stage Relu6 (a folded Clip(0,6)) applies before the fp16 rounding, exactly like the
+// unfused depthwise kernel's activation-then-store order.
+TEST(FusedDwPw, Relu6DepthwiseStageBitwise) {
+    DwPwSpec s;
+    s.relu6       = true;
+    DwPwOutputs o = runDwPwCase(s);
+    ASSERT_FALSE(o.fused.empty());
+    expectSameBits(o.fused, o.sim);
+}
+
+// 5x5 depthwise kernel (the MnasNet block shape); pads 2.
+TEST(FusedDwPw, Kernel5x5Bitwise) {
+    DwPwSpec s;
+    s.k           = 5;
+    DwPwOutputs o = runDwPwCase(s);
+    ASSERT_FALSE(o.fused.empty());
+    expectSameBits(o.fused, o.sim);
+}
+
+// Stride-2 depthwise stage; 19x19 input -> 10x10 output (100 >= kDwPwTileMinPixels, so the GPU
+// rule picks the tiled kernel for this shape).
+TEST(FusedDwPw, Stride2Bitwise) {
+    DwPwSpec s;
+    s.h = s.w     = 19;
+    s.stride      = 2;
+    DwPwOutputs o = runDwPwCase(s);
+    ASSERT_EQ(o.fused.size(), (size_t) (s.cout * 10 * 10));
+    expectSameBits(o.fused, o.sim);
+}
+
+// E = 1152 (the raised kDwPwMaxExpanded cap) fuses; 5x5 output plane, the GPU rule's per-pixel
+// side. A pair just past the cap must stay unfused.
+TEST(FusedDwPw, ExpandedChannels1152Cap) {
+    DwPwSpec s;
+    s.e    = 1152;
+    s.h    = 5;
+    s.w    = 5;
+    s.cout = 16;
+    DwPwOutputs o = runDwPwCase(s);
+    ASSERT_FALSE(o.fused.empty());
+    expectSameBits(o.fused, o.sim);
+
+    DwPwSpec over = s;
+    over.e        = 1156;
+    Graph       g = dwpwPairGraph(over);
+    PassOptions opt;
+    opt.fuseDwPw = true;
+    runStandardPasses(g, opt);
+    for (const Node &n: g.nodes)
+    {
+        EXPECT_NE(n.type, OpType::FusedDwPw) << "a pair wider than kDwPwMaxExpanded must not fuse";
+    }
+}
+
+// A trailing scalar Mul attaches as the fused node's pointwise epilogue; the chain runs after the
+// projection on the already-rounded intermediate.
+TEST(FusedDwPw, EpilogueAttachedBitwise) {
+    DwPwSpec s;
+    s.mulTail     = true;
+    DwPwOutputs o = runDwPwCase(s);
+    ASSERT_FALSE(o.fused.empty());
+    expectSameBits(o.fused, o.sim);
+}
+
+// A fused residual adds to the projection output before the projection activation. The node is
+// built directly in the form fuseDwPw emits (residual appended to inputs + fusedResidual edge).
+TEST(FusedDwPw, ResidualAddBitwise) {
+    DwPwSpec s; // residual shape = output shape {1, 6, 9, 9}
+    Shape    xshape {s.n, s.e, s.h, s.w};
+    Shape    rshape {s.n, s.cout, s.outH(), s.outW()};
+    std::vector<float> x   = dwpwData(numElements(xshape), 7);
+    std::vector<float> res = dwpwData(numElements(rshape), 21);
+
+    Graph      g;
+    TensorDesc xi;
+    xi.name    = "x";
+    xi.shape   = xshape;
+    xi.isInput = true;
+    TensorId xt = g.addTensor(xi);
+    TensorDesc ri;
+    ri.name    = "res";
+    ri.shape   = rshape;
+    ri.isInput = true;
+    TensorId rt = g.addTensor(ri);
+    g.inputs    = {xt, rt};
+    TensorId dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
+    TensorId dwB = dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102));
+    TensorId pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
+    TensorId pwB = dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104));
+    TensorDesc yo;
+    yo.name     = "y";
+    yo.isOutput = true;
+    TensorId y  = g.addTensor(yo);
+    Node     f;
+    f.type          = OpType::FusedDwPw;
+    f.name          = "dwpw";
+    f.inputs        = {xt, dwW, dwB, pwW, pwB, rt};
+    f.outputs       = {y};
+    f.fusedResidual = rt;
+    f.fusedAct      = ActType::Relu; // after the residual add, per inverted-residual semantics
+    {
+        int64_t p            = s.k / 2;
+        f.attr.map["pads"]   = ints({p, p, p, p});
+        f.attr.map["strides"] = ints({s.stride, s.stride});
+    }
+    g.nodes.push_back(f);
+    g.outputs = {y};
+    runStandardPasses(g, PassOptions::forOptLevel(0));
+    std::vector<float> fused = runCpuGraph(std::move(g), {dwpwIo("x", xshape, x), dwpwIo("res", rshape, res)});
+
+    PassOptions o0 = PassOptions::forOptLevel(0);
+    Graph       gd = dwpwDepthwiseGraph(s);
+    runStandardPasses(gd, o0);
+    std::vector<float> inter = dwpwQuantizeFp16(runCpuGraph(std::move(gd), {dwpwIo("x", xshape, x)}));
+    Graph              gp    = dwpwProjectGraph(s);
+    runStandardPasses(gp, o0);
+    std::vector<float> sim = runCpuGraph(std::move(gp), {dwpwIo("t", {s.n, s.e, s.outH(), s.outW()}, inter)});
+    ASSERT_EQ(sim.size(), res.size());
+    for (size_t i = 0; i < sim.size(); ++i)
+    {
+        // Residual add, then Relu spelled exactly as cpu::applyAct spells it (v > 0 ? v : 0), so a
+        // negative-zero sum maps to the same +0 byte on both sides.
+        float v = sim[i] + res[i];
+        sim[i]  = v > 0.f ? v : 0.f;
+    }
+    ASSERT_EQ(fused.size(), sim.size());
+    expectSameBits(fused, sim);
+}
+
+// --- fuseDwPw x auto_pad: the fused node inherits the depthwise conv's attrs, auto_pad included,
+// so the fused and simulated stage-1 paths must resolve the SAME_UPPER pads identically. ---
+TEST(Passes, FuseDwPwAutoPadSameUpper) {
+    DwPwSpec s;
+    s.samePad = true;
+    s.e       = 2;
+    s.h = s.w = 5;
+    s.cout    = 2;
+
+    Graph       gf = dwpwPairGraph(s);
     PassOptions opt;
     opt.fuseDwPw = true;
     runStandardPasses(gf, opt);
@@ -4169,12 +4560,9 @@ TEST(Passes, FuseDwPwAutoPadSameUpper) {
     ASSERT_TRUE(fused) << "SAME_UPPER depthwise + 1x1 project must still fuse";
     ASSERT_EQ(gf.desc(gf.outputs[0]).shape, (Shape {1, 2, 5, 5})); // SAME keeps the extent
 
-    Graph gu = build();
-    runStandardPasses(gu, {}); // unfused reference
-    std::vector<float> outFused   = run(std::move(gf));
-    std::vector<float> outUnfused = run(std::move(gu));
-    ASSERT_EQ(outFused.size(), (size_t) 50);
-    expectNear(outFused, outUnfused, 0.f); // identical fp32 loop order: bit-equal
+    DwPwOutputs o = runDwPwCase(s);
+    ASSERT_EQ(o.fused.size(), (size_t) 50);
+    expectSameBits(o.fused, o.sim);
 }
 
 // --- InstanceNormalization: imported as OpType::InstanceNorm, then lowerInstanceNorm decomposes it

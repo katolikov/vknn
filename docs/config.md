@@ -69,7 +69,7 @@ input model** — each `--graph` occurrence names its own source file (see the `
 | `vknn_compile` flag | Meaning |
 |---------------------|---------|
 | `--fp16` | Store weights as fp16 in the `.vxm` (default fp32). Halves the file and the runtime host repack; the run-time compute precision is a separate `Config::precision` knob. |
-| `-O0` / `-O1` / `-O2` / `-O3` (or `--opt N`) | Optimization level, default `-O1`. `-O0` = no optional fusion (reference); `-O1` = the general pointwise fusion + the GridSample warp-chain fold (both bit-exact, the production set); `-O2`/`-O3` = + the experimental Squeeze-Excite and depthwise+1×1 fusions. |
+| `-O0` / `-O1` / `-O2` / `-O3` (or `--opt N`) | Optimization level, default `-O1`. `-O0` = no optional fusion (reference); `-O1` = the general pointwise fusion, the GridSample warp-chain fold, and the depthwise+1×1 fusion (all bit-exact, the production set); `-O2`/`-O3` = + the experimental Squeeze-Excite fusion. |
 | `-Os` | A superset of `-O3`: all of its fusion plus calibration-free weight quantization (int4 by default; see `--quant-bits`). Per-op-class defaults quantize MatMul weights with a scale group and keep the activation-salient outlier columns fp16, while Conv/Gemm weights load-dequant to fp16; a per-layer relative-error guard keeps a hostile layer fp16, and native packed GPU MatMul kernels run the quantized weights. Emits a **VXM5** container for int4-only content or **VXM6** for any other format — the same subtag over the exact VXM3/VXM4 body, so a non-quantized compile stays byte-identical VXM3/4 and an engine without the extended formats rejects VXM6 cleanly instead of misreading it. The Qwen instruct model is ≈2.4× smaller as int4. Accepts a `.vxm` as input to re-quantize an already-compiled model; a multi-bucket `.vxm` re-quantizes every bucket over the shared initializer pool. |
 | `--quant-bits 4\|8\|lut4` | Packed-weight format for `-Os` (default `4` = symmetric int4). `8` trades half the weight-traffic saving for ~an order of magnitude lower quantization error; `lut4` keeps the 4-bit payload but decodes through one fitted 16-entry fp16 codebook per tensor (NF4-class, better on normal/heavy-tailed weight distributions than the uniform int4 grid). All formats run the same outlier/bias-correction/guard pipeline and their own native GPU MatMul kernels. |
 | `--quant-samples N` | Calibration samples for the min-MSE scale-group search + bias correction (`-Os`). `0` = weight-only (uniform column weighting, no calibration) — required for a multi-bucket compile so every bucket's scales stay identical and the payloads content-dedup. |
@@ -135,6 +135,9 @@ enum class Hint {
   RopeFusion      = 7,  // rotate-half RoPE chain fusion at load (On / Off, default On)
   FusedAttention  = 8,  // single-query decode-attention fusion at load (On / Off, default On)
   KvConcatFold    = 9,  // per-token KV-cache Concat fold into split-source attention (On / Off, default On)
+  SplitKConv      = 10, // split-K conv routing (Auto / On / Off, default Auto)
+  CoopmatGemm     = 11, // cooperative-matrix MatMul routing (Auto / On / Off / Fp8 / Int8Coop, default Auto)
+  KvCacheQuant    = 12, // int8 KV-cache storage: quantize-on-fold, dequant-in-kernel (Auto / On / Off; default Auto == Off)
 };
 // One Mode enum holds every value; the Hint picks the knob, the Mode the value. (Autotune effort is
 // a top-level Config::tuning field, not a Hint.)
@@ -153,7 +156,16 @@ int v = cfg.hint(Hint::WinogradUnit);         // read back (0 if unset)
 compiled `.vxm`; each is keyed into the plan-cache variant, so flipping the hint reselects (or recomputes) a
 variant instead of ever serving a stale plan.
 
-In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "heavy"`, `"flatLayout": false`);
+`KvCacheQuant` (`"kvCacheQuant": "on"` in JSON) stores the engine-resident decode KV cache as
+symmetric int8 with one fp16 scale per (token, head) row: the resident-link fold quantizes each
+present row on write and the FusedAttention kernels dequantize the past source inside their fp32
+loops (the current step's rows stay fp16). It halves cache memory and read traffic but changes
+numerics, so the default stays Off (`auto`) until a device-verified flip; an ineligible model
+(no split-KV fused attention), an fp32 session, or a device without 8-bit storage keeps the fp16
+cache byte-identically at every value.
+
+In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "heavy"`, `"flatLayout": false`,
+`"kvCacheQuant": "on"`);
 the raw hint form is an array indexed by the `Hint` value, one entry per hint in enum order
 (Winograd, WinogradVariant, WinogradUnit, DirectConv3x3, FlatLayout, GpuIslandFold, MatMulViewFold,
 RopeFusion, FusedAttention, KvConcatFold) — e.g. `"hints": [2, 0, 0, 0, 2, 1]` sets the first six and
@@ -175,7 +187,7 @@ compilation, conv autotuning, and weight prepacking. Caching is always on — it
   a shader change, a different GPU, a different model) the whole file is discarded and recomputed — there
   is nothing to invalidate by hand.
 - **Multi-variant** — one file holds an independent entry per cache-affecting configuration (`precision`,
-  `flatLayout`, `gpuIslandFold`, `matmulViewFold`, `ropeFusion`, `fusedAttention`, `kvConcatFold`, `fp32Tensors`, and the conv-kernel hints). Switching precision back and
+  `flatLayout`, `gpuIslandFold`, `matmulViewFold`, `ropeFusion`, `fusedAttention`, `kvConcatFold`, `kvCacheQuant`, `fp32Tensors`, and the conv-kernel hints). Switching precision back and
   forth reuses each variant instead of recompiling; a new configuration appends a new variant.
 - **`tuning`** sets the load-time autotune effort. Each chosen kernel is stored in the variant with the
   effort level it was measured at: a warm start reuses an entry measured at the requested level or higher,

@@ -1,7 +1,11 @@
-// Fused depthwise-3x3 + 1x1-project on the GPU. One workgroup per output pixel; depthwise output
-// staged in LDS (computed once), then projected. Gated by supportsNode to large-spatial fp16
-// blocks.
+// Fused depthwise + 1x1-project on the GPU. Two kernels share one prepare/record path and one
+// weight layout: the spatial-tiled kernel (fused_dwpw_t*, one workgroup per kDwPwTile^2 output
+// pixels) and the per-pixel kernel (fused_dwpw*, its small-spatial fallback). The choice is a
+// deterministic shape rule — tiled when the output plane has at least kDwPwTileMinPixels pixels —
+// never autotuned, so a model's kernel set is a pure function of its shapes. Both stage the
+// depthwise output in LDS (computed once, fp16-rounded like the unfused store), then project.
 #include "core/conv_geom.h"
+#include "core/fused_dwpw.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
@@ -43,9 +47,19 @@ namespace vknn {
                 pc                        = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,   (int) Cout,   (int) y.h,    (int) y.w,
                                              (int) KH,     (int) KW,         (int) st[0],         (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0],
                                              (int) dil[1], (int) node.subOp, (int) node.fusedAct, node.actLo,  node.actHi};
-                // One workgroup per output pixel (see file header): the grid is flattened to N*OH*OW so the
-                // shader staging the shared depthwise result in LDS is indexed by a single 1D dispatch id.
-                groups_                   = (int64_t) x.n * y.h * y.w;
+                // vkNodeGate refuses E past the shared-array cap before this op is ever built; the check here
+                // guards a plan constructed around the gate (both kernels' LDS arrays are sized to the cap).
+                if (E > kDwPwMaxExpanded)
+                {
+                    throw Error(Status::Unsupported, "FusedDwPw '" + node.name + "': expanded channels " + std::to_string(E) + " exceed the shared-memory cap " + std::to_string(kDwPwMaxExpanded));
+                }
+                // Deterministic kernel choice (see file header): the tiled kernel covers kDwPwTile^2 output
+                // pixels per workgroup, so its grid is ceil(OH/T)*ceil(OW/T) tiles per image; a plane below
+                // kDwPwTileMinPixels keeps the per-pixel kernel, whose N*OH*OW grid is the finer parallelism
+                // a small-spatial block needs. Both kernels produce identical bytes — the rule moves only
+                // where the work runs.
+                const bool tiled          = (int64_t) y.h * y.w >= kDwPwTileMinPixels;
+                groups_                   = tiled ? (int64_t) x.n * ((y.h + kDwPwTile - 1) / kDwPwTile) * ((y.w + kDwPwTile - 1) / kDwPwTile) : (int64_t) x.n * y.h * y.w;
                 std::vector<float> dwsrcv = initFloats(g, node.inputs[1]);
                 std::vector<float> pwsrcv = initFloats(g, node.inputs[3]);
                 const float       *dwsrc  = dwsrcv.data();
@@ -123,7 +137,7 @@ namespace vknn {
                 // With the epilogue attached the plan/operands bind after slot 6, so the layout always
                 // includes the Res binding (dummy-bound when there is no fused residual).
                 uint32_t nbuf = epi.active ? 7 + epi.extraBufs() : (hasRes ? 7u : 6u);
-                pipe = env.pipeline(shader((std::string("fused_dwpw") + epi.suffix()).c_str(), env.useFp16), nbuf, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
+                pipe = env.pipeline(shader((std::string(tiled ? "fused_dwpw_t" : "fused_dwpw") + epi.suffix()).c_str(), env.useFp16), nbuf, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer           *exp = env.devBuf(node.inputs[0]);

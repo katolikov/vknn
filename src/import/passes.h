@@ -104,6 +104,23 @@ namespace vknn {
     // filled from the encoder features by an on-GPU ScatterND (the position-dependent splice the host used
     // to do); the original decoder stays as the text-only path.
     void fuseBucketBoundaries(std::vector<Graph> &buckets, std::vector<std::string> &names);
+    // The shape set for the automatic chunk-prefill bucket a multi-bucket LLM compile appends
+    // (vknn_compile): input_ids/position_ids [1, kChunkPrefillTokens] plus the decode bucket's own
+    // past_key_values shapes and its attention-mask convention widened to past + chunk columns, so
+    // a variable-length prompt prefills as ceil(T / kChunkPrefillTokens) fixed-shape passes over
+    // the cached KV (io_link.h documents the chunk size). Scans `buckets` for a with-past decode
+    // graph (input_ids [1,1], position_ids, attention_mask, past_key_values.*, logits + present
+    // outputs) and fills `plan` with that bucket's index, one full concrete shape per graph input,
+    // and the bucket label. False when no decode bucket qualifies, when the compiled context is
+    // shorter than one chunk, when the mask layout is neither the 2-D [1, C+1] nor the 4-D
+    // [1, x, 1, C+1] convention, or when a chunk-capable prefill bucket (input_ids [1, S],
+    // 1 < S <= kChunkPrefillTokens over the same cache shape) already exists.
+    struct ChunkPrefillPlan {
+        size_t                       decodeBucket = 0; ///< Bucket whose geometry the shapes derive from.
+        std::map<std::string, Shape> shapes;           ///< Full concrete shape per chunk-bucket graph input.
+        std::string                  label;            ///< Bucket label for the .vxm bucket list.
+    };
+    bool planChunkPrefillBucket(const std::vector<Graph> &buckets, ChunkPrefillPlan *plan);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch = 1;
@@ -118,7 +135,9 @@ namespace vknn {
         // Empty = the batch-only path.
         std::map<std::string, int64_t> dimBindings;
         bool                           fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
-        bool                           fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
+        bool                           fuseDwPw            = true;  // fuse depthwise KxK + 1x1-project into FusedDwPw
+                                                                    // (default on: the fp16-rounded LDS intermediate keeps
+                                                                    // fused == unfused byte-identical; --no-fuse-dwpw opts out)
         bool                           fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
         bool                           fuseGridSampleWarp  = true;  // fold a scaled-flow + base-grid coordinate chain into
                                                                     // GridSample (bit-exact; default on, part of O1)
@@ -136,16 +155,17 @@ namespace vknn {
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
-        //   O1 = the default production set: the general pointwise fusion (bit-exact)
-        //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; can
-        //           regress on some models — measure before shipping a model with them).
+        //   O1 = the default production set: the general pointwise fusion and the dwpw-pair
+        //        fusion (both bit-exact to the unfused graph)
+        //   O2/O3 = + the experimental squeeze-excite fusion (situational; can regress on some
+        //           models — measure before shipping a model with it).
         //   ConvGemm lowering stays opt-in (--lower-conv) at every level until its kernel is tuned.
         static PassOptions forOptLevel(int level) {
             PassOptions o;
             o.fusePointwiseChains = level >= 1;
             o.fuseGridSampleWarp  = level >= 1;
             o.fuseSqueezeExcite   = level >= 2;
-            o.fuseDwPw            = level >= 2;
+            o.fuseDwPw            = level >= 1;
             return o;
         }
     };
@@ -268,13 +288,15 @@ namespace vknn {
     // match a pin keeps its decomposed form. Runs at load only, gated by Hint::RopeFusion, before
     // foldMatMulViews; never serialized. Returns the number of sites fused.
     int fuseRope(Graph &g, const std::string &fp32Pins = "");
-    // Fuse the single-query decode-attention chain — MatMul(view) [-> scale/mask pointwise] ->
-    // Softmax -> MatMul(view) [-> Transpose -> Reshape] — into one FusedAttention node
+    // Fuse the decode-attention chain — MatMul(view) [-> scale/mask pointwise] -> Softmax ->
+    // MatMul(view) [-> Transpose -> Reshape] — into one FusedAttention node
     // (core/fused_attention.h), so a decode step's attention core is one dispatch per layer and
     // the score/probability intermediates never touch memory. Consumes the operand-view stride
-    // attrs foldMatMulViews composed, so it must run after that pass; only the M == 1 (query
-    // length 1) form matches, and prefill/CNN graphs are untouched. Numerics-changing (fp32
-    // scores + softmax without the decomposed chain's fp16 round-trips); `fp32Pins` mirrors
+    // attrs foldMatMulViews composed, so it must run after that pass. Matches the M == 1
+    // (single-query decode) form and the M > 1 form whose mask varies per query row (the
+    // with-past chunk-prefill causal mask; the query axis is hosted as one more row dim);
+    // maskless / row-broadcast-mask M > 1 chains and CNN graphs are untouched. Numerics-changing
+    // (fp32 scores + softmax without the decomposed chain's fp16 round-trips); `fp32Pins` mirrors
     // foldMatMulViews — a chain whose erased tensors match the markFp32 set keeps its
     // decomposed form. Runs at load only, gated by Hint::FusedAttention; never serialized.
     void fuseDecodeAttention(Graph &g, const std::string &fp32Pins = "");

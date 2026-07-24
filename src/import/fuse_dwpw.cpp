@@ -1,3 +1,4 @@
+#include "core/fused_dwpw.h" // kDwPwMaxExpanded: the fused kernels' shared-memory channel cap
 #include "passes_internal.h"
 
 namespace vknn {
@@ -122,11 +123,12 @@ namespace vknn {
             {
                 continue;
             }
-            // Mirror the GPU kernel's LDS budget (supportsNode caps expanded channels at 1024): a
-            // wider pair would fall back to the CPU op at load, and a fused node hopping backends
-            // both loses the fusion's point and moves any attached pointwise epilogue's math to
-            // fp32 — diverging from the unfused graph's fp16 GPU elementwise ops.
-            if (dx.c > 1024)
+            // Mirror the GPU kernels' LDS budget (supportsNode caps expanded channels at
+            // kDwPwMaxExpanded, the size of the kernels' shared depthwise-stage arrays): a wider
+            // pair would fall back to the CPU op at load, and a fused node hopping backends both
+            // loses the fusion's point and moves any attached pointwise epilogue's math to fp32 —
+            // diverging from the unfused graph's fp16 GPU elementwise ops.
+            if (dx.c > kDwPwMaxExpanded)
             {
                 continue;
             }

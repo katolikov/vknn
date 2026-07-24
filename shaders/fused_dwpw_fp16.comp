@@ -1,7 +1,11 @@
 #version 450
-// Fused depthwise-3x3 + 1x1-project (NC4HW4, fp16). One workgroup per output pixel: phase A computes
+// Fused depthwise + 1x1-project (NC4HW4, fp16). One workgroup per output pixel: phase A computes
 // the depthwise output for all expanded channel-blocks of this pixel into LDS, phase B does the 1x1
 // project reading from LDS. The expanded intermediate stays in LDS and never touches global memory.
+// Each LDS lane is rounded through TO_STORE — the byte the unfused depthwise kernel
+// (dwconv_fp16.comp) stores to its fp16 output tensor — so the projection reads exactly the values
+// the unfused 1x1 conv would load and the fused output is byte-identical to the unfused fp16
+// pipeline. This is the small-spatial fallback of the tiled kernel (fused_dwpw_t_fp16.comp).
 // Parallelism = N*OH*OW workgroups.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -25,13 +29,18 @@ layout(push_constant) uniform PC {
   int N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_, dwAct, pwAct;
   float pwLo, pwHi;
 } pc;
-shared float comm[1024];  // depthwise output for this pixel (E channels), scalar SoA
+// Depthwise output for this pixel (E channels), scalar SoA. Sized by the same E cap as the tiled
+// kernels (kDwPwMaxExpanded in src/core/fused_dwpw.h); each value is fp16-rounded (see header) but
+// held widened in a float lane — bit-identical to staging f16, since widening fp16 is exact.
+#define MAX_E 1152
+shared float comm[MAX_E];
 
 void main() {
   int Eb = (pc.E + 3) / 4;
   int Coutb = (pc.Cout + 3) / 4;
   int OHW = pc.OH * pc.OW;
-  uint wg = gl_WorkGroupID.x;
+  // 2-term recovery: an oversized 1D dispatch is split into (x, y) by ComputePipeline::dispatch.
+  uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
   if (wg >= uint(pc.N * OHW)) return;
   int pix = int(wg) % OHW;
   int n = int(wg) / OHW;
@@ -51,10 +60,10 @@ void main() {
         acc += vec4(expb[sb + iy * pc.W + ix]) * vec4(dww[(eb * pc.KH + ky) * pc.KW + kx]);
       }
     }
-    comm[eb * 4 + 0] = vx_act(acc.x, pc.dwAct, 0.0, 6.0);
-    comm[eb * 4 + 1] = vx_act(acc.y, pc.dwAct, 0.0, 6.0);
-    comm[eb * 4 + 2] = vx_act(acc.z, pc.dwAct, 0.0, 6.0);
-    comm[eb * 4 + 3] = vx_act(acc.w, pc.dwAct, 0.0, 6.0);
+    comm[eb * 4 + 0] = float(TO_STORE(vx_act(acc.x, pc.dwAct, 0.0, 6.0)));
+    comm[eb * 4 + 1] = float(TO_STORE(vx_act(acc.y, pc.dwAct, 0.0, 6.0)));
+    comm[eb * 4 + 2] = float(TO_STORE(vx_act(acc.z, pc.dwAct, 0.0, 6.0)));
+    comm[eb * 4 + 3] = float(TO_STORE(vx_act(acc.w, pc.dwAct, 0.0, 6.0)));
   }
   barrier();
 

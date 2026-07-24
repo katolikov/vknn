@@ -1,7 +1,8 @@
 #version 450
-// Fused depthwise-3x3 + 1x1-project (NC4HW4, fp32). One workgroup per output pixel: phase A computes
+// Fused depthwise + 1x1-project (NC4HW4, fp32). One workgroup per output pixel: phase A computes
 // the depthwise output for all expanded channel-blocks of this pixel into LDS, phase B does the 1x1
 // project reading from LDS. The expanded intermediate stays in LDS and never touches global memory.
+// This is the small-spatial fallback of the tiled kernel (fused_dwpw_t.comp).
 // Parallelism = N*OH*OW workgroups.
 #include "common.glsl"
 #ifdef PW_EPI
@@ -21,13 +22,17 @@ layout(push_constant) uniform PC {
   int N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_, dwAct, pwAct;
   float pwLo, pwHi;
 } pc;
-shared float comm[1024];  // depthwise output for this pixel (E channels), scalar SoA
+// Depthwise output for this pixel (E channels), scalar SoA. Sized by the same E cap as the tiled
+// kernels (kDwPwMaxExpanded in src/core/fused_dwpw.h).
+#define MAX_E 1152
+shared float comm[MAX_E];
 
 void main() {
   int Eb = (pc.E + 3) / 4;
   int Coutb = (pc.Cout + 3) / 4;
   int OHW = pc.OH * pc.OW;
-  uint wg = gl_WorkGroupID.x;
+  // 2-term recovery: an oversized 1D dispatch is split into (x, y) by ComputePipeline::dispatch.
+  uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
   if (wg >= uint(pc.N * OHW)) return;
   int pix = int(wg) % OHW;
   int n = int(wg) / OHW;
