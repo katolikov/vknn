@@ -211,6 +211,15 @@ namespace vknn {
             return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle;
         }
 
+        /// The layout ONE reader operates a given input slot in — the exact rule the convert
+        /// splicer applies below, so an assignment derived from it provably removes the convert
+        /// instead of moving it.
+        bool readerWantsFlat(const Graph &g, const Node &n, size_t inputIndex) {
+            const bool needFlat = n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
+            // GridSample's non-warp grid is always a flat [N,Hout,Wout,2] buffer (see convertRead).
+            return (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp")) ? true : needFlat;
+        }
+
         LKind opLayoutKind(const Graph &g, const Node &n) {
             if (layoutAgnostic(n))
             {
@@ -231,31 +240,34 @@ namespace vknn {
         //    plain row-major copy (valid for any shape); the NC4HW4 byte-copy is only valid when the channel
         //    count is unchanged (else the vec4 interleave shifts) — so an agnostic op is flat if its input
         //    is flat OR it changes the channel count.
-        for (auto &nd: g.nodes)
-        {
-            LKind k = opLayoutKind(g, nd);
-            bool  f;
-            if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
+        auto seedFromProducers = [&g]() {
+            for (auto &nd: g.nodes)
             {
-                bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
-                int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
-                int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
-                f              = inFlat || cin != cout;
-            } else if (k == LKind::FixedNC4)
-            {
-                f = false;
-            } else
-            {
-                f = gpuFlatNode(g, nd); // FixedFlat, or an agnostic op with no usable input
-            }
-            for (TensorId o: nd.outputs)
-            {
-                if (o != kNoTensor)
+                LKind k = opLayoutKind(g, nd);
+                bool  f;
+                if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
                 {
-                    g.desc(o).gpuFlat = f;
+                    bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
+                    int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
+                    int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
+                    f              = inFlat || cin != cout;
+                } else if (k == LKind::FixedNC4)
+                {
+                    f = false;
+                } else
+                {
+                    f = gpuFlatNode(g, nd); // FixedFlat, or an agnostic op with no usable input
+                }
+                for (TensorId o: nd.outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        g.desc(o).gpuFlat = f;
+                    }
                 }
             }
-        }
+        };
+        seedFromProducers();
         // 2) FLEXIBLE re-vote: a standalone FusedPointwise whose plan is expressible in BOTH
         //    layouts — a rank-4 run with no general-broadcast (class-2) operand, the exact
         //    nc4Ok/flatOk rule the compile-time fuser applied — runs bit-identically through
@@ -390,6 +402,70 @@ namespace vknn {
                         }
                     }
                 }
+            }
+        }
+        // 2b) Graph inputs have no producer, so the seed above never reaches them and they keep the
+        //    NC4HW4 default — which forces a full-tensor ConvertLayout in front of every flat reader.
+        //    On a with-past decoder that is one convert of the WHOLE resident KV cache per layer per
+        //    decode step. An input read exclusively in flat layout is instead assigned flat, so the
+        //    host packs it flat once and the converts disappear; a mixed-layout or all-NC4HW4 input
+        //    keeps the default, so no convert is ever merely relocated. ConvertLayout is a lossless
+        //    same-dtype reorder, so the result is byte-identical either way, and the rule is a pure
+        //    function of the graph (adoption only ever flips NC4HW4 -> flat, so the loop below is
+        //    monotone and its fixed point is unique).
+        {
+            constexpr int kInputLayoutMaxRounds = 8; // monotone; this only caps pathological churn
+            for (int round = 0; round < kInputLayoutMaxRounds; ++round)
+            {
+                std::set<TensorId> produced;
+                for (const Node &nd: g.nodes)
+                {
+                    for (TensorId o: nd.outputs)
+                    {
+                        if (o != kNoTensor)
+                        {
+                            produced.insert(o);
+                        }
+                    }
+                }
+                std::map<TensorId, bool> allReadersFlat; // absent => no reader seen yet
+                for (const Node &nd: g.nodes)
+                {
+                    for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
+                    {
+                        TensorId in = nd.inputs[inIdx];
+                        if (in == kNoTensor || g.isInitializer(in) || produced.count(in))
+                        {
+                            continue;
+                        }
+                        bool &all = allReadersFlat.emplace(in, true).first->second;
+                        all       = all && readerWantsFlat(g, nd, inIdx);
+                    }
+                    for (TensorId edge: {nd.fusedResidual, nd.fusedBias})
+                    {
+                        if (edge == kNoTensor || g.isInitializer(edge) || produced.count(edge))
+                        {
+                            continue;
+                        }
+                        bool &all = allReadersFlat.emplace(edge, true).first->second;
+                        all       = all && (!nd.outputs.empty() && nd.outputs[0] != kNoTensor && g.desc(nd.outputs[0]).gpuFlat);
+                    }
+                }
+                bool changed = false;
+                for (const auto &entry: allReadersFlat)
+                {
+                    TensorDesc &d = g.desc(entry.first);
+                    if (entry.second && !d.gpuFlat)
+                    {
+                        d.gpuFlat = true;
+                        changed   = true;
+                    }
+                }
+                if (!changed)
+                {
+                    break;
+                }
+                seedFromProducers(); // an agnostic reader propagates the new input layout downstream
             }
         }
         // 3) NC4HW4 can only represent rank <= 4 (NCHW::from collapses rank>4 to (1,1,1,1)). Any tensor with
