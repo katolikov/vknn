@@ -108,13 +108,20 @@ int main(int argc, char **argv) {
     if (argc < 2)
     {
         fprintf(stderr,
-                "usage: %s model.vxm [--backend vulkan|cpu] [--precision low|normal|high]\n"
+                "usage: %s model.vxm [--config PATH] [--backend vulkan|cpu] [--precision low|normal|high]\n"
                 "        [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID]\n"
                 "        [--image-token ID] [--seed S]\n",
                 argv[0]);
         return 1;
     }
-    Config cfg;
+    // A JSON config file (Config::fromJsonFile) seeds every knob; the individual flags below then
+    // layer on top, so a command-line flag always wins over the file.
+    Config            cfg;
+    const std::string configPath = argValue(argc, argv, "--config", "");
+    if (!configPath.empty())
+    {
+        cfg = Config::fromJsonFile(configPath);
+    }
     cfg.backend                = backendFromStr(argValue(argc, argv, "--backend", "vulkan"));
     cfg.precision              = precisionFromStr(argValue(argc, argv, "--precision", "low"));
     cfg.freeWeightsAfterUpload = true;

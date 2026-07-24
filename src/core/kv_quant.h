@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <set>
 #include <vector>
 
@@ -135,19 +136,34 @@ namespace vknn {
     /// per-row-dim stride a headDim multiple — so payloadRowElementBase / headDim indexes the
     /// scale buffer directly in both kernels. fp32-pinned operands are refused: the scheme is
     /// defined on the fp16 storage path only.
-    inline bool kvQuantNodeEligible(const Graph &g, const Node &node) {
-        if (node.type != OpType::FusedAttention || node.attr.geti(kFaSplit, 0) == 0 || node.inputs.size() < 6)
+    /// Why one node is NOT eligible — nullptr when it is. The named reason is what the backends
+    /// log when the hint asks for the scheme and nothing qualifies, so a refusal is always
+    /// attributable to a specific structural fact rather than a bare "nothing qualified".
+    inline const char *kvQuantNodeRefusal(const Graph &g, const Node &node) {
+        if (node.type != OpType::FusedAttention)
         {
-            return false;
+            return "not a FusedAttention node";
+        }
+        if (node.attr.geti(kFaSplit, 0) == 0)
+        {
+            return "attention is not the split-KV form (no folded KV concat)";
+        }
+        if (node.inputs.size() < 6)
+        {
+            return "split-KV attention without the new-rows inputs";
         }
         const int64_t headDim = node.attr.geti(kFaHd);
-        if (headDim <= 0 || node.attr.geti(kFaPastLen) <= 0)
+        if (headDim <= 0)
         {
-            return false;
+            return "head dim is not static";
+        }
+        if (node.attr.geti(kFaPastLen) <= 0)
+        {
+            return "past length is zero (prefill-shaped bucket)";
         }
         if (node.attr.geti(kFaKK) != 1 || node.attr.geti(kFaKN) != headDim || node.attr.geti(kFaVN) != 1 || node.attr.geti(kFaVK) != headDim)
         {
-            return false;
+            return "past K/V are not dense row-contiguous [.., token, headDim] reads";
         }
         for (const char *key: {kFaKStride, kFaVStride})
         {
@@ -155,50 +171,111 @@ namespace vknn {
             {
                 if (stride % headDim != 0)
                 {
-                    return false;
+                    return "a past K/V row-dim stride is not a headDim multiple";
                 }
             }
         }
         const TensorId kPast = node.inputs[1], vPast = node.inputs[2];
         if (kPast == kNoTensor || vPast == kNoTensor || kPast == vPast || g.isInitializer(kPast) || g.isInitializer(vPast))
         {
-            return false;
+            return "past K/V are missing, aliased, or initializers";
         }
         // The past sources must be the resident cache itself: graph inputs, not mid-graph tensors.
         for (TensorId past: {kPast, vPast})
         {
             if (std::find(g.inputs.begin(), g.inputs.end(), past) == g.inputs.end())
             {
-                return false;
+                return "past K/V are mid-graph tensors, not the resident cache inputs";
             }
         }
         for (TensorId t: node.inputs)
         {
             if (t != kNoTensor && g.desc(t).storeFp32)
             {
-                return false;
+                return "an attention operand is pinned to fp32 storage";
             }
         }
         for (TensorId t: node.outputs)
         {
             if (t != kNoTensor && g.desc(t).storeFp32)
             {
-                return false;
+                return "an attention output is pinned to fp32 storage";
             }
         }
-        return true;
+        return nullptr;
     }
 
-    /// The cache tensors the int8 scheme applies to: Config::kvCacheQuant(), `backendEligible` (the
-    /// Vulkan segment passes its device 8-bit-storage capability AND fp16 storage; the CPU oracle
-    /// passes true — it models the quantized cache whenever the hint asks for it), and every
-    /// consumer of the tensor is an eligible FusedAttention reading it in a past slot (1 or 2).
-    /// `requireFlat` adds the Vulkan device-layout constraint (gpuFlat cache tensors); the CPU
-    /// caller passes false. Both the segment (buffer allocation) and the FusedAttention backends
-    /// derive from this ONE rule, so payload buffers and kernel variants can never disagree.
+    inline bool kvQuantNodeEligible(const Graph &g, const Node &node) {
+        return kvQuantNodeRefusal(g, node) == nullptr;
+    }
+
+    /// The refusal reason for a whole graph: the first FusedAttention node's reason, or a note that
+    /// the graph has no fused attention at all. Only meaningful when kvQuantCacheTensors came back
+    /// empty with the hint On.
+    inline std::string kvQuantGraphRefusal(const Graph &g) {
+        for (const Node &node: g.nodes)
+        {
+            if (node.type == OpType::FusedAttention)
+            {
+                const char *reason = kvQuantNodeRefusal(g, node);
+                if (!reason)
+                {
+                    return "every attention node qualifies but no cache tensor passed the consumer/layout check";
+                }
+                std::string detail = reason;
+                if (node.inputs.size() > 2)
+                {
+                    detail += " (past K '" + g.desc(node.inputs[1]).name + "', past V '" + g.desc(node.inputs[2]).name + "')";
+                }
+                return detail;
+            }
+        }
+        return "the graph has no FusedAttention node";
+    }
+
+    /// Auto-mode threshold: the smallest resident cache (fp16 bytes, summed over every eligible
+    /// cache tensor of one segment) at which halving the past-KV read traffic outweighs the
+    /// in-kernel dequantize. A decode step streams the WHOLE compiled cache — the attention kernel
+    /// walks all C slots — so the cache's compiled byte size, not the momentary fill, is what the
+    /// saving scales with, and the rule is a static property of the plan rather than a timing race.
+    /// Device-measured on a mobile Vulkan GPU with an int4 0.5B decoder: at 12.6 MB (24 layers x 2 kv
+    /// heads x 1024 slots x 64) int8 costs about 4% of the decode step, at 25.2 MB (the same decoder
+    /// at 2048 slots) it saves about 9%. The threshold sits at the upper measured point so Auto only
+    /// engages where a win was actually observed.
+    inline constexpr int64_t kKvQuantAutoMinCacheBytes = 24 * 1024 * 1024;
+
+    /// Bytes one cache tensor occupies in the fp16 layout — the traffic the int8 payload halves.
+    inline int64_t kvQuantCacheTensorFp16Bytes(const Graph &g, TensorId t) {
+        return numElements(g.desc(t).shape) * (int64_t) sizeof(fp16_t);
+    }
+
+    /// Resolve Hint::KvCacheQuant for one segment's candidate set. On/Off are literal; Auto engages
+    /// exactly when the eligible cache is at least kKvQuantAutoMinCacheBytes — a pure function of
+    /// the compiled shapes, so every load of the same plan on the same device decides identically.
+    inline bool kvQuantEnabled(const Config &cfg, int64_t candidateFp16Bytes) {
+        const int mode = cfg.kvCacheQuantMode();
+        if (mode == (int) Mode::Off)
+        {
+            return false;
+        }
+        if (mode == (int) Mode::On)
+        {
+            return true;
+        }
+        return candidateFp16Bytes >= kKvQuantAutoMinCacheBytes;
+    }
+
+    /// The cache tensors the int8 scheme applies to: the structural rules below, `backendEligible`
+    /// (the Vulkan segment passes its device 8-bit-storage capability AND fp16 storage; the CPU
+    /// oracle passes true — it models the quantized cache whenever the hint asks for it), every
+    /// consumer of the tensor being an eligible FusedAttention reading it in a past slot (1 or 2),
+    /// and finally kvQuantEnabled() over the qualifying set's total fp16 bytes. `requireFlat` adds
+    /// the Vulkan device-layout constraint (gpuFlat cache tensors); the CPU caller passes false.
+    /// Both the segment (buffer allocation) and the FusedAttention backends derive from this ONE
+    /// rule, so payload buffers and kernel variants can never disagree.
     inline std::set<TensorId> kvQuantCacheTensors(const Graph &g, const Config &cfg, bool backendEligible, bool requireFlat) {
         std::set<TensorId> cacheTensors;
-        if (!backendEligible || !cfg.kvCacheQuant())
+        if (!backendEligible || cfg.kvCacheQuantMode() == (int) Mode::Off)
         {
             return cacheTensors;
         }
@@ -211,6 +288,7 @@ namespace vknn {
                 candidates.insert(node.inputs[2]);
             }
         }
+        int64_t qualifyingBytes = 0;
         for (TensorId t: candidates)
         {
             if (requireFlat && !g.desc(t).gpuFlat)
@@ -234,7 +312,12 @@ namespace vknn {
             if (allConsumersEligible)
             {
                 cacheTensors.insert(t);
+                qualifyingBytes += kvQuantCacheTensorFp16Bytes(g, t);
             }
+        }
+        if (!kvQuantEnabled(cfg, qualifyingBytes))
+        {
+            cacheTensors.clear();
         }
         return cacheTensors;
     }

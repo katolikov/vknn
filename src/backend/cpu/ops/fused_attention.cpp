@@ -94,7 +94,7 @@ namespace vknn {
                 // byte-identical: the codec is a pure function and the attention loops are the
                 // deterministic fp32 chains below.
                 std::vector<float> kDequant, vDequant;
-                if (split && ctx.config && ctx.config->kvCacheQuant())
+                if (split && ctx.config)
                 {
                     const std::set<TensorId> cacheTensors = kvQuantCacheTensors(g, *ctx.config, /*backendEligible=*/true, /*requireFlat=*/false);
                     if (cacheTensors.count(node.inputs[1]) && cacheTensors.count(node.inputs[2]))

@@ -8,9 +8,12 @@
 // default); only the token loop and argmax/sampling are host code here — tokenization is the front
 // end's job.
 //
-//   vknn_chat model.vxm [--backend vulkan|cpu] [--precision low|normal|high] [--fp32-tensors CSV]
-//             [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID] [--seed S]
-//             [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]
+//   vknn_chat model.vxm [--config PATH] [--backend vulkan|cpu] [--precision low|normal|high]
+//             [--fp32-tensors CSV] [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID]
+//             [--seed S] [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]
+//
+// --config PATH seeds every knob from a JSON config file (Config::fromJsonFile); the flags below
+// override whatever the file sets.
 //
 // Greedy decode (--temp 0, the default) registers the decode bucket's logits for the engine-side
 // argmax (Session::setOutputArgMax): per token the engine reduces the logits on the GPU and the
@@ -103,7 +106,7 @@ int main(int argc, char **argv) {
     if (argc < 2)
     {
         fprintf(stderr,
-                "usage: %s model.vxm [--backend vulkan|cpu] [--precision low|normal|high]\n"
+                "usage: %s model.vxm [--config PATH] [--backend vulkan|cpu] [--precision low|normal|high]\n"
                 "        [--fp32-tensors CSV] [--max-tokens N] [--temp T] [--top-k K] [--top-p P]\n"
                 "        [--eos ID] [--seed S] [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]\n",
                 argv[0]);
@@ -111,7 +114,14 @@ int main(int argc, char **argv) {
     }
     std::string model = argv[1];
 
-    Config cfg;
+    // A JSON config file (Config::fromJsonFile) seeds every knob; the individual flags below then
+    // layer on top, so a command-line flag always wins over the file.
+    Config            cfg;
+    const std::string configPath = opt(argc, argv, "--config", "");
+    if (!configPath.empty())
+    {
+        cfg = Config::fromJsonFile(configPath);
+    }
     cfg.backend                = backendFromStr(opt(argc, argv, "--backend", "vulkan"));
     cfg.precision              = precisionFromStr(opt(argc, argv, "--precision", "low"));
     cfg.fp32Tensors            = opt(argc, argv, "--fp32-tensors", "");
@@ -1270,6 +1280,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        const double tTurnStart   = nowMs(); // turn walls for the --timing-summary line below
         size_t consumed         = 0;
         bool   chunkRanThisTurn = false;
         if (chunkBucket >= 0 && kvLink)
@@ -1338,6 +1349,11 @@ int main(int argc, char **argv) {
             }
             ++p;
         }
+        // The prompt is folded and the first token's logits are in hand: this instant is the
+        // turn's time-to-first-token (the argmax that turns the logits into an id follows below
+        // and is either already GPU-side or a single host vocab scan).
+        const double tPromptDone = nowMs();
+        int          emitted     = 0; // tokens actually printed this turn (the decode-rate denominator)
         int generated = 0;
         if (chainActive && kvLink)
         {
@@ -1369,6 +1385,7 @@ int main(int argc, char **argv) {
                 printf("%lld\n", (long long) next);
                 fflush(stdout);
                 ++generated;
+                ++emitted;
                 if (generated >= maxTokens)
                 {
                     // The single-step loop also feeds the last printed token (its argmax is never
@@ -1424,6 +1441,7 @@ int main(int argc, char **argv) {
                     {
                         printf("%lld\n", (long long) chainIds[(size_t) i]);
                         ++generated;
+                ++emitted;
                     }
                     fflush(stdout);
                     p += firstEosAt + 1;
@@ -1434,6 +1452,7 @@ int main(int argc, char **argv) {
                 {
                     printf("%lld\n", (long long) chainIds[(size_t) i]);
                     ++generated;
+                ++emitted;
                 }
                 fflush(stdout);
                 p += steps;
@@ -1481,11 +1500,21 @@ int main(int argc, char **argv) {
             }
             printf("%lld\n", (long long) next);
             fflush(stdout);
+            ++emitted;
             if (!step(next))
             {
                 return 3;
             }
             ++p;
+        }
+        if (cfg.timing || cfg.timingSummary)
+        {
+            // Turn walls: time-to-first-token (prompt fold through the first token's logits) and
+            // the mean decode step over the tokens generated after it.
+            const double turnEndMs = nowMs();
+            fprintf(stderr, "[chat] turn: prompt=%zu tok ttft=%.2fms generated=%d decode=%.3fms/tok\n",
+                    prompt.size(), tPromptDone - tTurnStart, emitted,
+                    emitted > 1 ? (turnEndMs - tPromptDone) / (emitted - 1) : 0.0);
         }
         if ((cfg.timing || cfg.timingSummary) && tmSteps > 0)
         {

@@ -35,13 +35,15 @@ namespace vknn {
                               ///< quantized weight operand - opt-in low-precision fast paths, never a
                               ///< default, numerics differ from the fp16 path by construction.
         KvCacheQuant    = 12, ///< Int8 KV-cache storage (Auto / On / Off, default Auto; Auto
-                              ///< currently equals Off). On stores the engine-resident decode KV
+                              ///< engages from kKvQuantAutoMinCacheBytes of eligible cache up,
+                              ///< the measured size where the traffic saving beats the in-kernel
+                              ///< dequantize). On stores the engine-resident decode KV
                               ///< cache as symmetric int8 with one fp16 scale per (token, head)
                               ///< row: the resident-link fold quantizes each present row on write
                               ///< and the FusedAttention kernels dequantize the past source inside
                               ///< their fp32 K-dot / V-apply loops (the current step's rows stay
-                              ///< fp16). Halves cache memory and read traffic; numerics change, so
-                              ///< the default stays Off until a device-verified flip. Requires the
+                              ///< fp16). Halves cache memory and read traffic; numerics change,
+                              ///< so Auto only engages above the measured size threshold. Requires the
                               ///< split-KV fold (Hint::KvConcatFold), fp16 storage, and 8-bit
                               ///< storage support — an ineligible model/device keeps the fp16
                               ///< cache byte-identically at every value (see src/core/kv_quant.h).

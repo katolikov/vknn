@@ -147,12 +147,13 @@ namespace vknn {
             if (!kvqCaches_.empty())
             {
                 VKNN_INFO << "int8 KV cache: " << kvqCaches_.size() << " cache tensor(s) stored as int8 payload + fp16 row scales";
-            } else if (cfg.kvCacheQuant())
+            } else if (cfg.kvCacheQuantMode() == (int) Mode::On)
             {
                 // Named refusal: the hint asked for the scheme but nothing qualified on this
                 // segment (no eligible split-KV attention, an fp32 session, or a device without
                 // 8-bit storage). The fp16 cache path runs unchanged.
-                VKNN_INFO << "int8 KV cache requested but no eligible cache tensor on this segment (device int8 storage: " << (int8Storage ? "yes" : "no") << ", fp16 storage: " << (useFp16_ ? "yes" : "no") << ")";
+                VKNN_INFO << "int8 KV cache requested but no eligible cache tensor on this segment: " << kvQuantGraphRefusal(g)
+                          << " (device int8 storage: " << (int8Storage ? "yes" : "no") << ", fp16 storage: " << (useFp16_ ? "yes" : "no") << ")";
             }
         }
         auto actBytes = [&](TensorId tid) -> size_t {

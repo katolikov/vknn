@@ -398,7 +398,9 @@ TEST(KvQuant, EligibilityRules) {
     EXPECT_TRUE(tensors.count(fa->inputs[1]));
     EXPECT_TRUE(tensors.count(fa->inputs[2]));
 
-    // Hint Off / Auto (the default), and an ineligible backend, each empty the set.
+    // Hint Off / Auto (the default), and an ineligible backend, each empty the set. Auto refuses
+    // here because this synthetic cache is far below kKvQuantAutoMinCacheBytes — the size-driven
+    // Auto resolution has its own case below.
     Config cfgDefault;
     EXPECT_TRUE(kvQuantCacheTensors(g, cfgDefault, true, false).empty());
     Config cfgOff;
@@ -433,18 +435,61 @@ TEST(KvQuant, EligibilityRules) {
     }
 }
 
+// Auto resolves on the segment's eligible cache size: the same graph is refused below the measured
+// threshold and accepted at or above it, with no timing input — the decision is a pure function of
+// the compiled shapes, so every load of one plan on one device picks the same path.
+TEST(KvQuant, AutoResolvesOnCacheSize) {
+    Graph       g  = foldedSplitDecodeGraph();
+    const Node *fa = findNode(g, OpType::FusedAttention);
+    ASSERT_NE(fa, nullptr);
+    const int64_t cacheBytes = kvQuantCacheTensorFp16Bytes(g, fa->inputs[1]) + kvQuantCacheTensorFp16Bytes(g, fa->inputs[2]);
+    ASSERT_GT(cacheBytes, 0);
+    ASSERT_LT(cacheBytes, kKvQuantAutoMinCacheBytes) << "the synthetic decode cache must sit below the Auto threshold";
+
+    Config autoCfg; // the unset default
+    EXPECT_TRUE(kvQuantCacheTensors(g, autoCfg, /*backendEligible=*/true, /*requireFlat=*/false).empty());
+
+    // Widen the same cache past the threshold: Auto now engages on exactly the two past tensors.
+    Graph wide = g;
+    for (TensorId past: {fa->inputs[1], fa->inputs[2]})
+    {
+        Shape shape = wide.desc(past).shape;
+        while (kvQuantCacheTensorFp16Bytes(wide, past) * 2 < kKvQuantAutoMinCacheBytes)
+        {
+            shape[shape.size() - 2] *= 2; // more cache slots, same row geometry
+            wide.desc(past).shape = shape;
+        }
+    }
+    const std::set<TensorId> engaged = kvQuantCacheTensors(wide, autoCfg, true, false);
+    EXPECT_EQ(engaged.size(), 2u);
+    EXPECT_TRUE(engaged.count(fa->inputs[1]));
+    // An explicit Off still refuses the widened cache.
+    Config offCfg;
+    offCfg.setHint(Hint::KvCacheQuant, Mode::Off);
+    EXPECT_TRUE(kvQuantCacheTensors(wide, offCfg, true, false).empty());
+}
+
 // Config plumbing and the cache-variant key: the JSON knob parses and round-trips, and a variant
 // with a different kvCacheQuant value never matches (so flipping the hint reselects a variant
 // instead of serving a stale plan) while the codec round-trips the field.
 TEST(KvQuant, ConfigAndCacheVariantKey) {
-    EXPECT_FALSE(Config().kvCacheQuant());
+    EXPECT_EQ(Config().kvCacheQuantMode(), (int) Mode::Auto);
     Config on = Config::fromJsonString("{\"kvCacheQuant\": \"on\"}");
-    EXPECT_TRUE(on.kvCacheQuant());
-    EXPECT_FALSE(Config::fromJsonString("{\"kvCacheQuant\": \"off\"}").kvCacheQuant());
-    EXPECT_FALSE(Config::fromJsonString("{\"kvCacheQuant\": \"auto\"}").kvCacheQuant());
-    EXPECT_FALSE(Config::fromJsonString("{}").kvCacheQuant());
+    EXPECT_EQ(on.kvCacheQuantMode(), (int) Mode::On);
+    EXPECT_EQ(Config::fromJsonString("{\"kvCacheQuant\": \"off\"}").kvCacheQuantMode(), (int) Mode::Off);
+    EXPECT_EQ(Config::fromJsonString("{\"kvCacheQuant\": \"auto\"}").kvCacheQuantMode(), (int) Mode::Auto);
+    EXPECT_EQ(Config::fromJsonString("{}").kvCacheQuantMode(), (int) Mode::Auto);
     // toJson -> fromJsonString round-trips the knob.
-    EXPECT_TRUE(Config::fromJsonString(on.toJson()).kvCacheQuant());
+    EXPECT_EQ(Config::fromJsonString(on.toJson()).kvCacheQuantMode(), (int) Mode::On);
+
+    // The Auto resolution: On/Off are literal at any size; Auto engages only from the measured
+    // cache-size threshold up, so a small cache keeps the fp16 path without any timing input.
+    Config autoCfg;
+    Config offCfg = Config::fromJsonString("{\"kvCacheQuant\": \"off\"}");
+    EXPECT_FALSE(kvQuantEnabled(autoCfg, kKvQuantAutoMinCacheBytes - 1));
+    EXPECT_TRUE(kvQuantEnabled(autoCfg, kKvQuantAutoMinCacheBytes));
+    EXPECT_TRUE(kvQuantEnabled(on, 0));
+    EXPECT_FALSE(kvQuantEnabled(offCfg, kKvQuantAutoMinCacheBytes * 4));
 
     CacheVariant base, quantized;
     quantized.kvCacheQuant = (int) Mode::On;

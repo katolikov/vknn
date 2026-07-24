@@ -195,12 +195,13 @@ namespace vknn {
         bool kvConcatFold() const noexcept {
             return hint(Hint::KvConcatFold, (int) Mode::On) != (int) Mode::Off;
         }
-        /// True when the int8 KV-cache scheme is requested (Hint::KvCacheQuant On). Auto — the
-        /// unset default — currently equals Off: the scheme changes numerics, so it stays an
-        /// explicit opt-in until a device-verified default flip. Controlled through the hint
-        /// mechanism.
-        bool kvCacheQuant() const noexcept {
-            return hint(Hint::KvCacheQuant, (int) Mode::Auto) == (int) Mode::On;
+        /// Hint::KvCacheQuant as set (Auto / On / Off). Whether the int8 KV-cache scheme actually
+        /// engages is NOT a config-only question: Auto resolves against the segment's eligible
+        /// cache size, so the decision lives in kvQuantEnabled() / kvQuantCacheTensors()
+        /// (src/core/kv_quant.h), the one rule every backend derives from. Off here is the only
+        /// value that answers on its own — it refuses the scheme outright.
+        int kvCacheQuantMode() const noexcept {
+            return hint(Hint::KvCacheQuant, (int) Mode::Auto);
         }
 
         static Config fromJsonFile(const std::string &path);

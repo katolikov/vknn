@@ -137,7 +137,7 @@ enum class Hint {
   KvConcatFold    = 9,  // per-token KV-cache Concat fold into split-source attention (On / Off, default On)
   SplitKConv      = 10, // split-K conv routing (Auto / On / Off, default Auto)
   CoopmatGemm     = 11, // cooperative-matrix MatMul routing (Auto / On / Off / Fp8 / Int8Coop, default Auto)
-  KvCacheQuant    = 12, // int8 KV-cache storage: quantize-on-fold, dequant-in-kernel (Auto / On / Off; default Auto == Off)
+  KvCacheQuant    = 12, // int8 KV-cache storage: quantize-on-fold, dequant-in-kernel (Auto / On / Off; Auto engages from a 24 MiB cache up)
 };
 // One Mode enum holds every value; the Hint picks the knob, the Mode the value. (Autotune effort is
 // a top-level Config::tuning field, not a Hint.)
@@ -156,13 +156,19 @@ int v = cfg.hint(Hint::WinogradUnit);         // read back (0 if unset)
 compiled `.vxm`; each is keyed into the plan-cache variant, so flipping the hint reselects (or recomputes) a
 variant instead of ever serving a stale plan.
 
-`KvCacheQuant` (`"kvCacheQuant": "on"` in JSON) stores the engine-resident decode KV cache as
-symmetric int8 with one fp16 scale per (token, head) row: the resident-link fold quantizes each
-present row on write and the FusedAttention kernels dequantize the past source inside their fp32
-loops (the current step's rows stay fp16). It halves cache memory and read traffic but changes
-numerics, so the default stays Off (`auto`) until a device-verified flip; an ineligible model
-(no split-KV fused attention), an fp32 session, or a device without 8-bit storage keeps the fp16
-cache byte-identically at every value.
+`KvCacheQuant` (`"kvCacheQuant": "on"` / `"off"` / `"auto"` in JSON) stores the engine-resident
+decode KV cache as symmetric int8 with one fp16 scale per (token, head) row: the resident-link fold
+quantizes each present row on write and the FusedAttention kernels dequantize the past source
+inside their fp32 loops (the current step's rows stay fp16). It halves cache memory and past-KV
+read traffic and changes numerics (the decode stream is close, not byte-identical, to the fp16
+cache). `auto` — the default — engages the scheme exactly when the segment's eligible cache reaches
+`kKvQuantAutoMinCacheBytes` (24 MiB of fp16 cache, `src/core/kv_quant.h`), the size from which the
+traffic saving was measured to beat the in-kernel dequantize; below it the fp16 cache runs
+unchanged. The threshold is read off the compiled shapes, so the choice is deterministic and
+identical on every load of one plan. `off` refuses the scheme at any size. An ineligible model (no
+split-KV fused attention, or a cache that is not the resident graph input), an fp32 session, or a
+device without 8-bit storage keeps the fp16 cache byte-identically at every value, and the refusal
+is logged with the specific structural reason.
 
 In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "heavy"`, `"flatLayout": false`,
 `"kvCacheQuant": "on"`);
