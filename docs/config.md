@@ -137,7 +137,7 @@ enum class Hint {
   KvConcatFold    = 9,  // per-token KV-cache Concat fold into split-source attention (On / Off, default On)
   SplitKConv      = 10, // split-K conv routing (Auto / On / Off, default Auto)
   CoopmatGemm     = 11, // cooperative-matrix MatMul routing (Auto / On / Off / Fp8 / Int8Coop, default Auto)
-  KvCacheQuant    = 12, // int8 KV-cache storage: quantize-on-fold, dequant-in-kernel (Auto / On / Off; Auto engages from a 24 MiB cache up)
+  KvCacheQuant    = 12, // int8 KV-cache storage: quantize-on-fold, dequant-in-kernel (Auto / On / Off, default OFF; Auto engages from a 24 MiB cache up)
 };
 // One Mode enum holds every value; the Hint picks the knob, the Mode the value. (Autotune effort is
 // a top-level Config::tuning field, not a Hint.)
@@ -160,15 +160,35 @@ variant instead of ever serving a stale plan.
 decode KV cache as symmetric int8 with one fp16 scale per (token, head) row: the resident-link fold
 quantizes each present row on write and the FusedAttention kernels dequantize the past source
 inside their fp32 loops (the current step's rows stay fp16). It halves cache memory and past-KV
-read traffic and changes numerics (the decode stream is close, not byte-identical, to the fp16
-cache). `auto` — the default — engages the scheme exactly when the segment's eligible cache reaches
-`kKvQuantAutoMinCacheBytes` (24 MiB of fp16 cache, `src/core/kv_quant.h`), the size from which the
-traffic saving was measured to beat the in-kernel dequantize; below it the fp16 cache runs
-unchanged. The threshold is read off the compiled shapes, so the choice is deterministic and
-identical on every load of one plan. `off` refuses the scheme at any size. An ineligible model (no
-split-KV fused attention, or a cache that is not the resident graph input), an fp32 session, or a
-device without 8-bit storage keeps the fp16 cache byte-identically at every value, and the refusal
-is logged with the specific structural reason.
+read traffic, and it is **lossy** — the decode stream is close, not byte-identical, to the fp16
+cache.
+
+**`off` is the default**: the scheme is opt-in, like the compile-time `-Os` int4 weight
+quantization it sits alongside, and never something the engine takes on a caller's behalf. What
+that buys, measured on a mobile Vulkan GPU with an int4 0.5B decoder (24 layers x 2 kv heads x head
+dim 64) over held-out text tokenized with the model's own tokenizer:
+
+| eligible fp16 cache | decode step (5 paired reps) | perplexity | greedy argmax agreement |
+|---|---|---|---|
+| 12.6 MB (1024 slots) | no win — 3 of 5 pairs favour fp16, median +0.3% | +2.3% | 92.7% |
+| 25.2 MB (2048 slots) | −1.5% median, int8 wins 5 of 5 pairs | +1.9% | 92.9% |
+
+Perplexity and agreement are teacher-forced, so both arms see an identical context at every
+position and the difference is attributable to the cache alone. The ~7% per-position argmax flip
+rate compounds when generating freely: 14 of 16 held-out prompts left the fp16 token stream, at a
+median of 18 (1024 slots) / 33 (2048 slots) generated tokens. The cost is flat in cache size and
+flat in how full the cache is, so a larger cache buys more speed at the same accuracy cost. The win
+stays small because a decode step is dominated by weight traffic (~520 MB of int4 weights per token
+against a 25.2 MB cache), which bounds any cache-only saving to a couple of percent.
+
+`auto` opts into the size-driven rule: it engages the scheme exactly when the segment's eligible
+cache reaches `kKvQuantAutoMinCacheBytes` (24 MiB of fp16 cache, `src/core/kv_quant.h`) — the point
+from which a win was actually measured — and keeps the fp16 cache below it. The threshold is read
+off the compiled shapes, so the choice is deterministic and identical on every load of one plan.
+`on` forces the scheme at any size; `off` refuses it at any size. An ineligible model (no split-KV
+fused attention, or a cache that is not the resident graph input), an fp32 session, or a device
+without 8-bit storage keeps the fp16 cache byte-identically at every value, and the refusal is
+logged with the specific structural reason.
 
 In JSON, the common knobs have named keys (`"winograd": "off"`, `"tuning": "heavy"`, `"flatLayout": false`,
 `"kvCacheQuant": "on"`);

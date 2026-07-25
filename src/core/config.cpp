@@ -292,7 +292,7 @@ namespace vknn {
         os << "  \"winogradVariant\": " << hint(Hint::WinogradVariant, 0) << ",\n";
         os << "  \"winogradUnit\": " << hint(Hint::WinogradUnit, 0) << ",\n";
         os << "  \"directConv3x3\": " << hint(Hint::DirectConv3x3, 0) << ",\n";
-        os << "  \"kvCacheQuant\": \"" << winoStr((Mode) hint(Hint::KvCacheQuant, (int) Mode::Auto)) << "\"\n";
+        os << "  \"kvCacheQuant\": \"" << winoStr((Mode) kvCacheQuantMode()) << "\"\n";
         os << "}\n";
         return os.str();
     }

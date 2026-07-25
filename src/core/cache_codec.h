@@ -40,7 +40,8 @@ namespace vknn {
         int         directConv3x3   = 0;   // Hint::DirectConv3x3
         int         splitKConv      = 0;   // Hint::SplitKConv
         int         coopmatGemm     = 0;   // Hint::CoopmatGemm (default equals Auto so an older file keys identically)
-        int         kvCacheQuant    = 0;   // Hint::KvCacheQuant (default equals Auto so an older file keys identically)
+        int         kvCacheQuant    = 0;   // Hint::KvCacheQuant as SET; a default Config resolves to Off (2), so a
+                                           // file written before the default moved off Auto keys 0 and is recomputed once
 
         // The compiled artifacts.
         std::vector<uint8_t>                      pipeline; // serialized VkPipelineCache blob

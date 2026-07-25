@@ -238,10 +238,35 @@ namespace vknn {
     /// in-kernel dequantize. A decode step streams the WHOLE compiled cache — the attention kernel
     /// walks all C slots — so the cache's compiled byte size, not the momentary fill, is what the
     /// saving scales with, and the rule is a static property of the plan rather than a timing race.
-    /// Device-measured on a mobile Vulkan GPU with an int4 0.5B decoder: at 12.6 MB (24 layers x 2 kv
-    /// heads x 1024 slots x 64) int8 costs about 4% of the decode step, at 25.2 MB (the same decoder
-    /// at 2048 slots) it saves about 9%. The threshold sits at the upper measured point so Auto only
-    /// engages where a win was actually observed.
+    /// Device-measured on a mobile Vulkan GPU with an int4 0.5B decoder (24 layers x 2 kv heads x
+    /// head dim 64), five paired reps per size alternating the two arms: at 12.6 MB (1024 slots)
+    /// the two arms are indistinguishable — only 2 of the 5 pairs favour int8 and the median paired
+    /// delta is +0.3% (18.49 -> 18.58 ms/tok on the medians), so nothing is won below this line; at
+    /// 25.2 MB (2048 slots) int8 wins all 5 pairs, median paired delta -1.5% (19.99 -> 19.63
+    /// ms/tok). Auto therefore engages only from the upper measured point up.
+    ///
+    /// The win is small because a decode step's traffic is dominated by the WEIGHTS, not the cache:
+    /// this decoder streams roughly 520 MB of int4 weights per token against a 25.2 MB cache, so
+    /// halving the cache removes about 2% of the step and no scheme confined to the cache can do
+    /// better. The size at which the scheme pays is therefore really a RATIO — cache bytes against
+    /// total per-step traffic — and an absolute byte threshold only approximates it for one weight
+    /// budget; a model whose cache rivals its weights would cross far earlier in absolute bytes.
+    /// Sizes above 25.2 MB are unmeasured here, so the threshold marks where a win was observed
+    /// rather than where it becomes large.
+    ///
+    /// Auto is NOT the default. The scheme's accuracy cost was measured on the same decoder against
+    /// held-out text with the model's own tokenizer (teacher-forced, so both arms see an identical
+    /// context at every position and the difference is attributable to the cache alone): perplexity
+    /// +2.3% at 12.6 MB and +1.9% at 25.2 MB, and the greedy argmax under that identical context
+    /// disagrees with the fp16 cache at about 7% of positions. Free-running, that per-step flip rate
+    /// makes 14 of 16 held-out prompts leave the fp16 token stream, at a median of 18 (1024 slots) /
+    /// 33 (2048 slots) generated tokens. Crucially the cost is FLAT in cache size and flat in how
+    /// full the cache is — binned by context position over a 2048-token run that fills the cache
+    /// completely, the per-token loss does not grow — so a larger cache buys more speed at the SAME
+    /// accuracy cost, and no size threshold can make the trade free. Paying roughly 2% perplexity
+    /// for roughly 1.5% decode is a judgement call that belongs to the caller, exactly like the
+    /// compile-time `-Os` int4 weight quantization it sits alongside, so Hint::KvCacheQuant
+    /// defaults to Off and Auto is an explicit opt-in to the size-driven rule.
     inline constexpr int64_t kKvQuantAutoMinCacheBytes = 24 * 1024 * 1024;
 
     /// Bytes one cache tensor occupies in the fp16 layout — the traffic the int8 payload halves.
@@ -252,6 +277,8 @@ namespace vknn {
     /// Resolve Hint::KvCacheQuant for one segment's candidate set. On/Off are literal; Auto engages
     /// exactly when the eligible cache is at least kKvQuantAutoMinCacheBytes — a pure function of
     /// the compiled shapes, so every load of the same plan on the same device decides identically.
+    /// Off is the unset default (Config::kvCacheQuantMode), so a caller who never names the hint
+    /// keeps the fp16 cache at every size.
     inline bool kvQuantEnabled(const Config &cfg, int64_t candidateFp16Bytes) {
         const int mode = cfg.kvCacheQuantMode();
         if (mode == (int) Mode::Off)

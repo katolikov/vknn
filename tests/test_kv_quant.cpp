@@ -4,8 +4,8 @@
 // (scaleIndex == destElem / headDim against kvFoldSlot/kvFoldRanges); the shared eligibility
 // rule the Vulkan segment and both FusedAttention backends key off; the config/cache-variant
 // plumbing; and the CPU-oracle stream (hint On vs Off: near-lossless cosine, engaged path,
-// byte-deterministic across runs and sessions). The hint's default (Auto == Off) is covered by
-// the entire existing suite running with the feature absent.
+// byte-deterministic across runs and sessions). The hint's default (Off) is covered by the entire
+// existing suite running with the feature absent.
 #include "core/cache_codec.h"
 #include "core/kv_quant.h"
 #include "import/passes.h"
@@ -398,11 +398,14 @@ TEST(KvQuant, EligibilityRules) {
     EXPECT_TRUE(tensors.count(fa->inputs[1]));
     EXPECT_TRUE(tensors.count(fa->inputs[2]));
 
-    // Hint Off / Auto (the default), and an ineligible backend, each empty the set. Auto refuses
-    // here because this synthetic cache is far below kKvQuantAutoMinCacheBytes — the size-driven
-    // Auto resolution has its own case below.
+    // The unset default (Off), an explicit Off, and an ineligible backend each empty the set. An
+    // explicit Auto also refuses here because this synthetic cache is far below
+    // kKvQuantAutoMinCacheBytes — the size-driven Auto resolution has its own case below.
     Config cfgDefault;
     EXPECT_TRUE(kvQuantCacheTensors(g, cfgDefault, true, false).empty());
+    Config cfgAuto;
+    cfgAuto.setHint(Hint::KvCacheQuant, Mode::Auto);
+    EXPECT_TRUE(kvQuantCacheTensors(g, cfgAuto, true, false).empty());
     Config cfgOff;
     cfgOff.setHint(Hint::KvCacheQuant, Mode::Off);
     EXPECT_TRUE(kvQuantCacheTensors(g, cfgOff, true, false).empty());
@@ -437,7 +440,8 @@ TEST(KvQuant, EligibilityRules) {
 
 // Auto resolves on the segment's eligible cache size: the same graph is refused below the measured
 // threshold and accepted at or above it, with no timing input — the decision is a pure function of
-// the compiled shapes, so every load of one plan on one device picks the same path.
+// the compiled shapes, so every load of one plan on one device picks the same path. Auto is an
+// explicit opt-in (the unset default is Off), so every case here sets the hint.
 TEST(KvQuant, AutoResolvesOnCacheSize) {
     Graph       g  = foldedSplitDecodeGraph();
     const Node *fa = findNode(g, OpType::FusedAttention);
@@ -446,8 +450,12 @@ TEST(KvQuant, AutoResolvesOnCacheSize) {
     ASSERT_GT(cacheBytes, 0);
     ASSERT_LT(cacheBytes, kKvQuantAutoMinCacheBytes) << "the synthetic decode cache must sit below the Auto threshold";
 
-    Config autoCfg; // the unset default
+    Config autoCfg;
+    autoCfg.setHint(Hint::KvCacheQuant, Mode::Auto);
     EXPECT_TRUE(kvQuantCacheTensors(g, autoCfg, /*backendEligible=*/true, /*requireFlat=*/false).empty());
+    // The unset default refuses the widened cache below too — it is Off, not Auto.
+    Config unsetCfg;
+    EXPECT_EQ(unsetCfg.kvCacheQuantMode(), (int) Mode::Off);
 
     // Widen the same cache past the threshold: Auto now engages on exactly the two past tensors.
     Graph wide = g;
@@ -473,23 +481,30 @@ TEST(KvQuant, AutoResolvesOnCacheSize) {
 // with a different kvCacheQuant value never matches (so flipping the hint reselects a variant
 // instead of serving a stale plan) while the codec round-trips the field.
 TEST(KvQuant, ConfigAndCacheVariantKey) {
-    EXPECT_EQ(Config().kvCacheQuantMode(), (int) Mode::Auto);
+    // Unset is Off: the scheme is lossy (measured perplexity cost in src/core/kv_quant.h) and is
+    // never taken on a caller's behalf, so it takes an explicit "on" or "auto" to engage.
+    EXPECT_EQ(Config().kvCacheQuantMode(), (int) Mode::Off);
+    EXPECT_EQ(Config::fromJsonString("{}").kvCacheQuantMode(), (int) Mode::Off);
     Config on = Config::fromJsonString("{\"kvCacheQuant\": \"on\"}");
     EXPECT_EQ(on.kvCacheQuantMode(), (int) Mode::On);
     EXPECT_EQ(Config::fromJsonString("{\"kvCacheQuant\": \"off\"}").kvCacheQuantMode(), (int) Mode::Off);
     EXPECT_EQ(Config::fromJsonString("{\"kvCacheQuant\": \"auto\"}").kvCacheQuantMode(), (int) Mode::Auto);
-    EXPECT_EQ(Config::fromJsonString("{}").kvCacheQuantMode(), (int) Mode::Auto);
-    // toJson -> fromJsonString round-trips the knob.
+    // toJson -> fromJsonString round-trips the knob, including the default and an explicit Auto.
     EXPECT_EQ(Config::fromJsonString(on.toJson()).kvCacheQuantMode(), (int) Mode::On);
-
-    // The Auto resolution: On/Off are literal at any size; Auto engages only from the measured
-    // cache-size threshold up, so a small cache keeps the fp16 path without any timing input.
+    EXPECT_EQ(Config::fromJsonString(Config().toJson()).kvCacheQuantMode(), (int) Mode::Off);
     Config autoCfg;
+    autoCfg.setHint(Hint::KvCacheQuant, Mode::Auto);
+    EXPECT_EQ(Config::fromJsonString(autoCfg.toJson()).kvCacheQuantMode(), (int) Mode::Auto);
+
+    // The resolution: On/Off are literal at any size; Auto engages only from the measured
+    // cache-size threshold up, so a small cache keeps the fp16 path without any timing input; the
+    // unset default keeps it at every size.
     Config offCfg = Config::fromJsonString("{\"kvCacheQuant\": \"off\"}");
     EXPECT_FALSE(kvQuantEnabled(autoCfg, kKvQuantAutoMinCacheBytes - 1));
     EXPECT_TRUE(kvQuantEnabled(autoCfg, kKvQuantAutoMinCacheBytes));
     EXPECT_TRUE(kvQuantEnabled(on, 0));
     EXPECT_FALSE(kvQuantEnabled(offCfg, kKvQuantAutoMinCacheBytes * 4));
+    EXPECT_FALSE(kvQuantEnabled(Config(), kKvQuantAutoMinCacheBytes * 4));
 
     CacheVariant base, quantized;
     quantized.kvCacheQuant = (int) Mode::On;
