@@ -27,11 +27,16 @@ namespace vknn {
     /// pad-to-full-window forward.
     inline constexpr int64_t kChunkPrefillTokens = 64;
 
-    /// Whether vknn_compile emits the chunk-prefill bucket at all. Off: on-device measurement of a
-    /// 0.5B decoder found the chunked path both slower to first token than the whole-window prefill
-    /// it replaces (+52% at one chunk, +218% at four) and incorrect — a multi-chunk prompt decodes
-    /// as though only its last chunk were present, so earlier chunks' cache rows are not reaching
-    /// the later passes. With no bucket emitted, `planChunkPrefillBucket` refuses and every model
+    /// Whether vknn_compile emits the chunk-prefill bucket at all. Off, because the path is still
+    /// incorrect on device. A three-way run of one 0.5B decoder — same model, same binary, only the
+    /// prefill path differing — has the whole-window prefill reproducing the token-by-token
+    /// reference stream exactly while the chunked path diverges from it, and a prompt SHORTER than
+    /// one chunk degenerates to a single repeated token, which is the signature of a cache the
+    /// decode step reads as empty. So the failure is in the single-chunk path, not in multi-chunk
+    /// accumulation as first supposed; the KV-concat fold uniformity defect fixed alongside this is
+    /// real but was not its cause. It is also slower than the path it replaces (+52% time to first
+    /// token at one chunk, +218% at four), which is architectural: each chunk pass re-reads the
+    /// whole weight set. With no bucket emitted, `planChunkPrefillBucket` refuses and every model
     /// keeps the whole-window path; the planner, runtime, and host tests stay live behind this
     /// switch so the defect can be fixed against them.
     inline constexpr bool kChunkPrefillEnabled = false;
