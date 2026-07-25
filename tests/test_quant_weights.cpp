@@ -10,18 +10,21 @@
 #include "vknn/session.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <gtest/gtest.h>
 
 using namespace vknn;
 
 namespace {
 
-    // a[1,K] -> Relu -> t -> MatMul(t, W[K,N]) -> y, the test_quant_int4.cpp fixture shape.
-    Graph matmulGraph(int64_t K, int64_t N) {
+    // a[M,K] -> Relu -> t -> MatMul(t, W[K,N]) -> y, the test_quant_int4.cpp fixture shape. `M` is
+    // the activation row count one calibration sample yields — the sequence length a bucket compiles
+    // at, which is what makes calibration statistics shape-dependent.
+    Graph matmulGraph(int64_t K, int64_t N, int64_t M = 1) {
         Graph      g;
         TensorDesc ai;
         ai.name    = "a";
-        ai.shape   = {1, K};
+        ai.shape   = {M, K};
         ai.isInput = true;
         TensorId a = g.addTensor(ai);
         g.inputs.push_back(a);
@@ -645,6 +648,182 @@ TEST(QuantWeights, UnsupportedBitsRejected) {
     QuantOptions opt;
     opt.bits = 5;
     EXPECT_THROW(quantizeWeights(g, opt), Error);
+}
+
+// --- Multi-bucket weight identity ----------------------------------------------------------------
+//
+// The buckets of one compile are the SAME model at different input shapes, so a weight they share
+// has to be one weight. Calibration statistics are shape-dependent (the synthetic samples are sized
+// by the graph's input shapes), so quantizing each bucket on its own gives that weight a different
+// packed payload per bucket: the decode and prefill buckets stop being the same model, and the
+// .vxm's content-deduped initializer pool has to store both copies.
+
+namespace {
+
+    // A whole file as bytes (empty on failure), for the container-size comparison below.
+    std::vector<uint8_t> readWholeFile(const std::string &path) {
+        FILE *f = fopen(path.c_str(), "rb");
+        if (!f)
+        {
+            return {};
+        }
+        fseek(f, 0, SEEK_END);
+        const long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        std::vector<uint8_t> bytes((size_t) (n > 0 ? n : 0));
+        if (!bytes.empty())
+        {
+            bytes.resize(fread(bytes.data(), 1, bytes.size(), f));
+        }
+        fclose(f);
+        return bytes;
+    }
+
+    // The tensor named `name` holds byte-identical payloads in both buckets — the exact condition under
+    // which the .vxm's pool stores one blob instead of one per bucket.
+    void expectSamePayload(const Graph &a, const Graph &b, const std::string &name) {
+        const TensorId ia = a.find(name), ib = b.find(name);
+        ASSERT_NE(ia, kNoTensor) << name << " is missing from the first bucket";
+        ASSERT_NE(ib, kNoTensor) << name << " is missing from the second bucket";
+        const ByteStorage &pa = a.initializers.at(ia).bytes;
+        const ByteStorage &pb = b.initializers.at(ib).bytes;
+        ASSERT_EQ(pa.size(), pb.size()) << name << " differs in payload size across the buckets";
+        EXPECT_EQ(0, std::memcmp(pa.data(), pb.data(), pa.size())) << name << " differs in payload bytes across the buckets";
+    }
+
+    // The int-valued attribute `key` of the single MatMul, for cross-bucket comparison.
+    int64_t matmulAttr(const Graph &g, const char *key) {
+        for (const Node &nd: g.nodes)
+        {
+            if (nd.type == OpType::MatMul)
+            {
+                return nd.attr.geti(key, -1);
+            }
+        }
+        return -1;
+    }
+
+} // namespace
+
+// A weight two buckets of one compile share quantizes ONCE: the decode bucket (one activation row
+// per sample) reuses the prefill bucket's payload instead of calibrating its own, and the packed
+// weight, the group scales, and the outlier columns come out byte-identical.
+TEST(QuantWeights, SharedWeightQuantizesIdenticallyAcrossBuckets) {
+    const int64_t K = 512, N = 96;
+    Graph         decode  = matmulGraph(K, N, 1);  // input_ids [1, 1]-style: one row per sample
+    Graph         prefill = matmulGraph(K, N, 64); // the prefill bucket: 64 rows per sample
+    runStandardPasses(decode);
+    runStandardPasses(prefill);
+    std::vector<Graph *>          buckets {&decode, &prefill};
+    const std::vector<QuantStats> stats = quantizeWeightsShared(buckets, QuantOptions {});
+    ASSERT_EQ(stats.size(), buckets.size());
+    EXPECT_EQ(stats[0].quantized, 1);
+    EXPECT_EQ(stats[1].quantized, 1);
+    // The longest-activation bucket calibrates and the other one reuses its result, whatever order
+    // the buckets are declared in: the richest statistics are the ones the shared weight carries.
+    EXPECT_TRUE(stats[1].calibrated);
+    EXPECT_EQ(stats[1].shared, 0);
+    EXPECT_EQ(stats[0].shared, 1);
+    EXPECT_FALSE(stats[0].calibrated) << "the decode bucket recalibrated a weight it should have reused";
+    // The payload and every side tensor: identical bytes, so the pool holds one copy.
+    expectSamePayload(decode, prefill, "w");
+    expectSamePayload(decode, prefill, "w#i4s");
+    ASSERT_GT(matmulAttr(prefill, kWqNOut), 0) << "the fixture must select outlier columns for the outlier check to bite";
+    expectSamePayload(decode, prefill, "w#i4oi");
+    expectSamePayload(decode, prefill, "w#i4ov");
+    // ... and the attribute set the runtime dequantizes with agrees too.
+    for (const char *key: {kWq, kWqK, kWqN, kWqGroup, kWqNOut, kWqLayout})
+    {
+        EXPECT_EQ(matmulAttr(decode, key), matmulAttr(prefill, key)) << key << " differs across the buckets";
+    }
+    // The installed quantization is a working one, not just matching bytes: materializing the shared
+    // bucket reconstructs the weight inside the int4 envelope, which a payload wired to the wrong
+    // group size or scale tensor could not.
+    Graph reconstructed = decode;
+    EXPECT_EQ(materializeQuantWeights(reconstructed, nullptr), 1);
+    const std::vector<float> got = initFloats(reconstructed, reconstructed.find("w"));
+    std::vector<float>       want((size_t) (K * N));
+    for (int64_t k = 0; k < K; ++k)
+    {
+        for (int64_t n = 0; n < N; ++n)
+        {
+            want[(size_t) (k * N + n)] = std::sin(0.37f * (float) k + 1.13f * (float) n);
+        }
+    }
+    EXPECT_LT(relL2(got, want), 0.25);
+}
+
+// The size consequence of that identity: a second bucket costs the .vxm its graph metadata, not a
+// second copy of the weights. Quantized per bucket the payloads differ, the content-deduped pool
+// cannot collapse them, and the two-bucket file carries nearly two full weight sets.
+TEST(QuantWeights, SecondBucketAddsGraphMetadataNotWeights) {
+    const int64_t K = 512, N = 96;
+    Graph         decode  = matmulGraph(K, N, 1);
+    Graph         prefill = matmulGraph(K, N, 64);
+    runStandardPasses(decode);
+    runStandardPasses(prefill);
+    std::vector<Graph *> refs {&decode, &prefill};
+    quantizeWeightsShared(refs, QuantOptions {});
+    convertInitializersFp16(decode);
+    convertInitializersFp16(prefill);
+    const std::string onePath = testing::TempDir() + "vknn_quant_shared_one.vxm";
+    const std::string twoPath = testing::TempDir() + "vknn_quant_shared_two.vxm";
+    ASSERT_TRUE(saveGraphBin(decode, onePath));
+    ASSERT_TRUE(saveGraphBinBuckets({decode, prefill}, {"decode", "prefill"}, twoPath));
+    const std::vector<uint8_t> one = readWholeFile(onePath);
+    const std::vector<uint8_t> two = readWholeFile(twoPath);
+    std::remove(onePath.c_str());
+    std::remove(twoPath.c_str());
+    ASSERT_FALSE(one.empty());
+    ASSERT_FALSE(two.empty());
+    // Weights are the bulk of this fixture, so a second stored copy would push the ratio toward 2.
+    EXPECT_LT((double) two.size(), 1.25 * (double) one.size()) << "two-bucket .vxm is " << two.size() << " bytes against a single bucket's " << one.size() << ": the buckets' weights are not deduping";
+}
+
+// One bucket is the single-graph pass exactly: sharing is a CROSS-bucket rule, so a lone graph
+// quantizes to the same bytes quantizeWeights produces, with nothing shared.
+TEST(QuantWeights, SharedQuantizationOfOneBucketMatchesTheSingleGraphPass) {
+    const int64_t K = 512, N = 96;
+    Graph         alone = matmulGraph(K, N);
+    Graph         solo  = matmulGraph(K, N);
+    runStandardPasses(alone);
+    runStandardPasses(solo);
+    std::vector<Graph *>          buckets {&alone};
+    const std::vector<QuantStats> stats = quantizeWeightsShared(buckets, QuantOptions {});
+    const QuantStats              ref   = quantizeWeights(solo, QuantOptions {});
+    ASSERT_EQ(stats.size(), 1u);
+    EXPECT_EQ(stats[0].quantized, ref.quantized);
+    EXPECT_EQ(stats[0].shared, 0);
+    expectSamePayload(alone, solo, "w");
+    expectSamePayload(alone, solo, "w#i4s");
+    expectSamePayload(alone, solo, "w#i4oi");
+    expectSamePayload(alone, solo, "w#i4ov");
+}
+
+// A weight the calibration bucket does not hold (a second model's tower compiled into the same
+// .vxm) is not left fp16: the first bucket that does hold it quantizes it on its own statistics.
+TEST(QuantWeights, WeightAbsentFromTheCalibrationBucketStillQuantizes) {
+    const int64_t K = 512, N = 96;
+    Graph         wide   = matmulGraph(K, N, 64); // calibrates first: the most activation rows
+    Graph         narrow = matmulGraph(K, N, 1);
+    runStandardPasses(wide);
+    runStandardPasses(narrow);
+    // Rename the second bucket's weight: same payload, different tensor, so it is genuinely absent
+    // from the bucket that calibrates.
+    const TensorId other = narrow.find("w");
+    ASSERT_NE(other, kNoTensor);
+    narrow.tensorByName.erase("w");
+    narrow.desc(other).name        = "w_other";
+    narrow.tensorByName["w_other"] = other;
+    std::vector<Graph *>          buckets {&wide, &narrow};
+    const std::vector<QuantStats> stats = quantizeWeightsShared(buckets, QuantOptions {});
+    EXPECT_EQ(stats[0].quantized, 1);
+    EXPECT_EQ(stats[1].quantized, 1);
+    EXPECT_EQ(stats[0].shared, 0);
+    EXPECT_EQ(stats[1].shared, 0) << "a weight the calibration bucket never held cannot be shared from it";
+    EXPECT_TRUE(stats[1].calibrated) << "the bucket holding it must calibrate it itself";
+    EXPECT_EQ(matmulAttr(narrow, kWq), kWqFormatInt4);
+    EXPECT_NE(narrow.find("w_other#i4s"), kNoTensor);
 }
 
 // The VXM5/VXM6 subtag guard: a quantized container whose subcontainer tag is not 3 or 4 is

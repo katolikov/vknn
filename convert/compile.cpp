@@ -395,17 +395,31 @@ static bool writeSupportReports(const std::vector<Graph> &buckets, const std::ve
 /// input_ids [1, kChunkPrefillTokens] over the same cache shapes, so any prompt length prefills as
 /// fixed-size chunk passes (docs/running-an-llm.md). The bucket lands at the END of the list —
 /// existing bucket indices, labels, and support-report paths are unchanged — and shares the
-/// content-deduped initializer pool, so the .vxm grows by the graph metadata, not the weights.
+/// content-deduped initializer pool, so the .vxm grows by the graph metadata, not the weights: the
+/// bucket runs the same weights at a different sequence length, and under -Os the compile quantizes
+/// each weight once for every bucket that shares it (quantizeWeightsShared), so every payload the
+/// bucket references is a pool blob another bucket already stores. Measured on a synthetic int4
+/// decoder, a second bucket of the same graph adds 0.2% to the .vxm; quantized per bucket instead,
+/// its differing payloads could not dedupe and the same pair cost +71%.
 /// `sourceFiles` holds each bucket's source model path (one entry per bucket, extended for the new
-/// bucket). A plan or compile failure only skips the bucket; the requested compile still succeeds.
+/// bucket). Runs BEFORE the quantization and fp16 sweeps, which then cover every bucket at once.
+/// A plan or compile failure only skips the bucket; the requested compile still succeeds.
 static void appendChunkPrefillBucket(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles,
-                                     const PassOptions &sharedOpt, bool quantize, const QuantOptions &quantOpts, bool fp16);
+                                     const PassOptions &sharedOpt);
 
-/// Run the -Os weight-quantization pass over one compiled bucket and print its summary line. The
-/// fp16 sweep for the non-quantized weights runs at the caller (quantization implies --fp16).
-static void runQuantPass(Graph &g, const QuantOptions &opts) {
-    QuantStats qs = quantizeWeights(g, opts);
-    char       formatName[8];
+/// Run the -Os weight-quantization pass over ALL buckets of one compile and print a summary line per
+/// bucket. The buckets are quantized together (quantizeWeightsShared) so a weight several of them
+/// share is calibrated once and lands byte-identical in each. The fp16 sweep for the non-quantized
+/// weights runs at the caller (quantization implies --fp16).
+static void runQuantPass(std::vector<Graph> &buckets, const std::vector<std::string> &labels, const QuantOptions &opts) {
+    std::vector<Graph *> refs;
+    refs.reserve(buckets.size());
+    for (Graph &g: buckets)
+    {
+        refs.push_back(&g);
+    }
+    const std::vector<QuantStats> stats = quantizeWeightsShared(refs, opts);
+    char                          formatName[8];
     if (opts.lut4)
     {
         snprintf(formatName, sizeof formatName, "lut4");
@@ -413,14 +427,37 @@ static void runQuantPass(Graph &g, const QuantOptions &opts) {
     {
         snprintf(formatName, sizeof formatName, "int%d", opts.bits);
     }
-    printf("[compile] -Os %s: quantized %lld/%lld eligible weights (%lld kept fp16 by the error guard, "
-           "%lld outlier columns, %s calibration), weights %.0f MB -> %.0f MB\n",
-           formatName, (long long) qs.quantized, (long long) qs.sites, (long long) qs.guardKept, (long long) qs.outlierCols,
-           qs.calibrated ? (opts.calibFiles.empty() ? "synthetic" : "file") : "no", qs.bytesBefore / 1e6, qs.bytesAfter / 1e6);
+    for (size_t b = 0; b < stats.size(); ++b)
+    {
+        const QuantStats &qs = stats[b];
+        // The calibration word reports where this bucket's statistics came from: its own run, or the
+        // buckets that quantized every weight it shares before it was reached.
+        const char *calibWord = qs.shared == qs.quantized && qs.quantized > 0 ? "shared"
+                                : qs.calibrated                              ? (opts.calibFiles.empty() ? "synthetic" : "file")
+                                                                             : "no";
+        printf("[compile] -Os %s: bucket %zu '%s': quantized %lld/%lld eligible weights (%lld shared with another bucket, "
+               "%lld kept fp16 by the error guard, %lld outlier columns, %s calibration), weights %.0f MB -> %.0f MB\n",
+               formatName, b, b < labels.size() ? labels[b].c_str() : "", (long long) qs.quantized, (long long) qs.sites,
+               (long long) qs.shared, (long long) qs.guardKept, (long long) qs.outlierCols, calibWord, qs.bytesBefore / 1e6,
+               qs.bytesAfter / 1e6);
+    }
+}
+
+/// Convert every bucket's remaining fp32 initializers to fp16 (vknn_compile --fp16, implied by -Os)
+/// and print the conversion summary per bucket. Runs after the whole compile is quantized, so the
+/// quantization pass sees every bucket's weights at their source precision.
+static void runFp16Pass(std::vector<Graph> &buckets, const std::vector<std::string> &labels) {
+    for (size_t b = 0; b < buckets.size(); ++b)
+    {
+        const Fp16ConvertStats st = convertInitializersFp16(buckets[b]);
+        printf("[compile] fp16: bucket %zu '%s': converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", b,
+               b < labels.size() ? labels[b].c_str() : "", (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6,
+               st.bytesAfter / 1e6);
+    }
 }
 
 static void appendChunkPrefillBucket(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles,
-                                     const PassOptions &sharedOpt, bool quantize, const QuantOptions &quantOpts, bool fp16) {
+                                     const PassOptions &sharedOpt) {
     if (!kChunkPrefillEnabled)
     {
         return; // the chunked path is measured slower and incorrect; see kChunkPrefillEnabled
@@ -449,14 +486,6 @@ static void appendChunkPrefillBucket(std::vector<Graph> &buckets, std::vector<st
     {
         printf("[compile] chunk-prefill: bucket compile failed (%s); continuing without it\n", e.what());
         return;
-    }
-    if (quantize)
-    {
-        runQuantPass(gb, quantOpts);
-    }
-    if (fp16 || quantize)
-    {
-        convertInitializersFp16(gb);
     }
     printf("[compile] chunk-prefill: post-passes %zu nodes, %zu weights\n", gb.nodes.size(), gb.initializers.size());
     buckets.push_back(std::move(gb));
@@ -755,14 +784,6 @@ int main(int argc, char **argv) {
                 printf("[compile] graph %zu '%s': %s\n", b, graphLabels[b].c_str(), e.what());
                 return 2;
             }
-            if (quantize)
-            {
-                runQuantPass(gb, quantOpts);
-            }
-            if (fp16 || quantize)
-            {
-                convertInitializersFp16(gb);
-            }
             printf("[compile] graph %zu '%s': post-passes %zu nodes, %zu weights\n", b, graphLabels[b].c_str(), gb.nodes.size(), gb.initializers.size());
             buckets.push_back(std::move(gb));
         }
@@ -770,7 +791,17 @@ int main(int argc, char **argv) {
         // buckets and would desynchronize the bucket->source-file mapping). A split VLM export
         // whose decode bucket only gains input_ids DURING the boundary fusion is not detected
         // here; an explicit --graph occurrence at the chunk shape covers it.
-        appendChunkPrefillBucket(buckets, graphLabels, graphFiles, opt, quantize, quantOpts, fp16);
+        appendChunkPrefillBucket(buckets, graphLabels, graphFiles, opt);
+        // Quantization and the fp16 sweep run once the bucket list is complete: the buckets are one
+        // model, so a weight they share is quantized once and lands byte-identical in each.
+        if (quantize)
+        {
+            runQuantPass(buckets, graphLabels, quantOpts);
+        }
+        if (fp16 || quantize)
+        {
+            runFp16Pass(buckets, graphLabels);
+        }
         if (!supportReport.empty() && !writeSupportReports(buckets, graphFiles, supportReport))
         {
             return 2;
@@ -821,20 +852,22 @@ int main(int argc, char **argv) {
                 printf("[compile] bucket %zu '%s': %s\n", b, bucketLabels[b].c_str(), e.what());
                 return 2;
             }
-            if (quantize)
-            {
-                runQuantPass(gb, quantOpts);
-            }
-            if (fp16 || quantize)
-            {
-                convertInitializersFp16(gb);
-            }
             printf("[compile] bucket %zu '%s': post-passes %zu nodes, %zu weights\n", b, bucketLabels[b].c_str(), gb.nodes.size(), gb.initializers.size());
             buckets.push_back(std::move(gb));
             names.push_back(bucketLabels[b]);
         }
         std::vector<std::string> models(buckets.size(), onnx);
-        appendChunkPrefillBucket(buckets, names, models, opt, quantize, quantOpts, fp16); // automatic chunk-prefill bucket
+        appendChunkPrefillBucket(buckets, names, models, opt); // automatic chunk-prefill bucket
+        // One quantization for the whole bucket set: the buckets are the same model at different
+        // shapes, so a shared weight is calibrated once and stored once.
+        if (quantize)
+        {
+            runQuantPass(buckets, names, quantOpts);
+        }
+        if (fp16 || quantize)
+        {
+            runFp16Pass(buckets, names);
+        }
         if (!supportReport.empty())
         {
             // One report per bucket: the backend assignment is shape-dependent, so every bucket is
@@ -856,9 +889,9 @@ int main(int argc, char **argv) {
 
     // A .vxm input skips import + passes (they ran at its compile time) and serves the remaining
     // stages from the stored graphs. EVERY stored bucket is processed: the quantization and fp16
-    // sweeps run per bucket, and the save keeps the bucket order and names over one content-deduped
-    // initializer pool, so a multi-bucket model keeps all its shape buckets through a re-compile.
-    // Identical weights quantize identically (the pass is deterministic per payload), so the shared
+    // sweeps cover the whole bucket set, and the save keeps the bucket order and names over one
+    // content-deduped initializer pool, so a multi-bucket model keeps all its shape buckets through
+    // a re-compile. A weight several buckets share is quantized once for the compile, so the shared
     // pool stays one copy per distinct payload. A single-bucket input writes the legacy single-graph
     // container, exactly as before.
     if (vxmInput)
@@ -873,20 +906,17 @@ int main(int argc, char **argv) {
         }
         for (size_t b = 0; b < buckets.size(); ++b)
         {
-            Graph &gb = buckets[b];
-            printf("[compile] bucket %zu '%s': %zu nodes, %zu weights\n", b, names[b].c_str(), gb.nodes.size(), gb.initializers.size());
-            if (quantize)
-            {
-                // A .vxm bucket re-quantizes fine (its passes are already applied; the pass only
-                // reads concrete shapes and payloads). An already-quantized weight is skipped by its
-                // wq attr.
-                runQuantPass(gb, quantOpts);
-            }
-            if (fp16 || quantize)
-            {
-                Fp16ConvertStats st = convertInitializersFp16(gb);
-                printf("[compile] fp16: converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
-            }
+            printf("[compile] bucket %zu '%s': %zu nodes, %zu weights\n", b, names[b].c_str(), buckets[b].nodes.size(), buckets[b].initializers.size());
+        }
+        if (quantize)
+        {
+            // A .vxm bucket re-quantizes fine (its passes are already applied; the pass only reads
+            // concrete shapes and payloads). An already-quantized weight is skipped by its wq attr.
+            runQuantPass(buckets, names, quantOpts);
+        }
+        if (fp16 || quantize)
+        {
+            runFp16Pass(buckets, names);
         }
         if (!supportReport.empty())
         {
@@ -923,19 +953,31 @@ int main(int argc, char **argv) {
     }
     printf("[compile] post-passes: %zu nodes, %zu weights\n", g.nodes.size(), g.initializers.size());
 
+    // A single-graph compile of a with-past decoder gains the automatic chunk-prefill bucket and
+    // saves as a two-bucket .vxm over one shared weight pool; any other model (no decode-graph
+    // match) keeps the legacy single-graph container, byte-identical to before. The bucket is
+    // appended BEFORE the quantization and fp16 sweeps so both cover it — and so a -Os compile
+    // quantizes the weights the two buckets share exactly once.
+    std::vector<Graph>       buckets;
+    std::vector<std::string> labels;
+    std::vector<std::string> sources;
+    buckets.push_back(std::move(g));
+    labels.emplace_back("default");
+    sources.push_back(onnx);
+    appendChunkPrefillBucket(buckets, labels, sources, opt);
+
     if (quantize)
     {
-        runQuantPass(g, quantOpts);
+        runQuantPass(buckets, labels, quantOpts);
     }
     if (fp16 || quantize)
     {
-        Fp16ConvertStats st = convertInitializersFp16(g);
-        printf("[compile] fp16: converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
+        runFp16Pass(buckets, labels);
     }
 
     if (!supportReport.empty())
     {
-        if (!writeSupportReport(g, onnx, supportReport))
+        if (!writeSupportReport(buckets.front(), onnx, supportReport))
         {
             printf("[compile] support report write failed\n");
             return 2;
@@ -943,16 +985,6 @@ int main(int argc, char **argv) {
         printf("[compile] wrote support report %s\n", supportReport.c_str());
     }
 
-    // A single-graph compile of a with-past decoder gains the automatic chunk-prefill bucket and
-    // saves as a two-bucket .vxm over one shared weight pool; any other model (no decode-graph
-    // match) keeps the legacy single-graph container, byte-identical to before.
-    std::vector<Graph>       buckets;
-    std::vector<std::string> labels;
-    std::vector<std::string> sources;
-    buckets.push_back(std::move(g));
-    labels.emplace_back("default");
-    sources.push_back(onnx);
-    appendChunkPrefillBucket(buckets, labels, sources, opt, quantize, quantOpts, fp16);
     if (buckets.size() == 1)
     {
         if (!saveGraphBin(buckets.front(), out))

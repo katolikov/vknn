@@ -212,6 +212,9 @@ namespace vknn {
     struct QuantStats {
         int64_t sites = 0, quantized = 0, guardKept = 0, outlierCols = 0;
         int64_t bytesBefore = 0, bytesAfter = 0;
+        // Sites served from another bucket's already-quantized weight instead of being calibrated
+        // and packed again (quantizeWeightsShared); always 0 for a single-graph quantization.
+        int64_t shared     = 0;
         bool    calibrated = false;
     };
     // Quantize eligible MatMul/Gemm/Conv weights to the packed width opt.bits selects (int4 or
@@ -219,6 +222,21 @@ namespace vknn {
     // (vknn_compile -Os). Layout/attribute contract in core/quant_weights.h (int4 authority:
     // core/quant_int4.h). Runs after runStandardPasses, before convertInitializersFp16.
     QuantStats quantizeWeights(Graph &g, const QuantOptions &opt);
+
+    // Quantize ALL buckets of one compile together, returning one QuantStats per bucket in bucket
+    // order. Calibration statistics are shape-dependent (they come from running the float graph on
+    // samples sized by its input shapes), so quantizing each bucket on its own gives the same weight
+    // a different packed payload per bucket: the buckets stop being one model, and the .vxm's
+    // content-deduped initializer pool has to store every copy. Here each distinct weight — same
+    // tensor name, same pre-quantization payload, same [K, N] geometry and op class — is calibrated
+    // and packed exactly ONCE, and every bucket that shares it receives the identical payload,
+    // scales, outlier columns, and bias correction. Buckets are visited longest-activation-first (the
+    // most calibration rows per sample), so a shared weight carries the most representative bucket's
+    // statistics; a weight no earlier bucket held is quantized by the first bucket that holds it.
+    // One bucket is quantizeWeights(g, opt) exactly — payload-identical, sharing never applies
+    // within a bucket. Every bucket must stay put for the duration of the call: a shared payload is
+    // copied out of the bucket that produced it, not out of a cached duplicate.
+    std::vector<QuantStats> quantizeWeightsShared(const std::vector<Graph *> &buckets, const QuantOptions &opt);
 
     // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
     struct Fp16ConvertStats {
