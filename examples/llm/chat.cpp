@@ -215,7 +215,11 @@ int main(int argc, char **argv) {
                         prefillBucket = (int) b;
                         prefillS      = (int) in.shape[1];
                     }
-                    if (in.shape[1] <= kChunkPrefillTokens && (int) in.shape[1] > chunkS)
+                    // The consumer is gated by the same switch as the emitter: a .vxm compiled
+                    // while the chunk bucket was still emitted keeps that bucket, and routing to it
+                    // would take the path that decodes a multi-chunk prompt as though only its last
+                    // chunk were present. Such a model falls back to its whole-window bucket.
+                    if (kChunkPrefillEnabled && in.shape[1] <= kChunkPrefillTokens && (int) in.shape[1] > chunkS)
                     {
                         chunkBucket = (int) b;
                         chunkS      = (int) in.shape[1];
