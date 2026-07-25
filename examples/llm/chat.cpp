@@ -8,9 +8,10 @@
 // default); only the token loop and argmax/sampling are host code here — tokenization is the front
 // end's job.
 //
-//   vknn_chat model.vxm [--config PATH] [--backend vulkan|cpu] [--precision low|normal|high]
-//             [--fp32-tensors CSV] [--max-tokens N] [--temp T] [--top-k K] [--top-p P] [--eos ID]
-//             [--seed S] [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]
+//   vknn_chat model.vxm [--draft draft.vxm] [--config PATH] [--backend vulkan|cpu]
+//             [--precision low|normal|high] [--fp32-tensors CSV] [--max-tokens N] [--temp T]
+//             [--top-k K] [--top-p P] [--eos ID] [--seed S] [--chain N] [--no-kv-link]
+//             [--no-prefill] [--no-gpu-argmax] [--timing]
 //
 // --config PATH seeds every knob from a JSON config file (Config::fromJsonFile); the flags below
 // override whatever the file sets.
@@ -56,14 +57,39 @@
 // fixed-shape plan serves every step. The new token's key/value (present index C) lands in cache
 // slot p. This matches the reference HF greedy stream token-for-token.
 //
+// --draft draft.vxm turns on GREEDY SPECULATIVE DECODING (vknn/spec_decode.h). A draft model is a
+// caller-supplied artifact the engine cannot manufacture, so it arrives as a driver argument the way
+// the model path itself does — it names a file, it does not tune the engine. There is no flag to
+// enable, size, or disable speculation: given a draft, every turn that qualifies speculates, using
+// the kSpecDraftTokens compiled into the .vxm's verification bucket.
+//
+// Per round the draft proposes kSpecDraftTokens tokens from the pending token, and the target checks
+// all of them plus their anchor in ONE forward through its [1, kSpecVerifyTokens] bucket. A proposal
+// is committed only when it equals the target's own argmax at that position; the first mismatch is
+// replaced by that argmax and ends the round, and a round with every proposal accepted also emits
+// the extra column's argmax as a bonus token. The emitted stream is therefore the plain greedy
+// stream, token for token, at one target forward per up-to-kSpecDraftTokens+1 tokens.
+//
+// The verification bucket's cache is ENGINE-RESIDENT between rounds, like the chunked prefill's: the
+// next round's link ranges (specVerifyFoldRanges) fold ONLY the accepted rows of the previous round
+// into their absolute slots, so the rejected rows are never copied anywhere and the rollback costs a
+// shorter range list rather than an erase. One readback per turn materializes the built cache for
+// the next turn's prefill. Speculation stands down — with one notice and the identical stream — for
+// sampling (--temp > 0, which needs the modified-rejection scheme), --chain N (an explicit request
+// for the other device path), --no-kv-link, a missing or unloadable draft, a draft whose vocabulary
+// differs from the target's, a .vxm with no verification bucket, and any position too close to a
+// compiled context edge to fit a whole verification window (the turn's tail decodes plainly).
+//
 // The KV cache is ENGINE-RESIDENT by default: every present.N.{key,value} output is linked to its
 // past_key_values.N.{key,value} input (Session::linkOutputToInput), so per token the engine folds
 // the new row into the cache in place — on the GPU backend entirely on-device, with no host copy of
 // the ~2*L*kv_heads*C*head_dim cache in either direction. --no-kv-link selects the host-side loop
 // (bind the cache every step, fold present rows on the host) for A/B comparison; both paths produce
 // the same token stream.
+#include "draft_decoder.h"
 #include "vknn/runtime.h"
 #include "vknn/session.h"
+#include "vknn/spec_decode.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -106,9 +132,10 @@ int main(int argc, char **argv) {
     if (argc < 2)
     {
         fprintf(stderr,
-                "usage: %s model.vxm [--config PATH] [--backend vulkan|cpu] [--precision low|normal|high]\n"
-                "        [--fp32-tensors CSV] [--max-tokens N] [--temp T] [--top-k K] [--top-p P]\n"
-                "        [--eos ID] [--seed S] [--chain N] [--no-kv-link] [--no-prefill] [--no-gpu-argmax] [--timing]\n",
+                "usage: %s model.vxm [--draft draft.vxm] [--config PATH] [--backend vulkan|cpu]\n"
+                "        [--precision low|normal|high] [--fp32-tensors CSV] [--max-tokens N] [--temp T]\n"
+                "        [--top-k K] [--top-p P] [--eos ID] [--seed S] [--chain N] [--no-kv-link]\n"
+                "        [--no-prefill] [--no-gpu-argmax] [--timing]\n",
                 argv[0]);
         return 1;
     }
@@ -196,8 +223,13 @@ int main(int argc, char **argv) {
     // largest such S wins: fewer passes per prompt); the whole-window role keeps the largest S
     // overall as the fallback. A single-bucket model keeps the token-by-token prefill below,
     // byte-identically to before.
+    // A bucket at exactly [1, kSpecVerifyTokens] additionally takes the speculative-verification
+    // role. It stays eligible for the prefill and chunk roles as well: when a model carries no other
+    // widened bucket it is better used as a narrow chunk bucket than not at all, and the two roles
+    // never run at the same moment (a turn prefills, then decodes).
     int decodeBucket = -1, prefillBucket = -1, prefillS = 0;
     int chunkBucket = -1, chunkS = 0;
+    int specBucket = -1;
     for (size_t b = 0; b < sess->bucketCount(); ++b)
     {
         const std::vector<IOInfo> bins = sess->inputInfo(b);
@@ -210,6 +242,10 @@ int main(int argc, char **argv) {
                     decodeBucket = (int) b;
                 } else if (in.shape[1] > 1)
                 {
+                    if (in.shape[1] == kSpecVerifyTokens && specBucket < 0)
+                    {
+                        specBucket = (int) b;
+                    }
                     if ((int) in.shape[1] > prefillS)
                     {
                         prefillBucket = (int) b;
@@ -509,6 +545,91 @@ int main(int argc, char **argv) {
         }
     }
 
+    // --- speculative decoding: prerequisites --------------------------------------------------
+    // Every refusal here is a NOTICE, not an error: speculation is a throughput optimization whose
+    // prerequisite (a second model) the engine cannot manufacture, and the plain decode loop below
+    // produces the identical stream. The gates are the ones the round's correctness argument rests
+    // on — greedy sampling, an engine-resident cache to fold accepted rows into, a verification
+    // bucket to run the batched forward through, and a draft over the same token vocabulary.
+    const std::string             draftPath = opt(argc, argv, "--draft", "");
+    std::unique_ptr<DraftDecoder> draft;
+    int                           specMaskLen = 0, specPresRows = 0, specLogitsIdx = -1;
+    if (!draftPath.empty())
+    {
+        if (temp > 0.0f)
+        {
+            fprintf(stderr, "[chat] --draft needs greedy decode (--temp 0): sampled speculation needs the modified-rejection scheme, which is not implemented; decoding without speculation\n");
+            specBucket = -1;
+        } else if (chainWanted)
+        {
+            fprintf(stderr, "[chat] --draft and --chain are two device paths for the same loop; --chain was asked for explicitly, so speculation stands down\n");
+            specBucket = -1;
+        } else if (!kvLink)
+        {
+            fprintf(stderr, "[chat] --draft needs the engine-resident KV cache (drop --no-kv-link); decoding without speculation\n");
+            specBucket = -1;
+        } else if (kvElemBytes != 4)
+        {
+            // The once-per-turn readResident materializes the verification cache in the engine's
+            // fp32 storage, byte-compatible with an fp32 host buffer only — the chunked flow's rule.
+            fprintf(stderr, "[chat] speculation needs an fp32 KV boundary (have %zu-byte); decoding without speculation\n", kvElemBytes);
+            specBucket = -1;
+        } else if (posIdx < 0)
+        {
+            fprintf(stderr, "[chat] speculation feeds a window of absolute positions; this model derives position internally, decoding without speculation\n");
+            specBucket = -1;
+        } else if (specBucket < 0)
+        {
+            fprintf(stderr, "[chat] this model has no input_ids [1,%lld] verification bucket (recompile with vknn_compile to get one); decoding without speculation\n", (long long) kSpecVerifyTokens);
+        } else if (!validateBatchedBucket(specBucket, (int) kSpecVerifyTokens, "spec-verify", &specMaskLen, &specPresRows, &specLogitsIdx))
+        {
+            specBucket = -1;
+        }
+        if (specBucket >= 0)
+        {
+            draft = DraftDecoder::open(draftPath, cfg);
+            if (draft && draft->vocab() != vocab)
+            {
+                fprintf(stderr, "[chat] draft vocabulary %lld does not match the target's %lld; its token ids are not this model's ids, decoding without speculation\n",
+                        (long long) draft->vocab(), (long long) vocab);
+                draft.reset();
+            }
+            if (!draft)
+            {
+                specBucket = -1;
+            }
+        }
+    }
+    const bool specActive     = specBucket >= 0 && draft;
+    bool       specLogitsFp16 = false;
+    if (specActive)
+    {
+        // The verification bucket declares its own logits dtype; reading the decode bucket's would
+        // misinterpret every row of the block on a model whose buckets differ.
+        for (const IOInfo &out: sess->outputInfo((size_t) specBucket))
+        {
+            if (out.name == "logits")
+            {
+                specLogitsFp16 = out.dtype == DType::Float16;
+            }
+        }
+        // A round binds the host past buffers once per turn to re-seed the verification bucket's
+        // resident cache, so they must exist even when no prefill bucket asked for them
+        // (--no-prefill leaves them unallocated).
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                const size_t idx = (size_t) (part ? pastVal[l] : pastKey[l]);
+                if (inputs[idx].data.empty())
+                {
+                    inputs[idx].data.assign((size_t) ins[idx].elems * kvElemBytes, 0);
+                }
+            }
+        }
+        fprintf(stderr, "[chat] speculative decode: %lld drafts verified per target forward (bucket S=%lld)\n", (long long) kSpecDraftTokens, (long long) kSpecVerifyTokens);
+    }
+
     // Declare the KV links up front: every present output feeds its past input on the next run. The
     // ranges start empty (the cache starts as zeros, matching the host loop's zero-filled buffers);
     // each step from p=1 on re-links with the ranges that fold the previous token's row into its slot.
@@ -559,6 +680,14 @@ int main(int argc, char **argv) {
     // Map an output name to its index in the run() result vector (stable across runs).
     std::vector<int> outIdxByInfo(outs.size(), -1);
     bool             mapped = false;
+
+    // Every token the target has been fed, in order, and how many of them the draft's cache already
+    // holds. The draft mirrors the conversation, not the target's engine state, so one list keeps it
+    // aligned across every path that can advance the target without it: a turn where speculation
+    // stood down, the token-by-token tail past the context edge, a turn that ended at end-of-stream.
+    // Only maintained under --draft (a chained decode disables speculation, so the two never mix).
+    std::vector<int64_t> fedTokens;
+    int                  draftValid = 0;
 
     int  p             = 0;     // absolute position across the whole conversation
     bool residentDirty = false; // linked decode ran: the engine cache is ahead of the host buffers
@@ -1222,6 +1351,297 @@ int main(int argc, char **argv) {
         return prevLen > 0 ? 1 : 0;
     };
 
+    // --- greedy speculative decode --------------------------------------------------------------
+    // One turn's rounds run inside the VERIFICATION bucket, whose KV cache stays engine-resident
+    // between rounds exactly as the chunk bucket's does between chunk passes. Round r's link ranges
+    // fold round r-1's ACCEPTED rows into their absolute slots at the start of run r; a rejected row
+    // appears in no range and so is never copied into the cache, which is the whole of the rollback.
+    // The session holds one link set at a time, so a speculative turn switches the links to the
+    // verification bucket and back to the decode bucket afterwards (readResident is name-keyed and
+    // stays unambiguous that way).
+    std::vector<IOTensor> specOutputs;
+    std::vector<float>    specLogitsF32; // fp32 copy of an fp16 verification logits block
+    int64_t               specRounds = 0, specProposed = 0, specAccepted = 0; // acceptance instrument
+
+    // Link every verification-bucket present output to its past input (ranges re-armed per round).
+    auto linkSpecBucket = [&]() -> bool {
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                if (sess->linkOutputToInput((size_t) specBucket, pres, past, {}) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] spec-verify link failed for %s -> %s (see log)\n", pres.c_str(), past.c_str());
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    // Materialize the verification bucket's resident cache into the host past buffers: the resident
+    // past (every armed fold applied) plus the last round's accepted rows, still pending in the
+    // present outputs. Requires the verification links to be the session's current set.
+    auto syncSpecResidentToHost = [&](int lastSlot, int lastRows) -> bool {
+        const int    newRowsAt    = specPresRows - (int) kSpecVerifyTokens;
+        const size_t presentBytes = (size_t) kvHeads * specPresRows * headDim * kvElemBytes;
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                IOTensor &hostPast = inputs[(size_t) (part ? pastVal[l] : pastKey[l])];
+                if (hostPast.data.empty())
+                {
+                    hostPast.data.assign((size_t) ins[(size_t) (part ? pastVal[l] : pastKey[l])].elems * kvElemBytes, 0);
+                }
+                IOTensor resident;
+                if (sess->readResident(hostPast.name, resident) != Status::Ok || resident.data.size() != hostPast.data.size())
+                {
+                    fprintf(stderr, "[chat] spec-verify resident cache readback failed for %s\n", hostPast.name.c_str());
+                    return false;
+                }
+                std::memcpy(hostPast.data.data(), resident.data.data(), resident.data.size());
+                if (lastRows <= 0)
+                {
+                    continue;
+                }
+                IOTensor present;
+                if (sess->readResident(outs[(size_t) (part ? presVal[l] : presKey[l])].name, present) != Status::Ok || present.data.size() != presentBytes)
+                {
+                    fprintf(stderr, "[chat] spec-verify resident present readback failed\n");
+                    return false;
+                }
+                const uint8_t *src = present.data.data();
+                uint8_t       *dst = hostPast.data.data();
+                for (int h = 0; h < kvHeads; ++h)
+                {
+                    std::memcpy(dst + ((size_t) h * C + lastSlot) * headDim * kvElemBytes, src + ((size_t) h * specPresRows + newRowsAt) * headDim * kvElemBytes, (size_t) lastRows * headDim * kvElemBytes);
+                }
+            }
+        }
+        return true;
+    };
+
+    // One verification forward over `window` real tokens at absolute position p, with the previous
+    // round's accepted rows armed as the fold ranges. Leaves the per-row argmax in `rowArgMax`.
+    // `bindPast` re-seeds the resident cache from the host buffers (the turn's first round).
+    auto runVerify = [&](const int64_t *windowTokens, int prevSlot, int prevRows, bool bindPast, std::vector<int64_t> &rowArgMax) -> bool {
+        const std::vector<LinkRange> ranges = specVerifyFoldRanges(kvHeads, specPresRows, C, headDim, kSpecVerifyTokens, prevSlot, prevRows);
+        for (int l = 0; l < L; ++l)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                const std::string &pres = outs[(size_t) (part ? presVal[l] : presKey[l])].name;
+                const std::string &past = ins[(size_t) (part ? pastVal[l] : pastKey[l])].name;
+                if (sess->linkOutputToInput((size_t) specBucket, pres, past, ranges) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] spec-verify link update failed for %s -> %s (see log)\n", pres.c_str(), past.c_str());
+                    return false;
+                }
+            }
+        }
+        IOTensor ids, mask, pos;
+        ids.name  = inputs[(size_t) idIdx].name;
+        ids.dtype = ins[(size_t) idIdx].dtype;
+        ids.shape = {1, kSpecVerifyTokens};
+        pos.name  = inputs[(size_t) posIdx].name;
+        pos.dtype = ins[(size_t) posIdx].dtype;
+        pos.shape = {1, kSpecVerifyTokens};
+        {
+            std::vector<int64_t> posVals((size_t) kSpecVerifyTokens);
+            for (int64_t t = 0; t < kSpecVerifyTokens; ++t)
+            {
+                posVals[(size_t) t] = (int64_t) p + t;
+            }
+            ids.data.resize((size_t) kSpecVerifyTokens * 8);
+            std::memcpy(ids.data.data(), windowTokens, ids.data.size());
+            pos.data.resize((size_t) kSpecVerifyTokens * 8);
+            std::memcpy(pos.data.data(), posVals.data(), pos.data.size());
+        }
+        mask.name  = inputs[(size_t) maskIdx].name;
+        mask.dtype = ins[(size_t) maskIdx].dtype;
+        mask.shape = {1, (int64_t) specMaskLen};
+        {
+            // Every window column is a real token (a round never pads), so the mask marks the valid
+            // past slots plus the whole window; the graph's own causal mask orders the columns.
+            std::vector<int64_t> maskVals((size_t) specMaskLen, 0);
+            for (int j = 0; j < p && j < C; ++j)
+            {
+                maskVals[(size_t) j] = 1;
+            }
+            for (int64_t t = 0; t < kSpecVerifyTokens; ++t)
+            {
+                maskVals[(size_t) (C + t)] = 1;
+            }
+            mask.data.resize((size_t) specMaskLen * 8);
+            std::memcpy(mask.data.data(), maskVals.data(), mask.data.size());
+        }
+        std::vector<IOTensor> bound {ids, mask, pos};
+        if (bindPast)
+        {
+            for (int l = 0; l < L; ++l)
+            {
+                bound.push_back(inputs[(size_t) pastKey[l]]);
+                bound.push_back(inputs[(size_t) pastVal[l]]);
+            }
+        }
+        if (sess->run(bound, specOutputs) != Status::Ok)
+        {
+            fprintf(stderr, "[chat] spec-verify run failed\n");
+            return false;
+        }
+        const IOTensor *logitsOut = nullptr;
+        for (const IOTensor &o: specOutputs)
+        {
+            if (o.name == "logits")
+            {
+                logitsOut = &o;
+            }
+        }
+        if (!logitsOut || logitsOut->data.size() < (size_t) (kSpecVerifyTokens * vocab) * (specLogitsFp16 ? sizeof(fp16_t) : sizeof(float)))
+        {
+            fprintf(stderr, "[chat] spec-verify logits missing or short (every window row feeds the acceptance test)\n");
+            return false;
+        }
+        const float *rows = nullptr;
+        if (specLogitsFp16)
+        {
+            specLogitsF32.resize((size_t) (kSpecVerifyTokens * vocab));
+            halfToFloatBulk(reinterpret_cast<const fp16_t *>(logitsOut->data.data()), specLogitsF32.data(), kSpecVerifyTokens * vocab);
+            rows = specLogitsF32.data();
+        } else
+        {
+            rows = reinterpret_cast<const float *>(logitsOut->data.data());
+        }
+        rowArgMax.assign((size_t) kSpecVerifyTokens, 0);
+        for (int64_t r = 0; r < kSpecVerifyTokens; ++r)
+        {
+            const float *row  = rows + r * vocab;
+            int64_t      best = 0;
+            for (int64_t i = 1; i < vocab; ++i)
+            {
+                if (row[i] > row[(size_t) best])
+                {
+                    best = i;
+                }
+            }
+            rowArgMax[(size_t) r] = best;
+        }
+        return true;
+    };
+
+    // Decode one turn speculatively, starting from the pending token `next` at position p.
+    // Returns 1 when the turn is complete (end-of-stream or the token budget), 0 when it handed the
+    // rest of the turn back to the plain loop with `next` still pending and unprinted (the context
+    // edge, or a round that could not run), and -1 on a fatal error. `generated` and `emitted` are
+    // advanced for every printed token. The engine state on return is the plain loop's: the host
+    // cache holds the conversation, the decode bucket's links are restored, and the next decode step
+    // re-seeds the resident cache from the host buffers.
+    auto specDecodeTurn = [&](int64_t &next, int &generated, int &emitted) -> int {
+        if (residentDirty)
+        {
+            // A linked decode from an earlier turn (or this turn's token-by-token prompt tail)
+            // leaves a pending fold at slot p-1; bring it and the resident rows to the host first.
+            if (!syncResidentToHost(pendingResidentFold ? kvFoldSlot(p, C) : -1))
+            {
+                return -1;
+            }
+            residentDirty = false;
+        }
+        sess->clearLinks();
+        auto restoreDecodeLinks = [&]() {
+            sess->clearLinks();
+            if (!relinkDecode())
+            {
+                sess->clearLinks();
+                fprintf(stderr, "[chat] switching to the host KV loop (decode re-link failed after speculation)\n");
+                kvLink = false; // the host cache holds the conversation state
+            }
+            reseedCache         = kvLink;
+            residentDirty       = false;
+            pendingResidentFold = true;
+        };
+        if (!linkSpecBucket())
+        {
+            restoreDecodeLinks();
+            return 0; // the plain loop owns the turn; `next` was never fed
+        }
+        int  prevSlot = -1, prevRows = 0;
+        bool bindPast  = true;
+        bool ranRound  = false;
+        int  outcome   = 0;
+        std::vector<int64_t> window((size_t) kSpecVerifyTokens, 0), rowArgMax, proposals((size_t) kSpecDraftTokens, 0);
+        while (generated < maxTokens && next != eos)
+        {
+            // A round writes kSpecVerifyTokens cache rows starting at p, so it needs a whole window
+            // inside the compiled context; past that the turn's tail decodes token by token, where
+            // the fold-slot clamp is the single-step loop's own.
+            if (p + (int) kSpecVerifyTokens > C || !draft->propose(next, p, proposals.data(), (int) kSpecDraftTokens))
+            {
+                break;
+            }
+            window[0] = next;
+            for (int64_t i = 0; i < kSpecDraftTokens; ++i)
+            {
+                window[(size_t) i + 1] = proposals[(size_t) i];
+            }
+            if (!runVerify(window.data(), prevSlot, prevRows, bindPast, rowArgMax))
+            {
+                break;
+            }
+            bindPast = false;
+            ranRound = true;
+            const int accepted = specAcceptedDrafts(proposals.data(), rowArgMax.data(), (int) kSpecDraftTokens);
+            ++specRounds;
+            specProposed += kSpecDraftTokens;
+            specAccepted += accepted;
+            // The round's committed tokens: the anchor plus the accepted proposals, then the plain
+            // loop's own two truncations (the first end-of-stream id, the token budget).
+            std::vector<int64_t> committed;
+            committed.push_back(next);
+            for (int i = 0; i < accepted; ++i)
+            {
+                committed.push_back(proposals[(size_t) i]);
+            }
+            const int commitCount = specEmittedCount(committed.data(), (int) committed.size(), eos, maxTokens - generated);
+            for (int i = 0; i < commitCount; ++i)
+            {
+                printf("%lld\n", (long long) committed[(size_t) i]);
+                fedTokens.push_back(committed[(size_t) i]);
+                ++generated;
+                ++emitted;
+            }
+            fflush(stdout);
+            prevSlot = p;
+            prevRows = commitCount;
+            p += commitCount;
+            tmSteps += commitCount; // a round counts as the tokens it committed
+            // The draft fed every committed token in this round, so its cache holds the whole
+            // conversation prefix again; the rows past it are the rejected proposals, which the next
+            // round's rewind masks out and overwrites.
+            draftValid = (int) fedTokens.size();
+            if (commitCount < (int) committed.size())
+            {
+                outcome = 1; // end-of-stream or the budget ended the turn inside the round
+                break;
+            }
+            next = rowArgMax[(size_t) accepted]; // the correction, or the bonus token at full acceptance
+        }
+        if (ranRound && !syncSpecResidentToHost(prevSlot, prevRows))
+        {
+            restoreDecodeLinks();
+            return -1;
+        }
+        restoreDecodeLinks();
+        if (generated >= maxTokens || next == eos)
+        {
+            outcome = 1;
+        }
+        return outcome;
+    };
+
     // Pick the next token id from a logits row: greedy at temp<=0, else temperature + top-k + top-p.
     auto sample = [&](const float *logits) -> int64_t {
         if (temp <= 0.0f)
@@ -1312,6 +1732,10 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (specActive)
+        {
+            fedTokens.insert(fedTokens.end(), prompt.begin(), prompt.end()); // every prefill path feeds the whole prompt
+        }
         const double tTurnStart   = nowMs(); // turn walls for the --timing-summary line below
         size_t consumed         = 0;
         bool   chunkRanThisTurn = false;
@@ -1393,6 +1817,78 @@ int main(int argc, char **argv) {
         const double tPromptDone = nowMs();
         int          emitted     = 0; // tokens actually printed this turn (the decode-rate denominator)
         int generated = 0;
+        // Greedy speculative decode. The draft first catches up on every conversation token it has
+        // not seen (this prompt, and anything an earlier turn generated while speculation was down),
+        // then the rounds run; whatever they leave — the context edge, a link failure, a draft that
+        // cannot reach this position — falls through to the single-step loop below with the pending
+        // token still in hand. Speculation and --chain are mutually exclusive by construction.
+        if (specActive && kvLink)
+        {
+            const double tSpec0 = nowMs();
+            int64_t      next   = 0;
+            if (gpuArgmax && lastFromDecode)
+            {
+                float bestValue;
+                if (sess->readOutputArgMax("logits", next, bestValue) != Status::Ok)
+                {
+                    fprintf(stderr, "[chat] engine argmax readback failed\n");
+                    return 3;
+                }
+            } else if (lastLogits)
+            {
+                next = sample(lastLogits); // the prefill pass's host row (greedy scan)
+            } else
+            {
+                fprintf(stderr, "[chat] logits row unavailable for sampling\n");
+                return 3;
+            }
+            tmSampleMs += nowMs() - tSpec0;
+            const int caughtUp = (int) fedTokens.size();
+            if (draftValid > caughtUp)
+            {
+                draftValid = caughtUp; // a trimmed turn left the draft ahead of the conversation
+            }
+            bool draftReady = draftValid == caughtUp;
+            if (!draftReady)
+            {
+                draft->rewind(draftValid);
+                draftReady = draft->consume(fedTokens.data() + draftValid, caughtUp - draftValid);
+                draftValid = draftReady ? caughtUp : draftValid;
+                if (!draftReady)
+                {
+                    fprintf(stderr, "[chat] draft model could not follow the conversation to %d tokens (its context is %d); decoding this turn plainly\n", caughtUp, draft->cacheSlots());
+                }
+            }
+            const int specOutcome = draftReady ? specDecodeTurn(next, generated, emitted) : 0;
+            if (specOutcome < 0)
+            {
+                return 3;
+            }
+            if (specOutcome == 1)
+            {
+                generated = maxTokens; // the turn is complete; skip the single-step loop
+            } else if (generated < maxTokens && next != eos)
+            {
+                // The pending token was never printed or fed: hand it to the single-step loop, which
+                // then continues from the decode bucket's own argmax.
+                printf("%lld\n", (long long) next);
+                fflush(stdout);
+                ++generated;
+                ++emitted;
+                if (specActive)
+                {
+                    fedTokens.push_back(next);
+                }
+                if (!step(next))
+                {
+                    return 3;
+                }
+                ++p;
+            } else
+            {
+                generated = maxTokens;
+            }
+        }
         if (chainActive && kvLink)
         {
             // Device-chained greedy decode: the same stream as the single-step loop below, one
@@ -1539,6 +2035,10 @@ int main(int argc, char **argv) {
             printf("%lld\n", (long long) next);
             fflush(stdout);
             ++emitted;
+            if (specActive)
+            {
+                fedTokens.push_back(next);
+            }
             if (!step(next))
             {
                 return 3;
@@ -1553,6 +2053,16 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[chat] turn: prompt=%zu tok ttft=%.2fms generated=%d decode=%.3fms/tok\n",
                     prompt.size(), tPromptDone - tTurnStart, emitted,
                     emitted > 1 ? (turnEndMs - tPromptDone) / (emitted - 1) : 0.0);
+        }
+        if (specActive && specRounds > 0)
+        {
+            // The acceptance rate and the tokens committed per target forward: the two numbers that
+            // decide whether speculation pays on this model pair, reported every turn.
+            fprintf(stderr, "[chat] speculation: %lld rounds, %lld/%lld drafts accepted (%.1f%%), %.2f tokens per target forward\n",
+                    (long long) specRounds, (long long) specAccepted, (long long) specProposed,
+                    specProposed > 0 ? 100.0 * (double) specAccepted / (double) specProposed : 0.0,
+                    (double) (specRounds + specAccepted) / (double) specRounds);
+            specRounds = specProposed = specAccepted = 0;
         }
         if ((cfg.timing || cfg.timingSummary) && tmSteps > 0)
         {

@@ -104,23 +104,45 @@ namespace vknn {
     // filled from the encoder features by an on-GPU ScatterND (the position-dependent splice the host used
     // to do); the original decoder stays as the text-only path.
     void fuseBucketBoundaries(std::vector<Graph> &buckets, std::vector<std::string> &names);
-    // The shape set for the automatic chunk-prefill bucket a multi-bucket LLM compile appends
-    // (vknn_compile): input_ids/position_ids [1, kChunkPrefillTokens] plus the decode bucket's own
-    // past_key_values shapes and its attention-mask convention widened to past + chunk columns, so
-    // a variable-length prompt prefills as ceil(T / kChunkPrefillTokens) fixed-shape passes over
-    // the cached KV (io_link.h documents the chunk size). Scans `buckets` for a with-past decode
-    // graph (input_ids [1,1], position_ids, attention_mask, past_key_values.*, logits + present
-    // outputs) and fills `plan` with that bucket's index, one full concrete shape per graph input,
-    // and the bucket label. False when no decode bucket qualifies, when the compiled context is
-    // shorter than one chunk, when the mask layout is neither the 2-D [1, C+1] nor the 4-D
-    // [1, x, 1, C+1] convention, or when a chunk-capable prefill bucket (input_ids [1, S],
-    // 1 < S <= kChunkPrefillTokens over the same cache shape) already exists.
-    struct ChunkPrefillPlan {
+    // The shape set for an automatic bucket that is one with-past decode graph recompiled at several
+    // token columns per step. A decode bucket fixes the whole cache geometry (input_ids [1,1],
+    // past_key_values.*.{key,value} [1, kvHeads, C, headDim], a mask spanning the C past slots plus
+    // the step's tokens, position_ids); widening it to [1, width] gives a bucket that processes
+    // `width` tokens against the same cache under one static plan. Two compiles use it: the
+    // chunk-prefill bucket at kChunkPrefillTokens (io_link.h) and the speculative-verification
+    // bucket at kSpecVerifyTokens (spec_decode.h).
+    struct WidenedDecodePlan {
         size_t                       decodeBucket = 0; ///< Bucket whose geometry the shapes derive from.
-        std::map<std::string, Shape> shapes;           ///< Full concrete shape per chunk-bucket graph input.
+        std::map<std::string, Shape> shapes;           ///< Full concrete shape per widened-bucket graph input.
         std::string                  label;            ///< Bucket label for the .vxm bucket list.
+        int64_t                      cacheSlots = 0;   ///< Compiled context length C, from the past inputs.
     };
+    // Scan `buckets` for a with-past decode graph (input_ids [1,1], position_ids [1,1],
+    // attention_mask, past_key_values.0.key, logits + present.0.key outputs) and fill `plan` with
+    // that bucket's index, its context length, and one full concrete shape per graph input at
+    // `width` token columns: ids and positions become [1, width], the mask widens to past + width
+    // columns, every other input keeps its decode shape. Leaves `plan->label` empty — the caller
+    // names the role. False when no decode bucket qualifies, when the compiled context is shorter
+    // than `width` (the runtime could never run a full window), or when the mask layout is neither
+    // the 2-D [1, C+1] nor the 4-D [1, x, 1, C+1] convention. Callers apply their own duplicate
+    // policy on top; this decides geometry only.
+    bool planWidenedDecodeBucket(const std::vector<Graph> &buckets, int64_t width, WidenedDecodePlan *plan);
+    using ChunkPrefillPlan = WidenedDecodePlan;
+    // The chunk-prefill bucket's plan: planWidenedDecodeBucket at kChunkPrefillTokens, so a
+    // variable-length prompt prefills as ceil(T / kChunkPrefillTokens) fixed-shape passes over the
+    // cached KV. Additionally false when a chunk-capable prefill bucket (input_ids [1, S],
+    // 1 < S <= kChunkPrefillTokens over the same cache shape) already exists, which would only
+    // duplicate the plan.
     bool planChunkPrefillBucket(const std::vector<Graph> &buckets, ChunkPrefillPlan *plan);
+    using SpecVerifyPlan = WidenedDecodePlan;
+    // The speculative-verification bucket's plan: planWidenedDecodeBucket at kSpecVerifyTokens, so a
+    // greedy speculative round verifies kSpecDraftTokens proposals plus their anchor token in ONE
+    // target forward (spec_decode.h). Additionally false when the compile already carries a bucket
+    // at exactly that width over the same cache (a recompile, or a hand-declared bucket that already
+    // serves the verification pass). Emitted AFTER the chunk-prefill bucket in one compile: the
+    // chunk plan refuses when any 1 < S <= kChunkPrefillTokens bucket exists, which the narrower
+    // verification bucket would otherwise satisfy.
+    bool planSpecVerifyBucket(const std::vector<Graph> &buckets, SpecVerifyPlan *plan);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch = 1;
