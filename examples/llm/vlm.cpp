@@ -332,14 +332,40 @@ int main(int argc, char **argv) {
     // the PREFILL bucket, whose present carries prefillWindow rows). This decoder's present holds
     // only the produced rows — [1,KV,1,HD] at S=1 — unlike a cache-concat decoder's [1,KV,C+1,HD];
     // the fold source is always the LAST present row, so both conventions drive the same code.
-    int presRowsDecode = 0;
-    {
-        const std::vector<IOInfo> decodeOut = session->outputInfo((size_t) decodeBucket);
-        const int                 presAt    = indexOfName(decodeOut, "present.0.key");
-        if (presAt >= 0 && decodeOut[(size_t) presAt].shape.size() == 4)
+    // Every layer's fold takes its source row from ONE reported row count, so a model whose layers
+    // mix the two conventions would have the odd ones seeded from the wrong present rows silently:
+    // a rows-only offset into a cache-concat tensor stays in bounds, it just addresses the head of
+    // the cached block instead of the rows just produced. Refuse that rather than decode through it
+    // (the same check chat.cpp applies).
+    auto presentRowsOf = [&](const std::vector<IOInfo> &outs, const char *role) -> int {
+        const int first = indexOfName(outs, "present.0.key");
+        if (first < 0 || outs[(size_t) first].shape.size() != 4)
         {
-            presRowsDecode = (int) decodeOut[(size_t) presAt].shape[2];
+            fprintf(stderr, "[vlm] %s bucket has no present.0.key [1,KV,rows,HD]\n", role);
+            return 0;
         }
+        const int rows = (int) outs[(size_t) first].shape[2];
+        for (int layer = 0; layer < numLayers; ++layer)
+        {
+            for (int part = 0; part < 2; ++part)
+            {
+                char name[64];
+                snprintf(name, sizeof name, "present.%d.%s", layer, part ? "value" : "key");
+                const int at = indexOfName(outs, name);
+                if (at < 0 || outs[(size_t) at].shape.size() != 4 || (int) outs[(size_t) at].shape[2] != rows)
+                {
+                    fprintf(stderr, "[vlm] %s bucket: present output '%s' reports a different row count than present.0.key (%d); the layers disagree on the present convention and one cache fold cannot serve both\n", role, name, rows);
+                    return 0;
+                }
+            }
+        }
+        return rows;
+    };
+    const int presRowsDecode  = presentRowsOf(session->outputInfo((size_t) decodeBucket), "decode");
+    const int presRowsPrefill = presentRowsOf(decoderOutputInfo, "text-prefill");
+    if (presRowsDecode <= 0 || presRowsPrefill <= 0)
+    {
+        return 2;
     }
     // Chunked text prefill (host cache flow): a text-only prompt runs as ceil(T/chunk) fixed-shape
     // passes through the chunk bucket — vknn_compile emits it automatically for the decoder — so
@@ -701,7 +727,7 @@ int main(int argc, char **argv) {
             {
                 return nullptr;
             }
-            if (!foldPresentIntoCache(/*presentRows=*/1, /*firstSrcRow=*/0, /*copyRows=*/1, slot))
+            if (!foldPresentIntoCache(presRowsDecode, presRowsDecode - 1, /*copyRows=*/1, slot))
             {
                 return nullptr;
             }
@@ -940,7 +966,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[vlm] prefill run failed\n");
             return 3;
         }
-        if (!foldPresentIntoCache(/*presentRows=*/prefillWindow, /*firstSrcRow=*/0, /*copyRows=*/promptLen, absolutePos))
+        if (!foldPresentIntoCache(presRowsPrefill, presRowsPrefill - prefillWindow, /*copyRows=*/promptLen, absolutePos))
         {
             fprintf(stderr, "[vlm] prefill present outputs missing\n");
             return 3;
