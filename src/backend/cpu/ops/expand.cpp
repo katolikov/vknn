@@ -7,10 +7,21 @@
 /// rank can exceed X's rank.
 ///
 /// The kernel is a pure gather with no arithmetic on the values, hence dtype-agnostic (fp32 / int64):
-///     out[outCoord] = X[ right-align(outCoord) with per-dim wrap ]
-/// A size-1 input dim contributes stride 0, so every output coordinate along that axis reads the same
-/// input element (broadcasting); a non-1 input dim indexes normally. Because a broadcast source dim is
-/// always 1, the general `outCoord_k % inDim_k` reduces to "stride 0 when inDim==1, else stride acc".
+///     out[outCoord] = X[ sum_k clamp(outCoord_k - (outDim_k - inDim_k), 0, inDim_k - 1) * inStride_k ]
+/// The source is RIGHT-ALIGNED into each output axis, the same alignment ONNX already applies to the
+/// ranks, and coordinates ahead of that alignment repeat the axis's first element. On the two shapes
+/// ONNX Expand defines this is exactly the broadcast: a size-1 input dim reduces to index 0 for every
+/// output coordinate, and an input dim equal to the output dim indexes straight through.
+///
+/// The alignment is what settles an axis where the two disagree without either being 1 — a shape ONNX
+/// Expand does not define, but which the ORT transformer mask subgraph emits: an [1,1,S,S] causal
+/// triangle expanded onto the [1,1,S,P+S] score mask, whose subgraph is written for the prompt pass
+/// where P is 0 and the two shapes coincide. Right alignment lands the triangle on the trailing S
+/// new-token columns and leaves the P cached-key columns reading the triangle's column 0 — zero, the
+/// additive mask's identity — which is the causal mask a decoder needs at ANY cache fill, not only at
+/// P == 0. The Vulkan flat_broadcast shader gathers by the same rule, so the two backends agree on
+/// such a graph and the constant folder (which executes THIS kernel) bakes the value the GPU op would
+/// have produced; a bare unaligned index would instead walk past the end of the source row.
 #include "backend/cpu/cpu_backend.h"
 #include "import/passes.h" // readI64Param
 #include "vknn/op.h"
@@ -53,13 +64,17 @@ namespace vknn {
                     out[k]    = std::max<int64_t>(pin[k], t < 0 ? 1 : t);
                 }
                 // Row-major (C-contiguous) strides for both tensors. `inStride` walks the *aligned*
-                // input shape `pin`: a broadcast axis (pin==1) gets stride 0 so it never advances the
-                // input offset, otherwise it gets the running product `acc` of trailing input dims.
-                std::vector<int64_t> inStride(rank, 0), outStride(rank, 1);
+                // input shape `pin`: the running product `acc` of trailing input dims. `inOrigin` is
+                // the output coordinate at which the source axis starts (out - in, zero when the two
+                // match); the gather subtracts it and clamps into [0, in-1], so a size-1 axis always
+                // reads element 0 (broadcasting) and a narrower source sits at the axis's tail.
+                std::vector<int64_t> inStride(rank, 0), outStride(rank, 1), inOrigin(rank, 0), inLast(rank, 0);
                 int64_t              acc = 1;
                 for (int k = rank - 1; k >= 0; --k)
                 {
-                    inStride[k] = (pin[k] == 1) ? 0 : acc;
+                    inStride[k] = acc;
+                    inOrigin[k] = out[k] - pin[k];
+                    inLast[k]   = std::max<int64_t>(pin[k] - 1, 0);
                     acc *= pin[k];
                 }
                 // Output strides are the standard product of trailing output dims; the innermost axis
@@ -79,14 +94,16 @@ namespace vknn {
                 for (int64_t oi = 0; oi < elems; ++oi)
                 {
                     // Decompose the flat output index into per-axis coordinates and simultaneously
-                    // fold them into the source offset `inf`. A broadcast axis has inStride 0, so its
-                    // coordinate drops out and the shared input element is reused.
+                    // fold them into the source offset `inf`. Each coordinate shifts by the axis's
+                    // alignment origin and clamps into the source extent, so a size-1 axis
+                    // contributes 0 (the shared input element is reused).
                     int64_t rem = oi, inf = 0;
                     for (int k = 0; k < rank; ++k)
                     {
                         int64_t c = rem / outStride[k];
                         rem %= outStride[k];
-                        inf += c * inStride[k];
+                        const int64_t src = std::min(std::max(c - inOrigin[k], (int64_t) 0), inLast[k]);
+                        inf += src * inStride[k];
                     }
                     if (i64)
                     {

@@ -1315,7 +1315,13 @@ int main(int argc, char **argv) {
         const double tTurnStart   = nowMs(); // turn walls for the --timing-summary line below
         size_t consumed         = 0;
         bool   chunkRanThisTurn = false;
-        if (chunkBucket >= 0 && kvLink)
+        // The whole-window bucket wins whenever it covers the prompt: one pass over the weights
+        // beats ceil(T / chunkS) passes, and every chunk pass re-reads the whole weight set (on a
+        // 0.5B decoder, time to first token is ~520 ms flat for the window pass against ~450 ms per
+        // chunk). Chunking earns its keep only past that window, where the alternative is the
+        // token-by-token tail — several times slower again. Both paths produce the same stream.
+        const bool windowCoversPrompt = prefillBucket >= 0 && (int64_t) prompt.size() <= (int64_t) prefillS;
+        if (chunkBucket >= 0 && kvLink && !windowCoversPrompt)
         {
             // Chunked-resident prefill: sync the decode-resident cache to the host once per turn
             // (a linked decode from the previous turn leaves a pending fold at slot p-1), then run

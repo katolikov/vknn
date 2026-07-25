@@ -6569,3 +6569,103 @@ TEST(ChannelShuffleFold, LayoutAdoptsFlatNeighborhood) {
         }
     }
 }
+
+// Expand right-aligns its source into every output axis and clamps ahead of the alignment --
+// out[i] = X[sum_k clamp(outCoord_k - (outDim_k - inDim_k), 0, inDim_k - 1) * inStride_k] -- the rule
+// the Vulkan flat_broadcast shader implements for mode 0. The ORT transformer mask subgraph depends
+// on it: a [1,1,S,S] causal triangle expanded onto the [1,1,S,P+S] score mask (its subgraph is
+// written for the prompt pass, where P is 0 and the two shapes coincide). Right alignment puts the
+// triangle on the trailing S new-token columns and leaves the P cached-key columns at the triangle's
+// column 0 -- zero, the additive mask's identity -- which is the causal mask a decoder needs at any
+// cache fill, not only an empty one. The constant folder executes THIS kernel, so a folded Expand and
+// a runtime Expand must agree element for element: otherwise a bucket small enough to fold computes
+// different attention from one that keeps the node.
+TEST(Expand, RightAlignsAWiderTargetAxisLikeTheGpuBroadcast) {
+    constexpr int64_t kQueryRows  = 8;                        // S
+    constexpr int64_t kCacheSlots = 33;                       // P, deliberately not a multiple of S
+    constexpr int64_t kKeyCols    = kCacheSlots + kQueryRows; // P + S
+    constexpr float   kBlocked    = -65504.0f;
+
+    std::vector<float> triangle((size_t) (kQueryRows * kQueryRows), 0.0f);
+    for (int64_t r = 0; r < kQueryRows; ++r)
+    {
+        for (int64_t c = r + 1; c < kQueryRows; ++c)
+        {
+            triangle[(size_t) (r * kQueryRows + c)] = kBlocked;
+        }
+    }
+    std::vector<float> expected((size_t) (kQueryRows * kKeyCols), 0.0f);
+    for (int64_t r = 0; r < kQueryRows; ++r)
+    {
+        for (int64_t c = 0; c < kKeyCols; ++c)
+        {
+            const int64_t src                    = std::min(std::max(c - kCacheSlots, (int64_t) 0), kQueryRows - 1);
+            expected[(size_t) (r * kKeyCols + c)] = triangle[(size_t) (r * kQueryRows + src)];
+        }
+    }
+    // That is the decoder's causal mask over [cache slots | new tokens]: every cache slot open, new
+    // token j closed to query row r past r.
+    for (int64_t r = 0; r < kQueryRows; ++r)
+    {
+        for (int64_t c = 0; c < kCacheSlots; ++c)
+        {
+            ASSERT_EQ(expected[(size_t) (r * kKeyCols + c)], 0.0f) << "cache slot r=" << r << " c=" << c;
+        }
+        for (int64_t c = 0; c < kQueryRows; ++c)
+        {
+            ASSERT_EQ(expected[(size_t) (r * kKeyCols + kCacheSlots + c)], c <= r ? 0.0f : kBlocked) << "r=" << r << " c=" << c;
+        }
+    }
+
+    const std::vector<int64_t> inShape {1, 1, kQueryRows, kQueryRows};
+    const std::vector<int64_t> outShape {1, 1, kQueryRows, kKeyCols};
+
+    // The runtime kernel, driven through a CPU session.
+    OpOut ran = runOp(OpType::Expand, 0, {}, inShape, triangle, {{{4}, {1.0f, 1.0f, (float) kQueryRows, (float) kKeyCols}}});
+    EXPECT_EQ(ran.shape, outShape);
+    expectNear(ran.data, expected, 0.0f);
+
+    // The same node with a constant source, folded at compile time: same bytes, or a bucket that
+    // folds and a bucket that does not compute different attention.
+    Graph      g;
+    TensorDesc src;
+    src.name           = "triangle";
+    src.shape          = inShape;
+    src.isInitializer  = true;
+    TensorId   srcId   = g.addTensor(src);
+    HostBuffer srcBuf;
+    srcBuf.resizeElems(triangle.size(), DType::Float32);
+    std::memcpy(srcBuf.f32(), triangle.data(), triangle.size() * sizeof(float));
+    g.initializers[srcId] = srcBuf;
+
+    TensorDesc target;
+    target.name           = "target_shape";
+    target.shape          = {4};
+    target.dtype          = DType::Int64;
+    target.isInitializer  = true;
+    TensorId   targetId   = g.addTensor(target);
+    HostBuffer targetBuf;
+    targetBuf.resizeElems(4, DType::Int64);
+    for (size_t k = 0; k < outShape.size(); ++k)
+    {
+        targetBuf.i64()[k] = outShape[k];
+    }
+    g.initializers[targetId] = targetBuf;
+
+    TensorDesc out;
+    out.name     = "mask";
+    out.isOutput = true;
+    TensorId  y  = g.addTensor(out);
+    Node      expand;
+    expand.type    = OpType::Expand;
+    expand.name    = "expand";
+    expand.inputs  = {srcId, targetId};
+    expand.outputs = {y};
+    g.nodes.push_back(expand);
+    g.outputs = {y};
+
+    EXPECT_GE(constFold(g), 1) << "an all-constant Expand of this size must fold";
+    ASSERT_TRUE(g.isInitializer(y)) << "the folded Expand must leave its value as an initializer";
+    EXPECT_EQ(g.desc(y).shape, Shape(outShape));
+    expectNear(initFloats(g, y), expected, 0.0f);
+}

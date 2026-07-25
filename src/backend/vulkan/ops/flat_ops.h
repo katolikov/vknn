@@ -318,9 +318,12 @@ namespace vknn {
             }
         };
 
-        // ---- Expand / Tile: out[i] = in[ sum_k (outCoord_k % inDim_k) * inStride_k ] ----
-        // One shader (flat_broadcast) for both: the modulo gives broadcast (inDim==1 => index 0) for Expand
-        // and wraparound for Tile. Input dims/strides are right-aligned into the output rank.
+        // ---- Expand / Tile: one gather over right-aligned input dims/strides ----
+        // One shader (flat_broadcast) for both, selected by `mode`: Tile wraps a coordinate into its
+        // source axis (outCoord % inDim), Expand right-aligns the source into the axis and clamps
+        // ahead of it. Both reduce to the plain broadcast on a size-1 source axis; they differ only
+        // where the target widens an axis the source neither matches nor broadcasts (see
+        // src/backend/cpu/ops/expand.cpp). Input dims/strides are right-aligned into the output rank.
         struct Broadcast {
             struct PC {
                 int rank, total, mode;

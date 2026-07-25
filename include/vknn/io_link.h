@@ -27,19 +27,24 @@ namespace vknn {
     /// pad-to-full-window forward.
     inline constexpr int64_t kChunkPrefillTokens = 64;
 
-    /// Whether vknn_compile emits the chunk-prefill bucket at all. Off, because the path is still
-    /// incorrect on device. A three-way run of one 0.5B decoder — same model, same binary, only the
-    /// prefill path differing — has the whole-window prefill reproducing the token-by-token
-    /// reference stream exactly while the chunked path diverges from it, and a prompt SHORTER than
-    /// one chunk degenerates to a single repeated token, which is the signature of a cache the
-    /// decode step reads as empty. So the failure is in the single-chunk path, not in multi-chunk
-    /// accumulation as first supposed; the KV-concat fold uniformity defect fixed alongside this is
-    /// real but was not its cause. It is also slower than the path it replaces (+52% time to first
-    /// token at one chunk, +218% at four), which is architectural: each chunk pass re-reads the
-    /// whole weight set. With no bucket emitted, `planChunkPrefillBucket` refuses and every model
-    /// keeps the whole-window path; the planner, runtime, and host tests stay live behind this
-    /// switch so the defect can be fixed against them.
-    inline constexpr bool kChunkPrefillEnabled = false;
+    /// Whether vknn_compile emits the chunk-prefill bucket at all. On: a three-way run of one 0.5B
+    /// decoder — same model, same binary, only the prefill path differing — has the chunked stream
+    /// matching the whole-window and token-by-token streams exactly at 20, 64, 65 and 200 prompt
+    /// tokens (one, one, two and four chunks). Both defects that broke it were the same one: the
+    /// chunk bucket's causal mask comes from an ORT transformer export whose subgraph expands a
+    /// [1,1,S,S] triangle onto the [1,1,S,P+S] score mask, and Expand's rule on an axis the target
+    /// widens without the source broadcasting decided what that mask means (src/backend/cpu/ops/
+    /// expand.cpp). Under the old CPU rule the constant folder and the GPU op disagreed outright,
+    /// and the folder's value — folded only in the chunk bucket, whose output is inside the folder's
+    /// size bound — carried no causal structure at all.
+    ///
+    /// Chunked prefill is SLOWER than the whole-window path it replaces on a prompt the whole-window
+    /// bucket already covers: on that decoder (whole-window S=256, chunk S=64, cooled, median of 3)
+    /// time to first token is 908 vs 519 ms at 20 tokens, 963 vs 528 ms at 64, 1202 vs 531 ms at 65
+    /// and 1669 vs 522 ms at 200 — flat for the whole-window pass, ~450 ms per chunk for the chunked
+    /// one, because every chunk pass re-reads the whole weight set. The path earns its keep only past
+    /// the whole-window bucket's own window, where the alternative is the token-by-token tail.
+    inline constexpr bool kChunkPrefillEnabled = true;
 
     /// The cache slot a decode step at absolute position `position` folds the PREVIOUS token's
     /// present row into: slot position-1, clamped to the last slot once the position runs past the
