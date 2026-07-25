@@ -404,11 +404,14 @@ namespace vknn {
                 });
                 // The default tile is the incumbent, so every other candidate is a challenger and
                 // must clear the margin; a tie or a noise-width win keeps the incumbent.
-                int    best   = entrants[0].tileIndex;
-                double bestMs = ms[0];
+                int          best   = entrants[0].tileIndex;
+                double       bestMs = ms[0];
+                const double need   = ms[0] * vk::kTuneRaceMargin;
                 for (size_t ei = 1; ei < entrants.size(); ++ei)
                 {
-                    if (ms[ei] < bestMs * kTuneRaceMargin)
+                    // Measured against the incumbent's own time rather than a running best, so the
+                    // margin cannot compound and the outcome does not depend on list order.
+                    if (ms[ei] < need && ms[ei] < bestMs)
                     {
                         bestMs = ms[ei];
                         best   = entrants[ei].tileIndex;

@@ -20,6 +20,14 @@ namespace vknn { namespace vk {
     /// that cancellation to be exact. Four rounds leave two samples on each side of the median.
     constexpr int kTuneRaceRounds = 4;
 
+    /// Fraction of the incumbent's time a challenger must beat to replace it. Every race keeps its
+    /// deterministic default as the incumbent and measures challengers against THAT time, so the
+    /// margin cannot compound and the outcome does not depend on candidate order. The device
+    /// throttles several-fold under sustained load and the isolated race's noise on small shapes is
+    /// wider than the differences it resolves, so an unmargined challenger displaces a proven pick
+    /// on noise alone.
+    constexpr double kTuneRaceMargin = 0.97;
+
     /// Race `count` candidates and return one millisecond estimate per candidate (index-aligned).
     /// `submitOnce(index)` records and submits that candidate's work once and returns the wall
     /// time of the submit; the caller keeps ownership of pipelines, scratch buffers and geometry.

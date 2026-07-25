@@ -511,14 +511,19 @@ namespace vknn {
                     vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
                     return submitMs;
                 });
+                // cands[0] is the deterministic default and stays the incumbent: a challenger must
+                // beat ITS time by the margin, and the fastest qualifier wins. Comparing against a
+                // running best instead would let the margin compound and make the outcome depend on
+                // the order the candidates happen to sit in the list. The margin applies to every
+                // challenger, not just the OCB>1 class — race noise on these shapes is wider than
+                // the differences being resolved, so an unmargined challenger displaces the proven
+                // default on noise alone.
                 uint32_t            best   = cands[0];
                 double              bestMs = ms[0];
+                const double        need   = ms[0] * vk::kTuneRaceMargin;
                 for (size_t ci = 1; ci < cands.size(); ++ci)
                 {
-                    // OCB>1 candidates carry an anti-noise margin: they are the newer class and the
-                    // classic tiles are the proven safe default.
-                    double need = (cands[ci] >> 8) > 0 ? bestMs * 0.97 : bestMs;
-                    if (ms[ci] < need)
+                    if (ms[ci] < need && ms[ci] < bestMs)
                     {
                         bestMs = ms[ci];
                         best   = cands[ci];
@@ -736,9 +741,10 @@ namespace vknn {
                     uint32_t ocb = cand & 0xffu, wt = std::max(4u, (cand >> 8) & 0xffu);
                     int64_t  ocbGroups = (Coutb + ocb - 1) / ocb;
                     int      parts     = (cand & kChoiceOcSplit2) ? 2 : ((cand & kChoiceOcSplit4) ? 4 : 1);
-                    // WTILE-tiled, 1-D, and OC-split candidates carry an anti-noise margin (the
-                    // classic tiles are the proven safe default).
-                    double margin = (cand >> 8) > 0 ? 0.97 : 1.0;
+                    // Every challenger carries the anti-noise margin, not just the tiled/split
+                    // classes: the race's noise on these shapes is wider than the differences it
+                    // resolves, so an unmargined challenger displaces the proven default on noise.
+                    double margin = vk::kTuneRaceMargin;
                     if (cand & kChoice1D)
                     {
                         int64_t alen = (kaxis == 0) ? y.w : y.h;
@@ -780,11 +786,14 @@ namespace vknn {
                 std::vector<double> ms     = vk::raceCandidates((int) entrants.size(), [&](int index) {
                     return entrants[(size_t) index].time();
                 });
+                // entrants[0] is the deterministic default and stays the incumbent: each challenger
+                // is measured against ITS time, not against a running best that would compound the
+                // margin and make the outcome depend on list order.
                 int                 best   = 0;
                 double              bestMs = ms[0];
                 for (size_t ei = 1; ei < entrants.size(); ++ei)
                 {
-                    if (ms[ei] < bestMs * entrants[ei].margin)
+                    if (ms[ei] < ms[0] * entrants[ei].margin && ms[ei] < bestMs)
                     {
                         bestMs = ms[ei];
                         best   = entrants[ei].choice;
