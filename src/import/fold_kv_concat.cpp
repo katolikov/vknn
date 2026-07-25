@@ -17,6 +17,13 @@
 // decompose over the concat operands' canonical strides, or a concat result consumed by anything
 // other than the one FusedAttention node and the graph output list.
 //
+// The conversion is ALL-OR-NOTHING across a graph's present outputs. Every cache consumer — the
+// engine-resident link fold's source row (io_link.h), the example drivers' present->cache copy,
+// a caller reading the declared present shapes — derives ONE row count and applies it to every
+// layer, so a graph with some layers rows-only and others cache-concat would address the unfolded
+// layers at the folded layers' offset and seed those layers' cache with the wrong rows. When any
+// Concat-produced present output cannot fold, none do.
+//
 // Runs at load only (never serialized), after fuseDecodeAttention, gated by Hint::KvConcatFold.
 #include "core/fused_attention.h"
 #include "passes_internal.h"
@@ -177,6 +184,18 @@ namespace vknn {
             }
         }
 
+        // One accepted fold, held until the whole candidate set is known: the present outputs of a
+        // graph must ALL end up on the same convention (see the uniformity gate below), so nothing
+        // is rewired while candidates are still being collected.
+        struct FoldPlan {
+            size_t         node = 0;
+            TensorId       kSrc = kNoTensor, vSrc = kNoTensor;
+            TensorId       kPastT = kNoTensor, kNewT = kNoTensor, vPastT = kNoTensor, vNewT = kNoTensor;
+            int64_t        pastLen = 0;
+            RemappedSource kPast, kNew, vPast, vNew;
+        };
+        std::vector<FoldPlan> plans;
+
         for (size_t fi = 0; fi < g.nodes.size(); ++fi)
         {
             Node &fa = g.nodes[fi];
@@ -246,44 +265,90 @@ namespace vknn {
                 continue;
             }
 
+            FoldPlan plan;
+            plan.node    = fi;
+            plan.kSrc    = kSrc;
+            plan.vSrc    = vSrc;
+            plan.kPastT  = kCat.inputs[0];
+            plan.kNewT   = kCat.inputs[1];
+            plan.vPastT  = vCat.inputs[0];
+            plan.vNewT   = vCat.inputs[1];
+            plan.pastLen = pastLen;
+            plan.kPast   = std::move(*kPast);
+            plan.kNew    = std::move(*kNew);
+            plan.vPast   = std::move(*vPast);
+            plan.vNew    = std::move(*vNew);
+            plans.push_back(std::move(plan));
+        }
+
+        // Uniformity gate: the fold moves a present output from the cache-concat convention
+        // (pastLen + new rows) to the rows-only one, and every consumer of a with-past decoder's
+        // caches — the engine-resident link fold's source row, the example drivers' present->cache
+        // copy, the .vxm's declared present shapes — reads ONE row count and applies it to all
+        // layers. A graph whose layers land on different conventions would silently address the
+        // unfolded layers' present rows with the folded layers' offset, so a candidate set that
+        // does not cover every Concat-produced present output folds nothing: the whole graph keeps
+        // the cache-concat convention, uniformly.
+        {
+            std::set<TensorId> covered;
+            for (const FoldPlan &plan: plans)
+            {
+                covered.insert(plan.kSrc);
+                covered.insert(plan.vSrc);
+            }
+            for (TensorId out: g.outputs)
+            {
+                const int prod = out >= 0 && out < (TensorId) producer.size() ? producer[(size_t) out] : -1;
+                if (prod < 0 || g.nodes[(size_t) prod].type != OpType::Concat || covered.count(out))
+                {
+                    continue;
+                }
+                VKNN_INFO << "foldFusedAttentionKvConcat: present output '" << g.tensors[(size_t) out].name << "' cannot fold; keeping the cache-concat convention for all "
+                          << plans.size() << " foldable site(s) so every layer reports the same present row count";
+                plans.clear();
+                break;
+            }
+        }
+
+        for (FoldPlan &plan: plans)
+        {
             // Rewire the attention node onto the two sources.
-            const TensorId kPastT = kCat.inputs[0], kNewT = kCat.inputs[1];
-            const TensorId vPastT = vCat.inputs[0], vNewT = vCat.inputs[1];
+            Node &fa = g.nodes[plan.node];
             fa.inputs.resize(4, kNoTensor); // slot 3 = mask or none
-            fa.inputs.push_back(kNewT);
-            fa.inputs.push_back(vNewT);
-            fa.inputs[1] = kPastT;
-            fa.inputs[2] = vPastT;
-            auto setInt = [&](const char *key, int64_t value) {
+            fa.inputs.push_back(plan.kNewT);
+            fa.inputs.push_back(plan.vNewT);
+            fa.inputs[1] = plan.kPastT;
+            fa.inputs[2] = plan.vPastT;
+            auto setInt  = [&](const char *key, int64_t value) {
                 Attr a;
-                a.kind          = Attr::Int;
-                a.i             = value;
+                a.kind           = Attr::Int;
+                a.i              = value;
                 fa.attr.map[key] = a;
             };
             auto setInts = [&](const char *key, std::vector<int64_t> value) {
                 Attr a;
-                a.kind          = Attr::Ints;
-                a.ints          = std::move(value);
+                a.kind           = Attr::Ints;
+                a.ints           = std::move(value);
                 fa.attr.map[key] = a;
             };
             setInt(kFaSplit, 1);
-            setInt(kFaPastLen, pastLen);
-            setInts(kFaKStride, std::move(kPast->rowStride));
-            setInt(kFaKN, kPast->tokenStride);
-            setInt(kFaKK, kPast->elemStride);
-            setInts(kFaVStride, std::move(vPast->rowStride));
-            setInt(kFaVK, vPast->tokenStride);
-            setInt(kFaVN, vPast->elemStride);
-            setInts(kFaKNewStride, std::move(kNew->rowStride));
-            setInt(kFaKNewN, kNew->tokenStride);
-            setInt(kFaKNewK, kNew->elemStride);
-            setInts(kFaVNewStride, std::move(vNew->rowStride));
-            setInt(kFaVNewK, vNew->tokenStride);
-            setInt(kFaVNewN, vNew->elemStride);
+            setInt(kFaPastLen, plan.pastLen);
+            setInts(kFaKStride, std::move(plan.kPast.rowStride));
+            setInt(kFaKN, plan.kPast.tokenStride);
+            setInt(kFaKK, plan.kPast.elemStride);
+            setInts(kFaVStride, std::move(plan.vPast.rowStride));
+            setInt(kFaVK, plan.vPast.tokenStride);
+            setInt(kFaVN, plan.vPast.elemStride);
+            setInts(kFaKNewStride, std::move(plan.kNew.rowStride));
+            setInt(kFaKNewN, plan.kNew.tokenStride);
+            setInt(kFaKNewK, plan.kNew.elemStride);
+            setInts(kFaVNewStride, std::move(plan.vNew.rowStride));
+            setInt(kFaVNewK, plan.vNew.tokenStride);
+            setInt(kFaVNewN, plan.vNew.elemStride);
 
             // A concat result on the graph output list becomes the new-rows tensor under the same
             // name (the rows-only present convention); the dead concat tensor keeps a suffixed name.
-            for (auto side: {std::pair<TensorId, TensorId> {kSrc, kNewT}, std::pair<TensorId, TensorId> {vSrc, vNewT}})
+            for (auto side: {std::pair<TensorId, TensorId> {plan.kSrc, plan.kNewT}, std::pair<TensorId, TensorId> {plan.vSrc, plan.vNewT}})
             {
                 auto it = std::find(g.outputs.begin(), g.outputs.end(), side.first);
                 if (it == g.outputs.end())
@@ -299,8 +364,8 @@ namespace vknn {
                 g.tensors[(size_t) side.second].isOutput = true;
                 // Keep the name index consistent: the present name must resolve to the new-rows
                 // tensor (the link and boundary paths look outputs up by name).
-                g.tensorByName[presentName]              = side.second;
-                g.tensorByName[retiredName]              = side.first;
+                g.tensorByName[presentName] = side.second;
+                g.tensorByName[retiredName] = side.first;
             }
             ++folded;
         }

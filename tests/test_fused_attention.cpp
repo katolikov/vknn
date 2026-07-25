@@ -900,3 +900,106 @@ TEST(FusedAttention, ChunkPrefillPerRowMaskFuses) {
     ASSERT_EQ(fused.size(), (size_t) (kHeads * m * kHd));
     EXPECT_LT(maxRelErr(fused, plain), 1e-3f);
 }
+
+// The present outputs of one graph must all report the SAME row count: every cache consumer (the
+// resident link fold's source row, the drivers' present->cache copy) derives one row count from
+// one present output and applies it to every layer. When a second attention site cannot fold —
+// here because its concat result has a consumer outside the attention node — the first site must
+// NOT fold either, or layer 0 would be rows-only while layer 1 stayed cache-concat.
+TEST(FusedAttention, KvConcatFoldIsUniformAcrossPresentOutputs) {
+    // One with-past attention site: q/kpast/knew/vpast/vnew inputs, past‖new Concats feeding the
+    // fused node, the concat results exported as present_key<tag> / present_value<tag>.
+    auto addSite = [&](Graph &g, const std::string &tag, bool extraConsumer) {
+        TensorId   q     = addInput(g, "q" + tag, {kB, kHeads, 1, kHd});
+        TensorId   kPast = addInput(g, "kpast" + tag, {kB, kKvHeads, kTokens - 1, kHd});
+        TensorId   kNew  = addInput(g, "knew" + tag, {kB, kKvHeads, 1, kHd});
+        TensorId   vPast = addInput(g, "vpast" + tag, {kB, kKvHeads, kTokens - 1, kHd});
+        TensorId   vNew  = addInput(g, "vnew" + tag, {kB, kKvHeads, 1, kHd});
+        TensorDesc kco;
+        kco.name      = "present_key" + tag;
+        kco.isOutput  = true;
+        TensorId   kc = g.addTensor(kco);
+        TensorDesc vco;
+        vco.name     = "present_value" + tag;
+        vco.isOutput = true;
+        TensorId vc  = g.addTensor(vco);
+        Attr     axis;
+        axis.kind                                                                     = Attr::Int;
+        axis.i                                                                        = 2;
+        addNode(g, OpType::Concat, "kcat" + tag, {kPast, kNew}, kc)->attr.map["axis"] = axis;
+        addNode(g, OpType::Concat, "vcat" + tag, {vPast, vNew}, vc)->attr.map["axis"] = axis;
+
+        TensorId kT     = repeatKv(g, kc, "k" + tag, true);
+        TensorId vR     = repeatKv(g, vc, "v" + tag, false);
+        TensorId scores = addTemp(g, "scores" + tag);
+        addNode(g, OpType::MatMul, "qk" + tag, {q, kT}, scores);
+        TensorId probs = addTemp(g, "probs" + tag);
+        Node    *sn    = addNode(g, OpType::Softmax, "softmax" + tag, {scores}, probs);
+        Attr     ax;
+        ax.kind              = Attr::Int;
+        ax.i                 = -1;
+        sn->attr.map["axis"] = ax;
+        TensorId ctx         = addTemp(g, "ctx" + tag);
+        addNode(g, OpType::MatMul, "pv" + tag, {probs, vR}, ctx);
+        TensorDesc yo;
+        yo.name     = "out" + tag;
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node    *tn = addNode(g, OpType::Transpose, "ctx_transpose" + tag, {ctx}, y);
+        Attr     perm;
+        perm.kind            = Attr::Ints;
+        perm.ints            = {0, 2, 1, 3};
+        tn->attr.map["perm"] = perm;
+        g.outputs.push_back(y);
+        g.outputs.push_back(kc);
+        g.outputs.push_back(vc);
+        if (extraConsumer)
+        {
+            // A reader of the concat result outside the attention node: the fold refuses this site
+            // (retiring the concat would drop that reader's source).
+            TensorDesc eo;
+            eo.name     = "aux" + tag;
+            eo.isOutput = true;
+            TensorId e  = g.addTensor(eo);
+            addNode(g, OpType::Unary, "aux_relu" + tag, {kc}, e);
+            g.outputs.push_back(e);
+        }
+    };
+
+    auto presentRows = [](const Graph &g, const std::string &name) -> int64_t {
+        TensorId t = g.find(name);
+        return t == kNoTensor || g.desc(t).shape.size() != 4 ? -1 : g.desc(t).shape[2];
+    };
+
+    // Both sites foldable: the fold applies and every present output reports the rows-only count.
+    {
+        Graph g;
+        addSite(g, "0", false);
+        addSite(g, "1", false);
+        inferShapes(g);
+        foldMatMulViews(g);
+        fuseDecodeAttention(g);
+        ASSERT_EQ(countNodes(g, OpType::FusedAttention), 2);
+        EXPECT_EQ(foldFusedAttentionKvConcat(g), 2);
+        EXPECT_EQ(presentRows(g, "present_key0"), 1);
+        EXPECT_EQ(presentRows(g, "present_key1"), 1);
+        EXPECT_EQ(presentRows(g, "present_value0"), 1);
+        EXPECT_EQ(presentRows(g, "present_value1"), 1);
+    }
+    // Site 1 refused: site 0 must keep the cache-concat convention too, so both present outputs
+    // still report kTokens rows.
+    {
+        Graph g;
+        addSite(g, "0", false);
+        addSite(g, "1", true);
+        inferShapes(g);
+        foldMatMulViews(g);
+        fuseDecodeAttention(g);
+        ASSERT_EQ(countNodes(g, OpType::FusedAttention), 2);
+        EXPECT_EQ(foldFusedAttentionKvConcat(g), 0);
+        EXPECT_EQ(presentRows(g, "present_key0"), kTokens);
+        EXPECT_EQ(presentRows(g, "present_key1"), kTokens);
+        EXPECT_EQ(presentRows(g, "present_value0"), kTokens);
+        EXPECT_EQ(presentRows(g, "present_value1"), kTokens);
+    }
+}

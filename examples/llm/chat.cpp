@@ -310,6 +310,24 @@ int main(int argc, char **argv) {
         fprintf(stderr, "present outputs are missing or not [1,KV,rows,HD]; cannot drive the KV fold\n");
         return 2;
     }
+    // That row count drives EVERY layer's fold (the link ranges and the host copies all take their
+    // source row from it), so every layer must report it. A model whose layers mix the two
+    // conventions would have the odd ones' cache seeded from the wrong present rows silently (the
+    // fold source stays in bounds, it just addresses the wrong block), so a mismatch is refused
+    // here rather than decoded through.
+    for (int l = 0; l < L; ++l)
+    {
+        for (int part = 0; part < 2; ++part)
+        {
+            const int idx = part ? presVal[l] : presKey[l];
+            if (idx < 0 || outs[(size_t) idx].shape.size() != 4 || (int) outs[(size_t) idx].shape[2] != presRows)
+            {
+                fprintf(stderr, "present output '%s' reports a different row count than '%s' (%d); the layers disagree on the present convention and one cache fold cannot serve both\n",
+                        idx >= 0 ? outs[(size_t) idx].name.c_str() : "(missing)", outs[(size_t) presKey[0]].name.c_str(), presRows);
+                return 2;
+            }
+        }
+    }
     // The KV cache and logits keep the model's declared boundary dtype on host readback (an fp16
     // export downloads fp16, not fp32). The host-side present-row folds copy raw rows, so they work
     // in the cache's element size; the prefill logits row is converted to fp32 for host sampling.
@@ -440,6 +458,16 @@ int main(int argc, char **argv) {
             }
         }
         ok = ok && *maskLen == C + windowS && *presRows >= windowS && *logitsOutIdx >= 0;
+        // One present row count serves every layer's fold in this bucket too (the batched paths read
+        // the produced rows at presRows - windowS for all layers), so layers that disagree disable
+        // the bucket instead of folding some of them from the wrong rows.
+        for (const IOInfo &out: pout)
+        {
+            if (out.name.rfind("present.", 0) == 0 && out.shape.size() == 4 && (int) out.shape[2] != *presRows)
+            {
+                ok = false;
+            }
+        }
         if (!ok)
         {
             fprintf(stderr, "[chat] %s bucket geometry mismatch (mask %d vs C+S %d, present rows %d); path disabled\n", role, *maskLen, C + windowS, *presRows);

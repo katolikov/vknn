@@ -10,7 +10,12 @@
 //     second conversation turn over a populated cache.
 // The synthetic model is a small GQA decoder (grouped KV heads, additive causal mask built
 // in-graph from the token mask, learned position embedding driven by position_ids, cache-concat
-// present outputs) built at each bucket's sequence length, saved as one multi-bucket .vxm.
+// present outputs) built at each bucket's sequence length, saved as one multi-bucket .vxm. Its
+// attention chain is shaped so the LOAD-TIME passes a real decoder hits engage in every bucket:
+// foldMatMulViews absorbs the repeat_kv expand into operand-view strides, fuseDecodeAttention
+// fuses the chain (at M == 1 in the decode bucket, at M > 1 in the chunk and whole-window ones),
+// and foldFusedAttentionKvConcat turns the present outputs into the rows-only convention — so the
+// chunked flow is compared against the whole-window flow on the graph form the device runs.
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/io_link.h"
@@ -118,9 +123,9 @@ namespace {
     }
 
     // The synthetic with-past GQA decoder at sequence length S: embedding + position-embedding
-    // Gathers, q/k/v projections, cache-concat present outputs, a Concat-based repeat_kv group
-    // expand, QK*scale + (token-mask bias + causal constant) -> Softmax -> PV, output projection
-    // with residual, and the lm-head logits. All weights are deterministic, shared byte-for-byte
+    // Gathers, q/k/v projections (q carrying the score scale), cache-concat present outputs, a
+    // Reshape/Expand/Reshape repeat_kv group expand, QK + (token-mask bias + causal constant) ->
+    // Softmax -> PV, output projection with residual, and the lm-head logits. All weights are deterministic, shared byte-for-byte
     // across the per-S builds so the multi-bucket save dedupes them.
     Graph buildDecoder(int64_t S, int64_t C = kCtx, bool withPositionIds = true) {
         const int64_t T = C + S;
@@ -168,15 +173,19 @@ namespace {
         TensorId presV = addOut(g, "present.0.value");
         setAttrI(addNode(g, OpType::Concat, "present_value", {pv, vT}, presV), "axis", 2);
 
-        // repeat_kv via self-Concat: [1,KV,T,hd] -> [1,KV,1,T*hd] -> [1,KV,G,T*hd] -> [1,Hq,T,hd],
-        // so q head h reads kv head h / G (G = Hq / KV = 2).
+        // repeat_kv as a transformers export emits it: [1,KV,T,hd] -> Reshape [1,KV,1,T,hd] ->
+        // Expand [1,KV,G,T,hd] -> Reshape [1,Hq,T,hd], so q head h reads kv head h / G
+        // (G = Hq / KV = 2). foldMatMulViews absorbs this chain into the operand-view strides
+        // fuseDecodeAttention consumes; a chain it cannot absorb leaves the attention unfused and
+        // the buckets running a graph form no device ever runs.
         auto groupExpand = [&](const char *tag, TensorId cache) {
-            TensorId r1 = addTemp(g, std::string(tag) + "_g1");
-            addNode(g, OpType::Reshape, std::string(tag) + "_greshape1", {cache, addI64(g, std::string(tag) + "_gs1", {1, kKvHeads, 1, T * kHeadDim})}, r1);
-            TensorId cat = addTemp(g, std::string(tag) + "_gcat");
-            setAttrI(addNode(g, OpType::Concat, std::string(tag) + "_gconcat", {r1, r1}, cat), "axis", 2);
+            const int64_t group = kQHeads / kKvHeads;
+            TensorId      r1    = addTemp(g, std::string(tag) + "_g1");
+            addNode(g, OpType::Reshape, std::string(tag) + "_greshape1", {cache, addI64(g, std::string(tag) + "_gs1", {1, kKvHeads, 1, T, kHeadDim})}, r1);
+            TensorId ex = addTemp(g, std::string(tag) + "_gex");
+            addNode(g, OpType::Expand, std::string(tag) + "_gexpand", {r1, addI64(g, std::string(tag) + "_gs2", {1, kKvHeads, group, T, kHeadDim})}, ex);
             TensorId r2 = addTemp(g, std::string(tag) + "_g2");
-            addNode(g, OpType::Reshape, std::string(tag) + "_greshape2", {cat, addI64(g, std::string(tag) + "_gs2", {1, kQHeads, T, kHeadDim})}, r2);
+            addNode(g, OpType::Reshape, std::string(tag) + "_greshape2", {ex, addI64(g, std::string(tag) + "_gs3", {1, kQHeads, T, kHeadDim})}, r2);
             return r2;
         };
         TensorId kAll = groupExpand("k", presK); // [1, Hq, T, hd]
@@ -184,11 +193,15 @@ namespace {
 
         TensorId kQk = addTemp(g, "k_qk");
         setAttrInts(addNode(g, OpType::Transpose, "k_qk_transpose", {kAll}, kQk), "perm", {0, 1, 3, 2});
-        TensorId scores = addTemp(g, "scores");
-        addNode(g, OpType::MatMul, "qk", {qT, kQk}, scores); // [1, Hq, S, T]
+        // The score scale rides on q (the transformers `q * scaling` form), so the only node
+        // between the QK MatMul and the Softmax is the additive mask — the standalone-Add shape
+        // fuseDecodeAttention absorbs. A separate scale node fuses with the mask into one
+        // pointwise unit, which the pass refuses, leaving the chain unfused.
+        TensorId qS = addTemp(g, "q_scaled");
+        Node    *sc = addNode(g, OpType::Binary, "q_scale", {qT, addF32(g, "scale_c", {1}, {0.5f})}, qS);
+        sc->subOp   = (int32_t) BinaryType::Mul;
         TensorId scaled = addTemp(g, "scaled");
-        Node    *sc     = addNode(g, OpType::Binary, "scale", {scores, addF32(g, "scale_c", {1}, {0.5f})}, scaled);
-        sc->subOp       = (int32_t) BinaryType::Mul;
+        addNode(g, OpType::MatMul, "qk", {qS, kQk}, scaled); // [1, Hq, S, T]
 
         // Additive mask operand: (token_mask - 1) * 1e9 broadcast over rows, plus the causal
         // constant for the S window columns (row i attends cache columns and window columns <= i).
@@ -316,14 +329,19 @@ namespace {
         {
             return false;
         }
-        const int64_t presRows = presK->shape[2]; // kCtx + window (cache-concat)
+        // The produced rows sit AFTER any past block, exactly as vknn_chat's prefillPass reads
+        // them: kCtx + window under the cache-concat present, 0 under the rows-only present the
+        // split-KV fold produces (Hint::KvConcatFold). The offset comes from the reported row
+        // count, so the pass serves both conventions.
+        const int64_t presRows  = presK->shape[2];
+        const int64_t newRowsAt = presRows - window;
         for (int part = 0; part < 2; ++part)
         {
             const float *src = (part ? presV : presK)->f32();
             float       *dst = (part ? f.pastV : f.pastK).data();
             for (int64_t h = 0; h < kKvHeads; ++h)
             {
-                std::memcpy(dst + (h * kCtx + f.p) * kHeadDim, src + (h * presRows + kCtx) * kHeadDim, (size_t) len * kHeadDim * 4);
+                std::memcpy(dst + (h * kCtx + f.p) * kHeadDim, src + (h * presRows + newRowsAt) * kHeadDim, (size_t) len * kHeadDim * 4);
             }
         }
         f.p += len;
