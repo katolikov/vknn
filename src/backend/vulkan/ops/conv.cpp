@@ -852,7 +852,15 @@ namespace vknn {
                     WinoGemmPC  gpc = {(int) Cin, (int) Cout, (int) nT};
                     WinoFusedPC opc = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, act, 0.f, 0.f};
                     auto        inPipe = env.pipeline(U_ == 2 ? "wino_input_fp16" : (U_ == 4 ? "wino_input4_fp16" : "wino_input6_fp16"), 2, sizeof(WinoInPC));
-                    auto        oPipe  = env.pipeline(U_ == 2 ? "wino_out_fp16" : (U_ == 4 ? "wino_out4_fp16" : "wino_out6_fp16"), 3, sizeof(WinoFusedPC));
+                    // The output pass hosts the fused epilogue, so the timed arm spells the same
+                    // stem + suffix at the same binding count record() dispatches — the epilogue's
+                    // register demand is part of what this race decides.
+                    std::string oName  = (U_ == 2) ? std::string("wino_out") + epi.suffix() :
+                                         (U_ == 4) ? std::string("wino_out4") + epi.suffix() :
+                                                     std::string("wino_out6") + epi.suffix();
+                    auto        oPipe  = env.pipeline((oName + "_fp16").c_str(), 3 + epi.extraBufs(), sizeof(WinoFusedPC));
+                    std::vector<VkBuffer> oBufs = {sM->handle(), sBias->handle(), sDst->handle()};
+                    epi.appendForTiming(oBufs, sDst->handle());
                     uint32_t    gy     = groups(Coutb, kWinoGemmTileNB);
                     // F(6,3)'s separable transforms run kWinoF63TransformLanes cooperating threads per
                     // (channel-block, tile) unit, so the timed transform dispatches match record()'s.
@@ -867,7 +875,7 @@ namespace vknn {
                             vk::computeBarrier(*env.ctx, cmd);
                             gemmPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
                             vk::computeBarrier(*env.ctx, cmd);
-                            oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT * lanes, 64));
+                            oPipe->dispatch(cmd, oBufs, &opc, sizeof(opc), groups(Coutb * nT * lanes, 64));
                         });
                     };
                     // Entrants in one interleaved race: LDS RM4 (the incumbent Tuning::None
@@ -940,6 +948,11 @@ namespace vknn {
                 // starves its N axis and runs far under the direct kernels (the DenseNet 128->32
                 // growth convs measured ~365 GF/s on it); those shapes take the direct/OCB race.
                 bool winoShape = (env.useFp16 && !depthwise && group == 1 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && x.c >= 32 && Cout >= 64);
+                // The epilogue is resolved before any race runs: every race builds the kernel the
+                // graph will actually dispatch (stem + epi.suffix()), and the epilogue's register
+                // demand is part of what the race is deciding. Preparing it after tuneWino left the
+                // Winograd race timing plain kernels while its siblings timed fused ones.
+                epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
                 int wchoice = winoShape ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
                 winograd    = (wchoice > 0);
                 winoUnit    = ((wchoice & 3) == 2) ? 4 : ((wchoice & 3) == 3) ? 6 : 2;
@@ -950,8 +963,6 @@ namespace vknn {
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
                 int64_t            Coutb = cBlocks(Cout);
-
-                epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
 
                 // bias, padded out to a multiple of 4 so the kernel can read whole vec4s
                 bbuf = uploadCached(env, node.name + "#b", [&] {
