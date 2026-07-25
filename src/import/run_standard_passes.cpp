@@ -100,10 +100,24 @@ namespace vknn {
         eliminateIdentity(g);
         foldBatchNorm(g);
         lowerBatchNorm(g); // whatever foldBatchNorm left becomes a fusable per-channel Mul+Add
-        // The experimental block-kernel fusions match on conv.fusedAct, so their prerequisite
-        // activation fold runs only with them; the general pointwise fusion below owns activation
-        // folding otherwise (and re-encodes any fusedAct these passes set as a unit step).
-        if (opt.fuseSqueezeExcite || opt.fuseDwPw)
+        // fuseActivations is the PREREQUISITE of the two experimental block-kernel fusions, not an
+        // activation optimization in its own right. fuseSqueezeExcite and fuseDwPw match on
+        // conv.fusedAct and both run here, ahead of the general pointwise fusion that otherwise
+        // sets it, so the fold has to precede them; it runs exactly when at least one of them will,
+        // once, ahead of both, so neither flag changes the graph the other pass sees.
+        //
+        // Activation folding at every optimization level is owned by fusePointwiseChains below,
+        // whose inline-act path sets the same conv.fusedAct from the same Relu/Clip, and re-encodes
+        // any fusedAct these passes set as a unit step. Running this fold first as well is measured
+        // to be redundant: over the classifier / depthwise / detector suite the result is isomorphic
+        // to the pointwise pass's own (same nodes, same epilogues, same encoded steps; only which of
+        // two equivalent tensor ids survives the fold differs, and the CPU oracle is byte-identical).
+        // So it is not a second, independent activation fusion, and adding it to the -O1 set would
+        // buy no fusion while changing every affected model's compiled bytes. Read the condition as
+        // the boolean below, not as "fuse-se or fuse-dwpw": with both off nothing needs the fold, so
+        // nothing loses it (tests/test_activation_fold_coupling.cpp pins that).
+        const bool blockFusionsNeedActivationEpilogues = opt.fuseSqueezeExcite || opt.fuseDwPw;
+        if (blockFusionsNeedActivationEpilogues)
         {
             fuseActivations(g);
         }

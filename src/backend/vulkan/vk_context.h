@@ -1,5 +1,6 @@
 // Vulkan instance/device context and capability discovery.
 #pragma once
+#include "core/dispatch_tally.h"
 #include "vk_common.h"
 #include "vknn/priority.h"
 #include <set>
@@ -145,6 +146,17 @@ namespace vknn { namespace vk {
             return memProps_;
         }
 
+        /// Compute-dispatch counter for everything recorded through this device's pipelines.
+        /// ComputePipeline::dispatch is the single site that notes into it, and the segment that
+        /// owns the recording drives the per-node attribution (see DispatchTally). One counter per
+        /// context = one per session backend, written only by that session's recording thread.
+        DispatchTally &dispatchTally() noexcept {
+            return dispatchTally_;
+        }
+        const DispatchTally &dispatchTally() const noexcept {
+            return dispatchTally_;
+        }
+
         // Extension function pointers (loaded if available).
         PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
         PFN_vkGetMemoryFdKHR          getMemoryFd          = nullptr;
@@ -167,6 +179,7 @@ namespace vknn { namespace vk {
         VulkanCaps                       caps_;
         std::vector<const char *>        enabledDeviceExts_;
         Priority                         priority_ = Priority::Normal;
+        DispatchTally                    dispatchTally_;
     };
 
 }} // namespace vknn::vk

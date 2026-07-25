@@ -48,6 +48,10 @@ namespace vknn {
         /// Sum of the measured GPU timestamp times, in milliseconds; records with no GPU measurement
         /// (negative gpuMs) are skipped.
         double totalGpuMs() const;
+        /// Sum of every record's recorded dispatch count. Covers the ops only — a segment's
+        /// boundary/epilogue dispatches belong to no record, so this is at or below the segment's
+        /// own dispatch total (which the segment logs).
+        uint64_t totalDispatches() const;
 
       private:
         bool                  enabled_ = false; ///< When false, add() records nothing.

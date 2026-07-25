@@ -2,6 +2,7 @@
 #include "vk_backend.h"
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
+#include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
 #include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
 #include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
 #include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
@@ -1406,7 +1407,7 @@ namespace vknn {
         if (cfg_.timingSummary && stat_.runs > 0)
         {
             const double n = (double) stat_.runs;
-            VKNN_INFO << "segment summary (" << nodeIdx.size() << " nodes, " << cmds_.size() << " chunk(s), " << stat_.runs
+            VKNN_INFO << "segment summary (" << nodeIdx.size() << " nodes, " << recordedDispatches_ << " dispatches, " << cmds_.size() << " chunk(s), " << stat_.runs
                       << " run(s)) avg ms/run: pack=" << stat_.packMs / n << " submitCall=" << stat_.submitCallMs / n
                       << " fenceWait=" << stat_.fenceWaitMs / n << " gpuBusy=" << stat_.gpuBusyMs / n
                       << " gpuGap=" << stat_.gpuGapMs / n << " unpack=" << stat_.unpackMs / n;
@@ -1435,6 +1436,12 @@ namespace vknn {
     }
 
     void VulkanSegment::record() {
+        // Recorded-dispatch accounting for this pass. Every dispatch the ops, boundary converts,
+        // link copies, chain feedback, and argmax epilogues record below is counted; the per-node
+        // share is attributed around each op's record() call. A re-record restarts the tally, so
+        // what it reports is always the CURRENT command stream.
+        DispatchTally &tally = env_.ctx->dispatchTally();
+        tally.beginRun(nodeIdx.size());
         // Per-chunk begin/end timestamps (Config::timingSummary): each chunk resets and writes
         // its own query pair, so a re-recorded buffer stays self-contained. Chunks past the
         // pool capacity execute untimed; gpuBusy/gpuGap then undercount rather than misindex.
@@ -1751,7 +1758,9 @@ namespace vknn {
                 vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2));
             }
             env_.useFp16 = nodeFp32(node) ? false : useFp16_; // match the variant chosen in prepare()
+            tally.openNode(k);
             ops_[k]->record(cmd_, node, env_);
+            tally.closeNode(); // a decode chain re-enters this loop per iteration; counts accumulate
             if (queryPool_)
             {
                 vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2 + 1));
@@ -1889,6 +1898,23 @@ namespace vknn {
         timedChunks_     = timedChunk;
         recorded_        = true;
         recordedConvert_ = convert_;
+        // Snapshot the tally into the segment: the tally belongs to the device context, so the next
+        // segment (or plan bucket) to record on it restarts the run and overwrites the table. The
+        // profile the run reports must be THIS segment's recording.
+        nodeDispatches_.assign(nodeIdx.size(), 0);
+        for (size_t k = 0; k < nodeIdx.size(); ++k)
+        {
+            nodeDispatches_[k] = tally.nodeDispatches(k);
+        }
+        recordedDispatches_ = tally.runTotal();
+        // The real per-run dispatch count, alongside the barrier tally above. It runs well above
+        // the node count: one op records several dispatches (split-K partial + reduce, Winograd's
+        // three passes, fused attention's partial + combine), and the boundary converts, resident
+        // link copies, chain feedback, and argmax epilogues dispatch outside any node. The op share
+        // also lands per node in the Config::profile table (OpRecord::dispatches).
+        const uint64_t nodeShare = tally.nodeTotal();
+        VKNN_INFO << "segment dispatches: " << recordedDispatches_ << " over " << nodeIdx.size() << " node(s) ("
+                  << nodeShare << " from nodes + " << (recordedDispatches_ - nodeShare) << " boundary/epilogue)";
     }
 
     void VulkanSegment::run(ExecContext &ctx) {
@@ -2387,6 +2413,9 @@ namespace vknn {
                 r.backend = "Vulkan";
                 r.gpuMs   = (double) (ts[k * 2 + 1] - ts[k * 2]) * period / 1e6;
                 r.cpuMs   = 0;
+                // What record() attributed to this node: 0 for an op the planner elided to a
+                // zero-copy view or lowered to a buffer copy, >1 for a multi-pass kernel.
+                r.dispatches = k < nodeDispatches_.size() ? nodeDispatches_[k] : 0;
                 ctx.profiler->add(r);
             }
             // GPU span (first dispatch start -> last dispatch end) vs the CPU-side submit wall: the

@@ -75,6 +75,13 @@ namespace vknn {
             uint64_t runs = 0;
             double   packMs = 0, submitCallMs = 0, fenceWaitMs = 0, gpuBusyMs = 0, gpuGapMs = 0, unpackMs = 0;
         } stat_;
+        // Compute dispatches the current recording holds: per node (index into nodeIdx, what the
+        // Config::profile table reports as OpRecord::dispatches) and the segment total, which also
+        // covers the boundary converts, resident-link copies, chain feedback, and argmax epilogues
+        // that belong to no node. Snapshotted at the end of record() because the counter itself
+        // lives on the device context and the next segment to record resets it.
+        std::vector<uint32_t>        nodeDispatches_;
+        uint64_t                     recordedDispatches_ = 0;
         std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
         // Zero-copy Concat/Split/Slice nodes whose EVERY slice the planner aliased as a sub-buffer
         // view: their record() emits nothing, so the barrier loop skips their hazard bookkeeping
