@@ -10,6 +10,7 @@
 // math byte-for-byte; the split-K kernels regroup the k chain (deterministically, identically to each
 // other) and so agree only to fp32 rounding.
 #include "backend/vulkan/coopmat_check.h"
+#include "backend/vulkan/vk_tune_race.h"
 #include "core/lowp_gemm.h"
 #include "core/matmul_tile.h"
 #include "core/matmul_view.h"
@@ -296,10 +297,11 @@ namespace vknn {
             }
 
             // Pick the tiled-GEMM tile for this shape (an index into kMatMulTiles; 0 = the default
-            // {128,128,16}). Tuning::None keeps the default; Fast/Heavy race the candidates
-            // min-of-5 x 8 reps on scratch buffers and persist the winning index in the tune
-            // table. Every candidate is bit-neutral (the per-output fp32 K chain is one
-            // ascending-k sequence for any tile), so the choice never affects output bits.
+            // {128,128,16}). Tuning::None keeps the default; Fast/Heavy race the candidates on
+            // scratch buffers through vk::raceCandidates (interleaved submits, order reversed every
+            // other round, median per candidate) and persist the winning index in the tune table.
+            // Every candidate is bit-neutral (the per-output fp32 K chain is one ascending-k
+            // sequence for any tile), so the choice never affects output bits.
             // Bit-neutrality is numeric safety, not measurement safety: the device throttles
             // several-fold under sustained load, so a challenger must still clear the incumbent by
             // kTuneRaceMargin before it displaces a proven pick in the persisted tune table (the
@@ -352,16 +354,6 @@ namespace vknn {
                     vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
                     return ms;
                 };
-                // Min over repeats: the fastest observed time is the least OS-perturbed estimate
-                // (see tuneWino); winners persist, so the measurement earns the rigorous tier.
-                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    double m = 1e30;
-                    for (int k = 0; k < 5; ++k)
-                    {
-                        m = std::min(m, timeIt(rec));
-                    }
-                    return m;
-                };
                 // Time each candidate with the kernel it will actually dispatch: the default tile
                 // runs the compile-time _fast kernel — the vec4-load twin when prepare()'s v4
                 // routing holds for this shape — and every other tile runs the spec-constant
@@ -374,8 +366,14 @@ namespace vknn {
                     fastBase = hasBias ? "matmul_tiled_fast_v4_bias" : "matmul_tiled_fast_v4";
                 }
                 uint32_t nbuf   = hasBias ? 5 : 4; // + the geometry SSBO bound after the operands/bias
-                int      best   = 0;
-                double   bestMs = 1e30;
+                // Entrants in kMatMulTiles order, minus the tiles whose dispatch does not fit; index
+                // 0 is always the default tile (tileFits holds for it whenever the op dispatches).
+                struct Entrant {
+                    int                                  tileIndex;
+                    std::shared_ptr<vk::ComputePipeline> pipe;
+                    uint32_t                             gxT, gyT;
+                };
+                std::vector<Entrant> entrants;
                 for (int ci = 0; ci < kMatMulTileCount; ++ci)
                 {
                     const MatMulTile &t = kMatMulTiles[ci];
@@ -385,26 +383,35 @@ namespace vknn {
                     }
                     bool                  fast = isDefaultMatMulTile(t);
                     std::vector<uint32_t> spec = fast ? std::vector<uint32_t> {} : std::vector<uint32_t> {(uint32_t) t.tm, (uint32_t) t.tn, (uint32_t) t.tk};
-                    auto                  p    = env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec);
-                    uint32_t              gxT  = (uint32_t) ((pc.N + t.tn - 1) / t.tn);
-                    uint32_t              gyT  = (uint32_t) ((pc.M + t.tm - 1) / t.tm);
-                    double                ms   = bestOf([&](VkCommandBuffer cmd) {
+                    entrants.push_back({ci, env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec), (uint32_t) ((pc.N + t.tn - 1) / t.tn), (uint32_t) ((pc.M + t.tm - 1) / t.tm)});
+                }
+                if (entrants.empty())
+                {
+                    return kMatMulTiles[0];
+                }
+                std::vector<double> ms = vk::raceCandidates((int) entrants.size(), [&](int index) {
+                    const Entrant &entrant = entrants[(size_t) index];
+                    return timeIt([&](VkCommandBuffer cmd) {
                         std::vector<VkBuffer> bufs {sA->handle(), sB->handle(), sD->handle()};
                         if (sBias)
                         {
                             bufs.push_back(sBias->handle());
                         }
                         bufs.push_back(geom->handle()); // geometry SSBO (matches the real dispatch's binding count)
-                        p->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, gyT, (uint32_t) gzT);
+                        entrant.pipe->dispatch(cmd, bufs, &pc, sizeof(pc), entrant.gxT, entrant.gyT, (uint32_t) gzT);
                         vk::computeBarrier(*env.ctx, cmd);
                     });
-                    // Candidate 0 (the default tile) seeds the race, so every later candidate is a
-                    // challenger and must clear the margin; a tie or a noise-width win keeps the
-                    // incumbent.
-                    if (ms < (ci == 0 ? bestMs : bestMs * kTuneRaceMargin))
+                });
+                // The default tile is the incumbent, so every other candidate is a challenger and
+                // must clear the margin; a tie or a noise-width win keeps the incumbent.
+                int    best   = entrants[0].tileIndex;
+                double bestMs = ms[0];
+                for (size_t ei = 1; ei < entrants.size(); ++ei)
+                {
+                    if (ms[ei] < bestMs * kTuneRaceMargin)
                     {
-                        bestMs = ms;
-                        best   = ci;
+                        bestMs = ms[ei];
+                        best   = entrants[ei].tileIndex;
                     }
                 }
                 VKNN_DEBUG << "autotune " << sig << " -> tile " << kMatMulTiles[best].tm << "x" << kMatMulTiles[best].tn << "x" << kMatMulTiles[best].tk;

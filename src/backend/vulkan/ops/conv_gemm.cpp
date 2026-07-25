@@ -11,11 +11,13 @@
 // (conv_gemm_ksplit fp32 partials + conv_gemm_kreduce finish); split-K changes the summation
 // order, so it is only ever selected by the race, never by default. Winners persist in the tune
 // cache so warm runs are stable.
-#include "core/conv_geom.h"
+#include "backend/vulkan/vk_tune_race.h"
 #include "core/conv_gemm_route.h"
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
+#include <algorithm>
 #include <functional>
 
 namespace vknn {
@@ -100,35 +102,52 @@ namespace vknn {
                     vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
                     return ms;
                 };
-                // Min over repeats: the fastest observed time is the least OS-perturbed estimate,
-                // keeping the cold-run choice stable across builds (bit-neutral, so it never affects output).
-                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    double m = 1e30;
-                    for (int k = 0; k < 5; ++k)
-                    {
-                        m = std::min(m, timeIt(rec));
-                    }
-                    return m;
-                };
-                int      best   = heur;
-                double   bestMs = 1e30;
                 uint32_t gxT    = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
-                for (int tm: {16, 32, 64})
+                // Entrants with the shape heuristic's tile first: it is what Tuning::None dispatches,
+                // so seeding the race with it keeps a race that resolves nothing on the default. The
+                // whole list is timed interleaved (vk::raceCandidates), so no tile is measured on a
+                // systematically warmer GPU than another.
+                struct Entrant {
+                    int                                  tm;
+                    std::shared_ptr<vk::ComputePipeline> pipe;
+                    uint32_t                             gyT;
+                };
+                std::vector<Entrant> entrants;
+                for (int tm: {heur, 16, 32, 64})
                 {
                     int64_t gyT = (M + tm - 1) / tm;
                     if (gyT > 65535)
                     {
                         continue; // the Y axis has no runtime split
                     }
-                    auto   p  = env.pipeline(shader(raceStem, env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm});
-                    double ms = bestOf([&](VkCommandBuffer cmd) {
-                        p->dispatch(cmd, {sSrc->handle(), raceWeights.handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()}, &pc, sizeof(pc), gxT, (uint32_t) gyT, (uint32_t) x.n);
+                    if (std::any_of(entrants.begin(), entrants.end(), [&](const Entrant &e) {
+                            return e.tm == tm;
+                        }))
+                    {
+                        continue; // heur repeats one of the three tiles
+                    }
+                    entrants.push_back({tm, env.pipeline(shader(raceStem, env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm}), (uint32_t) gyT});
+                }
+                if (entrants.empty())
+                {
+                    return heur;
+                }
+                std::vector<double> ms     = vk::raceCandidates((int) entrants.size(), [&](int index) {
+                    const Entrant &entrant = entrants[(size_t) index];
+                    return timeIt([&](VkCommandBuffer cmd) {
+                        entrant.pipe->dispatch(cmd, {sSrc->handle(), raceWeights.handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()}, &pc, sizeof(pc), gxT,
+                                               entrant.gyT, (uint32_t) x.n);
                         vk::computeBarrier(*env.ctx, cmd);
                     });
-                    if (ms < bestMs)
+                });
+                int                 best   = entrants[0].tm;
+                double              bestMs = ms[0];
+                for (size_t ei = 1; ei < entrants.size(); ++ei)
+                {
+                    if (ms[ei] < bestMs)
                     {
-                        bestMs = ms;
-                        best   = tm;
+                        bestMs = ms[ei];
+                        best   = entrants[ei].tm;
                     }
                 }
                 VKNN_DEBUG << "autotune " << sig << " -> tm=" << best;
