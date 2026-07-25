@@ -301,9 +301,17 @@ namespace vknn {
             // runs skip the measurement. Only the group==1 conv shader is tunable. Timing dispatches must
             // run on dedicated scratch buffers, never the real activation buffers, or they race and
             // corrupt the data path.
+            //
+            // Every race in this op times the epilogue-hosting kernel variant and keys its cache
+            // signature by epi.suffix(). A fused pointwise chain raises the kernel's register demand,
+            // and that is part of what decides which tile is fastest: measured on the efficientnet
+            // stem, the register-blocked conv_reg tile beats the direct kernel by 7% raced without
+            // the epilogue and loses to it by 87% raced with it (in-graph: +62%). Two nodes of the
+            // same shape that differ in whether they host a chain therefore need separate
+            // measurements, not a shared cache entry.
             uint32_t pickLocalSize(VkOpEnv &env) {
                 char buf[96];
-                snprintf(buf, sizeof(buf), "convls_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.SH);
+                snprintf(buf, sizeof(buf), "convls%s_%d_%d_%d_%d_%d_%d_%d_%d", epi.suffix(), pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.SH);
                 std::string sig      = env.gpuTag + "/" + buf;
                 const int   reqLevel = (int) env.tuning;
                 // Consult the cache first. A cached pick is reused under --tuning none (none runs no new
@@ -338,27 +346,15 @@ namespace vknn {
                     pipes.reserve(cands.size());
                     for (uint32_t ls: cands)
                     {
-                        pipes.push_back(env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {ls}));
+                        pipes.push_back(env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ls}));
                     }
-                    std::vector<double> ms     = vk::raceCandidates((int) cands.size(), [&](int index) {
-                        VkCommandBuffer cmd = env.runner->allocate();
-                        env.runner->begin(cmd);
-                        for (int rep = 0; rep < 8; ++rep)
-                        {
-                            // Barrier between reps, as in the other conv races: unbarriered reps
-                            // overlap on the GPU, and a wider local size issues proportionally fewer
-                            // workgroups, so it collects an overlap bonus the real (op-barriered)
-                            // command buffer never gives it.
-                            if (rep > 0)
-                            {
-                                vk::computeBarrier(*env.ctx, cmd);
-                            }
-                            pipes[(size_t) index]->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(total, cands[(size_t) index]));
-                        }
-                        env.runner->end(cmd);
-                        double submitMs = env.runner->submitAndWait(cmd);
-                        vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                        return submitMs;
+                    std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
+                    epi.appendForTiming(bufs, sDst->handle());
+                    vk::TuneTimer       timer(env);
+                    std::vector<double> ms = vk::raceCandidates((int) cands.size(), [&](int index) {
+                        return timer.time([&](VkCommandBuffer cmd) {
+                            pipes[(size_t) index]->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, cands[(size_t) index]));
+                        });
                     });
                     double              bestMs = ms[0];
                     for (size_t ci = 1; ci < cands.size(); ++ci)
@@ -369,7 +365,7 @@ namespace vknn {
                             best   = cands[ci];
                         }
                     }
-                    VKNN_DEBUG << "autotune " << sig << " -> local_size_x=" << best;
+                    VKNN_DEBUG << "autotune " << sig << " -> local_size_x=" << best << vk::raceTimes(ms);
                 }
                 if (env.weights)
                 {
@@ -378,72 +374,33 @@ namespace vknn {
                 return best;
             }
 
-            // Autotune the depthwise kernel's output tile: race the 1-pixel-per-thread dwconv kernel
-            // against the 2x2 output-tile twin (dwconv_t2). The two kernels share one per-output
-            // accumulation order (bias seed, ky/kx tap ascend, in-range taps only), so the choice is
-            // bit-neutral (pure thread->output remapping) and safe to timing-race under ADR-0009.
-            // Returns 0 = 1-pixel kernel, 1 = 2x2 tile. Measured on scratch buffers + cached like
-            // pickWTile; the tile is a NEW candidate class, so it must beat the incumbent by 3%.
-            // The tile is stride/dilation-agnostic (outputs stay independent) but only worth racing
-            // when the output extent actually tiles (y.h >= 2 && y.w >= 2).
-            // The tile quarters the thread count; below kDwTileMinThreads the dispatch is too small
-            // to fill the device, which is where the isolated race diverges most from the real
-            // op-barriered pipeline, so small dispatches keep the 1-pixel kernel without racing
-            // (the measured winners run 7000+ tile threads; sub-0.1ms shapes have nothing to win).
+            // The depthwise output tile is NOT raced: the 2x2 twin (dwconv_t2) is a measured
+            // negative result. Racing it representatively — each candidate dispatched once from a
+            // cold cache with the epilogue the graph actually runs — selects it on 1 of 32 depthwise
+            // shapes across the suite, and an in-graph study measured it 195-265% SLOWER than the
+            // 1-pixel kernel on the shapes the old warm-repeated race did pick it for: quartering
+            // the thread count trades parallelism, which this device punishes. ShuffleNetV2 never
+            // reaches this decision at all (its depthwise convs are consumed by FusedDwPw), so the
+            // v1.4.1 ShuffleNet win came from the ChannelShuffle fold, not this tile. Keeping the
+            // candidate also cost the most cold-tuning time of any entrant, since its losing
+            // pipeline variants still compile. The kernel stays selectable through the tune table
+            // for a deliberate experiment; nothing selects it automatically.
             int pickDwTile(VkOpEnv &env, NCHW x, NCHW y, int64_t Cb) {
                 // Eligibility precedes the cache consult: a cached tile pick is only honored while
                 // the shape still tiles (the sig carries OH/OW, so this re-gate is belt-and-braces).
                 const int64_t tileThreads  = (int64_t) x.n * Cb * ((y.h + 1) / 2) * ((y.w + 1) / 2);
                 bool          tileEligible = y.h >= 2 && y.w >= 2 && tileThreads >= kDwTileMinThreads;
                 char buf[112];
-                snprintf(buf, sizeof(buf), "dwt_%d_%d_%d_%d_%d_%d", dpc.C, dpc.OH, dpc.OW, dpc.KH, dpc.KW, dpc.SH);
+                snprintf(buf, sizeof(buf), "dwt%s_%d_%d_%d_%d_%d_%d", epi.suffix(), dpc.C, dpc.OH, dpc.OW, dpc.KH, dpc.KW, dpc.SH);
                 std::string sig = env.gpuTag + "/" + buf;
                 int         reuse;
                 if (env.reuseTuned(sig, reuse) && (reuse == 0 || (reuse == 1 && tileEligible)))
                 {
                     return reuse;
                 }
-                if (env.tuning == Tuning::None || !env.runner || !tileEligible)
-                {
-                    return 0; // deterministic default: the existing 1-pixel kernel
-                }
-                int    es       = env.useFp16 ? 2 : 4;
-                size_t srcBytes = (size_t) x.n * Cb * x.h * x.w * 4 * es;
-                size_t dstBytes = (size_t) y.n * Cb * y.h * y.w * 4 * es;
-                auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
-                auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
-                auto   timeIt   = [&](std::shared_ptr<vk::ComputePipeline> p, int64_t tot) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int rep = 0; rep < 8; ++rep)
-                    {
-                        // Barrier between reps: see pickWTile — unbarriered reps overlap and bias
-                        // the race toward low-workgroup-count tiles.
-                        if (rep > 0)
-                        {
-                            vk::computeBarrier(*env.ctx, cmd);
-                        }
-                        p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &dpc, sizeof(dpc), groups(tot, 64));
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
-                };
-                // Entrant 0 is the incumbent 1-pixel kernel, entrant 1 the 2x2 tile; interleaved so
-                // neither reads on a systematically warmer GPU than the other.
-                auto                basePipe = env.pipeline(shader("dwconv", env.useFp16), 4, sizeof(DwPC));
-                auto                tilePipe = env.pipeline(shader("dwconv_t2", env.useFp16), 4, sizeof(DwPC));
-                std::vector<double> ms       = vk::raceCandidates(2, [&](int index) {
-                    return index == 0 ? timeIt(basePipe, x.n * Cb * y.h * y.w) : timeIt(tilePipe, x.n * Cb * ((y.h + 1) / 2) * ((y.w + 1) / 2));
-                });
-                int                 best     = (ms[1] < ms[0] * 0.97) ? 1 : 0;
-                VKNN_DEBUG << "autotune " << sig << " -> dwtile=" << (best == 1 ? "2x2" : "1x1");
-                if (env.weights)
-                {
-                    env.weights->setTuned(sig, best, (int) env.tuning);
-                }
-                return best;
+                // The tile is never selected automatically (see above); only an explicit tune-table
+                // entry, consulted before this point, can still reach it.
+                return 0;
             }
 
             // Autotune the register tile of the 1x1 kernels: WTILE (output pixels per thread) and OCB
@@ -458,7 +415,7 @@ namespace vknn {
             }
             uint32_t pickWTile(VkOpEnv &env, bool s2, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
                 char buf[96];
-                snprintf(buf, sizeof(buf), "c1x1%s_%d_%d_%d_%d_%d", s2 ? "s2" : "", (int) x.c, (int) Cout, (int) y.h, (int) y.w, hasRes ? 1 : 0);
+                snprintf(buf, sizeof(buf), "c1x1%s%s_%d_%d_%d_%d_%d", s2 ? "s2" : "", epi.suffix(), (int) x.c, (int) Cout, (int) y.h, (int) y.w, hasRes ? 1 : 0);
                 std::string sig = env.gpuTag + "/" + buf;
                 int         reuse;
                 if (env.reuseTuned(sig, reuse) && reuse > 0 && valid1x1Tile(reuse))
@@ -484,32 +441,21 @@ namespace vknn {
                 for (uint32_t cand: cands)
                 {
                     uint32_t wt = cand & 0xffu, ocb = std::max(1u, cand >> 8);
-                    pipes.push_back(env.pipeline(shader(s2 ? "conv1x1_s2" : "conv1x1", env.useFp16), hasRes ? 5 : 4, sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb}));
+                    pipes.push_back(env.pipeline(shader((std::string(s2 ? "conv1x1_s2" : "conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb}));
                     int64_t HW  = y.h * y.w;
                     totals.push_back(x.n * ((Coutb + ocb - 1) / ocb) * ((HW + wt - 1) / wt));
                 }
-                std::vector<double> ms     = vk::raceCandidates((int) cands.size(), [&](int index) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
-                    if (hasRes)
-                    {
-                        bufs.push_back(sDst->handle()); // timing only: any readable buffer serves as the residual
-                    }
-                    env.runner->begin(cmd);
-                    for (int rep = 0; rep < 8; ++rep)
-                    {
-                        // Barrier between reps: unbarriered reps overlap on the GPU, which rewards
-                        // low-workgroup-count tiles the real (op-barriered) command buffer does not.
-                        if (rep > 0)
-                        {
-                            vk::computeBarrier(*env.ctx, cmd);
-                        }
+                std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
+                if (hasRes || epi.active)
+                {
+                    bufs.push_back(sDst->handle()); // timing only: any readable buffer serves as the residual
+                }
+                epi.appendForTiming(bufs, sDst->handle());
+                vk::TuneTimer       timer(env);
+                std::vector<double> ms = vk::raceCandidates((int) cands.size(), [&](int index) {
+                    return timer.time([&](VkCommandBuffer cmd) {
                         pipes[(size_t) index]->dispatch(cmd, bufs, &pc, sizeof(pc), groups(totals[(size_t) index], 64));
-                    }
-                    env.runner->end(cmd);
-                    double submitMs = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return submitMs;
+                    });
                 });
                 // cands[0] is the deterministic default and stays the incumbent: a challenger must
                 // beat ITS time by the margin, and the fastest qualifier wins. Comparing against a
@@ -529,7 +475,7 @@ namespace vknn {
                         best   = cands[ci];
                     }
                 }
-                VKNN_DEBUG << "autotune " << sig << " -> wtile=" << (best & 0xffu) << " ocb=" << std::max(1u, best >> 8);
+                VKNN_DEBUG << "autotune " << sig << " -> wtile=" << (best & 0xffu) << " ocb=" << std::max(1u, best >> 8) << vk::raceTimes(ms);
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, (int) best, (int) env.tuning);
@@ -595,7 +541,7 @@ namespace vknn {
                 char    buf[128];
                 // Stem convocb2_: the encoding gained the kChoiceOcSplit2/4 flags, so the stem is
                 // renamed and a pre-split convocb_ entry can never decode against the wider field.
-                snprintf(buf, sizeof(buf), "convocb2_%d_%d_%d_%d_%d_%d_%d_%d_%d", pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
+                snprintf(buf, sizeof(buf), "convocb2%s_%d_%d_%d_%d_%d_%d_%d_%d_%d", epi.suffix(), pc.Cin, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH);
                 std::string sig = env.gpuTag + "/" + buf;
                 int  reuse;
                 // A 1-D kernel (1xK / Kx1, stride 1, dilation 1) is eligible for the sliding-window
@@ -641,47 +587,27 @@ namespace vknn {
                 size_t dstBytes = (size_t) pc.N * Coutb * pc.OH * pc.OW * 4 * es;
                 auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
                 auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
-                auto    timeIt  = [&](std::shared_ptr<vk::ComputePipeline> p, int64_t tot, uint32_t ls) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int rep = 0; rep < 8; ++rep)
-                    {
-                        // Barrier between reps: see pickWTile — unbarriered reps overlap and bias
-                        // the race toward low-workgroup-count tiles.
-                        if (rep > 0)
-                        {
-                            vk::computeBarrier(*env.ctx, cmd);
-                        }
-                        p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &pc, sizeof(pc), groups(tot, ls));
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
+                std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
+                epi.appendForTiming(bufs, sDst->handle());
+                vk::TuneTimer timer(env);
+                auto          timeIt = [&](std::shared_ptr<vk::ComputePipeline> p, int64_t tot, uint32_t ls) {
+                    return timer.time([&](VkCommandBuffer cmd) {
+                        p->dispatch(cmd, bufs, &pc, sizeof(pc), groups(tot, ls));
+                    });
                 };
-                // OC-split timing twin of timeIt: each rep issues the candidate's slice dispatches
-                // back-to-back with no intra-rep barrier, exactly as record() replays the winner.
+                // OC-split timing twin of timeIt: the candidate's slice dispatches go back-to-back
+                // with no barrier between them, exactly as record() replays the winner. The slices
+                // are one op, so they are all inside the one measurement.
                 auto timeSplit = [&](std::shared_ptr<vk::ComputePipeline> p, int64_t tot, int parts) {
-                    int64_t         sliceThreads = ocSplitSliceThreads(tot, parts);
-                    VkCommandBuffer cmd          = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int rep = 0; rep < 8; ++rep)
-                    {
-                        if (rep > 0)
-                        {
-                            vk::computeBarrier(*env.ctx, cmd);
-                        }
+                    int64_t sliceThreads = ocSplitSliceThreads(tot, parts);
+                    return timer.time([&](VkCommandBuffer cmd) {
                         for (int64_t sliceBase = 0; sliceBase < tot; sliceBase += sliceThreads)
                         {
                             ConvPC slicePc  = pc;
                             slicePc.gidBase = (int) sliceBase;
-                            p->dispatch(cmd, {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()}, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(sliceThreads, tot - sliceBase), 64));
+                            p->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(sliceThreads, tot - sliceBase), 64));
                         }
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
+                    });
                 };
                 std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {2, 3, 2 | (8u << 8), 3 | (8u << 8), 1 | (8u << 8)} : std::vector<uint32_t> {2, 2 | (8u << 8)};
                 // A 1-D kernel (1xK / Kx1, stride 1, dilation 1) adds the sliding-window candidates:
@@ -734,7 +660,7 @@ namespace vknn {
                 };
                 std::vector<OcbEntrant> entrants;
                 entrants.push_back({0, 1.0, [&] {
-                                        return timeIt(env.pipeline(shader("conv", env.useFp16), 4, sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
+                                        return timeIt(env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
                                     }});
                 for (uint32_t cand: cands)
                 {
@@ -749,14 +675,14 @@ namespace vknn {
                     {
                         int64_t alen = (kaxis == 0) ? y.w : y.h;
                         int64_t clen = (kaxis == 0) ? y.h : y.w;
-                        auto    pipe = env.pipeline("conv_1d_fp16", 4, sizeof(ConvPC), {ocb, wt, kaxis, klen});
+                        auto    pipe = env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, kaxis, klen});
                         int64_t tot  = x.n * ocbGroups * clen * ((alen + wt - 1) / wt);
                         entrants.push_back({(int) cand, margin, [&, pipe, tot] {
                                                 return timeIt(pipe, tot, 64);
                                             }});
                     } else
                     {
-                        auto    pipe = env.pipeline(shader("conv_reg", env.useFp16), 4, sizeof(ConvPC), {ocb, wt});
+                        auto    pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt});
                         int64_t tot  = x.n * ocbGroups * ((HW + wt - 1) / wt);
                         entrants.push_back({(int) cand, margin, [&, pipe, tot, parts] {
                                                 return parts > 1 ? timeSplit(pipe, tot, parts) : timeIt(pipe, tot, 64);
@@ -768,7 +694,7 @@ namespace vknn {
                 // tap order, pad taps add +0.0), so the swap needs no anti-noise margin either.
                 if (lds3x3)
                 {
-                    auto pipe = env.pipeline("conv3x3_lds_fp16", 4, sizeof(ConvPC));
+                    auto pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC));
                     entrants.push_back({kChoiceLds3x3, 1.0, [&, pipe] {
                                             return timeIt(pipe, ldsG * 64, 64);
                                         }});
@@ -778,7 +704,7 @@ namespace vknn {
                 // tile's input reads); an anti-noise margin guards the new class.
                 if (lds16Ok)
                 {
-                    auto pipe = env.pipeline("conv3x3_lds_fp16", 4, sizeof(ConvPC), {16u, 256u});
+                    auto pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {16u, 256u});
                     entrants.push_back({kChoiceLds16, 0.97, [&, pipe] {
                                             return timeIt(pipe, ldsG16 * 256, 256);
                                         }});
@@ -799,7 +725,7 @@ namespace vknn {
                         best   = entrants[ei].choice;
                     }
                 }
-                VKNN_DEBUG << "autotune " << sig << " -> ocb=" << best;
+                VKNN_DEBUG << "autotune " << sig << " -> ocb=" << best << vk::raceTimes(ms);
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, best, (int) env.tuning);
@@ -931,29 +857,17 @@ namespace vknn {
                     // F(6,3)'s separable transforms run kWinoF63TransformLanes cooperating threads per
                     // (channel-block, tile) unit, so the timed transform dispatches match record()'s.
                     int64_t     lanes  = (U_ == 6) ? kWinoF63TransformLanes : 1;
-                    auto        timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                        VkCommandBuffer cmd = env.runner->allocate();
-                        env.runner->begin(cmd);
-                        for (int r = 0; r < 8; ++r)
-                        {
-                            rec(cmd);
-                        }
-                        env.runner->end(cmd);
-                        double ms = env.runner->submitAndWait(cmd);
-                        vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                        return ms;
-                    };
+                    vk::TuneTimer timer(env);
                     // Race only the bit-neutral choices — the RM tile and the GEMM body; ACC16 is
                     // fixed to 0 (fp32 accumulate). One full 3-pass per candidate so the GEMM's
                     // share of the pipeline is what is measured.
                     auto time3Pass = [&](std::shared_ptr<vk::ComputePipeline> gemmPipe, uint32_t gx) {
-                        return timeIt([&](VkCommandBuffer cmd) {
+                        return timer.time([&](VkCommandBuffer cmd) {
                             inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT * lanes, 64));
                             vk::computeBarrier(*env.ctx, cmd);
                             gemmPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
                             vk::computeBarrier(*env.ctx, cmd);
                             oPipe->dispatch(cmd, {sM->handle(), sBias->handle(), sDst->handle()}, &opc, sizeof(opc), groups(Coutb * nT * lanes, 64));
-                            vk::computeBarrier(*env.ctx, cmd);
                         });
                     };
                     // Entrants in one interleaved race: LDS RM4 (the incumbent Tuning::None

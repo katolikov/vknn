@@ -271,6 +271,25 @@ namespace vknn {
         uint32_t extraBufs() const {
             return active ? 1u + (uint32_t) kPwMaxOperands + (uint32_t) kPwMaxOuts : 0u;
         }
+        // Binding set for a load-time timing race: the real plan SSBO plus `filler` in every
+        // operand and extra-output slot. A race runs on dedicated scratch buffers, so there are no
+        // live operands to resolve and the results are discarded - the operand VALUES do not matter.
+        // What does matter is that the race dispatches the SAME kernel variant the graph will, at
+        // the same binding count: the epilogue's register demand is part of what decides which conv
+        // tile is fastest, and a race run on the plain stem ranks the tiles for a kernel that is
+        // never dispatched. `filler` must be at least output-sized, since the epilogue indexes its
+        // operands by output element.
+        void appendForTiming(std::vector<VkBuffer> &bufs, VkBuffer filler) const {
+            if (!active)
+            {
+                return;
+            }
+            bufs.push_back(plan->handle());
+            for (int slot = 0; slot < kPwMaxOperands + kPwMaxOuts; ++slot)
+            {
+                bufs.push_back(filler);
+            }
+        }
         void append(std::vector<VkBuffer> &bufs, const Node &node, VkOpEnv &env, VkBuffer dummy) {
             if (!active)
             {

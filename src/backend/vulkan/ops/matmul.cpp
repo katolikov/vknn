@@ -342,18 +342,7 @@ namespace vknn {
                 auto                        sB     = mk((size_t) gzT * pc.K * pc.bNp * es);
                 auto                        sD     = mk((size_t) gzT * pc.M * pc.N * es);
                 std::shared_ptr<vk::Buffer> sBias  = hasBias ? mk((size_t) pc.N * es) : nullptr;
-                auto                        timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int r = 0; r < 8; ++r)
-                    {
-                        rec(cmd);
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
-                };
+                vk::TuneTimer               timer(env);
                 // Time each candidate with the kernel it will actually dispatch: the default tile
                 // runs the compile-time _fast kernel — the vec4-load twin when prepare()'s v4
                 // routing holds for this shape — and every other tile runs the spec-constant
@@ -391,7 +380,7 @@ namespace vknn {
                 }
                 std::vector<double> ms = vk::raceCandidates((int) entrants.size(), [&](int index) {
                     const Entrant &entrant = entrants[(size_t) index];
-                    return timeIt([&](VkCommandBuffer cmd) {
+                    return timer.time([&](VkCommandBuffer cmd) {
                         std::vector<VkBuffer> bufs {sA->handle(), sB->handle(), sD->handle()};
                         if (sBias)
                         {
@@ -399,7 +388,6 @@ namespace vknn {
                         }
                         bufs.push_back(geom->handle()); // geometry SSBO (matches the real dispatch's binding count)
                         entrant.pipe->dispatch(cmd, bufs, &pc, sizeof(pc), entrant.gxT, entrant.gyT, (uint32_t) gzT);
-                        vk::computeBarrier(*env.ctx, cmd);
                     });
                 });
                 // The default tile is the incumbent, so every other candidate is a challenger and
@@ -417,7 +405,7 @@ namespace vknn {
                         best   = entrants[ei].tileIndex;
                     }
                 }
-                VKNN_DEBUG << "autotune " << sig << " -> tile " << kMatMulTiles[best].tm << "x" << kMatMulTiles[best].tn << "x" << kMatMulTiles[best].tk;
+                VKNN_DEBUG << "autotune " << sig << " -> tile " << kMatMulTiles[best].tm << "x" << kMatMulTiles[best].tn << "x" << kMatMulTiles[best].tk << vk::raceTimes(ms);
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, best, (int) env.tuning);

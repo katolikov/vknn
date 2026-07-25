@@ -69,10 +69,12 @@ namespace vknn {
                 (void) K;
                 int  heur = convGemmTileM(M);
                 char buf[112];
-                // The vec4-weight route gets its own signature namespace: a tile raced on one load
-                // width must never be reused for the other (bit-neutral either way, but the winner
-                // is a throughput measurement of the kernel it was raced on).
-                snprintf(buf, sizeof(buf), "cgemm%s_%d_%d_%d", wv4 ? "w" : "", (int) M, (int) K, (int) Cout);
+                // The vec4-weight route and the fused-epilogue variant each get their own signature
+                // namespace: a tile raced on one load width or without the epilogue must never be
+                // reused for the other (bit-neutral either way, but the winner is a throughput
+                // measurement of the exact kernel it was raced on, and the epilogue's register
+                // demand is part of what decides which tile wins).
+                snprintf(buf, sizeof(buf), "cgemm%s%s_%d_%d_%d", wv4 ? "w" : "", epi.suffix(), (int) M, (int) K, (int) Cout);
                 std::string sig = env.gpuTag + "/" + buf;
                 int         reuse;
                 if (env.reuseTuned(sig, reuse) && (reuse == 16 || reuse == 32 || reuse == 64))
@@ -90,19 +92,8 @@ namespace vknn {
                 };
                 auto sSrc   = mk((size_t) x.n * Cinb * x.h * x.w * 4 * es);
                 auto sDst   = mk((size_t) y.n * Coutb * y.h * y.w * 4 * es);
-                auto timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int r = 0; r < 8; ++r)
-                    {
-                        rec(cmd);
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
-                };
-                uint32_t gxT    = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
+                vk::TuneTimer timer(env);
+                uint32_t      gxT = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
                 // Entrants with the shape heuristic's tile first: it is what Tuning::None dispatches,
                 // so seeding the race with it keeps a race that resolves nothing on the default. The
                 // whole list is timed interleaved (vk::raceCandidates), so no tile is measured on a
@@ -126,18 +117,18 @@ namespace vknn {
                     {
                         continue; // heur repeats one of the three tiles
                     }
-                    entrants.push_back({tm, env.pipeline(shader(raceStem, env.useFp16), 4, sizeof(ConvGemmPC), {(uint32_t) tm}), (uint32_t) gyT});
+                    entrants.push_back({tm, env.pipeline(shader((std::string(raceStem) + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), {(uint32_t) tm}), (uint32_t) gyT});
                 }
                 if (entrants.empty())
                 {
                     return heur;
                 }
+                std::vector<VkBuffer> bufs = {sSrc->handle(), raceWeights.handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()};
+                epi.appendForTiming(bufs, sDst->handle());
                 std::vector<double> ms     = vk::raceCandidates((int) entrants.size(), [&](int index) {
                     const Entrant &entrant = entrants[(size_t) index];
-                    return timeIt([&](VkCommandBuffer cmd) {
-                        entrant.pipe->dispatch(cmd, {sSrc->handle(), raceWeights.handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()}, &pc, sizeof(pc), gxT,
-                                               entrant.gyT, (uint32_t) x.n);
-                        vk::computeBarrier(*env.ctx, cmd);
+                    return timer.time([&](VkCommandBuffer cmd) {
+                        entrant.pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, entrant.gyT, (uint32_t) x.n);
                     });
                 });
                 int                 best   = entrants[0].tm;
@@ -150,7 +141,7 @@ namespace vknn {
                         best   = entrants[ei].tm;
                     }
                 }
-                VKNN_DEBUG << "autotune " << sig << " -> tm=" << best;
+                VKNN_DEBUG << "autotune " << sig << " -> tm=" << best << vk::raceTimes(ms);
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, best, (int) env.tuning);
