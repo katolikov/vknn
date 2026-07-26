@@ -106,7 +106,8 @@ namespace vknn {
                 // Threads per implicit-GEMM workgroup (shaders/conv_gemm.comp).
                 constexpr double            kConvGemmThreads = 64.0;
                 const double                elemsPerVec4     = 4.0;
-                const double                footprint        = ((double) M * (double) K + (double) K * (double) Cout + (double) M * (double) Cout) * (double) x.n / elemsPerVec4;
+                const double                streamFootprint   = ((double) M * (double) K + (double) M * (double) Cout) * (double) x.n / elemsPerVec4;
+                const double                residentFootprint = (double) K * (double) Cout * (double) x.n / elemsPerVec4;
                 std::vector<Entrant>        entrants;
                 std::vector<vk::KernelCost> costs;
                 for (int tm: {heur, 16, 32, 64})
@@ -127,11 +128,13 @@ namespace vknn {
                     // weight panel per K step: K*(TM + kConvGemmTileN) elements over the reduction.
                     const double   wgroups = (double) gxT * (double) gyT * (double) x.n;
                     vk::KernelCost cost;
-                    // The implicit A panel and the output stream; the weight panel stays resident.
-                    cost.streamVec4    = (wgroups * (double) K * (double) tm + (double) x.n * (double) M * (double) Cout) / elemsPerVec4;
-                    cost.residentVec4  = wgroups * (double) K * (double) kConvGemmTileN / elemsPerVec4;
-                    cost.footprintVec4 = footprint;
-                    cost.waves         = wgroups * kConvGemmThreads / 64.0;
+                    // The implicit A panel and the output are the activation side; the weight
+                    // panel is the weight side.
+                    cost.streamVec4            = (wgroups * (double) K * (double) tm + (double) x.n * (double) M * (double) Cout) / elemsPerVec4;
+                    cost.residentVec4          = wgroups * (double) K * (double) kConvGemmTileN / elemsPerVec4;
+                    cost.streamFootprintVec4   = streamFootprint;
+                    cost.residentFootprintVec4 = residentFootprint;
+                    cost.waves                 = wgroups * kConvGemmThreads / 64.0;
                     costs.push_back(cost);
                 }
                 if (entrants.empty())

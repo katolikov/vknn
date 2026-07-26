@@ -51,6 +51,14 @@ namespace vknn {
         /// throttles several-fold under sustained load and the isolated race's noise on small shapes is
         /// wider than the differences it resolves, so an unmargined challenger displaces a proven pick
         /// on noise alone.
+        ///
+        /// The margin is waived for a challenger the analytical model (vk_tune_model.h) also ranks
+        /// cheaper than the incumbent: being faster is then enough. What the margin discards is one
+        /// noisy sample, and a second signal that is independent of the measurement and deterministic
+        /// is not that. Waiving it matters because the estimator's resolving power is not only noise:
+        /// on a 17x17 pointwise conv whose two tiles differ by 30% in graph, the raced difference is
+        /// a repeatable 2%, so the margin rejects a real win every time and which tile the pick lands
+        /// on comes down to where the noise falls.
         constexpr double kTuneRaceMargin = 0.97;
 
         /// Bytes the eviction kernel streams before each measured dispatch. Vulkan exposes no

@@ -370,7 +370,8 @@ namespace vknn {
                 // Threads per tiled-GEMM workgroup (shaders/matmul_tiled.comp dispatches TILE x TILE).
                 constexpr double            kMatMulTiledThreads = 256.0;
                 const double                elemsPerVec4        = 4.0;
-                const double                footprint    = (double) gzT * ((double) pc.M * pc.K + (double) pc.K * pc.N + (double) pc.M * pc.N) / elemsPerVec4;
+                const double                streamFootprint   = (double) gzT * ((double) pc.M * pc.K + (double) pc.M * pc.N) / elemsPerVec4;
+                const double                residentFootprint = (double) gzT * (double) pc.K * (double) pc.N / elemsPerVec4;
                 for (int ci = 0; ci < kMatMulTileCount; ++ci)
                 {
                     const MatMulTile &t = kMatMulTiles[ci];
@@ -382,12 +383,13 @@ namespace vknn {
                     entrants.push_back({ci, gxT, gyT});
                     const double   wgroups = (double) gxT * (double) gyT * (double) gzT;
                     vk::KernelCost cost;
-                    // The A panel and the output stream; the B panel is the weight side and stays
-                    // cache-resident across the workgroups that share it.
-                    cost.streamVec4    = (wgroups * (double) pc.K * (double) t.tm + (double) gzT * (double) pc.M * (double) pc.N) / elemsPerVec4;
-                    cost.residentVec4  = wgroups * (double) pc.K * (double) t.tn / elemsPerVec4;
-                    cost.footprintVec4 = footprint;
-                    cost.waves         = wgroups * (double) kMatMulTiledThreads / 64.0;
+                    // The A panel and the output are the activation side; the B panel is the
+                    // weight side, shared across the workgroups of one output column.
+                    cost.streamVec4            = (wgroups * (double) pc.K * (double) t.tm + (double) gzT * (double) pc.M * (double) pc.N) / elemsPerVec4;
+                    cost.residentVec4          = wgroups * (double) pc.K * (double) t.tn / elemsPerVec4;
+                    cost.streamFootprintVec4   = streamFootprint;
+                    cost.residentFootprintVec4 = residentFootprint;
+                    cost.waves                 = wgroups * (double) kMatMulTiledThreads / 64.0;
                     costs.push_back(cost);
                 }
                 if (entrants.empty())
@@ -413,14 +415,17 @@ namespace vknn {
                     });
                 });
                 // The default tile is the incumbent, so every other candidate is a challenger and
-                // must clear the margin; a tie or a noise-width win keeps the incumbent.
-                int          best   = entrants[0].tileIndex;
-                double       bestMs = ms[0];
-                const double need   = ms[0] * vk::kTuneRaceMargin;
+                // must clear the margin; a tie keeps the incumbent, and so does a noise-width win
+                // the analytical model does not corroborate.
+                const std::vector<double> model = vk::modelEstimates(costs, vk::deviceTuneModel(env));
+                int                       best   = entrants[0].tileIndex;
+                double                    bestMs = ms[0];
                 for (size_t ei = 1; ei < entrants.size(); ++ei)
                 {
                     // Measured against the incumbent's own time rather than a running best, so the
-                    // margin cannot compound and the outcome does not depend on list order.
+                    // margin cannot compound and the outcome does not depend on list order. The
+                    // margin is waived for a tile the model also ranks cheaper (see kTuneRaceMargin).
+                    const double need = ms[0] * (model[ei] < model[0] ? 1.0 : vk::kTuneRaceMargin);
                     if (ms[ei] < need && ms[ei] < bestMs)
                     {
                         bestMs = ms[ei];

@@ -18,12 +18,11 @@ namespace vknn { namespace vk {
         constexpr uint32_t kProbeLocalSize = 64;
         /// Bytes one probe load moves (one uvec4).
         constexpr uint32_t kProbeBytesPerLoad = 16;
-        /// Cold-stream probe footprint. Far above the few MB of GPU L2 + system-level cache on the
-        /// mobile parts this engine targets, so its rate is DRAM's and not a cache's.
-        constexpr size_t kProbeStreamBytes = 24u << 20;
-        /// Cache-resident probe footprint: small enough to stay in L1/L2 for the whole sweep, so
-        /// its rate is what a kernel's redundant (already-fetched) loads actually cost.
-        constexpr size_t kProbeResidentBytes = 128u << 10;
+        /// Cold-stream probe footprint. reReadBytesPerMs interpolates against these two, so the
+        /// probe and the model must name the same pair.
+        constexpr size_t kProbeStreamBytes = (size_t) kTuneModelStreamFootprintBytes;
+        /// Cache-resident probe footprint.
+        constexpr size_t kProbeResidentBytes = (size_t) kTuneModelResidentFootprintBytes;
         /// Loads each thread issues in the resident probes. Enough that the loop, not the launch,
         /// is what the measurement resolves.
         constexpr uint32_t kProbeLoadsPerThread = 64;
@@ -39,12 +38,8 @@ namespace vknn { namespace vk {
         /// Fraction of the sweep's peak throughput that counts as saturated.
         constexpr double kProbeSaturationFraction = 0.90;
 
-        /// Tune-table value scale: the constants are doubles and the table stores ints, so each is
-        /// persisted as a fixed-point integer. Large enough that the rounding is far below the
-        /// factor-of-two error the shortlist tolerates.
-        constexpr double kPersistScale = 1000.0;
         /// Bumped whenever the constant set or its meaning changes, so a stale entry cannot decode.
-        constexpr int kTuneModelVersion = 1;
+        constexpr int kTuneModelVersion = 2;
 
         /// Slope of throughput against waves below saturation, on a log-log fit of the sweep.
         double fitExponent(const std::vector<double> &waves, const std::vector<double> &rate, double peak, double satWaves) {
@@ -148,14 +143,23 @@ namespace vknn { namespace vk {
 
         const char *kTuneModelSigStem = "/tunemodel";
 
-        /// Persisted layout: one tune-table entry per constant, all under the device's own tag.
+        /// Persisted layout: one tune-table entry per constant, all under the device's own tag. The
+        /// constants are doubles and the table stores 32-bit ints, so each carries its OWN
+        /// fixed-point scale - one shared scale either overflows the rates (hundreds of millions of
+        /// bytes per millisecond) or rounds the exponent and the launch cost to nothing. Every
+        /// scale below leaves resolution far finer than the factor-of-two error the shortlist
+        /// tolerates, and every product stays inside a signed 32-bit int.
         struct PersistField {
             const char *name;
             double TuneModelCaps::*field;
+            double                  scale;
         };
         constexpr PersistField kPersistFields[] = {
-            {"w", &TuneModelCaps::wavesToSaturate}, {"e", &TuneModelCaps::latencyExponent}, {"i", &TuneModelCaps::residentBytesPerMs},
-            {"d", &TuneModelCaps::streamBytesPerMs},  {"l", &TuneModelCaps::launchMs},
+            {"w", &TuneModelCaps::wavesToSaturate, 1.0},     // a wave count, already integral
+            {"e", &TuneModelCaps::latencyExponent, 1.0e6},   // ~0.25 to 2
+            {"i", &TuneModelCaps::residentBytesPerMs, 1.0e-3}, // bytes/ms -> kilobytes/ms
+            {"d", &TuneModelCaps::streamBytesPerMs, 1.0e-3},   // bytes/ms -> kilobytes/ms
+            {"l", &TuneModelCaps::launchMs, 1.0e6},          // milliseconds -> nanoseconds
         };
 
         std::string fieldSig(const VkOpEnv &env, const char *name) {
@@ -176,7 +180,7 @@ namespace vknn { namespace vk {
                 {
                     return false;
                 }
-                got.*(f.field) = (double) stored / kPersistScale;
+                got.*(f.field) = (double) stored / f.scale;
             }
             got.calibrated = true;
             out            = got;
@@ -192,19 +196,47 @@ namespace vknn { namespace vk {
             {
                 const double v = caps.*(f.field);
                 // The table stores ints, so a constant below the fixed-point resolution would round
-                // to 0 and read back as "absent" - clamp to the smallest representable value.
-                const int stored = (int) std::max<long long>(1, std::llround(v * kPersistScale));
+                // to 0 and read back as "absent" - clamp to the smallest representable value. The
+                // upper clamp is what keeps a fast device's rate from wrapping to a negative int,
+                // which loadPersisted would reject and re-probe on every cold load.
+                const long long scaled = std::llround(v * f.scale);
+                const int       stored = (int) std::min<long long>(std::numeric_limits<int>::max(), std::max<long long>(1, scaled));
                 env.weights->setTuned(fieldSig(env, f.name), stored, (int) env.tuning);
             }
         }
     } // namespace
 
+    double reReadBytesPerMs(double footprintBytes, const TuneModelCaps &caps) {
+        // Log-linear between the two probe points: each doubling of the re-read set moves the rate
+        // a fixed fraction of the way from the cache's to DRAM's. Clamped at both ends, so a set
+        // below the resident probe is charged the cache rate and one above the stream probe DRAM's.
+        const double span = std::log(kTuneModelStreamFootprintBytes / kTuneModelResidentFootprintBytes);
+        const double t    = std::min(1.0, std::max(0.0, std::log(std::max(footprintBytes, 1.0) / kTuneModelResidentFootprintBytes) / span));
+        return caps.residentBytesPerMs * std::pow(caps.streamBytesPerMs / caps.residentBytesPerMs, t);
+    }
+
     double modelMs(const KernelCost &cost, const TuneModelCaps &caps) {
-        const double waves    = std::max(cost.waves, 1.0);
-        const double eff      = std::max(1e-4, std::min(1.0, std::pow(waves / caps.wavesToSaturate, caps.latencyExponent)));
-        const double issued   = cost.streamVec4 * kTuneModelVec4Bytes / (caps.streamBytesPerMs * eff) + cost.residentVec4 * kTuneModelVec4Bytes / (caps.residentBytesPerMs * eff);
-        const double compulsory = cost.footprintVec4 * kTuneModelVec4Bytes / caps.streamBytesPerMs;
+        const double waves = std::max(cost.waves, 1.0);
+        const double eff   = std::max(1e-4, std::min(1.0, std::pow(waves / caps.wavesToSaturate, caps.latencyExponent)));
+        // Each side's re-reads are priced by how much that side spans, not by which operand it is:
+        // a 17x17 activation map is a cache hit on every re-read while the weight set it is
+        // convolved with can be several times larger and reach past the cache.
+        const double streamRate   = reReadBytesPerMs(cost.streamFootprintVec4 * kTuneModelVec4Bytes, caps);
+        const double residentRate = reReadBytesPerMs(cost.residentFootprintVec4 * kTuneModelVec4Bytes, caps);
+        const double issued       = cost.streamVec4 * kTuneModelVec4Bytes / (streamRate * eff) + cost.residentVec4 * kTuneModelVec4Bytes / (residentRate * eff);
+        // Compulsory traffic: every distinct byte is fetched from DRAM once however the work tiles.
+        const double compulsory = (cost.streamFootprintVec4 + cost.residentFootprintVec4) * kTuneModelVec4Bytes / caps.streamBytesPerMs;
         return caps.launchMs * (double) std::max(1, cost.dispatches) + std::max(issued, compulsory);
+    }
+
+    std::vector<double> modelEstimates(const std::vector<KernelCost> &costs, const TuneModelCaps &caps) {
+        std::vector<double> out;
+        out.reserve(costs.size());
+        for (const KernelCost &cost: costs)
+        {
+            out.push_back(modelMs(cost, caps));
+        }
+        return out;
     }
 
     std::vector<int> analyticShortlist(const std::vector<KernelCost> &costs, const TuneModelCaps &caps) {

@@ -353,10 +353,11 @@ namespace vknn {
                     for (uint32_t ls: cands)
                     {
                         vk::KernelCost cost;
-                        cost.streamVec4    = (double) total * (double) Cinb * (double) pc.KH * (double) pc.KW + (double) total;
-                        cost.residentVec4  = (double) total * 4.0 * (double) Cinb * (double) pc.KH * (double) pc.KW;
-                        cost.footprintVec4 = (double) (pc.N * Cinb * pc.H * pc.W) + (double) (pc.Cout * Cinb * pc.KH * pc.KW) + (double) total;
-                        cost.waves         = (double) groups(total, ls) * (double) ls / 64.0;
+                        cost.streamVec4            = (double) total * (double) Cinb * (double) pc.KH * (double) pc.KW + (double) total;
+                        cost.residentVec4          = (double) total * 4.0 * (double) Cinb * (double) pc.KH * (double) pc.KW;
+                        cost.streamFootprintVec4   = (double) (pc.N * Cinb * pc.H * pc.W) + (double) total;
+                        cost.residentFootprintVec4 = (double) (pc.Cout * Cinb * pc.KH * pc.KW);
+                        cost.waves                 = (double) groups(total, ls) * (double) ls / 64.0;
                         costs.push_back(cost);
                     }
                     std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
@@ -462,12 +463,14 @@ namespace vknn {
                     const int64_t threads = x.n * ((Coutb + ocb - 1) / ocb) * ((HW + wt - 1) / wt);
                     totals.push_back(threads);
                     vk::KernelCost cost;
-                    // The activation window and the output are the streaming operand; the weight
-                    // block is small enough to stay cache-resident across the dispatch.
-                    cost.streamVec4    = (double) threads * ((double) wt * (double) Cinb + (double) wt * (double) ocb * storesPerOut);
-                    cost.residentVec4  = (double) threads * 4.0 * (double) ocb * (double) Cinb;
-                    cost.footprintVec4 = (double) (x.n * Cinb * x.h * x.w) + (double) (Cout * Cinb) + (double) (x.n * Coutb * HW);
-                    cost.waves         = (double) groups(threads, 64);
+                    // The activation window and the output are the activation side; the weight
+                    // block is the weight side. What each side's re-reads cost is set by how much
+                    // that side spans, which the model derives from the footprints below.
+                    cost.streamVec4            = (double) threads * ((double) wt * (double) Cinb + (double) wt * (double) ocb * storesPerOut);
+                    cost.residentVec4          = (double) threads * 4.0 * (double) ocb * (double) Cinb;
+                    cost.streamFootprintVec4   = (double) (x.n * Cinb * x.h * x.w) + (double) (x.n * Coutb * HW);
+                    cost.residentFootprintVec4 = (double) (Cout * Cinb);
+                    cost.waves                 = (double) groups(threads, 64);
                     costs.push_back(cost);
                 }
                 std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
@@ -494,12 +497,15 @@ namespace vknn {
                 // the order the candidates happen to sit in the list. The margin applies to every
                 // challenger, not just the OCB>1 class — race noise on these shapes is wider than
                 // the differences being resolved, so an unmargined challenger displaces the proven
-                // default on noise alone.
-                uint32_t            best   = cands[0];
-                double              bestMs = ms[0];
-                const double        need   = ms[0] * vk::kTuneRaceMargin;
+                // default on noise alone. It is waived only for a challenger the analytical model
+                // also ranks cheaper (see kTuneRaceMargin), which is a second signal independent of
+                // the measurement and not the noisy sample the margin exists to discard.
+                const std::vector<double> model = vk::modelEstimates(costs, vk::deviceTuneModel(env));
+                uint32_t                  best   = cands[0];
+                double                    bestMs = ms[0];
                 for (size_t ci = 1; ci < cands.size(); ++ci)
                 {
+                    const double need = ms[0] * (model[ci] < model[0] ? 1.0 : vk::kTuneRaceMargin);
                     if (ms[ci] < need && ms[ci] < bestMs)
                     {
                         bestMs = ms[ci];
@@ -690,20 +696,22 @@ namespace vknn {
                     vk::KernelCost          cost;
                     std::function<double()> time;
                 };
-                // Compulsory traffic: the input map, the weight set and the output map, each
-                // touched once. Identical for every entrant - only the ISSUED traffic and the wave
-                // count differ - so it is computed once and shared.
-                const int64_t Cinb        = cBlocks(pc.Cin);
-                const double  footprint   = (double) (x.n * Cinb * x.h * x.w) + (double) (pc.Cout * Cinb * pc.KH * pc.KW) + (double) (x.n * Coutb * HW);
+                // Compulsory traffic per side: the activation side is the input map plus the
+                // output map, the weight side is the weight set. Identical for every entrant - only
+                // the ISSUED traffic and the wave count differ - so both are computed once.
+                const int64_t Cinb              = cBlocks(pc.Cin);
+                const double  streamFootprint   = (double) (x.n * Cinb * x.h * x.w) + (double) (x.n * Coutb * HW);
+                const double  residentFootprint = (double) (pc.Cout * Cinb * pc.KH * pc.KW);
                 // Per thread the direct and conv_reg kernels issue WTILE input vec4 and OCB*4
                 // weight vec4 per (input channel-block, tap) and store WTILE*OCB.
                 auto tileCost = [&](int64_t threads, int64_t taps, double wt, double ocb, double loadsPerTap, int64_t wgroups, int dispatchCount) {
                     vk::KernelCost cost;
-                    cost.streamVec4    = (double) threads * ((double) Cinb * (double) taps * loadsPerTap + wt * ocb);
-                    cost.residentVec4  = (double) threads * (double) Cinb * (double) taps * 4.0 * ocb;
-                    cost.footprintVec4 = footprint;
-                    cost.waves         = (double) wgroups;
-                    cost.dispatches    = dispatchCount;
+                    cost.streamVec4            = (double) threads * ((double) Cinb * (double) taps * loadsPerTap + wt * ocb);
+                    cost.residentVec4          = (double) threads * (double) Cinb * (double) taps * 4.0 * ocb;
+                    cost.streamFootprintVec4   = streamFootprint;
+                    cost.residentFootprintVec4 = residentFootprint;
+                    cost.waves                 = (double) wgroups;
+                    cost.dispatches            = dispatchCount;
                     return cost;
                 };
                 std::vector<OcbEntrant> entrants;
@@ -746,12 +754,13 @@ namespace vknn {
                 // Its input term is the staged halo per workgroup, not a per-thread re-read.
                 auto ldsCost = [&](int64_t wgroups, int64_t ts) {
                     vk::KernelCost cost;
-                    // The halo is staged once per workgroup, so the LDS kernel's streaming term is
-                    // the halo plus the stores; the per-thread weight reads stay resident.
-                    cost.streamVec4    = (double) wgroups * ((double) Cinb * (double) (ts + 2) * (double) (ts + 2) + (double) (ts * ts));
-                    cost.residentVec4  = (double) wgroups * (double) (ts * ts) * (double) Cinb * 9.0 * 4.0;
-                    cost.footprintVec4 = footprint;
-                    cost.waves         = (double) wgroups * (double) (ts * ts) / 64.0;
+                    // The halo is staged once per workgroup, so the LDS kernel's activation term
+                    // is the halo plus the stores rather than a per-thread re-read.
+                    cost.streamVec4            = (double) wgroups * ((double) Cinb * (double) (ts + 2) * (double) (ts + 2) + (double) (ts * ts));
+                    cost.residentVec4          = (double) wgroups * (double) (ts * ts) * (double) Cinb * 9.0 * 4.0;
+                    cost.streamFootprintVec4   = streamFootprint;
+                    cost.residentFootprintVec4 = residentFootprint;
+                    cost.waves                 = (double) wgroups * (double) (ts * ts) / 64.0;
                     return cost;
                 };
                 if (lds3x3)
@@ -781,11 +790,15 @@ namespace vknn {
                 // entrants[0] is the deterministic default and stays the incumbent: each challenger
                 // is measured against ITS time, not against a running best that would compound the
                 // margin and make the outcome depend on list order.
-                int                 best   = 0;
-                double              bestMs = ms[0];
+                const std::vector<double> model  = vk::modelEstimates(costs, vk::deviceTuneModel(env));
+                int                       best   = 0;
+                double                    bestMs = ms[0];
                 for (size_t ei = 1; ei < entrants.size(); ++ei)
                 {
-                    if (ms[ei] < ms[0] * entrants[ei].margin && ms[ei] < bestMs)
+                    // The anti-noise margin is waived for a challenger the model also ranks cheaper
+                    // than the incumbent (see kTuneRaceMargin).
+                    const double margin = (model[ei] < model[0]) ? 1.0 : entrants[ei].margin;
+                    if (ms[ei] < ms[0] * margin && ms[ei] < bestMs)
                     {
                         bestMs = ms[ei];
                         best   = entrants[ei].choice;
