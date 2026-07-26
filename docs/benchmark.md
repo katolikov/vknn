@@ -452,6 +452,24 @@ The thermal A/B discipline and the byte gates below are committed as scripts, no
     --models models.txt --device <device-serial>
   ```
 
+### Warm-start cache persistence (v1.5.1)
+
+v1.5.1 changes when the warm-start cache reaches disk, not what any kernel computes. The cache was
+written only from `~Session()`; a host that never reaches the destructor — an Android app killed
+while a multi-GB model is resident — discarded the whole cold-load autotune sweep and repaid it on
+the next load. `Session::flushNewCacheWork()` now writes at the end of every creation path, gated on
+the weight cache being dirty or the driver's pipeline blob having grown, so a warm load with nothing
+new costs one size query and no encode.
+
+No kernel, layout, or scheduling decision changed, and the byte gate confirms it: the 3D-splat
+encoder's eight outputs are md5-identical between a v1.5.1 and a v1.5.0 build on one device with the
+same seeded inputs. Every measurement in this document therefore stands as recorded.
+
+Measuring load time on a multi-GB model needs the same discipline as the perf A/B above, for a
+different reason: page-cache state alone swings a warm encoder load between 2.3 s and 6.2 s on one
+device. Arms compared across separate batches produce a confident-looking difference that reverses
+when the same arms are interleaved inside one batch.
+
 ## Reproduce
 
 ```bash

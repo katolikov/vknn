@@ -260,6 +260,10 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 
 ## Benchmarks
 
+The current release is **v1.5.1**, a cache-persistence fix that changes no kernel and no scheduling
+decision: its outputs are byte-identical to v1.5.0 on the same device and inputs, so every figure
+below carries over unchanged and is reported under the version it was measured on.
+
 VKNN v1.5.0, whole CNN suite, fp16, `--tuning fast`, 20-iteration medians with a cooldown before
 every stage. Every number in this section uses the **default compile/run configuration** — the
 first quickstart command, no `--strict-fuse` (that flag exists for byte-comparing a fused compile
