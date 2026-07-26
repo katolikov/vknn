@@ -259,7 +259,7 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 
 ## Benchmarks
 
-VKNN v1.4.3+, whole CNN suite, fp16, `--tuning fast`, 20-iteration medians with a cooldown before
+VKNN v1.5.0, whole CNN suite, fp16, `--tuning fast`, 20-iteration medians with a cooldown before
 every stage. Every number in this section uses the **default compile/run configuration** — the
 first quickstart command, no `--strict-fuse` (that flag exists for byte-comparing a fused compile
 against an unfused one; the determinism and accuracy guarantees below hold in the default
@@ -339,7 +339,7 @@ level; mechanism in
 [docs/adr/0018-zero-copy-concat-split-views.md](docs/adr/0018-zero-copy-concat-split-views.md),
 numbers in [docs/benchmark.md](docs/benchmark.md) § Zero-copy.
 
-Since v1.4.3 the gains come from how work is scheduled rather than from new arithmetic. The dense
+v1.5.0's gains come from how work is scheduled rather than from new arithmetic. The dense
 fp16 GEMM loads its operand panels 64 bits at a time and an unaligned activation is virtualized
 into a padded physical row so the wide path can take it; a pointwise unit is no longer hosted on a
 concat whose parts can alias, which would have cancelled that concat's zero-copy views; and the
