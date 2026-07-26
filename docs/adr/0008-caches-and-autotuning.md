@@ -24,11 +24,19 @@ others:
    (when `tuning != off`) the op benchmarks candidates ({64,128,256}, or {32,64,128,256} thorough)
    on-device and stores the fastest. Warm starts load the table and skip benchmarking.
 
-`Runtime::load(path, cfg, cacheFile)` resolves the cache path — an empty `cacheFile` defaults to
-`<model>.cache` next to the model. `Session::updateCache()` writes the file from `~Session()`, and
-only when the cache actually changed during the session (an unchanged warm run leaves the file
-untouched). `config.cacheDir` is the fallback location for a session built from an in-memory graph,
-which has no model path to anchor the cache file.
+`Runtime::load(path, cfg, cacheFile)` resolves the cache path — the argument wins, then
+`Config::cacheFile`, then `<model>.cache` next to the model. A session built from an in-memory graph
+has no model path to anchor a default, so it caches only when `Config::cacheFile` is set;
+`Runtime::cacheFileIn(dir, model)` names one inside a shared directory, and missing parent
+directories are created on the first write.
+
+The file is written twice over a session's life, both times only when its bytes actually changed:
+`Session::flushNewCacheWork()` at the end of every creation path, so a cold load's autotune sweep is
+on disk before the first run, and `Session::updateCache()` from `~Session()` for whatever the run
+phase added. Without the creation-time flush a process killed while a model is resident (an Android
+app in the background) repeats the whole sweep on its next load. The creation-time flush costs one
+size query when nothing new was produced: it runs only when the weight cache is dirty or the driver's
+pipeline blob grew since the last save.
 
 ## Consequences
 - On device (MobileNetV2 fp16): cold session **445 ms** (first run incl. full autotune),

@@ -38,6 +38,10 @@ namespace vknn {
             size_t            diskBytes() const noexcept {
                 return diskBytes_;
             }
+            /// Size the driver would serialize right now, from the size-only half of the two-call idiom
+            /// (no blob copy). Grows as the driver compiles pipelines, so it tells a flush whether any
+            /// driver work happened since the last save without paying for the bytes.
+            size_t currentBytes() const noexcept;
 
           private:
             VulkanContext  &ctx_;

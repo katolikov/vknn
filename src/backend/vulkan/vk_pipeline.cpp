@@ -43,6 +43,15 @@ namespace vknn { namespace vk {
         return data;
     }
 
+    size_t PipelineCache::currentBytes() const noexcept {
+        size_t sz = 0;
+        if (vkGetPipelineCacheData(ctx_.device(), cache_, &sz, nullptr) != VK_SUCCESS)
+        {
+            return 0;
+        }
+        return sz;
+    }
+
     PipelineCache::~PipelineCache() {
         if (cache_)
         {

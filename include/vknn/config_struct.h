@@ -55,12 +55,13 @@ namespace vknn {
         /// table) are always saved to and reloaded from a per-model cache file, so a warm load skips shader
         /// compilation, weight prepacking, and autotuning. The file is self-validated (kernel hash + device
         /// + model) and multi-variant (one entry per cache-affecting config), so it auto-heals on a
-        /// device/driver/model/code change. Set the path via Runtime::load()'s cacheFile argument (empty
-        /// there -> "<model>.cache" next to the model); cacheDir is the fallback for a session built from an
-        /// in-memory graph (no model path).
-        std::string cacheFile;                               ///< unified cache path (resolved by Runtime::load; empty = no file cache)
-        std::string cacheDir = "vknn_cache"; ///< fallback cache directory (working-directory-relative) for an in-memory graph with no model path
-        bool        noCache  = false;                        ///< debug: skip all cache read/write (cold compile every load)
+        /// device/driver/model/code change. Set the path via Runtime::load()'s cacheFile argument, or here
+        /// directly -- the argument wins, and an empty pair resolves to "<model>.cache" next to the model.
+        /// Setting it here is the only way a session built from an in-memory graph (Session::create, no
+        /// model path) gets a cache at all. Missing parent directories are created on the first write, so
+        /// Runtime::cacheFileIn(dir, model) is enough to hold every model's cache in one directory.
+        std::string cacheFile; ///< unified cache path (empty = no file cache)
+        bool        noCache = false; ///< debug: skip all cache read/write (cold compile every load)
 
         /// Load-time conv-kernel autotune effort (None / Fast / Heavy). Effort only — never changes
         /// numerical output; the chosen kernels are cached and reused on a warm start.

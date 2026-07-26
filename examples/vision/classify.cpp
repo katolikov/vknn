@@ -36,7 +36,7 @@
 //   --golden PATH     raw float32 golden output for cosine/top-1 check
 //   --profile         enable per-op profiler + print table
 //   --layer-dump DIR  dump every layer output to DIR
-//   --cache DIR       cache directory
+//   --cache DIR       directory to hold the model cache file (default: beside the model)
 //   --bench N         after inference, run a warmup then N timed runs and print latency stats
 #include "vknn/session.h"
 #include <algorithm>
@@ -112,7 +112,12 @@ int main(int argc, char **argv) {
     }
     cfg.backend   = backendFromStr(backendArg);     // vulkan|cpu
     cfg.precision = precisionFromStr(precisionArg); // low|normal|high
-    cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());
+    // --cache names a directory to hold every model's cache file; without it the cache lands beside the
+    // model (Runtime::load's default). The directory is created on the first write.
+    if (const char *cacheDir = argval(argc, argv, "--cache", ""); cacheDir[0])
+    {
+        cfg.cacheFile = Runtime::cacheFileIn(cacheDir, model);
+    }
     {
         // Kernel-selection hints are passed through setHint(Hint, value) rather than plain fields.
         std::string winogradMode = argval(argc, argv, "--winograd", "auto"); // auto|on|off

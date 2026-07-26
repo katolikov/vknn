@@ -1225,7 +1225,7 @@ namespace vknn {
         env_.useFp16  = useFp16_;
         env_.baseFp16 = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
         // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
-        // model, distinct across models) so a shared cacheDir can't return another model's weights.
+        // model, distinct across models) so a shared cache directory can't return another model's weights.
         {
             uint64_t h   = kFnvOffsetBasis;
             auto     mix = [&](const std::string &s) {

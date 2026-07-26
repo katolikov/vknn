@@ -73,6 +73,12 @@ namespace vknn {
         /// ~Session(); also callable manually (e.g. before a checkpoint).
         void updateCache();
 
+        /// Write the cache file when session creation produced new cache content, and do nothing when it
+        /// was served entirely from an existing file. Called automatically at the end of every creation
+        /// path, so the autotune sweep a cold load pays for is on disk before the first run rather than
+        /// only at teardown -- a process killed while the model is resident would otherwise repeat it.
+        void flushNewCacheWork();
+
         /// Run the model. The bound input shapes select which compiled plan bucket runs: an exact
         /// match dispatches that bucket's pre-recorded segments; no match is Status::InvalidArgument
         /// with the available bucket shapes listed. A fixed-shape model has one bucket and always

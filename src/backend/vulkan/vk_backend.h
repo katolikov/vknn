@@ -76,6 +76,17 @@ namespace vknn {
         void                     finalize() override {
             saveCaches();
         }
+        // New cache content is either a prepacked weight / autotune pick (the weight cache's dirty mark)
+        // or a driver-compiled pipeline (the blob grew since the last save). Both are checked, because a
+        // model whose weights all take the flat upload path leaves the weight cache clean while still
+        // paying for every pipeline compile. Neither changed means the file already holds this session's
+        // work, so the flush costs one size query and no encode.
+        void flushNewCacheWork() override {
+            if ((wcache_ && wcache_->dirty()) || (cache_ && cache_->currentBytes() != savedPipelineBytes_))
+            {
+                saveCaches();
+            }
+        }
 
         // One VkPipeline (+ shader module + layout) per distinct kernel configuration, shared by every
         // node that requests it. Driver pipeline memory and creation time then scale with the number of
@@ -145,6 +156,9 @@ namespace vknn {
         CacheDoc             cacheDoc_;
         CacheVariant         curKey_;
         std::vector<uint8_t> loadedBytes_;
+        // Pipeline-blob size the cache file already holds, so flushNewCacheWork can tell driver compiles
+        // since the last save from a warm session that compiled nothing.
+        size_t savedPipelineBytes_ = 0;
         bool                 cacheLoaded_ = false;
         bool                 noCache_     = false;
 

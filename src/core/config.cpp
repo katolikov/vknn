@@ -181,7 +181,6 @@ namespace vknn {
         I("maxSubmitBindings", c.maxSubmitBindings);
         I("decodeChainSteps", c.decodeChainSteps);
         S("cacheFile", c.cacheFile);
-        S("cacheDir", c.cacheDir);
         B("noCache", c.noCache);
         if (v.get("cacheMode"))
         {
@@ -273,7 +272,6 @@ namespace vknn {
         os << "  \"maxSubmitBindings\": " << maxSubmitBindings << ",\n";
         os << "  \"decodeChainSteps\": " << decodeChainSteps << ",\n";
         os << "  \"cacheFile\": \"" << cacheFile << "\",\n";
-        os << "  \"cacheDir\": \"" << cacheDir << "\",\n";
         os << "  \"noCache\": " << (noCache ? "true" : "false") << ",\n";
         os << "  \"tuning\": \"" << tuningStr(tuning) << "\",\n";
         os << "  \"cpuThreads\": " << cpuThreads << ",\n";

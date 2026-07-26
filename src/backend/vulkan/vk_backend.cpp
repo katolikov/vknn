@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace vknn {
@@ -150,8 +151,8 @@ namespace vknn {
             return;
         }
         cacheLoaded_ = true;
-        noCache_     = cfg.noCache;
-        cacheFile_   = cfg.cacheFile;
+        noCache_   = cfg.noCache;
+        cacheFile_ = cfg.cacheFile;
         curKey_      = variantKey(cfg);
 
         const auto &caps        = ctx_->caps();
@@ -190,8 +191,12 @@ namespace vknn {
                 }
             }
         }
-        cache_  = std::make_unique<vk::PipelineCache>(*ctx_, pipeInit);
-        wcache_ = std::make_unique<WeightCache>();
+        cache_ = std::make_unique<vk::PipelineCache>(*ctx_, pipeInit);
+        // Baseline from the driver's own serialization of what was just restored, not from pipeInit: the
+        // two differ by however the driver re-encodes, and a warm session must compare equal so it skips
+        // the flush entirely.
+        savedPipelineBytes_ = cache_->currentBytes();
+        wcache_             = std::make_unique<WeightCache>();
         if (matched)
         {
             wcache_->loadFrom(*matched);
@@ -227,7 +232,18 @@ namespace vknn {
         std::vector<uint8_t> out = cacheEncode(cacheDoc_);
         if (out == loadedBytes_)
         {
+            wcache_->markSaved();
+            savedPipelineBytes_ = pipe.size();
             return; // unchanged
+        }
+        // A cache path may name a directory that does not exist yet (one directory holding every model's
+        // cache); create the chain so the first write lands instead of warning on every session.
+        for (size_t i = cacheFile_.find('/'); i != std::string::npos; i = cacheFile_.find('/', i + 1))
+        {
+            if (i > 0)
+            {
+                ::mkdir(cacheFile_.substr(0, i).c_str(), 0755); // EEXIST is the common case and is ignored
+            }
         }
         // Write a per-process temp file and atomically rename it over the target, so a crash or a
         // second concurrent writer mid-write leaves the existing cache intact instead of a truncated
@@ -256,7 +272,9 @@ namespace vknn {
             std::remove(tmp.c_str());
             return;
         }
-        loadedBytes_ = out;
+        loadedBytes_        = out;
+        savedPipelineBytes_ = pipe.size();
+        wcache_->markSaved();
         VKNN_INFO << "Saved cache (" << out.size() << " bytes, " << cacheDoc_.variants.size() << " variant(s)) -> " << cacheFile_;
     }
 

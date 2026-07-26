@@ -61,6 +61,12 @@ namespace vknn {
         /// Called once after all segments are compiled (flush pipeline/weight/tuning caches to disk).
         virtual void finalize() {
         }
+
+        /// Flush the caches when this backend produced new cache content that is not on disk yet, and
+        /// do nothing otherwise. Called at the end of session creation so an autotune sweep survives a
+        /// process that never reaches its destructor (an Android app killed while a model is resident).
+        virtual void flushNewCacheWork() {
+        }
     };
 
 } // namespace vknn

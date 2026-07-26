@@ -234,8 +234,8 @@ This requires the static lib to be linked whole-archive
   command-buffer split trigger by recorded push-descriptor writes, default 1024),
   `decodeChainSteps` (decode iterations recorded as one command-buffer chain with on-device
   token feedback, default 1).
-- Cache controls: `cacheFile` (the per-model cache, §7), `cacheDir` (the graph-only fallback location),
-  `noCache` (skip caching), and `tuning` (`None`/`Fast`/`Heavy` autotune effort).
+- Cache controls: `cacheFile` (the per-model cache, §7), `noCache` (skip caching), and `tuning`
+  (`None`/`Fast`/`Heavy` autotune effort).
 - Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
 - Conv kernel + GPU-pass knobs via `setHint(Hint, Mode)`: `Hint::Winograd` (`Auto`/`On`/`Off`),
@@ -533,8 +533,8 @@ bit-exact against the staged path (`maxAbsErr 0`).
 One **self-validating, multi-variant MessagePack cache file** accelerates warm session creation
 (ADR-0009; codec in `src/core/cache_codec.{h,cpp}`). `Runtime::load(path, cfg, cacheFile)` takes the
 cache path as its third argument; empty (the default) resolves to `<model>.cache` next to the model
-(e.g. `enc.vxm` → `enc.cache`), exposed as `Config::cacheFile`. For a session built from an in-memory
-graph (no model path), the cache lives under `cacheDir` instead. Loading the file on a warm start skips
+(e.g. `enc.vxm` → `enc.cache`), exposed as `Config::cacheFile`. A session built from an in-memory graph
+(no model path) caches only when `Config::cacheFile` is set. Loading the file on a warm start skips
 shader compilation, conv autotuning, and the Winograd weight transform; caching is always on
 (`Config::noCache` disables it for cold-compile measurement).
 
