@@ -41,7 +41,8 @@
 - **Verified, deterministic.** Every path is checked against an onnxruntime golden; autotuning races
   only bit-neutral launch parameters, so `--tuning none/fast/heavy` produce byte-identical output.
 - **Fast.** Faster than [MNN](https://github.com/alibaba/MNN)'s best backend on 8 of 9 benchmark
-  models, at parity on ResNet-50 ([benchmarks](#benchmarks)).
+  models, at parity on ResNet-50 ([benchmarks](#benchmarks)). v1.5.0 speeds the whole suite up
+  again — byte-identically, on three devices.
 
 ## What it runs
 
@@ -295,25 +296,28 @@ One table against [MNN](https://github.com/alibaba/MNN) (Alibaba's production en
 on the same device class: the **MNN-Vulkan** column is MNN's Vulkan backend, the **MNN best**
 column is its strongest backend per model (OpenCL with HEAVY autotuning, or CPU-4-thread where
 that wins). MNN figures are from the recorded head-to-head sweeps
-([docs/benchmark.md](docs/benchmark.md)); MNN times inference only with the input set once outside
-the loop, so the comparison is generous to MNN. VKNN is v1.4.2 throughout:
+([docs/benchmark.md](docs/benchmark.md)) and were **not** re-measured for this release, so the
+ratios are indicative rather than a same-session comparison. The VKNN column is v1.5.0's inference
+span, which is the metric MNN itself reports (it times `runSession` with the input set once outside
+the loop); earlier tables put VKNN's full `run()` wall against it and so understated VKNN by the
+host-copy time.
 
-| Model (fp16) | VKNN v1.4.2 | MNN-Vulkan | vs Vulkan | MNN best (backend) | vs best |
+| Model (fp16) | VKNN v1.5.0 | MNN-Vulkan | vs Vulkan | MNN best (backend) | vs best |
 |---|---|---|---|---|---|
-| SqueezeNet 1.1 | 1.7 ms | 10.9 ms | **~6.4×** | 2.59 ms (OpenCL-HEAVY) | **−34%** |
-| ShuffleNetV2 x1.0 | 1.8 ms | — | — | — | — |
-| MnasNet 1.0 | 2.2 ms | — | — | 3.68 ms (CPU-4t) | **−40%** |
-| MobileNetV2 | 2.4 ms | 13.8 ms | **~5.8×** | 3.11 ms (OpenCL-HEAVY) | **−23%** |
-| MobileNetV3-Large | 3.1 ms | 17.0 ms | **~5.5×** | 3.78 ms (CPU-4t) | **−18%** |
-| EfficientNet-B0 | 6.4 ms | 19.9 ms | **~3.1×** | 9.29 ms (OpenCL-HEAVY) | **−31%** |
-| ResNet-50 | 12.8 ms | 18.3 ms | **~1.4×** | 9.00 ms (OpenCL-HEAVY) | MNN ahead on a hot device¹ |
-| DenseNet-121 | 15.9 ms | — | — | 15.37 ms (CPU-4t) | ~parity |
-| Inception-v3 | 16.8 ms | 25.6 ms | **~1.5×** | 18.38 ms (CPU-4t) | **−9%** |
-| YOLOv8n (640×640) | 19.4 ms | ~73 ms | **~3.8×** | 24.71 ms (OpenCL) | **−21%** |
+| SqueezeNet 1.1 | 1.49 ms | 10.9 ms | **~7.3×** | 2.59 ms (OpenCL-HEAVY) | **−42%** |
+| ShuffleNetV2 x1.0 | 1.61 ms | — | — | — | — |
+| MnasNet 1.0 | 1.90 ms | — | — | 3.68 ms (CPU-4t) | **−48%** |
+| MobileNetV2 | 1.86 ms | 13.8 ms | **~7.4×** | 3.11 ms (OpenCL-HEAVY) | **−40%** |
+| MobileNetV3-Large | 2.49 ms | 17.0 ms | **~6.8×** | 3.78 ms (CPU-4t) | **−34%** |
+| EfficientNet-B0 | 4.03 ms | 19.9 ms | **~4.9×** | 9.29 ms (OpenCL-HEAVY) | **−57%** |
+| ResNet-50 | 11.96 ms | 18.3 ms | **~1.5×** | 9.00 ms (OpenCL-HEAVY) | MNN ahead on a hot device¹ |
+| DenseNet-121 | 12.52 ms | — | — | 15.37 ms (CPU-4t) | **−19%** |
+| Inception-v3 | 15.25 ms | 25.6 ms | **~1.7×** | 18.38 ms (CPU-4t) | **−17%** |
+| YOLOv8n (640×640) | 14.86 ms | ~73 ms | **~4.9×** | 24.71 ms (OpenCL) | **−40%** |
 
 ¹ ResNet-50 is the one conv net where MNN's HEAVY-tuned buffer GEMM keeps an edge when the device
-is deep-warm (its inference-only loop also rides DVFS clocks that VKNN's per-run wall does not);
-from a cool device the sweeps measured parity. A "—" means that cell was not part of a recorded
+is deep-warm; from a cool device the sweeps measured parity, and v1.5.0 closes a further 11-12% on
+two of the three devices. A "—" means that cell was not part of a recorded
 MNN sweep. YOLOv8n and the YoNoSplat encoder run **100% on the GPU** (no CPU fallback); MNN cannot
 convert the encoder at all. Methodology and per-stage timings:
 [docs/benchmark.md](docs/benchmark.md).
