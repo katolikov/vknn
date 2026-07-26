@@ -11,6 +11,7 @@
 // (conv_gemm_ksplit fp32 partials + conv_gemm_kreduce finish); split-K changes the summation
 // order, so it is only ever selected by the race, never by default. Winners persist in the tune
 // cache so warm runs are stable.
+#include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
 #include "core/conv_gemm_route.h"
 #include "core/conv_geom.h"
@@ -99,11 +100,15 @@ namespace vknn {
                 // whole list is timed interleaved (vk::raceCandidates), so no tile is measured on a
                 // systematically warmer GPU than another.
                 struct Entrant {
-                    int                                  tm;
-                    std::shared_ptr<vk::ComputePipeline> pipe;
-                    uint32_t                             gyT;
+                    int      tm;
+                    uint32_t gyT;
                 };
-                std::vector<Entrant> entrants;
+                // Threads per implicit-GEMM workgroup (shaders/conv_gemm.comp).
+                constexpr double            kConvGemmThreads = 64.0;
+                const double                elemsPerVec4     = 4.0;
+                const double                footprint        = ((double) M * (double) K + (double) K * (double) Cout + (double) M * (double) Cout) * (double) x.n / elemsPerVec4;
+                std::vector<Entrant>        entrants;
+                std::vector<vk::KernelCost> costs;
                 for (int tm: {heur, 16, 32, 64})
                 {
                     int64_t gyT = (M + tm - 1) / tm;
@@ -117,7 +122,17 @@ namespace vknn {
                     {
                         continue; // heur repeats one of the three tiles
                     }
-                    entrants.push_back({tm, env.pipeline(shader((std::string(raceStem) + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), {(uint32_t) tm}), (uint32_t) gyT});
+                    entrants.push_back({tm, (uint32_t) gyT});
+                    // One workgroup stages TM*TK of the implicit A panel and TK*N_TILE of the
+                    // weight panel per K step: K*(TM + kConvGemmTileN) elements over the reduction.
+                    const double   wgroups = (double) gxT * (double) gyT * (double) x.n;
+                    vk::KernelCost cost;
+                    // The implicit A panel and the output stream; the weight panel stays resident.
+                    cost.streamVec4    = (wgroups * (double) K * (double) tm + (double) x.n * (double) M * (double) Cout) / elemsPerVec4;
+                    cost.residentVec4  = wgroups * (double) K * (double) kConvGemmTileN / elemsPerVec4;
+                    cost.footprintVec4 = footprint;
+                    cost.waves         = wgroups * kConvGemmThreads / 64.0;
+                    costs.push_back(cost);
                 }
                 if (entrants.empty())
                 {
@@ -125,10 +140,11 @@ namespace vknn {
                 }
                 std::vector<VkBuffer> bufs = {sSrc->handle(), raceWeights.handle(), pc.hasBias ? bs->handle() : sDst->handle(), sDst->handle()};
                 epi.appendForTiming(bufs, sDst->handle());
-                std::vector<double> ms     = vk::raceCandidates((int) entrants.size(), [&](int index) {
+                std::vector<double> ms     = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
                     const Entrant &entrant = entrants[(size_t) index];
+                    auto           pipe    = env.pipeline(shader((std::string(raceStem) + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), {(uint32_t) entrant.tm});
                     return timer.time([&](VkCommandBuffer cmd) {
-                        entrant.pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, entrant.gyT, (uint32_t) x.n);
+                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, entrant.gyT, (uint32_t) x.n);
                     });
                 });
                 int                 best   = entrants[0].tm;

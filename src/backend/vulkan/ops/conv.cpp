@@ -2,6 +2,7 @@
 // covers 1x1 pointwise) and the depthwise case (the "dwconv" shader). Weights are repacked to
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
+#include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
 #include "core/conv_gemm_route.h"
 #include "core/conv_geom.h"
@@ -342,18 +343,29 @@ namespace vknn {
                     // The default local size leads the candidate list, so it is the incumbent below
                     // whatever else the level adds (Heavy also explores the narrower 32).
                     std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {kConvDefaultLocalSize, 32, 128, 256} : std::vector<uint32_t> {kConvDefaultLocalSize, 128, 256};
-                    std::vector<std::shared_ptr<vk::ComputePipeline>> pipes;
-                    pipes.reserve(cands.size());
+                    // The workgroup size changes neither the thread count nor the traffic, only how
+                    // the threads are packed, so every candidate carries the same cost inputs and
+                    // the analytical prefilter leaves the list alone. It stays on the shared path so
+                    // one selection rule covers every race.
+                    const int64_t               Cinb = cBlocks(pc.Cin);
+                    std::vector<vk::KernelCost> costs;
+                    costs.reserve(cands.size());
                     for (uint32_t ls: cands)
                     {
-                        pipes.push_back(env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ls}));
+                        vk::KernelCost cost;
+                        cost.streamVec4    = (double) total * (double) Cinb * (double) pc.KH * (double) pc.KW + (double) total;
+                        cost.residentVec4  = (double) total * 4.0 * (double) Cinb * (double) pc.KH * (double) pc.KW;
+                        cost.footprintVec4 = (double) (pc.N * Cinb * pc.H * pc.W) + (double) (pc.Cout * Cinb * pc.KH * pc.KW) + (double) total;
+                        cost.waves         = (double) groups(total, ls) * (double) ls / 64.0;
+                        costs.push_back(cost);
                     }
                     std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
                     epi.appendForTiming(bufs, sDst->handle());
                     vk::TuneTimer       timer(env);
-                    std::vector<double> ms = vk::raceCandidates((int) cands.size(), [&](int index) {
+                    std::vector<double> ms = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
+                        auto pipe = env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {cands[(size_t) index]});
                         return timer.time([&](VkCommandBuffer cmd) {
-                            pipes[(size_t) index]->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, cands[(size_t) index]));
+                            pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, cands[(size_t) index]));
                         });
                     });
                     double              bestMs = ms[0];
@@ -433,17 +445,30 @@ namespace vknn {
                 auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
                 // The default tile leads the list, so it is the incumbent every other candidate has
                 // to beat; a race that resolves nothing therefore keeps what Tuning::None dispatches.
-                const std::vector<uint32_t>                       cands = {kConv1x1DefaultWTile, 2u, 8u, 4u | (2u << 8), 8u | (2u << 8)};
-                std::vector<std::shared_ptr<vk::ComputePipeline>> pipes;
-                std::vector<int64_t>                              totals;
-                pipes.reserve(cands.size());
+                const std::vector<uint32_t> cands = {kConv1x1DefaultWTile, 2u, 8u, 4u | (2u << 8), 8u | (2u << 8)};
+                // Cost inputs for the analytical prefilter (vk_tune_model.h), from geometry alone.
+                // Per thread the 1x1 kernels issue WTILE input vec4 and OCB*4 weight vec4 per input
+                // channel-block and store WTILE*OCB; a residual or an epilogue reads the output back.
+                const int64_t               Cinb  = cBlocks(x.c);
+                const int64_t               HW    = y.h * y.w;
+                const double                storesPerOut = (hasRes || epi.active) ? 2.0 : 1.0;
+                std::vector<int64_t>        totals;
+                std::vector<vk::KernelCost> costs;
                 totals.reserve(cands.size());
+                costs.reserve(cands.size());
                 for (uint32_t cand: cands)
                 {
-                    uint32_t wt = cand & 0xffu, ocb = std::max(1u, cand >> 8);
-                    pipes.push_back(env.pipeline(shader((std::string(s2 ? "conv1x1_s2" : "conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb}));
-                    int64_t HW  = y.h * y.w;
-                    totals.push_back(x.n * ((Coutb + ocb - 1) / ocb) * ((HW + wt - 1) / wt));
+                    uint32_t      wt = cand & 0xffu, ocb = std::max(1u, cand >> 8);
+                    const int64_t threads = x.n * ((Coutb + ocb - 1) / ocb) * ((HW + wt - 1) / wt);
+                    totals.push_back(threads);
+                    vk::KernelCost cost;
+                    // The activation window and the output are the streaming operand; the weight
+                    // block is small enough to stay cache-resident across the dispatch.
+                    cost.streamVec4    = (double) threads * ((double) wt * (double) Cinb + (double) wt * (double) ocb * storesPerOut);
+                    cost.residentVec4  = (double) threads * 4.0 * (double) ocb * (double) Cinb;
+                    cost.footprintVec4 = (double) (x.n * Cinb * x.h * x.w) + (double) (Cout * Cinb) + (double) (x.n * Coutb * HW);
+                    cost.waves         = (double) groups(threads, 64);
+                    costs.push_back(cost);
                 }
                 std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
                 if (hasRes || epi.active)
@@ -452,9 +477,15 @@ namespace vknn {
                 }
                 epi.appendForTiming(bufs, sDst->handle());
                 vk::TuneTimer       timer(env);
-                std::vector<double> ms = vk::raceCandidates((int) cands.size(), [&](int index) {
+                // Pipelines are built inside the timed lambda so a pruned candidate never compiles
+                // its variant - the compilation of losing variants, not the timing, is what the
+                // prefilter is here to remove. env.pipeline() memoises, so the repeat rounds hit
+                // the cache.
+                std::vector<double> ms = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
+                    uint32_t wt = cands[(size_t) index] & 0xffu, ocb = std::max(1u, cands[(size_t) index] >> 8);
+                    auto     pipe = env.pipeline(shader((std::string(s2 ? "conv1x1_s2" : "conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb});
                     return timer.time([&](VkCommandBuffer cmd) {
-                        pipes[(size_t) index]->dispatch(cmd, bufs, &pc, sizeof(pc), groups(totals[(size_t) index], 64));
+                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(totals[(size_t) index], 64));
                     });
                 });
                 // cands[0] is the deterministic default and stays the incumbent: a challenger must
@@ -656,10 +687,27 @@ namespace vknn {
                 struct OcbEntrant {
                     int                     choice;
                     double                  margin;
+                    vk::KernelCost          cost;
                     std::function<double()> time;
                 };
+                // Compulsory traffic: the input map, the weight set and the output map, each
+                // touched once. Identical for every entrant - only the ISSUED traffic and the wave
+                // count differ - so it is computed once and shared.
+                const int64_t Cinb        = cBlocks(pc.Cin);
+                const double  footprint   = (double) (x.n * Cinb * x.h * x.w) + (double) (pc.Cout * Cinb * pc.KH * pc.KW) + (double) (x.n * Coutb * HW);
+                // Per thread the direct and conv_reg kernels issue WTILE input vec4 and OCB*4
+                // weight vec4 per (input channel-block, tap) and store WTILE*OCB.
+                auto tileCost = [&](int64_t threads, int64_t taps, double wt, double ocb, double loadsPerTap, int64_t wgroups, int dispatchCount) {
+                    vk::KernelCost cost;
+                    cost.streamVec4    = (double) threads * ((double) Cinb * (double) taps * loadsPerTap + wt * ocb);
+                    cost.residentVec4  = (double) threads * (double) Cinb * (double) taps * 4.0 * ocb;
+                    cost.footprintVec4 = footprint;
+                    cost.waves         = (double) wgroups;
+                    cost.dispatches    = dispatchCount;
+                    return cost;
+                };
                 std::vector<OcbEntrant> entrants;
-                entrants.push_back({0, 1.0, [&] {
+                entrants.push_back({0, 1.0, tileCost(x.n * Coutb * HW, pc.KH * pc.KW, 1.0, 1.0, 1.0, groups(x.n * Coutb * HW, 64), 1), [&] {
                                         return timeIt(env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
                                     }});
                 for (uint32_t cand: cands)
@@ -675,16 +723,19 @@ namespace vknn {
                     {
                         int64_t alen = (kaxis == 0) ? y.w : y.h;
                         int64_t clen = (kaxis == 0) ? y.h : y.w;
-                        auto    pipe = env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, kaxis, klen});
                         int64_t tot  = x.n * ocbGroups * clen * ((alen + wt - 1) / wt);
-                        entrants.push_back({(int) cand, margin, [&, pipe, tot] {
-                                                return timeIt(pipe, tot, 64);
+                        // The sliding window loads WTILE+K-1 input vec4 for the whole K-tap run
+                        // instead of WTILE per tap, so its input term is per RUN, not per tap.
+                        vk::KernelCost cost = tileCost(tot, klen, (double) wt, (double) ocb, (double) (wt + klen - 1) / (double) klen, groups(tot, 64), 1);
+                        entrants.push_back({(int) cand, margin, cost, [&, tot, ocb, wt] {
+                                                return timeIt(env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, kaxis, klen}), tot, 64);
                                             }});
                     } else
                     {
-                        auto    pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt});
-                        int64_t tot  = x.n * ocbGroups * ((HW + wt - 1) / wt);
-                        entrants.push_back({(int) cand, margin, [&, pipe, tot, parts] {
+                        int64_t        tot  = x.n * ocbGroups * ((HW + wt - 1) / wt);
+                        vk::KernelCost cost = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, (double) wt, groups(tot, 64), parts);
+                        entrants.push_back({(int) cand, margin, cost, [&, tot, parts, ocb, wt] {
+                                                auto pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt});
                                                 return parts > 1 ? timeSplit(pipe, tot, parts) : timeIt(pipe, tot, 64);
                                             }});
                     }
@@ -692,11 +743,21 @@ namespace vknn {
                 // The LDS input-halo 3x3 joins the same bit-exact race when eligible: its
                 // accumulation is value-identical to the direct kernel (fp32 accumulate, icb/ky/kx
                 // tap order, pad taps add +0.0), so the swap needs no anti-noise margin either.
+                // Its input term is the staged halo per workgroup, not a per-thread re-read.
+                auto ldsCost = [&](int64_t wgroups, int64_t ts) {
+                    vk::KernelCost cost;
+                    // The halo is staged once per workgroup, so the LDS kernel's streaming term is
+                    // the halo plus the stores; the per-thread weight reads stay resident.
+                    cost.streamVec4    = (double) wgroups * ((double) Cinb * (double) (ts + 2) * (double) (ts + 2) + (double) (ts * ts));
+                    cost.residentVec4  = (double) wgroups * (double) (ts * ts) * (double) Cinb * 9.0 * 4.0;
+                    cost.footprintVec4 = footprint;
+                    cost.waves         = (double) wgroups * (double) (ts * ts) / 64.0;
+                    return cost;
+                };
                 if (lds3x3)
                 {
-                    auto pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC));
-                    entrants.push_back({kChoiceLds3x3, 1.0, [&, pipe] {
-                                            return timeIt(pipe, ldsG * 64, 64);
+                    entrants.push_back({kChoiceLds3x3, 1.0, ldsCost(ldsG, 8), [&] {
+                                            return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC)), ldsG * 64, 64);
                                         }});
                 }
                 // The 16x16-tile halo variant joins the same bit-exact race: the tile size only
@@ -704,12 +765,17 @@ namespace vknn {
                 // tile's input reads); an anti-noise margin guards the new class.
                 if (lds16Ok)
                 {
-                    auto pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {16u, 256u});
-                    entrants.push_back({kChoiceLds16, 0.97, [&, pipe] {
-                                            return timeIt(pipe, ldsG16 * 256, 256);
+                    entrants.push_back({kChoiceLds16, 0.97, ldsCost(ldsG16, 16), [&] {
+                                            return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {16u, 256u}), ldsG16 * 256, 256);
                                         }});
                 }
-                std::vector<double> ms     = vk::raceCandidates((int) entrants.size(), [&](int index) {
+                std::vector<vk::KernelCost> costs;
+                costs.reserve(entrants.size());
+                for (const OcbEntrant &entrant: entrants)
+                {
+                    costs.push_back(entrant.cost);
+                }
+                std::vector<double> ms     = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
                     return entrants[(size_t) index].time();
                 });
                 // entrants[0] is the deterministic default and stays the incumbent: each challenger

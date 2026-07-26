@@ -10,6 +10,7 @@
 // math byte-for-byte; the split-K kernels regroup the k chain (deterministically, identically to each
 // other) and so agree only to fp32 rounding.
 #include "backend/vulkan/coopmat_check.h"
+#include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
 #include "core/lowp_gemm.h"
 #include "core/matmul_tile.h"
@@ -358,11 +359,18 @@ namespace vknn {
                 // Entrants in kMatMulTiles order, minus the tiles whose dispatch does not fit; index
                 // 0 is always the default tile (tileFits holds for it whenever the op dispatches).
                 struct Entrant {
-                    int                                  tileIndex;
-                    std::shared_ptr<vk::ComputePipeline> pipe;
-                    uint32_t                             gxT, gyT;
+                    int      tileIndex;
+                    uint32_t gxT, gyT;
                 };
-                std::vector<Entrant> entrants;
+                std::vector<Entrant>        entrants;
+                std::vector<vk::KernelCost> costs;
+                // Cooperative panel loads: one workgroup stages TM*TK of A and TK*TN of B per K
+                // step, so it issues K*(TM+TN) elements over the whole reduction and stores TM*TN.
+                // The compulsory footprint is the three operand panels, identical for every tile.
+                // Threads per tiled-GEMM workgroup (shaders/matmul_tiled.comp dispatches TILE x TILE).
+                constexpr double            kMatMulTiledThreads = 256.0;
+                const double                elemsPerVec4        = 4.0;
+                const double                footprint    = (double) gzT * ((double) pc.M * pc.K + (double) pc.K * pc.N + (double) pc.M * pc.N) / elemsPerVec4;
                 for (int ci = 0; ci < kMatMulTileCount; ++ci)
                 {
                     const MatMulTile &t = kMatMulTiles[ci];
@@ -370,16 +378,30 @@ namespace vknn {
                     {
                         continue;
                     }
-                    bool                  fast = isDefaultMatMulTile(t);
-                    std::vector<uint32_t> spec = fast ? std::vector<uint32_t> {} : std::vector<uint32_t> {(uint32_t) t.tm, (uint32_t) t.tn, (uint32_t) t.tk};
-                    entrants.push_back({ci, env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec), (uint32_t) ((pc.N + t.tn - 1) / t.tn), (uint32_t) ((pc.M + t.tm - 1) / t.tm)});
+                    const uint32_t gxT = (uint32_t) ((pc.N + t.tn - 1) / t.tn), gyT = (uint32_t) ((pc.M + t.tm - 1) / t.tm);
+                    entrants.push_back({ci, gxT, gyT});
+                    const double   wgroups = (double) gxT * (double) gyT * (double) gzT;
+                    vk::KernelCost cost;
+                    // The A panel and the output stream; the B panel is the weight side and stays
+                    // cache-resident across the workgroups that share it.
+                    cost.streamVec4    = (wgroups * (double) pc.K * (double) t.tm + (double) gzT * (double) pc.M * (double) pc.N) / elemsPerVec4;
+                    cost.residentVec4  = wgroups * (double) pc.K * (double) t.tn / elemsPerVec4;
+                    cost.footprintVec4 = footprint;
+                    cost.waves         = wgroups * (double) kMatMulTiledThreads / 64.0;
+                    costs.push_back(cost);
                 }
                 if (entrants.empty())
                 {
                     return kMatMulTiles[0];
                 }
-                std::vector<double> ms = vk::raceCandidates((int) entrants.size(), [&](int index) {
-                    const Entrant &entrant = entrants[(size_t) index];
+                std::vector<double> ms = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
+                    const Entrant    &entrant = entrants[(size_t) index];
+                    const MatMulTile &t       = kMatMulTiles[entrant.tileIndex];
+                    // Built inside the timed lambda so a candidate the analytical prefilter dropped
+                    // never compiles its spec-constant variant (env.pipeline memoises).
+                    const bool            fast = isDefaultMatMulTile(t);
+                    std::vector<uint32_t> spec = fast ? std::vector<uint32_t> {} : std::vector<uint32_t> {(uint32_t) t.tm, (uint32_t) t.tn, (uint32_t) t.tk};
+                    auto                  pipe = env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec);
                     return timer.time([&](VkCommandBuffer cmd) {
                         std::vector<VkBuffer> bufs {sA->handle(), sB->handle(), sD->handle()};
                         if (sBias)
@@ -387,7 +409,7 @@ namespace vknn {
                             bufs.push_back(sBias->handle());
                         }
                         bufs.push_back(geom->handle()); // geometry SSBO (matches the real dispatch's binding count)
-                        entrant.pipe->dispatch(cmd, bufs, &pc, sizeof(pc), entrant.gxT, entrant.gyT, (uint32_t) gzT);
+                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), entrant.gxT, entrant.gyT, (uint32_t) gzT);
                     });
                 });
                 // The default tile is the incumbent, so every other candidate is a challenger and

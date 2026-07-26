@@ -1,0 +1,34 @@
+#version 450
+// Occupancy / bandwidth probe for the analytical kernel-cost model
+// (src/backend/vulkan/vk_tune_model.h). One calibration, once per device, replaces the constants a
+// cost model would otherwise have to guess.
+//
+// Each thread issues PER_THREAD strided uvec4 loads, so the caller controls three axes
+// independently: the footprint (buffer length -> DRAM or cache resident), the issued volume
+// (threads x PER_THREAD), and the dispatched wave count (workgroups). Sweeping the wave count at a
+// fixed issued volume is what locates the point where more waves stop buying throughput.
+//
+// The loads feed a store the compiler cannot prove dead, or it deletes them and the probe measures
+// an empty dispatch. The store lands at element 0 and never fires in practice: the buffer is
+// zero-filled, so the accumulated xor is 0 and the sentinel is not.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Probe { uvec4 s[]; };
+layout(push_constant) uniform PC {
+  uint vec4Count;  // probe buffer length, in uvec4
+  uint perThread;  // loads each thread issues
+  uint stride;     // uvec4 between one thread's successive loads
+  uint sentinel;   // value the dead store compares against
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uvec4 acc = uvec4(0);
+  uint index = gid;
+  for (uint n = 0; n < pc.perThread; ++n) {
+    acc ^= s[index % pc.vec4Count];
+    index += pc.stride;
+  }
+  if ((acc.x ^ acc.y ^ acc.z ^ acc.w) == pc.sentinel) {
+    s[0] = acc;
+  }
+}

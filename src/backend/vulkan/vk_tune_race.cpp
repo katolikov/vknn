@@ -5,6 +5,7 @@
 #include "vk_op_env.h"
 #include "vk_pipeline.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace vknn { namespace vk {
@@ -123,8 +124,16 @@ namespace vknn { namespace vk {
         char          cell[32];
         for (size_t i = 0; i < estimates.size(); ++i)
         {
-            snprintf(cell, sizeof(cell), "%.*f", kMsDecimals, estimates[i]);
             out += (i ? " " : "");
+            // An infinite slot is a candidate the analytical prefilter dropped before the race
+            // (vk_tune_model.h). Printing it as a dash rather than "inf" keeps a pruned race
+            // readable and distinguishes "not measured" from "measured and slow".
+            if (!std::isfinite(estimates[i]))
+            {
+                out += "-";
+                continue;
+            }
+            snprintf(cell, sizeof(cell), "%.*f", kMsDecimals, estimates[i]);
             out += cell;
         }
         return out + "]";

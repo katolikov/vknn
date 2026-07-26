@@ -103,6 +103,7 @@ int main(int argc, char **argv) {
     cfg.priority               = priorityFromStr(optValue(argc, argv, "--priority", "normal"));
     cfg.tuning                 = tuningFromStr(optValue(argc, argv, "--tuning", "fast"));
     cfg.noCache                = hasFlag(argc, argv, "--no-cache");
+    cfg.verbosity              = atoi(optValue(argc, argv, "--verbosity", "1"));
     cfg.freeWeightsAfterUpload = !hasFlag(argc, argv, "--keep-weights");
     // Advanced GPU-pass off switches: each --no-* flag turns its optimization hint Off (default On).
     if (hasFlag(argc, argv, "--no-flat"))
@@ -175,7 +176,7 @@ int main(int argc, char **argv) {
     {
         if (argv[i][0] == '-')
         {
-            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") || !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads") || !strcmp(argv[i], "--bucket"))
+            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") || !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads") || !strcmp(argv[i], "--bucket") || !strcmp(argv[i], "--verbosity"))
             {
                 ++i; // skip the flag's value
             }
