@@ -1490,8 +1490,9 @@ namespace {
         int                                 fogPermille = 0;   // last encode: permille of gaussians above opacity 0.1
     };
 
-    // The encoder's predicted camera pose is an internal tensor, not a declared output; these names
-    // cover the declared-output case and the graph tensor the export pipeline produces.
+    // The shipped encoder declares `camera_poses` [1,V,4,4] as an output, so the first name resolves
+    // through outputByName. The second covers an export that leaves the pose an internal tensor; it
+    // reads back only when the caller made that tensor host-resident, else the poses stay identity.
     const char *const kPoseTensorNames[] = {"camera_poses", "/enc/Reshape_7_output_0"};
 
 } // namespace
@@ -1507,10 +1508,7 @@ JNIEXPORT jlong JNICALL Java_com_vknn_chat_NativeLib_nativeSplatLoad(JNIEnv *env
         cfg.backend                = backendFromStr(jstr(env, jbackend));
         cfg.precision              = precFromStr(jstr(env, jprec));
         cfg.freeWeightsAfterUpload = true;
-        // Forces the predicted-pose tensor into a dedicated host-readable buffer after each run (its
-        // debug file write targets a shell path and fails harmlessly inside an app sandbox).
-        cfg.dumpTensors = "camera_poses,Reshape_7_output_0";
-        splat->session  = Runtime::load(jstr(env, jvxm), cfg, jstr(env, jcache));
+        splat->session             = Runtime::load(jstr(env, jvxm), cfg, jstr(env, jcache));
         if (!splat->session)
         {
             LOGE("splat: Runtime::load failed");

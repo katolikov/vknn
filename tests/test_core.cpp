@@ -233,10 +233,10 @@ TEST(Config, JsonRoundTrip) {
 }
 
 TEST(Config, ParseExplicit) {
-    Config c = Config::fromJsonString(R"({"backend":"CPU","precision":"fp32","fallback":["VULKAN","CPU"],"cacheDir":"/tmp/x"})");
+    Config c = Config::fromJsonString(R"({"backend":"CPU","precision":"fp32","fallback":["VULKAN","CPU"],"cacheFile":"/tmp/x.cache"})");
     EXPECT_EQ(c.backend, BackendKind::Cpu);
     EXPECT_EQ(c.precision, Precision::High);
-    EXPECT_EQ(c.cacheDir, "/tmp/x");
+    EXPECT_EQ(c.cacheFile, "/tmp/x.cache");
     ASSERT_EQ(c.fallback.size(), 2u);
     EXPECT_EQ(c.fallback[0], BackendKind::Vulkan);
 }

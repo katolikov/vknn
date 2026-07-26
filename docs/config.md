@@ -37,8 +37,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `decodeChainSteps` | int | ≥ 1 | `1` | Decode iterations the decode bucket's GPU segment records as one command-buffer chain (`Session::configureDecodeChain`): this many greedy tokens per `run()` with on-device feedback (argmax id → `input_ids`, position + 1, mask slot) between iterations — no host readback or re-bind between tokens; each iteration's command buffer still submits with its own fence, so every submit stays watchdog-short. `1` records the single-step stream unchanged; only an explicitly configured bucket chains. The token stream is bit-identical to the single-step loop; chained decode is argmax-only. |
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `priority` | string | `"low"`, `"normal"`, `"high"` | `"normal"` | GPU queue scheduling priority (Vulkan `VK_KHR/EXT_global_priority`). `normal` reproduces the default device-creation path; `low`/`high` request the matching queue tier. Scheduling only — never changes numerical output; an inert no-op on a device without a global-priority extension. |
-| `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Per-model MessagePack cache holding the compiled pipelines, prepacked/Winograd weights, and conv autotune table. Empty resolves to `<model>.cache` next to the model. Caching is always on: a warm start reloads it (skipping shader compilation, weight prepacking, and autotuning), and it auto-heals when stale. See [Caching](#caching). |
-| `cacheDir` | string | filesystem path | `"vknn_cache"` | Fallback location for the cache when the session is built from an in-memory graph (no model path to anchor `cacheFile`). |
+| `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Per-model MessagePack cache holding the compiled pipelines, prepacked/Winograd weights, and conv autotune table. Empty resolves to `<model>.cache` next to the model. Setting it explicitly is also the only way a session built from an in-memory graph (`Session::create`, no model path) gets a cache; `Runtime::cacheFileIn(dir, model)` resolves one inside a shared directory, and missing parent directories are created on the first write. Caching is always on: a warm start reloads it (skipping shader compilation, weight prepacking, and autotuning), and it auto-heals when stale. See [Caching](#caching). |
 | `noCache` | bool | `true` / `false` | `false` | Debug: skip all cache read/write, recompiling + re-tuning on every load (for cold-compile measurement). |
 | `profile` | bool | `true` / `false` | `false` | Enable the per-op profiler (GPU timestamp queries + CPU timing); the table is available via `session.profiler()`. |
 | `verbosity` | int | `0`, `1`, `≥2` | `1` | Log level. `0` → Warn, `1` → Info, `≥2` → Debug. Applied by `Config::applyLogLevel()`. |
@@ -242,7 +241,6 @@ lists all of them, with non-default values where useful:
   "maxSubmitBindings": 1024,
   "decodeChainSteps": 1,
   "cacheFile": "enc.cache",
-  "cacheDir": "vknn_cache",
   "noCache": false,
   "tuning": "fast",
   "cpuThreads": 4,
@@ -313,7 +311,8 @@ Config cfg;
 if (!cfgpath.empty()) cfg = Config::fromJsonFile(cfgpath);   // base from JSON
 cfg.backend   = backendFromStr(backend);                      // --backend overrides
 cfg.precision = precisionFromStr(precision);                  // --precision overrides (low|normal|high)
-cfg.cacheDir  = argval(argc, argv, "--cache", cfg.cacheDir.c_str());  // --cache overrides
+if (const char *dir = argval(argc, argv, "--cache", ""); dir[0])       // --cache DIR overrides
+    cfg.cacheFile = Runtime::cacheFileIn(dir, model);
 if (hasflag(argc, argv, "--profile")) cfg.profile = true;     // --profile sets flag
 if (hasflag(argc, argv, "--layer-dump")) {                    // --layer-dump DIR
   cfg.layerDump = true;
@@ -328,7 +327,7 @@ The CLI flags and the config fields they touch:
 | `--config PATH` | loads the whole `Config` via `fromJsonFile` | (none) |
 | `--backend NAME` | `backend` (`vulkan`/`cpu`) | `vulkan` |
 | `--precision P` | `precision` (`low`/`normal`/`high`; `fp16`/`fp32` aliases) | `low` |
-| `--cache DIR` | `cacheDir` | struct default |
+| `--cache DIR` | `cacheFile = Runtime::cacheFileIn(DIR, model)` | beside the model |
 | `--profile` | `profile = true` | off |
 | `--layer-dump DIR` | `layerDump = true`, `layerDumpDir = DIR` | off |
 | `--winograd MODE` | `setHint(Hint::Winograd)` (`auto`/`on`/`off`) | `auto` |

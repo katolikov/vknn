@@ -58,7 +58,7 @@ namespace vknn {
         vk::CommandRunner                    *runner   = nullptr; // for on-device autotuning benchmarks
         Tuning                                tuning   = Tuning::Fast;
         Mode                                  winograd = Mode::Auto;
-        // Per-model namespace for the weight cache, so reusing one cacheDir across different models can't
+        // Per-model namespace for the weight cache, so reusing one cache directory across different models can't
         // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
         std::string modelTag;
         // Per-GPU namespace for the autotune table. The fastest kernel is GPU/driver-specific, so a cache

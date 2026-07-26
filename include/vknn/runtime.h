@@ -15,18 +15,38 @@ namespace vknn {
         /// @param path      Model file. A ".vxm" extension selects the pre-optimized loader; any other
         ///                  extension is treated as ONNX.
         /// @param cfg       Runtime configuration; copied so the resolved cache path can be stamped in.
-        /// @param cacheFile Unified per-model cache file: an existing file gives a fast warm start;
-        ///                  an absent one is populated and written on session teardown. Empty (the
-        ///                  default) resolves to "<model>.cache" next to the model via defaultCacheFile().
+        /// @param cacheFile Unified per-model cache file: an existing file gives a fast warm start; an
+        ///                  absent one is populated as soon as session creation produces content. Empty
+        ///                  (the default) falls back to cfg.cacheFile, then to "<model>.cache" next to
+        ///                  the model via defaultCacheFile().
         /// @returns An owning Session for the loaded model.
         static std::unique_ptr<Session> load(const std::string &path, const Config &cfg = {}, const std::string &cacheFile = "") {
-            Config c    = cfg;
-            c.cacheFile = cacheFile.empty() ? defaultCacheFile(path) : cacheFile;
+            Config c = cfg;
+            // A caller that configured Config::cacheFile and passed no argument here means that path: the
+            // argument overrides it, and only an empty pair falls through to the file beside the model.
+            if (!cacheFile.empty())
+            {
+                c.cacheFile = cacheFile;
+            } else if (c.cacheFile.empty())
+            {
+                c.cacheFile = defaultCacheFile(path);
+            }
             // Dispatch on extension: a pre-optimized ".vxm" skips ONNX parsing + passes; anything else is
             // ONNX.
             constexpr size_t kVxmExtLen = 4; // length of the ".vxm" extension suffix
             bool isVxm = path.size() >= kVxmExtLen && path.compare(path.size() - kVxmExtLen, kVxmExtLen, ".vxm") == 0;
             return isVxm ? Session::createFromVxm(path, c) : Session::createFromOnnx(path, c);
+        }
+        /// Place a model's cache file inside a directory: "<dir>/<model file name without extension>.cache".
+        /// Distinct models keep distinct entries when one directory is shared.
+        /// @param dir       Directory to hold the cache file (created on the first write if missing).
+        /// @param modelPath Path to the model file.
+        /// @returns The resolved cache-file path.
+        static std::string cacheFileIn(const std::string &dir, const std::string &modelPath) {
+            auto              slash = modelPath.find_last_of("/\\");
+            const std::string name  = slash == std::string::npos ? modelPath : modelPath.substr(slash + 1);
+            auto              dot   = name.find_last_of('.');
+            return dir + "/" + (dot == std::string::npos ? name : name.substr(0, dot)) + ".cache";
         }
         /// Derive the default cache path from a model path by swapping the final extension for ".cache"
         /// ("<model path without extension>.cache" — e.g. enc.vxm -> enc.cache). A model path with no

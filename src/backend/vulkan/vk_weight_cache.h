@@ -26,6 +26,11 @@ namespace vknn {
         bool dirty() const {
             return dirty_;
         }
+        /// Clear the dirty mark once the retained content has reached the cache file, so a later flush
+        /// with nothing new to add costs nothing.
+        void markSaved() const {
+            dirty_ = false;
+        }
         bool get(const std::string &key, std::vector<float> &out) const;
         void put(const std::string &key, const std::vector<float> &data);
         // autotune table: op-signature -> chosen kernel value, plus the Tuning level each entry was

@@ -272,6 +272,13 @@ namespace vknn {
         }
     }
 
+    void Session::flushNewCacheWork() {
+        for (auto &b: backends_)
+        {
+            b->flushNewCacheWork();
+        }
+    }
+
     std::unique_ptr<Session> Session::createFromOnnx(const std::string &path, const Config &cfg) {
         Config c = cfg;
         if (c.cacheFile.empty())
@@ -313,6 +320,7 @@ namespace vknn {
         }
         s->planned_ = true;
         s->warnUnmatchedDebugPatterns(); // all buckets built: name the pattern knobs that matched nothing
+        s->flushNewCacheWork();          // a cold load's tuning reaches disk here, not only at teardown
         auto t1 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created from .vxm in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms (" << s->buckets_.size() << " bucket(s))";
         return s;
@@ -342,6 +350,7 @@ namespace vknn {
         s->buckets_.front().key = Session::shapeKey(*s->buckets_.front().graph);
         s->planned_             = true;
         s->warnUnmatchedDebugPatterns(); // the default bucket is built: name the pattern knobs that matched nothing
+        s->flushNewCacheWork();          // a cold load's tuning reaches disk here, not only at teardown
         auto t1 = std::chrono::high_resolution_clock::now();
         VKNN_INFO << "Session created in " << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
         return s;
@@ -1313,6 +1322,7 @@ namespace vknn {
             return e.status();
         }
         cfg_ = saved;
+        flushNewCacheWork(); // the new bucket's tuning reaches disk here, not only at teardown
         VKNN_INFO << "prepareShapes: added bucket '" << k << "' (" << buckets_.size() << " total)";
         return Status::Ok;
     }
