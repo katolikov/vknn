@@ -132,9 +132,12 @@ fused-cooperative Winograd, a large kernel. See [benchmark.md](benchmark.md).
 
 Converting the caller's NCHW fp32 input into the internal `NC4HW4` packed layout (and the reverse on
 output), plus the `toHost`/`toDevice` residency reconciliation at segment boundaries
-(`Backend::toHost` / `Backend::toDevice` in `include/vknn/backend.h`), is host-side overhead. On
-small CNNs where GPU compute is only a few milliseconds, this boundary work is a large fraction of
-the wall time.
+(`Backend::toHost` / `Backend::toDevice` in `include/vknn/backend.h`), is host-side overhead. It is
+small on the classifier CNNs: measured against `run` on the suite artifacts, pack + unpack is
+1.2–2.7% of the run wall (SqueezeNet 1.4–2.1%, ShuffleNetV2 2.0–2.4%, MobileNetV2 1.9–2.7%,
+MnasNet 1.0 1.2–2.1%, MobileNetV3 1.8%, EfficientNet-B0 2.4–2.5%). It is material only where the
+tensors themselves are large: YOLOv8n, with a 4.92 MB input and a 2.82 MB `[1,84,8400]` output,
+spends 9–15% there. The whole-GPU plan described below is the lever for that case.
 
 The device is UMA (memory types are `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`, so there are **no
 staging copies** at the I/O boundary), but the pack/unpack itself is CPU work. A **whole-GPU plan**
@@ -269,8 +272,8 @@ with `Status::Unsupported`.
 | NPU / accelerator | None; Vulkan + CPU only (pluggable — see adding-a-backend.md) |
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
-| Host overhead | NC4HW4 pack/unpack at the I/O boundary (a large fraction on small CNNs); a whole-GPU plan converts 8-bit / rank-4 fp32 inputs on the GPU and downloads flat outputs at declared dtype |
+| Host overhead | NC4HW4 pack/unpack at the I/O boundary (1–3% of the run wall on the classifier CNNs; 9–15% on large-image I/O such as YOLOv8n); a whole-GPU plan converts 8-bit / rank-4 fp32 inputs on the GPU and downloads flat outputs at declared dtype |
 | Quantized models | Static QDQ / QLinear **and** the canonical dynamic-quant cluster run dequantized to float (static: clamps preserved, rounding dropped — not int-exact; dynamic: folded to float MatMul/Conv, no output clamp); a non-canonical dynamic-quant cluster fails at planning; no int8 compute tier |
 | Layer dump | Fused-activation tensors map to golden *post-Clip* name |
 | ONNX ops | See op-coverage.md |
-| Devices tested | One (Android arm64-v8a, AMD RDNA-class mobile GPU) |
+| Devices tested | Two (Android arm64-v8a, AMD RDNA-class mobile GPUs) |

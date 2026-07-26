@@ -195,6 +195,16 @@ namespace vknn {
         bool kvConcatFold() const noexcept {
             return hint(Hint::KvConcatFold, (int) Mode::On) != (int) Mode::Off;
         }
+        /// Hint::KvCacheQuant as set (Auto / On / Off), defaulting to Off: the scheme is lossy by
+        /// construction and its measured accuracy cost does not shrink with cache size, so it is
+        /// opt-in rather than something the engine takes on a user's behalf (rationale and the
+        /// measured numbers in src/core/kv_quant.h). Whether On/Auto actually engage is NOT a
+        /// config-only question — Auto resolves against the segment's eligible cache size, so the
+        /// decision lives in kvQuantEnabled() / kvQuantCacheTensors() (src/core/kv_quant.h), the
+        /// one rule every backend derives from. Off here is the only value that answers on its own.
+        int kvCacheQuantMode() const noexcept {
+            return hint(Hint::KvCacheQuant, (int) Mode::Off);
+        }
 
         static Config fromJsonFile(const std::string &path);
         static Config fromJsonString(const std::string &json);

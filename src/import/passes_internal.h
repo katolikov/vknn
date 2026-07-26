@@ -21,6 +21,11 @@ namespace vknn {
     // fusion pass's compile-time fp32 prediction (defined in mark_fp32.cpp).
     bool fp32NameMatch(const std::string &name, const std::string &substrs);
 
+    // The tensor named `name` when it is a GRAPH INPUT of `g`, else kNoTensor. A bucket plan reads
+    // only declared inputs — an internal tensor that happens to share the name carries no boundary
+    // shape (defined in plan_widened_bucket.cpp).
+    TensorId graphInputByName(const Graph &g, const std::string &name);
+
     // Redirect every reference to tensor `from` so it points at `to`: node inputs, the fused-residual
     // and fused-bias edges (which are not in the inputs list on every op), and graph outputs. Fusion
     // passes that delete a node and fold its output into a producer must use this; rewiring only

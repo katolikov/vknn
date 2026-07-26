@@ -52,6 +52,14 @@ namespace vknn {
             std::shared_ptr<vk::ComputePipeline> partialPipe;
             std::shared_ptr<vk::ComputePipeline> combinePipe;
             bool                                 useSgKernel = false; // pass 1 runs fused_attention_sg.comp
+            // int8 KV cache (Hint::KvCacheQuant): the segment stored this node's past K/V sources
+            // as int8 payload + fp16 per-(head, token)-row scales, so pass 1 runs the _kvq kernel
+            // twin that dequantizes them inside the fp32 K-dot / V-apply loops. Derived from the
+            // segment's allocation (env.kvqScale), never re-decided here — kernel and buffers
+            // cannot disagree. The scale buffers are segment-owned; the raw pointers stay valid
+            // for this op instance's lifetime.
+            bool                                 useKvq = false;
+            vk::Buffer                          *kvqKScale = nullptr, *kvqVScale = nullptr;
             FaPartialPC                          partialPc {};
             FaCombinePC                          combinePc {};
             std::shared_ptr<vk::Buffer>          geom;      // dims + strides + row strides, deduped SSBO
@@ -80,6 +88,16 @@ namespace vknn {
                 // Split-KV form: token s >= pastLen reads the new-rows sources (inputs 4/5) through
                 // their own strides; the unsplit form sets pastLen = C so the branch never fires.
                 const bool split   = node.attr.geti(kFaSplit, 0) != 0 && node.inputs.size() >= 6;
+                kvqKScale          = split && env.kvqScale ? env.kvqScale(node.inputs[1]) : nullptr;
+                kvqVScale          = split && env.kvqScale ? env.kvqScale(node.inputs[2]) : nullptr;
+                if ((kvqKScale != nullptr) != (kvqVScale != nullptr))
+                {
+                    // The shared eligibility rule admits K and V together or not at all; one-sided
+                    // allocation means the segment and this op disagree — a wiring bug, not a state
+                    // to run through.
+                    throw Error(Status::RuntimeError, "FusedAttention '" + node.name + "': int8 KV cache allocated for only one of the past K/V sources");
+                }
+                useKvq = kvqKScale != nullptr;
                 partialPc.pastLen  = split ? (int) node.attr.geti(kFaPastLen) : partialPc.C;
                 partialPc.kNewN    = (int) node.attr.geti(kFaKNewN);
                 partialPc.kNewK    = (int) node.attr.geti(kFaKNewK);
@@ -252,25 +270,27 @@ namespace vknn {
                 useSgKernel = sgEligible;
                 // Kernel-choice record under Config::verbosity Debug: which pass-1 kernel the node
                 // runs and whether the vec4 K/V paths engaged.
-                VKNN_DEBUG << "FusedAttention pass 1: " << (sgEligible ? "subgroup" : "base") << " kernel, kv4=" << kVec4 << " vv4=" << vVec4 << " group=" << groupSize << " hd=" << partialPc.hd
-                           << " chunk=" << chunkTokens << " wgs=" << wgs << " kvRows=" << partialPc.kvRows;
+                VKNN_DEBUG << "FusedAttention pass 1: " << (sgEligible ? "subgroup" : "base") << (useKvq ? " kvq" : "") << " kernel, kv4=" << kVec4 << " vv4=" << vVec4 << " group=" << groupSize
+                           << " hd=" << partialPc.hd << " chunk=" << chunkTokens << " wgs=" << wgs << " kvRows=" << partialPc.kvRows;
                 if (useSgKernel)
                 {
                     // Spec constants: G, HD, CHUNK, the shared-array products QT4 == G*HD/4,
                     // SCORETOTAL == G*CHUNK and FOLDTOTAL == G*WGS (a spec-constant product cannot
                     // size an array in GLSL, so the host computes them), the workgroup width, and
-                    // the vec4 path selectors.
+                    // the vec4 path selectors. The kvq twin shares the whole scheme and appends the
+                    // two scale bindings (12/13).
                     const std::vector<uint32_t> spec = {(uint32_t) groupSize,           (uint32_t) partialPc.hd, (uint32_t) chunkTokens, (uint32_t) (groupSize * partialPc.hd / 4),
                                                         (uint32_t) (groupSize * chunkTokens), (uint32_t) wgs,          kVec4 ? 1u : 0u,        vVec4 ? 1u : 0u,
                                                         (uint32_t) (groupSize * wgs)};
-                    partialPipe                      = env.pipeline(shader("fused_attention_sg", env.useFp16), 12, sizeof(FaPartialPC), spec);
+                    partialPipe                      = env.pipeline(shader(useKvq ? "fused_attention_sg_kvq" : "fused_attention_sg", env.useFp16), useKvq ? 14u : 12u, sizeof(FaPartialPC), spec);
                 } else
                 {
                     // Spec constants: G, HD, CHUNK plus the two shared-array products (a spec-constant
-                    // product cannot size an array in GLSL, so the host computes them).
+                    // product cannot size an array in GLSL, so the host computes them). The kvq twin
+                    // shares the scheme and appends the two scale bindings (8/9).
                     const std::vector<uint32_t> spec = {(uint32_t) groupSize, (uint32_t) partialPc.hd, (uint32_t) chunkTokens,
                                                         (uint32_t) (groupSize * partialPc.hd), (uint32_t) (groupSize * chunkTokens)};
-                    partialPipe                      = env.pipeline(shader("fused_attention", env.useFp16), 8, sizeof(FaPartialPC), spec);
+                    partialPipe                      = env.pipeline(shader(useKvq ? "fused_attention_kvq" : "fused_attention", env.useFp16), useKvq ? 10u : 8u, sizeof(FaPartialPC), spec);
                 }
                 combinePipe = env.pipeline(shader("fused_attention_combine", env.useFp16), 2, sizeof(FaCombinePC), std::vector<uint32_t> {});
             }
@@ -286,18 +306,23 @@ namespace vknn {
                 vk::Buffer *dst  = env.devBuf(node.outputs[0]);
                 // Pass 1: one workgroup per (KV row, chunk); the 1-D grid spills into y and the
                 // kernel folds it back through gl_WorkGroupID.y. The subgroup kernel re-binds the
-                // K/V (and split new-source) buffers at 8..11 as its vec4 views.
+                // K/V (and split new-source) buffers at 8..11 as its vec4 views; a kvq node
+                // appends the two per-row scale buffers as the last bindings of either kernel.
+                std::vector<VkBuffer> bindings;
                 if (useSgKernel)
                 {
-                    partialPipe->dispatch(cmd,
-                                          {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle(), kNew->handle(), vNew->handle(), k->handle(), v->handle(),
-                                           kNew->handle(), vNew->handle()},
-                                          &partialPc, sizeof(partialPc), (uint32_t) ((int64_t) partialPc.kvRows * partialPc.chunks));
+                    bindings = {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle(), kNew->handle(), vNew->handle(), k->handle(), v->handle(),
+                                kNew->handle(), vNew->handle()};
                 } else
                 {
-                    partialPipe->dispatch(cmd, {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle(), kNew->handle(), vNew->handle()}, &partialPc, sizeof(partialPc),
-                                          (uint32_t) ((int64_t) partialPc.kvRows * partialPc.chunks));
+                    bindings = {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle(), kNew->handle(), vNew->handle()};
                 }
+                if (useKvq)
+                {
+                    bindings.push_back(kvqKScale->handle());
+                    bindings.push_back(kvqVScale->handle());
+                }
+                partialPipe->dispatch(cmd, bindings, &partialPc, sizeof(partialPc), (uint32_t) ((int64_t) partialPc.kvRows * partialPc.chunks));
                 // Two dispatches in one record() are NOT auto-barriered; the combine reads the
                 // scratch pass 1 wrote (same pattern as reduce.cpp).
                 vk::computeBarrier(*env.ctx, cmd);

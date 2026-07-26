@@ -1,6 +1,14 @@
 #version 450
 #include "precision.glsl"
-// Flat broadcast: out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ].
+// Flat broadcast for Expand (mode 0) and Tile (mode 1):
+//   Expand: out[i] = in[ sum_k clamp(outCoord_k - (outDim[k] - inDim[k]), 0, inDim[k]-1) * inStride[k] ]
+//   Tile:   out[i] = in[ sum_k (outCoord_k % inDim[k]) * inStride[k] ]
+// Both reduce to the plain broadcast on a size-1 source axis. They differ only where the target
+// widens an axis the source neither matches nor broadcasts: Tile repeats the axis (its whole
+// purpose), while Expand right-aligns the source into the axis — the alignment ONNX already applies
+// to the ranks — and repeats the first element ahead of it. See src/backend/cpu/ops/expand.cpp for
+// why the alignment is the rule that makes the ORT transformer mask subgraph's [1,1,S,S] causal
+// triangle land correctly on an [1,1,S,P+S] score mask at any cache fill P.
 // STORE selects fp16/fp32 storage; values are read and written via float. Geometry
 // (outDim/inDim/inStride) rides a content-deduped SSBO (binding 2), not the push constant, so the
 // decodable rank is unbounded (see flat::uploadFlatGeom). Arrays pack back-to-back:
@@ -19,7 +27,9 @@ void main() {
   for (int k = pc.rank - 1; k >= 0; --k) {
     int c = rem % geom.g[k];
     rem /= geom.g[k];
-    inIdx += (c % geom.g[pc.rank + k]) * geom.g[2 * pc.rank + k];
+    int inDim = geom.g[pc.rank + k];
+    int src = (pc.mode == 1) ? (c % inDim) : clamp(c - (geom.g[k] - inDim), 0, inDim - 1);
+    inIdx += src * geom.g[2 * pc.rank + k];
   }
   d[gid] = STORE(float(s[inIdx]));
 }

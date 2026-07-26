@@ -6,6 +6,7 @@
 #include "core/vk_gates.h"
 #include "backend/cpu/cpu_backend.h"
 #include "core/fused_attention.h"
+#include "core/fused_dwpw.h"
 #include "vknn/dtype.h"
 #include "vknn/node.h"
 
@@ -147,20 +148,22 @@ namespace vknn {
         }
         if (nd.type == OpType::FusedDwPw)
         {
-            // LDS holds E depthwise outputs (cap 1024). Run ALL eligible fused nodes on the GPU: a
-            // partial gate (some fused nodes on CPU) creates a GPU/CPU boundary that mis-handles the
-            // fused residual.
+            // LDS holds E depthwise outputs; every fused_dwpw kernel sizes its shared array to
+            // kDwPwMaxExpanded (mirrored by MAX_E / MAX_EB in shaders/fused_dwpw*.comp), so this
+            // gate is the assertion that a planned node fits those arrays. Run ALL eligible fused
+            // nodes on the GPU: a partial gate (some fused nodes on CPU) creates a GPU/CPU boundary
+            // that mis-handles the fused residual.
             const Shape &in  = g.desc(nd.inputs[0]).shape;  // expanded [N,E,H,W]
             const Shape &out = g.desc(nd.outputs[0]).shape; // [N,Cout,OH,OW]
             if (in.size() != 4 || out.size() != 4)
             {
                 return refuse(whyNot, "FusedDwPw: input/output not 4D");
             }
-            if (in[1] <= 1024)
+            if (in[1] <= kDwPwMaxExpanded)
             {
                 return true;
             }
-            return refuse(whyNot, "FusedDwPw: expanded channels > 1024");
+            return refuse(whyNot, "FusedDwPw: expanded channels > " + std::to_string(kDwPwMaxExpanded));
         }
         if (nd.type == OpType::FusedSE)
         {

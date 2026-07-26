@@ -14,12 +14,18 @@
 //     workgroup and serialize ~14 barrier rounds per row.
 // The row index spans a 2D workgroup grid (ComputePipeline::dispatch spills the count into y past
 // the per-dim limit), so >65535-row shapes work in both modes.
+// pc.outPad is the output buffer's PHYSICAL last-axis extent, non-zero only for a virtualized
+// activation the segment allocated at roundUpVec4(axis) so its consuming tiled MatMul can take the
+// vec4-load kernels (core/matmul_tile.h). It applies only to a LAST-axis softmax (inner == 1): the
+// row then starts at o * outPad instead of o * axis, and the outPad - axis pad elements are stored
+// as zero every run, because the liveness pool hands the same buffer to different tensors between
+// runs and the consuming GEMM multiplies the A-side pad against its own zeroed k tail.
 #define WG 128
 layout(constant_id = 0) const int ROW_MODE = 0;
 layout(local_size_x = WG) in;
 layout(std430, binding = 0) readonly buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
-layout(push_constant) uniform PC { int outer, axis, inner; } pc;
+layout(push_constant) uniform PC { int outer, axis, inner, outPad; } pc;
 
 shared float red[WG];
 
@@ -29,6 +35,7 @@ void main() {
     if (row >= uint(pc.outer * pc.inner)) return;
     int o = int(row) / pc.inner, i = int(row) % pc.inner;
     int base = o * pc.axis * pc.inner + i;
+    int obase = pc.outPad > 0 ? o * pc.outPad + i : base;
 
     float m = -3.4e38;
     for (int a = 0; a < pc.axis; ++a)
@@ -42,8 +49,10 @@ void main() {
 #ifdef PW_EPI
       v = pw_apply(v, base + a * pc.inner);
 #endif
-      d[base + a * pc.inner] = STORE(v);
+      d[obase + a * pc.inner] = STORE(v);
     }
+    for (int a = pc.axis; a < pc.outPad; ++a)
+      d[obase + a] = STORE(0.0);
     return;
   }
 
@@ -51,6 +60,7 @@ void main() {
   if (row >= uint(pc.outer * pc.inner)) return;
   int o = int(row) / pc.inner, i = int(row) % pc.inner;
   int base = o * pc.axis * pc.inner + i;
+  int obase = pc.outPad > 0 ? o * pc.outPad + i : base;
   uint t = gl_LocalInvocationID.x;
 
   float m = -3.4e38;
@@ -82,6 +92,8 @@ void main() {
 #ifdef PW_EPI
     v = pw_apply(v, base + a * pc.inner);
 #endif
-    d[base + a * pc.inner] = STORE(v);
+    d[obase + a * pc.inner] = STORE(v);
   }
+  for (int a = pc.axis + int(t); a < pc.outPad; a += WG)
+    d[obase + a] = STORE(0.0);
 }

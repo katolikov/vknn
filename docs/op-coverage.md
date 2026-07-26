@@ -163,9 +163,11 @@ flags override a single pass on top of the level:
   kernel loses to the direct conv on classifier-CNN shapes (small output areas starve its pixel
   tiles); opt in with `--lower-conv` and measure per model.
 - **Squeeze-Excite** chain folds to one kernel (`-O2` or `--fuse-se`, experimental).
-- **Depthwise + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip (`-O2`
-  or `--fuse-dwpw`, experimental; pairs wider than the kernel's 1024-channel LDS budget stay
-  separate convs).
+- **Depthwise + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip,
+  fp16-rounded like the unfused store. Byte-identical to the unfused graph on the CPU oracle and
+  on the fp32 GPU path; the fp16 GPU path still diverges, so the pass stays experimental
+  (`-O2` or `--fuse-dwpw`; pairs wider than the kernels' 1152-channel LDS budget stay separate
+  convs).
 - **Einsum lowering** to MatMul/Squeeze/Unsqueeze; **ConvTranspose → Conv + DepthToSpace**
   (subpixel rewrite).
 

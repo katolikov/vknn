@@ -259,28 +259,37 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 
 ## Benchmarks
 
-VKNN v1.4.2, whole CNN suite, fp16, `--tuning fast`, primary device, 20-iteration medians with a
-cooldown before every stage. Every number in this section uses the **default compile/run
-configuration** — the first quickstart command, no `--strict-fuse` (that flag exists for byte-
-comparing a fused compile against an unfused one; the determinism and accuracy guarantees below
-hold in the default configuration). The VKNN figure is the full `run()` wall (it includes the host↔device
-copies). "vs v1.4.1" is the cooled interleaved paired A/B delta (min-of-5, two devices, same day);
-accuracy is against fp32 onnxruntime references and is byte-identical across runs, tuning levels,
-and both devices.
+VKNN v1.4.3+, whole CNN suite, fp16, `--tuning fast`, 20-iteration medians with a cooldown before
+every stage. Every number in this section uses the **default compile/run configuration** — the
+first quickstart command, no `--strict-fuse` (that flag exists for byte-comparing a fused compile
+against an unfused one; the determinism and accuracy guarantees below hold in the default
+configuration). The VKNN figure is the full `run()` wall (it includes the host↔device copies).
+"vs v1.4.3" is the cooled interleaved paired A/B delta (GPU span, min-of-5 valid pairs, **three
+devices**), measured under exclusive device use with each arm's tune table pinned and any pair
+whose arms straddled a DVFS step discarded. Accuracy is against fp32 onnxruntime references, and
+every output is **byte-identical to v1.4.3** on all three devices at `none`, `fast` and `heavy`
+with 0 CPU fallbacks — the speedups below change scheduling and memory traffic, never a result.
 
-| Model (fp16) | VKNN v1.4.2 median/min | vs v1.4.1 | cosine | PSNR |
+| Model (fp16) | VKNN GPU span | vs v1.4.3 (3 devices) | cosine | PSNR |
 |---|---|---|---|---|
-| SqueezeNet 1.1 | 1.7 / 1.6 ms | **−13 / −10%** | 1.000000 | 71.5 dB |
-| ShuffleNetV2 x1.0 | 1.8 / 1.7 ms | **−17 / −17%** | 0.999998 | 67.5 dB |
-| MnasNet 1.0 | 2.2 / 2.0 ms | ±0 (no eligible sites) | 0.999989 | 63.6 dB |
-| MobileNetV2 | 2.4 / 2.0 ms | ±0 (no eligible sites) | 0.999989 | 64.4 dB |
-| MobileNetV3-Large | 3.1 / 2.7 ms | ±0 (no eligible sites) | 0.999991 | 63.5 dB |
-| EfficientNet-B0 | 6.4 / 5.5 ms | ±0 (no eligible sites) | 0.999987 | 61.7 dB |
-| ResNet-50 | 12.8 / 12.0 ms | within the 3% gate | 1.000000 | 82.9 dB |
-| DenseNet-121 | 15.9 / 14.1 ms | within the 3% gate | 0.999997 | 70.8 dB |
-| Inception-v3 | 16.8 / 16.0 ms | −2% (−4% at `none`) | 0.999994 | 64.3 dB |
-| YOLOv8n (640×640) | 19.4 / 16.3 ms | **−8 / −4%** | 1.000000 | 86.9 dB |
-| YoNoSplat encoder (965M params, 8 views) | 8.73 s | ±0 (bit-identical) | 6 outputs ≥ 0.999993 | 65–81 dB |
+| SqueezeNet 1.1 | 1.5 ms | **−9 / −12 / −3%** | 1.000000 | 73.0 dB |
+| ShuffleNetV2 x1.0 | 1.6 ms | −3% / noise / noise | 0.999998 | 67.5 dB |
+| MnasNet 1.0 | 1.9 ms | **−9 / −5 / −5%** | 0.999989 | 63.6 dB |
+| MobileNetV2 | 1.9 ms | **−3 / −4 / −3%** | 0.999989 | 64.4 dB |
+| MobileNetV3-Large | 2.5 ms | **−12 / −15 / −8%** | 0.999991 | 63.5 dB |
+| EfficientNet-B0 | 4.0 ms | **−32 / −33 / −12%** | 0.999987 | 61.7 dB |
+| ResNet-50 | 12.0 ms | **−11 / −12 / −2%** | 1.000000 | 83.0 dB |
+| DenseNet-121 | 12.5 ms | **−16 / −5 / −14%** | 0.999997 | 70.8 dB |
+| Inception-v3 | 15.3 ms | −1.7% / −1.4% / ±0 | 0.999988 | 62.3 dB |
+| YOLOv8n (640×640) | 14.9 ms | **−4 / −6 / −4%** | 1.000000 | 87.4 dB |
+| YoNoSplat encoder (965M params, 8 views) | 7.60 s | **−13 / −16 / −16%** | 6 outputs ≥ 0.999993 | 65–81 dB |
+| Qwen2.5-0.5B int4 (decode) | 14.6 ms/token | **−16%**, token stream identical | — | — |
+| SmolVLM2-2.2B int4 (decode) | 59.0 ms/token | **−5%**, token stream identical | — | — |
+
+Cold load also moves, in both directions: an analytical model now prunes the autotuner's candidate
+list before it races, which cuts the 965M-parameter encoder's first load from 134 s to 23 s on the
+device where it was measured, while models whose candidates all survive pruning pay a little more
+first-load time for the more representative timing. Warm load is unchanged.
 
 One table against [MNN](https://github.com/alibaba/MNN) (Alibaba's production engine), both fp16
 on the same device class: the **MNN-Vulkan** column is MNN's Vulkan backend, the **MNN best**
@@ -330,10 +339,18 @@ level; mechanism in
 [docs/adr/0018-zero-copy-concat-split-views.md](docs/adr/0018-zero-copy-concat-split-views.md),
 numbers in [docs/benchmark.md](docs/benchmark.md) § Zero-copy.
 
+Since v1.4.3 the gains come from how work is scheduled rather than from new arithmetic. The dense
+fp16 GEMM loads its operand panels 64 bits at a time and an unaligned activation is virtualized
+into a padded physical row so the wide path can take it; a pointwise unit is no longer hosted on a
+concat whose parts can alias, which would have cancelled that concat's zero-copy views; and the
+autotuner now races the kernel the graph actually dispatches, from a cold cache, timed on the GPU,
+after an analytical model has pruned the candidate list. Each is byte-neutral by construction, and
+each was gated as such.
+
 The accuracy columns do not depend on the tuning level: kernel choices that change fp16 rounding
 are deterministic shape rules (see **Autotuned kernels** above), so `none` / `fast` / `heavy` produce
 byte-identical output for a given model and device — verified per model, along with run-to-run
-byte-identity, on both test devices.
+byte-identity, on all three test devices.
 
 ## Supported operators
 

@@ -2,6 +2,11 @@
 #include "vk_backend.h"
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
+#include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
+#include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
+#include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
+#include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
+#include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
 #include "vknn/dtype.h"
@@ -119,10 +124,199 @@ namespace vknn {
                 } while (comma != std::string::npos);
             }
         }
+        // int8 KV cache (Hint::KvCacheQuant): the eligible cache tensors — the ONE shared rule in
+        // core/kv_quant.h, gated here on the device's 8-bit storage support and the fp16 session —
+        // store a 1-byte payload in buffers_ plus an fp16 per-(head, token)-row scale side buffer.
+        // With the hint Off (the default) the set is empty and every allocation below is
+        // byte-identical to the fp16 path.
+        {
+            const auto &deviceCaps  = be_->ctx().caps();
+            const bool  int8Storage = deviceCaps.storage8bit && deviceCaps.shaderInt8;
+            for (TensorId tid: kvQuantCacheTensors(g, cfg, useFp16_ && int8Storage, /*requireFlat=*/true))
+            {
+                for (int ni: idx)
+                {
+                    const Node &node = g.nodes[ni];
+                    if (!kvQuantNodeEligible(g, node) || (node.inputs[1] != tid && node.inputs[2] != tid))
+                    {
+                        continue;
+                    }
+                    KvqCache cache;
+                    cache.headDim  = node.attr.geti(kFaHd);
+                    cache.rows     = numElements(g.tensors[tid].shape) / cache.headDim;
+                    kvqCaches_[tid] = cache; // the scale buffer is allocated with the boundary buffers below
+                    break;
+                }
+            }
+            if (!kvqCaches_.empty())
+            {
+                VKNN_INFO << "int8 KV cache: " << kvqCaches_.size() << " cache tensor(s) stored as int8 payload + fp16 row scales";
+            } else if (cfg.kvCacheQuantMode() == (int) Mode::On)
+            {
+                // Named refusal: the hint asked for the scheme but nothing qualified on this
+                // segment (no eligible split-KV attention, an fp32 session, or a device without
+                // 8-bit storage). The fp16 cache path runs unchanged.
+                VKNN_INFO << "int8 KV cache requested but no eligible cache tensor on this segment: " << kvQuantGraphRefusal(g)
+                          << " (device int8 storage: " << (int8Storage ? "yes" : "no") << ", fp16 storage: " << (useFp16_ ? "yes" : "no") << ")";
+            }
+        }
+        // Virtualized activation row stride: give an internal flat fp16 activation a buffer whose
+        // physical last axis is roundUpVec4(last) when that is exactly what unlocks the vec4-load
+        // GEMM route on every one of its consumers (core/matmul_tile.h). The attention batched
+        // MatMuls are the case that pays: a token count indivisible by 4 makes every row of the
+        // softmax probabilities (the A operand, last axis == K) and of the transposed keys (the B
+        // operand, last axis == N) start at an unaligned element index, which no partial-tail trick
+        // can rescue — only the physical stride can. Both sides of the contract come from the same
+        // rule, so the layout and the kernel that reads it are decided once.
+        // A padded store writes row o at o * padded rather than o * last, so it must never land in
+        // the buffer its own kernel is still reading: the liveness pool below frees a slot only once
+        // its occupant's last use is STRICTLY before the new tensor's first use, and a producer's
+        // input dies at the producing node itself — so a node's input and output never share a slot.
+        {
+            std::map<TensorId, int>              producerIn;  // tensor -> producing node index inside this segment
+            std::map<TensorId, std::vector<int>> consumersOf; // tensor -> every consuming node index, whole graph
+            for (int ni: idx)
+            {
+                for (TensorId o: g.nodes[ni].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producerIn[o] = ni;
+                    }
+                }
+            }
+            for (size_t q = 0; q < g.nodes.size(); ++q)
+            {
+                for (TensorId in: g.nodes[q].inputs)
+                {
+                    if (in != kNoTensor)
+                    {
+                        consumersOf[in].push_back((int) q);
+                    }
+                }
+                // A fused residual/bias is read by record() without appearing in node.inputs, so it
+                // counts as a consumer here too — a reader that indexes the logical layout must
+                // veto the padding just like any other.
+                for (TensorId fused: {g.nodes[q].fusedResidual, g.nodes[q].fusedBias})
+                {
+                    if (fused != kNoTensor)
+                    {
+                        consumersOf[fused].push_back((int) q);
+                    }
+                }
+            }
+            // A producer qualifies when its kernel can store at a padded last-axis stride: the flat
+            // gather (a Transpose that actually permutes; an identity one is aliased onto its input
+            // by the pure-copy rule below and never runs) and the flat last-axis Softmax.
+            auto producerStoresPadded = [&](const Node &nd, TensorId tid) {
+                if (nd.outputs.empty() || nd.outputs[0] != tid)
+                {
+                    return false; // only the primary store moves; a pw chain's extra output streams
+                                  // index the flat logical world and would miss the padded rows
+                }
+                if (nd.type == OpType::Transpose)
+                {
+                    if (nd.attr.has("view_stride"))
+                    {
+                        return true; // a folded movement chain always runs the gather
+                    }
+                    const auto &perm = nd.attr.getints("perm");
+                    if (perm.empty())
+                    {
+                        return false;
+                    }
+                    for (size_t d = 0; d < perm.size(); ++d)
+                    {
+                        if (perm[d] != (int64_t) d)
+                        {
+                            return true;
+                        }
+                    }
+                    return false; // identity perm: a pure copy, aliased rather than dispatched
+                }
+                if (nd.type != OpType::Softmax)
+                {
+                    return false;
+                }
+                const Shape &s    = g.desc(nd.inputs[0]).shape;
+                int64_t      axis = nd.attr.geti("axis", -1);
+                if (axis < 0)
+                {
+                    axis += (int64_t) s.size();
+                }
+                return axis == (int64_t) s.size() - 1; // padding moves the LAST axis; only a last-axis softmax fits
+            };
+            for (const auto &entry: producerIn)
+            {
+                const TensorId tid = entry.first;
+                const auto    &td  = g.tensors[tid];
+                if (!useFp16_ || !td.gpuFlat || td.storeFp32 || td.isInitializer || td.shape.size() < 2 || kvqCaches_.count(tid) || readBack.count(tid) || graphInputs_.count(tid))
+                {
+                    continue; // only an internal, flat, fp16 activation may change physical layout
+                }
+                if (!producerStoresPadded(g.nodes[entry.second], tid))
+                {
+                    continue;
+                }
+                auto consumers = consumersOf.find(tid);
+                if (consumers == consumersOf.end() || consumers->second.empty())
+                {
+                    continue;
+                }
+                int64_t padded = 0;
+                bool    ok     = true;
+                for (int ci: consumers->second)
+                {
+                    const Node &use = g.nodes[ci];
+                    // Every consumer must be a dense tiled MatMul in THIS segment reading the tensor
+                    // through the padded stride: a view-addressed or packed-quantized MatMul, a
+                    // fused-bias/residual read, or any other op would read the logical layout.
+                    if (!idxSet.count(ci) || use.type != OpType::MatMul || use.attr.has(kMmView) || use.attr.has(kWq) || use.inputs.size() < 2 || use.inputs[0] == use.inputs[1] || nodeFp32(use) || use.fusedResidual == tid || use.fusedBias == tid)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    const bool isA = use.inputs[0] == tid;
+                    const bool isB = use.inputs[1] == tid;
+                    if (!isA && !isB)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    int64_t want = 0;
+                    if (!matmulVec4PadUnlocks(useFp16_, isA ? MatMulOperand::A : MatMulOperand::B, g.desc(use.inputs[0]).shape, g.desc(use.inputs[1]).shape, g.desc(use.outputs[0]).shape, want) || (padded != 0 && want != padded))
+                    {
+                        ok = false;
+                        break;
+                    }
+                    padded = want;
+                }
+                if (ok && padded > td.shape.back())
+                {
+                    rowPad_[tid] = padded;
+                }
+            }
+            if (!rowPad_.empty())
+            {
+                VKNN_INFO << "vec4 activation padding: " << rowPad_.size() << " tensor(s) allocated with a 4-aligned physical row stride to unlock the vec4-load GEMM";
+            }
+        }
         auto actBytes = [&](TensorId tid) -> size_t {
             int64_t elems = g.tensors[tid].gpuFlat ? numElements(g.tensors[tid].shape) : packedElems(g.tensors[tid].shape);
-            int     es    = g.tensors[tid].storeFp32 ? 4 : elemSize_; // selective-fp32 tensors keep 4-byte storage
-            size_t  b     = (size_t) elems * es;
+            auto    padIt = rowPad_.find(tid);
+            if (padIt != rowPad_.end())
+            {
+                // Physical extent: the same tensor with its last axis widened to the padded stride.
+                elems = elems / g.tensors[tid].shape.back() * padIt->second;
+            }
+            if (kvqCaches_.count(tid))
+            {
+                // int8 KV cache payload: 1 byte per element (the fp16 row scales live in the
+                // dedicated side buffer, never in this activation buffer).
+                return (size_t) elems;
+            }
+            int    es = g.tensors[tid].storeFp32 ? 4 : elemSize_; // selective-fp32 tensors keep 4-byte storage
+            size_t b  = (size_t) elems * es;
             return b == 0 ? (size_t) elemSize_ * 4 : b;
         };
         // Liveness buffer planner. One buffer per tensor keeps ALL activations live at once (~11.5GB on
@@ -796,6 +990,14 @@ namespace vknn {
             }
             auto pref     = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
             buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref, 0, /*zeroInit=*/true, /*allowSubBufferViews=*/viewRoots.count(tid) != 0);
+            // int8 KV cache: the fp16 per-row scale side buffer rides next to the payload. Zero
+            // scales dequantize to 0, matching the zero-initialized fp16 cache the link path
+            // starts from.
+            auto kvqIt = kvqCaches_.find(tid);
+            if (kvqIt != kvqCaches_.end())
+            {
+                kvqIt->second.scales = std::make_shared<vk::Buffer>(be_->ctx(), (size_t) kvqIt->second.rows * kKvQuantScaleBytes, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
+            }
         }
         // [firstPos,lastPos] of each internal tensor within this segment's execution order
         std::map<TensorId, int> firstPos, lastPos;
@@ -1100,6 +1302,18 @@ namespace vknn {
             auto it = buffers_.find(t);
             return it == buffers_.end() ? nullptr : it->second.get();
         };
+        // Non-zero exactly for the tensors this segment allocated with a virtualized row stride, so
+        // the producing and consuming kernels read the layout decision off the allocation itself.
+        env_.rowPad = [this](TensorId t) -> int64_t {
+            auto it = rowPad_.find(t);
+            return it == rowPad_.end() ? 0 : it->second;
+        };
+        // Non-null exactly for the int8 KV-cache tensors of THIS segment: FusedAttention keys its
+        // kvq kernel choice off this resolver, so the kernels always agree with the allocation.
+        env_.kvqScale = [this](TensorId t) -> vk::Buffer * {
+            auto it = kvqCaches_.find(t);
+            return it == kvqCaches_.end() ? nullptr : it->second.scales.get();
+        };
         // `g` outlives every prepare() below (it is the bucket's owned graph), so the hook can drop
         // uploaded weight payloads as the ops consume them. Session frees whatever survives.
         env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g](TensorId t) {
@@ -1193,7 +1407,7 @@ namespace vknn {
         if (cfg_.timingSummary && stat_.runs > 0)
         {
             const double n = (double) stat_.runs;
-            VKNN_INFO << "segment summary (" << nodeIdx.size() << " nodes, " << cmds_.size() << " chunk(s), " << stat_.runs
+            VKNN_INFO << "segment summary (" << nodeIdx.size() << " nodes, " << recordedDispatches_ << " dispatches, " << cmds_.size() << " chunk(s), " << stat_.runs
                       << " run(s)) avg ms/run: pack=" << stat_.packMs / n << " submitCall=" << stat_.submitCallMs / n
                       << " fenceWait=" << stat_.fenceWaitMs / n << " gpuBusy=" << stat_.gpuBusyMs / n
                       << " gpuGap=" << stat_.gpuGapMs / n << " unpack=" << stat_.unpackMs / n;
@@ -1222,6 +1436,12 @@ namespace vknn {
     }
 
     void VulkanSegment::record() {
+        // Recorded-dispatch accounting for this pass. Every dispatch the ops, boundary converts,
+        // link copies, chain feedback, and argmax epilogues record below is counted; the per-node
+        // share is attributed around each op's record() call. A re-record restarts the tally, so
+        // what it reports is always the CURRENT command stream.
+        DispatchTally &tally = env_.ctx->dispatchTally();
+        tally.beginRun(nodeIdx.size());
         // Per-chunk begin/end timestamps (Config::timingSummary): each chunk resets and writes
         // its own query pair, so a re-recorded buffer stays self-contained. Chunks past the
         // pool capacity execute untimed; gpuBusy/gpuGap then undercount rather than misindex.
@@ -1303,8 +1523,29 @@ namespace vknn {
                 int      srcC, srcH, srcW, dstC, dstH, dstW, srcFmt, dstFmt;
                 uint32_t rangeWordBase;
             };
+            // Mirrors link_copy_kvq.comp's push_constant block.
+            struct LinkCopyKvqPC {
+                int      headDim;
+                uint32_t rangeWordBase;
+            };
             for (const ResidentLink &link: residentLinks_)
             {
+                if (link.kvq)
+                {
+                    // Quantizing fold (Hint::KvCacheQuant): the fp16 present rows encode into the
+                    // int8 cache payload + the per-row fp16 scale buffer. Same ranges SSBO and
+                    // per-iteration set addressing as the bit copy.
+                    if (!linkPipeKvq_)
+                    {
+                        linkPipeKvq_ = std::make_unique<vk::ComputePipeline>(be_->ctx(), "link_copy_kvq", 4, sizeof(LinkCopyKvqPC), std::vector<uint32_t> {},
+                                                                             env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                    }
+                    const KvqCache &cache = kvqCaches_.at(link.dst);
+                    LinkCopyKvqPC   pc {(int) cache.headDim, (uint32_t) step * (2u + link.capacity * 3u)};
+                    linkPipeKvq_->dispatch(cmd_, {buffers_[link.src]->handle(), buffers_[link.dst]->handle(), link.rangesBuf->handle(), cache.scales->handle()}, &pc, sizeof(pc),
+                                           kKvqLinkCopyGroups);
+                    continue;
+                }
                 const bool fp16 = boundaryElemBytes(link.src) == 2;
                 auto      &pipe = fp16 ? linkPipeFp16_ : linkPipeFp32_;
                 if (!pipe)
@@ -1517,7 +1758,9 @@ namespace vknn {
                 vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2));
             }
             env_.useFp16 = nodeFp32(node) ? false : useFp16_; // match the variant chosen in prepare()
+            tally.openNode(k);
             ops_[k]->record(cmd_, node, env_);
+            tally.closeNode(); // a decode chain re-enters this loop per iteration; counts accumulate
             if (queryPool_)
             {
                 vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2 + 1));
@@ -1655,6 +1898,23 @@ namespace vknn {
         timedChunks_     = timedChunk;
         recorded_        = true;
         recordedConvert_ = convert_;
+        // Snapshot the tally into the segment: the tally belongs to the device context, so the next
+        // segment (or plan bucket) to record on it restarts the run and overwrites the table. The
+        // profile the run reports must be THIS segment's recording.
+        nodeDispatches_.assign(nodeIdx.size(), 0);
+        for (size_t k = 0; k < nodeIdx.size(); ++k)
+        {
+            nodeDispatches_[k] = tally.nodeDispatches(k);
+        }
+        recordedDispatches_ = tally.runTotal();
+        // The real per-run dispatch count, alongside the barrier tally above. It runs well above
+        // the node count: one op records several dispatches (split-K partial + reduce, Winograd's
+        // three passes, fused attention's partial + combine), and the boundary converts, resident
+        // link copies, chain feedback, and argmax epilogues dispatch outside any node. The op share
+        // also lands per node in the Config::profile table (OpRecord::dispatches).
+        const uint64_t nodeShare = tally.nodeTotal();
+        VKNN_INFO << "segment dispatches: " << recordedDispatches_ << " over " << nodeIdx.size() << " node(s) ("
+                  << nodeShare << " from nodes + " << (recordedDispatches_ - nodeShare) << " boundary/epilogue)";
     }
 
     void VulkanSegment::run(ExecContext &ctx) {
@@ -1684,6 +1944,12 @@ namespace vknn {
                 std::shared_ptr<vk::Buffer> want = origBoundary_[tid];
                 RtTensor                   &rt   = ctx.t(tid);
                 int                         fd   = rt.dmaBufFd;
+                if (fd >= 0 && kvqCaches_.count(tid))
+                {
+                    // An int8 KV cache cannot bind a caller dma-buf: the fd holds fp16 rows, the
+                    // resident buffer int8 codes + side scales. The host seed path quantizes instead.
+                    fd = -1;
+                }
                 if (fd >= 0)
                 {
                     bool         flat    = g_.desc(tid).gpuFlat;
@@ -1790,6 +2056,12 @@ namespace vknn {
                         // runs); a per-submit staging convert would overwrite it. Keep the host path.
                         continue;
                     }
+                    if (kvqCaches_.count(tid))
+                    {
+                        // An int8 KV cache has no boundary_convert variant (int8 payload + side
+                        // scales); the host seed path quantizes instead.
+                        continue;
+                    }
                     bool         flat    = g_.desc(tid).gpuFlat;
                     TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
                     DType        devDt   = (useFp16_ && !g_.tensors[tid].storeFp32) ? DType::Float16 : DType::Float32;
@@ -1872,9 +2144,11 @@ namespace vknn {
             }
             rt.device->buffer = bit->second;
             auto sit          = stagingIn_.find(tid);
-            if (rt.dmaBufFd >= 0)
+            if (rt.dmaBufFd >= 0 && !kvqCaches_.count(tid))
             {
                 // zero-copy: the GPU reads the caller's dma-buf directly (device-native bytes); no pack.
+                // An int8 KV cache never binds an fd (the rebind refused the import); its host seed
+                // branch below quantizes instead.
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
             } else if (sit != stagingIn_.end() && convert_.count(tid))
@@ -1885,6 +2159,14 @@ namespace vknn {
                 std::memcpy(sit->second->host(), rt.host.bytes.data(), std::min(sit->second->bytes(), rt.host.bytes.size()));
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+            } else if (rt.hostValid && !alreadyHere && kvqCaches_.count(tid))
+            {
+                // int8 KV cache re-seed (the prefill -> decode hand-off): quantize the fp32 host
+                // mirror into the payload + scale buffers with the host codec — the host mirror
+                // itself stays float (quantize at upload, dequantize at download).
+                seedKvqFromHost(tid, rt);
+                rt.deviceValid  = true;
+                rt.deviceFormat = TensorFormat::NCHW;
             } else if (rt.hostValid && !alreadyHere)
             {
                 // The Vulkan device represents an integer tensor as its float value (index/shape ops
@@ -2069,7 +2351,15 @@ namespace vknn {
                     continue;
                 }
                 RtTensor &rt = ctx.t(tid);
-                VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, g_.desc(tid).gpuFlat);
+                if (kvqCaches_.count(tid))
+                {
+                    // int8 KV cache: dump the dequantized values, not the raw codes.
+                    rt.shape = rt.shape.empty() ? g_.tensors[tid].shape : rt.shape;
+                    dequantKvqToHost(tid, rt);
+                } else
+                {
+                    VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, g_.desc(tid).gpuFlat);
+                }
                 std::string nm = g_.tensors[tid].name;
                 for (char &c: nm)
                 {
@@ -2096,6 +2386,14 @@ namespace vknn {
                 {
                     continue;
                 }
+                if (kvqCaches_.count(kv.first))
+                {
+                    // int8 KV cache: the raw payload is codes, not fp16 words — dump the
+                    // dequantized values instead.
+                    rt.shape = rt.shape.empty() ? g_.tensors[kv.first].shape : rt.shape;
+                    dequantKvqToHost(kv.first, rt);
+                    continue;
+                }
                 VulkanBackend::unpackFromBuffer(kv.second.get(), rt, useFp16_ && !g_.tensors[kv.first].storeFp32, g_.desc(kv.first).gpuFlat);
             }
         }
@@ -2115,6 +2413,9 @@ namespace vknn {
                 r.backend = "Vulkan";
                 r.gpuMs   = (double) (ts[k * 2 + 1] - ts[k * 2]) * period / 1e6;
                 r.cpuMs   = 0;
+                // What record() attributed to this node: 0 for an op the planner elided to a
+                // zero-copy view or lowered to a buffer copy, >1 for a multi-pass kernel.
+                r.dispatches = k < nodeDispatches_.size() ? nodeDispatches_[k] : 0;
                 ctx.profiler->add(r);
             }
             // GPU span (first dispatch start -> last dispatch end) vs the CPU-side submit wall: the
@@ -2132,7 +2433,19 @@ namespace vknn {
             whyNot = "the segment holds no device buffer for a linked tensor";
             return Status::InvalidArgument;
         }
-        if (boundaryElemBytes(sourceOutput) != boundaryElemBytes(destInput))
+        const bool kvqDst = kvqCaches_.count(destInput) != 0;
+        if (kvqDst)
+        {
+            // int8 KV-cache destination: the fold quantizes instead of bit-copying, so the element
+            // sizes legitimately differ (fp16 source rows, int8 payload). The quantizing fold is
+            // defined on flat fp16 sources only — the eligibility rule guarantees both, so a miss
+            // here is a real wiring error worth surfacing.
+            if (boundaryElemBytes(sourceOutput) != 2 || !g_.desc(sourceOutput).gpuFlat || !g_.desc(destInput).gpuFlat)
+            {
+                whyNot = "the int8 KV-cache fold into '" + g_.tensors[destInput].name + "' needs a flat fp16 present source; '" + g_.tensors[sourceOutput].name + "' is not one";
+                return Status::InvalidArgument;
+            }
+        } else if (boundaryElemBytes(sourceOutput) != boundaryElemBytes(destInput))
         {
             whyNot = "device element size differs between '" + g_.tensors[sourceOutput].name + "' and '" + g_.tensors[destInput].name + "' (fp16 vs pinned-fp32 storage); the raw copy would misalign";
             return Status::InvalidArgument;
@@ -2152,6 +2465,7 @@ namespace vknn {
         ResidentLink link;
         link.src       = sourceOutput;
         link.dst       = destInput;
+        link.kvq       = kvqDst;
         link.capacity  = kLinkInitialRangeCapacity;
         link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), linkRangesBufferBytes(link.capacity), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
         residentLinks_.push_back(std::move(link));
@@ -2167,6 +2481,26 @@ namespace vknn {
             if (link.src != sourceOutput || link.dst != destInput)
             {
                 continue;
+            }
+            if (link.kvq)
+            {
+                // The quantizing fold processes whole token rows (one absmax + scale per row);
+                // sub-row or misaligned ranges have no defined scale semantics. The engine's own
+                // fold drivers (kvFoldRanges) are always row-aligned, so a violation is a caller
+                // bug surfaced hard rather than a silently mis-scaled cache.
+                const int64_t headDim = kvqCaches_.at(link.dst).headDim;
+                for (const std::vector<LinkRange> &ranges: rangeSets)
+                {
+                    for (const LinkRange &range: ranges)
+                    {
+                        if (range.sourceElem % headDim != 0 || range.destElem % headDim != 0 || range.count % headDim != 0)
+                        {
+                            throw Error(Status::InvalidArgument, "int8 KV-cache link '" + g_.tensors[link.dst].name + "': fold ranges must cover whole " + std::to_string(headDim) +
+                                                                     "-element token rows (got source " + std::to_string(range.sourceElem) + ", dest " + std::to_string(range.destElem) +
+                                                                     ", count " + std::to_string(range.count) + ")");
+                        }
+                    }
+                }
             }
             uint32_t neededCapacity = 0;
             for (const std::vector<LinkRange> &ranges: rangeSets)
@@ -2228,8 +2562,46 @@ namespace vknn {
             return false;
         }
         rt.shape = rt.shape.empty() ? g_.tensors[id].shape : rt.shape;
+        if (kvqCaches_.count(id))
+        {
+            // int8 KV cache: the host mirror stays float — dequantize on download (the inverse of
+            // the seed-path quantize), so a caller (the prefill hand-off, readResident) sees the
+            // same fp32 mirror convention as the fp16 cache path.
+            dequantKvqToHost(id, rt);
+            return true;
+        }
         VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[id].storeFp32, g_.desc(id).gpuFlat, cpu::threadCount(&cfg_));
         return true;
+    }
+
+    void VulkanSegment::dequantKvqToHost(TensorId id, RtTensor &rt) {
+        const KvqCache &cache = kvqCaches_.at(id);
+        rt.host.resizeElems(cache.rows * cache.headDim, DType::Float32);
+        rt.dtype = DType::Float32;
+        kvDequantRows(reinterpret_cast<const int8_t *>(buffers_.at(id)->host()), reinterpret_cast<const fp16_t *>(cache.scales->host()), cache.rows, cache.headDim, rt.host.f32());
+        rt.hostValid = true;
+    }
+
+    void VulkanSegment::seedKvqFromHost(TensorId id, const RtTensor &rt) {
+        const KvqCache &cache   = kvqCaches_.at(id);
+        int8_t         *payload = reinterpret_cast<int8_t *>(buffers_.at(id)->host());
+        fp16_t         *scales  = reinterpret_cast<fp16_t *>(cache.scales->host());
+        if (rt.dtype == DType::Float32)
+        {
+            // The via-fp16 pre-round makes the seeded bytes identical to a GPU fold of the same
+            // values (a mirror downloaded from an fp16 buffer is already fp16-representable, so
+            // the pre-round is the identity on the production hand-off).
+            kvQuantRowsFromFp32ViaFp16(reinterpret_cast<const float *>(rt.host.bytes.data()), cache.rows, cache.headDim, payload, scales);
+            return;
+        }
+        if (rt.dtype == DType::Float16)
+        {
+            std::vector<float> widened((size_t) (cache.rows * cache.headDim));
+            halfToFloatBulk(reinterpret_cast<const fp16_t *>(rt.host.bytes.data()), widened.data(), (int64_t) widened.size());
+            kvQuantRows(widened.data(), cache.rows, cache.headDim, payload, scales);
+            return;
+        }
+        throw Error(Status::InvalidArgument, "int8 KV cache '" + g_.tensors[id].name + "' seeded from a non-float host tensor (" + dtypeStr(rt.dtype) + ")");
     }
 
     Status VulkanSegment::setOutputArgMax(TensorId output, std::string &whyNot) {

@@ -40,6 +40,8 @@ namespace vknn {
         int         directConv3x3   = 0;   // Hint::DirectConv3x3
         int         splitKConv      = 0;   // Hint::SplitKConv
         int         coopmatGemm     = 0;   // Hint::CoopmatGemm (default equals Auto so an older file keys identically)
+        int         kvCacheQuant    = 0;   // Hint::KvCacheQuant as SET; a default Config resolves to Off (2), so a
+                                           // file written before the default moved off Auto keys 0 and is recomputed once
 
         // The compiled artifacts.
         std::vector<uint8_t>                      pipeline; // serialized VkPipelineCache blob
@@ -48,7 +50,7 @@ namespace vknn {
         std::map<std::string, int32_t>            tuneLevel; // append-only "tunelvl": op signature -> Tuning level it was measured at
 
         bool sameKey(const CacheVariant &o) const {
-            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && ropeFusion == o.ropeFusion && fusedAttention == o.fusedAttention && kvConcatFold == o.kvConcatFold && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3 && splitKConv == o.splitKConv && coopmatGemm == o.coopmatGemm;
+            return precision == o.precision && flatLayout == o.flatLayout && gpuIslandFold == o.gpuIslandFold && matmulViewFold == o.matmulViewFold && ropeFusion == o.ropeFusion && fusedAttention == o.fusedAttention && kvConcatFold == o.kvConcatFold && fp32Tensors == o.fp32Tensors && winograd == o.winograd && winogradVariant == o.winogradVariant && winogradUnit == o.winogradUnit && directConv3x3 == o.directConv3x3 && splitKConv == o.splitKConv && coopmatGemm == o.coopmatGemm && kvCacheQuant == o.kvCacheQuant;
         }
     };
 

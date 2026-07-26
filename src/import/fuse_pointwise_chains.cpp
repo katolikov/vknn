@@ -105,6 +105,91 @@ namespace vknn {
         return opDescriptor(t).pwEpilogue;
     }
 
+    // Structural mirror of the Vulkan segment's zero-copy Concat test (vk_segment.cpp, "Zero-copy
+    // Concat/Split"): parts that are contiguous slices of the whole in the stored byte layout can
+    // become sub-buffer views into one arena, and the Concat then records NO dispatches. A concat
+    // carrying pw_steps is excluded from that aliasing (its kernel must run to apply the chain), so
+    // hosting a unit on an aliasable concat trades an elided node for one copy dispatch PER PART —
+    // a DenseNet dense block pays hundreds of dispatches for it. The unit is cheaper standalone:
+    // the parts alias, the concat vanishes, and the unit runs as ONE FusedPointwise dispatch over
+    // the whole. This predicate covers the structural half only (layout, alignment, axis); the
+    // planner's segment-scoped conditions (produced in-segment, liveness, fp32 pins) can still
+    // refuse a view at load, which costs one extra dispatch, never correctness.
+    static bool pwConcatPartsCanAlias(const Graph &g, const Node &n) {
+        if (n.type != OpType::Concat || n.outputs.size() != 1 || n.inputs.empty() || n.fusedResidual != kNoTensor)
+        {
+            return false;
+        }
+        const TensorId whole = n.outputs[0];
+        if (whole == kNoTensor || g.isInitializer(whole))
+        {
+            return false;
+        }
+        const Shape &ws   = g.desc(whole).shape;
+        const int    rank = (int) ws.size();
+        int64_t      axis = n.attr.geti("axis", 1);
+        if (axis < 0)
+        {
+            axis += rank;
+        }
+        if (axis < 0 || axis >= rank || numElements(ws) <= 0)
+        {
+            return false;
+        }
+        if (gpuFlatNode(g, n))
+        {
+            int64_t outer = 1;
+            for (int d = 0; d < (int) axis; ++d)
+            {
+                outer *= ws[d];
+            }
+            if (outer != 1)
+            {
+                return false; // slices interleave along an inner axis: not contiguous slabs
+            }
+        } else if (rank != 4 || ws[0] != 1 || axis != 1)
+        {
+            return false;
+        }
+        int64_t axisSum = 0;
+        for (TensorId t: n.inputs)
+        {
+            // A part must come from a producing node: a graph input or initializer never gets a
+            // view (the planner's producedHere test), so such a concat keeps hosting the unit.
+            if (t == kNoTensor || g.isInitializer(t))
+            {
+                return false;
+            }
+            bool isGraphInput = false;
+            for (TensorId gi: g.inputs)
+            {
+                isGraphInput = isGraphInput || gi == t;
+            }
+            if (isGraphInput)
+            {
+                return false;
+            }
+            const Shape &ss = g.desc(t).shape;
+            if ((int) ss.size() != rank || numElements(ss) <= 0)
+            {
+                return false;
+            }
+            for (int d = 0; d < rank; ++d)
+            {
+                if (d == (int) axis ? ss[d] < 1 : ss[d] != ws[d])
+                {
+                    return false;
+                }
+            }
+            if (!gpuFlatNode(g, n) && ss[1] % kNC4Block != 0)
+            {
+                return false; // an unaligned slice straddles a channel block
+            }
+            axisSum += ss[axis];
+        }
+        return axisSum == ws[axis];
+    }
+
     // Broadcast class of tensor `t` against the unit's run shape: 0 same-shape, 3 scalar splat,
     // 1 per-channel (rank-4 [N,C,1,1]; a rank<4 CONSTANT that right-aligns to [1,C,1,1] with N==1
     // also qualifies — pwOperandBuf packs it by that interpretation), 2 general (flat-only).
@@ -810,6 +895,13 @@ namespace vknn {
                 // attached unit collapses the GEMM's occupancy and costs far more than a
                 // standalone dispatch. Such units run standalone; small matmuls (the
                 // 1-thread-per-output kernel) still host epilogues.
+                // An aliasable Concat must not host: pw_steps forces one copy dispatch per part,
+                // while an unhosted concat elides into arena views and the unit runs as a single
+                // standalone dispatch (see pwConcatPartsCanAlias).
+                if (ok && g.nodes[prod].type == OpType::Concat && pwConcatPartsCanAlias(g, g.nodes[prod]))
+                {
+                    ok = false;
+                }
                 if (ok && g.nodes[prod].type == OpType::MatMul)
                 {
                     const Node  &P  = g.nodes[prod];

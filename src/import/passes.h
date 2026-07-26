@@ -104,6 +104,45 @@ namespace vknn {
     // filled from the encoder features by an on-GPU ScatterND (the position-dependent splice the host used
     // to do); the original decoder stays as the text-only path.
     void fuseBucketBoundaries(std::vector<Graph> &buckets, std::vector<std::string> &names);
+    // The shape set for an automatic bucket that is one with-past decode graph recompiled at several
+    // token columns per step. A decode bucket fixes the whole cache geometry (input_ids [1,1],
+    // past_key_values.*.{key,value} [1, kvHeads, C, headDim], a mask spanning the C past slots plus
+    // the step's tokens, position_ids); widening it to [1, width] gives a bucket that processes
+    // `width` tokens against the same cache under one static plan. Two compiles use it: the
+    // chunk-prefill bucket at kChunkPrefillTokens (io_link.h) and the speculative-verification
+    // bucket at kSpecVerifyTokens (spec_decode.h).
+    struct WidenedDecodePlan {
+        size_t                       decodeBucket = 0; ///< Bucket whose geometry the shapes derive from.
+        std::map<std::string, Shape> shapes;           ///< Full concrete shape per widened-bucket graph input.
+        std::string                  label;            ///< Bucket label for the .vxm bucket list.
+        int64_t                      cacheSlots = 0;   ///< Compiled context length C, from the past inputs.
+    };
+    // Scan `buckets` for a with-past decode graph (input_ids [1,1], position_ids [1,1],
+    // attention_mask, past_key_values.0.key, logits + present.0.key outputs) and fill `plan` with
+    // that bucket's index, its context length, and one full concrete shape per graph input at
+    // `width` token columns: ids and positions become [1, width], the mask widens to past + width
+    // columns, every other input keeps its decode shape. Leaves `plan->label` empty — the caller
+    // names the role. False when no decode bucket qualifies, when the compiled context is shorter
+    // than `width` (the runtime could never run a full window), or when the mask layout is neither
+    // the 2-D [1, C+1] nor the 4-D [1, x, 1, C+1] convention. Callers apply their own duplicate
+    // policy on top; this decides geometry only.
+    bool planWidenedDecodeBucket(const std::vector<Graph> &buckets, int64_t width, WidenedDecodePlan *plan);
+    using ChunkPrefillPlan = WidenedDecodePlan;
+    // The chunk-prefill bucket's plan: planWidenedDecodeBucket at kChunkPrefillTokens, so a
+    // variable-length prompt prefills as ceil(T / kChunkPrefillTokens) fixed-shape passes over the
+    // cached KV. Additionally false when a chunk-capable prefill bucket (input_ids [1, S],
+    // 1 < S <= kChunkPrefillTokens over the same cache shape) already exists, which would only
+    // duplicate the plan.
+    bool planChunkPrefillBucket(const std::vector<Graph> &buckets, ChunkPrefillPlan *plan);
+    using SpecVerifyPlan = WidenedDecodePlan;
+    // The speculative-verification bucket's plan: planWidenedDecodeBucket at kSpecVerifyTokens, so a
+    // greedy speculative round verifies kSpecDraftTokens proposals plus their anchor token in ONE
+    // target forward (spec_decode.h). Additionally false when the compile already carries a bucket
+    // at exactly that width over the same cache (a recompile, or a hand-declared bucket that already
+    // serves the verification pass). Emitted AFTER the chunk-prefill bucket in one compile: the
+    // chunk plan refuses when any 1 < S <= kChunkPrefillTokens bucket exists, which the narrower
+    // verification bucket would otherwise satisfy.
+    bool planSpecVerifyBucket(const std::vector<Graph> &buckets, SpecVerifyPlan *plan);
     // Options for the standard pass pipeline (compile time), exposed by the model compiler as flags.
     struct PassOptions {
         int64_t batch = 1;
@@ -118,7 +157,11 @@ namespace vknn {
         // Empty = the batch-only path.
         std::map<std::string, int64_t> dimBindings;
         bool                           fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
-        bool                           fuseDwPw            = false; // fuse depthwise-3x3 + 1x1-project (experimental)
+        bool                           fuseDwPw            = false; // fuse depthwise KxK + 1x1-project into FusedDwPw
+                                                                    // (experimental: the fp16-rounded LDS intermediate matches
+                                                                    // the unfused store bit-for-bit on the CPU oracle and at
+                                                                    // fp32, but the fp16 GPU path still diverges from the
+                                                                    // unfused graph — opt in with --fuse-dwpw and measure)
         bool                           fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
         bool                           fuseGridSampleWarp  = true;  // fold a scaled-flow + base-grid coordinate chain into
                                                                     // GridSample (bit-exact; default on, part of O1)
@@ -137,8 +180,9 @@ namespace vknn {
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
         //   O1 = the default production set: the general pointwise fusion (bit-exact)
-        //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; can
-        //           regress on some models — measure before shipping a model with them).
+        //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; the
+        //           dwpw pair still diverges from the unfused graph on the fp16 GPU path —
+        //           measure before shipping a model with them).
         //   ConvGemm lowering stays opt-in (--lower-conv) at every level until its kernel is tuned.
         static PassOptions forOptLevel(int level) {
             PassOptions o;
@@ -190,6 +234,9 @@ namespace vknn {
     struct QuantStats {
         int64_t sites = 0, quantized = 0, guardKept = 0, outlierCols = 0;
         int64_t bytesBefore = 0, bytesAfter = 0;
+        // Sites served from another bucket's already-quantized weight instead of being calibrated
+        // and packed again (quantizeWeightsShared); always 0 for a single-graph quantization.
+        int64_t shared     = 0;
         bool    calibrated = false;
     };
     // Quantize eligible MatMul/Gemm/Conv weights to the packed width opt.bits selects (int4 or
@@ -197,6 +244,21 @@ namespace vknn {
     // (vknn_compile -Os). Layout/attribute contract in core/quant_weights.h (int4 authority:
     // core/quant_int4.h). Runs after runStandardPasses, before convertInitializersFp16.
     QuantStats quantizeWeights(Graph &g, const QuantOptions &opt);
+
+    // Quantize ALL buckets of one compile together, returning one QuantStats per bucket in bucket
+    // order. Calibration statistics are shape-dependent (they come from running the float graph on
+    // samples sized by its input shapes), so quantizing each bucket on its own gives the same weight
+    // a different packed payload per bucket: the buckets stop being one model, and the .vxm's
+    // content-deduped initializer pool has to store every copy. Here each distinct weight — same
+    // tensor name, same pre-quantization payload, same [K, N] geometry and op class — is calibrated
+    // and packed exactly ONCE, and every bucket that shares it receives the identical payload,
+    // scales, outlier columns, and bias correction. Buckets are visited longest-activation-first (the
+    // most calibration rows per sample), so a shared weight carries the most representative bucket's
+    // statistics; a weight no earlier bucket held is quantized by the first bucket that holds it.
+    // One bucket is quantizeWeights(g, opt) exactly — payload-identical, sharing never applies
+    // within a bucket. Every bucket must stay put for the duration of the call: a shared payload is
+    // copied out of the bucket that produced it, not out of a cached duplicate.
+    std::vector<QuantStats> quantizeWeightsShared(const std::vector<Graph *> &buckets, const QuantOptions &opt);
 
     // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
     struct Fp16ConvertStats {
@@ -268,13 +330,15 @@ namespace vknn {
     // match a pin keeps its decomposed form. Runs at load only, gated by Hint::RopeFusion, before
     // foldMatMulViews; never serialized. Returns the number of sites fused.
     int fuseRope(Graph &g, const std::string &fp32Pins = "");
-    // Fuse the single-query decode-attention chain — MatMul(view) [-> scale/mask pointwise] ->
-    // Softmax -> MatMul(view) [-> Transpose -> Reshape] — into one FusedAttention node
+    // Fuse the decode-attention chain — MatMul(view) [-> scale/mask pointwise] -> Softmax ->
+    // MatMul(view) [-> Transpose -> Reshape] — into one FusedAttention node
     // (core/fused_attention.h), so a decode step's attention core is one dispatch per layer and
     // the score/probability intermediates never touch memory. Consumes the operand-view stride
-    // attrs foldMatMulViews composed, so it must run after that pass; only the M == 1 (query
-    // length 1) form matches, and prefill/CNN graphs are untouched. Numerics-changing (fp32
-    // scores + softmax without the decomposed chain's fp16 round-trips); `fp32Pins` mirrors
+    // attrs foldMatMulViews composed, so it must run after that pass. Matches the M == 1
+    // (single-query decode) form and the M > 1 form whose mask varies per query row (the
+    // with-past chunk-prefill causal mask; the query axis is hosted as one more row dim);
+    // maskless / row-broadcast-mask M > 1 chains and CNN graphs are untouched. Numerics-changing
+    // (fp32 scores + softmax without the decomposed chain's fp16 round-trips); `fp32Pins` mirrors
     // foldMatMulViews — a chain whose erased tensors match the markFp32 set keeps its
     // decomposed form. Runs at load only, gated by Hint::FusedAttention; never serialized.
     void fuseDecodeAttention(Graph &g, const std::string &fp32Pins = "");

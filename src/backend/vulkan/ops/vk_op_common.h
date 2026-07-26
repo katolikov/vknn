@@ -80,10 +80,14 @@ namespace vknn {
         int Cin, Cout, nT;
     };
     // Implicit-GEMM conv (conv_gemm.comp); shared by the ConvGemm op and Conv's raced gemm path.
+    // Coutp is the weight panel's PHYSICAL row stride (Cout, or the zero-padded
+    // roundUpConvGemmCout(Cout) of a repacked panel) and is read only by the vec4-weight twin
+    // conv_gemm_wv4.comp. It is a TRAILING field so every offset conv_gemm.comp declares stays put.
     struct ConvGemmPC {
         int   C, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW;
         int   act, hasBias;
         float actLo, actHi;
+        int   Coutp;
     };
     // Split-K partial pass (conv_gemm_ksplit.comp) + reduce pass (conv_gemm_kreduce.comp).
     struct ConvGemmKsPC {

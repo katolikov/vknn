@@ -1,0 +1,198 @@
+#version 450
+#define VKNN_NO_RTE 1 // matmul-family kernel: avoids the float-controls execution mode (miscompiled by some drivers)
+#include "precision.glsl"
+#include "common.glsl"
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+// The fp16 scale buffers are declared in BOTH precision variants (the fp32 variant's precision.glsl
+// pulls in no 16-bit extensions of its own).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// Fused single-query decode attention, partial pass — int8 KV-cache twin of fused_attention.comp
+// (Hint::KvCacheQuant; same contract, push constants, geometry SSBO and partial layout — see the
+// base kernel for the algorithm commentary; fused_attention_combine.comp folds the chunks
+// unchanged). The op selects this kernel when the segment allocated the node's past K/V sources
+// as int8 payload + fp16 per-(head, token)-row scales (src/core/kv_quant.h); the base kernel and
+// its dispatch stay byte-unchanged otherwise.
+//
+// What differs from the base kernel — the PAST-source reads only:
+//   * K/V past buffers hold int8 codes (bindings 1/2); one fp16 scale per (head, token) row sits
+//     in the scale buffers (bindings 8/9) at payloadRowElementBase / hd — the eligibility rule
+//     guarantees row-contiguous token rows (kK == 1, kN == hd; vN == 1, vK == hd) with hd-multiple
+//     per-dim strides, so the division is exact.
+//   * K-dot: the fp32 dot accumulates q * code and the row scale multiplies the finished dot ONCE
+//     (dot * kScale[s] * scale), keeping one multiply per token instead of one per element.
+//   * V-apply: each code dequantizes in place (score * (vScale[s] * v)), mirroring the CPU
+//     oracle's element-wise dequantized cache.
+// The split-KV new-rows sources (bindings 6/7) and everything else stay fp16/fp32 exactly as in
+// the base kernel; softmax and all accumulation remain fp32.
+#define WG 256
+layout(constant_id = 0) const int G = 1;
+layout(constant_id = 1) const int HD = 64;
+layout(constant_id = 2) const int CHUNK = 256;
+layout(constant_id = 3) const int QTOTAL = 64;
+layout(constant_id = 4) const int SCORETOTAL = 256;
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer Q { STORE q[]; };
+layout(std430, binding = 1) readonly buffer K { int8_t k8[]; };
+layout(std430, binding = 2) readonly buffer V { int8_t v8[]; };
+layout(std430, binding = 3) writeonly buffer P { float part[]; };
+layout(std430, binding = 4) readonly buffer M { STORE msk[]; };
+// Geometry: g[0..rank) = KV-row dims (group axis collapsed to 1), then per-dim strides of
+// q, k, v, mask, the attention-row strides (row-major over the ORIGINAL dims), and the split-KV
+// new-source strides for k and v — 8 arrays (the last two are zeros when pastLen == C).
+layout(std430, binding = 5) readonly buffer GEO { int g[]; } geom;
+// Split-KV sources (foldFusedAttentionKvConcat): token s >= pastLen reads the current rows from
+// these instead of the cache — they stay fp16 (the current step's rows are not yet cached).
+layout(std430, binding = 6) readonly buffer KN2 { STORE kNew[]; };
+layout(std430, binding = 7) readonly buffer VN2 { STORE vNew[]; };
+// Per-(head, token)-row fp16 scales for the int8 past sources, [kvHeads, cacheSlots] token-minor:
+// index = payload row element base / hd (see src/core/kv_quant.h).
+layout(std430, binding = 8) readonly buffer KS { float16_t kScale[]; };
+layout(std430, binding = 9) readonly buffer VS { float16_t vScale[]; };
+layout(push_constant) uniform PC {
+  int rank, kvRows, C, hd;
+  int qK, kN, kK, vN, vK, mN, hasMask, chunks;
+  int groupStrideQ, groupStrideM, groupStrideRow;
+  int pastLen, kNewN, kNewK, vNewN, vNewK;
+  float scale, maskScale;
+} pc;
+
+shared float sQ[QTOTAL];
+shared float sScores[SCORETOTAL];
+shared float sRed[WG];
+shared float sAcc[HD];
+
+void main() {
+  // One workgroup per (kvRow, chunk); the 1-D grid spills into y past the per-dim limit.
+  uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  int kvRow = int(wg) / pc.chunks;
+  int chunk = int(wg) % pc.chunks;
+  if (kvRow >= pc.kvRows) return; // uniform per workgroup: barriers below stay uniform
+
+  // KV-row bases and the flat attention-row base from the per-axis strides.
+  int qB = 0, kB = 0, vB = 0, mB = 0, rowBase = 0, kNB = 0, vNB = 0;
+  {
+    int rem = kvRow;
+    for (int i = pc.rank - 1; i >= 0; --i) {
+      int c = rem % geom.g[i];
+      rem /= geom.g[i];
+      qB += c * geom.g[pc.rank + i];
+      kB += c * geom.g[2 * pc.rank + i];
+      vB += c * geom.g[3 * pc.rank + i];
+      mB += c * geom.g[4 * pc.rank + i];
+      rowBase += c * geom.g[5 * pc.rank + i];
+      kNB += c * geom.g[6 * pc.rank + i];
+      vNB += c * geom.g[7 * pc.rank + i];
+    }
+  }
+
+  int tid = int(gl_LocalInvocationID.x);
+  int s0 = chunk * CHUNK;
+  int sLen = min(CHUNK, pc.C - s0);
+
+  for (int i = tid; i < G * pc.hd; i += WG)
+    sQ[i] = float(q[qB + (i / pc.hd) * pc.groupStrideQ + (i % pc.hd) * pc.qK]);
+  barrier();
+
+  // Stage 1: one lane per token; each K element read once closes all G dots. A past token
+  // accumulates q * code and folds the row scale into the finished dot; a token past the split
+  // boundary reads the fp16 new-rows source exactly as the base kernel does.
+  bool chunkAllPast = s0 + sLen <= pc.pastLen;
+  for (int t = tid; t < sLen; t += WG) {
+    int s = s0 + t;
+    float dot[G];
+    for (int gi = 0; gi < G; ++gi) dot[gi] = 0.0;
+    float tokScale = 1.0;
+    if (chunkAllPast || s < pc.pastLen) {
+      int base = kB + s * pc.kN;
+      tokScale = float(kScale[base / pc.hd]);
+      for (int kk = 0; kk < pc.hd; ++kk) {
+        float kv = float(k8[base + kk * pc.kK]);
+        for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
+      }
+    } else {
+      int base = kNB + (s - pc.pastLen) * pc.kNewN;
+      for (int kk = 0; kk < pc.hd; ++kk) {
+        float kv = float(kNew[base + kk * pc.kNewK]);
+        for (int gi = 0; gi < G; ++gi) dot[gi] += sQ[gi * pc.hd + kk] * kv;
+      }
+    }
+    for (int gi = 0; gi < G; ++gi) {
+      float x = dot[gi] * tokScale * pc.scale;
+      if (pc.hasMask != 0) x += float(msk[mB + gi * pc.groupStrideM + s * pc.mN]) * pc.maskScale;
+      sScores[gi * CHUNK + t] = x;
+    }
+  }
+  barrier();
+
+  // Per group member: chunk softmax over the shared scores, then the p.V partial.
+  for (int gi = 0; gi < G; ++gi) {
+    float localMax = -3.4e38;
+    for (int t = tid; t < sLen; t += WG) localMax = max(localMax, sScores[gi * CHUNK + t]);
+    sRed[tid] = localMax;
+    barrier();
+    for (int step = WG / 2; step > 0; step >>= 1) {
+      if (tid < step) sRed[tid] = max(sRed[tid], sRed[tid + step]);
+      barrier();
+    }
+    float m = sRed[0];
+    barrier();
+    float localSum = 0.0;
+    for (int t = tid; t < sLen; t += WG) {
+      float p = exp(sScores[gi * CHUNK + t] - m);
+      sScores[gi * CHUNK + t] = p;
+      localSum += p;
+    }
+    sRed[tid] = localSum;
+    barrier();
+    for (int step = WG / 2; step > 0; step >>= 1) {
+      if (tid < step) sRed[tid] += sRed[tid + step];
+      barrier();
+    }
+    float l = sRed[0];
+    barrier();
+
+    // p.V: lane tid owns output n and token slice `prt`; a past code dequantizes in place.
+    int parts = WG / pc.hd > 0 ? WG / pc.hd : 1;
+    int n = tid % pc.hd;
+    int prt = tid / pc.hd;
+    float acc = 0.0;
+    if (prt < parts) {
+      if (chunkAllPast) {
+        for (int t = prt; t < sLen; t += parts) {
+          int rowBaseV = vB + (s0 + t) * pc.vK;
+          float vv = float(vScale[rowBaseV / pc.hd]) * float(v8[rowBaseV + n * pc.vN]);
+          acc += sScores[gi * CHUNK + t] * vv;
+        }
+      } else {
+        for (int t = prt; t < sLen; t += parts) {
+          int s = s0 + t;
+          float vv;
+          if (s < pc.pastLen) {
+            int rowBaseV = vB + s * pc.vK;
+            vv = float(vScale[rowBaseV / pc.hd]) * float(v8[rowBaseV + n * pc.vN]);
+          } else {
+            vv = float(vNew[vNB + (s - pc.pastLen) * pc.vNewK + n * pc.vNewN]);
+          }
+          acc += sScores[gi * CHUNK + t] * vv;
+        }
+      }
+    }
+    for (int i = tid; i < pc.hd; i += WG) sAcc[i] = 0.0;
+    barrier();
+    for (int fold = 0; fold < parts; ++fold) {
+      if (prt == fold) sAcc[n] += acc;
+      barrier();
+    }
+
+    // Partial slot for (attention row, chunk): {m, l, acc[hd]}.
+    int row = rowBase + gi * pc.groupStrideRow;
+    int pBase = (row * pc.chunks + chunk) * (pc.hd + 2);
+    if (tid == 0) {
+      part[pBase] = m;
+      part[pBase + 1] = l;
+    }
+    for (int i = tid; i < pc.hd; i += WG) part[pBase + 2 + i] = sAcc[i];
+    barrier(); // sScores/sRed/sAcc are reused by the next group member
+  }
+}

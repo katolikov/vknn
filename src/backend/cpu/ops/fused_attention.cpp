@@ -8,6 +8,7 @@
 #include "core/fused_attention.h"
 #include "backend/cpu/cpu_backend.h"
 #include "backend/cpu/parallel.h"
+#include "core/kv_quant.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <cmath>
@@ -82,6 +83,37 @@ namespace vknn {
                 const float *kNew = split ? ctx.t(node.inputs[4]).host.f32() : nullptr;
                 const float *vNew = split ? ctx.t(node.inputs[5]).host.f32() : nullptr;
                 float       *out  = cpu::allocOut(ctx.t(node.outputs[0]), g.desc(node.outputs[0]).shape);
+
+                // int8 KV-cache oracle (Hint::KvCacheQuant; scheme + shared rule in core/kv_quant.h):
+                // an eligible node's past K/V round-trip through the host codec — per-row absmax,
+                // fp16 scale, int8 codes, fp32 dequant — before the unchanged fp32 attention math.
+                // Quantize-at-read of a bit-copied cache equals quantize-at-write of the same rows
+                // (each row round-trips through the identical codec bytes on every read), so this
+                // is the reference stream for the GPU's quantize-on-fold + dequant-in-kernel path.
+                // The new-rows sources stay untouched, exactly like the GPU kernels. Two runs are
+                // byte-identical: the codec is a pure function and the attention loops are the
+                // deterministic fp32 chains below.
+                std::vector<float> kDequant, vDequant;
+                if (split && ctx.config)
+                {
+                    const std::set<TensorId> cacheTensors = kvQuantCacheTensors(g, *ctx.config, /*backendEligible=*/true, /*requireFlat=*/false);
+                    if (cacheTensors.count(node.inputs[1]) && cacheTensors.count(node.inputs[2]))
+                    {
+                        auto codecRoundTrip = [hd](const float *src, const Shape &shape, std::vector<float> &roundTripped) {
+                            const int64_t elems = numElements(shape);
+                            const int64_t rowCount = elems / hd;
+                            std::vector<int8_t> payload((size_t) elems);
+                            std::vector<fp16_t> scaleBits((size_t) rowCount);
+                            roundTripped.resize((size_t) elems);
+                            kvQuantRows(src, rowCount, hd, payload.data(), scaleBits.data());
+                            kvDequantRows(payload.data(), scaleBits.data(), rowCount, hd, roundTripped.data());
+                        };
+                        codecRoundTrip(k, g.desc(node.inputs[1]).shape, kDequant);
+                        codecRoundTrip(v, g.desc(node.inputs[2]).shape, vDequant);
+                        k = kDequant.data();
+                        v = vDequant.data();
+                    }
+                }
 
                 int64_t rows = 1;
                 for (int64_t d: dims)

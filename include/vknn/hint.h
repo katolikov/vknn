@@ -9,7 +9,7 @@ namespace vknn {
     enum class Hint {
         Winograd        = 0, ///< 3x3 Winograd selection (Auto / On / Off).
         WinogradVariant = 1, ///< Winograd matmul impl (TiledGemm / Fused / FusedSplit / FullyFused / SubgroupGemm).
-        WinogradUnit    = 2, ///< Winograd output tile (F23 / F43).
+        WinogradUnit    = 2, ///< Winograd output tile (F23 / F43 / F63).
         DirectConv3x3   = 3, ///< Direct 3x3 kernel (DirectAuto / RegisterTiled / LdsHalo).
         FlatLayout      = 4, ///< Flat row-major GPU layout pass — keeps generic head ops on the GPU (On / Off, default On).
         GpuIslandFold   = 5, ///< Fold tiny GPU op-islands onto the CPU (On / Off, default On).
@@ -34,12 +34,28 @@ namespace vknn {
                               ///< A operand per-dispatch (per-tensor absmax scale) against a host-
                               ///< quantized weight operand - opt-in low-precision fast paths, never a
                               ///< default, numerics differ from the fp16 path by construction.
+        KvCacheQuant    = 12, ///< Int8 KV-cache storage (Auto / On / Off, DEFAULT OFF). On stores
+                              ///< the engine-resident decode KV cache as symmetric int8 with one
+                              ///< fp16 scale per (token, head) row: the resident-link fold
+                              ///< quantizes each present row on write and the FusedAttention
+                              ///< kernels dequantize the past source inside their fp32 K-dot /
+                              ///< V-apply loops (the current step's rows stay fp16). Halves cache
+                              ///< memory and past-KV read traffic, and costs measured accuracy —
+                              ///< about +2% perplexity and a greedy token stream that leaves the
+                              ///< fp16 one within tens of tokens — so it is opt-in, never a
+                              ///< default. Auto engages from kKvQuantAutoMinCacheBytes of eligible
+                              ///< cache up, the measured size where the traffic saving beats the
+                              ///< in-kernel dequantize; below it neither speed nor accuracy favours
+                              ///< the scheme. Requires the split-KV fold (Hint::KvConcatFold),
+                              ///< fp16 storage, and 8-bit storage support — an ineligible
+                              ///< model/device keeps the fp16 cache byte-identically at every
+                              ///< value (measured numbers in src/core/kv_quant.h).
     };
 
     /// Every kernel/pass selection value, set uniformly via setHint(Hint, Mode). The value sets by
     /// Hint: Auto/On/Off serve Winograd, FlatLayout, GpuIslandFold, MatMulViewFold, RopeFusion,
     /// FusedAttention and KvConcatFold;
-    /// TiledGemm..SubgroupGemm serve WinogradVariant; F23/F43 serve WinogradUnit;
+    /// TiledGemm..SubgroupGemm serve WinogradVariant; F23/F43/F63 serve WinogradUnit;
     /// DirectAuto..LdsHalo serve DirectConv3x3. The same underlying int recurs across groups
     /// (legal — the Hint picks the knob, the Mode the value). Forcing Winograd On/Off skips
     /// per-shape timing, making the choice deterministic run-to-run.
@@ -54,6 +70,8 @@ namespace vknn {
         SubgroupGemm  = 4,
         F23           = 0,
         F43           = 4,
+        F63           = 6, ///< WinogradUnit: force F(6,3) (explicit-hint only; device measurement
+                           ///< refuted promoting it into the automatic F(2,3)/F(4,3) rule).
         DirectAuto    = 0,
         RegisterTiled = 1,
         LdsHalo       = 2,

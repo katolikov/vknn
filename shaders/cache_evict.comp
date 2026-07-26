@@ -1,0 +1,25 @@
+#version 450
+// Cache-eviction stream for the load-time kernel races (src/backend/vulkan/vk_tune_race.h).
+//
+// A race measures one candidate kernel in isolation, but the graph runs that kernel once among
+// ~100 others, every one of which has moved the caches since. Streaming a buffer larger than the
+// device's last-level cache immediately before the measured dispatch puts the candidate's operands
+// back in DRAM, which is where the graph leaves them.
+//
+// The loads feed a store the shader compiler cannot prove dead, or it deletes them and the kernel
+// touches no memory at all. The store lands at element 0 of the same scratch buffer and never fires
+// in practice: the buffer is zero-filled at allocation, so the xor is 0, and the sentinel is not.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Stream { uvec4 s[]; };
+layout(push_constant) uniform PC {
+  uint vec4Count, sentinel;
+} pc;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (i >= pc.vec4Count) return;
+  uvec4 v = s[i];
+  if ((v.x ^ v.y ^ v.z ^ v.w) == pc.sentinel) {
+    s[0] = v;
+  }
+}

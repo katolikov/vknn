@@ -19,6 +19,13 @@
 // generator, so the same compile inputs always produce byte-identical .vxm output. A calibration
 // failure degrades to weight-only quantization (uniform column weighting) rather than failing the
 // compile.
+//
+// Those statistics are SHAPE-dependent — the synthetic samples are sized by the graph's input
+// shapes — so the buckets of one multi-bucket compile would each pick their own outlier columns and
+// min-MSE steps for the very same weight. quantizeWeightsShared quantizes a whole compile's buckets
+// together for that reason: each distinct weight is calibrated and packed once and every bucket that
+// shares it gets the identical payload, so the buckets stay one model and the .vxm's content-deduped
+// initializer pool holds one copy.
 #include "core/quant_weights.h"
 #include "import/passes.h"
 #include "vknn/config.h"
@@ -32,6 +39,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace vknn {
@@ -727,9 +735,182 @@ namespace vknn {
             }
         }
 
+        // --- cross-bucket weight sharing -------------------------------------------------------
+        //
+        // The buckets of one compile are the same model at different input shapes, so a weight they
+        // share must quantize to the same bytes. This key is that weight's identity across buckets:
+        // the tensor's name plus everything that determines the quantization grid — the
+        // pre-quantization payload and the site geometry. Every field must match; a mismatch (a
+        // renamed tensor, a payload a shape-dependent pass rewrote, a different consumer op class)
+        // means no sharing, and the bucket quantizes the weight on its own statistics as before.
+        struct WeightKey {
+            std::string name;
+            uint64_t    digest       = 0; // FNV-1a 64 over the pre-quantization payload bytes
+            int64_t     payloadBytes = 0;
+            int64_t     K = 0, N = 0, group = 0;
+            int         layout  = 0;
+            int         dtype   = 0; // the stored weight's DType
+            int         opClass = 0; // consumer OpType: it selects the group / outlier defaults
+            bool        operator<(const WeightKey &other) const {
+                return std::tie(name, digest, payloadBytes, K, N, group, layout, dtype, opClass) <
+                       std::tie(other.name, other.digest, other.payloadBytes, other.K, other.N, other.group, other.layout,
+                                other.dtype, other.opClass);
+            }
+        };
+
+        // Where a shared weight was quantized: the producing bucket's graph and the tensors holding
+        // its packed payload and side data. That graph stays alive for the whole compile, so a
+        // sharing bucket copies the bytes straight out of it and the cache never holds a second copy
+        // of a weight.
+        struct QuantSource {
+            const Graph *graph    = nullptr;
+            bool         keptFp16 = false; // the error guard rejected it: every bucket keeps fp16
+            double       relErr   = 0;     // the guard's measured error, for the sharing bucket's log
+            TensorId     weight = kNoTensor, scales = kNoTensor;
+            TensorId     oidx = kNoTensor, oval = kNoTensor, lut = kNoTensor;
+            int64_t      nOut = 0, group = 0;
+            std::vector<double> biasDelta; // empty = uncalibrated, so no bias correction
+        };
+        using QuantCache = std::map<WeightKey, QuantSource>;
+
+        // FNV-1a 64 over an initializer's raw bytes — the payload half of a shared weight's
+        // identity, and the same digest the .vxm writer interns pool blobs by.
+        uint64_t payloadDigest(const HostBuffer &hb) {
+            constexpr uint64_t kFnvBasis = 1469598103934665603ull;
+            constexpr uint64_t kFnvPrime = 1099511628211ull;
+            const uint8_t     *bytes     = hb.bytes.data();
+            const size_t       count     = hb.bytes.size();
+            uint64_t           h         = kFnvBasis;
+            for (size_t i = 0; i < count; ++i)
+            {
+                h ^= bytes[i];
+                h *= kFnvPrime;
+            }
+            return h;
+        }
+
+        // The sharing key for one site. False when the weight has no identity other buckets can
+        // match: an unnamed initializer's fallback name is its tensor id, which is a per-bucket
+        // number, so it is quantized independently in every bucket.
+        bool weightKeyFor(const Graph &g, const QuantSite &s, const QuantOptions &opt, WeightKey &key) {
+            const TensorDesc &wd = g.desc(s.weight);
+            auto              it = g.initializers.find(s.weight);
+            if (wd.name.empty() || it == g.initializers.end())
+            {
+                return false;
+            }
+            const Node &nd   = g.nodes[s.nodeIdx];
+            key.name         = wd.name;
+            key.digest       = payloadDigest(it->second);
+            key.payloadBytes = (int64_t) it->second.bytes.size();
+            key.K            = s.K;
+            key.N            = s.N;
+            key.group        = std::min<int64_t>(nd.type == OpType::MatMul ? opt.group : opt.convGroup, s.K);
+            key.layout       = s.layout;
+            key.dtype        = (int) wd.dtype;
+            key.opClass      = (int) nd.type;
+            return true;
+        }
+
+        // Rows of statistics one calibration sample yields for a bucket: the largest per-site row
+        // count (elements / channels — exactly what accumulate() counts). A decode bucket at
+        // input_ids [1, 1] yields one row per sample where a prefill bucket at [1, 64] yields 64, so
+        // this ranks the buckets by how representative their calibration is.
+        int64_t calibrationRows(const Graph &g, const std::vector<QuantSite> &sites) {
+            int64_t rows = 0;
+            for (const QuantSite &s: sites)
+            {
+                const Shape  &shape    = g.desc(s.act).shape;
+                const int64_t total    = numElements(shape);
+                const int64_t channels = s.convChannels ? (shape.size() > 1 ? shape[1] : 1) : (shape.empty() ? 1 : shape.back());
+                if (total > 0 && channels > 0)
+                {
+                    rows = std::max(rows, total / channels);
+                }
+            }
+            return rows;
+        }
+
+        // Copy an initializer (desc and payload) from the producing bucket into `g`. The payload is
+        // copied out by value: a bucket owns its own initializer bytes.
+        TensorId copyInitializer(Graph &g, const Graph &from, TensorId id) {
+            TensorDesc d    = from.desc(id);
+            d.isInput       = false;
+            d.isOutput      = false;
+            d.isInitializer = true;
+            const TensorId out = g.addTensor(d);
+            HostBuffer     hb;
+            hb.bytes            = from.initializers.at(id).bytes.toVector();
+            g.initializers[out] = std::move(hb);
+            return out;
+        }
+
+        // Install another bucket's quantization of this weight: the identical packed payload,
+        // scales, outlier columns and codebook, the same node attributes, and the same bias
+        // correction. The two buckets then hold byte-identical weights, which the .vxm's
+        // content-deduped initializer pool stores once. Mirrors the emit order of the quantizing
+        // path below so the two buckets' tensor tables line up.
+        void applySharedQuant(Graph &g, const QuantSite &s, const QuantSource &src, int format, const char *biasSuffix,
+                              QuantStats &stats) {
+            Node          &nd      = g.nodes[s.nodeIdx];
+            const Graph   &from    = *src.graph;
+            const TensorId scaleId = copyInitializer(g, from, src.scales);
+            TensorId       oidxId = kNoTensor, ovalId = kNoTensor, lutId = kNoTensor;
+            if (src.oidx != kNoTensor)
+            {
+                oidxId = copyInitializer(g, from, src.oidx);
+                ovalId = copyInitializer(g, from, src.oval);
+            }
+            if (src.lut != kNoTensor)
+            {
+                lutId = copyInitializer(g, from, src.lut);
+            }
+            const std::string weightName = g.desc(s.weight).name;
+            {
+                HostBuffer hb;
+                hb.bytes                 = from.initializers.at(src.weight).bytes.toVector();
+                g.initializers[s.weight] = std::move(hb);
+            }
+            g.desc(s.weight).dtype = DType::Float16;
+            auto seti              = [&](const char *key, int64_t v) {
+                Attr a;
+                a.kind           = Attr::Int;
+                a.i              = v;
+                nd.attr.map[key] = a;
+            };
+            seti(kWq, format);
+            seti(kWqK, s.K);
+            seti(kWqN, s.N);
+            seti(kWqGroup, src.group);
+            seti(kWqNOut, src.nOut);
+            seti(kWqLayout, s.layout);
+            seti(kWqScales, scaleId);
+            if (oidxId != kNoTensor)
+            {
+                seti(kWqOidx, oidxId);
+                seti(kWqOval, ovalId);
+            }
+            if (lutId != kNoTensor)
+            {
+                seti(kWqLut, lutId);
+            }
+            if (!src.biasDelta.empty())
+            {
+                applyBiasCorrection(g, nd, s, src.biasDelta, weightName, biasSuffix);
+            }
+            ++stats.quantized;
+            ++stats.shared;
+            stats.outlierCols += src.nOut;
+        }
+
     } // namespace
 
-    QuantStats quantizeWeights(Graph &g, const QuantOptions &opt) {
+    // Quantize ONE bucket. `shared` holds the weights earlier buckets of this compile already
+    // quantized (null for a standalone graph); every site it answers is installed verbatim instead
+    // of recalibrated. Weights this bucket quantizes itself are recorded in `produced`, which the
+    // caller publishes into `shared` only after the bucket finishes — sharing is a CROSS-bucket
+    // rule, so a single graph quantizes exactly as it always did.
+    static QuantStats quantizeBucket(Graph &g, const QuantOptions &opt, const QuantCache *shared, QuantCache *produced) {
         if (opt.bits != 4 && opt.bits != 8)
         {
             throw Error(Status::InvalidArgument, "quantizeWeights: bits must be 4 or 8, got " + std::to_string(opt.bits));
@@ -757,17 +938,57 @@ namespace vknn {
             stats.bytesBefore += (int64_t) kv.second.bytes.size();
         }
         std::vector<QuantSite> sites = collectSites(g, opt);
+        // Sites an earlier bucket already quantized are installed from its payload and need no
+        // statistics of their own, so only the rest are calibrated — and when the cache answers
+        // every site, the calibration run (a full CPU forward of the float graph, per sample) is
+        // skipped entirely.
+        std::vector<WeightKey>           keys((size_t) sites.size());
+        std::vector<char>                hasKey((size_t) sites.size(), 0);
+        std::vector<const QuantSource *> cached((size_t) sites.size(), nullptr);
+        std::vector<QuantSite>           uncachedSites;
+        for (size_t si = 0; si < sites.size(); ++si)
+        {
+            hasKey[si] = weightKeyFor(g, sites[si], opt, keys[si]) ? 1 : 0;
+            if (hasKey[si] && shared)
+            {
+                auto it = shared->find(keys[si]);
+                if (it != shared->end())
+                {
+                    cached[si] = &it->second;
+                }
+            }
+            if (!cached[si])
+            {
+                uncachedSites.push_back(sites[si]);
+            }
+        }
         std::map<TensorId, ActStats> actStats;
-        const bool calibrated = calibrate(g, sites, opt, actStats);
-        if (!calibrated)
+        const bool                   calibrated = !uncachedSites.empty() && calibrate(g, uncachedSites, opt, actStats);
+        if (!calibrated && !uncachedSites.empty())
         {
             printf("[compile] -Os: no calibration statistics — quantizing weight-only (uniform column weights)\n");
         }
-        for (const QuantSite &s: sites)
+        for (size_t siteIdx = 0; siteIdx < sites.size(); ++siteIdx)
         {
-            Node             &nd = g.nodes[s.nodeIdx];
+            const QuantSite  &s          = sites[siteIdx];
+            Node             &nd         = g.nodes[s.nodeIdx];
             const TensorDesc  wdOriginal = g.desc(s.weight); // copied: addTensor below reallocates descs
             const int64_t     K = s.K, N = s.N;
+            if (cached[siteIdx])
+            {
+                // Another bucket of this compile already quantized this weight: take its bytes, its
+                // guard verdict, and its bias correction verbatim.
+                if (cached[siteIdx]->keptFp16)
+                {
+                    ++stats.guardKept;
+                    printf("[compile] -Os: kept %s fp16 (relative error %.4f > %.4f)\n",
+                           wdOriginal.name.empty() ? nd.name.c_str() : wdOriginal.name.c_str(), cached[siteIdx]->relErr,
+                           opt.maxLayerRelErr);
+                    continue;
+                }
+                applySharedQuant(g, s, *cached[siteIdx], format, biasSuffix, stats);
+                continue;
+            }
             // The logical [K, N] fp32 view of the stored weight.
             std::vector<float> raw = initFloats(g, s.weight);
             std::vector<float> w((size_t) (K * N));
@@ -933,6 +1154,16 @@ namespace vknn {
                 ++stats.guardKept;
                 printf("[compile] -Os: kept %s fp16 (relative error %.4f > %.4f)\n",
                        wdOriginal.name.empty() ? nd.name.c_str() : wdOriginal.name.c_str(), relErr, opt.maxLayerRelErr);
+                if (produced && hasKey[siteIdx])
+                {
+                    // The verdict travels with the weight: a layer one bucket keeps fp16 must stay
+                    // fp16 in every bucket, or they would not be the same model.
+                    QuantSource src;
+                    src.graph    = &g;
+                    src.keptFp16 = true;
+                    src.relErr   = relErr;
+                    produced->emplace(keys[siteIdx], std::move(src));
+                }
                 continue;
             }
 
@@ -1009,9 +1240,10 @@ namespace vknn {
             // Bias correction from the calibration means: remove the systematic ΔW·E[x] output shift
             // this layer's rounding introduces (outlier columns are exact, so they contribute none).
             const std::vector<double> colMean = columnMeans(s, actStats);
+            std::vector<double>       delta;
             if (!colMean.empty())
             {
-                std::vector<double> delta((size_t) N, 0.0);
+                delta.assign((size_t) N, 0.0);
                 for (int64_t gp = 0; gp < nGroups; ++gp)
                 {
                     const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
@@ -1038,6 +1270,20 @@ namespace vknn {
                 }
                 applyBiasCorrection(g, nd, s, delta, wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name, biasSuffix);
             }
+            if (produced && hasKey[siteIdx])
+            {
+                QuantSource src;
+                src.graph     = &g;
+                src.weight    = s.weight;
+                src.scales    = scaleId;
+                src.oidx      = oidxId;
+                src.oval      = ovalId;
+                src.lut       = lutId;
+                src.nOut      = (int64_t) oidx.size();
+                src.group     = G;
+                src.biasDelta = std::move(delta);
+                produced->emplace(keys[siteIdx], std::move(src));
+            }
             ++stats.quantized;
             stats.outlierCols += (int64_t) oidx.size();
         }
@@ -1047,6 +1293,37 @@ namespace vknn {
         }
         stats.sites = (int64_t) sites.size();
         stats.calibrated = calibrated;
+        return stats;
+    }
+
+    QuantStats quantizeWeights(Graph &g, const QuantOptions &opt) {
+        return quantizeBucket(g, opt, nullptr, nullptr);
+    }
+
+    std::vector<QuantStats> quantizeWeightsShared(const std::vector<Graph *> &buckets, const QuantOptions &opt) {
+        std::vector<QuantStats> stats(buckets.size());
+        // Visit order: the bucket whose calibration sees the most activation rows first, ties by
+        // bucket index. The first bucket to hold a weight quantizes it and every later bucket reuses
+        // that payload, so a shared weight carries the statistics of the longest-sequence bucket —
+        // the most representative one — and a weight that bucket does not hold (a second model's
+        // tower in the same .vxm) is quantized by the first bucket that does.
+        std::vector<std::pair<int64_t, size_t>> order;
+        order.reserve(buckets.size());
+        for (size_t b = 0; b < buckets.size(); ++b)
+        {
+            order.emplace_back(calibrationRows(*buckets[b], collectSites(*buckets[b], opt)), b);
+        }
+        std::stable_sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        QuantCache shared;
+        for (const auto &entry: order)
+        {
+            QuantCache produced;
+            stats[entry.second] = quantizeBucket(*buckets[entry.second], opt, &shared, &produced);
+            // Published only once the bucket is done: sharing is a CROSS-bucket rule, so no bucket
+            // ever reuses a weight it quantized itself and a one-bucket compile is bit-for-bit the
+            // single-graph quantizeWeights.
+            shared.insert(produced.begin(), produced.end());
+        }
         return stats;
     }
 

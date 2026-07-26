@@ -82,6 +82,38 @@ vknn_compile out.vxm --fp16 \
   --graph "model.onnx;dim:sequence_length=1;dim:past_sequence_length=1024;dim:total_sequence_length=1025"
 ```
 
+Every ONNX-sourced compile of a with-past decoder additionally appends an automatic
+**chunk-prefill bucket** — the same graph at `input_ids [1, 64]` (`kChunkPrefillTokens`,
+`include/vknn/io_link.h`; 64 balances per-pass overhead amortization against the last
+chunk's padded waste) over the decode bucket's cache shapes — as the LAST bucket of the
+`.vxm`, so existing bucket indices, labels, and old readers are unchanged, and the shared
+weight pool keeps the size cost to the bucket's graph metadata. No flag is involved: a
+plain single-graph decode compile becomes a two-bucket file, a `--bucket`/`--graph`
+compile gains one more bucket, and a model with no decode graph — or one that already
+carries a prefill bucket at `S <= 64` — is untouched. A `.vxm`-input recompile keeps its
+stored buckets and appends nothing (the stored graphs carry no re-importable source); a
+split VLM export whose decode graph only gains `input_ids` during the bucket-boundary
+fusion is not auto-detected either — give it an explicit `--graph` occurrence at
+`sequence_length=64` instead.
+
+Every such compile also appends an automatic **spec-verify bucket** — the same graph at
+`input_ids [1, 5]` (`kSpecVerifyTokens`, `include/vknn/spec_decode.h`) — which
+`vknn_chat --draft draft.vxm` uses for greedy speculative decoding: a small draft model
+proposes 4 tokens and the target checks all of them plus their anchor in ONE forward, so
+the target's whole weight set is streamed once for up to 5 committed tokens instead of
+once per token. A proposal is committed only when it equals the target's own argmax at
+that position, and the first mismatch is replaced by that argmax, so the emitted stream is
+the plain greedy stream token for token — speculation is a throughput change with no
+accuracy trade. The draft is a caller-supplied artifact, so it is a driver argument rather
+than an engine knob; with no `--draft` the bucket is never dispatched to and costs only its
+graph metadata. Speculation stands down (one notice, same stream) for `--temp > 0` —
+sampled speculation needs the modified-rejection scheme, which is not implemented —
+`--chain N`, `--no-kv-link`, a draft that does not load or whose vocabulary differs from
+the target's, a `.vxm` with no verification bucket, and any position too close to the
+compiled context edge to fit a whole verification window. Per turn the driver reports the
+acceptance rate and the tokens committed per target forward on stderr, which is the number
+that decides whether a given draft/target pair pays.
+
 `-Os` compiles every `-O3` fusion plus **calibration-free int4 weight quantization** (a
 native int4 GPU MatMul) in place of `--fp16`: the instruct model is ~2.4x smaller and
 stays coherent. `--quant-samples 0` selects weight-only quantization, which a multi-bucket

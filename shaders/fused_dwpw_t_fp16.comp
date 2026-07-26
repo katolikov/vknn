@@ -1,0 +1,124 @@
+#version 450
+// Fused depthwise + 1x1-project, spatial-tiled (NC4HW4, fp16). One workgroup per TILE x TILE
+// output-pixel tile: phase A computes the depthwise output for all expanded channel-blocks of the
+// tile's pixels into LDS, phase B does the 1x1 project for the same pixels reading from LDS. The
+// expanded intermediate stays in LDS and never touches global memory; a tile amortizes the
+// depthwise input halo and cuts the grid to a quarter of the per-pixel kernel's.
+//
+// Each LDS lane is rounded through TO_STORE — the byte the unfused depthwise kernel
+// (dwconv_fp16.comp) stores to its fp16 output tensor — so the projection reads exactly the
+// values the unfused 1x1 conv would load. Storing f16 also halves the LDS footprint against a
+// float stage. Phase B then sums in the same partition the unfused 1x1 conv would use for this
+// shape (pwKParts/pwChunk, from pw_splitk_rule.h), so the fused output is byte-identical to the
+// unfused fp16 pipeline whichever 1x1 kernel that shape selects.
+// Parallelism = N * ceil(OH/TILE) * ceil(OW/TILE) workgroups.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 7
+#include "pw_epilogue.glsl"
+#endif
+layout(constant_id = 0) const int HAS_RES = 0;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Exp { f16vec4 expb[]; };
+layout(std430, binding = 1) readonly  buffer DwW { f16vec4 dww[]; };
+layout(std430, binding = 2) readonly  buffer DwB { f16vec4 dwb[]; };
+layout(std430, binding = 3) readonly  buffer PwW { f16vec4 pww[]; };
+layout(std430, binding = 4) readonly  buffer PwB { f16vec4 pwb[]; };
+layout(std430, binding = 5) writeonly buffer Dst { f16vec4 dst[]; };
+layout(std430, binding = 6) readonly  buffer Res { f16vec4 res[]; };
+layout(push_constant) uniform PC {
+  int N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_, dwAct, pwAct;
+  // Project-stage reduction partition (see phase B): pwKParts chunks of pwChunk channel-blocks.
+  int pwKParts, pwChunk;
+  float pwLo, pwHi;
+} pc;
+// TILE mirrors kDwPwTile and MAX_EB mirrors kDwPwMaxExpanded/4 (src/core/fused_dwpw.h); the host
+// gate refuses E > MAX_EB*4 so the shared array below always fits the widest eligible pair.
+#define TILE 2
+#define TILE_PIX (TILE * TILE)
+#define MAX_EB 288
+// Depthwise tile output, one f16vec4 channel-block per tile pixel: comm[eb * TILE_PIX + p].
+// 288 * 4 * 8B = 9216 bytes.
+shared f16vec4 comm[MAX_EB * TILE_PIX];
+
+void main() {
+  int Eb = (pc.E + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int OHW = pc.OH * pc.OW;
+  int nTH = (pc.OH + TILE - 1) / TILE;
+  int nTW = (pc.OW + TILE - 1) / TILE;
+  int tiles = nTH * nTW;
+  // 2-term recovery: an oversized 1D dispatch is split into (x, y) by ComputePipeline::dispatch.
+  uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  if (wg >= uint(pc.N * tiles)) return;
+  int tile = int(wg) % tiles;
+  int n = int(wg) / tiles;
+  int oy0 = (tile / nTW) * TILE, ox0 = (tile % nTW) * TILE;
+  int tid = int(gl_LocalInvocationID.x);
+
+  // Phase A: depthwise KHxKW for every (channel-block, tile pixel) -> LDS, rounded to the fp16
+  // byte the unfused depthwise store would write. Accumulation order (bias, then ky/kx taps)
+  // matches dwconv_fp16.comp exactly. Edge tiles skip their out-of-range pixels; those LDS slots
+  // are never read (phase B skips the same pixels).
+  for (int i = tid; i < Eb * TILE_PIX; i += 64) {
+    int eb = i / TILE_PIX, p = i % TILE_PIX;
+    int oy = oy0 + p / TILE, ox = ox0 + p % TILE;
+    if (oy >= pc.OH || ox >= pc.OW) continue;
+    vec4 acc = vec4(dwb[eb]);
+    int sb = (n * Eb + eb) * pc.H * pc.W;
+    for (int ky = 0; ky < pc.KH; ++ky) {
+      int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+      if (iy < 0 || iy >= pc.H) continue;
+      for (int kx = 0; kx < pc.KW; ++kx) {
+        int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+        if (ix < 0 || ix >= pc.W) continue;
+        acc += vec4(expb[sb + iy * pc.W + ix]) * vec4(dww[(eb * pc.KH + ky) * pc.KW + kx]);
+      }
+    }
+    vec4 v = vec4(vx_act(acc.x, pc.dwAct, 0.0, 6.0),
+                  vx_act(acc.y, pc.dwAct, 0.0, 6.0),
+                  vx_act(acc.z, pc.dwAct, 0.0, 6.0),
+                  vx_act(acc.w, pc.dwAct, 0.0, 6.0));
+    comm[eb * TILE_PIX + p] = TO_STORE4(v);
+  }
+  barrier();
+
+  // Phase B: 1x1 project for every (output channel-block, tile pixel). Widening the f16 LDS lanes
+  // back to fp32 is exact, and the bias-then-per-block-dot accumulation order matches
+  // conv1x1_fp16.comp's single-block body.
+  for (int i = tid; i < Coutb * TILE_PIX; i += 64) {
+    int ocb = i / TILE_PIX, p = i % TILE_PIX;
+    int oy = oy0 + p / TILE, ox = ox0 + p % TILE;
+    if (oy >= pc.OH || ox >= pc.OW) continue;
+    vec4 acc = vec4(pwb[ocb]);
+    int wbase = ocb * 4 * Eb;
+    bool split = pc.pwKParts > 1;
+    int chunk = split ? pc.pwChunk : Eb;
+    for (int k = 0; k < max(pc.pwKParts, 1); ++k) {
+      int e0 = k * chunk, e1 = min(e0 + chunk, Eb);
+      vec4 part = split ? vec4(0.0) : acc;
+      for (int eb = e0; eb < e1; ++eb) {
+        vec4 d = vec4(comm[eb * TILE_PIX + p]);
+        part.x += dot(d, vec4(pww[wbase + 0 * Eb + eb]));
+        part.y += dot(d, vec4(pww[wbase + 1 * Eb + eb]));
+        part.z += dot(d, vec4(pww[wbase + 2 * Eb + eb]));
+        part.w += dot(d, vec4(pww[wbase + 3 * Eb + eb]));
+      }
+      acc = split ? acc + part : part;
+    }
+    int dbase = (n * Coutb + ocb) * OHW + oy * pc.OW + ox;
+    if (HAS_RES != 0) acc += vec4(res[dbase]);
+    vec4 v = vec4(vx_act(acc.x, pc.pwAct, pc.pwLo, pc.pwHi),
+                  vx_act(acc.y, pc.pwAct, pc.pwLo, pc.pwHi),
+                  vx_act(acc.z, pc.pwAct, pc.pwLo, pc.pwHi),
+                  vx_act(acc.w, pc.pwAct, pc.pwLo, pc.pwHi));
+#ifdef PW_EPI
+    v = pw_apply4(v, dbase);
+#endif
+    dst[dbase] = TO_STORE4(v);
+  }
+}

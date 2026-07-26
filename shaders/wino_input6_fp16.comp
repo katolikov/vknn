@@ -1,0 +1,80 @@
+#version 450
+// Winograd F(6x6,3x3) input transform: V = Bt * d * B, 64 transform points per 8x8 input tile
+// (6x6 output tile; stride 6, pad 1). Interpolation points {0, +-1/2, +-1, +-2, inf} — the
+// derivation and the measured point-selection scores live in src/core/wino_f63.h; kBt below
+// stays in lockstep with kWinoF63Bt there.
+//
+// STRUCTURE: separable two-stage through shared memory, NOT the all-in-registers form. F(4,3)'s
+// all-register 6x6 transform holds d[6][6] + t[6][6] = 72 vec4 per thread and loses to F(2,3) on
+// occupancy (docs/benchmark.md); the 8x8 equivalent would hold 128. Here 8 threads cooperate on
+// one (icb, tile) unit: stage 1 gives each thread one tile COLUMN (8 vec4 live) and writes the
+// row pass t[.][c] = Bt * d[.][c] to shared memory in fp32; after the barrier, stage 2 gives each
+// thread one t ROW (8 vec4 live) and stores V[i][.] = t[i][.] * B. Peak per-thread registers stay
+// ~8 vec4; the fp32 staging keeps the whole transform full-precision before the single fp16
+// store. 8 units per 64-thread workgroup; 8 KB of shared memory.
+// Vbuf layout: [pos(0..63)][icb][tile]  (vec4 = 4 input channels), fp16 storage (RTE via store16).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) writeonly buffer V { f16vec4 vbuf[]; };
+layout(push_constant) uniform PC { int N, C, H, W, OH, OW, nTH, nTW; } pc;
+
+// B^T rows (kWinoF63Bt). The zero entries fold away when the driver unrolls the constant-bound
+// loops below.
+const float kBt[8][8] = float[8][8](
+    float[8](1.0, 0.0, -5.25, 0.0, 5.25, 0.0, -1.0, 0.0),
+    float[8](0.0, 2.0, 4.0, -2.5, -5.0, 0.5, 1.0, 0.0),
+    float[8](0.0, -2.0, 4.0, 2.5, -5.0, -0.5, 1.0, 0.0),
+    float[8](0.0, 1.0, 1.0, -4.25, -4.25, 1.0, 1.0, 0.0),
+    float[8](0.0, -1.0, 1.0, 4.25, -4.25, -1.0, 1.0, 0.0),
+    float[8](0.0, 0.5, 0.25, -2.5, -1.25, 2.0, 1.0, 0.0),
+    float[8](0.0, -0.5, 0.25, 2.5, -1.25, -2.0, 1.0, 0.0),
+    float[8](0.0, -1.0, 0.0, 5.25, 0.0, -5.25, 0.0, 1.0));
+
+shared vec4 sT[8][8][8]; // [unit][row i][column c], fp32 row-pass staging
+
+void main() {
+  int Cinb = (pc.C + 3) / 4;
+  int nT = pc.N * pc.nTH * pc.nTW;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint unitId = gid / 8u;  // one unit = one (icb, tile)
+  int lane = int(gl_LocalInvocationID.x) % 8;
+  int unit = int(gl_LocalInvocationID.x) / 8;
+  bool unitLive = unitId < uint(Cinb * nT);
+  int tile = unitLive ? int(unitId) % nT : 0;
+  int icb = unitLive ? int(unitId) / nT : 0;
+  int tx = tile % pc.nTW;
+  int ty = (tile / pc.nTW) % pc.nTH;
+  int n = tile / (pc.nTH * pc.nTW);
+
+  if (unitLive) {
+    // Stage 1: this thread owns tile column `lane`; t[i][lane] = sum_r Bt[i][r] * d[r][lane].
+    vec4 d[8];
+    int base = (n * Cinb + icb) * pc.H * pc.W;
+    int ix = tx * 6 - 1 + lane;
+    for (int r = 0; r < 8; ++r) {
+      int iy = ty * 6 - 1 + r;
+      d[r] = (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W)
+                 ? vec4(src[base + iy * pc.W + ix])
+                 : vec4(0.0);
+    }
+    for (int i = 0; i < 8; ++i) {
+      vec4 acc = kBt[i][0] * d[0];
+      for (int r = 1; r < 8; ++r) acc += kBt[i][r] * d[r];
+      sT[unit][i][lane] = acc;
+    }
+  }
+  barrier();
+  if (!unitLive) return;
+  // Stage 2: this thread owns t row `lane`; V[lane][j] = sum_c t[lane][c] * Bt[j][c].
+  vec4 t[8];
+  for (int c = 0; c < 8; ++c) t[c] = sT[unit][lane][c];
+  for (int j = 0; j < 8; ++j) {
+    vec4 acc = kBt[j][0] * t[0];
+    for (int c = 1; c < 8; ++c) acc += kBt[j][c] * t[c];
+    vbuf[((lane * 8 + j) * Cinb + icb) * nT + tile] = f16vec4(acc);
+  }
+}

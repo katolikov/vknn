@@ -246,6 +246,10 @@ namespace vknn {
         {
             c.setHint(Hint::DirectConv3x3, (int) j->asNum(0));
         }
+        if (auto *j = v.get("kvCacheQuant"))
+        { // auto/on/off; the parser is the shared Mode-triple reader (winogradFromStr)
+            c.setHint(Hint::KvCacheQuant, winogradFromStr(j->asStr("auto")));
+        }
         return c;
     }
 
@@ -287,7 +291,8 @@ namespace vknn {
         os << "  \"winograd\": \"" << winoStr((Mode) hint(Hint::Winograd, (int) Mode::Auto)) << "\",\n";
         os << "  \"winogradVariant\": " << hint(Hint::WinogradVariant, 0) << ",\n";
         os << "  \"winogradUnit\": " << hint(Hint::WinogradUnit, 0) << ",\n";
-        os << "  \"directConv3x3\": " << hint(Hint::DirectConv3x3, 0) << "\n";
+        os << "  \"directConv3x3\": " << hint(Hint::DirectConv3x3, 0) << ",\n";
+        os << "  \"kvCacheQuant\": \"" << winoStr((Mode) kvCacheQuantMode()) << "\"\n";
         os << "}\n";
         return os.str();
     }

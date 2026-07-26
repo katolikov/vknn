@@ -5,6 +5,15 @@
 // materialized tensor. This is the correctness oracle the GPU FusedDwPw path is checked against, so
 // it stays a plain scalar reference rather than fast.
 //
+// The dwOut scratch is round-tripped through fp16 after the depthwise activation
+// (halfToFloat(floatToHalfSat(v))): it mirrors the fp16 tensor the unfused pipeline materializes
+// between the two convs, which the fused GPU kernels reproduce by rounding each LDS lane through
+// TO_STORE. The bitwise property this preserves: CPU-fused equals CPU-unfused with the
+// intermediate quantized to fp16 between the two standalone convs (which themselves store fp32) —
+// see the FusedDwPw tests. The host narrowing rounds an exact halfway value away from zero where
+// the device rounds it to even (floatToHalf vs the GPU RTE store); CPU-vs-GPU stays a PSNR gate,
+// so the tie rule difference is inside that gate, and the CPU-side property above is exact.
+//
 // inputs: [0] X (expanded activation, NCHW with C==E), [1] dw_w [E,1,KH,KW] (one KHxKW kernel per
 // channel), [2] dw_b [E] (optional), [3] pw_w [Cout,E,1,1] (the 1x1 projection as a Cout-by-E
 // matrix), [4] pw_b [Cout] (optional); node.fusedResidual is an optional [N,Cout,OH,OW] tensor.
@@ -12,6 +21,7 @@
 #include "backend/cpu/cpu_backend.h"
 #include "backend/cpu/parallel.h"
 #include "core/conv_geom.h"
+#include "vknn/dtype.h" // halfToFloat / floatToHalfSat: the dw-intermediate fp16 round-trip
 #include "vknn/op.h"
 #include <algorithm>
 #include <vector>
@@ -95,6 +105,13 @@ namespace vknn {
                     // Depthwise-stage activation applied in place to dwOut. subOp is an ActType code;
                     // the 0, 6 are the Clip lo/hi bounds, consulted only when subOp == Clip.
                     cpu::applyAct(dwOut.data(), E * OH * OW, (ActType) node.subOp, 0, 6);
+                    // fp16 round-trip of the activated intermediate (see file header): the value the
+                    // projection reads is the byte the unfused pipeline's fp16 intermediate tensor
+                    // would hold, saturated and rounded like every fp16 activation store.
+                    for (int64_t i = 0; i < E * OH * OW; ++i)
+                    {
+                        dwOut[i] = halfToFloat(floatToHalfSat(dwOut[i]));
+                    }
                     // Stage 2: 1x1 pointwise projection. Treating each of the OH*OW spatial positions
                     // as a column, pw_w [Cout, E] maps the E depthwise channels to Cout output
                     // channels: y[c, p] = pw_b[c] + sum_e pw_w[c, e] * dwOut[e, p]. Output channel c

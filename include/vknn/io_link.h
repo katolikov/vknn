@@ -16,16 +16,36 @@ namespace vknn {
         int64_t count      = 0; ///< Number of elements copied.
     };
 
-    /// Ranges for a single-token KV fold: copy the NEWEST row of a linked present output
-    /// [1, kvHeads, presentRows, headDim] into slot `slot` of a linked past input
-    /// [1, kvHeads, cacheSlots, headDim], one range per head. The newest row is the LAST present
-    /// row, which covers both with-past decoder conventions: a present that concatenates the cache
-    /// with the new token (presentRows == cacheSlots + 1; the new row sits at index cacheSlots) and
-    /// a present that carries only the produced rows (presentRows == 1 for a one-token step; the new
-    /// row is row 0). `presentRows` MUST come from the decode plan's present output shape — assuming
-    /// one convention breaks the other (a cache-concat offset applied to a rows-only present is out
-    /// of bounds and rejected by the link validation). `slot` < 0 returns no ranges (the reset /
-    /// first-step state with no pending fold).
+    /// Chunk length of the auto-emitted chunk-prefill bucket (vknn_compile) and the prompt window
+    /// the chunked prefill driver feeds per pass. 64 balances the two costs of a fixed-size chunk:
+    /// a larger chunk amortizes per-pass overhead (dispatch, mask/position pack, one submit per
+    /// chunk) over more prompt tokens, while every prompt pays the FULL chunk's compute for its
+    /// last, padded chunk — at 64 the average last-chunk waste is 32 token-columns, small against
+    /// the per-pass fixed cost it removes. One static [1, 64] graph serves every prompt length as
+    /// ceil(T / 64) sequential passes over the cached KV (the llm.npu chunked-prefill scheme,
+    /// arXiv 2407.05858), so a variable-length prompt never needs a per-length plan or a
+    /// pad-to-full-window forward.
+    inline constexpr int64_t kChunkPrefillTokens = 64;
+
+    /// Whether vknn_compile emits the chunk-prefill bucket at all. On: a three-way run of one 0.5B
+    /// decoder — same model, same binary, only the prefill path differing — has the chunked stream
+    /// matching the whole-window and token-by-token streams exactly at 20, 64, 65 and 200 prompt
+    /// tokens (one, one, two and four chunks). Both defects that broke it were the same one: the
+    /// chunk bucket's causal mask comes from an ORT transformer export whose subgraph expands a
+    /// [1,1,S,S] triangle onto the [1,1,S,P+S] score mask, and Expand's rule on an axis the target
+    /// widens without the source broadcasting decided what that mask means (src/backend/cpu/ops/
+    /// expand.cpp). Under the old CPU rule the constant folder and the GPU op disagreed outright,
+    /// and the folder's value — folded only in the chunk bucket, whose output is inside the folder's
+    /// size bound — carried no causal structure at all.
+    ///
+    /// Chunked prefill is SLOWER than the whole-window path it replaces on a prompt the whole-window
+    /// bucket already covers: on that decoder (whole-window S=256, chunk S=64, cooled, median of 3)
+    /// time to first token is 908 vs 519 ms at 20 tokens, 963 vs 528 ms at 64, 1202 vs 531 ms at 65
+    /// and 1669 vs 522 ms at 200 — flat for the whole-window pass, ~450 ms per chunk for the chunked
+    /// one, because every chunk pass re-reads the whole weight set. The path earns its keep only past
+    /// the whole-window bucket's own window, where the alternative is the token-by-token tail.
+    inline constexpr bool kChunkPrefillEnabled = true;
+
     /// The cache slot a decode step at absolute position `position` folds the PREVIOUS token's
     /// present row into: slot position-1, clamped to the last slot once the position runs past the
     /// compiled context window (the overrun then keeps overwriting the newest slot). Negative (no
@@ -40,19 +60,40 @@ namespace vknn {
         return slot < cacheSlots ? slot : cacheSlots - 1;
     }
 
-    inline std::vector<LinkRange> kvFoldRanges(int64_t kvHeads, int64_t presentRows, int64_t cacheSlots, int64_t headDim, int64_t slot) {
+    /// Ranges for a row-block KV fold: copy `rows` consecutive rows starting at row `sourceRow` of
+    /// a linked present output [1, kvHeads, presentRows, headDim] into slots `slot`..`slot`+rows-1
+    /// of a linked past input [1, kvHeads, cacheSlots, headDim], one contiguous range per head
+    /// (rows of one head are contiguous in row-major storage). `slot` < 0 or `rows` <= 0 returns no
+    /// ranges (the reset / first-step state with no pending fold). The caller keeps the block in
+    /// bounds on both sides; the link validation rejects an overrun. A chunked prefill folds each
+    /// chunk's `rows` produced KV rows into their absolute cache slots with this; the single-token
+    /// decode fold is the rows == 1 case below.
+    inline std::vector<LinkRange> kvFoldRowRanges(int64_t kvHeads, int64_t presentRows, int64_t cacheSlots, int64_t headDim, int64_t sourceRow, int64_t slot, int64_t rows) {
         std::vector<LinkRange> ranges;
-        if (slot < 0)
+        if (slot < 0 || rows <= 0)
         {
             return ranges;
         }
-        const int64_t newestRow = presentRows - 1;
         ranges.reserve((size_t) kvHeads);
         for (int64_t head = 0; head < kvHeads; ++head)
         {
-            ranges.push_back({(head * presentRows + newestRow) * headDim, (head * cacheSlots + slot) * headDim, headDim});
+            ranges.push_back({(head * presentRows + sourceRow) * headDim, (head * cacheSlots + slot) * headDim, rows * headDim});
         }
         return ranges;
+    }
+
+    /// Ranges for a single-token KV fold: copy the NEWEST row of a linked present output
+    /// [1, kvHeads, presentRows, headDim] into slot `slot` of a linked past input
+    /// [1, kvHeads, cacheSlots, headDim], one range per head. The newest row is the LAST present
+    /// row, which covers both with-past decoder conventions: a present that concatenates the cache
+    /// with the new token (presentRows == cacheSlots + 1; the new row sits at index cacheSlots) and
+    /// a present that carries only the produced rows (presentRows == 1 for a one-token step; the new
+    /// row is row 0). `presentRows` MUST come from the decode plan's present output shape — assuming
+    /// one convention breaks the other (a cache-concat offset applied to a rows-only present is out
+    /// of bounds and rejected by the link validation). `slot` < 0 returns no ranges (the reset /
+    /// first-step state with no pending fold).
+    inline std::vector<LinkRange> kvFoldRanges(int64_t kvHeads, int64_t presentRows, int64_t cacheSlots, int64_t headDim, int64_t slot) {
+        return kvFoldRowRanges(kvHeads, presentRows, cacheSlots, headDim, presentRows - 1, slot, 1);
     }
 
 } // namespace vknn

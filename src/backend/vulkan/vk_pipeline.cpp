@@ -216,6 +216,9 @@ namespace vknn { namespace vk {
             VKNN_INFO << "dispatch split for " << name_ << ": gx=" << gx << " gy=" << gy << " (max " << maxX << ")";
         }
         vkCmdDispatch(cmd, gx, gy, gz);
+        // The engine's only dispatch site, so this counter is the complete recorded-dispatch total.
+        // The recording segment reads it around each op to attribute the count per node.
+        ctx_.dispatchTally().note();
     }
 
 }} // namespace vknn::vk

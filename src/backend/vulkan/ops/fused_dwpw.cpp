@@ -1,8 +1,13 @@
-// Fused depthwise-3x3 + 1x1-project on the GPU. One workgroup per output pixel; depthwise output
-// staged in LDS (computed once), then projected. Gated by supportsNode to large-spatial fp16
-// blocks.
+// Fused depthwise + 1x1-project on the GPU. Two kernels share one prepare/record path and one
+// weight layout: the spatial-tiled kernel (fused_dwpw_t*, one workgroup per kDwPwTile^2 output
+// pixels) and the per-pixel kernel (fused_dwpw*, its small-spatial fallback). The choice is a
+// deterministic shape rule — tiled when the output plane has at least kDwPwTileMinPixels pixels —
+// never autotuned, so a model's kernel set is a pure function of its shapes. Both stage the
+// depthwise output in LDS (computed once, fp16-rounded like the unfused store), then project.
 #include "core/conv_geom.h"
+#include "core/fused_dwpw.h"
 #include "pw_plan.h"
+#include "pw_splitk_rule.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
@@ -10,6 +15,12 @@ namespace vknn {
     namespace {
         struct DwPwPC {
             int   N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DWd, dwAct, pwAct;
+            // Project-stage reduction partition, mirroring what the unfused 1x1 conv would do for
+            // this shape (pw_splitk_rule.h): pwKParts chunks of pwChunk expanded channel-blocks each,
+            // every chunk summed from zero into an fp32 partial that is then added onto the bias.
+            // pwKParts == 1 (pwChunk == Eb) is the single running sum conv1x1's register-tiled kernel
+            // keeps. Reproducing the partition keeps the fused output byte-identical to the pair.
+            int   pwKParts, pwChunk;
             float pwLo, pwHi;
         };
         struct FusedDwPwOp: VulkanOp {
@@ -37,15 +48,39 @@ namespace vknn {
                 // inherited auto_pad resolves into the same begin/end pads as the unfused Conv path.
                 auto pad = convGeom(x.h, x.w, KH, KW, node.attr).pads();
                 hasRes                    = (node.fusedResidual != kNoTensor);
+                // Project-stage reduction partition: read the standalone 1x1 conv's split-K shape rule
+                // for the shape this pair's projection has, so the fused sum is associated exactly like
+                // the kernel the unfused graph would have run (single running sum, or split-K's
+                // per-chunk fp32 partials). Off the split-K rule the partition is the whole reduction.
+                const int64_t OHW         = (int64_t) y.h * y.w;
+                const int     splitKHint  = env.config ? env.config->hint(Hint::SplitKConv) : 0;
+                int64_t       pwKParts    = 1;
+                int64_t       pwChunk     = Eb;
+                if (pwSplitKActive(env.useFp16, x.n, E, Coutb, OHW, splitKHint))
+                {
+                    pwKParts = pwSplitKParts(Eb, Coutb, OHW);
+                    pwChunk  = (Eb + pwKParts - 1) / pwKParts;
+                }
                 // Field order/types mirror fused_dwpw.comp's push_constant block: spatial/kernel geometry
                 // (N,E,H,W,Cout,OH,OW,KH,KW), then stride/pad/dilation (SH,SW,PT,PL,DH,DWd), then the fused
-                // depthwise + pointwise activation codes and clamp range. subOp carries the depthwise act.
-                pc                        = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,   (int) Cout,   (int) y.h,    (int) y.w,
-                                             (int) KH,     (int) KW,         (int) st[0],         (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0],
-                                             (int) dil[1], (int) node.subOp, (int) node.fusedAct, node.actLo,  node.actHi};
-                // One workgroup per output pixel (see file header): the grid is flattened to N*OH*OW so the
-                // shader staging the shared depthwise result in LDS is indexed by a single 1D dispatch id.
-                groups_                   = (int64_t) x.n * y.h * y.w;
+                // depthwise + pointwise activation codes, the project-stage reduction partition, and the
+                // clamp range. subOp carries the depthwise act.
+                pc                        = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,        (int) Cout,      (int) y.h,    (int) y.w,
+                                             (int) KH,     (int) KW,         (int) st[0],         (int) st[1],      (int) pad[0],    (int) pad[1], (int) dil[0],
+                                             (int) dil[1], (int) node.subOp, (int) node.fusedAct, (int) pwKParts,   (int) pwChunk,   node.actLo,   node.actHi};
+                // vkNodeGate refuses E past the shared-array cap before this op is ever built; the check here
+                // guards a plan constructed around the gate (both kernels' LDS arrays are sized to the cap).
+                if (E > kDwPwMaxExpanded)
+                {
+                    throw Error(Status::Unsupported, "FusedDwPw '" + node.name + "': expanded channels " + std::to_string(E) + " exceed the shared-memory cap " + std::to_string(kDwPwMaxExpanded));
+                }
+                // Deterministic kernel choice (see file header): the tiled kernel covers kDwPwTile^2 output
+                // pixels per workgroup, so its grid is ceil(OH/T)*ceil(OW/T) tiles per image; a plane below
+                // kDwPwTileMinPixels keeps the per-pixel kernel, whose N*OH*OW grid is the finer parallelism
+                // a small-spatial block needs. Both kernels produce identical bytes — the rule moves only
+                // where the work runs.
+                const bool tiled          = (int64_t) y.h * y.w >= kDwPwTileMinPixels;
+                groups_                   = tiled ? (int64_t) x.n * ((y.h + kDwPwTile - 1) / kDwPwTile) * ((y.w + kDwPwTile - 1) / kDwPwTile) : (int64_t) x.n * y.h * y.w;
                 std::vector<float> dwsrcv = initFloats(g, node.inputs[1]);
                 std::vector<float> pwsrcv = initFloats(g, node.inputs[3]);
                 const float       *dwsrc  = dwsrcv.data();
@@ -69,12 +104,14 @@ namespace vknn {
                     }
                     return wp;
                 });
-                // Pointwise (1x1 project) weights repacked to [Cout][Eb][4]: source [Cout,E,1,1] with the
+                // Pointwise (1x1 project) weights repacked to [Coutb*4][Eb][4]: source [Cout,E,1,1] with the
                 // *input* channel E as the contraction axis, so E is what gets vec4-packed (block icb = ic/4,
-                // lane l = ic%4) to align with the depthwise result's NC4HW4 lanes; Cout stays flat since it
-                // is the output axis. Trailing lanes of the last input block stay zero so they add nothing.
-                pww                       = uploadCached(env, node.name + "#pww", [&] { // [Cout][Eb][4]
-                    std::vector<float> wp((size_t) Cout * Eb * 4, 0.f);
+                // lane l = ic%4) to align with the depthwise result's NC4HW4 lanes; the output axis stays
+                // flat but is padded out to whole channel-blocks, because phase B reads all 4 rows of the
+                // last block. Trailing lanes of the last input block and the padded output rows stay zero,
+                // so a partial last block resolves to zero rows instead of reading past the buffer.
+                pww                       = uploadCached(env, node.name + "#pww", [&] { // [Coutb*4][Eb][4]
+                    std::vector<float> wp((size_t) Coutb * 4 * Eb * 4, 0.f);
                     for (int64_t oc = 0; oc < Cout; ++oc)
                     {
                         for (int64_t ic = 0; ic < E; ++ic)
@@ -123,7 +160,7 @@ namespace vknn {
                 // With the epilogue attached the plan/operands bind after slot 6, so the layout always
                 // includes the Res binding (dummy-bound when there is no fused residual).
                 uint32_t nbuf = epi.active ? 7 + epi.extraBufs() : (hasRes ? 7u : 6u);
-                pipe = env.pipeline(shader((std::string("fused_dwpw") + epi.suffix()).c_str(), env.useFp16), nbuf, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
+                pipe = env.pipeline(shader((std::string(tiled ? "fused_dwpw_t" : "fused_dwpw") + epi.suffix()).c_str(), env.useFp16), nbuf, sizeof(DwPwPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer           *exp = env.devBuf(node.inputs[0]);

@@ -1,6 +1,8 @@
 // Batched N-D MatMul on the FLAT row-major GPU path: out[...,m,n] = sum_k A[...,m,k]*B[...,k,n]
 // with NumPy broadcasting on the batch dims. Three kernels serve it, by shape: the register-blocked
-// tiled GEMM (shaders/matmul_tiled*.comp) for full matrices, the split-K mat-vec
+// tiled GEMM (shaders/matmul_tiled*.comp) for full matrices — the default tile in its f16vec4-load
+// form (matmul_tiled_fast_v4*, byte-identical, plus a zero-padded "#wv4" weight repack for an
+// unaligned N) when the matmulVec4Route alignment rule holds — the split-K mat-vec
 // (shaders/matmul_gemv*.comp — vector-load when N % kGemvVec == 0, scalar otherwise) for a narrow
 // M == 1 row, and otherwise one thread per output element walking K (shaders/matmul.comp). Either
 // operand may be an activation or a constant initializer (e.g. a Linear weight); an initializer is
@@ -8,6 +10,8 @@
 // math byte-for-byte; the split-K kernels regroup the k chain (deterministically, identically to each
 // other) and so agree only to fp32 rounding.
 #include "backend/vulkan/coopmat_check.h"
+#include "backend/vulkan/vk_tune_model.h"
+#include "backend/vulkan/vk_tune_race.h"
 #include "core/lowp_gemm.h"
 #include "core/matmul_tile.h"
 #include "core/matmul_view.h"
@@ -27,9 +31,15 @@ namespace vknn {
 
         // Scalars only; the per-axis outDim/aStride/bStride geometry rides a content-deduped SSBO
         // (flat::uploadFlatGeom) bound after the operands (and after the fused bias when present), so
-        // the decodable batch rank is unbounded and the push constant stays small.
+        // the decodable batch rank is unbounded and the push constant stays small. aKp/bNp are the
+        // operands' physical row strides: K and N for the packed operands every scalar kernel reads,
+        // the zero-padded Np of a "#wv4" repacked weight, or the padded last axis of a virtualized
+        // activation (VkOpEnv::rowPad). Tail fields: only the vec4-load twins
+        // (matmul_tiled_fast_v4*_fp16.comp) declare and consume them; every other MatMulPC kernel
+        // declares the shared 28-byte prefix (a pipeline's push range may exceed the shader's
+        // block). 36 bytes total, well under the 128-byte guaranteed push-constant minimum.
         struct MatMulPC {
-            int rank, total, M, N, K, aK, bK;
+            int rank, total, M, N, K, aK, bK, bNp, aKp;
         };
 
         // Push constant for the packed-quantized-weight kernels (matmul_gemv_i4/i8 /
@@ -288,12 +298,16 @@ namespace vknn {
             }
 
             // Pick the tiled-GEMM tile for this shape (an index into kMatMulTiles; 0 = the default
-            // {128,128,16}). Tuning::None keeps the default; Fast/Heavy race the candidates
-            // min-of-5 x 8 reps on scratch buffers and persist the winning index in the tune
-            // table. Every candidate is bit-neutral (the per-output fp32 K chain is one
-            // ascending-k sequence for any tile), so the race needs no anti-noise margin and the
-            // choice never affects output bits.
-            MatMulTile pickTile(VkOpEnv &env, bool hasBias) {
+            // {128,128,16}). Tuning::None keeps the default; Fast/Heavy race the candidates on
+            // scratch buffers through vk::raceCandidates (interleaved submits, order reversed every
+            // other round, median per candidate) and persist the winning index in the tune table.
+            // Every candidate is bit-neutral (the per-output fp32 K chain is one ascending-k
+            // sequence for any tile), so the choice never affects output bits.
+            // Bit-neutrality is numeric safety, not measurement safety: the device throttles
+            // several-fold under sustained load, so a challenger must still clear the incumbent by
+            // kTuneRaceMargin before it displaces a proven pick in the persisted tune table (the
+            // conv races carry the same margin for the same reason).
+            MatMulTile pickTile(VkOpEnv &env, bool hasBias, bool v4Default) {
                 char buf[112];
                 snprintf(buf, sizeof(buf), "mm_%d_%d_%d_%d_%d", pc.M, pc.N, pc.K, numBatch, hasBias ? 1 : 0);
                 std::string sig = env.gpuTag + "/" + buf;
@@ -312,8 +326,11 @@ namespace vknn {
                 // activation buffers). The timing batch is clamped: per-batch work is identical
                 // across candidates, so the relative ranking is preserved while attention-scale
                 // batch counts keep the scratch footprint bounded.
+                // The B scratch is sized by pc.bNp (== N unless the default candidate times the v4
+                // kernel over a padded weight layout), so a v4 timing read at the padded row
+                // stride stays in-bounds.
                 size_t es       = env.useFp16 ? 2 : 4;
-                size_t perBatch = ((size_t) pc.M * pc.K + (size_t) pc.K * pc.N + (size_t) pc.M * pc.N) * es;
+                size_t perBatch = ((size_t) pc.M * pc.K + (size_t) pc.K * pc.bNp + (size_t) pc.M * pc.N) * es;
                 if (perBatch == 0 || perBatch > ((size_t) 256 << 20))
                 {
                     return kMatMulTiles[0];
@@ -323,40 +340,38 @@ namespace vknn {
                     return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
                 };
                 auto                        sA     = mk((size_t) gzT * pc.M * pc.K * es);
-                auto                        sB     = mk((size_t) gzT * pc.K * pc.N * es);
+                auto                        sB     = mk((size_t) gzT * pc.K * pc.bNp * es);
                 auto                        sD     = mk((size_t) gzT * pc.M * pc.N * es);
                 std::shared_ptr<vk::Buffer> sBias  = hasBias ? mk((size_t) pc.N * es) : nullptr;
-                auto                        timeIt = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    VkCommandBuffer cmd = env.runner->allocate();
-                    env.runner->begin(cmd);
-                    for (int r = 0; r < 8; ++r)
-                    {
-                        rec(cmd);
-                    }
-                    env.runner->end(cmd);
-                    double ms = env.runner->submitAndWait(cmd);
-                    vkFreeCommandBuffers(env.ctx->device(), env.runner->pool(), 1, &cmd);
-                    return ms;
-                };
-                // Min over repeats: the fastest observed time is the least OS-perturbed estimate
-                // (see tuneWino); winners persist, so the measurement earns the rigorous tier.
-                auto bestOf = [&](const std::function<void(VkCommandBuffer)> &rec) {
-                    double m = 1e30;
-                    for (int k = 0; k < 5; ++k)
-                    {
-                        m = std::min(m, timeIt(rec));
-                    }
-                    return m;
-                };
+                vk::TuneTimer               timer(env);
                 // Time each candidate with the kernel it will actually dispatch: the default tile
-                // runs the compile-time _fast kernel (what prepare() picks for it), every other tile
-                // runs the spec-constant kernel. Timing the default with the spec-constant kernel
-                // would under-rank it against its own real (faster) dispatch.
+                // runs the compile-time _fast kernel — the vec4-load twin when prepare()'s v4
+                // routing holds for this shape — and every other tile runs the spec-constant
+                // kernel. Timing the default with any other kernel would mis-rank it against its
+                // own real dispatch.
                 const char *specBase = hasBias ? "matmul_tiled_bias" : "matmul_tiled";
                 const char *fastBase = hasBias ? "matmul_tiled_fast_bias" : "matmul_tiled_fast";
-                uint32_t    nbuf     = hasBias ? 5 : 4; // + the geometry SSBO bound after the operands/bias
-                int         best     = 0;
-                double      bestMs   = 1e30;
+                if (v4Default)
+                {
+                    fastBase = hasBias ? "matmul_tiled_fast_v4_bias" : "matmul_tiled_fast_v4";
+                }
+                uint32_t nbuf   = hasBias ? 5 : 4; // + the geometry SSBO bound after the operands/bias
+                // Entrants in kMatMulTiles order, minus the tiles whose dispatch does not fit; index
+                // 0 is always the default tile (tileFits holds for it whenever the op dispatches).
+                struct Entrant {
+                    int      tileIndex;
+                    uint32_t gxT, gyT;
+                };
+                std::vector<Entrant>        entrants;
+                std::vector<vk::KernelCost> costs;
+                // Cooperative panel loads: one workgroup stages TM*TK of A and TK*TN of B per K
+                // step, so it issues K*(TM+TN) elements over the whole reduction and stores TM*TN.
+                // The compulsory footprint is the three operand panels, identical for every tile.
+                // Threads per tiled-GEMM workgroup (shaders/matmul_tiled.comp dispatches TILE x TILE).
+                constexpr double            kMatMulTiledThreads = 256.0;
+                const double                elemsPerVec4        = 4.0;
+                const double                streamFootprint   = (double) gzT * ((double) pc.M * pc.K + (double) pc.M * pc.N) / elemsPerVec4;
+                const double                residentFootprint = (double) gzT * (double) pc.K * (double) pc.N / elemsPerVec4;
                 for (int ci = 0; ci < kMatMulTileCount; ++ci)
                 {
                     const MatMulTile &t = kMatMulTiles[ci];
@@ -364,28 +379,60 @@ namespace vknn {
                     {
                         continue;
                     }
-                    bool                  fast = isDefaultMatMulTile(t);
+                    const uint32_t gxT = (uint32_t) ((pc.N + t.tn - 1) / t.tn), gyT = (uint32_t) ((pc.M + t.tm - 1) / t.tm);
+                    entrants.push_back({ci, gxT, gyT});
+                    const double   wgroups = (double) gxT * (double) gyT * (double) gzT;
+                    vk::KernelCost cost;
+                    // The A panel and the output are the activation side; the B panel is the
+                    // weight side, shared across the workgroups of one output column.
+                    cost.streamVec4            = (wgroups * (double) pc.K * (double) t.tm + (double) gzT * (double) pc.M * (double) pc.N) / elemsPerVec4;
+                    cost.residentVec4          = wgroups * (double) pc.K * (double) t.tn / elemsPerVec4;
+                    cost.streamFootprintVec4   = streamFootprint;
+                    cost.residentFootprintVec4 = residentFootprint;
+                    cost.waves                 = wgroups * (double) kMatMulTiledThreads / 64.0;
+                    costs.push_back(cost);
+                }
+                if (entrants.empty())
+                {
+                    return kMatMulTiles[0];
+                }
+                std::vector<double> ms = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
+                    const Entrant    &entrant = entrants[(size_t) index];
+                    const MatMulTile &t       = kMatMulTiles[entrant.tileIndex];
+                    // Built inside the timed lambda so a candidate the analytical prefilter dropped
+                    // never compiles its spec-constant variant (env.pipeline memoises).
+                    const bool            fast = isDefaultMatMulTile(t);
                     std::vector<uint32_t> spec = fast ? std::vector<uint32_t> {} : std::vector<uint32_t> {(uint32_t) t.tm, (uint32_t) t.tn, (uint32_t) t.tk};
-                    auto                  p    = env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec);
-                    uint32_t              gxT  = (uint32_t) ((pc.N + t.tn - 1) / t.tn);
-                    uint32_t              gyT  = (uint32_t) ((pc.M + t.tm - 1) / t.tm);
-                    double                ms   = bestOf([&](VkCommandBuffer cmd) {
+                    auto                  pipe = env.pipeline(shader(fast ? fastBase : specBase, env.useFp16), nbuf, sizeof(MatMulPC), spec);
+                    return timer.time([&](VkCommandBuffer cmd) {
                         std::vector<VkBuffer> bufs {sA->handle(), sB->handle(), sD->handle()};
                         if (sBias)
                         {
                             bufs.push_back(sBias->handle());
                         }
                         bufs.push_back(geom->handle()); // geometry SSBO (matches the real dispatch's binding count)
-                        p->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, gyT, (uint32_t) gzT);
-                        vk::computeBarrier(*env.ctx, cmd);
+                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), entrant.gxT, entrant.gyT, (uint32_t) gzT);
                     });
-                    if (ms < bestMs)
+                });
+                // The default tile is the incumbent, so every other candidate is a challenger and
+                // must clear the margin; a tie keeps the incumbent, and so does a noise-width win
+                // the analytical model does not corroborate.
+                const std::vector<double> model = vk::modelEstimates(costs, vk::deviceTuneModel(env));
+                int                       best   = entrants[0].tileIndex;
+                double                    bestMs = ms[0];
+                for (size_t ei = 1; ei < entrants.size(); ++ei)
+                {
+                    // Measured against the incumbent's own time rather than a running best, so the
+                    // margin cannot compound and the outcome does not depend on list order. The
+                    // margin is waived for a tile the model also ranks cheaper (see kTuneRaceMargin).
+                    const double need = ms[0] * (model[ei] < model[0] ? 1.0 : vk::kTuneRaceMargin);
+                    if (ms[ei] < need && ms[ei] < bestMs)
                     {
-                        bestMs = ms;
-                        best   = ci;
+                        bestMs = ms[ei];
+                        best   = entrants[ei].tileIndex;
                     }
                 }
-                VKNN_DEBUG << "autotune " << sig << " -> tile " << kMatMulTiles[best].tm << "x" << kMatMulTiles[best].tn << "x" << kMatMulTiles[best].tk;
+                VKNN_DEBUG << "autotune " << sig << " -> tile " << kMatMulTiles[best].tm << "x" << kMatMulTiles[best].tn << "x" << kMatMulTiles[best].tk << vk::raceTimes(ms);
                 if (env.weights)
                 {
                     env.weights->setTuned(sig, best, (int) env.tuning);
@@ -415,6 +462,10 @@ namespace vknn {
                 bool       aWas1D = false, bWas1D = false;
                 int64_t    M, N, K;
                 int        rank;
+                // Physical last-axis extents of the operand buffers (0 = packed) and the resolved
+                // row strides the kernels index with. A view-addressed MatMul carries its own
+                // geometry and is never handed a virtualized operand.
+                int64_t    aRowPad = 0, bRowPad = 0, aRow = 0, bRow = 0;
                 // gemv4 loads B as vec4 along n; a view keeps that legal only when its n stride is 1
                 // and every other B offset term is 4-aligned.
                 bool                 viewGemv4Ok = false;
@@ -449,95 +500,32 @@ namespace vknn {
                         }
                     }
                     viewGemv4Ok = viewGemv4Ok && bStride[rank - 1] == 1;
+                    aRow        = K;
+                    bRow        = N;
                 } else
                 {
-                    // Promote 1-D operands (A[K]->[1,K], B[K]->[K,1]) to find M/N/K; the output rank already had
-                    // the promoted dim stripped by inferShapes, so we work the strides against `out` directly
-                    // below.
-                    aWas1D = sa.size() == 1;
-                    bWas1D = sb.size() == 1;
-                    if (aWas1D)
-                    {
-                        sa = {1, sa[0]};
-                    }
-                    if (bWas1D)
-                    {
-                        sb = {sb[0], 1};
-                    }
-
-                    M = sa[sa.size() - 2];
-                    K = sa[sa.size() - 1];
-                    N = sb[sb.size() - 1];
-
-                    rank  = (int) out.size();
-                    pc.aK = 1;       // A is [...,M,K] row-major -> stepping K moves by 1
-                    pc.bK = (int) N; // B is [...,K,N] row-major -> stepping K moves by N
-                    outDim.assign(rank, 0);
-                    aStride.assign(rank, 0);
-                    bStride.assign(rank, 0);
-                    for (int k = 0; k < rank; ++k)
-                    {
-                        outDim[k] = (int) out[k];
-                    }
-
-                    // The trailing output dims are the matrix dims. With 1-D promotion an axis may be absent:
-                    //   A 1-D  -> the M axis was dropped from the output; B 1-D -> the N axis was dropped.
-                    // Identify which output index (if any) is the M axis and which is the N axis.
-                    int nAxis = rank - 1; // N is the last output dim, unless B was 1-D (then absent)
-                    int mAxis = aWas1D ? -1 : (bWas1D ? rank - 1 : rank - 2);
-                    if (bWas1D)
-                    {
-                        nAxis = -1; // N axis was stripped
-                    }
-                    // batch dims occupy output indices [0, firstMatAxis)
-                    int firstMatAxis = rank;
-                    if (mAxis >= 0)
-                    {
-                        firstMatAxis = std::min(firstMatAxis, mAxis);
-                    }
-                    if (nAxis >= 0)
-                    {
-                        firstMatAxis = std::min(firstMatAxis, nAxis);
-                    }
-                    int batchRank = firstMatAxis;
-
-                    // Per-operand batch shapes (everything before the trailing matrix dims), left-padded to
-                    // batchRank.
-                    int64_t aBatchRank = (int64_t) sa.size() - 2, bBatchRank = (int64_t) sb.size() - 2;
-                    auto    aDim = [&](int i) -> int64_t {
-                        int off = batchRank - (int) aBatchRank;
-                        return i < off ? 1 : sa[i - off];
-                    };
-                    auto bDim = [&](int i) -> int64_t {
-                        int off = batchRank - (int) bBatchRank;
-                        return i < off ? 1 : sb[i - off];
-                    };
-                    std::vector<int64_t> aBatchStride(batchRank, 0), bBatchStride(batchRank, 0);
-                    int64_t              sAcc = M * K, sBcc = K * N;
-                    for (int i = batchRank - 1; i >= 0; --i)
-                    {
-                        aBatchStride[i] = (aDim(i) == 1) ? 0 : sAcc;
-                        bBatchStride[i] = (bDim(i) == 1) ? 0 : sBcc;
-                        sAcc *= aDim(i);
-                        sBcc *= bDim(i);
-                    }
-                    for (int i = 0; i < batchRank; ++i)
-                    {
-                        aStride[i] = (int) aBatchStride[i];
-                        bStride[i] = (int) bBatchStride[i];
-                    }
-                    // Matrix-axis strides: A depends on m (row stride K) not n; B depends on n (col stride 1) not
-                    // m.
-                    if (mAxis >= 0)
-                    {
-                        aStride[mAxis] = (int) K;
-                        bStride[mAxis] = 0;
-                    }
-                    if (nAxis >= 0)
-                    {
-                        aStride[nAxis] = 0;
-                        bStride[nAxis] = 1;
-                    }
+                    // Dense derivation (core/matmul_tile.h): 1-D promotion, broadcast batch strides,
+                    // matrix-axis strides. An operand whose activation buffer the segment allocated
+                    // with a virtualized last axis (env.rowPad) enters with that PHYSICAL row
+                    // stride, which scales every batch stride stepping over a whole matrix — the
+                    // segment's padding rule predicted this same geometry before it sized the
+                    // buffer, so the layout and the kernel can never disagree.
+                    aRowPad          = env.rowPad ? env.rowPad(node.inputs[0]) : 0;
+                    bRowPad          = env.rowPad ? env.rowPad(node.inputs[1]) : 0;
+                    MatMulFlatGeom d = matmulFlatGeom(sa, sb, out, aRowPad, bRowPad);
+                    aWas1D           = d.aWas1D;
+                    bWas1D           = d.bWas1D;
+                    M                = d.M;
+                    N                = d.N;
+                    K                = d.K;
+                    aRow             = d.aRow;
+                    bRow             = d.bRow;
+                    rank             = d.rank;
+                    pc.aK            = 1;             // A is [...,M,K] row-major -> stepping K moves by 1
+                    pc.bK            = (int) d.bRow;  // B is [...,K,N] row-major -> stepping K moves by one physical row
+                    outDim           = d.outDim;
+                    aStride          = d.aStride;
+                    bStride          = d.bStride;
                 }
                 pc.rank  = rank;
                 pc.total = (int) numElements(out);
@@ -560,7 +548,9 @@ namespace vknn {
                     cmCaps.wave32Pinnable       = cap.subgroupSizeControl && cap.requiredSubgroupSizeCompute && cap.minSubgroupSize <= 32u && 32u <= cap.maxSubgroupSize;
                     cmCaps.vulkanMemoryModel    = cap.vulkanMemoryModel;
                     cmCaps.selfCheckPassed      = true; // provisionally; the on-device check runs below only when the rule matches
-                    const bool denseRank2Batch1 = !hasView && !aWas1D && !bWas1D && M > 0 && N > 0 && pc.total == (int) (M * N);
+                    // A virtualized operand keeps the SSBO kernels: the coopmat kernels load dense
+                    // packed panels and have no physical-row-stride parameter.
+                    const bool denseRank2Batch1 = !hasView && !aWas1D && !bWas1D && aRowPad == 0 && bRowPad == 0 && M > 0 && N > 0 && pc.total == (int) (M * N);
                     const bool hasBiasOrEpi     = node.fusedBias != kNoTensor || node.attr.has("pw_steps");
                     const int  hintValue        = env.config ? env.config->hint(Hint::CoopmatGemm, (int) Mode::Auto) : (int) Mode::Auto;
                     coopKind                    = coopmatGemmRoute(cmCaps, hintValue, env.useFp16, denseRank2Batch1, hasBiasOrEpi, M, N, K, g.isInitializer(node.inputs[1]));
@@ -578,7 +568,10 @@ namespace vknn {
 
                 // Upload a constant operand flat (row-major NCHW fp32 -> device, fp16 when half precision).
                 // Direct fp16->fp16 passthrough when the stored weight already matches compute precision.
-                // A low-precision coopmat route replaces the B upload with host-quantized codes below.
+                // A low-precision coopmat route replaces the B upload with host-quantized codes. On the
+                // SSBO paths B's upload waits for the kernel choice below: the vec4 route may take the
+                // "#wv4" repacked layout instead of the flat copy, and the flat upload releases the host
+                // payload the repack computes from.
                 auto maybeUpload = [&](TensorId t, int which, const Shape &s) {
                     if (!g.isInitializer(t))
                     {
@@ -587,13 +580,13 @@ namespace vknn {
                     constBuf[which] = uploadInit(env, t, s);
                 };
                 maybeUpload(node.inputs[0], 0, g.desc(node.inputs[0]).shape);
-                if (coopKind != CoopmatGemmKind::Fp8 && coopKind != CoopmatGemmKind::Int8)
-                {
-                    maybeUpload(node.inputs[1], 1, g.desc(node.inputs[1]).shape);
-                }
 
                 if (coopKind != CoopmatGemmKind::None)
                 {
+                    if (coopKind != CoopmatGemmKind::Fp8 && coopKind != CoopmatGemmKind::Int8)
+                    {
+                        maybeUpload(node.inputs[1], 1, g.desc(node.inputs[1]).shape);
+                    }
                     prepareCoopmat(node, env);
                     return;
                 }
@@ -613,9 +606,43 @@ namespace vknn {
                     // to the tiled kernel (same ascending-k fp32 chain per output).
                     useTiled = false;
                 }
+
+                // ---- vec4-load kernel routing (deterministic alignment rule) ----
+                // The default {128,128,16} tile dispatches the f16vec4-load twin of the fast kernel
+                // when every global element index it would form is 4-aligned (matmulVec4Route,
+                // core/matmul_tile.h): a 4-aligned physical A row stride, a 4-aligned physical B row
+                // stride (N itself, the zero-padded Np of a repacked weight, or a virtualized
+                // activation's padded last axis), and 4-aligned batch strides on both operands. The
+                // twin is byte-identical to the scalar kernel, so the route trades load width only,
+                // never bits. Precision-high (fp32) nodes and non-default raced tiles keep the
+                // scalar kernels. The rule runs after A's upload above, so a payload shared with A
+                // (already uploaded flat and released) refuses the repack.
+                MatMulVec4Route v4Route;
                 if (useTiled)
                 {
-                    tile = pickTile(env, node.fusedBias != kNoTensor);
+                    const bool bIsInit          = g.isInitializer(node.inputs[1]);
+                    bool       bPayloadResident = false;
+                    if (bIsInit)
+                    {
+                        const HostBuffer &hb       = g.initializers.at(node.inputs[1]);
+                        const int64_t     elemSize = g.desc(node.inputs[1]).dtype == DType::Float16 ? 2 : 4;
+                        bPayloadResident           = (int64_t) hb.bytes.size() >= numElements(g.desc(node.inputs[1]).shape) * elemSize;
+                    }
+                    const int            batchRank = rank - 2;
+                    std::vector<int32_t> aBatch(aStride.begin(), aStride.begin() + batchRank);
+                    std::vector<int32_t> bBatch(bStride.begin(), bStride.begin() + batchRank);
+                    v4Route = matmulVec4Route(env.useFp16, N, K, aBatch, bBatch, bIsInit, bPayloadResident, aRow, bRow);
+                }
+                // Set before pickTile: the race times the v4 kernel for the default candidate when
+                // the route holds, and that kernel reads pc.aKp/pc.bNp.
+                pc.aKp = (int) (v4Route.eligible ? v4Route.aKp : aRow);
+                pc.bNp = (int) (v4Route.eligible ? v4Route.bNp : bRow);
+                if (useTiled)
+                {
+                    // A virtualized operand pins the default tile: its padded layout exists only so
+                    // the v4 twin can read it, and the segment's rule already proved the route
+                    // holds, so there is nothing left to race.
+                    tile = (aRowPad != 0 || bRowPad != 0) ? kMatMulTiles[0] : pickTile(env, node.fusedBias != kNoTensor, v4Route.eligible);
                 }
 
                 // A mat-vec too narrow to fill the naive grid takes the split-K kernel. B must keep its
@@ -642,16 +669,49 @@ namespace vknn {
                 useGemv = useGemvVec || (gemvShape && maxInv >= (uint32_t) (kGemvNx * kGemvKs));
 
                 // The default {128,128,16} tile runs the compile-time matmul_tiled_fast kernel (full
-                // inner-loop unroll, register-resident micro-tile — main's fast literal geometry);
-                // only a non-default raced tile runs the spec-constant matmul_tiled kernel. The
-                // tiled kernels are byte-identical at the default geometry (see core/matmul_tile.h).
+                // inner-loop unroll, register-resident micro-tile — main's fast literal geometry),
+                // in its vec4-load form when the alignment route holds; only a non-default raced
+                // tile runs the spec-constant matmul_tiled kernel. The tiled kernels are
+                // byte-identical at the default geometry (see core/matmul_tile.h).
                 bool useFastTiled = useTiled && isDefaultMatMulTile(tile);
+                bool useV4        = useFastTiled && v4Route.eligible;
+                if ((aRowPad != 0 || bRowPad != 0) && !useV4)
+                {
+                    // Contract backstop. A virtualized operand's buffer holds padded rows whatever
+                    // kernel runs, and only the v4 twin and the fully stride-driven naive kernel
+                    // read a physical row stride — the tiled scalar kernels and the split-K mat-vec
+                    // assume packed rows. The segment's rule and the routing above agree by
+                    // construction; if a future shape class ever splits them, drop to the naive
+                    // kernel (correct at any stride, merely slower) instead of reading the pad as
+                    // data.
+                    useTiled     = false;
+                    useFastTiled = false;
+                    useGemvVec   = false;
+                    useGemv      = false;
+                }
+
+                // B's upload, in the layout the chosen kernel reads. The vec4 route with an
+                // unaligned N repacks the weight to the zero-padded row stride bNp through the
+                // weight cache (key suffix "#wv4", so a warm start reuses the packed blob); every
+                // other route uploads the flat packed copy the scalar kernels read.
+                if (useV4 && v4Route.padB)
+                {
+                    const TensorId bId   = node.inputs[1];
+                    const int64_t  bRows = numElements(g.desc(bId).shape) / N; // == K: the repack requires broadcast (size-1) batch dims
+                    constBuf[1]          = uploadCached(env, node.name + "#wv4", [&] {
+                        return padMatMulRowsVec4(initFloats(g, bId), bRows, N, v4Route.bNp);
+                    });
+                } else
+                {
+                    maybeUpload(node.inputs[1], 1, g.desc(node.inputs[1]).shape);
+                }
 
                 // A fused Linear bias (rank-1 [N]) is added in the fp32 accumulator by the _bias kernel
                 // variant; upload it flat and bind it as a 4th buffer. The geometry SSBO follows the
                 // operands (and the bias when present): binding 3 without bias, binding 4 with it.
                 const char *gemvBase = useGemvVec ? "matmul_gemv4" : "matmul_gemv";
-                const char *base     = useFastTiled ? "matmul_tiled_fast" : (useTiled ? "matmul_tiled" : (useGemv ? gemvBase : "matmul"));
+                const char *fastBase = useV4 ? "matmul_tiled_fast_v4" : "matmul_tiled_fast";
+                const char *base     = useFastTiled ? fastBase : (useTiled ? "matmul_tiled" : (useGemv ? gemvBase : "matmul"));
                 std::string name     = base;
                 uint32_t    nbuf     = 4; // A, B, D, geometry
                 if (node.fusedBias != kNoTensor)

@@ -365,10 +365,18 @@ namespace vknn {
         auto isCpu = [&](int ni) {
             return backends_[nodeBackendIdx_[ni]]->kind() == BackendKind::Cpu;
         };
-        // Approximate per-node work: a conv/gemm output costs Cin*KH*KW per element, everything else ~1.
+        // Approximate per-node work: a conv/gemm/matmul output costs its reduction length (Cin*KH*KW,
+        // or K) per element, everything else ~1. A MatMul must be charged its K like a Gemm: a decode
+        // step's outputs are single rows, so a per-element count would score a whole transformer
+        // decoder as negligible work and fold it to the CPU.
         auto nodeCost = [&](int ni) -> int64_t {
             const Node &nd       = graph_.nodes[ni];
             int64_t     outElems = nd.outputs.empty() || nd.outputs[0] == kNoTensor ? 0 : numElements(graph_.desc(nd.outputs[0]).shape);
+            if (nd.type == OpType::MatMul && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
+            {
+                const Shape &a = graph_.desc(nd.inputs[0]).shape; // [.., M, K]: the reduction is the last dim
+                return outElems * std::max<int64_t>(a.empty() ? 1 : a.back(), 1);
+            }
             if ((nd.type == OpType::Conv || nd.type == OpType::Gemm) && nd.inputs.size() > 1)
             {
                 const Shape &w = graph_.desc(nd.inputs[1]).shape;
