@@ -13,9 +13,24 @@
 
 namespace vknn {
     namespace {
-        // Elements each lane processes, one slot apart -- must match PW_ITEMS in BOTH
-        // shaders/fused_pw_nc4.comp and shaders/fused_pw_flat.comp.
-        constexpr int kPwItemsPerLane = 8;
+        // Elements each lane processes, one slot apart (pc.items in both fused_pw_*.comp), as a
+        // deterministic shape rule -- the map is a pure placement choice, identical values either way.
+        //
+        // Several items per lane cover the applier's memory latency, which is what bounds a big unit.
+        // A SMALL unit has the opposite problem: dividing its lane count by the item count leaves too
+        // few workgroups to fill the device, and the latency it was hiding is replaced by idle cores.
+        // Measured: an image-resolution unit is -21% at eight items, while a classifier's late 7x7
+        // units (a few thousand lanes) are +6% -- so the rule is simply whether enough lanes survive
+        // the division.
+        constexpr int kPwMaxItemsPerLane = 8;
+        constexpr int kPwItemsLaneFloor  = 128 * 1024; // lanes that must remain after dividing
+
+        // Items per lane for a dispatch of `total` elements: as many as kPwMaxItemsPerLane, while
+        // leaving at least kPwItemsLaneFloor lanes.
+        inline int pwItemsPerLane(int total) {
+            const int byFloor = total / kPwItemsLaneFloor;
+            return byFloor < 1 ? 1 : (byFloor > kPwMaxItemsPerLane ? kPwMaxItemsPerLane : byFloor);
+        }
 
         struct FusedPointwiseOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline>     pipe;
@@ -57,8 +72,8 @@ namespace vknn {
                 // Buffer count = 2 (primary input + output) + 1 (plan SSBO) + kPwMaxOperands operand
                 // slots + kPwMaxOuts extra output streams. The shaders (fused_pw_flat/nc4.comp)
                 // statically declare every slot via pw_epilogue.glsl, so the descriptor set must
-                // always size for the full count even when the plan uses fewer. Push constant is a
-                // single int (the element count `total`), matching the shaders' `PC { int total; }`.
+                // always size for the full count even when the plan uses fewer. The push constant is
+                // two ints (the element count and the items-per-lane rule), matching `PC { int total, items; }`.
                 // The rounding discipline is compiled in: "_rx" = fp32-chained (pw_relax units),
                 // base name = strict per-step-rounded.
                 bool        relax = node.attr.geti("pw_relax", 0) != 0;
@@ -67,7 +82,7 @@ namespace vknn {
                 {
                     base += "_rx";
                 }
-                pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int), spec);
+                pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int) * 2, spec);
                 // Which of the two appliers this unit lands on is the difference between an unrolled
                 // chain with its params folded at pipeline creation and a per-element walk of the
                 // plan SSBO, so it is the first thing to know about a unit that costs more than its
@@ -97,10 +112,12 @@ namespace vknn {
                 }
                 // One int push constant: the element count guarding the 1D grid. The fused_pw_flat/nc4
                 // shaders are local_size_x=256 == flat::kFlatLocalSize.
-                int pc = total;
-                // Both kernels walk kPwItemsPerLane elements per lane (see their main()), so the grid
-                // covers that fraction of the element count.
-                const int lanes = (total + kPwItemsPerLane - 1) / kPwItemsPerLane;
+                struct {
+                    int total, items;
+                } pc {total, pwItemsPerLane(total)};
+                // Both kernels walk pc.items elements per lane (see their main()), so the grid covers
+                // that fraction of the element count.
+                const int lanes = (total + pc.items - 1) / pc.items;
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(lanes, flat::kFlatLocalSize));
             }
         };

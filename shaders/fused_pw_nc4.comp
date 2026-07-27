@@ -10,7 +10,7 @@
 layout(local_size_x=256) in;
 layout(std430,binding=0) readonly buffer Prim { STORE prim[]; };
 layout(std430,binding=1) writeonly buffer Dst { STORE dst[]; };
-layout(push_constant) uniform PC { int total; } pc;
+layout(push_constant) uniform PC { int total, items; } pc;
 // Monomorphization spec constants (host: fused_pointwise.cpp). PW_NS = 0 — the default, and the
 // value an empty spec vector leaves in place — keeps the runtime interpreter (pw_apply4). PW_NS in
 // [1,8] compiles a specialized unit: the driver unrolls the step loop at pipeline creation and
@@ -83,16 +83,15 @@ vec4 pw_apply4_mono(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut4(o,vecIdx,PW_CHAINED!=0?pwRound4(acc):acc); }
   }
   return PW_CHAINED!=0?pwRound4(acc):acc; }
-// PW_ITEMS block-pixels per lane, one slot apart, so each lane has that many INDEPENDENT operand
+// pc.items block-pixels per lane, one slot apart, so each lane has that many INDEPENDENT operand
 // fetches in flight at once. The kernel's runtime tracks its step count rather than its byte count
 // (a unit moving a third fewer bytes costs the same), which is the signature of a chain waiting on
 // memory latency rather than one saturating bandwidth; extra operands are already free because they
 // overlap. Slots are strided by the lane count, so every item is still a coalesced wave-wide access.
-#define PW_ITEMS 8
 void main(){ uint gid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;
-  int slot=(pc.total+PW_ITEMS-1)/PW_ITEMS;
+  int slot=(pc.total+pc.items-1)/pc.items;
   if(gid>=uint(slot)) return;
-  for(int k=0;k<PW_ITEMS;++k){
+  for(int k=0;k<pc.items;++k){
     int i=int(gid)+k*slot;
     if(i>=pc.total) break;
     vec4 v=vec4(prim[i*4],prim[i*4+1],prim[i*4+2],prim[i*4+3]);
