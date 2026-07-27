@@ -1,5 +1,6 @@
 #include "core/fused_attention.h"
 #include "core/matmul_view.h"
+#include "core/slice_bounds.h"
 #include "dim_expr.h"
 #include "passes_internal.h"
 
@@ -178,6 +179,50 @@ namespace vknn {
     /// Without the interleave each fold/infer alternation advanced exactly one such block per round (a
     /// deep encoder took dozens of full-graph rounds to converge, re-warning on every still-unresolved
     /// tensor each round). Idempotent; only ever fills shapes that are derivable from resolved inputs.
+    namespace {
+        /// Report a node whose rule resolved an output axis to zero while every data operand was
+        /// non-empty. Such a tensor allocates nothing, so every kernel downstream of it runs over zero
+        /// elements and the model produces a silently empty (not wrong-valued) result — with no CPU
+        /// fallback to announce it, because the node itself is perfectly supported. The message names
+        /// the node, its type, and the operand it collapsed, which is the whole diagnosis for a model
+        /// whose bytes are not available to inspect.
+        void warnCollapsedAxis(const Graph &g, const Node &nd) {
+            auto hasZero = [](const Shape &s) {
+                return std::find(s.begin(), s.end(), 0) != s.end();
+            };
+            for (TensorId o: nd.outputs)
+            {
+                if (o == kNoTensor)
+                {
+                    continue;
+                }
+                const Shape &out = g.desc(o).shape;
+                if (out.empty() || !hasZero(out))
+                {
+                    continue; // empty = "not resolved yet"; a zero-free shape is fine
+                }
+                std::string operands;
+                bool        fromInput = false;
+                for (TensorId in: nd.inputs)
+                {
+                    if (in == kNoTensor)
+                    {
+                        continue;
+                    }
+                    const Shape &s = g.desc(in).shape;
+                    fromInput      = fromInput || hasZero(s);
+                    operands += (operands.empty() ? "" : ", ") + g.desc(in).name + shapeStr(s);
+                }
+                if (fromInput)
+                {
+                    continue; // inherited, not introduced here: the producer already reported it
+                }
+                VKNN_WARN << "node '" << nd.name << "' (" << opTypeName(nd.type) << ") resolved output '" << g.desc(o).name << "' to " << shapeStr(out)
+                          << " -- a zero-length axis, so this tensor and everything downstream of it computes nothing. Operands: " << operands;
+            }
+        }
+    } // namespace
+
     void inferNodeShape(Graph &g, Node &nd) {
         auto SH = [&](TensorId id) -> Shape & {
             return g.desc(id).shape;
@@ -786,14 +831,8 @@ namespace vknn {
                         {
                             continue;
                         }
-                        int64_t step = (k < steps.size()) ? steps[k] : 1;
-                        int64_t dim  = a[ax];
-                        int64_t st   = starts[k] < 0 ? starts[k] + dim : starts[k];
-                        int64_t en   = ends[k] < 0 ? ends[k] + dim : ends[k];
-                        st           = std::max<int64_t>(0, std::min(st, dim));
-                        en           = std::max<int64_t>(0, std::min(en, dim));
-                        int64_t n    = step > 0 ? (en - st + step - 1) / step : 0;
-                        out[ax]      = std::max<int64_t>(0, n);
+                        const int64_t step = (k < steps.size()) ? steps[k] : 1;
+                        out[ax]            = resolveSliceAxis(a[ax], starts[k], ends[k], step).count;
                     }
                     SH(o) = out;
                     break;
@@ -1246,6 +1285,7 @@ namespace vknn {
                 default:
                     break; // shape-path ops resolved by constFold
             }
+            warnCollapsedAxis(g, nd);
         }
     }
 
