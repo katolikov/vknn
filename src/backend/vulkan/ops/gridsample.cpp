@@ -72,9 +72,11 @@ namespace vknn {
                 uint32_t    MODE = (mode == "nearest") ? 1u : (mode == "cubic" || mode == "bicubic") ? 2u : 0u;
                 std::string pad  = node.attr.gets("padding_mode", "zeros");
                 uint32_t    PAD  = pad == "border" ? 1u : (pad == "reflection" ? 2u : 0u);
-                // One dispatch lane per output NC4HW4 block-pixel: cBlocks(c) ceil-packs channels into
-                // groups of 4, so each lane resolves all 4 packed channels at one (n, OH, OW) location.
-                total            = (int64_t) x.n * cBlocks(x.c) * OH * OW;
+                // One dispatch lane per output PIXEL. The kernel loops the NC4HW4 channel blocks
+                // internally (cBlocks(c) ceil-packs channels into groups of 4, each resolved as a
+                // vec4), so the grid fetch and the coordinate/weight math happen once per pixel
+                // instead of once per block-pixel.
+                total            = (int64_t) x.n * OH * OW;
                 epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
                 // The warp shader reads its flow (NC4HW4) and base (fp32) from two dedicated bindings
                 // (source, flow, base, dest = 4 base buffers); the plain shader has one grid binding
