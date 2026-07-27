@@ -83,7 +83,18 @@ vec4 pw_apply4_mono(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut4(o,vecIdx,PW_CHAINED!=0?pwRound4(acc):acc); }
   }
   return PW_CHAINED!=0?pwRound4(acc):acc; }
+// PW_ITEMS block-pixels per lane, one slot apart, so each lane has that many INDEPENDENT operand
+// fetches in flight at once. The kernel's runtime tracks its step count rather than its byte count
+// (a unit moving a third fewer bytes costs the same), which is the signature of a chain waiting on
+// memory latency rather than one saturating bandwidth; extra operands are already free because they
+// overlap. Slots are strided by the lane count, so every item is still a coalesced wave-wide access.
+#define PW_ITEMS 8
 void main(){ uint gid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;
-  if(gid>=uint(pc.total)) return; vec4 v=vec4(prim[gid*4],prim[gid*4+1],prim[gid*4+2],prim[gid*4+3]);
-  vec4 o=PW_NS>0?pw_apply4_mono(v,int(gid)):pw_apply4(v,int(gid));
-  dst[gid*4]=STORE(o.x); dst[gid*4+1]=STORE(o.y); dst[gid*4+2]=STORE(o.z); dst[gid*4+3]=STORE(o.w); }
+  int slot=(pc.total+PW_ITEMS-1)/PW_ITEMS;
+  if(gid>=uint(slot)) return;
+  for(int k=0;k<PW_ITEMS;++k){
+    int i=int(gid)+k*slot;
+    if(i>=pc.total) break;
+    vec4 v=vec4(prim[i*4],prim[i*4+1],prim[i*4+2],prim[i*4+3]);
+    vec4 o=PW_NS>0?pw_apply4_mono(v,i):pw_apply4(v,i);
+    dst[i*4]=STORE(o.x); dst[i*4+1]=STORE(o.y); dst[i*4+2]=STORE(o.z); dst[i*4+3]=STORE(o.w); }}

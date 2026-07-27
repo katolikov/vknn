@@ -13,6 +13,10 @@
 
 namespace vknn {
     namespace {
+        // Elements each lane processes, one slot apart -- must match PW_ITEMS in BOTH
+        // shaders/fused_pw_nc4.comp and shaders/fused_pw_flat.comp.
+        constexpr int kPwItemsPerLane = 8;
+
         struct FusedPointwiseOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline>     pipe;
             std::shared_ptr<vk::Buffer>              planBuf;
@@ -94,7 +98,10 @@ namespace vknn {
                 // One int push constant: the element count guarding the 1D grid. The fused_pw_flat/nc4
                 // shaders are local_size_x=256 == flat::kFlatLocalSize.
                 int pc = total;
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, flat::kFlatLocalSize));
+                // Both kernels walk kPwItemsPerLane elements per lane (see their main()), so the grid
+                // covers that fraction of the element count.
+                const int lanes = (total + kPwItemsPerLane - 1) / kPwItemsPerLane;
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(lanes, flat::kFlatLocalSize));
             }
         };
     } // namespace

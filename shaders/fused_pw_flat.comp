@@ -80,6 +80,16 @@ float pw_apply_mono(float entryRaw, int outIdx){
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut(o,outIdx,PW_CHAINED!=0?PW_ROUND(acc):acc); }
   }
   return PW_CHAINED!=0?PW_ROUND(acc):acc; }
+// PW_ITEMS elements per lane, one slot apart -- the same reason as the NC4HW4 twin: the applier's
+// runtime tracks its step count rather than its byte count, which is a chain waiting on memory
+// latency, and independent items per lane are what covers it. Slots are strided by the lane count,
+// so every item stays a coalesced wave-wide access.
+#define PW_ITEMS 8
 void main(){ uint gid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;
-  if(gid>=uint(pc.total)) return; float v=float(prim[gid]);
-  dst[gid]=STORE(PW_NS>0?pw_apply_mono(v,int(gid)):pw_apply(v,int(gid))); }
+  int slot=(pc.total+PW_ITEMS-1)/PW_ITEMS;
+  if(gid>=uint(slot)) return;
+  for(int k=0;k<PW_ITEMS;++k){
+    int i=int(gid)+k*slot;
+    if(i>=pc.total) break;
+    float v=float(prim[i]);
+    dst[i]=STORE(PW_NS>0?pw_apply_mono(v,i):pw_apply(v,i)); }}
