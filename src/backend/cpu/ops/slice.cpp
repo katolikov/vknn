@@ -4,6 +4,7 @@
 // in `starts` are sliced — every other axis is copied whole. Handles both fp32 and int64 tensors
 // (the int64 path serves const-folded shape arithmetic feeding downstream Slice/Reshape bounds).
 #include "backend/cpu/cpu_backend.h"
+#include "core/slice_bounds.h"
 #include "vknn/op.h"
 #include <algorithm>
 
@@ -56,19 +57,15 @@ namespace vknn {
                     {
                         continue; // out-of-range axis: leave it a whole-axis copy
                     }
-                    // Negative start/end index from the end of the axis, then clamp to [0, dim] so an
-                    // over-large bound (e.g. INT_MAX, the ONNX "to the end" idiom) saturates instead of
-                    // reading past the axis. `steps` defaults to 1 when the list is shorter than `starts`.
-                    int64_t dim = X.shape[ax], sp = k < steps.size() ? steps[k] : 1;
-                    int64_t st = starts[k] < 0 ? starts[k] + dim : starts[k];
-                    int64_t en = ends[k] < 0 ? ends[k] + dim : ends[k];
-                    st         = std::max<int64_t>(0, std::min(st, dim));
-                    en         = std::max<int64_t>(0, std::min(en, dim));
-                    begin[ax]  = st;
-                    step[ax]   = sp;
-                    // Output length = ceil((en - st) / sp): the count of indices st, st+sp, ... below en.
-                    // Only positive steps are supported here; a non-positive step yields an empty axis.
-                    out[ax]    = sp > 0 ? std::max<int64_t>(0, (en - st + sp - 1) / sp) : 0;
+                    // resolveSliceAxis applies the ONNX bound rules (negative indices from the end, the
+                    // per-direction clamps, and an over-large bound such as the INT_MAX "to the end"
+                    // idiom saturating instead of reading past the axis). `steps` defaults to 1 when the
+                    // list is shorter than `starts`; a negative step walks the axis backwards.
+                    const int64_t   sp = k < steps.size() ? steps[k] : 1;
+                    SliceAxisBounds b  = resolveSliceAxis(X.shape[ax], starts[k], ends[k], sp);
+                    begin[ax]          = b.start;
+                    step[ax]           = sp;
+                    out[ax]            = b.count;
                 }
                 // Row-major (C-contiguous) strides for the source and the sliced output: stride[i] is
                 // the product of the dims after axis i, built right to left. They differ because the
