@@ -53,19 +53,35 @@ layout(std430, binding = PW_EPI_BASE+3) readonly buffer PwOp3 { STORE d[]; } pwo
 layout(std430, binding = PW_EPI_BASE+4) readonly buffer PwOp4 { STORE d[]; } pwop4;
 layout(std430, binding = PW_EPI_BASE+5) readonly buffer PwOp5 { STORE d[]; } pwop5;
 layout(std430, binding = PW_EPI_BASE+6) readonly buffer PwOp6 { STORE d[]; } pwop6;
-layout(std430, binding = PW_EPI_BASE+7)  writeonly buffer PwOut1 { STORE d[]; } pwout1;
-layout(std430, binding = PW_EPI_BASE+8)  writeonly buffer PwOut2 { STORE d[]; } pwout2;
-layout(std430, binding = PW_EPI_BASE+9)  writeonly buffer PwOut3 { STORE d[]; } pwout3;
-layout(std430, binding = PW_EPI_BASE+10) writeonly buffer PwOut4 { STORE d[]; } pwout4;
-float pwLoad(int slot,int idx){ if(slot==0)return float(pwop1.d[idx]); if(slot==1)return float(pwop2.d[idx]);
-  if(slot==2)return float(pwop3.d[idx]); if(slot==3)return float(pwop4.d[idx]); if(slot==4)return float(pwop5.d[idx]);
-  return float(pwop6.d[idx]); }
-vec4 pwLoad4(int slot,int idx){ if(slot==0)return vec4(pwop1.d[idx*4],pwop1.d[idx*4+1],pwop1.d[idx*4+2],pwop1.d[idx*4+3]);
+layout(std430, binding = PW_EPI_BASE+7) readonly buffer PwOp7 { STORE d[]; } pwop7;
+layout(std430, binding = PW_EPI_BASE+8) readonly buffer PwOp8 { STORE d[]; } pwop8;
+layout(std430, binding = PW_EPI_BASE+9) readonly buffer PwOp9 { STORE d[]; } pwop9;
+layout(std430, binding = PW_EPI_BASE+10) writeonly buffer PwOut1 { STORE d[]; } pwout1;
+layout(std430, binding = PW_EPI_BASE+11) writeonly buffer PwOut2 { STORE d[]; } pwout2;
+layout(std430, binding = PW_EPI_BASE+12) writeonly buffer PwOut3 { STORE d[]; } pwout3;
+layout(std430, binding = PW_EPI_BASE+13) writeonly buffer PwOut4 { STORE d[]; } pwout4;
+float pwLoad(int slot,int idx){
+  if(slot==0)return float(pwop1.d[idx]);
+  if(slot==1)return float(pwop2.d[idx]);
+  if(slot==2)return float(pwop3.d[idx]);
+  if(slot==3)return float(pwop4.d[idx]);
+  if(slot==4)return float(pwop5.d[idx]);
+  if(slot==5)return float(pwop6.d[idx]);
+  if(slot==6)return float(pwop7.d[idx]);
+  if(slot==7)return float(pwop8.d[idx]);
+  if(slot==8)return float(pwop9.d[idx]);
+  return float(pwop9.d[idx]); }
+vec4 pwLoad4(int slot,int idx){
+  if(slot==0)return vec4(pwop1.d[idx*4],pwop1.d[idx*4+1],pwop1.d[idx*4+2],pwop1.d[idx*4+3]);
   if(slot==1)return vec4(pwop2.d[idx*4],pwop2.d[idx*4+1],pwop2.d[idx*4+2],pwop2.d[idx*4+3]);
   if(slot==2)return vec4(pwop3.d[idx*4],pwop3.d[idx*4+1],pwop3.d[idx*4+2],pwop3.d[idx*4+3]);
   if(slot==3)return vec4(pwop4.d[idx*4],pwop4.d[idx*4+1],pwop4.d[idx*4+2],pwop4.d[idx*4+3]);
   if(slot==4)return vec4(pwop5.d[idx*4],pwop5.d[idx*4+1],pwop5.d[idx*4+2],pwop5.d[idx*4+3]);
-  return vec4(pwop6.d[idx*4],pwop6.d[idx*4+1],pwop6.d[idx*4+2],pwop6.d[idx*4+3]); }
+  if(slot==5)return vec4(pwop6.d[idx*4],pwop6.d[idx*4+1],pwop6.d[idx*4+2],pwop6.d[idx*4+3]);
+  if(slot==6)return vec4(pwop7.d[idx*4],pwop7.d[idx*4+1],pwop7.d[idx*4+2],pwop7.d[idx*4+3]);
+  if(slot==7)return vec4(pwop8.d[idx*4],pwop8.d[idx*4+1],pwop8.d[idx*4+2],pwop8.d[idx*4+3]);
+  if(slot==8)return vec4(pwop9.d[idx*4],pwop9.d[idx*4+1],pwop9.d[idx*4+2],pwop9.d[idx*4+3]);
+  return vec4(pwop9.d[idx*4],pwop9.d[idx*4+1],pwop9.d[idx*4+2],pwop9.d[idx*4+3]); }
 void pwStoreOut(int o,int idx,float v){ if(o==0)pwout1.d[idx]=STORE(v); else if(o==1)pwout2.d[idx]=STORE(v);
   else if(o==2)pwout3.d[idx]=STORE(v); else pwout4.d[idx]=STORE(v); }
 void pwStoreOut4(int o,int idx,vec4 v){
