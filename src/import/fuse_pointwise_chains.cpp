@@ -1,5 +1,5 @@
-#include "passes_internal.h"
 #include "core/matmul_tile.h"
+#include "passes_internal.h"
 #include <map>
 
 namespace vknn {
@@ -148,9 +148,7 @@ namespace vknn {
                 return false; // slices interleave along an inner axis: not contiguous slabs
             }
         } else if (rank != 4 || ws[0] != 1 || axis != 1)
-        {
-            return false;
-        }
+        { return false; }
         int64_t axisSum = 0;
         for (TensorId t: n.inputs)
         {
@@ -190,39 +188,41 @@ namespace vknn {
         return axisSum == ws[axis];
     }
 
-    // Broadcast class of tensor `t` against the unit's run shape: 0 same-shape, 3 scalar splat,
-    // 1 per-channel (rank-4 [N,C,1,1]; a rank<4 CONSTANT that right-aligns to [1,C,1,1] with N==1
-    // also qualifies — pwOperandBuf packs it by that interpretation), 2 general (flat-only).
+    // Broadcast class of tensor `t` against the unit's run shape (see the kPwBcast* constants).
+    // A rank<4 CONSTANT is judged by its right-aligned rank-4 interpretation, which is exactly how
+    // pwOperandBuf packs it. The spatial class is limited to a single batch: the NC4HW4 kernel
+    // recovers the pixel as vecIdx % HW, which drops the batch index, so N>1 would alias batch 0's
+    // values across the whole run and stays general.
     static int pwBcastClass(const Graph &g, TensorId t, const Shape &run) {
         const Shape &s = g.desc(t).shape;
         if (s == run)
         {
-            return 0;
+            return kPwBcastSame;
         }
         if (numElements(s) <= 1)
         {
-            return 3;
+            return kPwBcastScalar;
         }
         if (run.size() == 4)
         {
-            if (s.size() == 4 && s[0] == run[0] && s[1] == run[1] && s[2] == 1 && s[3] == 1)
+            Shape rs = s;
+            if (g.isInitializer(t) && rs.size() < 4)
             {
-                return 1;
+                rs.insert(rs.begin(), 4 - rs.size(), 1); // right-align the constant into NCHW
             }
-            if (g.isInitializer(t) && run[0] == 1 && s.size() < 4)
+            if (rs.size() == 4)
             {
-                Shape rs(4, 1);
-                for (size_t k = 0; k < s.size(); ++k)
+                if (rs[0] == run[0] && rs[1] == run[1] && rs[2] == 1 && rs[3] == 1)
                 {
-                    rs[4 - s.size() + k] = s[k];
+                    return kPwBcastChannel;
                 }
-                if (rs[0] == 1 && rs[1] == run[1] && rs[2] == 1 && rs[3] == 1)
+                if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == run[2] && rs[3] == run[3])
                 {
-                    return 1;
+                    return kPwBcastSpatial;
                 }
             }
         }
-        return 2;
+        return kPwBcastGeneral;
     }
 
     namespace {
@@ -240,9 +240,9 @@ namespace vknn {
             TensorId              mainOut = kNoTensor;
             /// First operand classified kPwBcastGeneral, the one that set nc4Ok false (see
             /// warnFlatForcedUnit). kNoTensor when the unit has none.
-            TensorId              generalOperand = kNoTensor;
-            bool                  nc4Ok = false, flatOk = false;
-            bool                  ok = false;
+            TensorId generalOperand = kNoTensor;
+            bool     nc4Ok = false, flatOk = false;
+            bool     ok = false;
         };
 
         // Plan a unit over `members` (node indices, ascending = emission order) with run shape
@@ -253,15 +253,16 @@ namespace vknn {
         // (loads pass through it), so those predecessors take registers too. External readers of a
         // member value (or a graph-output use) make it an export.
         struct PwPlanner {
-            const Graph                        &g;
-            const Shape                        &run;
-            const std::vector<int>             &producer;
-            const std::vector<int>             &consumerCount;
-            const std::vector<char>            &isGraphOut;
-            bool                                strict;
+            const Graph             &g;
+            const Shape             &run;
+            const std::vector<int>  &producer;
+            const std::vector<int>  &consumerCount;
+            const std::vector<char> &isGraphOut;
+            bool                     strict;
 
-            PwPlanner(const Graph &g_, const Shape &run_, const std::vector<int> &prod, const std::vector<int> &cc, const std::vector<char> &go, bool strict_)
-                : g(g_), run(run_), producer(prod), consumerCount(cc), isGraphOut(go), strict(strict_) {}
+            PwPlanner(const Graph &g_, const Shape &run_, const std::vector<int> &prod, const std::vector<int> &cc, const std::vector<char> &go, bool strict_):
+                g(g_), run(run_), producer(prod), consumerCount(cc), isGraphOut(go), strict(strict_) {
+            }
 
             // The member's data inputs (excluding Clip bound inputs, which encode as params).
             static std::vector<TensorId> dataInputs(const Node &n) {
@@ -283,7 +284,8 @@ namespace vknn {
                     for (TensorId t: dataInputs(g.nodes[m]))
                     {
                         int p = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
-                        if (t != kNoTensor && !(p >= 0 && memberSet.count(p)) && !g.isInitializer(t) && g.desc(t).shape == run && !pwTensorIsFp32(g, t) && std::find(cands.begin(), cands.end(), t) == cands.end())
+                        if (t != kNoTensor && !(p >= 0 && memberSet.count(p)) && !g.isInitializer(t) && g.desc(t).shape == run && !pwTensorIsFp32(g, t) &&
+                            std::find(cands.begin(), cands.end(), t) == cands.end())
                         {
                             cands.push_back(t);
                         }
@@ -293,8 +295,8 @@ namespace vknn {
             }
 
             PwUnit plan(const std::vector<int> &members, TensorId entry) {
-                PwUnit           u;
-                std::set<int>    memberSet(members.begin(), members.end());
+                PwUnit        u;
+                std::set<int> memberSet(members.begin(), members.end());
                 // internal readers per member value (member-granular), and reads of each tensor
                 // by unit members (to detect external readers of the entry later)
                 std::map<TensorId, std::vector<int>> internalReaders; // value tensor -> member node idx list
@@ -330,7 +332,7 @@ namespace vknn {
                     int bcastOperands = 0;
                     for (TensorId t: dataInputs(g.nodes[m]))
                     {
-                        int p = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
+                        int  p        = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
                         bool internal = p >= 0 && memberSet.count(p);
                         if (!internal && t != u.entry && t != kNoTensor && pwBcastClass(g, t, run) != 0)
                         {
@@ -388,8 +390,8 @@ namespace vknn {
                             {
                                 return u; // register pressure: caller retries a shorter prefix
                             }
-                            regFree[r]  = 0;
-                            regOf[val]  = r;
+                            regFree[r] = 0;
+                            regOf[val] = r;
                         }
                         auto fa = freeAfter.find(m);
                         if (fa != freeAfter.end())
@@ -415,8 +417,8 @@ namespace vknn {
                     u.operands.push_back(t);
                     return kPwRefOp0 - (int64_t) u.operands.size();
                 };
-                bool     hasClass2 = false;
-                TensorId accVal    = kNoTensor; // which member value the accumulator holds
+                bool                        hasClass2 = false;
+                TensorId                    accVal    = kNoTensor; // which member value the accumulator holds
                 std::map<TensorId, int64_t> emittedStepOf;
                 for (int mi = 0; mi < (int) members.size(); ++mi)
                 {
@@ -426,8 +428,8 @@ namespace vknn {
 
                     // resolve each data input to a ref + (for operands) its broadcast class
                     struct Src {
-                        int64_t ref = kPwRefNone;
-                        int     bc  = 0;
+                        int64_t ref     = kPwRefNone;
+                        int     bc      = 0;
                         bool    operand = false;
                     };
                     std::vector<Src> src(di.size());
@@ -619,14 +621,14 @@ namespace vknn {
                     // differ from the two rounded steps; --strict-fuse keeps those.
                     if (!strict && kind == kPwKindBinary && code == (int64_t) BinaryType::Mul && u.steps.size() >= 8 && nd.fusedAct == ActType::None)
                     {
-                        size_t  ps     = u.steps.size() - 8;
-                        int64_t pKind  = u.steps[ps], pCode = u.steps[ps + 1], pSrcA = u.steps[ps + 2], pDst = u.steps[ps + 5];
-                        bool    sig    = pKind == kPwKindUnary && pCode == (int64_t) UnaryType::Sigmoid;
-                        bool    hsig   = pKind == kPwKindUnary && pCode == (int64_t) UnaryType::HardSigmoid && u.params[u.params.size() - 2] == 1.0f / 6.0f && u.params.back() == 0.5f;
+                        size_t  ps    = u.steps.size() - 8;
+                        int64_t pKind = u.steps[ps], pCode = u.steps[ps + 1], pSrcA = u.steps[ps + 2], pDst = u.steps[ps + 5];
+                        bool    sig = pKind == kPwKindUnary && pCode == (int64_t) UnaryType::Sigmoid;
+                        bool hsig = pKind == kPwKindUnary && pCode == (int64_t) UnaryType::HardSigmoid && u.params[u.params.size() - 2] == 1.0f / 6.0f && u.params.back() == 0.5f;
                         // the gate value must feed ONLY this Mul (accumulator-carried, no register,
                         // no export) and the Mul's other source must be the gated value itself
-                        bool    gateOk = (sig || hsig) && pDst == kPwRefNone && accVal != kNoTensor && consumerCount[accVal] == 1;
-                        bool    diamond = gateOk && ((sA == pSrcA && sB == kPwRefAcc) || (sB == pSrcA && sA == kPwRefAcc));
+                        bool gateOk  = (sig || hsig) && pDst == kPwRefNone && accVal != kNoTensor && consumerCount[accVal] == 1;
+                        bool diamond = gateOk && ((sA == pSrcA && sB == kPwRefAcc) || (sB == pSrcA && sA == kPwRefAcc));
                         if (diamond)
                         {
                             int64_t pBc = u.steps[ps + 6], pBsrc = u.steps[ps + 7];
@@ -666,7 +668,7 @@ namespace vknn {
                 u.mainOut = g.nodes[members.back()].outputs[0];
                 for (int m: members)
                 {
-                    TensorId val = g.nodes[m].outputs[0];
+                    TensorId val      = g.nodes[m].outputs[0];
                     int      internal = 0;
                     auto     ir       = internalReaders.find(val);
                     if (ir != internalReaders.end())
@@ -707,9 +709,8 @@ namespace vknn {
             {
                 return; // NC4HW4-expressible, or a rank the blocked path has no form for anyway
             }
-            VKNN_INFO << "fusePointwiseChains: unit at '" << anchor.name << "' runs " << shapeStr(run)
-                      << " on the flat kernel -- operand '" << g.desc(general).name << "' " << shapeStr(g.desc(general).shape)
-                      << " has no blocked-layout index, so the whole unit loses vec4 and picks up a layout convert on each side";
+            VKNN_INFO << "fusePointwiseChains: unit at '" << anchor.name << "' runs " << shapeStr(run) << " on the flat kernel -- operand '" << g.desc(general).name << "' "
+                      << shapeStr(g.desc(general).shape) << " has no blocked-layout index, so the whole unit loses vec4 and picks up a layout convert on each side";
         }
     } // namespace
 
@@ -910,7 +911,8 @@ namespace vknn {
             auto canHostUnit = [&](const PwUnit &u, const std::vector<int> &mem, int &prod, bool &entryExp) -> bool {
                 prod     = (u.entry >= 0 && u.entry < (TensorId) producer.size()) ? producer[u.entry] : -1;
                 entryExp = false;
-                bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") && g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
+                bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") &&
+                           g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
                 // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >=
                 // kTiledMatMulMin — the same constant matmul.cpp gates on) has no register
                 // headroom for the VM at its per-thread register micro-tile store loop — an
@@ -1048,13 +1050,13 @@ namespace vknn {
             // bias would run as its own dispatch.
             if (!strictFuse && unit.exports.empty() && members.size() == 1 && unit.operands.size() == 1 && unit.steps.size() == 8)
             {
-                int  prod    = (unit.entry >= 0 && unit.entry < (TensorId) producer.size()) ? producer[unit.entry] : -1;
+                int prod = (unit.entry >= 0 && unit.entry < (TensorId) producer.size()) ? producer[unit.entry] : -1;
                 bool addStep = unit.steps[0] == kPwKindBinary && unit.steps[1] == (int64_t) BinaryType::Add && ((unit.steps[2] == kPwRefEntry && unit.steps[3] <= kPwRefOp0) || (unit.steps[3] == kPwRefEntry && unit.steps[2] <= kPwRefOp0));
                 if (addStep && prod >= 0 && !removed.count(prod) && g.isInitializer(unit.operands[0]))
                 {
-                    Node &P        = g.nodes[prod];
-                    bool  soleUse  = consumerCount[unit.entry] == 1 && !(unit.entry < (TensorId) isGraphOut.size() && isGraphOut[unit.entry]);
-                    bool  hostable = P.type == OpType::MatMul && P.fusedBias == kNoTensor && !P.attr.has("pw_steps") && P.outputs.size() == 1 && P.outputs[0] == unit.entry && soleUse;
+                    Node &P       = g.nodes[prod];
+                    bool  soleUse = consumerCount[unit.entry] == 1 && !(unit.entry < (TensorId) isGraphOut.size() && isGraphOut[unit.entry]);
+                    bool hostable = P.type == OpType::MatMul && P.fusedBias == kNoTensor && !P.attr.has("pw_steps") && P.outputs.size() == 1 && P.outputs[0] == unit.entry && soleUse;
                     const Shape &os = g.desc(unit.mainOut).shape;
                     const Shape &bs = g.desc(unit.operands[0]).shape;
                     if (hostable && !os.empty() && !bs.empty() && bs.back() == os.back() && numElements(bs) == os.back())
@@ -1081,11 +1083,13 @@ namespace vknn {
                 // fp32 accumulator stores the same bytes the unfused act-of-rounded-value would.
                 if (members.size() == 1 && unit.operands.empty() && unit.exports.empty() && !entryExported)
                 {
-                    Node       &P  = g.nodes[prod];
-                    const Node &mn = g.nodes[members[0]];
-                    bool hostable  = (P.type == OpType::Conv || P.type == OpType::Gemm) && P.fusedAct == ActType::None && P.fusedResidual == kNoTensor;
-                    auto rep       = [](float v) { return v == halfToFloat(floatToHalf(v)); };
-                    ActType act    = ActType::None;
+                    Node       &P        = g.nodes[prod];
+                    const Node &mn       = g.nodes[members[0]];
+                    bool        hostable = (P.type == OpType::Conv || P.type == OpType::Gemm) && P.fusedAct == ActType::None && P.fusedResidual == kNoTensor;
+                    auto        rep      = [](float v) {
+                        return v == halfToFloat(floatToHalf(v));
+                    };
+                    ActType act = ActType::None;
                     float   lo = 0, hi = 0;
                     if (hostable && mn.type == OpType::Relu)
                     {
@@ -1155,8 +1159,8 @@ namespace vknn {
                     P.attr.map["pw_relax"] = a;
                 }
                 P.outputs.assign(1, unit.mainOut);
-                std::vector<int64_t> outs = unit.outSteps;
-                std::vector<TensorId> exp = unit.exports;
+                std::vector<int64_t>  outs = unit.outSteps;
+                std::vector<TensorId> exp  = unit.exports;
                 if (entryExported)
                 {
                     exp.push_back(unit.entry); // the producer's own value keeps its tensor id
@@ -1217,14 +1221,14 @@ namespace vknn {
             if (!unit.outSteps.empty())
             {
                 Attr a;
-                a.kind                = Attr::Ints;
-                a.ints                = unit.outSteps;
+                a.kind                 = Attr::Ints;
+                a.ints                 = unit.outSteps;
                 fn.attr.map["pw_outs"] = a;
             }
             {
                 Attr a;
-                a.kind                = Attr::Int;
-                a.i                   = unit.nc4Ok ? 0 : 1; // NC4HW4 when expressible (conv-adjacent graphs live there)
+                a.kind                 = Attr::Int;
+                a.i                    = unit.nc4Ok ? 0 : 1; // NC4HW4 when expressible (conv-adjacent graphs live there)
                 fn.attr.map["pw_flat"] = a;
             }
             if (!strictFuse)
@@ -1242,8 +1246,8 @@ namespace vknn {
                     removed.insert(m);
                 }
             }
-            g.nodes[anchor]  = fn;
-            visited[anchor]  = 1;
+            g.nodes[anchor] = fn;
+            visited[anchor] = 1;
             fused++;
             rebuild();
         }

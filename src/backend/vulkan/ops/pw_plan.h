@@ -89,7 +89,17 @@ namespace vknn {
             plan.step[s * 8 + 3] = (int32_t) mapRef((int) st[s * 8 + 3]);
             plan.step[s * 8 + 4] = (int32_t) mapRef((int) st[s * 8 + 4]);
             plan.step[s * 8 + 5] = (int32_t) st[s * 8 + 5]; // dst register
-            plan.step[s * 8 + 6] = (int32_t) st[s * 8 + 6]; // bcast mode
+            // The broadcast class indexes a fixed set of arms in pw_epilogue.glsl. A .vxm written by
+            // a NEWER compiler can carry a class this build has no arm for; the kernel would then
+            // fall through to the same-shape read and address the operand as if it were full size --
+            // silently, since nothing about the file's container magic says the step encoding grew.
+            // Refuse by name instead: the pw step encoding has no version of its own.
+            const int64_t bcastClass = st[s * 8 + 6];
+            if (bcastClass < kPwBcastSame || bcastClass > kPwBcastSpatial)
+            {
+                throw Error(Status::Unsupported, "FusedPointwise '" + node.name + "' step " + std::to_string(s) + " carries broadcast class " + std::to_string(bcastClass) + ", which this build has no kernel arm for -- the model was compiled by a newer vknn_compile; reconvert it");
+            }
+            plan.step[s * 8 + 6] = (int32_t) bcastClass;    // bcast mode
             plan.step[s * 8 + 7] = (int32_t) st[s * 8 + 7]; // bcast source field
             plan.p0[s]           = pr[s * 2];
             plan.p1[s]           = pr[s * 2 + 1];
@@ -215,8 +225,8 @@ namespace vknn {
                 {
                     sh.insert(sh.begin(), 1);
                 }
-                NCHW    s  = NCHW::from(sh);
-                int64_t Cb = cBlocks(s.c), HW = s.h * s.w;
+                NCHW               s  = NCHW::from(sh);
+                int64_t            Cb = cBlocks(s.c), HW = s.h * s.w;
                 std::vector<float> p((size_t) (s.n * Cb * 4 * HW), 0.f);
                 for (int64_t n = 0; n < s.n; ++n)
                 {

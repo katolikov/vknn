@@ -155,6 +155,7 @@ namespace vknn {
     constexpr int kPwBcastChannel = 1; ///< Per-channel [N,C,1,1]: one value per channel.
     constexpr int kPwBcastGeneral = 2; ///< Anything else: per-axis strided decomposition, flat only.
     constexpr int kPwBcastScalar  = 3; ///< Single element splat.
+    constexpr int kPwBcastSpatial = 4; ///< Per-pixel [1,1,H,W]: one value per spatial position.
 
     /// pw_steps value references (the srcA/srcB/srcC/dst fields of a step). A source names the
     /// accumulator, the entry value, a register, or a tensor operand; a dst is kPwRefNone or a

@@ -189,6 +189,28 @@ def _file_requests_epi(path):
     return bool(re.search(r'#include\s+"flat_ops\.h"', text))
 
 
+
+# A standalone applier (fused_pw_flat.comp / fused_pw_nc4.comp) carries a monomorphized twin of the
+# interpreter, specialized on the step count for occupancy. The twin must reach operands through the
+# SHARED helpers in pw_epilogue.glsl: a second, hand-rolled copy of the broadcast-class dispatch
+# diverges from the interpreter the moment a class is added, and the twin is the path that runs for
+# every 1..8-step unit, so the divergence is the default rather than the exception.
+def check_applier_twins(shader_dir):
+    """Return a list of problems: hand-rolled broadcast-class dispatch outside pw_epilogue.glsl."""
+    problems = []
+    hand_rolled = re.compile(r"\(\s*m\s*==\s*\d+\s*\)\s*\?")
+    for name in sorted(os.listdir(shader_dir)):
+        if not name.startswith("fused_pw_") or not name.endswith(".comp"):
+            continue
+        with open(os.path.join(shader_dir, name)) as fh:
+            for lineno, line in enumerate(fh, 1):
+                if hand_rolled.search(line):
+                    problems.append(
+                        "%s:%d open-codes the broadcast-class dispatch; call the pw_epilogue.glsl "
+                        "helper (pwLoadBc4 / pwFlatIdx) so the twin cannot diverge from the interpreter"
+                        % (name, lineno))
+    return problems
+
 def main():
     ap = argparse.ArgumentParser(description="VKNN pointwise-epilogue multi-surface sync check")
     ap.add_argument("--repo", default=REPO_DEFAULT, help="VKNN repo root (default: this tree)")
@@ -235,6 +257,8 @@ def main():
     if no_kernel:
         problems.append(
             "pwEpilogueCapable OpTypes whose kernel cannot host an epilogue: %s" % ", ".join(no_kernel))
+
+    problems += check_applier_twins(shader_dir)
 
     print("check_epi_sync: %d shader stems (+%d standalone-VM), %d op-file-requested stems, "
           "%d pwEpilogueCapable OpTypes"

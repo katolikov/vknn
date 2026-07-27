@@ -77,6 +77,9 @@ void pwStoreOut4(int o,int idx,vec4 v){
 // broadcast needs the per-axis strided decomposition (integer div/mod per element), so that loop is
 // skipped for the common full-size operand.
 int pwFlatIdx(int s,int bc,int outIdx){ if(bc==0) return outIdx;
+  // A per-pixel operand is the trailing H*W plane of a single-batch run, so it indexes by the
+  // spatial remainder — the same value the strided walk below yields, without its div/mod chain.
+  if(bc==4) return outIdx % (plan.outDim[plan.rank-2]*plan.outDim[plan.rank-1]);
   int rem=outIdx; int oi=0; for(int k=plan.rank-1;k>=0;--k){ int c=rem%plan.outDim[k]; rem/=plan.outDim[k]; oi+=c*plan.stride[s*PW_EPI_MAXRANK+k]; } return oi; }
 vec4 pwBin4(vec4 a,vec4 b,int code){ return vec4(vx_binary(a.x,b.x,code),vx_binary(a.y,b.y,code),vx_binary(a.z,b.z,code),vx_binary(a.w,b.w,code)); }
 vec4 pwRound4(vec4 v){ return vec4(PW_ROUND(v.x),PW_ROUND(v.y),PW_ROUND(v.z),PW_ROUND(v.w)); }
@@ -155,8 +158,16 @@ float pw_apply(float entry, int outIdx){ return pw_apply_rx(entry,outIdx); }
 // Scalar NC4HW4 store: packedIdx = ((n*Cb+cb)*HW + hw)*4 + lane. Operands are NC4HW4-packed
 // (runtime activations natively; constants packed at upload), so bc==0 (same shape) loads at
 // packedIdx, bc==1 (per-channel [N,C,1,1]) at the store's channel-block lane, bc==3 at element 0.
+// bc==4 (per-pixel [1,1,H,W]) packs one value per spatial position at channel lane 0, so vecIdx%HW
+// recovers the pixel and the *4 lands on that lane. Single batch only (pwBcastClass enforces it):
+// vecIdx%HW carries no batch index.
+// One vec4 operand fetch for the NC4HW4 kernel, by broadcast class: a scalar and a per-pixel
+// operand both hold ONE value for the four channel lanes and splat it, while same-shape and
+// per-channel operands hold four distinct lane values and load them as a vec4.
+vec4 pwLoadBc4(int slot,int m,int vecIdx,int HW){
+  return (m==3)?vec4(pwLoad(slot,0)):(m==4)?vec4(pwLoad(slot,(vecIdx%HW)*4)):pwLoad4(slot,(m==1)?vecIdx/HW:vecIdx); }
 int pwNc4Idx(int bc,int packedIdx,int lane,int vecIdx){ int HW=plan.outDim[0];
-  return (bc==3)?0:(bc==1)?(vecIdx/HW)*4+lane:packedIdx; }
+  return (bc==3)?0:(bc==1)?(vecIdx/HW)*4+lane:(bc==4)?(vecIdx%HW)*4:packedIdx; }
 #ifndef PW_RELAX
 float pw_apply_nc4_st(float entryRaw, int packedIdx){ int lane=packedIdx&3, vecIdx=packedIdx>>2;
   float entry=float(TO_STORE(entryRaw));
@@ -223,13 +234,13 @@ vec4 pw_apply4_st(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     int kind=plan.step[s*8],code=plan.step[s*8+1],a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
     int dst=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
     vec4 va,vb=vec4(0.),vc=vec4(0.);
-    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=(m==3)?vec4(pwLoad(PW_REF_OP0-a,0)):pwLoad4(PW_REF_OP0-a,(m==1)?vecIdx/HW:vecIdx); }
+    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,m,vecIdx,HW); }
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
     else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
-    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=(m==3)?vec4(pwLoad(PW_REF_OP0-b,0)):pwLoad4(PW_REF_OP0-b,(m==1)?vecIdx/HW:vecIdx); }
+    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=pwLoadBc4(PW_REF_OP0-b,m,vecIdx,HW); }
     else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
     else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
-    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=(m==3)?vec4(pwLoad(PW_REF_OP0-c,0)):pwLoad4(PW_REF_OP0-c,(m==1)?vecIdx/HW:vecIdx); }
+    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=pwLoadBc4(PW_REF_OP0-c,m,vecIdx,HW); }
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     if(kind==0)      acc=pwRound4(pwBin4(va,vb,code));
@@ -251,13 +262,13 @@ vec4 pw_apply4_rx(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     int kind=plan.step[s*8],code=plan.step[s*8+1],a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
     int dst=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
     vec4 va,vb=vec4(0.),vc=vec4(0.);
-    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=(m==3)?vec4(pwLoad(PW_REF_OP0-a,0)):pwLoad4(PW_REF_OP0-a,(m==1)?vecIdx/HW:vecIdx); }
+    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,m,vecIdx,HW); }
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
     else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
-    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=(m==3)?vec4(pwLoad(PW_REF_OP0-b,0)):pwLoad4(PW_REF_OP0-b,(m==1)?vecIdx/HW:vecIdx); }
+    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=pwLoadBc4(PW_REF_OP0-b,m,vecIdx,HW); }
     else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
     else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
-    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=(m==3)?vec4(pwLoad(PW_REF_OP0-c,0)):pwLoad4(PW_REF_OP0-c,(m==1)?vecIdx/HW:vecIdx); }
+    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=pwLoadBc4(PW_REF_OP0-c,m,vecIdx,HW); }
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     if(kind==0)      acc=pwBin4(va,vb,code);
