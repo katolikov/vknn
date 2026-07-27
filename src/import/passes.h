@@ -288,6 +288,16 @@ namespace vknn {
     /// them reads the wrong layout -- so both call this.
     bool transposeReadsNc4(const Graph &g, const Node &n);
 
+    /// Does this DepthToSpace run entirely in NC4HW4 rather than flat row-major?
+    ///
+    /// True when both the input and the output channel counts are multiples of 4, so every NC4HW4
+    /// block is fully occupied on both sides and the remap is block-to-block
+    /// (shaders/depth_to_space_nc4.comp). The flat kernel otherwise forces an NC4HW4 producer and an
+    /// NC4HW4 consumer to pay a full-size ConvertLayout each, which costs more than the remap.
+    ///
+    /// The layout pass and the Vulkan op must agree exactly, so both call this.
+    bool depthToSpaceIsNc4(const Graph &g, const Node &n);
+
     // Split a comma-separated pattern list into its non-empty entries, as typed (an exclude entry
     // keeps its leading '-'). Shared by markFp32's per-entry match accounting and the session's
     // zero-match warnings, so both enumerate the same entries.

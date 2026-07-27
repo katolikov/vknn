@@ -45,6 +45,22 @@ namespace vknn {
     // predicate below; the switch handles exactly those (the anti-drift test asserts the two agree).
     //
     // A Transpose's OUTPUT is always flat; transposeReadsNc4 governs its INPUT separately.
+    bool depthToSpaceIsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::DepthToSpace || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape, &out = g.desc(n.outputs[0]).shape;
+        if (in.size() != 4 || out.size() != 4)
+        {
+            return false;
+        }
+        // A partly-filled NC4HW4 block on either side would put a block's four lanes in different
+        // source blocks (or leave output lanes with no source channel at all), which the packed
+        // kernel's quad-at-a-time store cannot express.
+        return in[1] % kNC4Block == 0 && out[1] % kNC4Block == 0;
+    }
+
     bool gpuFlatNode(const Graph &g, const Node &n) {
         auto sh = [&](TensorId t) -> const Shape & {
             return g.desc(t).shape;
@@ -112,6 +128,10 @@ namespace vknn {
                 }
                 return true;
             }
+            case OpType::DepthToSpace:
+                // Both sides packed when every NC4HW4 block is fully occupied; otherwise the flat
+                // row-major remap, with the layout pass converting at the boundary.
+                return !depthToSpaceIsNc4(g, n);
             case OpType::ScatterND:
                 // GPU flat scatter; index may be a constant or a runtime float activation.
                 return n.inputs.size() >= 3;

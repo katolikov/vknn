@@ -1,0 +1,47 @@
+#version 450
+#include "precision.glsl"
+// DepthToSpace over NC4HW4: [N,C,H,W] -> [N,C/b^2,H*b,W*b], both sides packed.
+//
+// The flat kernel forces the channel-count change to be a row-major reindex, so an NC4HW4 producer
+// and an NC4HW4 consumer each pay a full-size ConvertLayout around it -- three passes over the
+// tensor for one remap. Packed on both sides it is one pass.
+//
+// The output block cbOut covers channels cbOut*4 .. cbOut*4+3. Their source channels are
+//   DCR: cIn = blk * C2 + cOut     -- four CONSECUTIVE channels, so when C2 is a multiple of 4 they
+//                                     sit in ONE input block and the read is a single quad
+//   CRD: cIn = cOut * b^2 + blk    -- four channels b^2 apart, four separate lane reads
+// Both are read through the scalar view of the source, so the two modes share one body and the
+// consecutive DCR case falls out as four adjacent addresses.
+#include "common.glsl"
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer S  { STORE  src[];  };
+layout(std430, binding = 1) writeonly buffer D4 { STORE4 dst4[]; };
+layout(push_constant) uniform PC { int N, C, H, W, C2, OH, OW, b, mode; } pc;
+
+void main() {
+  int CbIn = (pc.C + 3) / 4, CbOut = (pc.C2 + 3) / 4;
+  int HW = pc.H * pc.W, OHW = pc.OH * pc.OW;
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (i >= uint(pc.N * CbOut * OHW)) return;
+  int ow = int(i) % pc.OW;
+  int oh = (int(i) / pc.OW) % pc.OH;
+  int cbOut = (int(i) / OHW) % CbOut;
+  int n = int(i) / (OHW * CbOut);
+  int ih = oh / pc.b, bh = oh % pc.b;
+  int iw = ow / pc.b, bw = ow % pc.b;
+  int blk = bh * pc.b + bw;
+  int srcPix = ih * pc.W + iw;
+  STORE4 v = STORE4(0.0);
+  for (int l = 0; l < 4; ++l) {
+    int cOut = cbOut * 4 + l;
+    if (cOut >= pc.C2) { break; } // the last output block's padding lanes have no source channel
+    int cIn = (pc.mode == 1) ? (cOut * pc.b * pc.b + blk) : (blk * pc.C2 + cOut);
+    v[l] = src[(((n * CbIn + cIn / 4) * HW) + srcPix) * 4 + (cIn % 4)];
+  }
+  dst4[(n * CbOut + cbOut) * OHW + oh * pc.OW + ow] = v;
+}
