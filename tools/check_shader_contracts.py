@@ -12,16 +12,25 @@ FATAL (correctness):
      via precision.glsl). Missing it lets some mobile drivers round fp16 stores toward zero, biasing
      every activation ~half a ULP smaller — SNR collapses while cosine stays ~1 (ADR-0011; the whole
      reason store16.glsl exists).
-  2. VKNN_NO_RTE ordering. A shader that opts out of the RoundingModeRTE execution mode must
+  2. Lane-count agreement across an fp32/fp16 pair. `X.comp` and `X_fp16.comp` are the same kernel
+     at two storage precisions; the host op computes ONE dispatch lane count and selects between
+     them on device fp16 support alone. If their grid-bound expressions disagree, one of the two
+     reads a grid that was never launched: the shipped precision silently writes a fraction of its
+     output and leaves the rest at whatever the buffer held. (Seen: a per-pixel lane map applied to
+     the fp32 kernel and its host dispatch but not to the fp16 twin, which still decoded a channel
+     block from the lane index -- every channel block above the first went unwritten, on the default
+     precision, with no error anywhere.)
+
+  3. VKNN_NO_RTE ordering. A shader that opts out of the RoundingModeRTE execution mode must
      #define VKNN_NO_RTE BEFORE it includes store16.glsl/precision.glsl; defined after the include it
      is a silent no-op and the execution mode the kernel meant to avoid gets compiled in anyway.
 
 ADVISORY (reported, non-fatal — flags with --strict):
-  3. VKNN_NO_RTE on the GEMM/elementwise family. Kernels in that family that store fp16 avoid the
+  4. VKNN_NO_RTE on the GEMM/elementwise family. Kernels in that family that store fp16 avoid the
      float-controls execution mode (miscompiled by some drivers -> nondeterminism/faults under load,
      and both float16_t(x) and packHalf2x16 round toward zero there) by defining VKNN_NO_RTE and
      rounding through the integer-exact vknnRte16. A family fp16 kernel without it is suspect.
-  4. 2-term gid recovery. A 1-D-dispatched kernel (local_size_x only) that reads
+  5. 2-term gid recovery. A 1-D-dispatched kernel (local_size_x only) that reads
      gl_GlobalInvocationID.x as a flat index must recover the global id as
      `gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x`;
      a bare .x drops every element past the 65535 workgroup cap once the dispatch is 2D-split.
@@ -29,7 +38,7 @@ ADVISORY (reported, non-fatal — flags with --strict):
 Usage:
   tools/check_shader_contracts.py [--shaders DIR] [--strict]
 
-  --strict   promote the advisory checks (3, 4) to failures as well.
+  --strict   promote the advisory checks (4, 5) to failures as well.
 """
 import argparse
 import glob
@@ -52,6 +61,34 @@ _NO_RTE_DEFINE_RE = re.compile(r'#define\s+VKNN_NO_RTE')
 _GID_RECOVERY_RE = re.compile(
     r'gl_GlobalInvocationID\.x\s*\+\s*gl_GlobalInvocationID\.y\s*\*\s*'
     r'gl_NumWorkGroups\.x\s*\*\s*gl_WorkGroupSize\.x')
+
+
+# The grid bound a kernel guards itself with: `if (gid >= uint(EXPR)) return;`. EXPR is the lane
+# count the host must dispatch, so it is the one thing an fp32/fp16 pair can never disagree on.
+_GRID_BOUND_RE = re.compile(r">=\s*uint\s*\((.+?)\)\s*\)\s*return", re.S)
+
+
+def _grid_bound(src):
+    """The kernel's dispatch-lane-count expression, whitespace-normalized, or None."""
+    m = _GRID_BOUND_RE.search(src)
+    return re.sub(r"\s+", "", m.group(1)) if m else None
+
+
+def check_precision_pairs(sources):
+    """FATAL: X.comp and X_fp16.comp must guard against the same lane count."""
+    fatals = []
+    for name, src in sorted(sources.items()):
+        if not name.endswith("_fp16.comp"):
+            continue
+        base = name[: -len("_fp16.comp")] + ".comp"
+        if base not in sources:
+            continue
+        a, b = _grid_bound(sources[base]), _grid_bound(src)
+        if a is not None and b is not None and a != b:
+            fatals.append("%s and %s disagree on the dispatch lane count (%s vs %s); the host op "
+                          "launches one grid for both, so the other reads lanes that were never "
+                          "launched and leaves part of its output unwritten" % (base, name, a, b))
+    return fatals
 
 
 def _stores_fp16(src):
@@ -96,12 +133,12 @@ def check_shader(name, src):
 
     stem = os.path.splitext(name)[0]
 
-    # 3. GEMM/elementwise-family fp16 kernels should carry VKNN_NO_RTE (advisory).
+    # 4. GEMM/elementwise-family fp16 kernels should carry VKNN_NO_RTE (advisory).
     if _FAMILY_RE.match(stem) and _stores_fp16(src) and not nortem:
         advisories.append("%s: GEMM/elementwise-family kernel stores fp16 but does not #define "
                           "VKNN_NO_RTE (ADR-0011 keeps this family off the RTE execution mode)" % name)
 
-    # 4. 1-D flat kernels need the 2-term gid recovery (advisory).
+    # 5. 1-D flat kernels need the 2-term gid recovery (advisory).
     lx, ly, lz = _local_size(src)
     one_dim = ly == 1 and lz == 1
     uses_x = "gl_GlobalInvocationID.x" in src
@@ -128,16 +165,21 @@ def main():
     if not comps:
         sys.exit("error: no *.comp under %s" % args.shaders)
 
+    sources = {}
     all_fatals, all_advisories = [], []
     for comp in comps:
         name = os.path.basename(comp)
         with open(comp, encoding="utf-8") as f:
             src = f.read()
+        sources[name] = src
         f_, a_ = check_shader(name, src)
         all_fatals += f_
         all_advisories += a_
+    all_fatals += check_precision_pairs(sources)
 
-    print("check_shader_contracts: scanned %d shaders" % len(comps))
+    print("check_shader_contracts: scanned %d shaders (%d fp32/fp16 pairs)"
+          % (len(comps), sum(1 for n in sources if n.endswith("_fp16.comp")
+                             and n[: -len("_fp16.comp")] + ".comp" in sources)))
     if all_advisories:
         print("ADVISORY:")
         for m in all_advisories:
@@ -149,7 +191,7 @@ def main():
     if all_fatals or (args.strict and all_advisories):
         sys.exit(1)
     if not all_advisories:
-        print("PASS — all shaders satisfy the store16 / VKNN_NO_RTE / gid-recovery contracts")
+        print("PASS — all shaders satisfy the store16 / pair-lane-count / VKNN_NO_RTE / gid-recovery contracts")
     else:
         print("PASS — no fatal contract violations (advisories above; --strict to enforce)")
 
