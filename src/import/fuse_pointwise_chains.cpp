@@ -238,6 +238,9 @@ namespace vknn {
             std::vector<int64_t>  outSteps; // pw_outs: emitted step index (or kPwRefEntry) per export
             TensorId              entry   = kNoTensor;
             TensorId              mainOut = kNoTensor;
+            /// First operand classified kPwBcastGeneral, the one that set nc4Ok false (see
+            /// warnFlatForcedUnit). kNoTensor when the unit has none.
+            TensorId              generalOperand = kNoTensor;
             bool                  nc4Ok = false, flatOk = false;
             bool                  ok = false;
         };
@@ -460,9 +463,13 @@ namespace vknn {
                                 return PwUnit {};
                             }
                             src[k].ref = operandRef(t);
-                            if (src[k].bc == 2)
+                            if (src[k].bc == kPwBcastGeneral)
                             {
                                 hasClass2 = true;
+                                if (u.generalOperand == kNoTensor)
+                                {
+                                    u.generalOperand = t;
+                                }
                             }
                         }
                     }
@@ -689,6 +696,21 @@ namespace vknn {
             }
         };
 
+        /// Report a rank-4 unit that a general-broadcast operand pushed onto the flat kernel. Such a
+        /// unit gives up vec4 addressing for the WHOLE region (one element per thread instead of
+        /// four), pays a per-axis integer div/mod walk per element per step that reads the operand,
+        /// and is excluded from the flexible layout re-vote, so a ConvertLayout appears on each of
+        /// its full-size edges. The message names the anchor node and the operand shape that caused
+        /// it, which is the whole diagnosis for a model whose bytes are not available to inspect.
+        void warnFlatForcedUnit(const Graph &g, const Node &anchor, TensorId general, const Shape &run, bool nc4Ok) {
+            if (nc4Ok || general == kNoTensor || run.size() != 4)
+            {
+                return; // NC4HW4-expressible, or a rank the blocked path has no form for anyway
+            }
+            VKNN_INFO << "fusePointwiseChains: unit at '" << anchor.name << "' runs " << shapeStr(run)
+                      << " on the flat kernel -- operand '" << g.desc(general).name << "' " << shapeStr(g.desc(general).shape)
+                      << " has no blocked-layout index, so the whole unit loses vec4 and picks up a layout convert on each side";
+        }
     } // namespace
 
     /// One general pointwise fusion: grow each maximal same-shape per-element region — Binary/Add/
@@ -1017,6 +1039,7 @@ namespace vknn {
                 visited[seed] = 1; // not encodable at all: leave the seed unfused
                 continue;
             }
+            warnFlatForcedUnit(g, g.nodes[members.back()], unit.generalOperand, run, unit.nc4Ok);
 
             // Fast mode: a lone initializer-bias Add on a MatMul folds onto the kernel's native
             // bias input — matmul[_tiled]_bias adds it in the fp32 accumulator with one store
