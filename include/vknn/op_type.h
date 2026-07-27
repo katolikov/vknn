@@ -147,16 +147,6 @@ namespace vknn {
     constexpr int kPwMaxRegs     = 4;  ///< Named registers for step values reused by later steps.
     constexpr int kPwMaxOuts     = 4;  ///< Extra output streams (fanout values exported from the unit).
 
-    /// Broadcast class of a pw operand against the unit's run shape, stored in a step's bcast field.
-    /// Every class except kPwBcastGeneral has a closed-form index in BOTH the flat and the NC4HW4
-    /// kernel; a general operand is addressable only by the flat kernel's per-axis div/mod walk, so
-    /// one of them forces its whole unit onto the flat path (and the layout converts that bracket it).
-    constexpr int kPwBcastSame    = 0; ///< Same shape as the run: reads at the output index.
-    constexpr int kPwBcastChannel = 1; ///< Per-channel [N,C,1,1]: one value per channel.
-    constexpr int kPwBcastGeneral = 2; ///< Anything else: per-axis strided decomposition, flat only.
-    constexpr int kPwBcastScalar  = 3; ///< Single element splat.
-    constexpr int kPwBcastSpatial = 4; ///< Per-pixel [1,1,H,W]: one value per spatial position.
-
     /// pw_steps value references (the srcA/srcB/srcC/dst fields of a step). A source names the
     /// accumulator, the entry value, a register, or a tensor operand; a dst is kPwRefNone or a
     /// register encoded the same way (every step's result always lands in the accumulator, a
