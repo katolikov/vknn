@@ -18,6 +18,21 @@ float coord(int d, int outS, int inS, int cm) {
   return (float(d) + 0.5) / scale - 0.5;
 }
 int clampi(int v, int lo, int hi) { return clamp(v, lo, hi); }
+// Nearest source index in exact integer arithmetic -- vxResizeNearestSrc in
+// src/backend/cpu/ops/resize.cpp, kept identical here. coord() cannot decide it: an integer
+// downsample factor under half_pixel puts every output pixel exactly on the round_prefer_floor
+// tie, this driver evaluates the divide through a reciprocal, and one ulp there moves the sample
+// a whole pixel. Integers make the index a pure function of the shape on any driver.
+int nearestSrc(int d, int outS, int inS, int cm) {
+  int num, den;
+  if (cm == 1)      { num = d * (inS - 1);            den = outS - 1; }
+  else if (cm == 2) { num = d * inS;                  den = outS; }
+  else              { num = (2 * d + 1) * inS - outS; den = 2 * outS; }
+  if (den <= 0 || (cm == 3 && outS <= 1)) return 0;
+  int q = num / den, r = num - q * den;
+  if (r < 0) { q--; r += den; }   // GLSL division truncates toward zero; the rule needs floor
+  return 2 * r > den ? q + 1 : q;
+}
 
 void main() {
   int Cb = (pc.C + 3) / 4;
@@ -28,15 +43,14 @@ void main() {
   int cb = (int(i) / (pc.OW * pc.OH)) % Cb;
   int n = int(i) / (pc.OW * pc.OH * Cb);
   int sb = (n * Cb + cb) * pc.IH * pc.IW;
-  float fy = coord(oy, pc.OH, pc.IH, pc.cm);
-  float fx = coord(ox, pc.OW, pc.IW, pc.cm);
   vec4 v;
   if (pc.mode == 0) {
-    int iy = int(floor(fy)); if (fy - float(iy) > 0.5) iy++;
-    int ix = int(floor(fx)); if (fx - float(ix) > 0.5) ix++;
+    int iy = nearestSrc(oy, pc.OH, pc.IH, pc.cm), ix = nearestSrc(ox, pc.OW, pc.IW, pc.cm);
     iy = clampi(iy, 0, pc.IH - 1); ix = clampi(ix, 0, pc.IW - 1);
     v = vec4(src[sb + iy * pc.IW + ix]);
   } else {
+    float fy = coord(oy, pc.OH, pc.IH, pc.cm);
+    float fx = coord(ox, pc.OW, pc.IW, pc.cm);
     int iy0 = int(floor(fy)), ix0 = int(floor(fx));
     float wy = fy - float(iy0), wx = fx - float(ix0);
     int cy0 = clampi(iy0, 0, pc.IH - 1), cx0 = clampi(ix0, 0, pc.IW - 1);

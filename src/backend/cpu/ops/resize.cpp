@@ -62,6 +62,44 @@ namespace vknn {
         return ((float) d + 0.5f) / scale - 0.5f; // half_pixel
     }
 
+    // Nearest-neighbour source index for output position `d`, in exact integer arithmetic. Every
+    // rule srcCoord() evaluates is a ratio of integers in (d, inS, outS), so round_prefer_floor is
+    // decided here without ever forming the fractional coordinate.
+    //
+    // The float form cannot decide it. An integer downsample factor under half_pixel puts EVERY
+    // output pixel exactly on the .5 tie (fy = 2d + 0.5 for a halving), and the GPU evaluates the
+    // divide through a reciprocal, so one ulp at the tie moves the sample a whole pixel: the GPU
+    // read x[2d+1] where this oracle read x[2d], on every pixel of every channel. Integers make the
+    // index a pure function of the shape -- same on both backends, on any driver. The products stay
+    // exact while outS * inS < 2^30, past any spatial extent the planner admits.
+    int vxResizeNearestSrc(int d, int outS, int inS, int coordMode) {
+        int64_t num, den;
+        if (coordMode == 1) // align_corners: d * (inS-1) / (outS-1)
+        {
+            num = (int64_t) d * (inS - 1);
+            den = outS - 1;
+        } else if (coordMode == 2) // asymmetric: d / scale = d * inS / outS
+        {
+            num = (int64_t) d * inS;
+            den = outS;
+        } else // half_pixel / pytorch_half_pixel: ((2d+1) * inS - outS) / (2 * outS)
+        {
+            num = (int64_t) (2 * d + 1) * inS - outS;
+            den = 2 * (int64_t) outS;
+        }
+        if (den <= 0 || (coordMode == 3 && outS <= 1))
+        {
+            return 0; // a single-pixel output axis spans no interval (srcCoord guards it the same way)
+        }
+        int64_t q = num / den, r = num % den;
+        if (r < 0)
+        {
+            --q; // C division truncates toward zero; the rule needs floor
+            r += den;
+        }
+        return (int) (2 * r > den ? q + 1 : q); // round_prefer_floor: bump only strictly past the midpoint
+    }
+
     namespace {
         struct ResizeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
@@ -126,19 +164,9 @@ namespace vknn {
                                 float fx = srcCoord(ox, OW, (int) x.w, coordMode);
                                 float v;
                                 if (mode == 0)
-                                { // nearest (round_prefer_floor)
-                                    // round_prefer_floor: floor, then bump up only when strictly past
-                                    // the midpoint, so an exact .5 rounds down (toward the floor).
-                                    int iy = (int) std::floor(fy);
-                                    if (fy - iy > 0.5f)
-                                    {
-                                        iy++;
-                                    }
-                                    int ix = (int) std::floor(fx);
-                                    if (fx - ix > 0.5f)
-                                    {
-                                        ix++;
-                                    }
+                                { // nearest (round_prefer_floor), decided in integers
+                                    int iy = vxResizeNearestSrc(oy, (int) OH, (int) x.h, coordMode);
+                                    int ix = vxResizeNearestSrc(ox, (int) OW, (int) x.w, coordMode);
                                     // Clamp to the valid input range so half_pixel's negative edge
                                     // coordinates (and the align_corners tail) read the border pixel.
                                     iy = clampi(iy, 0, (int) x.h - 1);
