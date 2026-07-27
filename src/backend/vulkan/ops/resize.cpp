@@ -17,8 +17,22 @@ namespace vknn {
         struct ResizePC {
             int   N, C, IH, IW, OH, OW, mode, cm;
             float cubicA;
-            int   excludeOutside;
+            int   excludeOutside, perPixel;
         };
+
+        // Lane map, as a deterministic shape rule. The two maps are byte-identical -- same arithmetic
+        // per (block, pixel), only the thread that runs it moves -- so this is a pure placement
+        // choice and none == fast == heavy still holds.
+        //
+        // One lane per output PIXEL evaluates the coordinate transform and the cubic weight fans once
+        // instead of once per channel block, which is what a GROWING output map wants. A SHRINKING
+        // one wants the opposite: it reads more than it writes, and the block-pixel map keeps a whole
+        // wave inside one channel block where the source streams. Measured per output/input pixel
+        // ratio at Cb=8, cubic, both directions: growing or equal is -20% to -41% on the per-pixel
+        // map, shrinking is +11% to +23% on it. The rule is the sign of that ratio.
+        inline bool resizePerPixelLanes(const NCHW &x, const NCHW &y) {
+            return (int64_t) y.h * y.w >= (int64_t) x.h * x.w;
+        }
         struct ResizeOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
             ResizePC                             pc {};
@@ -36,11 +50,12 @@ namespace vknn {
                           vxResizeMode(node.attr.gets("mode", "nearest")),
                           vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel")),
                           node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault),
-                          (int) node.attr.geti("exclude_outside", 0)};
-                // One dispatch lane per output NC4HW4 block-pixel: cBlocks(c) = ceil(c/4) ceil-packs
-                // channels into groups of 4, so each lane resolves all 4 packed channels at one
-                // (n, cb, oy, ox) location. Spatial extent uses the OUTPUT y.h/y.w (resize target size).
-                total = (int64_t) x.n * cBlocks(x.c) * y.h * y.w;
+                          (int) node.attr.geti("exclude_outside", 0),
+                          resizePerPixelLanes(x, y) ? 1 : 0};
+                // Lane count for the map resizePerPixelLanes chose: one per output pixel (the kernel
+                // loops the channel blocks internally) or one per NC4HW4 block-pixel. Spatial extent
+                // uses the OUTPUT y.h/y.w (the resize target size).
+                total = (int64_t) x.n * y.h * y.w * (pc.perPixel != 0 ? 1 : cBlocks(x.c));
                 epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
                 // Base binding count is 2 (src, dst); a fused pointwise epilogue appends its own operand
                 // buffers via extraBufs() and swaps in the _epi shader variant through suffix().
