@@ -142,7 +142,7 @@ namespace vknn {
     /// n > kDetMaxGpuN — no known real model — takes the CPU's double-precision LU via the named
     /// vkNodeGate refusal.
     constexpr int kDetMaxGpuN = 8;
-    constexpr int kPwMaxOperands = 6;  ///< Extra tensor operands per unit (the primary input is excluded).
+    constexpr int kPwMaxOperands = 9;  ///< Extra tensor operands per unit (the primary input is excluded).
     constexpr int kPwMaxRank     = 4;  ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
     constexpr int kPwMaxRegs     = 4;  ///< Named registers for step values reused by later steps.
     constexpr int kPwMaxOuts     = 4;  ///< Extra output streams (fanout values exported from the unit).
