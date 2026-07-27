@@ -4,6 +4,7 @@
 // YOLO head runs on the GPU. Ops with an existing NC4HW4 kernel (concat/binary/add/softmax) hold
 // one of these and dispatch to it when their tensors are flat; Transpose/Slice are flat-only.
 #pragma once
+#include "core/slice_bounds.h"
 #include "import/passes.h" // readI64Param
 #include "pw_plan.h"
 #include "vk_op_common.h"
@@ -134,9 +135,12 @@ namespace vknn {
                         {
                             continue;
                         }
-                        int s0    = (int) (starts[a] < 0 ? starts[a] + in[ax] : starts[a]);
-                        start[ax] = std::max(0, std::min(s0, (int) in[ax]));
-                        step[ax]  = (int) (steps.size() > a ? steps[a] : 1);
+                        // The same ONNX bound rules shape inference used, so `base` lands on the first
+                        // element the inferred `out` extent expects — including a reverse slice, whose
+                        // signed stride below then walks back down the axis.
+                        const int64_t sp = steps.size() > a ? steps[a] : 1;
+                        start[ax]        = resolveSliceAxis(in[ax], starts[a], ends[a], sp).start;
+                        step[ax]         = sp;
                     }
                     for (int k = 0; k < rank; ++k)
                     {
