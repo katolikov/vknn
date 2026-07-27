@@ -190,39 +190,41 @@ namespace vknn {
         return axisSum == ws[axis];
     }
 
-    // Broadcast class of tensor `t` against the unit's run shape: 0 same-shape, 3 scalar splat,
-    // 1 per-channel (rank-4 [N,C,1,1]; a rank<4 CONSTANT that right-aligns to [1,C,1,1] with N==1
-    // also qualifies — pwOperandBuf packs it by that interpretation), 2 general (flat-only).
+    // Broadcast class of tensor `t` against the unit's run shape (see the kPwBcast* constants).
+    // A rank<4 CONSTANT is judged by its right-aligned rank-4 interpretation, which is exactly how
+    // pwOperandBuf packs it. The spatial class is limited to a single batch: the NC4HW4 kernel
+    // recovers the pixel as vecIdx % HW, which drops the batch index, so N>1 would alias batch 0's
+    // values across the whole run and stays general.
     static int pwBcastClass(const Graph &g, TensorId t, const Shape &run) {
         const Shape &s = g.desc(t).shape;
         if (s == run)
         {
-            return 0;
+            return kPwBcastSame;
         }
         if (numElements(s) <= 1)
         {
-            return 3;
+            return kPwBcastScalar;
         }
         if (run.size() == 4)
         {
-            if (s.size() == 4 && s[0] == run[0] && s[1] == run[1] && s[2] == 1 && s[3] == 1)
+            Shape rs = s;
+            if (g.isInitializer(t) && rs.size() < 4)
             {
-                return 1;
+                rs.insert(rs.begin(), 4 - rs.size(), 1); // right-align the constant into NCHW
             }
-            if (g.isInitializer(t) && run[0] == 1 && s.size() < 4)
+            if (rs.size() == 4)
             {
-                Shape rs(4, 1);
-                for (size_t k = 0; k < s.size(); ++k)
+                if (rs[0] == run[0] && rs[1] == run[1] && rs[2] == 1 && rs[3] == 1)
                 {
-                    rs[4 - s.size() + k] = s[k];
+                    return kPwBcastChannel;
                 }
-                if (rs[0] == 1 && rs[1] == run[1] && rs[2] == 1 && rs[3] == 1)
+                if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == run[2] && rs[3] == run[3])
                 {
-                    return 1;
+                    return kPwBcastSpatial;
                 }
             }
         }
-        return 2;
+        return kPwBcastGeneral;
     }
 
     namespace {
