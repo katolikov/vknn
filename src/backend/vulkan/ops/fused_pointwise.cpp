@@ -5,6 +5,7 @@
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
+#include "vknn/logging.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <cstdint>
@@ -63,6 +64,11 @@ namespace vknn {
                     base += "_rx";
                 }
                 pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int), spec);
+                // Which of the two appliers this unit lands on is the difference between an unrolled
+                // chain with its params folded at pipeline creation and a per-element walk of the
+                // plan SSBO, so it is the first thing to know about a unit that costs more than its
+                // memory traffic.
+                VKNN_DEBUG << "FusedPointwise '" << node.name << "': " << plan.numSteps << " step(s), " << operands.size() << " operand(s), " << (flat ? "flat" : "NC4HW4") << ", " << (spec.empty() ? "plan-SSBO interpreter" : "monomorphized") << ", " << total << " lanes";
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
