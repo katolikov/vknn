@@ -1,21 +1,48 @@
-// Resize / Upsample (spatial), NCHW reference. nearest + linear(bilinear); coordinate transform
-// modes half_pixel / align_corners / asymmetric / pytorch_half_pixel. The output H/W derive from
+// Resize / Upsample (spatial), NCHW reference. nearest + linear(bilinear) + cubic; coordinate
+// transform modes half_pixel / align_corners / asymmetric / pytorch_half_pixel. The output H/W derive from
 // the RUNTIME input shape plus the `sizes` (input[3], preferred) or `scales` (input[2]) parameter,
 // mirroring the Resize arm of inferShapes; the pre-opset-10 Upsample form carries neither input
 // and falls back to the static graph desc. Only the H and W axes are resampled; N and C pass
 // through unchanged, so each (n, c) plane is resized independently against the source (x.h * x.w)
 // plane.
 #include "backend/cpu/cpu_backend.h"
+#include "core/resize_rule.h"
 #include "vknn/op.h"
 #include <algorithm>
 #include <cmath>
 
 namespace vknn {
 
-    // mode codes shared with the shader: 0 = nearest, 1 = linear/bilinear. Any unrecognized
-    // interpolation-mode string falls back to nearest.
+    // Interpolation-mode codes shared with the shader: 0 = nearest, 1 = linear/bilinear, 2 = cubic.
+    // These are the only three ONNX defines. An unrecognized string is refused rather than mapped to
+    // a default: `cubic` used to land on nearest here, which is not an approximation of cubic but a
+    // different picture -- cosine ~0.49 against onnxruntime, silently, on a model that reported no
+    // fallback and no unsupported op.
     int vxResizeMode(const std::string &s) {
-        return s == "linear" || s == "bilinear" ? 1 : 0;
+        if (s == "linear" || s == "bilinear")
+        {
+            return kResizeModeLinear;
+        }
+        if (s == "cubic" || s == "bicubic")
+        {
+            return kResizeModeCubic;
+        }
+        if (s != "nearest")
+        {
+            throw Error(Status::Unsupported, "Resize: unrecognized interpolation mode '" + s + "' (expects nearest, linear, or cubic)");
+        }
+        return kResizeModeNearest;
+    }
+    // Cubic-convolution weights for the 4 taps at floor-1 .. floor+2, at fractional position t.
+    // `a` is the ONNX cubic_coeff_a attribute (-0.75 by default, the PyTorch/OpenCV kernel).
+    // Identical body in shaders/resize.comp -- both must produce the same four floats in the same
+    // order, since the tap sum below is order-observable in fp32.
+    void vxResizeCubicWeights(float t, float a, float w[4]) {
+        const float t1 = 1.f + t, t2 = 2.f - t, tc = 1.f - t;
+        w[0] = a * t1 * t1 * t1 - 5.f * a * t1 * t1 + 8.f * a * t1 - 4.f * a;
+        w[1] = (a + 2.f) * t * t * t - (a + 3.f) * t * t + 1.f;
+        w[2] = (a + 2.f) * tc * tc * tc - (a + 3.f) * tc * tc + 1.f;
+        w[3] = a * t2 * t2 * t2 - 5.f * a * t2 * t2 + 8.f * a * t2 - 4.f * a;
     }
     // Coordinate-transformation-mode code shared with the shader: 0 = half_pixel (the ONNX
     // default and the fallback for any unrecognized string), 1 = align_corners, 2 = asymmetric,
@@ -23,17 +50,17 @@ namespace vknn {
     int vxResizeCoord(const std::string &s) {
         if (s == "align_corners")
         {
-            return 1;
+            return kResizeCoordAlignCorners;
         }
         if (s == "asymmetric")
         {
-            return 2;
+            return kResizeCoordAsymmetric;
         }
         if (s == "pytorch_half_pixel")
         {
-            return 3;
+            return kResizeCoordPytorchHalfPixel;
         }
-        return 0; // half_pixel
+        return kResizeCoordHalfPixel;
     }
     // Map an output pixel index `d` (along one spatial axis of length `outS`) back to a fractional
     // source coordinate in the input axis of length `inS`, per the ONNX Resize coordinate-transform
@@ -41,17 +68,17 @@ namespace vknn {
     // Nearest-neighbor rounds this value; bilinear splits it into floor + fractional weight.
     static float srcCoord(int d, int outS, int inS, int coordMode) {
         float scale = (float) outS / (float) inS;
-        if (coordMode == 1)
+        if (coordMode == kResizeCoordAlignCorners)
         {
             // align_corners: endpoints coincide, so d maps linearly over [0, inS-1]. A degenerate
             // outS==1 has no interval to span and collapses to 0 (avoids the /(outS-1) divide-by-zero).
             return outS > 1 ? (float) d * (inS - 1) / (outS - 1) : 0.f; // align_corners
         }
-        if (coordMode == 2)
+        if (coordMode == kResizeCoordAsymmetric)
         {
             return (float) d / scale; // asymmetric: pixel corners align at the origin, no half-pixel shift
         }
-        if (coordMode == 3)
+        if (coordMode == kResizeCoordPytorchHalfPixel)
         {
             // pytorch_half_pixel: same half-pixel formula as mode 0, but a single-pixel output axis
             // (outS==1) maps to 0 rather than -0.5.
@@ -74,11 +101,11 @@ namespace vknn {
     // exact while outS * inS < 2^30, past any spatial extent the planner admits.
     int vxResizeNearestSrc(int d, int outS, int inS, int coordMode) {
         int64_t num, den;
-        if (coordMode == 1) // align_corners: d * (inS-1) / (outS-1)
+        if (coordMode == kResizeCoordAlignCorners) // align_corners: d * (inS-1) / (outS-1)
         {
             num = (int64_t) d * (inS - 1);
             den = outS - 1;
-        } else if (coordMode == 2) // asymmetric: d / scale = d * inS / outS
+        } else if (coordMode == kResizeCoordAsymmetric) // asymmetric: d / scale = d * inS / outS
         {
             num = (int64_t) d * inS;
             den = outS;
@@ -87,7 +114,7 @@ namespace vknn {
             num = (int64_t) (2 * d + 1) * inS - outS;
             den = 2 * (int64_t) outS;
         }
-        if (den <= 0 || (coordMode == 3 && outS <= 1))
+        if (den <= 0 || (coordMode == kResizeCoordPytorchHalfPixel && outS <= 1))
         {
             return 0; // a single-pixel output axis spans no interval (srcCoord guards it the same way)
         }
@@ -110,10 +137,10 @@ namespace vknn {
                 // but one of the two is present). `sizes` gives the output dims directly; `scales`
                 // multiplies the runtime input dims (truncating, as inferShapes does). Both are read
                 // for the H/W axes only — N and C pass through the kernel unchanged.
-                auto            param = [&](int idx) -> const RtTensor * {
+                auto param = [&](int idx) -> const RtTensor * {
                     return idx < (int) pwCoreInputs(node) && node.inputs[idx] != kNoTensor ? &ctx.t(node.inputs[idx]) : nullptr;
                 };
-                int64_t         OH = 0, OW = 0;
+                int64_t OH = 0, OW = 0;
                 if (X.shape.size() == 4)
                 {
                     if (const RtTensor *sz = param(3); sz && sz->elems() == 4)
@@ -141,12 +168,37 @@ namespace vknn {
                     OH = os[2];
                     OW = os[3];
                 }
-                int             mode      = vxResizeMode(node.attr.gets("mode", "nearest"));
-                int             coordMode = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
-                float          *y         = cpu::allocOut(Y, os);
-                const float    *xd        = X.host.f32();
-                auto            clampi    = [](int v, int lo, int hi) {
+                int   mode      = vxResizeMode(node.attr.gets("mode", "nearest"));
+                int   coordMode = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
+                float cubicA    = node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault);
+                // exclude_outside=1 zeroes the taps that fall outside the input and renormalizes the
+                // axis; the default keeps them and reads the border pixel instead.
+                bool         excludeOutside = node.attr.geti("exclude_outside", 0) != 0;
+                float       *y              = cpu::allocOut(Y, os);
+                const float *xd             = X.host.f32();
+                auto         clampi         = [](int v, int lo, int hi) {
                     return v < lo ? lo : (v > hi ? hi : v);
+                };
+                // Cubic taps for one axis: the four weights, already zeroed/renormalized for
+                // exclude_outside, and the first tap index (floor - 1, unclamped).
+                auto cubicAxis = [&](float f, int inS, float w[kResizeCubicTaps]) {
+                    int first = (int) std::floor(f) - 1;
+                    vxResizeCubicWeights(f - std::floor(f), cubicA, w);
+                    if (excludeOutside)
+                    {
+                        float sum = 0.f;
+                        for (int k = 0; k < kResizeCubicTaps; ++k)
+                        {
+                            int t = first + k;
+                            w[k]  = (t < 0 || t >= inS) ? 0.f : w[k];
+                            sum += w[k];
+                        }
+                        for (int k = 0; k < kResizeCubicTaps && sum != 0.f; ++k)
+                        {
+                            w[k] /= sum;
+                        }
+                    }
+                    return first;
                 };
                 // Walk N and C outermost; xc / yc point at the start of the current source and
                 // destination H*W planes (row-major, so element (row, col) sits at row*width + col).
@@ -163,7 +215,7 @@ namespace vknn {
                             {
                                 float fx = srcCoord(ox, OW, (int) x.w, coordMode);
                                 float v;
-                                if (mode == 0)
+                                if (mode == kResizeModeNearest)
                                 { // nearest (round_prefer_floor), decided in integers
                                     int iy = vxResizeNearestSrc(oy, (int) OH, (int) x.h, coordMode);
                                     int ix = vxResizeNearestSrc(ox, (int) OW, (int) x.w, coordMode);
@@ -172,6 +224,27 @@ namespace vknn {
                                     iy = clampi(iy, 0, (int) x.h - 1);
                                     ix = clampi(ix, 0, (int) x.w - 1);
                                     v  = xc[iy * x.w + ix];
+                                } else if (mode == kResizeModeCubic)
+                                {
+                                    // Cubic convolution: 4 taps per axis at floor-1..floor+2, weights
+                                    // separable in (fy, fx). Out-of-range taps read the border pixel
+                                    // (or drop out entirely under exclude_outside, handled in
+                                    // cubicAxis). The row-then-column summation order is fixed: it is
+                                    // observable in fp32 and the shader repeats it exactly.
+                                    float wy[kResizeCubicTaps], wx[kResizeCubicTaps];
+                                    int   firstY = cubicAxis(fy, (int) x.h, wy);
+                                    int   firstX = cubicAxis(fx, (int) x.w, wx);
+                                    v            = 0.f;
+                                    for (int ty = 0; ty < kResizeCubicTaps; ++ty)
+                                    {
+                                        const float *row = xc + (size_t) clampi(firstY + ty, 0, (int) x.h - 1) * x.w;
+                                        float        acc = 0.f;
+                                        for (int tx = 0; tx < kResizeCubicTaps; ++tx)
+                                        {
+                                            acc += wx[tx] * row[clampi(firstX + tx, 0, (int) x.w - 1)];
+                                        }
+                                        v += wy[ty] * acc;
+                                    }
                                 } else
                                 { // bilinear
                                     // Floor gives the top-left neighbor (iy0, ix0); wy/wx are the
@@ -181,8 +254,8 @@ namespace vknn {
                                     // Clamp all four corner indices independently so out-of-range
                                     // samples (edges) fold onto the nearest in-bounds pixel while the
                                     // interpolation weights below stay unchanged.
-                                    int   iy1 = clampi(iy0 + 1, 0, (int) x.h - 1), ix1 = clampi(ix0 + 1, 0, (int) x.w - 1);
-                                    int   cy0 = clampi(iy0, 0, (int) x.h - 1), cx0 = clampi(ix0, 0, (int) x.w - 1);
+                                    int iy1 = clampi(iy0 + 1, 0, (int) x.h - 1), ix1 = clampi(ix0 + 1, 0, (int) x.w - 1);
+                                    int cy0 = clampi(iy0, 0, (int) x.h - 1), cx0 = clampi(ix0, 0, (int) x.w - 1);
                                     // Four corners: a=top-left, b=top-right, cc=bottom-left, d=bottom-right.
                                     float a = xc[cy0 * x.w + cx0], b = xc[cy0 * x.w + ix1];
                                     float cc = xc[iy1 * x.w + cx0], d = xc[iy1 * x.w + ix1];

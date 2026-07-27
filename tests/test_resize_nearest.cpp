@@ -33,8 +33,7 @@ namespace {
     // Run a nearest Resize of `in` (shape [1,1,inH,inW]) by `scale` on the CPU backend, through the
     // same graph path a model takes. The input desc is left unresolved so the geometry comes from the
     // bound runtime shape times `scales`, exactly as a real Resize node resolves it.
-    std::vector<float> runNearest(const std::vector<float> &in, int64_t inH, int64_t inW, float scale,
-                                  const std::string &coordMode) {
+    std::vector<float> runNearest(const std::vector<float> &in, int64_t inH, int64_t inW, float scale, const std::string &coordMode) {
         Graph      g;
         TensorDesc xi;
         xi.name    = "x";
@@ -93,8 +92,7 @@ TEST(ResizeNearest, HalvingKeepsTheEvenSourcePixel) {
     {
         for (int d = 0; d < outS; ++d)
         {
-            EXPECT_EQ(vxResizeNearestSrc(d, outS, outS * 2, kCoordHalfPixel), 2 * d)
-                << "outS=" << outS << " d=" << d;
+            EXPECT_EQ(vxResizeNearestSrc(d, outS, outS * 2, kCoordHalfPixel), 2 * d) << "outS=" << outS << " d=" << d;
         }
     }
 }
@@ -145,13 +143,11 @@ TEST(ResizeNearest, AgreesWithTheFloatRuleAwayFromTheTie) {
                     {
                         // The tie itself: the rule keeps the floor, which is what the float form
                         // could not be trusted to do.
-                        EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode), (int) floorY)
-                            << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
+                        EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode), (int) floorY) << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
                         continue;
                     }
                     const int want = (int) floorY + (frac > 0.5 ? 1 : 0);
-                    EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode), want)
-                        << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
+                    EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode), want) << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
                 }
             }
         }

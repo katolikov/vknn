@@ -1,5 +1,7 @@
 #version 450
-// Resize (spatial) over NC4HW4 (fp16). nearest + bilinear; coord modes match the CPU oracle.
+// Resize (spatial) over NC4HW4. nearest + bilinear + cubic; the mode/coord codes, the integer
+// nearest index and the cubic weight fan are the rules in src/core/resize_rule.h, copied here
+// because GLSL cannot include the C++ header. Both sides must agree element for element.
 #include "common.glsl"
 #ifdef PW_EPI
 #define PW_EPI_BASE 2
@@ -8,7 +10,7 @@
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
-layout(push_constant) uniform PC { int N, C, IH, IW, OH, OW, mode, cm; } pc;
+layout(push_constant) uniform PC { int N, C, IH, IW, OH, OW, mode, cm; float cubicA; int excludeOutside; } pc;
 
 float coord(int d, int outS, int inS, int cm) {
   float scale = float(outS) / float(inS);
@@ -33,6 +35,24 @@ int nearestSrc(int d, int outS, int inS, int cm) {
   if (r < 0) { q--; r += den; }   // GLSL division truncates toward zero; the rule needs floor
   return 2 * r > den ? q + 1 : q;
 }
+// Cubic taps for one axis -- vxResizeCubicWeights + the exclude_outside handling in
+// src/backend/cpu/ops/resize.cpp. Returns the first tap index (floor - 1, unclamped) and fills the
+// four weights; exclude_outside drops the taps that fall outside and renormalizes the axis.
+int cubicAxis(float f, int inS, out float w[4]) {
+  float fl = floor(f), t = f - fl;
+  float t1 = 1.0 + t, t2 = 2.0 - t, tc = 1.0 - t, a = pc.cubicA;
+  w[0] = a * t1 * t1 * t1 - 5.0 * a * t1 * t1 + 8.0 * a * t1 - 4.0 * a;
+  w[1] = (a + 2.0) * t * t * t - (a + 3.0) * t * t + 1.0;
+  w[2] = (a + 2.0) * tc * tc * tc - (a + 3.0) * tc * tc + 1.0;
+  w[3] = a * t2 * t2 * t2 - 5.0 * a * t2 * t2 + 8.0 * a * t2 - 4.0 * a;
+  int first = int(fl) - 1;
+  if (pc.excludeOutside != 0) {
+    float sum = 0.0;
+    for (int k = 0; k < 4; ++k) { int tp = first + k; w[k] = (tp < 0 || tp >= inS) ? 0.0 : w[k]; sum += w[k]; }
+    if (sum != 0.0) { for (int k = 0; k < 4; ++k) w[k] /= sum; }
+  }
+  return first;
+}
 
 void main() {
   int Cb = (pc.C + 3) / 4;
@@ -48,6 +68,19 @@ void main() {
     int iy = nearestSrc(oy, pc.OH, pc.IH, pc.cm), ix = nearestSrc(ox, pc.OW, pc.IW, pc.cm);
     iy = clampi(iy, 0, pc.IH - 1); ix = clampi(ix, 0, pc.IW - 1);
     v = vec4(src[sb + iy * pc.IW + ix]);
+  } else if (pc.mode == 2) {
+    // Cubic convolution: 4 taps per axis at floor-1..floor+2, separable weights. Out-of-range taps
+    // read the border pixel. The row-then-column summation order matches the CPU oracle's.
+    float wy[4], wx[4];
+    int firstY = cubicAxis(coord(oy, pc.OH, pc.IH, pc.cm), pc.IH, wy);
+    int firstX = cubicAxis(coord(ox, pc.OW, pc.IW, pc.cm), pc.IW, wx);
+    v = vec4(0.0);
+    for (int ty = 0; ty < 4; ++ty) {
+      int row = sb + clampi(firstY + ty, 0, pc.IH - 1) * pc.IW;
+      vec4 acc = vec4(0.0);
+      for (int tx = 0; tx < 4; ++tx) acc += wx[tx] * vec4(src[row + clampi(firstX + tx, 0, pc.IW - 1)]);
+      v += wy[ty] * acc;
+    }
   } else {
     float fy = coord(oy, pc.OH, pc.IH, pc.cm);
     float fx = coord(ox, pc.OW, pc.IW, pc.cm);
