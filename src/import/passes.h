@@ -156,26 +156,26 @@ namespace vknn {
         // automatically by inferShapes; `inputShapes` (per-tensor) overrides a binding for that tensor.
         // Empty = the batch-only path.
         std::map<std::string, int64_t> dimBindings;
-        bool                           fuseSqueezeExcite   = false; // fuse the SE squeeze->FC->scale chain (experimental)
-        bool                           fuseDwPw            = false; // fuse depthwise KxK + 1x1-project into FusedDwPw
-                                                                    // (experimental: the fp16-rounded LDS intermediate matches
-                                                                    // the unfused store bit-for-bit on the CPU oracle and at
-                                                                    // fp32, but the fp16 GPU path still diverges from the
-                                                                    // unfused graph — opt in with --fuse-dwpw and measure)
-        bool                           fusePointwiseChains = true;  // the general pointwise-region fusion (default on)
-        bool                           fuseGridSampleWarp  = true;  // fold a scaled-flow + base-grid coordinate chain into
-                                                                    // GridSample (bit-exact; default on, part of O1)
-        bool strictFuse = false;                                    // rounded steps everywhere: fused == unfused byte-identical
-                                                                    // (the byte-gate mode; default fast mode fp32-chains each
-                                                                    // unit and rounds once per stored stream)
-        bool lowerConv = false;                                     // non-Winograd KxK Conv -> ConvGemm (experimental: the
-                                                                    // v1 64x64x16 kernel loses to the direct conv on
-                                                                    // classifier-CNN shapes — opt in per model, measure)
-        bool dequantize = true;                                     // fold DequantizeLinear weights + collapse matching
-                                                                    // QDQ sandwiches so quantized checkpoints run as
-                                                                    // float graphs (--no-dequantize keeps the quantized
-                                                                    // ops; they have no kernel and fail planning)
-        bool dumpBig = false;                                       // debug: log tensors > 50M elements after shape inference
+        bool                           fuseSqueezeExcite = false; // fuse the SE squeeze->FC->scale chain (experimental)
+        bool                           fuseDwPw          = false; // fuse depthwise KxK + 1x1-project into FusedDwPw
+                                                                  // (experimental: the fp16-rounded LDS intermediate matches
+                                                                  // the unfused store bit-for-bit on the CPU oracle and at
+                                                                  // fp32, but the fp16 GPU path still diverges from the
+                                                                  // unfused graph — opt in with --fuse-dwpw and measure)
+        bool fusePointwiseChains = true;                          // the general pointwise-region fusion (default on)
+        bool fuseGridSampleWarp  = true;                          // fold a scaled-flow + base-grid coordinate chain into
+                                                                  // GridSample (bit-exact; default on, part of O1)
+        bool strictFuse = false;                                  // rounded steps everywhere: fused == unfused byte-identical
+                                                                  // (the byte-gate mode; default fast mode fp32-chains each
+                                                                  // unit and rounds once per stored stream)
+        bool lowerConv = false;                                   // non-Winograd KxK Conv -> ConvGemm (experimental: the
+                                                                  // v1 64x64x16 kernel loses to the direct conv on
+                                                                  // classifier-CNN shapes — opt in per model, measure)
+        bool dequantize = true;                                   // fold DequantizeLinear weights + collapse matching
+                                                                  // QDQ sandwiches so quantized checkpoints run as
+                                                                  // float graphs (--no-dequantize keeps the quantized
+                                                                  // ops; they have no kernel and fail planning)
+        bool dumpBig = false;                                     // debug: log tensors > 50M elements after shape inference
 
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
@@ -275,6 +275,18 @@ namespace vknn {
     // backend in a flat row-major layout (Transpose/Slice/Concat/Binary/Softmax). No-op for graphs
     // without such ops. Run after backend-agnostic passes, before backend planning.
     void insertLayoutConverts(Graph &g);
+
+    /// Does this Transpose read its input in NC4HW4 rather than flat row-major?
+    ///
+    /// True for the rank-4 NCHW -> NHWC permutation (0,2,3,1) with no fused epilogue: an NC4HW4
+    /// vec4 holds four consecutive channels of one pixel, which are four CONSECUTIVE elements of
+    /// the NHWC output, so shaders/transpose_nhwc.comp does the whole reindex in one coalesced
+    /// pass. Every other Transpose is a flat gather and takes the ConvertLayout in front of it.
+    ///
+    /// The layout pass and the Vulkan op must agree exactly -- the pass decides whether to leave
+    /// the input NC4HW4, the op decides which kernel to dispatch, and a disagreement means one of
+    /// them reads the wrong layout -- so both call this.
+    bool transposeReadsNc4(const Graph &g, const Node &n);
 
     // Split a comma-separated pattern list into its non-empty entries, as typed (an exclude entry
     // keeps its leading '-'). Shared by markFp32's per-entry match accounting and the session's

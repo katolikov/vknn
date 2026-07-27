@@ -1,6 +1,39 @@
 #include "passes_internal.h"
+#include <iterator>
 
 namespace vknn {
+
+    // Channel-last permutation of a rank-4 NCHW tensor: [N,C,H,W] -> [N,H,W,C].
+    static constexpr int64_t kNhwcPerm[] = {0, 2, 3, 1};
+
+    bool transposeReadsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::Transpose || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        if (n.attr.has("pw_steps") || n.attr.has("view_stride"))
+        {
+            return false; // a fused epilogue / folded movement chain runs through the flat gather
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape;
+        if (in.size() != std::size(kNhwcPerm) || g.isInitializer(n.inputs[0]))
+        {
+            return false;
+        }
+        const auto &perm = n.attr.getints("perm");
+        if (perm.size() != std::size(kNhwcPerm))
+        {
+            return false; // an absent perm is the full reverse, not channel-last
+        }
+        for (size_t k = 0; k < perm.size(); ++k)
+        {
+            if (perm[k] != kNhwcPerm[k])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 
     // Does this op run as a FLAT (row-major) GPU op rather than the NC4HW4 path? Mirrors the cases the
     // Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
@@ -10,6 +43,8 @@ namespace vknn {
     // The per-OpType layout fact lives in opDescriptor(): LayoutClass::Flat is unconditionally flat,
     // LayoutClass::Nc4 unconditionally NC4HW4. Only LayoutClass::ShapeDependent ops keep a per-node
     // predicate below; the switch handles exactly those (the anti-drift test asserts the two agree).
+    //
+    // A Transpose's OUTPUT is always flat; transposeReadsNc4 governs its INPUT separately.
     bool gpuFlatNode(const Graph &g, const Node &n) {
         auto sh = [&](TensorId t) -> const Shape & {
             return g.desc(t).shape;
@@ -193,7 +228,6 @@ namespace vknn {
         }
     }
 
-
     // --- Global layout assignment (NC4HW4 vs flat) ------------------------------------------------------
     // Every GPU tensor runs in one layout. A FIXED op has a kernel in only one layout; a FLEXIBLE op is
     // bit-exact in either (layout is an index remap over the same math + fp16 rounding), so the assignment
@@ -215,9 +249,22 @@ namespace vknn {
         /// splicer applies below, so an assignment derived from it provably removes the convert
         /// instead of moving it.
         bool readerWantsFlat(const Graph &g, const Node &n, size_t inputIndex) {
-            const bool needFlat = n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
-            // GridSample's non-warp grid is always a flat [N,Hout,Wout,2] buffer (see convertRead).
-            return (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp")) ? true : needFlat;
+            // GridSample's non-warp grid is always a flat [N,Hout,Wout,2] buffer, whatever layout the
+            // data path runs in: a runtime grid left NC4HW4 would be mis-packed. A warp-mode
+            // GridSample instead reads its NCHW flow (input 1) in the NC4HW4 activation layout (the
+            // op computes coordinates from it directly), so it follows the node's own format.
+            if (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp"))
+            {
+                return true;
+            }
+            // A channel-last Transpose reads NC4HW4 directly (transposeReadsNc4): the packed vec4 is
+            // four consecutive output channels, so the reindex is one coalesced pass and the
+            // full-size ConvertLayout that would otherwise precede it never gets spliced in.
+            if (inputIndex == 0 && transposeReadsNc4(g, n))
+            {
+                return false;
+            }
+            return n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
         }
 
         LKind opLayoutKind(const Graph &g, const Node &n) {
@@ -281,11 +328,11 @@ namespace vknn {
             // A step record is 8 ints: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc; a bcast
             // field of 2 marks the general-broadcast operand class that only the flat kernel
             // addresses.
-            constexpr int     kPwStepInts        = 8;
-            constexpr int     kPwStepBcastField  = 6;
-            constexpr int64_t kPwBcastGeneral    = 2;
-            constexpr int     kFlexVoteMaxRounds = 8; // cycles are byte-weight monotone; this only caps oscillation
-            constexpr int64_t kNc4Rank           = 4;
+            constexpr int       kPwStepInts        = 8;
+            constexpr int       kPwStepBcastField  = 6;
+            constexpr int64_t   kPwBcastGeneral    = 2;
+            constexpr int       kFlexVoteMaxRounds = 8; // cycles are byte-weight monotone; this only caps oscillation
+            constexpr int64_t   kNc4Rank           = 4;
             std::vector<size_t> flexible;
             for (size_t i = 0; i < g.nodes.size(); ++i)
             {
@@ -298,8 +345,8 @@ namespace vknn {
                 {
                     continue; // rank != 4 has no NC4HW4 form: stays with the classifier
                 }
-                const auto &steps   = nd.attr.getints("pw_steps");
-                bool        nc4Ok   = steps.size() % kPwStepInts == 0;
+                const auto &steps = nd.attr.getints("pw_steps");
+                bool        nc4Ok = steps.size() % kPwStepInts == 0;
                 for (size_t s = 0; nc4Ok && s + kPwStepBcastField < steps.size(); s += kPwStepInts)
                 {
                     nc4Ok = steps[s + kPwStepBcastField] != kPwBcastGeneral;
@@ -328,10 +375,10 @@ namespace vknn {
                     bool changed = false;
                     for (size_t i: flexible)
                     {
-                        Node   &nd        = g.nodes[i];
-                        int64_t flatCost  = 0; // elements converted if this node runs FLAT
-                        int64_t nc4Cost   = 0; // ... if it runs NC4HW4
-                        auto    voteEdge  = [&](TensorId t, bool neighborFlat) {
+                        Node   &nd       = g.nodes[i];
+                        int64_t flatCost = 0; // elements converted if this node runs FLAT
+                        int64_t nc4Cost  = 0; // ... if it runs NC4HW4
+                        auto    voteEdge = [&](TensorId t, bool neighborFlat) {
                             const int64_t w = numElements(g.desc(t).shape);
                             (neighborFlat ? nc4Cost : flatCost) += w;
                         };
@@ -364,10 +411,10 @@ namespace vknn {
                         if (wantFlat != (nd.attr.geti("pw_flat", 0) != 0))
                         {
                             Attr a;
-                            a.kind                  = Attr::Int;
-                            a.i                     = wantFlat ? 1 : 0;
-                            nd.attr.map["pw_flat"]  = a;
-                            changed                 = true;
+                            a.kind                 = Attr::Int;
+                            a.i                    = wantFlat ? 1 : 0;
+                            nd.attr.map["pw_flat"] = a;
+                            changed                = true;
                         }
                     }
                     if (!changed)
@@ -541,12 +588,10 @@ namespace vknn {
             bool needFlat = g.desc(nd.outputs[0]).gpuFlat; // the format this node operates in
             for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
             {
-                // GridSample's grid (input 1) is a flat [N,Hout,Wout,2] buffer regardless of the NC4HW4
-                // data path — keep it flat so a runtime grid is not mis-packed as NC4HW4. A warp-mode
-                // GridSample instead reads its NCHW flow (input 1) in the NC4HW4 activation layout (the
-                // op computes coordinates from it directly), so it follows the node's own format.
-                bool wantFlat = (nd.type == OpType::GridSample && inIdx == 1 && !nd.attr.has("warp")) ? true : needFlat;
-                convertRead(nd.inputs[inIdx], wantFlat);
+                // readerWantsFlat is the ONE rule for which layout a reader operates an input slot
+                // in; globalLayoutAssign derived the assignment from it, so the splicer has to ask
+                // the same function or the two drift and a convert gets moved instead of removed.
+                convertRead(nd.inputs[inIdx], readerWantsFlat(g, nd, inIdx));
             }
             // Fused residual/bias edges are reads outside the inputs list (rewireTensor's contract)
             // and the kernel decodes them in ITS layout world, so they take the same converts as any
@@ -569,13 +614,13 @@ namespace vknn {
             }
             TensorDesc d    = g.desc(out); // carries the model's output name, declared dtype, shape, storeFp32
             d.isInitializer = d.isInput = false;
-            d.isOutput      = true;
-            d.gpuFlat       = true;
+            d.isOutput                  = true;
+            d.gpuFlat                   = true;
             // The flat convert output KEEPS the model's declared output name (callers look up outputs by
             // name); the pre-convert tensor becomes an internal boundary and is renamed to stay unique.
             g.desc(out).name += "#nc4";
             g.desc(out).isOutput = false;
-            TensorId t2 = g.addTensor(d);
+            TensorId t2          = g.addTensor(d);
             Node     cv;
             cv.type    = OpType::ConvertLayout;
             cv.name    = "convertout" + std::to_string(n++);
