@@ -37,7 +37,7 @@ import onnx
 
 from onnx_optimizer import __version__, graph_util as gu, report as report_mod
 from onnx_optimizer.passes import PIPELINE, build_pipeline
-from onnx_optimizer.verify import Verifier, compare_runs, reference_config
+from onnx_optimizer.verify import Verifier, parse_dim_overrides, reference_config
 
 _PROTO_SPILL_BYTES = 1_900_000_000  # keep clear of the 2 GiB protobuf ceiling
 
@@ -60,7 +60,7 @@ class Engine:
     """Fixpoint pass driver with per-pass bit-exact gating and auto-revert."""
 
     def __init__(self, model, passes, report, gate_samples=2, seed=0,
-                 dyn_sizes=(1, 3), max_iterations=10, log=None):
+                 dyn_sizes=(1, 3), max_iterations=10, log=None, dim_overrides=None):
         self.model = model
         self.passes = passes
         self.report = report
@@ -68,7 +68,8 @@ class Engine:
         self.log = log or (lambda s: None)
         self.disabled = set()
         self.gate = Verifier(model, n_random=gate_samples, seed=seed,
-                             dyn_sizes=dyn_sizes, batteries=False)
+                             dyn_sizes=dyn_sizes, batteries=False,
+                             dim_overrides=dim_overrides)
 
     def run(self):
         self.model = _refresh_shapes(self.model)
@@ -181,6 +182,9 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0, help="RNG seed (default 0)")
     ap.add_argument("--dyn-sizes", default="1,3",
                     help="comma-separated sizes tried for symbolic dims (default 1,3)")
+    ap.add_argument("--dim", action="append", default=[], metavar="NAME=N",
+                    help="pin a named symbolic dim for verification inputs "
+                         "(repeatable), e.g. --dim height=224")
     ap.add_argument("--max-iterations", type=int, default=10,
                     help="fixpoint iteration cap (default 10)")
     ap.add_argument("--max-fold-bytes", type=int, default=16 * 1024 * 1024,
@@ -205,6 +209,10 @@ def main(argv=None):
         dyn_sizes = tuple(int(x) for x in args.dyn_sizes.split(",") if x)
     except ValueError:
         ap.error("--dyn-sizes must be comma-separated integers")
+    try:
+        dim_overrides = parse_dim_overrides(args.dim)
+    except ValueError as e:
+        ap.error(str(e))
 
     try:
         model = onnx.load(args.input)
@@ -232,7 +240,8 @@ def main(argv=None):
     try:
         engine = Engine(model, passes, report, gate_samples=args.gate_samples,
                         seed=args.seed, dyn_sizes=dyn_sizes,
-                        max_iterations=args.max_iterations, log=log)
+                        max_iterations=args.max_iterations, log=log,
+                        dim_overrides=dim_overrides)
     except RuntimeError as e:
         sys.stderr.write("error: cannot build the verification gate: %s\n" % e)
         return 2
@@ -249,7 +258,7 @@ def main(argv=None):
 
     print("final verification (%d random samples + edge batteries)..." % args.verify_samples)
     verifier = Verifier(original, n_random=args.verify_samples, seed=args.seed,
-                        dyn_sizes=dyn_sizes, batteries=True)
+                        dyn_sizes=dyn_sizes, batteries=True, dim_overrides=dim_overrides)
     verification = verifier.check(optimized)
     report.verification = verification
     report.after = report_mod.model_stats(optimized, os.path.abspath(args.output))

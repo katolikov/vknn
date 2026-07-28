@@ -110,6 +110,14 @@ else
   skip "check_shader_contracts.py" "tool not present in this tree"
 fi
 
+# 6c. onnx_optimizer unit + integration tests (pure Python; needs onnx/onnxruntime/pytest,
+# which the C++ build does not — skip cleanly when the deps are absent).
+if python3 -c "import onnx, onnxruntime, pytest" >/dev/null 2>&1; then
+  step "onnx_optimizer pytest" python3 -m pytest "$ROOT/tools/onnx_optimizer/tests" -q
+else
+  skip "onnx_optimizer pytest" "onnx/onnxruntime/pytest not installed (pip install -r tools/onnx_optimizer/requirements.txt)"
+fi
+
 # 7. clang-format drift (dry-run, never edits). Advisory unless --strict-format (step-7 note).
 if [ -f "$ROOT/.clang-format" ] && command -v clang-format >/dev/null 2>&1; then
   fmt_check() {

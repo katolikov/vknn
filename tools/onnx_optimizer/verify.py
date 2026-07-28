@@ -145,14 +145,21 @@ def runtime_input_specs(model):
     return specs
 
 
-def resolve_shapes(specs, dyn_size):
+def resolve_shapes(specs, dyn_size, dim_overrides=None):
     """Concrete shape per input, giving every dynamic dim `dyn_size`; dims that
-    share a dim_param name share the size."""
+    share a dim_param name share the size, and `dim_overrides` pins named
+    symbolic dims (e.g. {"height": 224}) regardless of dyn_size."""
+    dim_overrides = dim_overrides or {}
     shapes = {}
     for name, _, dims in specs:
         shape = []
         for d in dims:
-            shape.append(d if isinstance(d, int) else dyn_size)
+            if isinstance(d, int):
+                shape.append(d)
+            elif isinstance(d, str) and d in dim_overrides:
+                shape.append(dim_overrides[d])
+            else:
+                shape.append(dyn_size)
         shapes[name] = tuple(shape)
     return shapes
 
@@ -169,16 +176,16 @@ def _random_array(rng, dtype, shape):
     return rng.integers(0, 2, size=shape).astype(dtype)
 
 
-def random_feed(specs, rng, dyn_size):
-    shapes = resolve_shapes(specs, dyn_size)
+def random_feed(specs, rng, dyn_size, dim_overrides=None):
+    shapes = resolve_shapes(specs, dyn_size, dim_overrides)
     return {name: _random_array(rng, dtype, shapes[name]) for name, dtype, _ in specs}
 
 
-def battery_feeds(specs, rng, dyn_size):
+def battery_feeds(specs, rng, dyn_size, dim_overrides=None):
     """[(kind, feed)] edge-case batteries. Float inputs get the pattern; other
     dtypes keep a safe base (zeros/ones where meaningful, else random)."""
-    shapes = resolve_shapes(specs, dyn_size)
-    base = random_feed(specs, rng, dyn_size)
+    shapes = resolve_shapes(specs, dyn_size, dim_overrides)
+    base = random_feed(specs, rng, dyn_size, dim_overrides)
     out = []
 
     def build(kind, fill):
@@ -215,6 +222,17 @@ def battery_feeds(specs, rng, dyn_size):
     if any(dtype.kind == "f" for _, dtype, _ in specs):
         build("nan-inf", naninf)
     return out
+
+
+def parse_dim_overrides(pairs):
+    """["height=224", ...] -> {"height": 224}; raises ValueError on bad syntax."""
+    overrides = {}
+    for pair in pairs or []:
+        name, sep, value = pair.partition("=")
+        if not sep or not name or not value.lstrip("-").isdigit() or int(value) < 1:
+            raise ValueError("--dim expects NAME=positive-integer, got %r" % pair)
+        overrides[name] = int(value)
+    return overrides
 
 
 def _ulp_distance(a, b):
@@ -294,10 +312,12 @@ class Verifier:
     plus one run per case.
     """
 
-    def __init__(self, reference_model, n_random=8, seed=0, dyn_sizes=(1, 3), batteries=True):
+    def __init__(self, reference_model, n_random=8, seed=0, dyn_sizes=(1, 3), batteries=True,
+                 dim_overrides=None):
         self.config = dict(reference_config())
         self.config.update({"seed": seed, "random_samples": n_random,
-                            "dynamic_dim_sizes": list(dyn_sizes), "batteries": bool(batteries)})
+                            "dynamic_dim_sizes": list(dyn_sizes), "batteries": bool(batteries),
+                            "dim_overrides": dict(dim_overrides or {})})
         self.skipped = []  # cases the reference itself cannot run
         self.cases = []    # (label, feed, ref_outputs)
         session = ReferenceSession(reference_model)
@@ -307,10 +327,11 @@ class Verifier:
         planned = []
         for k in range(n_random):
             size = dyn_sizes[k % len(dyn_sizes)]
-            planned.append(("random[%d] dyn=%d" % (k, size), random_feed(specs, rng, size), True))
+            planned.append(("random[%d] dyn=%d" % (k, size),
+                            random_feed(specs, rng, size, dim_overrides), True))
         if batteries:
             size = dyn_sizes[-1]
-            for kind, feed in battery_feeds(specs, rng, size):
+            for kind, feed in battery_feeds(specs, rng, size, dim_overrides):
                 planned.append(("battery:%s dyn=%d" % (kind, size), feed, False))
         for label, feed, hard in planned:
             try:
@@ -353,12 +374,13 @@ class Verifier:
         return result
 
 
-def verify_models(model_a, model_b, n_random=8, seed=0, dyn_sizes=(1, 3), batteries=True):
+def verify_models(model_a, model_b, n_random=8, seed=0, dyn_sizes=(1, 3), batteries=True,
+                  dim_overrides=None):
     """Bit-exact check of model_b against model_a (paths or ModelProtos)."""
     if isinstance(model_a, (str, os.PathLike)):
         model_a = onnx.load(str(model_a))
     verifier = Verifier(model_a, n_random=n_random, seed=seed,
-                        dyn_sizes=dyn_sizes, batteries=batteries)
+                        dyn_sizes=dyn_sizes, batteries=batteries, dim_overrides=dim_overrides)
     return verifier.check(model_b)
 
 
@@ -396,6 +418,8 @@ def main(argv=None):
                     help="comma-separated sizes tried for symbolic dims (default 1,3)")
     ap.add_argument("--no-batteries", action="store_true",
                     help="skip the zeros/ones/negative/large/nan-inf edge batteries")
+    ap.add_argument("--dim", action="append", default=[], metavar="NAME=N",
+                    help="pin a named symbolic dim (repeatable), e.g. --dim height=224")
     ap.add_argument("--json", metavar="PATH", help="write the full result as JSON")
     args = ap.parse_args(argv)
 
@@ -404,9 +428,13 @@ def main(argv=None):
     except ValueError:
         ap.error("--dyn-sizes must be comma-separated integers")
     try:
+        dim_overrides = parse_dim_overrides(args.dim)
+    except ValueError as e:
+        ap.error(str(e))
+    try:
         result = verify_models(args.model_a, args.model_b, n_random=args.samples,
                                seed=args.seed, dyn_sizes=dyn_sizes,
-                               batteries=not args.no_batteries)
+                               batteries=not args.no_batteries, dim_overrides=dim_overrides)
     except (OSError, RuntimeError, ValueError) as e:
         sys.stderr.write("error: %s\n" % e)
         return 2
