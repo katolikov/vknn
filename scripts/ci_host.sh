@@ -132,7 +132,7 @@ if [ -f "$ROOT/.clang-format" ] && command -v clang-format >/dev/null 2>&1; then
     [ "$bad" -eq 0 ] || { echo "  $bad file(s) differ from clang-format $(clang-format --version | grep -oE '[0-9]+' | head -1) — scripts/format.sh fixes in place"; return 1; }
     return 0
   }
-  printf "\n>>>> clang-format drift (advisory)\n"
+  printf "\n>>>> clang-format drift (%s)\n" "$([ "$STRICT_FORMAT" -eq 1 ] && echo strict || echo advisory)"
   if fmt_check; then
     echo "PASS  clang-format drift"
   elif [ "$STRICT_FORMAT" -eq 1 ]; then
