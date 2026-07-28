@@ -32,7 +32,7 @@ namespace vknn {
                 }
                 // Field order/types mirror add.comp's push_constant block. count is the NC4HW4 packed
                 // element count, so one flat 1D grid covers every packed lane of the output buffer.
-                pc = {(uint32_t) packedElems(env.graph->desc(node.outputs[0]).shape), (int) node.fusedAct, node.actLo, node.actHi};
+                pc   = {(uint32_t) packedElems(env.graph->desc(node.outputs[0]).shape), (int) node.fusedAct, node.actLo, node.actHi};
                 pipe = env.pipeline(shader("add", env.useFp16), 3, sizeof(AddPC), std::vector<uint32_t> {});
             }
 

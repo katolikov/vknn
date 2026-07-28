@@ -38,8 +38,8 @@ TEST(PatternAccounting, SplitPatternListKeepsEntriesAsTyped) {
 TEST(PatternAccounting, MarkFp32RecordsMatchedEntriesOverEligibleTensorsOnly) {
     Graph    g;
     TensorId flatAct = addNamed(g, "attn_q_out", true);
-    addNamed(g, "conv_out", false);            // NC4HW4: never eligible for a substring mark
-    addNamed(g, "attn_table", true, true);     // initializer: never eligible
+    addNamed(g, "conv_out", false);        // NC4HW4: never eligible for a substring mark
+    addNamed(g, "attn_table", true, true); // initializer: never eligible
     std::set<std::string> matched;
     markFp32(g, "attn_q,-conv_out,ghost", &matched);
     EXPECT_TRUE(matched.count("attn_q")) << "the include entry matches the eligible flat tensor";

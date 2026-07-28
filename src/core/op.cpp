@@ -274,7 +274,8 @@ namespace vknn {
             {"DepthToSpace", OpType::DepthToSpace},
             {"Cast", OpType::Cast},
             {"Split", OpType::Split},
-            {"Where", OpType::Where}, {"Det", OpType::Det},
+            {"Where", OpType::Where},
+            {"Det", OpType::Det},
             {"Equal", OpType::Equal},
             {"Greater", OpType::Greater},
             // GreaterOrEqual is the canonical ONNX spelling; GreaterEqual is accepted as an alias.

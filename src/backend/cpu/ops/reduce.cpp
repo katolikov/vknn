@@ -18,9 +18,9 @@ namespace vknn {
     namespace {
         struct ReduceCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor      &X    = ctx.t(node.inputs[0]);
-                RtTensor            &Y    = ctx.t(node.outputs[0]);
-                int                  rank = (int) X.shape.size();
+                const RtTensor &X    = ctx.t(node.inputs[0]);
+                RtTensor       &Y    = ctx.t(node.outputs[0]);
+                int             rank = (int) X.shape.size();
                 // Axis source precedence: `axes` attribute, else the optional int64 `axes` input[1]
                 // (opset-18 form), else — when neither is supplied — reduce over all axes.
                 std::vector<int64_t> axes = node.attr.getints("axes");
@@ -43,11 +43,11 @@ namespace vknn {
                 {
                     ax.insert((int) (a < 0 ? a + rank : a));
                 }
-                ReduceType           op   = (ReduceType) node.subOp;
+                ReduceType op = (ReduceType) node.subOp;
                 // Output shape from the runtime input: reduced axes collapse to 1 (keepdims, the ONNX
                 // default) or are dropped; a full reduction with keepdims=0 yields the scalar-like {1}.
-                bool                 keep = node.attr.geti("keepdims", 1) != 0;
-                Shape                out;
+                bool  keep = node.attr.geti("keepdims", 1) != 0;
+                Shape out;
                 for (int i = 0; i < rank; ++i)
                 {
                     if (ax.count(i))
@@ -65,7 +65,7 @@ namespace vknn {
                 {
                     out.push_back(1);
                 }
-                int64_t              outElems = numElements(out), n = X.elems();
+                int64_t outElems = numElements(out), n = X.elems();
                 // Row-major strides of the full input tensor, used to decompose a flat index back into
                 // per-axis coordinates.
                 std::vector<int64_t> inStride(rank, 1);
@@ -101,9 +101,9 @@ namespace vknn {
                 // attention_mask to a valid-length count at runtime); read each element through its
                 // own dtype so the integer values are not reinterpreted as float bits. The count
                 // magnitudes these reductions produce are exact in the fp32 accumulator.
-                const bool           inI64 = X.dtype == DType::Int64;
-                const float         *xf    = inI64 ? nullptr : X.host.f32();
-                const int64_t       *xi    = inI64 ? X.host.i64() : nullptr;
+                const bool     inI64 = X.dtype == DType::Int64;
+                const float   *xf    = inI64 ? nullptr : X.host.f32();
+                const int64_t *xi    = inI64 ? X.host.i64() : nullptr;
                 // Single pass over the flat input. For each element, project its kept-axis coordinates
                 // to the output bin `oi` and fold the value in; the reduced axes contribute nothing to
                 // `oi`, so every input touching the same bin accumulates there.

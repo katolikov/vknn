@@ -69,8 +69,8 @@ namespace vknn {
                 // source, the rest the new-rows source. The score/context helpers run per segment
                 // in ascending s with the context accumulating across the boundary, so the fp32
                 // chains are the exact chains the concatenated form produces — bit-identical.
-                const bool                  split     = node.attr.geti(kFaSplit, 0) != 0 && node.inputs.size() >= 6;
-                const int64_t               pastLen   = split ? node.attr.geti(kFaPastLen) : C;
+                const bool                  split      = node.attr.geti(kFaSplit, 0) != 0 && node.inputs.size() >= 6;
+                const int64_t               pastLen    = split ? node.attr.geti(kFaPastLen) : C;
                 const std::vector<int64_t> &kNewStride = node.attr.getints(kFaKNewStride);
                 const std::vector<int64_t> &vNewStride = node.attr.getints(kFaVNewStride);
                 const int64_t               kNewN = node.attr.geti(kFaKNewN), kNewK = node.attr.geti(kFaKNewK);
@@ -100,8 +100,8 @@ namespace vknn {
                     if (cacheTensors.count(node.inputs[1]) && cacheTensors.count(node.inputs[2]))
                     {
                         auto codecRoundTrip = [hd](const float *src, const Shape &shape, std::vector<float> &roundTripped) {
-                            const int64_t elems = numElements(shape);
-                            const int64_t rowCount = elems / hd;
+                            const int64_t       elems    = numElements(shape);
+                            const int64_t       rowCount = elems / hd;
                             std::vector<int8_t> payload((size_t) elems);
                             std::vector<fp16_t> scaleBits((size_t) rowCount);
                             roundTripped.resize((size_t) elems);

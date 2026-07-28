@@ -32,7 +32,7 @@ namespace vknn {
                 epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
                 // Base binding count is 2 (src, dst); a fused pointwise epilogue appends its own operand
                 // buffers via extraBufs() and swaps in the _epi shader variant through suffix().
-                pipe  = env.pipeline(shader((std::string("resize") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ResizePC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader((std::string("resize") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ResizePC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer           *s    = env.devBuf(node.inputs[0]);

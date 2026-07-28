@@ -1,0 +1,53 @@
+# The host-only gate (scripts/ci_host.sh) on every PR targeting main: host build,
+# vknn_tests, the tools/ consistency checkers, clang-format (STRICT — drift fails
+# the gate; the tree is formatted with clang-format 18, pinned below, and
+# scripts/format.sh fixes drift in place), and CPU determinism. The Android and
+# docs steps are skipped here (no NDK/doxygen on the runner); the on-device
+# byte/perf gates remain manual, as documented in scripts/ci_host.sh.
+name: ci-host
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-host-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only the submodules the host build links against; glslang is the
+      # shader toolchain and is not needed without the Android step.
+      - name: submodules (host build)
+        run: git submodule update --init --depth 1 third_party/googletest third_party/msgpack-c
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # onnx_optimizer test deps (pinned). The requirements file guard keeps the
+      # workflow green on branches that predate tools/onnx_optimizer; without the
+      # deps, ci_host.sh skips that step cleanly.
+      - name: python deps
+        run: |
+          if [ -f tools/onnx_optimizer/requirements.txt ]; then
+            pip install -r tools/onnx_optimizer/requirements.txt
+          fi
+
+      # The strict format gate only means something at a fixed formatter version:
+      # clang-format's include-sort/comment behavior changes between releases, so
+      # the gate pins the version the tree is formatted with.
+      - name: clang-format 18
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang-format-18
+          sudo ln -sf "$(command -v clang-format-18)" /usr/local/bin/clang-format
+          clang-format --version
+
+      - name: ci_host.sh
+        run: scripts/ci_host.sh --no-android --no-docs --strict-format

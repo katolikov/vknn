@@ -158,9 +158,9 @@ int main(int argc, char **argv) {
     const int     topK         = atoi(opt(argc, argv, "--top-k", "0"));
     const float   topP         = (float) atof(opt(argc, argv, "--top-p", "1"));
     const int64_t eos          = atoll(opt(argc, argv, "--eos", "151643"));
-    bool          kvLink       = !flagSet(argc, argv, "--no-kv-link"); // may drop to the host loop mid-stream on a link failure
-    cfg.timing                 = flagSet(argc, argv, "--timing");      // per-run pack/submit/unpack walls
-    cfg.timingSummary          = flagSet(argc, argv, "--timing-summary"); // silent per-segment submit/sync accumulators, one line at teardown
+    bool          kvLink       = !flagSet(argc, argv, "--no-kv-link");             // may drop to the host loop mid-stream on a link failure
+    cfg.timing                 = flagSet(argc, argv, "--timing");                  // per-run pack/submit/unpack walls
+    cfg.timingSummary          = flagSet(argc, argv, "--timing-summary");          // silent per-segment submit/sync accumulators, one line at teardown
     const int maxSubmitNodes   = atoi(opt(argc, argv, "--max-submit-nodes", "0")); // >0 overrides Config::maxSubmitNodes (command-buffer chunking)
     if (maxSubmitNodes > 0)
     {
@@ -558,11 +558,13 @@ int main(int argc, char **argv) {
     {
         if (temp > 0.0f)
         {
-            fprintf(stderr, "[chat] --draft needs greedy decode (--temp 0): sampled speculation needs the modified-rejection scheme, which is not implemented; decoding without speculation\n");
+            fprintf(stderr, "[chat] --draft needs greedy decode (--temp 0): sampled speculation needs the modified-rejection scheme, which is not implemented; "
+                            "decoding without speculation\n");
             specBucket = -1;
         } else if (chainWanted)
         {
-            fprintf(stderr, "[chat] --draft and --chain are two device paths for the same loop; --chain was asked for explicitly, so speculation stands down\n");
+            fprintf(stderr,
+                    "[chat] --draft and --chain are two device paths for the same loop; --chain was asked for explicitly, so speculation stands down\n");
             specBucket = -1;
         } else if (!kvLink)
         {
@@ -582,9 +584,7 @@ int main(int argc, char **argv) {
         {
             fprintf(stderr, "[chat] this model has no input_ids [1,%lld] verification bucket (recompile with vknn_compile to get one); decoding without speculation\n", (long long) kSpecVerifyTokens);
         } else if (!validateBatchedBucket(specBucket, (int) kSpecVerifyTokens, "spec-verify", &specMaskLen, &specPresRows, &specLogitsIdx))
-        {
-            specBucket = -1;
-        }
+        { specBucket = -1; }
         if (specBucket >= 0)
         {
             draft = DraftDecoder::open(draftPath, cfg);
@@ -739,8 +739,8 @@ int main(int argc, char **argv) {
 
     // Decode-loop phase walls (--timing): accumulated per decode step, reported per turn.
     double tmLinkMs = 0, tmRunMs = 0, tmPrepMs = 0, tmSampleMs = 0;
-    int    tmSteps  = 0;
-    auto   nowMs    = [] {
+    int    tmSteps = 0;
+    auto   nowMs   = [] {
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
     };
 
@@ -813,7 +813,7 @@ int main(int argc, char **argv) {
                 } else
                 {
                     std::vector<IOTensor> bound = boundInputs();
-                    runStatus = sess->run(bound, outputs);
+                    runStatus                   = sess->run(bound, outputs);
                 }
                 ranLinked           = true;
                 residentDirty       = true;
@@ -969,7 +969,7 @@ int main(int argc, char **argv) {
         } else
         {
             std::vector<IOTensor> bound = boundInputs();
-            runStatus = sess->run(bound, outputs);
+            runStatus                   = sess->run(bound, outputs);
         }
         residentDirty       = true;
         pendingResidentFold = true;
@@ -1152,7 +1152,7 @@ int main(int argc, char **argv) {
     std::vector<float>    chunkLogitsF32; // fp32 copy of an fp16 logits row for host sampling
     auto                  runChunk = [&](const int64_t *toks, int len, int prevStart, int prevLen, bool bindPast) -> bool {
         const int                    newRowsAt = chunkPresRows - chunkS; // produced rows sit after any past block
-        const std::vector<LinkRange> ranges    = kvFoldRowRanges(kvHeads, chunkPresRows, C, headDim, newRowsAt, prevLen > 0 ? prevStart : -1, prevLen);
+        const std::vector<LinkRange> ranges = kvFoldRowRanges(kvHeads, chunkPresRows, C, headDim, newRowsAt, prevLen > 0 ? prevStart : -1, prevLen);
         for (int l = 0; l < L; ++l)
         {
             for (int part = 0; part < 2; ++part)
@@ -1360,7 +1360,7 @@ int main(int argc, char **argv) {
     // verification bucket and back to the decode bucket afterwards (readResident is name-keyed and
     // stays unambiguous that way).
     std::vector<IOTensor> specOutputs;
-    std::vector<float>    specLogitsF32; // fp32 copy of an fp16 verification logits block
+    std::vector<float>    specLogitsF32;                                      // fp32 copy of an fp16 verification logits block
     int64_t               specRounds = 0, specProposed = 0, specAccepted = 0; // acceptance instrument
 
     // Link every verification-bucket present output to its past input (ranges re-armed per round).
@@ -1568,10 +1568,10 @@ int main(int argc, char **argv) {
             restoreDecodeLinks();
             return 0; // the plain loop owns the turn; `next` was never fed
         }
-        int  prevSlot = -1, prevRows = 0;
-        bool bindPast  = true;
-        bool ranRound  = false;
-        int  outcome   = 0;
+        int                  prevSlot = -1, prevRows = 0;
+        bool                 bindPast = true;
+        bool                 ranRound = false;
+        int                  outcome  = 0;
         std::vector<int64_t> window((size_t) kSpecVerifyTokens, 0), rowArgMax, proposals((size_t) kSpecDraftTokens, 0);
         while (generated < maxTokens && next != eos)
         {
@@ -1591,8 +1591,8 @@ int main(int argc, char **argv) {
             {
                 break;
             }
-            bindPast = false;
-            ranRound = true;
+            bindPast           = false;
+            ranRound           = true;
             const int accepted = specAcceptedDrafts(proposals.data(), rowArgMax.data(), (int) kSpecDraftTokens);
             ++specRounds;
             specProposed += kSpecDraftTokens;
@@ -1736,9 +1736,9 @@ int main(int argc, char **argv) {
         {
             fedTokens.insert(fedTokens.end(), prompt.begin(), prompt.end()); // every prefill path feeds the whole prompt
         }
-        const double tTurnStart   = nowMs(); // turn walls for the --timing-summary line below
-        size_t consumed         = 0;
-        bool   chunkRanThisTurn = false;
+        const double tTurnStart       = nowMs(); // turn walls for the --timing-summary line below
+        size_t       consumed         = 0;
+        bool         chunkRanThisTurn = false;
         // The whole-window bucket wins whenever it covers the prompt: one pass over the weights
         // beats ceil(T / chunkS) passes, and every chunk pass re-reads the whole weight set (on a
         // 0.5B decoder, time to first token is ~520 ms flat for the window pass against ~450 ms per
@@ -1816,7 +1816,7 @@ int main(int argc, char **argv) {
         // and is either already GPU-side or a single host vocab scan).
         const double tPromptDone = nowMs();
         int          emitted     = 0; // tokens actually printed this turn (the decode-rate denominator)
-        int generated = 0;
+        int          generated   = 0;
         // Greedy speculative decode. The draft first catches up on every conversation token it has
         // not seen (this prompt, and anything an earlier turn generated while speculation was down),
         // then the rounds run; whatever they leave — the context edge, a link failure, a draft that
@@ -1856,7 +1856,8 @@ int main(int argc, char **argv) {
                 draftValid = draftReady ? caughtUp : draftValid;
                 if (!draftReady)
                 {
-                    fprintf(stderr, "[chat] draft model could not follow the conversation to %d tokens (its context is %d); decoding this turn plainly\n", caughtUp, draft->cacheSlots());
+                    fprintf(stderr, "[chat] draft model could not follow the conversation to %d tokens (its context is %d); decoding this turn plainly\n", caughtUp,
+                            draft->cacheSlots());
                 }
             }
             const int specOutcome = draftReady ? specDecodeTurn(next, generated, emitted) : 0;
@@ -1975,7 +1976,7 @@ int main(int argc, char **argv) {
                     {
                         printf("%lld\n", (long long) chainIds[(size_t) i]);
                         ++generated;
-                ++emitted;
+                        ++emitted;
                     }
                     fflush(stdout);
                     p += firstEosAt + 1;
@@ -1986,7 +1987,7 @@ int main(int argc, char **argv) {
                 {
                     printf("%lld\n", (long long) chainIds[(size_t) i]);
                     ++generated;
-                ++emitted;
+                    ++emitted;
                 }
                 fflush(stdout);
                 p += steps;
@@ -2050,26 +2051,20 @@ int main(int argc, char **argv) {
             // Turn walls: time-to-first-token (prompt fold through the first token's logits) and
             // the mean decode step over the tokens generated after it.
             const double turnEndMs = nowMs();
-            fprintf(stderr, "[chat] turn: prompt=%zu tok ttft=%.2fms generated=%d decode=%.3fms/tok\n",
-                    prompt.size(), tPromptDone - tTurnStart, emitted,
-                    emitted > 1 ? (turnEndMs - tPromptDone) / (emitted - 1) : 0.0);
+            fprintf(stderr, "[chat] turn: prompt=%zu tok ttft=%.2fms generated=%d decode=%.3fms/tok\n", prompt.size(), tPromptDone - tTurnStart, emitted, emitted > 1 ? (turnEndMs - tPromptDone) / (emitted - 1) : 0.0);
         }
         if (specActive && specRounds > 0)
         {
             // The acceptance rate and the tokens committed per target forward: the two numbers that
             // decide whether speculation pays on this model pair, reported every turn.
-            fprintf(stderr, "[chat] speculation: %lld rounds, %lld/%lld drafts accepted (%.1f%%), %.2f tokens per target forward\n",
-                    (long long) specRounds, (long long) specAccepted, (long long) specProposed,
-                    specProposed > 0 ? 100.0 * (double) specAccepted / (double) specProposed : 0.0,
-                    (double) (specRounds + specAccepted) / (double) specRounds);
+            fprintf(stderr, "[chat] speculation: %lld rounds, %lld/%lld drafts accepted (%.1f%%), %.2f tokens per target forward\n", (long long) specRounds, (long long) specAccepted, (long long) specProposed, specProposed > 0 ? 100.0 * (double) specAccepted / (double) specProposed : 0.0, (double) (specRounds + specAccepted) / (double) specRounds);
             specRounds = specProposed = specAccepted = 0;
         }
         if ((cfg.timing || cfg.timingSummary) && tmSteps > 0)
         {
-            fprintf(stderr, "[chat] step phases avg over %d step(s): prep=%.3fms links=%.3fms run=%.3fms sample=%.3fms\n",
-                    tmSteps, tmPrepMs / tmSteps, tmLinkMs / tmSteps, tmRunMs / tmSteps, tmSampleMs / tmSteps);
+            fprintf(stderr, "[chat] step phases avg over %d step(s): prep=%.3fms links=%.3fms run=%.3fms sample=%.3fms\n", tmSteps, tmPrepMs / tmSteps, tmLinkMs / tmSteps, tmRunMs / tmSteps, tmSampleMs / tmSteps);
             tmPrepMs = tmLinkMs = tmRunMs = tmSampleMs = 0;
-            tmSteps  = 0;
+            tmSteps                                    = 0;
         }
         printf("END\n");
         fflush(stdout);

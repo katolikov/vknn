@@ -26,7 +26,7 @@ namespace vknn {
                 int mode = node.attr.gets("mode", "DCR") == "CRD" ? 1 : 0;
                 // total (thread count) is computed in int64 to avoid overflowing the N*C2*OH*OW
                 // product before it is narrowed into the int push-constant field.
-                pc       = {(int) ((int64_t) x.n * C2 * OH * OW), (int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
+                pc   = {(int) ((int64_t) x.n * C2 * OH * OW), (int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
                 pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

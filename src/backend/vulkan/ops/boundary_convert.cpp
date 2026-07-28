@@ -33,7 +33,7 @@ namespace vknn {
     } // namespace
 
     void BoundaryConvert::record(VkCommandBuffer cmd, vk::VulkanContext &ctx, vk::PipelineCache *cache, vk::Buffer *src, vk::Buffer *dst, const NCHW &shape, TensorFormat srcFmt, DType srcDt, TensorFormat dstFmt, DType dstDt) {
-        auto  key = std::make_pair(srcDt, dstDt);
+        auto  key  = std::make_pair(srcDt, dstDt);
         auto &pipe = pipes_[key];
         if (!pipe)
         {

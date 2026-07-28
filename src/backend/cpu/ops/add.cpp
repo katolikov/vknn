@@ -27,20 +27,20 @@ namespace vknn {
                     Shape  out(rank, 1);
                     // Right-align the shorter operand: NumPy broadcasting matches axes from the trailing
                     // end, so a shape shorter than `rank` reads as an implicit leading run of size-1 dims.
-                    auto   dimOf = [&](const Shape &s, size_t i) -> int64_t {
+                    auto dimOf = [&](const Shape &s, size_t i) -> int64_t {
                         size_t off = rank - s.size();
                         return i < off ? 1 : s[i - off];
                     };
                     for (size_t i = 0; i < rank; ++i)
                     {
                         int64_t da = dimOf(sa, i), db = dimOf(sb, i);
-                    out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
+                        out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                     }
-                    int64_t  n   = cpu::elemCount(out); // a rank-0 scalar result carries its one element
-                    int64_t *y   = cpu::allocOutI64(Y, out);
+                    int64_t  n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
+                    int64_t *y = cpu::allocOutI64(Y, out);
                     // Read either operand as int64: a float operand (mixed-dtype shape arithmetic) is
                     // truncated toward zero, since this path only sees integral index/bound values.
-                    auto     val = [](const RtTensor &T, int64_t i) {
+                    auto val = [](const RtTensor &T, int64_t i) {
                         return T.dtype == DType::Int64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
                     };
                     // Per-axis input strides in row-major (C-contiguous) order, built right to left.
@@ -68,7 +68,7 @@ namespace vknn {
                 }
 
                 if (sa == sb)
-                { // residual add: same shape, vectorizable
+                {                                        // residual add: same shape, vectorizable
                     int64_t      n = cpu::elemCount(sa); // a rank-0 scalar result carries its one element
                     float       *y = cpu::allocOut(Y, sa);
                     const float *a = A.host.f32();
@@ -101,19 +101,19 @@ namespace vknn {
                 size_t rank = std::max(sa.size(), sb.size());
                 Shape  out(rank, 1);
                 // Right-align the shorter operand: shorter shapes read as leading size-1 dims.
-                auto   dimOf = [&](const Shape &s, size_t i) -> int64_t {
+                auto dimOf = [&](const Shape &s, size_t i) -> int64_t {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
                 };
                 for (size_t i = 0; i < rank; ++i)
                 {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
-                    out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
+                    out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
-                float               *y = cpu::allocOut(Y, out);
-                const float         *a = A.host.f32();
-                const float         *b = B.host.f32();
+                int64_t      n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
+                float       *y = cpu::allocOut(Y, out);
+                const float *a = A.host.f32();
+                const float *b = B.host.f32();
                 // Row-major input strides, built right to left: stride 0 on a broadcast axis (input dim 1)
                 // makes every output coordinate along it re-read the lone source element.
                 std::vector<int64_t> oa(rank), ob(rank);

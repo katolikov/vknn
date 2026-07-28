@@ -28,8 +28,7 @@
 // Fill `values` from a raw little-endian fp32 file. A missing or short file simply leaves the
 // remaining elements at their initial value (zero), which is a valid input for a quick smoke test.
 // This is ordinary file I/O; nothing here touches the VKNN API.
-static void loadRawFloats(const char *path, std::vector<float> &values)
-{
+static void loadRawFloats(const char *path, std::vector<float> &values) {
     std::ifstream inputFile(path, std::ios::binary);
     if (inputFile)
     {
@@ -37,8 +36,7 @@ static void loadRawFloats(const char *path, std::vector<float> &values)
     }
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     // --- not VKNN, just plumbing: read the command-line arguments -------------------------------
     if (argc < 2)
     {
@@ -62,11 +60,11 @@ int main(int argc, char **argv)
     // Step 2 - see what the model expects and produces. This is purely informational: the Model
     // already knows every name/shape/dtype, so you never have to set them. Printing them here just
     // shows a newcomer the shape of the graph they just loaded.
-    for (const vknn::TensorInfo &modelInput : model.inputs())
+    for (const vknn::TensorInfo &modelInput: model.inputs())
     {
         printf("input  '%s'  %s  (%lld values)\n", modelInput.name.c_str(), modelInput.shapeString().c_str(), (long long) modelInput.count);
     }
-    for (const vknn::TensorInfo &modelOutput : model.outputs())
+    for (const vknn::TensorInfo &modelOutput: model.outputs())
     {
         printf("output '%s'  %s\n", modelOutput.name.c_str(), modelOutput.shapeString().c_str());
     }

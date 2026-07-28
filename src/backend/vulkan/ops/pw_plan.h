@@ -215,8 +215,8 @@ namespace vknn {
                 {
                     sh.insert(sh.begin(), 1);
                 }
-                NCHW    s  = NCHW::from(sh);
-                int64_t Cb = cBlocks(s.c), HW = s.h * s.w;
+                NCHW               s  = NCHW::from(sh);
+                int64_t            Cb = cBlocks(s.c), HW = s.h * s.w;
                 std::vector<float> p((size_t) (s.n * Cb * 4 * HW), 0.f);
                 for (int64_t n = 0; n < s.n; ++n)
                 {

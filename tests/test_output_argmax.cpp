@@ -219,8 +219,8 @@ TEST(OutputArgMax, ConfigureDecodeChainValidation) {
     cfg.decodeChainSteps = 4;
     auto sess            = Session::create(makeVectorGraph(8), cfg);
     ASSERT_TRUE(sess);
-    EXPECT_EQ(sess->configureDecodeChain(3, "x", "x", "x", "scores"), Status::InvalidArgument);  // bucket out of range
-    EXPECT_EQ(sess->configureDecodeChain(0, "x", "x", "x", "scores"), Status::InvalidArgument);  // not argmax-registered yet
+    EXPECT_EQ(sess->configureDecodeChain(3, "x", "x", "x", "scores"), Status::InvalidArgument); // bucket out of range
+    EXPECT_EQ(sess->configureDecodeChain(0, "x", "x", "x", "scores"), Status::InvalidArgument); // not argmax-registered yet
     ASSERT_EQ(sess->setOutputArgMax(0, "scores"), Status::Ok);
     EXPECT_EQ(sess->configureDecodeChain(0, "x", "x", "x", "scores"), Status::Unsupported); // host reduction path: no device chain
     EXPECT_EQ(sess->setDecodeChainWindow(0, 0, 1), Status::NotFound);                       // nothing configured
@@ -233,11 +233,11 @@ TEST(OutputArgMax, ConfigureDecodeChainValidation) {
 TEST(OutputRow, ValidationAndCpuUnsupported) {
     auto matrix = cpuSession(makeMatrixGraph(2, 8)); // "scores" is [2, 8]: 2 rows of 8
     ASSERT_TRUE(matrix);
-    EXPECT_EQ(matrix->setOutputRow(3, "scores", 0), Status::InvalidArgument);  // bucket out of range
+    EXPECT_EQ(matrix->setOutputRow(3, "scores", 0), Status::InvalidArgument); // bucket out of range
     EXPECT_EQ(matrix->setOutputRow(0, "no_such_output", 0), Status::NotFound);
-    EXPECT_EQ(matrix->setOutputRow(0, "x", 0), Status::NotFound);              // an input is not an output
-    EXPECT_EQ(matrix->setOutputRow(0, "scores", 2), Status::InvalidArgument);  // row 2 past the 2 rows
-    EXPECT_EQ(matrix->setOutputRow(0, "scores", 1), Status::Unsupported);      // valid row, but CPU has no device slice
+    EXPECT_EQ(matrix->setOutputRow(0, "x", 0), Status::NotFound);             // an input is not an output
+    EXPECT_EQ(matrix->setOutputRow(0, "scores", 2), Status::InvalidArgument); // row 2 past the 2 rows
+    EXPECT_EQ(matrix->setOutputRow(0, "scores", 1), Status::Unsupported);     // valid row, but CPU has no device slice
     EXPECT_EQ(matrix->setOutputRow(0, "scores", -1), Status::Ok);             // negative clears
 
     // Unsupported leaves the full [2, 8] output intact — the caller slices the host copy itself.

@@ -72,10 +72,10 @@ namespace vknn {
                 // but one of the two is present). `sizes` gives the output dims directly; `scales`
                 // multiplies the runtime input dims (truncating, as inferShapes does). Both are read
                 // for the H/W axes only — N and C pass through the kernel unchanged.
-                auto            param = [&](int idx) -> const RtTensor * {
+                auto param = [&](int idx) -> const RtTensor * {
                     return idx < (int) pwCoreInputs(node) && node.inputs[idx] != kNoTensor ? &ctx.t(node.inputs[idx]) : nullptr;
                 };
-                int64_t         OH = 0, OW = 0;
+                int64_t OH = 0, OW = 0;
                 if (X.shape.size() == 4)
                 {
                     if (const RtTensor *sz = param(3); sz && sz->elems() == 4)
@@ -103,11 +103,11 @@ namespace vknn {
                     OH = os[2];
                     OW = os[3];
                 }
-                int             mode      = vxResizeMode(node.attr.gets("mode", "nearest"));
-                int             coordMode = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
-                float          *y         = cpu::allocOut(Y, os);
-                const float    *xd        = X.host.f32();
-                auto            clampi    = [](int v, int lo, int hi) {
+                int          mode      = vxResizeMode(node.attr.gets("mode", "nearest"));
+                int          coordMode = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
+                float       *y         = cpu::allocOut(Y, os);
+                const float *xd        = X.host.f32();
+                auto         clampi    = [](int v, int lo, int hi) {
                     return v < lo ? lo : (v > hi ? hi : v);
                 };
                 // Walk N and C outermost; xc / yc point at the start of the current source and
@@ -153,8 +153,8 @@ namespace vknn {
                                     // Clamp all four corner indices independently so out-of-range
                                     // samples (edges) fold onto the nearest in-bounds pixel while the
                                     // interpolation weights below stay unchanged.
-                                    int   iy1 = clampi(iy0 + 1, 0, (int) x.h - 1), ix1 = clampi(ix0 + 1, 0, (int) x.w - 1);
-                                    int   cy0 = clampi(iy0, 0, (int) x.h - 1), cx0 = clampi(ix0, 0, (int) x.w - 1);
+                                    int iy1 = clampi(iy0 + 1, 0, (int) x.h - 1), ix1 = clampi(ix0 + 1, 0, (int) x.w - 1);
+                                    int cy0 = clampi(iy0, 0, (int) x.h - 1), cx0 = clampi(ix0, 0, (int) x.w - 1);
                                     // Four corners: a=top-left, b=top-right, cc=bottom-left, d=bottom-right.
                                     float a = xc[cy0 * x.w + cx0], b = xc[cy0 * x.w + ix1];
                                     float cc = xc[iy1 * x.w + cx0], d = xc[iy1 * x.w + ix1];

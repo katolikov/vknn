@@ -9,11 +9,11 @@ namespace vknn {
 
         struct FlattenCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X    = ctx.t(node.inputs[0]);
-                RtTensor       &Y    = ctx.t(node.outputs[0]);
+                const RtTensor &X = ctx.t(node.inputs[0]);
+                RtTensor       &Y = ctx.t(node.outputs[0]);
                 // Default axis is 1 (batch dim stays as rows). ONNX permits axis in [-rank, rank].
-                int64_t         axis = node.attr.geti("axis", 1);
-                int64_t         rank = (int64_t) X.shape.size();
+                int64_t axis = node.attr.geti("axis", 1);
+                int64_t rank = (int64_t) X.shape.size();
                 // Negative axis counts back from the end, matching Python/ONNX indexing.
                 if (axis < 0)
                 {

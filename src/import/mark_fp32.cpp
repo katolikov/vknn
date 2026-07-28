@@ -146,8 +146,8 @@ namespace vknn {
         std::map<std::pair<TensorId, bool>, TensorId> cache;
         // New ConvertDtype nodes are buffered rather than appended in-place: mutating g.nodes while the
         // range-for below iterates it would invalidate that loop. They are spliced in after the walk.
-        std::vector<Node>                             converts;
-        int                                           n = 0;
+        std::vector<Node> converts;
+        int               n = 0;
         // Route one tensor read through a ConvertDtype when its storage precision differs from the
         // precision the reader's kernel runs in, reusing an already-converted copy from `cache`. `ref`
         // is the reader's reference (a node input or a fused edge) and is rewired in place.

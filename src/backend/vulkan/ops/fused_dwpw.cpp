@@ -4,8 +4,8 @@
 // deterministic shape rule — tiled when the output plane has at least kDwPwTileMinPixels pixels —
 // never autotuned, so a model's kernel set is a pure function of its shapes. Both stage the
 // depthwise output in LDS (computed once, fp16-rounded like the unfused store), then project.
-#include "core/conv_geom.h"
 #include "core/fused_dwpw.h"
+#include "core/conv_geom.h"
 #include "pw_plan.h"
 #include "pw_splitk_rule.h"
 #include "vk_op_common.h"
@@ -14,7 +14,7 @@
 namespace vknn {
     namespace {
         struct DwPwPC {
-            int   N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DWd, dwAct, pwAct;
+            int N, E, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DWd, dwAct, pwAct;
             // Project-stage reduction partition, mirroring what the unfused 1x1 conv would do for
             // this shape (pw_splitk_rule.h): pwKParts chunks of pwChunk expanded channel-blocks each,
             // every chunk summed from zero into an fp32 partial that is then added onto the bias.
@@ -47,15 +47,15 @@ namespace vknn {
                 // Shared forward geometry (core/conv_geom.h) over the depthwise conv's attrs, so an
                 // inherited auto_pad resolves into the same begin/end pads as the unfused Conv path.
                 auto pad = convGeom(x.h, x.w, KH, KW, node.attr).pads();
-                hasRes                    = (node.fusedResidual != kNoTensor);
+                hasRes   = (node.fusedResidual != kNoTensor);
                 // Project-stage reduction partition: read the standalone 1x1 conv's split-K shape rule
                 // for the shape this pair's projection has, so the fused sum is associated exactly like
                 // the kernel the unfused graph would have run (single running sum, or split-K's
                 // per-chunk fp32 partials). Off the split-K rule the partition is the whole reduction.
-                const int64_t OHW         = (int64_t) y.h * y.w;
-                const int     splitKHint  = env.config ? env.config->hint(Hint::SplitKConv) : 0;
-                int64_t       pwKParts    = 1;
-                int64_t       pwChunk     = Eb;
+                const int64_t OHW        = (int64_t) y.h * y.w;
+                const int     splitKHint = env.config ? env.config->hint(Hint::SplitKConv) : 0;
+                int64_t       pwKParts   = 1;
+                int64_t       pwChunk    = Eb;
                 if (pwSplitKActive(env.useFp16, x.n, E, Coutb, OHW, splitKHint))
                 {
                     pwKParts = pwSplitKParts(Eb, Coutb, OHW);
@@ -65,9 +65,9 @@ namespace vknn {
                 // (N,E,H,W,Cout,OH,OW,KH,KW), then stride/pad/dilation (SH,SW,PT,PL,DH,DWd), then the fused
                 // depthwise + pointwise activation codes, the project-stage reduction partition, and the
                 // clamp range. subOp carries the depthwise act.
-                pc                        = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,        (int) Cout,      (int) y.h,    (int) y.w,
-                                             (int) KH,     (int) KW,         (int) st[0],         (int) st[1],      (int) pad[0],    (int) pad[1], (int) dil[0],
-                                             (int) dil[1], (int) node.subOp, (int) node.fusedAct, (int) pwKParts,   (int) pwChunk,   node.actLo,   node.actHi};
+                pc = {(int) x.n,    (int) E,          (int) x.h,           (int) x.w,      (int) Cout,    (int) y.h,    (int) y.w,
+                      (int) KH,     (int) KW,         (int) st[0],         (int) st[1],    (int) pad[0],  (int) pad[1], (int) dil[0],
+                      (int) dil[1], (int) node.subOp, (int) node.fusedAct, (int) pwKParts, (int) pwChunk, node.actLo,   node.actHi};
                 // vkNodeGate refuses E past the shared-array cap before this op is ever built; the check here
                 // guards a plan constructed around the gate (both kernels' LDS arrays are sized to the cap).
                 if (E > kDwPwMaxExpanded)
@@ -79,8 +79,8 @@ namespace vknn {
                 // kDwPwTileMinPixels keeps the per-pixel kernel, whose N*OH*OW grid is the finer parallelism
                 // a small-spatial block needs. Both kernels produce identical bytes — the rule moves only
                 // where the work runs.
-                const bool tiled          = (int64_t) y.h * y.w >= kDwPwTileMinPixels;
-                groups_                   = tiled ? (int64_t) x.n * ((y.h + kDwPwTile - 1) / kDwPwTile) * ((y.w + kDwPwTile - 1) / kDwPwTile) : (int64_t) x.n * y.h * y.w;
+                const bool tiled = (int64_t) y.h * y.w >= kDwPwTileMinPixels;
+                groups_ = tiled ? (int64_t) x.n * ((y.h + kDwPwTile - 1) / kDwPwTile) * ((y.w + kDwPwTile - 1) / kDwPwTile) : (int64_t) x.n * y.h * y.w;
                 std::vector<float> dwsrcv = initFloats(g, node.inputs[1]);
                 std::vector<float> pwsrcv = initFloats(g, node.inputs[3]);
                 const float       *dwsrc  = dwsrcv.data();
@@ -89,7 +89,7 @@ namespace vknn {
                 // the Eb=cBlocks(E) channel blocks holds 4 channels in the vec4 lane l = c%4 (block cb = c/4).
                 // This matches the packed layout the shader reads the expanded activations in, so a lane's
                 // depthwise weight aligns with its channel. Trailing lanes of the last block stay zero-filled.
-                dww                       = uploadCached(env, node.name + "#dww", [&] { // [Eb][KH][KW][4]
+                dww = uploadCached(env, node.name + "#dww", [&] { // [Eb][KH][KW][4]
                     std::vector<float> wp(Eb * KH * KW * 4, 0.f);
                     for (int64_t c = 0; c < E; ++c)
                     {
@@ -110,7 +110,7 @@ namespace vknn {
                 // flat but is padded out to whole channel-blocks, because phase B reads all 4 rows of the
                 // last block. Trailing lanes of the last input block and the padded output rows stay zero,
                 // so a partial last block resolves to zero rows instead of reading past the buffer.
-                pww                       = uploadCached(env, node.name + "#pww", [&] { // [Coutb*4][Eb][4]
+                pww = uploadCached(env, node.name + "#pww", [&] { // [Coutb*4][Eb][4]
                     std::vector<float> wp((size_t) Coutb * 4 * Eb * 4, 0.f);
                     for (int64_t oc = 0; oc < Cout; ++oc)
                     {
@@ -124,7 +124,7 @@ namespace vknn {
                 });
                 // Biases are padded to the NC4HW4 block width (Eb*4 / Coutb*4) so a full-block buffer is
                 // always bound; a missing bias input leaves the buffer zero-filled (adds nothing).
-                dwb                       = uploadCached(env, node.name + "#dwb", [&] {
+                dwb = uploadCached(env, node.name + "#dwb", [&] {
                     std::vector<float> b(Eb * 4, 0.f);
                     if (node.inputs[2] != kNoTensor)
                     {
@@ -141,7 +141,7 @@ namespace vknn {
                     }
                     return b;
                 });
-                pwb                       = uploadCached(env, node.name + "#pwb", [&] {
+                pwb = uploadCached(env, node.name + "#pwb", [&] {
                     std::vector<float> b(Coutb * 4, 0.f);
                     if (node.inputs[4] != kNoTensor)
                     {

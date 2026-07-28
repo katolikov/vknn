@@ -73,7 +73,7 @@ namespace {
 // (like the in-tree F(4,3)) uses (+M(x), +1); the per-point product, and therefore the algorithm,
 // is identical either way.
 TEST(WinoConstruct, ReproducesEngineF23Matrices) {
-    const WinoMatrices w = buildWinoMatrices(2, {0.0, 1.0, -1.0});
+    const WinoMatrices w         = buildWinoMatrices(2, {0.0, 1.0, -1.0});
     const double       g2[4][3]  = {{1, 0, 0}, {0.5, 0.5, 0.5}, {0.5, -0.5, 0.5}, {0, 0, 1}};
     const double       bt2[4][4] = {{1, 0, -1, 0}, {0, 1, 1, 0}, {0, -1, 1, 0}, {0, 1, 0, -1}};
     const double       at2[2][4] = {{1, 1, 1, 0}, {0, 1, -1, -1}};
@@ -108,15 +108,11 @@ TEST(WinoConstruct, ReproducesEngineF23Matrices) {
 // The construction reproduces the engine's in-tree F(4,3) matrices (conv.cpp G4,
 // wino_input4_fp16.comp Bt, wino_out4_fp16.comp At) from points {0, 1, -1, 2, -2} exactly.
 TEST(WinoConstruct, ReproducesEngineF43Matrices) {
-    const WinoMatrices w = buildWinoMatrices(4, {0.0, 1.0, -1.0, 2.0, -2.0});
-    const float        g4[6][3]  = {{0.25f, 0, 0},
-                                    {-1.f / 6, -1.f / 6, -1.f / 6},
-                                    {-1.f / 6, 1.f / 6, -1.f / 6},
-                                    {1.f / 24, 1.f / 12, 1.f / 6},
-                                    {1.f / 24, -1.f / 12, 1.f / 6},
-                                    {0, 0, 1}};
-    const double       bt4[6][6] = {{4, 0, -5, 0, 1, 0}, {0, -4, -4, 1, 1, 0}, {0, 4, -4, -1, 1, 0}, {0, -2, -1, 2, 1, 0}, {0, 2, -1, -2, 1, 0}, {0, 4, 0, -5, 0, 1}};
-    const double       at4[4][6] = {{1, 1, 1, 1, 1, 0}, {0, 1, -1, 2, -2, 0}, {0, 1, 1, 4, 4, 0}, {0, 1, -1, 8, -8, 1}};
+    const WinoMatrices w        = buildWinoMatrices(4, {0.0, 1.0, -1.0, 2.0, -2.0});
+    const float        g4[6][3] = {
+        {0.25f, 0, 0}, {-1.f / 6, -1.f / 6, -1.f / 6}, {-1.f / 6, 1.f / 6, -1.f / 6}, {1.f / 24, 1.f / 12, 1.f / 6}, {1.f / 24, -1.f / 12, 1.f / 6}, {0, 0, 1}};
+    const double bt4[6][6] = {{4, 0, -5, 0, 1, 0}, {0, -4, -4, 1, 1, 0}, {0, 4, -4, -1, 1, 0}, {0, -2, -1, 2, 1, 0}, {0, 2, -1, -2, 1, 0}, {0, 4, 0, -5, 0, 1}};
+    const double at4[4][6] = {{1, 1, 1, 1, 1, 0}, {0, 1, -1, 2, -2, 0}, {0, 1, 1, 4, 4, 0}, {0, 1, -1, 8, -8, 1}};
     for (int i = 0; i < 6; ++i)
     {
         for (int j = 0; j < 3; ++j)
@@ -165,7 +161,7 @@ TEST(WinoConstruct, F63WinogradEqualsDirectFp64) {
     // F(2,3) and F(4,3) satisfy the same identity through the same construction.
     for (int unit: {2, 4})
     {
-        const WinoMatrices w = buildWinoMatrices(unit, unit == 2 ? std::vector<double> {0.0, 1.0, -1.0} : std::vector<double> {0.0, 1.0, -1.0, 2.0, -2.0});
+        const WinoMatrices  w = buildWinoMatrices(unit, unit == 2 ? std::vector<double> {0.0, 1.0, -1.0} : std::vector<double> {0.0, 1.0, -1.0, 2.0, -2.0});
         WinoNormalStream    noise(202);
         const int           cin = 2, cout = 2, height = 9, width = 7;
         std::vector<double> input((size_t) cin * height * width);
@@ -217,7 +213,7 @@ TEST(WinoF63, ChosenPointsBeatOrMatchAlternatives) {
     const WinoMatrices        chosen        = buildWinoMatrices(kWinoF63OutTile, chosenPoints);
     const WinoMatrices        classic       = buildWinoMatrices(kWinoF63OutTile, kClassicF63Points);
     const WinoMatrices        conditionBest = buildWinoMatrices(kWinoF63OutTile, kConditionBestF63Points);
-    auto worstCase = [](const WinoMatrices &w) {
+    auto                      worstCase     = [](const WinoMatrices &w) {
         WinoFp16Error worst;
         worst.snrDb = std::numeric_limits<double>::infinity();
         for (const WinoLayerConfig &cfg: winoScoreConfigs())
@@ -241,8 +237,8 @@ TEST(WinoF63, ChosenPointsBeatOrMatchAlternatives) {
 // host F(6,3) Winograd fp64 simulation on the same data (correctness of the transform math
 // against the engine's conv oracle; fp32-backend tolerance).
 TEST(WinoF63, CpuOracleMatchesWinoSimulation) {
-    const int cin = 6, cout = 5, height = 12, width = 12;
-    WinoNormalStream noise(303);
+    const int          cin = 6, cout = 5, height = 12, width = 12;
+    WinoNormalStream   noise(303);
     std::vector<float> input((size_t) cin * height * width);
     std::vector<float> weights((size_t) cout * cin * 9);
     std::vector<float> bias((size_t) cout);
@@ -295,8 +291,8 @@ TEST(WinoF63, CpuOracleMatchesWinoSimulation) {
     pads.kind = Attr::Ints;
     pads.ints = {1, 1, 1, 1};
     Attr strides;
-    strides.kind = Attr::Ints;
-    strides.ints = {1, 1};
+    strides.kind             = Attr::Ints;
+    strides.ints             = {1, 1};
     node.attr.map["pads"]    = pads;
     node.attr.map["strides"] = strides;
     node.inputs              = {x, w, b};
@@ -305,7 +301,7 @@ TEST(WinoF63, CpuOracleMatchesWinoSimulation) {
     g.outputs = {y};
 
     Config cfg;
-    cfg.backend = BackendKind::Cpu;
+    cfg.backend  = BackendKind::Cpu;
     auto session = Session::create(std::move(g), cfg);
     ASSERT_TRUE(session);
     IOTensor in;
@@ -323,15 +319,15 @@ TEST(WinoF63, CpuOracleMatchesWinoSimulation) {
     const WinoMatrices        wm = buildWinoMatrices(kWinoF63OutTile, points);
     const std::vector<double> inputF64(input.begin(), input.end());
     const std::vector<double> weightsF64(weights.begin(), weights.end());
-    const std::vector<double> wino = winoConv2dFp64(wm, inputF64, cin, height, width, weightsF64, cout);
-    const float              *cpu  = outs[0].f32();
+    const std::vector<double> wino    = winoConv2dFp64(wm, inputF64, cin, height, width, weightsF64, cout);
+    const float              *cpu     = outs[0].f32();
     double                    maxDiff = 0.0;
     for (int oc = 0; oc < cout; ++oc)
     {
         for (int i = 0; i < height * width; ++i)
         {
             const double expected = wino[(size_t) oc * height * width + i] + bias[(size_t) oc];
-            maxDiff = std::max(maxDiff, std::fabs(expected - (double) cpu[(size_t) oc * height * width + i]));
+            maxDiff               = std::max(maxDiff, std::fabs(expected - (double) cpu[(size_t) oc * height * width + i]));
         }
     }
     EXPECT_LT(maxDiff, 1e-4); // fp32 CPU backend vs fp64 winograd math

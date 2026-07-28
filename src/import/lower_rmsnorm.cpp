@@ -238,9 +238,9 @@ namespace vknn {
             rn.inputs  = {x, gamma};
             rn.outputs = {out};
             Attr eps;
-            eps.kind                = Attr::Float;
-            eps.f                   = epsv;
-            rn.attr.map["epsilon"]  = eps;
+            eps.kind               = Attr::Float;
+            eps.f                  = epsv;
+            rn.attr.map["epsilon"] = eps;
             added.push_back(std::move(rn));
             for (int c: chain)
             {

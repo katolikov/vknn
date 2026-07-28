@@ -22,7 +22,7 @@ namespace vknn {
         const Config          *config   = nullptr; ///< The run configuration (read-only during a run).
         Profiler              *profiler = nullptr; ///< Per-op timing sink, or nullptr when profiling is off.
         /// The runtime tensor for `id`. Precondition: `pool` is bound and `id` is a valid index into it.
-        RtTensor              &t(TensorId id) {
+        RtTensor &t(TensorId id) {
             return (*pool)[id];
         }
     };

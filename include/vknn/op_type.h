@@ -133,7 +133,7 @@ namespace vknn {
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;
     /// the shader plan layout (pw_plan.h) is sized from the same constants, so they are a shared
     /// contract between the importer and the kernel and cannot be changed independently.
-    constexpr int kPwMaxSteps    = 16; ///< Elementwise steps per fused unit.
+    constexpr int kPwMaxSteps = 16; ///< Elementwise steps per fused unit.
     /// Largest square-matrix side the GPU Det kernel covers by fixed-order cofactor expansion —
     /// the fast one-thread-per-matrix path every real camera/geometry head hits.
     constexpr int kDetMaxAnalyticN = 4;
@@ -141,11 +141,11 @@ namespace vknn {
     /// runs an in-register partial-pivot LU per matrix (fp32, deterministic fixed order). Only
     /// n > kDetMaxGpuN — no known real model — takes the CPU's double-precision LU via the named
     /// vkNodeGate refusal.
-    constexpr int kDetMaxGpuN = 8;
-    constexpr int kPwMaxOperands = 6;  ///< Extra tensor operands per unit (the primary input is excluded).
-    constexpr int kPwMaxRank     = 4;  ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
-    constexpr int kPwMaxRegs     = 4;  ///< Named registers for step values reused by later steps.
-    constexpr int kPwMaxOuts     = 4;  ///< Extra output streams (fanout values exported from the unit).
+    constexpr int kDetMaxGpuN    = 8;
+    constexpr int kPwMaxOperands = 6; ///< Extra tensor operands per unit (the primary input is excluded).
+    constexpr int kPwMaxRank     = 4; ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
+    constexpr int kPwMaxRegs     = 4; ///< Named registers for step values reused by later steps.
+    constexpr int kPwMaxOuts     = 4; ///< Extra output streams (fanout values exported from the unit).
 
     /// pw_steps value references (the srcA/srcB/srcC/dst fields of a step). A source names the
     /// accumulator, the entry value, a register, or a tensor operand; a dst is kPwRefNone or a

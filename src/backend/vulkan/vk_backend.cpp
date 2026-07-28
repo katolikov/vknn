@@ -90,10 +90,10 @@ namespace vknn {
             // with the op's own chunk = min(4096/G, 256). Refuse only when THIS node's staging
             // exceeds the device budget (the kFaMax* caps bound it, but a device with a small
             // shared budget can still run a small-group model).
-            const auto      &dims = nd.attr.getints(kFaDims);
-            const auto      &ks   = nd.attr.getints(kFaKStride);
-            const auto      &vs   = nd.attr.getints(kFaVStride);
-            int64_t          groupSize = 1;
+            const auto &dims      = nd.attr.getints(kFaDims);
+            const auto &ks        = nd.attr.getints(kFaKStride);
+            const auto &vs        = nd.attr.getints(kFaVStride);
+            int64_t     groupSize = 1;
             for (size_t d = 0; d < dims.size(); ++d)
             {
                 if (dims[d] > 1 && d < ks.size() && ks[d] == 0 && d < vs.size() && vs[d] == 0)
@@ -102,8 +102,8 @@ namespace vknn {
                     break;
                 }
             }
-            const int64_t hd    = nd.attr.geti(kFaHd);
-            const int64_t chunk = std::min<int64_t>(4096 / std::max<int64_t>(groupSize, 1), 256);
+            const int64_t hd          = nd.attr.geti(kFaHd);
+            const int64_t chunk       = std::min<int64_t>(4096 / std::max<int64_t>(groupSize, 1), 256);
             const int64_t sharedBytes = (groupSize * hd + groupSize * chunk + 256 + hd) * 4;
             if ((int64_t) caps.maxSharedMemory < sharedBytes)
             {
@@ -151,8 +151,8 @@ namespace vknn {
             return;
         }
         cacheLoaded_ = true;
-        noCache_   = cfg.noCache;
-        cacheFile_ = cfg.cacheFile;
+        noCache_     = cfg.noCache;
+        cacheFile_   = cfg.cacheFile;
         curKey_      = variantKey(cfg);
 
         const auto &caps        = ctx_->caps();

@@ -74,19 +74,35 @@ TEST(DType, HalfRoundTripAllPatterns) {
 // rules: the tie cases, the subnormal and flush-to-zero boundaries, the overflow boundary, and NaN.
 TEST(DType, FloatToHalfBulkMatchesScalarOnBoundaries) {
     std::vector<float> v = {
-            0.f, -0.f, 1.f, -1.f, 0.5f, 6.f, 3.14159f, -2.71828f,
-            65504.f,                                            // largest finite half
-            65519.996f, 65520.f,                                // the last value below the tie, and the tie that saturates
-            65535.f, 65536.f, 65537.f,                          // at and past 2^16, where the exponent branch trips
-            -65504.f, -65520.f, -65536.f,                       //
-            6.10352e-5f, 6.09756e-5f,                           // smallest normal half, and the largest subnormal below it
-            5.96046e-8f,                                        // smallest positive subnormal half (2^-24)
-            2.98023e-8f, -2.98023e-8f,                          // 2^-25: the tie between zero and the smallest subnormal
-            1.49012e-8f,                                        // 2^-26: below every tie, flushes to zero
-            bitsToFloat(0x7F800000u), bitsToFloat(0xFF800000u), // +/- inf
-            bitsToFloat(0x7FC00000u),                           // quiet nan
-            bitsToFloat(0x7F800001u), bitsToFloat(0xFF800001u), // signaling nan, both signs
-            bitsToFloat(0x7FFFFFFFu),                           // nan, every payload bit set
+        0.f,
+        -0.f,
+        1.f,
+        -1.f,
+        0.5f,
+        6.f,
+        3.14159f,
+        -2.71828f,
+        65504.f, // largest finite half
+        65519.996f,
+        65520.f, // the last value below the tie, and the tie that saturates
+        65535.f,
+        65536.f,
+        65537.f, // at and past 2^16, where the exponent branch trips
+        -65504.f,
+        -65520.f,
+        -65536.f, //
+        6.10352e-5f,
+        6.09756e-5f, // smallest normal half, and the largest subnormal below it
+        5.96046e-8f, // smallest positive subnormal half (2^-24)
+        2.98023e-8f,
+        -2.98023e-8f, // 2^-25: the tie between zero and the smallest subnormal
+        1.49012e-8f,  // 2^-26: below every tie, flushes to zero
+        bitsToFloat(0x7F800000u),
+        bitsToFloat(0xFF800000u), // +/- inf
+        bitsToFloat(0x7FC00000u), // quiet nan
+        bitsToFloat(0x7F800001u),
+        bitsToFloat(0xFF800001u), // signaling nan, both signs
+        bitsToFloat(0x7FFFFFFFu), // nan, every payload bit set
     };
     // Exact ties on the dropped mantissa bits (low 13 bits == 0x1000) over even and odd retained
     // mantissas: floatToHalf rounds both away from zero rather than to even.
@@ -124,7 +140,7 @@ TEST(DType, FloatToHalfSatSaturatesInsteadOfInf) {
     EXPECT_EQ(floatToHalfSat(1e9f), maxFinite);
     EXPECT_EQ(floatToHalfSat(bitsToFloat(0x7F800000u)), maxFinite); // +inf
     EXPECT_EQ(floatToHalfSat(-65505.f), (fp16_t) (0x8000u | maxFinite));
-    EXPECT_EQ(floatToHalfSat(bitsToFloat(0xFF800000u)), (fp16_t) (0x8000u | maxFinite)); // -inf
+    EXPECT_EQ(floatToHalfSat(bitsToFloat(0xFF800000u)), (fp16_t) (0x8000u | maxFinite));        // -inf
     EXPECT_EQ(floatToHalfSat(bitsToFloat(0x7FC00000u)), floatToHalf(bitsToFloat(0x7FC00000u))); // NaN passes
     for (float in: {0.f, -1.f, 3.14159f, 65504.f, -65504.f, 6.1e-5f})
     {
@@ -575,7 +591,6 @@ TEST(ConvGemmRoute, WeightVec4PadRows) {
     }
 }
 
-
 // Ergonomic Tensor API: construct, shape/size accessors, argmax.
 TEST(Api, TensorHelpers) {
     Tensor t({1.f, 5.f, 2.f, 9.f, 3.f, 0.f}, {1, 6});
@@ -648,7 +663,7 @@ TEST(Api, RunRejectsMismatchedInputShape) {
 // different channel split pack differently, and frozen kernels then misread every channel.
 TEST(Api, BoundShapeCompatibleContracts) {
     // Frozen plan, NC4HW4 store: N, C and the spatial product must match.
-    EXPECT_TRUE(boundShapeCompatible({1, 2, 4, 1}, {1, 2, 2, 2}, false, true));  // spatial reshape
+    EXPECT_TRUE(boundShapeCompatible({1, 2, 4, 1}, {1, 2, 2, 2}, false, true)); // spatial reshape
     EXPECT_TRUE(boundShapeCompatible({1, 2, 1, 4}, {1, 2, 2, 2}, false, true));
     // [1,1,2,4] and [1,2,2,4] have the SAME padded NC4 footprint (both one 4-lane channel block x
     // 8 pixels = 32) but a different channel count: must be rejected under a frozen plan.

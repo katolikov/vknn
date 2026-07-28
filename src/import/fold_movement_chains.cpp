@@ -101,8 +101,8 @@ namespace vknn {
                     {
                         return m; // negative steps reverse; the kernels here support positive only
                     }
-                    int64_t st     = starts[k] < 0 ? starts[k] + dim : starts[k];
-                    st             = std::max<int64_t>(0, std::min(st, dim));
+                    int64_t st         = starts[k] < 0 ? starts[k] + dim : starts[k];
+                    st                 = std::max<int64_t>(0, std::min(st, dim));
                     begin[(size_t) ax] = st;
                     step[(size_t) ax]  = sp;
                 }
@@ -124,7 +124,8 @@ namespace vknn {
             {
                 return false;
             }
-            return nd.outputs.size() == 1 && nd.outputs[0] != kNoTensor && !nd.inputs.empty() && nd.inputs[0] != kNoTensor && !nd.attr.has("pw_steps") && !nd.attr.has("pw_outs") && nd.fusedResidual == kNoTensor;
+            return nd.outputs.size() == 1 && nd.outputs[0] != kNoTensor && !nd.inputs.empty() && nd.inputs[0] != kNoTensor && !nd.attr.has("pw_steps") &&
+                   !nd.attr.has("pw_outs") && nd.fusedResidual == kNoTensor;
         }
 
     } // namespace
@@ -291,9 +292,9 @@ namespace vknn {
                 nd.inputs[0] = P.inputs[0];
                 {
                     Attr a;
-                    a.kind                      = Attr::Ints;
-                    a.ints                      = composed;
-                    nd.attr.map["view_stride"]  = a;
+                    a.kind                     = Attr::Ints;
+                    a.ints                     = composed;
+                    nd.attr.map["view_stride"] = a;
                 }
                 {
                     Attr a;

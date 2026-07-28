@@ -32,7 +32,7 @@ namespace vknn {
                 {
                     total += ctx.t(in).shape[axis];
                 }
-                out[axis]       = total;
+                out[axis] = total;
                 // Elements in one contiguous block: the product of the dims from `axis` to the end.
                 // For an input this is its per-outer run length; for `out` it is the destination stride.
                 auto blockElems = [&](const Shape &s) {
@@ -53,10 +53,10 @@ namespace vknn {
                 bool isI64 = first.dtype == DType::Int64;
                 if (isI64)
                 {
-                    int64_t *y        = cpu::allocOutI64(Y, out);
+                    int64_t *y = cpu::allocOutI64(Y, out);
                     // `off` is the running write position along the axis within each output block; it
                     // advances by every input's block length so inputs sit side by side, not overlapped.
-                    int64_t  outBlock = blockElems(out), off = 0;
+                    int64_t outBlock = blockElems(out), off = 0;
                     for (TensorId in: parts)
                     {
                         const RtTensor &T  = ctx.t(in);

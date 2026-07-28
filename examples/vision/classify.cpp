@@ -92,8 +92,8 @@ static bool hasflag(int argc, char **argv, const char *flag) noexcept {
 int main(int argc, char **argv) {
     // Step 1 - read the command line (plumbing). Everything has a sensible default, so the demo runs
     // with no arguments at all.
-    std::string model       = argval(argc, argv, "--model", "assets/mobilenetv2.onnx");
-    std::string inputPath   = argval(argc, argv, "--input", "assets/input.bin");
+    std::string model     = argval(argc, argv, "--model", "assets/mobilenetv2.onnx");
+    std::string inputPath = argval(argc, argv, "--input", "assets/input.bin");
     // Empty by default: the input shape comes from the model (inputInfo); --shape only OVERRIDES it.
     // (A non-empty default like "1,3,224,224" silently forces every model to 224x224 -> wrong input
     // crop for 299x299 Inception, 640x640 YOLO, and any non-image model.)

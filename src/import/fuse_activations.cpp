@@ -142,5 +142,4 @@ namespace vknn {
         }
     }
 
-
 } // namespace vknn
