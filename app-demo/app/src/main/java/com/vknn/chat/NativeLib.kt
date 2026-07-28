@@ -9,6 +9,14 @@ object NativeLib {
     }
 
     /**
+     * Version of the engine compiled into libvknnchat.so, as "major.minor.patch". Read from the
+     * loaded library rather than from a Kotlin constant, so it reports the engine that is actually
+     * running: the .so is a prebuilt input to the APK build, so a stale one would otherwise be
+     * invisible next to the app's own version.
+     */
+    external fun nativeVknnVersion(): String
+
+    /**
      * Load a .vxm decoder; returns a native handle, or 0 on failure. [greedyArgMax] registers the
      * decode logits for the engine-side argmax (an 8-byte per-token readback instead of the vocab
      * row); the registration holds for the session's lifetime, so it is requested only when the

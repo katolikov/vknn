@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.22)
-project(vknn LANGUAGES C CXX)
+
+# ONE place to change the version: the VERSION file at the repo root. Everything that reports a
+# version reads it from here -- the engine string compiled into the library, and the Android app's
+# versionName (app-demo/app/build.gradle.kts reads the same file) -- so a bump is a one-line edit
+# and the two can never disagree.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VKNN_VERSION_RAW)
+string(STRIP "${VKNN_VERSION_RAW}" VKNN_VERSION)
+if(NOT VKNN_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "VERSION must read major.minor.patch, got '${VKNN_VERSION}'")
+endif()
+
+project(vknn VERSION ${VKNN_VERSION} LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
 # vknn — Vulkan Neural Network. On-device inference engine (CNNs, transformers, 3D Gaussian Splatting).
@@ -327,6 +338,13 @@ if(VKNN_ENABLE_VULKAN)
 endif()
 
 add_library(vknn STATIC ${VKNN_SRC})
+# The version string is compiled in, so vknnVersion() reports the engine that is actually linked
+# rather than whatever header a caller was built against.
+target_compile_definitions(vknn PUBLIC
+  VKNN_VERSION_STRING="${PROJECT_VERSION}"
+  VKNN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+  VKNN_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+  VKNN_VERSION_PATCH=${PROJECT_VERSION_PATCH})
 target_include_directories(vknn PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src

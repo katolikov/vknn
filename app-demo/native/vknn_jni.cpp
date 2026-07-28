@@ -13,6 +13,7 @@
 #include "raster_core.h"
 #include "vknn/runtime.h"
 #include "vknn/session.h"
+#include "vknn/version.h"
 #include <algorithm>
 #include <android/log.h>
 #include <cmath>
@@ -1008,6 +1009,13 @@ namespace {
 } // namespace
 
 extern "C" {
+
+// The engine version compiled into THIS libvknnchat.so. The app pairs it with its own
+// BuildConfig.VERSION_NAME, which is stamped when the APK is assembled: the two are produced by
+// separate build steps, so a stale prebuilt .so shows up as a mismatch instead of passing silently.
+JNIEXPORT jstring JNICALL Java_com_vknn_chat_NativeLib_nativeVknnVersion(JNIEnv *env, jobject) {
+    return env->NewStringUTF(vknn::vknnVersion());
+}
 
 // Load the .vxm and build a Decoder. `greedyArgMax` registers the decode bucket's logits for the
 // engine-side argmax reduction — the registration holds for the session's lifetime and the decode

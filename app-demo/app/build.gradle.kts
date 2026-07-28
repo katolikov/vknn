@@ -1,3 +1,8 @@
+// The engine's VERSION file at the repo root is the single source for the version: the native
+// library compiles the same string in, so the app's label and the engine it loads cannot drift.
+// versionCode stays here -- it is a Play-store ordinal, not a version number.
+val vknnVersion = rootProject.file("../VERSION").readText().trim()
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,8 +17,8 @@ android {
         applicationId = "com.vknn.chat"
         minSdk = 28
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.5.1"
+        versionCode = 15
+        versionName = vknnVersion
         ndk {
             // Only ship the arm64 native lib (the only ABI vknn is built for here).
             abiFilters += "arm64-v8a"
@@ -34,6 +39,9 @@ android {
     }
     buildFeatures {
         compose = true
+        // VERSION_NAME/VERSION_CODE are shown in the Library screen next to the engine version the
+        // native library reports, so the app half of that pair has to be readable at runtime.
+        buildConfig = true
     }
     // Store the prebuilt libvknnchat.so uncompressed and page-aligned (useLegacyPackaging = false) so the
     // loader mmaps it directly — required for 16-KB-page-size devices; the .so is already release-built.
