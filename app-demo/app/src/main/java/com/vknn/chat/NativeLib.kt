@@ -10,9 +10,7 @@ object NativeLib {
 
     /**
      * Version of the engine compiled into libvknnchat.so, as "major.minor.patch". Read from the
-     * loaded library rather than from a Kotlin constant, so it reports the engine that is actually
-     * running: the .so is a prebuilt input to the APK build, so a stale one would otherwise be
-     * invisible next to the app's own version.
+     * loaded library, not a Kotlin constant, so it reports the .so the APK actually ships.
      */
     external fun nativeVknnVersion(): String
 

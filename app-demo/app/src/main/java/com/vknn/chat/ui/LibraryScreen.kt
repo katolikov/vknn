@@ -94,13 +94,12 @@ fun LibraryScreen(
     }
 }
 
-// App and engine versions, side by side. They are stamped by SEPARATE build steps -- the app's at
-// APK assembly, the engine's into the prebuilt libvknnchat.so -- so a stale native library shows up
-// here as a mismatch rather than passing for the version on the app label.
+// App and engine versions. The app's is stamped at APK assembly, the engine's into the prebuilt
+// libvknnchat.so; they differ whenever the bundled .so is stale.
 @Composable
 private fun VersionFooter() {
-    // The engine version is a property of the loaded library, so read it once per composition tree
-    // rather than per recomposition; a failure to load is reported instead of crashing the screen.
+    // Constant for the process; read once rather than per recomposition. A load failure is shown
+    // rather than thrown, so the screen still renders without the native library.
     val engine = remember {
         runCatching { NativeLib.nativeVknnVersion() }.getOrElse { "unavailable" }
     }

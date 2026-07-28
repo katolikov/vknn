@@ -515,7 +515,7 @@ static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<
 }
 
 int main(int argc, char **argv) {
-    // Answered before anything else parses, so `--version` works with no model argument.
+    // Before any other parsing, so --version needs no model argument.
     for (int i = 1; i < argc; ++i)
     {
         if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V"))

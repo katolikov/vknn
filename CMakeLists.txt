@@ -1,9 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
-# ONE place to change the version: the VERSION file at the repo root. Everything that reports a
-# version reads it from here -- the engine string compiled into the library, and the Android app's
-# versionName (app-demo/app/build.gradle.kts reads the same file) -- so a bump is a one-line edit
-# and the two can never disagree.
+# Version, from the repo-root VERSION file. The same file is read by app-demo/app/build.gradle.kts
+# for the Android versionName, so the engine and the app report one value.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VKNN_VERSION_RAW)
 string(STRIP "${VKNN_VERSION_RAW}" VKNN_VERSION)
 if(NOT VKNN_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
@@ -338,8 +336,7 @@ if(VKNN_ENABLE_VULKAN)
 endif()
 
 add_library(vknn STATIC ${VKNN_SRC})
-# The version string is compiled in, so vknnVersion() reports the engine that is actually linked
-# rather than whatever header a caller was built against.
+# Compiled in, so vknnVersion() reports the linked engine rather than a caller's header.
 target_compile_definitions(vknn PUBLIC
   VKNN_VERSION_STRING="${PROJECT_VERSION}"
   VKNN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}

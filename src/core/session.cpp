@@ -555,9 +555,7 @@ namespace vknn {
         {
             b->configure(cfg_); // apply Config (e.g. disableVkOps) before capability queries
         }
-        // The engine that is actually running, once per session. A host app links a PREBUILT
-        // library, so this is the only place its version is observable at runtime.
-        VKNN_INFO << "VKNN " << vknnVersion();
+        VKNN_INFO << "VKNN " << vknnVersion(); // the linked engine, for a device log
         VKNN_INFO << "Active backends (priority): " << [&] {
             std::string s;
             for (auto &b: backends_)

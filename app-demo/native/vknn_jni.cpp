@@ -1010,9 +1010,9 @@ namespace {
 
 extern "C" {
 
-// The engine version compiled into THIS libvknnchat.so. The app pairs it with its own
-// BuildConfig.VERSION_NAME, which is stamped when the APK is assembled: the two are produced by
-// separate build steps, so a stale prebuilt .so shows up as a mismatch instead of passing silently.
+// Version of the engine compiled into this libvknnchat.so. The app shows it beside its own
+// BuildConfig.VERSION_NAME, which is stamped when the APK is assembled; the .so is a prebuilt input
+// to that build, so the two values differ whenever it is stale.
 JNIEXPORT jstring JNICALL Java_com_vknn_chat_NativeLib_nativeVknnVersion(JNIEnv *env, jobject) {
     return env->NewStringUTF(vknn::vknnVersion());
 }

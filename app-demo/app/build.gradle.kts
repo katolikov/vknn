@@ -1,6 +1,5 @@
-// The engine's VERSION file at the repo root is the single source for the version: the native
-// library compiles the same string in, so the app's label and the engine it loads cannot drift.
-// versionCode stays here -- it is a Play-store ordinal, not a version number.
+// Version, from the repo-root VERSION file the native library compiles in. versionCode stays here:
+// it is a store ordinal, not a version.
 val vknnVersion = rootProject.file("../VERSION").readText().trim()
 
 plugins {
@@ -39,9 +38,7 @@ android {
     }
     buildFeatures {
         compose = true
-        // VERSION_NAME/VERSION_CODE are shown in the Library screen next to the engine version the
-        // native library reports, so the app half of that pair has to be readable at runtime.
-        buildConfig = true
+        buildConfig = true // VERSION_NAME/VERSION_CODE, read by the Library screen
     }
     // Store the prebuilt libvknnchat.so uncompressed and page-aligned (useLegacyPackaging = false) so the
     // loader mmaps it directly — required for 16-KB-page-size devices; the .so is already release-built.
