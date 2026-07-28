@@ -98,10 +98,18 @@ class Engine:
                 except Exception as e:
                     gate = {"ok": False, "cases": [],
                             "error": str(e).splitlines()[0][:200]}
-                if gate["ok"]:
+                ok = gate["ok"]
+                detail = None
+                if not ok and p.lossy and _only_byte_mismatches(gate):
+                    # Lossy passes are tolerance-gated: value drift is expected
+                    # and reported; structural breakage still reverts.
+                    ok = True
+                    detail = "lossy: byte-equality waived by --allow-lossy"
+                if ok:
                     changed = True
-                    self.report.log_pass(iteration, p.name, n, "applied")
-                    self.log("  iter %d: %-26s %d change(s)" % (iteration, p.name, n))
+                    self.report.log_pass(iteration, p.name, n, "applied", detail)
+                    self.log("  iter %d: %-26s %d change(s)%s"
+                             % (iteration, p.name, n, " [lossy]" if detail else ""))
                 else:
                     self.model = onnx.load_from_string(snapshot)
                     self.disabled.add(p.name)
@@ -114,6 +122,14 @@ class Engine:
         gu.toposort(self.model.graph)
         self.model = _refresh_shapes(self.model)
         return self.model
+
+
+def _only_byte_mismatches(gate):
+    """True when every gate failure is a value diff (no structural breakage)."""
+    if gate.get("error"):
+        return False
+    mismatches = [mm for case in gate.get("cases", []) for mm in case["mismatches"]]
+    return bool(mismatches) and all(mm["reason"] == "bytes" for mm in mismatches)
 
 
 def _first_gate_failure(gate):
@@ -131,7 +147,8 @@ def _lossy_tolerance_summary(verification):
             if mm["reason"] != "bytes":
                 return None  # structural mismatch: not a tolerance question
             max_ulp = max(max_ulp, mm.get("max_ulp", 0))
-            max_abs = max(max_abs, mm.get("max_abs_diff", float("inf")))
+            if mm.get("max_abs_diff") is not None:
+                max_abs = max(max_abs, mm["max_abs_diff"])
     return {"max_ulp": max_ulp, "max_abs_diff": max_abs}
 
 

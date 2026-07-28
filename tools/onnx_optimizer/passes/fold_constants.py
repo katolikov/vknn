@@ -114,7 +114,9 @@ class FoldConstants(Pass):
                 self._skip.add(key)
                 continue
             for name, arr in folded.items():
-                graph.initializer.append(numpy_helper.from_array(np.ascontiguousarray(arr), name))
+                if not arr.flags["C_CONTIGUOUS"]:
+                    arr = np.ascontiguousarray(arr)  # would promote 0-d to 1-d if unconditional
+                graph.initializer.append(numpy_helper.from_array(arr, name))
                 const_arrays[name] = arr
                 gu.remove_value_info(graph, name)
             graph.node.remove(node)

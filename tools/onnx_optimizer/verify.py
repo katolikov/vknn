@@ -112,7 +112,10 @@ class ReferenceSession:
         if missing:
             raise KeyError("feed is missing required inputs: %s" % ", ".join(missing))
         results = self.session.run(None, sub)
-        return {name: np.ascontiguousarray(arr) for name, arr in zip(self.output_names, results)}
+        # NOTE: np.ascontiguousarray would promote 0-d outputs to 1-d; only
+        # copy when the layout actually needs it.
+        return {name: arr if arr.flags["C_CONTIGUOUS"] else np.ascontiguousarray(arr)
+                for name, arr in zip(self.output_names, results)}
 
 
 def runtime_input_specs(model):
@@ -234,8 +237,10 @@ def compare_arrays(name, ref, got):
     if ref.shape != got.shape:
         return {"output": name, "reason": "shape",
                 "detail": "%s vs %s" % (list(ref.shape), list(got.shape))}
-    ref = np.ascontiguousarray(ref)
-    got = np.ascontiguousarray(got)
+    if not ref.flags["C_CONTIGUOUS"]:
+        ref = np.ascontiguousarray(ref)
+    if not got.flags["C_CONTIGUOUS"]:
+        got = np.ascontiguousarray(got)
     if ref.tobytes() == got.tobytes():
         return None
     if ref.dtype.kind == "f":
@@ -258,8 +263,10 @@ def compare_arrays(name, ref, got):
         ulp = _ulp_distance(ref.reshape(-1), got.reshape(-1))
         rec["first_ulp"] = int(ulp[first])
         rec["max_ulp"] = int(ulp.max())
-        rec["max_abs_diff"] = float(np.nanmax(np.abs(ref.astype(np.float64)
-                                                     - got.astype(np.float64))))
+        with np.errstate(invalid="ignore", over="ignore"):
+            diff = np.abs(ref.astype(np.float64) - got.astype(np.float64))
+        valid = diff[~np.isnan(diff)]
+        rec["max_abs_diff"] = float(valid.max()) if valid.size else None
     return rec
 
 
