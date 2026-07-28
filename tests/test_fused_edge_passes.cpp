@@ -23,8 +23,8 @@ namespace {
     }
 
     TensorId addInputT(Graph &g, const std::string &name, Shape shape, bool flat = false) {
-        TensorId t          = addAct(g, name, std::move(shape), flat);
-        g.desc(t).isInput   = true;
+        TensorId t        = addAct(g, name, std::move(shape), flat);
+        g.desc(t).isInput = true;
         g.inputs.push_back(t);
         return t;
     }
@@ -124,10 +124,10 @@ TEST(FusedEdges, RewireTensorFollowsBothFusedEdges) {
 // scheduling the reader first would execute it before the residual is written. ---
 TEST(FusedEdges, TopoSortOrdersFusedResidualProducerFirst) {
     Graph    g;
-    TensorId x = addInputT(g, "x", {1, 4, 2, 2});
-    TensorId z = addInputT(g, "z", {1, 4, 2, 2});
-    TensorId r = addAct(g, "r", {1, 4, 2, 2});
-    TensorId y = addAct(g, "y", {1, 4, 2, 2});
+    TensorId x         = addInputT(g, "x", {1, 4, 2, 2});
+    TensorId z         = addInputT(g, "z", {1, 4, 2, 2});
+    TensorId r         = addAct(g, "r", {1, 4, 2, 2});
+    TensorId y         = addAct(g, "y", {1, 4, 2, 2});
     g.desc(y).isOutput = true;
     // Deliberately listed reader-first: only the fused edge relates the two nodes.
     Node conv;
@@ -247,7 +247,7 @@ TEST(FusedEdges, FoldMatMulViewsKeepsChainTensorReadByFusedEdge) {
         tr.attr.map["perm"] = perm;
         g.nodes.push_back(tr);
     }
-    TensorId y = addAct(g, "y", {});
+    TensorId y         = addAct(g, "y", {});
     g.desc(y).isOutput = true;
     addNode(g, OpType::MatMul, "mm", {q, kt}, y);
     g.outputs = {y};
@@ -255,7 +255,7 @@ TEST(FusedEdges, FoldMatMulViewsKeepsChainTensorReadByFusedEdge) {
 
     // A side Conv reads the chain intermediate r2 through its fused edge ONLY (legacy encoding):
     // no node input names r2, so the chain's liveness hangs on the edge alone.
-    TensorId cy = addAct(g, "cy", {1, 6, 1, 4});
+    TensorId cy         = addAct(g, "cy", {1, 6, 1, 4});
     g.desc(cy).isOutput = true;
     Node conv;
     conv.type          = OpType::Conv;
@@ -282,10 +282,10 @@ TEST(FusedEdges, FoldMatMulViewsKeepsChainTensorReadByFusedEdge) {
 // without rewiring the edge splits the two and turns the residual into a phantom bias. ---
 TEST(FusedEdges, InsertLayoutConvertsBridgesMirroredFusedResidual) {
     Graph    g;
-    TensorId x = addInputT(g, "x", {1, 4, 2, 2});
-    TensorId z = addInputT(g, "z", {1, 4, 2, 2});
-    TensorId r = addAct(g, "r", {1, 4, 2, 2});
-    TensorId y = addAct(g, "y", {1, 4, 2, 2});
+    TensorId x         = addInputT(g, "x", {1, 4, 2, 2});
+    TensorId z         = addInputT(g, "z", {1, 4, 2, 2});
+    TensorId r         = addAct(g, "r", {1, 4, 2, 2});
+    TensorId y         = addAct(g, "y", {1, 4, 2, 2});
     g.desc(y).isOutput = true;
     {
         Node tr;
@@ -322,10 +322,10 @@ TEST(FusedEdges, InsertLayoutConvertsBridgesMirroredFusedResidual) {
 // conv it feeds. ---
 TEST(FusedEdges, InsertLayoutConvertsBridgesUnmirroredFusedResidual) {
     Graph    g;
-    TensorId x = addInputT(g, "x", {1, 4, 2, 2});
-    TensorId z = addInputT(g, "z", {1, 4, 2, 2});
-    TensorId r = addAct(g, "r", {1, 4, 2, 2});
-    TensorId y = addAct(g, "y", {1, 4, 2, 2});
+    TensorId x         = addInputT(g, "x", {1, 4, 2, 2});
+    TensorId z         = addInputT(g, "z", {1, 4, 2, 2});
+    TensorId r         = addAct(g, "r", {1, 4, 2, 2});
+    TensorId y         = addAct(g, "y", {1, 4, 2, 2});
     g.desc(y).isOutput = true;
     {
         Node tr;
@@ -374,10 +374,10 @@ TEST(FusedEdges, InsertLayoutConvertsBridgesUnmirroredFusedResidual) {
 // same way it bridges node inputs, keeping a mirrored inputs entry and the edge identical. ---
 TEST(FusedEdges, MarkFp32BridgesMirroredFusedResidualPrecision) {
     Graph    g;
-    TensorId x = addInputT(g, "x", {1, 4, 2, 2});
-    TensorId z = addInputT(g, "z", {1, 4, 2, 2}, true);
-    TensorId r = addAct(g, "r", {1, 4, 2, 2}, true);
-    TensorId y = addAct(g, "y", {1, 4, 2, 2});
+    TensorId x          = addInputT(g, "x", {1, 4, 2, 2});
+    TensorId z          = addInputT(g, "z", {1, 4, 2, 2}, true);
+    TensorId r          = addAct(g, "r", {1, 4, 2, 2}, true);
+    TensorId y          = addAct(g, "y", {1, 4, 2, 2});
     g.desc(y).isOutput  = true;
     g.desc(r).storeFp32 = true; // pinned by an earlier pass; the fp16 conv must not read it raw
     addNode(g, OpType::Relu, "mk_r", {z}, r);
@@ -403,10 +403,10 @@ TEST(FusedEdges, MarkFp32BridgesMirroredFusedResidualPrecision) {
 // be rewired to the ConvertDtype output. ---
 TEST(FusedEdges, MarkFp32BridgesUnmirroredFusedResidualPrecision) {
     Graph    g;
-    TensorId x = addInputT(g, "x", {1, 4, 2, 2});
-    TensorId z = addInputT(g, "z", {1, 4, 2, 2}, true);
-    TensorId r = addAct(g, "r", {1, 4, 2, 2}, true);
-    TensorId y = addAct(g, "y", {1, 4, 2, 2});
+    TensorId x          = addInputT(g, "x", {1, 4, 2, 2});
+    TensorId z          = addInputT(g, "z", {1, 4, 2, 2}, true);
+    TensorId r          = addAct(g, "r", {1, 4, 2, 2}, true);
+    TensorId y          = addAct(g, "y", {1, 4, 2, 2});
     g.desc(y).isOutput  = true;
     g.desc(r).storeFp32 = true;
     addNode(g, OpType::Relu, "mk_r", {z}, r);

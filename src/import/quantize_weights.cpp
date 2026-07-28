@@ -53,7 +53,7 @@ namespace vknn {
             TensorId weight  = kNoTensor;
             TensorId act     = kNoTensor;
             int64_t  K = 0, N = 0;
-            int      layout = 0;  // 0 = tensor is [K,N] row-major, 1 = tensor is [N,K] row-major
+            int      layout = 0; // 0 = tensor is [K,N] row-major, 1 = tensor is [N,K] row-major
             // Activation-channel granularity: a matmul/gemm column k IS activation channel k of the
             // last axis; a conv column k = (c, ky, kx) shares the per-input-channel statistic of c.
             bool    convChannels = false;
@@ -160,7 +160,8 @@ namespace vknn {
         // host's C++ library).
         struct DetRng {
             uint64_t state;
-            explicit DetRng(uint64_t seed): state(seed) {}
+            explicit DetRng(uint64_t seed): state(seed) {
+            }
             uint64_t next() {
                 // splitmix64: a small, well-mixed generator with a portable, fixed sequence.
                 uint64_t z = (state += 0x9e3779b97f4a7c15ull);
@@ -329,8 +330,7 @@ namespace vknn {
         // Run the float graph on the CPU backend over the calibration samples, capturing each site's
         // activation input as a temporary graph output. Returns false when calibration cannot run
         // (the caller degrades to weight-only quantization).
-        bool calibrate(const Graph &g, const std::vector<QuantSite> &sites, const QuantOptions &opt,
-                       std::map<TensorId, ActStats> &stats) {
+        bool calibrate(const Graph &g, const std::vector<QuantSite> &sites, const QuantOptions &opt, std::map<TensorId, ActStats> &stats) {
             const int samples = opt.calibFiles.empty() ? opt.calibSamples : (int) opt.calibFiles.size();
             if (samples <= 0)
             {
@@ -350,15 +350,13 @@ namespace vknn {
                 {
                     capture[s.act] = s.convChannels;
                 } else if (it->second != s.convChannels)
-                {
-                    it->second = true;
-                }
+                { it->second = true; }
             }
             if (capture.empty())
             {
                 return false;
             }
-            Graph calib = g; // Session::create consumes its graph; quantization still needs `g`
+            Graph                           calib = g; // Session::create consumes its graph; quantization still needs `g`
             std::map<std::string, TensorId> nameOf;
             for (auto &kv: capture)
             {
@@ -381,9 +379,7 @@ namespace vknn {
             cfg.noCache  = true;
             std::unique_ptr<Session> sess;
             try
-            {
-                sess = Session::create(std::move(calib), cfg);
-            } catch (const Error &e)
+            { sess = Session::create(std::move(calib), cfg); } catch (const Error &e)
             {
                 printf("[compile] -Os calibration: CPU session failed (%s)\n", e.what());
                 return false;
@@ -425,8 +421,7 @@ namespace vknn {
         // The per-column weighting for a site: colScale[k]^2 = E[x_k^2] from calibration, replicated
         // over a conv's kH*kW taps (and averaged over conv groups, whose columns alias several input
         // channels). All-ones when calibration is unavailable or the captured extent mismatches.
-        std::vector<double> columnWeights(const QuantSite &s, const std::map<TensorId, ActStats> &stats,
-                                          const Graph &g) {
+        std::vector<double> columnWeights(const QuantSite &s, const std::map<TensorId, ActStats> &stats, const Graph &g) {
             std::vector<double> w((size_t) s.K, 1.0);
             auto                it = stats.find(s.act);
             if (it == stats.end() || it->second.count <= 0)
@@ -482,7 +477,7 @@ namespace vknn {
             {
                 return {};
             }
-            const ActStats &st = it->second;
+            const ActStats     &st = it->second;
             std::vector<double> m((size_t) s.K, 0.0);
             if (!s.convChannels)
             {
@@ -525,20 +520,16 @@ namespace vknn {
         // through a deep stack). The correction lands in the existing bias when the node has one
         // (Conv/Gemm input[2], MatMul fusedBias); a bias-free node gets a fresh one only where that
         // cannot disturb fused-chain operand indexing.
-        void applyBiasCorrection(Graph &g, Node &nd, const QuantSite &s, const std::vector<double> &delta,
-                                 const std::string &weightName, const char *biasSuffix) {
+        void applyBiasCorrection(Graph &g, Node &nd, const QuantSite &s, const std::vector<double> &delta, const std::string &weightName, const char *biasSuffix) {
             TensorId biasId = kNoTensor;
             if (nd.type == OpType::MatMul)
             {
                 biasId = nd.fusedBias;
             } else if (pwCoreInputs(nd) >= 3)
-            {
-                biasId = nd.inputs[2];
-            }
+            { biasId = nd.inputs[2]; }
             if (biasId != kNoTensor)
             {
-                if (!g.isInitializer(biasId) || tensorUses(g, biasId) != 1 ||
-                    numElements(g.desc(biasId).shape) != s.N)
+                if (!g.isInitializer(biasId) || tensorUses(g, biasId) != 1 || numElements(g.desc(biasId).shape) != s.N)
                 {
                     return; // shared / runtime / oddly-shaped bias: skip rather than corrupt
                 }
@@ -600,11 +591,7 @@ namespace vknn {
         // reordered for the LUT4 contract: entry 0 is the exact zero, so the nonzero quantiles
         // live at 1..15 ascending. The weighted Lloyd fit below starts from it and adapts the
         // nonzero entries to the tensor's own normalized distribution.
-        constexpr double kNf4NonZero[15] = {
-            -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
-            -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.07958029955625534,
-            0.16093020141124725, 0.24611230194568634, 0.33791524171829224, 0.44070982933044434,
-            0.5626170039176941, 0.7229568362236023, 1.0};
+        constexpr double kNf4NonZero[15] = {-1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453, -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224, 0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0};
 
         // Nearest codebook entry to `v`, ties resolved to the lowest index (deterministic).
         int nearestLutEntry(const double cb[16], double v) {
@@ -629,10 +616,7 @@ namespace vknn {
         // `q`. Accumulates the same weighted-SSE guard metric the integer path computes.
         // Deterministic: fixed iteration count, stride subsampling, fp16-rounded sorted entries
         // every round.
-        void quantizeLut4Grid(const std::vector<float> &w, const std::vector<double> &colW,
-                              const std::vector<char> &isOut, int64_t K, int64_t N, int64_t G,
-                              int64_t nGroups, std::vector<uint16_t> &scales, std::vector<int8_t> &q,
-                              std::vector<uint16_t> &codebook, double &errNum, double &errDen) {
+        void quantizeLut4Grid(const std::vector<float> &w, const std::vector<double> &colW, const std::vector<char> &isOut, int64_t K, int64_t N, int64_t G, int64_t nGroups, std::vector<uint16_t> &scales, std::vector<int8_t> &q, std::vector<uint16_t> &codebook, double &errNum, double &errDen) {
             // Per-(group, column) absmax scales, fp16-rounded like the integer path's steps. A
             // degenerate group-column (absmax rounds to fp16 zero) keeps scale 1; its normalized
             // values sit at the pinned zero entry, so it flushes to zero exactly like the integer
@@ -665,9 +649,9 @@ namespace vknn {
             }
             // Codebook fit over a deterministic stride subsample of the normalized non-outlier
             // values (the fit is a shape estimate; the assignment below still visits every value).
-            constexpr int64_t kLutFitSamples = 65536;
-            const int64_t     total          = K * N;
-            const int64_t     stride         = std::max<int64_t>(1, total / kLutFitSamples);
+            constexpr int64_t                      kLutFitSamples = 65536;
+            const int64_t                          total          = K * N;
+            const int64_t                          stride         = std::max<int64_t>(1, total / kLutFitSamples);
             std::vector<std::pair<double, double>> samples; // (normalized value, column weight)
             samples.reserve((size_t) std::min<int64_t>(total, kLutFitSamples + 1));
             for (int64_t idx = 0; idx < total; idx += stride)
@@ -725,8 +709,8 @@ namespace vknn {
                         {
                             continue;
                         }
-                        const double v    = w[(size_t) (k * N + n)];
-                        const int    best = nearestLutEntry(cb, v / s);
+                        const double v          = w[(size_t) (k * N + n)];
+                        const int    best       = nearestLutEntry(cb, v / s);
                         q[(size_t) (k * N + n)] = (int8_t) best;
                         const double e          = v - cb[best] * s;
                         errNum += colW[(size_t) k] * e * e;
@@ -753,8 +737,7 @@ namespace vknn {
             int         opClass = 0; // consumer OpType: it selects the group / outlier defaults
             bool        operator<(const WeightKey &other) const {
                 return std::tie(name, digest, payloadBytes, K, N, group, layout, dtype, opClass) <
-                       std::tie(other.name, other.digest, other.payloadBytes, other.K, other.N, other.group, other.layout,
-                                other.dtype, other.opClass);
+                       std::tie(other.name, other.digest, other.payloadBytes, other.K, other.N, other.group, other.layout, other.dtype, other.opClass);
             }
         };
 
@@ -763,12 +746,12 @@ namespace vknn {
         // sharing bucket copies the bytes straight out of it and the cache never holds a second copy
         // of a weight.
         struct QuantSource {
-            const Graph *graph    = nullptr;
-            bool         keptFp16 = false; // the error guard rejected it: every bucket keeps fp16
-            double       relErr   = 0;     // the guard's measured error, for the sharing bucket's log
-            TensorId     weight = kNoTensor, scales = kNoTensor;
-            TensorId     oidx = kNoTensor, oval = kNoTensor, lut = kNoTensor;
-            int64_t      nOut = 0, group = 0;
+            const Graph        *graph    = nullptr;
+            bool                keptFp16 = false; // the error guard rejected it: every bucket keeps fp16
+            double              relErr   = 0;     // the guard's measured error, for the sharing bucket's log
+            TensorId            weight = kNoTensor, scales = kNoTensor;
+            TensorId            oidx = kNoTensor, oval = kNoTensor, lut = kNoTensor;
+            int64_t             nOut = 0, group = 0;
             std::vector<double> biasDelta; // empty = uncalibrated, so no bias correction
         };
         using QuantCache = std::map<WeightKey, QuantSource>;
@@ -834,10 +817,10 @@ namespace vknn {
         // Copy an initializer (desc and payload) from the producing bucket into `g`. The payload is
         // copied out by value: a bucket owns its own initializer bytes.
         TensorId copyInitializer(Graph &g, const Graph &from, TensorId id) {
-            TensorDesc d    = from.desc(id);
-            d.isInput       = false;
-            d.isOutput      = false;
-            d.isInitializer = true;
+            TensorDesc d       = from.desc(id);
+            d.isInput          = false;
+            d.isOutput         = false;
+            d.isInitializer    = true;
             const TensorId out = g.addTensor(d);
             HostBuffer     hb;
             hb.bytes            = from.initializers.at(id).bytes.toVector();
@@ -850,8 +833,7 @@ namespace vknn {
         // correction. The two buckets then hold byte-identical weights, which the .vxm's
         // content-deduped initializer pool stores once. Mirrors the emit order of the quantizing
         // path below so the two buckets' tensor tables line up.
-        void applySharedQuant(Graph &g, const QuantSite &s, const QuantSource &src, int format, const char *biasSuffix,
-                              QuantStats &stats) {
+        void applySharedQuant(Graph &g, const QuantSite &s, const QuantSource &src, int format, const char *biasSuffix, QuantStats &stats) {
             Node          &nd      = g.nodes[s.nodeIdx];
             const Graph   &from    = *src.graph;
             const TensorId scaleId = copyInitializer(g, from, src.scales);
@@ -932,7 +914,7 @@ namespace vknn {
         const char  *oidxSuffix  = lutFormat ? "#l4oi" : (int8Width ? "#i8oi" : "#i4oi");
         const char  *ovalSuffix  = lutFormat ? "#l4ov" : (int8Width ? "#i8ov" : "#i4ov");
         const char  *biasSuffix  = lutFormat ? "#l4b" : (int8Width ? "#i8b" : "#i4b");
-        QuantStats stats;
+        QuantStats   stats;
         for (const auto &kv: g.initializers)
         {
             stats.bytesBefore += (int64_t) kv.second.bytes.size();
@@ -970,10 +952,10 @@ namespace vknn {
         }
         for (size_t siteIdx = 0; siteIdx < sites.size(); ++siteIdx)
         {
-            const QuantSite  &s          = sites[siteIdx];
-            Node             &nd         = g.nodes[s.nodeIdx];
-            const TensorDesc  wdOriginal = g.desc(s.weight); // copied: addTensor below reallocates descs
-            const int64_t     K = s.K, N = s.N;
+            const QuantSite &s          = sites[siteIdx];
+            Node            &nd         = g.nodes[s.nodeIdx];
+            const TensorDesc wdOriginal = g.desc(s.weight); // copied: addTensor below reallocates descs
+            const int64_t    K = s.K, N = s.N;
             if (cached[siteIdx])
             {
                 // Another bucket of this compile already quantized this weight: take its bytes, its
@@ -981,9 +963,8 @@ namespace vknn {
                 if (cached[siteIdx]->keptFp16)
                 {
                     ++stats.guardKept;
-                    printf("[compile] -Os: kept %s fp16 (relative error %.4f > %.4f)\n",
-                           wdOriginal.name.empty() ? nd.name.c_str() : wdOriginal.name.c_str(), cached[siteIdx]->relErr,
-                           opt.maxLayerRelErr);
+                    printf("[compile] -Os: kept %s fp16 (relative error %.4f > %.4f)\n", wdOriginal.name.empty() ? nd.name.c_str() : wdOriginal.name.c_str(),
+                           cached[siteIdx]->relErr, opt.maxLayerRelErr);
                     continue;
                 }
                 applySharedQuant(g, s, *cached[siteIdx], format, biasSuffix, stats);
@@ -1011,7 +992,7 @@ namespace vknn {
             // Outlier preservation: the top outlierFrac of columns by (activation scale x weight
             // magnitude) stay fp16. Ties break on the lower k so the selection is deterministic.
             const double         outlierFrac = nd.type == OpType::MatMul ? opt.outlierFrac : opt.convOutlierFrac;
-            const int64_t        nOut = (int64_t) ((double) K * outlierFrac);
+            const int64_t        nOut        = (int64_t) ((double) K * outlierFrac);
             std::vector<int32_t> oidx;
             std::vector<char>    isOut((size_t) K, 0);
             if (nOut > 0)
@@ -1054,90 +1035,92 @@ namespace vknn {
             {
                 quantizeLut4Grid(w, colW, isOut, K, N, G, nGroups, scales, q, codebook, errNum, errDen);
             } else
-            for (int64_t gp = 0; gp < nGroups; ++gp)
             {
-                const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
-                for (int64_t n = 0; n < N; ++n)
+                for (int64_t gp = 0; gp < nGroups; ++gp)
                 {
-                    double maxAbs = 0;
-                    for (int64_t k = k0; k < k1; ++k)
+                    const int64_t k0 = gp * G, k1 = std::min(K, k0 + G);
+                    for (int64_t n = 0; n < N; ++n)
                     {
-                        if (!isOut[(size_t) k])
+                        double maxAbs = 0;
+                        for (int64_t k = k0; k < k1; ++k)
                         {
-                            maxAbs = std::max(maxAbs, (double) std::fabs(w[(size_t) (k * N + n)]));
+                            if (!isOut[(size_t) k])
+                            {
+                                maxAbs = std::max(maxAbs, (double) std::fabs(w[(size_t) (k * N + n)]));
+                            }
                         }
-                    }
-                    // The group-column's weighted energy: its errDen share, and — when no candidate
-                    // step survives fp16 rounding below — the exact cost of flushing it to zero.
-                    double colEnergy = 0;
-                    for (int64_t k = k0; k < k1; ++k)
-                    {
-                        if (!isOut[(size_t) k])
+                        // The group-column's weighted energy: its errDen share, and — when no candidate
+                        // step survives fp16 rounding below — the exact cost of flushing it to zero.
+                        double colEnergy = 0;
+                        for (int64_t k = k0; k < k1; ++k)
                         {
-                            colEnergy += colW[(size_t) k] * (double) w[(size_t) (k * N + n)] * (double) w[(size_t) (k * N + n)];
+                            if (!isOut[(size_t) k])
+                            {
+                                colEnergy += colW[(size_t) k] * (double) w[(size_t) (k * N + n)] * (double) w[(size_t) (k * N + n)];
+                            }
                         }
-                    }
-                    errDen += colEnergy;
-                    if (maxAbs == 0)
-                    {
-                        continue; // all-zero (or all-outlier) group: q stays 0 at scale 1
-                    }
-                    // Candidate steps shrink the max-abs mapping from 1.0 down to 0.4: clipping a few
-                    // large-magnitude weights often buys the rest of the group a finer step.
-                    double bestCost = 1e300;
-                    float  bestS    = 1.0f;
-                    bool   anyStep  = false; // at least one candidate step survived fp16 rounding
-                    for (int cand = 0; cand < 21; ++cand)
-                    {
-                        const double p = 1.0 - 0.03 * (double) cand;
-                        // The candidate is evaluated at its fp16-rounded value (saturated to the
-                        // finite range) — the exact step the runtime dequantizes with.
-                        const float s = (float) halfToFloat(floatToHalfSat((float) (maxAbs * p / qMax)));
-                        if (s <= 0)
+                        errDen += colEnergy;
+                        if (maxAbs == 0)
                         {
+                            continue; // all-zero (or all-outlier) group: q stays 0 at scale 1
+                        }
+                        // Candidate steps shrink the max-abs mapping from 1.0 down to 0.4: clipping a few
+                        // large-magnitude weights often buys the rest of the group a finer step.
+                        double bestCost = 1e300;
+                        float  bestS    = 1.0f;
+                        bool   anyStep  = false; // at least one candidate step survived fp16 rounding
+                        for (int cand = 0; cand < 21; ++cand)
+                        {
+                            const double p = 1.0 - 0.03 * (double) cand;
+                            // The candidate is evaluated at its fp16-rounded value (saturated to the
+                            // finite range) — the exact step the runtime dequantizes with.
+                            const float s = (float) halfToFloat(floatToHalfSat((float) (maxAbs * p / qMax)));
+                            if (s <= 0)
+                            {
+                                continue;
+                            }
+                            anyStep     = true;
+                            double cost = 0;
+                            for (int64_t k = k0; k < k1; ++k)
+                            {
+                                if (isOut[(size_t) k])
+                                {
+                                    continue;
+                                }
+                                const double v  = w[(size_t) (k * N + n)];
+                                double       qq = std::nearbyint(v / s);
+                                qq              = std::min(qMax, std::max(-qMax, qq));
+                                const double e  = v - qq * (double) s;
+                                cost += colW[(size_t) k] * e * e;
+                            }
+                            if (cost < bestCost)
+                            {
+                                bestCost = cost;
+                                bestS    = s;
+                            }
+                        }
+                        if (!anyStep)
+                        {
+                            // Every candidate step (maxAbs * p / 7) rounds to fp16 zero: the group holds
+                            // only subnormal-magnitude weights. It keeps the initialization — q = 0 at
+                            // scale 1, flushed to zero — and its metric contribution is the flushed energy
+                            // itself; the untouched 1e300 search sentinel is a bound, not an error value.
+                            errNum += colEnergy;
                             continue;
                         }
-                        anyStep     = true;
-                        double cost = 0;
+                        scales[(size_t) (gp * N + n)] = floatToHalfSat(bestS);
                         for (int64_t k = k0; k < k1; ++k)
                         {
                             if (isOut[(size_t) k])
                             {
                                 continue;
                             }
-                            const double v  = w[(size_t) (k * N + n)];
-                            double       qq = std::nearbyint(v / s);
-                            qq              = std::min(qMax, std::max(-qMax, qq));
-                            const double e  = v - qq * (double) s;
-                            cost += colW[(size_t) k] * e * e;
+                            double qq               = std::nearbyint((double) w[(size_t) (k * N + n)] / (double) bestS);
+                            qq                      = std::min(qMax, std::max(-qMax, qq));
+                            q[(size_t) (k * N + n)] = (int8_t) qq;
                         }
-                        if (cost < bestCost)
-                        {
-                            bestCost = cost;
-                            bestS    = s;
-                        }
+                        errNum += bestCost;
                     }
-                    if (!anyStep)
-                    {
-                        // Every candidate step (maxAbs * p / 7) rounds to fp16 zero: the group holds
-                        // only subnormal-magnitude weights. It keeps the initialization — q = 0 at
-                        // scale 1, flushed to zero — and its metric contribution is the flushed energy
-                        // itself; the untouched 1e300 search sentinel is a bound, not an error value.
-                        errNum += colEnergy;
-                        continue;
-                    }
-                    scales[(size_t) (gp * N + n)] = floatToHalfSat(bestS);
-                    for (int64_t k = k0; k < k1; ++k)
-                    {
-                        if (isOut[(size_t) k])
-                        {
-                            continue;
-                        }
-                        double qq = std::nearbyint((double) w[(size_t) (k * N + n)] / (double) bestS);
-                        qq        = std::min(qMax, std::max(-qMax, qq));
-                        q[(size_t) (k * N + n)] = (int8_t) qq;
-                    }
-                    errNum += bestCost;
                 }
             }
 
@@ -1152,8 +1135,7 @@ namespace vknn {
             if (relErr > opt.maxLayerRelErr)
             {
                 ++stats.guardKept;
-                printf("[compile] -Os: kept %s fp16 (relative error %.4f > %.4f)\n",
-                       wdOriginal.name.empty() ? nd.name.c_str() : wdOriginal.name.c_str(), relErr, opt.maxLayerRelErr);
+                printf("[compile] -Os: kept %s fp16 (relative error %.4f > %.4f)\n", wdOriginal.name.empty() ? nd.name.c_str() : wdOriginal.name.c_str(), relErr, opt.maxLayerRelErr);
                 if (produced && hasKey[siteIdx])
                 {
                     // The verdict travels with the weight: a layer one bucket keeps fp16 must stay
@@ -1169,7 +1151,7 @@ namespace vknn {
 
             // Emit: packed payload into the weight tensor (logical desc unchanged apart from the fp16
             // dtype stamp), scales/outliers as side initializers referenced from the node attributes.
-            std::vector<uint8_t> packed = int8Width ? int8Pack(q, K, N) : int4Pack(q, K, N);
+            std::vector<uint8_t>  packed = int8Width ? int8Pack(q, K, N) : int4Pack(q, K, N);
             std::vector<uint16_t> oval((size_t) (oidx.size() * (size_t) N));
             for (size_t j = 0; j < oidx.size(); ++j)
             {
@@ -1181,14 +1163,14 @@ namespace vknn {
 
             auto addSide = [&](const char *suffix, DType dt, int64_t elems, const void *bytes, size_t byteCount) {
                 TensorDesc d;
-                d.name          = (wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name) + suffix;
-                d.shape         = {elems};
-                d.dtype         = dt;
-                d.isInitializer = true;
-                TensorId id     = g.addTensor(d);
-                HostBuffer hb;
+                d.name                  = (wdOriginal.name.empty() ? ("#w" + std::to_string(s.weight)) : wdOriginal.name) + suffix;
+                d.shape                 = {elems};
+                d.dtype                 = dt;
+                d.isInitializer         = true;
+                TensorId             id = g.addTensor(d);
+                HostBuffer           hb;
                 std::vector<uint8_t> owned((const uint8_t *) bytes, (const uint8_t *) bytes + byteCount);
-                hb.bytes = std::move(owned);
+                hb.bytes           = std::move(owned);
                 g.initializers[id] = std::move(hb);
                 return id;
             };
@@ -1206,7 +1188,7 @@ namespace vknn {
 
             {
                 HostBuffer hb;
-                hb.bytes = std::move(packed);
+                hb.bytes                 = std::move(packed);
                 g.initializers[s.weight] = std::move(hb);
             }
             // The desc keeps its logical shape so every shape-reading gate/planner is untouched; the
@@ -1216,9 +1198,9 @@ namespace vknn {
 
             auto seti = [&](const char *key, int64_t v) {
                 Attr a;
-                a.kind             = Attr::Int;
-                a.i                = v;
-                nd.attr.map[key]   = a;
+                a.kind           = Attr::Int;
+                a.i              = v;
+                nd.attr.map[key] = a;
             };
             seti(kWq, format);
             seti(kWqK, K);
@@ -1291,7 +1273,7 @@ namespace vknn {
         {
             stats.bytesAfter += (int64_t) kv.second.bytes.size();
         }
-        stats.sites = (int64_t) sites.size();
+        stats.sites      = (int64_t) sites.size();
         stats.calibrated = calibrated;
         return stats;
     }
@@ -1313,7 +1295,9 @@ namespace vknn {
         {
             order.emplace_back(calibrationRows(*buckets[b], collectSites(*buckets[b], opt)), b);
         }
-        std::stable_sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        std::stable_sort(order.begin(), order.end(), [](const auto &a, const auto &b) {
+            return a.first > b.first;
+        });
         QuantCache shared;
         for (const auto &entry: order)
         {

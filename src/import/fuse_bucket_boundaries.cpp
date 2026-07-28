@@ -82,16 +82,16 @@ namespace vknn {
             // e.g. a shared `attention_mask`, so we never add a duplicate boundary input).
             for (TensorId si: src.inputs)
             {
-                const std::string &nm = src.desc(si).name;
+                const std::string &nm       = src.desc(si).name;
                 TensorId           existing = dst.find(nm);
                 if (existing != kNoTensor && inList(dst.inputs, existing))
                 {
                     remap[si] = existing;
                     continue;
                 }
-                TensorDesc d  = src.desc(si);
-                d.isOutput    = false;
-                TensorId nt   = dst.addTensor(d);
+                TensorDesc d = src.desc(si);
+                d.isOutput   = false;
+                TensorId nt  = dst.addTensor(d);
                 dst.inputs.push_back(nt);
                 remap[si] = nt;
             }
@@ -154,16 +154,15 @@ namespace vknn {
         // graph inputs carry the run-time data — `featureName` (the encoder's feature output, bound across
         // from the vision graph) and "image_positions" (the row each feature overwrites, computed by the
         // caller). `embeds` is the decoder's internal token-embedding tensor.
-        void spliceImageFeatures(Graph &dec, TensorId embeds, const std::string &featureName,
-                                 const Shape &featureShape, DType featureDtype) {
+        void spliceImageFeatures(Graph &dec, TensorId embeds, const std::string &featureName, const Shape &featureShape, DType featureDtype) {
             // Route the embedding lookup's output into a private tensor so ScatterND can read it as its
             // `data` operand and write the spliced result back into the original `embeds` the decoder body
             // already consumes (so no downstream node needs rewiring).
-            TensorDesc preDesc    = dec.desc(embeds);
-            preDesc.name          = dec.desc(embeds).name + ".pre_image_splice";
-            preDesc.isInput       = false;
-            preDesc.isOutput      = false;
-            preDesc.isInitializer = false;
+            TensorDesc preDesc       = dec.desc(embeds);
+            preDesc.name             = dec.desc(embeds).name + ".pre_image_splice";
+            preDesc.isInput          = false;
+            preDesc.isOutput         = false;
+            preDesc.isInitializer    = false;
             const TensorId preEmbeds = dec.addTensor(preDesc);
 
             size_t producerIndex = (size_t) -1;
@@ -186,10 +185,10 @@ namespace vknn {
             // New graph input 1: the image feature rows, shaped exactly like the vision graph's output so
             // the caller binds that output straight across.
             TensorDesc featDesc;
-            featDesc.name          = featureName;
-            featDesc.shape         = featureShape;
-            featDesc.dtype         = featureDtype;
-            featDesc.isInput       = true;
+            featDesc.name           = featureName;
+            featDesc.shape          = featureShape;
+            featDesc.dtype          = featureDtype;
+            featDesc.isInput        = true;
             const TensorId features = dec.addTensor(featDesc);
             dec.inputs.push_back(features);
 
@@ -198,11 +197,11 @@ namespace vknn {
             // the embeddings). Carried as float: the GPU ScatterND reads a float index activation and
             // truncates to int, and the caller fills in the image-token row positions (small, exact).
             const int64_t imageRows = featureShape[1];
-            TensorDesc     posDesc;
-            posDesc.name    = "image_positions";
-            posDesc.shape   = {1, imageRows, 2};
-            posDesc.dtype   = DType::Float32;
-            posDesc.isInput = true;
+            TensorDesc    posDesc;
+            posDesc.name             = "image_positions";
+            posDesc.shape            = {1, imageRows, 2};
+            posDesc.dtype            = DType::Float32;
+            posDesc.isInput          = true;
             const TensorId positions = dec.addTensor(posDesc);
             dec.inputs.push_back(positions);
 
@@ -245,8 +244,7 @@ namespace vknn {
                         // Same NAME and same SHAPE => a genuine hand-off. The shape check pairs the right
                         // producer with the right consumer when a model has several buckets that share a
                         // boundary name at different token counts (e.g. a prefill and a decode graph).
-                        if (bid != kNoTensor && inList(buckets[b].inputs, bid) && aid != kNoTensor
-                            && buckets[a].desc(aid).shape == buckets[b].desc(bid).shape)
+                        if (bid != kNoTensor && inList(buckets[b].inputs, bid) && aid != kNoTensor && buckets[a].desc(aid).shape == buckets[b].desc(bid).shape)
                         {
                             boundary = on;
                             break;

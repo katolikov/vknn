@@ -4,11 +4,10 @@
 // from every model load/run, would otherwise bury the gtest output. Pass --vknn-log to keep engine
 // logging on when diagnosing a failure. gtest reports pass/fail through assertions, not these logs, so
 // muting them loses no test signal.
-#include <cstring>
-#include <gtest/gtest.h>
-
 #include "vknn/log.h"
 #include "vknn/log_level.h"
+#include <cstring>
+#include <gtest/gtest.h>
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv); // consumes gtest's own flags; leaves --vknn-log in argv

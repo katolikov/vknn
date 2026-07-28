@@ -136,18 +136,18 @@ namespace vknn { namespace vk {
         /// and a failing constructor.
         void destroy() noexcept;
 
-        VulkanContext &ctx_;
-        VkBuffer       buf_       = VK_NULL_HANDLE;
-        VkDeviceMemory mem_       = VK_NULL_HANDLE;
-        size_t         bytes_     = 0;
-        void          *mapped_    = nullptr;
-        bool           imported_  = false; ///< Backing memory came from an imported fd (not owned here).
-        bool           accounted_ = false; ///< This allocation has been added to the live/peak totals.
-        bool           allowsViews_ = false;             ///< Allocated without the dedicated hint; views may bind in.
-        uint32_t       memTypeIndex_ = 0;                ///< Memory type of mem_ (view compatibility check).
-        VkDeviceSize   memSize_      = 0;                ///< Actual allocation size of mem_ (view fit check).
-        std::shared_ptr<Buffer> viewParent_;             ///< Root buffer whose memory backs this view (null = owns memory).
-        size_t                  viewOffset_ = 0;         ///< Byte offset within the root's memory (views only).
+        VulkanContext          &ctx_;
+        VkBuffer                buf_          = VK_NULL_HANDLE;
+        VkDeviceMemory          mem_          = VK_NULL_HANDLE;
+        size_t                  bytes_        = 0;
+        void                   *mapped_       = nullptr;
+        bool                    imported_     = false; ///< Backing memory came from an imported fd (not owned here).
+        bool                    accounted_    = false; ///< This allocation has been added to the live/peak totals.
+        bool                    allowsViews_  = false; ///< Allocated without the dedicated hint; views may bind in.
+        uint32_t                memTypeIndex_ = 0;     ///< Memory type of mem_ (view compatibility check).
+        VkDeviceSize            memSize_      = 0;     ///< Actual allocation size of mem_ (view fit check).
+        std::shared_ptr<Buffer> viewParent_;           ///< Root buffer whose memory backs this view (null = owns memory).
+        size_t                  viewOffset_ = 0;       ///< Byte offset within the root's memory (views only).
     };
 
 }} // namespace vknn::vk

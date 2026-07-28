@@ -86,9 +86,9 @@ namespace vknn {
                                     // (inference-mode) form is an identity and is rewired past here
         normalizeConv1d(g);         // before shape inference: conv arms assume 2-D weight/attr geometry
         inferShapes(g, batch, declared, bindings);
-        lowerOrtContribOps(g);      // ORT contrib ops (Skip/SimplifiedLayerNorm, RotaryEmbedding,
-                                    // MultiHeadAttention, MatMulNBits) expand to primitives in a
-                                    // fixpoint with shape inference; a scan-only no-op without them
+        lowerOrtContribOps(g); // ORT contrib ops (Skip/SimplifiedLayerNorm, RotaryEmbedding,
+                               // MultiHeadAttention, MatMulNBits) expand to primitives in a
+                               // fixpoint with shape inference; a scan-only no-op without them
         if (opt.dequantize)
         {
             dequantizeGraph(g); // QDQ checkpoints collapse to the float graph before any lowering
@@ -149,21 +149,21 @@ namespace vknn {
         foldGatherToSlice(g);    // constant-contiguous Gather -> Slice (byte-identical), so identity
                                  // slices alias and leading-axis slices become zero-copy views
         eliminateDeadNodes(g);
-        inferShapes(g, batch, declared, bindings);  // refresh shapes after fusion/folding
-        fuseChannelShuffle(g);  // Reshape/Transpose/Reshape group-interleave -> one ChannelShuffle
-                                // dispatch; needs the fixpoint-resolved Reshape shapes above, and
-                                // runs before the pointwise fusion so the chain is claimed whole
-        lowerRMSNorm(g);        // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate
-                                // RMSNorm kernel; before pointwise fusion so a trailing residual Add can fold
-        inferShapes(g, batch, declared, bindings);  // set the RMSNorm output shape (identity rule)
-        lowerInstanceNorm(g);   // needs the fixpoint-resolved input shapes; the emitted spatial
-                                // ReduceMeans recover as GlobalAvgPool in the pass below
-        lowerReduceToGap(g);    // a late-resolving rank can expose the spatial-mean form
-        lowerEinsum(g);        // batched einsums -> MatMul (needs the operand shapes resolved above)
+        inferShapes(g, batch, declared, bindings); // refresh shapes after fusion/folding
+        fuseChannelShuffle(g);                     // Reshape/Transpose/Reshape group-interleave -> one ChannelShuffle
+                                                   // dispatch; needs the fixpoint-resolved Reshape shapes above, and
+                                                   // runs before the pointwise fusion so the chain is claimed whole
+        lowerRMSNorm(g);                           // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate
+                                                   // RMSNorm kernel; before pointwise fusion so a trailing residual Add can fold
+        inferShapes(g, batch, declared, bindings); // set the RMSNorm output shape (identity rule)
+        lowerInstanceNorm(g);                      // needs the fixpoint-resolved input shapes; the emitted spatial
+                                                   // ReduceMeans recover as GlobalAvgPool in the pass below
+        lowerReduceToGap(g);                       // a late-resolving rank can expose the spatial-mean form
+        lowerEinsum(g);                            // batched einsums -> MatMul (needs the operand shapes resolved above)
         inferShapes(g, batch, declared, bindings); // resolve the inserted Unsqueeze/MatMul/Squeeze
-        subpixelConvTranspose(g); // ConvTranspose -> Conv + DepthToSpace; runs on fully-resolved dims, before
-        inferShapes(g, batch, declared, bindings);    // the pointwise fusion so trailing pointwise ops can still fold onto the Conv
-        lowerGroupedConv(g); // general grouped Conv (1 < group < Cin) -> group-1 Convs + Concat, on resolved shapes
+        subpixelConvTranspose(g);                  // ConvTranspose -> Conv + DepthToSpace; runs on fully-resolved dims, before
+        inferShapes(g, batch, declared, bindings); // the pointwise fusion so trailing pointwise ops can still fold onto the Conv
+        lowerGroupedConv(g);                       // general grouped Conv (1 < group < Cin) -> group-1 Convs + Concat, on resolved shapes
         inferShapes(g, batch, declared, bindings); // shape the inserted Slice/Conv/Concat parts
         if (opt.lowerConv)
         {

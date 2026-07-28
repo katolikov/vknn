@@ -32,8 +32,7 @@ namespace vknn {
         return packed;
     }
 
-    std::vector<float> int8Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx,
-                                   const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut) {
+    std::vector<float> int8Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut) {
         const int64_t      rowBytes = int8RowBytes(N);
         std::vector<float> w((size_t) (K * N));
         for (int64_t k = 0; k < K; ++k)
@@ -63,9 +62,7 @@ namespace vknn {
         return w;
     }
 
-    std::vector<float> lut4Dequant(const uint8_t *packed, const uint16_t *codebook, const uint16_t *scales,
-                                   const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N,
-                                   int64_t group, int64_t nOut) {
+    std::vector<float> lut4Dequant(const uint8_t *packed, const uint16_t *codebook, const uint16_t *scales, const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut) {
         const int64_t rowBytes = int4RowBytes(N);
         float         cb[16];
         for (int i = 0; i < 16; ++i)
@@ -121,9 +118,7 @@ namespace vknn {
             {
                 // A format this build does not implement must fail the load: defaulting to any
                 // implemented decode would dequantize garbage.
-                throw Error(Status::Unsupported, "weight-quantization format " + std::to_string(format) +
-                                                     " on node " + nd.name +
-                                                     " is not supported by this build — reconvert the model or upgrade vknn");
+                throw Error(Status::Unsupported, "weight-quantization format " + std::to_string(format) + " on node " + nd.name + " is not supported by this build — reconvert the model or upgrade vknn");
             }
             // Validate the quant dimensions (from an untrusted .vxm) for EVERY quant node, including the
             // GPU-native kept-packed ones below: their shader reads `group` directly (vulkan/ops/matmul)
@@ -136,16 +131,16 @@ namespace vknn {
             {
                 continue;
             }
-            const TensorId weight  = nd.inputs[1];
-            const int64_t  K       = nd.attr.geti(kWqK, 0);
-            const int64_t  N       = nd.attr.geti(kWqN, 0);
-            const int64_t  group   = nd.attr.geti(kWqGroup, 1);
-            const int64_t  nOut    = nd.attr.geti(kWqNOut, 0);
-            const int64_t  layout  = nd.attr.geti(kWqLayout, 0);
-            const TensorId scaleId = (TensorId) nd.attr.geti(kWqScales, kNoTensor);
-            const TensorId oidxId  = (TensorId) nd.attr.geti(kWqOidx, kNoTensor);
-            const TensorId ovalId  = (TensorId) nd.attr.geti(kWqOval, kNoTensor);
-            const TensorId lutId   = (TensorId) nd.attr.geti(kWqLut, kNoTensor);
+            const TensorId    weight   = nd.inputs[1];
+            const int64_t     K        = nd.attr.geti(kWqK, 0);
+            const int64_t     N        = nd.attr.geti(kWqN, 0);
+            const int64_t     group    = nd.attr.geti(kWqGroup, 1);
+            const int64_t     nOut     = nd.attr.geti(kWqNOut, 0);
+            const int64_t     layout   = nd.attr.geti(kWqLayout, 0);
+            const TensorId    scaleId  = (TensorId) nd.attr.geti(kWqScales, kNoTensor);
+            const TensorId    oidxId   = (TensorId) nd.attr.geti(kWqOidx, kNoTensor);
+            const TensorId    ovalId   = (TensorId) nd.attr.geti(kWqOval, kNoTensor);
+            const TensorId    lutId    = (TensorId) nd.attr.geti(kWqLut, kNoTensor);
             const HostBuffer &packedHb = g.initializers.at(weight);
             const HostBuffer &scaleHb  = g.initializers.at(scaleId);
             // Payloads may be unaligned .vxm mmap views; copy the typed side tensors out before the
@@ -170,19 +165,15 @@ namespace vknn {
             std::vector<float> w;
             if (format == kWqFormatInt4)
             {
-                w = int4Dequant(packedHb.bytes.data(), scales.data(), nOut > 0 ? oidx.data() : nullptr,
-                                nOut > 0 ? oval.data() : nullptr, K, N, group, nOut);
+                w = int4Dequant(packedHb.bytes.data(), scales.data(), nOut > 0 ? oidx.data() : nullptr, nOut > 0 ? oval.data() : nullptr, K, N, group, nOut);
             } else if (format == kWqFormatInt8)
             {
-                w = int8Dequant(packedHb.bytes.data(), scales.data(), nOut > 0 ? oidx.data() : nullptr,
-                                nOut > 0 ? oval.data() : nullptr, K, N, group, nOut);
+                w = int8Dequant(packedHb.bytes.data(), scales.data(), nOut > 0 ? oidx.data() : nullptr, nOut > 0 ? oval.data() : nullptr, K, N, group, nOut);
             } else // kWqFormatLut4
             {
                 std::vector<uint16_t> codebook(16);
                 copyQuantSide(codebook.data(), codebook.size() * 2, g.initializers.at(lutId));
-                w = lut4Dequant(packedHb.bytes.data(), codebook.data(), scales.data(),
-                                nOut > 0 ? oidx.data() : nullptr, nOut > 0 ? oval.data() : nullptr, K, N,
-                                group, nOut);
+                w = lut4Dequant(packedHb.bytes.data(), codebook.data(), scales.data(), nOut > 0 ? oidx.data() : nullptr, nOut > 0 ? oval.data() : nullptr, K, N, group, nOut);
             }
             // Back to the original tensor layout, narrowed to the fp16 the desc already declares.
             // Saturating keeps the reconstruction inside the same finite-fp16 contract every other

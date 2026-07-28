@@ -72,7 +72,7 @@ namespace vknn {
         VkQueryPool               chunkPool_      = VK_NULL_HANDLE;
         uint32_t                  timedChunks_    = 0;
         struct {
-            uint64_t runs = 0;
+            uint64_t runs   = 0;
             double   packMs = 0, submitCallMs = 0, fenceWaitMs = 0, gpuBusyMs = 0, gpuGapMs = 0, unpackMs = 0;
         } stat_;
         // Compute dispatches the current recording holds: per node (index into nodeIdx, what the
@@ -80,9 +80,9 @@ namespace vknn {
         // covers the boundary converts, resident-link copies, chain feedback, and argmax epilogues
         // that belong to no node. Snapshotted at the end of record() because the counter itself
         // lives on the device context and the next segment to record resets it.
-        std::vector<uint32_t>        nodeDispatches_;
-        uint64_t                     recordedDispatches_ = 0;
-        std::vector<TensorId>        dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
+        std::vector<uint32_t> nodeDispatches_;
+        uint64_t              recordedDispatches_ = 0;
+        std::vector<TensorId> dumpTids_; // Config::dumpTensors debug: tensors to dump after the run
         // Zero-copy Concat/Split/Slice nodes whose EVERY slice the planner aliased as a sub-buffer
         // view: their record() emits nothing, so the barrier loop skips their hazard bookkeeping
         // (the data hazards ride the real producers/consumers through the shared arena ranges).
@@ -104,7 +104,7 @@ namespace vknn {
             std::shared_ptr<vk::Buffer> buf;
         };
         std::map<TensorId, Imported> imported_;
-        static uint64_t dmaBufId(int fd);
+        static uint64_t              dmaBufId(int fd);
         // Declared-format zero-copy: boundary tensors whose declared dma-buf layout/dtype differs from the
         // device-native boundary, so the GPU converts between the imported buffer and the pooled boundary
         // buffer instead of binding the fd directly. `convert_` is rebuilt each run; `recordedConvert_` is
@@ -133,9 +133,9 @@ namespace vknn {
         // identity never changes, so the recording stays valid across runs.
         struct ResidentLink {
             TensorId                    src = kNoTensor, dst = kNoTensor;
-            std::shared_ptr<vk::Buffer> rangesBuf;    // header {count,total} + 3 uints per range
-            uint32_t                    capacity = 0; // ranges rangesBuf can hold
-            bool                        kvq = false;  // dst is an int8 KV cache: the fold quantizes (link_copy_kvq)
+            std::shared_ptr<vk::Buffer> rangesBuf;        // header {count,total} + 3 uints per range
+            uint32_t                    capacity = 0;     // ranges rangesBuf can hold
+            bool                        kvq      = false; // dst is an int8 KV cache: the fold quantizes (link_copy_kvq)
         };
         std::vector<ResidentLink>            residentLinks_;
         std::set<TensorId>                   linkedInputs_, linkedOutputs_;
@@ -153,7 +153,7 @@ namespace vknn {
             int64_t                     rows    = 0; // kvHeads * cacheSlots == payload elems / headDim
             std::shared_ptr<vk::Buffer> scales;      // fp16, one per row
         };
-        std::map<TensorId, KvqCache>         kvqCaches_;
+        std::map<TensorId, KvqCache> kvqCaches_;
         // ---- virtualized activation row stride (rule in core/matmul_tile.h) ----
         // An internal flat fp16 activation whose logical last axis is not 4-aligned gets a buffer
         // whose PHYSICAL last axis is roundUpVec4(last), zero-filled past the logical extent, when
@@ -171,10 +171,10 @@ namespace vknn {
         void dequantKvqToHost(TensorId id, RtTensor &rt);
         // The prefill re-seed upload: quantize rt's fp32 host mirror (rounded through fp16 exactly
         // like the pack it replaces) into the payload + scale buffers.
-        void seedKvqFromHost(TensorId id, const RtTensor &rt);
-        static constexpr uint32_t            kLinkRangeHeaderBytes     = 8;  // {rangeCount, totalElems}
-        static constexpr uint32_t            kLinkInitialRangeCapacity = 16; // ranges per set; grows on demand
-        static constexpr uint32_t            kLinkCopyGroups           = 4;  // fixed grid; the shader strides over totalElems
+        void                      seedKvqFromHost(TensorId id, const RtTensor &rt);
+        static constexpr uint32_t kLinkRangeHeaderBytes     = 8;  // {rangeCount, totalElems}
+        static constexpr uint32_t kLinkInitialRangeCapacity = 16; // ranges per set; grows on demand
+        static constexpr uint32_t kLinkCopyGroups           = 4;  // fixed grid; the shader strides over totalElems
         // A link's ranges buffer holds one range set per chain iteration at a fixed stride; a
         // single-step segment (chainStepsMax_ == 1) holds exactly the original one-set layout.
         size_t linkRangesBufferBytes(uint32_t rangeCapacity) const;
@@ -211,7 +211,7 @@ namespace vknn {
         std::unique_ptr<vk::ComputePipeline>            argMaxPipeFp16_, argMaxPipeFp32_;
         static constexpr uint32_t                       kArgMaxResultBytes = 8; // {index, value}
         // Device element width of a boundary tensor (2 for fp16 storage, 4 for fp32/storeFp32).
-        int boundaryElemBytes(TensorId tid) const;
+        int         boundaryElemBytes(TensorId tid) const;
         static bool sameConvert(const std::map<TensorId, ConvertBinding> &a, const std::map<TensorId, ConvertBinding> &b);
     };
 

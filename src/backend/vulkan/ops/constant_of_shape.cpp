@@ -41,9 +41,7 @@ namespace vknn {
                     {
                         pc.value = (float) it->second.ints[0];
                     } else if (!it->second.floats.empty())
-                    {
-                        pc.value = it->second.floats[0];
-                    }
+                    { pc.value = it->second.floats[0]; }
                 }
                 pipe = env.pipeline(shader("constant_of_shape", env.useFp16), 1, sizeof(PC), std::vector<uint32_t> {});
             }

@@ -114,7 +114,7 @@ namespace vknn {
         std::vector<float>   data_;
         int                  fd_           = -1;                 ///< DMA-BUF fd for zero-copy I/O (-1 = host data in data_).
         TensorFormat         dmaBufFormat_ = TensorFormat::NCHW; ///< Declared layout of the fd's bytes.
-        DType                dmaBufDtype_  = DType::Float32;      ///< Declared dtype of the fd's bytes.
+        DType                dmaBufDtype_  = DType::Float32;     ///< Declared dtype of the fd's bytes.
     };
 
 } // namespace vknn

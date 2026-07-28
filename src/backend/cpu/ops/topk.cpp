@@ -48,8 +48,8 @@ namespace vknn {
                 bool largest = node.attr.geti("largest", 1) != 0;
                 // Output shape = input with the selected axis shortened to k. Slices along `axis`
                 // are strided walks: element j of slice (o, i) sits at (o*dim + j)*inner + i.
-                Shape out = X.shape;
-                out[axis] = k;
+                Shape out     = X.shape;
+                out[axis]     = k;
                 int64_t outer = 1, inner = 1;
                 for (int64_t i = 0; i < axis; ++i)
                 {

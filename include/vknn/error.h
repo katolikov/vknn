@@ -1,9 +1,8 @@
 // The Error exception: a Status-carrying std::runtime_error thrown on any operation failure.
 #pragma once
+#include "vknn/status.h"
 #include <stdexcept>
 #include <string>
-
-#include "vknn/status.h"
 
 namespace vknn {
 

@@ -61,7 +61,7 @@ namespace vknn {
                 int64_t zCount = 0;
                 // scale (and zero_point, when present) upload flat as fp32 — the shader binds them as
                 // float, not STORE, so they stay full precision regardless of the activation precision.
-                scaleBuf       = upload(*env.ctx, initFloats(g, node.inputs[1]), false);
+                scaleBuf = upload(*env.ctx, initFloats(g, node.inputs[1]), false);
                 if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor)
                 {
                     zCount = elemCount(g.desc(node.inputs[2]).shape);

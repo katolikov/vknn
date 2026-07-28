@@ -10,8 +10,8 @@ namespace vknn {
 
     TEST(LowpGemm, Fp8E4M3KnownEncodings) {
         EXPECT_EQ(encodeFp8E4M3(0.f), 0x00);
-        EXPECT_EQ(encodeFp8E4M3(1.0f), 0x38);   // 2^0 * 1.000
-        EXPECT_EQ(encodeFp8E4M3(1.5f), 0x3C);   // 2^0 * 1.100
+        EXPECT_EQ(encodeFp8E4M3(1.0f), 0x38); // 2^0 * 1.000
+        EXPECT_EQ(encodeFp8E4M3(1.5f), 0x3C); // 2^0 * 1.100
         EXPECT_EQ(encodeFp8E4M3(-1.5f), 0xBC);
         EXPECT_EQ(encodeFp8E4M3(448.f), 0x7E);  // max finite 2^8 * 1.75
         EXPECT_EQ(encodeFp8E4M3(1000.f), 0x7E); // saturates (no infinity)
@@ -45,7 +45,7 @@ namespace vknn {
         EXPECT_EQ(encodeInt8Symmetric(absmax, scale), 127);
         EXPECT_EQ(encodeInt8Symmetric(-absmax, scale), -127);
         EXPECT_EQ(encodeInt8Symmetric(0.f, scale), 0);
-        EXPECT_EQ(encodeInt8Symmetric(10.f * absmax, scale), 127);  // clamps
+        EXPECT_EQ(encodeInt8Symmetric(10.f * absmax, scale), 127); // clamps
         EXPECT_EQ(encodeInt8Symmetric(-10.f * absmax, scale), -127);
         EXPECT_EQ(encodeInt8Symmetric(1.f, 0.f), 0); // zero tensor: zero scale, zero codes
     }
@@ -83,11 +83,11 @@ namespace vknn {
         CoopmatGemmCaps caps = fullCaps();
         caps.selfCheckPassed = false;
         EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::None);
-        caps                 = fullCaps();
-        caps.wave32Pinnable  = false;
+        caps                = fullCaps();
+        caps.wave32Pinnable = false;
         EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::None);
-        caps                      = fullCaps();
-        caps.vulkanMemoryModel    = false;
+        caps                   = fullCaps();
+        caps.vulkanMemoryModel = false;
         EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::None);
         caps                      = fullCaps();
         caps.coopmatFp16Fp32Row16 = false;
@@ -101,7 +101,7 @@ namespace vknn {
         EXPECT_EQ(coopmatGemmRoute(caps, 4, true, true, false, 64, 64, 64, true), CoopmatGemmKind::Int8);
         // Activation weights (no initializer) or a missing row degrade to the fp16 kind.
         EXPECT_EQ(coopmatGemmRoute(caps, 3, true, true, false, 64, 64, 64, false), CoopmatGemmKind::Fp16);
-        CoopmatGemmCaps noFp8    = fullCaps();
+        CoopmatGemmCaps noFp8     = fullCaps();
         noFp8.coopmatFp8Fp32Row16 = false;
         EXPECT_EQ(coopmatGemmRoute(noFp8, 3, true, true, false, 64, 64, 64, true), CoopmatGemmKind::Fp16);
         // Auto never selects a low-precision kind.

@@ -74,9 +74,7 @@ namespace vknn {
                     bv.resize(norm);
                     betaBuf = upload(*env.ctx, bv, env.useFp16);
                 } else if (!hasBeta)
-                {
-                    betaBuf = upload(*env.ctx, std::vector<float>((size_t) norm, 0.0f), env.useFp16);
-                }
+                { betaBuf = upload(*env.ctx, std::vector<float>((size_t) norm, 0.0f), env.useFp16); }
                 epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
                 // 4 fixed bindings (input, gamma, beta, output) plus any extra buffers the fused
                 // pointwise epilogue binds after them; suffix() picks the matching PW_EPI shader variant.

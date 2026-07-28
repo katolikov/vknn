@@ -39,25 +39,25 @@ namespace vknn {
                 NCHW            x  = NCHW::from(X.shape);
                 // E = expanded (depthwise) channel count = input C; Cout = projected channels = pw_w
                 // rows; KH/KW = depthwise kernel extent from the [E,1,KH,KW] weight.
-                int64_t         E = x.c, Cout = PW.shape[0], KH = DW.shape[2], KW = DW.shape[3];
-                auto            a = [&](const char *k, std::vector<int64_t> d) {
+                int64_t E = x.c, Cout = PW.shape[0], KH = DW.shape[2], KW = DW.shape[3];
+                auto    a = [&](const char *k, std::vector<int64_t> d) {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
                 // Depthwise conv geometry through the shared forward helper (core/conv_geom.h): the
                 // node carries the depthwise Conv's attrs, so auto_pad resolves the same way there.
                 // pads are [top, left, bottom, right] (begin then end).
-                auto               st  = a("strides", {1, 1}), dil = a("dilations", {1, 1});
-                ConvGeom           geo = convGeom(x.h, x.w, KH, KW, node.attr);
-                auto               pad = geo.pads();
-                int64_t            OH  = geo.outH;
-                int64_t            OW  = geo.outW;
-                const float       *xd  = X.host.f32();
-                const float       *dw  = DW.host.f32();
-                const float       *pw  = PW.host.f32();
-                Shape              os  = {x.n, Cout, OH, OW};
-                float             *y   = cpu::allocOut(Y, os);
-                const float       *res = node.fusedResidual != kNoTensor ? ctx.t(node.fusedResidual).host.f32() : nullptr;
+                auto         st = a("strides", {1, 1}), dil = a("dilations", {1, 1});
+                ConvGeom     geo = convGeom(x.h, x.w, KH, KW, node.attr);
+                auto         pad = geo.pads();
+                int64_t      OH  = geo.outH;
+                int64_t      OW  = geo.outW;
+                const float *xd  = X.host.f32();
+                const float *dw  = DW.host.f32();
+                const float *pw  = PW.host.f32();
+                Shape        os  = {x.n, Cout, OH, OW};
+                float       *y   = cpu::allocOut(Y, os);
+                const float *res = node.fusedResidual != kNoTensor ? ctx.t(node.fusedResidual).host.f32() : nullptr;
                 // Per-batch scratch for the depthwise stage, laid out [E, OH, OW]; reused across n so
                 // the E intermediate channels never become a full tensor.
                 std::vector<float> dwOut(E * OH * OW);

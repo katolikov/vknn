@@ -44,7 +44,7 @@ namespace vknn {
       private:
         std::map<std::string, std::vector<float>> weights_;
         std::map<std::string, int>                tune_;
-        std::map<std::string, int>                tuneLevel_; // op-signature -> Tuning level it was measured at
+        std::map<std::string, int>                tuneLevel_;       // op-signature -> Tuning level it was measured at
         bool                                      enabled_ = false; // retain prepacked weights for saving
         mutable bool                              dirty_   = false;
     };

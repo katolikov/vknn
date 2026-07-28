@@ -51,25 +51,18 @@ namespace vknn {
     // Input transform B^T (8x8): V = B^T d B (shaders/wino_input6_fp16.comp keeps these rows in
     // lockstep as its kBt constant).
     constexpr float kWinoF63Bt[kWinoF63Alpha][kWinoF63Alpha] = {
-        {1.0f, 0.0f, -5.25f, 0.0f, 5.25f, 0.0f, -1.0f, 0.0f},
-        {0.0f, 2.0f, 4.0f, -2.5f, -5.0f, 0.5f, 1.0f, 0.0f},
-        {0.0f, -2.0f, 4.0f, 2.5f, -5.0f, -0.5f, 1.0f, 0.0f},
-        {0.0f, 1.0f, 1.0f, -4.25f, -4.25f, 1.0f, 1.0f, 0.0f},
-        {0.0f, -1.0f, 1.0f, 4.25f, -4.25f, -1.0f, 1.0f, 0.0f},
-        {0.0f, 0.5f, 0.25f, -2.5f, -1.25f, 2.0f, 1.0f, 0.0f},
-        {0.0f, -0.5f, 0.25f, 2.5f, -1.25f, -2.0f, 1.0f, 0.0f},
-        {0.0f, -1.0f, 0.0f, 5.25f, 0.0f, -5.25f, 0.0f, 1.0f},
+        {1.0f, 0.0f, -5.25f, 0.0f, 5.25f, 0.0f, -1.0f, 0.0f},  {0.0f, 2.0f, 4.0f, -2.5f, -5.0f, 0.5f, 1.0f, 0.0f},
+        {0.0f, -2.0f, 4.0f, 2.5f, -5.0f, -0.5f, 1.0f, 0.0f},   {0.0f, 1.0f, 1.0f, -4.25f, -4.25f, 1.0f, 1.0f, 0.0f},
+        {0.0f, -1.0f, 1.0f, 4.25f, -4.25f, -1.0f, 1.0f, 0.0f}, {0.0f, 0.5f, 0.25f, -2.5f, -1.25f, 2.0f, 1.0f, 0.0f},
+        {0.0f, -0.5f, 0.25f, 2.5f, -1.25f, -2.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f, 5.25f, 0.0f, -5.25f, 0.0f, 1.0f},
     };
 
     // Output transform A^T (6x8): Y = A^T M A (shaders/wino_out6_fp16.comp keeps these rows in
     // lockstep as its kAt constant).
     constexpr float kWinoF63At[kWinoF63OutTile][kWinoF63Alpha] = {
-        {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f},
-        {0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 2.0f, -2.0f, 0.0f},
-        {0.0f, 0.25f, 0.25f, 1.0f, 1.0f, 4.0f, 4.0f, 0.0f},
-        {0.0f, 0.125f, -0.125f, 1.0f, -1.0f, 8.0f, -8.0f, 0.0f},
-        {0.0f, 0.0625f, 0.0625f, 1.0f, 1.0f, 16.0f, 16.0f, 0.0f},
-        {0.0f, 0.03125f, -0.03125f, 1.0f, -1.0f, 32.0f, -32.0f, 1.0f},
+        {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f},         {0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 2.0f, -2.0f, 0.0f},
+        {0.0f, 0.25f, 0.25f, 1.0f, 1.0f, 4.0f, 4.0f, 0.0f},       {0.0f, 0.125f, -0.125f, 1.0f, -1.0f, 8.0f, -8.0f, 0.0f},
+        {0.0f, 0.0625f, 0.0625f, 1.0f, 1.0f, 16.0f, 16.0f, 0.0f}, {0.0f, 0.03125f, -0.03125f, 1.0f, -1.0f, 32.0f, -32.0f, 1.0f},
     };
 
     // Research cost model C(n) = 2i(n+k-1) + io(n+k-1) + n(n+k-1)(2n+k-1), k = 3, normalized per

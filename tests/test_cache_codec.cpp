@@ -6,21 +6,21 @@ using namespace vknn;
 
 static CacheVariant makeVariant(const std::string &prec, bool flat) {
     CacheVariant v;
-    v.precision               = prec;
-    v.flatLayout              = flat;
-    v.gpuIslandFold           = true;
-    v.matmulViewFold          = flat; // exercise a non-default value through the round-trip
-    v.fusedAttention          = flat;
-    v.fp32Tensors             = "/enc/Foo,/enc/Bar";
-    v.winograd                = 1;
-    v.winogradVariant         = 2;
-    v.winogradUnit            = 4;
-    v.directConv3x3           = 1;
-    v.pipeline                = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02};
-    v.weights["conv1.weight"] = {1.5f, -2.25f, 3.0f, 0.0f};
-    v.weights["conv2.bias"]   = {0.125f};
-    v.tune["sig-a/64x3x3"]    = 128;
-    v.tune["sig-b/1x1"]       = -1;
+    v.precision                 = prec;
+    v.flatLayout                = flat;
+    v.gpuIslandFold             = true;
+    v.matmulViewFold            = flat; // exercise a non-default value through the round-trip
+    v.fusedAttention            = flat;
+    v.fp32Tensors               = "/enc/Foo,/enc/Bar";
+    v.winograd                  = 1;
+    v.winogradVariant           = 2;
+    v.winogradUnit              = 4;
+    v.directConv3x3             = 1;
+    v.pipeline                  = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02};
+    v.weights["conv1.weight"]   = {1.5f, -2.25f, 3.0f, 0.0f};
+    v.weights["conv2.bias"]     = {0.125f};
+    v.tune["sig-a/64x3x3"]      = 128;
+    v.tune["sig-b/1x1"]         = -1;
     v.tuneLevel["sig-a/64x3x3"] = 2; // measured at Heavy
     v.tuneLevel["sig-b/1x1"]    = 1; // measured at Fast
     return v;

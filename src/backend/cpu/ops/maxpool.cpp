@@ -18,8 +18,8 @@ namespace vknn {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
-                auto    ks = ints("kernel_shape", {1, 1});
-                auto    st = ints("strides", {1, 1});
+                auto ks = ints("kernel_shape", {1, 1});
+                auto st = ints("strides", {1, 1});
                 // Pads and output extent through the shared pool geometry (core/conv_geom.h), which
                 // resolves auto_pad into begin/end pads: pt/pl shift the window origin, while the end
                 // pads only widen the output extent (already folded into oh/ow).

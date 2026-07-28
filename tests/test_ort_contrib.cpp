@@ -16,17 +16,17 @@ namespace {
 
     TensorId addInput(Graph &g, const char *name, Shape s) {
         TensorDesc d;
-        d.name    = name;
-        d.shape   = std::move(s);
-        d.isInput = true;
+        d.name      = name;
+        d.shape     = std::move(s);
+        d.isInput   = true;
         TensorId id = g.addTensor(d);
         g.inputs.push_back(id);
         return id;
     }
     TensorId addOutput(Graph &g, const char *name) {
         TensorDesc d;
-        d.name     = name;
-        d.isOutput = true;
+        d.name      = name;
+        d.isOutput  = true;
         TensorId id = g.addTensor(d);
         g.outputs.push_back(id);
         return id;
@@ -36,7 +36,7 @@ namespace {
         d.name          = name;
         d.shape         = std::move(s);
         d.isInitializer = true;
-        TensorId id     = g.addTensor(d);
+        TensorId   id   = g.addTensor(d);
         HostBuffer hb;
         hb.resizeElems((int64_t) v.size(), DType::Float32);
         std::memcpy(hb.f32(), v.data(), v.size() * 4);
@@ -68,7 +68,7 @@ namespace {
         d.shape         = std::move(s);
         d.dtype         = DType::Int64;
         d.isInitializer = true;
-        TensorId id     = g.addTensor(d);
+        TensorId   id   = g.addTensor(d);
         HostBuffer hb;
         hb.resizeElems((int64_t) v.size(), DType::Int64);
         std::memcpy(hb.i64(), v.data(), v.size() * 8);
@@ -96,10 +96,10 @@ namespace {
 
     TensorId addInputI64(Graph &g, const char *name, Shape s) {
         TensorDesc d;
-        d.name    = name;
-        d.shape   = std::move(s);
-        d.dtype   = DType::Int64;
-        d.isInput = true;
+        d.name      = name;
+        d.shape     = std::move(s);
+        d.dtype     = DType::Int64;
+        d.isInput   = true;
         TensorId id = g.addTensor(d);
         g.inputs.push_back(id);
         return id;
@@ -110,7 +110,7 @@ namespace {
         d.shape         = std::move(s);
         d.dtype         = DType::Int32;
         d.isInitializer = true;
-        TensorId id     = g.addTensor(d);
+        TensorId   id   = g.addTensor(d);
         HostBuffer hb;
         hb.resizeElems((int64_t) v.size(), DType::Int32);
         std::memcpy(hb.bytes.data(), v.data(), v.size() * 4);
@@ -166,8 +166,7 @@ namespace {
         return nullptr;
     }
 
-    std::vector<float> runCpu(Graph g, const std::map<std::string, std::pair<Shape, std::vector<float>>> &feeds,
-                              const std::string &outName) {
+    std::vector<float> runCpu(Graph g, const std::map<std::string, std::pair<Shape, std::vector<float>>> &feeds, const std::string &outName) {
         Config cfg;
         cfg.backend = BackendKind::Cpu;
         auto sess   = Session::create(std::move(g), cfg);
@@ -207,11 +206,31 @@ TEST(OrtContrib, ScalarGatherFoldKeepsOnnxRank) {
     TensorId x   = addInput(g, "x", {1, 257});
     TensorId idx = addInitI64(g, "i0", {}, {1}); // rank-0 index
     TensorId one = addInitI64(g, "one", {1}, {1});
-    TensorId shp = g.addTensor([] { TensorDesc d; d.name = "shp"; d.dtype = DType::Int64; return d; }());
-    TensorId gth = g.addTensor([] { TensorDesc d; d.name = "gth"; d.dtype = DType::Int64; return d; }());
-    TensorId u1  = g.addTensor([] { TensorDesc d; d.name = "u1"; d.dtype = DType::Int64; return d; }());
-    TensorId cat = g.addTensor([] { TensorDesc d; d.name = "cat"; d.dtype = DType::Int64; return d; }());
-    Node sh;
+    TensorId shp = g.addTensor([] {
+        TensorDesc d;
+        d.name  = "shp";
+        d.dtype = DType::Int64;
+        return d;
+    }());
+    TensorId gth = g.addTensor([] {
+        TensorDesc d;
+        d.name  = "gth";
+        d.dtype = DType::Int64;
+        return d;
+    }());
+    TensorId u1  = g.addTensor([] {
+        TensorDesc d;
+        d.name  = "u1";
+        d.dtype = DType::Int64;
+        return d;
+    }());
+    TensorId cat = g.addTensor([] {
+        TensorDesc d;
+        d.name  = "cat";
+        d.dtype = DType::Int64;
+        return d;
+    }());
+    Node     sh;
     sh.type    = OpType::Shape;
     sh.name    = "shape";
     sh.inputs  = {x};
@@ -239,7 +258,7 @@ TEST(OrtContrib, ScalarGatherFoldKeepsOnnxRank) {
     setI(cc, "axis", 0);
     g.nodes.push_back(cc);
     // Keep the chain alive: route it through a Reshape target so DCE cannot drop it.
-    TensorId y  = addOutput(g, "y");
+    TensorId y = addOutput(g, "y");
     Node     rs;
     rs.type    = OpType::Reshape;
     rs.name    = "reshape";
@@ -498,10 +517,10 @@ namespace {
             {
                 for (int64_t h = 0; h < Hq; ++h)
                 {
-                    const int64_t             kh = h / grp;
-                    const std::vector<float>  qr = rot(&q[(size_t) (i * Hq * hd + h * hd)], pastLen + i);
-                    std::vector<double>       logits((size_t) T, -1e30);
-                    double                    mx = -1e30;
+                    const int64_t            kh = h / grp;
+                    const std::vector<float> qr = rot(&q[(size_t) (i * Hq * hd + h * hd)], pastLen + i);
+                    std::vector<double>      logits((size_t) T, -1e30);
+                    double                   mx = -1e30;
                     for (int64_t j = 0; j < T; ++j)
                     {
                         const bool valid = j < P ? (j < pastLen) : (j - P <= i);
@@ -551,14 +570,19 @@ namespace {
     Graph buildGqaGraph(const GqaRef &r, int64_t maxPos) {
         const int64_t T = r.P + r.S;
         Graph         g;
-        TensorId      q  = addInput(g, "q", {r.B, r.S, r.Hq * r.hd});
-        TensorId      k  = addInput(g, "k", {r.B, r.S, r.Hkv * r.hd});
-        TensorId      v  = addInput(g, "v", {r.B, r.S, r.Hkv * r.hd});
-        TensorId      pk = addInput(g, "past_key", {r.B, r.Hkv, r.P, r.hd});
-        TensorId      pv = addInput(g, "past_value", {r.B, r.Hkv, r.P, r.hd});
-        TensorId      am = addInputI64(g, "attention_mask", {r.B, T});
+        TensorId      q   = addInput(g, "q", {r.B, r.S, r.Hq * r.hd});
+        TensorId      k   = addInput(g, "k", {r.B, r.S, r.Hkv * r.hd});
+        TensorId      v   = addInput(g, "v", {r.B, r.S, r.Hkv * r.hd});
+        TensorId      pk  = addInput(g, "past_key", {r.B, r.Hkv, r.P, r.hd});
+        TensorId      pv  = addInput(g, "past_value", {r.B, r.Hkv, r.P, r.hd});
+        TensorId      am  = addInputI64(g, "attention_mask", {r.B, T});
         TensorId      one = addInitI64(g, "one", {1}, {1});
-        TensorId      rs  = g.addTensor([] { TensorDesc d; d.name = "mask_sum"; d.dtype = DType::Int64; return d; }());
+        TensorId      rs  = g.addTensor([] {
+            TensorDesc d;
+            d.name  = "mask_sum";
+            d.dtype = DType::Int64;
+            return d;
+        }());
         Node          red;
         red.type    = OpType::Reduce;
         red.subOp   = (int32_t) ReduceType::Sum;
@@ -567,7 +591,12 @@ namespace {
         red.outputs = {rs};
         setI(red, "keepdims", 1);
         g.nodes.push_back(red);
-        TensorId sub = g.addTensor([] { TensorDesc d; d.name = "mask_sub"; d.dtype = DType::Int64; return d; }());
+        TensorId sub = g.addTensor([] {
+            TensorDesc d;
+            d.name  = "mask_sub";
+            d.dtype = DType::Int64;
+            return d;
+        }());
         Node     sb;
         sb.type    = OpType::Binary;
         sb.subOp   = (int32_t) BinaryType::Sub;
@@ -575,7 +604,12 @@ namespace {
         sb.inputs  = {rs, one};
         sb.outputs = {sub};
         g.nodes.push_back(sb);
-        TensorId sl = g.addTensor([] { TensorDesc d; d.name = "seqlens_k"; d.dtype = DType::Int32; return d; }());
+        TensorId sl = g.addTensor([] {
+            TensorDesc d;
+            d.name  = "seqlens_k";
+            d.dtype = DType::Int32;
+            return d;
+        }());
         Node     cs;
         cs.type    = OpType::Cast;
         cs.name    = "mask_cast";
@@ -622,7 +656,7 @@ namespace {
 TEST(OrtContrib, GroupQueryAttentionDecodeExpands) {
     GqaRef r;
     r.S = 1, r.P = 4, r.Hq = 4, r.Hkv = 2, r.hd = 4;
-    r.scale = 0.5f;
+    r.scale              = 0.5f;
     const int64_t maxPos = 8, T = r.P + r.S, half = r.hd / 2;
     r.q     = sinFill(r.S * r.Hq * r.hd, 0.31f, 0.9f);
     r.k     = sinFill(r.S * r.Hkv * r.hd, 0.57f, 0.8f);
@@ -640,7 +674,7 @@ TEST(OrtContrib, GroupQueryAttentionDecodeExpands) {
     // past rows 2..3 are masked out.
     r.seqlens = 2;
     std::vector<int64_t> mask((size_t) T, 0);
-    mask[0] = mask[1] = 1;
+    mask[0] = mask[1]      = 1;
     mask[(size_t) (T - 1)] = 1;
 
     Graph g = buildGqaGraph(r, maxPos);
@@ -652,13 +686,7 @@ TEST(OrtContrib, GroupQueryAttentionDecodeExpands) {
         EXPECT_NE(n.type, OpType::GroupQueryAttention);
     }
 
-    auto outs = runCpuAll(std::move(g),
-                          {mkFeedF32("q", {r.B, r.S, r.Hq * r.hd}, r.q),
-                           mkFeedF32("k", {r.B, r.S, r.Hkv * r.hd}, r.k),
-                           mkFeedF32("v", {r.B, r.S, r.Hkv * r.hd}, r.v),
-                           mkFeedF32("past_key", {r.B, r.Hkv, r.P, r.hd}, r.pastK),
-                           mkFeedF32("past_value", {r.B, r.Hkv, r.P, r.hd}, r.pastV),
-                           mkFeedI64("attention_mask", {r.B, T}, mask)},
+    auto outs = runCpuAll(std::move(g), {mkFeedF32("q", {r.B, r.S, r.Hq * r.hd}, r.q), mkFeedF32("k", {r.B, r.S, r.Hkv * r.hd}, r.k), mkFeedF32("v", {r.B, r.S, r.Hkv * r.hd}, r.v), mkFeedF32("past_key", {r.B, r.Hkv, r.P, r.hd}, r.pastK), mkFeedF32("past_value", {r.B, r.Hkv, r.P, r.hd}, r.pastV), mkFeedI64("attention_mask", {r.B, T}, mask)},
                           /*kvConcatFold=*/false);
     const IOTensor *y = findOutput(outs, "y");
     ASSERT_TRUE(y);
@@ -694,7 +722,7 @@ TEST(OrtContrib, GroupQueryAttentionDecodeExpands) {
 TEST(OrtContrib, GroupQueryAttentionPrefillExpands) {
     GqaRef r;
     r.S = 3, r.P = 2, r.Hq = 2, r.Hkv = 1, r.hd = 4;
-    r.scale = 0.5f;
+    r.scale              = 0.5f;
     const int64_t maxPos = 8, T = r.P + r.S, half = r.hd / 2;
     r.q     = sinFill(r.S * r.Hq * r.hd, 0.29f, 1.0f);
     r.k     = sinFill(r.S * r.Hkv * r.hd, 0.53f, 0.9f);
@@ -714,14 +742,8 @@ TEST(OrtContrib, GroupQueryAttentionPrefillExpands) {
     std::vector<int64_t> mask((size_t) T, 1);
     mask[1] = 0;
 
-    Graph g    = buildGqaGraph(r, maxPos);
-    auto  outs = runCpuAll(std::move(g),
-                           {mkFeedF32("q", {r.B, r.S, r.Hq * r.hd}, r.q),
-                            mkFeedF32("k", {r.B, r.S, r.Hkv * r.hd}, r.k),
-                            mkFeedF32("v", {r.B, r.S, r.Hkv * r.hd}, r.v),
-                            mkFeedF32("past_key", {r.B, r.Hkv, r.P, r.hd}, r.pastK),
-                            mkFeedF32("past_value", {r.B, r.Hkv, r.P, r.hd}, r.pastV),
-                            mkFeedI64("attention_mask", {r.B, T}, mask)});
+    Graph g = buildGqaGraph(r, maxPos);
+    auto outs = runCpuAll(std::move(g), {mkFeedF32("q", {r.B, r.S, r.Hq * r.hd}, r.q), mkFeedF32("k", {r.B, r.S, r.Hkv * r.hd}, r.k), mkFeedF32("v", {r.B, r.S, r.Hkv * r.hd}, r.v), mkFeedF32("past_key", {r.B, r.Hkv, r.P, r.hd}, r.pastK), mkFeedF32("past_value", {r.B, r.Hkv, r.P, r.hd}, r.pastV), mkFeedI64("attention_mask", {r.B, T}, mask)});
     const IOTensor *y = findOutput(outs, "y");
     ASSERT_TRUE(y);
     const std::vector<float> want = r.attention();
@@ -737,8 +759,8 @@ TEST(OrtContrib, GroupQueryAttentionPrefillExpands) {
 TEST(OrtContrib, GroupQueryAttentionUnsupportedVariantKept) {
     GqaRef r;
     r.S = 1, r.P = 2, r.Hq = 2, r.Hkv = 1, r.hd = 4;
-    r.scale   = 0.5f;
-    r.seqlens = 2;
+    r.scale              = 0.5f;
+    r.seqlens            = 2;
     const int64_t maxPos = 4, half = r.hd / 2;
     r.q     = sinFill(r.S * r.Hq * r.hd, 0.3f, 1.0f);
     r.k     = sinFill(r.S * r.Hkv * r.hd, 0.5f, 1.0f);
@@ -791,15 +813,13 @@ TEST(OrtContrib, MultiHeadAttentionExpands) {
         }
         return r;
     };
-    auto qv = fill(B * S * E, 0.31f, 0.9f), kv = fill(B * T * E, 0.57f, 0.8f), vv = fill(B * T * E, 0.83f, 1.1f);
+    auto               qv = fill(B * S * E, 0.31f, 0.9f), kv = fill(B * T * E, 0.57f, 0.8f), vv = fill(B * T * E, 0.83f, 1.1f);
     std::vector<float> mv((size_t) (S * T));
     for (size_t i = 0; i < mv.size(); ++i)
     {
         mv[i] = i % 3 == 2 ? -10.0f : 0.0f;
     }
-    auto got = runCpu(std::move(g),
-                      {{"q", {{B, S, E}, qv}}, {"k", {{B, T, E}, kv}}, {"v", {{B, T, E}, vv}}, {"m", {{B, 1, S, T}, mv}}},
-                      "y");
+    auto got = runCpu(std::move(g), {{"q", {{B, S, E}, qv}}, {"k", {{B, T, E}, kv}}, {"v", {{B, T, E}, vv}}, {"m", {{B, 1, S, T}, mv}}}, "y");
     ASSERT_EQ((int64_t) got.size(), B * S * E);
     for (int64_t h = 0; h < H; ++h)
     {

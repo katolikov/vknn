@@ -21,7 +21,7 @@ namespace vknn {
                 int          rank  = (int) shape.size();
                 // `axis` (ONNX default -1) marks where the normalization region begins; a negative value
                 // counts from the end, then clamps to 0 so it stays in range for degenerate inputs.
-                int64_t      axis  = node.attr.geti("axis", -1);
+                int64_t axis = node.attr.geti("axis", -1);
                 if (axis < 0)
                 {
                     axis += rank;
@@ -52,12 +52,12 @@ namespace vknn {
                 const float *gamma = G.host.f32();
                 for (int64_t r = 0; r < outer; ++r)
                 {
-                    const float *xr   = x + r * norm;
-                    float       *yr   = y + r * norm;
+                    const float *xr = x + r * norm;
+                    float       *yr = y + r * norm;
                     // Accumulate the row mean and variance in double precision to blunt cancellation over
                     // long normalization regions; the final scale is folded back to fp32 to match the
                     // device kernel's output precision.
-                    double       mean = 0.0;
+                    double mean = 0.0;
                     for (int64_t j = 0; j < norm; ++j)
                     {
                         mean += xr[j];

@@ -132,12 +132,12 @@ namespace vknn { namespace vk {
                     break;
                 }
             }
-            out.wavesToSaturate = satWaves;
-            out.latencyExponent = fitExponent(waves, rate, peak, satWaves);
+            out.wavesToSaturate    = satWaves;
+            out.latencyExponent    = fitExponent(waves, rate, peak, satWaves);
             out.residentBytesPerMs = peak;
             out.streamBytesPerMs   = (double) kProbeStreamBytes / streamMs;
-            out.launchMs        = std::max(0.0, launchMs);
-            out.calibrated      = true;
+            out.launchMs           = std::max(0.0, launchMs);
+            out.calibrated         = true;
             return true;
         }
 
@@ -152,14 +152,14 @@ namespace vknn { namespace vk {
         struct PersistField {
             const char *name;
             double TuneModelCaps::*field;
-            double                  scale;
+            double                 scale;
         };
         constexpr PersistField kPersistFields[] = {
-            {"w", &TuneModelCaps::wavesToSaturate, 1.0},     // a wave count, already integral
-            {"e", &TuneModelCaps::latencyExponent, 1.0e6},   // ~0.25 to 2
+            {"w", &TuneModelCaps::wavesToSaturate, 1.0},       // a wave count, already integral
+            {"e", &TuneModelCaps::latencyExponent, 1.0e6},     // ~0.25 to 2
             {"i", &TuneModelCaps::residentBytesPerMs, 1.0e-3}, // bytes/ms -> kilobytes/ms
             {"d", &TuneModelCaps::streamBytesPerMs, 1.0e-3},   // bytes/ms -> kilobytes/ms
-            {"l", &TuneModelCaps::launchMs, 1.0e6},          // milliseconds -> nanoseconds
+            {"l", &TuneModelCaps::launchMs, 1.0e6},            // milliseconds -> nanoseconds
         };
 
         std::string fieldSig(const VkOpEnv &env, const char *name) {
@@ -245,7 +245,7 @@ namespace vknn { namespace vk {
         {
             return keep;
         }
-        auto total    = [](const KernelCost &c) {
+        auto total = [](const KernelCost &c) {
             return c.streamVec4 + c.residentVec4;
         };
         int cheapest = 0, leanest = 0, leanestStream = 0, widest = 0;
@@ -292,8 +292,8 @@ namespace vknn { namespace vk {
             } else
             {
                 calibrate(env, caps);
-                VKNN_DEBUG << "tune model: wavesToSaturate=" << caps.wavesToSaturate << " exponent=" << caps.latencyExponent << " resident=" << caps.residentBytesPerMs / 1e6 << " GB/s stream=" << caps.streamBytesPerMs / 1e6
-                           << " GB/s launch=" << caps.launchMs * 1e3 << " us calibrated=" << (int) caps.calibrated;
+                VKNN_DEBUG << "tune model: wavesToSaturate=" << caps.wavesToSaturate << " exponent=" << caps.latencyExponent << " resident=" << caps.residentBytesPerMs / 1e6 << " GB/s stream=" << caps.streamBytesPerMs / 1e6 << " GB/s launch=" << caps.launchMs * 1e3
+                           << " us calibrated=" << (int) caps.calibrated;
             }
         }
         // The first model loaded in a process may have no writable cache (a --no-cache run, an

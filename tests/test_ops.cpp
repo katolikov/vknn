@@ -128,10 +128,10 @@ namespace {
     OpOut runFusedPw(const std::vector<int64_t> &xshape, const std::vector<float> &xdata, const std::vector<Init> &operands, const std::vector<int64_t> &steps, const std::vector<float> &params) {
         Graph      g;
         TensorDesc xi;
-        xi.name                 = "x";
-        xi.shape                = xshape;
-        xi.isInput              = true;
-        TensorId              x = g.addTensor(xi);
+        xi.name    = "x";
+        xi.shape   = xshape;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
         g.inputs.push_back(x);
         std::vector<TensorId> ids {x};
         for (size_t k = 0; k < operands.size(); ++k)
@@ -432,8 +432,8 @@ TEST(Ops, GroupedConv1x1) {
     std::vector<float> in = {1, 2, 3, 4, 5, 6, 7, 8};
     // Weight [4,2,1,1] (Cout=4, inCg=2). oc0=[1,0] oc1=[0,1] (group0 over ch0,ch1);
     // oc2=[1,1] oc3=[2,0] (group1 over ch2,ch3).
-    std::vector<float> w = {1, 0, 0, 1, 1, 1, 2, 0};
-    auto out = runOp(OpType::Conv, 0, attr, {1, 4, 1, 2}, in, {{{4, 2, 1, 1}, w}});
+    std::vector<float> w   = {1, 0, 0, 1, 1, 1, 2, 0};
+    auto               out = runOp(OpType::Conv, 0, attr, {1, 4, 1, 2}, in, {{{4, 2, 1, 1}, w}});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 4, 1, 2}));
     // oc0 = ch0            = {1, 2}
     // oc1 = ch1            = {3, 4}
@@ -454,8 +454,8 @@ TEST(Ops, GroupedConvNonMultipleOf4) {
     // Input [1,6,1,1]: one spatial position, channels 0..5 = {1,2,3,4,5,6}.
     std::vector<float> in = {1, 2, 3, 4, 5, 6};
     // Weight [2,3,1,1]: oc0 sums group0 (ch0,1,2) with {1,1,1}; oc1 sums group1 (ch3,4,5) with {1,1,1}.
-    std::vector<float> w = {1, 1, 1, 1, 1, 1};
-    auto out = runOp(OpType::Conv, 0, attr, {1, 6, 1, 1}, in, {{{2, 3, 1, 1}, w}});
+    std::vector<float> w   = {1, 1, 1, 1, 1, 1};
+    auto               out = runOp(OpType::Conv, 0, attr, {1, 6, 1, 1}, in, {{{2, 3, 1, 1}, w}});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 2, 1, 1}));
     // oc0 = ch0+ch1+ch2 = 6 ; oc1 = ch3+ch4+ch5 = 15
     expectNear(out.data, {6, 15});
@@ -469,14 +469,14 @@ TEST(Ops, GroupedConv3x3) {
     grp.kind = Attr::Int;
     grp.i    = 2;
     Attributes attr;
-    attr.map["group"]    = grp;
-    attr.map["pads"]     = ints({1, 1, 1, 1});
+    attr.map["group"]        = grp;
+    attr.map["pads"]         = ints({1, 1, 1, 1});
     attr.map["kernel_shape"] = ints({3, 3});
     // Input [1,2,2,2]: ch0 = 1..4, ch1 = 10,20,30,40.
     std::vector<float> in = {1, 2, 3, 4, 10, 20, 30, 40};
     // Weight [2,1,3,3]: both output channels are an all-ones 3x3 box over their own group's 1 channel.
     std::vector<float> w(2 * 1 * 3 * 3, 1.f);
-    auto out = runOp(OpType::Conv, 0, attr, {1, 2, 2, 2}, in, {{{2, 1, 3, 3}, w}});
+    auto               out = runOp(OpType::Conv, 0, attr, {1, 2, 2, 2}, in, {{{2, 1, 3, 3}, w}});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 2, 2, 2}));
     // Each output is the sum over the 3x3 neighbourhood (SAME pad) of its own channel.
     // ch0 sums: [1+2+3+4]=10 at every position (all four pixels fall in every window here).
@@ -607,13 +607,13 @@ TEST(Ops, LowerRMSNormFusesChain) {
         return id;
     };
     TensorDesc xi;
-    xi.name          = "x";
-    xi.shape         = {2, 4};
-    xi.isInput       = true;
-    TensorId x       = g.addTensor(xi);
+    xi.name    = "x";
+    xi.shape   = {2, 4};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
     g.inputs.push_back(x);
-    TensorId           two   = addInit("two", {1}, {2.f});
-    TensorId           eps   = addInit("eps", {1}, {1e-5f});
+    TensorId           two = addInit("two", {1}, {2.f});
+    TensorId           eps = addInit("eps", {1}, {1e-5f});
     std::vector<float> gammaData {2.f, 0.5f, 1.f, -1.f};
     TensorId           gamma = addInit("gamma", {4}, gammaData);
     auto               tmp   = [&](const std::string &nm) {
@@ -623,9 +623,9 @@ TEST(Ops, LowerRMSNormFusesChain) {
     };
     TensorId   p = tmp("p"), m = tmp("m"), a = tmp("a"), s = tmp("s"), r = tmp("r"), nrm = tmp("nrm");
     TensorDesc yo;
-    yo.name     = "y";
-    yo.isOutput = true;
-    TensorId y  = g.addTensor(yo);
+    yo.name       = "y";
+    yo.isOutput   = true;
+    TensorId y    = g.addTensor(yo);
     auto     node = [&](OpType t, int sub, std::vector<TensorId> in, std::vector<TensorId> out, const std::string &nm) {
         Node n;
         n.type    = t;
@@ -635,19 +635,13 @@ TEST(Ops, LowerRMSNormFusesChain) {
         n.name    = nm;
         return n;
     };
-    Node rmean = node(OpType::Reduce, (int) ReduceType::Mean, {p}, {m}, "rmean");
+    Node rmean             = node(OpType::Reduce, (int) ReduceType::Mean, {p}, {m}, "rmean");
     rmean.attr.map["axes"] = ints({-1});
     Attr kd;
     kd.kind                    = Attr::Int;
     kd.i                       = 1;
     rmean.attr.map["keepdims"] = kd;
-    g.nodes = {node(OpType::Binary, (int) BinaryType::Pow, {x, two}, {p}, "pow"),
-               rmean,
-               node(OpType::Add, 0, {m, eps}, {a}, "add"),
-               node(OpType::Unary, (int) UnaryType::Sqrt, {a}, {s}, "sqrt"),
-               node(OpType::Unary, (int) UnaryType::Reciprocal, {s}, {r}, "recip"),
-               node(OpType::Binary, (int) BinaryType::Mul, {x, r}, {nrm}, "mulN"),
-               node(OpType::Binary, (int) BinaryType::Mul, {gamma, nrm}, {y}, "mulG")};
+    g.nodes = {node(OpType::Binary, (int) BinaryType::Pow, {x, two}, {p}, "pow"), rmean, node(OpType::Add, 0, {m, eps}, {a}, "add"), node(OpType::Unary, (int) UnaryType::Sqrt, {a}, {s}, "sqrt"), node(OpType::Unary, (int) UnaryType::Reciprocal, {s}, {r}, "recip"), node(OpType::Binary, (int) BinaryType::Mul, {x, r}, {nrm}, "mulN"), node(OpType::Binary, (int) BinaryType::Mul, {gamma, nrm}, {y}, "mulG")};
     g.outputs = {y};
 
     runStandardPasses(g);
@@ -671,9 +665,7 @@ TEST(Ops, LowerRMSNormFusesChain) {
         {
             sqrts++;
         } else if (n.type == OpType::Unary && n.subOp == (int) UnaryType::Reciprocal)
-        {
-            recips++;
-        }
+        { recips++; }
     }
     EXPECT_EQ(rms, 1);
     EXPECT_EQ(pows, 0);
@@ -732,8 +724,7 @@ TEST(Ops, Conv1dNormalizedGeometry) {
     {
         x[i] = (float) i;
     }
-    auto out = runOp(OpType::Conv, 0, attr, {1, 2, 8}, x,
-                     {{{3, 2, 3}, {1, 0, -1, 2, 1, 0, 0, 1, 0, 1, 1, 1, -1, 2, -1, 0, 0, 3}}});
+    auto out = runOp(OpType::Conv, 0, attr, {1, 2, 8}, x, {{{3, 2, 3}, {1, 0, -1, 2, 1, 0, 0, 1, 0, 1, 1, 1, -1, 2, -1, 0, 0, 3}}});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {1, 3, 4}));
     expectNear(out.data, {7, 26, 32, 38, 17, 32, 40, 48, 26, 33, 39, 45}, 1e-4f);
 }
@@ -815,7 +806,12 @@ TEST(Ops, SplitGeometryFollowsRuntimeShape) {
     n.name             = "sp";
     n.inputs           = {x};
     n.outputs          = {a, b};
-    n.attr.map["axis"] = [] { Attr t; t.kind = Attr::Int; t.i = 1; return t; }();
+    n.attr.map["axis"] = [] {
+        Attr t;
+        t.kind = Attr::Int;
+        t.i    = 1;
+        return t;
+    }();
     g.nodes.push_back(n);
     g.outputs = {a, b};
 
@@ -910,10 +906,10 @@ TEST(Ops, ResizeGeometryFollowsRuntimeShape) {
     TensorId   s     = g.addTensor(sd);
     HostBuffer hb;
     hb.resizeElems(4, DType::Float32);
-    hb.f32()[0] = 1.f;
-    hb.f32()[1] = 1.f;
-    hb.f32()[2] = 2.f;
-    hb.f32()[3] = 2.f;
+    hb.f32()[0]       = 1.f;
+    hb.f32()[1]       = 1.f;
+    hb.f32()[2]       = 2.f;
+    hb.f32()[3]       = 2.f;
     g.initializers[s] = hb;
     TensorDesc yo;
     yo.name     = "y";
@@ -1248,8 +1244,8 @@ namespace {
         if (kAsAttr)
         {
             Attr a;
-            a.kind         = Attr::Int;
-            a.i            = k;
+            a.kind          = Attr::Int;
+            a.i             = k;
             n.attr.map["k"] = a;
         } else
         {
@@ -1261,7 +1257,7 @@ namespace {
             TensorId   kid   = g.addTensor(kd);
             HostBuffer hb;
             hb.resizeElems(1, DType::Int64);
-            hb.i64()[0]        = k;
+            hb.i64()[0]         = k;
             g.initializers[kid] = hb;
             n.inputs.push_back(kid);
         }
@@ -1275,17 +1271,17 @@ namespace {
         seti("largest", largest);
         seti("sorted", sorted);
         TensorDesc vo;
-        vo.name     = "v";
-        vo.isOutput = true;
-        TensorId v  = g.addTensor(vo);
+        vo.name      = "v";
+        vo.isOutput  = true;
+        TensorId   v = g.addTensor(vo);
         TensorDesc ixd;
         ixd.name     = "i";
         ixd.isOutput = true;
         ixd.dtype    = DType::Int64; // ONNX declares the indices output int64 (graph-output value_info)
         TensorId ix  = g.addTensor(ixd);
-        n.outputs   = {v, ix};
-        g.nodes     = {n};
-        g.outputs   = {v, ix};
+        n.outputs    = {v, ix};
+        g.nodes      = {n};
+        g.outputs    = {v, ix};
 
         Config cfg;
         cfg.backend = BackendKind::Cpu;
@@ -1307,9 +1303,9 @@ namespace {
         {
             return {};
         }
-        TopKOut       r;
-        r.shape          = outs[0].shape;
-        r.iDtype         = outs[1].dtype;
+        TopKOut r;
+        r.shape              = outs[0].shape;
+        r.iDtype             = outs[1].dtype;
         const float   *vp    = reinterpret_cast<const float *>(outs[0].data.data());
         const int64_t *ip    = reinterpret_cast<const int64_t *>(outs[1].data.data());
         int64_t        elems = numElements(outs[0].shape);
@@ -1535,10 +1531,10 @@ TEST(Ops, DtypeUint8RoundTrip) {
     t0.name     = "xf";
     TensorId xf = g.addTensor(t0);
     Node     c0;
-    c0.type       = OpType::Cast;
-    c0.name       = "castin";
-    c0.inputs     = {x};
-    c0.outputs    = {xf};
+    c0.type             = OpType::Cast;
+    c0.name             = "castin";
+    c0.inputs           = {x};
+    c0.outputs          = {xf};
     c0.attr.map["to"].i = 1; // FLOAT
     g.nodes.push_back(c0);
     TensorDesc t1;
@@ -1690,8 +1686,8 @@ TEST(Ops, FusedPwSelect) {
 // --- FusedPointwise load step: replace the accumulator with an operand mid-unit, keeping the
 // entry reachable. y = c - x via load(c) then Sub(acc, entry). ---
 TEST(Ops, FusedPwLoad) {
-    std::vector<int64_t> steps {kPwKindLoad,   0,                     kPwRefOp0 - 1, kPwRefNone,  kPwRefNone, kPwRefNone, 0, 1,
-                                kPwKindBinary, (int) BinaryType::Sub, kPwRefAcc,     kPwRefEntry, kPwRefNone, kPwRefNone, 0, 0};
+    std::vector<int64_t> steps {kPwKindLoad,           0,         kPwRefOp0 - 1, kPwRefNone, kPwRefNone, kPwRefNone, 0, 1, kPwKindBinary,
+                                (int) BinaryType::Sub, kPwRefAcc, kPwRefEntry,   kPwRefNone, kPwRefNone, 0,          0};
     std::vector<float>   params {0, 0, 0, 0};
     auto                 got = runFusedPw({1, 3}, {1, 2, 3}, {{{1, 3}, {10, 10, 10}}}, steps, params);
     expectNear(got.data, {9, 8, 7});
@@ -1720,9 +1716,9 @@ TEST(Ops, FusedPwMultiOutput) {
     }
     g.initializers[c] = hb;
     TensorDesc yo;
-    yo.name     = "y";
-    yo.isOutput = true;
-    TensorId y  = g.addTensor(yo);
+    yo.name      = "y";
+    yo.isOutput  = true;
+    TensorId   y = g.addTensor(yo);
     TensorDesc zo;
     zo.name     = "z";
     zo.isOutput = true;
@@ -1798,23 +1794,23 @@ TEST(Ops, CpuEpilogueHookOnProducer) {
     ci.name          = "c";
     ci.shape         = {1};
     ci.isInitializer = true;
-    TensorId  c       = g.addTensor(ci);
+    TensorId   c     = g.addTensor(ci);
     HostBuffer hb;
     hb.resizeElems(1, DType::Float32);
-    hb.f32()[0]      = 3.0f;
+    hb.f32()[0]       = 3.0f;
     g.initializers[c] = hb;
     TensorDesc yo;
     yo.name     = "y";
     yo.isOutput = true;
     TensorId y  = g.addTensor(yo);
-    Node n;
+    Node     n;
     n.type    = OpType::Softmax;
     n.name    = "sm";
     n.inputs  = {x, c}; // inputs[1]=c is the epilogue operand
     n.outputs = {y};
     {
         Attr a;
-        a.kind                 = Attr::Ints;
+        a.kind = Attr::Ints;
         // Mul by inputs[1] (a scalar constant, bcast mode 3 on srcB)
         a.ints                 = {kPwKindBinary, (int) BinaryType::Mul, kPwRefAcc, kPwRefOp0 - 1, kPwRefNone, kPwRefNone, 3, 2};
         n.attr.map["pw_steps"] = a;
@@ -2077,8 +2073,8 @@ namespace {
         mul2.name    = "mul2";
         mul2.inputs  = {tf, s2};
         mul2.outputs = {y};
-        g.nodes   = {mul1, c1, c2, mul2};
-        g.outputs = {y};
+        g.nodes      = {mul1, c1, c2, mul2};
+        g.outputs    = {y};
         return g;
     }
 
@@ -2257,7 +2253,7 @@ TEST(Passes, InferShapesDeclaredSpatial) {
 // substitution to 1 (the vit_b16_q8 0.32-cosine bug: spatial axes froze to a 1x1 plan). The message
 // names the input and the offending axis. ---
 TEST(Passes, InferShapesUndeclaredDynamicAxisErrors) {
-    Graph g = makeDynamicInputConvGraph(); // pixel_values [-1,-1,-1,-1], no declaration
+    Graph g     = makeDynamicInputConvGraph(); // pixel_values [-1,-1,-1,-1], no declaration
     bool  threw = false;
     try
     {
@@ -2279,9 +2275,7 @@ TEST(Passes, InferShapesDeclaredRankMismatchErrors) {
     declared["pixel_values"] = {1, 3, 224}; // rank 3 != 4
     bool threw               = false;
     try
-    {
-        inferShapes(g, 1, &declared);
-    } catch (const Error &e)
+    { inferShapes(g, 1, &declared); } catch (const Error &e)
     {
         threw = true;
         EXPECT_EQ(e.status(), Status::InvalidArgument);
@@ -2426,17 +2420,17 @@ namespace {
             return g.addTensor(d);
         };
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = {2, 3};
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
+        xi.name     = "x";
+        xi.shape    = {2, 3};
+        xi.isInput  = true;
+        TensorId x  = g.addTensor(xi);
+        g.inputs    = {x};
         TensorId t1 = addT("t1"), s1 = addT("s1"), r1 = addT("r1");
         TensorId t2 = addT("t2"), s2 = addT("s2"), r2 = addT("r2");
-        TensorId y  = addT("y");
+        TensorId y       = addT("y");
         g.desc(s1).dtype = g.desc(s2).dtype = DType::Int64;
         g.desc(y).isOutput                  = true;
-        auto node = [&](OpType t, const char *nm, std::vector<TensorId> in, std::vector<TensorId> out) {
+        auto node                           = [&](OpType t, const char *nm, std::vector<TensorId> in, std::vector<TensorId> out) {
             Node n;
             n.type    = t;
             n.name    = nm;
@@ -2444,12 +2438,10 @@ namespace {
             n.outputs = std::move(out);
             return n;
         };
-        Node tr = node(OpType::Transpose, "tr", {r2}, {y});
+        Node tr             = node(OpType::Transpose, "tr", {r2}, {y});
         tr.attr.map["perm"] = ints({1, 0});
-        g.nodes             = {node(OpType::Relu, "relu1", {x}, {t1}), node(OpType::Shape, "shape1", {t1}, {s1}),
-                               node(OpType::Reshape, "reshape1", {t1, s1}, {r1}), node(OpType::Relu, "relu2", {r1}, {t2}),
-                               node(OpType::Shape, "shape2", {t2}, {s2}), node(OpType::Reshape, "reshape2", {t2, s2}, {r2}), tr};
-        g.outputs           = {y};
+        g.nodes = {node(OpType::Relu, "relu1", {x}, {t1}), node(OpType::Shape, "shape1", {t1}, {s1}), node(OpType::Reshape, "reshape1", {t1, s1}, {r1}), node(OpType::Relu, "relu2", {r1}, {t2}), node(OpType::Shape, "shape2", {t2}, {s2}), node(OpType::Reshape, "reshape2", {t2, s2}, {r2}), tr};
+        g.outputs = {y};
         return g;
     }
 } // namespace
@@ -2494,14 +2486,14 @@ namespace {
             d.isOutput = output;
             return g.addTensor(d);
         };
-        TensorId data = addT("data", {1, 4, 8, 8}, false, true);
-        TensorId flow = addT("flow", {1, 2, 8, 8}, false, true);
-        g.inputs      = {data, flow};
+        TensorId data     = addT("data", {1, 4, 8, 8}, false, true);
+        TensorId flow     = addT("flow", {1, 2, 8, 8}, false, true);
+        g.inputs          = {data, flow};
         TensorId flowFlat = addT("flow#flat", {1, 8, 8, 2}, true);
         TensorId base     = addT("base", {1, 8, 8, 2}, true);
         {
-            TensorDesc &bd    = g.desc(base);
-            bd.isInitializer  = true;
+            TensorDesc &bd   = g.desc(base);
+            bd.isInitializer = true;
             HostBuffer hb;
             hb.resizeElems(128, DType::Float32);
             for (int i = 0; i < 128; ++i)
@@ -2634,7 +2626,7 @@ namespace {
             g.initializers[id] = hb;
             return id;
         };
-        TensorId w  = konst("w"), c = konst("c");
+        TensorId w = konst("w"), c = konst("c");
         TensorId t0 = g.addTensor({.name = "t0"}), y = g.addTensor({.name = "y"});
         g.desc(y).isOutput = true;
         Node mm;
@@ -2693,12 +2685,12 @@ TEST(Passes, FusePointwiseMatMulTiledRefusal) {
 TEST(Passes, FusePointwiseRuntimePrimary) {
     Graph      g;
     TensorDesc xi;
-    xi.name       = "x";
-    xi.shape      = {1, 2, 2, 2};
-    xi.isInput    = true;
-    TensorId x    = g.addTensor(xi);
-    g.inputs      = {x};
-    auto konst    = [&](const char *nm, float v) {
+    xi.name    = "x";
+    xi.shape   = {1, 2, 2, 2};
+    xi.isInput = true;
+    TensorId x = g.addTensor(xi);
+    g.inputs   = {x};
+    auto konst = [&](const char *nm, float v) {
         TensorDesc t;
         t.name          = nm;
         t.shape         = {1, 2, 2, 2};
@@ -2713,7 +2705,7 @@ TEST(Passes, FusePointwiseRuntimePrimary) {
         g.initializers[id] = hb;
         return id;
     };
-    TensorId s  = konst("s", 2.f), b = konst("b", 1.f);
+    TensorId s = konst("s", 2.f), b = konst("b", 1.f);
     TensorId t0 = g.addTensor({.name = "t0"}), y = g.addTensor({.name = "y"});
     g.desc(y).isOutput = true;
     Node m;
@@ -2803,9 +2795,9 @@ TEST(Passes, RangeConstFoldFloat) {
     auto sess   = Session::create(std::move(g), cfg);
     ASSERT_TRUE(sess);
     IOTensor in;
-    in.name                 = "x";
-    in.shape                = {1, 1, 1, 4};
-    in.dtype                = DType::Float32;
+    in.name               = "x";
+    in.shape              = {1, 1, 1, 4};
+    in.dtype              = DType::Float32;
     std::vector<float> xd = {10, 20, 30, 40};
     in.data.resize(xd.size() * 4);
     for (size_t i = 0; i < xd.size(); ++i)
@@ -2827,10 +2819,9 @@ TEST(Ops, GridSampleCubicVsOrt) {
     {
         xd[i] = (float) i;
     }
-    const std::vector<float> grid = {
-        -8.4738344e-01f, 5.5983758e-01f, -1.2318152e-01f, 4.4693041e-01f, 9.5597899e-01f, 7.6991796e-02f,
-        2.2408962e-03f, -8.5589772e-01f, -4.6312201e-01f, -2.3502111e-04f, 3.5845995e-01f, 6.0747802e-01f,
-        -2.3811775e-01f, -8.6812729e-01f, -4.2370880e-01f, 8.1918705e-01f, -5.7322931e-01f, -9.5752060e-02f};
+    const std::vector<float> grid = {-8.4738344e-01f, 5.5983758e-01f,  -1.2318152e-01f, 4.4693041e-01f,  9.5597899e-01f,  7.6991796e-02f,
+                                     2.2408962e-03f,  -8.5589772e-01f, -4.6312201e-01f, -2.3502111e-04f, 3.5845995e-01f,  6.0747802e-01f,
+                                     -2.3811775e-01f, -8.6812729e-01f, -4.2370880e-01f, 8.1918705e-01f,  -5.7322931e-01f, -9.5752060e-02f};
     struct Case {
         const char        *pad;
         int                align;
@@ -2927,8 +2918,8 @@ namespace {
         add.inputs  = {base, fnhwc};
         add.outputs = {grid};
         Node gs;
-        gs.type = OpType::GridSample;
-        gs.name = "warp";
+        gs.type                     = OpType::GridSample;
+        gs.name                     = "warp";
         gs.attr.map["mode"]         = str("bilinear");
         gs.attr.map["padding_mode"] = str("border");
         Attr al;
@@ -2937,8 +2928,8 @@ namespace {
         gs.attr.map["align_corners"] = al;
         gs.inputs                    = {img, grid};
         gs.outputs                   = {y};
-        g.nodes   = {mul, tr, add, gs};
-        g.outputs = {y};
+        g.nodes                      = {mul, tr, add, gs};
+        g.outputs                    = {y};
         return g;
     }
 
@@ -2991,59 +2982,33 @@ namespace {
 // device byte gate then diffs the fp16 GPU warp shader against the materialized-grid path. ---
 TEST(Passes, GridSampleWarpFusionByteExactAndOrt) {
     static const std::vector<float> kImg = {
-        0.0763083f, 0.7799188f, 0.4384092f, 0.7234652f, 0.9779895f, 0.5384959f,
-        0.5011204f, 0.0720511f, 0.2684390f, 0.4998825f, 0.6792300f, 0.8037390f,
-        0.3809411f, 0.0659363f, 0.2881456f, 0.9095935f, 0.2133854f, 0.4521240f,
-        0.9312060f, 0.0248992f, 0.6005489f, 0.9501295f, 0.2303029f, 0.5484899f,
-        0.9091284f, 0.1331694f, 0.5234126f, 0.7504098f, 0.6690133f, 0.4677529f,
-        0.2048491f, 0.4907659f, 0.3723847f, 0.4774012f, 0.3658904f, 0.8379180f,
-        0.7686475f, 0.3139947f, 0.5726253f, 0.2760490f, 0.4528429f, 0.3529784f,
-        0.6573995f, 0.3703511f, 0.4590930f, 0.7193241f, 0.4129918f, 0.9064233f,
-        0.1804516f, 0.7411188f, 0.4223740f, 0.4264536f, 0.6343799f, 0.5229062f,
-        0.4148860f, 0.0014269f, 0.0922623f, 0.7093944f, 0.5243456f, 0.6961604f,
-        0.9554683f, 0.6829138f, 0.0531287f, 0.3088527f, 0.5925947f, 0.2351204f,
-        0.9649710f, 0.9450482f, 0.8484009f, 0.4723240f, 0.8414767f, 0.1311106f,
-        0.3087337f, 0.4629964f, 0.7418472f, 0.4858252f, 0.1368761f, 0.3435365f,
-        0.3244262f, 0.3004189f, 0.1655014f, 0.4149018f, 0.4481207f, 0.7749004f,
-        0.7963907f, 0.5223901f, 0.4606303f, 0.7782136f, 0.8872889f, 0.6749188f,
-        0.8004791f, 0.9391114f, 0.0406558f, 0.8756717f, 0.2765631f, 0.4757645f,
-        0.7967610f, 0.7172422f, 0.1471476f, 0.6587483f, 0.0692521f, 0.3570706f,
-        0.8128296f, 0.4277048f, 0.5998544f, 0.7281613f, 0.8212276f, 0.7605151f
-    };
+        0.0763083f, 0.7799188f, 0.4384092f, 0.7234652f, 0.9779895f, 0.5384959f, 0.5011204f, 0.0720511f, 0.2684390f, 0.4998825f, 0.6792300f, 0.8037390f,
+        0.3809411f, 0.0659363f, 0.2881456f, 0.9095935f, 0.2133854f, 0.4521240f, 0.9312060f, 0.0248992f, 0.6005489f, 0.9501295f, 0.2303029f, 0.5484899f,
+        0.9091284f, 0.1331694f, 0.5234126f, 0.7504098f, 0.6690133f, 0.4677529f, 0.2048491f, 0.4907659f, 0.3723847f, 0.4774012f, 0.3658904f, 0.8379180f,
+        0.7686475f, 0.3139947f, 0.5726253f, 0.2760490f, 0.4528429f, 0.3529784f, 0.6573995f, 0.3703511f, 0.4590930f, 0.7193241f, 0.4129918f, 0.9064233f,
+        0.1804516f, 0.7411188f, 0.4223740f, 0.4264536f, 0.6343799f, 0.5229062f, 0.4148860f, 0.0014269f, 0.0922623f, 0.7093944f, 0.5243456f, 0.6961604f,
+        0.9554683f, 0.6829138f, 0.0531287f, 0.3088527f, 0.5925947f, 0.2351204f, 0.9649710f, 0.9450482f, 0.8484009f, 0.4723240f, 0.8414767f, 0.1311106f,
+        0.3087337f, 0.4629964f, 0.7418472f, 0.4858252f, 0.1368761f, 0.3435365f, 0.3244262f, 0.3004189f, 0.1655014f, 0.4149018f, 0.4481207f, 0.7749004f,
+        0.7963907f, 0.5223901f, 0.4606303f, 0.7782136f, 0.8872889f, 0.6749188f, 0.8004791f, 0.9391114f, 0.0406558f, 0.8756717f, 0.2765631f, 0.4757645f,
+        0.7967610f, 0.7172422f, 0.1471476f, 0.6587483f, 0.0692521f, 0.3570706f, 0.8128296f, 0.4277048f, 0.5998544f, 0.7281613f, 0.8212276f, 0.7605151f};
     static const std::vector<float> kFlow = {
-        -0.4928567f, -0.0797432f, -0.0368638f, -0.4445005f, 0.0414422f, 0.1077707f,
-        0.3284532f, 0.4418093f, -0.3718522f, -0.2695693f, 0.1591584f, -0.3675260f,
-        -0.2759213f, 0.0748626f, -0.3304763f, 0.2822301f, 0.3569756f, -0.4663258f,
-        0.0326448f, 0.2969514f, 0.4751397f, -0.2257414f, -0.3308989f, 0.3767009f,
-        0.4091825f, -0.3024671f, -0.0584702f, 0.2192321f, 0.3453451f, -0.3317247f,
-        0.1649690f, 0.3078355f, 0.0497141f, -0.3352833f, -0.4644712f, -0.2184662f,
-        0.3078709f, -0.4552338f, -0.4917835f, -0.1383834f, -0.4363777f, -0.3505137f,
-        -0.4768096f, 0.0247198f, 0.1966959f, -0.0729465f, -0.3654295f, -0.1686428f,
-        0.0903459f, 0.4406614f, 0.4925577f, -0.2583971f, -0.4894201f, 0.3306403f,
-        0.4266129f, -0.0413965f, 0.2714424f, 0.3661990f, 0.1096148f, 0.3726272f,
-        -0.4760970f, -0.2284048f, -0.2227804f, -0.3793676f, 0.4107134f, -0.4695607f,
-        0.1725610f, -0.4286603f, -0.1392195f, -0.0819004f, -0.3185957f, 0.0210141f
-    };
+        -0.4928567f, -0.0797432f, -0.0368638f, -0.4445005f, 0.0414422f,  0.1077707f,  0.3284532f,  0.4418093f,  -0.3718522f, -0.2695693f, 0.1591584f,
+        -0.3675260f, -0.2759213f, 0.0748626f,  -0.3304763f, 0.2822301f,  0.3569756f,  -0.4663258f, 0.0326448f,  0.2969514f,  0.4751397f,  -0.2257414f,
+        -0.3308989f, 0.3767009f,  0.4091825f,  -0.3024671f, -0.0584702f, 0.2192321f,  0.3453451f,  -0.3317247f, 0.1649690f,  0.3078355f,  0.0497141f,
+        -0.3352833f, -0.4644712f, -0.2184662f, 0.3078709f,  -0.4552338f, -0.4917835f, -0.1383834f, -0.4363777f, -0.3505137f, -0.4768096f, 0.0247198f,
+        0.1966959f,  -0.0729465f, -0.3654295f, -0.1686428f, 0.0903459f,  0.4406614f,  0.4925577f,  -0.2583971f, -0.4894201f, 0.3306403f,  0.4266129f,
+        -0.0413965f, 0.2714424f,  0.3661990f,  0.1096148f,  0.3726272f,  -0.4760970f, -0.2284048f, -0.2227804f, -0.3793676f, 0.4107134f,  -0.4695607f,
+        0.1725610f,  -0.4286603f, -0.1392195f, -0.0819004f, -0.3185957f, 0.0210141f};
     static const std::vector<float> kGold = {
-        0.0763083f, 0.5604194f, 0.4744486f, 0.7319473f, 0.8434094f, 0.5384959f,
-        0.3432936f, 0.3036323f, 0.3064879f, 0.5814788f, 0.7607469f, 0.7174563f,
-        0.3913304f, 0.1582244f, 0.2544957f, 0.7709401f, 0.3715707f, 0.4698468f,
-        0.9275855f, 0.2634536f, 0.5739062f, 0.8781204f, 0.3459068f, 0.5359035f,
-        0.7481402f, 0.3987327f, 0.4554524f, 0.6722538f, 0.5742499f, 0.5527302f,
-        0.2048491f, 0.4181931f, 0.3833400f, 0.4718582f, 0.4746123f, 0.8379180f,
-        0.7686475f, 0.4558288f, 0.5453321f, 0.2819407f, 0.4222628f, 0.3529784f,
-        0.6987305f, 0.4323515f, 0.4688203f, 0.5721927f, 0.5187625f, 0.7263896f,
-        0.2216829f, 0.5749440f, 0.4694164f, 0.4865305f, 0.5936636f, 0.5422369f,
-        0.5035371f, 0.1675891f, 0.0870592f, 0.6399031f, 0.5598788f, 0.6242869f,
-        0.9576405f, 0.8235193f, 0.3181778f, 0.3890557f, 0.5119392f, 0.2112433f,
-        0.9649710f, 0.9501051f, 0.8573449f, 0.4906737f, 0.6778585f, 0.1311106f,
-        0.3087337f, 0.4148723f, 0.7124202f, 0.4741964f, 0.2001589f, 0.3435365f,
-        0.3185961f, 0.3418550f, 0.3249826f, 0.4318554f, 0.4297186f, 0.6345792f,
-        0.7555903f, 0.5915412f, 0.4624459f, 0.7418277f, 0.7691038f, 0.6799582f,
-        0.7998693f, 0.8881143f, 0.0801252f, 0.8025380f, 0.3048799f, 0.4572608f,
-        0.8004340f, 0.6958122f, 0.3083186f, 0.6193363f, 0.3980885f, 0.4496878f,
-        0.8128296f, 0.5254591f, 0.5839232f, 0.7327874f, 0.8072437f, 0.7605151f
-    };
+        0.0763083f, 0.5604194f, 0.4744486f, 0.7319473f, 0.8434094f, 0.5384959f, 0.3432936f, 0.3036323f, 0.3064879f, 0.5814788f, 0.7607469f, 0.7174563f,
+        0.3913304f, 0.1582244f, 0.2544957f, 0.7709401f, 0.3715707f, 0.4698468f, 0.9275855f, 0.2634536f, 0.5739062f, 0.8781204f, 0.3459068f, 0.5359035f,
+        0.7481402f, 0.3987327f, 0.4554524f, 0.6722538f, 0.5742499f, 0.5527302f, 0.2048491f, 0.4181931f, 0.3833400f, 0.4718582f, 0.4746123f, 0.8379180f,
+        0.7686475f, 0.4558288f, 0.5453321f, 0.2819407f, 0.4222628f, 0.3529784f, 0.6987305f, 0.4323515f, 0.4688203f, 0.5721927f, 0.5187625f, 0.7263896f,
+        0.2216829f, 0.5749440f, 0.4694164f, 0.4865305f, 0.5936636f, 0.5422369f, 0.5035371f, 0.1675891f, 0.0870592f, 0.6399031f, 0.5598788f, 0.6242869f,
+        0.9576405f, 0.8235193f, 0.3181778f, 0.3890557f, 0.5119392f, 0.2112433f, 0.9649710f, 0.9501051f, 0.8573449f, 0.4906737f, 0.6778585f, 0.1311106f,
+        0.3087337f, 0.4148723f, 0.7124202f, 0.4741964f, 0.2001589f, 0.3435365f, 0.3185961f, 0.3418550f, 0.3249826f, 0.4318554f, 0.4297186f, 0.6345792f,
+        0.7555903f, 0.5915412f, 0.4624459f, 0.7418277f, 0.7691038f, 0.6799582f, 0.7998693f, 0.8881143f, 0.0801252f, 0.8025380f, 0.3048799f, 0.4572608f,
+        0.8004340f, 0.6958122f, 0.3083186f, 0.6193363f, 0.3980885f, 0.4496878f, 0.8128296f, 0.5254591f, 0.5839232f, 0.7327874f, 0.8072437f, 0.7605151f};
     const float scale = 0.05f;
 
     std::vector<float> fused   = runWarpIdiomCpu(true, kImg, kFlow, scale);
@@ -3097,7 +3062,7 @@ TEST(Passes, ConstFoldEmptyRangeBinary) {
     };
     TensorId s = scal("start", 0.f), l = scal("limit", 0.f), d = scal("delta", 1.f), two = scal("two", 2.f);
     TensorId r = g.addTensor({.name = "r"}), m = g.addTensor({.name = "m"});
-    TensorId y = g.addTensor({.name = "y"});
+    TensorId y         = g.addTensor({.name = "y"});
     g.desc(y).isOutput = true;
     Node rg;
     rg.type    = OpType::Range; // folds to an EMPTY [0] constant
@@ -3132,10 +3097,10 @@ TEST(Passes, ConstFoldEmptyRangeBinary) {
 TEST(Passes, BinaryUnresolvedOperandStaysUnresolved) {
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {2, 8};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
+    xi.name      = "x";
+    xi.shape     = {2, 8};
+    xi.isInput   = true;
+    TensorId   x = g.addTensor(xi);
     TensorDesc si;
     si.name     = "s"; // runtime reshape target: keeps the Reshape output unresolved
     si.shape    = {3};
@@ -3209,10 +3174,10 @@ TEST(Passes, BinaryUnresolvedOperandStaysUnresolved) {
 TEST(Passes, SliceRuntimeBoundsStayUnresolved) {
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {2, 16, 64};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
+    xi.name      = "x";
+    xi.shape     = {2, 16, 64};
+    xi.isInput   = true;
+    TensorId   x = g.addTensor(xi);
     TensorDesc si;
     si.name     = "bound"; // runtime scalar bound (e.g. head_dim/2 computed from Shape() arith)
     si.shape    = {1};
@@ -3298,17 +3263,17 @@ TEST(Passes, BinaryScalarInitializerBroadcasts) {
 TEST(Ops, CpuAddTwoRank0ScalarInputs) {
     Graph      g;
     TensorDesc ai;
-    ai.name    = "a";
-    ai.shape   = {}; // rank-0 scalar input
-    ai.isInput = true;
-    TensorId a = g.addTensor(ai);
+    ai.name      = "a";
+    ai.shape     = {}; // rank-0 scalar input
+    ai.isInput   = true;
+    TensorId   a = g.addTensor(ai);
     TensorDesc bi;
-    bi.name    = "b";
-    bi.shape   = {}; // rank-0 scalar input
-    bi.isInput = true;
-    TensorId b = g.addTensor(bi);
-    g.inputs   = {a, b};
-    TensorId y = g.addTensor({.name = "y"});
+    bi.name            = "b";
+    bi.shape           = {}; // rank-0 scalar input
+    bi.isInput         = true;
+    TensorId b         = g.addTensor(bi);
+    g.inputs           = {a, b};
+    TensorId y         = g.addTensor({.name = "y"});
     g.desc(y).isOutput = true;
     Node n;
     n.type    = OpType::Add;
@@ -3348,10 +3313,10 @@ TEST(Ops, CpuAddTwoRank0ScalarInputs) {
 TEST(Ops, CpuRank0ScalarOutputFp16Readback) {
     Graph      g;
     TensorDesc ai;
-    ai.name    = "a";
-    ai.shape   = {}; // rank-0 scalar input
-    ai.isInput = true;
-    TensorId a = g.addTensor(ai);
+    ai.name      = "a";
+    ai.shape     = {}; // rank-0 scalar input
+    ai.isInput   = true;
+    TensorId   a = g.addTensor(ai);
     TensorDesc bi;
     bi.name    = "b";
     bi.shape   = {}; // rank-0 scalar input
@@ -3360,11 +3325,11 @@ TEST(Ops, CpuRank0ScalarOutputFp16Readback) {
     g.inputs   = {a, b};
     TensorDesc yo;
     yo.name     = "y";
-    yo.shape    = {};                 // rank-0 scalar output
-    yo.dtype    = DType::Float16;      // declared FLOAT16 -> readback converts from internal fp32
+    yo.shape    = {};             // rank-0 scalar output
+    yo.dtype    = DType::Float16; // declared FLOAT16 -> readback converts from internal fp32
     yo.isOutput = true;
     TensorId y  = g.addTensor(yo);
-    Node n;
+    Node     n;
     n.type    = OpType::Add;
     n.name    = "add";
     n.inputs  = {a, b};
@@ -3524,8 +3489,8 @@ TEST(Passes, TopKInferShapes) {
     n.outputs = {v, ix};
     {
         Attr a;
-        a.kind            = Attr::Int;
-        a.i               = 1;
+        a.kind             = Attr::Int;
+        a.i                = 1;
         n.attr.map["axis"] = a;
     }
     g.nodes   = {n};
@@ -3552,10 +3517,10 @@ TEST(Passes, PreservesDeclaredOutputDtype) {
     TensorId x = g.addTensor(xi);
     g.inputs.push_back(x);
     TensorDesc td;
-    td.name    = "t";
-    td.shape   = {1, 8};
-    td.dtype   = DType::Float32;
-    TensorId t = g.addTensor(td);
+    td.name      = "t";
+    td.shape     = {1, 8};
+    td.dtype     = DType::Float32;
+    TensorId   t = g.addTensor(td);
     TensorDesc yd;
     yd.name     = "y";
     yd.shape    = {1, 8};
@@ -3612,24 +3577,24 @@ TEST(Passes, LowerGroupedConvStructure) {
         yd.name     = "y";
         yd.shape    = {1, 8, 4, 4};
         yd.isOutput = true;
-        TensorId   y = g.addTensor(yd);
-        Node       c;
+        TensorId y  = g.addTensor(yd);
+        Node     c;
         c.type    = OpType::Conv;
         c.name    = "gconv";
         c.inputs  = {x, w};
         c.outputs = {y};
         Attr grp;
-        grp.kind          = Attr::Int;
-        grp.i             = 4;
-        c.attr.map["group"]        = grp;
+        grp.kind            = Attr::Int;
+        grp.i               = 4;
+        c.attr.map["group"] = grp;
         Attr ks;
-        ks.kind           = Attr::Ints;
-        ks.ints           = {3, 3};
+        ks.kind                    = Attr::Ints;
+        ks.ints                    = {3, 3};
         c.attr.map["kernel_shape"] = ks;
         Attr pd;
-        pd.kind           = Attr::Ints;
-        pd.ints           = {1, 1, 1, 1};
-        c.attr.map["pads"]         = pd;
+        pd.kind            = Attr::Ints;
+        pd.ints            = {1, 1, 1, 1};
+        c.attr.map["pads"] = pd;
         g.nodes.push_back(c);
         g.outputs = {y};
         return g;
@@ -3653,14 +3618,12 @@ TEST(Passes, LowerGroupedConvStructure) {
             {
                 slices++;
             } else if (n.type == OpType::Concat)
-            {
-                concats++;
-            }
+            { concats++; }
         }
-        EXPECT_EQ(grouped, 0);  // no grouped Conv survives
-        EXPECT_EQ(convs, 4);    // one group-1 Conv per group
-        EXPECT_EQ(slices, 4);   // one channel Slice per group
-        EXPECT_EQ(concats, 1);  // parts rejoined once
+        EXPECT_EQ(grouped, 0); // no grouped Conv survives
+        EXPECT_EQ(convs, 4);   // one group-1 Conv per group
+        EXPECT_EQ(slices, 4);  // one channel Slice per group
+        EXPECT_EQ(concats, 1); // parts rejoined once
     }
     // runtime weight -> untouched (stays a grouped Conv for the CPU op)
     {
@@ -3793,18 +3756,18 @@ namespace {
 TEST(Passes, DropoutInferenceModeEliminated) {
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {1, 8};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
-    g.inputs   = {x};
-    TensorId r     = addAct(g, "r");
-    TensorId d     = addAct(g, "d");
-    TensorId m     = addAct(g, "m"); // mask requested but never consumed
-    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
-    TensorId tm    = addScalarInit(g, "tm", DType::UInt8, 0); // constant-false training_mode
-    TensorId k     = addScalarInit(g, "k", DType::Float32, 2.0);
-    TensorId y     = addAct(g, "y");
+    xi.name            = "x";
+    xi.shape           = {1, 8};
+    xi.isInput         = true;
+    TensorId x         = g.addTensor(xi);
+    g.inputs           = {x};
+    TensorId r         = addAct(g, "r");
+    TensorId d         = addAct(g, "d");
+    TensorId m         = addAct(g, "m"); // mask requested but never consumed
+    TensorId ratio     = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    TensorId tm        = addScalarInit(g, "tm", DType::UInt8, 0); // constant-false training_mode
+    TensorId k         = addScalarInit(g, "k", DType::Float32, 2.0);
+    TensorId y         = addAct(g, "y");
     g.desc(y).isOutput = true;
     g.outputs          = {y};
     Node relu;
@@ -3823,7 +3786,7 @@ TEST(Passes, DropoutInferenceModeEliminated) {
     mul.name    = "mul";
     mul.inputs  = {d, k};
     mul.outputs = {y};
-    g.nodes = {relu, dp, mul};
+    g.nodes     = {relu, dp, mul};
 
     eliminateDropout(g);
     ASSERT_EQ(g.nodes.size(), 2u);
@@ -3836,13 +3799,13 @@ TEST(Passes, DropoutGraphOutputRewired) {
     // Opset-7 form: data input and output only, the output is a graph output.
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {1, 8};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
-    g.inputs   = {x};
-    TensorId r = addAct(g, "r");
-    TensorId d = addAct(g, "d");
+    xi.name            = "x";
+    xi.shape           = {1, 8};
+    xi.isInput         = true;
+    TensorId x         = g.addTensor(xi);
+    g.inputs           = {x};
+    TensorId r         = addAct(g, "r");
+    TensorId d         = addAct(g, "d");
     g.desc(d).isOutput = true;
     g.outputs          = {d};
     Node relu;
@@ -3855,7 +3818,7 @@ TEST(Passes, DropoutGraphOutputRewired) {
     dp.name    = "dp";
     dp.inputs  = {r};
     dp.outputs = {d};
-    g.nodes = {relu, dp};
+    g.nodes    = {relu, dp};
 
     eliminateDropout(g);
     ASSERT_EQ(g.nodes.size(), 1u);
@@ -3867,15 +3830,15 @@ TEST(Passes, DropoutGraphOutputRewired) {
 TEST(Passes, DropoutConsumedMaskKept) {
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {1, 8};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
-    g.inputs   = {x};
-    TensorId d = addAct(g, "d");
-    TensorId m = addAct(g, "m");
-    TensorId k = addScalarInit(g, "k", DType::Float32, 2.0);
-    TensorId y = addAct(g, "y");
+    xi.name            = "x";
+    xi.shape           = {1, 8};
+    xi.isInput         = true;
+    TensorId x         = g.addTensor(xi);
+    g.inputs           = {x};
+    TensorId d         = addAct(g, "d");
+    TensorId m         = addAct(g, "m");
+    TensorId k         = addScalarInit(g, "k", DType::Float32, 2.0);
+    TensorId y         = addAct(g, "y");
     g.desc(d).isOutput = true;
     g.desc(y).isOutput = true;
     g.outputs          = {d, y};
@@ -3890,7 +3853,7 @@ TEST(Passes, DropoutConsumedMaskKept) {
     mul.name    = "mul";
     mul.inputs  = {m, k};
     mul.outputs = {y};
-    g.nodes = {dp, mul};
+    g.nodes     = {dp, mul};
 
     eliminateDropout(g);
     ASSERT_EQ(g.nodes.size(), 2u);
@@ -3900,14 +3863,14 @@ TEST(Passes, DropoutConsumedMaskKept) {
 TEST(Passes, DropoutTrainingModeConstTrueKept) {
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {1, 8};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
-    g.inputs   = {x};
-    TensorId d     = addAct(g, "d");
-    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
-    TensorId tm    = addScalarInit(g, "tm", DType::UInt8, 1); // constant-true training_mode
+    xi.name            = "x";
+    xi.shape           = {1, 8};
+    xi.isInput         = true;
+    TensorId x         = g.addTensor(xi);
+    g.inputs           = {x};
+    TensorId d         = addAct(g, "d");
+    TensorId ratio     = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    TensorId tm        = addScalarInit(g, "tm", DType::UInt8, 1); // constant-true training_mode
     g.desc(d).isOutput = true;
     g.outputs          = {d};
     Node dp;
@@ -3915,7 +3878,7 @@ TEST(Passes, DropoutTrainingModeConstTrueKept) {
     dp.name    = "dp";
     dp.inputs  = {x, ratio, tm};
     dp.outputs = {d};
-    g.nodes = {dp};
+    g.nodes    = {dp};
 
     eliminateDropout(g);
     ASSERT_EQ(g.nodes.size(), 1u);
@@ -3925,18 +3888,18 @@ TEST(Passes, DropoutTrainingModeConstTrueKept) {
 TEST(Passes, DropoutTrainingModeRuntimeKept) {
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {1, 8};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
+    xi.name      = "x";
+    xi.shape     = {1, 8};
+    xi.isInput   = true;
+    TensorId   x = g.addTensor(xi);
     TensorDesc ti; // training_mode fed at run time: not provably false
-    ti.name     = "tm";
-    ti.isInput  = true;
-    ti.dtype    = DType::UInt8;
-    TensorId tm = g.addTensor(ti);
-    g.inputs    = {x, tm};
-    TensorId d     = addAct(g, "d");
-    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    ti.name            = "tm";
+    ti.isInput         = true;
+    ti.dtype           = DType::UInt8;
+    TensorId tm        = g.addTensor(ti);
+    g.inputs           = {x, tm};
+    TensorId d         = addAct(g, "d");
+    TensorId ratio     = addScalarInit(g, "ratio", DType::Float32, 0.5);
     g.desc(d).isOutput = true;
     g.outputs          = {d};
     Node dp;
@@ -3944,7 +3907,7 @@ TEST(Passes, DropoutTrainingModeRuntimeKept) {
     dp.name    = "dp";
     dp.inputs  = {x, ratio, tm};
     dp.outputs = {d};
-    g.nodes = {dp};
+    g.nodes    = {dp};
 
     eliminateDropout(g);
     ASSERT_EQ(g.nodes.size(), 1u);
@@ -3955,14 +3918,14 @@ TEST(Passes, DropoutConstantNodeTrainingModeFalse) {
     // training_mode produced by a not-yet-folded Constant node (the pass runs before constFold).
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = {1, 8};
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
-    g.inputs   = {x};
-    TensorId tm    = addAct(g, "tm");
-    TensorId d     = addAct(g, "d");
-    TensorId ratio = addScalarInit(g, "ratio", DType::Float32, 0.5);
+    xi.name            = "x";
+    xi.shape           = {1, 8};
+    xi.isInput         = true;
+    TensorId x         = g.addTensor(xi);
+    g.inputs           = {x};
+    TensorId tm        = addAct(g, "tm");
+    TensorId d         = addAct(g, "d");
+    TensorId ratio     = addScalarInit(g, "ratio", DType::Float32, 0.5);
     g.desc(d).isOutput = true;
     g.outputs          = {d};
     Node cn;
@@ -3970,15 +3933,15 @@ TEST(Passes, DropoutConstantNodeTrainingModeFalse) {
     cn.name    = "tm_const";
     cn.outputs = {tm};
     Attr v;
-    v.kind = Attr::Ints;
-    v.ints = {0};
+    v.kind               = Attr::Ints;
+    v.ints               = {0};
     cn.attr.map["value"] = v;
     Node dp;
     dp.type    = OpType::Dropout;
     dp.name    = "dp";
     dp.inputs  = {x, ratio, tm};
     dp.outputs = {d};
-    g.nodes = {cn, dp};
+    g.nodes    = {cn, dp};
 
     eliminateDropout(g);
     ASSERT_EQ(g.nodes.size(), 1u);
@@ -4004,10 +3967,10 @@ TEST(Passes, DropoutRunStandardPassesRewires) {
     TensorId   w     = g.addTensor(wd);
     HostBuffer hb;
     hb.resizeElems(64, DType::Float32);
-    g.initializers[w] = hb;
-    TensorId t        = addAct(g, "t");
-    TensorId d        = addAct(g, "d");
-    TensorId y        = addAct(g, "y");
+    g.initializers[w]  = hb;
+    TensorId t         = addAct(g, "t");
+    TensorId d         = addAct(g, "d");
+    TensorId y         = addAct(g, "y");
     g.desc(y).isOutput = true;
     g.outputs          = {y};
     Node mm;
@@ -4025,7 +3988,7 @@ TEST(Passes, DropoutRunStandardPassesRewires) {
     sm.name    = "sm";
     sm.inputs  = {d};
     sm.outputs = {y};
-    g.nodes = {mm, dp, sm};
+    g.nodes    = {mm, dp, sm};
 
     runStandardPasses(g);
     const Node *matmul = nullptr, *softmax = nullptr;
@@ -4149,8 +4112,8 @@ namespace {
 
     struct DwPwSpec {
         int64_t n = 1, e = 8, h = 9, w = 9, cout = 6, k = 3, stride = 1;
-        bool    bias  = true;
-        bool    relu6 = false;   // Clip(0, 6) after the depthwise conv; folds onto the fused dw stage
+        bool    bias    = true;
+        bool    relu6   = false; // Clip(0, 6) after the depthwise conv; folds onto the fused dw stage
         bool    mulTail = false; // trailing Binary Mul by a scalar constant (pointwise epilogue)
         bool    samePad = false; // auto_pad SAME_UPPER on the depthwise conv instead of explicit pads
         int64_t outH() const {
@@ -4180,8 +4143,8 @@ namespace {
             d.attr.map["auto_pad"] = str("SAME_UPPER");
         } else
         {
-            int64_t p           = s.k / 2;
-            d.attr.map["pads"]  = ints({p, p, p, p});
+            int64_t p          = s.k / 2;
+            d.attr.map["pads"] = ints({p, p, p, p});
         }
         d.attr.map["strides"] = ints({s.stride, s.stride});
         return d;
@@ -4191,15 +4154,15 @@ namespace {
     Graph dwpwPairGraph(const DwPwSpec &s) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = {s.n, s.e, s.h, s.w};
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
-        TensorId dwB = s.bias ? dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102)) : kNoTensor;
-        TensorId pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
-        TensorId pwB = s.bias ? dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104)) : kNoTensor;
+        xi.name        = "x";
+        xi.shape       = {s.n, s.e, s.h, s.w};
+        xi.isInput     = true;
+        TensorId x     = g.addTensor(xi);
+        g.inputs       = {x};
+        TensorId   dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
+        TensorId   dwB = s.bias ? dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102)) : kNoTensor;
+        TensorId   pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
+        TensorId   pwB = s.bias ? dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104)) : kNoTensor;
         TensorDesc td;
         td.name    = "t";
         TensorId t = g.addTensor(td);
@@ -4216,12 +4179,12 @@ namespace {
             c.inputs  = {t};
             c.outputs = {tc};
             Attr lo, hi;
-            lo.kind            = Attr::Float;
-            lo.f               = 0.f;
-            hi.kind            = Attr::Float;
-            hi.f               = 6.f;
-            c.attr.map["min"]  = lo;
-            c.attr.map["max"]  = hi;
+            lo.kind           = Attr::Float;
+            lo.f              = 0.f;
+            hi.kind           = Attr::Float;
+            hi.f              = 6.f;
+            c.attr.map["min"] = lo;
+            c.attr.map["max"] = hi;
             g.nodes.push_back(c);
             pwIn = tc;
         }
@@ -4232,8 +4195,8 @@ namespace {
         if (s.mulTail)
         {
             TensorDesc md;
-            md.name     = "m";
-            TensorId m  = g.addTensor(md);
+            md.name    = "m";
+            TensorId m = g.addTensor(md);
             Node     p;
             p.type    = OpType::Conv;
             p.name    = "pconv";
@@ -4265,13 +4228,13 @@ namespace {
     Graph dwpwDepthwiseGraph(const DwPwSpec &s) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = {s.n, s.e, s.h, s.w};
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
-        TensorId dwB = s.bias ? dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102)) : kNoTensor;
+        xi.name        = "x";
+        xi.shape       = {s.n, s.e, s.h, s.w};
+        xi.isInput     = true;
+        TensorId x     = g.addTensor(xi);
+        g.inputs       = {x};
+        TensorId   dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
+        TensorId   dwB = s.bias ? dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102)) : kNoTensor;
         TensorDesc yo;
         yo.name     = "t";
         yo.isOutput = true;
@@ -4307,13 +4270,13 @@ namespace {
     Graph dwpwProjectGraph(const DwPwSpec &s) {
         Graph      g;
         TensorDesc ti;
-        ti.name    = "t";
-        ti.shape   = {s.n, s.e, s.outH(), s.outW()};
-        ti.isInput = true;
-        TensorId t = g.addTensor(ti);
-        g.inputs   = {t};
-        TensorId pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
-        TensorId pwB = s.bias ? dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104)) : kNoTensor;
+        ti.name        = "t";
+        ti.shape       = {s.n, s.e, s.outH(), s.outW()};
+        ti.isInput     = true;
+        TensorId t     = g.addTensor(ti);
+        g.inputs       = {t};
+        TensorId   pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
+        TensorId   pwB = s.bias ? dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104)) : kNoTensor;
         TensorDesc yo;
         yo.name     = "y";
         yo.isOutput = true;
@@ -4364,8 +4327,8 @@ namespace {
         DwPwOutputs out;
         out.fused = runCpuGraph(std::move(gf), {dwpwIo("x", xshape, x)});
 
-        PassOptions        o0 = PassOptions::forOptLevel(0);
-        Graph              gd = dwpwDepthwiseGraph(s);
+        PassOptions o0 = PassOptions::forOptLevel(0);
+        Graph       gd = dwpwDepthwiseGraph(s);
         runStandardPasses(gd, o0);
         std::vector<float> inter = runCpuGraph(std::move(gd), {dwpwIo("x", xshape, x)});
         Shape              tshape {s.n, s.e, s.outH(), s.outW()};
@@ -4407,7 +4370,8 @@ TEST(FusedDwPw, Fp16IntermediateBitwise) {
     DwPwOutputs o = runDwPwCase(s);
     ASSERT_EQ(o.fused.size(), (size_t) (s.n * s.cout * s.outH() * s.outW()));
     expectSameBits(o.fused, o.sim);
-    EXPECT_NE(0, std::memcmp(o.fused.data(), o.simRaw.data(), o.fused.size() * sizeof(float))) << "the fp16 round-trip must actually change the intermediate on this data";
+    EXPECT_NE(0, std::memcmp(o.fused.data(), o.simRaw.data(), o.fused.size() * sizeof(float)))
+        << "the fp16 round-trip must actually change the intermediate on this data";
 }
 
 // Depthwise-stage Relu6 (a folded Clip(0,6)) applies before the fp16 rounding, exactly like the
@@ -4444,10 +4408,10 @@ TEST(FusedDwPw, Stride2Bitwise) {
 // side. A pair just past the cap must stay unfused.
 TEST(FusedDwPw, ExpandedChannels1152Cap) {
     DwPwSpec s;
-    s.e    = 1152;
-    s.h    = 5;
-    s.w    = 5;
-    s.cout = 16;
+    s.e           = 1152;
+    s.h           = 5;
+    s.w           = 5;
+    s.cout        = 16;
     DwPwOutputs o = runDwPwCase(s);
     ASSERT_FALSE(o.fused.empty());
     expectSameBits(o.fused, o.sim);
@@ -4477,28 +4441,28 @@ TEST(FusedDwPw, EpilogueAttachedBitwise) {
 // A fused residual adds to the projection output before the projection activation. The node is
 // built directly in the form fuseDwPw emits (residual appended to inputs + fusedResidual edge).
 TEST(FusedDwPw, ResidualAddBitwise) {
-    DwPwSpec s; // residual shape = output shape {1, 6, 9, 9}
-    Shape    xshape {s.n, s.e, s.h, s.w};
-    Shape    rshape {s.n, s.cout, s.outH(), s.outW()};
+    DwPwSpec           s; // residual shape = output shape {1, 6, 9, 9}
+    Shape              xshape {s.n, s.e, s.h, s.w};
+    Shape              rshape {s.n, s.cout, s.outH(), s.outW()};
     std::vector<float> x   = dwpwData(numElements(xshape), 7);
     std::vector<float> res = dwpwData(numElements(rshape), 21);
 
     Graph      g;
     TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = xshape;
-    xi.isInput = true;
-    TensorId xt = g.addTensor(xi);
+    xi.name       = "x";
+    xi.shape      = xshape;
+    xi.isInput    = true;
+    TensorId   xt = g.addTensor(xi);
     TensorDesc ri;
-    ri.name    = "res";
-    ri.shape   = rshape;
-    ri.isInput = true;
-    TensorId rt = g.addTensor(ri);
-    g.inputs    = {xt, rt};
-    TensorId dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
-    TensorId dwB = dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102));
-    TensorId pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
-    TensorId pwB = dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104));
+    ri.name        = "res";
+    ri.shape       = rshape;
+    ri.isInput     = true;
+    TensorId rt    = g.addTensor(ri);
+    g.inputs       = {xt, rt};
+    TensorId   dwW = dwpwInit(g, "dw_w", {s.e, 1, s.k, s.k}, dwpwData(s.e * s.k * s.k, 101));
+    TensorId   dwB = dwpwInit(g, "dw_b", {s.e}, dwpwData(s.e, 102));
+    TensorId   pwW = dwpwInit(g, "pw_w", {s.cout, s.e, 1, 1}, dwpwData(s.cout * s.e, 103));
+    TensorId   pwB = dwpwInit(g, "pw_b", {s.cout}, dwpwData(s.cout, 104));
     TensorDesc yo;
     yo.name     = "y";
     yo.isOutput = true;
@@ -4511,8 +4475,8 @@ TEST(FusedDwPw, ResidualAddBitwise) {
     f.fusedResidual = rt;
     f.fusedAct      = ActType::Relu; // after the residual add, per inverted-residual semantics
     {
-        int64_t p            = s.k / 2;
-        f.attr.map["pads"]   = ints({p, p, p, p});
+        int64_t p             = s.k / 2;
+        f.attr.map["pads"]    = ints({p, p, p, p});
         f.attr.map["strides"] = ints({s.stride, s.stride});
     }
     g.nodes.push_back(f);
@@ -4576,11 +4540,11 @@ namespace {
     Graph instanceNormGraph(const std::vector<int64_t> &xshape, const std::vector<float> &scale, const std::vector<float> &bias, float eps, bool scaleIsInput = false) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = xshape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
+        xi.name      = "x";
+        xi.shape     = xshape;
+        xi.isInput   = true;
+        TensorId x   = g.addTensor(xi);
+        g.inputs     = {x};
         auto addInit = [&](const char *name, const std::vector<float> &v) {
             TensorDesc d;
             d.name          = name;
@@ -4709,7 +4673,7 @@ namespace {
 
 TEST(Ops, InstanceNormNchwMatchesReference) {
     std::vector<int64_t> xshape {2, 3, 8, 8};
-    std::vector<float>   x     = pseudoRandom(2 * 3 * 8 * 8);
+    std::vector<float>   x = pseudoRandom(2 * 3 * 8 * 8);
     std::vector<float>   scale {0.5f, 1.5f, -2.0f};
     std::vector<float>   bias {0.1f, -0.3f, 0.7f};
     std::vector<float>   got = runInstanceNorm(instanceNormGraph(xshape, scale, bias, 1e-5f), xshape, x);
@@ -4720,7 +4684,7 @@ TEST(Ops, InstanceNormRank3NormalizesOverL) {
     // [N,C,L] (whisper-class): the mean/variance reduce over L only. The non-default epsilon
     // separates the attribute-read path from the 1e-5 fallback.
     std::vector<int64_t> xshape {2, 4, 16};
-    std::vector<float>   x     = pseudoRandom(2 * 4 * 16);
+    std::vector<float>   x = pseudoRandom(2 * 4 * 16);
     std::vector<float>   scale {1.0f, 0.25f, -1.5f, 3.0f};
     std::vector<float>   bias {0.0f, 0.5f, -0.25f, 1.0f};
     std::vector<float>   got = runInstanceNorm(instanceNormGraph(xshape, scale, bias, 1e-3f), xshape, x);
@@ -4829,16 +4793,16 @@ namespace {
     Graph dequantWeightGraph(const Shape &shape, const std::vector<float> &wq, const Shape &sshape, const std::vector<float> &scale, const std::vector<float> &zp, bool withAxis, int64_t axis, TensorId *wdOut) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = shape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId w = addFloatInit(g, "w", shape, wq);
-        TensorId s = addFloatInit(g, "s", sshape, scale);
-        TensorId z = zp.empty() ? kNoTensor : addFloatInit(g, "z", sshape, zp);
-        TensorId wd = addUnshaped(g, "wd");
-        TensorId y  = addUnshaped(g, "y");
+        xi.name            = "x";
+        xi.shape           = shape;
+        xi.isInput         = true;
+        TensorId x         = g.addTensor(xi);
+        g.inputs           = {x};
+        TensorId w         = addFloatInit(g, "w", shape, wq);
+        TensorId s         = addFloatInit(g, "s", sshape, scale);
+        TensorId z         = zp.empty() ? kNoTensor : addFloatInit(g, "z", sshape, zp);
+        TensorId wd        = addUnshaped(g, "wd");
+        TensorId y         = addUnshaped(g, "y");
         g.desc(y).isOutput = true;
         g.outputs          = {y};
         Node dq;
@@ -4859,7 +4823,7 @@ namespace {
         add.name    = "add";
         add.inputs  = {x, wd};
         add.outputs = {y};
-        g.nodes = {dq, add};
+        g.nodes     = {dq, add};
         if (wdOut)
         {
             *wdOut = wd;
@@ -4874,20 +4838,20 @@ namespace {
     Graph qdqSandwichGraph(bool shared, float qScale, float qZp, float dqScale, float dqZp, bool dqHasZp = true, DType quantDt = DType::Int8) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = {1, 8};
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId r  = addUnshaped(g, "r");
-        TensorId q  = addUnshaped(g, "q");
-        TensorId d  = addUnshaped(g, "d");
-        TensorId y  = addUnshaped(g, "y");
-        TensorId s1 = addFloatInit(g, "s1", {}, {qScale});
-        TensorId z1 = addZeroPointInit(g, "z1", {}, {qZp}, quantDt);
-        TensorId s2 = shared ? s1 : addFloatInit(g, "s2", {}, {dqScale});
-        TensorId z2 = shared ? z1 : (dqHasZp ? addZeroPointInit(g, "z2", {}, {dqZp}, quantDt) : kNoTensor);
-        TensorId k  = addFloatInit(g, "k", {1}, {2.f});
+        xi.name            = "x";
+        xi.shape           = {1, 8};
+        xi.isInput         = true;
+        TensorId x         = g.addTensor(xi);
+        g.inputs           = {x};
+        TensorId r         = addUnshaped(g, "r");
+        TensorId q         = addUnshaped(g, "q");
+        TensorId d         = addUnshaped(g, "d");
+        TensorId y         = addUnshaped(g, "y");
+        TensorId s1        = addFloatInit(g, "s1", {}, {qScale});
+        TensorId z1        = addZeroPointInit(g, "z1", {}, {qZp}, quantDt);
+        TensorId s2        = shared ? s1 : addFloatInit(g, "s2", {}, {dqScale});
+        TensorId z2        = shared ? z1 : (dqHasZp ? addZeroPointInit(g, "z2", {}, {dqZp}, quantDt) : kNoTensor);
+        TensorId k         = addFloatInit(g, "k", {1}, {2.f});
         g.desc(y).isOutput = true;
         g.outputs          = {y};
         Node relu;
@@ -4911,7 +4875,7 @@ namespace {
         mul.name    = "mul";
         mul.inputs  = {d, k};
         mul.outputs = {y};
-        g.nodes = {relu, qn, dn, mul};
+        g.nodes     = {relu, qn, dn, mul};
         return g;
     }
 
@@ -5108,17 +5072,17 @@ TEST(Passes, QdqSandwichCollapsesByteEqual) {
     Graph              plain;
     {
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = {1, 8};
-        xi.isInput = true;
-        TensorId x = plain.addTensor(xi);
-        plain.inputs = {x};
-        TensorId r   = addUnshaped(plain, "r");
-        TensorId c   = addUnshaped(plain, "c");
-        TensorId y   = addUnshaped(plain, "y");
-        TensorId lo  = addFloatInit(plain, "lo", {}, {(-128.f - 3.f) * 0.05f}); // (qmin - zp) * scale
-        TensorId hi  = addFloatInit(plain, "hi", {}, {(127.f - 3.f) * 0.05f});  // (qmax - zp) * scale
-        TensorId k   = addFloatInit(plain, "k", {1}, {2.f});
+        xi.name                = "x";
+        xi.shape               = {1, 8};
+        xi.isInput             = true;
+        TensorId x             = plain.addTensor(xi);
+        plain.inputs           = {x};
+        TensorId r             = addUnshaped(plain, "r");
+        TensorId c             = addUnshaped(plain, "c");
+        TensorId y             = addUnshaped(plain, "y");
+        TensorId lo            = addFloatInit(plain, "lo", {}, {(-128.f - 3.f) * 0.05f}); // (qmin - zp) * scale
+        TensorId hi            = addFloatInit(plain, "hi", {}, {(127.f - 3.f) * 0.05f});  // (qmax - zp) * scale
+        TensorId k             = addFloatInit(plain, "k", {1}, {2.f});
         plain.desc(y).isOutput = true;
         plain.outputs          = {y};
         Node relu;
@@ -5153,8 +5117,8 @@ TEST(Passes, QdqSandwichPreservesClamp) {
     Graph g = qdqSandwichGraph(/*shared=*/true, 0.05f, 0.f, 0.05f, 0.f, /*dqHasZp=*/true, DType::UInt8);
     // Drop the Relu so the clamp is the only lower bound under test (rewire the Q to read x directly).
     ASSERT_EQ(g.nodes[0].type, OpType::Relu);
-    TensorId reluIn  = g.nodes[0].inputs[0];
-    TensorId reluOut = g.nodes[0].outputs[0];
+    TensorId reluIn      = g.nodes[0].inputs[0];
+    TensorId reluOut     = g.nodes[0].outputs[0];
     g.nodes[1].inputs[0] = reluIn; // Q now reads x
     g.nodes.erase(g.nodes.begin());
     (void) reluOut;
@@ -5177,7 +5141,7 @@ TEST(Passes, QdqSandwichInt8ClampSaturates) {
     // int8 saturating case: values past either bound clamp, in-range values pass.
     Graph g = qdqSandwichGraph(/*shared=*/true, 0.1f, -40.f, 0.1f, -40.f, /*dqHasZp=*/true, DType::Int8);
     ASSERT_EQ(g.nodes[0].type, OpType::Relu);
-    TensorId reluIn = g.nodes[0].inputs[0];
+    TensorId reluIn      = g.nodes[0].inputs[0];
     g.nodes[1].inputs[0] = reluIn; // Q reads x directly, no ReLU floor
     g.nodes.erase(g.nodes.begin());
     dequantizeGraph(g);
@@ -5243,14 +5207,14 @@ namespace {
     std::vector<float> runQuantize(const Shape &xshape, const std::vector<float> &xd, const Shape &sshape, const std::vector<float> &scale, const std::vector<float> &zp, DType quantDt, int64_t axis = 1) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = xshape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId s = addFloatInit(g, "s", sshape, scale);
-        TensorId z = zp.empty() ? kNoTensor : addZeroPointInit(g, "z", sshape, zp, quantDt);
-        TensorId y = addUnshaped(g, "y");
+        xi.name            = "x";
+        xi.shape           = xshape;
+        xi.isInput         = true;
+        TensorId x         = g.addTensor(xi);
+        g.inputs           = {x};
+        TensorId s         = addFloatInit(g, "s", sshape, scale);
+        TensorId z         = zp.empty() ? kNoTensor : addZeroPointInit(g, "z", sshape, zp, quantDt);
+        TensorId y         = addUnshaped(g, "y");
         g.desc(y).isOutput = true;
         g.desc(y).dtype    = quantDt; // the declared graph-output quant type
         g.outputs          = {y};
@@ -5262,8 +5226,8 @@ namespace {
         if (scale.size() > 1)
         {
             Attr a;
-            a.kind            = Attr::Int;
-            a.i               = axis;
+            a.kind             = Attr::Int;
+            a.i                = axis;
             q.attr.map["axis"] = a;
         }
         g.nodes = {q};
@@ -5299,14 +5263,14 @@ namespace {
     std::vector<float> runDequantize(const Shape &xshape, const std::vector<float> &xd, const Shape &sshape, const std::vector<float> &scale, const std::vector<float> &zp, int64_t axis = 1) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = xshape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId s = addFloatInit(g, "s", sshape, scale);
-        TensorId z = zp.empty() ? kNoTensor : addFloatInit(g, "z", sshape, zp);
-        TensorId y = addUnshaped(g, "y");
+        xi.name            = "x";
+        xi.shape           = xshape;
+        xi.isInput         = true;
+        TensorId x         = g.addTensor(xi);
+        g.inputs           = {x};
+        TensorId s         = addFloatInit(g, "s", sshape, scale);
+        TensorId z         = zp.empty() ? kNoTensor : addFloatInit(g, "z", sshape, zp);
+        TensorId y         = addUnshaped(g, "y");
         g.desc(y).isOutput = true;
         g.outputs          = {y};
         Node dq;
@@ -5317,8 +5281,8 @@ namespace {
         if (scale.size() > 1)
         {
             Attr a;
-            a.kind             = Attr::Int;
-            a.i                = axis;
+            a.kind              = Attr::Int;
+            a.i                 = axis;
             dq.attr.map["axis"] = a;
         }
         g.nodes = {dq};
@@ -5411,32 +5375,28 @@ namespace {
     // trailing DQ over the decomposed (float) output drops. `x` is fed directly as the pre-dequant
     // float activation value (a standalone leading dequant is not modeled here -- the decomposition
     // reads the producer's float, and here the "producer" is the graph input). Returns the fp32 out.
-    std::vector<float> runQLinearConv(const Shape &xshape, const std::vector<float> &xd,
-                                      const Shape &wshape, const std::vector<float> &wq,
-                                      const Shape &wsshape, const std::vector<float> &ws, const std::vector<float> &wzp, int64_t wAxis,
-                                      float xs, float xzp, float ys, float yzp, DType actDt,
-                                      const Shape &bshape, const std::vector<float> &bq, const Attributes &convAttr) {
+    std::vector<float> runQLinearConv(const Shape &xshape, const std::vector<float> &xd, const Shape &wshape, const std::vector<float> &wq, const Shape &wsshape, const std::vector<float> &ws, const std::vector<float> &wzp, int64_t wAxis, float xs, float xzp, float ys, float yzp, DType actDt, const Shape &bshape, const std::vector<float> &bq, const Attributes &convAttr) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = xshape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId xsI  = addFloatInit(g, "xs", {}, {xs});
-        TensorId xzpI = addZeroPointInit(g, "xzp", {}, {xzp}, actDt);
-        TensorId wI   = addFloatInit(g, "w", wshape, wq);
-        TensorId wsI  = addFloatInit(g, "ws", wsshape, ws);
-        TensorId wzpI = addZeroPointInit(g, "wzp", wsshape, wzp, DType::Int8);
-        TensorId ysI  = addFloatInit(g, "ys", {}, {ys});
-        TensorId yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
-        std::vector<TensorId> ins = {x, xsI, xzpI, wI, wsI, wzpI, ysI, yzpI};
+        xi.name                    = "x";
+        xi.shape                   = xshape;
+        xi.isInput                 = true;
+        TensorId x                 = g.addTensor(xi);
+        g.inputs                   = {x};
+        TensorId              xsI  = addFloatInit(g, "xs", {}, {xs});
+        TensorId              xzpI = addZeroPointInit(g, "xzp", {}, {xzp}, actDt);
+        TensorId              wI   = addFloatInit(g, "w", wshape, wq);
+        TensorId              wsI  = addFloatInit(g, "ws", wsshape, ws);
+        TensorId              wzpI = addZeroPointInit(g, "wzp", wsshape, wzp, DType::Int8);
+        TensorId              ysI  = addFloatInit(g, "ys", {}, {ys});
+        TensorId              yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
+        std::vector<TensorId> ins  = {x, xsI, xzpI, wI, wsI, wzpI, ysI, yzpI};
         if (!bq.empty())
         {
             ins.push_back(addInt32Init(g, "b", bshape, bq));
         }
-        TensorId yq  = addUnshaped(g, "yq");
-        TensorId out = addUnshaped(g, "out");
+        TensorId yq          = addUnshaped(g, "yq");
+        TensorId out         = addUnshaped(g, "out");
         g.desc(out).isOutput = true;
         g.outputs            = {out};
         Node conv;
@@ -5457,7 +5417,7 @@ namespace {
         dq.name    = "outdq";
         dq.inputs  = {yq, ysI, yzpI};
         dq.outputs = {out};
-        g.nodes = {conv, dq};
+        g.nodes    = {conv, dq};
         Config cfg;
         cfg.backend = BackendKind::Cpu;
         auto sess   = Session::create(std::move(g), cfg);
@@ -5489,8 +5449,8 @@ namespace {
     void yClampRange(float ys, float yzp, DType dt, float &lo, float &hi) {
         float qmin = dt == DType::Int8 ? -128.f : 0.f;
         float qmax = dt == DType::Int8 ? 127.f : 255.f;
-        lo = (qmin - yzp) * ys;
-        hi = (qmax - yzp) * ys;
+        lo         = (qmin - yzp) * ys;
+        hi         = (qmax - yzp) * ys;
     }
 
 } // namespace
@@ -5506,7 +5466,7 @@ TEST(Ops, QLinearConvDecomposedNumericExactReluRecovered) {
     //   y-clamp (uint8, ys=0.1, yzp=0): lo=0, hi=25.5 -> out0=2, out1=0 (ReLU!)
     Attributes attr;
     attr.map["kernel_shape"] = ints({1, 1});
-    std::vector<float> y = runQLinearConv(
+    std::vector<float> y     = runQLinearConv(
         /*xshape*/ {1, 2, 1, 1}, /*xd*/ {1.f, -2.f},
         /*wshape*/ {2, 2, 1, 1}, /*wq*/ {3, 0, 0, 4},
         /*wsshape*/ {}, /*ws*/ {1.0f}, /*wzp*/ {0.f}, /*wAxis*/ 0,
@@ -5514,7 +5474,9 @@ TEST(Ops, QLinearConvDecomposedNumericExactReluRecovered) {
         /*bshape*/ {2}, /*bq*/ {-1.f, 1.f}, attr);
     float lo, hi;
     yClampRange(0.1f, 0.f, DType::UInt8, lo, hi);
-    auto clamp = [&](float v) { return v < lo ? lo : (v > hi ? hi : v); };
+    auto clamp = [&](float v) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    };
     expectNear(y, {clamp(2.f), clamp(-7.f)});
     EXPECT_NEAR(y[1], 0.f, 1e-5f) << "y-quant range with zp=0 recovers the fused ReLU (no ReLU deleted)";
 }
@@ -5525,7 +5487,7 @@ TEST(Ops, QLinearConvPerAxisWeightScale) {
     //   out0 = 1*4 = 4 ; out1 = 6*5 = 30. y-quant int8, ys=1, yzp=0: lo=-128, hi=127 (no clamp).
     Attributes attr;
     attr.map["kernel_shape"] = ints({1, 1});
-    std::vector<float> y = runQLinearConv(
+    std::vector<float> y     = runQLinearConv(
         /*xshape*/ {1, 2, 1, 1}, /*xd*/ {4.f, 5.f},
         /*wshape*/ {2, 2, 1, 1}, /*wq*/ {2, 0, 0, 2},
         /*wsshape*/ {2}, /*ws*/ {0.5f, 3.0f}, /*wzp*/ {0.f, 0.f}, /*wAxis*/ 0,
@@ -5538,33 +5500,30 @@ namespace {
 
     // Builds and runs a QGemm(A, a_s, a_zp, B, b_s, b_zp, [C_i32], y_s, y_zp) over a float "A" input,
     // with a trailing DequantizeLinear to expose the real-float output. transB selects B layout.
-    std::vector<float> runQGemm(const Shape &ashape, const std::vector<float> &ad,
-                                const Shape &bshape, const std::vector<float> &bq, const std::vector<float> &bs, const std::vector<float> &bzp,
-                                float as, float azp, float ys, float yzp, DType actDt,
-                                const std::vector<float> &cq, int64_t transB) {
+    std::vector<float> runQGemm(const Shape &ashape, const std::vector<float> &ad, const Shape &bshape, const std::vector<float> &bq, const std::vector<float> &bs, const std::vector<float> &bzp, float as, float azp, float ys, float yzp, DType actDt, const std::vector<float> &cq, int64_t transB) {
         Graph      g;
         TensorDesc ai;
-        ai.name    = "A";
-        ai.shape   = ashape;
-        ai.isInput = true;
-        TensorId a = g.addTensor(ai);
-        g.inputs   = {a};
-        TensorId asI  = addFloatInit(g, "as", {}, {as});
-        TensorId azpI = addZeroPointInit(g, "azp", {}, {azp}, actDt);
-        TensorId bI   = addFloatInit(g, "B", bshape, bq);
-        TensorId bsI  = addFloatInit(g, "bs", bs.size() > 1 ? Shape {(int64_t) bs.size()} : Shape {}, bs);
-        TensorId bzpI = addZeroPointInit(g, "bzp", bzp.size() > 1 ? Shape {(int64_t) bzp.size()} : Shape {}, bzp, DType::Int8);
-        TensorId ysI  = addFloatInit(g, "ys", {}, {ys});
-        TensorId yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
-        std::vector<TensorId> ins = {a, asI, azpI, bI, bsI, bzpI};
+        ai.name                    = "A";
+        ai.shape                   = ashape;
+        ai.isInput                 = true;
+        TensorId a                 = g.addTensor(ai);
+        g.inputs                   = {a};
+        TensorId              asI  = addFloatInit(g, "as", {}, {as});
+        TensorId              azpI = addZeroPointInit(g, "azp", {}, {azp}, actDt);
+        TensorId              bI   = addFloatInit(g, "B", bshape, bq);
+        TensorId              bsI  = addFloatInit(g, "bs", bs.size() > 1 ? Shape {(int64_t) bs.size()} : Shape {}, bs);
+        TensorId              bzpI = addZeroPointInit(g, "bzp", bzp.size() > 1 ? Shape {(int64_t) bzp.size()} : Shape {}, bzp, DType::Int8);
+        TensorId              ysI  = addFloatInit(g, "ys", {}, {ys});
+        TensorId              yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
+        std::vector<TensorId> ins  = {a, asI, azpI, bI, bsI, bzpI};
         if (!cq.empty())
         {
             ins.push_back(addInt32Init(g, "C", {(int64_t) cq.size()}, cq));
         }
         ins.push_back(ysI);
         ins.push_back(yzpI);
-        TensorId yq  = addUnshaped(g, "yq");
-        TensorId out = addUnshaped(g, "out");
+        TensorId yq          = addUnshaped(g, "yq");
+        TensorId out         = addUnshaped(g, "out");
         g.desc(out).isOutput = true;
         g.outputs            = {out};
         Node gemm;
@@ -5585,7 +5544,7 @@ namespace {
         dq.name    = "outdq";
         dq.inputs  = {yq, ysI, yzpI};
         dq.outputs = {out};
-        g.nodes = {gemm, dq};
+        g.nodes    = {gemm, dq};
         Config cfg;
         cfg.backend = BackendKind::Cpu;
         auto sess   = Session::create(std::move(g), cfg);
@@ -5632,28 +5591,27 @@ namespace {
 
     // Builds and runs QLinearAdd(A, a_s, a_zp, B, b_s, b_zp, y_s, y_zp) where both A and B are float
     // graph inputs (real activation values), with a trailing DequantizeLinear to expose real float.
-    std::vector<float> runQLinearAdd(const Shape &shape, const std::vector<float> &ad, const std::vector<float> &bd,
-                                     float as, float azp, float bs, float bzp, float ys, float yzp, DType actDt) {
+    std::vector<float> runQLinearAdd(const Shape &shape, const std::vector<float> &ad, const std::vector<float> &bd, float as, float azp, float bs, float bzp, float ys, float yzp, DType actDt) {
         Graph      g;
         TensorDesc ai;
         ai.name    = "A";
         ai.shape   = shape;
         ai.isInput = true;
         TensorDesc bi;
-        bi.name    = "B";
-        bi.shape   = shape;
-        bi.isInput = true;
-        TensorId a = g.addTensor(ai);
-        TensorId b = g.addTensor(bi);
-        g.inputs   = {a, b};
-        TensorId asI  = addFloatInit(g, "as", {}, {as});
-        TensorId azpI = addZeroPointInit(g, "azp", {}, {azp}, actDt);
-        TensorId bsI  = addFloatInit(g, "bs", {}, {bs});
-        TensorId bzpI = addZeroPointInit(g, "bzp", {}, {bzp}, actDt);
-        TensorId ysI  = addFloatInit(g, "ys", {}, {ys});
-        TensorId yzpI = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
-        TensorId yq   = addUnshaped(g, "yq");
-        TensorId out  = addUnshaped(g, "out");
+        bi.name              = "B";
+        bi.shape             = shape;
+        bi.isInput           = true;
+        TensorId a           = g.addTensor(ai);
+        TensorId b           = g.addTensor(bi);
+        g.inputs             = {a, b};
+        TensorId asI         = addFloatInit(g, "as", {}, {as});
+        TensorId azpI        = addZeroPointInit(g, "azp", {}, {azp}, actDt);
+        TensorId bsI         = addFloatInit(g, "bs", {}, {bs});
+        TensorId bzpI        = addZeroPointInit(g, "bzp", {}, {bzp}, actDt);
+        TensorId ysI         = addFloatInit(g, "ys", {}, {ys});
+        TensorId yzpI        = addZeroPointInit(g, "yzp", {}, {yzp}, actDt);
+        TensorId yq          = addUnshaped(g, "yq");
+        TensorId out         = addUnshaped(g, "out");
         g.desc(out).isOutput = true;
         g.outputs            = {out};
         Node add;
@@ -5666,7 +5624,7 @@ namespace {
         dq.name    = "outdq";
         dq.inputs  = {yq, ysI, yzpI};
         dq.outputs = {out};
-        g.nodes = {add, dq};
+        g.nodes    = {add, dq};
         Config cfg;
         cfg.backend = BackendKind::Cpu;
         auto sess   = Session::create(std::move(g), cfg);
@@ -5702,11 +5660,13 @@ namespace {
 TEST(Ops, QLinearAddChainDecomposed) {
     // Add of two real-float activation tensors, then output clamp. y-quant int8 zp=0 ys=0.5:
     // lo=-64, hi=63.5. A=[10, 100, -100], B=[5, 50, -50] -> [15, 150, -150] -> clamp [15, 63.5, -64].
-    auto y = runQLinearAdd({1, 3}, {10.f, 100.f, -100.f}, {5.f, 50.f, -50.f},
-                           /*as*/ 1.f, 0.f, /*bs*/ 1.f, 0.f, /*ys*/ 0.5f, 0.f, DType::Int8);
+    auto  y = runQLinearAdd({1, 3}, {10.f, 100.f, -100.f}, {5.f, 50.f, -50.f},
+                            /*as*/ 1.f, 0.f, /*bs*/ 1.f, 0.f, /*ys*/ 0.5f, 0.f, DType::Int8);
     float lo, hi;
     yClampRange(0.5f, 0.f, DType::Int8, lo, hi);
-    auto clamp = [&](float v) { return v < lo ? lo : (v > hi ? hi : v); };
+    auto clamp = [&](float v) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    };
     expectNear(y, {clamp(15.f), clamp(150.f), clamp(-150.f)});
 }
 
@@ -5729,28 +5689,26 @@ namespace {
     //   [withBias] Add(y_scaled, bias[init 1xN]) -> y
     // `ws` is the weight scale (length 1 per-tensor, or N per-column); `wzp` the weight zero point
     // (int8 payload widened to fp32, Int8-labeled), empty for none. Returns the assembled graph.
-    Graph dynQuantMatMulGraph(const Shape &xshape, int64_t N, const std::vector<float> &wq,
-                              const std::vector<float> &ws, const std::vector<float> &wzp,
-                              bool withBias, const std::vector<float> &bias) {
+    Graph dynQuantMatMulGraph(const Shape &xshape, int64_t N, const std::vector<float> &wq, const std::vector<float> &ws, const std::vector<float> &wzp, bool withBias, const std::vector<float> &bias) {
         Graph      g;
         int64_t    K = xshape.back();
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = xshape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        TensorId xq   = addUnshaped(g, "x_q");
-        TensorId xs   = addUnshaped(g, "x_s");
-        TensorId xzp  = addUnshaped(g, "x_zp");
-        TensorId wI   = addFloatInit(g, "w", {K, N}, wq);
-        TensorId wsI  = addFloatInit(g, "ws", ws.size() == 1 ? Shape {} : Shape {N}, ws);
-        TensorId wzpI = wzp.empty() ? kNoTensor : addZeroPointInit(g, "wzp", {}, wzp, DType::Int8);
+        xi.name        = "x";
+        xi.shape       = xshape;
+        xi.isInput     = true;
+        TensorId x     = g.addTensor(xi);
+        g.inputs       = {x};
+        TensorId xq    = addUnshaped(g, "x_q");
+        TensorId xs    = addUnshaped(g, "x_s");
+        TensorId xzp   = addUnshaped(g, "x_zp");
+        TensorId wI    = addFloatInit(g, "w", {K, N}, wq);
+        TensorId wsI   = addFloatInit(g, "ws", ws.size() == 1 ? Shape {} : Shape {N}, ws);
+        TensorId wzpI  = wzp.empty() ? kNoTensor : addZeroPointInit(g, "wzp", {}, wzp, DType::Int8);
         TensorId combS = addUnshaped(g, "comb_s");
         TensorId yi    = addUnshaped(g, "y_i32");
         TensorId ycast = addUnshaped(g, "y_cast");
         TensorId yscl  = addUnshaped(g, "y_scaled");
-        Node dql;
+        Node     dql;
         dql.type    = OpType::DynamicQuantizeLinear;
         dql.name    = "dql";
         dql.inputs  = {x};
@@ -5773,8 +5731,8 @@ namespace {
         cast.outputs = {ycast};
         {
             Attr a;
-            a.kind             = Attr::Int;
-            a.i                = 1; // to=FLOAT
+            a.kind              = Attr::Int;
+            a.i                 = 1; // to=FLOAT
             cast.attr.map["to"] = a;
         }
         Node outMul;
@@ -5783,8 +5741,8 @@ namespace {
         outMul.name    = "out_scale_mul";
         outMul.inputs  = {ycast, combS};
         outMul.outputs = {yscl};
-        g.nodes = {dql, scMul, mmi, cast, outMul};
-        TensorId out = yscl;
+        g.nodes        = {dql, scMul, mmi, cast, outMul};
+        TensorId out   = yscl;
         if (withBias)
         {
             TensorId bI = addFloatInit(g, "bias", {1, N}, bias);
@@ -5834,9 +5792,7 @@ namespace {
 
     // The float reference the dynamic-quant MatMul cluster approximates: y = x @ ((w_q - w_zp) * w_s)
     // (+ bias), all in double. w_s is scalar or per-column of length N.
-    std::vector<float> refMatMul(const Shape &xshape, int64_t N, const std::vector<float> &xd,
-                                 const std::vector<float> &wq, const std::vector<float> &ws,
-                                 const std::vector<float> &wzp, const std::vector<float> &bias) {
+    std::vector<float> refMatMul(const Shape &xshape, int64_t N, const std::vector<float> &xd, const std::vector<float> &wq, const std::vector<float> &ws, const std::vector<float> &wzp, const std::vector<float> &bias) {
         int64_t            M = xshape[0], K = xshape[1];
         double             zp = wzp.empty() ? 0.0 : (double) wzp[0];
         std::vector<float> out((size_t) (M * N));
@@ -5939,27 +5895,26 @@ namespace {
     //   ConvInteger(x_q, w_q[init O,C,kh,kw], x_zp, w_zp[init]) -> y_i32
     //   Cast(y_i32 -> float) -> Mul(comb_s) -> y   (graph output)
     // w_s is scalar (per-tensor) or per-output-channel of length O. Conv attrs come from `convAttr`.
-    Graph dynQuantConvGraph(const Shape &xshape, const Shape &wshape, const std::vector<float> &wq,
-                            const std::vector<float> &ws, const std::vector<float> &wzp, const Attributes &convAttr) {
+    Graph dynQuantConvGraph(const Shape &xshape, const Shape &wshape, const std::vector<float> &wq, const std::vector<float> &ws, const std::vector<float> &wzp, const Attributes &convAttr) {
         Graph      g;
         TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = xshape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs   = {x};
-        int64_t  O    = wshape[0];
-        TensorId xq   = addUnshaped(g, "x_q");
-        TensorId xs   = addUnshaped(g, "x_s");
-        TensorId xzp  = addUnshaped(g, "x_zp");
-        TensorId wI   = addFloatInit(g, "w", wshape, wq);
-        TensorId wsI  = addFloatInit(g, "ws", ws.size() == 1 ? Shape {} : Shape {O}, ws);
-        TensorId wzpI = wzp.empty() ? kNoTensor : addZeroPointInit(g, "wzp", {}, wzp, DType::UInt8);
+        xi.name        = "x";
+        xi.shape       = xshape;
+        xi.isInput     = true;
+        TensorId x     = g.addTensor(xi);
+        g.inputs       = {x};
+        int64_t  O     = wshape[0];
+        TensorId xq    = addUnshaped(g, "x_q");
+        TensorId xs    = addUnshaped(g, "x_s");
+        TensorId xzp   = addUnshaped(g, "x_zp");
+        TensorId wI    = addFloatInit(g, "w", wshape, wq);
+        TensorId wsI   = addFloatInit(g, "ws", ws.size() == 1 ? Shape {} : Shape {O}, ws);
+        TensorId wzpI  = wzp.empty() ? kNoTensor : addZeroPointInit(g, "wzp", {}, wzp, DType::UInt8);
         TensorId combS = addUnshaped(g, "comb_s");
         TensorId yi    = addUnshaped(g, "y_i32");
         TensorId ycast = addUnshaped(g, "y_cast");
         TensorId y     = addUnshaped(g, "y");
-        Node dql;
+        Node     dql;
         dql.type    = OpType::DynamicQuantizeLinear;
         dql.name    = "dql";
         dql.inputs  = {x};
@@ -5988,11 +5943,11 @@ namespace {
             cast.attr.map["to"] = a;
         }
         Node outMul;
-        outMul.type    = OpType::Binary;
-        outMul.subOp   = (int) BinaryType::Mul;
-        outMul.name    = "out_scale_mul";
-        outMul.inputs  = {ycast, combS};
-        outMul.outputs = {y};
+        outMul.type        = OpType::Binary;
+        outMul.subOp       = (int) BinaryType::Mul;
+        outMul.name        = "out_scale_mul";
+        outMul.inputs      = {ycast, combS};
+        outMul.outputs     = {y};
         g.nodes            = {dql, scMul, ci, cast, outMul};
         g.desc(y).isOutput = true;
         g.outputs          = {y};
@@ -6007,16 +5962,16 @@ TEST(Passes, DynamicQuantConvClusterLowersToFloatConv) {
     Attributes attr;
     {
         Attr ks;
-        ks.kind = Attr::Ints;
-        ks.ints = {2, 2};
+        ks.kind                  = Attr::Ints;
+        ks.ints                  = {2, 2};
         attr.map["kernel_shape"] = ks;
         Attr st;
-        st.kind = Attr::Ints;
-        st.ints = {1, 1};
+        st.kind             = Attr::Ints;
+        st.ints             = {1, 1};
         attr.map["strides"] = st;
         Attr gp;
-        gp.kind          = Attr::Int;
-        gp.i             = 1;
+        gp.kind           = Attr::Int;
+        gp.i              = 1;
         attr.map["group"] = gp;
     }
     std::vector<float> wq {2, 0, 1, 3}; // [O=1,C=1,2,2]
@@ -6048,14 +6003,14 @@ TEST(Passes, DynamicQuantBareMatMulIntegerNotLowered) {
     // int8 graph input) does not match the cluster and is left standing for the support report.
     Graph      g;
     TensorDesc xi;
-    xi.name    = "xq";
-    xi.shape   = {2, 3};
-    xi.dtype   = DType::Int8;
-    xi.isInput = true;
-    TensorId xq = g.addTensor(xi);
-    g.inputs    = {xq};
-    TensorId wI = addZeroPointInit(g, "w", {3, 2}, {1, 2, 3, 4, 5, 6}, DType::Int8); // native int8 weight
-    TensorId y  = addUnshaped(g, "y");
+    xi.name            = "xq";
+    xi.shape           = {2, 3};
+    xi.dtype           = DType::Int8;
+    xi.isInput         = true;
+    TensorId xq        = g.addTensor(xi);
+    g.inputs           = {xq};
+    TensorId wI        = addZeroPointInit(g, "w", {3, 2}, {1, 2, 3, 4, 5, 6}, DType::Int8); // native int8 weight
+    TensorId y         = addUnshaped(g, "y");
     g.desc(y).isOutput = true;
     g.desc(y).dtype    = DType::Int32;
     g.outputs          = {y};
@@ -6143,8 +6098,8 @@ namespace {
             d.shape = std::move(shape);
             return graph.addTensor(d);
         };
-        TensorId splitOut = addAct("split_out", {N, g, C / g, H, W});
-        TensorId swapOut  = addAct("swap_out", {N, C / g, g, H, W});
+        TensorId   splitOut = addAct("split_out", {N, g, C / g, H, W});
+        TensorId   swapOut  = addAct("swap_out", {N, C / g, g, H, W});
         TensorDesc yd;
         yd.name     = "y";
         yd.shape    = {N, C, H, W};
@@ -6158,10 +6113,10 @@ namespace {
         split.outputs = {splitOut};
         graph.nodes.push_back(split);
         Node swap;
-        swap.type            = OpType::Transpose;
-        swap.name            = "swap";
-        swap.inputs          = {splitOut};
-        swap.outputs         = {swapOut};
+        swap.type             = OpType::Transpose;
+        swap.name             = "swap";
+        swap.inputs           = {splitOut};
+        swap.outputs          = {swapOut};
         swap.attr.map["perm"] = ints(std::move(perm));
         graph.nodes.push_back(swap);
         Node merge;
@@ -6179,10 +6134,10 @@ namespace {
 // forward scatter reference. ---
 TEST(Ops, ChannelShuffleGroups2) {
     const int64_t N = 2, C = 8, H = 3, W = 2, g = 2;
-    Attributes attr;
-    attr.map["groups"] = intAttr(g);
-    std::vector<float> in = iotaData(N * C * H * W);
-    auto out              = runOp(OpType::ChannelShuffle, 0, attr, {N, C, H, W}, in, {});
+    Attributes    attr;
+    attr.map["groups"]     = intAttr(g);
+    std::vector<float> in  = iotaData(N * C * H * W);
+    auto               out = runOp(OpType::ChannelShuffle, 0, attr, {N, C, H, W}, in, {});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {N, C, H, W}));
     EXPECT_EQ(out.data, channelShuffleRef(in, N, C, H * W, g));
 }
@@ -6190,10 +6145,10 @@ TEST(Ops, ChannelShuffleGroups2) {
 // --- ChannelShuffle CPU op, g=4, a different asymmetric geometry. ---
 TEST(Ops, ChannelShuffleGroups4) {
     const int64_t N = 1, C = 12, H = 2, W = 5, g = 4;
-    Attributes attr;
-    attr.map["groups"] = intAttr(g);
-    std::vector<float> in = iotaData(N * C * H * W);
-    auto out              = runOp(OpType::ChannelShuffle, 0, attr, {N, C, H, W}, in, {});
+    Attributes    attr;
+    attr.map["groups"]     = intAttr(g);
+    std::vector<float> in  = iotaData(N * C * H * W);
+    auto               out = runOp(OpType::ChannelShuffle, 0, attr, {N, C, H, W}, in, {});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {N, C, H, W}));
     EXPECT_EQ(out.data, channelShuffleRef(in, N, C, H * W, g));
 }
@@ -6207,9 +6162,7 @@ TEST(Ops, DetAnalyticAndBatched) {
     ASSERT_EQ(d2.shape, (std::vector<int64_t> {1}));
     EXPECT_FLOAT_EQ(d2.data[0], -14.f);
     // det([[6,1,1],[4,-2,5],[2,8,7]]) = -306; batched with an identity (det = 1)
-    auto d3 = runOp(OpType::Det, 0, none, {2, 3, 3},
-                    {6, 1, 1, 4, -2, 5, 2, 8, 7,
-                     1, 0, 0, 0, 1, 0, 0, 0, 1}, {});
+    auto d3 = runOp(OpType::Det, 0, none, {2, 3, 3}, {6, 1, 1, 4, -2, 5, 2, 8, 7, 1, 0, 0, 0, 1, 0, 0, 0, 1}, {});
     ASSERT_EQ(d3.shape, (std::vector<int64_t> {2}));
     EXPECT_FLOAT_EQ(d3.data[0], -306.f);
     EXPECT_FLOAT_EQ(d3.data[1], 1.f);
@@ -6219,14 +6172,9 @@ TEST(Ops, DetLuLargeMatrix) {
     // n=5 exceeds kDetMaxAnalyticN: the CPU takes the partial-pivot LU path. An upper-triangular
     // matrix with a row swap makes the exact answer readable: det = -(1*2*3*4*5) = -120 after one
     // permutation, computed here on the swapped-rows layout directly.
-    Attributes none;
-    std::vector<float> m = {
-        0, 2, 9, 9, 9,
-        1, 9, 9, 9, 9,
-        0, 0, 3, 9, 9,
-        0, 0, 0, 4, 9,
-        0, 0, 0, 0, 5};
-    auto d = runOp(OpType::Det, 0, none, {5, 5}, m, {});
+    Attributes         none;
+    std::vector<float> m = {0, 2, 9, 9, 9, 1, 9, 9, 9, 9, 0, 0, 3, 9, 9, 0, 0, 0, 4, 9, 0, 0, 0, 0, 5};
+    auto               d = runOp(OpType::Det, 0, none, {5, 5}, m, {});
     ASSERT_EQ(d.shape, (std::vector<int64_t> {1}));
     EXPECT_FLOAT_EQ(d.data[0], -120.f);
 }
@@ -6236,16 +6184,12 @@ TEST(Ops, DetLuLargeMatrix) {
 // corner), so the two implementations agree at their boundary. ---
 TEST(Ops, DetOneAndFourByFourCrossLu) {
     Attributes none;
-    auto d1 = runOp(OpType::Det, 0, none, {1, 1}, {7.5f}, {});
+    auto       d1 = runOp(OpType::Det, 0, none, {1, 1}, {7.5f}, {});
     ASSERT_EQ(d1.shape, (std::vector<int64_t> {1}));
     EXPECT_FLOAT_EQ(d1.data[0], 7.5f);
     // det of this 4x4 is 24 (block upper-triangular after one elimination; verified by hand)
-    std::vector<float> m4 = {
-        1, 0, 2, -1,
-        3, 0, 0, 5,
-        2, 1, 4, -3,
-        1, 0, 5, 0};
-    auto d4 = runOp(OpType::Det, 0, none, {4, 4}, m4, {});
+    std::vector<float> m4 = {1, 0, 2, -1, 3, 0, 0, 5, 2, 1, 4, -3, 1, 0, 5, 0};
+    auto               d4 = runOp(OpType::Det, 0, none, {4, 4}, m4, {});
     EXPECT_FLOAT_EQ(d4.data[0], 30.f);
     // 5x5 = diag(m4, 1): the LU path must reproduce the analytic 4x4 value
     std::vector<float> m5(25, 0.f);
@@ -6265,7 +6209,7 @@ TEST(Ops, DetOneAndFourByFourCrossLu) {
 // pivot column (the LU early return). ---
 TEST(Ops, DetSingular) {
     Attributes none;
-    auto z3 = runOp(OpType::Det, 0, none, {3, 3}, {1, 2, 3, 1, 2, 3, 4, 5, 6}, {});
+    auto       z3 = runOp(OpType::Det, 0, none, {3, 3}, {1, 2, 3, 1, 2, 3, 4, 5, 6}, {});
     EXPECT_FLOAT_EQ(z3.data[0], 0.f);
     std::vector<float> m5(25, 1.f);
     for (int r = 0; r < 5; ++r)
@@ -6279,10 +6223,9 @@ TEST(Ops, DetSingular) {
 // --- Sign as a Unary member: 1/-1 for nonzero, +-0 and NaN pass through unchanged (the exact
 // expression both backends evaluate). ---
 TEST(Ops, UnarySign) {
-    Attributes none;
+    Attributes  none;
     const float nanv = std::numeric_limits<float>::quiet_NaN();
-    auto out = runOp(OpType::Unary, (int) UnaryType::Sign, none, {6},
-                     {3.5f, -0.25f, 0.f, -0.f, 1e-30f, nanv}, {});
+    auto        out  = runOp(OpType::Unary, (int) UnaryType::Sign, none, {6}, {3.5f, -0.25f, 0.f, -0.f, 1e-30f, nanv}, {});
     ASSERT_EQ(out.shape, (std::vector<int64_t> {6}));
     EXPECT_FLOAT_EQ(out.data[0], 1.f);
     EXPECT_FLOAT_EQ(out.data[1], -1.f);
@@ -6306,12 +6249,12 @@ TEST(Passes, DetHostsSignEpilogue) {
         TensorId x = g.addTensor(xi);
         g.inputs   = {x};
         TensorDesc dd;
-        dd.name     = "det";
-        TensorId dt = g.addTensor(dd);
+        dd.name       = "det";
+        TensorId   dt = g.addTensor(dd);
         TensorDesc sd;
         sd.name     = "sign";
         TensorId st = g.addTensor(sd);
-        Node det;
+        Node     det;
         det.type    = OpType::Det;
         det.name    = "det";
         det.inputs  = {x};
@@ -6382,8 +6325,8 @@ TEST(ChannelShuffleFold, KeepsChainWithSecondReader) {
     // A Relu also consuming the Transpose output: folding would leave it reading a dead tensor.
     TensorId   swapOut = graph.nodes[1].outputs[0];
     TensorDesc td;
-    td.name     = "tap";
-    td.shape    = graph.desc(swapOut).shape;
+    td.name      = "tap";
+    td.shape     = graph.desc(swapOut).shape;
     TensorId tap = graph.addTensor(td);
     Node     relu;
     relu.type    = OpType::Relu;
@@ -6404,8 +6347,8 @@ TEST(ChannelShuffleFold, KeepsChainWithSecondReader) {
 // forward reference exactly. ---
 TEST(ChannelShuffleFold, SessionOutputMatchesManualPermute) {
     const int64_t N = 2, C = 6, H = 2, W = 3, g = 3;
-    Graph  graph = buildShuffleChain(N, C, H, W, g);
-    Config cfg;
+    Graph         graph = buildShuffleChain(N, C, H, W, g);
+    Config        cfg;
     cfg.backend = BackendKind::Cpu;
     auto sess   = Session::create(std::move(graph), cfg);
     ASSERT_TRUE(sess);
@@ -6459,7 +6402,7 @@ TEST(ChannelShuffleFold, LayoutAdoptsNc4Neighborhood) {
         d.shape = {N, C, H, W};
         return graph.addTensor(d);
     };
-    TensorId c1 = addAct("conv1_out"), sh = addAct("shuffle_out");
+    TensorId   c1 = addAct("conv1_out"), sh = addAct("shuffle_out");
     TensorDesc yd;
     yd.name     = "y";
     yd.shape    = {N, C, H, W};
@@ -6516,8 +6459,8 @@ TEST(ChannelShuffleFold, LayoutAdoptsFlatNeighborhood) {
         d.shape = std::move(shape);
         return graph.addTensor(d);
     };
-    TensorId t1 = addAct("nhwc", {N, H, W, C});
-    TensorId sh = addAct("shuffle_out", {N, H, W, C}); // shuffling axis 1 of the NHWC view
+    TensorId   t1 = addAct("nhwc", {N, H, W, C});
+    TensorId   sh = addAct("shuffle_out", {N, H, W, C}); // shuffling axis 1 of the NHWC view
     TensorDesc yd;
     yd.name     = "y";
     yd.shape    = {N, C, H, W};
@@ -6599,7 +6542,7 @@ TEST(Expand, RightAlignsAWiderTargetAxisLikeTheGpuBroadcast) {
     {
         for (int64_t c = 0; c < kKeyCols; ++c)
         {
-            const int64_t src                    = std::min(std::max(c - kCacheSlots, (int64_t) 0), kQueryRows - 1);
+            const int64_t src                     = std::min(std::max(c - kCacheSlots, (int64_t) 0), kQueryRows - 1);
             expected[(size_t) (r * kKeyCols + c)] = triangle[(size_t) (r * kQueryRows + src)];
         }
     }
@@ -6629,21 +6572,21 @@ TEST(Expand, RightAlignsAWiderTargetAxisLikeTheGpuBroadcast) {
     // folds and a bucket that does not compute different attention.
     Graph      g;
     TensorDesc src;
-    src.name           = "triangle";
-    src.shape          = inShape;
-    src.isInitializer  = true;
-    TensorId   srcId   = g.addTensor(src);
+    src.name          = "triangle";
+    src.shape         = inShape;
+    src.isInitializer = true;
+    TensorId   srcId  = g.addTensor(src);
     HostBuffer srcBuf;
     srcBuf.resizeElems(triangle.size(), DType::Float32);
     std::memcpy(srcBuf.f32(), triangle.data(), triangle.size() * sizeof(float));
     g.initializers[srcId] = srcBuf;
 
     TensorDesc target;
-    target.name           = "target_shape";
-    target.shape          = {4};
-    target.dtype          = DType::Int64;
-    target.isInitializer  = true;
-    TensorId   targetId   = g.addTensor(target);
+    target.name          = "target_shape";
+    target.shape         = {4};
+    target.dtype         = DType::Int64;
+    target.isInitializer = true;
+    TensorId   targetId  = g.addTensor(target);
     HostBuffer targetBuf;
     targetBuf.resizeElems(4, DType::Int64);
     for (size_t k = 0; k < outShape.size(); ++k)
@@ -6655,8 +6598,8 @@ TEST(Expand, RightAlignsAWiderTargetAxisLikeTheGpuBroadcast) {
     TensorDesc out;
     out.name     = "mask";
     out.isOutput = true;
-    TensorId  y  = g.addTensor(out);
-    Node      expand;
+    TensorId y   = g.addTensor(out);
+    Node     expand;
     expand.type    = OpType::Expand;
     expand.name    = "expand";
     expand.inputs  = {srcId, targetId};

@@ -1,9 +1,9 @@
 // Shared includes + internal helper declarations for the split graph-pass translation units. Each
 // pass lives in its own src/import/<pass>.cpp and includes this header.
 #pragma once
-#include "passes.h"
 #include "backend/cpu/cpu_backend.h"
 #include "core/conv_geom.h"
+#include "passes.h"
 #include "vknn/logging.h"
 #include "vknn/op_descriptor.h"
 #include "vknn/precision.h"
@@ -103,4 +103,4 @@ namespace vknn {
     // (pure data movement). Runs after the const-fold/shape fixpoint (the Reshape targets are
     // resolved), before fusePointwiseChains (defined in fuse_channel_shuffle.cpp).
     void fuseChannelShuffle(Graph &g);
-}
+} // namespace vknn

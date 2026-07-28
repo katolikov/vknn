@@ -21,7 +21,7 @@ namespace vknn {
         // and consume it, every other ConvPC kernel declares only the shared 72-byte prefix (a
         // pipeline's push range may exceed the shader's block). 76 bytes total, well under the
         // 128-byte guaranteed push-constant minimum.
-        int   gidBase;
+        int gidBase;
     };
     struct DwPC {
         // pad0 is a reserved slot present in dwconv.comp's push_constant block too: it pads the int run
@@ -104,7 +104,7 @@ namespace vknn {
     // narrow tile for small-M shapes so the M axis still spreads across workgroups; Tuning::Fast/
     // Heavy race the variants per shape instead (see conv_gemm.cpp / conv.cpp).
     constexpr int kConvGemmTileN = 64, kConvGemmTileK = 16;
-    inline int convGemmTileM(int64_t M) {
+    inline int    convGemmTileM(int64_t M) {
         return M < 24 ? 16 : (M < 48 ? 32 : 64);
     }
 
@@ -244,9 +244,7 @@ namespace vknn {
             const int64_t elemSize = dt == DType::Float16 ? 2 : (dt == DType::Int64 ? 8 : 4);
             if (n > 0 && hb.bytes.size() < (size_t) n * (size_t) elemSize)
             {
-                throw Error(Status::InvalidArgument, "uploadInit: '" + g.tensors[id].name + "' payload is " + std::to_string(hb.bytes.size()) + " bytes but its " + dtypeStr(dt) + " [" +
-                                                         std::to_string(n) + "] shape needs " + std::to_string((size_t) n * (size_t) elemSize) +
-                                                         " (a packed quantized weight reached the flat upload path instead of the native kernel)");
+                throw Error(Status::InvalidArgument, "uploadInit: '" + g.tensors[id].name + "' payload is " + std::to_string(hb.bytes.size()) + " bytes but its " + dtypeStr(dt) + " [" + std::to_string(n) + "] shape needs " + std::to_string((size_t) n * (size_t) elemSize) + " (a packed quantized weight reached the flat upload path instead of the native kernel)");
             }
         }
         auto make = [&] {

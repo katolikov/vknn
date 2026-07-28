@@ -31,13 +31,13 @@ namespace vknn {
                 if (opIsFlat(node, env))
                 {
                     // total is computed in int64 before narrowing into the int push-constant field.
-                    pc   = {(int) (batch * channels * spatial), (int) channels, (int) spatial, groupCount};
+                    pc = {(int) (batch * channels * spatial), (int) channels, (int) spatial, groupCount};
                     pipe = env.pipeline(shader("channel_shuffle_flat", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {});
                 } else
                 {
                     int64_t channelBlocks = (channels + 3) / 4;
-                    pc                    = {(int) (batch * channelBlocks * spatial), (int) channels, (int) spatial, groupCount};
-                    pipe                  = env.pipeline(shader("channel_shuffle_nc4", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {});
+                    pc = {(int) (batch * channelBlocks * spatial), (int) channels, (int) spatial, groupCount};
+                    pipe = env.pipeline(shader("channel_shuffle_nc4", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {});
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
