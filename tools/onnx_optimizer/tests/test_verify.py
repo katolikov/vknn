@@ -1,6 +1,5 @@
 """Verifier tests: the byte gate must catch what tolerances would forgive."""
 import numpy as np
-import onnx
 from onnx import TensorProto, helper
 
 from onnx_optimizer.tests.helpers import init, make_model, vi

@@ -148,6 +148,13 @@ export time would fold them); the `--target vknn` report flags exactly those
 inputs. All four optimized models also pass the standalone
 `python -m onnx_optimizer.verify original.onnx optimized.onnx` gate.
 
+**Second gate through vknn itself** (mobilenetv2_100): both the original and
+the optimized model were compiled with `build-host/vknn_compile` and run with
+`vknn_run_io` on the same fixed-seed input; the CPU-backend outputs are
+byte-identical (`cmp` clean, same md5), and vknn's own post-passes converge
+both to the same 55-node graph — the pre-optimizer hands the importer a
+cleaner graph without perturbing the engine's result.
+
 ## Tests
 
 ```sh

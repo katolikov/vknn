@@ -7,8 +7,6 @@ first occurrence. Nondeterministic ops, nodes with subgraph attributes, and
 nodes whose outputs are graph outputs or subgraph-captured are never merged.
 Runs in topological order so chains of duplicates collapse in one sweep.
 """
-from onnx import AttributeProto
-
 from onnx_optimizer import graph_util as gu
 from onnx_optimizer.passes.base import Pass
 
