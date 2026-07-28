@@ -1,13 +1,12 @@
-# The host-only gate (scripts/ci_host.sh) on every PR and push to main: host build,
+# The host-only gate (scripts/ci_host.sh) on every PR targeting main: host build,
 # vknn_tests, the tools/ consistency checkers, format drift, and CPU determinism.
 # The Android and docs steps are skipped here (no NDK/doxygen on the runner); the
 # on-device byte/perf gates remain manual, as documented in scripts/ci_host.sh.
 name: ci-host
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-host-${{ github.workflow }}-${{ github.ref }}
