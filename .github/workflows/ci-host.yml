@@ -1,7 +1,9 @@
 # The host-only gate (scripts/ci_host.sh) on every PR targeting main: host build,
-# vknn_tests, the tools/ consistency checkers, format drift, and CPU determinism.
-# The Android and docs steps are skipped here (no NDK/doxygen on the runner); the
-# on-device byte/perf gates remain manual, as documented in scripts/ci_host.sh.
+# vknn_tests, the tools/ consistency checkers, clang-format (STRICT — drift fails
+# the gate; the tree is formatted with clang-format 18, pinned below, and
+# scripts/format.sh fixes drift in place), and CPU determinism. The Android and
+# docs steps are skipped here (no NDK/doxygen on the runner); the on-device
+# byte/perf gates remain manual, as documented in scripts/ci_host.sh.
 name: ci-host
 
 on:
@@ -37,5 +39,15 @@ jobs:
             pip install -r tools/onnx_optimizer/requirements.txt
           fi
 
+      # The strict format gate only means something at a fixed formatter version:
+      # clang-format's include-sort/comment behavior changes between releases, so
+      # the gate pins the version the tree is formatted with.
+      - name: clang-format 18
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang-format-18
+          sudo ln -sf "$(command -v clang-format-18)" /usr/local/bin/clang-format
+          clang-format --version
+
       - name: ci_host.sh
-        run: scripts/ci_host.sh --no-android --no-docs
+        run: scripts/ci_host.sh --no-android --no-docs --strict-format
