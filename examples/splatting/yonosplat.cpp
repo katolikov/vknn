@@ -231,7 +231,7 @@ int main(int argc, char **argv) {
     if (!rawPath.empty())
     {
         std::ofstream rawFile(rawPath, std::ios::binary);
-        rawFile.write(reinterpret_cast<const char *>(img.data()), (std::streamsize) (img.size() * 4));
+        rawFile.write(reinterpret_cast<const char *>(img.data()), (std::streamsize)(img.size() * 4));
         printf("[raw] fp32 render -> %s\n", rawPath.c_str());
     }
 
@@ -264,7 +264,7 @@ int main(int argc, char **argv) {
             }
         }
         std::ofstream packedFile(packedPath, std::ios::binary);
-        packedFile.write(reinterpret_cast<const char *>(packed.data()), (std::streamsize) (packed.size() * 4));
+        packedFile.write(reinterpret_cast<const char *>(packed.data()), (std::streamsize)(packed.size() * 4));
         printf("[packed] ARGB render -> %s, %zu/%zu pixels differ from the quantized fp32 render\n", packedPath.c_str(), mismatches, packed.size());
         if (mismatches != 0)
         {

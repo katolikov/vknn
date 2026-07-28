@@ -22,8 +22,8 @@ namespace vknn {
                 // inputs: [0] pooled avg [N,C,1,1], [1] W1, [2] b1, [3] W2, [4] b2. C is the full
                 // channel count (FC2 output width); Cr is the reduced squeeze width. W1 is [Cr][C] and
                 // W2 is [C][Cr], so the FC1 output count Cr is W1's row count (shape[0] of inputs[1]).
-                NCHW         x = NCHW::from(g.desc(node.inputs[0]).shape);
-                int64_t      C = x.c, Cr = g.desc(node.inputs[1]).shape[0]; // W1 is [Cr][C], row count is Cr
+                NCHW    x = NCHW::from(g.desc(node.inputs[0]).shape);
+                int64_t C = x.c, Cr = g.desc(node.inputs[1]).shape[0]; // W1 is [Cr][C], row count is Cr
                 pc = {(int) x.n, (int) C, (int) Cr, node.actLo, node.actHi};
                 w1 = uploadCached(env, node.name + "#w1", [&] {
                     return initFloats(g, node.inputs[1]);
@@ -62,7 +62,7 @@ namespace vknn {
                 pipe = env.pipeline(shader("fused_se", env.useFp16), 6, sizeof(SePC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                vk::Buffer *f = env.devBuf(node.inputs[0]); // pooled avg in
+                vk::Buffer *f = env.devBuf(node.inputs[0]);  // pooled avg in
                 vk::Buffer *s = env.devBuf(node.outputs[0]); // channel scale out
                 // One workgroup per image (pc.N groups): each group does the whole FC1->relu->FC2->
                 // hardsigmoid for its image, so the FC accumulations stay in shared memory. Buffer order

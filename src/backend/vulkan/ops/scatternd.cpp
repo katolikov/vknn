@@ -83,9 +83,9 @@ namespace vknn {
                 TensorId iid = node.inputs[1];
                 if (g.isInitializer(iid))
                 {
-                    const HostBuffer  &ib   = g.initializers.at(iid);
-                    DType              idt  = g.desc(iid).dtype;
-                    int64_t            nIdx = (int64_t) numElements(is);
+                    const HostBuffer &ib   = g.initializers.at(iid);
+                    DType             idt  = g.desc(iid).dtype;
+                    int64_t           nIdx = (int64_t) numElements(is);
                     // Floor the staging vector at 4 elements: a scalar/empty index tensor gives nIdx == 0,
                     // and upload() (which also floors the device buffer at 4) must not be handed an empty
                     // vector whose data() could be null. Only the first nIdx entries are ever read.
@@ -106,9 +106,8 @@ namespace vknn {
                     idxBuf = upload(*env.ctx, idxf, env.useFp16);
                 }
 
-                copyPipe = env.pipeline(shader("scatternd_copy", env.useFp16), 2, sizeof(CopyPC), std::vector<uint32_t> {});
-                scatterPipe =
-                    env.pipeline(shader("scatternd", env.useFp16), 4, sizeof(ScatterPC), std::vector<uint32_t> {});
+                copyPipe    = env.pipeline(shader("scatternd_copy", env.useFp16), 2, sizeof(CopyPC), std::vector<uint32_t> {});
+                scatterPipe = env.pipeline(shader("scatternd", env.useFp16), 4, sizeof(ScatterPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

@@ -7,11 +7,11 @@ namespace vknn {
     namespace {
         struct CastCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X      = ctx.t(node.inputs[0]);
-                RtTensor       &Y      = ctx.t(node.outputs[0]);
-                int64_t         to     = node.attr.geti("to", 1); // ONNX TensorProto: 1=FLOAT, 7=INT64, 6=INT32
-                int64_t         n      = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
-                bool            inI64  = X.dtype == DType::Int64;
+                const RtTensor &X     = ctx.t(node.inputs[0]);
+                RtTensor       &Y     = ctx.t(node.outputs[0]);
+                int64_t         to    = node.attr.geti("to", 1); // ONNX TensorProto: 1=FLOAT, 7=INT64, 6=INT32
+                int64_t         n     = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
+                bool            inI64 = X.dtype == DType::Int64;
                 // Integer targets are carried as int64 storage (truncate toward zero, ONNX Cast semantics):
                 // 2=UINT8 3=INT8 4=UINT16 5=INT16 6=INT32 7=INT64 9=BOOL 12=UINT32 13=UINT64.
                 bool outI64 = (to == 2 || to == 3 || to == 4 || to == 5 || to == 6 || to == 7 || to == 9 || to == 12 || to == 13);

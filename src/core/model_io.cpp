@@ -111,12 +111,12 @@ namespace vknn {
             }
         };
         struct Reader {
-            FILE                   *f = nullptr;
+            FILE *f = nullptr;
             // Sticky short-read flag. Once any fread returns fewer elements than requested it latches
             // false and every later read is skipped, so a truncated file yields zero/default-filled
             // fields instead of reading past EOF; callers gate on this after the whole graph is read.
-            bool                    ok = true;
-            off_t                   fsize = -1; // total file size, cached on first remaining() call
+            bool  ok    = true;
+            off_t fsize = -1; // total file size, cached on first remaining() call
             // Bytes readable from the current position to EOF (0 past end or on error). A length prefix
             // is validated against this before it sizes an allocation, so a corrupt count field yields a
             // graceful ok=false rather than a std::bad_alloc/length_error thrown out of the reader.
@@ -317,8 +317,10 @@ namespace vknn {
             // bit-flipped .vxm (e.g. a node output of 0x40000000) would otherwise be an OOB index into
             // g.tensors or a derived producer map (a heap write in collectGatherIndexAxisSizes).
             {
-                const int64_t nt64 = (int64_t) g.tensors.size();
-                auto validId = [&](TensorId id) { return id == kNoTensor || ((int64_t) id >= 0 && (int64_t) id < nt64); };
+                const int64_t nt64    = (int64_t) g.tensors.size();
+                auto          validId = [&](TensorId id) {
+                    return id == kNoTensor || ((int64_t) id >= 0 && (int64_t) id < nt64);
+                };
                 auto validVec = [&](const std::vector<TensorId> &v) {
                     for (TensorId id: v)
                     {
@@ -380,7 +382,7 @@ namespace vknn {
             VKNN_WARN << "saveGraph: cannot write " << tmpPath;
             return false;
         }
-        Writer w {f};
+        Writer             w {f};
         const QuantContent content = graphQuantContent(g);
         if (content.anyQuantized)
         {
@@ -446,7 +448,7 @@ namespace vknn {
             VKNN_WARN << "saveGraphBuckets: cannot write " << tmpPath;
             return false;
         }
-        Writer w {f};
+        Writer       w {f};
         QuantContent content;
         for (const Graph &b: buckets)
         {
@@ -468,9 +470,9 @@ namespace vknn {
         // (size, FNV-1a 64) digest with an exact byte compare on digest collision -- never by a
         // full-payload map key, whose copies would double the writer's memory for multi-GB weight
         // sets. Pool slots keep first-seen order, so the on-disk layout is unchanged.
-        std::vector<const ByteStorage *>                          pool;
+        std::vector<const ByteStorage *>                               pool;
         std::map<std::pair<uint64_t, uint64_t>, std::vector<uint32_t>> poolIndex; // (size, digest) -> candidate slots
-        auto                                                      internPayload = [&](const ByteStorage &bytes) -> uint32_t {
+        auto                                                           internPayload = [&](const ByteStorage &bytes) -> uint32_t {
             constexpr uint64_t kFnvBasis = 1469598103934665603ull;
             constexpr uint64_t kFnvPrime = 1099511628211ull;
             uint64_t           h         = kFnvBasis;
@@ -581,15 +583,15 @@ namespace vknn {
             }
             for (uint32_t i = 0; i < ni && r.ok; ++i)
             {
-                TensorId   id = (TensorId) r.i64();
-                HostBuffer hb;
+                TensorId       id = (TensorId) r.i64();
+                HostBuffer     hb;
                 const uint32_t blobBytes = r.u32();
                 if (blobBytes > r.remaining())
                 {
                     r.ok = false; // corrupt length: the owned path would allocate up to ~4GB before fread bounds it
                     break;
                 }
-                const int64_t  blobAt    = (int64_t) ftello(f);
+                const int64_t blobAt = (int64_t) ftello(f);
                 if (mapping && blobAt >= 0 && (size_t) blobAt + blobBytes <= mapping->size())
                 {
                     hb.bytes.setView(mapping, mapping->data() + blobAt, blobBytes);
@@ -626,14 +628,10 @@ namespace vknn {
             constexpr uint32_t kVxmPrefix = 0x004d5856; // "VXM" -- low 3 bytes shared by every VXM<n>
             if ((magic & 0x00ffffffu) == kVxmPrefix)
             {
-                VKNN_WARN << "loadGraph: " << path << " is a VXM" << (char) (magic >> 24)
-                          << " container from an incompatible vknn version (this build reads VXM3-VXM6)"
-                          << " -- reconvert the model from its .onnx with the current vknn_compile";
+                VKNN_WARN << "loadGraph: " << path << " is a VXM" << (char) (magic >> 24) << " container from an incompatible vknn version (this build reads VXM3-VXM6)" << " -- reconvert the model from its .onnx with the current vknn_compile";
             } else
             {
-                VKNN_WARN << "loadGraph: bad magic in " << path
-                          << " -- not a valid .vxm (truncated, corrupt, or the wrong file)"
-                          << " -- reconvert from the .onnx with the current vknn_compile";
+                VKNN_WARN << "loadGraph: bad magic in " << path << " -- not a valid .vxm (truncated, corrupt, or the wrong file)" << " -- reconvert from the .onnx with the current vknn_compile";
             }
             return false;
         }
@@ -655,7 +653,7 @@ namespace vknn {
                 r.ok = false; // corrupt pool-blob size: bound it before it drives an owned-buffer alloc
                 break;
             }
-            blobs[i]    = {(int64_t) ftello(f), sz};
+            blobs[i] = {(int64_t) ftello(f), sz};
             if (fseeko(f, (off_t) sz, SEEK_CUR) != 0)
             {
                 r.ok = false;

@@ -23,19 +23,19 @@ namespace vknn {
                 //   [1] W1   FC1 weights, row-major [Cr][C]   [2] b1  FC1 bias [Cr] (optional)
                 //   [3] W2   FC2 weights, row-major [C][Cr]   [4] b2  FC2 bias [C]  (optional)
                 // An absent Conv bias is kNoTensor, decoded here to a null pointer treated as zero.
-                const RtTensor    &A  = ctx.t(node.inputs[0]); // pooled avg [N,C,1,1]
-                const RtTensor    &W1 = ctx.t(node.inputs[1]);
-                const RtTensor    &W2 = ctx.t(node.inputs[3]);
-                const float       *b1 = node.inputs[2] != kNoTensor ? ctx.t(node.inputs[2]).host.f32() : nullptr;
-                const float       *b2 = node.inputs[4] != kNoTensor ? ctx.t(node.inputs[4]).host.f32() : nullptr;
-                RtTensor          &Y  = ctx.t(node.outputs[0]);
-                NCHW               x  = NCHW::from(A.shape);
+                const RtTensor &A  = ctx.t(node.inputs[0]); // pooled avg [N,C,1,1]
+                const RtTensor &W1 = ctx.t(node.inputs[1]);
+                const RtTensor &W2 = ctx.t(node.inputs[3]);
+                const float    *b1 = node.inputs[2] != kNoTensor ? ctx.t(node.inputs[2]).host.f32() : nullptr;
+                const float    *b2 = node.inputs[4] != kNoTensor ? ctx.t(node.inputs[4]).host.f32() : nullptr;
+                RtTensor       &Y  = ctx.t(node.outputs[0]);
+                NCHW            x  = NCHW::from(A.shape);
                 // C is the full channel width (FC2 output); Cr is the reduced "squeeze" width, taken as
                 // W1's row count since W1 is [Cr][C].
-                int64_t            N = x.n, C = x.c, Cr = W1.shape[0];
-                const float       *avg = A.host.f32();
-                const float       *w1  = W1.host.f32();
-                const float       *w2  = W2.host.f32();
+                int64_t      N = x.n, C = x.c, Cr = W1.shape[0];
+                const float *avg = A.host.f32();
+                const float *w1  = W1.host.f32();
+                const float *w2  = W2.host.f32();
                 // HardSigmoid slope/offset carried through from the fused node: scale = clamp(a*z + b, 0, 1).
                 float              a = node.actLo, b = node.actHi;
                 float             *y = cpu::allocOut(Y, {N, C, 1, 1});

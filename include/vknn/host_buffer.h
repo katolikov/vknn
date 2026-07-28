@@ -110,7 +110,7 @@ namespace vknn {
         }
 
         std::vector<uint8_t>              owned_;
-        std::shared_ptr<const MappedFile> mapping_;  // keeps the view's pages alive
+        std::shared_ptr<const MappedFile> mapping_; // keeps the view's pages alive
         const uint8_t                    *viewData_ = nullptr;
         size_t                            viewSize_ = 0;
     };

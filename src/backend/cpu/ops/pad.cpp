@@ -48,8 +48,8 @@ namespace vknn {
                 // of inferShapes; a pads vector shorter than 2*rank shifts and enlarges nothing. Build
                 // row-major (contiguous, last-axis-fastest) strides for both input and output so a
                 // per-axis coordinate can be reconstructed from, and folded back into, a flat index.
-                const bool           padded = (int64_t) pads.size() >= 2 * (int64_t) rank;
-                Shape                out    = X.shape;
+                const bool padded = (int64_t) pads.size() >= 2 * (int64_t) rank;
+                Shape      out    = X.shape;
                 if (padded)
                 {
                     for (int i = 0; i < rank; ++i)
@@ -63,16 +63,16 @@ namespace vknn {
                     inStride[i]  = inStride[i + 1] * X.shape[i + 1];
                     outStride[i] = outStride[i + 1] * out[i + 1];
                 }
-                int64_t      elems   = numElements(out);
-                float       *y       = cpu::allocOut(Y, out);
-                const float *x       = X.host.f32();
+                int64_t      elems = numElements(out);
+                float       *y     = cpu::allocOut(Y, out);
+                const float *x     = X.host.f32();
                 // Map a possibly out-of-range coordinate `i` onto [0, n) by mirroring at both edges
                 // WITHOUT repeating the boundary element (ONNX "reflect": ...2,1,[0,1,2,3],2,1...).
                 // A degenerate axis (n == 1) has no interior to mirror, so every coordinate folds to 0.
                 // Period p = 2*(n-1) is the length of one out-and-back sweep; `i` is reduced into
                 // [0, p) with a floored modulo (the ((i%p)+p)%p guards negative i), then a value past
                 // the last index (i >= n) reflects to p - i.
-                auto         reflect = [](int64_t i, int64_t n) {
+                auto reflect = [](int64_t i, int64_t n) {
                     if (n == 1)
                     {
                         return (int64_t) 0;

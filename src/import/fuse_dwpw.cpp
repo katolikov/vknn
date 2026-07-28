@@ -40,7 +40,6 @@ namespace vknn {
         }
     }
 
-
     void fuseDwPw(Graph &g) {
         // Fuse depthwise-3x3 conv (D) -> 1x1 project conv (P) into one kFusedDwPw node, so the expanded
         // intermediate (D's output, the block's largest activation) never hits global memory and a
@@ -173,6 +172,5 @@ namespace vknn {
             VKNN_INFO << "fuseDwPw: fused " << fused << " depthwise+project pair(s)";
         }
     }
-
 
 } // namespace vknn

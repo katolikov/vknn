@@ -10,7 +10,7 @@
 // Umbrella header: each top-level type lives in its own header (one type per file). This file
 // re-exports them, in dependency order, so `#include "vknn/backend.h"` exposes the full set of names.
 #pragma once
-#include "vknn/exec_context.h"     // struct ExecContext (+ fwd class Profiler)
 #include "vknn/backend_class.h"    // class Backend (fwd-decls class Segment)
-#include "vknn/segment.h"          // class Segment (fwd-decls class Backend)
 #include "vknn/backend_registry.h" // class BackendRegistry, struct BackendRegistrar, VKNN_REGISTER_BACKEND
+#include "vknn/exec_context.h"     // struct ExecContext (+ fwd class Profiler)
+#include "vknn/segment.h"          // class Segment (fwd-decls class Backend)

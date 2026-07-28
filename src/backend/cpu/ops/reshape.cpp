@@ -15,16 +15,16 @@ namespace vknn {
 
         struct ReshapeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X    = ctx.t(node.inputs[0]);
-                const RtTensor &S    = ctx.t(node.inputs[1]);
-                RtTensor       &Y    = ctx.t(node.outputs[0]);
+                const RtTensor &X = ctx.t(node.inputs[0]);
+                const RtTensor &S = ctx.t(node.inputs[1]);
+                RtTensor       &Y = ctx.t(node.outputs[0]);
                 // The shape tensor's element count is the output rank; its int64 entries are the
                 // target dims. `known` accumulates the product of every fixed dim so a lone -1 can be
                 // solved for later; `inferIdx` records that -1's position (-1 = none).
-                int64_t         rank = S.elems();
-                const int64_t  *sd   = S.host.i64();
-                Shape           out(rank);
-                int64_t         known = 1, inferIdx = -1;
+                int64_t        rank = S.elems();
+                const int64_t *sd   = S.host.i64();
+                Shape          out(rank);
+                int64_t        known = 1, inferIdx = -1;
                 for (int64_t i = 0; i < rank; ++i)
                 {
                     int64_t d = sd[i];

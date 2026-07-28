@@ -21,8 +21,8 @@ namespace vknn {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
-                auto ks  = ints("kernel_shape", {1, 1});
-                auto st  = ints("strides", {1, 1});
+                auto ks = ints("kernel_shape", {1, 1});
+                auto st = ints("strides", {1, 1});
                 // Shared pool geometry (core/conv_geom.h): resolves auto_pad. Only the top/left origin
                 // offsets (pad[0], pad[1]) reach the shader, which reads the trailing pad implicitly by
                 // clamping to H/W; the end pads are already folded into the output extent (y).
@@ -30,11 +30,11 @@ namespace vknn {
                 // Field order/types mirror maxpool.comp's push_constant block (N, C, H, W, OH, OW,
                 // KH, KW, SH, SW, PT, PL). C is the true channel count; the shader derives the block
                 // count as ceil(C/4) itself.
-                pc       = {(int) x.n,   (int) x.c,   (int) x.h,   (int) x.w,   (int) y.h,    (int) y.w,
-                            (int) ks[0], (int) ks[1], (int) st[0], (int) st[1], (int) pad[0], (int) pad[1]};
+                pc = {(int) x.n,   (int) x.c,   (int) x.h,   (int) x.w,   (int) y.h,    (int) y.w,
+                      (int) ks[0], (int) ks[1], (int) st[0], (int) st[1], (int) pad[0], (int) pad[1]};
                 // One thread per output vec4 lane: n * channel-blocks * out-H * out-W. No factor of 4
                 // (unlike packedElems), because each thread already handles a full 4-channel block.
-                total    = x.n * cBlocks(x.c) * y.h * y.w;
+                total = x.n * cBlocks(x.c) * y.h * y.w;
                 // flat=false: the epilogue indexes in NC4HW4 (channel-block) space to match the max
                 // reduction above, not a flat elementwise layout.
                 epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);

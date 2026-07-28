@@ -178,9 +178,7 @@ namespace vknn {
             return 0.0;
         }
         try
-        {
-            return std::stod(s_.substr(start, i_ - start));
-        } catch (...)
+        { return std::stod(s_.substr(start, i_ - start)); } catch (...)
         {
             return 0.0; // empty / non-numeric / overflowing span -> permissive 0, never abort config load
         }

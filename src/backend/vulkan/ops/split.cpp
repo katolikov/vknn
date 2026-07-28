@@ -69,7 +69,7 @@ namespace vknn {
                         // Each output is a contiguous slice of the input along the split axis. flat_gather reads
                         // in[base + sum_d outCoord_d * inStride_d]; base skips this output's axis offset (offset
                         // rows of the axis stride), and the input strides carry every other axis through unchanged.
-                        pc.base  = (int) (offset * inStride[axis]);
+                        pc.base = (int) (offset * inStride[axis]);
                         std::vector<int32_t> outDim(rank), inStr(rank);
                         for (int d = 0; d < rank; ++d)
                         {
@@ -85,10 +85,10 @@ namespace vknn {
                     return;
                 }
                 // NC4HW4 channel split
-                x_          = NCHW::from(g.desc(node.inputs[0]).shape);
-                elem_       = env.useFp16 ? 2 : 4; // bytes per stored element (fp16 half vs fp32 float)
-                cbTotal_    = cBlocks(x_.c);       // input's channel-block count (the source row pitch)
-                hw_         = x_.h * x_.w;
+                x_       = NCHW::from(g.desc(node.inputs[0]).shape);
+                elem_    = env.useFp16 ? 2 : 4; // bytes per stored element (fp16 half vs fp32 float)
+                cbTotal_ = cBlocks(x_.c);       // input's channel-block count (the source row pitch)
+                hw_      = x_.h * x_.w;
                 // Each output owns a contiguous run of channel-blocks. blk is the input's first block index
                 // for the current output; because every split channel count is a multiple of four here, a
                 // block is never shared, so each output is a whole-block copy with no channel remainder.

@@ -10,10 +10,10 @@ namespace vknn {
     // int<->float casts (shape / index paths) are left intact.
     void eliminateFloatCast(Graph &g) {
         // ONNX TensorProto.DataType codes for the float element types a Cast can target.
-        constexpr int64_t kOnnxFloat   = 1;
-        constexpr int64_t kOnnxFloat16 = 10;
-        constexpr int64_t kOnnxDouble  = 11;
-        auto onnxToIsFloat = [](int64_t to) {
+        constexpr int64_t kOnnxFloat    = 1;
+        constexpr int64_t kOnnxFloat16  = 10;
+        constexpr int64_t kOnnxDouble   = 11;
+        auto              onnxToIsFloat = [](int64_t to) {
             return to == kOnnxFloat || to == kOnnxFloat16 || to == kOnnxDouble;
         };
         auto isFloat = [](DType d) {
@@ -195,6 +195,5 @@ namespace vknn {
             VKNN_INFO << "eliminateFloatCast: removed " << n << " float->float Cast node(s)";
         }
     }
-
 
 } // namespace vknn

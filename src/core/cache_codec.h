@@ -26,26 +26,26 @@ namespace vknn {
     // field also requires extending sameKey() so the new dimension actually distinguishes variants.
     struct CacheVariant {
         // The cache-affecting configuration (the variant key).
-        std::string precision;             // "low" / "normal" / "high"
-        bool        flatLayout     = true; // Config::flatLayout()
-        bool        gpuIslandFold  = true; // Config::gpuIslandFold()
-        bool        matmulViewFold = true; // Config::matmulViewFold()
-        bool        ropeFusion     = true; // Config::ropeFusion()
-        bool        fusedAttention = true; // Config::fusedAttention()
+        std::string precision;              // "low" / "normal" / "high"
+        bool        flatLayout     = true;  // Config::flatLayout()
+        bool        gpuIslandFold  = true;  // Config::gpuIslandFold()
+        bool        matmulViewFold = true;  // Config::matmulViewFold()
+        bool        ropeFusion     = true;  // Config::ropeFusion()
+        bool        fusedAttention = true;  // Config::fusedAttention()
         bool        kvConcatFold   = false; // Config::kvConcatFold()
-        std::string fp32Tensors;           // Config::fp32Tensors
-        int         winograd        = 0;   // Hint::Winograd
-        int         winogradVariant = 0;   // Hint::WinogradVariant
-        int         winogradUnit    = 0;   // Hint::WinogradUnit
-        int         directConv3x3   = 0;   // Hint::DirectConv3x3
-        int         splitKConv      = 0;   // Hint::SplitKConv
-        int         coopmatGemm     = 0;   // Hint::CoopmatGemm (default equals Auto so an older file keys identically)
-        int         kvCacheQuant    = 0;   // Hint::KvCacheQuant as SET; a default Config resolves to Off (2), so a
-                                           // file written before the default moved off Auto keys 0 and is recomputed once
+        std::string fp32Tensors;            // Config::fp32Tensors
+        int         winograd        = 0;    // Hint::Winograd
+        int         winogradVariant = 0;    // Hint::WinogradVariant
+        int         winogradUnit    = 0;    // Hint::WinogradUnit
+        int         directConv3x3   = 0;    // Hint::DirectConv3x3
+        int         splitKConv      = 0;    // Hint::SplitKConv
+        int         coopmatGemm     = 0;    // Hint::CoopmatGemm (default equals Auto so an older file keys identically)
+        int         kvCacheQuant    = 0;    // Hint::KvCacheQuant as SET; a default Config resolves to Off (2), so a
+                                            // file written before the default moved off Auto keys 0 and is recomputed once
 
         // The compiled artifacts.
-        std::vector<uint8_t>                      pipeline; // serialized VkPipelineCache blob
-        std::map<std::string, std::vector<float>> weights;  // prepacked / Winograd-transformed weights by name
+        std::vector<uint8_t>                      pipeline;  // serialized VkPipelineCache blob
+        std::map<std::string, std::vector<float>> weights;   // prepacked / Winograd-transformed weights by name
         std::map<std::string, int32_t>            tune;      // conv autotune table (op signature -> chosen value)
         std::map<std::string, int32_t>            tuneLevel; // append-only "tunelvl": op signature -> Tuning level it was measured at
 

@@ -193,7 +193,6 @@ namespace vknn {
         }
     }
 
-
     // --- Global layout assignment (NC4HW4 vs flat) ------------------------------------------------------
     // Every GPU tensor runs in one layout. A FIXED op has a kernel in only one layout; a FLEXIBLE op is
     // bit-exact in either (layout is an index remap over the same math + fp16 rounding), so the assignment
@@ -281,11 +280,11 @@ namespace vknn {
             // A step record is 8 ints: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc; a bcast
             // field of 2 marks the general-broadcast operand class that only the flat kernel
             // addresses.
-            constexpr int     kPwStepInts        = 8;
-            constexpr int     kPwStepBcastField  = 6;
-            constexpr int64_t kPwBcastGeneral    = 2;
-            constexpr int     kFlexVoteMaxRounds = 8; // cycles are byte-weight monotone; this only caps oscillation
-            constexpr int64_t kNc4Rank           = 4;
+            constexpr int       kPwStepInts        = 8;
+            constexpr int       kPwStepBcastField  = 6;
+            constexpr int64_t   kPwBcastGeneral    = 2;
+            constexpr int       kFlexVoteMaxRounds = 8; // cycles are byte-weight monotone; this only caps oscillation
+            constexpr int64_t   kNc4Rank           = 4;
             std::vector<size_t> flexible;
             for (size_t i = 0; i < g.nodes.size(); ++i)
             {
@@ -298,8 +297,8 @@ namespace vknn {
                 {
                     continue; // rank != 4 has no NC4HW4 form: stays with the classifier
                 }
-                const auto &steps   = nd.attr.getints("pw_steps");
-                bool        nc4Ok   = steps.size() % kPwStepInts == 0;
+                const auto &steps = nd.attr.getints("pw_steps");
+                bool        nc4Ok = steps.size() % kPwStepInts == 0;
                 for (size_t s = 0; nc4Ok && s + kPwStepBcastField < steps.size(); s += kPwStepInts)
                 {
                     nc4Ok = steps[s + kPwStepBcastField] != kPwBcastGeneral;
@@ -328,10 +327,10 @@ namespace vknn {
                     bool changed = false;
                     for (size_t i: flexible)
                     {
-                        Node   &nd        = g.nodes[i];
-                        int64_t flatCost  = 0; // elements converted if this node runs FLAT
-                        int64_t nc4Cost   = 0; // ... if it runs NC4HW4
-                        auto    voteEdge  = [&](TensorId t, bool neighborFlat) {
+                        Node   &nd       = g.nodes[i];
+                        int64_t flatCost = 0; // elements converted if this node runs FLAT
+                        int64_t nc4Cost  = 0; // ... if it runs NC4HW4
+                        auto    voteEdge = [&](TensorId t, bool neighborFlat) {
                             const int64_t w = numElements(g.desc(t).shape);
                             (neighborFlat ? nc4Cost : flatCost) += w;
                         };
@@ -364,10 +363,10 @@ namespace vknn {
                         if (wantFlat != (nd.attr.geti("pw_flat", 0) != 0))
                         {
                             Attr a;
-                            a.kind                  = Attr::Int;
-                            a.i                     = wantFlat ? 1 : 0;
-                            nd.attr.map["pw_flat"]  = a;
-                            changed                 = true;
+                            a.kind                 = Attr::Int;
+                            a.i                    = wantFlat ? 1 : 0;
+                            nd.attr.map["pw_flat"] = a;
+                            changed                = true;
                         }
                     }
                     if (!changed)
@@ -569,13 +568,13 @@ namespace vknn {
             }
             TensorDesc d    = g.desc(out); // carries the model's output name, declared dtype, shape, storeFp32
             d.isInitializer = d.isInput = false;
-            d.isOutput      = true;
-            d.gpuFlat       = true;
+            d.isOutput                  = true;
+            d.gpuFlat                   = true;
             // The flat convert output KEEPS the model's declared output name (callers look up outputs by
             // name); the pre-convert tensor becomes an internal boundary and is renamed to stay unique.
             g.desc(out).name += "#nc4";
             g.desc(out).isOutput = false;
-            TensorId t2 = g.addTensor(d);
+            TensorId t2          = g.addTensor(d);
             Node     cv;
             cv.type    = OpType::ConvertLayout;
             cv.name    = "convertout" + std::to_string(n++);

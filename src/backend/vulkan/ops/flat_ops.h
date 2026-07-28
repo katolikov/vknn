@@ -69,7 +69,7 @@ namespace vknn {
             // gather reads exactly in[base .. base+total). SliceOp::record may then skip the dispatch
             // when the output buffer is a sub-buffer view of the input at that byte offset.
             bool contiguousSlice = false;
-            void                                 prepare(const Node &node, VkOpEnv &env) {
+            void prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g  = *env.graph;
                 Shape        in = g.desc(node.inputs[0]).shape, out = g.desc(node.outputs[0]).shape;
                 auto         inStride = rowStrides(in);
@@ -157,9 +157,7 @@ namespace vknn {
                             {
                                 contiguousSlice = false;
                             } else if (start[d] != 0 || out[d] != in[d])
-                            {
-                                partial = d;
-                            }
+                            { partial = d; }
                         }
                         for (int d = 0; contiguousSlice && partial >= 0 && d < r; ++d)
                         {
@@ -242,10 +240,9 @@ namespace vknn {
                     padBegin[k] = pads.empty() ? 0 : (int) pads[k];
                 }
                 geom = uploadFlatGeom(env, {outDim, inDim, inStr, padBegin});
-                pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {})
-                                  : env.pipeline(shader("flat_pad", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
+                pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {}) : env.pipeline(shader("flat_pad", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
                 {
-                    const size_t es = env.useFp16 ? 2 : 4;
+                    const size_t es      = env.useFp16 ? 2 : 4;
                     int          padAxis = -1;
                     bool         padOk   = pc.mode == 0 && !runtimeVal && (int) pads.size() >= 2 * rank;
                     for (int d = 0; d < rank && padOk; ++d)
@@ -347,10 +344,10 @@ namespace vknn {
                 std::vector<int32_t> outDim(rank), inDim(rank), inStr(rank);
                 for (int k = 0; k < rank; ++k)
                 {
-                    outDim[k]  = (int) out[k];
-                    int j      = k - pad; // matching input dim, or -1 if padded (size 1)
-                    inDim[k]   = (j >= 0) ? (int) in[j] : 1;
-                    inStr[k]   = (j >= 0) ? (int) inStrideFull[j] : 0;
+                    outDim[k] = (int) out[k];
+                    int j     = k - pad; // matching input dim, or -1 if padded (size 1)
+                    inDim[k]  = (j >= 0) ? (int) in[j] : 1;
+                    inStr[k]  = (j >= 0) ? (int) inStrideFull[j] : 0;
                 }
                 geom = uploadFlatGeom(env, {outDim, inDim, inStr});
                 // Expand/Tile of a constant operand (no activation buffer): upload it flat (direct fp16).
@@ -374,11 +371,11 @@ namespace vknn {
             std::vector<std::shared_ptr<vk::ComputePipeline>> pipes;
             std::vector<PC>                                   pcs;
             std::vector<int>                                  inIdx;
-            std::vector<std::shared_ptr<vk::Buffer>>          geoms; // per-part inDim/outStride, deduped SSBO (binding 2)
-            std::vector<std::shared_ptr<vk::Buffer>>          holds; // per-input, set when that input is a constant
-            PwEpi                                             epi;   // fused unit applied at each part's stores
-            bool contiguousParts = false; // every dim before the axis is 1: parts are contiguous slabs at pc.base
-            void prepare(const Node &node, VkOpEnv &env) {
+            std::vector<std::shared_ptr<vk::Buffer>>          geoms;                   // per-part inDim/outStride, deduped SSBO (binding 2)
+            std::vector<std::shared_ptr<vk::Buffer>>          holds;                   // per-input, set when that input is a constant
+            PwEpi                                             epi;                     // fused unit applied at each part's stores
+            bool                                              contiguousParts = false; // every dim before the axis is 1: parts are contiguous slabs at pc.base
+            void                                              prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g    = *env.graph;
                 Shape        out  = g.desc(node.outputs[0]).shape;
                 int          rank = (int) out.size();
@@ -399,7 +396,7 @@ namespace vknn {
                 auto    outStride = rowStrides(out);
                 int64_t offset    = 0;
                 // Inputs from pwCoreInputs on are the fused unit's operands, not concatenated parts.
-                size_t  nIn = (size_t) pwCoreInputs(node);
+                size_t nIn = (size_t) pwCoreInputs(node);
                 for (size_t e = 0; e < nIn && e < node.inputs.size(); ++e)
                 {
                     if (node.inputs[e] == kNoTensor)
@@ -421,8 +418,7 @@ namespace vknn {
                     pcs.push_back(pc);
                     inIdx.push_back((int) e);
                     offset += in[axis];
-                    pipes.push_back(
-                        env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {}));
+                    pipes.push_back(env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {}));
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -488,7 +484,7 @@ namespace vknn {
                     auto st = rowStrides(ps);
                     for (int k = 0; k < rank; ++k)
                     {
-                        int stride                                       = ps[k] == 1 ? 0 : (int) st[k];
+                        int stride                                        = ps[k] == 1 ? 0 : (int) st[k];
                         (which == 0 ? aStride.data() : bStride.data())[k] = stride;
                     }
                     if (g.isInitializer(t))
@@ -552,8 +548,7 @@ namespace vknn {
                 }
                 threadRow = s[axis] <= kThreadRowMaxAxis;
                 epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC),
-                                    std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0)});
+                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0)});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 // ROW_MODE 0: one workgroup per row (LDS reduction across the workgroup).

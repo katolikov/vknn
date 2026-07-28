@@ -71,7 +71,7 @@ namespace {
 
     // float -> IEEE fp16 bit pattern (via the native __fp16 rounding).
     inline uint16_t f2h(float x) noexcept {
-        __fp16 h = (__fp16) x;
+        __fp16   h = (__fp16) x;
         uint16_t o;
         std::memcpy(&o, &h, 2);
         return o;

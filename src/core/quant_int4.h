@@ -76,8 +76,7 @@ namespace vknn {
     // raw fp16 words; oidx/oval may be null when nOut == 0. Dequantization is exact in fp32
     // (q * halfToFloat(s)), so a CPU consumer of the materialized weight computes on the same values
     // the int4 GPU kernel dequantizes in-register.
-    std::vector<float> int4Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx,
-                                   const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut);
+    std::vector<float> int4Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut);
 
     // Load-time materialization: for every node carrying the kWq attributes whose `keepPacked(nodeIdx,
     // node)` is false, reconstruct the weight's fp16 payload in its original tensor layout, drop the

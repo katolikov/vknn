@@ -17,9 +17,9 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>          slope;
             PReluPC                              pc {};
             void                                 prepare(const Node &node, VkOpEnv &env) override {
-                const Graph &g        = *env.graph;
-                NCHW         x        = NCHW::from(g.desc(node.outputs[0]).shape);
-                int64_t      Cb       = cBlocks(x.c);
+                const Graph &g  = *env.graph;
+                NCHW         x  = NCHW::from(g.desc(node.outputs[0]).shape);
+                int64_t      Cb = cBlocks(x.c);
                 // count spans every NC4HW4 packed lane of the output (n * Cb * h * w vec4s).
                 pc                    = {(int) ((int64_t) x.n * Cb * x.h * x.w), (int) (x.h * x.w), (int) Cb};
                 std::vector<float> sv = initFloats(g, node.inputs[1]);
@@ -39,7 +39,7 @@ namespace vknn {
                     }
                     return sp;
                 });
-                pipe = env.pipeline(shader("prelu", env.useFp16), 3, sizeof(PReluPC), std::vector<uint32_t> {});
+                                                pipe = env.pipeline(shader("prelu", env.useFp16), 3, sizeof(PReluPC), std::vector<uint32_t> {});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *s = env.devBuf(node.inputs[0]);

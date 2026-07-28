@@ -29,7 +29,7 @@ namespace vknn {
                     }
                     return (double) t.host.f32()[0];
                 };
-                double  start = scalar(S), limit = scalar(L), delta = scalar(D);
+                double start = scalar(S), limit = scalar(L), delta = scalar(D);
                 // Element count per the ONNX Range rule: n = max(ceil((limit-start)/delta), 0), which
                 // also yields 0 for a range whose sign disagrees with `delta`. A zero `delta` is treated
                 // as an empty range rather than dividing by zero.

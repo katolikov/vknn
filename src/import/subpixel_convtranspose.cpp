@@ -69,12 +69,16 @@ namespace vknn {
             }
             int64_t Hc = outH / sh, Wc = outW / sw;
             int     R = (int) (kH / sh), S = (int) (kW / sw);
-            auto    CyOf = [&](int a) { return (int) ((a + padH) / sh); };
-            auto    CxOf = [&](int b) { return (int) ((b + padW) / sw); };
+            auto    CyOf = [&](int a) {
+                return (int) ((a + padH) / sh);
+            };
+            auto CxOf = [&](int b) {
+                return (int) ((b + padW) / sw);
+            };
             // Seed the tap-index min/max reductions past any real tap index (taps are small kernel
             // offsets), so the first CyOf/CxOf sample always replaces the sentinel.
             constexpr int kTapIndexSentinel = 1 << 30;
-            int     tyMin = kTapIndexSentinel, tyMax = -kTapIndexSentinel, txMin = kTapIndexSentinel, txMax = -kTapIndexSentinel;
+            int           tyMin = kTapIndexSentinel, tyMax = -kTapIndexSentinel, txMin = kTapIndexSentinel, txMax = -kTapIndexSentinel;
             for (int a = 0; a < (int) sh; ++a)
             {
                 tyMin = std::min(tyMin, CyOf(a) - R + 1);
@@ -98,8 +102,12 @@ namespace vknn {
             Kb.resizeElems(Co * Cin * KcY * KcX, DType::Float32);
             const float *Wp   = g.initializers[wId].f32();
             float       *Kp   = Kb.f32();
-            auto         Widx = [&](int64_t ic, int64_t oc, int ky, int kx) { return ((ic * Cout + oc) * kH + ky) * kW + kx; };
-            auto         Kidx = [&](int64_t co, int64_t ic, int ty, int tx) { return ((co * Cin + ic) * KcY + ty) * KcX + tx; };
+            auto         Widx = [&](int64_t ic, int64_t oc, int ky, int kx) {
+                return ((ic * Cout + oc) * kH + ky) * kW + kx;
+            };
+            auto Kidx = [&](int64_t co, int64_t ic, int ty, int tx) {
+                return ((co * Cin + ic) * KcY + ty) * KcX + tx;
+            };
             for (int64_t oc = 0; oc < Cout; ++oc)
             {
                 for (int a = 0; a < (int) sh; ++a)
@@ -133,10 +141,10 @@ namespace vknn {
                 }
             }
             TensorDesc kd;
-            kd.name          = ct.name + "_spw";
-            kd.shape         = {Co, Cin, (int64_t) KcY, (int64_t) KcX};
-            kd.isInitializer = true;
-            TensorId kId     = g.addTensor(kd);
+            kd.name             = ct.name + "_spw";
+            kd.shape            = {Co, Cin, (int64_t) KcY, (int64_t) KcX};
+            kd.isInitializer    = true;
+            TensorId kId        = g.addTensor(kd);
             g.initializers[kId] = std::move(Kb);
             // Bias: the deconv bias is per output channel; it lands once per output pixel, i.e. once per
             // (oc, phase). Broadcast bias[oc] across the s*s phase channels; DepthToSpace then passes it
@@ -144,7 +152,7 @@ namespace vknn {
             TensorId cbId = kNoTensor;
             if (ct.inputs.size() > 2 && ct.inputs[2] != kNoTensor && g.isInitializer(ct.inputs[2]))
             {
-                HostBuffer   Bb;
+                HostBuffer Bb;
                 Bb.resizeElems(Co, DType::Float32);
                 const float *Bp = g.initializers[ct.inputs[2]].f32();
                 for (int64_t oc = 0; oc < Cout; ++oc)
@@ -155,21 +163,21 @@ namespace vknn {
                     }
                 }
                 TensorDesc bd;
-                bd.name          = ct.name + "_spb";
-                bd.shape         = {Co};
-                bd.isInitializer = true;
-                cbId             = g.addTensor(bd);
+                bd.name              = ct.name + "_spb";
+                bd.shape             = {Co};
+                bd.isInitializer     = true;
+                cbId                 = g.addTensor(bd);
                 g.initializers[cbId] = std::move(Bb);
             }
             TensorDesc cd;
-            cd.name      = ct.name + "_spc";
-            cd.shape     = {N, Co, Hc, Wc};
+            cd.name       = ct.name + "_spc";
+            cd.shape      = {N, Co, Hc, Wc};
             TensorId cOut = g.addTensor(cd);
 
             auto setInts = [&](Node &nd, const char *k, std::vector<int64_t> v) {
                 Attr a;
-                a.kind = Attr::Ints;
-                a.ints = std::move(v);
+                a.kind         = Attr::Ints;
+                a.ints         = std::move(v);
                 nd.attr.map[k] = a;
             };
             Node conv;
@@ -192,8 +200,8 @@ namespace vknn {
             setInts(conv, "dilations", {1, 1});
             {
                 Attr a;
-                a.kind                = Attr::Int;
-                a.i                   = 1;
+                a.kind                 = Attr::Int;
+                a.i                    = 1;
                 conv.attr.map["group"] = a;
             }
             Node d2s;
@@ -203,14 +211,14 @@ namespace vknn {
             d2s.outputs = {ct.outputs[0]};
             {
                 Attr a;
-                a.kind                     = Attr::Int;
-                a.i                        = sh;
+                a.kind                    = Attr::Int;
+                a.i                       = sh;
                 d2s.attr.map["blocksize"] = a;
             }
             {
                 Attr a;
-                a.kind                = Attr::String;
-                a.str                 = "CRD";
+                a.kind               = Attr::String;
+                a.str                = "CRD";
                 d2s.attr.map["mode"] = a;
             }
             g.nodes[ni] = std::move(conv);

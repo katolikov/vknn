@@ -46,8 +46,8 @@ namespace vknn {
                         k = kv[0];
                     }
                 }
-                int64_t dim = rank > 0 ? in[axis] : 0;
-                k           = std::max<int64_t>(0, std::min<int64_t>(k, dim));
+                int64_t dim   = rank > 0 ? in[axis] : 0;
+                k             = std::max<int64_t>(0, std::min<int64_t>(k, dim));
                 int64_t outer = 1, inner = 1;
                 for (int64_t i = 0; i < axis; ++i)
                 {
@@ -57,8 +57,8 @@ namespace vknn {
                 {
                     inner *= in[i];
                 }
-                hasIdx      = node.outputs.size() > 1 && node.outputs[1] != kNoTensor;
-                pc          = {(int) outer, (int) dim, (int) inner, (int) k, node.attr.geti("largest", 1) != 0 ? 1 : 0, hasIdx ? 1 : 0};
+                hasIdx = node.outputs.size() > 1 && node.outputs[1] != kNoTensor;
+                pc = {(int) outer, (int) dim, (int) inner, (int) k, node.attr.geti("largest", 1) != 0 ? 1 : 0, hasIdx ? 1 : 0};
                 // 3 SSBOs (input, values, indices); the indices binding is bound to the values buffer when
                 // the node omits the indices output (the shader's writeIdx flag then skips the store).
                 pipe = env.pipeline(shader("topk", env.useFp16), 3, sizeof(TopKPC), std::vector<uint32_t> {});
