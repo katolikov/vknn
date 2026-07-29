@@ -18,8 +18,8 @@ group folder). Build them with the host or Android build (`./build.sh` / `./buil
 | `llm/` | `vlm_host.py` | — | Front-end for `vknn_vlm`: HF processor (tokenizer + chat template) and image preprocessing over adb. |
 | `splatting/` | `yonosplat.cpp` | `vknn_yonosplat` | YoNoSplat 3D Gaussian-Splatting encoder + the Vulkan rasterizer (`raster_core`). |
 | `io/` | `run_io.cpp` | `vknn_run_io` | Run any model over positional input files (the workhorse harness). |
-| `io/` | `dmabuf_fd_io.cpp` | `vknn_dmabuf_fd_io` | Zero-copy caller-owned DMA-BUF I/O. |
-| `io/` | `zerocopy_cache.cpp` / `zerocopy_simple.cpp` | `vknn_zerocopy_cache` / `vknn_zerocopy_simple` | Zero-copy + unified cache paths. |
+| `io/` | `dmabuf_fd_io.cpp` | `vknn_dmabuf_fd_io` | Zero-copy caller-owned DMA-BUF I/O. Linux/Android only (dma-buf kernel interface); not built on Windows. |
+| `io/` | `zerocopy_cache.cpp` / `zerocopy_simple.cpp` | `vknn_zerocopy_cache` / `vknn_zerocopy_simple` | Zero-copy + unified cache paths. Linux/Android only; not built on Windows. |
 | `bench/` | `profile.cpp` | `vknn_profile` | Per-op profiling summary. |
 | `bench/` | `microbench.cpp` | `vknn_microbench` | Drives Vulkan kernels directly (Android/Vulkan only). |
 

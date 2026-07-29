@@ -33,7 +33,8 @@ mirror for Windows (same flags; `--leakcheck` stays POSIX-only).
 ./build-host/vknn_tests    # run the host unit/integration tests
 ```
 
-Host artifacts land in `build-host/`, Android in `build-android/`. Override the NDK with
+Host artifacts land in `build-host/` (`build-host\Release\` when build.ps1 uses the Visual
+Studio generator), Android in `build-android/`. Override the NDK with
 `ANDROID_NDK=...` and the API level with `ANDROID_API=...`.
 
 **Before you push, run `scripts/ci_host.sh`** — the host-only gate: host build + `vknn_tests` +

@@ -384,20 +384,31 @@ namespace vknn {
             {
                 bad = true;
             }
-#ifdef _WIN32
-            // Windows rename() refuses to replace an existing file (POSIX replaces atomically), so a
-            // recompile onto an existing .vxm must drop the previous output first. The brief window
-            // with neither file present is accepted on this platform.
-            if (!bad)
-            {
-                std::remove(path.c_str());
-            }
-#endif
-            if (bad || std::rename(tmpPath.c_str(), path.c_str()) != 0)
+            if (bad)
             {
                 std::remove(tmpPath.c_str());
                 return false;
             }
+#ifdef _WIN32
+            // Windows rename() refuses to replace an existing file (POSIX replaces atomically), so
+            // try the plain rename first and only on failure drop the previous output and retry.
+            // A failed retry keeps the fully written temp on disk instead of deleting it: the old
+            // file may already be gone, and the temp is then the only surviving copy of the model.
+            if (std::rename(tmpPath.c_str(), path.c_str()) != 0)
+            {
+                std::remove(path.c_str());
+                if (std::rename(tmpPath.c_str(), path.c_str()) != 0)
+                {
+                    return false;
+                }
+            }
+#else
+            if (std::rename(tmpPath.c_str(), path.c_str()) != 0)
+            {
+                std::remove(tmpPath.c_str());
+                return false;
+            }
+#endif
             return true;
         }
     } // namespace
