@@ -2627,7 +2627,7 @@ namespace {
             return id;
         };
         TensorId w = konst("w"), c = konst("c");
-        TensorId t0 = g.addTensor({.name = "t0"}), y = g.addTensor({.name = "y"});
+        TensorId t0 = g.addTensor({"t0"}), y = g.addTensor({"y"});
         g.desc(y).isOutput = true;
         Node mm;
         mm.type    = OpType::MatMul;
@@ -2706,7 +2706,7 @@ TEST(Passes, FusePointwiseRuntimePrimary) {
         return id;
     };
     TensorId s = konst("s", 2.f), b = konst("b", 1.f);
-    TensorId t0 = g.addTensor({.name = "t0"}), y = g.addTensor({.name = "y"});
+    TensorId t0 = g.addTensor({"t0"}), y = g.addTensor({"y"});
     g.desc(y).isOutput = true;
     Node m;
     m.type    = OpType::Binary;
@@ -2760,7 +2760,7 @@ namespace {
             return id;
         };
         TensorId s = scal("start", start), l = scal("limit", limit), d = scal("delta", delta);
-        TensorId r = g.addTensor({.name = "r"}), y = g.addTensor({.name = "y"});
+        TensorId r = g.addTensor({"r"}), y = g.addTensor({"y"});
         g.desc(y).isOutput = true;
         Node rg;
         rg.type    = OpType::Range;
@@ -3061,8 +3061,8 @@ TEST(Passes, ConstFoldEmptyRangeBinary) {
         return id;
     };
     TensorId s = scal("start", 0.f), l = scal("limit", 0.f), d = scal("delta", 1.f), two = scal("two", 2.f);
-    TensorId r = g.addTensor({.name = "r"}), m = g.addTensor({.name = "m"});
-    TensorId y         = g.addTensor({.name = "y"});
+    TensorId r = g.addTensor({"r"}), m = g.addTensor({"m"});
+    TensorId y         = g.addTensor({"y"});
     g.desc(y).isOutput = true;
     Node rg;
     rg.type    = OpType::Range; // folds to an EMPTY [0] constant
@@ -3118,8 +3118,8 @@ TEST(Passes, BinaryUnresolvedOperandStaysUnresolved) {
     hb.resizeElems(16, DType::Float32);
     g.initializers[b] = hb;
 
-    TensorId r = g.addTensor({.name = "r"}), y0 = g.addTensor({.name = "y0"});
-    TensorId y1 = g.addTensor({.name = "y1"}), y2 = g.addTensor({.name = "y2"});
+    TensorId r = g.addTensor({"r"}), y0 = g.addTensor({"y0"});
+    TensorId y1 = g.addTensor({"y1"}), y2 = g.addTensor({"y2"});
     Node     rs;
     rs.type    = OpType::Reshape;
     rs.name    = "reshape";
@@ -3151,7 +3151,7 @@ TEST(Passes, BinaryUnresolvedOperandStaysUnresolved) {
     fb.resizeElems(1, DType::Int64);
     fb.i64()[0]       = -1;
     g.initializers[f] = fb;
-    TensorId y3       = g.addTensor({.name = "y3"});
+    TensorId y3       = g.addTensor({"y3"});
     Node     rs2;
     rs2.type    = OpType::Reshape;
     rs2.name    = "reshape_flat";
@@ -3204,7 +3204,7 @@ TEST(Passes, SliceRuntimeBoundsStayUnresolved) {
     TensorId ax = vec("axes", {2}), sp = vec("steps", {1});
     // Both bounds flow through a Reshape with a runtime target, so their descs stay empty —
     // the shape-computed start/end pattern (head_dim/2 from Shape() arithmetic).
-    TensorId e0 = g.addTensor({.name = "e0"}), e1 = g.addTensor({.name = "e1"});
+    TensorId e0 = g.addTensor({"e0"}), e1 = g.addTensor({"e1"});
     Node     r0;
     r0.type    = OpType::Reshape;
     r0.name    = "r0";
@@ -3215,7 +3215,7 @@ TEST(Passes, SliceRuntimeBoundsStayUnresolved) {
     r1.name    = "r1";
     r1.inputs  = {bd, bd};
     r1.outputs = {e1};
-    TensorId y = g.addTensor({.name = "y"});
+    TensorId y = g.addTensor({"y"});
     Node     sl;
     sl.type    = OpType::Slice;
     sl.name    = "slice";
@@ -3242,7 +3242,7 @@ TEST(Passes, BinaryScalarInitializerBroadcasts) {
     hb.resizeElems(1, DType::Float32);
     hb.f32()[0]        = 2.f;
     g.initializers[k]  = hb;
-    TensorId y         = g.addTensor({.name = "y"});
+    TensorId y         = g.addTensor({"y"});
     g.desc(y).isOutput = true;
     Node m;
     m.type    = OpType::Binary;
@@ -3273,7 +3273,7 @@ TEST(Ops, CpuAddTwoRank0ScalarInputs) {
     bi.isInput         = true;
     TensorId b         = g.addTensor(bi);
     g.inputs           = {a, b};
-    TensorId y         = g.addTensor({.name = "y"});
+    TensorId y         = g.addTensor({"y"});
     g.desc(y).isOutput = true;
     Node n;
     n.type    = OpType::Add;
@@ -3426,8 +3426,8 @@ TEST(Passes, LessConstFoldInt64) {
     };
     TensorId a  = addI64("a", {4}, {0, 1ll << 25, (1ll << 25) + 1, 7});
     TensorId b  = addI64("b", {1}, {1ll << 25});
-    TensorId y0 = g.addTensor({.name = "lt"});
-    TensorId y1 = g.addTensor({.name = "le"});
+    TensorId y0 = g.addTensor({"lt"});
+    TensorId y1 = g.addTensor({"le"});
     Node     lt;
     lt.type    = OpType::Less;
     lt.name    = "less";
@@ -3480,8 +3480,8 @@ TEST(Passes, TopKInferShapes) {
     hb.resizeElems(1, DType::Int64);
     hb.i64()[0]         = 2;
     g.initializers[kid] = hb;
-    TensorId v          = g.addTensor({.name = "v"});
-    TensorId ix         = g.addTensor({.name = "i"});
+    TensorId v          = g.addTensor({"v"});
+    TensorId ix         = g.addTensor({"i"});
     Node     n;
     n.type    = OpType::TopK;
     n.name    = "topk";
