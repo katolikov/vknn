@@ -20,7 +20,7 @@ namespace vknn {
         // One row's score vector: scores[s] = dot(q, k_s) * scale + mask[s] * maskScale, fp32 over
         // ascending k. Contraction pinned off for the same reason as matmul.cpp's matmulRow: only
         // the strict IEEE mul+add chain is bit-stable across compiler specializations.
-        __attribute__((noinline)) void attentionScores(const float *q, const float *k, const float *mask, float *scores, int64_t C, int64_t hd, int64_t qK, int64_t kN, int64_t kK, int64_t mN, float scale, float maskScale) {
+        VKNN_NOINLINE void attentionScores(const float *q, const float *k, const float *mask, float *scores, int64_t C, int64_t hd, int64_t qK, int64_t kN, int64_t kK, int64_t mN, float scale, float maskScale) {
 #pragma clang fp contract(off)
             for (int64_t s = 0; s < C; ++s)
             {
@@ -34,7 +34,7 @@ namespace vknn {
         }
 
         // One row's context vector: out[n] = sum_s p[s] * v[s][n], fp32 over ascending s.
-        __attribute__((noinline)) void attentionContext(const float *p, const float *v, float *out, int64_t C, int64_t hd, int64_t vK, int64_t vN, bool accumulate) {
+        VKNN_NOINLINE void attentionContext(const float *p, const float *v, float *out, int64_t C, int64_t hd, int64_t vK, int64_t vN, bool accumulate) {
 #pragma clang fp contract(off)
             for (int64_t n = 0; n < hd; ++n)
             {

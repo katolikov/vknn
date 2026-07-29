@@ -150,7 +150,7 @@ namespace {
     // Reference dot with the CPU oracle's exact FP semantics: strict IEEE mul+add over ascending k
     // with contraction pinned off (backend/cpu/ops/matmul.cpp's matmulRow pins the same), so
     // equality against the engine is exact, not approximate.
-    __attribute__((noinline)) float refDot(const float *a, int64_t aStep, const float *b, int64_t bStep, int64_t K) {
+    VKNN_NOINLINE float refDot(const float *a, int64_t aStep, const float *b, int64_t bStep, int64_t K) {
 #pragma clang fp contract(off)
         float acc = 0.f;
         for (int64_t k = 0; k < K; ++k)

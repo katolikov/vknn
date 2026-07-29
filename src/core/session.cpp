@@ -11,6 +11,9 @@
 #include <limits>
 #include <set>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h> // _mkdir (one-argument; no mode bits on Windows)
+#endif
 
 namespace vknn {
 
@@ -2289,7 +2292,11 @@ namespace vknn {
         // --- layer dump ---
         if (cfg_.layerDump)
         {
+#ifdef _WIN32
+            ::_mkdir(cfg_.layerDumpDir.c_str());
+#else
             ::mkdir(cfg_.layerDumpDir.c_str(), 0755);
+#endif
             for (size_t i = 0; i < pool_.size(); ++i)
             {
                 RtTensor &rt = pool_[i];
