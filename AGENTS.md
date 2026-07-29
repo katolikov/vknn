@@ -19,7 +19,8 @@ multi-graph `.vxm`), and a 965M-parameter transformer encoder (YoNoSplat) plus a
 
 ## Build & test
 
-`./build.sh` is the **only** build entry point.
+`./build.sh` is the **only** build entry point on macOS/Linux; `.\build.ps1` is its PowerShell
+mirror for Windows (same flags; `--leakcheck` stays POSIX-only).
 
 ```sh
 ./build.sh                 # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
