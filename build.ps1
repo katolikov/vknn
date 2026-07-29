@@ -105,10 +105,12 @@ function HostConfigArgs([string]$BuildDir) {
 # build-host\Release\ for multi-config (Visual Studio). After a generator switch both layouts
 # can hold a binary, so the NEWEST existing candidate is the one this build produced.
 function HostBinary([string]$BuildDir, [string]$Name) {
-    $found = @("$BuildDir/$Name.exe", "$BuildDir/Release/$Name.exe", "$BuildDir/$Name") |
-        Where-Object { Test-Path $_ } |
-        Sort-Object { (Get-Item $_).LastWriteTimeUtc } -Descending
-    if ($found) { return $found[0] }
+    # @(...) keeps a single surviving candidate an ARRAY: a bare pipeline result unrolls one match
+    # to a plain string, whose [0] is its first character.
+    $found = @(@("$BuildDir/$Name.exe", "$BuildDir/Release/$Name.exe", "$BuildDir/$Name") |
+            Where-Object { Test-Path $_ } |
+            Sort-Object { (Get-Item $_).LastWriteTimeUtc } -Descending)
+    if ($found.Count -gt 0) { return $found[0] }
     Fail "build.ps1: $Name not found under $BuildDir"
 }
 
