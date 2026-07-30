@@ -7,7 +7,8 @@ namespace vknn {
     namespace {
 
         // Local workgroup size along x; matches local_size_x in shaders/convert_layout.comp.
-        constexpr uint32_t kConvertLayoutLocalSize = 256;
+        // Workgroup width rides spec constant 0, resolved at load (env.flatLocalSize);
+        // the dispatch below divides by the same value.
 
         struct ConvertPC {
             int N, C, H, W, dir;
@@ -26,14 +27,14 @@ namespace vknn {
                 count = (uint32_t) (x.n * Cb * HW); // one thread per NC4 lane-quad, both directions
                 // Binding count is 4: bindings 0/1 (scalar) and 2/3 (vec4) alias the same src/dst
                 // buffers, so each direction reads scalars on the flat side and one STORE4 on the NC4 side.
-                pipe = env.pipeline(shader("convert_layout", env.useFp16), 4, sizeof(ConvertPC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("convert_layout", env.useFp16), 4, sizeof(ConvertPC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 // bindings 0/1 = scalar views, 2/3 = vec4 views of the same src/dst buffers
                 vk::Buffer *s = env.devBuf(node.inputs[0]);
                 vk::Buffer *d = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {s->handle(), d->handle(), s->handle(), d->handle()}, &pc, sizeof(pc), groups(count, kConvertLayoutLocalSize));
+                pipe->dispatch(cmd, {s->handle(), d->handle(), s->handle(), d->handle()}, &pc, sizeof(pc), groups(count, env.flatLocalSize));
             }
         };
 
