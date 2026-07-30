@@ -31,19 +31,19 @@ namespace vknn {
                 if (opIsFlat(node, env))
                 {
                     // total is computed in int64 before narrowing into the int push-constant field.
-                    pc   = {(int) (batch * channels * spatial), (int) channels, (int) spatial, groupCount};
-                    pipe = env.pipeline(shader("channel_shuffle_flat", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {});
+                    pc = {(int) (batch * channels * spatial), (int) channels, (int) spatial, groupCount};
+                    pipe = env.pipeline(shader("channel_shuffle_flat", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {env.flatLocalSize});
                 } else
                 {
                     int64_t channelBlocks = (channels + 3) / 4;
-                    pc                    = {(int) (batch * channelBlocks * spatial), (int) channels, (int) spatial, groupCount};
-                    pipe                  = env.pipeline(shader("channel_shuffle_nc4", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {});
+                    pc = {(int) (batch * channelBlocks * spatial), (int) channels, (int) spatial, groupCount};
+                    pipe = env.pipeline(shader("channel_shuffle_nc4", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {env.flatLocalSize});
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 // Both kernels are local_size_x=256 == flat::kFlatLocalSize; groups() rounds pc.total
                 // up to whole workgroups and dispatch() 2D-splits past the device's x-limit.
-                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
     } // namespace

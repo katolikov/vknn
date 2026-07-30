@@ -44,7 +44,7 @@ namespace vknn {
                     }
                     if (g.isInitializer(t))
                     {
-                        std::vector<float> cv = initFloats(g, t); // decodes fp16 (fp16 .vxm); fp32 passthrough
+                        std::vector<float> cv = initFloats(g, t);                 // decodes fp16 (fp16 .vxm); fp32 passthrough
                         cv.resize((size_t) std::max<int64_t>(1, numElements(s))); // 0-D scalar: keep its 1 element
                         constBuf[which] = upload(*env.ctx, cv, env.useFp16);
                     }
@@ -53,7 +53,7 @@ namespace vknn {
                 setup(node.inputs[1], 1);
                 setup(node.inputs[2], 2);
                 geom = flat::uploadFlatGeom(env, {outDim, cStride, xStride, yStride});
-                pipe = env.pipeline(shader("where_select", env.useFp16), 5, sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("where_select", env.useFp16), 5, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -62,7 +62,7 @@ namespace vknn {
                 };
                 // where_select.comp is local_size_x=256 with one invocation per output element, so the
                 // 1D grid is ceil(total/256) — the shared flat element-parallel dispatch size.
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), buf(2)->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), buf(2)->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
 

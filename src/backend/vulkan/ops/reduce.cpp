@@ -97,6 +97,11 @@ namespace vknn {
                 {
                     // groups per output: enough workgroups to fill the GPU (~4096 total), each chunk still
                     // >= 256 elements, capped at 64 so the combine pass stays a single trivial workgroup.
+                    // These occupancy gates stay FIXED constants on purpose: the split count they
+                    // choose sets the summation order (byte-affecting), and the only device signal
+                    // that could size them is the MEASURED saturation probe - which may only ever
+                    // steer placement-only choices (see VkOpEnv::flatLocalSize). A caps-exact
+                    // derivation does not exist for "how many groups fill this GPU".
                     int64_t byWork = reducedExtent / 256;       // no more groups than 256-elem chunks
                     int64_t byGrid = 4096 / std::max(total, 1); // ~4096 workgroups total
                     int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, (int64_t) 64}));

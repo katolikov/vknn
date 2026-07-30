@@ -2,7 +2,7 @@
 #include "precision.glsl"
 // Einsum "i,j->ij" outer product.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };

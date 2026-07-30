@@ -9,7 +9,7 @@
 // into the fp32 accumulator so the result is stored once. Mirrors matmul.comp with binding 3 = bias;
 // matmul.cpp selects this variant when a MatMul has a fused bias. One thread per output element.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer A  { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B  { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D  { STORE d[]; };

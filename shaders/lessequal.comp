@@ -5,7 +5,7 @@
 // so the decodable rank is unbounded (see flat::uploadFlatGeom). Arrays pack back-to-back:
 // outDim = g[0..rank), aStride = g[rank..2*rank), bStride = g[2*rank..3*rank).
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };

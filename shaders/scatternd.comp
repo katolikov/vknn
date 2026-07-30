@@ -6,7 +6,7 @@
 // decodable data rank is unbounded (see flat::uploadFlatGeom). Arrays pack back-to-back:
 // dataDim = g[0..rank), stride = g[rank..2*rank).
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer U   { STORE u[]; };
 layout(std430, binding = 1) readonly  buffer IDX { STORE ix[]; };  // index in STORE; one kernel for const and runtime indices
 layout(std430, binding = 2) buffer            D   { STORE d[]; };

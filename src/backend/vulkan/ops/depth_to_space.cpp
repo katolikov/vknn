@@ -19,8 +19,6 @@ namespace vknn {
         struct D2sNc4PC {
             int N, C, H, W, C2, OH, OW, b, mode;
         };
-        // Local workgroup size along x; matches local_size_x in shaders/depth_to_space_nc4.comp.
-        constexpr uint32_t kD2sNc4LocalSize = 64;
 
         struct DepthToSpaceOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
@@ -45,21 +43,21 @@ namespace vknn {
                 {
                     nc4Pc    = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
                     nc4Count = (uint32_t) ((int64_t) x.n * cBlocks(C2) * OH * OW); // one lane per output block-pixel
-                    pipe     = env.pipeline(shader("depth_to_space_nc4", env.useFp16), 2, sizeof(D2sNc4PC), std::vector<uint32_t> {});
+                    pipe = env.pipeline(shader("depth_to_space_nc4", env.useFp16), 2, sizeof(D2sNc4PC), std::vector<uint32_t> {env.convLocalSize});
                     return;
                 }
-                pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()};
                 if (nc4Count)
                 {
-                    pipe->dispatch(cmd, bufs, &nc4Pc, sizeof(nc4Pc), groups(nc4Count, kD2sNc4LocalSize));
+                    pipe->dispatch(cmd, bufs, &nc4Pc, sizeof(nc4Pc), groups(nc4Count, env.convLocalSize));
                     return;
                 }
                 // One thread per output element; flat_depth_to_space.comp is local_size_x=256 ==
                 // flat::kFlatLocalSize. groups() rounds pc.total up to whole workgroups.
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
     } // namespace

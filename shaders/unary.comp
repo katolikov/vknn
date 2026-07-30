@@ -2,7 +2,7 @@
 #define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the fused-unit per-step rounding exactly
 #include "precision.glsl"
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { uint count; int op; float a, b; } pc;

@@ -6,7 +6,7 @@
 // arrays pack back-to-back: outDim = g[0..rank), cStride = g[rank..2*rank),
 // xStride = g[2*rank..3*rank), yStride = g[3*rank..4*rank).
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer C { STORE cond[]; };
 layout(std430, binding = 1) readonly  buffer X { STORE x[]; };
 layout(std430, binding = 2) readonly  buffer Y { STORE y[]; };
