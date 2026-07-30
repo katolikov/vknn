@@ -17,7 +17,7 @@
 #define PW_EPI_BASE 4
 #include "pw_epilogue.glsl"
 #endif
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 0) in; // trailing spec = device-resolved lane width (env.convLocalSize)
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };

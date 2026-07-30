@@ -19,7 +19,7 @@
 #endif
 layout(constant_id = 0) const int MODE = 0;
 layout(constant_id = 1) const int PADMODE = 0;
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 2) in; // trailing spec = device-resolved lane width (env.convLocalSize)
 layout(std430, binding = 0) readonly  buffer Src  { f16vec4 src[]; };
 layout(std430, binding = 1) readonly  buffer Flow { f16vec4 flow[]; };
 layout(std430, binding = 2) readonly  buffer Base { float base[]; };

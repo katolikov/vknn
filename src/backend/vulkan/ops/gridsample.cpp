@@ -18,8 +18,9 @@
 
 namespace vknn {
     namespace {
-        // Local workgroup size along x; matches local_size_x in shaders/gridsample.comp.
-        constexpr uint32_t kGridSampleLocalSize = 64;
+        // The lane width rides the shaders' trailing spec constant, resolved at load from exact
+        // caps (env.convLocalSize - the per-thread sampler family width); the dispatch divides by
+        // the same value.
 
         // Field order/types mirror gridsample.comp's push_constant block { N, C, Hin, Win, OH, OW, align }.
         // align is align_corners (0/1), which shifts the grid-to-pixel coordinate mapping in the shader.
@@ -60,8 +61,8 @@ namespace vknn {
                     // Mul: fp16 storage narrows the scalar exactly as the Binary op's uploadInit did
                     // (floatToHalfSat, saturating out-of-range like an imported constant), fp32 keeps it
                     // exact. The shader then rounds the product itself.
-                    float s        = node.attr.getf("warp_scale", 1.f);
-                    pc.scale       = env.useFp16 ? halfToFloat(floatToHalfSat(s)) : s;
+                    float s  = node.attr.getf("warp_scale", 1.f);
+                    pc.scale = env.useFp16 ? halfToFloat(floatToHalfSat(s)) : s;
                     // Base grid [.,OH,OW,2]: N stride 0 broadcasts a single-frame base over the batch.
                     pc.baseNStride = g.desc(node.inputs[2]).shape[0] == 1 ? 0 : OH * OW * 2;
                 }
@@ -76,14 +77,14 @@ namespace vknn {
                 // internally (cBlocks(c) ceil-packs channels into groups of 4, each resolved as a
                 // vec4), so the grid fetch and the coordinate/weight math happen once per pixel
                 // instead of once per block-pixel.
-                total            = (int64_t) x.n * OH * OW;
+                total = (int64_t) x.n * OH * OW;
                 epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
                 // The warp shader reads its flow (NC4HW4) and base (fp32) from two dedicated bindings
                 // (source, flow, base, dest = 4 base buffers); the plain shader has one grid binding
                 // (source, grid, dest = 3). The base grid always uploads fp32, so the warp fp16 shader
                 // has no GRID_FP32 selector. epi.suffix() selects the matching _epi shader variant.
-                std::vector<uint32_t> spec = warp ? std::vector<uint32_t> {MODE, PAD} : std::vector<uint32_t> {MODE, PAD, gridWordsFp32(g, node)};
-                int                   nbuf = warp ? 4 : 3;
+                std::vector<uint32_t> spec = warp ? std::vector<uint32_t> {MODE, PAD, env.convLocalSize} : std::vector<uint32_t> {MODE, PAD, gridWordsFp32(g, node), env.convLocalSize};
+                int nbuf = warp ? 4 : 3;
                 pipe = env.pipeline(shader((std::string(warp ? "gridsample_warp" : "gridsample") + epi.suffix()).c_str(), env.useFp16), nbuf + epi.extraBufs(), sizeof(GsPC), spec);
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -121,8 +122,8 @@ namespace vknn {
                     bufs = {s->handle(), grid->handle(), d->handle()};
                 }
                 epi.append(bufs, node, env, d->handle());
-                // Flat 1D grid over the packed output lanes; kGridSampleLocalSize matches gridsample.comp's local_size_x.
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, kGridSampleLocalSize));
+                // Flat 1D grid over the packed output lanes at the load-resolved lane width.
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, env.convLocalSize));
             }
         };
     } // namespace
