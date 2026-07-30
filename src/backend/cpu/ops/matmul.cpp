@@ -20,7 +20,7 @@ namespace vknn {
         // two calls reading the same values in the same order then round differently. Only the
         // strict IEEE mul+add chain is bit-stable across every specialization (and across
         // compilers), so that is the oracle contract: fp32 products summed over ascending k.
-        __attribute__((noinline)) void matmulRow(const float *am, const float *bm, float *ym, const float *bias, int64_t N, int64_t K, int64_t aK, int64_t bK, int64_t bN) {
+        VKNN_NOINLINE void matmulRow(const float *am, const float *bm, float *ym, const float *bias, int64_t N, int64_t K, int64_t aK, int64_t bK, int64_t bN) {
 #pragma clang fp contract(off)
             for (int64_t n = 0; n < N; ++n)
             {

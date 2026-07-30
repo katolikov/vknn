@@ -18,13 +18,11 @@ namespace vknn { namespace vk {
 
     std::string VulkanCaps::summary() const {
         std::ostringstream os;
-        os << deviceName << " | " << driverName << " (" << driverInfo << ")"
-           << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B"
-           << " tsPeriod=" << timestampPeriod << "ns\n"
+        os << deviceName << " | " << driverName << " (" << driverInfo << ")" << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B" << " tsPeriod=" << timestampPeriod << "ns\n"
            << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " int64=" << shaderInt64 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
            << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
-           << "  globalPriority=" << globalPriority << " sync2=" << synchronization2 << " sgCtl=" << subgroupSizeControl << " sgRange=[" << minSubgroupSize << "," << maxSubgroupSize << "]"
-           << " vkMemModel=" << vulkanMemoryModel << " coopmatRows=" << coopmatShapes.size() << " fp8=" << shaderFloat8 << " int8dotAccel=" << int8DotAccel8Bit << "/" << int8DotAccel4x8Packed;
+           << "  globalPriority=" << globalPriority << " sync2=" << synchronization2 << " sgCtl=" << subgroupSizeControl << " sgRange=[" << minSubgroupSize << "," << maxSubgroupSize << "]" << " vkMemModel=" << vulkanMemoryModel
+           << " coopmatRows=" << coopmatShapes.size() << " fp8=" << shaderFloat8 << " int8dotAccel=" << int8DotAccel8Bit << "/" << int8DotAccel4x8Packed;
         return os.str();
     }
 

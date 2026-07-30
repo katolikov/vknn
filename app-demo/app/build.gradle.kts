@@ -1,3 +1,7 @@
+// Version, from the repo-root VERSION file the native library compiles in. versionCode stays here:
+// it is a store ordinal, not a version.
+val vknnVersion = rootProject.file("../VERSION").readText().trim()
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,8 +16,8 @@ android {
         applicationId = "com.vknn.chat"
         minSdk = 28
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.5.1"
+        versionCode = 15
+        versionName = vknnVersion
         ndk {
             // Only ship the arm64 native lib (the only ABI vknn is built for here).
             abiFilters += "arm64-v8a"
@@ -34,6 +38,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true // VERSION_NAME/VERSION_CODE, read by the Library screen
     }
     // Store the prebuilt libvknnchat.so uncompressed and page-aligned (useLegacyPackaging = false) so the
     // loader mmaps it directly — required for 16-KB-page-size devices; the .so is already release-built.

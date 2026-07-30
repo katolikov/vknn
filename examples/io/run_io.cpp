@@ -45,6 +45,9 @@
 #include <string>
 #include <sys/stat.h>
 #include <vector>
+#ifdef _WIN32
+#include <direct.h> // _mkdir (one-argument; no mode bits on Windows)
+#endif
 
 using namespace vknn;
 
@@ -92,7 +95,11 @@ int main(int argc, char **argv) {
     // Not VKNN: the two positional args are the model path and the output directory. Make the output
     // directory up front so the writes at the end always land.
     std::string model = argv[1], outdir = argv[2];
+#ifdef _WIN32
+    ::_mkdir(outdir.c_str()); // create the output dir if missing
+#else
     ::mkdir(outdir.c_str(), 0755); // create the output dir if missing
+#endif
 
     // Step 1 - translate the command line into a Config.
     // The Config is the one struct of engine knobs; every flag below sets a single field or hint. The

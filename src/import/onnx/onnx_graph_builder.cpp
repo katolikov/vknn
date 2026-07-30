@@ -157,9 +157,7 @@ namespace vknn { namespace onnx {
         }
         if (reused > 0)
         {
-            VKNN_WARN << "ONNX graph is not SSA: " << reused << " tensor name(s) have multiple producers "
-                      << "(un-deduped trace export). Inputs bind to the nearest preceding producer; "
-                      << "value_info shape hints for reused names are ignored.";
+            VKNN_WARN << "ONNX graph is not SSA: " << reused << " tensor name(s) have multiple producers " << "(un-deduped trace export). Inputs bind to the nearest preceding producer; " << "value_info shape hints for reused names are ignored.";
         }
         std::unordered_map<std::string, TensorId> latest;
         for (TensorId id: g.inputs)

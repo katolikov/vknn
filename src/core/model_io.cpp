@@ -23,6 +23,25 @@
 namespace vknn {
 
     namespace {
+        // 64-bit stdio seek/tell, spelled per platform. On Windows (MSVC and MinGW alike) plain
+        // fseeko/ftello either does not exist or works on a 32-bit off_t, which truncates offsets in
+        // multi-GB .vxm files; _fseeki64/_ftelli64 is the always-64-bit spelling there.
+#ifdef _WIN32
+        inline int fseek64(FILE *f, int64_t off, int whence) {
+            return ::_fseeki64(f, off, whence);
+        }
+        inline int64_t ftell64(FILE *f) {
+            return ::_ftelli64(f);
+        }
+#else
+        inline int fseek64(FILE *f, int64_t off, int whence) {
+            return ::fseeko(f, (off_t) off, whence);
+        }
+        inline int64_t ftell64(FILE *f) {
+            return (int64_t)::ftello(f);
+        }
+#endif
+
         // Format version guard, stored as the first word of every .vxm. A load whose leading word
         // does not match is rejected: the on-disk layout is field-order- and width-sensitive, so
         // bumping this is the only safe way to evolve the schema. The "3" revision widens the
@@ -115,8 +134,8 @@ namespace vknn {
             // Sticky short-read flag. Once any fread returns fewer elements than requested it latches
             // false and every later read is skipped, so a truncated file yields zero/default-filled
             // fields instead of reading past EOF; callers gate on this after the whole graph is read.
-            bool  ok    = true;
-            off_t fsize = -1; // total file size, cached on first remaining() call
+            bool    ok    = true;
+            int64_t fsize = -1; // total file size, cached on first remaining() call
             // Bytes readable from the current position to EOF (0 past end or on error). A length prefix
             // is validated against this before it sizes an allocation, so a corrupt count field yields a
             // graceful ok=false rather than a std::bad_alloc/length_error thrown out of the reader.
@@ -125,19 +144,19 @@ namespace vknn {
                 {
                     return 0;
                 }
-                off_t cur = ftello(f);
+                int64_t cur = ftell64(f);
                 if (cur < 0)
                 {
                     return 0;
                 }
                 if (fsize < 0)
                 {
-                    if (fseeko(f, 0, SEEK_END) != 0)
+                    if (fseek64(f, 0, SEEK_END) != 0)
                     {
                         return 0;
                     }
-                    fsize = ftello(f);
-                    if (fseeko(f, cur, SEEK_SET) != 0)
+                    fsize = ftell64(f);
+                    if (fseek64(f, cur, SEEK_SET) != 0)
                     {
                         fsize = -1;
                         return 0;
@@ -365,11 +384,31 @@ namespace vknn {
             {
                 bad = true;
             }
-            if (bad || std::rename(tmpPath.c_str(), path.c_str()) != 0)
+            if (bad)
             {
                 std::remove(tmpPath.c_str());
                 return false;
             }
+#ifdef _WIN32
+            // Windows rename() refuses to replace an existing file (POSIX replaces atomically), so
+            // try the plain rename first and only on failure drop the previous output and retry.
+            // A failed retry keeps the fully written temp on disk instead of deleting it: the old
+            // file may already be gone, and the temp is then the only surviving copy of the model.
+            if (std::rename(tmpPath.c_str(), path.c_str()) != 0)
+            {
+                std::remove(path.c_str());
+                if (std::rename(tmpPath.c_str(), path.c_str()) != 0)
+                {
+                    return false;
+                }
+            }
+#else
+            if (std::rename(tmpPath.c_str(), path.c_str()) != 0)
+            {
+                std::remove(tmpPath.c_str());
+                return false;
+            }
+#endif
             return true;
         }
     } // namespace
@@ -591,11 +630,11 @@ namespace vknn {
                     r.ok = false; // corrupt length: the owned path would allocate up to ~4GB before fread bounds it
                     break;
                 }
-                const int64_t blobAt = (int64_t) ftello(f);
+                const int64_t blobAt = ftell64(f);
                 if (mapping && blobAt >= 0 && (size_t) blobAt + blobBytes <= mapping->size())
                 {
                     hb.bytes.setView(mapping, mapping->data() + blobAt, blobBytes);
-                    if (fseeko(f, (off_t) blobBytes, SEEK_CUR) != 0)
+                    if (fseek64(f, (int64_t) blobBytes, SEEK_CUR) != 0)
                     {
                         r.ok = false;
                     }
@@ -628,12 +667,10 @@ namespace vknn {
             constexpr uint32_t kVxmPrefix = 0x004d5856; // "VXM" -- low 3 bytes shared by every VXM<n>
             if ((magic & 0x00ffffffu) == kVxmPrefix)
             {
-                VKNN_WARN << "loadGraph: " << path << " is a VXM" << (char) (magic >> 24) << " container from an incompatible vknn version (this build reads VXM3-VXM6)"
-                          << " -- reconvert the model from its .onnx with the current vknn_compile";
+                VKNN_WARN << "loadGraph: " << path << " is a VXM" << (char) (magic >> 24) << " container from an incompatible vknn version (this build reads VXM3-VXM6)" << " -- reconvert the model from its .onnx with the current vknn_compile";
             } else
             {
-                VKNN_WARN << "loadGraph: bad magic in " << path << " -- not a valid .vxm (truncated, corrupt, or the wrong file)"
-                          << " -- reconvert from the .onnx with the current vknn_compile";
+                VKNN_WARN << "loadGraph: bad magic in " << path << " -- not a valid .vxm (truncated, corrupt, or the wrong file)" << " -- reconvert from the .onnx with the current vknn_compile";
             }
             return false;
         }
@@ -655,8 +692,8 @@ namespace vknn {
                 r.ok = false; // corrupt pool-blob size: bound it before it drives an owned-buffer alloc
                 break;
             }
-            blobs[i] = {(int64_t) ftello(f), sz};
-            if (fseeko(f, (off_t) sz, SEEK_CUR) != 0)
+            blobs[i] = {ftell64(f), sz};
+            if (fseek64(f, (int64_t) sz, SEEK_CUR) != 0)
             {
                 r.ok = false;
             }
@@ -684,7 +721,7 @@ namespace vknn {
                 break;
             }
             // The next bucket's records follow this ref table; blob reads seek away and back.
-            int64_t next = (int64_t) ftello(f);
+            int64_t next = ftell64(f);
             for (const auto &ref: refs)
             {
                 HostBuffer hb;
@@ -700,7 +737,7 @@ namespace vknn {
                     } else
                     {
                         std::vector<uint8_t> owned(blobBytes);
-                        if (blobBytes && (fseeko(f, (off_t) blobAt, SEEK_SET) != 0 || fread(owned.data(), 1, blobBytes, f) != blobBytes))
+                        if (blobBytes && (fseek64(f, blobAt, SEEK_SET) != 0 || fread(owned.data(), 1, blobBytes, f) != blobBytes))
                         {
                             r.ok = false;
                             break;
@@ -710,7 +747,7 @@ namespace vknn {
                 }
                 g.initializers[ref.first] = std::move(hb);
             }
-            if (!r.ok || fseeko(f, (off_t) next, SEEK_SET) != 0)
+            if (!r.ok || fseek64(f, next, SEEK_SET) != 0)
             {
                 r.ok = false;
                 break;

@@ -87,6 +87,7 @@
 #include "vknn/graph.h"
 #include "vknn/io_link.h"
 #include "vknn/spec_decode.h"
+#include "vknn/version.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -196,9 +197,9 @@ static bool parseBucketSpec(const char *spec, BucketSpec *out) {
     {
         return false;
     }
-    static const char    kDimPrefix[]  = "dim:";
-    constexpr size_t     kDimPrefixLen = 4; // strlen("dim:")
-    size_t               start         = 0;
+    static const char kDimPrefix[]  = "dim:";
+    constexpr size_t  kDimPrefixLen = 4; // strlen("dim:")
+    size_t            start         = 0;
     while (start <= s.size())
     {
         size_t      semi = s.find(';', start);
@@ -421,8 +422,7 @@ static bool writeSupportReports(const std::vector<Graph> &buckets, const std::ve
 /// `sourceFiles` holds each bucket's source model path (one entry per bucket, extended for each new
 /// bucket). Runs BEFORE the quantization and fp16 sweeps, which then cover every bucket at once.
 /// A plan or compile failure only skips that bucket; the requested compile still succeeds.
-static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles,
-                                       const PassOptions &sharedOpt);
+static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles, const PassOptions &sharedOpt);
 
 /// Run the -Os weight-quantization pass over ALL buckets of one compile and print a summary line per
 /// bucket. The buckets are quantized together (quantizeWeightsShared) so a weight several of them
@@ -449,14 +449,13 @@ static void runQuantPass(std::vector<Graph> &buckets, const std::vector<std::str
         const QuantStats &qs = stats[b];
         // The calibration word reports where this bucket's statistics came from: its own run, or the
         // buckets that quantized every weight it shares before it was reached.
-        const char *calibWord = qs.shared == qs.quantized && qs.quantized > 0 ? "shared"
-                                : qs.calibrated                              ? (opts.calibFiles.empty() ? "synthetic" : "file")
-                                                                             : "no";
+        const char *calibWord = qs.shared == qs.quantized && qs.quantized > 0 ? "shared" :
+                                qs.calibrated                                 ? (opts.calibFiles.empty() ? "synthetic" : "file") :
+                                                                                "no";
         printf("[compile] -Os %s: bucket %zu '%s': quantized %lld/%lld eligible weights (%lld shared with another bucket, "
                "%lld kept fp16 by the error guard, %lld outlier columns, %s calibration), weights %.0f MB -> %.0f MB\n",
-               formatName, b, b < labels.size() ? labels[b].c_str() : "", (long long) qs.quantized, (long long) qs.sites,
-               (long long) qs.shared, (long long) qs.guardKept, (long long) qs.outlierCols, calibWord, qs.bytesBefore / 1e6,
-               qs.bytesAfter / 1e6);
+               formatName, b, b < labels.size() ? labels[b].c_str() : "", (long long) qs.quantized, (long long) qs.sites, (long long) qs.shared, (long long) qs.guardKept,
+               (long long) qs.outlierCols, calibWord, qs.bytesBefore / 1e6, qs.bytesAfter / 1e6);
     }
 }
 
@@ -467,15 +466,13 @@ static void runFp16Pass(std::vector<Graph> &buckets, const std::vector<std::stri
     for (size_t b = 0; b < buckets.size(); ++b)
     {
         const Fp16ConvertStats st = convertInitializersFp16(buckets[b]);
-        printf("[compile] fp16: bucket %zu '%s': converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", b,
-               b < labels.size() ? labels[b].c_str() : "", (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6,
-               st.bytesAfter / 1e6);
+        printf("[compile] fp16: bucket %zu '%s': converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", b, b < labels.size() ? labels[b].c_str() : "",
+               (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
     }
 }
 
 /// Import and append ONE planned widened-decode bucket. `role` names the path in the compile log.
-static void appendPlannedBucket(const WidenedDecodePlan &plan, const char *role, std::vector<Graph> &buckets, std::vector<std::string> &labels,
-                                std::vector<std::string> &sourceFiles, const PassOptions &sharedOpt) {
+static void appendPlannedBucket(const WidenedDecodePlan &plan, const char *role, std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles, const PassOptions &sharedOpt) {
     const std::string &file = sourceFiles[plan.decodeBucket < sourceFiles.size() ? plan.decodeBucket : 0];
     // The plan pins EVERY graph input to a full concrete shape (the strongest binding, overriding
     // any shared --dim for those tensors), so the bucket compiles from the same source with the same
@@ -502,8 +499,7 @@ static void appendPlannedBucket(const WidenedDecodePlan &plan, const char *role,
     sourceFiles.push_back(file);
 }
 
-static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles,
-                                       const PassOptions &sharedOpt) {
+static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<std::string> &labels, std::vector<std::string> &sourceFiles, const PassOptions &sharedOpt) {
     // Chunk-prefill first: its plan refuses when a bucket at 1 < S <= kChunkPrefillTokens already
     // exists, and the verification bucket is one such bucket.
     ChunkPrefillPlan chunkPlan;
@@ -519,6 +515,15 @@ static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<
 }
 
 int main(int argc, char **argv) {
+    // Before any other parsing, so --version needs no model argument.
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V"))
+        {
+            printf("vknn %s\n", vknnVersion());
+            return 0;
+        }
+    }
     // `--graph` selects the multi-graph form: no positional input model, one source graph per
     // occurrence, all compiled into one multi-bucket .vxm over a shared initializer pool.
     bool graphMode = false;
@@ -532,8 +537,10 @@ int main(int argc, char **argv) {
     }
     if (argc < (graphMode ? 2 : 3))
     {
-        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--dim NAME=VALUE] [--list-dims] [--shape NAME=D0xD1x...] [--bucket \"NAME=...;dim:NAME2=VALUE;...\"] [-O0..-O3 | --opt N | -Os] "
-               "[--quant-bits 4|8] [--calib F0[,F1,...]] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] [--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
+        printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--dim NAME=VALUE] [--list-dims] [--shape NAME=D0xD1x...] [--bucket "
+               "\"NAME=...;dim:NAME2=VALUE;...\"] [-O0..-O3 | --opt N | -Os] "
+               "[--quant-bits 4|8] [--calib F0[,F1,...]] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] "
+               "[--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
                "   or: %s <out.vxm> --graph \"FILE.onnx[;NAME=D0xD1x...;dim:NAME2=VALUE;...]\" [--graph ...] [shared flags as above]\n"
                "       each --graph occurrence compiles ONE bucket from its file (with its own shape/dim segments);\n"
                "       all buckets share one initializer pool in a single multi-graph .vxm\n",
@@ -541,13 +548,15 @@ int main(int argc, char **argv) {
         return 1;
     }
     const int   flagStart = graphMode ? 2 : 3;
-    std::string onnx = graphMode ? std::string() : argv[1];
-    std::string out  = graphMode ? argv[1] : argv[2];
+    std::string onnx      = graphMode ? std::string() : argv[1];
+    std::string out       = graphMode ? argv[1] : argv[2];
     if (graphMode && argc > 2 && argv[2][0] != '-')
     {
         // Mixed forms: `vknn_compile model.onnx out.vxm --graph ...` would make argv[1] the OUTPUT
         // and silently overwrite the source model. In graph mode the only positional is the output.
-        printf("[compile] --graph form takes ONE positional (the output .vxm); '%s' would be overwritten as the output and '%s' ignored. Use: %s <out.vxm> --graph \"FILE[;segments]\" ...\n", argv[1], argv[2], argv[0]);
+        printf("[compile] --graph form takes ONE positional (the output .vxm); '%s' would be overwritten as the output and '%s' ignored. Use: %s <out.vxm> "
+               "--graph \"FILE[;segments]\" ...\n",
+               argv[1], argv[2], argv[0]);
         return 1;
     }
     if (graphMode && !strcmp(argv[argc - 1], "--graph"))
@@ -754,9 +763,7 @@ int main(int argc, char **argv) {
             printf("[compile] importing %s (--list-dims) ...\n", file.c_str());
             Graph g;
             try
-            {
-                g = importOnnx(file);
-            } catch (const Error &e)
+            { g = importOnnx(file); } catch (const Error &e)
             {
                 printf("[compile] %s\n", e.what());
                 return 2;
@@ -969,8 +976,8 @@ int main(int argc, char **argv) {
         // act-prefold reports the activation fold the block fusions require as their prerequisite.
         // It is not an independent knob: it follows fuse-se/fuse-dwpw, so printing it keeps the two
         // arms of a block-fusion A/B self-documenting instead of leaving the difference implicit.
-        printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d act-prefold=%d fuse-pointwise=%d lower-conv=%d)\n", g.nodes.size(), g.initializers.size(), optLevel,
-               opt.fuseSqueezeExcite, opt.fuseDwPw, opt.fuseSqueezeExcite || opt.fuseDwPw, opt.fusePointwiseChains, opt.lowerConv);
+        printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d act-prefold=%d fuse-pointwise=%d lower-conv=%d)\n", g.nodes.size(),
+               g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw, opt.fuseSqueezeExcite || opt.fuseDwPw, opt.fusePointwiseChains, opt.lowerConv);
         runStandardPasses(g, opt);
     } catch (const Error &e)
     {
