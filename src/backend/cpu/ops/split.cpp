@@ -48,15 +48,15 @@ namespace vknn {
                     {
                         continue;
                     }
-                    RtTensor &Y   = ctx.t(node.outputs[k]);
+                    RtTensor &Y = ctx.t(node.outputs[k]);
                     // This output's extent along the split axis: its `split` entry, or an equal share
                     // of the runtime axis. The output shape is the runtime input shape with the split
                     // axis swapped for that extent.
-                    int64_t   seg = k < (int64_t) sp.size() ? sp[k] : X.shape[axis] / nout;
-                    Shape     os  = X.shape;
-                    os[axis]      = seg;
-                    float    *yf  = i64 ? nullptr : cpu::allocOut(Y, os);
-                    int64_t  *yi  = i64 ? cpu::allocOutI64(Y, os) : nullptr;
+                    int64_t seg = k < (int64_t) sp.size() ? sp[k] : X.shape[axis] / nout;
+                    Shape   os  = X.shape;
+                    os[axis]    = seg;
+                    float   *yf = i64 ? nullptr : cpu::allocOut(Y, os);
+                    int64_t *yi = i64 ? cpu::allocOutI64(Y, os) : nullptr;
                     // For each outer slab `o` and each position `s` within this output's segment, copy
                     // the contiguous `inner`-length row. Source axis index is `off + s` (this output's
                     // slice of the input axis), so the input is strided by its full X.shape[axis]; the

@@ -124,14 +124,14 @@ TEST(Passes, ReverseSliceKeepsTheAxisExtent) {
     // Reverse the channel axis: starts=[-1], ends=[INT64_MIN+1], axes=[1], steps=[-1].
     TensorId st = vec("starts", {-1}), en = vec("ends", {-9223372036854775807LL});
     TensorId ax = vec("axes", {1}), sp = vec("steps", {-1});
-    TensorId y  = g.addTensor({.name = "y"});
+    TensorId y = g.addTensor({"y"});
     Node     sl;
-    sl.type     = OpType::Slice;
-    sl.name     = "reverse_channels";
-    sl.inputs   = {x, st, en, ax, sp};
-    sl.outputs  = {y};
-    g.nodes     = {sl};
-    g.outputs   = {y};
+    sl.type    = OpType::Slice;
+    sl.name    = "reverse_channels";
+    sl.inputs  = {x, st, en, ax, sp};
+    sl.outputs = {y};
+    g.nodes    = {sl};
+    g.outputs  = {y};
     inferShapes(g, 1);
     ASSERT_EQ(g.desc(y).shape.size(), 4u);
     EXPECT_EQ(g.desc(y).shape[1], 2) << "a reverse slice of a 2-channel axis must keep both channels, not resolve to 0";
@@ -165,14 +165,14 @@ TEST(Ops, ReverseSliceOnCpuReversesTheAxis) {
     };
     TensorId st = vec("starts", {-1}), en = vec("ends", {-9223372036854775807LL});
     TensorId ax = vec("axes", {1}), sp = vec("steps", {-1});
-    TensorId y  = g.addTensor({.name = "y"});
+    TensorId y = g.addTensor({"y"});
     Node     sl;
-    sl.type     = OpType::Slice;
-    sl.name     = "reverse_channels";
-    sl.inputs   = {x, st, en, ax, sp};
-    sl.outputs  = {y};
-    g.nodes     = {sl};
-    g.outputs   = {y};
+    sl.type    = OpType::Slice;
+    sl.name    = "reverse_channels";
+    sl.inputs  = {x, st, en, ax, sp};
+    sl.outputs = {y};
+    g.nodes    = {sl};
+    g.outputs  = {y};
 
     Config cfg;
     cfg.backend = BackendKind::Cpu;
@@ -188,7 +188,7 @@ TEST(Ops, ReverseSliceOnCpuReversesTheAxis) {
     ASSERT_EQ(sess->run(inputs, outputs), Status::Ok);
     ASSERT_EQ(outputs.size(), 1u);
     EXPECT_EQ(outputs[0].shape, (Shape {1, 2, 1, 3}));
-    const float *got = outputs[0].f32();
+    const float *got     = outputs[0].f32();
     const float  want[6] = {4, 5, 6, 1, 2, 3}; // channels swapped
     for (int i = 0; i < 6; ++i)
     {

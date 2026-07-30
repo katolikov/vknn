@@ -58,10 +58,10 @@ namespace vknn {
                     inner *= d[k];
                 }
 
-                TensorId iid  = node.inputs[1];
+                TensorId iid = node.inputs[1];
                 // A scalar index has a rank-0 shape (numElements == 1); the max() keeps nIdx >= 1
                 // so the empty-shape scalar case still allocates and dispatches one index lane.
-                int64_t  nIdx = std::max<int64_t>(numElements(g.desc(iid).shape), 1);
+                int64_t nIdx = std::max<int64_t>(numElements(g.desc(iid).shape), 1);
                 if (g.isInitializer(iid))
                 { // const index -> upload as float (decode int64/fp16 as needed)
                     const HostBuffer  &hb  = g.initializers.at(iid);
@@ -92,7 +92,7 @@ namespace vknn {
                     idxBuf = upload(*env.ctx, iv, false); // index is always fp32 (gather.comp binding 1)
                 }
 
-                pc = {(int) numElements(out), (int) outer, (int) axisSize, (int) inner, (int) nIdx};
+                pc   = {(int) numElements(out), (int) outer, (int) axisSize, (int) inner, (int) nIdx};
                 pipe = env.pipeline(shader("gather", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
             }
 

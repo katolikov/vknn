@@ -71,7 +71,9 @@ namespace vknn { namespace cpu { namespace detail {
                 std::exception_ptr e;
                 {
                     std::unique_lock<std::mutex> lk(mu_);
-                    doneCv_.wait(lk, [this] { return awake_ == 0; });
+                    doneCv_.wait(lk, [this] {
+                        return awake_ == 0;
+                    });
                     e     = err_;
                     err_  = nullptr;
                     task_ = nullptr;
@@ -102,7 +104,9 @@ namespace vknn { namespace cpu { namespace detail {
                 std::lock_guard<std::mutex> lk(mu_);
                 while ((int) workers_.size() < want)
                 {
-                    workers_.emplace_back([this, g = gen_] { workerLoop(g); });
+                    workers_.emplace_back([this, g = gen_] {
+                        workerLoop(g);
+                    });
                 }
             }
 
@@ -112,10 +116,7 @@ namespace vknn { namespace cpu { namespace detail {
                 bool outer   = !tlInParallel;
                 tlInParallel = true;
                 try
-                {
-                    (*task_)(i);
-                }
-                catch (...)
+                { (*task_)(i); } catch (...)
                 {
                     std::lock_guard<std::mutex> lk(mu_);
                     if (!err_)
@@ -135,7 +136,9 @@ namespace vknn { namespace cpu { namespace detail {
                 {
                     {
                         std::unique_lock<std::mutex> lk(mu_);
-                        cv_.wait(lk, [this, seen] { return stop_ || gen_ != seen; });
+                        cv_.wait(lk, [this, seen] {
+                            return stop_ || gen_ != seen;
+                        });
                         seen = gen_;
                         if (stop_)
                         {

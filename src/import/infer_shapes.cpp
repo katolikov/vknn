@@ -217,8 +217,7 @@ namespace vknn {
                 {
                     continue; // inherited, not introduced here: the producer already reported it
                 }
-                VKNN_WARN << "node '" << nd.name << "' (" << opTypeName(nd.type) << ") resolved output '" << g.desc(o).name << "' to " << shapeStr(out)
-                          << " -- a zero-length axis, so this tensor and everything downstream of it computes nothing. Operands: " << operands;
+                VKNN_WARN << "node '" << nd.name << "' (" << opTypeName(nd.type) << ") resolved output '" << g.desc(o).name << "' to " << shapeStr(out) << " -- a zero-length axis, so this tensor and everything downstream of it computes nothing. Operands: " << operands;
             }
         }
     } // namespace

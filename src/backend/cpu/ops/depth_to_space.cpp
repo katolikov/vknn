@@ -21,7 +21,7 @@ namespace vknn {
                 {
                     b = 1;
                 }
-                bool         crd = node.attr.gets("mode", "DCR") == "CRD";
+                bool crd = node.attr.gets("mode", "DCR") == "CRD";
                 // Output geometry: b*b input channels collapse into each output channel while H and W
                 // each grow by b. C2 = C/(b*b) is exact because a valid DepthToSpace requires b*b | C.
                 int64_t      C2 = x.c / (b * b), OH = x.h * b, OW = x.w * b;
@@ -48,8 +48,8 @@ namespace vknn {
                                 // b x b block. DCR (default) lays block index ABOVE the output channel
                                 // in the input-channel axis (channel = blk*C2 + c); CRD lays it BELOW
                                 // (channel = c*b*b + blk). This is the only difference between the modes.
-                                int64_t blk    = bh * b + bw;
-                                int64_t ic     = crd ? (c * (b * b) + blk) : (blk * C2 + c);
+                                int64_t blk = bh * b + bw;
+                                int64_t ic  = crd ? (c * (b * b) + blk) : (blk * C2 + c);
                                 // Row-major (NCHW) flattening of the resolved 4-D coordinates: input at
                                 // (n, ic, ih, iw) with X's original channel count x.c, output at
                                 // (n, c, h, w) with C2 channels.

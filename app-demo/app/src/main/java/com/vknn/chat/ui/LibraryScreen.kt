@@ -30,6 +30,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.vknn.chat.BuildConfig
+import com.vknn.chat.NativeLib
 import com.vknn.chat.model.BackendPolicy
 import com.vknn.chat.model.InferenceBackend
 import com.vknn.chat.model.ModelSpec
@@ -87,6 +89,29 @@ fun LibraryScreen(
             ModelCard(spec, states[spec.id] ?: ModelState.Missing, loadErrors[spec.id], metered, backend, cpuVerdictFor, onDownload, onPause, onDelete)
             Spacer(Modifier.height(12.dp))
         }
+        VersionFooter()
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+// App and engine versions. The app's is stamped at APK assembly, the engine's into the prebuilt
+// libvknnchat.so; they differ whenever the bundled .so is stale.
+@Composable
+private fun VersionFooter() {
+    // Constant for the process; read once rather than per recomposition. A load failure is shown
+    // rather than thrown, so the screen still renders without the native library.
+    val engine = remember {
+        runCatching { NativeLib.nativeVknnVersion() }.getOrElse { "unavailable" }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Text("About", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "App ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+            color = TextSecondary,
+            fontSize = 12.sp,
+        )
+        Text("VKNN engine $engine", color = TextSecondary, fontSize = 12.sp)
     }
 }
 

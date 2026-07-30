@@ -1,12 +1,12 @@
 // Vulkan backend orchestrator: device context, op gate, shared pools, model cache.
 #pragma once
+#include "core/cache_codec.h"
 #include "vk_buffer.h"
 #include "vk_command.h"
 #include "vk_context.h"
 #include "vk_pipeline.h"
 #include "vk_weight_cache.h"
 #include "vk_weight_pool.h"
-#include "core/cache_codec.h"
 #include "vknn/backend.h"
 #include <functional>
 #include <map>
@@ -159,8 +159,8 @@ namespace vknn {
         // Pipeline-blob size the cache file already holds, so flushNewCacheWork can tell driver compiles
         // since the last save from a warm session that compiled nothing.
         size_t savedPipelineBytes_ = 0;
-        bool                 cacheLoaded_ = false;
-        bool                 noCache_     = false;
+        bool   cacheLoaded_        = false;
+        bool   noCache_            = false;
 
         std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;   // sharedPipeline()
         std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_;  // uploadPooled()

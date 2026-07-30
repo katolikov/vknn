@@ -26,8 +26,7 @@ using namespace vknn;
 // Read a raw little-endian fp32 file into a float vector (row-major NCHW, the layout the API expects).
 // This is ordinary file I/O so the example can accept a real input from disk; it is not part of the
 // engine. Returns empty on any error.
-static std::vector<float> readFloat32Bin(const char *path)
-{
+static std::vector<float> readFloat32Bin(const char *path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file)
     {
@@ -35,13 +34,12 @@ static std::vector<float> readFloat32Bin(const char *path)
     }
     std::vector<float> values((size_t) file.tellg() / sizeof(float));
     file.seekg(0);
-    file.read(reinterpret_cast<char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)));
+    file.read(reinterpret_cast<char *>(values.data()), (std::streamsize)(values.size() * sizeof(float)));
     return values;
 }
 // --- end plumbing -----------------------------------------------------------------------------------
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc < 2)
     {
         printf("usage: %s <model.vxm|model.onnx> [input.bin]\n", argv[0]);
@@ -90,8 +88,7 @@ int main(int argc, char **argv)
             return 1;
         }
         inputData.resize((size_t) firstInput.count);
-    }
-    else
+    } else
     {
         inputData.resize((size_t) firstInput.count);
         for (size_t i = 0; i < inputData.size(); ++i)

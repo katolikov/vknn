@@ -41,17 +41,17 @@ namespace vknn {
                 // scalar scale, computing coord = base + scale*flow per output location. The arithmetic
                 // reproduces the split Mul(float)+Add(float) it replaces exactly, so the two paths are
                 // byte-identical on this fp32 oracle.
-                const bool      warp  = node.attr.has("warp");
-                const RtTensor &G     = ctx.t(node.inputs[1]);
-                int             Hout  = warp ? (int) G.shape[2] : (int) G.shape[1];
-                int             Wout  = warp ? (int) G.shape[3] : (int) G.shape[2];
-                const float    *gd    = warp ? nullptr : G.host.f32();
-                const float    *flowd = warp ? G.host.f32() : nullptr;                     // [N,2,Hout,Wout]
-                const float    *based = warp ? ctx.t(node.inputs[2]).host.f32() : nullptr; // [Nb,Hout,Wout,2]
-                const float     scale = warp ? node.attr.getf("warp_scale", 1.f) : 0.f;
+                const bool      warp           = node.attr.has("warp");
+                const RtTensor &G              = ctx.t(node.inputs[1]);
+                int             Hout           = warp ? (int) G.shape[2] : (int) G.shape[1];
+                int             Wout           = warp ? (int) G.shape[3] : (int) G.shape[2];
+                const float    *gd             = warp ? nullptr : G.host.f32();
+                const float    *flowd          = warp ? G.host.f32() : nullptr;                     // [N,2,Hout,Wout]
+                const float    *based          = warp ? ctx.t(node.inputs[2]).host.f32() : nullptr; // [Nb,Hout,Wout,2]
+                const float     scale          = warp ? node.attr.getf("warp_scale", 1.f) : 0.f;
                 const bool      baseBroadcastN = warp && ctx.t(node.inputs[2]).shape[0] == 1;
                 // Normalized grid value at (n,oy,ox) for coordinate axis c (0=x, 1=y).
-                auto            gridVal        = [&](int64_t n, int oy, int ox, int c) -> double {
+                auto gridVal = [&](int64_t n, int oy, int ox, int c) -> double {
                     if (warp)
                     {
                         int64_t bn = baseBroadcastN ? 0 : n;
@@ -64,21 +64,21 @@ namespace vknn {
                     }
                     return (double) gd[((n * Hout + oy) * Wout + ox) * 2 + c];
                 };
-                std::string     mode    = node.attr.gets("mode", "linear");
-                bool            nearest = (mode == "nearest");
-                bool            cubic   = (mode == "cubic" || mode == "bicubic");
-                std::string     pad     = node.attr.gets("padding_mode", "zeros");
-                int             align   = (int) node.attr.geti("align_corners", 0);
+                std::string mode    = node.attr.gets("mode", "linear");
+                bool        nearest = (mode == "nearest");
+                bool        cubic   = (mode == "cubic" || mode == "bicubic");
+                std::string pad     = node.attr.gets("padding_mode", "zeros");
+                int         align   = (int) node.attr.geti("align_corners", 0);
                 // Denormalization selectors for `unnorm` below. align_corners=1 maps grid [-1,1] onto
                 // pixel centers [0, S-1] (a=1, b=0); align_corners=0 maps onto [-0.5, S-0.5], i.e. the
                 // outer edges of the border pixels (a=0, b=1).
-                int             a = align ? 1 : 0, b = 1 - a;
+                int a = align ? 1 : 0, b = 1 - a;
 
-                float       *y      = cpu::allocOut(Y, {x.n, x.c, (int64_t) Hout, (int64_t) Wout});
-                const float *xd     = X.host.f32();
+                float       *y  = cpu::allocOut(Y, {x.n, x.c, (int64_t) Hout, (int64_t) Wout});
+                const float *xd = X.host.f32();
                 // Grid value g in [-1, 1] -> input coordinate. Expands to (g+1)/2*(S-1) when
                 // align_corners (a=1,b=0) and ((g+1)*S - 1)/2 otherwise (a=0,b=1).
-                auto         unnorm = [&](double g, int S) {
+                auto unnorm = [&](double g, int S) {
                     return ((1.0 + g) * (S - a) - b) * 0.5;
                 };
                 auto handle = [&](double c, int S) { // map continuous coord per padding mode
@@ -112,8 +112,8 @@ namespace vknn {
                     {
                         for (int ox = 0; ox < Wout; ++ox)
                         {
-                            double  ix = handle(unnorm(gridVal(n, oy, ox, 0), (int) x.w), (int) x.w);
-                            double  iy = handle(unnorm(gridVal(n, oy, ox, 1), (int) x.h), (int) x.h);
+                            double ix = handle(unnorm(gridVal(n, oy, ox, 0), (int) x.w), (int) x.w);
+                            double iy = handle(unnorm(gridVal(n, oy, ox, 1), (int) x.h), (int) x.h);
                             if (nearest)
                             {
                                 // Round half up (floor(x+0.5)), the ONNX nearest convention: exact .5
@@ -130,7 +130,7 @@ namespace vknn {
                                 int    x0 = (int) std::floor(ix), y0 = (int) std::floor(iy);
                                 double tx = ix - x0, ty = iy - y0;
                                 auto   wts = [](double t, double w[4]) {
-                                    constexpr double A = -0.75;
+                                    constexpr double A  = -0.75;
                                     double           t1 = 1.0 + t, t2 = 2.0 - t;
                                     w[0] = A * t1 * t1 * t1 - 5 * A * t1 * t1 + 8 * A * t1 - 4 * A;
                                     w[1] = (A + 2) * t * t * t - (A + 3) * t * t + 1;

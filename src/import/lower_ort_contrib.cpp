@@ -88,7 +88,7 @@ namespace vknn {
             d.shape         = std::move(shape);
             d.dtype         = DType::Int64;
             d.isInitializer = true;
-            TensorId id     = g.addTensor(d);
+            TensorId   id   = g.addTensor(d);
             HostBuffer hb;
             hb.resizeElems((int64_t) v.size(), DType::Int64);
             std::memcpy(hb.i64(), v.data(), v.size() * 8);
@@ -105,7 +105,7 @@ namespace vknn {
             d.name          = name;
             d.shape         = std::move(shape);
             d.isInitializer = true;
-            TensorId id     = g.addTensor(d);
+            TensorId   id   = g.addTensor(d);
             HostBuffer hb;
             hb.resizeElems((int64_t) v.size(), DType::Float32);
             std::memcpy(hb.f32(), v.data(), v.size() * 4);
@@ -128,25 +128,25 @@ namespace vknn {
 
         void setAttrI(Node &n, const char *k, int64_t v) {
             Attr a;
-            a.kind          = Attr::Int;
-            a.i             = v;
-            n.attr.map[k]   = a;
+            a.kind        = Attr::Int;
+            a.i           = v;
+            n.attr.map[k] = a;
         }
         void setAttrF(Node &n, const char *k, float v) {
             Attr a;
-            a.kind          = Attr::Float;
-            a.f             = v;
-            n.attr.map[k]   = a;
+            a.kind        = Attr::Float;
+            a.f           = v;
+            n.attr.map[k] = a;
         }
         void setAttrInts(Node &n, const char *k, std::vector<int64_t> v) {
             Attr a;
-            a.kind          = Attr::Ints;
-            a.ints          = std::move(v);
-            n.attr.map[k]   = a;
+            a.kind        = Attr::Ints;
+            a.ints        = std::move(v);
+            n.attr.map[k] = a;
         }
 
         Node mkBinary(BinaryType op, const std::string &name, TensorId a, TensorId b, TensorId out) {
-            Node n = mkNode(OpType::Binary, name, {a, b}, {out});
+            Node n  = mkNode(OpType::Binary, name, {a, b}, {out});
             n.subOp = (int32_t) op;
             return n;
         }
@@ -191,8 +191,7 @@ namespace vknn {
             const TensorId input = nd.inputs[0], skip = nd.inputs[1], gamma = nd.inputs[2];
             const TensorId beta = simplified ? kNoTensor : optionalInput(nd, 3);
             const TensorId bias = simplified ? optionalInput(nd, 3) : optionalInput(nd, 4);
-            TensorId sum = nd.outputs.size() > 3 && nd.outputs[3] != kNoTensor ? nd.outputs[3]
-                                                                               : newTensor(g, nd.name + "#sum");
+            TensorId       sum  = nd.outputs.size() > 3 && nd.outputs[3] != kNoTensor ? nd.outputs[3] : newTensor(g, nd.name + "#sum");
             if (bias != kNoTensor)
             {
                 TensorId pre = newTensor(g, nd.name + "#insum");
@@ -202,10 +201,7 @@ namespace vknn {
             {
                 out.push_back(mkNode(OpType::Add, nd.name + "#add", {input, skip}, {sum}));
             }
-            Node norm = simplified ? mkNode(OpType::RMSNorm, nd.name + "#rms", {sum, gamma}, {nd.outputs[0]})
-                                   : mkNode(OpType::LayerNorm, nd.name + "#ln",
-                                            beta != kNoTensor ? std::vector<TensorId> {sum, gamma, beta} : std::vector<TensorId> {sum, gamma},
-                                            {nd.outputs[0]});
+            Node norm = simplified ? mkNode(OpType::RMSNorm, nd.name + "#rms", {sum, gamma}, {nd.outputs[0]}) : mkNode(OpType::LayerNorm, nd.name + "#ln", beta != kNoTensor ? std::vector<TensorId> {sum, gamma, beta} : std::vector<TensorId> {sum, gamma}, {nd.outputs[0]});
             setAttrF(norm, "epsilon", nd.attr.getf("epsilon", 1e-5f));
             if (!simplified)
             {
@@ -221,13 +217,10 @@ namespace vknn {
         //   cosU/sinU = unsqueeze(gather(cache, positions), axis 2)   [.., 1, head/2]
         //   y = reshape(concat(x1*cos - x2*sin, x1*sin + x2*cos), [B,S,H*head])
         // This is exactly the primitive form fuseRope re-collapses into one Rope dispatch at load.
-        void emitRotateHalf(Graph &g, std::vector<Node> &out, const std::string &base, TensorId x,
-                            TensorId pos, TensorId cosC, TensorId sinC,
-                            int64_t B, int64_t S, int64_t H, int64_t head, TensorId y) {
+        void emitRotateHalf(Graph &g, std::vector<Node> &out, const std::string &base, TensorId x, TensorId pos, TensorId cosC, TensorId sinC, int64_t B, int64_t S, int64_t H, int64_t head, TensorId y) {
             const int64_t half = head / 2;
             TensorId      r4   = newTensor(g, base + "#r4");
-            out.push_back(mkNode(OpType::Reshape, base + "#reshape4",
-                                 {x, addConstI64(g, base + "#s4", {B, S, H, head})}, {r4}));
+            out.push_back(mkNode(OpType::Reshape, base + "#reshape4", {x, addConstI64(g, base + "#s4", {B, S, H, head})}, {r4}));
             auto slice = [&](const char *tag, int64_t lo, int64_t hi) {
                 TensorId t  = newTensor(g, base + tag);
                 Node     sl = mkNode(OpType::Slice, base + "#slice" + tag, {r4}, {t});
@@ -237,9 +230,9 @@ namespace vknn {
                 out.push_back(std::move(sl));
                 return t;
             };
-            TensorId x1 = slice("#x1", 0, half);
-            TensorId x2 = slice("#x2", half, head);
-            auto gatherRows = [&](TensorId cache, const char *tag) {
+            TensorId x1         = slice("#x1", 0, half);
+            TensorId x2         = slice("#x2", half, head);
+            auto     gatherRows = [&](TensorId cache, const char *tag) {
                 TensorId rows = newTensor(g, base + tag);
                 Node     gn   = mkNode(OpType::Gather, base + "#gather" + tag, {cache, pos}, {rows});
                 setAttrI(gn, "axis", 0);
@@ -266,8 +259,7 @@ namespace vknn {
             Node     cc  = mkNode(OpType::Concat, base + "#concat", {o1, o2}, {cat});
             setAttrI(cc, "axis", 3);
             out.push_back(std::move(cc));
-            out.push_back(mkNode(OpType::Reshape, base + "#reshape3",
-                                 {cat, addConstI64(g, base + "#s3", {B, S, H * head})}, {y}));
+            out.push_back(mkNode(OpType::Reshape, base + "#reshape3", {cat, addConstI64(g, base + "#s3", {B, S, H * head})}, {y}));
         }
 
         // RotaryEmbedding (x[B,S,H*head], position_ids[B,S] or [1,S], cos_cache/sin_cache
@@ -338,29 +330,27 @@ namespace vknn {
             {
                 return false; // unequal q/k/v widths would need the separate-head-size form
             }
-            const int64_t hd    = E / H;
-            const float   scale = nd.attr.getf("scale", (float) (1.0 / std::sqrt((double) hd)));
-            const std::string base = nd.name;
+            const int64_t     hd    = E / H;
+            const float       scale = nd.attr.getf("scale", (float) (1.0 / std::sqrt((double) hd)));
+            const std::string base  = nd.name;
 
             auto reshapeTranspose = [&](TensorId src, int64_t rows, const std::vector<int64_t> &perm, const char *tag) {
                 TensorId r = newTensor(g, base + tag + std::string("r"));
-                out.push_back(mkNode(OpType::Reshape, base + "#reshape" + tag,
-                                     {src, addConstI64(g, base + tag + std::string("s"), {B, rows, H, hd})}, {r}));
+                out.push_back(mkNode(OpType::Reshape, base + "#reshape" + tag, {src, addConstI64(g, base + tag + std::string("s"), {B, rows, H, hd})}, {r}));
                 TensorId t  = newTensor(g, base + tag);
                 Node     tr = mkNode(OpType::Transpose, base + "#transpose" + tag, {r}, {t});
                 setAttrInts(tr, "perm", perm);
                 out.push_back(std::move(tr));
                 return t;
             };
-            TensorId qT = reshapeTranspose(q, S, {0, 2, 1, 3}, "#q");  // [B,H,S,hd]
-            TensorId kT = reshapeTranspose(k, T, {0, 2, 3, 1}, "#k");  // [B,H,hd,T]
-            TensorId vT = reshapeTranspose(v, T, {0, 2, 1, 3}, "#v");  // [B,H,T,hd]
+            TensorId qT = reshapeTranspose(q, S, {0, 2, 1, 3}, "#q"); // [B,H,S,hd]
+            TensorId kT = reshapeTranspose(k, T, {0, 2, 3, 1}, "#k"); // [B,H,hd,T]
+            TensorId vT = reshapeTranspose(v, T, {0, 2, 1, 3}, "#v"); // [B,H,T,hd]
 
             TensorId scores = newTensor(g, base + "#scores");
             out.push_back(mkNode(OpType::MatMul, base + "#qk", {qT, kT}, {scores}));
             TensorId scaled = newTensor(g, base + "#scaled");
-            out.push_back(mkBinary(BinaryType::Mul, base + "#scale",
-                                   scores, addConstF32(g, base + "#scalec", scale), scaled));
+            out.push_back(mkBinary(BinaryType::Mul, base + "#scale", scores, addConstF32(g, base + "#scalec", scale), scaled));
             TensorId logits = scaled;
             if (attnBias != kNoTensor)
             {
@@ -377,8 +367,7 @@ namespace vknn {
             Node     tr   = mkNode(OpType::Transpose, base + "#transposeO", {ctx}, {ctxT});
             setAttrInts(tr, "perm", {0, 2, 1, 3});
             out.push_back(std::move(tr));
-            out.push_back(mkNode(OpType::Reshape, base + "#reshapeO",
-                                 {ctxT, addConstI64(g, base + "#so", {B, S, E})}, {nd.outputs[0]}));
+            out.push_back(mkNode(OpType::Reshape, base + "#reshapeO", {ctxT, addConstI64(g, base + "#so", {B, S, E})}, {nd.outputs[0]}));
             return true;
         }
 
@@ -438,8 +427,7 @@ namespace vknn {
                 }
             }
             const bool doRotary = nd.attr.geti("do_rotary", 0) != 0;
-            if (nd.attr.geti("local_window_size", -1) != -1 || nd.attr.getf("softcap", 0.0f) != 0.0f ||
-                nd.attr.geti("smooth_softmax", 0) != 0 || (doRotary && nd.attr.geti("rotary_interleaved", 0) != 0))
+            if (nd.attr.geti("local_window_size", -1) != -1 || nd.attr.getf("softcap", 0.0f) != 0.0f || nd.attr.geti("smooth_softmax", 0) != 0 || (doRotary && nd.attr.geti("rotary_interleaved", 0) != 0))
             {
                 return false;
             }
@@ -512,19 +500,16 @@ namespace vknn {
                 setAttrI(cast, "to", 7); // ONNX TensorProto INT64
                 out.push_back(std::move(cast));
                 TensorId seqB1 = newTensorI64(g, base + "#seqlens_b1");
-                out.push_back(mkNode(OpType::Reshape, base + "#reshape_seqlens",
-                                     {seqI, addConstI64(g, base + "#seqlens_shape", {B, 1})}, {seqB1}));
+                out.push_back(mkNode(OpType::Reshape, base + "#reshape_seqlens", {seqI, addConstI64(g, base + "#seqlens_shape", {B, 1})}, {seqB1}));
                 TensorId pastLen = newTensorI64(g, base + "#past_len");
-                out.push_back(mkBinary(BinaryType::Sub, base + "#sub_past_len", seqB1,
-                                       addConstI64(g, base + "#s_minus_1", {S - 1}), pastLen));
+                out.push_back(mkBinary(BinaryType::Sub, base + "#sub_past_len", seqB1, addConstI64(g, base + "#s_minus_1", {S - 1}), pastLen));
                 std::vector<int64_t> ar((size_t) S);
                 for (int64_t i = 0; i < S; ++i)
                 {
                     ar[(size_t) i] = i;
                 }
                 TensorId positions = newTensorI64(g, base + "#positions");
-                out.push_back(mkNode(OpType::Add, base + "#add_positions",
-                                     {pastLen, addConstI64Shaped(g, base + "#arange_s", {1, S}, ar)}, {positions}));
+                out.push_back(mkNode(OpType::Add, base + "#add_positions", {pastLen, addConstI64Shaped(g, base + "#arange_s", {1, S}, ar)}, {positions}));
                 dv.positions = positions;
 
                 // Additive mask over the concat-form key axis [past(P) | new(S)]:
@@ -541,22 +526,15 @@ namespace vknn {
                     }
                     TensorId colIdx   = addConstI64Shaped(g, base + "#past_cols", {1, 1, 1, P}, cols);
                     TensorId pastLen4 = newTensorI64(g, base + "#past_len4");
-                    out.push_back(mkNode(OpType::Reshape, base + "#reshape_past_len",
-                                         {pastLen, addConstI64(g, base + "#past_len4_shape", {B, 1, 1, 1})}, {pastLen4}));
+                    out.push_back(mkNode(OpType::Reshape, base + "#reshape_past_len", {pastLen, addConstI64(g, base + "#past_len4_shape", {B, 1, 1, 1})}, {pastLen4}));
                     TensorId colValid = newTensor(g, base + "#past_col_valid");
                     out.push_back(mkNode(OpType::Less, base + "#less_past_cols", {colIdx, pastLen4}, {colValid}));
                     TensorId pastMask = newTensor(g, base + "#past_mask");
-                    out.push_back(mkNode(OpType::Where, base + "#where_past_mask",
-                                         {colValid, addConstF32(g, base + "#mask_zero", 0.0f),
-                                          addConstF32(g, base + "#mask_blocked", kMaskBlocked)},
-                                         {pastMask}));
+                    out.push_back(mkNode(OpType::Where, base + "#where_past_mask", {colValid, addConstF32(g, base + "#mask_zero", 0.0f), addConstF32(g, base + "#mask_blocked", kMaskBlocked)}, {pastMask}));
                     // Widen to the full T columns: the S new-token columns carry zero here (the
                     // causal triangle below owns them).
                     TensorId widened = newTensor(g, base + "#mask_t");
-                    Node     cat     = mkNode(OpType::Concat, base + "#concat_mask",
-                                              {pastMask, addConstF32Shaped(g, base + "#new_cols_zero", {B, 1, 1, S},
-                                                                           std::vector<float>((size_t) (B * S), 0.0f))},
-                                              {widened});
+                    Node cat = mkNode(OpType::Concat, base + "#concat_mask", {pastMask, addConstF32Shaped(g, base + "#new_cols_zero", {B, 1, 1, S}, std::vector<float>((size_t) (B * S), 0.0f))}, {widened});
                     setAttrI(cat, "axis", 3);
                     out.push_back(std::move(cat));
                     mask = widened;
@@ -598,8 +576,7 @@ namespace vknn {
             // --- head-major reshape/transpose: [B,S,H*hd] -> [B,H,S,hd] ---
             auto headMajor = [&](TensorId src, int64_t H, const char *tag) {
                 TensorId r = newTensor(g, base + tag + std::string("_r"));
-                out.push_back(mkNode(OpType::Reshape, base + "#reshape" + tag,
-                                     {src, addConstI64(g, base + tag + std::string("_s"), {B, S, H, hd})}, {r}));
+                out.push_back(mkNode(OpType::Reshape, base + "#reshape" + tag, {src, addConstI64(g, base + tag + std::string("_s"), {B, S, H, hd})}, {r}));
                 TensorId t  = newTensor(g, base + tag);
                 Node     tr = mkNode(OpType::Transpose, base + "#transpose" + tag, {r}, {t});
                 setAttrInts(tr, "perm", {0, 2, 1, 3});
@@ -609,9 +586,7 @@ namespace vknn {
 
             // --- presents: Concat(past, new) along the token axis ---
             auto emitPresent = [&](TensorId past, TensorId newRows, size_t outIdx, const char *tag) {
-                TensorId present = nd.outputs.size() > outIdx && nd.outputs[outIdx] != kNoTensor
-                                       ? nd.outputs[outIdx]
-                                       : newTensor(g, base + tag + std::string("_present"));
+                TensorId present = nd.outputs.size() > outIdx && nd.outputs[outIdx] != kNoTensor ? nd.outputs[outIdx] : newTensor(g, base + tag + std::string("_present"));
                 Node cat = mkNode(OpType::Concat, base + "#concat" + tag, {past, newRows}, {present});
                 setAttrI(cat, "axis", 2);
                 out.push_back(std::move(cat));
@@ -629,11 +604,9 @@ namespace vknn {
                 setAttrInts(uq, "axes", {2});
                 out.push_back(std::move(uq));
                 TensorId e = newTensor(g, base + tag + std::string("_e"));
-                out.push_back(mkNode(OpType::Expand, base + "#expand" + tag,
-                                     {u, addConstI64(g, base + tag + std::string("_es"), {B, Hkv, grp, T, hd})}, {e}));
+                out.push_back(mkNode(OpType::Expand, base + "#expand" + tag, {u, addConstI64(g, base + tag + std::string("_es"), {B, Hkv, grp, T, hd})}, {e}));
                 TensorId r = newTensor(g, base + tag);
-                out.push_back(mkNode(OpType::Reshape, base + "#reshape" + tag,
-                                     {e, addConstI64(g, base + tag + std::string("_rs"), {B, Hq, T, hd})}, {r}));
+                out.push_back(mkNode(OpType::Reshape, base + "#reshape" + tag, {e, addConstI64(g, base + tag + std::string("_rs"), {B, Hq, T, hd})}, {r}));
                 return r;
             };
             TensorId kAll = repeatKv(presentK, "#k_all"); // [B,Hq,T,hd]
@@ -650,8 +623,7 @@ namespace vknn {
             TensorId scores = newTensor(g, base + "#scores");
             out.push_back(mkNode(OpType::MatMul, base + "#qk", {qT, kT}, {scores}));
             TensorId scaled = newTensor(g, base + "#scaled");
-            out.push_back(mkBinary(BinaryType::Mul, base + "#scale",
-                                   scores, addConstF32(g, base + "#scale_c", scale), scaled));
+            out.push_back(mkBinary(BinaryType::Mul, base + "#scale", scores, addConstF32(g, base + "#scale_c", scale), scaled));
             TensorId logits = scaled;
             if (dv.mask != kNoTensor)
             {
@@ -668,8 +640,7 @@ namespace vknn {
             Node     tr   = mkNode(OpType::Transpose, base + "#transpose_out", {ctx}, {ctxT});
             setAttrInts(tr, "perm", {0, 2, 1, 3});
             out.push_back(std::move(tr));
-            out.push_back(mkNode(OpType::Reshape, base + "#reshape_out",
-                                 {ctxT, addConstI64(g, base + "#out_shape", {B, S, E})}, {nd.outputs[0]}));
+            out.push_back(mkNode(OpType::Reshape, base + "#reshape_out", {ctxT, addConstI64(g, base + "#out_shape", {B, S, E})}, {nd.outputs[0]}));
             return true;
         }
 
@@ -713,8 +684,8 @@ namespace vknn {
             {
                 for (int64_t k = 0; k < K; ++k)
                 {
-                    const uint8_t byte = (uint8_t) bqf[(size_t) (n * kBlocks * blobBytes + (k / bs) * blobBytes + (k % bs) / 2)];
-                    const int     nib  = (k & 1) ? (byte >> 4) : (byte & 0xF);
+                    const uint8_t byte      = (uint8_t) bqf[(size_t) (n * kBlocks * blobBytes + (k / bs) * blobBytes + (k % bs) / 2)];
+                    const int     nib       = (k & 1) ? (byte >> 4) : (byte & 0xF);
                     q[(size_t) (k * N + n)] = (int8_t) (nib - 8);
                 }
             }
@@ -728,11 +699,11 @@ namespace vknn {
                 }
             }
             const std::string wname = g.desc(bq).name.empty() ? nd.name + "#w" : g.desc(bq).name;
-            TensorDesc wd;
-            wd.name          = wname + "#i4w";
-            wd.shape         = {K, N}; // the logical view; the payload is the packed bytes
-            wd.dtype         = DType::Float16;
-            wd.isInitializer = true;
+            TensorDesc        wd;
+            wd.name               = wname + "#i4w";
+            wd.shape              = {K, N}; // the logical view; the payload is the packed bytes
+            wd.dtype              = DType::Float16;
+            wd.isInitializer      = true;
             const TensorId weight = g.addTensor(wd);
             {
                 HostBuffer hb;
@@ -740,13 +711,13 @@ namespace vknn {
                 g.initializers[weight] = std::move(hb);
             }
             TensorDesc sd;
-            sd.name          = wname + "#i4s";
-            sd.shape         = {kBlocks * N};
-            sd.dtype         = DType::Float16;
-            sd.isInitializer = true;
+            sd.name                = wname + "#i4s";
+            sd.shape               = {kBlocks * N};
+            sd.dtype               = DType::Float16;
+            sd.isInitializer       = true;
             const TensorId scaleId = g.addTensor(sd);
             {
-                HostBuffer hb;
+                HostBuffer           hb;
                 std::vector<uint8_t> bytes((const uint8_t *) scales.data(), (const uint8_t *) scales.data() + scales.size() * 2);
                 hb.bytes                = std::move(bytes);
                 g.initializers[scaleId] = std::move(hb);
@@ -754,7 +725,9 @@ namespace vknn {
             nd.type   = OpType::MatMul;
             nd.inputs = {nd.inputs[0], weight};
             nd.attr.map.clear();
-            auto seti = [&](const char *key, int64_t v) { setAttrI(nd, key, v); };
+            auto seti = [&](const char *key, int64_t v) {
+                setAttrI(nd, key, v);
+            };
             seti(kWq, kWqVersion);
             seti(kWqK, K);
             seti(kWqN, N);

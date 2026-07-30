@@ -25,25 +25,25 @@
 // the attention kernels multiply back); code = roundEven(x / scale) clamped to [-127, 127], zero
 // when the scale is zero; dequant = float(code) * scale in fp32.
 #pragma once
+#include "core/fused_attention.h"
 #include "vknn/config_struct.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
-#include "core/fused_attention.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <string>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace vknn {
 
-    inline constexpr int   kKvQuantBits        = 8;      // payload bits per cached element
-    inline constexpr float kKvQuantMaxCode     = 127.f;  // symmetric: codes span [-127, 127]
-    inline constexpr int   kKvQuantScaleBytes  = 2;      // one fp16 scale per (head, token) row
+    inline constexpr int   kKvQuantBits       = 8;     // payload bits per cached element
+    inline constexpr float kKvQuantMaxCode    = 127.f; // symmetric: codes span [-127, 127]
+    inline constexpr int   kKvQuantScaleBytes = 2;     // one fp16 scale per (head, token) row
     // The cache holds fp16-stored values, so no legitimate row magnitude exceeds the fp16 finite
     // ceiling; clamping absmax there keeps the scale finite even against a hostile host mirror.
-    inline constexpr float kKvQuantAbsMaxCeil  = 65504.f;
+    inline constexpr float kKvQuantAbsMaxCeil = 65504.f;
 
     /// absmax over one cache row: NaN elements are skipped (std::fmax ignores a NaN operand) and
     /// the result saturates at the fp16 finite ceiling, so the derived scale is always finite.

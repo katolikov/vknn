@@ -196,14 +196,14 @@ namespace vknn {
                 float *out = hb.f32();
                 for (size_t e = 0; e < xv.size(); ++e)
                 {
-                    size_t c   = sv.size() == 1 ? 0 : (size_t) ((int64_t) e / inner) % sv.size();
-                    double zp  = zv.empty() ? 0.0 : zv[zv.size() == 1 ? 0 : c];
-                    out[e]     = (float) ((xv[e] - zp) * sv[c]);
+                    size_t c  = sv.size() == 1 ? 0 : (size_t) ((int64_t) e / inner) % sv.size();
+                    double zp = zv.empty() ? 0.0 : zv[zv.size() == 1 ? 0 : c];
+                    out[e]    = (float) ((xv[e] - zp) * sv[c]);
                 }
-                TensorDesc &yd  = g.desc(y);
-                yd.isInitializer = true;
-                yd.dtype         = DType::Float32;
-                yd.shape         = shape;
+                TensorDesc &yd    = g.desc(y);
+                yd.isInitializer  = true;
+                yd.dtype          = DType::Float32;
+                yd.shape          = shape;
                 g.initializers[y] = std::move(hb);
                 remove.insert(i); // the orphaned x/scale/zp payloads fall to pruneDeadInitializers
             }
@@ -243,7 +243,7 @@ namespace vknn {
             TensorId   id   = g.addTensor(std::move(d));
             HostBuffer hb;
             hb.resizeElems(1, DType::Float32);
-            hb.f32()[0]     = v;
+            hb.f32()[0]        = v;
             g.initializers[id] = std::move(hb);
             return id;
         }
@@ -282,17 +282,17 @@ namespace vknn {
             {
                 zpv = zv[0];
             }
-            float    lo = (float) ((qmin - zpv) * sv[0]);
-            float    hi = (float) ((qmax - zpv) * sv[0]);
+            float lo = (float) ((qmin - zpv) * sv[0]);
+            float hi = (float) ((qmax - zpv) * sv[0]);
             // Name off the clamped tensor id (not just its name, which may be empty on an anonymous
             // intermediate) so clamps on distinct hops never collide.
             std::string base = g.desc(x).name + "_qclamp" + std::to_string((long long) x);
-            TensorId loId = addScalarFloatInit(g, base + "_lo", lo);
-            TensorId hiId = addScalarFloatInit(g, base + "_hi", hi);
-            TensorDesc yd;
-            yd.name       = base;
-            TensorId y    = g.addTensor(std::move(yd));
-            Node clip;
+            TensorId    loId = addScalarFloatInit(g, base + "_lo", lo);
+            TensorId    hiId = addScalarFloatInit(g, base + "_hi", hi);
+            TensorDesc  yd;
+            yd.name    = base;
+            TensorId y = g.addTensor(std::move(yd));
+            Node     clip;
             clip.type    = OpType::Clip;
             clip.name    = base;
             clip.inputs  = {x, loId, hiId};
@@ -323,10 +323,10 @@ namespace vknn {
                     }
                 }
             }
-            std::set<size_t> remove;
-            int              collapsed = 0;
-            std::vector<Node> added;               // Clip nodes to append after the iteration
-            std::map<size_t, TensorId> clampOf;    // Q producer index -> its shared clamp output (fan-out reuse)
+            std::set<size_t>           remove;
+            int                        collapsed = 0;
+            std::vector<Node>          added;   // Clip nodes to append after the iteration
+            std::map<size_t, TensorId> clampOf; // Q producer index -> its shared clamp output (fan-out reuse)
             for (size_t i = 0; i < g.nodes.size(); ++i)
             {
                 const Node &dq = g.nodes[i];
@@ -470,7 +470,7 @@ namespace vknn {
             std::vector<float> out(wv.size());
             for (size_t e = 0; e < wv.size(); ++e)
             {
-                size_t c = sv.size() == 1 ? 0 : (size_t) ((int64_t) e / inner) % sv.size();
+                size_t c   = sv.size() == 1 ? 0 : (size_t) ((int64_t) e / inner) % sv.size();
                 double zpv = zv.empty() ? 0.0 : zv[zv.size() == 1 ? 0 : c];
                 out[e]     = (float) ((wv[e] - zpv) * sv[c]);
             }
@@ -560,9 +560,9 @@ namespace vknn {
                 {
                     continue;
                 }
-                OpType   ft;    // the float op the decomposition emits
+                OpType   ft;                                  // the float op the decomposition emits
                 TensorId yScale = kNoTensor, yZp = kNoTensor; // output quant range
-                Node     fn;    // the rewritten float node (reuses the original output id below)
+                Node     fn;                                  // the rewritten float node (reuses the original output id below)
                 fn.name = n.name;
                 switch (n.type)
                 {
@@ -572,10 +572,10 @@ namespace vknn {
                         {
                             continue;
                         }
-                        ft            = OpType::Conv;
+                        ft          = OpType::Conv;
                         TensorId xs = n.inputs[1], xzp = n.inputs[2];
-                        TensorId x    = activationOperand(g, n.inputs[0], xs, xzp, n.name + "_Xf");
-                        TensorId w    = n.inputs[3], ws = n.inputs[4], wzp = n.inputs[5];
+                        TensorId x = activationOperand(g, n.inputs[0], xs, xzp, n.name + "_Xf");
+                        TensorId w = n.inputs[3], ws = n.inputs[4], wzp = n.inputs[5];
                         yScale        = n.inputs[6];
                         yZp           = n.inputs[7];
                         int64_t  axis = n.attr.geti("axis", 0); // per-axis weights default to axis 0
@@ -605,9 +605,9 @@ namespace vknn {
                         {
                             continue;
                         }
-                        ft            = OpType::MatMul;
-                        TensorId a    = activationOperand(g, n.inputs[0], n.inputs[1], n.inputs[2], n.name + "_Af");
-                        TensorId b    = n.inputs[3], bs = n.inputs[4], bzp = n.inputs[5];
+                        ft         = OpType::MatMul;
+                        TensorId a = activationOperand(g, n.inputs[0], n.inputs[1], n.inputs[2], n.name + "_Af");
+                        TensorId b = n.inputs[3], bs = n.inputs[4], bzp = n.inputs[5];
                         yScale        = n.inputs[6];
                         yZp           = n.inputs[7];
                         int64_t  axis = n.attr.geti("axis", 1);
@@ -628,9 +628,9 @@ namespace vknn {
                         }
                         ft            = OpType::Gemm;
                         bool     hasC = n.inputs.size() >= 9; // C present when 9 inputs (8 = no bias)
-                        TensorId as = n.inputs[1];
+                        TensorId as   = n.inputs[1];
                         TensorId a    = activationOperand(g, n.inputs[0], as, n.inputs[2], n.name + "_Af");
-                        TensorId b    = n.inputs[3], bs = n.inputs[4], bzp = n.inputs[5];
+                        TensorId b = n.inputs[3], bs = n.inputs[4], bzp = n.inputs[5];
                         yScale        = n.inputs[hasC ? 7 : 6];
                         yZp           = n.inputs[hasC ? 8 : 7];
                         int64_t  axis = n.attr.geti("axis", 0);
@@ -660,13 +660,13 @@ namespace vknn {
                         {
                             continue;
                         }
-                        ft            = OpType::Binary;
-                        fn.subOp      = (int) BinaryType::Add;
+                        ft       = OpType::Binary;
+                        fn.subOp = (int) BinaryType::Add;
                         // Either addend may be an activation (read as float) or a genuine quantized
                         // initializer (dequantized here) -- ORT feeds the classifier bias as a
                         // quantized tensor on the tail QLinearAdd, so both go through activationOperand.
-                        TensorId aA   = activationOperand(g, n.inputs[0], n.inputs[1], n.inputs[2], n.name + "_Af");
-                        TensorId aB   = activationOperand(g, n.inputs[3], n.inputs[4], n.inputs[5], n.name + "_Bf");
+                        TensorId aA = activationOperand(g, n.inputs[0], n.inputs[1], n.inputs[2], n.name + "_Af");
+                        TensorId aB = activationOperand(g, n.inputs[3], n.inputs[4], n.inputs[5], n.name + "_Bf");
                         if (aA == kNoTensor || aB == kNoTensor)
                         {
                             VKNN_WARN << "QLinearAdd " << n.name << " kept: operand dequant fold failed";
@@ -701,9 +701,9 @@ namespace vknn {
                 // The float op writes an intermediate tensor; the Clip to the output quant range takes
                 // the op's original output id, so consumers read the clamped real-valued float.
                 TensorDesc mid;
-                mid.name     = n.name + "_pre";
-                TensorId m   = g.addTensor(std::move(mid));
-                TensorId yid = n.outputs[0];
+                mid.name         = n.name + "_pre";
+                TensorId m       = g.addTensor(std::move(mid));
+                TensorId yid     = n.outputs[0];
                 TensorId clamped = insertQuantClamp(g, yScale, yZp, m, added);
                 if (clamped == kNoTensor)
                 {
@@ -777,7 +777,7 @@ namespace vknn {
                 {
                     continue; // a const-quantize (rare) is not an activation hop; leave for the CPU op
                 }
-                TensorId zp = n.inputs.size() > 2 ? n.inputs[2] : kNoTensor;
+                TensorId zp      = n.inputs.size() > 2 ? n.inputs[2] : kNoTensor;
                 TensorId clamped = insertQuantClamp(g, n.inputs[1], zp, f, added);
                 if (clamped == kNoTensor)
                 {
@@ -849,7 +849,7 @@ namespace vknn {
         // consumers (a cluster tail we only lower when the chain is linear). A graph output counts as
         // an extra consumer and forces the multi-consumer bail.
         size_t soleConsumer(const Graph &g, const std::set<size_t> &removed, TensorId t) {
-            auto c = consumersOf(g, removed, t);
+            auto             c = consumersOf(g, removed, t);
             std::set<size_t> nodes;
             for (auto &p: c)
             {
@@ -928,7 +928,7 @@ namespace vknn {
                 const char *opName = opTypeName(intOp.type);
                 // The activation operand must come from a DynamicQuantizeLinear; x_f is its float input,
                 // fed to the float op directly. w_q must be an initializer.
-                TensorId xq = intOp.inputs[0];
+                TensorId xq    = intOp.inputs[0];
                 auto     dqlIt = producer.find(xq);
                 if (dqlIt == producer.end() || remove.count(dqlIt->second) || g.nodes[dqlIt->second].type != OpType::DynamicQuantizeLinear)
                 {
@@ -940,8 +940,8 @@ namespace vknn {
                 {
                     continue;
                 }
-                TensorId xf   = dql.inputs[0];       // the unquantized float activation
-                TensorId xScl = dql.outputs[1];      // x_scale (the scales-Mul reads this)
+                TensorId xf   = dql.inputs[0];  // the unquantized float activation
+                TensorId xScl = dql.outputs[1]; // x_scale (the scales-Mul reads this)
                 TensorId wq   = intOp.inputs[1];
                 TensorId wzp  = intOp.inputs.size() > 3 ? intOp.inputs[3] : kNoTensor;
                 if (!g.isInitializer(wq))
@@ -956,16 +956,17 @@ namespace vknn {
                     VKNN_WARN << opName << " " << intOp.name << " kept: int32 output is not consumed by a single Cast";
                     continue;
                 }
-                const Node &cast = g.nodes[castIdx];
+                const Node &cast   = g.nodes[castIdx];
                 size_t      mulIdx = soleConsumer(g, remove, cast.outputs[0]);
-                if (mulIdx == (size_t) -1 || g.nodes[mulIdx].type != OpType::Binary || g.nodes[mulIdx].subOp != (int) BinaryType::Mul || g.nodes[mulIdx].inputs.size() != 2 || g.nodes[mulIdx].outputs.empty())
+                if (mulIdx == (size_t) -1 || g.nodes[mulIdx].type != OpType::Binary || g.nodes[mulIdx].subOp != (int) BinaryType::Mul || g.nodes[mulIdx].inputs.size() != 2 ||
+                    g.nodes[mulIdx].outputs.empty())
                 {
                     VKNN_WARN << opName << " " << intOp.name << " kept: cast output is not consumed by a single scale Mul";
                     continue;
                 }
                 const Node &outMul = g.nodes[mulIdx];
                 // The Mul's other operand is the scales-Mul (x_s * w_s). Identify it and recover w_s.
-                TensorId combS = outMul.inputs[0] == cast.outputs[0] ? outMul.inputs[1] : outMul.inputs[0];
+                TensorId combS   = outMul.inputs[0] == cast.outputs[0] ? outMul.inputs[1] : outMul.inputs[0];
                 auto     scMulIt = producer.find(combS);
                 if (scMulIt == producer.end())
                 {
@@ -985,9 +986,7 @@ namespace vknn {
                 {
                     ws = scMul.inputs[1];
                 } else if (scMul.inputs[1] == xScl)
-                {
-                    ws = scMul.inputs[0];
-                }
+                { ws = scMul.inputs[0]; }
                 if (ws == kNoTensor || !g.isInitializer(ws))
                 {
                     VKNN_WARN << opName << " " << intOp.name << " kept: weight scale is not an initializer combined with the activation scale";
@@ -1075,8 +1074,8 @@ namespace vknn {
     // pruneDeadInitializers at the end of the pipeline.
     void dequantizeGraph(Graph &g) {
         std::set<TensorId> floatValued; // activation edges the QLinear decomposition made real-float
-        int                decomposed = decomposeQLinearOps(g, floatValued);
-        int                boundary   = decomposed ? resolveBoundaryQuant(g, floatValued) : 0;
+        int                decomposed  = decomposeQLinearOps(g, floatValued);
+        int                boundary    = decomposed ? resolveBoundaryQuant(g, floatValued) : 0;
         int                dynClusters = lowerDynamicQuantClusters(g);
         int                folded      = foldWeightDequant(g);
         int                collapsed   = collapseQdqSandwiches(g);

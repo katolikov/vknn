@@ -60,7 +60,7 @@ namespace vknn {
         /// Setting it here is the only way a session built from an in-memory graph (Session::create, no
         /// model path) gets a cache at all. Missing parent directories are created on the first write, so
         /// Runtime::cacheFileIn(dir, model) is enough to hold every model's cache in one directory.
-        std::string cacheFile; ///< unified cache path (empty = no file cache)
+        std::string cacheFile;       ///< unified cache path (empty = no file cache)
         bool        noCache = false; ///< debug: skip all cache read/write (cold compile every load)
 
         /// Load-time conv-kernel autotune effort (None / Fast / Heavy). Effort only — never changes
@@ -137,9 +137,9 @@ namespace vknn {
         std::string fp32Tensors;
 
         // Profiling / debug.
-        bool        profile      = false;                       ///< collect per-op timing into the Profiler and print the summary table
-        int         verbosity    = 1;                           ///< log verbosity applied by applyLogLevel(): 0=Warn, 1=Info, >=2=Debug
-        bool        layerDump    = false;                       ///< write every layer's output tensor to layerDumpDir for numeric debugging
+        bool        profile      = false;       ///< collect per-op timing into the Profiler and print the summary table
+        int         verbosity    = 1;           ///< log verbosity applied by applyLogLevel(): 0=Warn, 1=Info, >=2=Debug
+        bool        layerDump    = false;       ///< write every layer's output tensor to layerDumpDir for numeric debugging
         std::string layerDumpDir = "vknn_dump"; ///< destination directory (working-directory-relative by default) for tensor dumps
 
         /// Conv kernel selection + GPU-pass knobs, set via setHint(Hint, value) (see the Hint enum):

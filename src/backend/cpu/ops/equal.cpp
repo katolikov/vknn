@@ -25,9 +25,9 @@ namespace vknn {
                 for (size_t i = 0; i < rank; ++i)
                 {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
-                    out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
+                    out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
+                int64_t n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-axis element strides into each operand, built right-to-left (row-major).
                 // A size-1 axis gets stride 0 so every output index along that axis re-reads the
                 // single source element -- the standard broadcast trick. sA/sB accumulate the true

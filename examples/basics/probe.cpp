@@ -86,7 +86,8 @@ int main() {
     }
     for (uint32_t heapIndex = 0; heapIndex < memoryProperties.memoryHeapCount; ++heapIndex)
     {
-        printf("  heap %2u size=%.2f GiB flags=0x%x\n", heapIndex, memoryProperties.memoryHeaps[heapIndex].size / (1024.0 * 1024 * 1024), memoryProperties.memoryHeaps[heapIndex].flags);
+        printf("  heap %2u size=%.2f GiB flags=0x%x\n", heapIndex, memoryProperties.memoryHeaps[heapIndex].size / (1024.0 * 1024 * 1024),
+               memoryProperties.memoryHeaps[heapIndex].flags);
     }
     printf("==== probe OK ====\n");
     return 0;

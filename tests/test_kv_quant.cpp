@@ -98,9 +98,9 @@ namespace {
         TensorId   vPast = addInput(g, "vpast", {kB, kKvHeads, kSlots, kHd});
         TensorId   vNew  = addInput(g, "vnew", {kB, kKvHeads, 1, kHd});
         TensorDesc kco;
-        kco.name     = "present_key";
-        kco.isOutput = true;
-        TensorId kc  = g.addTensor(kco);
+        kco.name      = "present_key";
+        kco.isOutput  = true;
+        TensorId   kc = g.addTensor(kco);
         TensorDesc vco;
         vco.name     = "present_value";
         vco.isOutput = true;
@@ -115,16 +115,16 @@ namespace {
         TensorId vR     = repeatKv(g, vc, "v", false);
         TensorId scores = addTemp(g, "scores");
         addNode(g, OpType::MatMul, "qk", {q, kT}, scores);
-        TensorId probs       = addTemp(g, "probs");
-        Node    *sn          = addNode(g, OpType::Softmax, "softmax", {scores}, probs);
+        TensorId probs = addTemp(g, "probs");
+        Node    *sn    = addNode(g, OpType::Softmax, "softmax", {scores}, probs);
         Attr     ax;
         ax.kind              = Attr::Int;
         ax.i                 = -1;
         sn->attr.map["axis"] = ax;
         TensorId ctx         = addTemp(g, "ctx");
         addNode(g, OpType::MatMul, "pv", {probs, vR}, ctx);
-        TensorId ctxT        = addTemp(g, "ctxT");
-        Node    *tn          = addNode(g, OpType::Transpose, "ctx_transpose", {ctx}, ctxT);
+        TensorId ctxT = addTemp(g, "ctxT");
+        Node    *tn   = addNode(g, OpType::Transpose, "ctx_transpose", {ctx}, ctxT);
         Attr     perm;
         perm.kind            = Attr::Ints;
         perm.ints            = {0, 2, 1, 3};
@@ -190,9 +190,9 @@ namespace {
 
     double cosine(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
         EXPECT_EQ(a.size(), b.size());
-        const float *fa = reinterpret_cast<const float *>(a.data());
-        const float *fb = reinterpret_cast<const float *>(b.data());
-        const size_t n  = a.size() / 4;
+        const float *fa  = reinterpret_cast<const float *>(a.data());
+        const float *fb  = reinterpret_cast<const float *>(b.data());
+        const size_t n   = a.size() / 4;
         double       dot = 0, na = 0, nb = 0;
         for (size_t i = 0; i < n; ++i)
         {
@@ -208,7 +208,7 @@ namespace {
 // Round-trip accuracy: every element lands within the code's half-step of the original (plus the
 // fp16 rounding of the scale itself), and the row's largest magnitude uses the full code range.
 TEST(KvQuant, CodecRoundTrip) {
-    constexpr int64_t kRows = 8;
+    constexpr int64_t  kRows = 8;
     std::vector<float> src((size_t) (kRows * kHd));
     unsigned           s = 7;
     for (float &v: src)
@@ -513,7 +513,7 @@ TEST(KvQuant, ConfigAndCacheVariantKey) {
 
     CacheDoc doc;
     doc.variants.push_back(quantized);
-    CacheDoc decoded;
+    CacheDoc                   decoded;
     const std::vector<uint8_t> bytes = cacheEncode(doc);
     ASSERT_TRUE(cacheDecode(bytes.data(), bytes.size(), decoded));
     ASSERT_EQ(decoded.variants.size(), 1u);
@@ -527,10 +527,8 @@ TEST(KvQuant, ConfigAndCacheVariantKey) {
 // is validated against on device.
 TEST(KvQuant, CpuOracleCosineAndDeterminism) {
     const std::vector<IOTensor> inputs = {
-        randTensor("q", {kB, kHeads, 1, kHd}, 11),
-        randTensor("kpast", {kB, kKvHeads, kSlots, kHd}, 12),
-        randTensor("knew", {kB, kKvHeads, 1, kHd}, 13),
-        randTensor("vpast", {kB, kKvHeads, kSlots, kHd}, 14),
+        randTensor("q", {kB, kHeads, 1, kHd}, 11),      randTensor("kpast", {kB, kKvHeads, kSlots, kHd}, 12),
+        randTensor("knew", {kB, kKvHeads, 1, kHd}, 13), randTensor("vpast", {kB, kKvHeads, kSlots, kHd}, 14),
         randTensor("vnew", {kB, kKvHeads, 1, kHd}, 15),
     };
     Config cfgOff;

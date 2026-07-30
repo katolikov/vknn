@@ -140,7 +140,7 @@ namespace vknn {
             Expr acc = leafExpr(n.inputs[0]);
             Expr reg[kPwMaxRegs];
             bool regSet[kPwMaxRegs] = {};
-            auto resolve = [&](int64_t ref, Expr &e) {
+            auto resolve            = [&](int64_t ref, Expr &e) {
                 if (ref == kPwRefAcc)
                 {
                     e = acc;
@@ -177,7 +177,7 @@ namespace vknn {
             {
                 const int64_t kind = steps[s * 8], code = steps[s * 8 + 1];
                 const int64_t srcA = steps[s * 8 + 2], srcB = steps[s * 8 + 3];
-                const int64_t dst  = steps[s * 8 + 5];
+                const int64_t dst = steps[s * 8 + 5];
                 Expr          a, b, result;
                 if (kind == kPwKindLoad)
                 {
@@ -372,11 +372,11 @@ namespace vknn {
         }
 
         struct RopeSite {
-            TensorId x        = kNoTensor; // the sliced source r4 [.., H, head]
-            TensorId pos      = kNoTensor; // gather index (positions)
-            TensorId cosTable = kNoTensor; // [P, half]
-            TensorId sinTable = kNoTensor; // [P, half]
-            int64_t  half     = 0;
+            TensorId              x        = kNoTensor; // the sliced source r4 [.., H, head]
+            TensorId              pos      = kNoTensor; // gather index (positions)
+            TensorId              cosTable = kNoTensor; // [P, half]
+            TensorId              sinTable = kNoTensor; // [P, half]
+            int64_t               half     = 0;
             std::vector<TensorId> internal; // tensors whose stores the fusion removes
         };
 
@@ -539,7 +539,8 @@ namespace vknn {
                 site.internal = std::move(chain);
                 return true;
             };
-            return tryOrientation(plus.first, plus.second, minus.first, minus.second) || tryOrientation(plus.first, plus.second, minus.second, minus.first) || tryOrientation(plus.second, plus.first, minus.first, minus.second) || tryOrientation(plus.second, plus.first, minus.second, minus.first);
+            return tryOrientation(plus.first, plus.second, minus.first, minus.second) || tryOrientation(plus.first, plus.second, minus.second, minus.first) ||
+                   tryOrientation(plus.second, plus.first, minus.first, minus.second) || tryOrientation(plus.second, plus.first, minus.second, minus.first);
         }
 
     } // namespace
@@ -580,13 +581,13 @@ namespace vknn {
             {
                 continue;
             }
-            Node &nd = g.nodes[i];
-            nd.type  = OpType::Rope;
+            Node &nd  = g.nodes[i];
+            nd.type   = OpType::Rope;
             nd.inputs = {site.x, site.pos, site.cosTable, site.sinTable};
             nd.attr.map.clear();
             Attr h;
-            h.kind             = Attr::Int;
-            h.i                = site.half;
+            h.kind              = Attr::Int;
+            h.i                 = site.half;
             nd.attr.map["half"] = h;
             ++fused;
         }

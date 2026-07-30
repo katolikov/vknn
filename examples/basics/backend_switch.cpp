@@ -32,15 +32,13 @@ using namespace vknn;
 // consume. A real integration gets those from wherever its data already lives.
 
 /// Read an entire file into a byte vector; returns an empty vector if the file cannot be opened.
-static std::vector<uint8_t> readFile(const std::string &path)
-{
+static std::vector<uint8_t> readFile(const std::string &path) {
     std::ifstream file(path, std::ios::binary);
     return file ? std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>()) : std::vector<uint8_t>();
 }
 
 /// Return the argument following flag `flag` on the command line, or `fallback` when the flag is absent.
-static const char *argval(int argc, char **argv, const char *flag, const char *fallback) noexcept
-{
+static const char *argval(int argc, char **argv, const char *flag, const char *fallback) noexcept {
     for (int i = 1; i < argc - 1; ++i)
     {
         if (!strcmp(argv[i], flag))
@@ -54,8 +52,7 @@ static const char *argval(int argc, char **argv, const char *flag, const char *f
 // --- VKNN - one full inference run on a single backend ---------------------------------------------
 // One inference run, end to end: load the model, describe the input, run it, then inspect the routing
 // and the prediction. The two calls in main() differ ONLY in the `backend` argument.
-static void runOnBackend(const std::string &modelPath, const std::vector<uint8_t> &inputBytes, BackendKind backend)
-{
+static void runOnBackend(const std::string &modelPath, const std::vector<uint8_t> &inputBytes, BackendKind backend) {
     // Step 1 - load the model onto the chosen backend. `backend` is the one field that changes between
     // the Vulkan and CPU runs; `fallback` is the ordered chain tried for any op the backend refuses.
     Config config;
@@ -115,8 +112,7 @@ static void runOnBackend(const std::string &modelPath, const std::vector<uint8_t
     printf("  top-1 = class %lld (score %.4f)\n", (long long) topClass, scores[topClass]);
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     // Step 1 - decide which model and input to use (plumbing: CLI parsing + file reading, above).
     std::string          modelPath  = argval(argc, argv, "--model", "assets/mobilenetv2.onnx");
     std::vector<uint8_t> inputBytes = readFile(argval(argc, argv, "--input", "assets/input.bin"));

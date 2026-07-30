@@ -28,8 +28,7 @@ namespace vknn {
         return packed;
     }
 
-    std::vector<float> int4Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx,
-                                   const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut) {
+    std::vector<float> int4Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut) {
         const int64_t      rowBytes = int4RowBytes(N);
         std::vector<float> w((size_t) (K * N));
         for (int64_t k = 0; k < K; ++k)
@@ -37,7 +36,7 @@ namespace vknn {
             const int64_t g = k / group;
             for (int64_t n = 0; n < N; ++n)
             {
-                const float s      = halfToFloat(scales[(size_t) (g * N + n)]);
+                const float s           = halfToFloat(scales[(size_t) (g * N + n)]);
                 w[(size_t) (k * N + n)] = (float) int4At(packed, rowBytes, k, n) * s;
             }
         }

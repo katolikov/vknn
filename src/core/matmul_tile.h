@@ -178,7 +178,7 @@ namespace vknn {
         bool                 aWas1D = false, bWas1D = false; ///< operand promoted from 1-D ([K] -> [1,K] / [K,1])
         int64_t              M = 0, N = 0, K = 0;
         int64_t              aRow = 0, bRow = 0; ///< resolved physical row strides (K / N unless padded)
-        int                  rank = 0;           ///< output rank; the geometry arrays are this long
+        int                  rank      = 0;      ///< output rank; the geometry arrays are this long
         int                  batchRank = 0;      ///< output axes [0, batchRank) are the batch dims
         std::vector<int32_t> outDim, aStride, bStride;
     };
@@ -232,7 +232,7 @@ namespace vknn {
         geom.batchRank = firstMatAxis;
         // Per-operand batch shapes (everything before the trailing matrix dims), left-padded to batchRank.
         int64_t aBatchRank = (int64_t) sa.size() - 2, bBatchRank = (int64_t) sb.size() - 2;
-        auto    aDim       = [&](int i) -> int64_t {
+        auto    aDim = [&](int i) -> int64_t {
             int off = geom.batchRank - (int) aBatchRank;
             return i < off ? 1 : sa[i - off];
         };
@@ -292,7 +292,8 @@ namespace vknn {
         auto          route  = [&](const MatMulFlatGeom &geometry) {
             std::vector<int32_t> aBatch(geometry.aStride.begin(), geometry.aStride.begin() + geometry.batchRank);
             std::vector<int32_t> bBatch(geometry.bStride.begin(), geometry.bStride.begin() + geometry.batchRank);
-            return matmulVec4Route(useFp16, geometry.N, geometry.K, aBatch, bBatch, /*bIsInitializer=*/false, /*bPayloadResident=*/false, geometry.aRow, geometry.bRow);
+            return matmulVec4Route(useFp16, geometry.N, geometry.K, aBatch, bBatch, /*bIsInitializer=*/false, /*bPayloadResident=*/false, geometry.aRow,
+                                             geometry.bRow);
         };
         if (route(packed).eligible)
         {

@@ -108,8 +108,7 @@ namespace vknn {
     // device capability). hintValue is the raw Hint::CoopmatGemm int (Mode::Auto/On/Off/Fp8/
     // Int8Coop); lowPrecisionWeightsAvailable reports whether the B operand is a host-quantizable
     // initializer (the opt-in paths quantize weights at prepare time).
-    inline CoopmatGemmKind coopmatGemmRoute(const CoopmatGemmCaps &caps, int hintValue, bool fp16Storage, bool denseRank2Batch1, bool hasBiasOrEpilogue, int64_t M, int64_t N, int64_t K,
-                                            bool lowPrecisionWeightsAvailable) {
+    inline CoopmatGemmKind coopmatGemmRoute(const CoopmatGemmCaps &caps, int hintValue, bool fp16Storage, bool denseRank2Batch1, bool hasBiasOrEpilogue, int64_t M, int64_t N, int64_t K, bool lowPrecisionWeightsAvailable) {
         const bool base = caps.wave32Pinnable && caps.vulkanMemoryModel && caps.selfCheckPassed && fp16Storage && denseRank2Batch1 && !hasBiasOrEpilogue && M >= 32 && N >= 32 && K >= 32 && M % 32 == 0 && N % 32 == 0 && K % 16 == 0;
         if (!base || hintValue == 2) // Mode::Off
         {

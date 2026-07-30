@@ -9,8 +9,8 @@
 // any header, so the feature struct and the fp8 cooperative-matrix component types are defined
 // here when absent). Values match the Khronos registry.
 #ifndef VK_EXT_shader_float8
-#define VK_EXT_shader_float8 1
-#define VK_EXT_SHADER_FLOAT8_EXTENSION_NAME "VK_EXT_shader_float8"
+#define VK_EXT_shader_float8                                         1
+#define VK_EXT_SHADER_FLOAT8_EXTENSION_NAME                          "VK_EXT_shader_float8"
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT ((VkStructureType) 1000567000)
 typedef struct VkPhysicalDeviceShaderFloat8FeaturesEXT {
     VkStructureType sType;

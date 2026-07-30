@@ -1,4 +1,6 @@
 #include "vknn/ion.h"
+#ifndef _WIN32 // dma-buf is a Linux kernel interface; on Windows the wrapper has no body and
+               // IonBuffer is never constructed (wrapFd is the only way in, defined below).
 #include "vknn/logging.h"
 #include <sys/mman.h>
 #include <unistd.h>
@@ -36,3 +38,4 @@ namespace vknn {
     }
 
 } // namespace vknn
+#endif // !_WIN32

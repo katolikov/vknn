@@ -495,9 +495,9 @@ namespace vknn {
             {
                 continue;
             }
-            const int64_t C = qk.attr.geti(kMmViewN);
+            const int64_t C  = qk.attr.geti(kMmViewN);
             const int64_t hd = pv.attr.geti(kMmViewN);
-            const int64_t M = qk.attr.geti(kMmViewM);
+            const int64_t M  = qk.attr.geti(kMmViewM);
             if (M < 1 || pv.attr.geti(kMmViewM) != M)
             {
                 continue;
@@ -667,9 +667,9 @@ namespace vknn {
             // staging cap cannot dispatch, so the site keeps its decomposed form. The group is the
             // first row axis K and V do not advance along (the op's own detection rule).
             {
-                const std::vector<int64_t> &fd = fa.attr.getints(kFaDims);
-                const std::vector<int64_t> &fk = fa.attr.getints(kFaKStride);
-                const std::vector<int64_t> &fv = fa.attr.getints(kFaVStride);
+                const std::vector<int64_t> &fd        = fa.attr.getints(kFaDims);
+                const std::vector<int64_t> &fk        = fa.attr.getints(kFaKStride);
+                const std::vector<int64_t> &fv        = fa.attr.getints(kFaVStride);
                 int64_t                     groupSize = 1;
                 for (size_t d = 0; d < fd.size(); ++d)
                 {

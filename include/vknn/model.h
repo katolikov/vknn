@@ -8,9 +8,8 @@
 #pragma once
 #include "vknn/config.h"
 #include "vknn/dtype.h"
-#include "vknn/tensor_format.h"
-
-#include "vknn/tensor_info.h"  // struct TensorInfo
-#include "vknn/tensor_class.h" // class Tensor
-#include "vknn/model_class.h"  // class Model (+ forward decl class Session)
 #include "vknn/find_tensor.h"  // findTensor()
+#include "vknn/model_class.h"  // class Model (+ forward decl class Session)
+#include "vknn/tensor_class.h" // class Tensor
+#include "vknn/tensor_format.h"
+#include "vknn/tensor_info.h" // struct TensorInfo

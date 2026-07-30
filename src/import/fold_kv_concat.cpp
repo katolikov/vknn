@@ -227,11 +227,11 @@ namespace vknn {
             {
                 vAxis += (int64_t) vShape.size();
             }
-            const Shape &kPastShape = g.desc(kCat.inputs[0]).shape;
-            const Shape &kNewShape  = g.desc(kCat.inputs[1]).shape;
-            const Shape &vPastShape = g.desc(vCat.inputs[0]).shape;
-            const Shape &vNewShape  = g.desc(vCat.inputs[1]).shape;
-            const int64_t C         = fa.attr.geti(kFaC);
+            const Shape  &kPastShape = g.desc(kCat.inputs[0]).shape;
+            const Shape  &kNewShape  = g.desc(kCat.inputs[1]).shape;
+            const Shape  &vPastShape = g.desc(vCat.inputs[0]).shape;
+            const Shape  &vNewShape  = g.desc(vCat.inputs[1]).shape;
+            const int64_t C          = fa.attr.geti(kFaC);
             if (kAxis >= (int64_t) kShape.size() || vAxis >= (int64_t) vShape.size() || kShape[(size_t) kAxis] != C || vShape[(size_t) vAxis] != C)
             {
                 continue;
@@ -258,8 +258,8 @@ namespace vknn {
             auto                       kNew    = remapOntoOperand(kStride, fa.attr.geti(kFaKN), fa.attr.geti(kFaKK), kShape, kAxis, kNewShape);
             // V's element-stride convention is transposed relative to K: kFaVK steps the token
             // axis and kFaVN the output axis (contract in core/fused_attention.h).
-            auto                       vPast   = remapOntoOperand(vStride, fa.attr.geti(kFaVK), fa.attr.geti(kFaVN), vShape, vAxis, vPastShape);
-            auto                       vNew    = remapOntoOperand(vStride, fa.attr.geti(kFaVK), fa.attr.geti(kFaVN), vShape, vAxis, vNewShape);
+            auto vPast = remapOntoOperand(vStride, fa.attr.geti(kFaVK), fa.attr.geti(kFaVN), vShape, vAxis, vPastShape);
+            auto vNew  = remapOntoOperand(vStride, fa.attr.geti(kFaVK), fa.attr.geti(kFaVN), vShape, vAxis, vNewShape);
             if (!kPast || !kNew || !vPast || !vNew)
             {
                 continue;

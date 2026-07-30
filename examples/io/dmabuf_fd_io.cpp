@@ -104,8 +104,14 @@ int main(int argc, char **argv) {
         if (inputFd < 0 || outputFd < 0)
         {
             fprintf(stderr, "no fds given and acquireCallerFd() failed (needs /dev/dma_heap/system; Android only)\n");
-            if (inputFd >= 0) { ::close(inputFd); }
-            if (outputFd >= 0) { ::close(outputFd); }
+            if (inputFd >= 0)
+            {
+                ::close(inputFd);
+            }
+            if (outputFd >= 0)
+            {
+                ::close(outputFd);
+            }
             return 2;
         }
     }
@@ -119,7 +125,8 @@ int main(int argc, char **argv) {
     // buffer. The returned tensor for a dma-buf-bound output carries no host data; the result lives in
     // the caller's output fd, which the caller reads (e.g. by mmap-ing it).
     net.run(inputs, outputs);
-    printf("ran '%s': input fd %d -> output '%s' fd %d (%lld elems), zero-copy both ways\n", argv[1], inputFd, outInfo.name.c_str(), outputFd, (long long) outInfo.elems);
+    printf("ran '%s': input fd %d -> output '%s' fd %d (%lld elems), zero-copy both ways\n", argv[1], inputFd, outInfo.name.c_str(), outputFd,
+           (long long) outInfo.elems);
 
     // Ownership rule: the fds are CALLER-owned, so this example does NOT close caller-supplied fds — the
     // caller closes them when done. The only fds cleaned up here are the ones acquireCallerFd() minted

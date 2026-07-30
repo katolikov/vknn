@@ -36,7 +36,7 @@ namespace vknn {
                 // Prepack weights into the row-major [Cout][Cin] the fc shader indexes as wt[oc*Cin+ic].
                 // transB=1: the source is already [Cout][Cin], copy straight through. transB=0 (the ONNX
                 // default): the source is [Cin][Cout], so transpose by reading wsrc[ic*Cout+oc].
-                wbuf                    = uploadCached(env, node.name + "#w", [&] {
+                wbuf = uploadCached(env, node.name + "#w", [&] {
                     std::vector<float> wp((size_t) CoutL * Cin);
                     for (int64_t oc = 0; oc < CoutL; ++oc)
                     {
@@ -56,7 +56,7 @@ namespace vknn {
                 // The fc shader always seeds its accumulator with bias[oc], so materialize a full-length
                 // bias buffer even when Gemm has no C input: default to zeros, filled only when present.
                 // bsrc is dereferenced solely inside the same has-bias guard, so an empty bv is safe here.
-                bbuf              = uploadCached(env, node.name + "#b", [&] {
+                bbuf = uploadCached(env, node.name + "#b", [&] {
                     std::vector<float> bias(CoutL, 0.f);
                     if (pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor)
                     {

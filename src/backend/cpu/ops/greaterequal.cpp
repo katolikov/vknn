@@ -20,20 +20,20 @@ namespace vknn {
                 const Shape    &sa = A.shape, &sb = B.shape;
                 // Broadcasting aligns shapes at the trailing axis, so the result rank is the larger of
                 // the two and the shorter operand is treated as if left-padded with size-1 axes.
-                size_t          rank = std::max(sa.size(), sb.size());
-                Shape           out(rank, 1);
+                size_t rank = std::max(sa.size(), sb.size());
+                Shape  out(rank, 1);
                 // Size of axis `i` (in the common `rank`-axis frame) for shape `s`: axes ahead of `s`'s
                 // first real axis are the implicit leading 1s that padding introduces.
-                auto            dimOf = [&](const Shape &s, size_t i) -> int64_t {
+                auto dimOf = [&](const Shape &s, size_t i) -> int64_t {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
                 };
                 for (size_t i = 0; i < rank; ++i)
                 {
                     int64_t da = dimOf(sa, i), db = dimOf(sb, i);
-                    out[i]     = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
+                    out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
+                int64_t n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand broadcast strides in the common frame, built by a right-to-left
                 // row-major scan: sA/sB accumulate each operand's own row-major stride, while a size-1
                 // (broadcast) axis is pinned to stride 0 so every output index along it rereads the

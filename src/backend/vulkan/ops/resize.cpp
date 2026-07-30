@@ -42,17 +42,17 @@ namespace vknn {
                 NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
                 NCHW y = NCHW::from(env.graph->desc(node.outputs[0]).shape);
                 pc     = {(int) x.n,
-                          (int) x.c,
-                          (int) x.h,
-                          (int) x.w,
-                          (int) y.h,
-                          (int) y.w,
-                          vxResizeMode(node.attr.gets("mode", "nearest")),
-                          vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel")),
-                          node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault),
-                          (int) node.attr.geti("exclude_outside", 0),
-                          resizePerPixelLanes(x, y) ? 1 : 0,
-                          vxResizeNearestMode(node.attr.gets("nearest_mode", "round_prefer_floor"))};
+                                                          (int) x.c,
+                                                          (int) x.h,
+                                                          (int) x.w,
+                                                          (int) y.h,
+                                                          (int) y.w,
+                                                          vxResizeMode(node.attr.gets("mode", "nearest")),
+                                                          vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel")),
+                                                          node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault),
+                                                          (int) node.attr.geti("exclude_outside", 0),
+                      resizePerPixelLanes(x, y) ? 1 : 0,
+                                                          vxResizeNearestMode(node.attr.gets("nearest_mode", "round_prefer_floor"))};
                 // Lane count for the map resizePerPixelLanes chose: one per output pixel (the kernel
                 // loops the channel blocks internally) or one per NC4HW4 block-pixel. Spatial extent
                 // uses the OUTPUT y.h/y.w (the resize target size).
