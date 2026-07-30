@@ -11,8 +11,8 @@ namespace vknn {
 
         struct ConvGemmCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X  = ctx.t(node.inputs[0]);
-                const RtTensor &Wt = ctx.t(node.inputs[1]);
+                const RtTensor &X    = ctx.t(node.inputs[0]);
+                const RtTensor &Wt   = ctx.t(node.inputs[1]);
                 const float    *bias = nullptr;
                 // Bias presence bounds by pwCoreInputs: inputs appended past it are fused-unit operands.
                 if (pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor)

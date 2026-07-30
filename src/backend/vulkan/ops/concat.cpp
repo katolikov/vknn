@@ -38,8 +38,8 @@ namespace vknn {
                 }
                 Shape out = env.graph->desc(node.outputs[0]).shape;
                 epi.prepare(node, env, false, out);
-                NCHW   y     = NCHW::from(out);
-                int    Cob   = (int) cBlocks(y.c), HW = (int) (y.h * y.w);
+                NCHW   y   = NCHW::from(out);
+                int    Cob = (int) cBlocks(y.c), HW = (int) (y.h * y.w);
                 int    cbOff = 0;
                 size_t nIn   = (size_t) pwCoreInputs(node);
                 for (size_t e = 0; e < nIn && e < node.inputs.size(); ++e)
@@ -72,7 +72,8 @@ namespace vknn {
                     // Zero-copy: the planner made this part a sub-buffer view of the output at exactly
                     // its channel-block slice, so the producer already wrote the bytes in place. Valid
                     // only for the contiguous N==1 tiling the planner links.
-                    if (mayAlias && parts[i].N == 1 && src->hazardRoot() == dst->hazardRoot() && src->rootOffset() == dst->rootOffset() + (size_t) parts[i].cbOff * parts[i].HW * kNC4Block * elemBytes)
+                    if (mayAlias && parts[i].N == 1 && src->hazardRoot() == dst->hazardRoot() &&
+                        src->rootOffset() == dst->rootOffset() + (size_t) parts[i].cbOff * parts[i].HW * kNC4Block * elemBytes)
                     {
                         continue;
                     }

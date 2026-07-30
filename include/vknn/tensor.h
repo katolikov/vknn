@@ -10,7 +10,7 @@
 #include <vector>
 
 // Per-type headers, in dependency order (a type used by another comes first).
-#include "vknn/tensor_desc.h"     // struct TensorDesc
-#include "vknn/host_buffer.h"     // struct HostBuffer
-#include "vknn/device_storage.h"  // struct DeviceStorage (forward declaration)
-#include "vknn/rt_tensor.h"       // struct RtTensor (uses HostBuffer + DeviceStorage)
+#include "vknn/device_storage.h" // struct DeviceStorage (forward declaration)
+#include "vknn/host_buffer.h"    // struct HostBuffer
+#include "vknn/rt_tensor.h"      // struct RtTensor (uses HostBuffer + DeviceStorage)
+#include "vknn/tensor_desc.h"    // struct TensorDesc

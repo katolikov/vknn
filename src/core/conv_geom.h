@@ -8,9 +8,9 @@ namespace vknn {
     /// Resolved forward Conv/pool geometry: begin/end pads per spatial axis plus the output extent.
     /// pads() re-serializes to the ONNX order [top, left, bottom, right].
     struct ConvGeom {
-        int64_t outH, outW;
-        int64_t padT, padL; // begin pads (top, left): the input-window origin offset
-        int64_t padB, padR; // end pads (bottom, right): folded into outH/outW only
+        int64_t              outH, outW;
+        int64_t              padT, padL; // begin pads (top, left): the input-window origin offset
+        int64_t              padB, padR; // end pads (bottom, right): folded into outH/outW only
         std::vector<int64_t> pads() const {
             return {padT, padL, padB, padR};
         }

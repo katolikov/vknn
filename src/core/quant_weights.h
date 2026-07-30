@@ -82,14 +82,11 @@ namespace vknn {
     // Reconstruct the logical [K, N] fp32 matrix from an int8 payload + scales + outliers, mirroring
     // int4Dequant's contract: exact fp32 dequantization (q * halfToFloat(s)), outlier rows
     // overwritten from oval.
-    std::vector<float> int8Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx,
-                                   const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut);
+    std::vector<float> int8Dequant(const uint8_t *packed, const uint16_t *scales, const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut);
 
     // Reconstruct the logical [K, N] fp32 matrix from a LUT4 payload (unsigned nibble indices) + the
     // 16-entry fp16 codebook + scales + outliers: value = codebook[index] * scale.
-    std::vector<float> lut4Dequant(const uint8_t *packed, const uint16_t *codebook, const uint16_t *scales,
-                                   const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N,
-                                   int64_t group, int64_t nOut);
+    std::vector<float> lut4Dequant(const uint8_t *packed, const uint16_t *codebook, const uint16_t *scales, const int32_t *oidx, const uint16_t *oval, int64_t K, int64_t N, int64_t group, int64_t nOut);
 
     // The format id of a node's packed weight: 0 when the node carries no kWq attr, the raw attr
     // value otherwise (a reader must reject values it does not implement — never default to int4).

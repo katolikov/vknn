@@ -19,7 +19,7 @@ namespace vknn {
     /// of nodes into a Segment, and finalize() flushes caches after all segments are compiled.
     class Backend {
       public:
-        virtual ~Backend()               = default;
+        virtual ~Backend() = default;
         /// Stable identity of this backend, used as the key for registration and assignment.
         virtual BackendKind kind() const = 0;
         /// Readable backend name for logs, the profiler, and fallback diagnostics.

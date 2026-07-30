@@ -34,7 +34,7 @@ namespace vknn {
         Trunc       = 21, ///< Round toward zero (drop the fraction). Not an ONNX operator: produced only by
                           ///< foldIntRoundtripCast, which collapses a float->wide-int->float Cast pair into
                           ///< this single step so the truncation joins the surrounding pointwise unit.
-        Sign        = 22, ///< Elementwise sign: 1 for x>0, -1 for x<0, x itself for +-0 and NaN (ONNX
+        Sign = 22,        ///< Elementwise sign: 1 for x>0, -1 for x<0, x itself for +-0 and NaN (ONNX
                           ///< "Sign"). The 0/NaN pass-through keeps the CPU and GPU evaluators
                           ///< bitwise-identical without relying on either language's sign() builtin.
     };

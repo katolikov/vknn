@@ -505,28 +505,28 @@ TEST(FusedAttention, CnnGraphUntouched) {
 // fold moves the copy, never the math.
 TEST(FusedAttention, KvConcatFoldsToSplitSources) {
     auto buildConcatGraph = [&]() {
-        Graph    g;
-        TensorId q     = addInput(g, "q", {kB, kHeads, 1, kHd});
-        TensorId kPast = addInput(g, "kpast", {kB, kKvHeads, kTokens - 1, kHd});
-        TensorId kNew  = addInput(g, "knew", {kB, kKvHeads, 1, kHd});
-        TensorId vPast = addInput(g, "vpast", {kB, kKvHeads, kTokens - 1, kHd});
-        TensorId vNew  = addInput(g, "vnew", {kB, kKvHeads, 1, kHd});
+        Graph      g;
+        TensorId   q     = addInput(g, "q", {kB, kHeads, 1, kHd});
+        TensorId   kPast = addInput(g, "kpast", {kB, kKvHeads, kTokens - 1, kHd});
+        TensorId   kNew  = addInput(g, "knew", {kB, kKvHeads, 1, kHd});
+        TensorId   vPast = addInput(g, "vpast", {kB, kKvHeads, kTokens - 1, kHd});
+        TensorId   vNew  = addInput(g, "vnew", {kB, kKvHeads, 1, kHd});
         TensorDesc kco;
-        kco.name     = "present_key";
-        kco.isOutput = true;
-        TensorId kc  = g.addTensor(kco);
+        kco.name      = "present_key";
+        kco.isOutput  = true;
+        TensorId   kc = g.addTensor(kco);
         TensorDesc vco;
         vco.name     = "present_value";
         vco.isOutput = true;
         TensorId vc  = g.addTensor(vco);
-        Attr axis;
-        axis.kind = Attr::Int;
-        axis.i    = 2;
+        Attr     axis;
+        axis.kind                                                               = Attr::Int;
+        axis.i                                                                  = 2;
         addNode(g, OpType::Concat, "kcat", {kPast, kNew}, kc)->attr.map["axis"] = axis;
         addNode(g, OpType::Concat, "vcat", {vPast, vNew}, vc)->attr.map["axis"] = axis;
 
-        TensorId kT = repeatKv(g, kc, "k", true);
-        TensorId vR = repeatKv(g, vc, "v", false);
+        TensorId kT     = repeatKv(g, kc, "k", true);
+        TensorId vR     = repeatKv(g, vc, "v", false);
         TensorId scores = addTemp(g, "scores");
         addNode(g, OpType::MatMul, "qk", {q, kT}, scores);
         TensorId probs = addTemp(g, "probs");
@@ -535,7 +535,7 @@ TEST(FusedAttention, KvConcatFoldsToSplitSources) {
         ax.kind              = Attr::Int;
         ax.i                 = -1;
         sn->attr.map["axis"] = ax;
-        TensorId ctx = addTemp(g, "ctx");
+        TensorId ctx         = addTemp(g, "ctx");
         addNode(g, OpType::MatMul, "pv", {probs, vR}, ctx);
         TensorId ctxT = addTemp(g, "ctxT");
         Node    *tn   = addNode(g, OpType::Transpose, "ctx_transpose", {ctx}, ctxT);
@@ -557,12 +557,12 @@ TEST(FusedAttention, KvConcatFoldsToSplitSources) {
 
     auto randTensor = [](const std::string &name, const Shape &shape, unsigned seed) {
         IOTensor io;
-        io.name  = name;
-        io.shape = shape;
-        io.dtype = DType::Float32;
+        io.name       = name;
+        io.shape      = shape;
+        io.dtype      = DType::Float32;
         int64_t elems = numElements(shape);
         io.data.resize((size_t) elems * 4);
-        float *f = reinterpret_cast<float *>(io.data.data());
+        float   *f = reinterpret_cast<float *>(io.data.data());
         unsigned s = seed;
         for (int64_t i = 0; i < elems; ++i)
         {
@@ -572,10 +572,8 @@ TEST(FusedAttention, KvConcatFoldsToSplitSources) {
         return io;
     };
     const std::vector<IOTensor> inputs = {
-        randTensor("q", {kB, kHeads, 1, kHd}, 1),
-        randTensor("kpast", {kB, kKvHeads, kTokens - 1, kHd}, 2),
-        randTensor("knew", {kB, kKvHeads, 1, kHd}, 3),
-        randTensor("vpast", {kB, kKvHeads, kTokens - 1, kHd}, 4),
+        randTensor("q", {kB, kHeads, 1, kHd}, 1),      randTensor("kpast", {kB, kKvHeads, kTokens - 1, kHd}, 2),
+        randTensor("knew", {kB, kKvHeads, 1, kHd}, 3), randTensor("vpast", {kB, kKvHeads, kTokens - 1, kHd}, 4),
         randTensor("vnew", {kB, kKvHeads, 1, kHd}, 5),
     };
     auto outBytes = [](const std::vector<IOTensor> &outs, const std::string &name) {
@@ -618,8 +616,8 @@ TEST(FusedAttention, KvConcatFoldsToSplitSources) {
     cfgRef.setHint(Hint::KvConcatFold, (int) Mode::Off);
     Config cfgFold;
     cfgFold.backend = BackendKind::Cpu;
-    auto sRef  = Session::create(std::move(gRef), cfgRef);
-    auto sFold = Session::create(std::move(gFold), cfgFold);
+    auto sRef       = Session::create(std::move(gRef), cfgRef);
+    auto sFold      = Session::create(std::move(gFold), cfgFold);
     ASSERT_TRUE(sRef);
     ASSERT_TRUE(sFold);
     std::vector<IOTensor> oRef, oFold;
@@ -650,13 +648,13 @@ namespace {
     // passes (foldMatMulViews -> fuseDecodeAttention -> foldFusedAttentionKvConcat when enabled)
     // turn this into the split-source FusedAttention with a rows-only present.
     Graph withPastDecodeGraph() {
-        constexpr int64_t kSlots = kTokens - 1;
-        Graph             g;
-        TensorId          q      = addInput(g, "q", {kB, kHeads, 1, kHd});
-        TensorId          pastK  = addInput(g, "past_key", {kB, kKvHeads, kSlots, kHd});
-        TensorId          pastV  = addInput(g, "past_value", {kB, kKvHeads, kSlots, kHd});
-        TensorId          kNewIn = addInput(g, "knew", {kB, kKvHeads, 1, kHd});
-        TensorId          vNewIn = addInput(g, "vnew", {kB, kKvHeads, 1, kHd});
+        constexpr int64_t  kSlots = kTokens - 1;
+        Graph              g;
+        TensorId           q      = addInput(g, "q", {kB, kHeads, 1, kHd});
+        TensorId           pastK  = addInput(g, "past_key", {kB, kKvHeads, kSlots, kHd});
+        TensorId           pastV  = addInput(g, "past_value", {kB, kKvHeads, kSlots, kHd});
+        TensorId           kNewIn = addInput(g, "knew", {kB, kKvHeads, 1, kHd});
+        TensorId           vNewIn = addInput(g, "vnew", {kB, kKvHeads, 1, kHd});
         std::vector<float> eye((size_t) (kHd * kHd), 0.f);
         for (int64_t d = 0; d < kHd; ++d)
         {
@@ -667,39 +665,39 @@ namespace {
         addNode(g, OpType::MatMul, "k_proj", {kNewIn, addF32Init(g, "k_eye", {kHd, kHd}, eye)}, kNew);
         addNode(g, OpType::MatMul, "v_proj", {vNewIn, addF32Init(g, "v_eye", {kHd, kHd}, eye)}, vNew);
         TensorDesc kco;
-        kco.name     = "present_key";
-        kco.isOutput = true;
-        TensorId kc  = g.addTensor(kco);
+        kco.name      = "present_key";
+        kco.isOutput  = true;
+        TensorId   kc = g.addTensor(kco);
         TensorDesc vco;
         vco.name     = "present_value";
         vco.isOutput = true;
         TensorId vc  = g.addTensor(vco);
         Attr     axis;
-        axis.kind                                                                = Attr::Int;
-        axis.i                                                                   = 2;
-        addNode(g, OpType::Concat, "kcat", {pastK, kNew}, kc)->attr.map["axis"]  = axis;
-        addNode(g, OpType::Concat, "vcat", {pastV, vNew}, vc)->attr.map["axis"]  = axis;
+        axis.kind                                                               = Attr::Int;
+        axis.i                                                                  = 2;
+        addNode(g, OpType::Concat, "kcat", {pastK, kNew}, kc)->attr.map["axis"] = axis;
+        addNode(g, OpType::Concat, "vcat", {pastV, vNew}, vc)->attr.map["axis"] = axis;
 
         TensorId kT     = repeatKv(g, kc, "k", true);
         TensorId vR     = repeatKv(g, vc, "v", false);
         TensorId scores = addTemp(g, "scores");
         addNode(g, OpType::MatMul, "qk", {q, kT}, scores);
-        TensorId mask   = addInput(g, "mask", {1, 1, 1, kTokens});
-        TensorId scale  = addF32Init(g, "scalec", {1}, {kScaleValue});
-        TensorId scaled = addTemp(g, "scaled");
+        TensorId mask                                                          = addInput(g, "mask", {1, 1, 1, kTokens});
+        TensorId scale                                                         = addF32Init(g, "scalec", {1}, {kScaleValue});
+        TensorId scaled                                                        = addTemp(g, "scaled");
         addNode(g, OpType::Binary, "scalemul", {scores, scale}, scaled)->subOp = (int32_t) BinaryType::Mul;
         TensorId masked                                                        = addTemp(g, "masked");
         addNode(g, OpType::Add, "maskadd", {scaled, mask}, masked);
-        TensorId probs       = addTemp(g, "probs");
-        Node    *sn          = addNode(g, OpType::Softmax, "softmax", {masked}, probs);
+        TensorId probs = addTemp(g, "probs");
+        Node    *sn    = addNode(g, OpType::Softmax, "softmax", {masked}, probs);
         Attr     ax;
         ax.kind              = Attr::Int;
         ax.i                 = -1;
         sn->attr.map["axis"] = ax;
         TensorId ctx         = addTemp(g, "ctx");
         addNode(g, OpType::MatMul, "pv", {probs, vR}, ctx);
-        TensorId ctxT        = addTemp(g, "ctxT");
-        Node    *tn          = addNode(g, OpType::Transpose, "ctx_transpose", {ctx}, ctxT);
+        TensorId ctxT = addTemp(g, "ctxT");
+        Node    *tn   = addNode(g, OpType::Transpose, "ctx_transpose", {ctx}, ctxT);
         Attr     perm;
         perm.kind            = Attr::Ints;
         perm.ints            = {0, 2, 1, 3};
@@ -791,11 +789,11 @@ TEST(FusedAttention, KvConcatFoldedPresentDrivesResidentLink) {
         {
             mask[(size_t) j] = 0.f;
         }
-        mask[(size_t) kTokens - 1]  = 0.f;
-        const IOTensor     qT       = pseudoTensor("q", {kB, kHeads, 1, kHd}, (unsigned) (7 * p + 1));
-        const IOTensor     kNewT    = pseudoTensor("knew", {kB, kKvHeads, 1, kHd}, (unsigned) (7 * p + 2));
-        const IOTensor     vNewT    = pseudoTensor("vnew", {kB, kKvHeads, 1, kHd}, (unsigned) (7 * p + 3));
-        const IOTensor     maskT    = ioTensor("mask", {1, 1, 1, kTokens}, mask);
+        mask[(size_t) kTokens - 1] = 0.f;
+        const IOTensor qT          = pseudoTensor("q", {kB, kHeads, 1, kHd}, (unsigned) (7 * p + 1));
+        const IOTensor kNewT       = pseudoTensor("knew", {kB, kKvHeads, 1, kHd}, (unsigned) (7 * p + 2));
+        const IOTensor vNewT       = pseudoTensor("vnew", {kB, kKvHeads, 1, kHd}, (unsigned) (7 * p + 3));
+        const IOTensor maskT       = ioTensor("mask", {1, 1, 1, kTokens}, mask);
 
         // Linked: fold the PREVIOUS step's present row into slot p-1 at the head of this run.
         ASSERT_EQ(sFold->linkOutputToInput("present_key", "past_key", kvFoldRanges(kKvHeads, foldRows, kSlots, kHd, kvFoldSlot(p, kSlots))), Status::Ok);
@@ -805,8 +803,7 @@ TEST(FusedAttention, KvConcatFoldedPresentDrivesResidentLink) {
 
         // Reference: bind the host cache, then fold the newest present row into slot p by hand.
         std::vector<IOTensor> refOuts;
-        ASSERT_EQ(sRef->run({qT, ioTensor("past_key", {kB, kKvHeads, kSlots, kHd}, pastKeyRef), ioTensor("past_value", {kB, kKvHeads, kSlots, kHd}, pastValueRef), kNewT, vNewT, maskT}, refOuts),
-                  Status::Ok);
+        ASSERT_EQ(sRef->run({qT, ioTensor("past_key", {kB, kKvHeads, kSlots, kHd}, pastKeyRef), ioTensor("past_value", {kB, kKvHeads, kSlots, kHd}, pastValueRef), kNewT, vNewT, maskT}, refOuts), Status::Ok);
         for (int part = 0; part < 2; ++part)
         {
             const std::vector<uint8_t> present = outBytes(refOuts, part ? "present_value" : "present_key");
@@ -829,14 +826,14 @@ TEST(FusedAttention, KvConcatFoldedPresentDrivesResidentLink) {
 // carrying stride 0 along it, and the mask addressed per row; the fused CPU op matches the
 // decomposed chain. A row-broadcast mask at M > 1 stays primitive (PrefillRefused above).
 TEST(FusedAttention, ChunkPrefillPerRowMaskFuses) {
-    const int64_t m = 3;
-    auto buildRowMaskGraph = [&]() {
+    const int64_t m                 = 3;
+    auto          buildRowMaskGraph = [&]() {
         Graph    g;
-        TensorId q  = addInput(g, "q", {kB, kHeads, m, kHd});
-        TensorId kc = addInput(g, "kcache", {kB, kKvHeads, kTokens, kHd});
-        TensorId vc = addInput(g, "vcache", {kB, kKvHeads, kTokens, kHd});
-        TensorId kT = repeatKv(g, kc, "k", true);
-        TensorId vR = repeatKv(g, vc, "v", false);
+        TensorId q      = addInput(g, "q", {kB, kHeads, m, kHd});
+        TensorId kc     = addInput(g, "kcache", {kB, kKvHeads, kTokens, kHd});
+        TensorId vc     = addInput(g, "vcache", {kB, kKvHeads, kTokens, kHd});
+        TensorId kT     = repeatKv(g, kc, "k", true);
+        TensorId vR     = repeatKv(g, vc, "v", false);
         TensorId scores = addTemp(g, "scores");
         addNode(g, OpType::MatMul, "qk", {q, kT}, scores);
         TensorId mask   = addInput(g, "mask", {1, 1, m, kTokens});
@@ -853,9 +850,9 @@ TEST(FusedAttention, ChunkPrefillPerRowMaskFuses) {
         ax.i                 = -1;
         sn->attr.map["axis"] = ax;
         TensorDesc od;
-        od.name       = "out";
-        od.isOutput   = true;
-        TensorId out  = g.addTensor(od);
+        od.name      = "out";
+        od.isOutput  = true;
+        TensorId out = g.addTensor(od);
         addNode(g, OpType::MatMul, "pv", {probs, vR}, out); // [1, H, m, hd], the dense row layout
         g.outputs = {out};
         return g;

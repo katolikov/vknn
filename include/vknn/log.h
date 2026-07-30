@@ -1,7 +1,6 @@
 #pragma once
-#include <string>
-
 #include "vknn/log_level.h"
+#include <string>
 
 namespace vknn {
 

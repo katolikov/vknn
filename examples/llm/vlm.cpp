@@ -322,10 +322,10 @@ int main(int argc, char **argv) {
     // Engine-resident KV cache on the DECODE bucket: link every present output to its past input
     // (empty ranges; the per-step fold slot arrives before each run). The prefill bucket keeps the
     // host cache, so turn boundaries materialize the device state back into decoderInputs.
-    auto pastNameOf = [](int layer, int part, char (&buf)[64]) {
+    auto pastNameOf = [](int layer, int part, char(&buf)[64]) {
         snprintf(buf, sizeof buf, part ? "past_key_values.%d.value" : "past_key_values.%d.key", layer);
     };
-    auto presentNameOf = [](int layer, int part, char (&buf)[64]) {
+    auto presentNameOf = [](int layer, int part, char(&buf)[64]) {
         snprintf(buf, sizeof buf, part ? "present.%d.value" : "present.%d.key", layer);
     };
     // Present rows from the DECODE bucket's own present output shape (decoderOutputInfo describes
@@ -385,8 +385,8 @@ int main(int argc, char **argv) {
         const int                 logitsAt = indexOfName(chunkOut, "logits");
         bool                      ok       = maskAt >= 0 && posAt >= 0 && pastAt >= 0 && presAt >= 0 && logitsAt >= 0;
         ok                                 = ok && chunkIn[(size_t) pastAt].shape == pastShape;
-        ok                                 = ok && chunkIn[(size_t) maskAt].shape.size() == 4 && (int) chunkIn[(size_t) maskAt].shape[2] == chunkWindow && (int) chunkIn[(size_t) maskAt].shape.back() == cacheSlots + chunkWindow;
-        ok                                 = ok && chunkOut[(size_t) presAt].shape.size() == 4 && (int) chunkOut[(size_t) presAt].shape[2] >= chunkWindow;
+        ok = ok && chunkIn[(size_t) maskAt].shape.size() == 4 && (int) chunkIn[(size_t) maskAt].shape[2] == chunkWindow && (int) chunkIn[(size_t) maskAt].shape.back() == cacheSlots + chunkWindow;
+        ok = ok && chunkOut[(size_t) presAt].shape.size() == 4 && (int) chunkOut[(size_t) presAt].shape[2] >= chunkWindow;
         if (ok)
         {
             chunkMaskCols = cacheSlots + chunkWindow;
@@ -911,8 +911,8 @@ int main(int argc, char **argv) {
         const bool imageTurn = !imageRows.empty();
         if (imageTurn && (imageEmbeddings.empty() || (int) imageRows.size() != imageRowCount || imagePrefillBucket < 0))
         {
-            fprintf(stderr, "[vlm] image prompt needs %d image rows and an image bucket (have %d rows, image bucket %s); turn skipped\n",
-                    imageRowCount, imageEmbeddings.empty() ? 0 : (int) imageRows.size(), imagePrefillBucket >= 0 ? "yes" : "no");
+            fprintf(stderr, "[vlm] image prompt needs %d image rows and an image bucket (have %d rows, image bucket %s); turn skipped\n", imageRowCount,
+                    imageEmbeddings.empty() ? 0 : (int) imageRows.size(), imagePrefillBucket >= 0 ? "yes" : "no");
             imageEmbeddings.clear();
             printf("END\n");
             fflush(stdout);

@@ -20,30 +20,30 @@ namespace vknn {
                     const auto &v = node.attr.getints(k);
                     return v.empty() ? d : v;
                 };
-                auto ks  = ints("kernel_shape", {1, 1});
-                auto st  = ints("strides", {1, 1});
+                auto ks = ints("kernel_shape", {1, 1});
+                auto st = ints("strides", {1, 1});
                 // Shared pool geometry (core/conv_geom.h): resolves auto_pad; the shader reads the
                 // begin pads and clamps the window to H/W (end pads are folded into the output extent).
                 auto pad = poolGeom(x.h, x.w, node.attr).pads();
                 // Positional fields map 1:1 to AvgPC / the shader's PC block (N,C,H,W,OH,OW,KH,KW,SH,SW,PT,PL,
                 // countIncludePad). count_include_pad follows ONNX: 0 (default) divides by the in-bounds window
                 // count, 1 divides by the full KH*KW, so its value changes the numerical result.
-                pc       = {(int) x.n,
-                            (int) x.c,
-                            (int) x.h,
-                            (int) x.w,
-                            (int) y.h,
-                            (int) y.w,
-                            (int) ks[0],
-                            (int) ks[1],
-                            (int) st[0],
-                            (int) st[1],
-                            (int) pad[0],
-                            (int) pad[1],
-                            (int) node.attr.geti("count_include_pad", 0)};
+                pc = {(int) x.n,
+                      (int) x.c,
+                      (int) x.h,
+                      (int) x.w,
+                      (int) y.h,
+                      (int) y.w,
+                      (int) ks[0],
+                      (int) ks[1],
+                      (int) st[0],
+                      (int) st[1],
+                      (int) pad[0],
+                      (int) pad[1],
+                      (int) node.attr.geti("count_include_pad", 0)};
                 // One thread per NC4HW4 output block-pixel: a thread emits one vec4 (four packed channels),
                 // so the dispatch counts channel blocks (ceil(C/4)) rather than channels.
-                total    = x.n * cBlocks(x.c) * y.h * y.w;
+                total = x.n * cBlocks(x.c) * y.h * y.w;
                 epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
                 pipe = env.pipeline(shader((std::string("avgpool2d") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(AvgPC), std::vector<uint32_t> {});
             }

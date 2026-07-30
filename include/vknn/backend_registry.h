@@ -24,11 +24,11 @@ namespace vknn {
         /// before configure() runs).
         using Factory = std::function<std::unique_ptr<Backend>(const Config &)>;
         /// The single shared registry (function-local static, constructed on first use).
-        static BackendRegistry  &instance();
+        static BackendRegistry &instance();
         /// Install (or replace) the factory for kind `k`. A later registration of the same kind wins.
-        void                     registerBackend(BackendKind k, Factory f);
+        void registerBackend(BackendKind k, Factory f);
         /// @returns True if a factory is registered for kind `k`.
-        bool                     has(BackendKind k) const;
+        bool has(BackendKind k) const;
         /// Instantiate the backend for kind `k`, forwarding `cfg` to its factory.
         /// @returns The new backend, or nullptr if no factory is registered for `k`.
         std::unique_ptr<Backend> create(BackendKind k, const Config &cfg) const;

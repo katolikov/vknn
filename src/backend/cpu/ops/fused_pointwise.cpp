@@ -236,8 +236,8 @@ namespace vknn {
                     {
                         throw Error(Status::RuntimeError, "FusedPointwise operand tensor " + std::to_string(node.inputs[kPwRefOp0 - r.ref]) + " (" + node.name + ") has no fp32 host payload");
                     }
-                    r.p               = O.host.f32();
-                    r.ob              = broadcastStrides(O.shape, node.inputs[kPwRefOp0 - r.ref]);
+                    r.p  = O.host.f32();
+                    r.ob = broadcastStrides(O.shape, node.inputs[kPwRefOp0 - r.ref]);
                 }
             }
         }
@@ -255,8 +255,8 @@ namespace vknn {
 
         // Extra output streams share the unit's output shape (the fuser only exports same-shape
         // step values); allocate them here since the producing op only writes outputs[0].
-        int    numOuts = std::min((int) po.size(), (int) kPwMaxOuts);
-        float *outPtr[kPwMaxOuts] = {};
+        int    numOuts             = std::min((int) po.size(), (int) kPwMaxOuts);
+        float *outPtr[kPwMaxOuts]  = {};
         int    outStep[kPwMaxOuts] = {};
         for (int o = 0; o < numOuts; ++o)
         {
@@ -272,8 +272,8 @@ namespace vknn {
             walk.seek(chunkBegin);
             for (int64_t lin = chunkBegin; lin < chunkEnd; ++lin, walk.next())
             {
-                float entry = y[lin];
-                float acc   = entry;
+                float entry           = y[lin];
+                float acc             = entry;
                 float reg[kPwMaxRegs] = {};
                 for (int o = 0; o < numOuts; ++o)
                 {

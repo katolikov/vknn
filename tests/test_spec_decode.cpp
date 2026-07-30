@@ -38,11 +38,11 @@ using namespace vknn;
 
 namespace {
 
-    constexpr int64_t kVocab       = 48;
-    constexpr int64_t kCtx         = 96; // cache slots C; several verification windows wide
-    constexpr int     kBudget      = 14; // generated tokens per turn (the --max-tokens analogue)
-    constexpr int64_t kNoEos       = -1; // the "never matches" sentinel vknn_chat uses
-    constexpr int64_t kBadDraftId  = 7;  // the always-wrong scripted proposal
+    constexpr int64_t kVocab          = 48;
+    constexpr int64_t kCtx            = 96;    // cache slots C; several verification windows wide
+    constexpr int     kBudget         = 14;    // generated tokens per turn (the --max-tokens analogue)
+    constexpr int64_t kNoEos          = -1;    // the "never matches" sentinel vknn_chat uses
+    constexpr int64_t kBadDraftId     = 7;     // the always-wrong scripted proposal
     constexpr float   kNearDraftPhase = 0.02f; // a lightly perturbed draft: agrees with the target often
     constexpr float   kFarDraftPhase  = 1.7f;  // a deliberately bad draft: a different model entirely
 
@@ -200,9 +200,9 @@ namespace {
             for (int i = 0; i < count; ++i)
             {
                 // The token at absolute position anchorPos + 1 + i, when the oracle reaches it.
-                const int idx  = anchorPos + 1 + i - promptLen;
-                const int64_t o = idx >= 0 && idx < (int) oracle.size() ? oracle[(size_t) idx] : kBadDraftId;
-                out[i] = i < wrongAt ? (o + 1) % kVocab : o;
+                const int     idx = anchorPos + 1 + i - promptLen;
+                const int64_t o   = idx >= 0 && idx < (int) oracle.size() ? oracle[(size_t) idx] : kBadDraftId;
+                out[i]            = i < wrongAt ? (o + 1) % kVocab : o;
             }
         };
     }
@@ -237,10 +237,10 @@ namespace {
     // buffers at the end of the turn. A round that would cross the compiled context edge hands the
     // rest of the turn to the plain loop.
     TurnResult specDecode(HostDecoder &target, size_t verifyBucket, const ProposalSource &propose, int64_t eos, int budget) {
-        const synth::DecoderSpec &s        = target.spec;
-        const int                 drafts   = (int) kSpecDraftTokens;
-        const int64_t             window   = kSpecVerifyTokens;
-        const int64_t             maskLen  = s.ctx + window;
+        const synth::DecoderSpec &s       = target.spec;
+        const int                 drafts  = (int) kSpecDraftTokens;
+        const int64_t             window  = kSpecVerifyTokens;
+        const int64_t             maskLen = s.ctx + window;
         TurnResult                result;
         int64_t                   presRows = 0;
         for (const IOInfo &o: target.sess->outputInfo(verifyBucket))
@@ -280,7 +280,7 @@ namespace {
             }
             for (int64_t t = 0; t < window; ++t)
             {
-                pos[(size_t) t]             = target.p + t;
+                pos[(size_t) t]            = target.p + t;
                 mask[(size_t) (s.ctx + t)] = 1; // every window column is a real token
             }
             for (int64_t j = 0; j < target.p && j < s.ctx; ++j)
@@ -409,9 +409,9 @@ namespace {
     std::unique_ptr<HostDecoder> openDecoder(const std::string &path, const synth::DecoderSpec &spec) {
         auto   decoder = std::make_unique<HostDecoder>();
         Config cfg;
-        cfg.backend    = BackendKind::Cpu;
-        decoder->sess  = Session::createFromVxm(path, cfg);
-        decoder->spec  = spec;
+        cfg.backend   = BackendKind::Cpu;
+        decoder->sess = Session::createFromVxm(path, cfg);
+        decoder->spec = spec;
         if (decoder->sess)
         {
             for (size_t b = 0; b < decoder->sess->bucketCount(); ++b)
@@ -673,9 +673,8 @@ TEST(SpecDecode, RealDraftModelsMatchPlainStream) {
             EXPECT_LE(a, (int) kSpecDraftTokens) << d.name;
         }
         bestAccepted = totalAccepted > bestAccepted ? totalAccepted : bestAccepted;
-        printf("[spec-decode] draft '%s': %zu rounds, %d accepted drafts, %zu tokens (%.2f tokens per target forward)\n",
-               d.name, spec.acceptedRounds.size(), totalAccepted, spec.tokens.size(),
-               spec.acceptedRounds.empty() ? 0.0 : (double) spec.tokens.size() / (double) spec.acceptedRounds.size());
+        printf("[spec-decode] draft '%s': %zu rounds, %d accepted drafts, %zu tokens (%.2f tokens per target forward)\n", d.name, spec.acceptedRounds.size(), totalAccepted,
+               spec.tokens.size(), spec.acceptedRounds.empty() ? 0.0 : (double) spec.tokens.size() / (double) spec.acceptedRounds.size());
     }
     // At least one real draft must actually get proposals through, or the whole suite would be
     // proving the rejection path only and the acceptance path would be untested against a live
@@ -746,7 +745,7 @@ TEST(SpecDecode, ContextEdgeAndSecondTurnMatchPlainStream) {
     auto reference = openDecoder(path, target);
     ASSERT_TRUE(reference->sess);
     feedPrompt(*reference, prompt);
-    const TurnResult plain1 = plainDecode(*reference, kNoEos, kEdgeBudget);
+    const TurnResult         plain1           = plainDecode(*reference, kNoEos, kEdgeBudget);
     const std::vector<float> refKeyAfterTurn1 = reference->pastK;
     const std::vector<float> refValAfterTurn1 = reference->pastV;
     const int                refPAfterTurn1   = reference->p;
@@ -801,8 +800,8 @@ TEST(SpecDecode, EndOfStreamInsideAnAcceptedRun) {
     // Stop on a token that lands in the middle of a fully accepted round.
     for (int stopAt = 1; stopAt <= 3; ++stopAt)
     {
-        const int64_t eos = unbounded.tokens[(size_t) stopAt];
-        auto reference = openDecoder(path, target);
+        const int64_t eos       = unbounded.tokens[(size_t) stopAt];
+        auto          reference = openDecoder(path, target);
         ASSERT_TRUE(reference->sess);
         feedPrompt(*reference, prompt);
         const TurnResult plain = plainDecode(*reference, eos, kBudget);
@@ -844,9 +843,9 @@ TEST(SpecDecode, AcceptanceAndEmissionRules) {
     // cache-concat present carries 2 ranges per head starting at the first produced row.
     const std::vector<LinkRange> ranges = specVerifyFoldRanges(2, 100 + kSpecVerifyTokens, 100, 4, kSpecVerifyTokens, 7, 3);
     ASSERT_EQ(ranges.size(), 2u);
-    EXPECT_EQ(ranges[0].sourceElem, 100 * 4);            // head 0, first produced row
-    EXPECT_EQ(ranges[0].destElem, 7 * 4);                // slot 7
-    EXPECT_EQ(ranges[0].count, 3 * 4);                   // three rows, no more
+    EXPECT_EQ(ranges[0].sourceElem, 100 * 4); // head 0, first produced row
+    EXPECT_EQ(ranges[0].destElem, 7 * 4);     // slot 7
+    EXPECT_EQ(ranges[0].count, 3 * 4);        // three rows, no more
     EXPECT_TRUE(specVerifyFoldRanges(2, 105, 100, 4, kSpecVerifyTokens, 7, 0).empty());
     EXPECT_TRUE(specVerifyFoldRanges(2, 105, 100, 4, kSpecVerifyTokens, -1, 3).empty());
 }

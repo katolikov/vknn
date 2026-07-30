@@ -45,6 +45,9 @@
 #include <string>
 #include <sys/stat.h>
 #include <vector>
+#ifdef _WIN32
+#include <direct.h> // _mkdir (one-argument; no mode bits on Windows)
+#endif
 
 using namespace vknn;
 
@@ -82,7 +85,8 @@ int main(int argc, char **argv) {
     if (argc < 3)
     {
         printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
-               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--no-rope-fusion] [--no-fused-attention] [--timing] [--cache DIR]"
+               " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--no-rope-fusion] [--no-fused-attention] "
+               "[--timing] [--cache DIR]"
                " [--winograd auto|on|off] [--max-submit-nodes N] [--bucket N] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
@@ -91,7 +95,11 @@ int main(int argc, char **argv) {
     // Not VKNN: the two positional args are the model path and the output directory. Make the output
     // directory up front so the writes at the end always land.
     std::string model = argv[1], outdir = argv[2];
+#ifdef _WIN32
+    ::_mkdir(outdir.c_str()); // create the output dir if missing
+#else
     ::mkdir(outdir.c_str(), 0755); // create the output dir if missing
+#endif
 
     // Step 1 - translate the command line into a Config.
     // The Config is the one struct of engine knobs; every flag below sets a single field or hint. The
@@ -140,9 +148,9 @@ int main(int argc, char **argv) {
     {
         cfg.cacheFile = Runtime::cacheFileIn(cacheDir, model);
     }
-    cfg.dumpTensors   = optValue(argc, argv, "--dump", "");
-    cfg.fp32Tensors   = optValue(argc, argv, "--fp32-tensors", "");
-    cfg.profile       = hasFlag(argc, argv, "--profile");
+    cfg.dumpTensors = optValue(argc, argv, "--dump", "");
+    cfg.fp32Tensors = optValue(argc, argv, "--fp32-tensors", "");
+    cfg.profile     = hasFlag(argc, argv, "--profile");
     cfg.setHint(Hint::Winograd, winogradFromStr(optValue(argc, argv, "--winograd", "auto")));
     cfg.maxSubmitNodes    = atoi(optValue(argc, argv, "--max-submit-nodes", std::to_string(cfg.maxSubmitNodes).c_str()));
     cfg.maxSubmitBindings = atoi(optValue(argc, argv, "--max-submit-bindings", std::to_string(cfg.maxSubmitBindings).c_str()));

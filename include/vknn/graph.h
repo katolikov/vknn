@@ -88,7 +88,9 @@ namespace vknn {
         // is a no-op there. (The else branch reads fp32 because FLOAT/DOUBLE/INT32 all materialize to
         // fp32 host bytes at import, so its width is 4 regardless of the declared dtype.)
         const size_t blobBytes = hb.bytes.size();
-        auto         lanes     = [&](size_t w) -> int64_t { return w ? std::min<int64_t>(std::max<int64_t>(n, 0), (int64_t) (blobBytes / w)) : 0; };
+        auto         lanes     = [&](size_t w) -> int64_t {
+            return w ? std::min<int64_t>(std::max<int64_t>(n, 0), (int64_t) (blobBytes / w)) : 0;
+        };
         if (dt == DType::Float16)
         {
             const uint8_t *h = hb.bytes.data(); // viewed .vxm payload: unaligned, byte-copy only

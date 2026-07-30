@@ -28,13 +28,13 @@ namespace {
         TensorId a = g.addTensor(ai);
         g.inputs.push_back(a);
         TensorDesc td;
-        td.name    = "t";
-        TensorId t = g.addTensor(td);
+        td.name      = "t";
+        TensorId   t = g.addTensor(td);
         TensorDesc wd;
         wd.name          = "w";
         wd.shape         = {K, N};
         wd.isInitializer = true;
-        TensorId w       = g.addTensor(wd);
+        TensorId   w     = g.addTensor(wd);
         HostBuffer hb;
         hb.resizeElems(K * N, DType::Float32);
         for (int64_t k = 0; k < K; ++k)
@@ -49,7 +49,7 @@ namespace {
         yo.name     = "y";
         yo.isOutput = true;
         TensorId y  = g.addTensor(yo);
-        Node relu;
+        Node     relu;
         relu.type    = OpType::Relu;
         relu.name    = "relu";
         relu.inputs  = {a};
@@ -161,8 +161,7 @@ TEST(QuantInt4, DequantAppliesScalesAndOutliers) {
     {
         for (int64_t n = 0; n < N; ++n)
         {
-            float want = k == 2 ? 10.0f + (float) n
-                                : (float) q[(size_t) (k * N + n)] * halfToFloat(scales[(size_t) ((k / group) * N + n)]);
+            float want = k == 2 ? 10.0f + (float) n : (float) q[(size_t) (k * N + n)] * halfToFloat(scales[(size_t) ((k / group) * N + n)]);
             EXPECT_FLOAT_EQ(w[(size_t) (k * N + n)], want) << "k=" << k << " n=" << n;
         }
     }
@@ -266,9 +265,9 @@ TEST(QuantInt4, IneligibleWeightsSkipped) {
 // the int4 error envelope while a plain fp16 compile of the same graph stays VXM3.
 TEST(QuantInt4, QuantizedVxmRoundTripsAndTracksFp32) {
     const int64_t K = 512, N = 96;
-    const auto    a    = testInput(K);
-    const auto    ref  = runCpu(matmulGraph(K, N), a, K);
-    Graph         g    = matmulGraph(K, N);
+    const auto    a   = testInput(K);
+    const auto    ref = runCpu(matmulGraph(K, N), a, K);
+    Graph         g   = matmulGraph(K, N);
     runStandardPasses(g);
     QuantStats st = quantizeWeights(g, QuantOptions {});
     EXPECT_EQ(st.quantized, 1);
@@ -329,7 +328,7 @@ TEST(QuantInt4, QuantizedVxmRoundTripsAndTracksFp32) {
 // original — so the quantized CPU run is bit-identical to the plain fp16 compile.
 TEST(QuantInt4, ExactlyRepresentableWeightsRoundTripExactly) {
     const int64_t K = 256, N = 64;
-    const float   step = 0.125f; // 2^-3: exact in fp16, and q*step is exact for q in [-7,7]
+    const float   step       = 0.125f; // 2^-3: exact in fp16, and q*step is exact for q in [-7,7]
     auto          buildExact = [&] {
         Graph    g = matmulGraph(K, N);
         TensorId w = g.find("w");
@@ -340,12 +339,12 @@ TEST(QuantInt4, ExactlyRepresentableWeightsRoundTripExactly) {
         }
         return g;
     };
-    const auto a = testInput(K);
+    const auto a     = testInput(K);
     Graph      plain = buildExact();
     runStandardPasses(plain);
     convertInitializersFp16(plain);
     const auto ref = runCpu(std::move(plain), a, K);
-    Graph      g = buildExact();
+    Graph      g   = buildExact();
     runStandardPasses(g);
     ASSERT_EQ(quantizeWeights(g, QuantOptions {}).quantized, 1);
     convertInitializersFp16(g);
@@ -546,8 +545,8 @@ TEST(QuantInt4, SubnormalGroupKeepsGuardMetricFinite) {
     ASSERT_TRUE(mm->attr.has(kWq));
     // The subnormal group encodes as zero nibbles at scale 1 (outlier columns rank by magnitude and
     // land in the healthy group).
-    const TensorId  w      = mm->inputs[1];
-    const uint8_t  *packed = g.initializers.at(w).bytes.data();
+    const TensorId w      = mm->inputs[1];
+    const uint8_t *packed = g.initializers.at(w).bytes.data();
     for (int64_t k = 0; k < 128; ++k)
     {
         for (int64_t n = 0; n < N; ++n)

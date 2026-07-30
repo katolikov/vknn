@@ -1,0 +1,5 @@
+# Pinned to the versions the tool was validated with (see README.md).
+onnx==1.17.0
+onnxruntime==1.20.1
+numpy==2.4.6
+pytest==9.1.1

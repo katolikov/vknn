@@ -61,7 +61,7 @@ namespace vknn {
                     // A negative `shape` entry is treated as 1 so it never shrinks the axis: the output
                     // dim is then driven solely by X (matching numpy/ONNX Expand, which forbids a real
                     // dimension from broadcasting down).
-                    out[k]    = std::max<int64_t>(pin[k], t < 0 ? 1 : t);
+                    out[k] = std::max<int64_t>(pin[k], t < 0 ? 1 : t);
                 }
                 // Row-major (C-contiguous) strides for both tensors. `inStride` walks the *aligned*
                 // input shape `pin`: the running product `acc` of trailing input dims. `inOrigin` is
@@ -83,14 +83,14 @@ namespace vknn {
                 {
                     outStride[k] = outStride[k + 1] * out[k + 1];
                 }
-                int64_t        elems = numElements(out);
+                int64_t elems = numElements(out);
                 // Two type lanes only: int64 for shape/index tensors, fp32 for everything else. The
                 // gather never touches the values, so no other dtype needs a distinct path here.
-                bool           i64   = X.dtype == DType::Int64;
-                const float   *xf    = i64 ? nullptr : X.host.f32();
-                const int64_t *xi    = i64 ? X.host.i64() : nullptr;
-                float         *yf    = i64 ? nullptr : cpu::allocOut(Y, out);
-                int64_t       *yi    = i64 ? cpu::allocOutI64(Y, out) : nullptr;
+                bool           i64 = X.dtype == DType::Int64;
+                const float   *xf  = i64 ? nullptr : X.host.f32();
+                const int64_t *xi  = i64 ? X.host.i64() : nullptr;
+                float         *yf  = i64 ? nullptr : cpu::allocOut(Y, out);
+                int64_t       *yi  = i64 ? cpu::allocOutI64(Y, out) : nullptr;
                 for (int64_t oi = 0; oi < elems; ++oi)
                 {
                     // Decompose the flat output index into per-axis coordinates and simultaneously

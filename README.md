@@ -79,7 +79,7 @@ explorer of the engine's class graph.
 
 ## Quickstart
 
-Build the engine and tools:
+Build the engine and tools (macOS / Linux):
 
 ```sh
 ./build.sh             # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
@@ -89,6 +89,24 @@ Build the engine and tools:
 ./build.sh --leakcheck # run the tests under memory-leak detection (Linux: ASan+LeakSanitizer+UBSan; macOS: the `leaks` tool)
 ./build.sh --docs      # the static documentation site -> docs/site/index.html
 ```
+
+On **Windows**, `build.ps1` mirrors the same interface from PowerShell (CMake plus any host
+toolchain — MSVC, or MinGW-w64; ninja is preferred when on PATH, else the Visual Studio
+generator is used and binaries land in `build-host\Release\`):
+
+```powershell
+.\build.ps1            # host build: CPU backend + IR + ONNX import + tools + tests (no Vulkan)
+.\build.ps1 --android  # full engine incl. the Vulkan backend (Windows NDK r27 + ninja)
+.\build.ps1 --convert  # only the model compiler (vknn_compile), for the chosen target
+.\build.ps1 --test     # build + run the host unit tests
+.\build.ps1 --docs     # the static documentation site -> docs/site/index.html
+```
+
+The Windows host path is CPU-only, same as the POSIX host build (the Vulkan backend targets
+Android devices), and skips the Linux dma-buf zero-copy demos; `--leakcheck` stays POSIX-only.
+Weight-file loads fall back from `mmap` to buffered reads on Windows — functionally identical,
+model load only. Everything else — `vknn_compile`, `vknn_run_io`, the full test suite — builds
+and runs natively.
 
 **Compile once, run many times.** `vknn_compile` turns an ONNX model into an optimized `.vxm` that
 skips ONNX parsing and graph passes at load:

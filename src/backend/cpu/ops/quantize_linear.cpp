@@ -38,20 +38,20 @@ namespace vknn {
 
         struct QuantizeLinearCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X = ctx.t(node.inputs[0]);
-                const RtTensor &S = ctx.t(node.inputs[1]);
-                RtTensor       &Y = ctx.t(node.outputs[0]);
-                int64_t         n = cpu::elemCount(X.shape);
-                const float    *x = X.host.f32();
-                const float    *s = S.host.f32();
+                const RtTensor &X      = ctx.t(node.inputs[0]);
+                const RtTensor &S      = ctx.t(node.inputs[1]);
+                RtTensor       &Y      = ctx.t(node.outputs[0]);
+                int64_t         n      = cpu::elemCount(X.shape);
+                const float    *x      = X.host.f32();
+                const float    *s      = S.host.f32();
                 int64_t         sCount = cpu::elemCount(S.shape); // rank-0 scalar counts as 1 (per-tensor)
                 const float    *z      = nullptr;
                 int64_t         zCount = 0;
                 if (node.inputs.size() > 2 && node.inputs[2] != kNoTensor)
                 {
                     const RtTensor &Z = ctx.t(node.inputs[2]);
-                    z      = Z.host.f32();
-                    zCount = cpu::elemCount(Z.shape);
+                    z                 = Z.host.f32();
+                    zCount            = cpu::elemCount(Z.shape);
                 }
                 double qmin, qmax;
                 quantRange(ctx.graph->desc(node.outputs[0]).dtype, qmin, qmax);
@@ -82,9 +82,9 @@ namespace vknn {
                     float   zp = z == nullptr ? 0.0f : z[zCount == 1 ? 0 : c];
                     // std::nearbyint honors the current rounding mode, which is round-to-nearest-even
                     // by default (never changed in this process) -- exactly ONNX's round-half-even.
-                    double  q  = std::nearbyint((double) x[i] / (double) s[c]) + (double) zp;
-                    q          = q < qmin ? qmin : (q > qmax ? qmax : q);
-                    y[i]       = (float) q;
+                    double q = std::nearbyint((double) x[i] / (double) s[c]) + (double) zp;
+                    q        = q < qmin ? qmin : (q > qmax ? qmax : q);
+                    y[i]     = (float) q;
                 }
             }
         };

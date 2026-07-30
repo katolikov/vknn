@@ -27,10 +27,10 @@ namespace vknn {
                 int total, head, halfDim, headsPerPos, tableRows;
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
-            std::shared_ptr<vk::Buffer>          posBuf;   // const positions uploaded as fp32; null when runtime
-            std::shared_ptr<vk::Buffer>          holdX;    // const data operand
-            std::shared_ptr<vk::Buffer>          holdCos;  // const cos table
-            std::shared_ptr<vk::Buffer>          holdSin;  // const sin table
+            std::shared_ptr<vk::Buffer>          posBuf;  // const positions uploaded as fp32; null when runtime
+            std::shared_ptr<vk::Buffer>          holdX;   // const data operand
+            std::shared_ptr<vk::Buffer>          holdCos; // const cos table
+            std::shared_ptr<vk::Buffer>          holdSin; // const sin table
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph  &g       = *env.graph;
@@ -62,8 +62,7 @@ namespace vknn {
                     posBuf = upload(*env.ctx, pv, false); // positions are always fp32 (rope.comp binding 1)
                 }
 
-                pc = {(int) numElements(g.desc(node.outputs[0]).shape), (int) (halfDim * 2), (int) halfDim,
-                      (int) (rank >= 2 ? s[rank - 2] : 1), (int) (ts.empty() ? 0 : ts[0])};
+                pc = {(int) numElements(g.desc(node.outputs[0]).shape), (int) (halfDim * 2), (int) halfDim, (int) (rank >= 2 ? s[rank - 2] : 1), (int) (ts.empty() ? 0 : ts[0])};
                 pipe = env.pipeline(shader("rope", env.useFp16), 5, sizeof(PC), std::vector<uint32_t> {});
             }
 
@@ -71,10 +70,8 @@ namespace vknn {
                 // Bind order must match the shader: x, positions, cos table, sin table, out.
                 vk::Buffer *pos = posBuf ? posBuf.get() : env.devBuf(node.inputs[1]);
                 pipe->dispatch(cmd,
-                               {operandBuf(env, node.inputs[0], holdX)->handle(), pos->handle(),
-                                operandBuf(env, node.inputs[2], holdCos)->handle(),
-                                operandBuf(env, node.inputs[3], holdSin)->handle(),
-                                env.devBuf(node.outputs[0])->handle()},
+                               {operandBuf(env, node.inputs[0], holdX)->handle(), pos->handle(), operandBuf(env, node.inputs[2], holdCos)->handle(),
+                                operandBuf(env, node.inputs[3], holdSin)->handle(), env.devBuf(node.outputs[0])->handle()},
                                &pc, sizeof(pc), groups(pc.total, kRopeLocalSize));
             }
         };

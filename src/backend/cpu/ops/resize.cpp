@@ -147,10 +147,14 @@ namespace vknn {
         // non-integer sample position, which is every position of a non-integer scale.
         switch (nearestMode)
         {
-            case kResizeNearestPreferCeil: return (int) (2 * r >= den ? q + 1 : q);
-            case kResizeNearestFloor: return (int) q;
-            case kResizeNearestCeil: return (int) (r > 0 ? q + 1 : q);
-            default: return (int) (2 * r > den ? q + 1 : q); // round_prefer_floor: bump only strictly past the midpoint
+            case kResizeNearestPreferCeil:
+                return (int) (2 * r >= den ? q + 1 : q);
+            case kResizeNearestFloor:
+                return (int) q;
+            case kResizeNearestCeil:
+                return (int) (r > 0 ? q + 1 : q);
+            default:
+                return (int) (2 * r > den ? q + 1 : q); // round_prefer_floor: bump only strictly past the midpoint
         }
     }
 

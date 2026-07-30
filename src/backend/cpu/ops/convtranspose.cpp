@@ -18,7 +18,7 @@ namespace vknn {
                 const RtTensor *B       = hasBias ? &ctx.t(node.inputs[2]) : nullptr;
                 RtTensor       &Y       = ctx.t(node.outputs[0]);
 
-                NCHW    x     = NCHW::from(X.shape);
+                NCHW x = NCHW::from(X.shape);
                 // ONNX weight layout is W[Cin, Cout/group, kH, kW]: dim 1 is output channels PER
                 // GROUP (not total Cout), so outC below is recovered as outCg * group.
                 int64_t outCg = W.shape[1], kh = W.shape[2], kw = W.shape[3];

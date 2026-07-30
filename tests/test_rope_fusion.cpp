@@ -91,7 +91,7 @@ namespace {
         {
             for (int64_t j = 0; j < kHalf; ++j)
             {
-                double a               = 0.13 * (double) p * (double) (j + 1);
+                double a                    = 0.13 * (double) p * (double) (j + 1);
                 v[(size_t) (p * kHalf + j)] = (float) (sine ? std::sin(a) : std::cos(a));
             }
         }
@@ -103,8 +103,8 @@ namespace {
     // Sub/Add rotate combines, Concat, Reshape back to [1,S,H*head].
     Graph ropeGraph() {
         Graph    g;
-        TensorId x   = addInput(g, "x", {1, kS, kH * kHead});
-        TensorId pos = addInput(g, "pos", {1, kS}, DType::Int64);
+        TensorId x    = addInput(g, "x", {1, kS, kH * kHead});
+        TensorId pos  = addInput(g, "pos", {1, kS}, DType::Int64);
         TensorId cosT = addF32Init(g, "cos_table", {kP, kHalf}, tableVals(false));
         TensorId sinT = addF32Init(g, "sin_table", {kP, kHalf}, tableVals(true));
 
@@ -194,9 +194,9 @@ namespace {
 
     std::vector<IOTensor> ropeInputs() {
         std::vector<IOTensor> ins(2);
-        ins[0].name  = "x";
-        ins[0].shape = {1, kS, kH * kHead};
-        ins[0].dtype = DType::Float32;
+        ins[0].name           = "x";
+        ins[0].shape          = {1, kS, kH * kHead};
+        ins[0].dtype          = DType::Float32;
         std::vector<float> xv = rampX();
         ins[0].data.resize(xv.size() * 4);
         std::memcpy(ins[0].data.data(), xv.data(), xv.size() * 4);
@@ -300,10 +300,10 @@ TEST(RopeFusion, FusesPointwiseUnitChain) {
 // The fused CPU kernel reproduces the decomposed chain and the ground-truth formula exactly (same
 // fp32 expression per element, contraction pinned off on both sides).
 TEST(RopeFusion, CpuFusedMatchesDecomposedAndReference) {
-    std::vector<IOTensor> ins    = ropeInputs();
-    std::vector<float>    fused  = runGraph(ropeGraph(), true, ins);
-    std::vector<float>    plain  = runGraph(ropeGraph(), false, ins);
-    std::vector<float>    ref    = ropeReference();
+    std::vector<IOTensor> ins   = ropeInputs();
+    std::vector<float>    fused = runGraph(ropeGraph(), true, ins);
+    std::vector<float>    plain = runGraph(ropeGraph(), false, ins);
+    std::vector<float>    ref   = ropeReference();
     ASSERT_EQ(fused.size(), ref.size());
     ASSERT_EQ(plain.size(), ref.size());
     for (size_t i = 0; i < ref.size(); ++i)
@@ -423,7 +423,7 @@ TEST(RopeFusion, CnnGraphUntouched) {
 TEST(RopeFusion, OutOfRangePositionFailsAtBind) {
     Config cfg;
     cfg.backend = BackendKind::Cpu;
-    Graph g = ropeGraph();
+    Graph g     = ropeGraph();
     inferShapes(g);
     auto sess = Session::create(std::move(g), cfg);
     ASSERT_TRUE(sess);

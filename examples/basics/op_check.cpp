@@ -78,10 +78,10 @@ int main(int argc, char **argv) {
 
     // Step 4 - allocate GPU buffers and fill the two inputs. The output buffer asks for kReadback
     // memory so the CPU can read the GPU's result back efficiently.
-    const uint32_t elementCount = 1u << 20; // 1M elements
-    vk::Buffer     inputBufferA(context, elementCount * 4);
-    vk::Buffer     inputBufferB(context, elementCount * 4);
-    vk::Buffer     outputBuffer(context, elementCount * 4, vk::MemPref::kReadback);
+    const uint32_t     elementCount = 1u << 20; // 1M elements
+    vk::Buffer         inputBufferA(context, elementCount * 4);
+    vk::Buffer         inputBufferB(context, elementCount * 4);
+    vk::Buffer         outputBuffer(context, elementCount * 4, vk::MemPref::kReadback);
     std::vector<float> inputA(elementCount), inputB(elementCount);
     for (uint32_t i = 0; i < elementCount; ++i)
     {

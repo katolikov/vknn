@@ -10,8 +10,8 @@ namespace vknn {
     /// dtype, its role at the graph boundary (input/output/initializer), and backend storage hints.
     /// One TensorDesc exists per distinct tensor; ops reference tensors by name.
     struct TensorDesc {
-        std::string  name;  ///< Unique tensor name; ops reference their inputs and outputs by this name.
-        Shape        shape; ///< Logical NCHW shape. A dynamic dimension is encoded as -1.
+        std::string name;  ///< Unique tensor name; ops reference their inputs and outputs by this name.
+        Shape       shape; ///< Logical NCHW shape. A dynamic dimension is encoded as -1.
         /// Per-axis symbolic dimension names for a graph input, mirroring `shape`: entry `i` is the ONNX
         /// `dim_param` string of axis `i` (a symbol like "past_sequence_length", or a compound expression
         /// like "past_sequence_length + sequence_length") when that axis is dynamic, and empty when the
@@ -20,11 +20,11 @@ namespace vknn {
         /// small set of dim bindings (Config::dimBindings / --dim). Compile-time only: it is never
         /// serialized into a .vxm (a compiled model already has concrete shapes).
         std::vector<std::string> dimParams;
-        DType        dtype         = DType::Float32; ///< Element type of the logical tensor.
-        TensorFormat format        = TensorFormat::NCHW; ///< Logical layout of the tensor (the IR is always NCHW).
-        bool         isInput       = false; ///< True for a graph input (a value the caller supplies).
-        bool         isOutput      = false; ///< True for a graph output (a value the caller reads back).
-        bool         isInitializer = false; ///< True for a constant/weight tensor baked into the model.
+        DType                    dtype         = DType::Float32;     ///< Element type of the logical tensor.
+        TensorFormat             format        = TensorFormat::NCHW; ///< Logical layout of the tensor (the IR is always NCHW).
+        bool                     isInput       = false;              ///< True for a graph input (a value the caller supplies).
+        bool                     isOutput      = false;              ///< True for a graph output (a value the caller reads back).
+        bool                     isInitializer = false;              ///< True for a constant/weight tensor baked into the model.
         /// Vulkan only: store this tensor as a flat row-major buffer (set by the layout-convert pass for
         /// the generic head ops) instead of the default NC4HW4 packing. Ignored by the CPU backend.
         bool gpuFlat = false;

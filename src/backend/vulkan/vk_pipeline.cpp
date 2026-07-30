@@ -8,7 +8,7 @@ namespace vknn { namespace vk {
         // Every kernel exposes a single compute entry point named "main" (glslang default).
         constexpr const char *kEntryPoint = "main";
         // All bindings are storage buffers in the compute stage (the engine binds no images/samplers here).
-        constexpr VkDescriptorType     kBindingType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        constexpr VkDescriptorType kBindingType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         // The bits enum (not VkShaderStageFlags) so it also assigns to VkPipelineShaderStageCreateInfo::stage.
         constexpr VkShaderStageFlagBits kComputeStage = VK_SHADER_STAGE_COMPUTE_BIT;
     } // namespace
@@ -110,7 +110,8 @@ namespace vknn { namespace vk {
             if (pushConstBytes > ctx_.caps().maxPushConstantsSize)
             {
                 VKNN_ERROR << "shader " << shaderName << " needs " << pushConstBytes << " B of push constants but the device caps at " << ctx_.caps().maxPushConstantsSize << " B";
-                throw Error(Status::Unsupported, "push-constant block of shader " + shaderName + " (" + std::to_string(pushConstBytes) + " B) exceeds device maxPushConstantsSize (" + std::to_string(ctx_.caps().maxPushConstantsSize) + " B)");
+                throw Error(Status::Unsupported, "push-constant block of shader " + shaderName + " (" + std::to_string(pushConstBytes) + " B) exceeds device maxPushConstantsSize (" +
+                                                     std::to_string(ctx_.caps().maxPushConstantsSize) + " B)");
             }
             VkPushConstantRange pcr {};
             pcr.stageFlags = kComputeStage;

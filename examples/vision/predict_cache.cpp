@@ -37,8 +37,8 @@ int main(int argc, char **argv) {
     // pointing cacheFile at "<model>.cache" makes vknn persist its warm-start artifacts there so the
     // next load of this model is fast.
     Config config;
-    config.precision = Precision::Low;                     // fp16 GPU inference
-    config.cacheFile = std::string(argv[1]) + ".cache";    // reused next load for a warm start
+    config.precision = Precision::Low;                  // fp16 GPU inference
+    config.cacheFile = std::string(argv[1]) + ".cache"; // reused next load for a warm start
 
     // Step 2 - load + compile the model. The returned handle is falsy if the load failed.
     Model model = Model::load(argv[1], config);
@@ -74,7 +74,8 @@ int main(int argc, char **argv) {
     // Step 6 - read the first output: its name, element count, first few raw values, and argmax (the
     // predicted class for a classifier). Then report where the warm-start cache was written.
     const Tensor &output = outputs[0];
-    printf("output '%s' [%lld values]: %.4f %.4f %.4f %.4f ...  argmax=%lld\n", output.name().c_str(), (long long) output.size(), output[0], output[1], output[2], output[3], (long long) output.argmax());
+    printf("output '%s' [%lld values]: %.4f %.4f %.4f %.4f ...  argmax=%lld\n", output.name().c_str(), (long long) output.size(), output[0], output[1], output[2], output[3],
+           (long long) output.argmax());
     printf("done (cache: %s)\n", session->config().cacheFile.c_str());
     return 0;
 }
