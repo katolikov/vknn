@@ -34,7 +34,10 @@ namespace vknn {
 
         // Workgroup size of the group==1 direct conv shader when no measurement applies: the value
         // Tuning::None dispatches and the incumbent every local-size race is seeded with.
-        constexpr uint32_t kConvDefaultLocalSize = 64;
+        // The direct kernel's Tuning::None width and race incumbent is env.convLocalSize (the
+        // device's one-subgroup width, resolved at load); only the race's narrow-candidate floor
+        // stays a constant.
+        constexpr uint32_t kConvRaceMinWidth = 32;
         // Output pixels per thread of the 1x1 kernels when no measurement applies: the value
         // Tuning::None dispatches and the incumbent pickWTile's race is seeded with.
         constexpr uint32_t kConv1x1DefaultWTile = 4;
@@ -334,9 +337,9 @@ namespace vknn {
                 }
                 if (env.tuning == Tuning::None)
                 {
-                    return kConvDefaultLocalSize; // no cached pick and no new sweep -> the deterministic default kernel
+                    return env.convLocalSize; // no cached pick and no new sweep -> the device's one-subgroup default
                 }
-                uint32_t best = kConvDefaultLocalSize;
+                uint32_t best = env.convLocalSize;
                 if (env.runner)
                 {
                     int    es       = env.useFp16 ? 2 : 4;
@@ -344,9 +347,25 @@ namespace vknn {
                     size_t dstBytes = (size_t) pc.N * cBlocks(pc.Cout) * pc.OH * pc.OW * 4 * es;
                     auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
                     auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
-                    // The default local size leads the candidate list, so it is the incumbent below
-                    // whatever else the level adds (Heavy also explores the narrower 32).
-                    std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {kConvDefaultLocalSize, 32, 128, 256} : std::vector<uint32_t> {kConvDefaultLocalSize, 128, 256};
+                    // The device default (one whole subgroup, env.convLocalSize) leads the list, so
+                    // it is the incumbent; the challengers are its 2x and 4x subgroup multiples and
+                    // (under Heavy) the half-subgroup narrower packing - the same ladder the old
+                    // hardcoded {64, 128, 256} + Heavy 32 spelled on a 64-wide device, but spanning
+                    // whatever width this device actually runs. Everything clamps to the exact caps.
+                    const auto &cap = env.ctx->caps();
+                    const uint32_t maxInv = std::min(cap.maxWorkGroupInvocations != 0u ? cap.maxWorkGroupInvocations : env.convLocalSize, cap.maxWorkGroupSize[0] != 0u ? cap.maxWorkGroupSize[0] : env.convLocalSize);
+                    std::vector<uint32_t> cands {env.convLocalSize};
+                    for (uint32_t mult: {2u, 4u})
+                    {
+                        if (env.convLocalSize * mult <= maxInv)
+                        {
+                            cands.push_back(env.convLocalSize * mult);
+                        }
+                    }
+                    if (env.tuning == Tuning::Heavy && env.convLocalSize / 2u >= kConvRaceMinWidth)
+                    {
+                        cands.insert(cands.begin() + 1, env.convLocalSize / 2u);
+                    }
                     // The workgroup size changes neither the thread count nor the traffic, only how
                     // the threads are packed, so every candidate carries the same cost inputs and
                     // the analytical prefilter leaves the list alone. It stays on the shared path so
