@@ -2,6 +2,7 @@
 // fusePointwiseChains) as one kernel instead of one dispatch per original op. The plan (steps +
 // broadcast strides) is uploaded once as a small SSBO read by shaders/pw_epilogue.glsl; the extra
 // step operands bind at consecutive slots after it (see PW_EPI_BASE in the .comp files).
+#include "backend/vulkan/vk_tune_model.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
@@ -22,13 +23,23 @@ namespace vknn {
         // Measured: an image-resolution unit is -21% at eight items, while a classifier's late 7x7
         // units (a few thousand lanes) are +6% -- so the rule is simply whether enough lanes survive
         // the division.
-        constexpr int kPwMaxItemsPerLane = 8;
-        constexpr int kPwItemsLaneFloor  = 128 * 1024; // lanes that must remain after dividing
+        //
+        // The lane floor is DEVICE-DERIVED at load, not a constant: it is the saturation point the
+        // TuneModel probe measures on this GPU (deviceTuneModel; 64-wide waves before added waves
+        // stop buying throughput) times a fixed headroom multiple, in lanes. A wider GPU keeps more
+        // items per lane profitable exactly that much longer; a narrower one drops to one item
+        // sooner instead of idling. The multiple reproduces the measured -21% choice on the
+        // calibration device (5 x 400 waves x 64 lanes ~= the 128 Ki-lane floor it was tuned at).
+        constexpr int kPwMaxItemsPerLane      = 8; // independent loads one lane keeps in flight
+        constexpr int kPwLaneFloorWaveHeadroom = 5;
+        constexpr int kPwProbeWaveLanes        = 64; // the probe counts 64-wide waves
 
         // Items per lane for a dispatch of `total` elements: as many as kPwMaxItemsPerLane, while
-        // leaving at least kPwItemsLaneFloor lanes.
-        inline int pwItemsPerLane(int total) {
-            const int byFloor = total / kPwItemsLaneFloor;
+        // leaving at least the device's saturation lane count.
+        inline int pwItemsPerLane(int total, VkOpEnv &env) {
+            const double waves     = vk::deviceTuneModel(env).wavesToSaturate;
+            const int    laneFloor = (int) (waves * kPwProbeWaveLanes) * kPwLaneFloorWaveHeadroom;
+            const int    byFloor   = laneFloor > 0 ? total / laneFloor : 1;
             return byFloor < 1 ? 1 : (byFloor > kPwMaxItemsPerLane ? kPwMaxItemsPerLane : byFloor);
         }
 
@@ -38,6 +49,7 @@ namespace vknn {
             std::vector<TensorId>                    operands;
             std::vector<std::shared_ptr<vk::Buffer>> holds;
             int                                      total = 0;
+            int                                      items = 1; // per-lane walk count, resolved at load in prepare()
             bool                                     flat  = false;
 
             void prepare(const Node &node, VkOpEnv &env) override {
@@ -47,6 +59,7 @@ namespace vknn {
 
                 PwPlanCPU plan {};
                 buildPwPlan(g, node, flat, out, plan, operands, total);
+                items = pwItemsPerLane(total, env); // device-probe consult happens at load, never at record
                 holds.assign(operands.size(), nullptr);
 
                 planBuf = uploadPwPlan(env, plan);
@@ -114,7 +127,7 @@ namespace vknn {
                 // shaders are local_size_x=256 == flat::kFlatLocalSize.
                 struct {
                     int total, items;
-                } pc {total, pwItemsPerLane(total)};
+                } pc {total, items};
                 // Both kernels walk pc.items elements per lane (see their main()), so the grid covers
                 // that fraction of the element count.
                 const int lanes = (total + pc.items - 1) / pc.items;
