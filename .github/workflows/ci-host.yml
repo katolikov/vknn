@@ -71,39 +71,5 @@ jobs:
 
   # The same Android cross-build driven from Windows through build.ps1 (NDK from
   # the runner image; vcvars so the vendored-glslang HOST prebuild gets cl+ninja).
-  ci-windows-android:
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: submodules (android build)
-        run: git submodule update --init --depth 1 third_party/googletest third_party/msgpack-c third_party/glslang
-
-      - name: build.ps1 --android
-        shell: cmd
-        run: |
-          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
-          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          set "ANDROID_NDK=%ANDROID_NDK_LATEST_HOME%"
-          pwsh -NoProfile -ExecutionPolicy Bypass -File build.ps1 --android
-
-  # Windows host build + unit tests through build.ps1, with the MSVC toolchain
-  # (vcvars64 located via vswhere; ninja is on the runner PATH, so the script
-  # configures Ninja + cl). Guards the Windows port: the same vknn_tests suite
-  # must pass natively on Windows.
-  ci-windows:
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: submodules (host build)
-        run: git submodule update --init --depth 1 third_party/googletest third_party/msgpack-c
-
-      - name: build + run tests (build.ps1 --test)
-        shell: cmd
-        run: |
-          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
-          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          pwsh -NoProfile -ExecutionPolicy Bypass -File build.ps1 --test
+  # ci-windows / ci-windows-android need main's build.ps1 and portability guards,
+  # which postdate this branch series; they return when the stack merges with main.
