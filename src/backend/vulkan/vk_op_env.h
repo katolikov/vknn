@@ -23,11 +23,19 @@ namespace vknn {
 
     /// Environment passed to Vulkan operators during prepare/record.
     struct VkOpEnv {
-        VulkanBackend                        *backend = nullptr;
-        vk::VulkanContext                    *ctx     = nullptr;
-        vk::PipelineCache                    *cache   = nullptr;
-        const Graph                          *graph   = nullptr;
-        const Config                         *config  = nullptr;
+        VulkanBackend     *backend = nullptr;
+        vk::VulkanContext *ctx     = nullptr;
+        vk::PipelineCache *cache   = nullptr;
+        const Graph       *graph   = nullptr;
+        const Config      *config  = nullptr;
+        /// Workgroup width of the flat/element-parallel kernel family, resolved ONCE at segment
+        /// build from exact device caps (min(256, maxWorkGroupInvocations) in whole subgroups -
+        /// flatLocalSizeFor). Every family pipeline takes it as its workgroup-size spec constant
+        /// and every dispatch derives its group count from the same value, so the two can never
+        /// disagree. Caps are exact per device, so this may steer byte-affecting choices (a
+        /// workgroup reduction tree); MEASURED probe values (deviceTuneModel) may only ever steer
+        /// placement-only choices such as items-per-lane.
+        uint32_t                              flatLocalSize = 256;
         std::function<vk::Buffer *(TensorId)> devBuf; // resolves a tensor id to its (possibly pool-aliased) activation buffer
         // Resolves a tensor id to its int8 KV-cache SCALE buffer (Hint::KvCacheQuant): non-null
         // exactly for the cache tensors the owning segment allocated as int8 payload + fp16 scales
@@ -40,24 +48,24 @@ namespace vknn {
         // kernels (rule in core/matmul_tile.h): the producing kernel stores at this stride and
         // zero-fills the pad, the consumer reads at it. Null on a segment without the scheme, so
         // callers use `rowPad ? rowPad(t) : 0`.
-        std::function<int64_t(TensorId)>      rowPad;
+        std::function<int64_t(TensorId)> rowPad;
         // Drops an initializer's HOST bytes the moment its device copy exists, so a large-weight model
         // never holds the host and device copy of the same weight at once (the load-time peak would
         // otherwise be twice the weight set, which exhausts phone RAM on a multi-GB model). Null when
         // the session keeps its weights (Config::freeWeightsAfterUpload off). Only weights uploaded at
         // prepare() time are released; record-time constant operands stay resident.
-        std::function<void(TensorId)>         releaseInitializer;
+        std::function<void(TensorId)> releaseInitializer;
         // Memo of the flat device buffer already uploaded for an initializer of THIS graph. A weight may
         // feed several nodes; once its host bytes are released the content digest can no longer be
         // recomputed, so every consumer after the first resolves through this memo instead.
         std::function<std::shared_ptr<vk::Buffer>(TensorId)>       lookupFlatWeight;
         std::function<void(TensorId, std::shared_ptr<vk::Buffer>)> rememberFlatWeight;
-        bool                                  useFp16  = false; // per-node: false for a storeFp32 node so it runs its fp32 kernel
-        bool                                  baseFp16 = false; // segment-wide precision (what a non-storeFp32 tensor is stored as)
-        WeightCache                          *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
-        vk::CommandRunner                    *runner   = nullptr; // for on-device autotuning benchmarks
-        Tuning                                tuning   = Tuning::Fast;
-        Mode                                  winograd = Mode::Auto;
+        bool                                                       useFp16  = false;   // per-node: false for a storeFp32 node so it runs its fp32 kernel
+        bool                                                       baseFp16 = false;   // segment-wide precision (what a non-storeFp32 tensor is stored as)
+        WeightCache                                               *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
+        vk::CommandRunner                                         *runner   = nullptr; // for on-device autotuning benchmarks
+        Tuning                                                     tuning   = Tuning::Fast;
+        Mode                                                       winograd = Mode::Auto;
         // Per-model namespace for the weight cache, so reusing one cache directory across different models can't
         // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
         std::string modelTag;
@@ -129,7 +137,7 @@ namespace vknn {
         /// The process-wide singleton (constructed on first use, so registration order is irrelevant).
         static VkOpRegistry &instance();
         /// Register (or replace) the factory for an OpType.
-        void                 reg(OpType t, VkOpFactory f) {
+        void reg(OpType t, VkOpFactory f) {
             factories_[t] = std::move(f);
         }
         /// True if a Vulkan implementation is registered for `t` (i.e. the op can run on the GPU).

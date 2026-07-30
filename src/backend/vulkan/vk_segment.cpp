@@ -1,5 +1,4 @@
 #include "vk_segment.h"
-#include "vk_backend.h"
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
 #include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
@@ -9,6 +8,8 @@
 #include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
+#include "ops/flat_ops.h" // flat::flatLocalSizeFor (the family workgroup width, resolved at load)
+#include "vk_backend.h"
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
 #include "vknn/profiler.h"
@@ -142,8 +143,8 @@ namespace vknn {
                         continue;
                     }
                     KvqCache cache;
-                    cache.headDim  = node.attr.geti(kFaHd);
-                    cache.rows     = numElements(g.tensors[tid].shape) / cache.headDim;
+                    cache.headDim   = node.attr.geti(kFaHd);
+                    cache.rows      = numElements(g.tensors[tid].shape) / cache.headDim;
                     kvqCaches_[tid] = cache; // the scale buffer is allocated with the boundary buffers below
                     break;
                 }
@@ -156,8 +157,7 @@ namespace vknn {
                 // Named refusal: the hint asked for the scheme but nothing qualified on this
                 // segment (no eligible split-KV attention, an fp32 session, or a device without
                 // 8-bit storage). The fp16 cache path runs unchanged.
-                VKNN_INFO << "int8 KV cache requested but no eligible cache tensor on this segment: " << kvQuantGraphRefusal(g)
-                          << " (device int8 storage: " << (int8Storage ? "yes" : "no") << ", fp16 storage: " << (useFp16_ ? "yes" : "no") << ")";
+                VKNN_INFO << "int8 KV cache requested but no eligible cache tensor on this segment: " << kvQuantGraphRefusal(g) << " (device int8 storage: " << (int8Storage ? "yes" : "no") << ", fp16 storage: " << (useFp16_ ? "yes" : "no") << ")";
             }
         }
         // Virtualized activation row stride: give an internal flat fp16 activation a buffer whose
@@ -250,7 +250,8 @@ namespace vknn {
             {
                 const TensorId tid = entry.first;
                 const auto    &td  = g.tensors[tid];
-                if (!useFp16_ || !td.gpuFlat || td.storeFp32 || td.isInitializer || td.shape.size() < 2 || kvqCaches_.count(tid) || readBack.count(tid) || graphInputs_.count(tid))
+                if (!useFp16_ || !td.gpuFlat || td.storeFp32 || td.isInitializer || td.shape.size() < 2 || kvqCaches_.count(tid) || readBack.count(tid) ||
+                    graphInputs_.count(tid))
                 {
                     continue; // only an internal, flat, fp16 activation may change physical layout
                 }
@@ -284,7 +285,9 @@ namespace vknn {
                         break;
                     }
                     int64_t want = 0;
-                    if (!matmulVec4PadUnlocks(useFp16_, isA ? MatMulOperand::A : MatMulOperand::B, g.desc(use.inputs[0]).shape, g.desc(use.inputs[1]).shape, g.desc(use.outputs[0]).shape, want) || (padded != 0 && want != padded))
+                    if (!matmulVec4PadUnlocks(useFp16_, isA ? MatMulOperand::A : MatMulOperand::B, g.desc(use.inputs[0]).shape, g.desc(use.inputs[1]).shape,
+                                              g.desc(use.outputs[0]).shape, want) ||
+                        (padded != 0 && want != padded))
                     {
                         ok = false;
                         break;
@@ -446,7 +449,7 @@ namespace vknn {
             // Deeper than any real chain (a DenseNet-264 block links ~48 generations); named so the
             // bound is visibly a guard, not a tuning value.
             constexpr int kViewChainMaxHops = 4096;
-            size_t        off              = 0;
+            size_t        off               = 0;
             for (int hop = 0; hop < kViewChainMaxHops; ++hop)
             {
                 auto it = viewOf.find(t);
@@ -466,7 +469,7 @@ namespace vknn {
         // split/slice views claim nothing (they are read-only aliases of bytes the parent's own
         // writers produce).
         std::map<TensorId, std::vector<std::pair<size_t, size_t>>> writeClaims;
-        auto claimWrite = [&](TensorId parent, size_t begin, size_t end) {
+        auto                                                       claimWrite = [&](TensorId parent, size_t begin, size_t end) {
             auto &intervals = writeClaims[parent];
             for (const auto &c: intervals)
             {
@@ -553,8 +556,8 @@ namespace vknn {
                     {
                         continue;
                     }
-                    int padAxis = -1;
-                    bool padOk  = true;
+                    int  padAxis = -1;
+                    bool padOk   = true;
                     for (int d = 0; d < rank && padOk; ++d)
                     {
                         const int64_t b = pads[(size_t) d], e = pads[(size_t) (rank + d)];
@@ -629,7 +632,7 @@ namespace vknn {
                         continue;
                     }
                     const Shape &is = g.desc(in0).shape, &os = g.desc(out).shape;
-                    const int    r  = (int) is.size();
+                    const int    r = (int) is.size();
                     if ((int) os.size() != r || r == 0 || numElements(os) <= 0 || numElements(is) <= 0)
                     {
                         continue;
@@ -748,9 +751,7 @@ namespace vknn {
                         continue; // slices interleave along an inner axis: not contiguous slabs
                     }
                 } else if (rank != 4 || ws[0] != 1 || axis != 1)
-                {
-                    continue;
-                }
+                { continue; }
                 // Byte offset and size of each slice within the whole, refusing any structural
                 // mismatch. All members store elemSize_ bytes per element (fp32 pins are refused
                 // above/below), so flat offsets count elements and NC4HW4 offsets count whole
@@ -826,7 +827,9 @@ namespace vknn {
                         {
                             ok = ok && s.delta == delta;
                         }
-                        std::sort(tiles.begin(), tiles.end(), [](const SliceRef &a, const SliceRef &b) { return a.off < b.off; });
+                        std::sort(tiles.begin(), tiles.end(), [](const SliceRef &a, const SliceRef &b) {
+                            return a.off < b.off;
+                        });
                         // Tiles must be disjoint and in-range; fullTile = they cover r's every byte.
                         size_t prevEnd  = 0;
                         bool   fullTile = true;
@@ -988,7 +991,7 @@ namespace vknn {
             {
                 continue; // pooled below, or backed by a sub-buffer view created after the pool
             }
-            auto pref     = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
+            auto pref = readBack.count(tid) ? vk::MemPref::kReadback : vk::MemPref::kAuto;
             buffers_[tid] = std::make_shared<vk::Buffer>(be_->ctx(), actBytes(tid), pref, 0, /*zeroInit=*/true, /*allowSubBufferViews=*/viewRoots.count(tid) != 0);
             // int8 KV cache: the fp16 per-row scale side buffer rides next to the payload. Zero
             // scales dequantize to 0, matching the zero-initialized fp16 cache the link path
@@ -1098,19 +1101,15 @@ namespace vknn {
         bool anyViewFallback = false;
         for (auto &kv: viewOf)
         {
-            const TensorId              member    = kv.first;
+            const TensorId              member     = kv.first;
             const auto                  rootAndOff = resolveView(member);
             std::shared_ptr<vk::Buffer> made;
             auto                        rit = rootAndOff.first == kNoTensor ? buffers_.end() : buffers_.find(rootAndOff.first);
             if (rit != buffers_.end())
             {
                 try
-                {
-                    made = std::make_shared<vk::Buffer>(be_->ctx(), rit->second, rootAndOff.second, actBytes(member));
-                } catch (const Error &e)
-                {
-                    VKNN_WARN << "zero-copy view fallback for '" << g.tensors[member].name << "': " << e.what();
-                }
+                { made = std::make_shared<vk::Buffer>(be_->ctx(), rit->second, rootAndOff.second, actBytes(member)); } catch (const Error &e)
+                { VKNN_WARN << "zero-copy view fallback for '" << g.tensors[member].name << "': " << e.what(); }
             }
             if (!made)
             {
@@ -1220,10 +1219,13 @@ namespace vknn {
         env_.runner   = &be_->runner();
         env_.tuning   = cfg.tuning;
         env_.winograd = (Mode) cfg.hint(Hint::Winograd, (int) Mode::Auto);
-        env_.graph    = &g;
-        env_.config   = &cfg;
-        env_.useFp16  = useFp16_;
-        env_.baseFp16 = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
+        // Load-time device resolution: the flat family's workgroup width comes from exact caps
+        // here, once, and rides VkOpEnv so pipelines and dispatch math share one value.
+        env_.flatLocalSize = flat::flatLocalSizeFor(env_.ctx->caps());
+        env_.graph         = &g;
+        env_.config        = &cfg;
+        env_.useFp16       = useFp16_;
+        env_.baseFp16      = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
         // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
         // model, distinct across models) so a shared cache directory can't return another model's weights.
         {
@@ -1407,10 +1409,7 @@ namespace vknn {
         if (cfg_.timingSummary && stat_.runs > 0)
         {
             const double n = (double) stat_.runs;
-            VKNN_INFO << "segment summary (" << nodeIdx.size() << " nodes, " << recordedDispatches_ << " dispatches, " << cmds_.size() << " chunk(s), " << stat_.runs
-                      << " run(s)) avg ms/run: pack=" << stat_.packMs / n << " submitCall=" << stat_.submitCallMs / n
-                      << " fenceWait=" << stat_.fenceWaitMs / n << " gpuBusy=" << stat_.gpuBusyMs / n
-                      << " gpuGap=" << stat_.gpuGapMs / n << " unpack=" << stat_.unpackMs / n;
+            VKNN_INFO << "segment summary (" << nodeIdx.size() << " nodes, " << recordedDispatches_ << " dispatches, " << cmds_.size() << " chunk(s), " << stat_.runs << " run(s)) avg ms/run: pack=" << stat_.packMs / n << " submitCall=" << stat_.submitCallMs / n << " fenceWait=" << stat_.fenceWaitMs / n << " gpuBusy=" << stat_.gpuBusyMs / n << " gpuGap=" << stat_.gpuGapMs / n << " unpack=" << stat_.unpackMs / n;
         }
         if (!cmds_.empty())
         {
@@ -1487,387 +1486,383 @@ namespace vknn {
         iterationFirstChunk_.assign((size_t) recordedSteps, 0);
         for (int step = 0; step < recordedSteps; ++step)
         {
-        iterationFirstChunk_[(size_t) step] = (uint32_t) cmds_.size();
-        // Chain state feedback: iteration `step` consumes the previous iteration's argmax index
-        // as its token id, position basePosition + step, and a mask with one more valid slot —
-        // each computed by the host pack's exact rules, so the chained stream is bit-identical
-        // to the single-step loop. Iteration 0 consumes the host-provided inputs unchanged.
-        if (step > 0)
-        {
-            struct ChainFeedbackPC {
-                uint32_t stepIndex, maskValidSlots, tokenElemFp16, positionElemFp16, maskElemFp16;
-            };
-            if (!chainFeedbackPipe_)
+            iterationFirstChunk_[(size_t) step] = (uint32_t) cmds_.size();
+            // Chain state feedback: iteration `step` consumes the previous iteration's argmax index
+            // as its token id, position basePosition + step, and a mask with one more valid slot —
+            // each computed by the host pack's exact rules, so the chained stream is bit-identical
+            // to the single-step loop. Iteration 0 consumes the host-provided inputs unchanged.
+            if (step > 0)
             {
-                chainFeedbackPipe_ = std::make_unique<vk::ComputePipeline>(be_->ctx(), "chain_feedback", 5, sizeof(ChainFeedbackPC), std::vector<uint32_t> {},
-                                                                           env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
-            }
-            ChainFeedbackPC pc {(uint32_t) step,
-                                (uint32_t) (numElements(g_.tensors[chain_.maskInput].shape) - 1),
-                                boundaryElemBytes(chain_.tokenInput) == 2 ? 1u : 0u,
-                                boundaryElemBytes(chain_.positionInput) == 2 ? 1u : 0u,
-                                boundaryElemBytes(chain_.maskInput) == 2 ? 1u : 0u};
-            chainFeedbackPipe_->dispatch(cmd_,
-                                         {argMaxResults_[chain_.argMaxOutput]->handle(), buffers_[chain_.tokenInput]->handle(), buffers_[chain_.positionInput]->handle(),
-                                          buffers_[chain_.maskInput]->handle(), chainStateBuf_->handle()},
-                                         &pc, sizeof(pc), 1);
-        }
-        // Device-resident links: fold each linked output's PREVIOUS-run (or previous-iteration)
-        // values into its linked input, per this iteration's range set in the host-updated
-        // ranges SSBO, before anything else executes. The barrier orders the copies against
-        // both hazards below: nodes reading the destination (the fold must land first) and
-        // nodes rewriting the source (the copy must read the old values).
-        if (!residentLinks_.empty())
-        {
-            struct LinkCopyPC {
-                int      srcC, srcH, srcW, dstC, dstH, dstW, srcFmt, dstFmt;
-                uint32_t rangeWordBase;
-            };
-            // Mirrors link_copy_kvq.comp's push_constant block.
-            struct LinkCopyKvqPC {
-                int      headDim;
-                uint32_t rangeWordBase;
-            };
-            for (const ResidentLink &link: residentLinks_)
-            {
-                if (link.kvq)
+                struct ChainFeedbackPC {
+                    uint32_t stepIndex, maskValidSlots, tokenElemFp16, positionElemFp16, maskElemFp16;
+                };
+                if (!chainFeedbackPipe_)
                 {
-                    // Quantizing fold (Hint::KvCacheQuant): the fp16 present rows encode into the
-                    // int8 cache payload + the per-row fp16 scale buffer. Same ranges SSBO and
-                    // per-iteration set addressing as the bit copy.
-                    if (!linkPipeKvq_)
+                    chainFeedbackPipe_ = std::make_unique<vk::ComputePipeline>(be_->ctx(), "chain_feedback", 5, sizeof(ChainFeedbackPC), std::vector<uint32_t> {},
+                                                                               env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                }
+                ChainFeedbackPC pc {(uint32_t) step, (uint32_t) (numElements(g_.tensors[chain_.maskInput].shape) - 1), boundaryElemBytes(chain_.tokenInput) == 2 ? 1u : 0u,
+                                    boundaryElemBytes(chain_.positionInput) == 2 ? 1u : 0u, boundaryElemBytes(chain_.maskInput) == 2 ? 1u : 0u};
+                chainFeedbackPipe_->dispatch(cmd_,
+                                             {argMaxResults_[chain_.argMaxOutput]->handle(), buffers_[chain_.tokenInput]->handle(),
+                                              buffers_[chain_.positionInput]->handle(), buffers_[chain_.maskInput]->handle(), chainStateBuf_->handle()},
+                                             &pc, sizeof(pc), 1);
+            }
+            // Device-resident links: fold each linked output's PREVIOUS-run (or previous-iteration)
+            // values into its linked input, per this iteration's range set in the host-updated
+            // ranges SSBO, before anything else executes. The barrier orders the copies against
+            // both hazards below: nodes reading the destination (the fold must land first) and
+            // nodes rewriting the source (the copy must read the old values).
+            if (!residentLinks_.empty())
+            {
+                struct LinkCopyPC {
+                    int      srcC, srcH, srcW, dstC, dstH, dstW, srcFmt, dstFmt;
+                    uint32_t rangeWordBase;
+                };
+                // Mirrors link_copy_kvq.comp's push_constant block.
+                struct LinkCopyKvqPC {
+                    int      headDim;
+                    uint32_t rangeWordBase;
+                };
+                for (const ResidentLink &link: residentLinks_)
+                {
+                    if (link.kvq)
                     {
-                        linkPipeKvq_ = std::make_unique<vk::ComputePipeline>(be_->ctx(), "link_copy_kvq", 4, sizeof(LinkCopyKvqPC), std::vector<uint32_t> {},
-                                                                             env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                        // Quantizing fold (Hint::KvCacheQuant): the fp16 present rows encode into the
+                        // int8 cache payload + the per-row fp16 scale buffer. Same ranges SSBO and
+                        // per-iteration set addressing as the bit copy.
+                        if (!linkPipeKvq_)
+                        {
+                            linkPipeKvq_ = std::make_unique<vk::ComputePipeline>(be_->ctx(), "link_copy_kvq", 4, sizeof(LinkCopyKvqPC), std::vector<uint32_t> {},
+                                                                                 env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                        }
+                        const KvqCache &cache = kvqCaches_.at(link.dst);
+                        LinkCopyKvqPC   pc {(int) cache.headDim, (uint32_t) step * (2u + link.capacity * 3u)};
+                        linkPipeKvq_->dispatch(cmd_, {buffers_[link.src]->handle(), buffers_[link.dst]->handle(), link.rangesBuf->handle(), cache.scales->handle()}, &pc, sizeof(pc), kKvqLinkCopyGroups);
+                        continue;
                     }
-                    const KvqCache &cache = kvqCaches_.at(link.dst);
-                    LinkCopyKvqPC   pc {(int) cache.headDim, (uint32_t) step * (2u + link.capacity * 3u)};
-                    linkPipeKvq_->dispatch(cmd_, {buffers_[link.src]->handle(), buffers_[link.dst]->handle(), link.rangesBuf->handle(), cache.scales->handle()}, &pc, sizeof(pc),
-                                           kKvqLinkCopyGroups);
-                    continue;
+                    const bool fp16 = boundaryElemBytes(link.src) == 2;
+                    auto      &pipe = fp16 ? linkPipeFp16_ : linkPipeFp32_;
+                    if (!pipe)
+                    {
+                        pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "link_copy_fp16" : "link_copy", 3, sizeof(LinkCopyPC), std::vector<uint32_t> {},
+                                                                     env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                    }
+                    NCHW       srcShape = NCHW::from(g_.tensors[link.src].shape);
+                    NCHW       dstShape = NCHW::from(g_.tensors[link.dst].shape);
+                    LinkCopyPC pc {(int) srcShape.c,
+                                   (int) srcShape.h,
+                                   (int) srcShape.w,
+                                   (int) dstShape.c,
+                                   (int) dstShape.h,
+                                   (int) dstShape.w,
+                                   g_.desc(link.src).gpuFlat ? 0 : 2,
+                                   g_.desc(link.dst).gpuFlat ? 0 : 2,
+                                   (uint32_t) step * (2u + link.capacity * 3u)};
+                    pipe->dispatch(cmd_, {buffers_[link.src]->handle(), buffers_[link.dst]->handle(), link.rangesBuf->handle()}, &pc, sizeof(pc), kLinkCopyGroups);
                 }
-                const bool fp16 = boundaryElemBytes(link.src) == 2;
-                auto      &pipe = fp16 ? linkPipeFp16_ : linkPipeFp32_;
-                if (!pipe)
-                {
-                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "link_copy_fp16" : "link_copy", 3, sizeof(LinkCopyPC), std::vector<uint32_t> {},
-                                                                 env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
-                }
-                NCHW       srcShape = NCHW::from(g_.tensors[link.src].shape);
-                NCHW       dstShape = NCHW::from(g_.tensors[link.dst].shape);
-                LinkCopyPC pc {(int) srcShape.c,
-                               (int) srcShape.h,
-                               (int) srcShape.w,
-                               (int) dstShape.c,
-                               (int) dstShape.h,
-                               (int) dstShape.w,
-                               g_.desc(link.src).gpuFlat ? 0 : 2,
-                               g_.desc(link.dst).gpuFlat ? 0 : 2,
-                               (uint32_t) step * (2u + link.capacity * 3u)};
-                pipe->dispatch(cmd_, {buffers_[link.src]->handle(), buffers_[link.dst]->handle(), link.rangesBuf->handle()}, &pc, sizeof(pc), kLinkCopyGroups);
             }
-        }
-        if (step > 0 || !residentLinks_.empty())
-        {
-            vk::computeBarrier(*env_.ctx, cmd_);
-        }
-        // Declared-format zero-copy inputs: convert each caller dma-buf (declared layout/dtype) into
-        // this segment's device-native boundary buffer, then a barrier before the ops read it.
-        // Iteration 0 only: later chain iterations take their inputs from the feedback dispatch,
-        // which a re-run convert would overwrite with the stale iteration-0 bytes.
-        if (step == 0)
-        {
-            bool any = false;
-            for (const auto &kv: convert_)
-            {
-                if (!kv.second.isInput)
-                {
-                    continue;
-                }
-                const ConvertBinding &c = kv.second;
-                if (!conv_)
-                {
-                    conv_ = std::make_unique<BoundaryConvert>();
-                }
-                conv_->record(cmd_, *env_.ctx, env_.cache, c.imported.get(), buffers_[kv.first].get(), c.shape, c.declFmt, c.declDtype, c.devFmt, c.devDtype);
-                any = true;
-            }
-            if (any)
+            if (step > 0 || !residentLinks_.empty())
             {
                 vk::computeBarrier(*env_.ctx, cmd_);
             }
-        }
-        auto isCopy = [&](int idx) {
-            const Node &nn = g_.nodes[idx];
-            OpType      t  = nn.type;
-            // A flat split is a compute dispatch (flat_gather); the NC4HW4 split is a buffer copy.
-            if (t == OpType::Split)
+            // Declared-format zero-copy inputs: convert each caller dma-buf (declared layout/dtype) into
+            // this segment's device-native boundary buffer, then a barrier before the ops read it.
+            // Iteration 0 only: later chain iterations take their inputs from the feedback dispatch,
+            // which a re-run convert would overwrite with the stale iteration-0 bytes.
+            if (step == 0)
             {
-                return nn.outputs.empty() || nn.outputs[0] == kNoTensor || !g_.desc(nn.outputs[0]).gpuFlat;
-            }
-            // A zero-copy Pad records vkCmdFillBuffer for its pad ranges — transfer-stage writes.
-            if (t == OpType::Pad)
-            {
-                return transferFillNodes_.count(idx) != 0;
-            }
-            // Reshape/Flatten/Squeeze/Unsqueeze/Cast are vkCmdCopyBuffer (transfer-stage writes).
-            return t == OpType::Reshape || t == OpType::Flatten || t == OpType::Squeeze || t == OpType::Unsqueeze || t == OpType::Cast;
-        };
-        // Precise barriers: each activation tensor has a single writer, so only a read-after-write
-        // needs a barrier. Emit one before an op only when it reads a tensor written since the last
-        // barrier, letting independent ops (e.g. the parallel branches of an Inception module, or a
-        // residual block's downsample and conv1) run without draining the GPU between them. When
-        // profiling, keep a barrier after every op so the per-op timestamps aren't polluted by overlap.
-        const bool perOpBarrier = (queryPool_ != VK_NULL_HANDLE);
-        // Hazard tracking is at the BUFFER level, not the tensor level: the liveness planner aliases
-        // multiple tensors onto one buffer, so a node that writes a reused buffer has a
-        // write-after-read hazard against the previous occupant that a tensor-level check would miss.
-        // For non-aliased buffers this reduces to per-tensor read-after-write (single writer per
-        // buffer), so independent-op overlap (Inception/YOLO) is preserved.
-        std::set<vk::Buffer *> writtenBufs, readBufs;
-        auto                   bufOf = [&](TensorId t) -> vk::Buffer                   *{
-            if (t == kNoTensor)
-            {
-                return nullptr;
-            }
-            auto it = buffers_.find(t);
-            return it == buffers_.end() ? nullptr : it->second.get();
-        };
-        // With zero-copy sub-buffer views, two distinct buffer handles can address overlapping
-        // memory (a slice view and its arena, or two views of one arena), so hazard membership is a
-        // (root, byte-range) overlap test rather than a handle match. Non-view buffers keep the old
-        // exact semantics: their range is the whole buffer and distinct roots never overlap, so
-        // disjoint slices of one arena (parallel Inception branches writing their slots) still
-        // record no barrier between them.
-        auto hazard = [](const std::set<vk::Buffer *> &s, vk::Buffer *b) {
-            for (vk::Buffer *a: s)
-            {
-                if (a == b)
+                bool any = false;
+                for (const auto &kv: convert_)
                 {
-                    return true;
+                    if (!kv.second.isInput)
+                    {
+                        continue;
+                    }
+                    const ConvertBinding &c = kv.second;
+                    if (!conv_)
+                    {
+                        conv_ = std::make_unique<BoundaryConvert>();
+                    }
+                    conv_->record(cmd_, *env_.ctx, env_.cache, c.imported.get(), buffers_[kv.first].get(), c.shape, c.declFmt, c.declDtype, c.devFmt, c.devDtype);
+                    any = true;
                 }
-                if (a->hazardRoot() == b->hazardRoot())
+                if (any)
                 {
-                    const size_t a0 = a->rootOffset(), b0 = b->rootOffset();
-                    if (a0 < b0 + b->bytes() && b0 < a0 + a->bytes())
+                    vk::computeBarrier(*env_.ctx, cmd_);
+                }
+            }
+            auto isCopy = [&](int idx) {
+                const Node &nn = g_.nodes[idx];
+                OpType      t  = nn.type;
+                // A flat split is a compute dispatch (flat_gather); the NC4HW4 split is a buffer copy.
+                if (t == OpType::Split)
+                {
+                    return nn.outputs.empty() || nn.outputs[0] == kNoTensor || !g_.desc(nn.outputs[0]).gpuFlat;
+                }
+                // A zero-copy Pad records vkCmdFillBuffer for its pad ranges — transfer-stage writes.
+                if (t == OpType::Pad)
+                {
+                    return transferFillNodes_.count(idx) != 0;
+                }
+                // Reshape/Flatten/Squeeze/Unsqueeze/Cast are vkCmdCopyBuffer (transfer-stage writes).
+                return t == OpType::Reshape || t == OpType::Flatten || t == OpType::Squeeze || t == OpType::Unsqueeze || t == OpType::Cast;
+            };
+            // Precise barriers: each activation tensor has a single writer, so only a read-after-write
+            // needs a barrier. Emit one before an op only when it reads a tensor written since the last
+            // barrier, letting independent ops (e.g. the parallel branches of an Inception module, or a
+            // residual block's downsample and conv1) run without draining the GPU between them. When
+            // profiling, keep a barrier after every op so the per-op timestamps aren't polluted by overlap.
+            const bool perOpBarrier = (queryPool_ != VK_NULL_HANDLE);
+            // Hazard tracking is at the BUFFER level, not the tensor level: the liveness planner aliases
+            // multiple tensors onto one buffer, so a node that writes a reused buffer has a
+            // write-after-read hazard against the previous occupant that a tensor-level check would miss.
+            // For non-aliased buffers this reduces to per-tensor read-after-write (single writer per
+            // buffer), so independent-op overlap (Inception/YOLO) is preserved.
+            std::set<vk::Buffer *> writtenBufs, readBufs;
+            auto                   bufOf = [&](TensorId t) -> vk::Buffer                   *{
+                if (t == kNoTensor)
+                {
+                    return nullptr;
+                }
+                auto it = buffers_.find(t);
+                return it == buffers_.end() ? nullptr : it->second.get();
+            };
+            // With zero-copy sub-buffer views, two distinct buffer handles can address overlapping
+            // memory (a slice view and its arena, or two views of one arena), so hazard membership is a
+            // (root, byte-range) overlap test rather than a handle match. Non-view buffers keep the old
+            // exact semantics: their range is the whole buffer and distinct roots never overlap, so
+            // disjoint slices of one arena (parallel Inception branches writing their slots) still
+            // record no barrier between them.
+            auto hazard = [](const std::set<vk::Buffer *> &s, vk::Buffer *b) {
+                for (vk::Buffer *a: s)
+                {
+                    if (a == b)
                     {
                         return true;
                     }
-                }
-            }
-            return false;
-        };
-        bool copySinceBarrier = false;
-        // Push-descriptor writes a node records = one per bound storage buffer. A fused
-        // pointwise/epilogue kernel always binds the plan SSBO plus the fixed kPwMaxOperands
-        // operand slots and kPwMaxOuts extra output streams on top of its own inputs/outputs; a
-        // plain op binds just those. Concat dispatches once per concatenated part, re-binding
-        // the full set each time. Accumulated per command buffer, this drives the
-        // maxSubmitBindings split below.
-        auto bindEstimate = [&](const Node &nd) -> int {
-            int pwExtra = (nd.type == OpType::FusedPointwise || nd.attr.has("pw_steps")) ? 1 + kPwMaxOperands + kPwMaxOuts : 0;
-            if (nd.type == OpType::Concat)
-            {
-                return (int) pwCoreInputs(nd) * (2 + pwExtra);
-            }
-            return (int) nd.inputs.size() + (int) nd.outputs.size() + pwExtra;
-        };
-        int nodesSinceSplit = 0, bindsSinceSplit = 0;
-        int fullBarriers = 0, execBarriers = 0; // recorded-barrier tally for the segment INFO line
-        for (size_t k = 0; k < nodeIdx.size(); ++k)
-        {
-            const Node &node        = g_.nodes[nodeIdx[k]];
-            // A fully-elided zero-copy node records no commands and touches no memory: its data
-            // hazards ride the real producers/consumers through the shared arena ranges, so it
-            // neither needs a barrier nor marks reads/writes (a phantom mark would insert a
-            // redundant pipeline drain at every elided site).
-            const bool elided      = fullyElided_.count(nodeIdx[k]) != 0;
-            bool       needBarrier = perOpBarrier && !elided; // full memory barrier (RAW/WAW: data must become visible)
-            bool       needWarOnly = false;                   // execution-only barrier (WAR on a reused pool slot: order, no data)
-            if (!needBarrier && !elided)
-            {
-                for (TensorId in: node.inputs) // read-after-write
-                {
-                    if (vk::Buffer *b = bufOf(in))
+                    if (a->hazardRoot() == b->hazardRoot())
                     {
-                        if (hazard(writtenBufs, b))
+                        const size_t a0 = a->rootOffset(), b0 = b->rootOffset();
+                        if (a0 < b0 + b->bytes() && b0 < a0 + a->bytes())
                         {
-                            needBarrier = true;
-                            break;
+                            return true;
                         }
                     }
                 }
-                if (!needBarrier)
+                return false;
+            };
+            bool copySinceBarrier = false;
+            // Push-descriptor writes a node records = one per bound storage buffer. A fused
+            // pointwise/epilogue kernel always binds the plan SSBO plus the fixed kPwMaxOperands
+            // operand slots and kPwMaxOuts extra output streams on top of its own inputs/outputs; a
+            // plain op binds just those. Concat dispatches once per concatenated part, re-binding
+            // the full set each time. Accumulated per command buffer, this drives the
+            // maxSubmitBindings split below.
+            auto bindEstimate = [&](const Node &nd) -> int {
+                int pwExtra = (nd.type == OpType::FusedPointwise || nd.attr.has("pw_steps")) ? 1 + kPwMaxOperands + kPwMaxOuts : 0;
+                if (nd.type == OpType::Concat)
                 {
-                    if (vk::Buffer *b = bufOf(node.fusedResidual))
-                    {
-                        if (hazard(writtenBufs, b))
-                        {
-                            needBarrier = true;
-                        }
-                    }
+                    return (int) pwCoreInputs(nd) * (2 + pwExtra);
                 }
-                if (!needBarrier)
+                return (int) nd.inputs.size() + (int) nd.outputs.size() + pwExtra;
+            };
+            int nodesSinceSplit = 0, bindsSinceSplit = 0;
+            int fullBarriers = 0, execBarriers = 0; // recorded-barrier tally for the segment INFO line
+            for (size_t k = 0; k < nodeIdx.size(); ++k)
+            {
+                const Node &node = g_.nodes[nodeIdx[k]];
+                // A fully-elided zero-copy node records no commands and touches no memory: its data
+                // hazards ride the real producers/consumers through the shared arena ranges, so it
+                // neither needs a barrier nor marks reads/writes (a phantom mark would insert a
+                // redundant pipeline drain at every elided site).
+                const bool elided      = fullyElided_.count(nodeIdx[k]) != 0;
+                bool       needBarrier = perOpBarrier && !elided; // full memory barrier (RAW/WAW: data must become visible)
+                bool       needWarOnly = false;                   // execution-only barrier (WAR on a reused pool slot: order, no data)
+                if (!needBarrier && !elided)
                 {
-                    for (TensorId o: node.outputs) // write-after-write (unflushed writer) / write-after-read (reused buffer)
+                    for (TensorId in: node.inputs) // read-after-write
                     {
-                        if (vk::Buffer *b = bufOf(o))
+                        if (vk::Buffer *b = bufOf(in))
                         {
                             if (hazard(writtenBufs, b))
                             {
                                 needBarrier = true;
                                 break;
                             }
-                            if (hazard(readBufs, b))
+                        }
+                    }
+                    if (!needBarrier)
+                    {
+                        if (vk::Buffer *b = bufOf(node.fusedResidual))
+                        {
+                            if (hazard(writtenBufs, b))
                             {
-                                needWarOnly = true; // upgrade to full below if a copy is involved
+                                needBarrier = true;
                             }
                         }
                     }
+                    if (!needBarrier)
+                    {
+                        for (TensorId o: node.outputs) // write-after-write (unflushed writer) / write-after-read (reused buffer)
+                        {
+                            if (vk::Buffer *b = bufOf(o))
+                            {
+                                if (hazard(writtenBufs, b))
+                                {
+                                    needBarrier = true;
+                                    break;
+                                }
+                                if (hazard(readBufs, b))
+                                {
+                                    needWarOnly = true; // upgrade to full below if a copy is involved
+                                }
+                            }
+                        }
+                    }
+                    // A WAR against a vkCmdCopyBuffer read (or ahead of a copy write) crosses the
+                    // transfer stage, which the compute-only execution barrier does not order.
+                    if (needWarOnly && (copySinceBarrier || isCopy(nodeIdx[k])))
+                    {
+                        needBarrier = true;
+                    }
                 }
-                // A WAR against a vkCmdCopyBuffer read (or ahead of a copy write) crosses the
-                // transfer stage, which the compute-only execution barrier does not order.
-                if (needWarOnly && (copySinceBarrier || isCopy(nodeIdx[k])))
+                if (needBarrier)
                 {
-                    needBarrier = true;
+                    if (copySinceBarrier || isCopy(nodeIdx[k]))
+                    {
+                        vk::transferBarrier(*env_.ctx, cmd_);
+                    } else
+                    {
+                        vk::computeBarrier(*env_.ctx, cmd_);
+                    }
+                    ++fullBarriers;
+                    writtenBufs.clear();
+                    readBufs.clear();
+                    copySinceBarrier = false;
+                } else if (needWarOnly)
+                {
+                    // Orders this node's write after every recorded read; earlier writes stay in
+                    // writtenBufs because nothing here made them available or visible.
+                    vk::executionBarrier(*env_.ctx, cmd_);
+                    ++execBarriers;
+                    readBufs.clear();
                 }
-            }
-            if (needBarrier)
-            {
-                if (copySinceBarrier || isCopy(nodeIdx[k]))
+                if (queryPool_)
                 {
-                    vk::transferBarrier(*env_.ctx, cmd_);
-                } else
-                {
-                    vk::computeBarrier(*env_.ctx, cmd_);
+                    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2));
                 }
-                ++fullBarriers;
-                writtenBufs.clear();
-                readBufs.clear();
-                copySinceBarrier = false;
-            } else if (needWarOnly)
-            {
-                // Orders this node's write after every recorded read; earlier writes stay in
-                // writtenBufs because nothing here made them available or visible.
-                vk::executionBarrier(*env_.ctx, cmd_);
-                ++execBarriers;
-                readBufs.clear();
-            }
-            if (queryPool_)
-            {
-                vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2));
-            }
-            env_.useFp16 = nodeFp32(node) ? false : useFp16_; // match the variant chosen in prepare()
-            tally.openNode(k);
-            ops_[k]->record(cmd_, node, env_);
-            tally.closeNode(); // a decode chain re-enters this loop per iteration; counts accumulate
-            if (queryPool_)
-            {
-                vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2 + 1));
-            }
-            if (!elided)
-            {
-                for (TensorId in: node.inputs)
+                env_.useFp16 = nodeFp32(node) ? false : useFp16_; // match the variant chosen in prepare()
+                tally.openNode(k);
+                ops_[k]->record(cmd_, node, env_);
+                tally.closeNode(); // a decode chain re-enters this loop per iteration; counts accumulate
+                if (queryPool_)
                 {
-                    if (vk::Buffer *b = bufOf(in))
+                    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2 + 1));
+                }
+                if (!elided)
+                {
+                    for (TensorId in: node.inputs)
+                    {
+                        if (vk::Buffer *b = bufOf(in))
+                        {
+                            readBufs.insert(b);
+                        }
+                    }
+                    if (vk::Buffer *b = bufOf(node.fusedResidual))
                     {
                         readBufs.insert(b);
                     }
-                }
-                if (vk::Buffer *b = bufOf(node.fusedResidual))
-                {
-                    readBufs.insert(b);
-                }
-                for (TensorId o: node.outputs)
-                {
-                    if (vk::Buffer *b = bufOf(o))
+                    for (TensorId o: node.outputs)
                     {
-                        writtenBufs.insert(b);
+                        if (vk::Buffer *b = bufOf(o))
+                        {
+                            writtenBufs.insert(b);
+                        }
+                    }
+                    if (isCopy(nodeIdx[k]))
+                    {
+                        copySinceBarrier = true;
                     }
                 }
-                if (isCopy(nodeIdx[k]))
+                // Split the segment into multiple command buffers so no single batch (a) runs long
+                // enough to trip the GPU watchdog (a ~20s submit on this driver gets reset silently,
+                // zeroing the unexecuted tail) or (b) records more push-descriptor writes than the
+                // driver holds (maxSubmitBindings; a newer driver corrupts the recording past its cap).
+                // The explicit barrier at each chunk tail keeps buffer reuse correct across the
+                // boundary (the chunks of one run are submitted together). Only when not profiling.
+                nodesSinceSplit++;
+                bindsSinceSplit += bindEstimate(node);
+                const int  chunkNodes = cfg_.maxSubmitNodes, chunkBinds = cfg_.maxSubmitBindings;
+                const bool splitNodes = chunkNodes > 0 && nodesSinceSplit >= chunkNodes;
+                const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
+                if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
                 {
-                    copySinceBarrier = true;
+                    // Each chunk is its own vkQueueSubmit + fence wait (see run()). The fence is a
+                    // full barrier, so a chunk's writes are complete and visible before the next chunk
+                    // is submitted and buffer reuse stays correct across the boundary. Batching the
+                    // chunks into one submit and ordering them with a vkCmdPipelineBarrier at the
+                    // chunk tail is faster but unsafe: a submit spanning several chunks runs long
+                    // enough for the driver to reset it and zero the tail (the watchdog the chunking
+                    // exists to avoid), so a heavily-chunked model then produces nondeterministic
+                    // output. Keeping chunks as separate submits keeps every submit short.
+                    chunkTsEnd();
+                    be_->runner().end(cmd_);
+                    cmds_.push_back(cmd_);
+                    cmd_ = be_->runner().allocate();
+                    be_->runner().begin(cmd_);
+                    chunkTsBegin();
+                    writtenBufs.clear();
+                    readBufs.clear();
+                    copySinceBarrier = false;
+                    nodesSinceSplit  = 0;
+                    bindsSinceSplit  = 0;
                 }
             }
-            // Split the segment into multiple command buffers so no single batch (a) runs long
-            // enough to trip the GPU watchdog (a ~20s submit on this driver gets reset silently,
-            // zeroing the unexecuted tail) or (b) records more push-descriptor writes than the
-            // driver holds (maxSubmitBindings; a newer driver corrupts the recording past its cap).
-            // The explicit barrier at each chunk tail keeps buffer reuse correct across the
-            // boundary (the chunks of one run are submitted together). Only when not profiling.
-            nodesSinceSplit++;
-            bindsSinceSplit += bindEstimate(node);
-            const int  chunkNodes = cfg_.maxSubmitNodes, chunkBinds = cfg_.maxSubmitBindings;
-            const bool splitNodes = chunkNodes > 0 && nodesSinceSplit >= chunkNodes;
-            const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
-            if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
+            if (fullBarriers + execBarriers > 0)
             {
-                // Each chunk is its own vkQueueSubmit + fence wait (see run()). The fence is a
-                // full barrier, so a chunk's writes are complete and visible before the next chunk
-                // is submitted and buffer reuse stays correct across the boundary. Batching the
-                // chunks into one submit and ordering them with a vkCmdPipelineBarrier at the
-                // chunk tail is faster but unsafe: a submit spanning several chunks runs long
-                // enough for the driver to reset it and zero the tail (the watchdog the chunking
-                // exists to avoid), so a heavily-chunked model then produces nondeterministic
-                // output. Keeping chunks as separate submits keeps every submit short.
+                VKNN_INFO << "segment barriers: " << fullBarriers << " full + " << execBarriers << " execution-only over " << nodeIdx.size() << " node(s)";
+            }
+            // Final barrier so the segment outputs are complete + visible before the host reads them.
+            if (copySinceBarrier)
+            {
+                vk::transferBarrier(*env_.ctx, cmd_);
+            } else
+            {
+                vk::computeBarrier(*env_.ctx, cmd_);
+            }
+            // Registered output argmax epilogues: one single-workgroup dispatch per output, reading
+            // the finished boundary buffer and writing {index, value} into its per-iteration result
+            // slot. Rides the same submission; the final barrier above makes the outputs visible to it.
+            for (TensorId argMaxTid: argMaxOutputs_)
+            {
+                struct ArgMaxPC {
+                    uint32_t elemCount, resultSlot;
+                };
+                const bool fp16 = boundaryElemBytes(argMaxTid) == 2;
+                auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
+                if (!pipe)
+                {
+                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
+                                                                 env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
+                }
+                ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape), (uint32_t) step};
+                pipe->dispatch(cmd_, {buffers_[argMaxTid]->handle(), argMaxResults_[argMaxTid]->handle()}, &pc, sizeof(pc), 1);
+            }
+            // Iteration boundary: end the chunk so a run can submit any iteration prefix, with the
+            // tail barrier ordering this iteration's argmax/node writes against the next
+            // iteration's feedback, link copies, and node reads (the same contract as a
+            // maxSubmitNodes split; each chunk submits with its own fence).
+            if (step + 1 < recordedSteps)
+            {
+                vk::transferBarrier(*env_.ctx, cmd_);
                 chunkTsEnd();
                 be_->runner().end(cmd_);
                 cmds_.push_back(cmd_);
                 cmd_ = be_->runner().allocate();
                 be_->runner().begin(cmd_);
                 chunkTsBegin();
-                writtenBufs.clear();
-                readBufs.clear();
-                copySinceBarrier = false;
-                nodesSinceSplit  = 0;
-                bindsSinceSplit  = 0;
             }
-        }
-        if (fullBarriers + execBarriers > 0)
-        {
-            VKNN_INFO << "segment barriers: " << fullBarriers << " full + " << execBarriers << " execution-only over " << nodeIdx.size() << " node(s)";
-        }
-        // Final barrier so the segment outputs are complete + visible before the host reads them.
-        if (copySinceBarrier)
-        {
-            vk::transferBarrier(*env_.ctx, cmd_);
-        } else
-        {
-            vk::computeBarrier(*env_.ctx, cmd_);
-        }
-        // Registered output argmax epilogues: one single-workgroup dispatch per output, reading
-        // the finished boundary buffer and writing {index, value} into its per-iteration result
-        // slot. Rides the same submission; the final barrier above makes the outputs visible to it.
-        for (TensorId argMaxTid: argMaxOutputs_)
-        {
-            struct ArgMaxPC {
-                uint32_t elemCount, resultSlot;
-            };
-            const bool fp16 = boundaryElemBytes(argMaxTid) == 2;
-            auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
-            if (!pipe)
-            {
-                pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
-                                                             env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
-            }
-            ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape), (uint32_t) step};
-            pipe->dispatch(cmd_, {buffers_[argMaxTid]->handle(), argMaxResults_[argMaxTid]->handle()}, &pc, sizeof(pc), 1);
-        }
-        // Iteration boundary: end the chunk so a run can submit any iteration prefix, with the
-        // tail barrier ordering this iteration's argmax/node writes against the next
-        // iteration's feedback, link copies, and node reads (the same contract as a
-        // maxSubmitNodes split; each chunk submits with its own fence).
-        if (step + 1 < recordedSteps)
-        {
-            vk::transferBarrier(*env_.ctx, cmd_);
-            chunkTsEnd();
-            be_->runner().end(cmd_);
-            cmds_.push_back(cmd_);
-            cmd_ = be_->runner().allocate();
-            be_->runner().begin(cmd_);
-            chunkTsBegin();
-        }
         }
         // Declared-format zero-copy outputs: convert the device-native boundary buffer into each
         // caller dma-buf (declared layout/dtype), then a barrier before the host reads it.
@@ -1913,8 +1908,7 @@ namespace vknn {
         // link copies, chain feedback, and argmax epilogues dispatch outside any node. The op share
         // also lands per node in the Config::profile table (OpRecord::dispatches).
         const uint64_t nodeShare = tally.nodeTotal();
-        VKNN_INFO << "segment dispatches: " << recordedDispatches_ << " over " << nodeIdx.size() << " node(s) ("
-                  << nodeShare << " from nodes + " << (recordedDispatches_ - nodeShare) << " boundary/epilogue)";
+        VKNN_INFO << "segment dispatches: " << recordedDispatches_ << " over " << nodeIdx.size() << " node(s) (" << nodeShare << " from nodes + " << (recordedDispatches_ - nodeShare) << " boundary/epilogue)";
     }
 
     void VulkanSegment::run(ExecContext &ctx) {
@@ -2319,8 +2313,7 @@ namespace vknn {
                 if (chunkPool_ && timedThisRun > 0)
                 {
                     std::vector<uint64_t> ts((size_t) timedThisRun * 2, 0);
-                    vkGetQueryPoolResults(be_->ctx().device(), chunkPool_, 0, (uint32_t) ts.size(), ts.size() * sizeof(uint64_t), ts.data(), sizeof(uint64_t),
-                                          VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+                    vkGetQueryPoolResults(be_->ctx().device(), chunkPool_, 0, (uint32_t) ts.size(), ts.size() * sizeof(uint64_t), ts.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
                     const double period = be_->ctx().caps().timestampPeriod;
                     for (uint32_t c = 0; c < timedThisRun; ++c)
                     {
@@ -2495,9 +2488,9 @@ namespace vknn {
                     {
                         if (range.sourceElem % headDim != 0 || range.destElem % headDim != 0 || range.count % headDim != 0)
                         {
-                            throw Error(Status::InvalidArgument, "int8 KV-cache link '" + g_.tensors[link.dst].name + "': fold ranges must cover whole " + std::to_string(headDim) +
-                                                                     "-element token rows (got source " + std::to_string(range.sourceElem) + ", dest " + std::to_string(range.destElem) +
-                                                                     ", count " + std::to_string(range.count) + ")");
+                            throw Error(Status::InvalidArgument, "int8 KV-cache link '" + g_.tensors[link.dst].name + "': fold ranges must cover whole " + std::to_string(headDim) + "-element token rows (got source " +
+                                                                     std::to_string(range.sourceElem) + ", dest " + std::to_string(range.destElem) + ", count " +
+                                                                     std::to_string(range.count) + ")");
                         }
                     }
                 }
@@ -2511,7 +2504,7 @@ namespace vknn {
             {
                 link.capacity  = std::max<uint32_t>(link.capacity * 2, neededCapacity);
                 link.rangesBuf = std::make_shared<vk::Buffer>(be_->ctx(), linkRangesBufferBytes(link.capacity), vk::MemPref::kAuto, 0, /*zeroInit=*/true);
-                linksChanged_ = true; // buffer identity (and the per-set stride) changed; the recording binds the old one
+                linksChanged_  = true; // buffer identity (and the per-set stride) changed; the recording binds the old one
             }
             // One set per chain iteration at a fixed stride of {rangeCount, totalElems} + 3
             // uint32 per range slot. Iterations past the last provided set get a zero header, so
@@ -2578,7 +2571,8 @@ namespace vknn {
         const KvqCache &cache = kvqCaches_.at(id);
         rt.host.resizeElems(cache.rows * cache.headDim, DType::Float32);
         rt.dtype = DType::Float32;
-        kvDequantRows(reinterpret_cast<const int8_t *>(buffers_.at(id)->host()), reinterpret_cast<const fp16_t *>(cache.scales->host()), cache.rows, cache.headDim, rt.host.f32());
+        kvDequantRows(reinterpret_cast<const int8_t *>(buffers_.at(id)->host()), reinterpret_cast<const fp16_t *>(cache.scales->host()), cache.rows, cache.headDim,
+                      rt.host.f32());
         rt.hostValid = true;
     }
 
@@ -2622,7 +2616,7 @@ namespace vknn {
             // One {uint index, float value} slot per decode-chain iteration; a single-step
             // segment holds (and writes) slot 0 only.
             argMaxResults_[output] = std::make_shared<vk::Buffer>(be_->ctx(), kArgMaxResultBytes * (size_t) chainStepsMax_, vk::MemPref::kAuto, 0, /*zeroInit=*/true);
-            argMaxChanged_         = true; // the next run re-records with the epilogue dispatch
+            argMaxChanged_ = true; // the next run re-records with the epilogue dispatch
         }
         return Status::Ok;
     }
