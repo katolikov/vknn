@@ -83,9 +83,9 @@ namespace vknn {
                 TensorId iid = node.inputs[1];
                 if (g.isInitializer(iid))
                 {
-                    const HostBuffer  &ib   = g.initializers.at(iid);
-                    DType              idt  = g.desc(iid).dtype;
-                    int64_t            nIdx = (int64_t) numElements(is);
+                    const HostBuffer &ib   = g.initializers.at(iid);
+                    DType             idt  = g.desc(iid).dtype;
+                    int64_t           nIdx = (int64_t) numElements(is);
                     // Floor the staging vector at 4 elements: a scalar/empty index tensor gives nIdx == 0,
                     // and upload() (which also floors the device buffer at 4) must not be handed an empty
                     // vector whose data() could be null. Only the first nIdx entries are ever read.
@@ -106,9 +106,8 @@ namespace vknn {
                     idxBuf = upload(*env.ctx, idxf, env.useFp16);
                 }
 
-                copyPipe = env.pipeline(shader("scatternd_copy", env.useFp16), 2, sizeof(CopyPC), std::vector<uint32_t> {});
-                scatterPipe =
-                    env.pipeline(shader("scatternd", env.useFp16), 4, sizeof(ScatterPC), std::vector<uint32_t> {});
+                copyPipe    = env.pipeline(shader("scatternd_copy", env.useFp16), 2, sizeof(CopyPC), std::vector<uint32_t> {env.flatLocalSize});
+                scatterPipe = env.pipeline(shader("scatternd", env.useFp16), 4, sizeof(ScatterPC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -117,7 +116,7 @@ namespace vknn {
                 vk::Buffer *idx     = idxBuf ? idxBuf.get() : env.devBuf(node.inputs[1]);
                 vk::Buffer *out     = env.devBuf(node.outputs[0]);
                 // Pass 1: out = copy(data). scatternd_copy.comp is local_size_x=256 == flat::kFlatLocalSize.
-                copyPipe->dispatch(cmd, {data->handle(), out->handle()}, &copyPc, sizeof(copyPc), groups(copyPc.count, flat::kFlatLocalSize));
+                copyPipe->dispatch(cmd, {data->handle(), out->handle()}, &copyPc, sizeof(copyPc), groups(copyPc.count, env.flatLocalSize));
                 // The framework only barriers BETWEEN nodes (read-after-write across ops); two dispatches
                 // inside one record() are NOT auto-barriered. Pass 2 scatters into the SAME `out` buffer pass 1
                 // wrote, so without this compute->compute barrier the dispatches can overlap and read stale
@@ -127,7 +126,7 @@ namespace vknn {
                 // flat::kFlatLocalSize.
                 if (pc.total > 0)
                 {
-                    scatterPipe->dispatch(cmd, {updates->handle(), idx->handle(), out->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                    scatterPipe->dispatch(cmd, {updates->handle(), idx->handle(), out->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
                 }
             }
         };

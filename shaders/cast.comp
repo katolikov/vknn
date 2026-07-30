@@ -13,7 +13,7 @@
 //   2  UINT8: truncate, then saturate to [0,255] (matching readbackOutput's clamp for uint8).
 // The narrowed result is always small (<=255 magnitude for INT8/UINT8), hence exact in both fp16 and
 // fp32 storage, and the terminal readback re-narrowing is idempotent.
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int total; float lo, hi; int mode; } pc;

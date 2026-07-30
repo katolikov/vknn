@@ -6,9 +6,6 @@
 namespace vknn {
     namespace {
 
-        // Local workgroup size along x for the NC4HW4 path; matches local_size_x in shaders/add.comp.
-        constexpr uint32_t kAddLocalSize = 256;
-
         struct AddPC {
             uint32_t count;
             int      act;
@@ -32,8 +29,8 @@ namespace vknn {
                 }
                 // Field order/types mirror add.comp's push_constant block. count is the NC4HW4 packed
                 // element count, so one flat 1D grid covers every packed lane of the output buffer.
-                pc = {(uint32_t) packedElems(env.graph->desc(node.outputs[0]).shape), (int) node.fusedAct, node.actLo, node.actHi};
-                pipe = env.pipeline(shader("add", env.useFp16), 3, sizeof(AddPC), std::vector<uint32_t> {});
+                pc   = {(uint32_t) packedElems(env.graph->desc(node.outputs[0]).shape), (int) node.fusedAct, node.actLo, node.actHi};
+                pipe = env.pipeline(shader("add", env.useFp16), 3, sizeof(AddPC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -45,7 +42,7 @@ namespace vknn {
                 vk::Buffer *a = env.devBuf(node.inputs[0]);
                 vk::Buffer *b = env.devBuf(node.inputs[1]);
                 vk::Buffer *y = env.devBuf(node.outputs[0]);
-                pipe->dispatch(cmd, {a->handle(), b->handle(), y->handle()}, &pc, sizeof(pc), groups(pc.count, kAddLocalSize));
+                pipe->dispatch(cmd, {a->handle(), b->handle(), y->handle()}, &pc, sizeof(pc), groups(pc.count, env.flatLocalSize));
             }
         };
 

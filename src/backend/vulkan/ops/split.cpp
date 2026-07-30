@@ -69,7 +69,7 @@ namespace vknn {
                         // Each output is a contiguous slice of the input along the split axis. flat_gather reads
                         // in[base + sum_d outCoord_d * inStride_d]; base skips this output's axis offset (offset
                         // rows of the axis stride), and the input strides carry every other axis through unchanged.
-                        pc.base  = (int) (offset * inStride[axis]);
+                        pc.base = (int) (offset * inStride[axis]);
                         std::vector<int32_t> outDim(rank), inStr(rank);
                         for (int d = 0; d < rank; ++d)
                         {
@@ -77,18 +77,19 @@ namespace vknn {
                             inStr[d]  = (int) inStride[d];
                         }
                         fgeom_.push_back(flat::uploadFlatGeom(env, {outDim, inStr}));
+                        pc.items = flat::itemsPerLane(pc.total, env); // device-probe consult at load
                         fpcs_.push_back(pc);
                         foutIdx_.push_back((int) k);
                         offset += out[axis]; // next output starts where this one ends
-                        fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 3, sizeof(FPC), std::vector<uint32_t> {}));
+                        fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 3, sizeof(FPC), std::vector<uint32_t> {env.flatLocalSize}));
                     }
                     return;
                 }
                 // NC4HW4 channel split
-                x_          = NCHW::from(g.desc(node.inputs[0]).shape);
-                elem_       = env.useFp16 ? 2 : 4; // bytes per stored element (fp16 half vs fp32 float)
-                cbTotal_    = cBlocks(x_.c);       // input's channel-block count (the source row pitch)
-                hw_         = x_.h * x_.w;
+                x_       = NCHW::from(g.desc(node.inputs[0]).shape);
+                elem_    = env.useFp16 ? 2 : 4; // bytes per stored element (fp16 half vs fp32 float)
+                cbTotal_ = cBlocks(x_.c);       // input's channel-block count (the source row pitch)
+                hw_      = x_.h * x_.w;
                 // Each output owns a contiguous run of channel-blocks. blk is the input's first block index
                 // for the current output; because every split channel count is a multiple of four here, a
                 // block is never shared, so each output is a whole-block copy with no channel remainder.
@@ -122,7 +123,8 @@ namespace vknn {
                         }
                         // One flat_gather invocation per output element (local_size_x = kFlatLocalSize),
                         // gathering the slice for this output straight out of the shared input buffer.
-                        fpipes_[i]->dispatch(cmd, {src->handle(), dst->handle(), fgeom_[i]->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, flat::kFlatLocalSize));
+                        fpipes_[i]->dispatch(cmd, {src->handle(), dst->handle(), fgeom_[i]->handle()}, &fpcs_[i], sizeof(FPC),
+                                             groups((fpcs_[i].total + fpcs_[i].items - 1) / fpcs_[i].items, env.flatLocalSize));
                     }
                     return;
                 }

@@ -6,7 +6,6 @@ namespace vknn {
     namespace {
 
         // Local workgroup size along x; matches local_size_x in shaders/unary.comp.
-        constexpr uint32_t kUnaryLocalSize = 256;
 
         // Field order/types mirror unary.comp's push_constant block byte-for-byte.
         // op selects the activation function; a/b carry its scalar parameters (e.g. LeakyRelu
@@ -28,14 +27,14 @@ namespace vknn {
                 pc             = {count, node.subOp, node.actLo, node.actHi};
                 // 2 SSBOs: source (binding 0) and destination (binding 1); the kernel is a pure
                 // elementwise map so no packed-layout math is needed here.
-                pipe = env.pipeline(shader("unary", env.useFp16), 2, sizeof(UnaryPC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("unary", env.useFp16), 2, sizeof(UnaryPC), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *s = operandBuf(env, node.inputs[0], hold);
                 vk::Buffer *d = env.devBuf(node.outputs[0]);
-                // One flat 1D grid of kUnaryLocalSize-wide workgroups covers every element/packed lane;
+                // One flat 1D grid of env.flatLocalSize-wide workgroups covers every element/packed lane;
                 // the kernel's bounds check drops the tail past count.
-                pipe->dispatch(cmd, {s->handle(), d->handle()}, &pc, sizeof(pc), groups(pc.count, kUnaryLocalSize));
+                pipe->dispatch(cmd, {s->handle(), d->handle()}, &pc, sizeof(pc), groups(pc.count, env.flatLocalSize));
             }
         };
 

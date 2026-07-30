@@ -11,7 +11,7 @@
 //
 // Slice element j sits at (o*dim + j)*inner + in for slice (o, in); the k outputs sit at
 // (o*k + p)*inner + in for pass p. `largest` selects the max vs min per pass.
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer V { STORE v[]; };
 layout(std430, binding = 2) writeonly buffer I { STORE idx[]; };

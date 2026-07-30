@@ -19,14 +19,14 @@ namespace vknn {
             void prepare(const Node &node, VkOpEnv &env) override {
                 pc.total = (int) numElements(env.graph->desc(node.outputs[0]).shape);
                 // 2 SSBOs: source (binding 0) and destination (binding 1).
-                pipe = env.pipeline(shader("isnan", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("isnan", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *s = operandBuf(env, node.inputs[0], hold);
                 vk::Buffer *d = env.devBuf(node.outputs[0]);
                 // One flat invocation per element; isnan.comp is local_size_x=256 == flat::kFlatLocalSize.
-                pipe->dispatch(cmd, {s->handle(), d->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                pipe->dispatch(cmd, {s->handle(), d->handle()}, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
 
