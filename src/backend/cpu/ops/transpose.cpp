@@ -7,9 +7,9 @@ namespace vknn {
     namespace {
         struct TransposeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor      &X    = ctx.t(node.inputs[0]);
-                RtTensor            &Y    = ctx.t(node.outputs[0]);
-                int                  rank = (int) X.shape.size();
+                const RtTensor &X    = ctx.t(node.inputs[0]);
+                RtTensor       &Y    = ctx.t(node.outputs[0]);
+                int             rank = (int) X.shape.size();
                 if (node.attr.has("view_stride"))
                 {
                     cpu::runViewGather(node, ctx);
@@ -48,15 +48,15 @@ namespace vknn {
                     inStride[i]  = inStride[i + 1] * X.shape[i + 1];
                     outStride[i] = outStride[i + 1] * out[i + 1];
                 }
-                int64_t        elems = numElements(out);
+                int64_t elems = numElements(out);
                 // Data is copied verbatim (a pure gather), so the same permutation serves any dtype;
                 // only the element width differs. Int64 tensors (shape/index math) take the i64 path,
                 // everything else the f32 path, each with its own typed source pointer and output alloc.
-                bool           i64   = X.dtype == DType::Int64;
-                const float   *xf    = i64 ? nullptr : X.host.f32();
-                const int64_t *xi    = i64 ? X.host.i64() : nullptr;
-                float         *yf    = i64 ? nullptr : cpu::allocOut(Y, out);
-                int64_t       *yi    = i64 ? cpu::allocOutI64(Y, out) : nullptr;
+                bool           i64 = X.dtype == DType::Int64;
+                const float   *xf  = i64 ? nullptr : X.host.f32();
+                const int64_t *xi  = i64 ? X.host.i64() : nullptr;
+                float         *yf  = i64 ? nullptr : cpu::allocOut(Y, out);
+                int64_t       *yi  = i64 ? cpu::allocOutI64(Y, out) : nullptr;
                 // For each output element, decode its flat index `oi` into per-axis coordinates via the
                 // output strides, then re-address the source: output axis i corresponds to input axis
                 // perm[i], so coordinate `c` contributes c * inStride[perm[i]] to the input offset `inf`.

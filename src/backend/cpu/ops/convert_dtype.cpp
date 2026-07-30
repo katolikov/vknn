@@ -20,9 +20,9 @@ namespace vknn {
                 RtTensor       &Y = ctx.t(node.outputs[0]);
                 // Y takes X's shape verbatim (ConvertDtype never reshapes), then receives a straight
                 // element-for-element copy over the flat fp32 buffer.
-                float          *y = cpu::allocOut(Y, X.shape);
-                const float    *x = X.host.f32();
-                int64_t         n = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
+                float       *y = cpu::allocOut(Y, X.shape);
+                const float *x = X.host.f32();
+                int64_t      n = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
                 for (int64_t i = 0; i < n; ++i)
                 {
                     y[i] = x[i];

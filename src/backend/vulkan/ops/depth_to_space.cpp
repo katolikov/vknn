@@ -45,7 +45,7 @@ namespace vknn {
                 {
                     nc4Pc    = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
                     nc4Count = (uint32_t) ((int64_t) x.n * cBlocks(C2) * OH * OW); // one lane per output block-pixel
-                    pipe     = env.pipeline(shader("depth_to_space_nc4", env.useFp16), 2, sizeof(D2sNc4PC), std::vector<uint32_t> {});
+                    pipe = env.pipeline(shader("depth_to_space_nc4", env.useFp16), 2, sizeof(D2sNc4PC), std::vector<uint32_t> {});
                     return;
                 }
                 pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC), std::vector<uint32_t> {});

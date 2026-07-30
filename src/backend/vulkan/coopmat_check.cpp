@@ -1,7 +1,7 @@
 #include "coopmat_check.h"
-#include "vk_op_env.h"
 #include "vk_buffer.h"
 #include "vk_command.h"
+#include "vk_op_env.h"
 #include "vknn/dtype.h"
 #include <map>
 #include <mutex>
@@ -28,8 +28,8 @@ namespace vknn {
     } // namespace
 
     bool coopmatGemmSelfCheckPassed(VkOpEnv &env) {
-        static std::mutex                 verdictMutex;
-        static std::map<VkDevice, bool>   verdictByDevice;
+        static std::mutex               verdictMutex;
+        static std::map<VkDevice, bool> verdictByDevice;
 
         vk::VulkanContext &ctx = *env.ctx;
         {
@@ -80,7 +80,9 @@ namespace vknn {
                 bufA.upload(hostA.data(), hostA.size() * sizeof(fp16_t));
                 bufB.upload(hostB.data(), hostB.size() * sizeof(fp16_t));
 
-                struct { int M, N, K; } pc {kCheckM, kCheckN, kCheckK};
+                struct {
+                    int M, N, K;
+                } pc {kCheckM, kCheckN, kCheckK};
                 auto pipe = env.pipeline("coopmat_gemm", 3, sizeof(pc), {}, /*requiredSubgroupSize=*/32);
                 env.runner->oneShot([&](VkCommandBuffer cmd) {
                     // Grid matches the op dispatch: one workgroup per 32x32 output tile.
@@ -93,8 +95,7 @@ namespace vknn {
                 if (!passed)
                 {
                     VKNN_WARN << "coopmat_gemm self-check mismatch: cooperative-matrix path disabled for this device";
-                }
-                else
+                } else
                 {
                     VKNN_INFO << "coopmat_gemm self-check passed (asymmetric " << kCheckM << "x" << kCheckN << "x" << kCheckK << " exact match)";
                 }

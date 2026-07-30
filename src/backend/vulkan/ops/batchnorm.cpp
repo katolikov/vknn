@@ -95,8 +95,8 @@ namespace vknn {
                 if (runtime)
                 {
                     pipe->dispatch(cmd,
-                                   {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.inputs[1])->handle(), env.devBuf(node.inputs[2])->handle(), env.devBuf(node.inputs[3])->handle(),
-                                    env.devBuf(node.inputs[4])->handle(), env.devBuf(node.outputs[0])->handle()},
+                                   {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.inputs[1])->handle(), env.devBuf(node.inputs[2])->handle(),
+                                    env.devBuf(node.inputs[3])->handle(), env.devBuf(node.inputs[4])->handle(), env.devBuf(node.outputs[0])->handle()},
                                    &rtpc, sizeof(rtpc), groups(rtpc.count, kBnLocalSize));
                     return;
                 }

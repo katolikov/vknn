@@ -29,13 +29,13 @@ namespace {
         TensorId a = g.addTensor(ai);
         g.inputs.push_back(a);
         TensorDesc td;
-        td.name    = "t";
-        TensorId t = g.addTensor(td);
+        td.name      = "t";
+        TensorId   t = g.addTensor(td);
         TensorDesc wd;
         wd.name          = "w";
         wd.shape         = {K, N};
         wd.isInitializer = true;
-        TensorId w       = g.addTensor(wd);
+        TensorId   w     = g.addTensor(wd);
         HostBuffer hb;
         hb.resizeElems(K * N, DType::Float32);
         for (int64_t k = 0; k < K; ++k)
@@ -50,7 +50,7 @@ namespace {
         yo.name     = "y";
         yo.isOutput = true;
         TensorId y  = g.addTensor(yo);
-        Node relu;
+        Node     relu;
         relu.type    = OpType::Relu;
         relu.name    = "relu";
         relu.inputs  = {a};
@@ -71,9 +71,9 @@ namespace {
     // the serialized product the int8 quantization pass emits, built directly so the container and
     // materialization contracts are testable without the pass.
     void packWeightInt8ByHand(Graph &g, int64_t K, int64_t N, int64_t group) {
-        TensorId           w   = g.find("w");
-        std::vector<float> vals = initFloats(g, w);
-        const int64_t      nGroups = int4GroupCount(K, group);
+        TensorId              w       = g.find("w");
+        std::vector<float>    vals    = initFloats(g, w);
+        const int64_t         nGroups = int4GroupCount(K, group);
         std::vector<uint16_t> scales((size_t) (nGroups * N));
         std::vector<int8_t>   q((size_t) (K * N), 0);
         for (int64_t gp = 0; gp < nGroups; ++gp)
@@ -94,28 +94,28 @@ namespace {
                 }
                 for (int64_t k = k0; k < k1; ++k)
                 {
-                    double qq = std::nearbyint((double) vals[(size_t) (k * N + n)] / (double) s);
-                    qq        = std::min(127.0, std::max(-127.0, qq));
+                    double qq               = std::nearbyint((double) vals[(size_t) (k * N + n)] / (double) s);
+                    qq                      = std::min(127.0, std::max(-127.0, qq));
                     q[(size_t) (k * N + n)] = (int8_t) qq;
                 }
             }
         }
         {
             HostBuffer hb;
-            hb.bytes = int8Pack(q, K, N);
+            hb.bytes          = int8Pack(q, K, N);
             g.initializers[w] = std::move(hb);
         }
         g.desc(w).dtype = DType::Float16;
         TensorDesc sd;
-        sd.name          = "w#i8s";
-        sd.shape         = {nGroups * N};
-        sd.dtype         = DType::Float16;
-        sd.isInitializer = true;
-        TensorId scaleId = g.addTensor(sd);
-        HostBuffer shb;
+        sd.name                      = "w#i8s";
+        sd.shape                     = {nGroups * N};
+        sd.dtype                     = DType::Float16;
+        sd.isInitializer             = true;
+        TensorId             scaleId = g.addTensor(sd);
+        HostBuffer           shb;
         std::vector<uint8_t> scaleBytes((const uint8_t *) scales.data(), (const uint8_t *) scales.data() + scales.size() * 2);
-        shb.bytes                 = std::move(scaleBytes);
-        g.initializers[scaleId]   = std::move(shb);
+        shb.bytes               = std::move(scaleBytes);
+        g.initializers[scaleId] = std::move(shb);
         for (Node &nd: g.nodes)
         {
             if (nd.type != OpType::MatMul)
@@ -243,8 +243,7 @@ TEST(QuantWeights, Int8DequantAppliesScalesAndOutliers) {
     {
         for (int64_t n = 0; n < N; ++n)
         {
-            float want = k == 2 ? 10.0f + (float) n
-                                : (float) q[(size_t) (k * N + n)] * halfToFloat(scales[(size_t) ((k / group) * N + n)]);
+            float want = k == 2 ? 10.0f + (float) n : (float) q[(size_t) (k * N + n)] * halfToFloat(scales[(size_t) ((k / group) * N + n)]);
             EXPECT_FLOAT_EQ(w[(size_t) (k * N + n)], want) << "k=" << k << " n=" << n;
         }
     }
@@ -478,7 +477,8 @@ TEST(QuantWeights, Int8ExactlyRepresentableWeightsRoundTripExactly) {
             {
                 const int64_t i = k * N + n;
                 v[i]            = k % opt.group == 0 ? 127.0f * step // the group's maxAbs anchor
-                                                     : (float) ((i * 7919) % 255 - 127) * step;
+                                                       :
+                                                       (float) ((i * 7919) % 255 - 127) * step;
             }
         }
         return g;
@@ -558,9 +558,9 @@ TEST(QuantWeights, Lut4PassQuantizesAndRoundTrips) {
     // packed loop — they rely on the grid contribution being zero there.
     const int64_t nOut = mm->attr.geti(kWqNOut, 0);
     ASSERT_GT(nOut, 0);
-    const TensorId  oidxId = (TensorId) mm->attr.geti(kWqOidx, kNoTensor);
-    const int32_t  *oidx   = reinterpret_cast<const int32_t *>(g.initializers.at(oidxId).bytes.data());
-    const uint8_t  *packed = g.initializers.at(w).bytes.data();
+    const TensorId oidxId = (TensorId) mm->attr.geti(kWqOidx, kNoTensor);
+    const int32_t *oidx   = reinterpret_cast<const int32_t *>(g.initializers.at(oidxId).bytes.data());
+    const uint8_t *packed = g.initializers.at(w).bytes.data();
     for (int64_t j = 0; j < nOut; ++j)
     {
         for (int64_t n = 0; n < N; ++n)

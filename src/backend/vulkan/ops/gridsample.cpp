@@ -60,8 +60,8 @@ namespace vknn {
                     // Mul: fp16 storage narrows the scalar exactly as the Binary op's uploadInit did
                     // (floatToHalfSat, saturating out-of-range like an imported constant), fp32 keeps it
                     // exact. The shader then rounds the product itself.
-                    float s        = node.attr.getf("warp_scale", 1.f);
-                    pc.scale       = env.useFp16 ? halfToFloat(floatToHalfSat(s)) : s;
+                    float s  = node.attr.getf("warp_scale", 1.f);
+                    pc.scale = env.useFp16 ? halfToFloat(floatToHalfSat(s)) : s;
                     // Base grid [.,OH,OW,2]: N stride 0 broadcasts a single-frame base over the batch.
                     pc.baseNStride = g.desc(node.inputs[2]).shape[0] == 1 ? 0 : OH * OW * 2;
                 }
@@ -76,7 +76,7 @@ namespace vknn {
                 // internally (cBlocks(c) ceil-packs channels into groups of 4, each resolved as a
                 // vec4), so the grid fetch and the coordinate/weight math happen once per pixel
                 // instead of once per block-pixel.
-                total            = (int64_t) x.n * OH * OW;
+                total = (int64_t) x.n * OH * OW;
                 epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
                 // The warp shader reads its flow (NC4HW4) and base (fp32) from two dedicated bindings
                 // (source, flow, base, dest = 4 base buffers); the plain shader has one grid binding

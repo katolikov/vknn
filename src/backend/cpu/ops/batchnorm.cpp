@@ -28,7 +28,7 @@ namespace vknn {
                 float          *y     = cpu::allocOut(Y, X.shape);
                 const float    *xd    = X.host.f32();
                 // Elements in one channel plane; the innermost loop is a contiguous run over H*W.
-                int64_t         hw    = x.h * x.w;
+                int64_t hw = x.h * x.w;
                 for (int64_t n = 0; n < x.n; ++n)
                 {
                     for (int64_t c = 0; c < x.c; ++c)
@@ -36,8 +36,8 @@ namespace vknn {
                         // Fold the normalization into y = a*x + b: a folds scale with the inverse std,
                         // b re-centers with bias. std::sqrt(var+eps) with eps>0 (default 1e-5) keeps the
                         // divisor away from zero for channels with vanishing variance.
-                        float        a = scale[c] / std::sqrt(var[c] + eps);
-                        float        b = bias[c] - mean[c] * a;
+                        float a = scale[c] / std::sqrt(var[c] + eps);
+                        float b = bias[c] - mean[c] * a;
                         // Base of channel c of batch item n in the dense NCHW layout: (n*C + c)*H*W.
                         const float *p = xd + (n * x.c + c) * hw;
                         float       *q = y + (n * x.c + c) * hw;

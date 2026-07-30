@@ -180,11 +180,11 @@ namespace vknn {
             // the kernel is the split-K GEMV for a single output row or the {128,128,16} tile
             // otherwise, in the wrapper variant matching the weight's format.
             void prepareWq(const Node &node, VkOpEnv &env) {
-                const Graph  &g      = *env.graph;
-                const Shape  &sa     = g.desc(node.inputs[0]).shape;
-                const Shape  &out    = g.desc(node.outputs[0]).shape;
-                const int64_t M      = sa.size() >= 2 ? sa[sa.size() - 2] : 1;
-                const int     format = weightQuantFormat(node);
+                const Graph  &g       = *env.graph;
+                const Shape  &sa      = g.desc(node.inputs[0]).shape;
+                const Shape  &out     = g.desc(node.outputs[0]).shape;
+                const int64_t M       = sa.size() >= 2 ? sa[sa.size() - 2] : 1;
+                const int     format  = weightQuantFormat(node);
                 const bool    int8Fmt = format == kWqFormatInt8;
                 const bool    lutFmt  = format == kWqFormatLut4;
 
@@ -339,10 +339,10 @@ namespace vknn {
                 auto mk  = [&](size_t bytes) {
                     return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
                 };
-                auto                        sA     = mk((size_t) gzT * pc.M * pc.K * es);
-                auto                        sB     = mk((size_t) gzT * pc.K * pc.bNp * es);
-                auto                        sD     = mk((size_t) gzT * pc.M * pc.N * es);
-                std::shared_ptr<vk::Buffer> sBias  = hasBias ? mk((size_t) pc.N * es) : nullptr;
+                auto                        sA    = mk((size_t) gzT * pc.M * pc.K * es);
+                auto                        sB    = mk((size_t) gzT * pc.K * pc.bNp * es);
+                auto                        sD    = mk((size_t) gzT * pc.M * pc.N * es);
+                std::shared_ptr<vk::Buffer> sBias = hasBias ? mk((size_t) pc.N * es) : nullptr;
                 vk::TuneTimer               timer(env);
                 // Time each candidate with the kernel it will actually dispatch: the default tile
                 // runs the compile-time _fast kernel — the vec4-load twin when prepare()'s v4
@@ -355,7 +355,7 @@ namespace vknn {
                 {
                     fastBase = hasBias ? "matmul_tiled_fast_v4_bias" : "matmul_tiled_fast_v4";
                 }
-                uint32_t nbuf   = hasBias ? 5 : 4; // + the geometry SSBO bound after the operands/bias
+                uint32_t nbuf = hasBias ? 5 : 4; // + the geometry SSBO bound after the operands/bias
                 // Entrants in kMatMulTiles order, minus the tiles whose dispatch does not fit; index
                 // 0 is always the default tile (tileFits holds for it whenever the op dispatches).
                 struct Entrant {
@@ -368,10 +368,10 @@ namespace vknn {
                 // step, so it issues K*(TM+TN) elements over the whole reduction and stores TM*TN.
                 // The compulsory footprint is the three operand panels, identical for every tile.
                 // Threads per tiled-GEMM workgroup (shaders/matmul_tiled.comp dispatches TILE x TILE).
-                constexpr double            kMatMulTiledThreads = 256.0;
-                const double                elemsPerVec4        = 4.0;
-                const double                streamFootprint   = (double) gzT * ((double) pc.M * pc.K + (double) pc.M * pc.N) / elemsPerVec4;
-                const double                residentFootprint = (double) gzT * (double) pc.K * (double) pc.N / elemsPerVec4;
+                constexpr double kMatMulTiledThreads = 256.0;
+                const double     elemsPerVec4        = 4.0;
+                const double     streamFootprint     = (double) gzT * ((double) pc.M * pc.K + (double) pc.M * pc.N) / elemsPerVec4;
+                const double     residentFootprint   = (double) gzT * (double) pc.K * (double) pc.N / elemsPerVec4;
                 for (int ci = 0; ci < kMatMulTileCount; ++ci)
                 {
                     const MatMulTile &t = kMatMulTiles[ci];
@@ -417,7 +417,7 @@ namespace vknn {
                 // The default tile is the incumbent, so every other candidate is a challenger and
                 // must clear the margin; a tie keeps the incumbent, and so does a noise-width win
                 // the analytical model does not corroborate.
-                const std::vector<double> model = vk::modelEstimates(costs, vk::deviceTuneModel(env));
+                const std::vector<double> model  = vk::modelEstimates(costs, vk::deviceTuneModel(env));
                 int                       best   = entrants[0].tileIndex;
                 double                    bestMs = ms[0];
                 for (size_t ei = 1; ei < entrants.size(); ++ei)
@@ -465,7 +465,7 @@ namespace vknn {
                 // Physical last-axis extents of the operand buffers (0 = packed) and the resolved
                 // row strides the kernels index with. A view-addressed MatMul carries its own
                 // geometry and is never handed a virtualized operand.
-                int64_t    aRowPad = 0, bRowPad = 0, aRow = 0, bRow = 0;
+                int64_t aRowPad = 0, bRowPad = 0, aRow = 0, bRow = 0;
                 // gemv4 loads B as vec4 along n; a view keeps that legal only when its n stride is 1
                 // and every other B offset term is 4-aligned.
                 bool                 viewGemv4Ok = false;
@@ -521,8 +521,8 @@ namespace vknn {
                     aRow             = d.aRow;
                     bRow             = d.bRow;
                     rank             = d.rank;
-                    pc.aK            = 1;             // A is [...,M,K] row-major -> stepping K moves by 1
-                    pc.bK            = (int) d.bRow;  // B is [...,K,N] row-major -> stepping K moves by one physical row
+                    pc.aK            = 1;            // A is [...,M,K] row-major -> stepping K moves by 1
+                    pc.bK            = (int) d.bRow; // B is [...,K,N] row-major -> stepping K moves by one physical row
                     outDim           = d.outDim;
                     aStride          = d.aStride;
                     bStride          = d.bStride;
@@ -543,17 +543,17 @@ namespace vknn {
                     const auto     &cap = env.ctx->caps();
                     CoopmatGemmCaps cmCaps;
                     cmCaps.coopmatFp16Fp32Row16 = cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_FLOAT16_KHR, (uint32_t) VK_COMPONENT_TYPE_FLOAT32_KHR);
-                    cmCaps.coopmatFp8Fp32Row16  = cap.shaderFloat8CoopMat && cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT, (uint32_t) VK_COMPONENT_TYPE_FLOAT32_KHR);
-                    cmCaps.coopmatI8I32Row16    = cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_SINT8_KHR, (uint32_t) VK_COMPONENT_TYPE_SINT32_KHR);
-                    cmCaps.wave32Pinnable       = cap.subgroupSizeControl && cap.requiredSubgroupSizeCompute && cap.minSubgroupSize <= 32u && 32u <= cap.maxSubgroupSize;
-                    cmCaps.vulkanMemoryModel    = cap.vulkanMemoryModel;
-                    cmCaps.selfCheckPassed      = true; // provisionally; the on-device check runs below only when the rule matches
+                    cmCaps.coopmatFp8Fp32Row16 = cap.shaderFloat8CoopMat && cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT, (uint32_t) VK_COMPONENT_TYPE_FLOAT32_KHR);
+                    cmCaps.coopmatI8I32Row16 = cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_SINT8_KHR, (uint32_t) VK_COMPONENT_TYPE_SINT32_KHR);
+                    cmCaps.wave32Pinnable = cap.subgroupSizeControl && cap.requiredSubgroupSizeCompute && cap.minSubgroupSize <= 32u && 32u <= cap.maxSubgroupSize;
+                    cmCaps.vulkanMemoryModel = cap.vulkanMemoryModel;
+                    cmCaps.selfCheckPassed   = true; // provisionally; the on-device check runs below only when the rule matches
                     // A virtualized operand keeps the SSBO kernels: the coopmat kernels load dense
                     // packed panels and have no physical-row-stride parameter.
                     const bool denseRank2Batch1 = !hasView && !aWas1D && !bWas1D && aRowPad == 0 && bRowPad == 0 && M > 0 && N > 0 && pc.total == (int) (M * N);
                     const bool hasBiasOrEpi     = node.fusedBias != kNoTensor || node.attr.has("pw_steps");
                     const int  hintValue        = env.config ? env.config->hint(Hint::CoopmatGemm, (int) Mode::Auto) : (int) Mode::Auto;
-                    coopKind                    = coopmatGemmRoute(cmCaps, hintValue, env.useFp16, denseRank2Batch1, hasBiasOrEpi, M, N, K, g.isInitializer(node.inputs[1]));
+                    coopKind = coopmatGemmRoute(cmCaps, hintValue, env.useFp16, denseRank2Batch1, hasBiasOrEpi, M, N, K, g.isInitializer(node.inputs[1]));
                     // The 2-D coopmat dispatch has no runtime X-overflow rescue; a grid past the
                     // device limit keeps the SSBO kernels.
                     if (coopKind != CoopmatGemmKind::None && ((uint32_t) (N / 32) > cap.maxWorkGroupCount[0] || (uint32_t) (M / 32) > cap.maxWorkGroupCount[1]))

@@ -23,16 +23,16 @@ namespace vknn {
                 Shape           out(rank, 1);
                 // Right-align the shorter operand: NumPy broadcasting matches axes from the trailing
                 // end, so a shape shorter than `rank` reads as an implicit leading run of size-1 dims.
-                auto            dimOf = [&](const Shape &s, size_t i) -> int64_t {
+                auto dimOf = [&](const Shape &s, size_t i) -> int64_t {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
                 };
                 for (size_t i = 0; i < rank; ++i)
                 {
                     int64_t dc = dimOf(sc, i), dx = dimOf(sx, i), dy = dimOf(sy, i);
-                    out[i]     = (dc == 0 || dx == 0 || dy == 0) ? 0 : std::max(dc, std::max(dx, dy)); // a 0 dim broadcasts to 0 (NumPy), never to 1
+                    out[i] = (dc == 0 || dx == 0 || dy == 0) ? 0 : std::max(dc, std::max(dx, dy)); // a 0 dim broadcasts to 0 (NumPy), never to 1
                 }
-                int64_t              n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
+                int64_t n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-axis input strides in row-major (C-contiguous) order, built right to left. A
                 // broadcast axis (input dim 1, output dim > 1) gets stride 0 so every output index
                 // along it re-reads the single source element; a non-broadcast axis carries the

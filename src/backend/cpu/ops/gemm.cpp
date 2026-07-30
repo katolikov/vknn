@@ -14,8 +14,8 @@ namespace vknn {
 
         struct GemmCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &A    = ctx.t(node.inputs[0]);
-                const RtTensor &Bt   = ctx.t(node.inputs[1]);
+                const RtTensor &A  = ctx.t(node.inputs[0]);
+                const RtTensor &Bt = ctx.t(node.inputs[1]);
                 // Optional bias C is input[2]. Bound the read by pwCoreInputs, not inputs.size():
                 // pointwise-chain fusion appends operands past the op's core inputs, and one of those
                 // must never be misread as C.
@@ -36,14 +36,14 @@ namespace vknn {
                 int64_t K = transA ? A.shape[0] : A.shape[1];
                 int64_t N = transB ? Bt.shape[0] : Bt.shape[1];
 
-                float       *y  = cpu::allocOut(Y, {M, N});
-                const float *a  = A.host.f32();
-                const float *b  = Bt.host.f32();
-                const float *c  = C ? C->host.f32() : nullptr;
+                float       *y = cpu::allocOut(Y, {M, N});
+                const float *a = A.host.f32();
+                const float *b = Bt.host.f32();
+                const float *c = C ? C->host.f32() : nullptr;
                 // cN is the divisor for the C broadcast below: for a 1-D bias it is the row length
                 // (one value per output column N); otherwise it is C's total element count so a
                 // full/other-shaped C is wrapped element-wise.
-                int64_t      cN = C ? (C->shape.size() == 1 ? C->shape[0] : numElements(C->shape)) : 0;
+                int64_t cN = C ? (C->shape.size() == 1 ? C->shape[0] : numElements(C->shape)) : 0;
 
                 // Output row m depends on no other row and its K-contraction runs to completion inside
                 // one iteration, so the M rows partition across threads with every dot product summed

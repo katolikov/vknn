@@ -29,7 +29,7 @@ namespace vknn {
 
     /// A draft decoder loaded from its own .vxm, driven on the host KV cache flow.
     class DraftDecoder {
-    public:
+      public:
         /// Load and describe a draft model. Returns null when the artifact does not load or is not a
         /// with-past decoder this driver can feed — speculation then simply does not engage, which is
         /// why every failure here is a notice rather than an error.
@@ -39,9 +39,7 @@ namespace vknn {
             // session. The primary model is allowed to end the process that way; the draft is not —
             // it is an optimization, so a bad path costs speculation and nothing else.
             try
-            {
-                draft->session_ = Runtime::load(path, cfg);
-            } catch (const std::exception &e)
+            { draft->session_ = Runtime::load(path, cfg); } catch (const std::exception &e)
             {
                 fprintf(stderr, "[chat] draft model %s did not load (%s); decoding without speculation\n", path.c_str(), e.what());
                 return nullptr;
@@ -60,8 +58,8 @@ namespace vknn {
                 fprintf(stderr, "[chat] draft model %s is not a with-past decoder this driver can feed; decoding without speculation\n", path.c_str());
                 return nullptr;
             }
-            fprintf(stderr, "[chat] draft model %s: layers=%d kv_heads=%d C=%d head_dim=%d vocab=%lld, catch-up window %d\n",
-                    path.c_str(), layerCount(*draft), draft->kvHeads_, draft->cacheSlots_, draft->headDim_, (long long) draft->vocab_, draft->catchUpWindow_);
+            fprintf(stderr, "[chat] draft model %s: layers=%d kv_heads=%d C=%d head_dim=%d vocab=%lld, catch-up window %d\n", path.c_str(), layerCount(*draft),
+                    draft->kvHeads_, draft->cacheSlots_, draft->headDim_, (long long) draft->vocab_, draft->catchUpWindow_);
             return draft;
         }
 
@@ -140,7 +138,7 @@ namespace vknn {
             return true;
         }
 
-    private:
+      private:
         DraftDecoder() = default;
 
         static int layerCount(const DraftDecoder &draft) noexcept {
@@ -170,9 +168,9 @@ namespace vknn {
 
         /// Locate the decode bucket, the widest catch-up bucket, and the whole cache geometry.
         bool describe() {
-            decodeBucket_   = -1;
-            catchUpBucket_  = -1;
-            catchUpWindow_  = 0;
+            decodeBucket_  = -1;
+            catchUpBucket_ = -1;
+            catchUpWindow_ = 0;
             for (size_t b = 0; b < session_->bucketCount(); ++b)
             {
                 for (const IOInfo &in: session_->inputInfo(b))
@@ -195,8 +193,8 @@ namespace vknn {
             {
                 return false;
             }
-            ins_  = session_->inputInfo((size_t) decodeBucket_);
-            outs_ = session_->outputInfo((size_t) decodeBucket_);
+            ins_       = session_->inputInfo((size_t) decodeBucket_);
+            outs_      = session_->outputInfo((size_t) decodeBucket_);
             idIdx_     = findIn("input_ids");
             maskIdx_   = findIn("attention_mask");
             posIdx_    = findIn("position_ids");
@@ -234,10 +232,10 @@ namespace vknn {
             {
                 return false;
             }
-            kvHeads_    = (int) cacheShape[1];
-            cacheSlots_ = (int) cacheShape[2];
-            headDim_    = (int) cacheShape[3];
-            vocab_      = outs_[(size_t) logitsIdx_].shape.back();
+            kvHeads_     = (int) cacheShape[1];
+            cacheSlots_  = (int) cacheShape[2];
+            headDim_     = (int) cacheShape[3];
+            vocab_       = outs_[(size_t) logitsIdx_].shape.back();
             kvElemBytes_ = dtypeSize(ins_[(size_t) pastKey_[0]].dtype);
             logitsFp16_  = outs_[(size_t) logitsIdx_].dtype == DType::Float16;
             presRows_    = outs_[(size_t) presKey_[0]].shape.size() == 4 ? (int) outs_[(size_t) presKey_[0]].shape[2] : 0;
@@ -317,7 +315,7 @@ namespace vknn {
         bool windowPass(int bucket, int window, const int64_t *tokens, int len) {
             const std::vector<IOInfo> bucketIns  = session_->inputInfo((size_t) bucket);
             const std::vector<IOInfo> bucketOuts = session_->outputInfo((size_t) bucket);
-            int                       maskLen    = 0, presRows = 0;
+            int                       maskLen = 0, presRows = 0;
             for (const IOInfo &in: bucketIns)
             {
                 if (in.name == "attention_mask" && in.shape.size() == 2)
@@ -411,9 +409,7 @@ namespace vknn {
                     uint8_t *dst = inputs_[(size_t) (part ? pastVal_[(size_t) layer] : pastKey_[(size_t) layer])].data.data();
                     for (int head = 0; head < kvHeads_; ++head)
                     {
-                        std::memcpy(dst + ((size_t) head * cacheSlots_ + position_) * headDim_ * kvElemBytes_,
-                                    present->data.data() + ((size_t) head * presRows + newRowsAt) * headDim_ * kvElemBytes_,
-                                    (size_t) len * headDim_ * kvElemBytes_);
+                        std::memcpy(dst + ((size_t) head * cacheSlots_ + position_) * headDim_ * kvElemBytes_, present->data.data() + ((size_t) head * presRows + newRowsAt) * headDim_ * kvElemBytes_, (size_t) len * headDim_ * kvElemBytes_);
                     }
                 }
             }

@@ -30,7 +30,7 @@ namespace vknn {
         // items per lane profitable exactly that much longer; a narrower one drops to one item
         // sooner instead of idling. The multiple reproduces the measured -21% choice on the
         // calibration device (5 x 400 waves x 64 lanes ~= the 128 Ki-lane floor it was tuned at).
-        constexpr int kPwMaxItemsPerLane      = 8; // independent loads one lane keeps in flight
+        constexpr int kPwMaxItemsPerLane       = 8; // independent loads one lane keeps in flight
         constexpr int kPwLaneFloorWaveHeadroom = 5;
         constexpr int kPwProbeWaveLanes        = 64; // the probe counts 64-wide waves
 

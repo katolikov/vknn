@@ -36,11 +36,11 @@ namespace vknn {
                     cpu::runViewGather(node, ctx);
                     return; // folded movement chain: the composed map replaces starts/steps entirely
                 }
-                const RtTensor      &X      = ctx.t(node.inputs[0]);
-                RtTensor            &Y      = ctx.t(node.outputs[0]);
-                int                  rank   = (int) X.shape.size();
-                auto                 starts = readParamList(node, ctx, "starts", 1), ends = readParamList(node, ctx, "ends", 2);
-                auto                 axes = readParamList(node, ctx, "axes", 3), steps = readParamList(node, ctx, "steps", 4);
+                const RtTensor &X      = ctx.t(node.inputs[0]);
+                RtTensor       &Y      = ctx.t(node.outputs[0]);
+                int             rank   = (int) X.shape.size();
+                auto            starts = readParamList(node, ctx, "starts", 1), ends = readParamList(node, ctx, "ends", 2);
+                auto            axes = readParamList(node, ctx, "axes", 3), steps = readParamList(node, ctx, "steps", 4);
                 // Per-axis begin/step default to a whole-axis copy (start 0, step 1); `out` starts as
                 // X's shape and is overwritten only on the sliced axes. The k-th entry of each list
                 // refers to axis `axes[k]` (or axis k when `axes` is absent, per ONNX default).

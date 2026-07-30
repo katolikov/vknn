@@ -55,11 +55,10 @@ namespace vknn {
             size_t                                i   = 0;
             bool                                  bad = false;
 
-            DimExprParser(const std::string &str, const std::map<std::string, int64_t> &b, std::vector<std::string> &f)
-                : s(str), binds(b), free(f) {
+            DimExprParser(const std::string &str, const std::map<std::string, int64_t> &b, std::vector<std::string> &f): s(str), binds(b), free(f) {
             }
 
-            void        skipws() {
+            void skipws() {
                 while (i < s.size() && (s[i] == ' ' || s[i] == '\t'))
                 {
                     ++i;

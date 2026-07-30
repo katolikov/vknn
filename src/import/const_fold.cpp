@@ -148,7 +148,7 @@ namespace vknn {
                         {
                             return false;
                         }
-                        auto it = g.initializers.find(t);
+                        auto it  = g.initializers.find(t);
                         bool i64 = g.desc(t).dtype == DType::Int64;
                         if (it == g.initializers.end() || it->second.bytes.size() < (i64 ? 8u : 4u))
                         {
@@ -256,8 +256,7 @@ namespace vknn {
                     // out rank = data.rank - 1 + index.rank; scalar iff 1-D data and rank-0 index
                     // (the desc-empty form, or the idx_scalar tag markScalarGatherIndices saved
                     // before the index Constant folded).
-                    scalarOut = nd.inputs.size() >= 2 &&
-                                (g.desc(nd.inputs[1]).shape.empty() || nd.attr.geti("idx_scalar", 0) != 0) &&
+                    scalarOut = nd.inputs.size() >= 2 && (g.desc(nd.inputs[1]).shape.empty() || nd.attr.geti("idx_scalar", 0) != 0) &&
                                 g.desc(nd.inputs[0]).shape.size() == 1;
                     break;
                 case OpType::Squeeze: {
@@ -344,6 +343,5 @@ namespace vknn {
         }
         return (int) removeNodes.size();
     }
-
 
 } // namespace vknn

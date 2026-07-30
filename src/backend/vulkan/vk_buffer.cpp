@@ -91,10 +91,11 @@ namespace vknn { namespace vk {
         {
             VkPhysicalDeviceMemoryBudgetPropertiesEXT budget {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
             VkPhysicalDeviceMemoryProperties2         props {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
-            props.pNext         = &budget;
+            props.pNext = &budget;
             vkGetPhysicalDeviceMemoryProperties2(ctx_.physicalDevice(), &props);
             const uint32_t heap = ctx_.memProps().memoryTypes[typeIdx].heapIndex;
-            detail += ", heap " + std::to_string(heap) + " budget " + std::to_string(budget.heapBudget[heap] >> kBytesToMiBShift) + " MiB / in use " + std::to_string(budget.heapUsage[heap] >> kBytesToMiBShift) + " MiB";
+            detail += ", heap " + std::to_string(heap) + " budget " + std::to_string(budget.heapBudget[heap] >> kBytesToMiBShift) + " MiB / in use " +
+                      std::to_string(budget.heapUsage[heap] >> kBytesToMiBShift) + " MiB";
         }
         detail += ", vknn live " + std::to_string(gLiveBytes.load() >> kBytesToMiBShift) + " MiB across " + std::to_string(gLiveCount.load()) + " buffers";
         return detail;
@@ -136,7 +137,8 @@ namespace vknn { namespace vk {
         }
     }
 
-    Buffer::Buffer(VulkanContext &ctx, size_t bytes, MemPref pref, VkBufferUsageFlags extraUsage, bool zeroInit, bool allowSubBufferViews): ctx_(ctx), bytes_(bytes), allowsViews_(allowSubBufferViews) {
+    Buffer::Buffer(VulkanContext &ctx, size_t bytes, MemPref pref, VkBufferUsageFlags extraUsage, bool zeroInit, bool allowSubBufferViews):
+        ctx_(ctx), bytes_(bytes), allowsViews_(allowSubBufferViews) {
         // A throwing constructor does not run the destructor, so any partially-created handle is
         // reclaimed here before the exception propagates.
         try
@@ -172,9 +174,7 @@ namespace vknn { namespace vk {
 
             uint32_t typeIdx;
             try
-            {
-                typeIdx = findMemoryType(req.memoryTypeBits, want, avoid);
-            } catch (const Error &)
+            { typeIdx = findMemoryType(req.memoryTypeBits, want, avoid); } catch (const Error &)
             {
                 // No device-local host-visible type (a discrete GPU rather than UMA): settle for any
                 // host-coherent mapping so the buffer is still CPU-reachable, just across the bus.
@@ -219,9 +219,7 @@ namespace vknn { namespace vk {
                     std::memset(mapped_, 0, bytes_);
                 }
             } else if (zeroInit)
-            {
-                throw Error(Status::InvalidArgument, "zeroInit requires a host-mapped buffer; kDeviceOnly cannot be memset from the host");
-            }
+            { throw Error(Status::InvalidArgument, "zeroInit requires a host-mapped buffer; kDeviceOnly cannot be memset from the host"); }
             account();
         } catch (...)
         {
@@ -338,8 +336,8 @@ namespace vknn { namespace vk {
 
             // Which memory types accept this dma-buf fd is dictated by the fd, not by the buffer alone.
             VkMemoryFdPropertiesKHR fdProps {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
-            auto                    pfnGetFdProps = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(vkGetDeviceProcAddr(ctx.device(), "vkGetMemoryFdPropertiesKHR"));
-            uint32_t                typeBits      = kAnyMemoryType;
+            auto     pfnGetFdProps = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(vkGetDeviceProcAddr(ctx.device(), "vkGetMemoryFdPropertiesKHR"));
+            uint32_t typeBits      = kAnyMemoryType;
             if (pfnGetFdProps)
             {
                 // The query and the import each consume an fd reference, and the driver takes ownership
@@ -363,9 +361,7 @@ namespace vknn { namespace vk {
             // accept any type the fd allows rather than over-constraining the import.
             uint32_t typeIdx;
             try
-            {
-                typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-            } catch (const Error &)
+            { typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT); } catch (const Error &)
             {
                 const auto &mp   = ctx.memProps();
                 int         pick = -1;
@@ -398,7 +394,7 @@ namespace vknn { namespace vk {
             ai.pNext           = &importInfo;
             ai.allocationSize  = req.size;
             ai.memoryTypeIndex = typeIdx;
-            VkResult ar = vkAllocateMemory(ctx.device(), &ai, nullptr, &b->mem_);
+            VkResult ar        = vkAllocateMemory(ctx.device(), &ai, nullptr, &b->mem_);
             if (ar != VK_SUCCESS)
             {
                 ::close(importFd); // reclaim the dup the driver did not take
@@ -422,9 +418,7 @@ namespace vknn { namespace vk {
             VKNN_WARN << "dma-buf import failed: " << e.what();
             return nullptr;
         } catch (...)
-        {
-            return nullptr;
-        }
+        { return nullptr; }
     }
 
 }} // namespace vknn::vk

@@ -101,7 +101,7 @@ namespace vknn {
         // The point at infinity: leading filter coefficient, the full node polynomial M(x), and the
         // last output row.
         w.filterG[(size_t) (alpha - 1) * kWinoKernelTaps + (kWinoKernelTaps - 1)] = 1.0;
-        const std::vector<double> node = winoPolyFromRoots(finitePoints); // degree alpha - 1
+        const std::vector<double> node                                            = winoPolyFromRoots(finitePoints); // degree alpha - 1
         for (int j = 0; j < alpha; ++j)
         {
             w.inputBt[(size_t) (alpha - 1) * alpha + j] = node[(size_t) j];
@@ -113,7 +113,9 @@ namespace vknn {
         // F(2,3) matrices exactly (F(4,3)'s c_0 is already positive and needs no flip).
         if (w.filterG[0] < 0.0)
         {
-            const auto flip = [](double v) { return v == 0.0 ? 0.0 : -v; }; // keep zeros +0.0
+            const auto flip = [](double v) {
+                return v == 0.0 ? 0.0 : -v;
+            }; // keep zeros +0.0
             for (int k = 0; k < kWinoKernelTaps; ++k)
             {
                 w.filterG[(size_t) k] = flip(w.filterG[(size_t) k]);
@@ -158,17 +160,17 @@ namespace vknn {
                     const double c = std::cos(theta), s = std::sin(theta);
                     for (int k = 0; k < n; ++k)
                     {
-                        const double akp        = a[(size_t) k * n + p];
-                        const double akq        = a[(size_t) k * n + q];
-                        a[(size_t) k * n + p]   = c * akp - s * akq;
-                        a[(size_t) k * n + q]   = s * akp + c * akq;
+                        const double akp      = a[(size_t) k * n + p];
+                        const double akq      = a[(size_t) k * n + q];
+                        a[(size_t) k * n + p] = c * akp - s * akq;
+                        a[(size_t) k * n + q] = s * akp + c * akq;
                     }
                     for (int k = 0; k < n; ++k)
                     {
-                        const double apk        = a[(size_t) p * n + k];
-                        const double aqk        = a[(size_t) q * n + k];
-                        a[(size_t) p * n + k]   = c * apk - s * aqk;
-                        a[(size_t) q * n + k]   = s * apk + c * aqk;
+                        const double apk      = a[(size_t) p * n + k];
+                        const double aqk      = a[(size_t) q * n + k];
+                        a[(size_t) p * n + k] = c * apk - s * aqk;
+                        a[(size_t) q * n + k] = s * apk + c * aqk;
                     }
                 }
             }
@@ -201,7 +203,7 @@ namespace vknn {
             }
         }
         const std::vector<double> eig = winoSymmetricEigenvalues(gram, n);
-        double lo = std::numeric_limits<double>::infinity(), hi = 0.0;
+        double                    lo = std::numeric_limits<double>::infinity(), hi = 0.0;
         for (double e: eig)
         {
             lo = std::min(lo, e);
@@ -293,12 +295,12 @@ namespace vknn {
                 return spare;
             }
             constexpr double kTwoPi = 6.283185307179586;
-            const double u1 = ((double) rng() + 1.0) * (1.0 / 4294967296.0); // (0, 1]
-            const double u2 = ((double) rng() + 1.0) * (1.0 / 4294967296.0);
-            const double radius = std::sqrt(-2.0 * std::log(u1));
-            const double angle  = kTwoPi * u2;
-            spare    = radius * std::sin(angle);
-            hasSpare = true;
+            const double     u1     = ((double) rng() + 1.0) * (1.0 / 4294967296.0); // (0, 1]
+            const double     u2     = ((double) rng() + 1.0) * (1.0 / 4294967296.0);
+            const double     radius = std::sqrt(-2.0 * std::log(u1));
+            const double     angle  = kTwoPi * u2;
+            spare                   = radius * std::sin(angle);
+            hasSpare                = true;
             return radius * std::cos(angle);
         }
     };
@@ -375,8 +377,8 @@ namespace vknn {
     // Full-precision Winograd 3x3 pad-1 convolution: double math throughout, no fp16 stores.
     // Validates the transform algebra of a point set (winograd == direct to fp64 tolerance).
     inline std::vector<double> winoConv2dFp64(const WinoMatrices &w, const std::vector<double> &input, int cin, int height, int width, const std::vector<double> &weights, int cout) {
-        const int m = w.outTile, alpha = w.alpha;
-        const int tilesY = (height + m - 1) / m, tilesX = (width + m - 1) / m;
+        const int           m = w.outTile, alpha = w.alpha;
+        const int           tilesY = (height + m - 1) / m, tilesX = (width + m - 1) / m;
         std::vector<double> out((size_t) cout * height * width, 0.0);
         // U = G g G^T per (oc, ic).
         std::vector<double> u((size_t) alpha * alpha * cout * cin, 0.0);
@@ -427,7 +429,7 @@ namespace vknn {
                         for (int c = 0; c < alpha; ++c)
                         {
                             const int ix = tx * m - 1 + c;
-                            d[r][c] = (iy >= 0 && iy < height && ix >= 0 && ix < width) ? input[((size_t) ic * height + iy) * width + ix] : 0.0;
+                            d[r][c]      = (iy >= 0 && iy < height && ix >= 0 && ix < width) ? input[((size_t) ic * height + iy) * width + ix] : 0.0;
                         }
                     }
                     for (int i = 0; i < alpha; ++i)
@@ -559,8 +561,7 @@ namespace vknn {
                 {
                     for (int j = 0; j < kWinoKernelTaps; ++j)
                     {
-                        gg[i][j] = gF[(size_t) i * kWinoKernelTaps + 0] * kernel[j] + gF[(size_t) i * kWinoKernelTaps + 1] * kernel[kWinoKernelTaps + j] +
-                                   gF[(size_t) i * kWinoKernelTaps + 2] * kernel[2 * kWinoKernelTaps + j];
+                        gg[i][j] = gF[(size_t) i * kWinoKernelTaps + 0] * kernel[j] + gF[(size_t) i * kWinoKernelTaps + 1] * kernel[kWinoKernelTaps + j] + gF[(size_t) i * kWinoKernelTaps + 2] * kernel[2 * kWinoKernelTaps + j];
                     }
                 }
                 for (int i = 0; i < alpha; ++i)
@@ -590,7 +591,7 @@ namespace vknn {
                         for (int c = 0; c < alpha; ++c)
                         {
                             const int ix = tx * m - 1 + c;
-                            d[r][c] = (iy >= 0 && iy < height && ix >= 0 && ix < width) ? input[((size_t) ic * height + iy) * width + ix] : 0.0f;
+                            d[r][c]      = (iy >= 0 && iy < height && ix >= 0 && ix < width) ? input[((size_t) ic * height + iy) * width + ix] : 0.0f;
                         }
                     }
                     for (int i = 0; i < alpha; ++i)

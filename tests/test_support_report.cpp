@@ -66,22 +66,22 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
     // graph): a surviving general grouped Conv means lowerGroupedConv could not fire, so the gate
     // routes it to the group-aware CPU op. In a real compile the constant-weight case here is lowered
     // to group-1 Convs + Concat (all GPU) before the survey.
-    TensorId w1 = initializer(g, "w1", {8, 2, 3, 3});
-    TensorId c1 = tensor(g, "gconv_out", {1, 8, 8, 8});
+    TensorId   w1 = initializer(g, "w1", {8, 2, 3, 3});
+    TensorId   c1 = tensor(g, "gconv_out", {1, 8, 8, 8});
     Attributes gattr;
     gattr.map["group"] = intAttr(4);
     addNode(g, OpType::Conv, "conv_grouped", {c0, w1}, {c1}, gattr);
 
     // cubic GridSample: GPU (the mode list includes cubic/bicubic)
-    TensorId grid = tensor(g, "grid", {1, 8, 8, 2});
-    TensorId gs   = tensor(g, "gs_out", {1, 8, 8, 8});
+    TensorId   grid = tensor(g, "grid", {1, 8, 8, 2});
+    TensorId   gs   = tensor(g, "gs_out", {1, 8, 8, 8});
     Attributes gsattr;
     gsattr.map["mode"] = strAttr("cubic");
     addNode(g, OpType::GridSample, "gridsample_cubic", {c1, grid}, {gs}, gsattr);
 
     // cast whose input is an int64 shape/index tensor to float: GPU (the int64 lanes decode to
     // compute-precision float at the pack boundary; `to`=1 is FLOAT).
-    TensorId   idx = tensor(g, "idx", {4}, DType::Int64);
+    TensorId   idx  = tensor(g, "idx", {4}, DType::Int64);
     TensorId   cast = tensor(g, "cast_out", {4});
     Attributes castattr;
     castattr.map["to"] = intAttr(1);
@@ -137,7 +137,7 @@ TEST(SupportReport, SurveyMatchesExpectedAssignment) {
 TEST(SupportReport, IsNaNAndBooleanAndRunOnGpu) {
     // The float->bool NaN guard and the broadcasting boolean AND both have flat GPU kernels: the
     // survey (the same gate the device runs) must promote them to vulkan, not the CPU oracle.
-    Graph g;
+    Graph    g;
     TensorId sm  = tensor(g, "softmax_out", {1, 14, 4, 4});
     TensorId nan = tensor(g, "isnan_out", {1, 14, 4, 4});
     addNode(g, OpType::IsNaN, "isnan_guard", {sm}, {nan});
@@ -220,8 +220,8 @@ TEST(SupportReport, ConstantOfShapeIntegerFillRunsOnGpu) {
     };
     {
         Graph g;
-        cosNode(g, "cos_int64", {6}, true, DType::Int64);   // integer fill, int64 output -> GPU
-        cosNode(g, "cos_int32", {6}, true, DType::Int32);   // integer fill, int32 output -> GPU
+        cosNode(g, "cos_int64", {6}, true, DType::Int64);    // integer fill, int64 output -> GPU
+        cosNode(g, "cos_int32", {6}, true, DType::Int32);    // integer fill, int32 output -> GPU
         cosNode(g, "cos_float", {6}, false, DType::Float32); // float fill -> GPU (unchanged)
         std::vector<NodeSupport> rows = vkSupportSurvey(g);
         ASSERT_EQ(rows.size(), 3u);
@@ -247,16 +247,16 @@ TEST(SupportReport, RangeIntegerRunsOnGpu) {
     // start/limit/delta generate the ramp in compute-precision float and the graph boundary repacks the
     // declared int dtype on readback. An unresolved output size stays on the exact CPU op.
     auto rangeNode = [&](Graph &g, const char *name, Shape outShape, DType scalarDt, DType outDt) {
-        TensorId   s   = tensor(g, std::string(name) + "_s", {}, scalarDt);
-        TensorId   l   = tensor(g, std::string(name) + "_l", {}, scalarDt);
-        TensorId   d   = tensor(g, std::string(name) + "_d", {}, scalarDt);
-        TensorId   out = tensor(g, std::string(name) + "_out", std::move(outShape), outDt);
+        TensorId s   = tensor(g, std::string(name) + "_s", {}, scalarDt);
+        TensorId l   = tensor(g, std::string(name) + "_l", {}, scalarDt);
+        TensorId d   = tensor(g, std::string(name) + "_d", {}, scalarDt);
+        TensorId out = tensor(g, std::string(name) + "_out", std::move(outShape), outDt);
         addNode(g, OpType::Range, name, {s, l, d}, {out});
     };
     {
         Graph g;
-        rangeNode(g, "range_int64", {8}, DType::Int64, DType::Int64); // int64 scalars/output -> GPU
-        rangeNode(g, "range_int32", {8}, DType::Int32, DType::Int32); // int32 scalars/output -> GPU
+        rangeNode(g, "range_int64", {8}, DType::Int64, DType::Int64);     // int64 scalars/output -> GPU
+        rangeNode(g, "range_int32", {8}, DType::Int32, DType::Int32);     // int32 scalars/output -> GPU
         rangeNode(g, "range_float", {8}, DType::Float32, DType::Float32); // float -> GPU (unchanged)
         std::vector<NodeSupport> rows = vkSupportSurvey(g);
         ASSERT_EQ(rows.size(), 3u);
@@ -283,9 +283,9 @@ TEST(SupportReport, TopKGateOnCompileTimeK) {
     // the static plan fixes the output slot count.
     {
         Graph      g;
-        TensorId   x  = tensor(g, "x", {1, 8, 8, 16});
-        TensorId   v  = tensor(g, "v", {1, 8, 8, 4});
-        TensorId   i  = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
+        TensorId   x = tensor(g, "x", {1, 8, 8, 16});
+        TensorId   v = tensor(g, "v", {1, 8, 8, 4});
+        TensorId   i = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
         Attributes a;
         a.map["k"] = intAttr(4);
         addNode(g, OpType::TopK, "topk_attr_k", {x}, {v, i}, a);
@@ -296,10 +296,10 @@ TEST(SupportReport, TopKGateOnCompileTimeK) {
     }
     {
         Graph    g;
-        TensorId x  = tensor(g, "x", {1, 8, 8, 16});
-        TensorId k  = initializer(g, "k_const", {1}); // constant k input[1]
-        TensorId v  = tensor(g, "v", {1, 8, 8, 4});
-        TensorId i  = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
+        TensorId x = tensor(g, "x", {1, 8, 8, 16});
+        TensorId k = initializer(g, "k_const", {1}); // constant k input[1]
+        TensorId v = tensor(g, "v", {1, 8, 8, 4});
+        TensorId i = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
         addNode(g, OpType::TopK, "topk_const_k", {x, k}, {v, i});
         std::vector<NodeSupport> rows = vkSupportSurvey(g);
         ASSERT_EQ(rows.size(), 1u);
@@ -308,10 +308,10 @@ TEST(SupportReport, TopKGateOnCompileTimeK) {
     }
     {
         Graph    g;
-        TensorId x  = tensor(g, "x", {1, 8, 8, 16});
-        TensorId k  = tensor(g, "k_runtime", {1}, DType::Int64); // runtime k, not an initializer
-        TensorId v  = tensor(g, "v", {1, 8, 8, 4});
-        TensorId i  = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
+        TensorId x = tensor(g, "x", {1, 8, 8, 16});
+        TensorId k = tensor(g, "k_runtime", {1}, DType::Int64); // runtime k, not an initializer
+        TensorId v = tensor(g, "v", {1, 8, 8, 4});
+        TensorId i = tensor(g, "i", {1, 8, 8, 4}, DType::Int64);
         addNode(g, OpType::TopK, "topk_runtime_k", {x, k}, {v, i});
         std::vector<NodeSupport> rows = vkSupportSurvey(g);
         ASSERT_EQ(rows.size(), 1u);
@@ -347,7 +347,7 @@ TEST(SupportReport, BatchNormRuntimeParamsRunOnGpu) {
         TensorId x  = tensor(g, "x2", {8, 4});
         TensorId ga = tensor(g, "gamma2", {4}), be = tensor(g, "beta2", {4});
         TensorId me = tensor(g, "mean2", {4}), va = tensor(g, "var2", {4});
-        TensorId y  = tensor(g, "bn_out2", {8, 4});
+        TensorId y = tensor(g, "bn_out2", {8, 4});
         addNode(g, OpType::BatchNorm, "bn2", {x, ga, be, me, va}, {y});
         std::vector<NodeSupport> rows = vkSupportSurvey(g);
         ASSERT_EQ(rows.size(), 1u);
@@ -424,14 +424,14 @@ TEST(SupportReport, PadRuntimeValueRunsOnGpuButRuntimePadsStayCpu) {
     // SSBO scalar. A runtime pads GEOMETRY keeps the CPU op, since the output shape is data-dependent.
     {
         // static pads (attr) + runtime pad value -> GPU
-        Graph    g;
-        TensorId x   = tensor(g, "x", {1, 4, 4, 4});
-        TensorId val = tensor(g, "pad_val", {}); // runtime scalar, not an initializer
-        TensorId out = tensor(g, "pad_out", {1, 4, 6, 6});
+        Graph      g;
+        TensorId   x   = tensor(g, "x", {1, 4, 4, 4});
+        TensorId   val = tensor(g, "pad_val", {}); // runtime scalar, not an initializer
+        TensorId   out = tensor(g, "pad_out", {1, 4, 6, 6});
         Attributes a;
         Attr       pads;
-        pads.kind = Attr::Ints;
-        pads.ints = {0, 0, 1, 1, 0, 0, 1, 1};
+        pads.kind     = Attr::Ints;
+        pads.ints     = {0, 0, 1, 1, 0, 0, 1, 1};
         a.map["pads"] = pads;
         // input[1] (pads) absent via kNoTensor so the attr pads apply; input[2] is the runtime value.
         addNode(g, OpType::Pad, "pad_runtime_val", {x, kNoTensor, val}, {out}, a);
@@ -602,11 +602,10 @@ TEST(OpDescriptor, LayoutClassAgreesWithGpuFlatNode) {
     TensorId b = tensor(g, "b", {1, 4, 4, 4});
     for (int i = 1; i <= (int) OpType::QGemm; ++i)
     {
-        OpType             t  = (OpType) i;
+        OpType              t = (OpType) i;
         const OpDescriptor &d = opDescriptor(t);
         // The descriptor's ShapeDependent set must be exactly the switch's predicate set.
-        EXPECT_EQ(d.layout == LayoutClass::ShapeDependent, isShapeDependent(t))
-            << "descriptor/gpuFlatNode disagree on whether " << opTypeName(t) << " is shape-dependent";
+        EXPECT_EQ(d.layout == LayoutClass::ShapeDependent, isShapeDependent(t)) << "descriptor/gpuFlatNode disagree on whether " << opTypeName(t) << " is shape-dependent";
         if (d.layout == LayoutClass::ShapeDependent)
         {
             continue; // the value is a per-node function; nothing fixed to assert
@@ -634,8 +633,7 @@ TEST(OpDescriptor, FusionRolesAreStable) {
     auto expectMember = [](OpType t, bool want) {
         EXPECT_EQ(opDescriptor(t).pwMember, want) << opTypeName(t) << " pwMember";
     };
-    for (OpType t: {OpType::Binary, OpType::Add, OpType::Unary, OpType::Clip, OpType::Relu, OpType::PRelu,
-                    OpType::Where, OpType::Greater, OpType::GreaterEqual, OpType::Less, OpType::LessEqual, OpType::Equal})
+    for (OpType t: {OpType::Binary, OpType::Add, OpType::Unary, OpType::Clip, OpType::Relu, OpType::PRelu, OpType::Where, OpType::Greater, OpType::GreaterEqual, OpType::Less, OpType::LessEqual, OpType::Equal})
     {
         expectMember(t, true);
     }
@@ -647,10 +645,7 @@ TEST(OpDescriptor, FusionRolesAreStable) {
     auto expectEpi = [](OpType t, bool want) {
         EXPECT_EQ(opDescriptor(t).pwEpilogue, want) << opTypeName(t) << " pwEpilogue";
     };
-    for (OpType t: {OpType::MatMul, OpType::Gemm, OpType::Conv, OpType::ConvGemm, OpType::ConvTranspose,
-                    OpType::FusedDwPw, OpType::Softmax, OpType::LayerNorm, OpType::Reduce, OpType::GridSample,
-                    OpType::Resize, OpType::MaxPool, OpType::AvgPool, OpType::GlobalAvgPool, OpType::Transpose,
-                    OpType::Slice, OpType::Concat})
+    for (OpType t: {OpType::MatMul, OpType::Gemm, OpType::Conv, OpType::ConvGemm, OpType::ConvTranspose, OpType::FusedDwPw, OpType::Softmax, OpType::LayerNorm, OpType::Reduce, OpType::GridSample, OpType::Resize, OpType::MaxPool, OpType::AvgPool, OpType::GlobalAvgPool, OpType::Transpose, OpType::Slice, OpType::Concat})
     {
         expectEpi(t, true);
     }

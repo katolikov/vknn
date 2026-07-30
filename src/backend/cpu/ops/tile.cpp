@@ -11,10 +11,10 @@ namespace vknn {
 
         struct TileCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor      &X    = ctx.t(node.inputs[0]);
-                RtTensor            &Y    = ctx.t(node.outputs[0]);
-                const Shape         &in   = X.shape;
-                int                  rank = (int) in.size();
+                const RtTensor &X    = ctx.t(node.inputs[0]);
+                RtTensor       &Y    = ctx.t(node.outputs[0]);
+                const Shape    &in   = X.shape;
+                int             rank = (int) in.size();
                 // `repeats` is the second Tile input: a rank-length int64 vector. Prefer the
                 // constant-folded value (readI64Param); fall back to reading it from the runtime
                 // tensor when it survives as a live int64 input.

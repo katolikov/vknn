@@ -15,8 +15,8 @@ namespace vknn {
     /// layout and dtype are tracked separately from the host side so a cross-backend handoff can
     /// convert correctly rather than assuming both copies share a format.
     struct RtTensor {
-        TensorId id = kNoTensor; ///< Graph-unique tensor id, or kNoTensor when unbound.
-        Shape    shape;          ///< Logical dimensions in NCHW order.
+        TensorId id = kNoTensor;         ///< Graph-unique tensor id, or kNoTensor when unbound.
+        Shape    shape;                  ///< Logical dimensions in NCHW order.
         DType    dtype = DType::Float32; ///< Element type of the host residency (canonical NCHW).
 
         // ---- host residency (canonical NCHW, fp32 for compute/IO) ----
@@ -24,10 +24,10 @@ namespace vknn {
         bool       hostValid = false; ///< True when `host` holds the current values.
 
         // ---- device residency (managed by a backend) ----
-        std::shared_ptr<DeviceStorage> device; ///< Backend-owned device storage; null until a backend allocates it.
+        std::shared_ptr<DeviceStorage> device;                               ///< Backend-owned device storage; null until a backend allocates it.
         TensorFormat                   deviceFormat = TensorFormat::Unknown; ///< Layout of the device copy (the Vulkan backend packs to NC4HW4).
         DType                          deviceDtype  = DType::Float32;        ///< Element type of the device copy.
-        bool                           deviceValid  = false;                ///< True when `device` holds the current values.
+        bool                           deviceValid  = false;                 ///< True when `device` holds the current values.
         /// Zero-copy boundary: caller dma-buf fd to use directly as this tensor's GPU buffer, or -1 for none.
         int dmaBufFd = -1;
         /// Layout the caller declares the dma-buf holds. Matching the device-native boundary binds the

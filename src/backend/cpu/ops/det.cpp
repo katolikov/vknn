@@ -37,7 +37,7 @@ namespace vknn {
         // permutation sign. CPU-only (the GPU gate refuses n > kDetMaxAnalyticN by name).
         float detLu(const float *src, int64_t n) {
             std::vector<double> a(src, src + n * n);
-            double              det  = 1.0;
+            double              det = 1.0;
             for (int64_t col = 0; col < n; ++col)
             {
                 int64_t pivot = col;
