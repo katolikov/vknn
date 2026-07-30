@@ -12,6 +12,15 @@
 #include <cstring>
 #include <gtest/gtest.h>
 
+namespace {
+    // MSVC at C++17 rejects designated initializers; a tiny helper names the tensor.
+    vknn::TensorDesc namedDesc(const char *name) {
+        vknn::TensorDesc d;
+        d.name = name;
+        return d;
+    }
+} // namespace
+
 using namespace vknn;
 
 namespace {
@@ -48,7 +57,7 @@ namespace {
 
         // A producer for the chain to fold into: the fusion pass grows a pointwise region behind a
         // producer's epilogue, so a lone Binary forms no unit.
-        TensorId t = g.addTensor({.name = "t"});
+        TensorId t = g.addTensor(namedDesc("t"));
         Node     act;
         act.type    = OpType::Unary;
         act.name    = "producer";
@@ -56,7 +65,7 @@ namespace {
         act.inputs  = {x};
         act.outputs = {t};
 
-        TensorId y = g.addTensor({.name = "y"});
+        TensorId y = g.addTensor(namedDesc("y"));
         Node     mul;
         mul.type    = OpType::Binary;
         mul.name    = "spatial_weight";
@@ -205,7 +214,7 @@ namespace {
         TensorId m = g.addTensor(mi);
         g.inputs   = {x, m};
 
-        TensorId t = g.addTensor({.name = "t"});
+        TensorId t = g.addTensor(namedDesc("t"));
         Node     act;
         act.type    = OpType::Unary;
         act.name    = "producer";
@@ -214,7 +223,7 @@ namespace {
         act.outputs = {t};
 
         // A node between the graph input and the use, so the operand is a produced activation.
-        TensorId mm = g.addTensor({.name = "mm"});
+        TensorId mm = g.addTensor(namedDesc("mm"));
         Node     mact;
         mact.type    = OpType::Unary;
         mact.name    = "mask_producer";
@@ -222,7 +231,7 @@ namespace {
         mact.inputs  = {m};
         mact.outputs = {mm};
 
-        TensorId y = g.addTensor({.name = "y"});
+        TensorId y = g.addTensor(namedDesc("y"));
         Node     mul;
         mul.type    = OpType::Binary;
         mul.name    = "spatial_weight";
@@ -320,21 +329,21 @@ TEST(PwSpatialBcast, UnalignedChannelsRuntimeMaskGpuMatchesCpu) {
         mi.isInput = true;
         TensorId m = g.addTensor(mi);
         g.inputs   = {x, m};
-        TensorId t = g.addTensor({.name = "t"});
+        TensorId t = g.addTensor(namedDesc("t"));
         Node     act;
         act.type    = OpType::Unary;
         act.name    = "producer";
         act.subOp   = (int) UnaryType::Abs;
         act.inputs  = {x};
         act.outputs = {t};
-        TensorId mm = g.addTensor({.name = "mm"});
+        TensorId mm = g.addTensor(namedDesc("mm"));
         Node     mact;
         mact.type    = OpType::Unary;
         mact.name    = "mask_producer";
         mact.subOp   = (int) UnaryType::Abs;
         mact.inputs  = {m};
         mact.outputs = {mm};
-        TensorId y   = g.addTensor({.name = "y"});
+        TensorId y   = g.addTensor(namedDesc("y"));
         Node     mul;
         mul.type    = OpType::Binary;
         mul.name    = "spatial_weight";
@@ -429,21 +438,21 @@ TEST(PwSpatialBcast, BlockedLayoutSpatialOperandMatchesCpu) {
         mi.isInput = true;
         TensorId m = g.addTensor(mi);
         g.inputs   = {x, m};
-        TensorId t = g.addTensor({.name = "t"});
+        TensorId t = g.addTensor(namedDesc("t"));
         Node     act;
         act.type    = OpType::Unary;
         act.name    = "producer";
         act.subOp   = (int) UnaryType::Abs;
         act.inputs  = {x};
         act.outputs = {t};
-        TensorId mm = g.addTensor({.name = "mm"});
+        TensorId mm = g.addTensor(namedDesc("mm"));
         Node     mact;
         mact.type    = OpType::Unary;
         mact.name    = "mask_producer";
         mact.subOp   = (int) UnaryType::Abs;
         mact.inputs  = {m};
         mact.outputs = {mm};
-        TensorId y   = g.addTensor({.name = "y"});
+        TensorId y   = g.addTensor(namedDesc("y"));
         Node     mul;
         mul.type    = OpType::Binary;
         mul.name    = "spatial_weight";
