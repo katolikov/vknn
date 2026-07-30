@@ -7,7 +7,7 @@
 #include "precision.glsl"
 #define PW_EPI_BASE 2
 #include "pw_epilogue.glsl"
-layout(local_size_x=256) in;
+layout(local_size_x=256, local_size_x_id=25) in; // spec 25 = device-resolved family width (0..24 carry the plan)
 layout(std430,binding=0) readonly buffer Prim { STORE prim[]; };
 layout(std430,binding=1) writeonly buffer Dst { STORE dst[]; };
 layout(push_constant) uniform PC { int total, items; } pc;

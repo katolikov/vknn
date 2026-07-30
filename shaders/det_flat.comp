@@ -10,7 +10,7 @@
 // change must be mirrored there or CPU-vs-GPU byte parity breaks), and rounds once at the store.
 // n is capped at kDetMaxAnalyticN by the plan-time gate; larger matrices run on the CPU.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int batches, n; } pc;

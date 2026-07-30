@@ -23,11 +23,24 @@ namespace vknn {
 
     /// Environment passed to Vulkan operators during prepare/record.
     struct VkOpEnv {
-        VulkanBackend                        *backend = nullptr;
-        vk::VulkanContext                    *ctx     = nullptr;
-        vk::PipelineCache                    *cache   = nullptr;
-        const Graph                          *graph   = nullptr;
-        const Config                         *config  = nullptr;
+        VulkanBackend     *backend = nullptr;
+        vk::VulkanContext *ctx     = nullptr;
+        vk::PipelineCache *cache   = nullptr;
+        const Graph       *graph   = nullptr;
+        const Config      *config  = nullptr;
+        /// Workgroup width of the flat/element-parallel kernel family, resolved ONCE at segment
+        /// build from exact device caps (min(256, maxWorkGroupInvocations) in whole subgroups -
+        /// flatLocalSizeFor). Every family pipeline takes it as its workgroup-size spec constant
+        /// and every dispatch derives its group count from the same value, so the two can never
+        /// disagree. Caps are exact per device, so this may steer byte-affecting choices (a
+        /// workgroup reduction tree); MEASURED probe values (deviceTuneModel) may only ever steer
+        /// placement-only choices such as items-per-lane.
+        uint32_t flatLocalSize = 256;
+        /// Lane width of the per-thread conv/sampler family (conv1x1/_s2, dwconv/_t2, conv_reg,
+        /// conv_1d, gridsample) - laneWidthFor(caps, 64): one subgroup minimum, so a wave-128
+        /// device is not split mid-subgroup and a constrained device stays legal. Same load-time
+        /// contract as flatLocalSize; the direct conv kernel keeps its RACED width instead.
+        uint32_t                              convLocalSize = 64;
         std::function<vk::Buffer *(TensorId)> devBuf; // resolves a tensor id to its (possibly pool-aliased) activation buffer
         // Resolves a tensor id to its int8 KV-cache SCALE buffer (Hint::KvCacheQuant): non-null
         // exactly for the cache tensors the owning segment allocated as int8 payload + fp16 scales

@@ -44,7 +44,7 @@ namespace vknn {
                         constBuf[e] = upload(*env.ctx, v, env.useFp16);
                     }
                 }
-                pipe = env.pipeline(shader("einsum_outer", env.useFp16), 3, sizeof(EinsumPC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("einsum_outer", env.useFp16), 3, sizeof(EinsumPC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -54,7 +54,7 @@ namespace vknn {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
                 // One flat 1D grid of total output lanes; einsum_outer.comp is local_size_x=256 == flat::kFlatLocalSize.
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
 

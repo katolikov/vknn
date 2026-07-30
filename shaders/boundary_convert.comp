@@ -22,7 +22,7 @@
 #define DST_T float
 #endif
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
 layout(std430, binding = 0) readonly buffer S { SRC_T s[]; };
 layout(std430, binding = 1) writeonly buffer D { DST_T d[]; };
 layout(push_constant) uniform PC { int N, C, H, W, srcFmt, dstFmt; uint count; } pc;

@@ -8,7 +8,6 @@ namespace vknn {
     namespace {
 
         // Local workgroup size along x for the NC4HW4 path; matches local_size_x in shaders/binary.comp.
-        constexpr uint32_t kBinaryLocalSize = 256;
 
         struct BinaryPC {
             int count, HW, op;
@@ -47,7 +46,7 @@ namespace vknn {
                 // so the thread count is y.n * ceil(C/4) * HW. The int64 product guards the multiply from
                 // overflow before it is truncated to the shader's int `count`.
                 pc   = {(int) ((int64_t) y.n * cBlocks(y.c) * HW), HW, node.subOp};
-                pipe = env.pipeline(shader("binary", env.useFp16), 3, sizeof(BinaryPC), std::vector<uint32_t> {bcast});
+                pipe = env.pipeline(shader("binary", env.useFp16), 3, sizeof(BinaryPC), std::vector<uint32_t> {bcast, env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -59,8 +58,8 @@ namespace vknn {
                 vk::Buffer *a = env.devBuf(node.inputs[0]);
                 vk::Buffer *b = env.devBuf(node.inputs[1]);
                 vk::Buffer *c = env.devBuf(node.outputs[0]);
-                // groups() rounds pc.count up to whole kBinaryLocalSize workgroups.
-                pipe->dispatch(cmd, {a->handle(), b->handle(), c->handle()}, &pc, sizeof(pc), groups(pc.count, kBinaryLocalSize));
+                // groups() rounds pc.count up to whole env.flatLocalSize workgroups.
+                pipe->dispatch(cmd, {a->handle(), b->handle(), c->handle()}, &pc, sizeof(pc), groups(pc.count, env.flatLocalSize));
             }
         };
 

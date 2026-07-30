@@ -87,7 +87,6 @@
 #include "vknn/graph.h"
 #include "vknn/io_link.h"
 #include "vknn/spec_decode.h"
-#include "vknn/version.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -466,8 +465,8 @@ static void runFp16Pass(std::vector<Graph> &buckets, const std::vector<std::stri
     for (size_t b = 0; b < buckets.size(); ++b)
     {
         const Fp16ConvertStats st = convertInitializersFp16(buckets[b]);
-        printf("[compile] fp16: bucket %zu '%s': converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", b, b < labels.size() ? labels[b].c_str() : "",
-               (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
+        printf("[compile] fp16: bucket %zu '%s': converted %lld weights (%lld kept non-fp32, %lld coordinate-class), %.0f MB -> %.0f MB\n", b,
+               b < labels.size() ? labels[b].c_str() : "", (long long) st.converted, (long long) st.kept, (long long) st.keptCoord, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
     }
 }
 
@@ -515,15 +514,6 @@ static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<
 }
 
 int main(int argc, char **argv) {
-    // Before any other parsing, so --version needs no model argument.
-    for (int i = 1; i < argc; ++i)
-    {
-        if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V"))
-        {
-            printf("vknn %s\n", vknnVersion());
-            return 0;
-        }
-    }
     // `--graph` selects the multi-graph form: no positional input model, one source graph per
     // occurrence, all compiled into one multi-bucket .vxm over a shared initializer pool.
     bool graphMode = false;

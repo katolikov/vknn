@@ -731,6 +731,10 @@ namespace vknn {
                 // The spec-constant tiled kernel takes its TM/TN/TK tile as specialization constants
                 // 0/1/2; the fast kernel bakes {128,128,16} in as literal #defines (no spec words).
                 std::vector<uint32_t> spec;
+                if (!useFastTiled && !useTiled && !useGemv)
+                {
+                    spec = {env.flatLocalSize}; // the naive kernel's workgroup width (spec 0), resolved at load
+                }
                 if (useTiled && !useFastTiled)
                 {
                     spec = {(uint32_t) tile.tm, (uint32_t) tile.tn, (uint32_t) tile.tk};
@@ -780,7 +784,7 @@ namespace vknn {
                 {
                     // Naive kernel: one thread per output element over a flat 1-D grid of pc.total lanes.
                     // matmul.comp is local_size_x=256 == flat::kFlatLocalSize.
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
                 }
             }
         };

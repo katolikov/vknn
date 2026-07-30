@@ -8,6 +8,7 @@
 #include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
+#include "ops/flat_ops.h" // flat::flatLocalSizeFor / laneWidthFor (family widths, resolved at load)
 #include "vk_backend.h"
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
@@ -1218,10 +1219,14 @@ namespace vknn {
         env_.runner   = &be_->runner();
         env_.tuning   = cfg.tuning;
         env_.winograd = (Mode) cfg.hint(Hint::Winograd, (int) Mode::Auto);
-        env_.graph    = &g;
-        env_.config   = &cfg;
-        env_.useFp16  = useFp16_;
-        env_.baseFp16 = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
+        // Load-time device resolution: the flat family's workgroup width comes from exact caps
+        // here, once, and rides VkOpEnv so pipelines and dispatch math share one value.
+        env_.flatLocalSize = flat::flatLocalSizeFor(env_.ctx->caps());
+        env_.convLocalSize = flat::laneWidthFor(env_.ctx->caps(), flat::kConvFamilyLaneWidth);
+        env_.graph         = &g;
+        env_.config        = &cfg;
+        env_.useFp16       = useFp16_;
+        env_.baseFp16      = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
         // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
         // model, distinct across models) so a shared cache directory can't return another model's weights.
         {
@@ -1839,7 +1844,8 @@ namespace vknn {
                 auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
                 if (!pipe)
                 {
-                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
+                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC),
+                                                                 std::vector<uint32_t> {flat::laneWidthPow2For(be_->ctx().caps(), flat::kFlatLocalSize)},
                                                                  env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
                 }
                 ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape), (uint32_t) step};

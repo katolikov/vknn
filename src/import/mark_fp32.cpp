@@ -1,4 +1,5 @@
 #include "passes_internal.h"
+#include <unordered_set>
 
 namespace vknn {
 
@@ -351,6 +352,118 @@ namespace vknn {
         if (pinned)
         {
             VKNN_INFO << "pinGridSampleGridFp32: pinned " << pinned << " grid tensor(s) to fp32";
+        }
+    }
+
+    bool coordinateTransparentOp(OpType op) {
+        switch (op)
+        {
+            case OpType::Add:
+            case OpType::Binary:
+            case OpType::Unary:
+            case OpType::Clip:
+            case OpType::Concat:
+            case OpType::Slice:
+            case OpType::Split:
+            case OpType::Expand:
+            case OpType::Tile:
+            case OpType::Reshape:
+            case OpType::Transpose:
+            case OpType::Unsqueeze:
+            case OpType::Squeeze:
+            case OpType::Cast:
+            case OpType::Where:
+            case OpType::FusedPointwise:
+            case OpType::Reduce:
+            case OpType::ConvertLayout:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void pinSampleCoordFp32(Graph &g) {
+        std::vector<int> producer(g.tensors.size(), -1);
+        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        {
+            for (TensorId o: g.nodes[ni].outputs)
+            {
+                if (o != kNoTensor)
+                {
+                    producer[(size_t) o] = ni;
+                }
+            }
+        }
+        // Seeds: every GridSample coordinate operand. The warp variant's base grid (input 2) is a
+        // constant the op already uploads fp32; the runtime operands are the plain grid and the
+        // warp flow at input 1.
+        std::vector<TensorId> walk;
+        for (const auto &nd: g.nodes)
+        {
+            if (nd.type != OpType::GridSample || nd.inputs.size() < 2)
+            {
+                continue;
+            }
+            for (size_t i = 1; i < nd.inputs.size(); ++i)
+            {
+                if (nd.inputs[i] != kNoTensor && !g.isInitializer(nd.inputs[i]))
+                {
+                    walk.push_back(nd.inputs[i]);
+                }
+            }
+        }
+        int                          pinned = 0;
+        std::unordered_set<TensorId> seen;
+        while (!walk.empty())
+        {
+            TensorId t = walk.back();
+            walk.pop_back();
+            if (t == kNoTensor || !seen.insert(t).second || g.isInitializer(t))
+            {
+                continue;
+            }
+            const int p = producer[(size_t) t];
+            // A hop produced by a non-transparent, non-flat op (the NC4HW4 conv family) stays at
+            // the session precision: those kernels have no fp32 twins, and markFp32 bridges the
+            // fp16 -> fp32 boundary with a ConvertDtype where the pinned algebra reads it.
+            if (p >= 0 && !coordinateTransparentOp(g.nodes[(size_t) p].type) && !g.desc(t).gpuFlat)
+            {
+                continue;
+            }
+            if (!g.desc(t).storeFp32)
+            {
+                g.desc(t).storeFp32 = true;
+                ++pinned;
+            }
+            // A GPU kernel stores every one of its streams at ONE precision: pinning a node's
+            // output pins its sibling outputs too (a fused unit's export streams, a Split's other
+            // parts), or the fp32 kernel would write 4-byte values into buffers planned fp16.
+            if (p >= 0)
+            {
+                for (TensorId sib: g.nodes[(size_t) p].outputs)
+                {
+                    if (sib != kNoTensor && !g.desc(sib).storeFp32)
+                    {
+                        g.desc(sib).storeFp32 = true;
+                        ++pinned;
+                    }
+                }
+            }
+            // A Reduce is the cone's upstream BOUNDARY, not a corridor: its output (a zoom-box
+            // extent, a mask centroid) is a coordinate and pins, but its INPUT domain is image
+            // content - walking through would pin whole mask-image chains, paying fp32 traffic on
+            // image-sized tensors for values whose fp16 noise the reduction itself averages away.
+            if (p >= 0 && coordinateTransparentOp(g.nodes[(size_t) p].type) && g.nodes[(size_t) p].type != OpType::Reduce)
+            {
+                for (TensorId in: g.nodes[(size_t) p].inputs)
+                {
+                    walk.push_back(in);
+                }
+            }
+        }
+        if (pinned)
+        {
+            VKNN_INFO << "pinSampleCoordFp32: pinned " << pinned << " coordinate tensor(s) to fp32";
         }
     }
 

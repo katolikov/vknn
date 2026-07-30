@@ -12,7 +12,7 @@
 #define PW_EPI_BASE 3
 #include "pw_epilogue.glsl"
 #endif
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
@@ -23,26 +23,35 @@ layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
 // other lane keeps the logical flat index — so the fused epilogue still indexes the flat row-major
 // output world it was planned against, and only the destination address moves. The pad is rewritten
 // every run because the liveness pool hands the same buffer to different tensors between runs.
-layout(push_constant) uniform PC { int rank, total, base, outPad, outLast; } pc;
+layout(push_constant) uniform PC { int rank, total, base, outPad, outLast, items; } pc;
 
+// pc.items elements per lane, one slot apart (the fused_pw walk): independent items cover the
+// per-element div/mod chain's memory latency; slots stride by the lane count so every item
+// stays a coalesced wave-wide access. The workgroup width is spec constant 0, resolved by the
+// host at load from device caps (env.flatLocalSize).
 void main() {
-  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(pc.total)) return;
-  int outIdx = int(gid), dstIdx = int(gid);
-  if (pc.outPad > 0) {
-    int row = int(gid) / pc.outPad, col = int(gid) % pc.outPad;
-    if (col >= pc.outLast) { d[dstIdx] = STORE(0.0); return; }
-    outIdx = row * pc.outLast + col;
+  uint lane = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint slot = (uint(pc.total) + uint(pc.items) - 1u) / uint(pc.items);
+  if (lane >= slot) return;
+  for (int it = 0; it < pc.items; ++it) {
+    uint gid = lane + uint(it) * slot;
+    if (gid >= uint(pc.total)) break;
+      int outIdx = int(gid), dstIdx = int(gid);
+      if (pc.outPad > 0) {
+        int row = int(gid) / pc.outPad, col = int(gid) % pc.outPad;
+        if (col >= pc.outLast) { d[dstIdx] = STORE(0.0); continue; }
+        outIdx = row * pc.outLast + col;
+      }
+      int rem = outIdx, inIdx = pc.base;
+      for (int k = pc.rank - 1; k >= 0; --k) {
+        int c = rem % geom.g[k];
+        rem /= geom.g[k];
+        inIdx += c * geom.g[pc.rank + k];
+      }
+    #ifdef PW_EPI
+      d[dstIdx] = STORE(pw_apply(float(s[inIdx]), outIdx));
+    #else
+      d[dstIdx] = s[inIdx];
+    #endif
   }
-  int rem = outIdx, inIdx = pc.base;
-  for (int k = pc.rank - 1; k >= 0; --k) {
-    int c = rem % geom.g[k];
-    rem /= geom.g[k];
-    inIdx += c * geom.g[pc.rank + k];
-  }
-#ifdef PW_EPI
-  d[dstIdx] = STORE(pw_apply(float(s[inIdx]), outIdx));
-#else
-  d[dstIdx] = s[inIdx];
-#endif
 }

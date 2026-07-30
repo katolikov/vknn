@@ -18,8 +18,9 @@
 
 namespace vknn {
     namespace {
-        // Local workgroup size along x; matches local_size_x in shaders/gridsample.comp.
-        constexpr uint32_t kGridSampleLocalSize = 64;
+        // The lane width rides the shaders' trailing spec constant, resolved at load from exact
+        // caps (env.convLocalSize - the per-thread sampler family width); the dispatch divides by
+        // the same value.
 
         // Field order/types mirror gridsample.comp's push_constant block { N, C, Hin, Win, OH, OW, align }.
         // align is align_corners (0/1), which shifts the grid-to-pixel coordinate mapping in the shader.
@@ -82,8 +83,11 @@ namespace vknn {
                 // (source, flow, base, dest = 4 base buffers); the plain shader has one grid binding
                 // (source, grid, dest = 3). The base grid always uploads fp32, so the warp fp16 shader
                 // has no GRID_FP32 selector. epi.suffix() selects the matching _epi shader variant.
-                std::vector<uint32_t> spec = warp ? std::vector<uint32_t> {MODE, PAD} : std::vector<uint32_t> {MODE, PAD, gridWordsFp32(g, node)};
-                int                   nbuf = warp ? 4 : 3;
+                // FLOW_FP32 mirrors the plain kernel's GRID_FP32: 1 when pinSampleCoordFp32 pinned the
+                // runtime flow's storage to fp32, so the kernel decodes full-precision coordinates.
+                const uint32_t flowFp32 = warp && !g.isInitializer(node.inputs[1]) && g.desc(node.inputs[1]).storeFp32 ? 1u : 0u;
+                std::vector<uint32_t> spec = warp ? std::vector<uint32_t> {MODE, PAD, flowFp32, env.convLocalSize} : std::vector<uint32_t> {MODE, PAD, gridWordsFp32(g, node), env.convLocalSize};
+                int nbuf = warp ? 4 : 3;
                 pipe = env.pipeline(shader((std::string(warp ? "gridsample_warp" : "gridsample") + epi.suffix()).c_str(), env.useFp16), nbuf + epi.extraBufs(), sizeof(GsPC), spec);
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -121,8 +125,8 @@ namespace vknn {
                     bufs = {s->handle(), grid->handle(), d->handle()};
                 }
                 epi.append(bufs, node, env, d->handle());
-                // Flat 1D grid over the packed output lanes; kGridSampleLocalSize matches gridsample.comp's local_size_x.
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, kGridSampleLocalSize));
+                // Flat 1D grid over the packed output lanes at the load-resolved lane width.
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, env.convLocalSize));
             }
         };
     } // namespace

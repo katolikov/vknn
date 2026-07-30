@@ -261,12 +261,15 @@ namespace vknn {
     std::vector<QuantStats> quantizeWeightsShared(const std::vector<Graph *> &buckets, const QuantOptions &opt);
 
     // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
+    // keptCoord counts the coordinate-class keeps (a subset of kept): fp32 initializers whose bits
+    // reach a GridSample coordinate operand through elementwise/movement ops only, left at fp32
+    // because their stored precision is the sample position itself.
     struct Fp16ConvertStats {
-        int64_t converted = 0, kept = 0, bytesBefore = 0, bytesAfter = 0;
+        int64_t converted = 0, kept = 0, keptCoord = 0, bytesBefore = 0, bytesAfter = 0;
     };
     // Convert every Float32 initializer payload to Float16 in place (vknn_compile --fp16), stamping
-    // the tensor descs. Non-fp32 payloads (int64 shape tensors, ...) stay untouched. Runs after the
-    // standard passes, immediately before saveGraphBin.
+    // the tensor descs. Non-fp32 payloads (int64 shape tensors, ...) and coordinate-class
+    // initializers stay untouched. Runs after the standard passes, immediately before saveGraphBin.
     Fp16ConvertStats convertInitializersFp16(Graph &g);
 
     // Read an int64 list param from a node attribute or an initializer input (Slice/Pad/Reduce style).
@@ -320,6 +323,19 @@ namespace vknn {
     // sample point by up to ~0.5 px at 1920-wide inputs (a direct warp/UV-quality loss); the shader
     // decodes the grid at its storage precision via the GRID_FP32 spec constant. Runs at load, after
     // insertLayoutConverts, before markFp32.
+    // True for ops a sampling coordinate flows through unchanged in kind: elementwise algebra,
+    // value-preserving movement, fused pointwise chains, reductions, and layout converts. Shared
+    // by the convert-time fp16 keep (convert_fp16.cpp) and the load-time coordinate-cone pin, so
+    // the two sides of the coordinate-precision contract can never drift apart.
+    bool coordinateTransparentOp(OpType op);
+
+    // Pin every sampling-coordinate cone to fp32 storage: for each GridSample coordinate operand
+    // (the plain grid, or the warp variant's flow), walk backward through
+    // coordinateTransparentOp producers pinning each non-initializer hop, so the whole
+    // grid/flow algebra computes and stores at fp32 while image tensors stay at the session
+    // precision. A hop whose producer is neither transparent nor flat stays unpinned (the NC4HW4
+    // conv family has no fp32 kernels); markFp32's frontier converts bridge that boundary.
+    void pinSampleCoordFp32(Graph &g);
     void pinGridSampleGridFp32(Graph &g);
 
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into

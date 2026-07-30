@@ -18,7 +18,7 @@
 #else
 #define STORE4 vec4
 #endif
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S  { STORE  src[];  };
 layout(std430, binding = 1) writeonly buffer D4 { STORE4 dst4[]; };
 layout(push_constant) uniform PC { int N, C, H, W, C2, OH, OW, b, mode; } pc;

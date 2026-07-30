@@ -34,7 +34,10 @@ namespace vknn {
 
         // Workgroup size of the group==1 direct conv shader when no measurement applies: the value
         // Tuning::None dispatches and the incumbent every local-size race is seeded with.
-        constexpr uint32_t kConvDefaultLocalSize = 64;
+        // The direct kernel's Tuning::None width and race incumbent is env.convLocalSize (the
+        // device's one-subgroup width, resolved at load); only the race's narrow-candidate floor
+        // stays a constant.
+        constexpr uint32_t kConvRaceMinWidth = 32;
         // Output pixels per thread of the 1x1 kernels when no measurement applies: the value
         // Tuning::None dispatches and the incumbent pickWTile's race is seeded with.
         constexpr uint32_t kConv1x1DefaultWTile = 4;
@@ -49,6 +52,10 @@ namespace vknn {
         // channel tiles (of kConvGemmTileN each) on the N axis and kGemmMinM output rows on the M axis.
         // Same rationale as Winograd: a deterministic shape rule replaces a timing race so the K-reduction
         // order (and thus the output bits) never changes with thermal state or tuning level.
+        // The per-thread conv family's lane width is env.convLocalSize (laneWidthFor over
+        // flat::kConvFamilyLaneWidth, resolved at load). The kSplitK*/kGemmMin* thresholds below
+        // stay fixed shape rules on purpose: they steer summation order (byte-affecting), so no
+        // measured value may move them.
         constexpr int64_t kGemmMinCoutTiles = 8;
         constexpr int64_t kGemmMinM         = 128;
 
@@ -330,9 +337,9 @@ namespace vknn {
                 }
                 if (env.tuning == Tuning::None)
                 {
-                    return kConvDefaultLocalSize; // no cached pick and no new sweep -> the deterministic default kernel
+                    return env.convLocalSize; // no cached pick and no new sweep -> the device's one-subgroup default
                 }
-                uint32_t best = kConvDefaultLocalSize;
+                uint32_t best = env.convLocalSize;
                 if (env.runner)
                 {
                     int    es       = env.useFp16 ? 2 : 4;
@@ -340,9 +347,25 @@ namespace vknn {
                     size_t dstBytes = (size_t) pc.N * cBlocks(pc.Cout) * pc.OH * pc.OW * 4 * es;
                     auto   sSrc     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
                     auto   sDst     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
-                    // The default local size leads the candidate list, so it is the incumbent below
-                    // whatever else the level adds (Heavy also explores the narrower 32).
-                    std::vector<uint32_t> cands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {kConvDefaultLocalSize, 32, 128, 256} : std::vector<uint32_t> {kConvDefaultLocalSize, 128, 256};
+                    // The device default (one whole subgroup, env.convLocalSize) leads the list, so
+                    // it is the incumbent; the challengers are its 2x and 4x subgroup multiples and
+                    // (under Heavy) the half-subgroup narrower packing - the same ladder the old
+                    // hardcoded {64, 128, 256} + Heavy 32 spelled on a 64-wide device, but spanning
+                    // whatever width this device actually runs. Everything clamps to the exact caps.
+                    const auto &cap = env.ctx->caps();
+                    const uint32_t maxInv = std::min(cap.maxWorkGroupInvocations != 0u ? cap.maxWorkGroupInvocations : env.convLocalSize, cap.maxWorkGroupSize[0] != 0u ? cap.maxWorkGroupSize[0] : env.convLocalSize);
+                    std::vector<uint32_t> cands {env.convLocalSize};
+                    for (uint32_t mult: {2u, 4u})
+                    {
+                        if (env.convLocalSize * mult <= maxInv)
+                        {
+                            cands.push_back(env.convLocalSize * mult);
+                        }
+                    }
+                    if (env.tuning == Tuning::Heavy && env.convLocalSize / 2u >= kConvRaceMinWidth)
+                    {
+                        cands.insert(cands.begin() + 1, env.convLocalSize / 2u);
+                    }
                     // The workgroup size changes neither the thread count nor the traffic, only how
                     // the threads are packed, so every candidate carries the same cost inputs and
                     // the analytical prefilter leaves the list alone. It stays on the shared path so
@@ -486,9 +509,9 @@ namespace vknn {
                 // the cache.
                 std::vector<double> ms = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
                     uint32_t wt = cands[(size_t) index] & 0xffu, ocb = std::max(1u, cands[(size_t) index] >> 8);
-                    auto pipe = env.pipeline(shader((std::string(s2 ? "conv1x1_s2" : "conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb});
+                    auto pipe = env.pipeline(shader((std::string(s2 ? "conv1x1_s2" : "conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb, env.convLocalSize});
                     return timer.time([&](VkCommandBuffer cmd) {
-                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(totals[(size_t) index], 64));
+                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(totals[(size_t) index], env.convLocalSize));
                     });
                 });
                 // cands[0] is the deterministic default and stays the incumbent: a challenger must
@@ -642,7 +665,7 @@ namespace vknn {
                         {
                             ConvPC slicePc  = pc;
                             slicePc.gidBase = (int) sliceBase;
-                            p->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(sliceThreads, tot - sliceBase), 64));
+                            p->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(sliceThreads, tot - sliceBase), env.convLocalSize));
                         }
                     });
                 };
@@ -736,15 +759,15 @@ namespace vknn {
                         // instead of WTILE per tap, so its input term is per RUN, not per tap.
                         vk::KernelCost cost = tileCost(tot, klen, (double) wt, (double) ocb, (double) (wt + klen - 1) / (double) klen, groups(tot, 64), 1);
                         entrants.push_back({(int) cand, margin, cost, [&, tot, ocb, wt] {
-                                                return timeIt(env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, kaxis, klen}), tot, 64);
+                                                return timeIt(env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, kaxis, klen, env.convLocalSize}), tot, env.convLocalSize);
                                             }});
                     } else
                     {
                         int64_t        tot  = x.n * ocbGroups * ((HW + wt - 1) / wt);
                         vk::KernelCost cost = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, (double) wt, groups(tot, 64), parts);
                         entrants.push_back({(int) cand, margin, cost, [&, tot, parts, ocb, wt] {
-                                                auto pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt});
-                                                return parts > 1 ? timeSplit(pipe, tot, parts) : timeIt(pipe, tot, 64);
+                                                auto pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, env.convLocalSize});
+                                                return parts > 1 ? timeSplit(pipe, tot, parts) : timeIt(pipe, tot, env.convLocalSize);
                                             }});
                     }
                 }
@@ -1089,7 +1112,7 @@ namespace vknn {
                     // Bit-exact tile race: 1 pixel/thread vs the 2x2 output tile (dwconv_t2).
                     bool dwTile2 = pickDwTile(env, x, y, Cb) == 1;
                     total        = dwTile2 ? x.n * Cb * ((y.h + 1) / 2) * ((y.w + 1) / 2) : x.n * Cb * y.h * y.w;
-                    pipe = env.pipeline(shader((std::string(dwTile2 ? "dwconv_t2" : "dwconv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), std::vector<uint32_t> {});
+                    pipe = env.pipeline(shader((std::string(dwTile2 ? "dwconv_t2" : "dwconv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), std::vector<uint32_t> {env.convLocalSize});
                 } else
                 {
                     int64_t Cinb = cBlocks(x.c);
@@ -1150,7 +1173,7 @@ namespace vknn {
                             int64_t nTiles    = (HW + wTile - 1) / wTile;
                             int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
                             total             = x.n * ocbGroups * nTiles;
-                            pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile});
+                            pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, env.convLocalSize});
                         }
                     } else if (starvedDeep)
                     {
@@ -1169,7 +1192,7 @@ namespace vknn {
                         ocbTile           = std::max(1u, pick >> 8);
                         int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
                         total             = x.n * ocbGroups * ((HW + wTile - 1) / wTile);
-                        pipe = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile});
+                        pipe = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, env.convLocalSize});
                     } else if (cfgHint(env, Hint::DirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
                     {
                         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
@@ -1257,7 +1280,7 @@ namespace vknn {
                             int64_t  clen      = (kaxis == 0) ? y.h : y.w;
                             int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
                             total              = x.n * ocbGroups * clen * ((alen + regWt - 1) / regWt);
-                            pipe = env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, kaxis, klen});
+                            pipe = env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, kaxis, klen, env.convLocalSize});
                         } else if (ocb > 0)
                         {
                             // register-tiled conv computing OCB output channel-blocks per thread for WTILE
@@ -1272,7 +1295,7 @@ namespace vknn {
                             total              = x.n * ocbGroups * ((HW + regWt - 1) / regWt);
                             ocSplitParts       = (ocb & kChoiceOcSplit2) ? 2 : ((ocb & kChoiceOcSplit4) ? 4 : 1);
                             ocSliceThreads     = ocSplitSliceThreads(total, ocSplitParts);
-                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt});
+                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, env.convLocalSize});
                         } else
                         {
                             // autotuned 1-pixel-per-thread direct kernel (the fallback when OCB tiling didn't win)
@@ -1355,7 +1378,7 @@ namespace vknn {
                 if (depthwise)
                 {
                     epi.append(bufs, node, env, dst->handle());
-                    pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, 64));
+                    pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, env.convLocalSize));
                 } else if (pointwise || pwS2)
                 {
                     if (hasRes)
@@ -1366,7 +1389,7 @@ namespace vknn {
                         bufs.push_back(dst->handle()); // epilogue binds after the Res slot: fill it
                     }
                     epi.append(bufs, node, env, dst->handle());
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, 64));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, env.convLocalSize));
                 } else if (lds)
                 {
                     epi.append(bufs, node, env, dst->handle());
@@ -1382,12 +1405,12 @@ namespace vknn {
                     {
                         ConvPC slicePc  = pc;
                         slicePc.gidBase = (int) sliceBase;
-                        pipe->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(ocSliceThreads, total - sliceBase), 64));
+                        pipe->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(ocSliceThreads, total - sliceBase), env.convLocalSize));
                     }
                 } else
                 {
                     epi.append(bufs, node, env, dst->handle());
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, reg ? 64 : localSize));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, reg ? env.convLocalSize : localSize));
                 }
             }
         };

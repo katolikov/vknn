@@ -8,6 +8,7 @@
 // oracle). These tests pin the integer rule and the values the kernel must produce.
 #include "vknn/graph.h"
 #include "vknn/session.h"
+#include <cmath>
 #include <cstring>
 #include <gtest/gtest.h>
 

@@ -19,9 +19,14 @@
 #endif
 layout(constant_id = 0) const int MODE = 0;
 layout(constant_id = 1) const int PADMODE = 0;
-layout(local_size_x = 64) in;
+// FLOW_FP32 selects the flow buffer's storage decode, exactly like the plain kernel's GRID_FP32:
+// pinSampleCoordFp32 pins the flow cone to fp32 storage, and fp16-quantized flow drifts the
+// sample point ~0.5-1 px at 2k-wide inputs. The buffer binds as raw words; one NC4HW4 block per
+// pixel is 2 words at fp16 (lanes x/y in word 0) or 4 words at fp32 (x, y in words 0/1).
+layout(constant_id = 2) const int FLOW_FP32 = 0;
+layout(local_size_x = 64, local_size_x_id = 3) in; // trailing spec = device-resolved lane width (env.convLocalSize)
 layout(std430, binding = 0) readonly  buffer Src  { f16vec4 src[]; };
-layout(std430, binding = 1) readonly  buffer Flow { f16vec4 flow[]; };
+layout(std430, binding = 1) readonly  buffer Flow { uint flowWords[]; };
 layout(std430, binding = 2) readonly  buffer Base { float base[]; };
 layout(std430, binding = 3) writeonly buffer Dst  { f16vec4 dst[]; };
 layout(push_constant) uniform PC { int N, C, Hin, Win, OH, OW, align; float scale; int baseNStride; } pc;
@@ -74,9 +79,16 @@ void main() {
   // (flow_x, flow_y) in lanes .x/.y. The product rounds to fp16 exactly as the standalone Mul did
   // (vknnRte16 == flat_binary's VKNN_NO_RTE store), then widens into the fp32 base add.
   int fb = n * pc.OH * pc.OW + oy * pc.OW + ox;
-  f16vec4 fblk = flow[fb];
-  float fscx = float(vknnRte16(float(fblk.x) * pc.scale));
-  float fscy = float(vknnRte16(float(fblk.y) * pc.scale));
+  float fscx, fscy;
+  if (FLOW_FP32 != 0) {
+    // Pinned flow: full-precision coordinates, no parity rounding - the pin exists to remove it.
+    fscx = uintBitsToFloat(flowWords[4 * fb + 0]) * pc.scale;
+    fscy = uintBitsToFloat(flowWords[4 * fb + 1]) * pc.scale;
+  } else {
+    vec2 f = unpackHalf2x16(flowWords[2 * fb]);
+    fscx = float(vknnRte16(f.x * pc.scale));
+    fscy = float(vknnRte16(f.y * pc.scale));
+  }
   int bi = n * pc.baseNStride + 2 * (oy * pc.OW + ox);
   int a = pc.align == 1 ? 1 : 0, b = 1 - a;
   float ix = handle(((1.0 + (base[bi + 0] + fscx)) * float(pc.Win - a) - float(b)) * 0.5, pc.Win);

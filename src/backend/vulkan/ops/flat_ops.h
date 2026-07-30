@@ -4,6 +4,7 @@
 // YOLO head runs on the GPU. Ops with an existing NC4HW4 kernel (concat/binary/add/softmax) hold
 // one of these and dispatch to it when their tensors are flat; Transpose/Slice are flat-only.
 #pragma once
+#include "backend/vulkan/vk_tune_model.h"
 #include "core/slice_bounds.h"
 #include "import/passes.h" // readI64Param
 #include "pw_plan.h"
@@ -18,10 +19,70 @@ namespace vknn {
 
     namespace flat {
 
-        // 1D dispatch local size for the element-parallel flat shaders (gather/pad/broadcast/scatter/binary):
-        // one invocation per output element, so the group count is ceil(total/256). Matches local_size_x=256
-        // in each of those .comp files; flat_softmax dispatches one workgroup per row instead and does not use it.
-        constexpr uint32_t          kFlatLocalSize = 256;
+        // 1D dispatch local size CEILING for the element-parallel flat shaders (gather/pad/broadcast/
+        // scatter/binary/converts): the family's shaders declare local_size_x = 256 as the default
+        // AND expose it as their workgroup-size spec constant, so the value that actually runs is
+        // env.flatLocalSize - resolved once at load by flatLocalSizeFor() below and passed to every
+        // family pipeline. 256 remains the ceiling (and the shared-array size of the workgroup-
+        // reduction kernels); a device whose caps cannot host it gets the largest whole-subgroup
+        // width that fits instead of a pipeline-creation failure.
+        constexpr uint32_t kFlatLocalSize = 256;
+
+        // A family workgroup width for this device, from EXACT caps (never a measured probe -
+        // see VkOpEnv::flatLocalSize): the family's ceiling clamped to maxWorkGroupInvocations and
+        // maxWorkGroupSize[0], rounded down to whole subgroups, at least one subgroup.
+        inline uint32_t laneWidthFor(const vk::VulkanCaps &caps, uint32_t ceiling) {
+            uint32_t width = ceiling;
+            if (caps.maxWorkGroupInvocations != 0u && caps.maxWorkGroupInvocations < width)
+            {
+                width = caps.maxWorkGroupInvocations;
+            }
+            if (caps.maxWorkGroupSize[0] != 0u && caps.maxWorkGroupSize[0] < width)
+            {
+                width = caps.maxWorkGroupSize[0];
+            }
+            const uint32_t sub = caps.subgroupSize != 0u ? caps.subgroupSize : 64u;
+            width              = width / sub * sub;
+            return width != 0u ? width : sub;
+        }
+        inline uint32_t flatLocalSizeFor(const vk::VulkanCaps &caps) {
+            return laneWidthFor(caps, kFlatLocalSize);
+        }
+
+        // Lane-width ceiling of the per-thread conv/sampler family (VkOpEnv::convLocalSize).
+        constexpr uint32_t kConvFamilyLaneWidth = 64;
+
+        // Power-of-two width for the workgroup TREE-FOLD kernels (reduce partial/combine, softmax,
+        // layernorm/rmsnorm, the argmax epilogue): their stride >>= 1 fold requires a pow2 width,
+        // so the caps-clamped value rounds down to one. Caps are exact, so the (byte-affecting)
+        // fold order stays a pure per-device function - the rule VkOpEnv::flatLocalSize documents.
+        inline uint32_t laneWidthPow2For(const vk::VulkanCaps &caps, uint32_t ceiling) {
+            const uint32_t width = laneWidthFor(caps, ceiling);
+            uint32_t       pow2  = 1u;
+            while (pow2 * 2u <= width)
+            {
+                pow2 *= 2u;
+            }
+            return pow2;
+        }
+
+        // flat_softmax's width ceiling (its shared array and the rows-per-workgroup host math).
+        constexpr uint32_t kSoftmaxWgMax = 128;
+
+        // Elements each lane walks, one slot apart, for the element-parallel family (the fused_pw
+        // pattern extended to the movement kernels). A pure placement choice - identical values at
+        // any count - so it may consume the MEASURED device probe: the floor is the saturation
+        // point deviceTuneModel reports (64-wide waves before added waves stop buying throughput)
+        // times a fixed headroom multiple, in lanes. Resolved at load (prepare), never at record.
+        constexpr int kItemsPerLaneMax       = 8; // independent loads one lane keeps in flight
+        constexpr int kLaneFloorWaveHeadroom = 5;
+        constexpr int kProbeWaveLanes        = 64; // the probe counts 64-wide waves
+        inline int    itemsPerLane(int64_t total, VkOpEnv &env) {
+            const double  waves     = vk::deviceTuneModel(env).wavesToSaturate;
+            const int64_t laneFloor = (int64_t) (waves * kProbeWaveLanes) * kLaneFloorWaveHeadroom;
+            const int64_t byFloor   = laneFloor > 0 ? total / laneFloor : 1;
+            return byFloor < 1 ? 1 : (byFloor > kItemsPerLaneMax ? (int) kItemsPerLaneMax : (int) byFloor);
+        }
         inline std::vector<int64_t> rowStrides(const Shape &s) {
             std::vector<int64_t> st(s.size(), 1);
             for (int k = (int) s.size() - 2; k >= 0; --k)
@@ -58,7 +119,7 @@ namespace vknn {
             // outPad/outLast are the output's physical and logical last-axis extents, both 0 unless
             // the segment allocated the output as a virtualized activation (VkOpEnv::rowPad).
             struct PC {
-                int rank, total, base, outPad, outLast;
+                int rank, total, base, outPad, outLast, items = 1;
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          geom;  // outDim/inStride, deduped SSBO (binding 2, before the epilogue)
@@ -76,6 +137,7 @@ namespace vknn {
                 int          rank     = (int) out.size();
                 pc.rank               = rank;
                 pc.total              = (int) numElements(out);
+                pc.items              = itemsPerLane(pc.total, env);
                 pc.base               = 0;
                 std::vector<int32_t> outDim(rank), inStr(rank);
                 // A virtualized output (the segment allocated its buffer with a padded physical last
@@ -91,6 +153,7 @@ namespace vknn {
                     pc.outLast      = (int) out.back();
                     pc.outPad       = (int) outPad;
                     pc.total        = (int) (numElements(out) / out.back() * outPad);
+                    pc.items        = itemsPerLane(pc.total, env);
                     contiguousSlice = false;
                 };
                 // A folded movement chain (foldMovementChains) carries its composed per-axis map in
@@ -109,7 +172,7 @@ namespace vknn {
                         applyOutPad();
                         geom = uploadFlatGeom(env, {outDim, inStr});
                         epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
-                        pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
+                        pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
                         return;
                     }
                 }
@@ -171,13 +234,13 @@ namespace vknn {
                 applyOutPad();
                 geom = uploadFlatGeom(env, {outDim, inStr});
                 epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {operandBuf(env, node.inputs[0], hold0)->handle(), dst->handle(), geom->handle()};
                 epi.append(bufs, node, env, dst->handle());
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups((pc.total + pc.items - 1) / pc.items, env.flatLocalSize));
             }
         };
 
@@ -192,6 +255,7 @@ namespace vknn {
             struct PC {
                 int   rank, total, mode;
                 float cval;
+                int   items = 1;
             } pc {};
             bool                                 runtimeVal = false;
             std::shared_ptr<vk::ComputePipeline> pipe;
@@ -229,6 +293,7 @@ namespace vknn {
                 runtimeVal = node.inputs.size() > 2 && node.inputs[2] != kNoTensor && !g.isInitializer(node.inputs[2]);
                 pc.rank    = rank;
                 pc.total   = (int) numElements(out);
+                pc.items   = itemsPerLane(pc.total, env);
                 pc.mode    = (mode == "edge") ? 1 : (mode == "reflect") ? 2 : 0;
                 pc.cval    = cval;
                 std::vector<int32_t> outDim(rank), inDim(rank), inStr(rank), padBegin(rank);
@@ -240,7 +305,7 @@ namespace vknn {
                     padBegin[k] = pads.empty() ? 0 : (int) pads[k];
                 }
                 geom = uploadFlatGeom(env, {outDim, inDim, inStr, padBegin});
-                pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {}) : env.pipeline(shader("flat_pad", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
+                pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize}) : env.pipeline(shader("flat_pad", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
                 {
                     const size_t es      = env.useFp16 ? 2 : 4;
                     int          padAxis = -1;
@@ -312,10 +377,10 @@ namespace vknn {
                 VkBuffer dst = dstB->handle();
                 if (runtimeVal)
                 {
-                    pipe->dispatch(cmd, {src, env.devBuf(node.inputs[2])->handle(), dst, geom->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
+                    pipe->dispatch(cmd, {src, env.devBuf(node.inputs[2])->handle(), dst, geom->handle()}, &pc, sizeof(pc), groups((pc.total + pc.items - 1) / pc.items, env.flatLocalSize));
                     return;
                 }
-                pipe->dispatch(cmd, {src, dst, geom->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
+                pipe->dispatch(cmd, {src, dst, geom->handle()}, &pc, sizeof(pc), groups((pc.total + pc.items - 1) / pc.items, env.flatLocalSize));
             }
         };
 
@@ -327,7 +392,7 @@ namespace vknn {
         // src/backend/cpu/ops/expand.cpp). Input dims/strides are right-aligned into the output rank.
         struct Broadcast {
             struct PC {
-                int rank, total, mode;
+                int rank, total, mode, items = 1;
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          geom;     // outDim/inDim/inStride, deduped SSBO
@@ -340,6 +405,7 @@ namespace vknn {
                 int          pad          = rank - (int) in.size(); // right-align input into output rank
                 pc.rank                   = rank;
                 pc.total                  = (int) numElements(out);
+                pc.items                  = itemsPerLane(pc.total, env);
                 pc.mode                   = (node.type == OpType::Tile) ? 1 : 0;
                 std::vector<int32_t> outDim(rank), inDim(rank), inStr(rank);
                 for (int k = 0; k < rank; ++k)
@@ -355,18 +421,18 @@ namespace vknn {
                 {
                     constBuf = uploadInit(env, node.inputs[0], in);
                 }
-                pipe = env.pipeline(shader("flat_broadcast", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("flat_broadcast", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer *src = constBuf ? constBuf.get() : env.devBuf(node.inputs[0]);
-                pipe->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
+                pipe->dispatch(cmd, {src->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups((pc.total + pc.items - 1) / pc.items, env.flatLocalSize));
             }
         };
 
         // ---- Concat: scatter each input into the output at its axis offset ----
         struct Concat {
             struct PC {
-                int rank, total, base;
+                int rank, total, base, items = 1;
             };
             std::vector<std::shared_ptr<vk::ComputePipeline>> pipes;
             std::vector<PC>                                   pcs;
@@ -407,6 +473,7 @@ namespace vknn {
                     PC    pc {};
                     pc.rank  = rank;
                     pc.total = (int) numElements(in);
+                    pc.items = itemsPerLane(pc.total, env);
                     pc.base  = (int) (offset * outStride[axis]);
                     std::vector<int32_t> inDim(rank), outStr(rank);
                     for (int k = 0; k < rank; ++k)
@@ -418,7 +485,7 @@ namespace vknn {
                     pcs.push_back(pc);
                     inIdx.push_back((int) e);
                     offset += in[axis];
-                    pipes.push_back(env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {}));
+                    pipes.push_back(env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {env.flatLocalSize}));
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -441,7 +508,7 @@ namespace vknn {
                     }
                     std::vector<VkBuffer> bufs {src->handle(), dst->handle(), geoms[i]->handle()};
                     epi.append(bufs, node, env, dst->handle());
-                    pipes[i]->dispatch(cmd, bufs, &pcs[i], sizeof(PC), groups(pcs[i].total, kFlatLocalSize));
+                    pipes[i]->dispatch(cmd, bufs, &pcs[i], sizeof(PC), groups((pcs[i].total + pcs[i].items - 1) / pcs[i].items, env.flatLocalSize));
                 }
             }
         };
@@ -453,6 +520,7 @@ namespace vknn {
                 int   act;
                 float actLo, actHi;
                 int   bothFull; // both operands same shape as output => index == gid (skip the stride loop)
+                int   items = 1;
             } pc {};
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          geom; // outDim/aStride/bStride, deduped SSBO
@@ -463,6 +531,7 @@ namespace vknn {
                 int          rank = (int) out.size();
                 pc.rank           = rank;
                 pc.total          = (int) numElements(out);
+                pc.items          = itemsPerLane(pc.total, env);
                 pc.op             = node.type == OpType::Add ? (int) BinaryType::Add : node.subOp;
                 // A fused activation (e.g. a Linear+Relu fused into the Add epilogue, as in the camera_head
                 // res_conv) is applied here, matching the NC4HW4 add.
@@ -496,13 +565,13 @@ namespace vknn {
                 setup(node.inputs[1], 1);
                 pc.bothFull = (g.desc(node.inputs[0]).shape == out && g.desc(node.inputs[1]).shape == out) ? 1 : 0;
                 geom        = uploadFlatGeom(env, {outDim, aStride, bStride});
-                pipe        = env.pipeline(shader("flat_binary", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("flat_binary", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 auto buf = [&](int e) {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, kFlatLocalSize));
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups((pc.total + pc.items - 1) / pc.items, env.flatLocalSize));
             }
         };
 
@@ -520,6 +589,7 @@ namespace vknn {
             struct PC {
                 int outer, axis, inner, outPad;
             } pc {};
+            uint32_t                             softmaxWg = kSoftmaxWgMax; // resolved at load in prepare()
             bool                                 threadRow = false;
             std::shared_ptr<vk::ComputePipeline> pipe;
             PwEpi                                epi;
@@ -548,7 +618,8 @@ namespace vknn {
                 }
                 threadRow = s[axis] <= kThreadRowMaxAxis;
                 epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0)});
+                softmaxWg = laneWidthPow2For(env.ctx->caps(), kSoftmaxWgMax);
+                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0), softmaxWg});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 // ROW_MODE 0: one workgroup per row (LDS reduction across the workgroup).
@@ -557,7 +628,7 @@ namespace vknn {
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst};
                 epi.append(bufs, node, env, dst);
                 int64_t rows   = (int64_t) pc.outer * pc.inner;
-                int64_t groups = threadRow ? (rows + 127) / 128 : rows;
+                int64_t groups = threadRow ? (rows + softmaxWg - 1) / softmaxWg : rows;
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t) groups);
             }
         };

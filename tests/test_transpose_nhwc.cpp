@@ -11,6 +11,15 @@
 #include <cstring>
 #include <gtest/gtest.h>
 
+namespace {
+    // MSVC at C++17 rejects designated initializers; a tiny helper names the tensor.
+    vknn::TensorDesc namedDesc(const char *name) {
+        vknn::TensorDesc d;
+        d.name = name;
+        return d;
+    }
+} // namespace
+
 using namespace vknn;
 
 namespace {
@@ -47,7 +56,7 @@ namespace {
         }
         g.initializers[w] = hb;
 
-        TensorId t = g.addTensor({.name = "t"});
+        TensorId t = g.addTensor(namedDesc("t"));
         Node     cv;
         cv.type    = OpType::Conv;
         cv.name    = "conv";

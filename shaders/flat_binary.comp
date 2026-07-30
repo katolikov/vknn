@@ -5,7 +5,7 @@
 // (binding 3), not the push constant, so the decodable rank is unbounded (see flat::uploadFlatGeom).
 // Arrays pack back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank), bStride = g[2*rank..3*rank).
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
@@ -14,22 +14,32 @@ layout(push_constant) uniform PC {
   int rank, total, op;
   int act; float actLo, actHi;
   int bothFull; // both operands same shape as output => index == gid (skip the stride loop)
+  int items;
 } pc;
 
+// pc.items elements per lane, one slot apart (the fused_pw walk): independent items cover the
+// per-element div/mod chain's memory latency; slots stride by the lane count so every item
+// stays a coalesced wave-wide access. The workgroup width is spec constant 0, resolved by the
+// host at load from device caps (env.flatLocalSize).
 void main() {
-  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(pc.total)) return;
-  int ai = int(gid), bi = int(gid);
-  // Both operands same-shape as the output => contiguous, index == gid. Only a broadcast operand needs the
-  // per-axis strided decomposition (integer div/mod per element), so skip that loop in the common case.
-  if (pc.bothFull == 0) {
-    int rem = int(gid); ai = 0; bi = 0;
-    for (int k = pc.rank - 1; k >= 0; --k) {
-      int c = rem % geom.g[k];
-      rem /= geom.g[k];
-      ai += c * geom.g[pc.rank + k];
-      bi += c * geom.g[2 * pc.rank + k];
-    }
+  uint lane = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint slot = (uint(pc.total) + uint(pc.items) - 1u) / uint(pc.items);
+  if (lane >= slot) return;
+  for (int it = 0; it < pc.items; ++it) {
+    uint gid = lane + uint(it) * slot;
+    if (gid >= uint(pc.total)) break;
+      int ai = int(gid), bi = int(gid);
+      // Both operands same-shape as the output => contiguous, index == gid. Only a broadcast operand needs the
+      // per-axis strided decomposition (integer div/mod per element), so skip that loop in the common case.
+      if (pc.bothFull == 0) {
+        int rem = int(gid); ai = 0; bi = 0;
+        for (int k = pc.rank - 1; k >= 0; --k) {
+          int c = rem % geom.g[k];
+          rem /= geom.g[k];
+          ai += c * geom.g[pc.rank + k];
+          bi += c * geom.g[2 * pc.rank + k];
+        }
+      }
+      d[gid] = TO_STORE(vx_act(vx_binary(float(a[ai]), float(b[bi]), pc.op), pc.act, pc.actLo, pc.actHi));
   }
-  d[gid] = TO_STORE(vx_act(vx_binary(float(a[ai]), float(b[bi]), pc.op), pc.act, pc.actLo, pc.actHi));
 }

@@ -52,7 +52,8 @@ namespace vknn {
                 epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
                 // 3 fixed bindings (input, gamma, output) plus any extra buffers the fused pointwise
                 // epilogue binds after them; suffix() picks the matching PW_EPI shader variant.
-                pipe = env.pipeline(shader((std::string("flat_rmsnorm") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(RmsPC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader((std::string("flat_rmsnorm") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(RmsPC),
+                                    std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

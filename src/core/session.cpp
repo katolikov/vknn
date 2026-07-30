@@ -664,10 +664,11 @@ namespace vknn {
             // that would overflow a value above 65504 to +inf. Pin the Gather index chains to fp32 before
             // markFp32 so the buffer planner sizes them 4-byte and their producers run in fp32.
             pinGatherIndexFp32(graph_);
-            // GridSample grids hold normalized sampling coordinates whose fp16 storage quantization
-            // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
-            // the same way; the GridSample shader decodes the grid at its storage precision.
-            pinGridSampleGridFp32(graph_);
+            // Sampling coordinates (a GridSample grid or the warp variant's flow) quantized to fp16
+            // drift the sample point (~0.5-1 px at 1920-wide inputs). Pin the whole coordinate cone
+            // - the grid/flow algebra back through elementwise/movement/fused chains - to fp32; the
+            // samplers decode their coordinate operands at storage precision.
+            pinSampleCoordFp32(graph_);
             // Only a caller-supplied fp32Tensors list takes zero-match accounting; the built-in
             // Precision::Normal preset is engine-owned and exempt from the load-end warning.
             markFp32(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);

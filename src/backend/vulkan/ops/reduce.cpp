@@ -97,6 +97,11 @@ namespace vknn {
                 {
                     // groups per output: enough workgroups to fill the GPU (~4096 total), each chunk still
                     // >= 256 elements, capped at 64 so the combine pass stays a single trivial workgroup.
+                    // These occupancy gates stay FIXED constants on purpose: the split count they
+                    // choose sets the summation order (byte-affecting), and the only device signal
+                    // that could size them is the MEASURED saturation probe - which may only ever
+                    // steer placement-only choices (see VkOpEnv::flatLocalSize). A caps-exact
+                    // derivation does not exist for "how many groups fill this GPU".
                     int64_t byWork = reducedExtent / 256;       // no more groups than 256-elem chunks
                     int64_t byGrid = 4096 / std::max(total, 1); // ~4096 workgroups total
                     int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, (int64_t) 64}));
@@ -104,14 +109,16 @@ namespace vknn {
                     combinePc      = {total, node.subOp, groups, (int) reducedExtent};
                     scratch = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) total * groups * sizeof(float), 16), vk::MemPref::kDeviceOnly);
                     // pass 1 bindings: input(0), scratch(1), geom(2). No epilogue on the partials.
-                    partialPipe = env.pipeline(shader("flat_reduce_partial", env.useFp16), 3, sizeof(ReducePCPartial), std::vector<uint32_t> {});
+                    partialPipe = env.pipeline(shader("flat_reduce_partial", env.useFp16), 3, sizeof(ReducePCPartial),
+                                               std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
                     // pass 2 bindings: scratch(0), output(1), then epilogue operands.
-                    combinePipe = env.pipeline(shader((std::string("flat_reduce_combine") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ReducePCCombine), std::vector<uint32_t> {});
+                    combinePipe = env.pipeline(shader((std::string("flat_reduce_combine") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ReducePCCombine),
+                                               std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
                 } else
                 {
                     pc = {rank, total, node.subOp};
                     // scalar bindings: input(0), output(1), geom(2), then epilogue operands.
-                    pipe = env.pipeline(shader((std::string("flat_reduce") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(ReducePCFlat), std::vector<uint32_t> {});
+                    pipe = env.pipeline(shader((std::string("flat_reduce") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(ReducePCFlat), std::vector<uint32_t> {env.flatLocalSize});
                 }
             }
 
@@ -135,7 +142,7 @@ namespace vknn {
                     // Binding order matches flat_reduce.comp: input(0), output(1), geometry(2), epilogue.
                     std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst, geom->handle()};
                     epi.append(bufs, node, env, dst);
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
                 }
             }
         };
