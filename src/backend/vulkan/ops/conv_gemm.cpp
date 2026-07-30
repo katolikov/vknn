@@ -37,11 +37,11 @@ namespace vknn {
             // wt is the packed [K][Cout] panel the split-K partial pass reads; wtV4 is what the
             // single-pass kernel binds — the same buffer when the panel is already 4-aligned on
             // Cout, else the zero-padded [K][coutP] repack the vec4-weight twin needs.
-            std::shared_ptr<vk::Buffer>          wt, wtV4, bs;
-            ConvGemmPC                           pc {};
-            PwEpi                                epi;
-            uint32_t                             gx = 0, gy = 0, gz = 0;
-            bool                                 wv4 = false; // the single pass runs conv_gemm_wv4
+            std::shared_ptr<vk::Buffer> wt, wtV4, bs;
+            ConvGemmPC                  pc {};
+            PwEpi                       epi;
+            uint32_t                    gx = 0, gy = 0, gz = 0;
+            bool                        wv4 = false; // the single pass runs conv_gemm_wv4
 
             // --- split-K state (partial pass + reduce pass) ---
             bool                                 ksplit = false;
@@ -87,12 +87,12 @@ namespace vknn {
                     return heur;
                 }
                 int64_t Cinb = cBlocks(x.c), Coutb = cBlocks(Cout);
-                int     es   = env.useFp16 ? 2 : 4;
-                auto    mk   = [&](size_t bytes) {
+                int     es = env.useFp16 ? 2 : 4;
+                auto    mk = [&](size_t bytes) {
                     return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
                 };
-                auto sSrc   = mk((size_t) x.n * Cinb * x.h * x.w * 4 * es);
-                auto sDst   = mk((size_t) y.n * Coutb * y.h * y.w * 4 * es);
+                auto          sSrc = mk((size_t) x.n * Cinb * x.h * x.w * 4 * es);
+                auto          sDst = mk((size_t) y.n * Coutb * y.h * y.w * 4 * es);
                 vk::TuneTimer timer(env);
                 uint32_t      gxT = (uint32_t) ((Cout + kConvGemmTileN - 1) / kConvGemmTileN);
                 // Entrants with the shape heuristic's tile first: it is what Tuning::None dispatches,
@@ -104,8 +104,8 @@ namespace vknn {
                     uint32_t gyT;
                 };
                 // Threads per implicit-GEMM workgroup (shaders/conv_gemm.comp).
-                constexpr double            kConvGemmThreads = 64.0;
-                const double                elemsPerVec4     = 4.0;
+                constexpr double            kConvGemmThreads  = 64.0;
+                const double                elemsPerVec4      = 4.0;
                 const double                streamFootprint   = ((double) M * (double) K + (double) M * (double) Cout) * (double) x.n / elemsPerVec4;
                 const double                residentFootprint = (double) K * (double) Cout * (double) x.n / elemsPerVec4;
                 std::vector<Entrant>        entrants;
@@ -145,7 +145,8 @@ namespace vknn {
                 epi.appendForTiming(bufs, sDst->handle());
                 std::vector<double> ms     = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
                     const Entrant &entrant = entrants[(size_t) index];
-                    auto           pipe    = env.pipeline(shader((std::string(raceStem) + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC), {(uint32_t) entrant.tm});
+                    auto pipe = env.pipeline(shader((std::string(raceStem) + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvGemmPC),
+                                                 {(uint32_t) entrant.tm});
                     return timer.time([&](VkCommandBuffer cmd) {
                         pipe->dispatch(cmd, bufs, &pc, sizeof(pc), gxT, entrant.gyT, (uint32_t) x.n);
                     });
@@ -185,10 +186,8 @@ namespace vknn {
                 // Bias presence bounds by pwCoreInputs: inputs appended past it are fused-unit
                 // operands, and reading one as the bias would double-apply it.
                 bool hasBias = pwCoreInputs(node) > 2 && node.inputs[2] != kNoTensor;
-                pc = {(int) x.c,  (int) x.h,  (int) x.w,  (int) y.c,  (int) y.h,  (int) y.w,
-                      (int) k[0], (int) k[1], (int) st[0], (int) st[1], (int) p[0], (int) p[1],
-                      (int) dl[0], (int) dl[1], (int) node.fusedAct, hasBias ? 1 : 0,
-                      node.actLo, node.actHi};
+                pc           = {(int) x.c,   (int) x.h,  (int) x.w,  (int) y.c,   (int) y.h,   (int) y.w,           (int) k[0],      (int) k[1], (int) st[0],
+                                (int) st[1], (int) p[0], (int) p[1], (int) dl[0], (int) dl[1], (int) node.fusedAct, hasBias ? 1 : 0, node.actLo, node.actHi};
 
                 wt = uploadInit(env, node.inputs[1], g.desc(node.inputs[1]).shape);
                 if (pc.hasBias)
@@ -208,12 +207,12 @@ namespace vknn {
                 // zero-padded [K][coutP] repack. The twin is byte-identical to conv_gemm — it
                 // widens the weight load and nothing else — so the rule needs no race and no
                 // accuracy gate.
-                const TensorId wtId       = node.inputs[1];
-                const int64_t  wtElemSize = g.desc(wtId).dtype == DType::Float16 ? 2 : 4;
-                const bool     wtResident = (int64_t) g.initializers.at(wtId).bytes.size() >= numElements(g.desc(wtId).shape) * wtElemSize;
-                const ConvGemmWVec4Route wRoute = convGemmWVec4Route(y.c, wtResident);
-                pc.Coutp                        = (int) (wRoute.eligible ? wRoute.coutP : y.c);
-                wv4                             = wRoute.eligible;
+                const TensorId           wtId       = node.inputs[1];
+                const int64_t            wtElemSize = g.desc(wtId).dtype == DType::Float16 ? 2 : 4;
+                const bool               wtResident = (int64_t) g.initializers.at(wtId).bytes.size() >= numElements(g.desc(wtId).shape) * wtElemSize;
+                const ConvGemmWVec4Route wRoute     = convGemmWVec4Route(y.c, wtResident);
+                pc.Coutp                            = (int) (wRoute.eligible ? wRoute.coutP : y.c);
+                wv4                                 = wRoute.eligible;
                 // The padded repack goes through the weight cache (key suffix "#gemmwp", so a warm
                 // start reuses the packed blob and never collides with the flat upload's entry).
                 wtV4 = wt;
@@ -243,12 +242,12 @@ namespace vknn {
                     int S = 0, chunk = 0;
                     splitGeom(K, S, chunk);
                     int64_t Coutb = cBlocks(y.c);
-                    kspc = {pc.C, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, S, chunk};
-                    krpc = {(int) y.n, pc.Cout, (int) M, S, pc.act, pc.hasBias, pc.actLo, pc.actHi};
+                    kspc          = {pc.C, pc.H, pc.W, pc.Cout, pc.OH, pc.OW, pc.KH, pc.KW, pc.SH, pc.SW, pc.PT, pc.PL, pc.DH, pc.DW, S, chunk};
+                    krpc          = {(int) y.n, pc.Cout, (int) M, S, pc.act, pc.hasBias, pc.actLo, pc.actHi};
                     partBuf  = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) y.n * S * Coutb * M * 4 * 4, 16), vk::MemPref::kDeviceOnly);
                     krGroups = groups(y.n * Coutb * M, kKreduceLocalSize);
                     gz       = (uint32_t) (y.n * S);
-                    ksPipe = env.pipeline(shader("conv_gemm_ksplit", env.useFp16), 3, sizeof(ConvGemmKsPC), {(uint32_t) tm});
+                    ksPipe   = env.pipeline(shader("conv_gemm_ksplit", env.useFp16), 3, sizeof(ConvGemmKsPC), {(uint32_t) tm});
                     krPipe = env.pipeline(shader((std::string("conv_gemm_kreduce") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(ConvGemmKrPC));
                 } else
                 {

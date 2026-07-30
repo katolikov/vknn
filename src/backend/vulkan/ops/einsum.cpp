@@ -27,9 +27,9 @@ namespace vknn {
                 const Graph &g = *env.graph;
                 // The outer product treats each operand as a flat vector, so its element count is the
                 // full shape product regardless of rank; the I*J product is the output size.
-                int64_t      I = numElements(g.desc(node.inputs[0]).shape);
-                int64_t      J = numElements(g.desc(node.inputs[1]).shape);
-                pc             = {(uint32_t) (I * J), (int) I, (int) J};
+                int64_t I = numElements(g.desc(node.inputs[0]).shape);
+                int64_t J = numElements(g.desc(node.inputs[1]).shape);
+                pc        = {(uint32_t) (I * J), (int) I, (int) J};
                 // Either operand may be a constant initializer (e.g. a RoPE frequency table). Pack it
                 // flat into a device buffer here, matching the fp16/fp32 mode; activation operands are
                 // instead bound from env.devBuf at record time. resize(n) pins the blob to n elements.

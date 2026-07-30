@@ -9,8 +9,8 @@
 #include "vknn/session.h"
 #include <cmath>
 #include <cstdio>
-#include <limits>
 #include <gtest/gtest.h>
+#include <limits>
 
 using namespace vknn;
 
@@ -41,8 +41,8 @@ namespace {
         TensorId   c0 = scalar("c0", 127.5f);
         TensorId   c1 = scalar("c1", 255.f);
         TensorDesc ti;
-        ti.name    = "t";
-        TensorId t = g.addTensor(ti);
+        ti.name      = "t";
+        TensorId   t = g.addTensor(ti);
         TensorDesc yo;
         yo.name     = "y";
         yo.isOutput = true;
@@ -180,11 +180,11 @@ TEST(Fp16Payloads, OutOfRangeConstantClampsToFiniteExtreme) {
     TensorId   id   = g.addTensor(d);
     HostBuffer hb;
     hb.resizeElems(5, DType::Float32);
-    hb.f32()[0] = -3.4028235e38f;      // fp32 lowest, overflows fp16 -> would be -inf
-    hb.f32()[1] = 3.4028235e38f;       // fp32 max, overflows fp16 -> would be +inf
-    hb.f32()[2] = 1.5f;                // normal, exactly representable
-    hb.f32()[3] = -std::numeric_limits<float>::infinity(); // already -inf
-    hb.f32()[4] = std::numeric_limits<float>::infinity();  // already +inf
+    hb.f32()[0]        = -3.4028235e38f;                          // fp32 lowest, overflows fp16 -> would be -inf
+    hb.f32()[1]        = 3.4028235e38f;                           // fp32 max, overflows fp16 -> would be +inf
+    hb.f32()[2]        = 1.5f;                                    // normal, exactly representable
+    hb.f32()[3]        = -std::numeric_limits<float>::infinity(); // already -inf
+    hb.f32()[4]        = std::numeric_limits<float>::infinity();  // already +inf
     g.initializers[id] = hb;
 
     Fp16ConvertStats st = convertInitializersFp16(g);
@@ -194,8 +194,8 @@ TEST(Fp16Payloads, OutOfRangeConstantClampsToFiniteExtreme) {
     const fp16_t *h = reinterpret_cast<const fp16_t *>(g.initializers[id].bytes.data());
 
     // The clamped values are the finite fp16 extremes, never inf.
-    EXPECT_EQ(h[0], 0xFBFFu);              // -65504
-    EXPECT_EQ(h[1], 0x7BFFu);              // +65504
+    EXPECT_EQ(h[0], 0xFBFFu); // -65504
+    EXPECT_EQ(h[1], 0x7BFFu); // +65504
     EXPECT_EQ(halfToFloat(h[0]), -65504.0f);
     EXPECT_EQ(halfToFloat(h[1]), 65504.0f);
     EXPECT_FALSE(std::isinf(halfToFloat(h[0])));
@@ -218,9 +218,9 @@ TEST(Fp16Payloads, OutOfRangeConstantClampsToFiniteExtreme) {
 TEST(Fp16Payloads, MaskBiasIdiomNoNaNFp16Cpu) {
     Graph      g;
     TensorDesc mi;
-    mi.name    = "mask";
-    mi.shape   = {1, 4};
-    mi.isInput = true;
+    mi.name       = "mask";
+    mi.shape      = {1, 4};
+    mi.isInput    = true;
     TensorId mask = g.addTensor(mi);
     g.inputs.push_back(mask);
     auto scalar = [&](const char *name, float v) {
@@ -235,11 +235,11 @@ TEST(Fp16Payloads, MaskBiasIdiomNoNaNFp16Cpu) {
         g.initializers[id] = hb;
         return id;
     };
-    TensorId one = scalar("one", 1.0f);
-    TensorId neg = scalar("neg", -3.4028235e38f); // fp32 lowest, the mask-bias constant
+    TensorId   one = scalar("one", 1.0f);
+    TensorId   neg = scalar("neg", -3.4028235e38f); // fp32 lowest, the mask-bias constant
     TensorDesc si;
-    si.name    = "sub_out";
-    TensorId subOut = g.addTensor(si);
+    si.name           = "sub_out";
+    TensorId   subOut = g.addTensor(si);
     TensorDesc yo;
     yo.name     = "y";
     yo.isOutput = true;
@@ -381,8 +381,8 @@ TEST(Fp16Payloads, FusedResidualInitializerCpu) {
 // Cast(scalar) -> Div, both foldable, feeds a SIGSEGV inside the Binary kernel. The op must treat
 // a rank-0 tensor as its one element, so the folded scalar carries a value, not zero bytes.
 TEST(Fp16Payloads, ConstFoldScalarCastThenBinary) {
-    Graph      g;
-    auto       init = [&](const char *name, const Shape &shape, float v) {
+    Graph g;
+    auto  init = [&](const char *name, const Shape &shape, float v) {
         TensorDesc d;
         d.name          = name;
         d.shape         = shape;
@@ -397,18 +397,23 @@ TEST(Fp16Payloads, ConstFoldScalarCastThenBinary) {
     // Numerator carries a [1] shape and the denominator a rank-0 [] shape: broadcasting [1] against
     // the empty-scalar operand yields a [1] output the Binary loop actually iterates, so a null-data
     // denominator is dereferenced (the tiny-yolov3 arange box-decode divide).
-    TensorId   num   = init("num", {1}, 6.f);   // numerator, shape [1]
-    TensorId   denIn = init("den_in", {}, 3.f); // pre-cast denominator scalar, rank-0
+    TensorId num   = init("num", {1}, 6.f);   // numerator, shape [1]
+    TensorId denIn = init("den_in", {}, 3.f); // pre-cast denominator scalar, rank-0
     // Cast(den_in) -> den : a float->float cast of a rank-0 scalar, foldable by const-fold.
     TensorDesc dc;
-    dc.name    = "den";
+    dc.name      = "den";
     TensorId den = g.addTensor(dc);
-    Node       cast;
-    cast.type            = OpType::Cast;
-    cast.name            = "cast_den";
-    cast.inputs          = {denIn};
-    cast.outputs         = {den};
-    cast.attr.map["to"]  = [] { Attr a; a.kind = Attr::Int; a.i = 1 /*FLOAT*/; return a; }();
+    Node     cast;
+    cast.type           = OpType::Cast;
+    cast.name           = "cast_den";
+    cast.inputs         = {denIn};
+    cast.outputs        = {den};
+    cast.attr.map["to"] = [] {
+        Attr a;
+        a.kind = Attr::Int;
+        a.i    = 1 /*FLOAT*/;
+        return a;
+    }();
     g.nodes.push_back(cast);
     // Div(num, den) -> y : both operands are now known constants, folded on the CPU.
     TensorDesc yo;
@@ -455,7 +460,12 @@ TEST(Fp16Payloads, ConstFoldScalarCastKeepsElement) {
     cast.name           = "cast_s";
     cast.inputs         = {s};
     cast.outputs        = {y};
-    cast.attr.map["to"] = [] { Attr a; a.kind = Attr::Int; a.i = 1 /*FLOAT*/; return a; }();
+    cast.attr.map["to"] = [] {
+        Attr a;
+        a.kind = Attr::Int;
+        a.i    = 1 /*FLOAT*/;
+        return a;
+    }();
     g.nodes.push_back(cast);
     g.outputs = {y};
 

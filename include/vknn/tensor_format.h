@@ -6,5 +6,5 @@
 //   - tensor_format_enum.h: the TensorFormat enum and formatStr().
 //   - nchw.h:               the NCHW shape view, cBlocks()/formatElems(), and the kNC4Block constant.
 #pragma once
-#include "vknn/tensor_format_enum.h"
 #include "vknn/nchw.h"
+#include "vknn/tensor_format_enum.h"

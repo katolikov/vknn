@@ -54,8 +54,7 @@ namespace vknn {
                 case DType::Float16:
                     halfToFloatBulk(reinterpret_cast<const fp16_t *>(data.data()), out.data(), n);
                     break;
-                case DType::Int64:
-                {
+                case DType::Int64: {
                     const int64_t *v = reinterpret_cast<const int64_t *>(data.data());
                     for (int64_t i = 0; i < n; ++i)
                     {
@@ -63,8 +62,7 @@ namespace vknn {
                     }
                     break;
                 }
-                case DType::Int32:
-                {
+                case DType::Int32: {
                     const int32_t *v = reinterpret_cast<const int32_t *>(data.data());
                     for (int64_t i = 0; i < n; ++i)
                     {
@@ -72,8 +70,7 @@ namespace vknn {
                     }
                     break;
                 }
-                case DType::UInt8:
-                {
+                case DType::UInt8: {
                     const uint8_t *v = data.data();
                     for (int64_t i = 0; i < n; ++i)
                     {
@@ -81,8 +78,7 @@ namespace vknn {
                     }
                     break;
                 }
-                case DType::Int8:
-                {
+                case DType::Int8: {
                     const int8_t *v = reinterpret_cast<const int8_t *>(data.data());
                     for (int64_t i = 0; i < n; ++i)
                     {

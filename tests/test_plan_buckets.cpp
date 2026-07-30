@@ -136,7 +136,7 @@ TEST(PlanBuckets, FixedShapeModelHasExactlyOneBucket) {
     EXPECT_EQ(s->bucketCount(), 1u);
     // The single bucket resolved N=1.
     ASSERT_EQ(s->inputInfo().size(), 1u);
-    EXPECT_EQ(s->inputInfo()[0].shape, (Shape{1, 4, 3, 3}));
+    EXPECT_EQ(s->inputInfo()[0].shape, (Shape {1, 4, 3, 3}));
 }
 
 // Running the default (N=1) shape gives relu(2*x); every repeat is byte-identical and the bucket
@@ -156,7 +156,7 @@ TEST(PlanBuckets, DefaultBucketRunsAndRepeatsByteIdentical) {
     for (int iter = 0; iter < 8; ++iter)
     {
         std::vector<float> y = runShape(*s, {1, 4, 3, 3}, x);
-        EXPECT_EQ(y, y0) << "iter " << iter;         // steady-state runs are byte-identical
+        EXPECT_EQ(y, y0) << "iter " << iter;                // steady-state runs are byte-identical
         EXPECT_EQ(s->bucketCount(), 1u) << "iter " << iter; // no bucket is added by running
     }
 }
@@ -311,7 +311,7 @@ TEST(PlanBuckets, MultiGraphVxmDispatchesByInputName) {
     // Graph A: "data" [1,4,3,3] -> conv(diag 2) -> relu -> "y".
     Graph ga = makeDynamicBatchConvRelu(4, 4, 3, 3);
     // Graph B: same structure, but its own names ("pix" -> "emb") and weight scale 3.
-    Graph gb = makeDynamicBatchConvRelu(4, 4, 3, 3);
+    Graph gb                       = makeDynamicBatchConvRelu(4, 4, 3, 3);
     gb.tensors[gb.inputs[0]].name  = "pix";
     gb.tensors[gb.outputs[0]].name = "emb";
     {
@@ -338,7 +338,7 @@ TEST(PlanBuckets, MultiGraphVxmDispatchesByInputName) {
 
     Config cfg;
     cfg.backend = BackendKind::Cpu;
-    auto s = Session::createFromVxm(path, cfg);
+    auto s      = Session::createFromVxm(path, cfg);
     std::remove(path.c_str());
     ASSERT_TRUE(s);
     ASSERT_EQ(s->bucketCount(), 2u);
@@ -406,20 +406,20 @@ TEST(PlanBuckets, MultiGraphUnnamedSoleEntryPicksBySingleInputShape) {
     Graph g2in;
     {
         TensorDesc ai;
-        ai.name    = "a";
-        ai.shape   = {1, 4, 3, 3};
-        ai.isInput = true;
-        TensorId a = g2in.addTensor(ai);
+        ai.name      = "a";
+        ai.shape     = {1, 4, 3, 3};
+        ai.isInput   = true;
+        TensorId   a = g2in.addTensor(ai);
         TensorDesc bi;
-        bi.name    = "b";
-        bi.shape   = {1, 4, 3, 3};
-        bi.isInput = true;
-        TensorId b = g2in.addTensor(bi);
+        bi.name     = "b";
+        bi.shape    = {1, 4, 3, 3};
+        bi.isInput  = true;
+        TensorId b  = g2in.addTensor(bi);
         g2in.inputs = {a, b};
         TensorDesc yo;
-        yo.name     = "sum";
-        yo.isOutput = true;
-        TensorId y  = g2in.addTensor(yo);
+        yo.name      = "sum";
+        yo.isOutput  = true;
+        TensorId y   = g2in.addTensor(yo);
         g2in.outputs = {y};
         Node n;
         n.type    = OpType::Add;
@@ -428,7 +428,7 @@ TEST(PlanBuckets, MultiGraphUnnamedSoleEntryPicksBySingleInputShape) {
         n.outputs = {y};
         g2in.nodes.push_back(n);
     }
-    Graph g1in = makeDynamicBatchConvRelu(4, 4, 5, 5);
+    Graph g1in                         = makeDynamicBatchConvRelu(4, 4, 5, 5);
     g1in.tensors[g1in.inputs[0]].name  = "pix";
     g1in.tensors[g1in.outputs[0]].name = "emb";
 
@@ -449,8 +449,8 @@ TEST(PlanBuckets, MultiGraphUnnamedSoleEntryPicksBySingleInputShape) {
     // Unnamed sole entry with the conv graph's shape: must reach bucket 1 (not the earlier add
     // bucket via its all-defaults key).
     IOTensor in;
-    in.shape = Shape {1, 4, 5, 5};
-    in.dtype = DType::Float32;
+    in.shape             = Shape {1, 4, 5, 5};
+    in.dtype             = DType::Float32;
     std::vector<float> x = ramp(1 * 4 * 5 * 5);
     in.data.resize(x.size() * 4);
     std::memcpy(in.data.data(), x.data(), in.data.size());

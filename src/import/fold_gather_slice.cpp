@@ -92,8 +92,8 @@ namespace vknn {
             nd.inputs.assign(1, data); // the dead indices initializer falls to pruneDeadInitializers
             auto setInts = [&](const char *name, std::vector<int64_t> v) {
                 Attr a;
-                a.kind           = Attr::Ints;
-                a.ints           = std::move(v);
+                a.kind            = Attr::Ints;
+                a.ints            = std::move(v);
                 nd.attr.map[name] = a;
             };
             setInts("starts", {start});

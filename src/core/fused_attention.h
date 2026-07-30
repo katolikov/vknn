@@ -64,7 +64,7 @@ namespace vknn {
     inline constexpr const char *kFaVNewStride = "fattn_vnew_stride"; // ints: new-rows v stride per row dim
     inline constexpr const char *kFaVNewN      = "fattn_vnew_n";      // int: new-rows v element stride per n step
     inline constexpr const char *kFaVNewK      = "fattn_vnew_k";      // int: new-rows v element stride per token step
-    inline constexpr int kFaVersion = 1;
+    inline constexpr int         kFaVersion    = 1;
 
     // The FusedAttention GPU kernel keeps q, the row's score vector, and the merged output row in
     // fixed-size shared arrays; head dims / token counts above these caps are refused by the pass
@@ -74,7 +74,7 @@ namespace vknn {
     // The partial kernel stages G*hd q values and a G*chunk score slab in shared memory; both
     // products are capped so the specialized arrays never exceed the gated shared budget (the op
     // sizes the chunk to 4096/G, and the pass refuses a group*headDim product past the cap).
-    inline constexpr int kFaMaxStaging  = 4096;
+    inline constexpr int kFaMaxStaging = 4096;
     // Shared bytes the kernel's arrays can occupy at the caps (sQ + sScores + sRed + sAcc).
     inline constexpr int kFaSharedBytes = (kFaMaxStaging + kFaMaxStaging + 256 + kFaMaxHeadDim) * 4;
 

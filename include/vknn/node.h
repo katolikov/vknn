@@ -22,7 +22,7 @@ namespace vknn {
         /// Activation folded into this op's epilogue, or ActType::None when unfused.
         ActType fusedAct = ActType::None;
         /// Clamp/param bounds for fusedAct (e.g. Relu6/Clip min and max), in [actLo, actHi].
-        float   actLo = 0, actHi = 0;
+        float actLo = 0, actHi = 0;
         /// For kUnary/kBinary: the UnaryType/BinaryType code. For unary ops with params (LeakyRelu/Elu
         /// alpha, HardSigmoid alpha/beta) the params live in actLo/actHi.
         int32_t subOp = 0;

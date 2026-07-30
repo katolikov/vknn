@@ -18,7 +18,7 @@ namespace vknn { namespace vk {
         uint32_t    apiVersion    = 0;
         uint32_t    driverVersion = 0;
         uint32_t    vendorID = 0, deviceID = 0;
-        uint32_t    driverID = 0;
+        uint32_t    driverID              = 0;
         uint8_t     pipelineCacheUUID[16] = {}; // device+driver pipeline-cache identity (cache guard)
 
         // Compute limits
@@ -37,8 +37,8 @@ namespace vknn { namespace vk {
         bool     timestampSupported   = false;
 
         // Feature flags we exploit
-        bool shaderFloat16        = false;
-        bool shaderInt8           = false;
+        bool shaderFloat16 = false;
+        bool shaderInt8    = false;
         // Core VkPhysicalDeviceFeatures::shaderInt64 — 64-bit ints in shader code. The Cast-from-int64
         // path does not require it (int64 shape/index tensors decode to compute-precision float at the
         // pack boundary, exact for their small magnitudes), so this is reported for diagnostics only.
@@ -57,7 +57,7 @@ namespace vknn { namespace vk {
         bool subgroupArithmetic   = false;
         bool subgroupShuffle      = false;
         // VK_KHR/EXT_global_priority: the queue scheduling-priority tier the Config::priority knob drives.
-        bool globalPriority       = false;
+        bool globalPriority = false;
 
         // VK_KHR_synchronization2 (feature enabled at device creation): scoped VkMemoryBarrier2
         // between compute dispatches instead of the coarser sync1 access classes.
@@ -82,7 +82,7 @@ namespace vknn { namespace vk {
         // VkPhysicalDeviceShaderIntegerDotProductProperties acceleration bits. The feature bit
         // (int8DotProduct) alone only promises the OpSDot* opcodes EXIST — a driver may emulate
         // them slower than plain FMA, so int8-dot kernels gate on these instead.
-        bool int8DotAccel8Bit     = false; // integerDotProduct8BitSignedAccelerated
+        bool int8DotAccel8Bit      = false; // integerDotProduct8BitSignedAccelerated
         bool int8DotAccel4x8Packed = false; // integerDotProduct4x8BitPackedSignedAccelerated
 
         /// One supported cooperative-matrix configuration row, as enumerated from the driver.

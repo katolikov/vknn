@@ -2,13 +2,13 @@
 #include "vknn/logging.h"
 
 #if defined(_WIN32)
-#    define VKNN_HAVE_MMAP 0
+#define VKNN_HAVE_MMAP 0
 #else
-#    define VKNN_HAVE_MMAP 1
-#    include <fcntl.h>
-#    include <sys/mman.h>
-#    include <sys/stat.h>
-#    include <unistd.h>
+#define VKNN_HAVE_MMAP 1
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace vknn {

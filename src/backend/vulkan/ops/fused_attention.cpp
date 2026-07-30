@@ -45,8 +45,8 @@ namespace vknn {
         // (kvRows * chunks) grid over the base kernel's, and the full-width workgroup keeps every
         // lane busy in the p.V sweep (measured best among chunk 64..256 x width 64..256 tiles on
         // the reference decode; the differences past this pick are a few percent).
-        constexpr int kFaSgChunkTokens    = 128;
-        constexpr int kFaSgWorkgroupSize  = 256;
+        constexpr int kFaSgChunkTokens   = 128;
+        constexpr int kFaSgWorkgroupSize = 256;
 
         struct FusedAttentionOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> partialPipe;
@@ -58,14 +58,14 @@ namespace vknn {
             // segment's allocation (env.kvqScale), never re-decided here — kernel and buffers
             // cannot disagree. The scale buffers are segment-owned; the raw pointers stay valid
             // for this op instance's lifetime.
-            bool                                 useKvq = false;
-            vk::Buffer                          *kvqKScale = nullptr, *kvqVScale = nullptr;
-            FaPartialPC                          partialPc {};
-            FaCombinePC                          combinePc {};
-            std::shared_ptr<vk::Buffer>          geom;      // dims + strides + row strides, deduped SSBO
-            std::shared_ptr<vk::Buffer>          scratch;   // fp32 chunk partials, rows*chunks*(hd+2)
-            std::shared_ptr<vk::Buffer>          hold[6];   // per-operand, set when that operand is a constant initializer
-            std::shared_ptr<vk::Buffer>          maskDummy; // bound in the mask slot when the node has no mask
+            bool                        useKvq    = false;
+            vk::Buffer                 *kvqKScale = nullptr, *kvqVScale = nullptr;
+            FaPartialPC                 partialPc {};
+            FaCombinePC                 combinePc {};
+            std::shared_ptr<vk::Buffer> geom;      // dims + strides + row strides, deduped SSBO
+            std::shared_ptr<vk::Buffer> scratch;   // fp32 chunk partials, rows*chunks*(hd+2)
+            std::shared_ptr<vk::Buffer> hold[6];   // per-operand, set when that operand is a constant initializer
+            std::shared_ptr<vk::Buffer> maskDummy; // bound in the mask slot when the node has no mask
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const std::vector<int64_t> &dims    = node.attr.getints(kFaDims);
@@ -87,9 +87,9 @@ namespace vknn {
                 partialPc.hasMask = node.inputs.size() > 3 && node.inputs[3] != kNoTensor ? 1 : 0;
                 // Split-KV form: token s >= pastLen reads the new-rows sources (inputs 4/5) through
                 // their own strides; the unsplit form sets pastLen = C so the branch never fires.
-                const bool split   = node.attr.geti(kFaSplit, 0) != 0 && node.inputs.size() >= 6;
-                kvqKScale          = split && env.kvqScale ? env.kvqScale(node.inputs[1]) : nullptr;
-                kvqVScale          = split && env.kvqScale ? env.kvqScale(node.inputs[2]) : nullptr;
+                const bool split = node.attr.geti(kFaSplit, 0) != 0 && node.inputs.size() >= 6;
+                kvqKScale        = split && env.kvqScale ? env.kvqScale(node.inputs[1]) : nullptr;
+                kvqVScale        = split && env.kvqScale ? env.kvqScale(node.inputs[2]) : nullptr;
                 if ((kvqKScale != nullptr) != (kvqVScale != nullptr))
                 {
                     // The shared eligibility rule admits K and V together or not at all; one-sided
@@ -97,14 +97,14 @@ namespace vknn {
                     // to run through.
                     throw Error(Status::RuntimeError, "FusedAttention '" + node.name + "': int8 KV cache allocated for only one of the past K/V sources");
                 }
-                useKvq = kvqKScale != nullptr;
-                partialPc.pastLen  = split ? (int) node.attr.geti(kFaPastLen) : partialPc.C;
-                partialPc.kNewN    = (int) node.attr.geti(kFaKNewN);
-                partialPc.kNewK    = (int) node.attr.geti(kFaKNewK);
-                partialPc.vNewN    = (int) node.attr.geti(kFaVNewN);
-                partialPc.vNewK    = (int) node.attr.geti(kFaVNewK);
-                const float scale = node.attr.getf(kFaScale, 1.f);
-                const float mask  = node.attr.getf(kFaMaskScale, 1.f);
+                useKvq              = kvqKScale != nullptr;
+                partialPc.pastLen   = split ? (int) node.attr.geti(kFaPastLen) : partialPc.C;
+                partialPc.kNewN     = (int) node.attr.geti(kFaKNewN);
+                partialPc.kNewK     = (int) node.attr.geti(kFaKNewK);
+                partialPc.vNewN     = (int) node.attr.geti(kFaVNewN);
+                partialPc.vNewK     = (int) node.attr.geti(kFaVNewK);
+                const float scale   = node.attr.getf(kFaScale, 1.f);
+                const float mask    = node.attr.getf(kFaMaskScale, 1.f);
                 partialPc.scale     = scale;
                 partialPc.maskScale = mask;
 
@@ -204,7 +204,7 @@ namespace vknn {
                         chunkTokens = (partialPc.C + kFaMaxChunks - 1) / kFaMaxChunks;
                     }
                 }
-                int64_t chunks = (partialPc.C + chunkTokens - 1) / chunkTokens;
+                int64_t chunks   = (partialPc.C + chunkTokens - 1) / chunkTokens;
                 partialPc.chunks = (int) chunks;
                 combinePc        = {(int) rows, partialPc.hd, (int) chunks};
 
@@ -212,7 +212,7 @@ namespace vknn {
                 // stride arrays and the row strides.
                 const std::vector<int64_t> &kNewStride = node.attr.getints(kFaKNewStride);
                 const std::vector<int64_t> &vNewStride = node.attr.getints(kFaVNewStride);
-                std::vector<int32_t> dimsKv(rank), qs(rank), ks(rank), vs(rank), ms(rank, 0), rs(rank), kn2(rank, 0), vn2(rank, 0);
+                std::vector<int32_t>        dimsKv(rank), qs(rank), ks(rank), vs(rank), ms(rank, 0), rs(rank), kn2(rank, 0), vn2(rank, 0);
                 for (int i = 0; i < rank; ++i)
                 {
                     dimsKv[i] = (int32_t) (i == groupAxis ? 1 : dims[(size_t) i]);
@@ -279,31 +279,28 @@ namespace vknn {
                     // size an array in GLSL, so the host computes them), the workgroup width, and
                     // the vec4 path selectors. The kvq twin shares the whole scheme and appends the
                     // two scale bindings (12/13).
-                    const std::vector<uint32_t> spec = {(uint32_t) groupSize,           (uint32_t) partialPc.hd, (uint32_t) chunkTokens, (uint32_t) (groupSize * partialPc.hd / 4),
-                                                        (uint32_t) (groupSize * chunkTokens), (uint32_t) wgs,          kVec4 ? 1u : 0u,        vVec4 ? 1u : 0u,
-                                                        (uint32_t) (groupSize * wgs)};
-                    partialPipe                      = env.pipeline(shader(useKvq ? "fused_attention_sg_kvq" : "fused_attention_sg", env.useFp16), useKvq ? 14u : 12u, sizeof(FaPartialPC), spec);
+                    const std::vector<uint32_t> spec = {(uint32_t) groupSize, (uint32_t) partialPc.hd, (uint32_t) chunkTokens, (uint32_t) (groupSize * partialPc.hd / 4), (uint32_t) (groupSize * chunkTokens), (uint32_t) wgs, kVec4 ? 1u : 0u, vVec4 ? 1u : 0u, (uint32_t) (groupSize * wgs)};
+                    partialPipe = env.pipeline(shader(useKvq ? "fused_attention_sg_kvq" : "fused_attention_sg", env.useFp16), useKvq ? 14u : 12u, sizeof(FaPartialPC), spec);
                 } else
                 {
                     // Spec constants: G, HD, CHUNK plus the two shared-array products (a spec-constant
                     // product cannot size an array in GLSL, so the host computes them). The kvq twin
                     // shares the scheme and appends the two scale bindings (8/9).
-                    const std::vector<uint32_t> spec = {(uint32_t) groupSize, (uint32_t) partialPc.hd, (uint32_t) chunkTokens,
-                                                        (uint32_t) (groupSize * partialPc.hd), (uint32_t) (groupSize * chunkTokens)};
-                    partialPipe                      = env.pipeline(shader(useKvq ? "fused_attention_kvq" : "fused_attention", env.useFp16), useKvq ? 10u : 8u, sizeof(FaPartialPC), spec);
+                    const std::vector<uint32_t> spec = {(uint32_t) groupSize, (uint32_t) partialPc.hd, (uint32_t) chunkTokens, (uint32_t) (groupSize * partialPc.hd), (uint32_t) (groupSize * chunkTokens)};
+                    partialPipe = env.pipeline(shader(useKvq ? "fused_attention_kvq" : "fused_attention", env.useFp16), useKvq ? 10u : 8u, sizeof(FaPartialPC), spec);
                 }
                 combinePipe = env.pipeline(shader("fused_attention_combine", env.useFp16), 2, sizeof(FaCombinePC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 const bool  split = partialPc.pastLen < partialPc.C;
-                vk::Buffer *q    = operandBuf(env, node.inputs[0], hold[0]);
-                vk::Buffer *k    = operandBuf(env, node.inputs[1], hold[1]);
-                vk::Buffer *v    = operandBuf(env, node.inputs[2], hold[2]);
-                vk::Buffer *mask = partialPc.hasMask ? operandBuf(env, node.inputs[3], hold[3]) : maskDummy.get();
-                vk::Buffer *kNew = split ? operandBuf(env, node.inputs[4], hold[4]) : maskDummy.get();
-                vk::Buffer *vNew = split ? operandBuf(env, node.inputs[5], hold[5]) : maskDummy.get();
-                vk::Buffer *dst  = env.devBuf(node.outputs[0]);
+                vk::Buffer *q     = operandBuf(env, node.inputs[0], hold[0]);
+                vk::Buffer *k     = operandBuf(env, node.inputs[1], hold[1]);
+                vk::Buffer *v     = operandBuf(env, node.inputs[2], hold[2]);
+                vk::Buffer *mask  = partialPc.hasMask ? operandBuf(env, node.inputs[3], hold[3]) : maskDummy.get();
+                vk::Buffer *kNew  = split ? operandBuf(env, node.inputs[4], hold[4]) : maskDummy.get();
+                vk::Buffer *vNew  = split ? operandBuf(env, node.inputs[5], hold[5]) : maskDummy.get();
+                vk::Buffer *dst   = env.devBuf(node.outputs[0]);
                 // Pass 1: one workgroup per (KV row, chunk); the 1-D grid spills into y and the
                 // kernel folds it back through gl_WorkGroupID.y. The subgroup kernel re-binds the
                 // K/V (and split new-source) buffers at 8..11 as its vec4 views; a kvq node
@@ -311,8 +308,8 @@ namespace vknn {
                 std::vector<VkBuffer> bindings;
                 if (useSgKernel)
                 {
-                    bindings = {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle(), kNew->handle(), vNew->handle(), k->handle(), v->handle(),
-                                kNew->handle(), vNew->handle()};
+                    bindings = {q->handle(),    k->handle(),    v->handle(), scratch->handle(), mask->handle(), geom->handle(),
+                                kNew->handle(), vNew->handle(), k->handle(), v->handle(),       kNew->handle(), vNew->handle()};
                 } else
                 {
                     bindings = {q->handle(), k->handle(), v->handle(), scratch->handle(), mask->handle(), geom->handle(), kNew->handle(), vNew->handle()};

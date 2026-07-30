@@ -32,7 +32,7 @@ namespace vknn {
                 int64_t outC = W.shape[0], inCg = W.shape[1], kh = W.shape[2], kw = W.shape[3];
                 // Attribute lists shorter than their 2-spatial-dim length (a malformed graph) pad
                 // with identity values instead of indexing past the vector.
-                auto    ints = [&](const char *k, std::vector<int64_t> d) {
+                auto ints = [&](const char *k, std::vector<int64_t> d) {
                     std::vector<int64_t> v = node.attr.getints(k);
                     if (v.empty())
                     {
@@ -53,7 +53,7 @@ namespace vknn {
                 // Pads and output extent through the shared forward geometry (core/conv_geom.h),
                 // which resolves auto_pad (SAME_UPPER/SAME_LOWER/VALID) into begin/end pads; the
                 // loop below reads only the begin pads (the end pads are folded into outH/outW).
-                ConvGeom geo  = convGeom(x.h, x.w, kh, kw, node.attr);
+                ConvGeom geo = convGeom(x.h, x.w, kh, kw, node.attr);
                 int64_t  pt = geo.padT, pl = geo.padL;
                 int64_t  outH = geo.outH;
                 int64_t  outW = geo.outW;
@@ -62,9 +62,9 @@ namespace vknn {
                 // kw == 1 so outW == 1): the output keeps the input's rank, mirroring inferShapes.
                 const bool   oneD = X.shape.size() == 3 && outW == 1;
                 float       *y    = cpu::allocOut(Y, oneD ? Shape {x.n, outC, outH} : Shape {x.n, outC, outH, outW});
-                const float *xd = X.host.f32();
-                const float *wd = W.host.f32();
-                const float *bd = B ? B->host.f32() : nullptr;
+                const float *xd   = X.host.f32();
+                const float *wd   = W.host.f32();
+                const float *bd   = B ? B->host.f32() : nullptr;
 
                 int64_t outCg = outC / group; // output channels per group
                 // Each (image, output channel) pair owns one output plane and accumulates entirely
@@ -85,7 +85,7 @@ namespace vknn {
                         {
                             for (int64_t ox = 0; ox < outW; ++ox)
                             {
-                                float   acc = bias;
+                                float acc = bias;
                                 // Top-left input coordinate of this output's receptive field, shifted
                                 // by the begin pad so a negative value lands in the padded margin.
                                 int64_t iy0 = oy * sh - pt;

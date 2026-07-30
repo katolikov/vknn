@@ -19,14 +19,14 @@ namespace vknn {
                 int64_t      n = numElements(g.desc(node.outputs[0]).shape);
                 // Flatten every logical element onto the C axis ({1, n, 1, 1}) so BoundaryConvert walks a
                 // 1-D index range and its layout math degenerates to a straight element-for-element copy.
-                sh.n           = 1;
-                sh.c           = n;
-                sh.h           = 1;
-                sh.w           = 1;
+                sh.n = 1;
+                sh.c = n;
+                sh.h = 1;
+                sh.w = 1;
                 // Storage dtype of a tensor: fp32 when it is inside a markFp32-promoted region (storeFp32),
                 // otherwise the segment's base precision (fp16 when baseFp16, else fp32). The src/dst pair
                 // straddles the region frontier, so these two dtypes differ and select the cross-dtype shader.
-                auto dt        = [&](TensorId t) {
+                auto dt = [&](TensorId t) {
                     return g.desc(t).storeFp32 ? DType::Float32 : (env.baseFp16 ? DType::Float16 : DType::Float32);
                 };
                 srcDt = dt(node.inputs[0]);

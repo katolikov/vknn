@@ -41,13 +41,12 @@ using namespace vknn;
 // example is self-contained on an Android device.
 // ---------------------------------------------------------------------------------------------------
 struct DmaBuffer {
-    int    fd         = -1;        // the DMA-BUF file descriptor
-    void  *cpuMapping = nullptr;   // CPU-visible mmap of the buffer (fill inputs / read outputs here)
-    size_t byteLength = 0;         // size of the buffer in bytes
+    int    fd         = -1;      // the DMA-BUF file descriptor
+    void  *cpuMapping = nullptr; // CPU-visible mmap of the buffer (fill inputs / read outputs here)
+    size_t byteLength = 0;       // size of the buffer in bytes
 };
 
-static DmaBuffer allocDmaBuf(size_t bytes) noexcept
-{
+static DmaBuffer allocDmaBuf(size_t bytes) noexcept {
     DmaBuffer buffer;
     buffer.byteLength = bytes;
     struct {
@@ -74,8 +73,7 @@ static DmaBuffer allocDmaBuf(size_t bytes) noexcept
     return buffer;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc < 2)
     {
         printf("usage: %s model.vxm\n", argv[0]);
@@ -86,8 +84,8 @@ int main(int argc, char **argv)
     // The cache file (here "<model>.vxm.cache") is written on teardown and reused next time for a fast
     // warm start. Passing an empty Config also works — it defaults to "<model>.cache" next to the model.
     Config cfg;
-    cfg.cacheFile    = std::string(argv[1]) + ".cache";
-    Model  model     = Model::load(argv[1], cfg);
+    cfg.cacheFile = std::string(argv[1]) + ".cache";
+    Model model   = Model::load(argv[1], cfg);
     if (!model)
     {
         fprintf(stderr, "failed to load %s\n", argv[1]);
@@ -97,9 +95,9 @@ int main(int argc, char **argv)
     // Step 2 - see what the model expects and produces.
     // inputInfo()/outputInfo() report each boundary tensor's name, NCHW shape and element count, so we
     // can size a DMA-BUF for every one of them without hand-specifying anything.
-    Session             *session      = model.session();
-    std::vector<IOInfo>  modelInputs   = session->inputInfo();
-    std::vector<IOInfo>  modelOutputs  = session->outputInfo();
+    Session            *session      = model.session();
+    std::vector<IOInfo> modelInputs  = session->inputInfo();
+    std::vector<IOInfo> modelOutputs = session->outputInfo();
 
     // Step 3 - give the engine one caller-owned DMA-BUF per input.
     // Each fd is bound as a zero-copy INPUT declared NCHW fp32 (the default): we write ordinary

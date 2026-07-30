@@ -78,7 +78,7 @@ namespace vknn {
             // [1,C,1,..] to the data input's rank: rank-4 data gets the NC4-friendly [1,C,1,1]
             // channel-broadcast class; other ranks broadcast by right-alignment the same way.
             Shape pshape(xs.size(), 1);
-            pshape[1] = C;
+            pshape[1]     = C;
             auto addParam = [&](const char *suffix, const std::vector<float> &v) -> TensorId {
                 TensorDesc d;
                 d.name          = bn.name + suffix;
@@ -99,10 +99,10 @@ namespace vknn {
             TensorId bId = addParam("#bn_shift", b);
 
             TensorDesc mi;
-            mi.name       = bn.name + "#bn_mul";
-            mi.shape      = g.desc(bn.outputs[0]).shape;
-            mi.dtype      = g.desc(bn.outputs[0]).dtype;
-            TensorId mid  = g.addTensor(mi);
+            mi.name      = bn.name + "#bn_mul";
+            mi.shape     = g.desc(bn.outputs[0]).shape;
+            mi.dtype     = g.desc(bn.outputs[0]).dtype;
+            TensorId mid = g.addTensor(mi);
 
             Node add;
             add.type    = OpType::Add;

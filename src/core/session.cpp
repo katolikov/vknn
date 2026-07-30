@@ -6,8 +6,8 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
-#include <limits>
 #include <fstream>
+#include <limits>
 #include <set>
 #include <sys/stat.h>
 
@@ -744,7 +744,8 @@ namespace vknn {
         // invisible to it. Must run after the island fold: that pass reassigns nodes to the CPU,
         // and a reassigned MatMul needs its weight materialized like any other CPU node.
         materializeQuantWeights(graph_, [&](size_t n, const Node &nd) {
-            return nd.type == OpType::MatMul && weightQuantHasNativeMatMulKernel(weightQuantFormat(nd)) && nodeBackendIdx_[n] >= 0 && backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Vulkan;
+            return nd.type == OpType::MatMul && weightQuantHasNativeMatMulKernel(weightQuantFormat(nd)) && nodeBackendIdx_[n] >= 0 &&
+                   backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Vulkan;
         });
 
         // --- load CPU-consumed initializers into the pool (fp16 -> fp32 decode) ---
@@ -1504,8 +1505,7 @@ namespace vknn {
         }
         if (rangeSets.empty() || rangeSets.size() > (size_t) std::max(1, cfg_.decodeChainSteps))
         {
-            VKNN_ERROR << "link: " << rangeSets.size() << " range set(s) for '" << outputName << "' -> '" << inputName << "'; a link carries 1.." << std::max(1, cfg_.decodeChainSteps)
-                       << " sets (Config::decodeChainSteps)";
+            VKNN_ERROR << "link: " << rangeSets.size() << " range set(s) for '" << outputName << "' -> '" << inputName << "'; a link carries 1.." << std::max(1, cfg_.decodeChainSteps) << " sets (Config::decodeChainSteps)";
             return Status::InvalidArgument;
         }
         for (const std::vector<LinkRange> &ranges: rangeSets)
@@ -1845,8 +1845,8 @@ namespace vknn {
                 VKNN_ERROR << "argmax: '" << outputName << "' has no values to reduce (no completed run)";
                 return Status::RuntimeError;
             }
-            const float  *data  = reinterpret_cast<const float *>(rt.host.bytes.data());
-            const int64_t elems = rt.shape.empty() ? (int64_t) (rt.host.bytes.size() / sizeof(float)) : numElements(rt.shape);
+            const float  *data   = reinterpret_cast<const float *>(rt.host.bytes.data());
+            const int64_t elems  = rt.shape.empty() ? (int64_t) (rt.host.bytes.size() / sizeof(float)) : numElements(rt.shape);
             float         best   = -std::numeric_limits<float>::infinity();
             int64_t       bestAt = -1;
             for (int64_t i = 0; i < elems; ++i)
@@ -2325,8 +2325,8 @@ namespace vknn {
             // otherwise falls back to a full readback (a dynamic-row output whose row count only lands at
             // run time); mirror that exact per-run range check here so io.shape can never claim one row
             // while rt.host holds the full [R, V] buffer.
-            Shape    outShape = rt.shape;
-            auto     rowSel   = rowSelectOutputs_.find({bucketIndex, oid});
+            Shape outShape = rt.shape;
+            auto  rowSel   = rowSelectOutputs_.find({bucketIndex, oid});
             if (rowSel != rowSelectOutputs_.end() && !outShape.empty())
             {
                 const int64_t rowElems = outShape.back();

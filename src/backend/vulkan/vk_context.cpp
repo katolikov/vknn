@@ -123,15 +123,15 @@ namespace vknn { namespace vk {
         props2.pNext = &driver;
         vkGetPhysicalDeviceProperties2(phys_, &props2);
 
-        const auto &p                 = props2.properties;
-        caps_.deviceName              = p.deviceName;
-        caps_.apiVersion              = p.apiVersion;
-        caps_.driverVersion           = p.driverVersion;
-        caps_.vendorID                = p.vendorID;
-        caps_.deviceID                = p.deviceID;
-        caps_.driverID                = driver.driverID;
-        caps_.driverName              = driver.driverName;
-        caps_.driverInfo              = driver.driverInfo;
+        const auto &p       = props2.properties;
+        caps_.deviceName    = p.deviceName;
+        caps_.apiVersion    = p.apiVersion;
+        caps_.driverVersion = p.driverVersion;
+        caps_.vendorID      = p.vendorID;
+        caps_.deviceID      = p.deviceID;
+        caps_.driverID      = driver.driverID;
+        caps_.driverName    = driver.driverName;
+        caps_.driverInfo    = driver.driverInfo;
         std::memcpy(caps_.pipelineCacheUUID, p.pipelineCacheUUID, sizeof(caps_.pipelineCacheUUID));
         caps_.subgroupSize            = subgroup.subgroupSize;
         caps_.subgroupArithmetic      = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
@@ -165,8 +165,8 @@ namespace vknn { namespace vk {
         VkPhysicalDeviceVulkanMemoryModelFeatures    memModelFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES};
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopmatFeat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         VkPhysicalDeviceShaderFloat8FeaturesEXT      float8Feat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT};
-        VkBaseOutStructure *featureTail = reinterpret_cast<VkBaseOutStructure *>(&tsem);
-        auto                chainFeatureQuery = [&featureTail](bool present, void *featureStruct) {
+        VkBaseOutStructure                          *featureTail       = reinterpret_cast<VkBaseOutStructure *>(&tsem);
+        auto                                         chainFeatureQuery = [&featureTail](bool present, void *featureStruct) {
             if (present)
             {
                 featureTail->pNext = reinterpret_cast<VkBaseOutStructure *>(featureStruct);
@@ -191,19 +191,19 @@ namespace vknn { namespace vk {
         caps_.int8DotProduct    = dot.shaderIntegerDotProduct;
         caps_.timelineSemaphore = tsem.timelineSemaphore;
 
-        caps_.synchronization2            = sync2Feat.synchronization2;
-        caps_.subgroupSizeControl         = subgroupSizeFeat.subgroupSizeControl;
-        caps_.computeFullSubgroups        = subgroupSizeFeat.computeFullSubgroups;
-        caps_.minSubgroupSize             = subgroupSizeProps.minSubgroupSize;
-        caps_.maxSubgroupSize             = subgroupSizeProps.maxSubgroupSize;
-        caps_.requiredSubgroupSizeCompute = (subgroupSizeProps.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
-        caps_.vulkanMemoryModel           = memModelFeat.vulkanMemoryModel;
+        caps_.synchronization2             = sync2Feat.synchronization2;
+        caps_.subgroupSizeControl          = subgroupSizeFeat.subgroupSizeControl;
+        caps_.computeFullSubgroups         = subgroupSizeFeat.computeFullSubgroups;
+        caps_.minSubgroupSize              = subgroupSizeProps.minSubgroupSize;
+        caps_.maxSubgroupSize              = subgroupSizeProps.maxSubgroupSize;
+        caps_.requiredSubgroupSizeCompute  = (subgroupSizeProps.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+        caps_.vulkanMemoryModel            = memModelFeat.vulkanMemoryModel;
         caps_.vulkanMemoryModelDeviceScope = memModelFeat.vulkanMemoryModelDeviceScope;
-        caps_.cooperativeMatrixFeature    = coopmatFeat.cooperativeMatrix;
-        caps_.shaderFloat8                = float8Feat.shaderFloat8;
-        caps_.shaderFloat8CoopMat         = float8Feat.shaderFloat8CooperativeMatrix;
-        caps_.int8DotAccel8Bit            = dotProps.integerDotProduct8BitSignedAccelerated;
-        caps_.int8DotAccel4x8Packed       = dotProps.integerDotProduct4x8BitPackedSignedAccelerated;
+        caps_.cooperativeMatrixFeature     = coopmatFeat.cooperativeMatrix;
+        caps_.shaderFloat8                 = float8Feat.shaderFloat8;
+        caps_.shaderFloat8CoopMat          = float8Feat.shaderFloat8CooperativeMatrix;
+        caps_.int8DotAccel8Bit             = dotProps.integerDotProduct8BitSignedAccelerated;
+        caps_.int8DotAccel4x8Packed        = dotProps.integerDotProduct4x8BitPackedSignedAccelerated;
 
         caps_.pushDescriptor       = caps_.has("VK_KHR_push_descriptor");
         caps_.dedicatedAllocation  = caps_.has("VK_KHR_dedicated_allocation");
@@ -219,8 +219,9 @@ namespace vknn { namespace vk {
         // treat as "no coopmat" (the SSBO kernels remain the only path).
         if (caps_.cooperativeMatrix && caps_.cooperativeMatrixFeature)
         {
-            auto enumerateCoopmat = reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(vkGetInstanceProcAddr(instance_, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
-            uint32_t rowCount     = 0;
+            auto enumerateCoopmat = reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
+                vkGetInstanceProcAddr(instance_, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
+            uint32_t rowCount = 0;
             if (enumerateCoopmat && enumerateCoopmat(phys_, &rowCount, nullptr) == VK_SUCCESS && rowCount > 0)
             {
                 std::vector<VkCooperativeMatrixPropertiesKHR> rows(rowCount, VkCooperativeMatrixPropertiesKHR {VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR});
@@ -230,7 +231,8 @@ namespace vknn { namespace vk {
                     for (uint32_t i = 0; i < rowCount; ++i)
                     {
                         const auto &r = rows[i];
-                        caps_.coopmatShapes.push_back({r.MSize, r.NSize, r.KSize, (uint32_t) r.AType, (uint32_t) r.BType, (uint32_t) r.CType, (uint32_t) r.ResultType, (uint32_t) r.scope, r.saturatingAccumulation == VK_TRUE});
+                        caps_.coopmatShapes.push_back(
+                            {r.MSize, r.NSize, r.KSize, (uint32_t) r.AType, (uint32_t) r.BType, (uint32_t) r.CType, (uint32_t) r.ResultType, (uint32_t) r.scope, r.saturatingAccumulation == VK_TRUE});
                     }
                 }
             }
@@ -396,8 +398,8 @@ namespace vknn { namespace vk {
         VkPhysicalDeviceShaderFloat8FeaturesEXT float8Feat {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT};
         float8Feat.shaderFloat8                  = VK_TRUE;
         float8Feat.shaderFloat8CooperativeMatrix = caps_.shaderFloat8CoopMat;
-        VkBaseOutStructure *enableTail = reinterpret_cast<VkBaseOutStructure *>(&tsem);
-        auto                chainFeatureEnable = [&enableTail](bool enable, void *featureStruct) {
+        VkBaseOutStructure *enableTail           = reinterpret_cast<VkBaseOutStructure *>(&tsem);
+        auto                chainFeatureEnable   = [&enableTail](bool enable, void *featureStruct) {
             if (enable)
             {
                 enableTail->pNext = reinterpret_cast<VkBaseOutStructure *>(featureStruct);
@@ -427,12 +429,10 @@ namespace vknn { namespace vk {
             if (gpci.globalPriority == VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR)
             {
                 gpci.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
-            }
-            else if (gpci.globalPriority == VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR)
+            } else if (gpci.globalPriority == VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR)
             {
                 gpci.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR;
-            }
-            else
+            } else
             {
                 qci.pNext = nullptr;
             }

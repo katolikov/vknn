@@ -58,10 +58,10 @@ namespace {
 
     struct Flow {
         std::unique_ptr<Session> sess;
-        std::vector<float>       pastK, pastV;     // host cache [KV, C, hd]
-        int                      p = 0;            // absolute position
-        std::vector<float>       logitsRow;        // last real token's logits row
-        std::vector<int64_t>     tokens;           // full greedy stream across all turns
+        std::vector<float>       pastK, pastV; // host cache [KV, C, hd]
+        int                      p = 0;        // absolute position
+        std::vector<float>       logitsRow;    // last real token's logits row
+        std::vector<int64_t>     tokens;       // full greedy stream across all turns
     };
 
     IOTensor i64Tensor(const char *name, Shape s, const std::vector<int64_t> &v) {
@@ -158,7 +158,7 @@ namespace {
     // (kvFoldRowRanges), first pass re-seeding the resident cache from the host buffers, then one
     // readResident materialization (resident past + the last chunk's pending rows) and clearLinks.
     bool chunkedPrefill(Flow &f, size_t chunkBucket, int64_t chunkS, const std::vector<int64_t> &prompt) {
-        const int64_t T = kCtx + chunkS;
+        const int64_t T            = kCtx + chunkS;
         const char   *presNames[2] = {"present.0.key", "present.0.value"};
         const char   *pastNames[2] = {"past_key_values.0.key", "past_key_values.0.value"};
         for (int part = 0; part < 2; ++part)
@@ -304,7 +304,7 @@ namespace {
     }
 
     Flow makeFlow(const std::string &vxmPath) {
-        Flow f;
+        Flow   f;
         Config cfg;
         cfg.backend = BackendKind::Cpu;
         f.sess      = Session::createFromVxm(vxmPath, cfg);
@@ -408,10 +408,10 @@ TEST(ChunkPrefill, ChunkedPrefillMatchesLegacyByteExact) {
     ASSERT_GT(threeBytes, 0);
     printf("[chunk-prefill] synthetic .vxm: 2 buckets = %ld bytes, +chunk bucket = %ld bytes (+%ld)\n", twoBytes, threeBytes, threeBytes - twoBytes);
 
-    const size_t chunkTokens = (size_t) kChunkPrefillTokens;
+    const size_t                            chunkTokens  = (size_t) kChunkPrefillTokens;
     const std::vector<std::vector<int64_t>> firstPrompts = {
-        promptOf(5, 3),                // shorter than one chunk
-        promptOf(2 * chunkTokens, 11), // exact chunk multiple
+        promptOf(5, 3),                    // shorter than one chunk
+        promptOf(2 * chunkTokens, 11),     // exact chunk multiple
         promptOf(2 * chunkTokens + 1, 19), // one over a multiple
     };
     for (size_t caseIdx = 0; caseIdx < firstPrompts.size(); ++caseIdx)

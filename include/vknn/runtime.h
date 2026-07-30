@@ -28,13 +28,11 @@ namespace vknn {
             {
                 c.cacheFile = cacheFile;
             } else if (c.cacheFile.empty())
-            {
-                c.cacheFile = defaultCacheFile(path);
-            }
+            { c.cacheFile = defaultCacheFile(path); }
             // Dispatch on extension: a pre-optimized ".vxm" skips ONNX parsing + passes; anything else is
             // ONNX.
             constexpr size_t kVxmExtLen = 4; // length of the ".vxm" extension suffix
-            bool isVxm = path.size() >= kVxmExtLen && path.compare(path.size() - kVxmExtLen, kVxmExtLen, ".vxm") == 0;
+            bool             isVxm      = path.size() >= kVxmExtLen && path.compare(path.size() - kVxmExtLen, kVxmExtLen, ".vxm") == 0;
             return isVxm ? Session::createFromVxm(path, c) : Session::createFromOnnx(path, c);
         }
         /// Place a model's cache file inside a directory: "<dir>/<model file name without extension>.cache".

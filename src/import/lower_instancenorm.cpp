@@ -35,7 +35,7 @@ namespace vknn {
                 continue;
             }
             TensorId x = g.nodes[i].inputs[0], sc = g.nodes[i].inputs[1], bi = g.nodes[i].inputs[2];
-            TensorId out = g.nodes[i].outputs[0];
+            TensorId out      = g.nodes[i].outputs[0];
             bool     paramsOk = true;
             for (TensorId p: {sc, bi})
             {
@@ -124,8 +124,8 @@ namespace vknn {
                 axes.ints.push_back((int64_t) d);
             }
             Attr keep;
-            keep.kind = Attr::Int;
-            keep.i    = 1;
+            keep.kind       = Attr::Int;
+            keep.i          = 1;
             auto reduceMean = [&](const char *suffix, TensorId in, TensorId o) {
                 Node r;
                 r.type                 = OpType::Reduce;

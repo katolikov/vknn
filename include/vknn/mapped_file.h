@@ -32,7 +32,8 @@ namespace vknn {
         }
 
       private:
-        MappedFile(const unsigned char *base, size_t size): base_(base), size_(size) {}
+        MappedFile(const unsigned char *base, size_t size): base_(base), size_(size) {
+        }
         const unsigned char *base_ = nullptr;
         size_t               size_ = 0;
     };

@@ -87,9 +87,9 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                VkBuffer              dst = env.devBuf(node.outputs[0])->handle();
-                VkBuffer              w   = rtWeight ? env.devBuf(node.inputs[1])->handle() : wbuf->handle();
-                VkBuffer              b   = rtBias ? env.devBuf(node.inputs[2])->handle() : bbuf->handle();
+                VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
+                VkBuffer              w    = rtWeight ? env.devBuf(node.inputs[1])->handle() : wbuf->handle();
+                VkBuffer              b    = rtBias ? env.devBuf(node.inputs[2])->handle() : bbuf->handle();
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), w, b, dst};
                 epi.append(bufs, node, env, dst);
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, kConvTransposeLocalSize));

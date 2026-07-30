@@ -118,7 +118,7 @@ TEST(VxmBuckets, LegacyFileLoadsAsOneBucket) {
     ASSERT_EQ(names.size(), 1u);
     EXPECT_EQ(buckets[0].tensors.size(), g.tensors.size());
     EXPECT_EQ(buckets[0].nodes.size(), g.nodes.size());
-    EXPECT_EQ(buckets[0].desc(buckets[0].inputs[0]).shape, (Shape{1, 3, 8, 8}));
+    EXPECT_EQ(buckets[0].desc(buckets[0].inputs[0]).shape, (Shape {1, 3, 8, 8}));
     EXPECT_EQ(buckets[0].initializers.size(), 1u);
 }
 
@@ -141,8 +141,8 @@ TEST(VxmBuckets, TwoBucketRoundTrip) {
     ASSERT_EQ(names.size(), 2u);
     EXPECT_EQ(names[0], "s224");
     EXPECT_EQ(names[1], "s320");
-    EXPECT_EQ(buckets[0].desc(buckets[0].inputs[0]).shape, (Shape{1, 3, 224, 224}));
-    EXPECT_EQ(buckets[1].desc(buckets[1].inputs[0]).shape, (Shape{1, 3, 320, 320}));
+    EXPECT_EQ(buckets[0].desc(buckets[0].inputs[0]).shape, (Shape {1, 3, 224, 224}));
+    EXPECT_EQ(buckets[1].desc(buckets[1].inputs[0]).shape, (Shape {1, 3, 320, 320}));
     // Each bucket recovers its own weight bytes from the shared pool.
     ASSERT_EQ(buckets[0].initializers.size(), 1u);
     ASSERT_EQ(buckets[1].initializers.size(), 1u);
@@ -154,8 +154,8 @@ TEST(VxmBuckets, TwoBucketRoundTrip) {
     ASSERT_NE(wid1, kNoTensor);
     std::vector<float> f0 = initFloats(buckets[0], wid0);
     std::vector<float> f1 = initFloats(buckets[1], wid1);
-    EXPECT_EQ(f0, (std::vector<float>{1.f, 2.f, 3.f, 4.f}));
-    EXPECT_EQ(f1, (std::vector<float>{1.f, 2.f, 3.f, 4.f}));
+    EXPECT_EQ(f0, (std::vector<float> {1.f, 2.f, 3.f, 4.f}));
+    EXPECT_EQ(f1, (std::vector<float> {1.f, 2.f, 3.f, 4.f}));
 }
 
 // The shared initializer pool is stored ONCE for identical weights, not once per bucket. Compare a
@@ -205,21 +205,21 @@ TEST(VxmBuckets, MultiGraphBucketsRoundTrip) {
     ASSERT_EQ(buckets.size(), 2u);
     EXPECT_EQ(buckets[0].desc(buckets[0].inputs[0]).name, "x");
     EXPECT_EQ(buckets[1].desc(buckets[1].inputs[0]).name, "pix");
-    EXPECT_EQ(buckets[1].desc(buckets[1].inputs[0]).shape, (Shape{1, 3, 384, 384}));
+    EXPECT_EQ(buckets[1].desc(buckets[1].inputs[0]).shape, (Shape {1, 3, 384, 384}));
     TensorId wp = buckets[1].find("wp");
     ASSERT_NE(wp, kNoTensor);
-    EXPECT_EQ(initFloats(buckets[1], wp), (std::vector<float>{9.f, 8.f, 7.f}));
+    EXPECT_EQ(initFloats(buckets[1], wp), (std::vector<float> {9.f, 8.f, 7.f}));
     TensorId wx = buckets[0].find("w");
     ASSERT_NE(wx, kNoTensor);
-    EXPECT_EQ(initFloats(buckets[0], wx), (std::vector<float>{1.f, 2.f}));
+    EXPECT_EQ(initFloats(buckets[0], wx), (std::vector<float> {1.f, 2.f}));
 }
 
 // Identical weight bytes dedupe in the pool even when they belong to DIFFERENT graphs: the pool is
 // content-keyed, so a weight shared by two unrelated buckets is stored once.
 TEST(VxmBuckets, CrossGraphContentDedup) {
     std::vector<float> bigW(4096, 2.71f);
-    Graph              gA = makeGraph({1, 3, 16, 16}, bigW);
-    Graph              gB = makeGraph({1, 3, 32, 32}, bigW);
+    Graph              gA          = makeGraph({1, 3, 16, 16}, bigW);
+    Graph              gB          = makeGraph({1, 3, 32, 32}, bigW);
     gB.tensors[gB.inputs[0]].name  = "in2";
     gB.tensors[gB.outputs[0]].name = "out2";
     gB.tensors[gB.find("w")].name  = "w2"; // different name, same bytes
@@ -284,7 +284,7 @@ TEST(VxmBuckets, StreamedLoadMatchesBulkLoad) {
     // loadGraphBin takes the first bucket of a multi-bucket file.
     Graph first;
     ASSERT_TRUE(loadGraphBin(first, path));
-    EXPECT_EQ(first.desc(first.inputs[0]).shape, (Shape{1, 3, 8, 8}));
+    EXPECT_EQ(first.desc(first.inputs[0]).shape, (Shape {1, 3, 8, 8}));
     std::remove(path.c_str());
 }
 

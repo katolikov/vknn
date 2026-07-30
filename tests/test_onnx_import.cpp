@@ -95,7 +95,7 @@ namespace {
 // --- raw_data payloads ------------------------------------------------------------------------
 
 TEST(OnnxTensorProto, Int8RawWidensExact) {
-    const std::vector<int8_t> v{-128, -1, 0, 1, 127};
+    const std::vector<int8_t> v {-128, -1, 0, 1, 127};
     std::vector<uint8_t>      raw(v.size());
     std::memcpy(raw.data(), v.data(), v.size());
     auto f = decodeF32(protoWithRaw(OnnxType::Int8, {(int64_t) v.size()}, raw), (int64_t) v.size());
@@ -106,7 +106,7 @@ TEST(OnnxTensorProto, Int8RawWidensExact) {
 }
 
 TEST(OnnxTensorProto, Uint8RawWidensExact) {
-    const std::vector<uint8_t> v{0, 1, 128, 255};
+    const std::vector<uint8_t> v {0, 1, 128, 255};
     auto                       f = decodeF32(protoWithRaw(OnnxType::Uint8, {(int64_t) v.size()}, v), (int64_t) v.size());
     for (size_t i = 0; i < v.size(); ++i)
     {
@@ -115,7 +115,7 @@ TEST(OnnxTensorProto, Uint8RawWidensExact) {
 }
 
 TEST(OnnxTensorProto, Int32RawWidensExact) {
-    const std::vector<int32_t> v{std::numeric_limits<int32_t>::min(), -7, 0, 1, 1 << 24, std::numeric_limits<int32_t>::max()};
+    const std::vector<int32_t> v {std::numeric_limits<int32_t>::min(), -7, 0, 1, 1 << 24, std::numeric_limits<int32_t>::max()};
     std::vector<uint8_t>       raw(v.size() * 4);
     std::memcpy(raw.data(), v.data(), raw.size());
     auto f = decodeF32(protoWithRaw(OnnxType::Int32, {(int64_t) v.size()}, raw), (int64_t) v.size());
@@ -126,7 +126,7 @@ TEST(OnnxTensorProto, Int32RawWidensExact) {
 }
 
 TEST(OnnxTensorProto, BoolRawWidensToZeroOne) {
-    const std::vector<uint8_t> v{0, 1, 1, 0};
+    const std::vector<uint8_t> v {0, 1, 1, 0};
     auto                       f = decodeF32(protoWithRaw(OnnxType::Bool, {(int64_t) v.size()}, v), (int64_t) v.size());
     for (size_t i = 0; i < v.size(); ++i)
     {
@@ -136,7 +136,7 @@ TEST(OnnxTensorProto, BoolRawWidensToZeroOne) {
 
 TEST(OnnxTensorProto, TruncatedRawLeavesTailZero) {
     // 3 payload bytes for a 5-element tensor: decoded head, zero tail (clamped copy contract).
-    const std::vector<int8_t> v{-3, 4, -5};
+    const std::vector<int8_t> v {-3, 4, -5};
     std::vector<uint8_t>      raw(v.size());
     std::memcpy(raw.data(), v.data(), v.size());
     auto f = decodeF32(protoWithRaw(OnnxType::Int8, {5}, raw), 5);
@@ -150,7 +150,7 @@ TEST(OnnxTensorProto, TruncatedRawLeavesTailZero) {
 // --- int32_data payloads ----------------------------------------------------------------------
 
 TEST(OnnxTensorProto, Int8Int32DataPacked) {
-    const std::vector<int64_t> v{-128, 127, -1, 0, 42};
+    const std::vector<int64_t> v {-128, 127, -1, 0, 42};
     auto                       f = decodeF32(protoWithInt32Data(OnnxType::Int8, {(int64_t) v.size()}, v, true), (int64_t) v.size());
     for (size_t i = 0; i < v.size(); ++i)
     {
@@ -159,7 +159,7 @@ TEST(OnnxTensorProto, Int8Int32DataPacked) {
 }
 
 TEST(OnnxTensorProto, Uint8Int32DataPacked) {
-    const std::vector<int64_t> v{0, 255, 7, 128};
+    const std::vector<int64_t> v {0, 255, 7, 128};
     auto                       f = decodeF32(protoWithInt32Data(OnnxType::Uint8, {(int64_t) v.size()}, v, true), (int64_t) v.size());
     for (size_t i = 0; i < v.size(); ++i)
     {
@@ -168,7 +168,7 @@ TEST(OnnxTensorProto, Uint8Int32DataPacked) {
 }
 
 TEST(OnnxTensorProto, Int32Int32DataPacked) {
-    const std::vector<int64_t> v{std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max(), -123456, 1 << 24};
+    const std::vector<int64_t> v {std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max(), -123456, 1 << 24};
     auto                       f = decodeF32(protoWithInt32Data(OnnxType::Int32, {(int64_t) v.size()}, v, true), (int64_t) v.size());
     for (size_t i = 0; i < v.size(); ++i)
     {
@@ -177,7 +177,7 @@ TEST(OnnxTensorProto, Int32Int32DataPacked) {
 }
 
 TEST(OnnxTensorProto, BoolInt32DataPacked) {
-    const std::vector<int64_t> v{0, 1, 1, 0};
+    const std::vector<int64_t> v {0, 1, 1, 0};
     auto                       f = decodeF32(protoWithInt32Data(OnnxType::Bool, {(int64_t) v.size()}, v, true), (int64_t) v.size());
     for (size_t i = 0; i < v.size(); ++i)
     {
@@ -187,7 +187,7 @@ TEST(OnnxTensorProto, BoolInt32DataPacked) {
 
 TEST(OnnxTensorProto, Float16Int32DataDecodesBits) {
     // FLOAT16 rides int32_data as raw bit patterns, not numeric values.
-    const std::vector<float> want{1.0f, -2.0f, 0.5f, 65504.0f};
+    const std::vector<float> want {1.0f, -2.0f, 0.5f, 65504.0f};
     std::vector<int64_t>     bits;
     for (float w: want)
     {
@@ -202,7 +202,7 @@ TEST(OnnxTensorProto, Float16Int32DataDecodesBits) {
 
 TEST(OnnxTensorProto, Int8Int32DataUnpacked) {
     // One varint per tag instead of the packed blob; both encodings appear in the wild.
-    const std::vector<int64_t> v{-5, 6};
+    const std::vector<int64_t> v {-5, 6};
     auto                       f = decodeF32(protoWithInt32Data(OnnxType::Int8, {(int64_t) v.size()}, v, false), (int64_t) v.size());
     EXPECT_EQ(f[0], -5.0f);
     EXPECT_EQ(f[1], 6.0f);
@@ -223,7 +223,7 @@ namespace {
 } // namespace
 
 TEST(OnnxAttr, ConstantInt8RawPayload) {
-    const std::vector<int8_t> v{-128, 0, 127};
+    const std::vector<int8_t> v {-128, 0, 127};
     std::vector<uint8_t>      raw(v.size());
     std::memcpy(raw.data(), v.data(), v.size());
     Attr a = parseTensorAttr(protoWithRaw(OnnxType::Int8, {(int64_t) v.size()}, raw));
@@ -236,7 +236,7 @@ TEST(OnnxAttr, ConstantInt8RawPayload) {
 }
 
 TEST(OnnxAttr, ConstantUint8Int32DataPayload) {
-    const std::vector<int64_t> v{0, 200, 255};
+    const std::vector<int64_t> v {0, 200, 255};
     Attr                       a = parseTensorAttr(protoWithInt32Data(OnnxType::Uint8, {(int64_t) v.size()}, v, true));
     EXPECT_EQ(a.kind, Attr::Floats);
     ASSERT_EQ(a.floats.size(), v.size());

@@ -64,13 +64,13 @@ namespace {
     // large-map convs a lowered graph hands to the ConvGemm op. The last entry has Cout % 4 != 0 and
     // exercises the zero-padded repack.
     constexpr ShapeSpec kDefaultShapes[] = {
-        {1, 3, 512, 512, 1152, 16, 16, 16, 16, 0, 0},  // SigLIP-class patch embed: M = 1024, K = 768
-        {1, 3, 224, 224, 768, 16, 16, 16, 16, 0, 0},   // ViT-B/16 patch embed: M = 196, K = 768
-        {1, 256, 28, 28, 512, 3, 3, 1, 1, 1, 1},       // deep large-map 3x3: M = 784, K = 2304
-        {1, 512, 14, 14, 1024, 3, 3, 1, 1, 1, 1},      // deeper, smaller map: M = 196, K = 4608
-        {1, 128, 56, 56, 512, 3, 3, 2, 2, 1, 1},       // strided 3x3 (Winograd refuses): M = 784
-        {1, 256, 28, 28, 514, 3, 3, 1, 1, 1, 1},       // Cout % 4 != 0: the padded-panel route
-        {1, 256, 28, 28, 516, 3, 3, 1, 1, 1, 1},       // the same shape 4-aligned, as its control
+        {1, 3, 512, 512, 1152, 16, 16, 16, 16, 0, 0}, // SigLIP-class patch embed: M = 1024, K = 768
+        {1, 3, 224, 224, 768, 16, 16, 16, 16, 0, 0},  // ViT-B/16 patch embed: M = 196, K = 768
+        {1, 256, 28, 28, 512, 3, 3, 1, 1, 1, 1},      // deep large-map 3x3: M = 784, K = 2304
+        {1, 512, 14, 14, 1024, 3, 3, 1, 1, 1, 1},     // deeper, smaller map: M = 196, K = 4608
+        {1, 128, 56, 56, 512, 3, 3, 2, 2, 1, 1},      // strided 3x3 (Winograd refuses): M = 784
+        {1, 256, 28, 28, 514, 3, 3, 1, 1, 1, 1},      // Cout % 4 != 0: the padded-panel route
+        {1, 256, 28, 28, 516, 3, 3, 1, 1, 1, 1},      // the same shape 4-aligned, as its control
     };
 
     inline uint16_t f2h(float x) noexcept {
@@ -189,25 +189,25 @@ int main(int argc, char **argv) {
         std::vector<float>().swap(wFloats);
 
         ConvGemmPC pc {};
-        pc.C     = s.Cin;
-        pc.H     = s.H;
-        pc.W     = s.W;
-        pc.Cout  = s.Cout;
-        pc.OH    = (int) OH;
-        pc.OW    = (int) OW;
-        pc.KH    = s.KH;
-        pc.KW    = s.KW;
-        pc.SH    = s.SH;
-        pc.SW    = s.SW;
-        pc.PT    = s.PT;
-        pc.PL    = s.PL;
-        pc.DH    = 1;
-        pc.DW    = 1;
-        pc.act   = 0;
+        pc.C       = s.Cin;
+        pc.H       = s.H;
+        pc.W       = s.W;
+        pc.Cout    = s.Cout;
+        pc.OH      = (int) OH;
+        pc.OW      = (int) OW;
+        pc.KH      = s.KH;
+        pc.KW      = s.KW;
+        pc.SH      = s.SH;
+        pc.SW      = s.SW;
+        pc.PT      = s.PT;
+        pc.PL      = s.PL;
+        pc.DH      = 1;
+        pc.DW      = 1;
+        pc.act     = 0;
         pc.hasBias = 1;
-        pc.actLo = 0.0f;
-        pc.actHi = 0.0f;
-        pc.Coutp = (int) coutP;
+        pc.actLo   = 0.0f;
+        pc.actHi   = 0.0f;
+        pc.Coutp   = (int) coutP;
 
         ComputePipeline scalarPipe(ctx, "conv_gemm_fp16", 4, sizeof(ConvGemmPC), {(uint32_t) tm});
         ComputePipeline wv4Pipe(ctx, "conv_gemm_wv4_fp16", 4, sizeof(ConvGemmPC), {(uint32_t) tm});
@@ -256,8 +256,7 @@ int main(int argc, char **argv) {
             wv4Ms    = std::min(wv4Ms, oneSubmit(wv4Pipe, bufWv4.handle()));
         }
 
-        printf("%d,%d,%d,%d,%d,%dx%d,%dx%d,%lld,%lld,%s,%d,%d,%.4f,%.4f,%+.1f\n", s.N, s.Cin, s.H, s.W, s.Cout, s.KH, s.KW, s.SH, s.SW, (long long) M, (long long) K, route.padW ? "padded" : "packed", tm,
-               equal ? 1 : 0, scalarMs, wv4Ms, (wv4Ms - scalarMs) / scalarMs * 100.0);
+        printf("%d,%d,%d,%d,%d,%dx%d,%dx%d,%lld,%lld,%s,%d,%d,%.4f,%.4f,%+.1f\n", s.N, s.Cin, s.H, s.W, s.Cout, s.KH, s.KW, s.SH, s.SW, (long long) M, (long long) K, route.padW ? "padded" : "packed", tm, equal ? 1 : 0, scalarMs, wv4Ms, (wv4Ms - scalarMs) / scalarMs * 100.0);
         fflush(stdout);
     }
     return 0;

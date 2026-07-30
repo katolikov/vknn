@@ -12,11 +12,11 @@ namespace vknn {
 
         struct ClipCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                const RtTensor &X  = ctx.t(node.inputs[0]);
-                RtTensor       &Y  = ctx.t(node.outputs[0]);
+                const RtTensor &X = ctx.t(node.inputs[0]);
+                RtTensor       &Y = ctx.t(node.outputs[0]);
                 // Default an absent bound to +/-infinity so the clamp below is a no-op on that side.
-                float           lo = -std::numeric_limits<float>::infinity();
-                float           hi = std::numeric_limits<float>::infinity();
+                float lo = -std::numeric_limits<float>::infinity();
+                float hi = std::numeric_limits<float>::infinity();
                 // min/max are scalar tensors; kNoTensor marks an optional input the model omitted
                 // (an unsupplied middle input still occupies a slot), so both existence and the
                 // sentinel are checked before dereferencing element [0].
@@ -45,7 +45,7 @@ namespace vknn {
                     float v = x[i];
                     // Clamp low first, then high. Both comparisons are false for a NaN input, so a
                     // NaN falls through to the trailing v and propagates unchanged.
-                    y[i]    = v < lo ? lo : (v > hi ? hi : v);
+                    y[i] = v < lo ? lo : (v > hi ? hi : v);
                 }
             }
         };
