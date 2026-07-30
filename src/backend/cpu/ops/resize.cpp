@@ -99,7 +99,25 @@ namespace vknn {
     // read x[2d+1] where this oracle read x[2d], on every pixel of every channel. Integers make the
     // index a pure function of the shape -- same on both backends, on any driver. The products stay
     // exact while outS * inS < 2^30, past any spatial extent the planner admits.
-    int vxResizeNearestSrc(int d, int outS, int inS, int coordMode) {
+    // Nearest-rounding-mode code shared with the shader: 0 = round_prefer_floor (the ONNX default
+    // and the fallback for any unrecognized string), 1 = round_prefer_ceil, 2 = floor, 3 = ceil.
+    // vxResizeNearestSrc dispatches on this code after the exact-integer coordinate transform.
+    int vxResizeNearestMode(const std::string &s) {
+        if (s == "round_prefer_ceil")
+        {
+            return kResizeNearestPreferCeil;
+        }
+        if (s == "floor")
+        {
+            return kResizeNearestFloor;
+        }
+        if (s == "ceil")
+        {
+            return kResizeNearestCeil;
+        }
+        return kResizeNearestPreferFloor;
+    }
+    int vxResizeNearestSrc(int d, int outS, int inS, int coordMode, int nearestMode) {
         int64_t num, den;
         if (coordMode == kResizeCoordAlignCorners) // align_corners: d * (inS-1) / (outS-1)
         {
@@ -124,7 +142,16 @@ namespace vknn {
             --q; // C division truncates toward zero; the rule needs floor
             r += den;
         }
-        return (int) (2 * r > den ? q + 1 : q); // round_prefer_floor: bump only strictly past the midpoint
+        // The four ONNX nearest_mode roundings over the exact fraction q + r/den. The prefer
+        // variants differ only on the exact midpoint; floor/ceil differ from them at every
+        // non-integer sample position, which is every position of a non-integer scale.
+        switch (nearestMode)
+        {
+            case kResizeNearestPreferCeil: return (int) (2 * r >= den ? q + 1 : q);
+            case kResizeNearestFloor: return (int) q;
+            case kResizeNearestCeil: return (int) (r > 0 ? q + 1 : q);
+            default: return (int) (2 * r > den ? q + 1 : q); // round_prefer_floor: bump only strictly past the midpoint
+        }
     }
 
     namespace {
@@ -168,9 +195,10 @@ namespace vknn {
                     OH = os[2];
                     OW = os[3];
                 }
-                int   mode      = vxResizeMode(node.attr.gets("mode", "nearest"));
-                int   coordMode = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
-                float cubicA    = node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault);
+                int   mode        = vxResizeMode(node.attr.gets("mode", "nearest"));
+                int   coordMode   = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));
+                int   nearestMode = vxResizeNearestMode(node.attr.gets("nearest_mode", "round_prefer_floor"));
+                float cubicA      = node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault);
                 // exclude_outside=1 zeroes the taps that fall outside the input and renormalizes the
                 // axis; the default keeps them and reads the border pixel instead.
                 bool         excludeOutside = node.attr.geti("exclude_outside", 0) != 0;
@@ -216,9 +244,9 @@ namespace vknn {
                                 float fx = srcCoord(ox, OW, (int) x.w, coordMode);
                                 float v;
                                 if (mode == kResizeModeNearest)
-                                { // nearest (round_prefer_floor), decided in integers
-                                    int iy = vxResizeNearestSrc(oy, (int) OH, (int) x.h, coordMode);
-                                    int ix = vxResizeNearestSrc(ox, (int) OW, (int) x.w, coordMode);
+                                { // nearest (nearest_mode rounding), decided in integers
+                                    int iy = vxResizeNearestSrc(oy, (int) OH, (int) x.h, coordMode, nearestMode);
+                                    int ix = vxResizeNearestSrc(ox, (int) OW, (int) x.w, coordMode, nearestMode);
                                     // Clamp to the valid input range so half_pixel's negative edge
                                     // coordinates (and the align_corners tail) read the border pixel.
                                     iy = clampi(iy, 0, (int) x.h - 1);

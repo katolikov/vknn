@@ -10,14 +10,14 @@ namespace vknn {
         constexpr uint32_t kResizeLocalSize = 64;
 
         // Byte-matched to shaders/resize.comp's push_constant block
-        // { int N, C, IH, IW, OH, OW, mode, cm; float cubicA; int excludeOutside }.
+        // { int N, C, IH, IW, OH, OW, mode, cm; float cubicA; int excludeOutside, perPixel, nm }.
         // mode is the resolved vxResizeMode() code, cm the vxResizeCoord() code the shader's coord()
-        // switches on; cubicA and excludeOutside carry the ONNX cubic attributes and are read only in
-        // cubic mode.
+        // switches on, nm the vxResizeNearestMode() rounding nearestSrc applies; cubicA and
+        // excludeOutside carry the ONNX cubic attributes and are read only in cubic mode.
         struct ResizePC {
             int   N, C, IH, IW, OH, OW, mode, cm;
             float cubicA;
-            int   excludeOutside, perPixel;
+            int   excludeOutside, perPixel, nm;
         };
 
         // Lane map, as a deterministic shape rule. The two maps are byte-identical -- same arithmetic
@@ -51,7 +51,8 @@ namespace vknn {
                           vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel")),
                           node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault),
                           (int) node.attr.geti("exclude_outside", 0),
-                          resizePerPixelLanes(x, y) ? 1 : 0};
+                          resizePerPixelLanes(x, y) ? 1 : 0,
+                          vxResizeNearestMode(node.attr.gets("nearest_mode", "round_prefer_floor"))};
                 // Lane count for the map resizePerPixelLanes chose: one per output pixel (the kernel
                 // loops the channel blocks internally) or one per NC4HW4 block-pixel. Spatial extent
                 // uses the OUTPUT y.h/y.w (the resize target size).

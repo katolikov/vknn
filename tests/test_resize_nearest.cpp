@@ -14,7 +14,7 @@
 using namespace vknn;
 
 namespace vknn {
-    int vxResizeNearestSrc(int d, int outS, int inS, int coordMode);
+    int vxResizeNearestSrc(int d, int outS, int inS, int coordMode, int nearestMode);
 }
 
 namespace {
@@ -92,7 +92,7 @@ TEST(ResizeNearest, HalvingKeepsTheEvenSourcePixel) {
     {
         for (int d = 0; d < outS; ++d)
         {
-            EXPECT_EQ(vxResizeNearestSrc(d, outS, outS * 2, kCoordHalfPixel), 2 * d) << "outS=" << outS << " d=" << d;
+            EXPECT_EQ(vxResizeNearestSrc(d, outS, outS * 2, kCoordHalfPixel, 0), 2 * d) << "outS=" << outS << " d=" << d;
         }
     }
 }
@@ -103,11 +103,11 @@ TEST(ResizeNearest, LargeHalvingIsExactOnBothAxes) {
     constexpr int kTallOut = 517, kWideOut = 1031; // coprime, neither a power of two
     for (int d = 0; d < kTallOut; ++d)
     {
-        EXPECT_EQ(vxResizeNearestSrc(d, kTallOut, 2 * kTallOut, kCoordHalfPixel), 2 * d) << "row " << d;
+        EXPECT_EQ(vxResizeNearestSrc(d, kTallOut, 2 * kTallOut, kCoordHalfPixel, 0), 2 * d) << "row " << d;
     }
     for (int d = 0; d < kWideOut; ++d)
     {
-        EXPECT_EQ(vxResizeNearestSrc(d, kWideOut, 2 * kWideOut, kCoordHalfPixel), 2 * d) << "col " << d;
+        EXPECT_EQ(vxResizeNearestSrc(d, kWideOut, 2 * kWideOut, kCoordHalfPixel, 0), 2 * d) << "col " << d;
     }
 }
 
@@ -143,11 +143,11 @@ TEST(ResizeNearest, AgreesWithTheFloatRuleAwayFromTheTie) {
                     {
                         // The tie itself: the rule keeps the floor, which is what the float form
                         // could not be trusted to do.
-                        EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode), (int) floorY) << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
+                        EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode, 0), (int) floorY) << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
                         continue;
                     }
                     const int want = (int) floorY + (frac > 0.5 ? 1 : 0);
-                    EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode), want) << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
+                    EXPECT_EQ(vxResizeNearestSrc(d, outS, inS, coordMode, 0), want) << "mode=" << coordMode << " in=" << inS << " out=" << outS << " d=" << d;
                 }
             }
         }
@@ -169,4 +169,24 @@ TEST(ResizeNearest, KernelHalvingPicksTheEvenGrid) {
 TEST(ResizeNearest, KernelDoublingDuplicatesEachPixel) {
     const std::vector<float> got = runNearest({1, 2, 3, 4}, 2, 2, 2.0f, "half_pixel");
     EXPECT_EQ(got, (std::vector<float> {1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4}));
+}
+
+TEST(ResizeNearestRule, NearestModeRoundings) {
+    // Non-integer upscale (out 3, in 2 -> fractions 0, 2/3, 4/3 under asymmetric): floor and
+    // round_prefer_floor disagree at 2/3, the PyTorch interpolate export class
+    // (asymmetric + floor) that a prefer-floor-only rule shifts by one source pixel.
+    constexpr int kPreferFloor = 0, kPreferCeil = 1, kFloor = 2, kCeil = 3;
+    EXPECT_EQ(vxResizeNearestSrc(1, 3, 2, kCoordAsymmetric, kPreferFloor), 1); // 2/3 rounds to 1
+    EXPECT_EQ(vxResizeNearestSrc(1, 3, 2, kCoordAsymmetric, kFloor), 0);       // floor keeps 0
+    EXPECT_EQ(vxResizeNearestSrc(2, 3, 2, kCoordAsymmetric, kFloor), 1);       // 4/3 floors to 1
+    EXPECT_EQ(vxResizeNearestSrc(2, 3, 2, kCoordAsymmetric, kCeil), 2);        // 4/3 ceils to 2
+    // Exact midpoints split the prefer variants: 1/2 at out 4, in 2 position d=1.
+    EXPECT_EQ(vxResizeNearestSrc(1, 4, 2, kCoordAsymmetric, kPreferFloor), 0);
+    EXPECT_EQ(vxResizeNearestSrc(1, 4, 2, kCoordAsymmetric, kPreferCeil), 1);
+    // Integer positions agree across every rounding.
+    for (int nm = 0; nm < 4; ++nm)
+    {
+        EXPECT_EQ(vxResizeNearestSrc(2, 4, 2, kCoordAsymmetric, nm), 1) << "nm=" << nm;
+        EXPECT_EQ(vxResizeNearestSrc(0, 4, 2, kCoordAsymmetric, nm), 0) << "nm=" << nm;
+    }
 }

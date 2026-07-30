@@ -21,6 +21,16 @@ namespace vknn {
     constexpr int kResizeCoordAsymmetric       = 2;
     constexpr int kResizeCoordPytorchHalfPixel = 3;
 
+    /// Nearest-rounding wire codes (the ONNX nearest_mode attribute), shared with the shader's `nm`
+    /// push constant. round_prefer_floor is the ONNX default and the fallback for an unknown
+    /// string; floor is what a PyTorch `interpolate(mode="nearest")` export carries (paired with
+    /// the asymmetric coordinate mode), and the two agree only when every sample lands off the
+    /// rounding boundary - at a non-integer scale they differ by one source pixel.
+    constexpr int kResizeNearestPreferFloor = 0;
+    constexpr int kResizeNearestPreferCeil  = 1;
+    constexpr int kResizeNearestFloor       = 2;
+    constexpr int kResizeNearestCeil        = 3;
+
     /// Taps per axis in cubic mode: floor-1 .. floor+2.
     constexpr int kResizeCubicTaps = 4;
 
@@ -32,8 +42,10 @@ namespace vknn {
     int vxResizeMode(const std::string &s);
     /// Coordinate-transformation mode as a wire code; an unrecognized string is half_pixel.
     int vxResizeCoord(const std::string &s);
+    /// Nearest-rounding mode as a wire code; an unrecognized string is round_prefer_floor.
+    int vxResizeNearestMode(const std::string &s);
     /// Nearest-neighbour source index for output position `d`, in exact integer arithmetic.
-    int vxResizeNearestSrc(int d, int outS, int inS, int coordMode);
+    int vxResizeNearestSrc(int d, int outS, int inS, int coordMode, int nearestMode);
     /// Cubic-convolution weights for the four taps at fractional position `t`, coefficient `a`.
     void vxResizeCubicWeights(float t, float a, float w[kResizeCubicTaps]);
 
