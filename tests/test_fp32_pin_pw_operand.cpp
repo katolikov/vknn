@@ -15,6 +15,15 @@
 #include <cstring>
 #include <gtest/gtest.h>
 
+namespace {
+    // MSVC at C++17 rejects designated initializers; a tiny helper names the tensor.
+    vknn::TensorDesc namedDesc(const char *name) {
+        vknn::TensorDesc d;
+        d.name = name;
+        return d;
+    }
+} // namespace
+
 using namespace vknn;
 
 namespace {
@@ -45,7 +54,7 @@ namespace {
         }
         g.initializers[w] = hb;
 
-        TensorId logit = g.addTensor({.name = "logit"});
+        TensorId logit = g.addTensor(namedDesc("logit"));
         Node     conv;
         conv.type    = OpType::Conv;
         conv.name    = "maskconv";
@@ -55,7 +64,7 @@ namespace {
 
         // "/enc/Mul_" is in mixedPrecisionFp32Tensors(), so this tensor is both kept materialized by
         // the pointwise fusion and pinned to fp32 storage by markFp32 under Precision::Normal.
-        TensorId mask = g.addTensor({.name = "/enc/Mul_mask"});
+        TensorId mask = g.addTensor(namedDesc("/enc/Mul_mask"));
         Node     sig;
         sig.type    = OpType::Unary;
         sig.name    = "sigmoid";
