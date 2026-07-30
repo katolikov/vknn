@@ -1,10 +1,13 @@
 #version 450
 #define VKNN_NO_RTE 1 // gemm family avoids the float-controls execution mode (miscompiled by some drivers)
 // Cooperative-matrix GEMM: D[M,N] = A[M,K] * B[K,N], all row-major flat fp16 storage, fp32
-// accumulation on the matrix units. One workgroup is one 32-wide subgroup (the host pins the
-// subgroup size via VK_EXT_subgroup_size_control) and owns a 32x32 output tile as a 2x2 grid of
-// 16x16x16 fragments; K advances 16 per step. The host routing rule guarantees M % 32 == 0,
-// N % 32 == 0, K % 16 == 0, so no edge masking exists in this kernel.
+// accumulation on the matrix units. One workgroup is one subgroup at the device's native compute
+// width - 32 or 64, set by the host as spec constant 0 AND pinned via
+// VK_EXT_subgroup_size_control (coopmatSubgroupWidth) - and owns a 32x32 output tile as a 2x2
+// grid of 16x16x16 fragments; K advances 16 per step. The body is width-independent: fragments
+// are subgroup-scope, so the lane distribution changes with the width but the tile math does not.
+// The host routing rule guarantees M % 32 == 0, N % 32 == 0, K % 16 == 0, so no edge masking
+// exists in this kernel.
 //
 // The fragment-to-lane mapping is opaque here by design: loads and stores go through
 // coopMatLoad/coopMatStore with explicit RowMajor layouts, so a driver whose lane distribution is
@@ -19,7 +22,7 @@
 // the fragment conversion (coopmat constructor), which rounds to nearest even on conformant
 // drivers - the RTZ-store workaround targets a driver that never runs this capability-gated path.
 #include "store16.glsl"
-layout(local_size_x = 32) in;
+layout(local_size_x = 32, local_size_x_id = 0) in; // spec 0 = the pinned subgroup width (32/64)
 
 layout(std430, binding = 0) readonly buffer ABuf { float16_t aBuf[]; };
 layout(std430, binding = 1) readonly buffer BBuf { float16_t bBuf[]; };

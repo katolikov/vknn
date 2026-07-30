@@ -56,12 +56,29 @@ namespace vknn {
             caps.coopmatFp16Fp32Row16 = true;
             caps.coopmatFp8Fp32Row16  = true;
             caps.coopmatI8I32Row16    = true;
-            caps.wave32Pinnable       = true;
+            caps.subgroupWidth        = kCoopmatWave32;
+            caps.widthPinnable        = true;
             caps.vulkanMemoryModel    = true;
             caps.selfCheckPassed      = true;
             return caps;
         }
     } // namespace
+
+    TEST(LowpGemm, CoopmatSubgroupWidth) {
+        // The device's native width is the one the kernels pin - 32 and 64 both serve.
+        CoopmatGemmCaps caps = fullCaps();
+        EXPECT_EQ(coopmatSubgroupWidth(caps), kCoopmatWave32);
+        caps.subgroupWidth = kCoopmatWave64;
+        EXPECT_EQ(coopmatSubgroupWidth(caps), kCoopmatWave64);
+        // A width the driver refuses to pin, or one outside {32, 64}, disables the path.
+        caps.widthPinnable = false;
+        EXPECT_EQ(coopmatSubgroupWidth(caps), 0u);
+        caps               = fullCaps();
+        caps.subgroupWidth = 128;
+        EXPECT_EQ(coopmatSubgroupWidth(caps), 0u);
+        caps.subgroupWidth = 16;
+        EXPECT_EQ(coopmatSubgroupWidth(caps), 0u);
+    }
 
     TEST(LowpGemm, CoopmatRouteEligibility) {
         const CoopmatGemmCaps caps = fullCaps();
@@ -83,9 +100,13 @@ namespace vknn {
         CoopmatGemmCaps caps = fullCaps();
         caps.selfCheckPassed = false;
         EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::None);
-        caps                = fullCaps();
-        caps.wave32Pinnable = false;
+        caps               = fullCaps();
+        caps.widthPinnable = false;
         EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::None);
+        // A wave64 device routes exactly like a wave32 one.
+        caps               = fullCaps();
+        caps.subgroupWidth = kCoopmatWave64;
+        EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::Fp16);
         caps                   = fullCaps();
         caps.vulkanMemoryModel = false;
         EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::None);
@@ -106,6 +127,45 @@ namespace vknn {
         EXPECT_EQ(coopmatGemmRoute(noFp8, 3, true, true, false, 64, 64, 64, true), CoopmatGemmKind::Fp16);
         // Auto never selects a low-precision kind.
         EXPECT_EQ(coopmatGemmRoute(caps, 0, true, true, false, 64, 64, 64, true), CoopmatGemmKind::Fp16);
+    }
+
+    TEST(LowpGemm, CoopmatConvRouteEligibility) {
+        const CoopmatGemmCaps caps = fullCaps();
+        // Auto on an eligible conv shape (one full tile on each GEMM axis) routes.
+        EXPECT_TRUE(coopmatConvRoute(caps, 0, true, 64, 64, 64));
+        // The staged kernel masks ragged edges: no %32 alignment requirement, floors only.
+        EXPECT_TRUE(coopmatConvRoute(caps, 0, true, 33, 33, 17));
+        EXPECT_TRUE(coopmatConvRoute(caps, 0, true, kCoopmatConvMinM, kCoopmatConvMinN, kCoopmatConvMinK));
+        // Below a floor on any axis the SSBO kernels keep the shape.
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, true, kCoopmatConvMinM - 1, 64, 64));
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, true, 64, kCoopmatConvMinN - 1, 64));
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, true, 64, 64, kCoopmatConvMinK - 1));
+        // Off always keeps the SSBO kernels; the structural gate (fp32, residual, epilogue,
+        // depthwise, grouped) is carried by the caller as one flag.
+        EXPECT_FALSE(coopmatConvRoute(caps, 2, true, 64, 64, 64));
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, false, 64, 64, 64));
+        // The MatMul-only opt-in values behave as Auto for the conv route.
+        EXPECT_TRUE(coopmatConvRoute(caps, 3, true, 64, 64, 64));
+        EXPECT_TRUE(coopmatConvRoute(caps, 4, true, 64, 64, 64));
+    }
+
+    TEST(LowpGemm, CoopmatConvRouteCapabilityGates) {
+        CoopmatGemmCaps caps = fullCaps();
+        caps.selfCheckPassed = false;
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, true, 64, 64, 64));
+        caps               = fullCaps();
+        caps.widthPinnable = false;
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, true, 64, 64, 64));
+        caps                   = fullCaps();
+        caps.vulkanMemoryModel = false;
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, true, 64, 64, 64));
+        caps                      = fullCaps();
+        caps.coopmatFp16Fp32Row16 = false;
+        EXPECT_FALSE(coopmatConvRoute(caps, 0, true, 64, 64, 64));
+        // A wave64 device routes exactly like a wave32 one.
+        caps               = fullCaps();
+        caps.subgroupWidth = kCoopmatWave64;
+        EXPECT_TRUE(coopmatConvRoute(caps, 0, true, 64, 64, 64));
     }
 
 } // namespace vknn

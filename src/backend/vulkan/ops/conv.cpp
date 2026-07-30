@@ -2,10 +2,12 @@
 // covers 1x1 pointwise) and the depthwise case (the "dwconv" shader). Weights are repacked to
 // NC4HW4 on the host and uploaded once. For the group==1 path we also autotune the workgroup
 // size the first time we see a given shape and cache the winner.
+#include "backend/vulkan/coopmat_check.h"
 #include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
 #include "core/conv_gemm_route.h"
 #include "core/conv_geom.h"
+#include "core/lowp_gemm.h"
 #include "core/wino_f63.h"
 #include "pw_plan.h"
 #include "pw_splitk_rule.h"
@@ -1032,7 +1034,38 @@ namespace vknn {
                 // demand is part of what the race is deciding. Preparing it after tuneWino left the
                 // Winograd race timing plain kernels while its siblings timed fused ones.
                 epi.prepare(node, env, /*flat=*/false, g.desc(node.outputs[0]).shape);
-                int wchoice = winoShape ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
+
+                // ---- cooperative-matrix implicit-GEMM route (deterministic capability + shape rule) ----
+                // On a coopmat device one staged kernel (conv_gemm_cm) serves every routed group-1
+                // conv - 1x1 included - through the matrix units, preempting the Winograd decision
+                // and every SSBO race below: the matrix-unit K order differs from all of them, so
+                // the choice must be a pure function of caps, Hint::CoopmatGemm and the shape,
+                // never a timing race. Residual and pointwise-epilogue chains keep the SSBO
+                // kernels (the cm kernel hosts bias+act only); the one-time on-device conv
+                // self-check gates the kernel's fragment mapping before the first use.
+                bool     coopGemm  = false;
+                uint32_t coopWidth = 0;
+                {
+                    const auto     &cap        = env.ctx->caps();
+                    CoopmatGemmCaps cmCaps     = fillCoopmatGemmCaps(cap);
+                    coopWidth                  = coopmatSubgroupWidth(cmCaps);
+                    const bool    cmStructural = env.useFp16 && !depthwise && group == 1 && !hasRes && !epi.active;
+                    const int     cmHint       = cfgHint(env, Hint::CoopmatGemm);
+                    const int64_t cmM          = y.h * y.w;
+                    coopGemm                   = coopmatConvRoute(cmCaps, cmHint, cmStructural, cmM, Cout, x.c * KH * KW);
+                    // The 3-D coopmat dispatch has no runtime X-overflow rescue; a grid past the
+                    // device limit keeps the SSBO kernels.
+                    if (coopGemm && ((uint64_t) ((Cout + kCoopmatTileN - 1) / kCoopmatTileN) > cap.maxWorkGroupCount[0] || (uint64_t) ((cmM + kCoopmatTileM - 1) / kCoopmatTileM) > cap.maxWorkGroupCount[1] ||
+                                     (uint64_t) x.n > cap.maxWorkGroupCount[2]))
+                    {
+                        coopGemm = false;
+                    }
+                    if (coopGemm && !coopmatConvGemmSelfCheckPassed(env))
+                    {
+                        coopGemm = false;
+                    }
+                }
+                int wchoice = (winoShape && !coopGemm) ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
                 winograd    = (wchoice > 0);
                 winoUnit    = ((wchoice & 3) == 2) ? 4 : ((wchoice & 3) == 3) ? 6 : 2;
                 winoRm      = (wchoice & 4) != 0 ? 8 : 4;
@@ -1042,6 +1075,26 @@ namespace vknn {
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
                 int64_t            Coutb = cBlocks(Cout);
+
+                // [Cout,Cin,KH,KW] -> [K][coutP], k = (ky*KW+kx)*Cin+ic (the implicit-GEMM kernels'
+                // channel-fastest k order; matches lowerConv's convert-time repack). coutP > Cout
+                // leaves each row's tail channels at the zero fill - the value the kernels' own
+                // column guard yields, so the pad is output-byte-neutral. Shared by the SSBO
+                // conv_gemm route and the cooperative-matrix route (same tag -> one cache entry).
+                auto packGemmWeights = [&](int64_t coutP) {
+                    std::vector<float> wp((size_t) x.c * KH * KW * coutP, 0.f);
+                    for (int64_t oc = 0; oc < Cout; ++oc)
+                    {
+                        for (int64_t ic = 0; ic < x.c; ++ic)
+                        {
+                            for (int64_t t = 0; t < KH * KW; ++t)
+                            {
+                                wp[(size_t) ((t * x.c + ic) * coutP + oc)] = wsrc[(oc * x.c + ic) * KH * KW + t];
+                            }
+                        }
+                    }
+                    return wp;
+                };
 
                 // bias, padded out to a multiple of 4 so the kernel can read whole vec4s
                 bbuf = uploadCached(env, node.name + "#b", [&] {
@@ -1058,6 +1111,27 @@ namespace vknn {
                     }
                     return bias;
                 });
+
+                if (coopGemm)
+                {
+                    // Cooperative-matrix implicit-GEMM: reuses the gemm record path (Src/Wt/Bs/Dst
+                    // bindings, gpc push constants) with the staged coopmat kernel and the
+                    // unpadded "#gemmw" weight panel (coutP == Cout; the kernel stages B through
+                    // LDS with its own column guard, so no physical row padding is needed).
+                    gemm      = true;
+                    gpc       = {(int) x.c,   (int) x.h,    (int) x.w,    (int) Cout,   (int) y.h,    (int) y.w,           (int) KH, (int) KW,   (int) st[0],
+                                 (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) node.fusedAct, 1,        node.actLo, node.actHi,
+                                 (int) Cout};
+                    gwbuf     = uploadCached(env, node.name + "#gemmw", [&] {
+                        return packGemmWeights(Cout);
+                    });
+                    int64_t M = y.h * y.w;
+                    ggx       = (uint32_t) ((Cout + kCoopmatTileN - 1) / kCoopmatTileN);
+                    ggy       = (uint32_t) ((M + kCoopmatTileM - 1) / kCoopmatTileM);
+                    ggz       = (uint32_t) x.n;
+                    pipe      = env.pipeline("conv_gemm_cm", 4, sizeof(ConvGemmPC), {coopWidth}, /*requiredSubgroupSize=*/coopWidth);
+                    return;
+                }
 
                 if (winograd)
                 {
@@ -1212,23 +1286,7 @@ namespace vknn {
                             // A padded panel gets its own cache key: same node, different bytes at
                             // the same length-per-row, so it must never alias the packed entry.
                             gwbuf = uploadCached(env, node.name + (wRoute.padW ? "#gemmwp" : "#gemmw"), [&] {
-                                // [Cout,Cin,KH,KW] -> [K][coutP], k = (ky*KW+kx)*Cin+ic (the kernel's
-                                // channel-fastest k order; matches lowerConv's convert-time repack).
-                                // coutP > Cout leaves each row's tail channels at the zero fill —
-                                // the value the kernel's own column guard yields, so the pad is
-                                // output-byte-neutral.
-                                std::vector<float> wp((size_t) x.c * KH * KW * coutP, 0.f);
-                                for (int64_t oc = 0; oc < Cout; ++oc)
-                                {
-                                    for (int64_t ic = 0; ic < x.c; ++ic)
-                                    {
-                                        for (int64_t t = 0; t < KH * KW; ++t)
-                                        {
-                                            wp[(size_t) ((t * x.c + ic) * coutP + oc)] = wsrc[(oc * x.c + ic) * KH * KW + t];
-                                        }
-                                    }
-                                }
-                                return wp;
+                                return packGemmWeights(coutP);
                             });
                             wbuf.reset(); // the NC4HW4 pack only served the race timing
                             int64_t M = y.h * y.w;
