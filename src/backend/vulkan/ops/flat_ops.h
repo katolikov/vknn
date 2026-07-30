@@ -52,6 +52,23 @@ namespace vknn {
         // Lane-width ceiling of the per-thread conv/sampler family (VkOpEnv::convLocalSize).
         constexpr uint32_t kConvFamilyLaneWidth = 64;
 
+        // Power-of-two width for the workgroup TREE-FOLD kernels (reduce partial/combine, softmax,
+        // layernorm/rmsnorm, the argmax epilogue): their stride >>= 1 fold requires a pow2 width,
+        // so the caps-clamped value rounds down to one. Caps are exact, so the (byte-affecting)
+        // fold order stays a pure per-device function - the rule VkOpEnv::flatLocalSize documents.
+        inline uint32_t laneWidthPow2For(const vk::VulkanCaps &caps, uint32_t ceiling) {
+            const uint32_t width = laneWidthFor(caps, ceiling);
+            uint32_t       pow2  = 1u;
+            while (pow2 * 2u <= width)
+            {
+                pow2 *= 2u;
+            }
+            return pow2;
+        }
+
+        // flat_softmax's width ceiling (its shared array and the rows-per-workgroup host math).
+        constexpr uint32_t kSoftmaxWgMax = 128;
+
         // Elements each lane walks, one slot apart, for the element-parallel family (the fused_pw
         // pattern extended to the movement kernels). A pure placement choice - identical values at
         // any count - so it may consume the MEASURED device probe: the floor is the saturation
@@ -572,6 +589,7 @@ namespace vknn {
             struct PC {
                 int outer, axis, inner, outPad;
             } pc {};
+            uint32_t                             softmaxWg = kSoftmaxWgMax; // resolved at load in prepare()
             bool                                 threadRow = false;
             std::shared_ptr<vk::ComputePipeline> pipe;
             PwEpi                                epi;
@@ -600,7 +618,8 @@ namespace vknn {
                 }
                 threadRow = s[axis] <= kThreadRowMaxAxis;
                 epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0)});
+                softmaxWg = laneWidthPow2For(env.ctx->caps(), kSoftmaxWgMax);
+                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0), softmaxWg});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 // ROW_MODE 0: one workgroup per row (LDS reduction across the workgroup).
@@ -609,7 +628,7 @@ namespace vknn {
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst};
                 epi.append(bufs, node, env, dst);
                 int64_t rows   = (int64_t) pc.outer * pc.inner;
-                int64_t groups = threadRow ? (rows + 127) / 128 : rows;
+                int64_t groups = threadRow ? (rows + softmaxWg - 1) / softmaxWg : rows;
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), (uint32_t) groups);
             }
         };
