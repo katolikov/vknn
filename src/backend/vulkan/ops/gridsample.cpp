@@ -83,7 +83,10 @@ namespace vknn {
                 // (source, flow, base, dest = 4 base buffers); the plain shader has one grid binding
                 // (source, grid, dest = 3). The base grid always uploads fp32, so the warp fp16 shader
                 // has no GRID_FP32 selector. epi.suffix() selects the matching _epi shader variant.
-                std::vector<uint32_t> spec = warp ? std::vector<uint32_t> {MODE, PAD, env.convLocalSize} : std::vector<uint32_t> {MODE, PAD, gridWordsFp32(g, node), env.convLocalSize};
+                // FLOW_FP32 mirrors the plain kernel's GRID_FP32: 1 when pinSampleCoordFp32 pinned the
+                // runtime flow's storage to fp32, so the kernel decodes full-precision coordinates.
+                const uint32_t flowFp32 = warp && !g.isInitializer(node.inputs[1]) && g.desc(node.inputs[1]).storeFp32 ? 1u : 0u;
+                std::vector<uint32_t> spec = warp ? std::vector<uint32_t> {MODE, PAD, flowFp32, env.convLocalSize} : std::vector<uint32_t> {MODE, PAD, gridWordsFp32(g, node), env.convLocalSize};
                 int nbuf = warp ? 4 : 3;
                 pipe = env.pipeline(shader((std::string(warp ? "gridsample_warp" : "gridsample") + epi.suffix()).c_str(), env.useFp16), nbuf + epi.extraBufs(), sizeof(GsPC), spec);
             }

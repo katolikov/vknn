@@ -38,39 +38,6 @@ namespace vknn {
         return v;
     }
 
-    // True for the ops a sampling coordinate legitimately flows through on its way from a constant
-    // to a GridSample grid/flow input: elementwise algebra and value-preserving movement. The
-    // backward walk below crosses these and stops at anything else (Conv/MatMul/Reduce/...): a
-    // coordinate produced by real computation is dominated by fp16 activations either way, while
-    // a constant that reaches the sampler through pure algebra delivers its full stored precision
-    // to the sample position - narrowing THAT is what shifts every sample.
-    static bool coordinateTransparent(OpType op) {
-        switch (op)
-        {
-            case OpType::Add:
-            case OpType::Binary: // Mul/Sub/Div/Max/Min/Pow
-            case OpType::Unary:  // Sigmoid/Tanh/Sqrt/Neg/...
-            case OpType::Clip:
-            case OpType::Concat:
-            case OpType::Slice:
-            case OpType::Split:
-            case OpType::Expand:
-            case OpType::Tile:
-            case OpType::Reshape:
-            case OpType::Transpose:
-            case OpType::Unsqueeze:
-            case OpType::Squeeze:
-            case OpType::Cast:
-            case OpType::Where:
-            case OpType::FusedPointwise:
-                return true; // a fused elementwise chain is still pure algebra
-            case OpType::Reduce:
-                return true; // a reduced coordinate (mean center, extent) still steers the sample
-            default:
-                return false;
-        }
-    }
-
     // Initializers whose stored bits reach a sampling-coordinate input (GridSample's grid, or the
     // fused warp variant's flow/base operands) through coordinate-transparent ops only. These keep
     // their fp32 payloads: their precision IS the sample position.
@@ -116,7 +83,7 @@ namespace vknn {
                 continue;
             }
             auto it = producer.find(t);
-            if (it == producer.end() || !coordinateTransparent(it->second->type))
+            if (it == producer.end() || !coordinateTransparentOp(it->second->type))
             {
                 continue; // a graph input, or real computation: fp16 activations dominate past here
             }
