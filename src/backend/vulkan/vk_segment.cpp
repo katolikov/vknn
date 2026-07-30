@@ -1844,7 +1844,8 @@ namespace vknn {
                 auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
                 if (!pipe)
                 {
-                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
+                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC),
+                                                                 std::vector<uint32_t> {flat::laneWidthPow2For(be_->ctx().caps(), flat::kFlatLocalSize)},
                                                                  env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
                 }
                 ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape), (uint32_t) step};

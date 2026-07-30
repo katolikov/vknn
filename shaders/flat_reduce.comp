@@ -9,7 +9,7 @@
 // back-to-back: inDim = g[0..rank), inStride = g[rank..2*rank), reduce = g[2*rank..3*rank). The fused
 // epilogue's bindings start after it.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;

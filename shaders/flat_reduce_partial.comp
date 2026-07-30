@@ -9,7 +9,7 @@
 // inDim[0..rank), inStride[rank..2*rank), reduce[2*rank..3*rank). Partials are raw (no mean-divide /
 // L2-sqrt): Mean stores the sum, L2 stores the sum of squares; the combine pass finalises.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved width (pow2 for the tree fold)
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer P { float part[]; };
 layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
@@ -47,7 +47,7 @@ void main() {
   uint t = gl_LocalInvocationID.x;
   float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
   if (nRed == 1) {
-    for (int r = start + int(t); r < end; r += 256) {
+    for (int r = start + int(t); r < end; r += int(gl_WorkGroupSize.x)) {
       float v = float(s[base + r * singleStride]);
       if (pc.op == 2) acc = max(acc, v);
       else if (pc.op == 3) acc = min(acc, v);
@@ -56,7 +56,7 @@ void main() {
       else acc += v;
     }
   } else {
-    for (int r = start + int(t); r < end; r += 256) {
+    for (int r = start + int(t); r < end; r += int(gl_WorkGroupSize.x)) {
       int rr = r, off = base;
       for (int k = pc.rank - 1; k >= 0; --k) {
         if (geom.g[2 * pc.rank + k] == 0) continue;
@@ -75,7 +75,7 @@ void main() {
 
   red[t] = acc;
   barrier();
-  for (uint stride = 128u; stride > 0u; stride >>= 1) {
+  for (uint stride = gl_WorkGroupSize.x / 2u; stride > 0u; stride >>= 1) {
     if (t < stride) {
       float a = red[t], b = red[t + stride];
       red[t] = (pc.op == 2) ? max(a, b) : (pc.op == 3) ? min(a, b) : (pc.op == 4) ? a * b : a + b;
