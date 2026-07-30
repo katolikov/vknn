@@ -28,11 +28,11 @@ namespace vknn {
         // width that fits instead of a pipeline-creation failure.
         constexpr uint32_t kFlatLocalSize = 256;
 
-        // The family workgroup width for this device, from EXACT caps (never a measured probe -
-        // see VkOpEnv::flatLocalSize): the ceiling clamped to maxWorkGroupInvocations and
+        // A family workgroup width for this device, from EXACT caps (never a measured probe -
+        // see VkOpEnv::flatLocalSize): the family's ceiling clamped to maxWorkGroupInvocations and
         // maxWorkGroupSize[0], rounded down to whole subgroups, at least one subgroup.
-        inline uint32_t flatLocalSizeFor(const vk::VulkanCaps &caps) {
-            uint32_t width = kFlatLocalSize;
+        inline uint32_t laneWidthFor(const vk::VulkanCaps &caps, uint32_t ceiling) {
+            uint32_t width = ceiling;
             if (caps.maxWorkGroupInvocations != 0u && caps.maxWorkGroupInvocations < width)
             {
                 width = caps.maxWorkGroupInvocations;
@@ -45,6 +45,12 @@ namespace vknn {
             width              = width / sub * sub;
             return width != 0u ? width : sub;
         }
+        inline uint32_t flatLocalSizeFor(const vk::VulkanCaps &caps) {
+            return laneWidthFor(caps, kFlatLocalSize);
+        }
+
+        // Lane-width ceiling of the per-thread conv/sampler family (VkOpEnv::convLocalSize).
+        constexpr uint32_t kConvFamilyLaneWidth = 64;
 
         // Elements each lane walks, one slot apart, for the element-parallel family (the fused_pw
         // pattern extended to the movement kernels). A pure placement choice - identical values at

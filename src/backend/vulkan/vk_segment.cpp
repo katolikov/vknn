@@ -8,7 +8,7 @@
 #include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
-#include "ops/flat_ops.h" // flat::flatLocalSizeFor (the family workgroup width, resolved at load)
+#include "ops/flat_ops.h" // flat::flatLocalSizeFor / laneWidthFor (family widths, resolved at load)
 #include "vk_backend.h"
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
@@ -1222,6 +1222,7 @@ namespace vknn {
         // Load-time device resolution: the flat family's workgroup width comes from exact caps
         // here, once, and rides VkOpEnv so pipelines and dispatch math share one value.
         env_.flatLocalSize = flat::flatLocalSizeFor(env_.ctx->caps());
+        env_.convLocalSize = flat::laneWidthFor(env_.ctx->caps(), flat::kConvFamilyLaneWidth);
         env_.graph         = &g;
         env_.config        = &cfg;
         env_.useFp16       = useFp16_;
