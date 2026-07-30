@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
-project(vknn LANGUAGES C CXX)
+
+# Version, from the repo-root VERSION file. The same file is read by app-demo/app/build.gradle.kts
+# for the Android versionName, so the engine and the app report one value.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VKNN_VERSION_RAW)
+string(STRIP "${VKNN_VERSION_RAW}" VKNN_VERSION)
+if(NOT VKNN_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "VERSION must read major.minor.patch, got '${VKNN_VERSION}'")
+endif()
+
+project(vknn VERSION ${VKNN_VERSION} LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
 # vknn — Vulkan Neural Network. On-device inference engine (CNNs, transformers, 3D Gaussian Splatting).
@@ -13,7 +22,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+if(MSVC)
+  # cl.exe has no -O3; keep its Release optimizer defaults and just pin NDEBUG.
+  set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG")
+else()
+  set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+endif()
 
 option(VKNN_ENABLE_VULKAN "Build the Vulkan compute backend" ${ANDROID})
 option(VKNN_ENABLE_NEON    "Build NEON-optimized CPU kernels" ${ANDROID})
@@ -327,6 +341,12 @@ if(VKNN_ENABLE_VULKAN)
 endif()
 
 add_library(vknn STATIC ${VKNN_SRC})
+# Compiled in, so vknnVersion() reports the linked engine rather than a caller's header.
+target_compile_definitions(vknn PUBLIC
+  VKNN_VERSION_STRING="${PROJECT_VERSION}"
+  VKNN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+  VKNN_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+  VKNN_VERSION_PATCH=${PROJECT_VERSION_PATCH})
 target_include_directories(vknn PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -365,8 +385,13 @@ if(VKNN_BUILD_EXAMPLES)
       vision/classify vision/predict vision/predict_cache vision/image_bench
       llm/chat llm/vlm
       splatting/yonosplat
-      io/run_io io/dmabuf_fd_io io/zerocopy_cache io/zerocopy_simple
+      io/run_io
       bench/profile)
+  if(NOT WIN32)
+    # The dma-buf zero-copy demos drive Linux kernel interfaces (ioctl/mmap on dma-buf fds),
+    # which do not exist on Windows.
+    list(APPEND _vknn_examples io/dmabuf_fd_io io/zerocopy_cache io/zerocopy_simple)
+  endif()
   if(VKNN_ENABLE_VULKAN)
     # microbench drives Vulkan kernels directly (includes vk_context.h), so it needs the backend.
     list(APPEND _vknn_examples bench/microbench)
@@ -428,6 +453,11 @@ endif()
 # Tests (GoogleTest, host-focused but buildable on-device too)
 # ---------------------------------------------------------------------------
 if(VKNN_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletest/CMakeLists.txt)
+  if(MSVC)
+    # Link gtest against the shared CRT like every other target, or MSVC links fail with
+    # LNK2038 runtime-library mismatches.
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  endif()
   add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
   file(GLOB VKNN_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
   add_executable(vknn_tests ${VKNN_TEST_SRC})

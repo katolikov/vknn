@@ -124,7 +124,7 @@ TEST(Passes, ReverseSliceKeepsTheAxisExtent) {
     // Reverse the channel axis: starts=[-1], ends=[INT64_MIN+1], axes=[1], steps=[-1].
     TensorId st = vec("starts", {-1}), en = vec("ends", {-9223372036854775807LL});
     TensorId ax = vec("axes", {1}), sp = vec("steps", {-1});
-    TensorId y = g.addTensor({.name = "y"});
+    TensorId y = g.addTensor({"y"});
     Node     sl;
     sl.type    = OpType::Slice;
     sl.name    = "reverse_channels";
@@ -165,7 +165,7 @@ TEST(Ops, ReverseSliceOnCpuReversesTheAxis) {
     };
     TensorId st = vec("starts", {-1}), en = vec("ends", {-9223372036854775807LL});
     TensorId ax = vec("axes", {1}), sp = vec("steps", {-1});
-    TensorId y = g.addTensor({.name = "y"});
+    TensorId y = g.addTensor({"y"});
     Node     sl;
     sl.type    = OpType::Slice;
     sl.name    = "reverse_channels";

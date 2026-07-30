@@ -2,6 +2,7 @@
 #include "../import/passes.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
+#include "vknn/version.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -10,6 +11,9 @@
 #include <limits>
 #include <set>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h> // _mkdir (one-argument; no mode bits on Windows)
+#endif
 
 namespace vknn {
 
@@ -554,6 +558,7 @@ namespace vknn {
         {
             b->configure(cfg_); // apply Config (e.g. disableVkOps) before capability queries
         }
+        VKNN_INFO << "VKNN " << vknnVersion(); // the linked engine, for a device log
         VKNN_INFO << "Active backends (priority): " << [&] {
             std::string s;
             for (auto &b: backends_)
@@ -2287,7 +2292,11 @@ namespace vknn {
         // --- layer dump ---
         if (cfg_.layerDump)
         {
+#ifdef _WIN32
+            ::_mkdir(cfg_.layerDumpDir.c_str());
+#else
             ::mkdir(cfg_.layerDumpDir.c_str(), 0755);
+#endif
             for (size_t i = 0; i < pool_.size(); ++i)
             {
                 RtTensor &rt = pool_[i];
