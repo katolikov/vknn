@@ -190,9 +190,11 @@ namespace vknn {
 
     // Broadcast class of tensor `t` against the unit's run shape (see the kPwBcast* constants).
     // A rank<4 CONSTANT is judged by its right-aligned rank-4 interpretation, which is exactly how
-    // pwOperandBuf packs it. The spatial class is limited to a single batch: the NC4HW4 kernel
-    // recovers the pixel as vecIdx % HW, which drops the batch index, so N>1 would alias batch 0's
-    // values across the whole run and stays general.
+    // pwOperandBuf packs it. The spatial and *Splat classes are limited to a single batch: the
+    // NC4HW4 kernel recovers the pixel as vecIdx % HW, which drops the batch index, so N>1 would
+    // alias batch 0's values across the whole run and stays general. The Row/Col classes carry the
+    // batch in their channel-block index, so they have no such restriction. The older classes are
+    // tested first, so every shape that classified before keeps its class and its encoded bytes.
     static int pwBcastClass(const Graph &g, TensorId t, const Shape &run) {
         const Shape &s = g.desc(t).shape;
         if (s == run)
@@ -219,6 +221,22 @@ namespace vknn {
                 if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == run[2] && rs[3] == run[3])
                 {
                     return kPwBcastSpatial;
+                }
+                if (rs[0] == run[0] && rs[1] == run[1] && rs[2] == run[2] && rs[3] == 1)
+                {
+                    return kPwBcastRow;
+                }
+                if (rs[0] == run[0] && rs[1] == run[1] && rs[2] == 1 && rs[3] == run[3])
+                {
+                    return kPwBcastCol;
+                }
+                if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == run[2] && rs[3] == 1)
+                {
+                    return kPwBcastRowSplat;
+                }
+                if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == 1 && rs[3] == run[3])
+                {
+                    return kPwBcastColSplat;
                 }
             }
         }

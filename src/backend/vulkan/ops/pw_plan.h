@@ -95,7 +95,7 @@ namespace vknn {
             // silently, since nothing about the file's container magic says the step encoding grew.
             // Refuse by name instead: the pw step encoding has no version of its own.
             const int64_t bcastClass = st[s * 8 + 6];
-            if (bcastClass < kPwBcastSame || bcastClass > kPwBcastSpatial)
+            if (bcastClass < kPwBcastSame || bcastClass > kPwBcastColSplat)
             {
                 throw Error(Status::Unsupported, "FusedPointwise '" + node.name + "' step " + std::to_string(s) + " carries broadcast class " + std::to_string(bcastClass) + ", which this build has no kernel arm for -- the model was compiled by a newer vknn_compile; reconvert it");
             }
@@ -157,14 +157,18 @@ namespace vknn {
             }
         } else
         {
-            // NC4HW4 world: the kernel indexes packed channel blocks, so the plan carries only the
-            // spatial extent (rank 1, outDim[0] = H*W). `total` is the thread count: one thread per
-            // (n, channel-block, hw) triple = n * ceil(c/4) * H*W, each thread handling the 4 packed
-            // channel lanes as a vec4. Blocks for c not a multiple of 4 (padded lanes) are included.
+            // NC4HW4 world: the kernel indexes packed channel blocks, so the plan carries the
+            // spatial extent (rank 1, outDim[0] = H*W) plus W and H in the otherwise-unused next
+            // slots — the row/column broadcast arms split hw into (h, w) with them. `total` is the
+            // thread count: one thread per (n, channel-block, hw) triple = n * ceil(c/4) * H*W, each
+            // thread handling the 4 packed channel lanes as a vec4. Blocks for c not a multiple of 4
+            // (padded lanes) are included.
             NCHW y         = NCHW::from(out);
             int  HW        = (int) (y.h * y.w);
             plan.rank      = 1;
             plan.outDim[0] = HW;
+            plan.outDim[1] = (int) y.w;
+            plan.outDim[2] = (int) y.h;
             total          = (int) ((int64_t) y.n * ((y.c + 3) / 4) * HW);
         }
 

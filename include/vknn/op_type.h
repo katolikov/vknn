@@ -156,6 +156,14 @@ namespace vknn {
     constexpr int kPwBcastGeneral = 2; ///< Anything else: per-axis strided decomposition, flat only.
     constexpr int kPwBcastScalar  = 3; ///< Single element splat.
     constexpr int kPwBcastSpatial = 4; ///< Per-pixel [1,1,H,W]: one value per spatial position.
+    /// Row/column masks. The Row/Col forms carry the channel axis (four distinct lane values, a
+    /// vec4 load in the NC4HW4 kernel at the operand's own packed index); the *Splat forms hold one
+    /// value per row/column at channel lane 0 and splat it across the four lanes, like kPwBcastSpatial.
+    /// The class list is append-only: pw_plan.h refuses an unknown class by name at load.
+    constexpr int kPwBcastRow      = 5; ///< Per-row [N,C,H,1]: one value per (n, channel, row).
+    constexpr int kPwBcastCol      = 6; ///< Per-column [N,C,1,W]: one value per (n, channel, column).
+    constexpr int kPwBcastRowSplat = 7; ///< Per-row [1,1,H,1], single batch: one value per row.
+    constexpr int kPwBcastColSplat = 8; ///< Per-column [1,1,1,W], single batch: one value per column.
 
     /// pw_steps value references (the srcA/srcB/srcC/dst fields of a step). A source names the
     /// accumulator, the entry value, a register, or a tensor operand; a dst is kPwRefNone or a

@@ -34,6 +34,16 @@
 #define PW_REF_NONE  (-3)
 #define PW_REF_REG0  (-4)
 #define PW_REF_OP0   (-8)
+// Operand broadcast classes, mirroring the kPwBcast* constants in include/vknn/op_type.h.
+#define PW_BCAST_SAME      0
+#define PW_BCAST_CHANNEL   1
+#define PW_BCAST_GENERAL   2
+#define PW_BCAST_SCALAR    3
+#define PW_BCAST_SPATIAL   4
+#define PW_BCAST_ROW       5
+#define PW_BCAST_COL       6
+#define PW_BCAST_ROW_SPLAT 7
+#define PW_BCAST_COL_SPLAT 8
 // flags bit 0 records the fp32-chained discipline for the plan (set from the pw_relax attr). The
 // discipline is selected at COMPILE time: kernels built with -DPW_RELAX contain only the
 // fp32-chained appliers, kernels built without it only the strict per-step-rounded ones — a
@@ -92,10 +102,11 @@ void pwStoreOut4(int o,int idx,vec4 v){
 // Flat operand element index for step s: a same-shape operand (bc==0) reads at outIdx; only a real
 // broadcast needs the per-axis strided decomposition (integer div/mod per element), so that loop is
 // skipped for the common full-size operand.
-int pwFlatIdx(int s,int bc,int outIdx){ if(bc==0) return outIdx;
+int pwFlatIdx(int s,int bc,int outIdx){
+  if(bc==PW_BCAST_SAME) return outIdx;
   // A per-pixel operand is the trailing H*W plane of a single-batch run, so it indexes by the
   // spatial remainder — the same value the strided walk below yields, without its div/mod chain.
-  if(bc==4) return outIdx % (plan.outDim[plan.rank-2]*plan.outDim[plan.rank-1]);
+  if(bc==PW_BCAST_SPATIAL) return outIdx % (plan.outDim[plan.rank-2]*plan.outDim[plan.rank-1]);
   int rem=outIdx; int oi=0; for(int k=plan.rank-1;k>=0;--k){ int c=rem%plan.outDim[k]; rem/=plan.outDim[k]; oi+=c*plan.stride[s*PW_EPI_MAXRANK+k]; } return oi; }
 vec4 pwBin4(vec4 a,vec4 b,int code){ return vec4(vx_binary(a.x,b.x,code),vx_binary(a.y,b.y,code),vx_binary(a.z,b.z,code),vx_binary(a.w,b.w,code)); }
 vec4 pwRound4(vec4 v){ return vec4(PW_ROUND(v.x),PW_ROUND(v.y),PW_ROUND(v.z),PW_ROUND(v.w)); }
@@ -177,13 +188,42 @@ float pw_apply(float entry, int outIdx){ return pw_apply_rx(entry,outIdx); }
 // bc==4 (per-pixel [1,1,H,W]) packs one value per spatial position at channel lane 0, so vecIdx%HW
 // recovers the pixel and the *4 lands on that lane. Single batch only (pwBcastClass enforces it):
 // vecIdx%HW carries no batch index.
-// One vec4 operand fetch for the NC4HW4 kernel, by broadcast class: a scalar and a per-pixel
-// operand both hold ONE value for the four channel lanes and splat it, while same-shape and
-// per-channel operands hold four distinct lane values and load them as a vec4.
+// bc==5 (per-row [N,C,H,1]) and bc==6 (per-column [N,C,1,W]) are packed with their own spatial
+// extent (H or W), so the operand's block index is the store's channel-block index (vecIdx/HW,
+// which carries n) times that extent plus the row hw/W or column hw%W — four distinct lane values,
+// any batch. bc==7 ([1,1,H,1]) and bc==8 ([1,1,1,W]) hold one value per row/column at channel
+// lane 0 like bc==4, and share its single-batch restriction. W rides plan.outDim[1] and H
+// plan.outDim[2]; the NC4 plan uses neither slot otherwise.
+// One vec4 operand fetch for the NC4HW4 kernel, by broadcast class: scalar, per-pixel and the
+// row/column *Splat classes hold ONE value for the four channel lanes and splat it, while
+// same-shape, per-channel and the row/column channel-carrying classes hold four distinct lane
+// values and load them as a vec4.
 vec4 pwLoadBc4(int slot,int m,int vecIdx,int HW){
-  return (m==3)?vec4(pwLoad(slot,0)):(m==4)?vec4(pwLoad(slot,(vecIdx%HW)*4)):pwLoad4(slot,(m==1)?vecIdx/HW:vecIdx); }
-int pwNc4Idx(int bc,int packedIdx,int lane,int vecIdx){ int HW=plan.outDim[0];
-  return (bc==3)?0:(bc==1)?(vecIdx/HW)*4+lane:(bc==4)?(vecIdx%HW)*4:packedIdx; }
+  if(m==PW_BCAST_SCALAR)  return vec4(pwLoad(slot,0));
+  if(m==PW_BCAST_SPATIAL) return vec4(pwLoad(slot,(vecIdx%HW)*4));
+  if(m>=PW_BCAST_ROW){
+    int W=plan.outDim[1]; int H=plan.outDim[2];
+    int blockIdx=vecIdx/HW; int hw=vecIdx%HW;
+    if(m==PW_BCAST_ROW) return pwLoad4(slot,blockIdx*H+hw/W);
+    if(m==PW_BCAST_COL) return pwLoad4(slot,blockIdx*W+hw%W);
+    if(m==PW_BCAST_ROW_SPLAT) return vec4(pwLoad(slot,(hw/W)*4));
+    return vec4(pwLoad(slot,(hw%W)*4)); // PW_BCAST_COL_SPLAT
+  }
+  return pwLoad4(slot,(m==PW_BCAST_CHANNEL)?vecIdx/HW:vecIdx); }
+int pwNc4Idx(int bc,int packedIdx,int lane,int vecIdx){
+  int HW=plan.outDim[0];
+  if(bc==PW_BCAST_SCALAR)  return 0;
+  if(bc==PW_BCAST_CHANNEL) return (vecIdx/HW)*4+lane;
+  if(bc==PW_BCAST_SPATIAL) return (vecIdx%HW)*4;
+  if(bc>=PW_BCAST_ROW){
+    int W=plan.outDim[1]; int H=plan.outDim[2];
+    int blockIdx=vecIdx/HW; int hw=vecIdx%HW;
+    if(bc==PW_BCAST_ROW) return (blockIdx*H+hw/W)*4+lane;
+    if(bc==PW_BCAST_COL) return (blockIdx*W+hw%W)*4+lane;
+    if(bc==PW_BCAST_ROW_SPLAT) return (hw/W)*4;
+    return (hw%W)*4; // PW_BCAST_COL_SPLAT
+  }
+  return packedIdx; }
 #ifndef PW_RELAX
 float pw_apply_nc4_st(float entryRaw, int packedIdx){ int lane=packedIdx&3, vecIdx=packedIdx>>2;
   float entry=float(TO_STORE(entryRaw));
