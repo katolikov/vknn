@@ -1,0 +1,91 @@
+#version 450
+#include "precision.glsl"
+// Vectorized twin of convert_layout.comp: a lane processes CLAYOUT_QUAD CONSECUTIVE elements of the
+// FLAT row-major side, so the flat side moves as one whole vec4 transaction (a store for dir==0,
+// a load for dir==1) and the NC4HW4 side as 4 scalars. dir as in the scalar kernel (0: NC4HW4 ->
+// flat; 1: flat -> NC4HW4). Bindings are the scalar kernel's exact layout (0/1 scalar views, 2/3
+// vec4 views of the SAME src/dst buffers); this kernel takes the vec4 view on the flat side, the
+// scalar kernel takes it on the NC4 side.
+//
+// Index hoisting: flat element e = (n*C + c)*HW + hw and its NC4HW4 scalar position
+// a(e) = ((n*Cb + c/4)*HW + hw)*4 + c%4 share the plane offset hw = h*W + w. Across the HW
+// consecutive flat elements of one (n,c) plane only hw varies, and a(e) is linear in hw with
+// stride CLAYOUT_NC4_BLOCK (the packing scales the hw term by the block width), so a whole quad
+// inside one plane (hw + CLAYOUT_QUAD <= HW) decodes (n, c, hw) once and steps the NC4 index. A
+// quad that crosses a plane boundary (c or n changes, so a() jumps by the inter-plane base change)
+// decodes its <= CLAYOUT_QUAD elements independently — exactly the scalar kernel's per-element
+// mapping — through the scalar views, so nothing reads or writes past the flat element count.
+//
+// Byte-interchangeable with the scalar kernel (host pick: convert_layout.cpp pickClayoutQuad):
+// elements are copied, never combined, so byte identity is (src,dst) index-pair identity, and both
+// kernels map flat element (n, c, hw) to the same a(e) above. dir==0 writes every flat element
+// exactly once in both kernels (this kernel merely never loads the pad lanes the scalar kernel
+// loads and discards; reads do not change bytes). dir==1 writes the same pairs, but only the
+// scalar kernel zero-fills the pad lanes of a partial final channel block, so the host offers this
+// kernel only when C is a multiple of CLAYOUT_NC4_BLOCK (no pad lanes exist).
+#include "common.glsl"
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+// Flat elements per lane; mirrored by kClayoutQuad in src/backend/vulkan/ops/convert_layout.cpp.
+#define CLAYOUT_QUAD 4
+// Channels per NC4HW4 block (mirrors kNC4Block, include/vknn/nchw.h): the packing's lane width,
+// and therefore the NC4 scalar-index stride per flat-element step inside one (n,c) plane.
+#define CLAYOUT_NC4_BLOCK 4
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
+layout(std430, binding = 0) readonly  buffer S  { STORE  s[];  };
+layout(std430, binding = 1) writeonly buffer D  { STORE  d[];  };
+layout(std430, binding = 2) readonly  buffer S4 { STORE4 s4[]; };
+layout(std430, binding = 3) writeonly buffer D4 { STORE4 d4[]; };
+layout(push_constant) uniform PC { int N, C, H, W, dir; } pc;
+
+// NC4HW4 scalar position of logical element (n, c, hw) — the scalar kernel's layout equation
+// (lane-quad gid = (n*Cb + c/4)*HW + hw, scalar element = gid*CLAYOUT_NC4_BLOCK + c%4).
+int nc4At(int n, int c, int hw, int Cb, int HW) {
+  return ((n * Cb + c / CLAYOUT_NC4_BLOCK) * HW + hw) * CLAYOUT_NC4_BLOCK + c % CLAYOUT_NC4_BLOCK;
+}
+
+void main() {
+  uint q = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int HW = pc.H * pc.W;
+  int flatTotal = pc.N * pc.C * HW;
+  int quadTotal = (flatTotal + CLAYOUT_QUAD - 1) / CLAYOUT_QUAD;
+  if (q >= uint(quadTotal)) return;
+  int Cb = (pc.C + CLAYOUT_NC4_BLOCK - 1) / CLAYOUT_NC4_BLOCK;
+  int e0 = int(q) * CLAYOUT_QUAD;
+  int hw0 = e0 % HW;
+  if (e0 + CLAYOUT_QUAD <= flatTotal && hw0 + CLAYOUT_QUAD <= HW) {
+    // Whole quad inside one (n,c) plane: decode once; the NC4 index advances by CLAYOUT_NC4_BLOCK
+    // per flat element (linearity argument in the header). Flat vec4 SSBO element q is exactly the
+    // bytes of flat elements e0..e0+CLAYOUT_QUAD-1, so d4[q]/s4[q] is the whole-vec4 access.
+    int c  = (e0 / HW) % pc.C;
+    int n  = e0 / (HW * pc.C);
+    int a0 = nc4At(n, c, hw0, Cb, HW);
+    if (pc.dir == 0) {
+      STORE4 v;
+      for (int j = 0; j < CLAYOUT_QUAD; ++j) v[j] = s[a0 + j * CLAYOUT_NC4_BLOCK];
+      d4[q] = v;
+    } else {
+      STORE4 v = s4[q];
+      for (int j = 0; j < CLAYOUT_QUAD; ++j) d[a0 + j * CLAYOUT_NC4_BLOCK] = v[j];
+    }
+  } else {
+    // Tail quad or plane-crossing quad: per element through the scalar views, exactly the scalar
+    // kernel's per-element mapping; nothing reads or writes past flatTotal.
+    for (int j = 0; j < CLAYOUT_QUAD; ++j) {
+      int e = e0 + j;
+      if (e >= flatTotal) break;
+      int hw = e % HW;
+      int c  = (e / HW) % pc.C;
+      int n  = e / (HW * pc.C);
+      int a  = nc4At(n, c, hw, Cb, HW);
+      if (pc.dir == 0) {
+        d[e] = s[a];
+      } else {
+        d[a] = s[e];
+      }
+    }
+  }
+}
