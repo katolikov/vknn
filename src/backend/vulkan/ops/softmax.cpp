@@ -34,7 +34,10 @@ namespace vknn {
                 epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
                 // 2 fixed bindings (source, dest) plus any extra buffers the fused pointwise epilogue
                 // binds after them at PW_EPI_BASE=2; suffix() picks the matching PW_EPI shader variant.
-                pipe = env.pipeline(shader((std::string("softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(SmPC), std::vector<uint32_t> {});
+                // The workgroup width is the device-resolved family width; the shader's reduction tree and
+                // channel strides derive from the same spec constant, and the dispatch is one workgroup
+                // per image regardless of width.
+                pipe = env.pipeline(shader((std::string("softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(SmPC), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 if (flat)

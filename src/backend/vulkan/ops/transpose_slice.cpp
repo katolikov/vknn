@@ -11,9 +11,6 @@ namespace vknn {
         // builds the matching push constants per op type in its prepare(). The one exception is the
         // channel-last Transpose below, which reads the packed layout instead of a converted copy.
 
-        // Local workgroup size along x; matches local_size_x in shaders/transpose_nhwc.comp.
-        constexpr uint32_t kTransposeNhwcLocalSize = 64;
-
         // Byte-matched to shaders/transpose_nhwc.comp's push_constant block { int N, C, H, W }.
         struct TransposeNhwcPC {
             int N, C, H, W;
@@ -34,7 +31,9 @@ namespace vknn {
                     NCHW x   = NCHW::from(env.graph->desc(node.inputs[0]).shape);
                     nc4Pc    = {(int) x.n, (int) x.c, (int) x.h, (int) x.w};
                     nc4Count = (uint32_t) (x.n * x.h * x.w * cBlocks(x.c)); // one lane per (pixel, channel block)
-                    nc4Pipe  = env.pipeline(shader("transpose_nhwc", env.useFp16), 2, sizeof(TransposeNhwcPC), std::vector<uint32_t> {});
+                    // The pipeline's workgroup-size spec constant and record()'s group count both
+                    // derive from env.flatLocalSize, so the two can never disagree.
+                    nc4Pipe = env.pipeline(shader("transpose_nhwc", env.useFp16), 2, sizeof(TransposeNhwcPC), std::vector<uint32_t> {env.flatLocalSize});
                     return;
                 }
                 impl.prepare(node, env);
@@ -44,7 +43,7 @@ namespace vknn {
                 {
                     vk::Buffer *s = env.devBuf(node.inputs[0]);
                     vk::Buffer *d = env.devBuf(node.outputs[0]);
-                    nc4Pipe->dispatch(cmd, {s->handle(), d->handle()}, &nc4Pc, sizeof(nc4Pc), groups(nc4Count, kTransposeNhwcLocalSize));
+                    nc4Pipe->dispatch(cmd, {s->handle(), d->handle()}, &nc4Pc, sizeof(nc4Pc), groups(nc4Count, env.flatLocalSize));
                     return;
                 }
                 // An identity-perm Transpose is aliased onto its input by the segment planner (the

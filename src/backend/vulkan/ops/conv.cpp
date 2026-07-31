@@ -93,7 +93,15 @@ namespace vknn {
             // 32-tile geometry.
             static constexpr int kWinoGemmTileNB = 8;  // output channel-blocks (N) per workgroup
             static constexpr int kWinoSgTileM    = 32; // wino_gemm_sg's fixed M tile
-            static int           winoGemmTileM(int rm) {
+            /// Subgroup width wino_gemm_sg's shuffles span (its lane split, shuffle sources and
+            /// tile math all assume it). The pipeline pins this exact compute subgroup width; a
+            /// device that cannot pin it falls back to the default tiled GEMM.
+            static constexpr uint32_t kWinoSgSubgroupWidth = 64;
+            /// Input channel-block ceiling of wino_full_fp16.comp's LDS array (mirrors its MAXCB
+            /// define); a deeper Cin under Hint::WinogradVariant=3 would index shared memory out
+            /// of bounds, so the host refuses the variant past it.
+            static constexpr int64_t kWinoFullMaxCinBlocks = 128;
+            static int               winoGemmTileM(int rm) {
                 return 8 * rm; // MDIM * RM
             }
             int                                  winoRm         = 4;     // wino_gemm tiles per thread (spec constant 0)
@@ -204,8 +212,14 @@ namespace vknn {
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
 
-                int wvar     = cfgHint(env, Hint::WinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
-                gemmSubgroup = (wvar == 4);
+                int wvar = cfgHint(env, Hint::WinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
+                // The subgroup-shuffle GEMM's lane split, shuffle sources and tile math all span
+                // kWinoSgSubgroupWidth lanes; on a device that cannot pin that exact compute
+                // subgroup width the shuffles would cross subgroup boundaries and return garbage,
+                // so the hint falls back to the default tiled GEMM there.
+                const auto &sgCaps = env.ctx->caps();
+                gemmSubgroup = (wvar == 4) && sgCaps.subgroupSizeControl && sgCaps.requiredSubgroupSizeCompute && sgCaps.minSubgroupSize <= kWinoSgSubgroupWidth &&
+                               kWinoSgSubgroupWidth <= sgCaps.maxSubgroupSize;
 
                 // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3) inline; F(6,3) from
                 // core/wino_f63.h (kWinoF63G, derived + scored by tools/wino_f63_points.cpp).
@@ -249,7 +263,10 @@ namespace vknn {
                 });
 
                 wFusedPC = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, (int) node.fusedAct, node.actLo, node.actHi};
-                winofull = (wvar == 3);
+                // The fully-fused variant stages every input channel-block's V in shared memory,
+                // so its LDS array bounds the Cin it can serve (kWinoFullMaxCinBlocks); deeper
+                // shapes keep the default tiled-GEMM path whatever the hint says.
+                winofull = (wvar == 3) && Cinb <= kWinoFullMaxCinBlocks;
                 if (winofull)
                 {
                     // Single fused kernel: one workgroup per (tile, ocb-group of 16). No V buffer, no input pass.
@@ -286,7 +303,7 @@ namespace vknn {
                     // GEMM body: the LDS-staged kernel by default, the no-LDS register-tile twin
                     // when tuneWino's bit-neutral race picked it (bit 4), or the Hint-gated
                     // subgroup variant. The register kernel takes RM alone (no ACC16 body).
-                    wGemmPipe = env.pipeline(gemmSubgroup ? "wino_gemm_sg_fp16" : (winoRegGemm ? "wino_gemm_reg_fp16" : "wino_gemm_fp16"), 3, sizeof(WinoGemmPC), gemmSubgroup ? std::vector<uint32_t> {} : (winoRegGemm ? std::vector<uint32_t> {(uint32_t) winoRm} : std::vector<uint32_t> {(uint32_t) winoRm, (uint32_t) winoAcc16}));
+                    wGemmPipe = gemmSubgroup ? env.pipeline("wino_gemm_sg_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {}, kWinoSgSubgroupWidth) : env.pipeline(winoRegGemm ? "wino_gemm_reg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC), winoRegGemm ? std::vector<uint32_t> {(uint32_t) winoRm} : std::vector<uint32_t> {(uint32_t) winoRm, (uint32_t) winoAcc16});
                     // wino_out / wino_out4 run one thread per (ocb, tile); wino_out6 runs
                     // kWinoF63TransformLanes cooperating threads per unit (record() dispatches
                     // wOutGroups). Each arm spells "<stem>" + epi.suffix() so the

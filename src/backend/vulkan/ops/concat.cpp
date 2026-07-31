@@ -11,9 +11,6 @@
 namespace vknn {
     namespace {
 
-        // Local workgroup size along x for the NC4HW4 path; matches local_size_x in shaders/concat.comp.
-        constexpr uint32_t kConcatLocalSize = 64;
-
         // Mirror of the concat shader's push_constant block. Cib/Cob are input/output channel-block
         // counts (channels/4 in NC4HW4), cbOff is this input's starting channel block in the output,
         // and HW is the flattened spatial extent. One invocation copies one [n][cb][hw] vec4 element.
@@ -47,12 +44,13 @@ namespace vknn {
                     NCHW xi  = NCHW::from(env.graph->desc(node.inputs[e]).shape);
                     int  Cib = (int) cBlocks(xi.c);
                     parts.push_back({(int) y.n, Cib, Cob, cbOff, HW});
-                    // One invocation per [n][cb][hw] vec4; kConcatLocalSize matches the shader's local_size_x.
-                    partGroups.push_back(groups((int64_t) y.n * Cib * HW, kConcatLocalSize));
+                    // One invocation per [n][cb][hw] vec4; the group count and the pipeline's
+                    // workgroup-size spec constant derive from the same device-resolved width.
+                    partGroups.push_back(groups((int64_t) y.n * Cib * HW, env.flatLocalSize));
                     // Advance the output channel-block cursor so the next input lands after this one.
                     cbOff += Cib;
                 }
-                pipe = env.pipeline(shader((std::string("concat") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ConcatPC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader((std::string("concat") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ConcatPC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {

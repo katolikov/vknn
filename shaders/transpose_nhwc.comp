@@ -23,7 +23,7 @@
 #else
 #define STORE4 vec4
 #endif
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 0) in; // spec 0 = device-resolved family width (env.flatLocalSize)
 layout(std430, binding = 0) readonly  buffer S { STORE4 src[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE  dst[]; };
 layout(push_constant) uniform PC { int N, C, H, W; } pc;
