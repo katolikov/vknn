@@ -1,4 +1,4 @@
-# The host-only gate (scripts/ci_host.sh) on every pull request: host build,
+# The host-only gate (scripts/ci_host.sh) on every PR targeting main: host build,
 # vknn_tests, the tools/ consistency checkers, clang-format (STRICT — drift fails
 # the gate; the tree is formatted with clang-format 18, pinned below, and
 # scripts/format.sh fixes drift in place), and CPU determinism. The Android and
@@ -8,6 +8,7 @@ name: ci-host
 
 on:
   pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-host-${{ github.workflow }}-${{ github.ref }}
