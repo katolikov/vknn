@@ -56,6 +56,13 @@ namespace {
         return total;
     }
 
+    // Backend assignment for a single-node graph: the node runs on the GPU.
+    const std::vector<bool> kSoleNodeOnGpu {false};
+    // Backend assignment for a single-node graph: the node fell back to the CPU.
+    const std::vector<bool> kSoleNodeOnCpu {true};
+    // No assignment at all, as an incompletely planned bucket would carry.
+    const std::vector<bool> kNoNodeAssignment {};
+
     // Erase every reclaimable initializer, mirroring what Session::buildBucket does once the bucket's
     // segments are built.
     void applyReclaim(Graph &g, const std::vector<bool> &nodeRunsOnCpu) {
@@ -70,7 +77,7 @@ namespace {
     // Conv nor MatMul nor Gemm nor ConvGemm.
     Graph makeFusedDwPwGraph(int64_t depthwiseElems, int64_t pointwiseElems) {
         Graph    g;
-        TensorId x = addActivation(g, "x");
+        TensorId x        = addActivation(g, "x");
         g.desc(x).isInput = true;
         g.inputs.push_back(x);
         TensorId dwWeight  = addInitializer(g, "dw.weight", depthwiseElems, 0.5f);
@@ -96,12 +103,11 @@ namespace {
 // weight bytes and its type is not one of the four the reclaim used to enumerate, so an op-type
 // allowlist leaves every one of those payloads resident for the session lifetime.
 TEST(PlanRetention, FusedDepthwisePointwiseWeightsAreReclaimed) {
-    Graph                   g       = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
-    const std::vector<bool> onGpu   = {false};
-    const size_t            beforeBytes = initializerBytes(g);
+    Graph        g           = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
+    const size_t beforeBytes = initializerBytes(g);
     ASSERT_GT(beforeBytes, 0u);
 
-    applyReclaim(g, onGpu);
+    applyReclaim(g, kSoleNodeOnGpu);
 
     EXPECT_EQ(initializerBytes(g), 0u) << "a GPU-assigned fused node's weights must not stay resident";
     EXPECT_TRUE(g.initializers.empty());
@@ -113,9 +119,9 @@ TEST(PlanRetention, FusedDepthwisePointwiseWeightsAreReclaimed) {
 TEST(PlanRetention, FusedSeAndConvTransposeWeightsAreReclaimed) {
     for (OpType type: {OpType::FusedSE, OpType::ConvTranspose})
     {
-        Graph    g = makeFusedDwPwGraph(/*depthwiseElems=*/4 * 3 * 3, /*pointwiseElems=*/4 * 8);
+        Graph g         = makeFusedDwPwGraph(/*depthwiseElems=*/4 * 3 * 3, /*pointwiseElems=*/4 * 8);
         g.nodes[0].type = type;
-        applyReclaim(g, /*nodeRunsOnCpu=*/{false});
+        applyReclaim(g, kSoleNodeOnGpu);
         EXPECT_TRUE(g.initializers.empty()) << "op type " << opTypeName(type);
     }
 }
@@ -123,10 +129,10 @@ TEST(PlanRetention, FusedSeAndConvTransposeWeightsAreReclaimed) {
 // A CPU-assigned node's operands stay resolvable: the CPU op reads its payload from the runtime pool,
 // and the graph entry keeps isInitializer() true for the boundary and dump paths that key off it.
 TEST(PlanRetention, CpuAssignedNodeKeepsItsOperands) {
-    Graph        g          = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
+    Graph        g           = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
     const size_t beforeBytes = initializerBytes(g);
 
-    applyReclaim(g, /*nodeRunsOnCpu=*/{true});
+    applyReclaim(g, kSoleNodeOnCpu);
 
     EXPECT_EQ(initializerBytes(g), beforeBytes);
     EXPECT_EQ(g.initializers.size(), 4u);
@@ -135,10 +141,10 @@ TEST(PlanRetention, CpuAssignedNodeKeepsItsOperands) {
 // A node vector shorter than the graph's node list reads as CPU-assigned for the missing tail, so an
 // incomplete assignment can only ever keep too much, never free something still in use.
 TEST(PlanRetention, MissingBackendAssignmentKeepsOperands) {
-    Graph        g          = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
+    Graph        g           = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
     const size_t beforeBytes = initializerBytes(g);
 
-    applyReclaim(g, /*nodeRunsOnCpu=*/{});
+    applyReclaim(g, kNoNodeAssignment);
 
     EXPECT_EQ(initializerBytes(g), beforeBytes);
 }
@@ -146,20 +152,20 @@ TEST(PlanRetention, MissingBackendAssignmentKeepsOperands) {
 // A pointwise-chain epilogue operand (an input at or past pwCoreInputs()) uploads lazily while
 // recording, so it stays resident even on a GPU-assigned node; the node's core weights still go.
 TEST(PlanRetention, PointwiseEpilogueOperandStaysResident) {
-    Graph    g = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
+    Graph    g     = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
     TensorId slope = addInitializer(g, "prelu.slope", 8, 0.01f);
     Node    &n     = g.nodes[0];
     n.inputs.push_back(slope);
     Attr steps;
-    steps.kind         = Attr::Ints;
-    steps.ints         = {1};
-    n.attr.map["pw_steps"]  = steps;
+    steps.kind             = Attr::Ints;
+    steps.ints             = {1};
+    n.attr.map["pw_steps"] = steps;
     Attr opbase;
     opbase.kind             = Attr::Int;
     opbase.i                = (int64_t) n.inputs.size() - 1;
     n.attr.map["pw_opbase"] = opbase;
 
-    applyReclaim(g, /*nodeRunsOnCpu=*/{false});
+    applyReclaim(g, kSoleNodeOnGpu);
 
     ASSERT_EQ(g.initializers.size(), 1u);
     EXPECT_EQ(g.initializers.begin()->first, slope);
@@ -167,11 +173,11 @@ TEST(PlanRetention, PointwiseEpilogueOperandStaysResident) {
 
 // A fused residual/bias edge is referenced outside node.inputs, so it is kept for every node.
 TEST(PlanRetention, FusedResidualAndBiasEdgesStayResident) {
-    Graph    g    = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
-    TensorId bias = addInitializer(g, "fused.bias", 8, 3.f);
+    Graph    g           = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
+    TensorId bias        = addInitializer(g, "fused.bias", 8, 3.f);
     g.nodes[0].fusedBias = bias;
 
-    applyReclaim(g, /*nodeRunsOnCpu=*/{false});
+    applyReclaim(g, kSoleNodeOnGpu);
 
     ASSERT_EQ(g.initializers.size(), 1u);
     EXPECT_EQ(g.initializers.begin()->first, bias);
@@ -183,7 +189,7 @@ TEST(PlanRetention, ConstantGraphOutputStaysResident) {
     TensorId constant = addInitializer(g, "const.out", 4, 7.f);
     g.outputs.push_back(constant);
 
-    applyReclaim(g, /*nodeRunsOnCpu=*/{false});
+    applyReclaim(g, kSoleNodeOnGpu);
 
     ASSERT_EQ(g.initializers.size(), 1u);
     EXPECT_EQ(g.initializers.begin()->first, constant);
@@ -193,7 +199,7 @@ TEST(PlanRetention, ConstantGraphOutputStaysResident) {
 // fills only dimensions the model left dynamic, so its pristine imported graph is dead weight once
 // the default bucket is built.
 TEST(PlanRetention, StaticInputGraphCannotPlanNewShapes) {
-    Graph      g = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
+    Graph g                   = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
     g.desc(g.inputs[0]).shape = {1, 8, 16, 16};
     EXPECT_FALSE(importedGraphCanPlanNewShapes(g));
 }
@@ -201,7 +207,7 @@ TEST(PlanRetention, StaticInputGraphCannotPlanNewShapes) {
 // One dynamic axis anywhere in the inputs is enough: a declared shape resolves it, so the pristine
 // graph must stay.
 TEST(PlanRetention, DynamicInputAxisKeepsPristineGraphUseful) {
-    Graph g = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
+    Graph g                   = makeFusedDwPwGraph(/*depthwiseElems=*/4, /*pointwiseElems=*/4);
     g.desc(g.inputs[0]).shape = {-1, 8, 16, 16};
     EXPECT_TRUE(importedGraphCanPlanNewShapes(g));
 

@@ -352,8 +352,8 @@ namespace vknn {
         {
             s->importedGraph_ = g;
         }
-        auto  t0             = std::chrono::high_resolution_clock::now();
-        Graph def            = std::move(g);
+        auto  t0  = std::chrono::high_resolution_clock::now();
+        Graph def = std::move(g);
         s->ensureBackends();
         std::string key = Session::shapeKey(def); // key reflects the input names before shape resolution
         s->buckets_.push_back(s->buildBucket(std::move(def), key));
@@ -1300,7 +1300,8 @@ namespace vknn {
                 }
                 if (kv.second.size() != planned.desc(id).shape.size())
                 {
-                    VKNN_ERROR << "prepareShapes: declared shape for input '" << kv.first << "' has rank " << kv.second.size() << " but the model declares rank " << planned.desc(id).shape.size();
+                    VKNN_ERROR << "prepareShapes: declared shape for input '" << kv.first << "' has rank " << kv.second.size() << " but the model declares rank "
+                               << planned.desc(id).shape.size();
                     return Status::InvalidArgument;
                 }
             }

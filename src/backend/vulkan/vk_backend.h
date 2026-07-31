@@ -2,6 +2,7 @@
 #pragma once
 #include "core/cache_codec.h"
 #include "vk_buffer.h"
+#include "vk_cache_image.h"
 #include "vk_command.h"
 #include "vk_context.h"
 #include "vk_pipeline.h"
@@ -65,27 +66,36 @@ namespace vknn {
         WeightCache *weightCache() noexcept {
             return wcache_.get();
         }
-        // Update this config's variant in the loaded document and rewrite the cache file, but only when
-        // the serialized bytes changed (an unchanged warm session leaves the file untouched). Called from
-        // Session::updateCache() at teardown.
+        // Merge this config's variant into the cache file and rewrite it, but only when the serialized
+        // bytes changed (an unchanged warm session leaves the file untouched). The file is re-read here
+        // rather than held decoded in memory, so a variant belonging to another configuration survives
+        // the rewrite without costing this session a resident copy of its weights. A confirmed write
+        // releases the retained prepacked blobs (releaseSavedWeights).
         void saveCaches();
 
         bool useFp16(const Config &cfg) const;
 
         std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) override;
-        void                     finalize() override {
-            saveCaches();
+        // Teardown flush. Routed through the same new-work check as a load-end flush: the cache document
+        // is built from the file and this session's artifacts at every save, and neither changes outside
+        // saveCaches(), so a session with nothing new to add owes the file nothing and skips the encode.
+        void finalize() override {
+            flushNewCacheWork();
         }
         // New cache content is either a prepacked weight / autotune pick (the weight cache's dirty mark)
         // or a driver-compiled pipeline (the blob grew since the last save). Both are checked, because a
         // model whose weights all take the flat upload path leaves the weight cache clean while still
         // paying for every pipeline compile. Neither changed means the file already holds this session's
         // work, so the flush costs one size query and no encode.
+        //
+        // Also the point where load-time scratch is handed back: every creation path calls this once the
+        // plan is built, and prepareShapes calls it again for a bucket added later.
         void flushNewCacheWork() override {
             if ((wcache_ && wcache_->dirty()) || (cache_ && cache_->currentBytes() != savedPipelineBytes_))
             {
                 saveCaches();
             }
+            weightStaging_.reset();
         }
 
         // One VkPipeline (+ shader module + layout) per distinct kernel configuration, shared by every
@@ -142,20 +152,38 @@ namespace vknn {
         static void downloadFlatOutput(vk::Buffer *buf, RtTensor &rt, bool deviceFp16, DType declared, int threads = 1, int64_t srcElemOffset = 0, int64_t elemCount = -1);
 
       private:
+        // Read + decode the cache file and validate it against cacheDoc_'s header. Returns false (and
+        // leaves `out` untouched) when there is no usable file, in which case the caller starts from an
+        // empty variant list. `image`, when non-null, receives the fingerprint of the bytes just read.
+        bool readCacheFile(CacheDoc &out, CacheImageFingerprint *image = nullptr) const;
+        // Post-save bookkeeping: remember the pipeline-blob size the file now holds, clear the weight
+        // cache's dirty mark, and drop the retained prepacked blobs now that the file holds them.
+        void releaseSavedWeights(size_t savedPipelineBytes);
+
         std::unique_ptr<vk::VulkanContext> ctx_;
         std::unique_ptr<vk::CommandRunner> runner_;
         std::unique_ptr<vk::PipelineCache> cache_;
         std::unique_ptr<WeightCache>       wcache_;
         std::string                        disabledOps_; // Config::disableVkOps (debug op-fallback list)
-        // Multi-variant per-model cache file (cfg.cacheFile). loadCache() reads + validates it into
-        // cacheDoc_ and selects the variant matching curKey_; saveCaches() updates that variant and
-        // rewrites the file only when the serialized bytes (loadedBytes_) change. cacheLoaded_ makes
-        // loadCache idempotent across this model's segments: one VulkanBackend serves exactly one model
-        // (one Session), so the single loaded document + curKey_ stay valid for its whole lifetime.
-        std::string          cacheFile_;
-        CacheDoc             cacheDoc_;
-        CacheVariant         curKey_;
-        std::vector<uint8_t> loadedBytes_;
+        // Multi-variant per-model cache file (cfg.cacheFile). loadCache() reads + validates it, takes
+        // the artifacts of the variant matching curKey_, and drops the rest; saveCaches() reads it
+        // again, merges this config's variant back in, and rewrites the file only when the serialized
+        // image differs from savedImage_. cacheLoaded_ makes loadCache idempotent across this model's
+        // segments: one VulkanBackend serves exactly one model (one Session), so cacheDoc_'s header and
+        // curKey_ stay valid for its whole lifetime.
+        //
+        // cacheDoc_ holds the document HEADER only (format, kernel hash, device identity, model hash) —
+        // the guards every variant is validated against. Its variants vector stays empty between saves:
+        // holding decoded variants would keep a weight-sized map resident per cached configuration, and
+        // the file is the authority for all of them.
+        std::string  cacheFile_;
+        CacheDoc     cacheDoc_;
+        CacheVariant curKey_;
+        // Identity of the file image this session last read or wrote, so an unchanged encode is
+        // recognized without keeping the encoded image (weight-sized) resident. Seeded at load from the
+        // file that was read, so a warm session that produces nothing new compares equal and writes
+        // nothing.
+        CacheImageFingerprint savedImage_;
         // Pipeline-blob size the cache file already holds, so flushNewCacheWork can tell driver compiles
         // since the last save from a warm session that compiled nothing.
         size_t savedPipelineBytes_ = 0;
@@ -165,9 +193,12 @@ namespace vknn {
         std::map<std::string, std::shared_ptr<vk::ComputePipeline>> pipePool_;   // sharedPipeline()
         std::map<std::string, std::weak_ptr<vk::Buffer>>            constPool_;  // uploadPooled()
         DeviceWeightPool<vk::Buffer>                                weightPool_; // acquireWeight() — shared across plan buckets
-        // stageWeightToDevice() staging buffer, bounded by kWeightStagingBufferBytes and kept for the
-        // backend's lifetime: constant operands also upload at RECORD time (operandBuf in ops'
-        // record()), and segments re-record when a boundary buffer changes, so uploads outlive load.
+        // stageWeightToDevice() staging buffer, bounded by kWeightStagingBufferBytes. Host-visible, so
+        // it counts against the per-process host-mappable budget the weights themselves are kept out
+        // of; it is therefore released at every flushNewCacheWork() (the end of a load or of an added
+        // bucket) rather than held for the backend's lifetime. stageWeightToDevice allocates it on
+        // demand, so a later upload — a constant operand uploaded at RECORD time, or a bucket added by
+        // prepareShapes — simply re-creates it at the size that upload needs.
         std::unique_ptr<vk::Buffer> weightStaging_;
     };
 
