@@ -358,12 +358,9 @@ namespace vknn {
         //    with their classifier layout. Rounds alternate vote and re-seed until stable — the
         //    result stays a deterministic pure function of the graph.
         {
-            // A step record is 8 ints: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc; a bcast
-            // field of 2 marks the general-broadcast operand class that only the flat kernel
-            // addresses.
-            constexpr int       kPwStepInts        = 8;
-            constexpr int       kPwStepBcastField  = 6;
-            constexpr int64_t   kPwBcastGeneral    = 2;
+            // A step's bcast field of kPwBcastGeneral marks the general-broadcast operand class
+            // that only the flat kernel addresses (record geometry: kPwStepInts/kPwStepBcastField,
+            // include/vknn/op_type.h).
             constexpr int       kFlexVoteMaxRounds = 8; // cycles are byte-weight monotone; this only caps oscillation
             constexpr int64_t   kNc4Rank           = 4;
             std::vector<size_t> flexible;

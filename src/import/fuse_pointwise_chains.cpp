@@ -1,5 +1,6 @@
 #include "core/matmul_tile.h"
 #include "passes_internal.h"
+#include <algorithm>
 #include <map>
 
 namespace vknn {
@@ -190,7 +191,9 @@ namespace vknn {
 
     // Broadcast class of tensor `t` against the unit's run shape (see the kPwBcast* constants).
     // A rank<4 CONSTANT is judged by its right-aligned rank-4 interpretation, which is exactly how
-    // pwOperandBuf packs it. The spatial and *Splat classes are limited to a single batch: the
+    // pwOperandBuf packs it; rank<4 RUNTIME tensors reach here already right-aligned behind the
+    // explicit Reshape rightAlignPwOperands inserts (their device packing must match the reading).
+    // The spatial and *Splat classes are limited to a single batch: the
     // NC4HW4 kernel recovers the pixel as vecIdx % HW, which drops the batch index, so N>1 would
     // alias batch 0's values across the whole run and stays general. The Row/Col classes carry the
     // batch in their channel-block index, so they have no such restriction. The older classes are
@@ -237,6 +240,19 @@ namespace vknn {
                 if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == 1 && rs[3] == run[3])
                 {
                     return kPwBcastColSplat;
+                }
+                // Any remaining 1-or-full axis mask has a closed-form packed index: buildPwPlan
+                // derives per-axis vec4-space strides from the operand shape (zero on broadcast
+                // axes), so the NC4HW4 kernel addresses it without the flat div/mod walk. Tested
+                // after every named class, so shapes that classified before keep their encodings.
+                bool oneOrFull = rs.size() == kNchwRank;
+                for (size_t k = 0; oneOrFull && k < kNchwRank; ++k)
+                {
+                    oneOrFull = rs[k] == 1 || rs[k] == run[k];
+                }
+                if (oneOrFull)
+                {
+                    return kPwBcastPacked;
                 }
             }
         }
@@ -730,6 +746,125 @@ namespace vknn {
             VKNN_INFO << "fusePointwiseChains: unit at '" << anchor.name << "' runs " << shapeStr(run) << " on the flat kernel -- operand '" << g.desc(general).name << "' "
                       << shapeStr(g.desc(general).shape) << " has no blocked-layout index, so the whole unit loses vec4 and picks up a layout convert on each side";
         }
+
+        /// Rewire every rank<4 RUNTIME operand of a rank-4 pointwise run through an explicit Reshape
+        /// to its right-aligned rank-4 NumPy interpretation ([H,W] -> [1,1,H,W], [C,1,1] ->
+        /// [1,C,1,1]). pwBcastClass may only judge a tensor by right-alignment when its device bytes
+        /// follow that reading: initializers do (pwOperandBuf packs them right-aligned at upload),
+        /// but a runtime tensor's NC4HW4 packing follows NCHW::from's LEFT-aligned rank<4 mapping,
+        /// so without the Reshape such operands classify kPwBcastGeneral and flat-force their unit.
+        /// The Reshape puts the right-aligned reading into the graph itself: the layout passes then
+        /// convert the small operand into the unit's world instead of dropping the whole unit to the
+        /// flat kernel. Reshape is layout-agnostic and elides to a buffer alias at record time, so
+        /// the node adds nothing to the data path. Only readers in the pw-eligible set are rewired;
+        /// every other consumer keeps the original tensor.
+        void rightAlignPwOperands(Graph &g) {
+            struct PendingReshape {
+                Node     node;
+                TensorId source;
+            };
+            std::map<TensorId, TensorId> aligned; // original tensor -> its rank-4 view
+            std::vector<PendingReshape>  pending;
+            for (auto &nd: g.nodes)
+            {
+                if (!pwEligibleNode(g, nd) || PwPlanner::dataInputs(nd).size() < 2)
+                {
+                    continue;
+                }
+                const Shape run = g.desc(nd.outputs[0]).shape;
+                if (run.size() != kNchwRank)
+                {
+                    continue;
+                }
+                for (TensorId &in: nd.inputs)
+                {
+                    if (in == kNoTensor || g.isInitializer(in) || pwTensorIsFp32(g, in))
+                    {
+                        continue;
+                    }
+                    const Shape &s = g.desc(in).shape;
+                    if (s.empty() || s.size() >= kNchwRank || numElements(s) <= 1)
+                    {
+                        continue;
+                    }
+                    Shape rs = s;
+                    rs.insert(rs.begin(), kNchwRank - rs.size(), 1);
+                    bool broadcastLegal = true;
+                    for (size_t k = 0; k < kNchwRank; ++k)
+                    {
+                        broadcastLegal = broadcastLegal && (rs[k] == 1 || rs[k] == run[k]);
+                    }
+                    if (!broadcastLegal)
+                    {
+                        continue; // malformed broadcast: leave it for the plan builder's diagnostics
+                    }
+                    auto it = aligned.find(in);
+                    if (it == aligned.end())
+                    {
+                        TensorDesc d;
+                        d.name        = g.desc(in).name + "#pwr4";
+                        d.shape       = rs;
+                        d.dtype       = g.desc(in).dtype;
+                        TensorId view = g.addTensor(d);
+
+                        TensorDesc sd;
+                        sd.name            = d.name + "#shape";
+                        sd.shape           = {(int64_t) kNchwRank};
+                        sd.dtype           = DType::Int64;
+                        sd.isInitializer   = true;
+                        TensorId   shapeId = g.addTensor(sd);
+                        HostBuffer hb;
+                        hb.resizeElems((int64_t) kNchwRank, DType::Int64);
+                        for (size_t k = 0; k < kNchwRank; ++k)
+                        {
+                            hb.i64()[k] = rs[k];
+                        }
+                        g.initializers[shapeId] = std::move(hb);
+
+                        PendingReshape pr;
+                        pr.node.type    = OpType::Reshape;
+                        pr.node.name    = d.name;
+                        pr.node.inputs  = {in, shapeId};
+                        pr.node.outputs = {view};
+                        pr.source       = in;
+                        pending.push_back(std::move(pr));
+                        it = aligned.emplace(in, view).first;
+                    }
+                    in = it->second;
+                }
+            }
+            if (pending.empty())
+            {
+                return;
+            }
+            // Splice each Reshape right after its source's producer (graph inputs at the front), so
+            // node order stays topological for the index-interval convexity walk below. Insertions
+            // run back-to-front so earlier positions stay valid.
+            std::map<TensorId, size_t> producerAt;
+            for (size_t i = 0; i < g.nodes.size(); ++i)
+            {
+                for (TensorId o: g.nodes[i].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producerAt[o] = i;
+                    }
+                }
+            }
+            std::stable_sort(pending.begin(), pending.end(), [&](const PendingReshape &a, const PendingReshape &b) {
+                auto   pa = producerAt.find(a.source), pb = producerAt.find(b.source);
+                size_t ia = pa == producerAt.end() ? 0 : pa->second + 1;
+                size_t ib = pb == producerAt.end() ? 0 : pb->second + 1;
+                return ia < ib;
+            });
+            for (size_t i = pending.size(); i-- > 0;)
+            {
+                auto   pa  = producerAt.find(pending[i].source);
+                size_t pos = pa == producerAt.end() ? 0 : pa->second + 1;
+                g.nodes.insert(g.nodes.begin() + (long) pos, std::move(pending[i].node));
+            }
+            VKNN_INFO << "fusePointwiseChains: right-aligned " << pending.size() << " rank<4 runtime operand(s) behind Reshape views";
+        }
     } // namespace
 
     /// One general pointwise fusion: grow each maximal same-shape per-element region — Binary/Add/
@@ -764,6 +899,7 @@ namespace vknn {
     /// FusedPointwise node) yields the unit's main output and carries pw_steps/pw_params/pw_outs —
     /// plus pw_flat on standalone nodes for the load-time layout classifier.
     void fusePointwiseChains(Graph &g, bool strictFuse) {
+        rightAlignPwOperands(g); // rank<4 runtime operands -> explicit right-aligned rank-4 views
         std::vector<int>  producer, consumerCount;
         std::vector<char> isGraphOut;
         auto              rebuild = [&]() {
@@ -1205,11 +1341,22 @@ namespace vknn {
                 continue;
             }
 
-            // ---- standalone unit (worth a node only for >= 2 members) ----
+            // ---- standalone unit. A multi-member region is always worth a node. A SINGLE member
+            // is worth one exactly when it would otherwise run on the flat kernel with a broadcast
+            // or constant operand (gpuFlatNode: initializer-operand Binary/Add, non-channel
+            // broadcasts, Where and the comparisons have no NC4 kernel of their own): as a
+            // one-step NC4-expressible unit it joins the flexible layout re-vote, runs packed, and
+            // sheds the full-size ConvertLayout pair the flat node would carry. Everything the
+            // flat classifier already serves in NC4 (same-shape runtime Binary, lone activations)
+            // keeps its original node, so existing encodings are untouched. ----
             if (members.size() < 2)
             {
-                visited[members[0]] = 1;
-                continue;
+                const bool broadcastSingle = unit.nc4Ok && !unit.operands.empty() && PwPlanner::dataInputs(g.nodes[members[0]]).size() > 1 && gpuFlatNode(g, g.nodes[members[0]]);
+                if (!broadcastSingle)
+                {
+                    visited[members[0]] = 1;
+                    continue;
+                }
             }
             Node fn;
             fn.type   = OpType::FusedPointwise;

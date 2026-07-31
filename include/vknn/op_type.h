@@ -164,6 +164,26 @@ namespace vknn {
     constexpr int kPwBcastCol      = 6; ///< Per-column [N,C,1,W]: one value per (n, channel, column).
     constexpr int kPwBcastRowSplat = 7; ///< Per-row [1,1,H,1], single batch: one value per row.
     constexpr int kPwBcastColSplat = 8; ///< Per-column [1,1,1,W], single batch: one value per column.
+    /// Generic 1-or-full mask: every right-aligned NCHW axis of the operand is 1 or the run's
+    /// extent. The NC4HW4 kernel indexes it with per-step packed vec4-space strides (n / cb / h / w,
+    /// zero on the broadcast axes) carried in the plan's stride slots — unused by the NC4 world's
+    /// other classes — and splats channel lane 0 when the operand's channel axis is 1 (a zero cb
+    /// stride). Any batch. The named classes above stay the fast paths; the classifier only lands
+    /// here for masks none of them cover, so existing encodings are byte-stable.
+    constexpr int kPwBcastPacked = 9;
+
+    /// pw_steps record geometry: ints per step and the field offsets read outside the plan
+    /// builder. Mirrored as PW_STEP_FIELDS in shaders/pw_epilogue.glsl.
+    constexpr int kPwStepInts       = 8; ///< Ints per step: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc.
+    constexpr int kPwStepBcastField = 6; ///< Offset of the step's broadcast-class field.
+
+    /// Stride-slot order of a kPwBcastPacked step's packed vec4-space strides
+    /// (plan.stride[s * kPwMaxRank + slot], mirrored as PW_PACKED_STRIDE_* in
+    /// shaders/pw_epilogue.glsl). A broadcast axis carries stride 0.
+    constexpr int kPwPackedStrideN  = 0; ///< Batch stride: opCb * opH * opW.
+    constexpr int kPwPackedStrideCb = 1; ///< Channel-block stride: opH * opW (0 marks a channel-1 operand: splat lane 0).
+    constexpr int kPwPackedStrideH  = 2; ///< Row stride: opW.
+    constexpr int kPwPackedStrideW  = 3; ///< Column stride: 1.
 
     /// pw_steps value references (the srcA/srcB/srcC/dst fields of a step). A source names the
     /// accumulator, the entry value, a register, or a tensor operand; a dst is kPwRefNone or a

@@ -24,11 +24,9 @@ namespace {
 using namespace vknn;
 
 namespace {
-    constexpr int     kPwStepInts       = 8;
-    constexpr int     kPwStepBcastField = 6;
-    constexpr int64_t kC                = 8;
-    constexpr int64_t kH                = 4;
-    constexpr int64_t kW                = 5;
+    constexpr int64_t kC = 8;
+    constexpr int64_t kH = 4;
+    constexpr int64_t kW = 5;
 
     // x[1,kC,kH,kW] * mask[1,1,kH,kW] -> y, the per-pixel weighting an image pipeline is built from.
     Graph buildSpatialMulGraph(std::vector<float> &maskValues) {

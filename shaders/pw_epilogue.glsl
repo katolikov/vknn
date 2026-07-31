@@ -52,6 +52,16 @@
 #define PW_BCAST_COL       6
 #define PW_BCAST_ROW_SPLAT 7
 #define PW_BCAST_COL_SPLAT 8
+#define PW_BCAST_PACKED    9
+// Stride-slot order of a PW_BCAST_PACKED step's packed vec4-space strides
+// (plan.stride[s*PW_EPI_MAXRANK + slot]), mirroring kPwPackedStride* in include/vknn/op_type.h.
+// A broadcast axis carries stride 0; a zero CB stride marks a channel-1 operand (splat lane 0).
+#define PW_PACKED_STRIDE_N  0
+#define PW_PACKED_STRIDE_CB 1
+#define PW_PACKED_STRIDE_H  2
+#define PW_PACKED_STRIDE_W  3
+// NC4HW4 channel-block width (kNC4Block in include/vknn/nchw.h): four channels per packed vec4.
+#define NC4_LANES 4
 // flags bit 0 records the fp32-chained discipline for the plan (set from the pw_relax attr). The
 // discipline is selected at COMPILE time: kernels built with -DPW_RELAX contain only the
 // fp32-chained appliers, kernels built without it only the strict per-step-rounded ones — a
@@ -200,15 +210,34 @@ float pw_apply(float entry, int outIdx){ return pw_apply_rx(entry,outIdx); }
 // extent (H or W), so the operand's block index is the store's channel-block index (vecIdx/HW,
 // which carries n) times that extent plus the row hw/W or column hw%W — four distinct lane values,
 // any batch. bc==7 ([1,1,H,1]) and bc==8 ([1,1,1,W]) hold one value per row/column at channel
-// lane 0 like bc==4, and share its single-batch restriction. W rides plan.outDim[1] and H
-// plan.outDim[2]; the NC4 plan uses neither slot otherwise.
+// lane 0 like bc==4, and share its single-batch restriction. W rides plan.outDim[1], H
+// plan.outDim[2] and the run's channel-block count plan.outDim[3]; the NC4 plan uses no other slot.
+// bc==9 (generic 1-or-full mask, PW_BCAST_PACKED) covers every remaining broadcast pattern: the
+// store's (n, cb, h, w) recover from vecIdx via outDim, and the operand's own NC4HW4 block index
+// is their dot product with the step's packed vec4-space strides (plan.stride, zero on each
+// broadcast axis). A zero cb stride means the operand's channel axis is 1 — its value lives at
+// channel lane 0 of its block and splats across the four lanes; a non-broadcast channel axis
+// aligns lane for lane. Any batch: n is recovered explicitly, unlike the vecIdx%HW classes.
 // One vec4 operand fetch for the NC4HW4 kernel, by broadcast class: scalar, per-pixel and the
 // row/column *Splat classes hold ONE value for the four channel lanes and splat it, while
 // same-shape, per-channel and the row/column channel-carrying classes hold four distinct lane
-// values and load them as a vec4.
-vec4 pwLoadBc4(int slot,int m,int vecIdx,int HW){
+// values and load them as a vec4. `s` is the step index: only the packed class reads its
+// per-step strides.
+int pwPackedBlock(int s,int vecIdx,int HW){
+  int W=plan.outDim[1]; int runCb=plan.outDim[3];
+  int hw=vecIdx%HW; int blockIdx=vecIdx/HW;
+  int cb=blockIdx%runCb; int n=blockIdx/runCb;
+  int h=hw/W; int w=hw-h*W;
+  return n*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_N]+cb*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_CB]
+        +h*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_H]+w*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_W]; }
+vec4 pwLoadBc4(int slot,int s,int m,int vecIdx,int HW){
   if(m==PW_BCAST_SCALAR)  return vec4(pwLoad(slot,0));
   if(m==PW_BCAST_SPATIAL) return vec4(pwLoad(slot,(vecIdx%HW)*4));
+  if(m==PW_BCAST_PACKED){
+    int ob=pwPackedBlock(s,vecIdx,HW);
+    if(plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_CB]==0) return vec4(pwLoad(slot,ob*NC4_LANES)); // channel axis 1: splat lane 0
+    return pwLoad4(slot,ob);
+  }
   if(m>=PW_BCAST_ROW){
     int W=plan.outDim[1]; int H=plan.outDim[2];
     int blockIdx=vecIdx/HW; int hw=vecIdx%HW;
@@ -218,11 +247,15 @@ vec4 pwLoadBc4(int slot,int m,int vecIdx,int HW){
     return vec4(pwLoad(slot,(hw%W)*4)); // PW_BCAST_COL_SPLAT
   }
   return pwLoad4(slot,(m==PW_BCAST_CHANNEL)?vecIdx/HW:vecIdx); }
-int pwNc4Idx(int bc,int packedIdx,int lane,int vecIdx){
+int pwNc4Idx(int s,int bc,int packedIdx,int lane,int vecIdx){
   int HW=plan.outDim[0];
   if(bc==PW_BCAST_SCALAR)  return 0;
   if(bc==PW_BCAST_CHANNEL) return (vecIdx/HW)*4+lane;
   if(bc==PW_BCAST_SPATIAL) return (vecIdx%HW)*4;
+  if(bc==PW_BCAST_PACKED){
+    int ob=pwPackedBlock(s,vecIdx,HW);
+    return plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_CB]==0 ? ob*NC4_LANES : ob*NC4_LANES+lane; // channel axis 1: lane 0 value
+  }
   if(bc>=PW_BCAST_ROW){
     int W=plan.outDim[1]; int H=plan.outDim[2];
     int blockIdx=vecIdx/HW; int hw=vecIdx%HW;
@@ -241,13 +274,13 @@ float pw_apply_nc4_st(float entryRaw, int packedIdx){ int lane=packedIdx&3, vecI
     int kind=plan.step[s*PW_STEP_FIELDS],code=plan.step[s*PW_STEP_FIELDS+1],a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
     int dst=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     float va,vb=0.,vc=0.;
-    if(a<=PW_REF_OP0)      va=pwLoad(PW_REF_OP0-a,pwNc4Idx(bsrc==1?bc:0,packedIdx,lane,vecIdx));
+    if(a<=PW_REF_OP0)      va=pwLoad(PW_REF_OP0-a,pwNc4Idx(s,bsrc==1?bc:0,packedIdx,lane,vecIdx));
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
     else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
-    if(b<=PW_REF_OP0)      vb=pwLoad(PW_REF_OP0-b,pwNc4Idx(bsrc==2?bc:0,packedIdx,lane,vecIdx));
+    if(b<=PW_REF_OP0)      vb=pwLoad(PW_REF_OP0-b,pwNc4Idx(s,bsrc==2?bc:0,packedIdx,lane,vecIdx));
     else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
     else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
-    if(c<=PW_REF_OP0)      vc=pwLoad(PW_REF_OP0-c,pwNc4Idx(bsrc==3?bc:0,packedIdx,lane,vecIdx));
+    if(c<=PW_REF_OP0)      vc=pwLoad(PW_REF_OP0-c,pwNc4Idx(s,bsrc==3?bc:0,packedIdx,lane,vecIdx));
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     if(kind==PW_KIND_BINARY)      acc=PW_ROUND(vx_binary(va,vb,code));
@@ -269,13 +302,13 @@ float pw_apply_nc4_rx(float entryRaw, int packedIdx){ int lane=packedIdx&3, vecI
     int kind=plan.step[s*PW_STEP_FIELDS],code=plan.step[s*PW_STEP_FIELDS+1],a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
     int dst=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     float va,vb=0.,vc=0.;
-    if(a<=PW_REF_OP0)      va=pwLoad(PW_REF_OP0-a,pwNc4Idx(bsrc==1?bc:0,packedIdx,lane,vecIdx));
+    if(a<=PW_REF_OP0)      va=pwLoad(PW_REF_OP0-a,pwNc4Idx(s,bsrc==1?bc:0,packedIdx,lane,vecIdx));
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
     else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
-    if(b<=PW_REF_OP0)      vb=pwLoad(PW_REF_OP0-b,pwNc4Idx(bsrc==2?bc:0,packedIdx,lane,vecIdx));
+    if(b<=PW_REF_OP0)      vb=pwLoad(PW_REF_OP0-b,pwNc4Idx(s,bsrc==2?bc:0,packedIdx,lane,vecIdx));
     else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
     else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
-    if(c<=PW_REF_OP0)      vc=pwLoad(PW_REF_OP0-c,pwNc4Idx(bsrc==3?bc:0,packedIdx,lane,vecIdx));
+    if(c<=PW_REF_OP0)      vc=pwLoad(PW_REF_OP0-c,pwNc4Idx(s,bsrc==3?bc:0,packedIdx,lane,vecIdx));
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     if(kind==PW_KIND_BINARY)      acc=vx_binary(va,vb,code);
@@ -298,13 +331,13 @@ vec4 pw_apply4_st(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     int kind=plan.step[s*PW_STEP_FIELDS],code=plan.step[s*PW_STEP_FIELDS+1],a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
     int dst=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     vec4 va,vb=vec4(0.),vc=vec4(0.);
-    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,m,vecIdx,HW); }
+    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,s,m,vecIdx,HW); }
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
     else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
-    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=pwLoadBc4(PW_REF_OP0-b,m,vecIdx,HW); }
+    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=pwLoadBc4(PW_REF_OP0-b,s,m,vecIdx,HW); }
     else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
     else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
-    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=pwLoadBc4(PW_REF_OP0-c,m,vecIdx,HW); }
+    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=pwLoadBc4(PW_REF_OP0-c,s,m,vecIdx,HW); }
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     if(kind==PW_KIND_BINARY)      acc=pwRound4(pwBin4(va,vb,code));
@@ -326,13 +359,13 @@ vec4 pw_apply4_rx(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     int kind=plan.step[s*PW_STEP_FIELDS],code=plan.step[s*PW_STEP_FIELDS+1],a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
     int dst=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     vec4 va,vb=vec4(0.),vc=vec4(0.);
-    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,m,vecIdx,HW); }
+    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,s,m,vecIdx,HW); }
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
     else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
-    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=pwLoadBc4(PW_REF_OP0-b,m,vecIdx,HW); }
+    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=pwLoadBc4(PW_REF_OP0-b,s,m,vecIdx,HW); }
     else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
     else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
-    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=pwLoadBc4(PW_REF_OP0-c,m,vecIdx,HW); }
+    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=pwLoadBc4(PW_REF_OP0-c,s,m,vecIdx,HW); }
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     if(kind==PW_KIND_BINARY)      acc=pwBin4(va,vb,code);

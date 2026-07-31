@@ -16,8 +16,6 @@
 using namespace vknn;
 
 namespace {
-    constexpr int kPwStepInts       = 8;
-    constexpr int kPwStepBcastField = 6;
 
     // MSVC at C++17 rejects designated initializers; a tiny helper names the tensor.
     TensorDesc namedDesc(const char *name) {

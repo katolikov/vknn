@@ -95,7 +95,7 @@ namespace vknn {
             // silently, since nothing about the file's container magic says the step encoding grew.
             // Refuse by name instead: the pw step encoding has no version of its own.
             const int64_t bcastClass = st[s * 8 + 6];
-            if (bcastClass < kPwBcastSame || bcastClass > kPwBcastColSplat)
+            if (bcastClass < kPwBcastSame || bcastClass > kPwBcastPacked)
             {
                 throw Error(Status::Unsupported, "FusedPointwise '" + node.name + "' step " + std::to_string(s) + " carries broadcast class " + std::to_string(bcastClass) + ", which this build has no kernel arm for -- the model was compiled by a newer vknn_compile; reconvert it");
             }
@@ -158,18 +158,55 @@ namespace vknn {
         } else
         {
             // NC4HW4 world: the kernel indexes packed channel blocks, so the plan carries the
-            // spatial extent (rank 1, outDim[0] = H*W) plus W and H in the otherwise-unused next
-            // slots — the row/column broadcast arms split hw into (h, w) with them. `total` is the
-            // thread count: one thread per (n, channel-block, hw) triple = n * ceil(c/4) * H*W, each
-            // thread handling the 4 packed channel lanes as a vec4. Blocks for c not a multiple of 4
-            // (padded lanes) are included.
-            NCHW y         = NCHW::from(out);
-            int  HW        = (int) (y.h * y.w);
+            // spatial extent (rank 1, outDim[0] = H*W) plus W, H and the run's channel-block count
+            // in the otherwise-unused next slots — the row/column arms split hw into (h, w) with
+            // W/H, and the generic packed arm additionally splits the block index into (n, cb) with
+            // outDim[3]. `total` is the thread count: one thread per (n, channel-block, hw) triple
+            // = n * ceil(c/4) * H*W, each thread handling the 4 packed channel lanes as a vec4.
+            // Blocks for c not a multiple of 4 (padded lanes) are included.
+            NCHW    y      = NCHW::from(out);
+            int     HW     = (int) (y.h * y.w);
+            int64_t runCb  = cBlocks(y.c);
             plan.rank      = 1;
             plan.outDim[0] = HW;
             plan.outDim[1] = (int) y.w;
             plan.outDim[2] = (int) y.h;
-            total          = (int) ((int64_t) y.n * ((y.c + 3) / 4) * HW);
+            plan.outDim[3] = (int) runCb;
+            total          = (int) ((int64_t) y.n * runCb * HW);
+            // A kPwBcastPacked operand reads through per-step packed vec4-space strides: its own
+            // NC4HW4 block index is n*sN + cb*sCb + h*sH + w*sW with a zero stride on each
+            // broadcast axis. The kernel splats channel lane 0 when the operand's channel axis is
+            // 1, which it detects as a zero kPwPackedStrideCb (a non-broadcast channel axis always
+            // has sCb = opH*opW >= 1). Shapes right-align into NCHW exactly as pwOperandBuf packs
+            // constants and as the compile-time Reshape views present runtime operands.
+            for (int s = 0; s < nSteps; ++s)
+            {
+                if (plan.step[s * kPwStepInts + kPwStepBcastField] != kPwBcastPacked)
+                {
+                    continue;
+                }
+                TensorId opd = bcastOperand(s);
+                if (opd == kNoTensor)
+                {
+                    throw Error(Status::InvalidArgument, "FusedPointwise (" + node.name + ") step " + std::to_string(s) + " carries the packed broadcast class but names no operand");
+                }
+                Shape sh = g.desc(opd).shape;
+                while (sh.size() < kNchwRank)
+                {
+                    sh.insert(sh.begin(), 1);
+                }
+                NCHW o = NCHW::from(sh);
+                if ((o.n != 1 && o.n != y.n) || (o.c != 1 && o.c != y.c) || (o.h != 1 && o.h != y.h) || (o.w != 1 && o.w != y.w))
+                {
+                    throw Error(Status::InvalidArgument,
+                                "FusedPointwise (" + node.name + ") operand tensor " + std::to_string(opd) + " shape " + shapeStr(g.desc(opd).shape) + " is not broadcast-compatible with output " + shapeStr(out));
+                }
+                const int64_t opCb = cBlocks(o.c), opHW = o.h * o.w;
+                plan.stride[s * kPwMaxRank + kPwPackedStrideN]  = (int32_t) (o.n == 1 ? 0 : opCb * opHW);
+                plan.stride[s * kPwMaxRank + kPwPackedStrideCb] = (int32_t) (o.c == 1 ? 0 : opHW);
+                plan.stride[s * kPwMaxRank + kPwPackedStrideH]  = (int32_t) (o.h == 1 ? 0 : o.w);
+                plan.stride[s * kPwMaxRank + kPwPackedStrideW]  = o.w == 1 ? 0 : 1;
+            }
         }
 
         const auto &po = node.attr.getints("pw_outs");
