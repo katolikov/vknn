@@ -4,9 +4,11 @@
 // size the first time we see a given shape and cache the winner.
 #include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
+#include "core/conv_dispatch_rules.h"
 #include "core/conv_gemm_route.h"
 #include "core/conv_geom.h"
 #include "core/wino_f63.h"
+#include "flat_ops.h" // flat::kConvFamilyLaneWidth (the family's declared lane-width ceiling)
 #include "pw_plan.h"
 #include "pw_splitk_rule.h"
 #include "vk_op_common.h"
@@ -41,6 +43,13 @@ namespace vknn {
         // Output pixels per thread of the 1x1 kernels when no measurement applies: the value
         // Tuning::None dispatches and the incumbent pickWTile's race is seeded with.
         constexpr uint32_t kConv1x1DefaultWTile = 4;
+        // Workgroup width DECLARED by the conv kernels that expose no workgroup-size specialization
+        // constant - the split-K partial/reduce pair and the Winograd input/GEMM/output/fused
+        // passes (shaders/conv_splitk_fp16.comp, conv1x1_splitk_fp16.comp, conv1x1_reduce_fp16.comp,
+        // wino_input*_fp16.comp, wino_out*_fp16.comp, wino_fused*_fp16.comp). Their group counts
+        // divide by this and by nothing else, so it mirrors their `layout(local_size_x = 64)`
+        // literally; the device-resolved env.convLocalSize steers only the specializable kernels.
+        constexpr uint32_t kConvFixedKernelWidth = 64;
 
         // Depthwise 2x2-tile occupancy floor: the tile kernel's dispatch (N * Cb * ceil(OH/2) *
         // ceil(OW/2) threads) must keep at least this many threads or the candidate never races
@@ -101,6 +110,12 @@ namespace vknn {
             /// define); a deeper Cin under Hint::WinogradVariant=3 would index shared memory out
             /// of bounds, so the host refuses the variant past it.
             static constexpr int64_t kWinoFullMaxCinBlocks = 128;
+            /// Output channel-blocks one wino_full workgroup covers (mirrors the `(Coutb + 15) / 16`
+            /// group decode in wino_full_fp16.comp); the host derives its workgroup count from it.
+            static constexpr int64_t kWinoFullOcbPerGroup = 16;
+            /// Cooperating threads wino_fused2 gives one (output channel-block, tile) - its M split
+            /// across a lane quad (mirrors the quad decode in shaders/wino_fused2_fp16.comp).
+            static constexpr int64_t kWino2ThreadsPerTile = 4;
             static int               winoGemmTileM(int rm) {
                 return 8 * rm; // MDIM * RM
             }
@@ -118,13 +133,20 @@ namespace vknn {
             bool                                 pwS2           = false; // strided 1x1 (downsample) on the register-tiled kernel
             bool                                 hasRes         = false; // residual Add fused into the epilogue (out = act(conv + residual))
             int                                  ocSplitParts   = 1;     // conv_reg OC-split: record() replays this many flat-gid slice dispatches
-            int64_t                              ocSliceThreads = 0;     // threads per OC-split slice (64-aligned; see ocSplitSliceThreads)
+            int64_t                              ocSliceThreads = 0;     // threads per OC-split slice (whole laneWidth workgroups; convOcSplitSliceThreads)
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
             ConvPC                               pc {};
             DwPC                                 dpc {};
-            int64_t                              total     = 0;
-            uint32_t                             localSize = 64;
+            int64_t                              total = 0;
+            /// Workgroup width of this node's per-thread kernel: the value its pipeline is COMPILED
+            /// at (the workgroup-size specialization constant) AND the value its dispatch divides
+            /// the thread count by. One field, so the two can never disagree. prepare() seeds it
+            /// with the device-resolved family width (env.convLocalSize) before any branch runs;
+            /// the direct kernel's branch replaces it with its raced width. The LDS-halo and
+            /// implicit-GEMM kernels dispatch workgroup counts directly and carry their own tile
+            /// geometry instead.
+            uint32_t laneWidth = flat::kConvFamilyLaneWidth;
 
             // Attached pointwise-chain epilogue (fusePointwiseChains); applies at whichever
             // variant's final store runs (direct/dw/1x1/lds/reg, split-K reduce, Winograd output).
@@ -153,8 +175,8 @@ namespace vknn {
             void prepareSplitKShared(const Node &node, VkOpEnv &env, int64_t Cout, int64_t Coutb, int64_t OHW, int64_t kparts) {
                 skRedPC     = {(int) Cout, (int) OHW, (int) kparts, (int) node.fusedAct, node.actLo, node.actHi};
                 partBuf     = std::make_shared<vk::Buffer>(*env.ctx, (size_t) kparts * Coutb * OHW * 4 * 4, vk::MemPref::kDeviceOnly); // fp32 partials (vec4)
-                skGroups    = groups(kparts * Coutb * OHW, 64);
-                skRedGroups = groups(Coutb * OHW, 64);
+                skGroups    = groups(kparts * Coutb * OHW, kConvFixedKernelWidth);
+                skRedGroups = groups(Coutb * OHW, kConvFixedKernelWidth);
                 skRed = env.pipeline((std::string("conv1x1_reduce") + epi.suffix() + "_fp16").c_str(), epi.active ? 4 + epi.extraBufs() : (hasRes ? 4u : 3u), sizeof(ReducePC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0)});
             }
 
@@ -190,7 +212,7 @@ namespace vknn {
             WinoInPC                             wInPC {};
             WinoFusedPC                          wFusedPC {};
             int64_t                              wInGroups = 0, wFusedGroups = 0, wFullGroups = 0;
-            bool                                 wino2    = false; // occupancy-friendly 2-pass matmul (4 threads/tile, M split across quads)
+            bool                                 wino2    = false; // occupancy-friendly 2-pass matmul (M split across quads)
             bool                                 winofull = false; // single fully-fused kernel: V stays in LDS, no global round-trip
             // 3-pass with a TILED batched GEMM for the transform-domain multiply (MNN's structure).
             bool winogemm     = false;
@@ -212,13 +234,18 @@ namespace vknn {
                 std::vector<float> wsrcv = initFloats(g, node.inputs[1]);
                 const float       *wsrc  = wsrcv.data();
 
-                int wvar = cfgHint(env, Hint::WinogradVariant); // 0=tiled-GEMM 1=fused 2=split 3=full 4=subgroup-GEMM
+                // The variant this shape RUNS (Mode::TiledGemm / Fused / FusedSplit / FullyFused /
+                // SubgroupGemm). resolveWinogradVariant applies the fully-fused kernel's input-depth
+                // bound: that kernel stages every input channel-block's V in shared memory, so a
+                // deeper shape resolves to the default tiled-GEMM 3-pass whatever the hint says -
+                // the same fallback the subgroup-GEMM caps refusal below takes.
+                const int wvar = resolveWinogradVariant(cfgHint(env, Hint::WinogradVariant), Cinb, kWinoFullMaxCinBlocks);
                 // The subgroup-shuffle GEMM's lane split, shuffle sources and tile math all span
                 // kWinoSgSubgroupWidth lanes; on a device that cannot pin that exact compute
                 // subgroup width the shuffles would cross subgroup boundaries and return garbage,
                 // so the hint falls back to the default tiled GEMM there.
                 const auto &sgCaps = env.ctx->caps();
-                gemmSubgroup = (wvar == 4) && sgCaps.subgroupSizeControl && sgCaps.requiredSubgroupSizeCompute && sgCaps.minSubgroupSize <= kWinoSgSubgroupWidth &&
+                gemmSubgroup = (wvar == (int) Mode::SubgroupGemm) && sgCaps.subgroupSizeControl && sgCaps.requiredSubgroupSizeCompute && sgCaps.minSubgroupSize <= kWinoSgSubgroupWidth &&
                                kWinoSgSubgroupWidth <= sgCaps.maxSubgroupSize;
 
                 // Filter transform matrix G (A_ x 3): F(2,3) and F(4,3) inline; F(6,3) from
@@ -263,14 +290,14 @@ namespace vknn {
                 });
 
                 wFusedPC = {(int) x.n, (int) Cin, (int) Cout, (int) y.h, (int) y.w, (int) nTH, (int) nTW, (int) node.fusedAct, node.actLo, node.actHi};
-                // The fully-fused variant stages every input channel-block's V in shared memory,
-                // so its LDS array bounds the Cin it can serve (kWinoFullMaxCinBlocks); deeper
-                // shapes keep the default tiled-GEMM path whatever the hint says.
-                winofull = (wvar == 3) && Cinb <= kWinoFullMaxCinBlocks;
+                // wvar already carries the fully-fused kernel's input-depth refusal (see above), so
+                // this arm runs exactly the shapes its LDS array can serve.
+                winofull = wvar == (int) Mode::FullyFused;
                 if (winofull)
                 {
-                    // Single fused kernel: one workgroup per (tile, ocb-group of 16). No V buffer, no input pass.
-                    int64_t ocbGroups = (Coutb + 15) / 16;
+                    // Single fused kernel: one workgroup per (tile, output-channel-block group). No V
+                    // buffer, no input pass.
+                    int64_t ocbGroups = (Coutb + kWinoFullOcbPerGroup - 1) / kWinoFullOcbPerGroup;
                     wFullGroups       = nT * ocbGroups;
                     wFullPipe = env.pipeline((std::string("wino_full") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(WinoFusedPC), std::vector<uint32_t> {});
                     return;
@@ -283,12 +310,13 @@ namespace vknn {
                 wInPC = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
                 // wino_input / wino_input4 run one thread per (icb, tile); wino_input6's separable
                 // two-stage transform runs kWinoF63TransformLanes cooperating threads per unit.
-                wInGroups = groups(Cinb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), 64);
+                wInGroups = groups(Cinb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), kConvFixedKernelWidth);
 
-                // The tiled-GEMM 3-pass is the default Winograd kernel (variant 0). Variant 4 is the same
-                // 3-pass with the subgroup-shuffle GEMM (no LDS). The fused / fused-split variants are
-                // Hint-gated regressions (see above).
-                winogemm = (wvar == 0 || wvar == 4);
+                // The tiled-GEMM 3-pass is the default Winograd kernel (Mode::TiledGemm), and the
+                // variant every refusal above resolves to. Mode::SubgroupGemm is the same 3-pass with
+                // the subgroup-shuffle GEMM (no LDS). The fused / fused-split variants are Hint-gated
+                // regressions (see above).
+                winogemm = wvar == (int) Mode::TiledGemm || wvar == (int) Mode::SubgroupGemm;
                 if (winogemm)
                 {
                     // 3-pass: input transform -> V, TILED batched GEMM -> M, output transform -> dst.
@@ -311,13 +339,14 @@ namespace vknn {
                     std::string outName = (U_ == 2) ? std::string("wino_out") + epi.suffix() :
                                           (U_ == 4) ? std::string("wino_out4") + epi.suffix() :
                                                       std::string("wino_out6") + epi.suffix();
-                    wOutGroups          = groups(Coutb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), 64);
+                    wOutGroups          = groups(Coutb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), kConvFixedKernelWidth);
                     wOutPipe            = env.pipeline((outName + "_fp16").c_str(), 3 + epi.extraBufs(), sizeof(WinoFusedPC), std::vector<uint32_t> {});
                     return;
                 }
-                wino2 = (wvar == 2);
-                // wino2: 4 threads cooperate per (ocb,tile) -> 4x the threads, dispatched 64/workgroup.
-                wFusedGroups = wino2 ? groups(Coutb * nT * 4, 64) : groups(Coutb * nT, 64);
+                wino2 = wvar == (int) Mode::FusedSplit;
+                // wino2 splits one (ocb, tile) across kWino2ThreadsPerTile cooperating threads, so it
+                // dispatches that many times the threads; both fused kernels run at the fixed width.
+                wFusedGroups = groups(Coutb * nT * (wino2 ? kWino2ThreadsPerTile : 1), kConvFixedKernelWidth);
                 wInPipe      = env.pipeline("wino_input_fp16", 2, sizeof(WinoInPC), std::vector<uint32_t> {});
                 wFusedPipe = env.pipeline((std::string(wino2 ? "wino_fused2" : "wino_fused") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(WinoFusedPC), std::vector<uint32_t> {});
             }
@@ -397,7 +426,7 @@ namespace vknn {
                         cost.residentVec4          = (double) total * 4.0 * (double) Cinb * (double) pc.KH * (double) pc.KW;
                         cost.streamFootprintVec4   = (double) (pc.N * Cinb * pc.H * pc.W) + (double) total;
                         cost.residentFootprintVec4 = (double) (pc.Cout * Cinb * pc.KH * pc.KW);
-                        cost.waves                 = (double) groups(total, ls) * (double) ls / 64.0;
+                        cost.waves                 = convDispatchWaves(total, ls);
                         costs.push_back(cost);
                     }
                     std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
@@ -510,7 +539,7 @@ namespace vknn {
                     cost.residentVec4          = (double) threads * 4.0 * (double) ocb * (double) Cinb;
                     cost.streamFootprintVec4   = (double) (x.n * Cinb * x.h * x.w) + (double) (x.n * Coutb * HW);
                     cost.residentFootprintVec4 = (double) (Cout * Cinb);
-                    cost.waves                 = (double) groups(threads, 64);
+                    cost.waves                 = convDispatchWaves(threads, laneWidth);
                     costs.push_back(cost);
                 }
                 std::vector<VkBuffer> bufs = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
@@ -526,9 +555,9 @@ namespace vknn {
                 // the cache.
                 std::vector<double> ms = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
                     uint32_t wt = cands[(size_t) index] & 0xffu, ocb = std::max(1u, cands[(size_t) index] >> 8);
-                    auto pipe = env.pipeline(shader((std::string(s2 ? "conv1x1_s2" : "conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb, env.convLocalSize});
+                    auto pipe = env.pipeline(shader((std::string(s2 ? "conv1x1_s2" : "conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wt, ocb, laneWidth});
                     return timer.time([&](VkCommandBuffer cmd) {
-                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(totals[(size_t) index], env.convLocalSize));
+                        pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(totals[(size_t) index], laneWidth));
                     });
                 });
                 // cands[0] is the deterministic default and stays the incumbent: a challenger must
@@ -585,6 +614,31 @@ namespace vknn {
             // and disjoint, so no barrier separates them). The split flags never combine with each
             // other, the 1-D kernel, or the LDS/tiny-Cout scalar choices. A plain cached value from
             // before the WTILE axis existed decodes unchanged.
+            // conv3x3_lds_fp16.comp geometry: spec constant 0 is the square output-tile edge, spec
+            // constant 1 the workgroup width, which is one lane per tile pixel (edge*edge). The 8x8
+            // tile is the kernel's declared default; the 16x16 twin joins the race where its group
+            // count fits the device X limit. A 3x3 tap window reaches one pixel past each side of
+            // the tile, so the halo staged per tile spans (edge + kLdsHaloMargin)^2 input vec4.
+            static constexpr uint32_t kLdsTileEdgeSmall = 8;
+            static constexpr uint32_t kLdsTileEdgeLarge = 16;
+            static constexpr int64_t  kLdsHaloMargin    = 2;     // halo pixels a 3x3 window adds per tile axis
+            static constexpr int64_t  kLdsHaloTaps      = 3 * 3; // taps each tile pixel accumulates
+            /// Smallest output extent (both axes) the LDS-halo kernel is offered at: below it the
+            /// tile barely fills and the halo overhead dominates the input reuse it buys.
+            static constexpr int64_t kLdsHaloMinOutputExtent = 14;
+            /// Anti-noise margin the 16x16 halo twin has to clear against the direct incumbent. The
+            /// tile size only remaps threads to outputs, so the swap is bit-neutral; the margin
+            /// guards the class against race noise rather than against a value change.
+            static constexpr double kLds16RaceMargin = 0.97;
+            /// conv3x3_lds's specialization constants: the tile edge and the width one lane per tile
+            /// pixel gives, so the pipeline's width and the tile geometry can never disagree.
+            static std::vector<uint32_t> ldsSpecConstants(uint32_t tileEdge) {
+                return {tileEdge, tileEdge * tileEdge};
+            }
+            /// Workgroups the LDS-halo kernel dispatches for one output map at `tileEdge`.
+            static int64_t ldsTileGroups(int64_t batch, int64_t Coutb, NCHW y, int64_t tileEdge) {
+                return batch * Coutb * ((y.h + tileEdge - 1) / tileEdge) * ((y.w + tileEdge - 1) / tileEdge);
+            }
             // conv_tiny_oc_fp16.comp geometry, mirrored by the TINYOC_* defines in the shader
             // (keep in lockstep): a lane's vec4 accumulator runs over kTinyOcPixelsPerLane output
             // pixels of ONE channel row of the single output block, and kTinyOcBlockRows adjacent
@@ -612,19 +666,12 @@ namespace vknn {
                 int ocb = v & 0xff, wt = (v >> 8) & 0xff;
                 return ocb >= 0 && ocb <= 3 && (wt == 0 || wt == 4 || wt == 8);
             }
-            // Threads per OC-split slice: the flat gid range divided by the slice count, rounded up
-            // to whole 64-thread workgroups so every non-final slice dispatches exactly its range
-            // (64-aligned slices are disjoint - no padding thread of one slice reaches the next
-            // one's outputs; the final slice's padding is cut by the kernel's total bound).
-            static int64_t ocSplitSliceThreads(int64_t total, int parts) {
-                return (((total + parts - 1) / parts + 63) / 64) * 64;
-            }
             int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, bool lds3x3) {
                 // The LDS-halo kernel decodes a flat gl_WorkGroupID.x with no split spill, so its
                 // group count must fit the device X limit outright. (Computed before the cache consult
                 // because the reuse gate below needs it.)
-                int64_t ldsG    = x.n * Coutb * ((y.h + 7) / 8) * ((y.w + 7) / 8);
-                int64_t ldsG16  = x.n * Coutb * ((y.h + 15) / 16) * ((y.w + 15) / 16);
+                int64_t ldsG    = ldsTileGroups(x.n, Coutb, y, kLdsTileEdgeSmall);
+                int64_t ldsG16  = ldsTileGroups(x.n, Coutb, y, kLdsTileEdgeLarge);
                 lds3x3          = lds3x3 && ldsG <= (int64_t) env.ctx->caps().maxWorkGroupCount[0];
                 bool    lds16Ok = lds3x3 && ldsG16 <= (int64_t) env.ctx->caps().maxWorkGroupCount[0];
                 int64_t HW      = y.h * y.w;
@@ -665,7 +712,7 @@ namespace vknn {
                         return false;
                     }
                     int64_t tot = x.n * ocbGroups * ((HW + wtile - 1) / wtile);
-                    return ocSplitSliceThreads(tot, parts) / 64 <= (int64_t) env.ctx->caps().maxWorkGroupCount[0];
+                    return convOcSplitSliceGroups(tot, parts, laneWidth) <= (int64_t) env.ctx->caps().maxWorkGroupCount[0];
                 };
                 // The sig omits pads/dilations (the direct and OCB kernels are pad/dilation-agnostic),
                 // but choice kChoiceLds3x3 is only valid for the gated 3x3/s1/p1/d1 shape, a
@@ -698,13 +745,13 @@ namespace vknn {
                 // with no barrier between them, exactly as record() replays the winner. The slices
                 // are one op, so they are all inside the one measurement.
                 auto timeSplit = [&](std::shared_ptr<vk::ComputePipeline> p, int64_t tot, int parts) {
-                    int64_t sliceThreads = ocSplitSliceThreads(tot, parts);
+                    int64_t sliceThreads = convOcSplitSliceThreads(tot, parts, laneWidth);
                     return timer.time([&](VkCommandBuffer cmd) {
                         for (int64_t sliceBase = 0; sliceBase < tot; sliceBase += sliceThreads)
                         {
                             ConvPC slicePc  = pc;
                             slicePc.gidBase = (int) sliceBase;
-                            p->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(sliceThreads, tot - sliceBase), env.convLocalSize));
+                            p->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(sliceThreads, tot - sliceBase), laneWidth));
                         }
                     });
                 };
@@ -766,19 +813,28 @@ namespace vknn {
                 const double  residentFootprint = (double) (pc.Cout * Cinb * pc.KH * pc.KW);
                 // Per thread the direct and conv_reg kernels issue WTILE input vec4 and OCB*4
                 // weight vec4 per (input channel-block, tap) and store WTILE*OCB.
-                auto tileCost = [&](int64_t threads, int64_t taps, double wt, double ocb, double loadsPerTap, int64_t wgroups, int dispatchCount) {
+                // Every per-thread entrant dispatches at `laneWidth`, so its wave count is derived
+                // from that one width - the analytical prefilter and the kTuneRaceMargin waiver
+                // compare these figures against each other and a mixed basis mis-ranks entrants on
+                // any device whose width is not kConvCostWaveLanes.
+                auto tileCost = [&](int64_t threads, int64_t taps, double wt, double ocb, double loadsPerTap, int dispatchCount) {
                     vk::KernelCost cost;
                     cost.streamVec4            = (double) threads * ((double) Cinb * (double) taps * loadsPerTap + wt * ocb);
                     cost.residentVec4          = (double) threads * (double) Cinb * (double) taps * 4.0 * ocb;
                     cost.streamFootprintVec4   = streamFootprint;
                     cost.residentFootprintVec4 = residentFootprint;
-                    cost.waves                 = (double) wgroups;
+                    cost.waves                 = convDispatchWaves(threads, laneWidth);
                     cost.dispatches            = dispatchCount;
                     return cost;
                 };
                 std::vector<OcbEntrant> entrants;
-                entrants.push_back({0, 1.0, tileCost(x.n * Coutb * HW, pc.KH * pc.KW, 1.0, 1.0, 1.0, groups(x.n * Coutb * HW, 64), 1), [&] {
-                                        return timeIt(env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
+                // The direct kernel is the incumbent, raced at `laneWidth` - the width record()
+                // dispatches it at when this race resolves nothing and the width pickLocalSize seeds
+                // its own candidate ladder with. Compiling it at any other width would time a
+                // pipeline the graph never runs, and a width past the device's caps would fail
+                // pipeline creation mid-race.
+                entrants.push_back({0, 1.0, tileCost(x.n * Coutb * HW, pc.KH * pc.KW, 1.0, 1.0, 1.0, 1), [&] {
+                                        return timeIt(env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {laneWidth}), x.n * Coutb * HW, laneWidth);
                                     }});
                 for (uint32_t cand: cands)
                 {
@@ -796,17 +852,17 @@ namespace vknn {
                         int64_t tot  = x.n * ocbGroups * clen * ((alen + wt - 1) / wt);
                         // The sliding window loads WTILE+K-1 input vec4 for the whole K-tap run
                         // instead of WTILE per tap, so its input term is per RUN, not per tap.
-                        vk::KernelCost cost = tileCost(tot, klen, (double) wt, (double) ocb, (double) (wt + klen - 1) / (double) klen, groups(tot, 64), 1);
+                        vk::KernelCost cost = tileCost(tot, klen, (double) wt, (double) ocb, (double) (wt + klen - 1) / (double) klen, 1);
                         entrants.push_back({(int) cand, margin, cost, [&, tot, ocb, wt] {
-                                                return timeIt(env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, kaxis, klen, env.convLocalSize}), tot, env.convLocalSize);
+                                                return timeIt(env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, kaxis, klen, laneWidth}), tot, laneWidth);
                                             }});
                     } else
                     {
                         int64_t        tot  = x.n * ocbGroups * ((HW + wt - 1) / wt);
-                        vk::KernelCost cost = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, (double) wt, groups(tot, 64), parts);
+                        vk::KernelCost cost = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, (double) wt, parts);
                         entrants.push_back({(int) cand, margin, cost, [&, tot, parts, ocb, wt] {
-                                                auto pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, env.convLocalSize});
-                                                return parts > 1 ? timeSplit(pipe, tot, parts) : timeIt(pipe, tot, env.convLocalSize);
+                                                auto pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRegSpecConstants(ocb, wt, laneWidth));
+                                                return parts > 1 ? timeSplit(pipe, tot, parts) : timeIt(pipe, tot, laneWidth);
                                             }});
                     }
                 }
@@ -818,17 +874,19 @@ namespace vknn {
                     vk::KernelCost cost;
                     // The halo is staged once per workgroup, so the LDS kernel's activation term
                     // is the halo plus the stores rather than a per-thread re-read.
-                    cost.streamVec4            = (double) wgroups * ((double) Cinb * (double) (ts + 2) * (double) (ts + 2) + (double) (ts * ts));
-                    cost.residentVec4          = (double) wgroups * (double) (ts * ts) * (double) Cinb * 9.0 * 4.0;
+                    const int64_t haloEdge     = ts + kLdsHaloMargin;
+                    cost.streamVec4            = (double) wgroups * ((double) Cinb * (double) (haloEdge * haloEdge) + (double) (ts * ts));
+                    cost.residentVec4          = (double) wgroups * (double) (ts * ts) * (double) Cinb * (double) kLdsHaloTaps * 4.0;
                     cost.streamFootprintVec4   = streamFootprint;
                     cost.residentFootprintVec4 = residentFootprint;
-                    cost.waves                 = (double) wgroups * (double) (ts * ts) / 64.0;
+                    cost.waves                 = (double) (wgroups * ts * ts) / (double) kConvCostWaveLanes;
                     return cost;
                 };
                 if (lds3x3)
                 {
-                    entrants.push_back({kChoiceLds3x3, 1.0, ldsCost(ldsG, 8), [&] {
-                                            return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC)), ldsG * 64, 64);
+                    entrants.push_back({kChoiceLds3x3, 1.0, ldsCost(ldsG, kLdsTileEdgeSmall), [&] {
+                                            const uint32_t tileLanes = kLdsTileEdgeSmall * kLdsTileEdgeSmall;
+                                            return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), ldsSpecConstants(kLdsTileEdgeSmall)), ldsG * tileLanes, tileLanes);
                                         }});
                 }
                 // The 16x16-tile halo variant joins the same bit-exact race: the tile size only
@@ -836,8 +894,9 @@ namespace vknn {
                 // tile's input reads); an anti-noise margin guards the new class.
                 if (lds16Ok)
                 {
-                    entrants.push_back({kChoiceLds16, 0.97, ldsCost(ldsG16, 16), [&] {
-                                            return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {16u, 256u}), ldsG16 * 256, 256);
+                    entrants.push_back({kChoiceLds16, kLds16RaceMargin, ldsCost(ldsG16, kLdsTileEdgeLarge), [&] {
+                                            const uint32_t tileLanes = kLdsTileEdgeLarge * kLdsTileEdgeLarge;
+                                            return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), ldsSpecConstants(kLdsTileEdgeLarge)), ldsG16 * tileLanes, tileLanes);
                                         }});
                 }
                 // The tiny-Cout pixel-quad kernel joins the same bit-exact race for the one-block
@@ -852,14 +911,15 @@ namespace vknn {
                 if (tinyOcOk)
                 {
                     const int64_t  tinyThreads = x.n * kTinyOcBlockRows * ((HW + kTinyOcPixelsPerLane - 1) / kTinyOcPixelsPerLane);
+                    const int64_t  tinyGroups  = convDispatchGroups(tinyThreads, laneWidth);
                     vk::KernelCost tinyCost;
                     tinyCost.streamVec4            = (double) tinyThreads * ((double) Cinb * (double) kTinyOcKernelTaps + 1.0);
-                    tinyCost.residentVec4          = (double) groups(tinyThreads, env.convLocalSize) * (double) (kTinyOcBlockRows * Cinb * kTinyOcKernelTaps);
+                    tinyCost.residentVec4          = (double) tinyGroups * (double) (kTinyOcBlockRows * Cinb * kTinyOcKernelTaps);
                     tinyCost.streamFootprintVec4   = streamFootprint;
                     tinyCost.residentFootprintVec4 = residentFootprint;
-                    tinyCost.waves                 = (double) groups(tinyThreads, 64);
+                    tinyCost.waves                 = convDispatchWaves(tinyThreads, laneWidth);
                     entrants.push_back({kChoiceTinyOc, vk::kTuneRaceMargin, tinyCost, [&, tinyThreads] {
-                                            return timeIt(env.pipeline((std::string("conv_tiny_oc") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {(uint32_t) Cinb, env.convLocalSize}), tinyThreads, env.convLocalSize);
+                                            return timeIt(env.pipeline((std::string("conv_tiny_oc") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {(uint32_t) Cinb, laneWidth}), tinyThreads, laneWidth);
                                         }});
                 }
                 std::vector<vk::KernelCost> costs;
@@ -1034,11 +1094,11 @@ namespace vknn {
                     // share of the pipeline is what is measured.
                     auto time3Pass = [&](std::shared_ptr<vk::ComputePipeline> gemmPipe, uint32_t gx) {
                         return timer.time([&](VkCommandBuffer cmd) {
-                            inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT * lanes, 64));
+                            inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT * lanes, kConvFixedKernelWidth));
                             vk::computeBarrier(*env.ctx, cmd);
                             gemmPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
                             vk::computeBarrier(*env.ctx, cmd);
-                            oPipe->dispatch(cmd, oBufs, &opc, sizeof(opc), groups(Coutb * nT * lanes, 64));
+                            oPipe->dispatch(cmd, oBufs, &opc, sizeof(opc), groups(Coutb * nT * lanes, kConvFixedKernelWidth));
                         });
                     };
                     // Entrants in one interleaved race: LDS RM4 (the incumbent Tuning::None
@@ -1087,6 +1147,11 @@ namespace vknn {
             }
 
             void prepare(const Node &node, VkOpEnv &env) override {
+                // The per-thread conv family's width for this device, resolved at load. Every
+                // pipeline this prepare creates is compiled at it and every dispatch record()
+                // issues divides by it; the direct kernel's branch replaces it with its raced width,
+                // which its own pipeline is then compiled at.
+                laneWidth         = env.convLocalSize;
                 const Graph &g    = *env.graph;
                 NCHW         x    = NCHW::from(g.desc(node.inputs[0]).shape);
                 NCHW         y    = NCHW::from(g.desc(node.outputs[0]).shape);
@@ -1173,7 +1238,7 @@ namespace vknn {
                     // Bit-exact tile race: 1 pixel/thread vs the 2x2 output tile (dwconv_t2).
                     bool dwTile2 = pickDwTile(env, x, y, Cb) == 1;
                     total        = dwTile2 ? x.n * Cb * ((y.h + 1) / 2) * ((y.w + 1) / 2) : x.n * Cb * y.h * y.w;
-                    pipe = env.pipeline(shader((std::string(dwTile2 ? "dwconv_t2" : "dwconv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), std::vector<uint32_t> {env.convLocalSize});
+                    pipe = env.pipeline(shader((std::string(dwTile2 ? "dwconv_t2" : "dwconv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), std::vector<uint32_t> {laneWidth});
                 } else
                 {
                     int64_t Cinb = cBlocks(x.c);
@@ -1234,7 +1299,7 @@ namespace vknn {
                             int64_t nTiles    = (HW + wTile - 1) / wTile;
                             int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
                             total             = x.n * ocbGroups * nTiles;
-                            pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, env.convLocalSize});
+                            pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, laneWidth});
                         }
                     } else if (starvedDeep)
                     {
@@ -1253,30 +1318,32 @@ namespace vknn {
                         ocbTile           = std::max(1u, pick >> 8);
                         int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
                         total             = x.n * ocbGroups * ((HW + wTile - 1) / wTile);
-                        pipe = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, env.convLocalSize});
-                    } else if (cfgHint(env, Hint::DirectConv3x3) == 2 && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14)
+                        pipe = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, laneWidth});
+                    } else if (cfgHint(env, Hint::DirectConv3x3) == (int) Mode::LdsHalo && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= kLdsHaloMinOutputExtent && y.w >= kLdsHaloMinOutputExtent)
                     {
-                        // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). 7x7
-                        // layer4 stays on the direct kernel (tile barely fills, halo overhead dominates).
-                        lds         = true;
-                        int64_t nTX = (y.w + 7) / 8, nTY = (y.h + 7) / 8;
-                        ldsGroups = x.n * Coutb * nTY * nTX;
-                        pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {});
-                    } else if (cfgHint(env, Hint::DirectConv3x3) == 1)
+                        // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). A
+                        // 7x7 map stays on the direct kernel (tile barely fills, halo overhead dominates).
+                        lds       = true;
+                        ldsGroups = ldsTileGroups(x.n, Coutb, y, kLdsTileEdgeSmall);
+                        pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), ldsSpecConstants(kLdsTileEdgeSmall));
+                    } else if (cfgHint(env, Hint::DirectConv3x3) == (int) Mode::RegisterTiled)
                     {
                         // register-tiled implicit-im2col (opt-in). Regresses 3x3 on this GPU: small weight
-                        // tensors already cache well, so WTILE overhead + extra input loads dominate.
+                        // tensors already cache well, so WTILE overhead + extra input loads dominate. The
+                        // tile it runs at is stated, not left to the shader's declared defaults: the thread
+                        // count below and the pipeline have to agree on OCB/WTILE, and the dispatch width
+                        // record() divides by has to be the width the pipeline is compiled at.
                         reg        = true;
                         int64_t HW = y.h * y.w;
-                        total      = x.n * Coutb * ((HW + kTile - 1) / kTile);
-                        pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {});
+                        total      = x.n * Coutb * ((HW + kConvRegDefaultPixelTile - 1) / kConvRegDefaultPixelTile);
+                        pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRegSpecConstants(kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile, laneWidth));
                     } else
                     {
                         // DirectAuto: the bit-exact direct race picks the baseline (1-pixel direct,
                         // conv_reg OCB tiling, or the LDS-halo 3x3 when eligible), then the
                         // implicit-GEMM shape rule (fp16-floor, deterministic at every tuning
                         // level) may take the shape from that baseline.
-                        bool lds3x3 = env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= 14 && y.w >= 14;
+                        bool lds3x3 = env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= kLdsHaloMinOutputExtent && y.w >= kLdsHaloMinOutputExtent;
                         int ocb = env.useFp16 ? pickOcb(env, x, y, Cout, Coutb, lds3x3) : 0;
                         int gtm = (env.useFp16 && group == 1 && KH * KW > 1) ? tuneConvGemm(node, env, x, y, Cout, Coutb, KH, KW, ocb) : 0;
                         if (gtm > 0)
@@ -1324,11 +1391,10 @@ namespace vknn {
                         {
                             // LDS input-halo 3x3 at the autotuned tile edge (8x8 or 16x16; won the
                             // bit-exact direct race for this shape).
-                            lds          = true;
-                            uint32_t ts  = (ocb == kChoiceLds16) ? 16u : 8u;
-                            int64_t  nTX = (y.w + ts - 1) / ts, nTY = (y.h + ts - 1) / ts;
-                            ldsGroups = x.n * Coutb * nTY * nTX;
-                            pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {ts, ts * ts});
+                            lds                     = true;
+                            const uint32_t tileEdge = (ocb == kChoiceLds16) ? kLdsTileEdgeLarge : kLdsTileEdgeSmall;
+                            ldsGroups               = ldsTileGroups(x.n, Coutb, y, tileEdge);
+                            pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), ldsSpecConstants(tileEdge));
                         } else if (ocb == kChoiceTinyOc)
                         {
                             // tiny-Cout pixel-quad kernel (single output channel-block; won the
@@ -1338,7 +1404,7 @@ namespace vknn {
                             reg        = true;
                             int64_t HW = y.h * y.w;
                             total      = x.n * kTinyOcBlockRows * ((HW + kTinyOcPixelsPerLane - 1) / kTinyOcPixelsPerLane);
-                            pipe = env.pipeline((std::string("conv_tiny_oc") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) Cinb, env.convLocalSize});
+                            pipe = env.pipeline((std::string("conv_tiny_oc") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) Cinb, laneWidth});
                         } else if ((ocb & kChoice1D) != 0)
                         {
                             // sliding-window 1-D kernel (1xK / Kx1; autotuned, won the bit-exact race).
@@ -1351,7 +1417,7 @@ namespace vknn {
                             int64_t  clen      = (kaxis == 0) ? y.h : y.w;
                             int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
                             total              = x.n * ocbGroups * clen * ((alen + regWt - 1) / regWt);
-                            pipe = env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, kaxis, klen, env.convLocalSize});
+                            pipe = env.pipeline((std::string("conv_1d") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, kaxis, klen, laneWidth});
                         } else if (ocb > 0)
                         {
                             // register-tiled conv computing OCB output channel-blocks per thread for WTILE
@@ -1365,14 +1431,14 @@ namespace vknn {
                             int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
                             total              = x.n * ocbGroups * ((HW + regWt - 1) / regWt);
                             ocSplitParts       = (ocb & kChoiceOcSplit2) ? 2 : ((ocb & kChoiceOcSplit4) ? 4 : 1);
-                            ocSliceThreads     = ocSplitSliceThreads(total, ocSplitParts);
-                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, env.convLocalSize});
+                            ocSliceThreads     = convOcSplitSliceThreads(total, ocSplitParts, laneWidth);
+                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRegSpecConstants(regOcb, regWt, laneWidth));
                         } else
                         {
                             // autotuned 1-pixel-per-thread direct kernel (the fallback when OCB tiling didn't win)
                             total     = x.n * Coutb * y.h * y.w;
-                            localSize = pickLocalSize(env);
-                            pipe = env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {localSize});
+                            laneWidth = pickLocalSize(env);
+                            pipe = env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {laneWidth});
                         }
                     }
                 }
@@ -1449,7 +1515,7 @@ namespace vknn {
                 if (depthwise)
                 {
                     epi.append(bufs, node, env, dst->handle());
-                    pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, env.convLocalSize));
+                    pipe->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(total, laneWidth));
                 } else if (pointwise || pwS2)
                 {
                     if (hasRes)
@@ -1460,7 +1526,7 @@ namespace vknn {
                         bufs.push_back(dst->handle()); // epilogue binds after the Res slot: fill it
                     }
                     epi.append(bufs, node, env, dst->handle());
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, env.convLocalSize));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, laneWidth));
                 } else if (lds)
                 {
                     epi.append(bufs, node, env, dst->handle());
@@ -1476,12 +1542,12 @@ namespace vknn {
                     {
                         ConvPC slicePc  = pc;
                         slicePc.gidBase = (int) sliceBase;
-                        pipe->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(ocSliceThreads, total - sliceBase), env.convLocalSize));
+                        pipe->dispatch(cmd, bufs, &slicePc, sizeof(slicePc), groups(std::min<int64_t>(ocSliceThreads, total - sliceBase), laneWidth));
                     }
                 } else
                 {
                     epi.append(bufs, node, env, dst->handle());
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, reg ? env.convLocalSize : localSize));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, laneWidth));
                 }
             }
         };

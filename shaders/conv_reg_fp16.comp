@@ -14,9 +14,22 @@
 #define PW_EPI_BASE 4
 #include "pw_epilogue.glsl"
 #endif
-layout(constant_id = 0) const int OCB_BLK = 1; // output channel-blocks (of 4 oc) computed per thread
-layout(constant_id = 1) const int WTILE = 4;   // output pixels per thread (autotuned per shape)
-layout(local_size_x = 64, local_size_x_id = 2) in; // trailing spec = device-resolved lane width (env.convLocalSize)
+// Specialization-constant mirrors of src/core/conv_dispatch_rules.h (keep in lockstep):
+// CONV_REG_OCB_SPEC / CONV_REG_WTILE_SPEC / CONV_REG_LANE_WIDTH_SPEC are kConvRegOcbSpecIndex,
+// kConvRegPixelTileSpecIndex and kConvRegLaneWidthSpecIndex; the DECLARED_ values are
+// kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile and flat::kConvFamilyLaneWidth. The host
+// states all three explicitly through convRegSpecConstants(), so the DECLARED lane width only
+// stands in for a standalone compile - a pipeline built without it would run this kernel at a
+// width its dispatch does not divide by and leave the outputs past that width unwritten.
+#define CONV_REG_OCB_SPEC 0
+#define CONV_REG_WTILE_SPEC 1
+#define CONV_REG_LANE_WIDTH_SPEC 2
+#define CONV_REG_DECLARED_OCB_BLK 1
+#define CONV_REG_DECLARED_WTILE 4
+#define CONV_REG_DECLARED_LANE_WIDTH 64
+layout(constant_id = CONV_REG_OCB_SPEC) const int OCB_BLK = CONV_REG_DECLARED_OCB_BLK; // output channel-blocks (of 4 oc) computed per thread
+layout(constant_id = CONV_REG_WTILE_SPEC) const int WTILE = CONV_REG_DECLARED_WTILE;   // output pixels per thread (autotuned per shape)
+layout(local_size_x = CONV_REG_DECLARED_LANE_WIDTH, local_size_x_id = CONV_REG_LANE_WIDTH_SPEC) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };

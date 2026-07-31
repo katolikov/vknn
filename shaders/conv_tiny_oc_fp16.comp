@@ -29,8 +29,16 @@
 #define TINYOC_BLOCK_ROWS 4 // kTinyOcBlockRows: channel rows of the single NC4 output block
 #define TINYOC_KEDGE 3      // kernel edge; the host gates this kernel to 3x3
 #define TINYOC_KTAPS (TINYOC_KEDGE * TINYOC_KEDGE) // kTinyOcKernelTaps
-layout(constant_id = 0) const int CINB = 1;        // input channel-blocks (sizes the staged weights)
-layout(local_size_x = 64, local_size_x_id = 1) in; // trailing spec = device-resolved lane width (env.convLocalSize)
+// Specialization-constant slots. TINYOC_LANE_WIDTH_SPEC carries the device-resolved lane width
+// (VkOpEnv::convLocalSize, the value ConvOp::laneWidth dispatches at); TINYOC_DECLARED_LANE_WIDTH
+// mirrors that width's ceiling, flat::kConvFamilyLaneWidth, and only stands in for a standalone
+// compile - the host always states the width its dispatch divides by.
+#define TINYOC_CINB_SPEC 0
+#define TINYOC_LANE_WIDTH_SPEC 1
+#define TINYOC_DECLARED_CINB 1
+#define TINYOC_DECLARED_LANE_WIDTH 64
+layout(constant_id = TINYOC_CINB_SPEC) const int CINB = TINYOC_DECLARED_CINB; // input channel-blocks (sizes the staged weights)
+layout(local_size_x = TINYOC_DECLARED_LANE_WIDTH, local_size_x_id = TINYOC_LANE_WIDTH_SPEC) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
