@@ -546,15 +546,18 @@ namespace vknn {
             // Autotune the general direct conv's bit-exact kernel set: race the 1-pixel/thread direct
             // kernel against conv_reg computing OCB channel-blocks per thread (each input vec4 reused
             // across 4*OCB output-channel dots), the conv_reg tiles replayed as 2/4 OC-split slice
-            // dispatches (kChoiceOcSplit2/4), and — when `lds3x3` marks the shape eligible (3x3, s1,
-            // p1, d1, >=14x14 output, fp16) — the LDS input-halo kernel. Returns 0 = direct, the OCB
-            // block factor (optionally with a split flag), or kChoiceLds3x3. Per-output arithmetic is
+            // dispatches (kChoiceOcSplit2/4), when `lds3x3` marks the shape eligible (3x3, s1,
+            // p1, d1, >=14x14 output, fp16) — the LDS input-halo kernel, and — for the
+            // single-output-channel-block 3x3/s1/d1 shapes — the tiny-Cout pixel-quad kernel.
+            // Returns 0 = direct, the OCB block factor (optionally with a split flag),
+            // kChoiceLds3x3/kChoiceLds16, or kChoiceTinyOc. Per-output arithmetic is
             // identical for every candidate (only the thread<->output mapping and the input staging
             // change), so the choice never affects output bits (no anti-noise margin needed, unlike
             // Winograd) and a cache-off re-tune stays deterministic. Measured on scratch buffers +
             // cached like pickWTile.
             static constexpr int kChoiceLds3x3   = 9;       // pickOcb result: the LDS input-halo 3x3 kernel (8x8 tile) won
             static constexpr int kChoiceLds16    = 10;      // pickOcb result: the LDS input-halo 3x3 kernel (16x16 tile) won
+            static constexpr int kChoiceTinyOc   = 11;      // pickOcb result: the tiny-Cout pixel-quad kernel (Cout <= 4) won
             static constexpr int kChoice1D       = 1 << 16; // pickOcb result flag: the sliding-window 1-D kernel won
             static constexpr int kChoiceOcSplit2 = 1 << 17; // pickOcb result flag: conv_reg dispatched as 2 flat-gid slices
             static constexpr int kChoiceOcSplit4 = 1 << 18; // pickOcb result flag: conv_reg dispatched as 4 flat-gid slices
@@ -563,10 +566,20 @@ namespace vknn {
             // kChoiceOcSplit2/4 marking a conv_reg tile whose flat gid range record() splits into
             // 2/4 back-to-back dispatches (MNN-style output-channel chunking; slices are 64-aligned
             // and disjoint, so no barrier separates them). The split flags never combine with each
-            // other, the 1-D kernel, or the LDS choices. A plain cached value from before the
-            // WTILE axis existed decodes unchanged.
-            static bool validOcbChoice(int v) {
-                if (v == kChoiceLds3x3 || v == kChoiceLds16)
+            // other, the 1-D kernel, or the LDS/tiny-Cout scalar choices. A plain cached value from
+            // before the WTILE axis existed decodes unchanged.
+            // conv_tiny_oc_fp16.comp geometry, mirrored by the TINYOC_* defines in the shader
+            // (keep in lockstep): a lane's vec4 accumulator runs over kTinyOcPixelsPerLane output
+            // pixels of ONE channel row of the single output block, and kTinyOcBlockRows adjacent
+            // lanes cover the block's rows (padded rows included, so the full NC4 buffer is
+            // written byte-identically to the direct kernel's).
+            static constexpr int kTinyOcPixelsPerLane = 4;     // TINYOC_PIXELS in the shader
+            static constexpr int kTinyOcBlockRows     = 4;     // TINYOC_BLOCK_ROWS: rows of one NC4 block
+            static constexpr int kTinyOcKernelTaps    = 3 * 3; // TINYOC_KTAPS: the gated 3x3 tap count
+            // Bytes of one f16vec4, the staged weight element (sizes the shared-memory fit gate).
+            static constexpr int64_t kF16Vec4Bytes = 4 * (int64_t) sizeof(uint16_t);
+            static bool              validOcbChoice(int v) {
+                if (v == kChoiceLds3x3 || v == kChoiceLds16 || v == kChoiceTinyOc)
                 {
                     return true;
                 }
@@ -607,6 +620,14 @@ namespace vknn {
                 // A 1-D kernel (1xK / Kx1, stride 1, dilation 1) is eligible for the sliding-window
                 // candidates; computed before the cache consult because the reuse gate needs it.
                 bool asym1dOk = env.useFp16 && ((pc.KH == 1) != (pc.KW == 1)) && pc.SH == 1 && pc.SW == 1 && pc.DH == 1 && pc.DW == 1;
+                // The tiny-Cout pixel-quad kernel serves the single-output-channel-block 3x3/s1/d1
+                // class (Cout <= 4), where the channel-block kernels have no block axis to spread
+                // and most of a lane's dots compute padded rows. Pads stay free: the kernel guards
+                // taps per pixel exactly like the direct kernel. Eligible only while its staged
+                // weight block fits the device's shared memory (read at load, no fallback ladder);
+                // computed before the cache consult because the reuse gate needs it.
+                bool tinyOcOk = env.useFp16 && Coutb == 1 && pc.KH == 3 && pc.KW == 3 && pc.SH == 1 && pc.SW == 1 && pc.DH == 1 && pc.DW == 1 &&
+                                kTinyOcBlockRows * cBlocks(pc.Cin) * kTinyOcKernelTaps * kF16Vec4Bytes <= (int64_t) env.ctx->caps().maxSharedMemory;
                 // An OC-split choice is eligible only while its conv_reg tile still yields enough
                 // output-channel-block groups (>= 8 for 2 slices, >= 16 for 4) and every slice's
                 // group count fits the device X limit on its own: the flat-gid slices rely on the
@@ -631,10 +652,11 @@ namespace vknn {
                 };
                 // The sig omits pads/dilations (the direct and OCB kernels are pad/dilation-agnostic),
                 // but choice kChoiceLds3x3 is only valid for the gated 3x3/s1/p1/d1 shape, a
-                // kChoice1D value only for the 1-D-eligible shape, and an OC-split value only while
-                // its slice geometry stays eligible — an ineligible node with the same sig fields
-                // must re-race without it.
-                if (env.reuseTuned(sig, reuse) && validOcbChoice(reuse) && (reuse != kChoiceLds3x3 || lds3x3) && (reuse != kChoiceLds16 || lds16Ok) && (!(reuse & kChoice1D) || asym1dOk) && ocSplitEligible(reuse))
+                // kChoice1D value only for the 1-D-eligible shape, kChoiceTinyOc only for the
+                // tiny-Cout-eligible shape, and an OC-split value only while its slice geometry
+                // stays eligible — an ineligible node with the same sig fields must re-race
+                // without it.
+                if (env.reuseTuned(sig, reuse) && validOcbChoice(reuse) && (reuse != kChoiceLds3x3 || lds3x3) && (reuse != kChoiceLds16 || lds16Ok) && (reuse != kChoiceTinyOc || tinyOcOk) && (!(reuse & kChoice1D) || asym1dOk) && ocSplitEligible(reuse))
                 {
                     return reuse;
                 }
@@ -799,6 +821,28 @@ namespace vknn {
                 {
                     entrants.push_back({kChoiceLds16, 0.97, ldsCost(ldsG16, 16), [&] {
                                             return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {16u, 256u}), ldsG16 * 256, 256);
+                                        }});
+                }
+                // The tiny-Cout pixel-quad kernel joins the same bit-exact race for the one-block
+                // shapes: per (pixel, channel) its accumulation is value-identical to the direct
+                // kernel (fp32 accumulate, icb/ky/kx tap order, out-of-range taps skipped by the
+                // same guard), so the swap never affects output bits; the anti-noise margin guards
+                // the new class. Cost inputs reflect what the kernel issues: a quad's four lanes
+                // load the SAME input vec4 per (pixel, tap) — one broadcast transaction, counted
+                // once, like the LDS halo's per-workgroup stage — its four scalar f16 stores merge
+                // into one f16vec4, and the weight block is staged into shared memory once per
+                // workgroup instead of re-read per thread.
+                if (tinyOcOk)
+                {
+                    const int64_t  tinyThreads = x.n * kTinyOcBlockRows * ((HW + kTinyOcPixelsPerLane - 1) / kTinyOcPixelsPerLane);
+                    vk::KernelCost tinyCost;
+                    tinyCost.streamVec4            = (double) tinyThreads * ((double) Cinb * (double) kTinyOcKernelTaps + 1.0);
+                    tinyCost.residentVec4          = (double) groups(tinyThreads, env.convLocalSize) * (double) (kTinyOcBlockRows * Cinb * kTinyOcKernelTaps);
+                    tinyCost.streamFootprintVec4   = streamFootprint;
+                    tinyCost.residentFootprintVec4 = residentFootprint;
+                    tinyCost.waves                 = (double) groups(tinyThreads, 64);
+                    entrants.push_back({kChoiceTinyOc, vk::kTuneRaceMargin, tinyCost, [&, tinyThreads] {
+                                            return timeIt(env.pipeline((std::string("conv_tiny_oc") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {(uint32_t) Cinb, env.convLocalSize}), tinyThreads, env.convLocalSize);
                                         }});
                 }
                 std::vector<vk::KernelCost> costs;
@@ -1268,6 +1312,16 @@ namespace vknn {
                             int64_t  nTX = (y.w + ts - 1) / ts, nTY = (y.h + ts - 1) / ts;
                             ldsGroups = x.n * Coutb * nTY * nTX;
                             pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {ts, ts * ts});
+                        } else if (ocb == kChoiceTinyOc)
+                        {
+                            // tiny-Cout pixel-quad kernel (single output channel-block; won the
+                            // bit-exact direct race). Byte-identical to the direct kernel. reg
+                            // routes record() to the flat device-lane-width dispatch, like the
+                            // 1-D winner.
+                            reg        = true;
+                            int64_t HW = y.h * y.w;
+                            total      = x.n * kTinyOcBlockRows * ((HW + kTinyOcPixelsPerLane - 1) / kTinyOcPixelsPerLane);
+                            pipe = env.pipeline((std::string("conv_tiny_oc") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) Cinb, env.convLocalSize});
                         } else if ((ocb & kChoice1D) != 0)
                         {
                             // sliding-window 1-D kernel (1xK / Kx1; autotuned, won the bit-exact race).

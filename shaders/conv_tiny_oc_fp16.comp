@@ -1,0 +1,108 @@
+#version 450
+// Tiny-Cout direct conv (Cout <= 4, i.e. ONE NC4 output channel-block), 3x3 stride-1, fp16.
+// The channel-block kernels give a lane one (pixel, channel-block) output, so a single-block
+// shape leaves them no channel-block axis to spread and (at Cout < 4) most of each lane's four
+// dots computing padded rows. Here the vec4 accumulator runs over PIXELS instead: a lane
+// computes TINYOC_PIXELS consecutive outputs of ONE row of the block, and the four rows of a
+// pixel quad sit in adjacent lanes (row-fastest gid) - their per-tap input loads hit the same
+// address (one broadcast transaction per quad) and their four scalar stores merge into whole
+// f16vec4s. Padded block rows are computed like real ones (their weights and bias are the zero
+// fill), so the full NC4 output buffer is written byte-identically to the direct kernel's.
+// The block's whole weight set (TINYOC_BLOCK_ROWS * CINB * TINYOC_KTAPS f16vec4, the exact
+// prefix of the [Cout][Cinb][3][3][4] pack) is staged into shared memory once per workgroup;
+// staging changes no values and no accumulation order.
+// Member of the bit-exact direct race: per (pixel, channel) the fp32 accumulator starts at the
+// same bias value and adds the same dot(input vec4, weight vec4) terms in conv.comp's exact
+// icb -> ky -> kx order, out-of-range taps skipped by the same bounds guard (never folded in as
+// zero loads), and the result rounds through the same TO_STORE discipline.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+// Mirrors of the ConvOp host constants (src/backend/vulkan/ops/conv.cpp); keep in lockstep.
+#define TINYOC_PIXELS 4     // kTinyOcPixelsPerLane: output pixels per lane (the accumulator width)
+#define TINYOC_BLOCK_ROWS 4 // kTinyOcBlockRows: channel rows of the single NC4 output block
+#define TINYOC_KEDGE 3      // kernel edge; the host gates this kernel to 3x3
+#define TINYOC_KTAPS (TINYOC_KEDGE * TINYOC_KEDGE) // kTinyOcKernelTaps
+layout(constant_id = 0) const int CINB = 1;        // input channel-blocks (sizes the staged weights)
+layout(local_size_x = 64, local_size_x_id = 1) in; // trailing spec = device-resolved lane width (env.convLocalSize)
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { float16_t dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+} pc;
+// The single output block's weight set. Rows 0..3 are contiguous at the head of the
+// [Cout][Cinb][KH][KW][4] pack, so the stage is a straight prefix copy of wt.
+shared f16vec4 wlds[TINYOC_BLOCK_ROWS * CINB * TINYOC_KTAPS];
+
+void main() {
+  // Cooperative weight stage; every lane participates (out-of-range lanes return only after the
+  // barrier, keeping the barrier in uniform control flow).
+  int tid = int(gl_LocalInvocationID.x);
+  for (int i = tid; i < TINYOC_BLOCK_ROWS * CINB * TINYOC_KTAPS; i += int(gl_WorkGroupSize.x)) {
+    wlds[i] = wt[i];
+  }
+  barrier();
+
+  int HW = pc.OH * pc.OW;
+  int quads = (HW + TINYOC_PIXELS - 1) / TINYOC_PIXELS;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * TINYOC_BLOCK_ROWS * quads)) return;
+  int row = int(gid) % TINYOC_BLOCK_ROWS; // channel row of the single output block (row-fastest)
+  int quad = (int(gid) / TINYOC_BLOCK_ROWS) % quads;
+  int n = int(gid) / (TINYOC_BLOCK_ROWS * quads);
+  int p0 = quad * TINYOC_PIXELS;
+
+  int oyv[TINYOC_PIXELS], oxv[TINYOC_PIXELS];
+  for (int p = 0; p < TINYOC_PIXELS; ++p) {
+    // clamp: the last quad can overhang HW; the clamped pixel recomputes a valid output that is
+    // never stored (same discipline as conv_reg).
+    int pix = min(p0 + p, HW - 1);
+    oyv[p] = pix / pc.OW;
+    oxv[p] = pix - oyv[p] * pc.OW;
+  }
+
+  // acc[p] = pixel p of this lane's channel row; fp32 accumulation seeded with the row's bias,
+  // exactly like the direct kernel's per-lane bias seed.
+  vec4 acc = vec4(vec4(bias[0])[row]);
+
+  int ocStride = CINB * TINYOC_KTAPS; // f16vec4 step between the block's channel rows
+  int wrow = row * ocStride;
+  for (int icb = 0; icb < CINB; ++icb) {
+    int sb = (n * CINB + icb) * pc.H * pc.W;
+    int wtap0 = wrow + icb * TINYOC_KTAPS;
+    for (int ky = 0; ky < TINYOC_KEDGE; ++ky) {
+      for (int kx = 0; kx < TINYOC_KEDGE; ++kx) {
+        // one weight vec4 per tap, reused across the quad's pixels.
+        vec4 w = vec4(wlds[wtap0 + ky * TINYOC_KEDGE + kx]);
+        for (int p = 0; p < TINYOC_PIXELS; ++p) {
+          int iy = oyv[p] * pc.SH - pc.PT + ky * pc.DH;
+          int ix = oxv[p] * pc.SW - pc.PL + kx * pc.DW;
+          if (uint(iy) < uint(pc.H) && uint(ix) < uint(pc.W)) {
+            acc[p] += dot(vec4(src[sb + iy * pc.W + ix]), w);
+          }
+        }
+      }
+    }
+  }
+
+  int dbase = n * HW; // vec4-space index of this image's single output block (Coutb == 1)
+  for (int p = 0; p < TINYOC_PIXELS; ++p) {
+    int pix = p0 + p;
+    if (pix < HW) {
+      float v = vx_act(acc[p], pc.act, pc.actLo, pc.actHi);
+#ifdef PW_EPI
+      v = pw_apply_nc4(v, (dbase + pix) * TINYOC_BLOCK_ROWS + row);
+#endif
+      dst[(dbase + pix) * TINYOC_BLOCK_ROWS + row] = TO_STORE(v);
+    }
+  }
+}
