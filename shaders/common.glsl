@@ -5,7 +5,7 @@
 
 #extension GL_GOOGLE_include_directive : require
 
-// Activation fusion codes (kept in sync with vknn::ActType in include/vknn/op.h).
+// Activation fusion codes (kept in sync with vknn::ActType in include/vknn/act_type.h and include/vknn/unary_type.h).
 #define ACT_NONE  0
 #define ACT_RELU  1
 #define ACT_RELU6 2
@@ -15,12 +15,12 @@ float vx_act(float x, int act, float lo, float hi) {
   if (act == ACT_RELU)  return max(x, 0.0);
   if (act == ACT_RELU6) return clamp(x, 0.0, 6.0);
   if (act == ACT_CLIP)  return clamp(x, lo, hi);
-  if (act == 4)         return x * clamp(x + 3.0, 0.0, 6.0) / 6.0;  // HardSwish
-  if (act == 5)         return x / (1.0 + exp(-x));                 // SiLU / Swish
+  if (act == ACT_HARDSWISH)         return x * clamp(x + 3.0, 0.0, 6.0) / 6.0;  // HardSwish
+  if (act == ACT_SILU)         return x / (1.0 + exp(-x));                 // SiLU / Swish
   return x;
 }
 
-// Unary family (codes must match vknn::UnaryType in include/vknn/op.h). a,b are op params.
+// Unary family (codes must match vknn::UnaryType in include/vknn/act_type.h and include/vknn/unary_type.h). a,b are op params.
 float vx_unary(float x, int op, float a, float b) {
   if (op == 0)  return 1.0 / (1.0 + exp(-x));          // sigmoid
   // tanh: the driver lowers the built-in to (e^x - e^-x)/(e^x + e^-x), which is inf/inf = NaN for

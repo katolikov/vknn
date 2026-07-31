@@ -60,8 +60,8 @@ vec4 pw_apply4_mono(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
   for(int s=0;s<PW_NS;++s){
     int kind=int(pwSpecK(s)>>16), code=int(pwSpecK(s)&0xffffu);
     float p0=pwSpecP0(s), p1=pwSpecP1(s);
-    int a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
-    int dr=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
+    int a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
+    int dr=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     vec4 va,vb=vec4(0.),vc=vec4(0.);
     if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,m,vecIdx,HW); }
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
@@ -73,12 +73,12 @@ vec4 pw_apply4_mono(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     vec4 v;
-    if(kind==0)      v=pwBin4(va,vb,code);
-    else if(kind==1) v=vec4(vx_unary(va.x,code,p0,p1),vx_unary(va.y,code,p0,p1),vx_unary(va.z,code,p0,p1),vx_unary(va.w,code,p0,p1));
-    else if(kind==2) v=vec4(vx_act(va.x,code,p0,p1),vx_act(va.y,code,p0,p1),vx_act(va.z,code,p0,p1),vx_act(va.w,code,p0,p1));
-    else if(kind==3) v=vec4(va.x!=0.?vb.x:vc.x,va.y!=0.?vb.y:vc.y,va.z!=0.?vb.z:vc.z,va.w!=0.?vb.w:vc.w);
+    if(kind==PW_KIND_BINARY)      v=pwBin4(va,vb,code);
+    else if(kind==PW_KIND_UNARY) v=vec4(vx_unary(va.x,code,p0,p1),vx_unary(va.y,code,p0,p1),vx_unary(va.z,code,p0,p1),vx_unary(va.w,code,p0,p1));
+    else if(kind==PW_KIND_ACT) v=vec4(vx_act(va.x,code,p0,p1),vx_act(va.y,code,p0,p1),vx_act(va.z,code,p0,p1),vx_act(va.w,code,p0,p1));
+    else if(kind==PW_KIND_SELECT) v=vec4(va.x!=0.?vb.x:vc.x,va.y!=0.?vb.y:vc.y,va.z!=0.?vb.z:vc.z,va.w!=0.?vb.w:vc.w);
     else             v=va;
-    acc=(kind==4||PW_CHAINED!=0)?v:pwRound4(v);
+    acc=(kind==PW_KIND_LOAD||PW_CHAINED!=0)?v:pwRound4(v);
     if(dr==0)r0=acc; else if(dr==1)r1=acc; else if(dr==2)r2=acc; else if(dr==3)r3=acc;
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut4(o,vecIdx,PW_CHAINED!=0?pwRound4(acc):acc); }
   }

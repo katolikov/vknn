@@ -57,8 +57,8 @@ float pw_apply_mono(float entryRaw, int outIdx){
   for(int s=0;s<PW_NS;++s){
     int kind=int(pwSpecK(s)>>16), code=int(pwSpecK(s)&0xffffu);
     float p0=pwSpecP0(s), p1=pwSpecP1(s);
-    int a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
-    int dr=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
+    int a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
+    int dr=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     float va,vb=0.,vc=0.;
     if(a<=PW_REF_OP0)      va=pwLoad(PW_REF_OP0-a,pwFlatIdx(s,bsrc==1?bc:0,outIdx));
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
@@ -70,12 +70,12 @@ float pw_apply_mono(float entryRaw, int outIdx){
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     float v;
-    if(kind==0)      v=vx_binary(va,vb,code);
-    else if(kind==1) v=vx_unary(va,code,p0,p1);
-    else if(kind==2) v=vx_act(va,code,p0,p1);
-    else if(kind==3) v=va!=0.?vb:vc;
+    if(kind==PW_KIND_BINARY)      v=vx_binary(va,vb,code);
+    else if(kind==PW_KIND_UNARY) v=vx_unary(va,code,p0,p1);
+    else if(kind==PW_KIND_ACT) v=vx_act(va,code,p0,p1);
+    else if(kind==PW_KIND_SELECT) v=va!=0.?vb:vc;
     else             v=va;
-    acc=(kind==4||PW_CHAINED!=0)?v:PW_ROUND(v);
+    acc=(kind==PW_KIND_LOAD||PW_CHAINED!=0)?v:PW_ROUND(v);
     if(dr==0)r0=acc; else if(dr==1)r1=acc; else if(dr==2)r2=acc; else if(dr==3)r3=acc;
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut(o,outIdx,PW_CHAINED!=0?PW_ROUND(acc):acc); }
   }
