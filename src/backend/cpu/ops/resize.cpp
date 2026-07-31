@@ -97,8 +97,11 @@ namespace vknn {
     // output pixel exactly on the .5 tie (fy = 2d + 0.5 for a halving), and the GPU evaluates the
     // divide through a reciprocal, so one ulp at the tie moves the sample a whole pixel: the GPU
     // read x[2d+1] where this oracle read x[2d], on every pixel of every channel. Integers make the
-    // index a pure function of the shape -- same on both backends, on any driver. The products stay
-    // exact while outS * inS < 2^30, past any spatial extent the planner admits.
+    // index a pure function of the shape -- same on both backends, on any driver.
+    //
+    // This is the reference form: 64-bit products, so the rule reads as the ratio of integers it
+    // is. vxResizeNearestSrcNarrow below is the same rule in the 32-bit arithmetic the GPU kernels
+    // can execute, and the two agree over every extent the ops accept (tests/test_resize_rule.cpp).
     // Nearest-rounding-mode code shared with the shader: 0 = round_prefer_floor (the ONNX default
     // and the fallback for any unrecognized string), 1 = round_prefer_ceil, 2 = floor, 3 = ceil.
     // vxResizeNearestSrc dispatches on this code after the exact-integer coordinate transform.
@@ -118,6 +121,10 @@ namespace vknn {
         return kResizeNearestPreferFloor;
     }
     int vxResizeNearestSrc(int d, int outS, int inS, int coordMode, int nearestMode) {
+        if (inS <= 0)
+        {
+            return 0; // an input axis of zero extent holds no pixel any rounding could land on
+        }
         int64_t num, den;
         if (coordMode == kResizeCoordAlignCorners) // align_corners: d * (inS-1) / (outS-1)
         {
@@ -129,7 +136,9 @@ namespace vknn {
             den = outS;
         } else // half_pixel / pytorch_half_pixel: ((2d+1) * inS - outS) / (2 * outS)
         {
-            num = (int64_t) (2 * d + 1) * inS - outS;
+            // Every factor widens before it is combined: an output axis may run to
+            // kResizeMaxSpatialExtent, and 2 * d + 1 leaves a 32-bit int well before that.
+            num = (2 * (int64_t) d + 1) * inS - outS;
             den = 2 * (int64_t) outS;
         }
         if (den <= 0 || (coordMode == kResizeCoordPytorchHalfPixel && outS <= 1))
@@ -158,6 +167,118 @@ namespace vknn {
         }
     }
 
+    // floor(a * b / den) into `quotient` and the remainder in [0, den) into `remainder`, using
+    // 32-bit signed arithmetic only -- the arithmetic a GLSL kernel has, since Vulkan does not
+    // guarantee 64-bit integers in shader code. Preconditions, all established by the nearest rule
+    // below: a >= 0, b >= 0, den > 0, and a <= den (the left factor is an output position and the
+    // denominator the output extent it is measured against, doubled together in the half_pixel
+    // modes).
+    //
+    // Splitting b into whole multiples of den plus a residue below den leaves a product of two
+    // factors that are each at most den. The direct path takes that product whenever both factors
+    // fit kResizeNarrowFactorMax; past that, the bit-scanned path accumulates it from the top bit
+    // of `a` down, holding the running remainder inside [0, den) so no intermediate ever leaves
+    // the range one int holds, and the quotient it builds is bounded by a * residue / den < a.
+    // Identical body in the four resize shaders (narrowMulDiv).
+    static void resizeNarrowMulDiv(int a, int b, int den, int &quotient, int &remainder) {
+        const int wholeSteps = b / den, residue = b - wholeSteps * den;
+        if (a <= kResizeNarrowFactorMax && residue <= kResizeNarrowFactorMax)
+        {
+            const int product = a * residue, tileQuotient = product / den;
+            quotient  = a * wholeSteps + tileQuotient;
+            remainder = product - tileQuotient * den;
+            return;
+        }
+        int tileQuotient = 0, rem = 0;
+        for (int bit = kResizeNarrowProductBits - 1; bit >= 0; --bit)
+        {
+            // Double the running (quotient, remainder). `headroom` is what the remainder still has
+            // before it reaches den, so comparing against it doubles without ever forming 2 * rem.
+            const int headroom = den - rem;
+            tileQuotient += tileQuotient;
+            if (rem >= headroom)
+            {
+                rem -= headroom;
+                ++tileQuotient;
+            } else
+            {
+                rem += rem;
+            }
+            // Fold in one more copy of the residue where this bit of `a` is set, carrying the same way.
+            if (((a >> bit) & 1) != 0)
+            {
+                const int slack = den - residue;
+                if (rem >= slack)
+                {
+                    rem -= slack;
+                    ++tileQuotient;
+                } else
+                {
+                    rem += residue;
+                }
+            }
+        }
+        quotient  = a * wholeSteps + tileQuotient;
+        remainder = rem;
+    }
+
+    int vxResizeNearestSrcNarrow(int d, int outS, int inS, int coordMode, int nearestMode) {
+        if (inS <= 0)
+        {
+            return 0; // an input axis of zero extent holds no pixel any rounding could land on
+        }
+        // Each coordinate transform is one fraction (leftFactor * rightFactor - shift) / den. The
+        // shift stays outside the product so resizeNarrowMulDiv sees two non-negative factors.
+        int leftFactor, rightFactor, den, shift;
+        if (coordMode == kResizeCoordAlignCorners) // align_corners: d * (inS-1) / (outS-1)
+        {
+            leftFactor  = d;
+            rightFactor = inS - 1;
+            den         = outS - 1;
+            shift       = 0;
+        } else if (coordMode == kResizeCoordAsymmetric) // asymmetric: d / scale = d * inS / outS
+        {
+            leftFactor  = d;
+            rightFactor = inS;
+            den         = outS;
+            shift       = 0;
+        } else // half_pixel / pytorch_half_pixel: ((2d+1) * inS - outS) / (2 * outS)
+        {
+            leftFactor  = 2 * d + 1;
+            rightFactor = inS;
+            den         = 2 * outS;
+            shift       = outS;
+        }
+        if (den <= 0 || (coordMode == kResizeCoordPytorchHalfPixel && outS <= 1))
+        {
+            return 0; // a single-pixel output axis spans no interval (srcCoord guards it the same way)
+        }
+        int quotient, remainder;
+        resizeNarrowMulDiv(leftFactor, rightFactor, den, quotient, remainder);
+        // Apply the numerator's shift after the division. It is smaller than den, so it can borrow
+        // at most one whole step, which is the floor correction the rule needs.
+        remainder -= shift;
+        if (remainder < 0)
+        {
+            remainder += den;
+            --quotient;
+        }
+        // The four ONNX nearest_mode roundings over the exact fraction quotient + remainder/den.
+        // The midpoint tests are spelled against den - remainder rather than 2 * remainder, which
+        // for a denominator near the top of the int range would not fit.
+        switch (nearestMode)
+        {
+            case kResizeNearestPreferCeil:
+                return remainder >= den - remainder ? quotient + 1 : quotient;
+            case kResizeNearestFloor:
+                return quotient;
+            case kResizeNearestCeil:
+                return remainder > 0 ? quotient + 1 : quotient;
+            default:
+                return remainder > den - remainder ? quotient + 1 : quotient; // round_prefer_floor
+        }
+    }
+
     namespace {
         struct ResizeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
@@ -172,20 +293,28 @@ namespace vknn {
                     return idx < (int) pwCoreInputs(node) && node.inputs[idx] != kNoTensor ? &ctx.t(node.inputs[idx]) : nullptr;
                 };
                 int64_t OH = 0, OW = 0;
+                // Whether this node carries a resize parameter at all. A `sizes` or `scales` input
+                // that is PRESENT decides the output geometry even when it resolves to a
+                // zero-extent axis: a zero there is a request for an empty output, not the
+                // pre-opset-10 Upsample form, which carries neither input and is the only case the
+                // graph desc stands in for.
+                bool haveResizeParam = false;
                 if (X.shape.size() == 4)
                 {
                     if (const RtTensor *sz = param(3); sz && sz->elems() == 4)
                     {
-                        OH = sz->dtype == DType::Int64 ? sz->host.i64()[2] : (int64_t) sz->host.f32()[2];
-                        OW = sz->dtype == DType::Int64 ? sz->host.i64()[3] : (int64_t) sz->host.f32()[3];
+                        OH              = sz->dtype == DType::Int64 ? sz->host.i64()[2] : (int64_t) sz->host.f32()[2];
+                        OW              = sz->dtype == DType::Int64 ? sz->host.i64()[3] : (int64_t) sz->host.f32()[3];
+                        haveResizeParam = true;
                     } else if (const RtTensor *sc = param(2); sc && sc->elems() == 4 && sc->dtype != DType::Int64)
                     {
-                        OH = (int64_t) (x.h * sc->host.f32()[2]);
-                        OW = (int64_t) (x.w * sc->host.f32()[3]);
+                        OH              = (int64_t) (x.h * sc->host.f32()[2]);
+                        OW              = (int64_t) (x.w * sc->host.f32()[3]);
+                        haveResizeParam = true;
                     }
                 }
                 Shape os;
-                if (OH > 0 && OW > 0)
+                if (haveResizeParam)
                 {
                     os = {x.n, x.c, OH, OW};
                 } else
@@ -198,6 +327,22 @@ namespace vknn {
                     }
                     OH = os[2];
                     OW = os[3];
+                }
+                if (OH < 0 || OW < 0)
+                {
+                    throw Error(Status::Unsupported, "Resize '" + node.name + "': output spatial extent " + std::to_string(OH) + "x" + std::to_string(OW) + " is negative (an axis length is a count)");
+                }
+                if (OH > kResizeMaxSpatialExtent || OW > kResizeMaxSpatialExtent || x.h > kResizeMaxSpatialExtent || x.w > kResizeMaxSpatialExtent)
+                {
+                    throw Error(Status::Unsupported, "Resize '" + node.name + "': spatial extent " + std::to_string(x.h) + "x" + std::to_string(x.w) + " -> " + std::to_string(OH) + "x" + std::to_string(OW) + " exceeds the exactly-resolvable bound " + std::to_string(kResizeMaxSpatialExtent) + " (past it the source index has no exact form on the GPU kernels, which resolve it in 32-bit integers)");
+                }
+                // A source plane with no elements has no pixel to sample. Every arm clamps its tap
+                // indices into [0, extent-1], which is an empty range here, so resampling would
+                // read off the front of an empty buffer rather than fold onto a border pixel. An
+                // empty output needs no source and stays legal.
+                if ((x.h <= 0 || x.w <= 0) && OH > 0 && OW > 0)
+                {
+                    throw Error(Status::Unsupported, "Resize '" + node.name + "': input spatial extent " + std::to_string(x.h) + "x" + std::to_string(x.w) + " holds no pixels, so the requested " + std::to_string(OH) + "x" + std::to_string(OW) + " output has nothing to sample");
                 }
                 int   mode        = vxResizeMode(node.attr.gets("mode", "nearest"));
                 int   coordMode   = vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel"));

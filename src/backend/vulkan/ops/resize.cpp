@@ -1,4 +1,5 @@
 // Resize (spatial) on the GPU (NC4HW4): nearest + bilinear + cubic, per output channel-block.
+#include "backend/vulkan/resize_race_scratch.h"
 #include "backend/vulkan/vk_tune_race.h"
 #include "core/resize_rule.h"
 #include "pw_plan.h"
@@ -15,6 +16,9 @@ namespace vknn {
         // Output pixels one row-kernel lane computes along its row; mirrors RESIZE_ROW_TILE in
         // shaders/resize_row.comp.
         constexpr int kResizeRowTile = 4;
+        // Floor on a race scratch allocation. A degenerate geometry sizes a buffer at zero bytes,
+        // which is not a legal VkBuffer; one NC4HW4 storage element is the smallest that is.
+        constexpr size_t kResizeMinScratchBytes = sizeof(float) * (size_t) kNC4Block;
         // Tune-table values of the resize kernel pick (append-only).
         constexpr int kResizeKernelScalar = 0; ///< resize: one output pixel or block-pixel per lane.
         constexpr int kResizeKernelRow    = 1; ///< resize_row: kResizeRowTile row pixels per lane.
@@ -103,19 +107,28 @@ namespace vknn {
                 {
                     return false;
                 }
-                // Scratch sized like the real NC4HW4 tensors: one vec4 storage element per
-                // (n, block, pixel). The epilogue's operand filler is output-sized (the
-                // appendForTiming rule: the epilogue indexes operands by output element).
-                const size_t vec4Bytes = (size_t) (env.useFp16 ? 2 : 4) * 4;
-                auto         mk        = [&](size_t bytes) {
-                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                // The scratch is sized by the node's own geometry, so a large upscale asks for two
+                // output-sized buffers on top of a resident arena. Past the budget the incumbent
+                // stands: nothing is measured and nothing is stored, so a device or a bucket where
+                // the same signature fits still races it (resize_race_scratch.h).
+                if (!resizeRaceScratchFits(pc.N, pc.C, pc.IH, pc.IW, pc.OH, pc.OW, epi.active, env.useFp16))
+                {
+                    VKNN_DEBUG << "autotune " << sig << " -> scalar (race scratch " << resizeRaceScratchBytes(pc.N, pc.C, pc.IH, pc.IW, pc.OH, pc.OW, epi.active, env.useFp16) << " B over the " << kResizeRaceScratchBudgetBytes << " B budget)";
+                    return false;
+                }
+                // Scratch sized like the real NC4HW4 tensors (resizeNc4TensorBytes: one vec4
+                // storage element per (n, block, pixel)), which is what the budget above accounts
+                // for. The epilogue's operand filler is output-sized (the appendForTiming rule: the
+                // epilogue indexes operands by output element).
+                auto mk = [&](size_t bytes) {
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max(bytes, kResizeMinScratchBytes), vk::MemPref::kDeviceOnly);
                 };
-                auto                        sSrc = mk((size_t) pc.N * cBlocks(pc.C) * pc.IH * pc.IW * vec4Bytes);
-                auto                        sDst = mk((size_t) pc.N * cBlocks(pc.C) * pc.OH * pc.OW * vec4Bytes);
+                auto                        sSrc = mk(resizeNc4TensorBytes(pc.N, pc.C, pc.IH, pc.IW, env.useFp16));
+                auto                        sDst = mk(resizeNc4TensorBytes(pc.N, pc.C, pc.OH, pc.OW, env.useFp16));
                 std::shared_ptr<vk::Buffer> sFill;
                 if (epi.active)
                 {
-                    sFill = mk((size_t) pc.N * cBlocks(pc.C) * pc.OH * pc.OW * vec4Bytes);
+                    sFill = mk(resizeNc4TensorBytes(pc.N, pc.C, pc.OH, pc.OW, env.useFp16));
                 }
                 vk::TuneTimer timer(env);
                 auto          ms  = vk::raceCandidates(2, [&](int index) {
@@ -137,21 +150,39 @@ namespace vknn {
                 return won;
             }
 
+            // The geometry both kernels resolve exactly, refused here rather than truncated into
+            // the push constants. The extent bound is what keeps the shaders' nearestSrc inside
+            // 32-bit arithmetic (kResizeMaxSpatialExtent); a source plane of zero extent has no
+            // pixel to sample, so the tap clamps would fold to an empty range and the lane would
+            // index a plane that holds nothing. Both are the refusals the CPU oracle makes, so the
+            // two backends accept exactly the same set of shapes.
+            static void refuseUnresolvableGeometry(const Node &node, const NCHW &x, const NCHW &y) {
+                if (x.h > kResizeMaxSpatialExtent || x.w > kResizeMaxSpatialExtent || y.h > kResizeMaxSpatialExtent || y.w > kResizeMaxSpatialExtent)
+                {
+                    throw Error(Status::Unsupported, "Resize '" + node.name + "': spatial extent " + std::to_string(x.h) + "x" + std::to_string(x.w) + " -> " + std::to_string(y.h) + "x" + std::to_string(y.w) + " exceeds the exactly-resolvable bound " + std::to_string(kResizeMaxSpatialExtent) + " (past it the source index has no exact form in the 32-bit integers the kernels evaluate)");
+                }
+                if ((x.h <= 0 || x.w <= 0) && y.h > 0 && y.w > 0)
+                {
+                    throw Error(Status::Unsupported, "Resize '" + node.name + "': input spatial extent " + std::to_string(x.h) + "x" + std::to_string(x.w) + " holds no pixels, so the requested " + std::to_string(y.h) + "x" + std::to_string(y.w) + " output has nothing to sample");
+                }
+            }
+
             void prepare(const Node &node, VkOpEnv &env) override {
                 NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
                 NCHW y = NCHW::from(env.graph->desc(node.outputs[0]).shape);
-                pc     = {(int) x.n,
-                          (int) x.c,
-                          (int) x.h,
-                          (int) x.w,
-                          (int) y.h,
-                          (int) y.w,
-                          vxResizeMode(node.attr.gets("mode", "nearest")),
-                          vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel")),
-                          node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault),
-                          (int) node.attr.geti("exclude_outside", 0),
+                refuseUnresolvableGeometry(node, x, y);
+                pc = {(int) x.n,
+                      (int) x.c,
+                      (int) x.h,
+                      (int) x.w,
+                      (int) y.h,
+                      (int) y.w,
+                      vxResizeMode(node.attr.gets("mode", "nearest")),
+                      vxResizeCoord(node.attr.gets("coordinate_transformation_mode", "half_pixel")),
+                      node.attr.getf("cubic_coeff_a", kResizeCubicCoeffDefault),
+                      (int) node.attr.geti("exclude_outside", 0),
                       resizePerPixelLanes(x, y) ? 1 : 0,
-                          vxResizeNearestMode(node.attr.gets("nearest_mode", "round_prefer_floor"))};
+                      vxResizeNearestMode(node.attr.gets("nearest_mode", "round_prefer_floor"))};
                 epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
                 // Scalar-kernel lane count for the map resizePerPixelLanes chose: one per output
                 // pixel (the kernel loops the channel blocks internally) or one per NC4HW4
