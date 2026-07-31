@@ -15,29 +15,42 @@ layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved 
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
-layout(push_constant) uniform PC { int rank, total, base, items; } pc;
+layout(push_constant) uniform PC { int rank, total, base; } pc;
 
-// pc.items elements per lane, one slot apart (the fused_pw walk): independent items cover the
-// per-element div/mod chain's memory latency; slots stride by the lane count so every item
-// stays a coalesced wave-wide access. The workgroup width is spec constant 0, resolved by the
-// host at load from device caps (env.flatLocalSize).
+// ITEMS elements per lane, one slot apart (the fused_pw walk): independent items cover the
+// per-element div/mod chain's memory latency; slots stride by the lane count so every item stays
+// a coalesced wave-wide access. ITEMS is a specialization constant (the host resolves it per node
+// at load, same rule as before), so the common single-item pipeline compiles the straight-line
+// body below with no loop or slot division — the runtime-bound loop was measured to cost the
+// driver its div/mod-chain optimization even at one item. The workgroup width is spec constant 0,
+// resolved by the host at load from device caps (env.flatLocalSize).
+layout(constant_id = 1) const int ITEMS = 1;
+void processOne(uint gid) {
+    int rem = int(gid), outIdx = pc.base;
+    for (int k = pc.rank - 1; k >= 0; --k) {
+      int c = rem % geom.g[k];
+      rem /= geom.g[k];
+      outIdx += c * geom.g[pc.rank + k];
+    }
+  #ifdef PW_EPI
+    d[outIdx] = STORE(pw_apply(float(s[gid]), outIdx));
+  #else
+    d[outIdx] = s[gid];
+  #endif
+}
+
 void main() {
   uint lane = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  uint slot = (uint(pc.total) + uint(pc.items) - 1u) / uint(pc.items);
+  if (ITEMS == 1) {
+    if (lane >= uint(pc.total)) return;
+    processOne(lane);
+    return;
+  }
+  uint slot = (uint(pc.total) + uint(ITEMS) - 1u) / uint(ITEMS);
   if (lane >= slot) return;
-  for (int it = 0; it < pc.items; ++it) {
+  for (int it = 0; it < ITEMS; ++it) {
     uint gid = lane + uint(it) * slot;
     if (gid >= uint(pc.total)) break;
-      int rem = int(gid), outIdx = pc.base;
-      for (int k = pc.rank - 1; k >= 0; --k) {
-        int c = rem % geom.g[k];
-        rem /= geom.g[k];
-        outIdx += c * geom.g[pc.rank + k];
-      }
-    #ifdef PW_EPI
-      d[outIdx] = STORE(pw_apply(float(s[gid]), outIdx));
-    #else
-      d[outIdx] = s[gid];
-    #endif
+    processOne(gid);
   }
 }

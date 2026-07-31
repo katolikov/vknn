@@ -74,6 +74,14 @@ namespace vknn {
         // any count - so it may consume the MEASURED device probe: the floor is the saturation
         // point deviceTuneModel reports (64-wide waves before added waves stop buying throughput)
         // times a fixed headroom multiple, in lanes. Resolved at load (prepare), never at record.
+        // The movement kernels (gather/scatter/pad/broadcast/binary) run ONE element per lane.
+        // The multi-item walk was extended to them from the fused_pw kernels without its own gate,
+        // and on large STRIDED gathers it is a heavy loss (measured: a deep-channel permutation at
+        // items = 8 ran 7x slower than the one-item map; a full transformer-encoder pass was +1%
+        // end to end). fused_pw keeps its measured-win walk below. The ITEMS specialization
+        // constant stays in the movement pipelines, so a future shape rule can re-enable the walk
+        // per node without another kernel change.
+        constexpr int kMovementItemsPerLane  = 1;
         constexpr int kItemsPerLaneMax       = 8; // independent loads one lane keeps in flight
         constexpr int kLaneFloorWaveHeadroom = 5;
         constexpr int kProbeWaveLanes        = 64; // the probe counts 64-wide waves
@@ -137,7 +145,7 @@ namespace vknn {
                 int          rank     = (int) out.size();
                 pc.rank               = rank;
                 pc.total              = (int) numElements(out);
-                pc.items              = itemsPerLane(pc.total, env);
+                pc.items              = kMovementItemsPerLane;
                 pc.base               = 0;
                 std::vector<int32_t> outDim(rank), inStr(rank);
                 // A virtualized output (the segment allocated its buffer with a padded physical last
@@ -153,7 +161,7 @@ namespace vknn {
                     pc.outLast      = (int) out.back();
                     pc.outPad       = (int) outPad;
                     pc.total        = (int) (numElements(out) / out.back() * outPad);
-                    pc.items        = itemsPerLane(pc.total, env);
+                    pc.items        = kMovementItemsPerLane;
                     contiguousSlice = false;
                 };
                 // A folded movement chain (foldMovementChains) carries its composed per-axis map in
@@ -172,7 +180,8 @@ namespace vknn {
                         applyOutPad();
                         geom = uploadFlatGeom(env, {outDim, inStr});
                         epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
-                        pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
+                        pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
+                                            std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
                         return;
                     }
                 }
@@ -234,7 +243,8 @@ namespace vknn {
                 applyOutPad();
                 geom = uploadFlatGeom(env, {outDim, inStr});
                 epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
+                pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
+                                    std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
@@ -293,7 +303,7 @@ namespace vknn {
                 runtimeVal = node.inputs.size() > 2 && node.inputs[2] != kNoTensor && !g.isInitializer(node.inputs[2]);
                 pc.rank    = rank;
                 pc.total   = (int) numElements(out);
-                pc.items   = itemsPerLane(pc.total, env);
+                pc.items   = kMovementItemsPerLane;
                 pc.mode    = (mode == "edge") ? 1 : (mode == "reflect") ? 2 : 0;
                 pc.cval    = cval;
                 std::vector<int32_t> outDim(rank), inDim(rank), inStr(rank), padBegin(rank);
@@ -305,7 +315,8 @@ namespace vknn {
                     padBegin[k] = pads.empty() ? 0 : (int) pads[k];
                 }
                 geom = uploadFlatGeom(env, {outDim, inDim, inStr, padBegin});
-                pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize}) : env.pipeline(shader("flat_pad", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
+                pipe = runtimeVal ? env.pipeline(shader("flat_pad_rt", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}) :
+                                      env.pipeline(shader("flat_pad", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
                 {
                     const size_t es      = env.useFp16 ? 2 : 4;
                     int          padAxis = -1;
@@ -405,7 +416,7 @@ namespace vknn {
                 int          pad          = rank - (int) in.size(); // right-align input into output rank
                 pc.rank                   = rank;
                 pc.total                  = (int) numElements(out);
-                pc.items                  = itemsPerLane(pc.total, env);
+                pc.items                  = kMovementItemsPerLane;
                 pc.mode                   = (node.type == OpType::Tile) ? 1 : 0;
                 std::vector<int32_t> outDim(rank), inDim(rank), inStr(rank);
                 for (int k = 0; k < rank; ++k)
@@ -421,7 +432,7 @@ namespace vknn {
                 {
                     constBuf = uploadInit(env, node.inputs[0], in);
                 }
-                pipe = env.pipeline(shader("flat_broadcast", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
+                pipe = env.pipeline(shader("flat_broadcast", env.useFp16), 3, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer *src = constBuf ? constBuf.get() : env.devBuf(node.inputs[0]);
@@ -473,7 +484,7 @@ namespace vknn {
                     PC    pc {};
                     pc.rank  = rank;
                     pc.total = (int) numElements(in);
-                    pc.items = itemsPerLane(pc.total, env);
+                    pc.items = kMovementItemsPerLane;
                     pc.base  = (int) (offset * outStride[axis]);
                     std::vector<int32_t> inDim(rank), outStr(rank);
                     for (int k = 0; k < rank; ++k)
@@ -485,7 +496,8 @@ namespace vknn {
                     pcs.push_back(pc);
                     inIdx.push_back((int) e);
                     offset += in[axis];
-                    pipes.push_back(env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {env.flatLocalSize}));
+                    pipes.push_back(env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
+                                                                                              std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}));
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -531,7 +543,7 @@ namespace vknn {
                 int          rank = (int) out.size();
                 pc.rank           = rank;
                 pc.total          = (int) numElements(out);
-                pc.items          = itemsPerLane(pc.total, env);
+                pc.items          = kMovementItemsPerLane;
                 pc.op             = node.type == OpType::Add ? (int) BinaryType::Add : node.subOp;
                 // A fused activation (e.g. a Linear+Relu fused into the Add epilogue, as in the camera_head
                 // res_conv) is applied here, matching the NC4HW4 add.
@@ -565,7 +577,7 @@ namespace vknn {
                 setup(node.inputs[1], 1);
                 pc.bothFull = (g.desc(node.inputs[0]).shape == out && g.desc(node.inputs[1]).shape == out) ? 1 : 0;
                 geom        = uploadFlatGeom(env, {outDim, aStride, bStride});
-                pipe = env.pipeline(shader("flat_binary", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
+                pipe = env.pipeline(shader("flat_binary", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 auto buf = [&](int e) {

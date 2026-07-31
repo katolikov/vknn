@@ -77,11 +77,12 @@ namespace vknn {
                             inStr[d]  = (int) inStride[d];
                         }
                         fgeom_.push_back(flat::uploadFlatGeom(env, {outDim, inStr}));
-                        pc.items = flat::itemsPerLane(pc.total, env); // device-probe consult at load
+                        pc.items = flat::kMovementItemsPerLane; // one element per lane (see flat_ops.h)
                         fpcs_.push_back(pc);
                         foutIdx_.push_back((int) k);
                         offset += out[axis]; // next output starts where this one ends
-                        fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 3, sizeof(FPC), std::vector<uint32_t> {env.flatLocalSize}));
+                        fpipes_.push_back(
+                            env.pipeline(shader("flat_gather", env.useFp16), 3, sizeof(FPC), std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}));
                     }
                     return;
                 }

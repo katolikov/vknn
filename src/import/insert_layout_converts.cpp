@@ -6,6 +6,15 @@ namespace vknn {
     // Channel-last permutation of a rank-4 NCHW tensor: [N,C,H,W] -> [N,H,W,C].
     static constexpr int64_t kNhwcPerm[] = {0, 2, 3, 1};
 
+    // Channel bound for the NC4-reading channel-last kernel. The lane-per-(pixel, channel-block)
+    // map wins where the July image-path class lives (measured -50% at C = 32 over a large spatial
+    // map) and degrades sharply where the channel axis dominates the spatial one (measured 7x
+    // SLOWER at a deep-channel, small-spatial embedding transpose): every output pixel's channel
+    // run then reads C/4 blocks a full plane apart with no reuse. The bound keeps the kernel inside
+    // its proven-win region; wider channels take the ConvertLayout + flat gather route, exactly as
+    // before the kernel existed. Routing only - both routes store identical bytes.
+    constexpr int64_t kTransposeNhwcMaxChannels = 32;
+
     bool transposeReadsNc4(const Graph &g, const Node &n) {
         if (n.type != OpType::Transpose || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
         {
@@ -19,6 +28,10 @@ namespace vknn {
         if (in.size() != std::size(kNhwcPerm) || g.isInitializer(n.inputs[0]))
         {
             return false;
+        }
+        if (in[1] > kTransposeNhwcMaxChannels)
+        {
+            return false; // outside the kernel's proven-win region (see kTransposeNhwcMaxChannels)
         }
         const auto &perm = n.attr.getints("perm");
         if (perm.size() != std::size(kNhwcPerm))
