@@ -1,0 +1,190 @@
+#version 450
+// Vectorized twin of fused_pw_flat: a lane processes PW_FLAT_QUAD CONSECUTIVE elements, so the
+// entry load and the store are whole vec4 transactions (a 64-lane wave touches 512 contiguous
+// bytes per access instead of 128) and a same-shape operand loads as one vec4 at the quad's base.
+// Broadcast operands keep the scalar per-element pwFlatIdx walk — their values, indices and every
+// per-element op, order and rounding are IDENTICAL to the scalar kernel, so the two variants are
+// byte-interchangeable and the host may pick either on measured speed alone. The final partial
+// quad (total not a multiple of PW_FLAT_QUAD) runs the scalar interpreter per element behind a
+// bounds guard; component indexing of the vec4 SSBO element compiles to scalar accesses, so the
+// tail never reads or writes past total.
+// VKNN_NO_RTE keeps the float-controls RTE execution mode out of this module, matching the scalar
+// twin: stores stay exact — every stored value is already PW_ROUND-rounded.
+#define VKNN_NO_RTE 1
+#include "precision.glsl"
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+// Storage vector of PW_FLAT_QUAD consecutive elements (the fp32 variant stores plain vec4).
+#ifdef USE_FP16
+#define STORE_QUAD f16vec4
+#else
+#define STORE_QUAD vec4
+#endif
+#define PW_FLAT_QUAD 4
+layout(local_size_x=256, local_size_x_id=25) in; // spec 25 = device-resolved family width (0..24 carry the plan)
+layout(std430,binding=0) readonly buffer Prim { STORE_QUAD prim4[]; };
+layout(std430,binding=1) writeonly buffer Dst { STORE_QUAD dst4[]; };
+layout(push_constant) uniform PC { int total, items; } pc;
+// Monomorphization spec constants: the same 26-word map as the scalar twin (host:
+// fused_pointwise.cpp). PW_NS = 0 keeps the runtime interpreter; PW_NS in [1,8] unrolls the step
+// loop with kind/code/params folded at pipeline creation.
+layout(constant_id=0) const int PW_NS = 0;
+layout(constant_id=1) const uint PW_K0=0u; layout(constant_id=2) const uint PW_K1=0u;
+layout(constant_id=3) const uint PW_K2=0u; layout(constant_id=4) const uint PW_K3=0u;
+layout(constant_id=5) const uint PW_K4=0u; layout(constant_id=6) const uint PW_K5=0u;
+layout(constant_id=7) const uint PW_K6=0u; layout(constant_id=8) const uint PW_K7=0u;
+layout(constant_id=9)  const float PW_P0_0=0.; layout(constant_id=10) const float PW_P0_1=0.;
+layout(constant_id=11) const float PW_P0_2=0.; layout(constant_id=12) const float PW_P0_3=0.;
+layout(constant_id=13) const float PW_P0_4=0.; layout(constant_id=14) const float PW_P0_5=0.;
+layout(constant_id=15) const float PW_P0_6=0.; layout(constant_id=16) const float PW_P0_7=0.;
+layout(constant_id=17) const float PW_P1_0=0.; layout(constant_id=18) const float PW_P1_1=0.;
+layout(constant_id=19) const float PW_P1_2=0.; layout(constant_id=20) const float PW_P1_3=0.;
+layout(constant_id=21) const float PW_P1_4=0.; layout(constant_id=22) const float PW_P1_5=0.;
+layout(constant_id=23) const float PW_P1_6=0.; layout(constant_id=24) const float PW_P1_7=0.;
+#ifdef PW_RELAX
+#define PW_CHAINED 1
+#else
+#define PW_CHAINED 0
+#endif
+// Spec constants are not indexable as an array; each if-chain folds to one constant per unrolled
+// iteration.
+uint pwSpecK(int s){ if(s==0)return PW_K0; if(s==1)return PW_K1; if(s==2)return PW_K2; if(s==3)return PW_K3;
+  if(s==4)return PW_K4; if(s==5)return PW_K5; if(s==6)return PW_K6; return PW_K7; }
+float pwSpecP0(int s){ if(s==0)return PW_P0_0; if(s==1)return PW_P0_1; if(s==2)return PW_P0_2; if(s==3)return PW_P0_3;
+  if(s==4)return PW_P0_4; if(s==5)return PW_P0_5; if(s==6)return PW_P0_6; return PW_P0_7; }
+float pwSpecP1(int s){ if(s==0)return PW_P1_0; if(s==1)return PW_P1_1; if(s==2)return PW_P1_2; if(s==3)return PW_P1_3;
+  if(s==4)return PW_P1_4; if(s==5)return PW_P1_5; if(s==6)return PW_P1_6; return PW_P1_7; }
+// One vec4 operand fetch for a full quad at flat base element e0 (e0 is PW_FLAT_QUAD-aligned):
+// a same-shape operand is the four consecutive elements starting at e0 (one whole-vec4 load), a
+// scalar splats element 0, and every other broadcast class takes the scalar kernel's exact
+// per-element pwFlatIdx walk, so each lane of the result equals the scalar kernel's value for
+// that element.
+vec4 pwLoadBcFlat4(int slot,int s,int bc,int e0){
+  if(bc==PW_BCAST_SAME)   return pwLoad4(slot,e0/PW_FLAT_QUAD);
+  if(bc==PW_BCAST_SCALAR) return vec4(pwLoad(slot,0));
+  return vec4(pwLoad(slot,pwFlatIdx(s,bc,e0)),pwLoad(slot,pwFlatIdx(s,bc,e0+1)),
+              pwLoad(slot,pwFlatIdx(s,bc,e0+2)),pwLoad(slot,pwFlatIdx(s,bc,e0+3)));
+}
+// Per-component export at the quad's flat elements (the extra output streams are element-indexed
+// exactly like the scalar kernel's).
+void pwStoreOutFlat4(int o,int e0,vec4 v){
+  pwStoreOut(o,e0,v.x); pwStoreOut(o,e0+1,v.y); pwStoreOut(o,e0+2,v.z); pwStoreOut(o,e0+3,v.w);
+}
+#ifndef PW_RELAX
+// Quad twin of pw_apply_st: identical per-element op order and rounding placement; only the load
+// and store widths differ.
+vec4 pw_apply_flat4(vec4 entryRaw, int e0){
+  vec4 entry=pwToStore4(entryRaw);
+  vec4 acc=entry; vec4 r0=vec4(0.),r1=vec4(0.),r2=vec4(0.),r3=vec4(0.);
+  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOutFlat4(o,e0,entry); }
+  for(int s=0;s<plan.numSteps;++s){
+    int kind=plan.step[s*PW_STEP_FIELDS],code=plan.step[s*PW_STEP_FIELDS+1],a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
+    int dst=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
+    vec4 va,vb=vec4(0.),vc=vec4(0.);
+    if(a<=PW_REF_OP0)      va=pwLoadBcFlat4(PW_REF_OP0-a,s,bsrc==1?bc:0,e0);
+    else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
+    else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
+    if(b<=PW_REF_OP0)      vb=pwLoadBcFlat4(PW_REF_OP0-b,s,bsrc==2?bc:0,e0);
+    else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
+    else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
+    if(c<=PW_REF_OP0)      vc=pwLoadBcFlat4(PW_REF_OP0-c,s,bsrc==3?bc:0,e0);
+    else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
+    else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
+    if(kind==PW_KIND_BINARY)      acc=pwRound4(pwBin4(va,vb,code));
+    else if(kind==PW_KIND_UNARY)  acc=pwRound4(vec4(vx_unary(va.x,code,plan.p0[s],plan.p1[s]),vx_unary(va.y,code,plan.p0[s],plan.p1[s]),vx_unary(va.z,code,plan.p0[s],plan.p1[s]),vx_unary(va.w,code,plan.p0[s],plan.p1[s])));
+    else if(kind==PW_KIND_ACT)    acc=pwRound4(vec4(vx_act(va.x,code,plan.p0[s],plan.p1[s]),vx_act(va.y,code,plan.p0[s],plan.p1[s]),vx_act(va.z,code,plan.p0[s],plan.p1[s]),vx_act(va.w,code,plan.p0[s],plan.p1[s])));
+    else if(kind==PW_KIND_SELECT) acc=pwRound4(vec4(va.x!=0.?vb.x:vc.x,va.y!=0.?vb.y:vc.y,va.z!=0.?vb.z:vc.z,va.w!=0.?vb.w:vc.w));
+    else                          acc=va;
+    if(dst==0)r0=acc; else if(dst==1)r1=acc; else if(dst==2)r2=acc; else if(dst==3)r3=acc;
+    for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOutFlat4(o,e0,acc); }
+  }
+  return acc; }
+#else
+// Quad twin of pw_apply_rx: entry rounds to the producer's store byte, steps chain unrounded,
+// one PW_ROUND per stored stream.
+vec4 pw_apply_flat4(vec4 entryRaw, int e0){
+  vec4 entry=pwToStore4(entryRaw);
+  vec4 acc=entry; vec4 r0=vec4(0.),r1=vec4(0.),r2=vec4(0.),r3=vec4(0.);
+  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOutFlat4(o,e0,entry); }
+  for(int s=0;s<plan.numSteps;++s){
+    int kind=plan.step[s*PW_STEP_FIELDS],code=plan.step[s*PW_STEP_FIELDS+1],a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
+    int dst=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
+    vec4 va,vb=vec4(0.),vc=vec4(0.);
+    if(a<=PW_REF_OP0)      va=pwLoadBcFlat4(PW_REF_OP0-a,s,bsrc==1?bc:0,e0);
+    else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
+    else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
+    if(b<=PW_REF_OP0)      vb=pwLoadBcFlat4(PW_REF_OP0-b,s,bsrc==2?bc:0,e0);
+    else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
+    else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
+    if(c<=PW_REF_OP0)      vc=pwLoadBcFlat4(PW_REF_OP0-c,s,bsrc==3?bc:0,e0);
+    else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
+    else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
+    if(kind==PW_KIND_BINARY)      acc=pwBin4(va,vb,code);
+    else if(kind==PW_KIND_UNARY)  acc=vec4(vx_unary(va.x,code,plan.p0[s],plan.p1[s]),vx_unary(va.y,code,plan.p0[s],plan.p1[s]),vx_unary(va.z,code,plan.p0[s],plan.p1[s]),vx_unary(va.w,code,plan.p0[s],plan.p1[s]));
+    else if(kind==PW_KIND_ACT)    acc=vec4(vx_act(va.x,code,plan.p0[s],plan.p1[s]),vx_act(va.y,code,plan.p0[s],plan.p1[s]),vx_act(va.z,code,plan.p0[s],plan.p1[s]),vx_act(va.w,code,plan.p0[s],plan.p1[s]));
+    else if(kind==PW_KIND_SELECT) acc=vec4(va.x!=0.?vb.x:vc.x,va.y!=0.?vb.y:vc.y,va.z!=0.?vb.z:vc.z,va.w!=0.?vb.w:vc.w);
+    else                          acc=va;
+    if(dst==0)r0=acc; else if(dst==1)r1=acc; else if(dst==2)r2=acc; else if(dst==3)r3=acc;
+    for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOutFlat4(o,e0,pwRound4(acc)); }
+  }
+  return pwRound4(acc); }
+#endif
+// Quad twin of the monomorphized applier: the step loop unrolls to PW_NS with kind/code/params
+// folded, addressing through the SAME pwLoadBcFlat4 as the interpreter (a second copy of the
+// class dispatch would silently diverge the moment a class is added).
+vec4 pw_apply_flat4_mono(vec4 entryRaw, int e0){
+  vec4 entry=pwToStore4(entryRaw);
+  vec4 acc=entry; vec4 r0=vec4(0.),r1=vec4(0.),r2=vec4(0.),r3=vec4(0.);
+  for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==PW_REF_ENTRY) pwStoreOutFlat4(o,e0,entry); }
+  for(int s=0;s<PW_NS;++s){
+    int kind=int(pwSpecK(s)>>16), code=int(pwSpecK(s)&0xffffu);
+    float p0=pwSpecP0(s), p1=pwSpecP1(s);
+    int a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
+    int dr=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
+    vec4 va,vb=vec4(0.),vc=vec4(0.);
+    if(a<=PW_REF_OP0)      va=pwLoadBcFlat4(PW_REF_OP0-a,s,bsrc==1?bc:0,e0);
+    else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
+    else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
+    if(b<=PW_REF_OP0)      vb=pwLoadBcFlat4(PW_REF_OP0-b,s,bsrc==2?bc:0,e0);
+    else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
+    else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
+    if(c<=PW_REF_OP0)      vc=pwLoadBcFlat4(PW_REF_OP0-c,s,bsrc==3?bc:0,e0);
+    else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
+    else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
+    vec4 v;
+    if(kind==PW_KIND_BINARY)      v=pwBin4(va,vb,code);
+    else if(kind==PW_KIND_UNARY)  v=vec4(vx_unary(va.x,code,p0,p1),vx_unary(va.y,code,p0,p1),vx_unary(va.z,code,p0,p1),vx_unary(va.w,code,p0,p1));
+    else if(kind==PW_KIND_ACT)    v=vec4(vx_act(va.x,code,p0,p1),vx_act(va.y,code,p0,p1),vx_act(va.z,code,p0,p1),vx_act(va.w,code,p0,p1));
+    else if(kind==PW_KIND_SELECT) v=vec4(va.x!=0.?vb.x:vc.x,va.y!=0.?vb.y:vc.y,va.z!=0.?vb.z:vc.z,va.w!=0.?vb.w:vc.w);
+    else                          v=va;
+    acc=(kind==PW_KIND_LOAD||PW_CHAINED!=0)?v:pwRound4(v);
+    if(dr==0)r0=acc; else if(dr==1)r1=acc; else if(dr==2)r2=acc; else if(dr==3)r3=acc;
+    for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOutFlat4(o,e0,PW_CHAINED!=0?pwRound4(acc):acc); }
+  }
+  return PW_CHAINED!=0?pwRound4(acc):acc; }
+// pc.items QUADS per lane, one slot apart — the scalar twin's walk over quads: every item stays a
+// coalesced wave-wide access, now PW_FLAT_QUAD elements wide. The tail quad (total not a multiple
+// of the quad width) runs the scalar interpreter per element behind a bounds guard; the
+// interpreter and the monomorphized applier produce identical bytes by construction, so the tail
+// never needs the spec-constant path.
+void main(){ uint gid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;
+  int quadTotal=(pc.total+PW_FLAT_QUAD-1)/PW_FLAT_QUAD;
+  int slot=(quadTotal+pc.items-1)/pc.items;
+  if(gid>=uint(slot)) return;
+  for(int k=0;k<pc.items;++k){
+    int q=int(gid)+k*slot;
+    if(q>=quadTotal) break;
+    int e0=q*PW_FLAT_QUAD;
+    if(e0+PW_FLAT_QUAD<=pc.total){
+      vec4 v=vec4(prim4[q]);
+      vec4 o=PW_NS>0?pw_apply_flat4_mono(v,e0):pw_apply_flat4(v,e0);
+      dst4[q]=STORE_QUAD(o);
+    } else {
+      for(int j=0;j<PW_FLAT_QUAD;++j){
+        int e=e0+j;
+        if(e>=pc.total) break;
+        float v=float(prim4[q][j]);
+        dst4[q][j]=STORE(pw_apply(v,e));
+      }
+    }
+  }}

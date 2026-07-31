@@ -3,6 +3,7 @@
 // broadcast strides) is uploaded once as a small SSBO read by shaders/pw_epilogue.glsl; the extra
 // step operands bind at consecutive slots after it (see PW_EPI_BASE in the .comp files).
 #include "backend/vulkan/vk_tune_model.h"
+#include "backend/vulkan/vk_tune_race.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
@@ -17,6 +18,13 @@ namespace vknn {
         // Items-per-lane and its device-derived lane floor live in flat::itemsPerLane
         // (flat_ops.h) - shared with the movement kernels, resolved at load.
 
+        // Elements per lane-quad of the vectorized flat kernel; mirrors PW_FLAT_QUAD in
+        // shaders/fused_pw_flat_v4.comp.
+        constexpr int kPwFlatQuad = 4;
+        // Tune-table values of the flat-kernel pick (append-only).
+        constexpr int kPwFlatKernelScalar = 0; ///< fused_pw_flat: one element per lane step.
+        constexpr int kPwFlatKernelQuad   = 1; ///< fused_pw_flat_v4: one whole-vec4 quad per lane step.
+
         struct FusedPointwiseOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline>     pipe;
             std::shared_ptr<vk::Buffer>              planBuf;
@@ -24,7 +32,74 @@ namespace vknn {
             std::vector<std::shared_ptr<vk::Buffer>> holds;
             int                                      total = 0;
             int                                      items = 1; // per-lane walk count, resolved at load in prepare()
+            int                                      units = 0; // lane-step count the grid covers: total (scalar) or quads (vec4)
             bool                                     flat  = false;
+
+            // The scalar and quad flat kernels are byte-interchangeable: identical per-element
+            // values, op order and rounding — the quad twin only widens the load/store
+            // transactions to whole vec4s over four consecutive elements. The pick is therefore
+            // placement-only and follows the standard cached race: Tuning::None keeps the scalar
+            // kernel (the deterministic default), Fast/Heavy race both once on dedicated scratch
+            // through TuneTimer/raceCandidates and persist the winner; the quad challenger must
+            // clear vk::kTuneRaceMargin to displace the incumbent.
+            bool pickFlatQuad(VkOpEnv &env, const std::vector<uint32_t> &spec, bool relax, int numSteps) {
+                char buf[96];
+                snprintf(buf, sizeof(buf), "pwflat_%d_%d_%d_%d_%d", total, numSteps, (int) operands.size(), relax ? 1 : 0, env.useFp16 ? 1 : 0);
+                std::string sig = env.gpuTag + "/" + buf;
+                int         reuse;
+                if (env.reuseTuned(sig, reuse) && (reuse == kPwFlatKernelScalar || reuse == kPwFlatKernelQuad))
+                {
+                    return reuse == kPwFlatKernelQuad;
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return false;
+                }
+                // Dedicated scratch: entry/output/operand-filler buffers of the unit's element
+                // count (the epilogue indexes operands by output element, so the filler must be at
+                // least output-sized — the appendForTiming rule). The real plan SSBO makes the
+                // race walk the unit's actual classes and step chain.
+                const size_t es = (size_t) (env.useFp16 ? 2 : 4);
+                auto         mk = [&](size_t bytes) {
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                };
+                auto          sPrim = mk((size_t) total * es);
+                auto          sDst  = mk((size_t) total * es);
+                auto          sFill = mk((size_t) total * es);
+                vk::TuneTimer timer(env);
+                const int     quadTotal   = (total + kPwFlatQuad - 1) / kPwFlatQuad;
+                const int     itemsScalar = flat::itemsPerLane(total, env);
+                const int     itemsQuad   = flat::itemsPerLane(quadTotal, env);
+                auto          ms          = vk::raceCandidates(2, [&](int index) {
+                    const bool  quad = index == kPwFlatKernelQuad;
+                    std::string base = quad ? "fused_pw_flat_v4" : "fused_pw_flat";
+                    if (relax)
+                    {
+                        base += "_rx";
+                    }
+                    auto pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int) * 2, spec);
+                    struct {
+                        int total, items;
+                    } rpc {total, quad ? itemsQuad : itemsScalar};
+                    const int laneSteps = quad ? quadTotal : total;
+                    const int lanes     = (laneSteps + rpc.items - 1) / rpc.items;
+                    return timer.time([&](VkCommandBuffer cmd) {
+                        std::vector<VkBuffer> bufs {sPrim->handle(), sDst->handle(), planBuf->handle()};
+                        for (int k = 0; k < kPwMaxOperands + kPwMaxOuts; ++k)
+                        {
+                            bufs.push_back(sFill->handle());
+                        }
+                        pipe->dispatch(cmd, bufs, &rpc, sizeof(rpc), groups(lanes, env.flatLocalSize));
+                    });
+                });
+                const bool    quad        = ms.size() == 2 && ms[kPwFlatKernelQuad] < ms[kPwFlatKernelScalar] * vk::kTuneRaceMargin;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, quad ? kPwFlatKernelQuad : kPwFlatKernelScalar, (int) env.tuning);
+                }
+                VKNN_DEBUG << "autotune " << sig << " -> " << (quad ? "quad" : "scalar") << vk::raceTimes(ms);
+                return quad;
+            }
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g = *env.graph;
@@ -33,7 +108,6 @@ namespace vknn {
 
                 PwPlanCPU plan {};
                 buildPwPlan(g, node, flat, out, plan, operands, total);
-                items = flat::itemsPerLane(total, env); // device-probe consult happens at load, never at record
                 holds.assign(operands.size(), nullptr);
 
                 planBuf = uploadPwPlan(env, plan);
@@ -66,8 +140,11 @@ namespace vknn {
                 // two ints (the element count and the items-per-lane rule), matching `PC { int total, items; }`.
                 // The rounding discipline is compiled in: "_rx" = fp32-chained (pw_relax units),
                 // base name = strict per-step-rounded.
-                bool        relax = node.attr.geti("pw_relax", 0) != 0;
-                std::string base  = flat ? "fused_pw_flat" : "fused_pw_nc4";
+                bool       relax = node.attr.geti("pw_relax", 0) != 0;
+                const bool quad  = flat && pickFlatQuad(env, spec, relax, plan.numSteps);
+                units            = quad ? (total + kPwFlatQuad - 1) / kPwFlatQuad : total;
+                items            = flat::itemsPerLane(units, env); // device-probe consult happens at load, never at record
+                std::string base = flat ? (quad ? "fused_pw_flat_v4" : "fused_pw_flat") : "fused_pw_nc4";
                 if (relax)
                 {
                     base += "_rx";
@@ -77,7 +154,7 @@ namespace vknn {
                 // chain with its params folded at pipeline creation and a per-element walk of the
                 // plan SSBO, so it is the first thing to know about a unit that costs more than its
                 // memory traffic.
-                VKNN_DEBUG << "FusedPointwise '" << node.name << "': " << plan.numSteps << " step(s), " << operands.size() << " operand(s), " << (flat ? "flat" : "NC4HW4") << ", " << (plan.numSteps >= 1 && plan.numSteps <= 8 ? "monomorphized" : "plan-SSBO interpreter") << ", " << total << " lanes";
+                VKNN_DEBUG << "FusedPointwise '" << node.name << "': " << plan.numSteps << " step(s), " << operands.size() << " operand(s), " << (flat ? (quad ? "flat-quad" : "flat") : "NC4HW4") << ", " << (plan.numSteps >= 1 && plan.numSteps <= 8 ? "monomorphized" : "plan-SSBO interpreter") << ", " << total << " lanes";
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -100,14 +177,14 @@ namespace vknn {
                     bool live = 1 + o < (int) node.outputs.size() && node.outputs[1 + o] != kNoTensor;
                     bufs.push_back(live ? env.devBuf(node.outputs[1 + o])->handle() : dst->handle());
                 }
-                // Push constants: the element count guarding the 1D grid and the per-lane walk;
-                // the workgroup width matches spec word 25 set at prepare.
+                // Push constants: the element count guarding the grid and the per-lane walk; the
+                // workgroup width matches spec word 25 set at prepare. `units` is the lane-step
+                // count the grid covers — elements for the scalar kernels, whole quads for the
+                // vectorized flat kernel (which re-derives its quad count from pc.total).
                 struct {
                     int total, items;
                 } pc {total, items};
-                // Both kernels walk pc.items elements per lane (see their main()), so the grid covers
-                // that fraction of the element count.
-                const int lanes = (total + pc.items - 1) / pc.items;
+                const int lanes = (units + pc.items - 1) / pc.items;
                 pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(lanes, env.flatLocalSize));
             }
         };
