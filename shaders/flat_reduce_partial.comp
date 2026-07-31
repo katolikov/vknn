@@ -45,7 +45,7 @@ void main() {
   int end   = min(start + chunk, rcount);
 
   uint t = gl_LocalInvocationID.x;
-  float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
+  float acc = (pc.op == 2) ? VX_NEG_INF : (pc.op == 3) ? VX_POS_INF : (pc.op == 4) ? 1.0 : 0.0;
   if (nRed == 1) {
     for (int r = start + int(t); r < end; r += int(gl_WorkGroupSize.x)) {
       float v = float(s[base + r * singleStride]);

@@ -23,7 +23,7 @@ void main() {
   uint t = gl_LocalInvocationID.x;
 
   // Fold this output's `groups` partials; lanes past the group count seed the op identity.
-  float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
+  float acc = (pc.op == 2) ? VX_NEG_INF : (pc.op == 3) ? VX_POS_INF : (pc.op == 4) ? 1.0 : 0.0;
   for (int gi = int(t); gi < pc.groups; gi += int(gl_WorkGroupSize.x)) {
     float v = part[outIdx * uint(pc.groups) + uint(gi)];
     acc = (pc.op == 2) ? max(acc, v) : (pc.op == 3) ? min(acc, v) : (pc.op == 4) ? acc * v : acc + v;

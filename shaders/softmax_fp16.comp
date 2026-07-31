@@ -21,7 +21,7 @@ void main() {
   int n = int(gl_WorkGroupID.x);
   int tid = int(gl_LocalInvocationID.x);
   // max over channels
-  float m = -1e30;
+  float m = VX_NEG_INF;
   for (int cb = tid; cb < Cb; cb += 256) {
     vec4 v = vec4(src[n * Cb + cb]);
     for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) m = max(m, v[l]);

@@ -13,6 +13,13 @@
 #define ACT_HARDSWISH 4
 #define ACT_SILU      5
 
+// Exact float infinities, from the bit pattern (GLSL has no infinity literal). These seed Max/Min
+// reduction folds, mirroring the CPU oracle's std::numeric_limits<float>::infinity() identities
+// (src/backend/cpu/ops/reduce.cpp, maxpool.cpp): a finite seed is returned VERBATIM for any input
+// entirely beyond it, so the old -3.4e38 / -1e30 sentinels mis-answered near-FLT_MAX data.
+#define VX_POS_INF uintBitsToFloat(0x7F800000u)
+#define VX_NEG_INF uintBitsToFloat(0xFF800000u)
+
 float vx_act(float x, int act, float lo, float hi) {
   if (act == ACT_RELU)      return max(x, 0.0);
   if (act == ACT_RELU6)     return clamp(x, 0.0, 6.0);

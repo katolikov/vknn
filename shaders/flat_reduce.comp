@@ -33,7 +33,7 @@ void main() {
   int rcount = 1, nRed = 0, singleStride = 0;
   for (int k = 0; k < pc.rank; ++k) if (geom.g[2 * pc.rank + k] != 0) { rcount *= geom.g[k]; nRed++; singleStride = geom.g[pc.rank + k]; }
 
-  float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
+  float acc = (pc.op == 2) ? VX_NEG_INF : (pc.op == 3) ? VX_POS_INF : (pc.op == 4) ? 1.0 : 0.0;
   // Fast path for a single reduced axis (the common global-min/max/sum-over-one-axis case): the reduced
   // element offset is base + r*stride, so the per-element multi-dim index recompute below is unneeded.
   // Same iteration order as the general path, so byte-identical for every op.
