@@ -1,5 +1,6 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
+#include "core/plan_retention.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
 #include "vknn/version.h"
@@ -339,11 +340,18 @@ namespace vknn {
         s->cfg_ = cfg;
         cfg.applyLogLevel();
         s->profiler_.setEnabled(cfg.profile);
-        // ONNX-built session: retain the pristine imported graph so prepareShapes() can re-run the
-        // pass pipeline at a new declared shape. The default bucket is compiled from a copy so the
-        // pristine graph (with its weights) survives the passes and the freeWeightsAfterUpload reclaim.
-        s->importedGraph_    = g;
-        s->hasImportedGraph_ = true;
+        // ONNX-built session: retain the pristine imported graph so prepareShapes() can re-run the pass
+        // pipeline at a new declared shape. The default bucket is compiled from a copy so the pristine
+        // graph (with its weights) survives the passes and the freeWeightsAfterUpload reclaim. That copy
+        // is a second resident set of every initializer payload, so it is taken only when a declared
+        // shape can still change the plan: shape resolution fills dynamic axes only, so a model whose
+        // inputs are fully static plans exactly one bucket and needs no pristine copy
+        // (importedGraphCanPlanNewShapes, core/plan_retention.h).
+        s->hasImportedGraph_ = importedGraphCanPlanNewShapes(g);
+        if (s->hasImportedGraph_)
+        {
+            s->importedGraph_ = g;
+        }
         auto  t0             = std::chrono::high_resolution_clock::now();
         Graph def            = std::move(g);
         s->ensureBackends();
@@ -941,45 +949,18 @@ namespace vknn {
         //     need weights resident (re-plan, weight introspection) can opt out.
         if (cfg_.freeWeightsAfterUpload)
         {
-            // Free the bulk weights — Conv/MatMul/Gemm operands, which their ops upload + cache at compile.
-            // KEEP the remaining (small) constants: some ops read their initializers while recording the
-            // command buffer, which the zero-copy path re-records, so those initializers must stay
-            // resolvable. Keeping them costs little (KB-scale shapes/biases/tables).
-            // A fused pointwise-chain epilogue uploads its operands (inputs[pw_opbase..]) lazily while
-            // RECORDING, not at prepare — e.g. a PRelu slope folded into a Conv. Those initializers must
-            // stay resolvable, so keep any tensor used as an epilogue operand anywhere.
-            std::set<TensorId> keepAtRecord;
-            for (const auto &nd: graph_.nodes)
+            // Which payloads are still needed is decided by reclaimableInitializers (core/plan_retention.h)
+            // from what the plan still resolves — a CPU-assigned node's operand, a fused residual/bias
+            // edge, a constant graph output, a pointwise-chain epilogue operand — never from a list of
+            // weighted op types, so the weights of a fused or newly added weighted op are reclaimed
+            // without naming it here.
+            std::vector<bool> nodeRunsOnCpu(graph_.nodes.size(), true);
+            for (size_t n = 0; n < graph_.nodes.size(); ++n)
             {
-                if (!nd.attr.has("pw_steps"))
-                {
-                    continue;
-                }
-                int opbase = (int) pwCoreInputs(nd); // clamped to [0, inputs.size()]; a raw pw_opbase could be negative -> OOB
-                for (int k = opbase; k < (int) nd.inputs.size(); ++k)
-                {
-                    if (nd.inputs[k] != kNoTensor)
-                    {
-                        keepAtRecord.insert(nd.inputs[k]);
-                    }
-                }
-            }
-            std::set<TensorId> freeable;
-            for (const auto &nd: graph_.nodes)
-            {
-                if (nd.type == OpType::Conv || nd.type == OpType::MatMul || nd.type == OpType::Gemm || nd.type == OpType::ConvGemm)
-                {
-                    for (TensorId in: nd.inputs)
-                    {
-                        if (in != kNoTensor && graph_.isInitializer(in) && !keepAtRecord.count(in))
-                        {
-                            freeable.insert(in);
-                        }
-                    }
-                }
+                nodeRunsOnCpu[n] = nodeBackendIdx_[n] < 0 || backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Cpu;
             }
             size_t freed = 0;
-            for (TensorId id: freeable)
+            for (TensorId id: reclaimableInitializers(graph_, nodeRunsOnCpu))
             {
                 auto it = graph_.initializers.find(id);
                 if (it != graph_.initializers.end())
@@ -988,7 +969,8 @@ namespace vknn {
                     graph_.initializers.erase(it);
                 }
             }
-            VKNN_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
+            constexpr size_t kBytesPerMegabyte = 1024 * 1024;
+            VKNN_INFO << "freed " << freed / kBytesPerMegabyte << " MB of host weights after upload";
         }
 
         // Bind-time index bounds: which graph inputs index a Gather, and how many rows it holds.
@@ -1295,11 +1277,34 @@ namespace vknn {
     }
 
     Status Session::prepareShapes(const std::map<std::string, Shape> &shapes) {
-        if (!hasImportedGraph_)
+        if (graphOptimized_)
         {
             VKNN_ERROR << "prepareShapes: this session was loaded from a .vxm; its buckets are fixed at "
                           "compile time. Recompile with vknn_compile --bucket to add shapes.";
             return Status::Unsupported;
+        }
+        if (!hasImportedGraph_)
+        {
+            // Every input of this model is statically shaped, so the pass pipeline resolves nothing from
+            // a declared shape and the default bucket is the only plan this graph has (see
+            // importedGraphCanPlanNewShapes). The request is answered against that bucket: a declared
+            // rank the model does not have is the same InvalidArgument the pipeline raises, and anything
+            // else is the idempotent no-op re-declaring a planned shape always is.
+            const Graph &planned = *buckets_.front().graph;
+            for (const auto &kv: shapes)
+            {
+                TensorId id = planned.find(kv.first);
+                if (id == kNoTensor || !planned.desc(id).isInput)
+                {
+                    continue; // an input name the model does not declare is ignored, as the passes ignore it
+                }
+                if (kv.second.size() != planned.desc(id).shape.size())
+                {
+                    VKNN_ERROR << "prepareShapes: declared shape for input '" << kv.first << "' has rank " << kv.second.size() << " but the model declares rank " << planned.desc(id).shape.size();
+                    return Status::InvalidArgument;
+                }
+            }
+            return Status::Ok;
         }
         // Re-run the whole pipeline from the pristine imported graph at the declared shapes, then key
         // the bucket by the shapes the passes actually resolved. If that key already exists this is a
