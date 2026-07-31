@@ -75,6 +75,17 @@ namespace vknn {
         {64, 128, 16},  // mirror, for M-heavy asymmetric shapes
         {64, 64, 16},   // small/medium matrices where a 128 tile is one mostly-padded workgroup
         {128, 128, 8},  // half the LDS of the default -> potentially two concurrent workgroups/CU
+        // Appended candidates (append-only: the tune table persists indices into this array, and
+        // entries 0..4 must keep their positions). Same legality bounds as above: tm/tn TILE
+        // multiples <= TM_MAX/TN_MAX, tk <= TK_MAX, tm*tk and tk*tn multiples of the 256-thread
+        // cooperative load. The analytic prefilter (racePruned) drops hopeless geometries before
+        // any is timed, so the added tune cost is bounded.
+        {64, 128, 8},  // M-heavy tile at half LDS
+        {128, 64, 8},  // N-parallel tile at half LDS
+        {64, 64, 8},   // smallest legal square: maximum concurrent workgroups
+        {96, 96, 16},  // 6x6 micro-tile between the 64 and 128 squares
+        {96, 128, 16}, // intermediate register pressure, N-wide panel
+        {128, 96, 16}, // mirror, M-wide panel
     };
     constexpr int kMatMulTileCount = (int) (sizeof(kMatMulTiles) / sizeof(kMatMulTiles[0]));
 
