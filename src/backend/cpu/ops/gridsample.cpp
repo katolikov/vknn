@@ -89,6 +89,15 @@ namespace vknn {
                     return c; // zeros/border handled at fetch
                 };
                 auto fetch = [&](int n, int ch, int px, int py) -> float {
+                    // A source plane with a zero extent holds no pixel any padding rule can land
+                    // on: the border/reflection clamp below would run over the empty range
+                    // [0, -1] and index past an empty buffer. Mirrors gridSampleSourceEmpty() in
+                    // backend/vulkan/ops/gridsample_rule.h, which the kernels apply as
+                    // GS_TAP_OOB in every padding mode.
+                    if (x.h == 0 || x.w == 0)
+                    {
+                        return 0.f;
+                    }
                     if (pad == "reflection")
                     {
                         // Reflect each tap (cubic reaches +-2 px past the mapped coordinate, where a

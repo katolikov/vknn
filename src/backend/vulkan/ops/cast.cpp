@@ -9,6 +9,7 @@
 // boundary); INT16/UINT16 are not distinct vknn dtypes (they map to fp32 storage) and take the copy path.
 #include "backend/vulkan/vk_tune_race.h"
 #include "dispatch_extent.h"
+#include "flat_ops.h" // flat::quadBindingsAligned (the vec4 base gate every quad pick applies)
 #include "vk_op_common.h"
 #include "vknn/error.h"
 #include "vknn/logging.h"
@@ -48,8 +49,16 @@ namespace vknn {
             // element count — record()'s physical count can add NC4HW4 channel padding, which
             // moves the raced workload by at most the pad fraction and the bytes not at all (the
             // pick is placement-only).
-            bool pickCastQuad(VkOpEnv &env, int raceTotal) {
+            bool pickCastQuad(VkOpEnv &env, const Node &node, int raceTotal) {
                 if (raceTotal <= 0)
+                {
+                    return false;
+                }
+                // cast_v4 re-types BOTH bindings as STORE_QUAD, so both bases must be whole
+                // vectors. The gate precedes the tune cache: a cached verdict keys on the
+                // signature, which carries no buffer identity, so a quad verdict recorded for an
+                // aligned node must not be replayed onto a zero-copy view that is not.
+                if (!flat::quadBindingsAligned(env, {node.inputs[0], node.outputs[0]}))
                 {
                     return false;
                 }
@@ -75,9 +84,9 @@ namespace vknn {
                 PC            rpc = pc;
                 rpc.total         = raceTotal;
                 auto       ms     = vk::raceCandidates(2, [&](int index) {
-                    const bool q = index == kCastKernelQuad;
+                    const bool q        = index == kCastKernelQuad;
                     auto       racePipe = env.pipeline(shader(q ? "cast_v4" : "cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
-                    const int  lanes = q ? (raceTotal + kCastQuad - 1) / kCastQuad : raceTotal;
+                    const int  lanes    = q ? (raceTotal + kCastQuad - 1) / kCastQuad : raceTotal;
                     return timer.time([&](VkCommandBuffer cmd) {
                         racePipe->dispatch(cmd, {sSrc->handle(), sDst->handle()}, &rpc, sizeof(rpc), groups(lanes, env.flatLocalSize));
                     });
@@ -153,7 +162,7 @@ namespace vknn {
                     }
                     // 2 SSBO bindings (src, dst); the spec constant pins both kernels to the
                     // device-resolved width (spec 0 = env.flatLocalSize, matching groups() below).
-                    quadKernel = pickCastQuad(env, (int) outputElements);
+                    quadKernel = pickCastQuad(env, node, (int) outputElements);
                     pipe       = env.pipeline(shader(quadKernel ? "cast_v4" : "cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
                 }
             }

@@ -348,9 +348,12 @@ namespace vknn {
         // One compiled plan per declared input-shape set. buckets_[0] is the default (batch-fallback)
         // plan every fixed-shape model has; more are added by prepareShapes() or a multi-bucket .vxm.
         std::vector<PlanBucket> buckets_;
-        // The pristine imported graph (pre-passes), retained only for ONNX-built sessions so
-        // prepareShapes() can re-run the pipeline at a new shape. Empty for a .vxm session, which
-        // cannot add buckets (its passes were baked at compile time, one shape per stored bucket).
+        // The pristine imported graph (pre-passes), retained so prepareShapes() can re-run the
+        // pipeline at a new shape. Held only for an ONNX-built session whose inputs carry a
+        // dynamic axis: shape resolution fills dynamic extents only, so a fully static model
+        // plans the one bucket it can ever have and the copy — every weight payload included —
+        // is dead once that bucket is built. Empty for a .vxm session, which cannot add buckets
+        // (its passes were baked at compile time, one shape per stored bucket).
         Graph importedGraph_;
         bool  hasImportedGraph_ = false;
         bool  planned_          = false;

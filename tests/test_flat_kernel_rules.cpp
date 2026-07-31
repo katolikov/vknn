@@ -223,3 +223,22 @@ TEST(FlatKernelRules, MemoKeepsDeviceSignaturesApart) {
     EXPECT_FALSE(QuadVerdictMemo::lookup("gpuB/fbin_1", Tuning::Fast, kernel));
     QuadVerdictMemo::clear();
 }
+
+// The cast kernels join the family through the same gate. cast_v4 re-types BOTH of its bindings
+// (source and destination) as STORE_QUAD, unlike the gather/broadcast/pad twins that widen only
+// their store, so a misaligned base on either side disqualifies the quad pick.
+TEST(FlatKernelRules, CastQuadNeedsBothBindingsWholeVectors) {
+    for (bool fp16: {false, true})
+    {
+        const size_t quadBytes = quadBindingBytes(fp16);
+        // A concat lead of two elements leaves the next member 8 B in at fp32 and 4 B in at fp16 --
+        // past the driver's 4-byte buffer alignment, so the view is created, and short of a whole
+        // vector either way.
+        const size_t viewBase = arenaMemberOffsetBytes(2, fp16);
+        EXPECT_EQ(viewBase % sizeof(uint32_t), 0u) << "the view constructor would refuse it first";
+        EXPECT_FALSE(quadBaseAligned(viewBase, quadBytes));
+        // An owning allocation starts at 0 and always qualifies, so a node is only disqualified by
+        // the view side -- either side being misaligned is enough.
+        EXPECT_TRUE(quadBaseAligned(0, quadBytes));
+    }
+}
