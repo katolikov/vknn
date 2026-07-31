@@ -5,10 +5,12 @@
 // one of these and dispatch to it when their tensors are flat; Transpose/Slice are flat-only.
 #pragma once
 #include "backend/vulkan/vk_tune_model.h"
+#include "backend/vulkan/vk_tune_race.h"
 #include "core/slice_bounds.h"
 #include "import/passes.h" // readI64Param
 #include "pw_plan.h"
 #include "vk_op_common.h"
+#include "vknn/logging.h"
 
 namespace vknn {
 
@@ -82,10 +84,16 @@ namespace vknn {
         // end to end). fused_pw keeps its measured-win walk below. The ITEMS specialization
         // constant stays in the movement pipelines, so a future shape rule can re-enable the walk
         // per node without another kernel change.
-        constexpr int kMovementItemsPerLane  = 1;
-        constexpr int kItemsPerLaneMax       = 8; // independent loads one lane keeps in flight
-        constexpr int kLaneFloorWaveHeadroom = 5;
-        constexpr int kProbeWaveLanes        = 64; // the probe counts 64-wide waves
+        constexpr int kMovementItemsPerLane = 1;
+        // Output elements per lane-quad of the vectorized flat gather (one whole-vec4 store);
+        // mirrors FLAT_GATHER_QUAD in shaders/flat_gather_v4.comp.
+        constexpr int kFlatGatherQuad = 4;
+        // Tune-table values of the flat-gather kernel pick (append-only).
+        constexpr int kFlatGatherKernelScalar = 0; ///< flat_gather: one output element per lane step.
+        constexpr int kFlatGatherKernelQuad   = 1; ///< flat_gather_v4: one whole-vec4 quad per lane step.
+        constexpr int kItemsPerLaneMax        = 8; // independent loads one lane keeps in flight
+        constexpr int kLaneFloorWaveHeadroom  = 5;
+        constexpr int kProbeWaveLanes         = 64; // the probe counts 64-wide waves
         inline int    itemsPerLane(int64_t total, VkOpEnv &env) {
             const double  waves     = vk::deviceTuneModel(env).wavesToSaturate;
             const int64_t laneFloor = (int64_t) (waves * kProbeWaveLanes) * kLaneFloorWaveHeadroom;
@@ -139,6 +147,89 @@ namespace vknn {
             // gather reads exactly in[base .. base+total). SliceOp::record may then skip the dispatch
             // when the output buffer is a sub-buffer view of the input at that byte offset.
             bool contiguousSlice = false;
+            // flat_gather_v4 (one whole-vec4 quad of consecutive output elements per lane step)
+            // when the cached race picked it; the scalar kernel otherwise. Byte-identical either
+            // way (see pickQuad).
+            bool quad = false;
+
+            // The scalar and quad gather kernels are byte-interchangeable: identical input
+            // indices, bytes, zero-fill lanes and per-element epilogue application — the quad twin
+            // only widens the store to one whole vec4 over four consecutive output elements. The
+            // pick is therefore placement-only and follows the standard cached race
+            // (fused_pointwise.cpp pickFlatQuad): Tuning::None keeps the scalar kernel (the
+            // deterministic default), Fast/Heavy race both once on dedicated scratch through
+            // TuneTimer/raceCandidates and persist the winner; the quad challenger must clear
+            // vk::kTuneRaceMargin to displace the incumbent. The race dispatches the SAME variant
+            // the node will (same epilogue suffix, same binding count) on the REAL geometry SSBO,
+            // so it times the node's actual walk; the innermost output extent and input stride
+            // ride the signature because they set the row-straddle rate and the load coalescing
+            // class.
+            bool pickQuad(VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inStr, int64_t inElems) {
+                if (pc.total <= 0)
+                {
+                    return false;
+                }
+                const int epiKind = !epi.active ? 0 : epi.relax ? 2 : 1;
+                const int lastDim = outDim.empty() ? 1 : outDim.back();
+                const int lastStr = inStr.empty() ? 0 : inStr.back();
+                char      buf[96];
+                snprintf(buf, sizeof(buf), "fgather_%d_%d_%d_%d_%d_%d_%d", pc.total, pc.rank, lastDim, lastStr, pc.outPad, epiKind, env.useFp16 ? 1 : 0);
+                std::string sig = env.gpuTag + "/" + buf;
+                int         reuse;
+                if (env.reuseTuned(sig, reuse) && (reuse == kFlatGatherKernelScalar || reuse == kFlatGatherKernelQuad))
+                {
+                    return reuse == kFlatGatherKernelQuad;
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return false;
+                }
+                // Dedicated scratch sized like the real tensors: every gathered index lies inside
+                // the input tensor, so an input-sized source covers all reads; the destination —
+                // and the epilogue's operand filler, indexed by output element (the
+                // appendForTiming rule) — cover pc.total, the output's physical element count.
+                const size_t es = (size_t) (env.useFp16 ? 2 : 4);
+                auto         mk = [&](size_t bytes) {
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                };
+                auto                        sSrc = mk((size_t) inElems * es);
+                auto                        sDst = mk((size_t) pc.total * es);
+                std::shared_ptr<vk::Buffer> sFill;
+                if (epi.active)
+                {
+                    sFill = mk((size_t) pc.total * es);
+                }
+                vk::TuneTimer timer(env);
+                auto          ms  = vk::raceCandidates(2, [&](int index) {
+                    const bool q = index == kFlatGatherKernelQuad;
+                    auto racePipe = env.pipeline(shader((std::string(q ? "flat_gather_v4" : "flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
+                                                           std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                    const int laneSteps = q ? (pc.total + kFlatGatherQuad - 1) / kFlatGatherQuad : pc.total;
+                    const int lanes     = (laneSteps + pc.items - 1) / pc.items;
+                    return timer.time([&](VkCommandBuffer cmd) {
+                        std::vector<VkBuffer> bufs {sSrc->handle(), sDst->handle(), geom->handle()};
+                        epi.appendForTiming(bufs, sFill ? sFill->handle() : sDst->handle());
+                        racePipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(lanes, env.flatLocalSize));
+                    });
+                });
+                const bool    won = ms.size() == 2 && ms[kFlatGatherKernelQuad] < ms[kFlatGatherKernelScalar] * vk::kTuneRaceMargin;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, won ? kFlatGatherKernelQuad : kFlatGatherKernelScalar, (int) env.tuning);
+                }
+                VKNN_DEBUG << "autotune " << sig << " -> " << (won ? "quad" : "scalar") << vk::raceTimes(ms);
+                return won;
+            }
+
+            // Shared prepare tail: geometry upload, epilogue plan, the scalar-vs-quad kernel
+            // pick, and pipeline creation. inElems sizes the pick's source scratch.
+            void finishPrepare(const Node &node, VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inStr, int64_t inElems) {
+                geom = uploadFlatGeom(env, {outDim, inStr});
+                epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
+                quad = pickQuad(env, outDim, inStr, inElems);
+                pipe = env.pipeline(shader((std::string(quad ? "flat_gather_v4" : "flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
+                                    std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+            }
             void prepare(const Node &node, VkOpEnv &env) {
                 const Graph &g  = *env.graph;
                 Shape        in = g.desc(node.inputs[0]).shape, out = g.desc(node.outputs[0]).shape;
@@ -179,10 +270,7 @@ namespace vknn {
                         }
                         pc.base = (int) node.attr.geti("view_base", 0);
                         applyOutPad();
-                        geom = uploadFlatGeom(env, {outDim, inStr});
-                        epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
-                        pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
-                                            std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                        finishPrepare(node, env, outDim, inStr, numElements(in));
                         return;
                     }
                 }
@@ -242,16 +330,16 @@ namespace vknn {
                     }
                 }
                 applyOutPad();
-                geom = uploadFlatGeom(env, {outDim, inStr});
-                epi.prepare(node, env, /*flat=*/true, g.desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
-                                    std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                finishPrepare(node, env, outDim, inStr, numElements(in));
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {operandBuf(env, node.inputs[0], hold0)->handle(), dst->handle(), geom->handle()};
                 epi.append(bufs, node, env, dst->handle());
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups((pc.total + pc.items - 1) / pc.items, env.flatLocalSize));
+                // Lane steps: output elements for the scalar kernel, whole quads for the
+                // vectorized twin (which re-derives its quad count from pc.total).
+                const int laneSteps = quad ? (pc.total + kFlatGatherQuad - 1) / kFlatGatherQuad : pc.total;
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups((laneSteps + pc.items - 1) / pc.items, env.flatLocalSize));
             }
         };
 

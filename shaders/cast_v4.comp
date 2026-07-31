@@ -1,0 +1,55 @@
+#version 450
+#include "precision.glsl"
+#include "common.glsl"
+// Vectorized twin of cast.comp: a lane processes CAST_QUAD CONSECUTIVE elements, so the load and
+// the store are whole vec4 transactions. The per-element narrowing (castOne) is the scalar
+// kernel's body statement for statement, applied per component at the same element index — values,
+// order and rounding are identical, so the two variants are byte-interchangeable and the host
+// (cast.cpp pickCastQuad) may pick either on measured speed alone. The tail quad (total not a
+// multiple of CAST_QUAD) runs per element behind a bounds guard; component indexing of the vec4
+// SSBO element compiles to scalar accesses, so the tail never reads or writes past total. See
+// cast.comp for the mode contract (0 wide clamp, 1 INT8 wrap, 2 UINT8 saturate) and how it matches
+// the CPU Cast + readback narrowing bit-for-bit.
+// Storage vector of CAST_QUAD consecutive elements (the fp32 variant loads/stores plain vec4).
+#ifdef USE_FP16
+#define STORE_QUAD f16vec4
+#else
+#define STORE_QUAD vec4
+#endif
+// Elements per lane-quad; mirrored by kCastQuad in src/backend/vulkan/ops/cast.cpp.
+#define CAST_QUAD 4
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
+layout(std430, binding = 0) readonly buffer S { STORE_QUAD s4[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE_QUAD d4[]; };
+layout(push_constant) uniform PC { int total; float lo, hi; int mode; } pc;
+
+// The scalar kernel's per-element narrowing (cast.comp's main body), value-returning.
+float castOne(float v) {
+  float t = trunc(v);
+  if (pc.mode == 1) {
+    // INT8 modulo wrap: reinterpret the low 8 bits of the truncated integer as a signed byte.
+    int m = int(t) & 0xFF;
+    if (m >= 128) m -= 256;
+    return float(m);
+  }
+  // mode 0 (wide, clamp to fence inf/NaN) and mode 2 (UINT8, saturate to [0,255]) both clamp.
+  return clamp(t, pc.lo, pc.hi);
+}
+
+void main() {
+  uint q = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int quadTotal = (pc.total + CAST_QUAD - 1) / CAST_QUAD;
+  if (q >= uint(quadTotal)) return;
+  int e0 = int(q) * CAST_QUAD;
+  if (e0 + CAST_QUAD <= pc.total) {
+    vec4 v = vec4(s4[q]);
+    d4[q] = STORE_QUAD(castOne(v.x), castOne(v.y), castOne(v.z), castOne(v.w));
+  } else {
+    // Tail quad: per element behind the bounds guard; component accesses compile to scalar
+    // loads/stores, so nothing reads or writes past total.
+    for (int j = 0; j < CAST_QUAD; ++j) {
+      if (e0 + j >= pc.total) break;
+      d4[q][j] = STORE(castOne(float(s4[q][j])));
+    }
+  }
+}
