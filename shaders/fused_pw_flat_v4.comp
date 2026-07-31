@@ -55,13 +55,24 @@ float pwSpecP0(int s){ if(s==0)return PW_P0_0; if(s==1)return PW_P0_1; if(s==2)r
 float pwSpecP1(int s){ if(s==0)return PW_P1_0; if(s==1)return PW_P1_1; if(s==2)return PW_P1_2; if(s==3)return PW_P1_3;
   if(s==4)return PW_P1_4; if(s==5)return PW_P1_5; if(s==6)return PW_P1_6; return PW_P1_7; }
 // One vec4 operand fetch for a full quad at flat base element e0 (e0 is PW_FLAT_QUAD-aligned):
-// a same-shape operand is the four consecutive elements starting at e0 (one whole-vec4 load), a
-// scalar splats element 0, and every other broadcast class takes the scalar kernel's exact
-// per-element pwFlatIdx walk, so each lane of the result equals the scalar kernel's value for
-// that element.
+// a same-shape operand is the four consecutive elements starting at e0 (one whole-vec4 load) and
+// a scalar splats element 0. Every other broadcast class resolves through pwFlatIdx — but the
+// walk runs ONCE per quad whenever the quad sits inside one innermost-axis row: the flat index is
+// a per-axis linear form, so within a row the four indices differ by exactly the operand's
+// innermost stride (0 on a broadcast axis, which collapses the quad to a single load). Only a
+// quad straddling a row boundary pays the scalar kernel's four independent walks. Indices — and
+// therefore bytes — are identical to the scalar kernel's in every case.
 vec4 pwLoadBcFlat4(int slot,int s,int bc,int e0){
   if(bc==PW_BCAST_SAME)   return pwLoad4(slot,e0/PW_FLAT_QUAD);
   if(bc==PW_BCAST_SCALAR) return vec4(pwLoad(slot,0));
+  int lastDim=plan.outDim[plan.rank-1];
+  int lastPos=e0-(e0/lastDim)*lastDim;
+  if(lastPos+PW_FLAT_QUAD<=lastDim){
+    int i0=pwFlatIdx(s,bc,e0);
+    int st=plan.stride[s*PW_EPI_MAXRANK+plan.rank-1];
+    if(st==0) return vec4(pwLoad(slot,i0)); // innermost axis broadcast: one value serves the quad
+    return vec4(pwLoad(slot,i0),pwLoad(slot,i0+st),pwLoad(slot,i0+2*st),pwLoad(slot,i0+3*st));
+  }
   return vec4(pwLoad(slot,pwFlatIdx(s,bc,e0)),pwLoad(slot,pwFlatIdx(s,bc,e0+1)),
               pwLoad(slot,pwFlatIdx(s,bc,e0+2)),pwLoad(slot,pwFlatIdx(s,bc,e0+3)));
 }
