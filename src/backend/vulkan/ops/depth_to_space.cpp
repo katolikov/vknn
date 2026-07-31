@@ -5,26 +5,23 @@
 //
 // Flat row-major (anything else): one thread per output element does the DCR/CRD index remap, and
 // the layout pass converts at each NC4HW4 boundary.
+//
+// The two kernels take different push-constant blocks, so the pipeline and the pushed block are one
+// choice carried on the op instance as a DepthToSpaceDispatchPlan (depth_to_space_plan.h).
+#include "depth_to_space_plan.h"
+#include "dispatch_extent.h"
 #include "flat_ops.h"
 #include "vk_op_common.h"
+#include "vknn/error.h"
 #include "vknn/op.h"
 
 namespace vknn {
     namespace {
-        struct D2sPC {
-            int total, N, C, H, W, C2, OH, OW, b, mode;
-        };
-        // Byte-matched to shaders/depth_to_space_nc4.comp's push_constant block; the packed kernel
-        // derives its own block counts, so it needs no thread total in the block.
-        struct D2sNc4PC {
-            int N, C, H, W, C2, OH, OW, b, mode;
-        };
-
         struct DepthToSpaceOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
-            D2sPC                                pc {};
-            D2sNc4PC                             nc4Pc {};
-            uint32_t                             nc4Count = 0; // non-zero on the packed path
+            DepthToSpaceDispatchPlan             plan;
+            DepthToSpaceFlatPC                   flatPc {};
+            DepthToSpacePackedPC                 packedPc {};
             void                                 prepare(const Node &node, VkOpEnv &env) override {
                 NCHW x = NCHW::from(env.graph->desc(node.inputs[0]).shape);
                 int  b = (int) node.attr.geti("blocksize", 1);
@@ -36,28 +33,39 @@ namespace vknn {
                 // count is preserved; the shader reads mode to pick the DCR vs CRD channel unpacking.
                 int C2 = (int) x.c / (b * b), OH = (int) x.h * b, OW = (int) x.w * b;
                 int mode = node.attr.gets("mode", "DCR") == "CRD" ? 1 : 0;
-                // total (thread count) is computed in int64 to avoid overflowing the N*C2*OH*OW
-                // product before it is narrowed into the int push-constant field.
-                pc = {(int) ((int64_t) x.n * C2 * OH * OW), (int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
-                if (depthToSpaceIsNc4(*env.graph, node))
+                // Lane counts stay int64 until the extent gate has cleared them: one lane per output
+                // element for the flat kernel, one per output NC4HW4 block-pixel for the packed one.
+                const int64_t flatLanes   = (int64_t) x.n * C2 * OH * OW;
+                const int64_t packedLanes = (int64_t) x.n * cBlocks(C2) * OH * OW;
+                plan                      = planDepthToSpaceDispatch(depthToSpaceIsNc4(*env.graph, node), packedLanes, flatLanes);
+                // Both counts are narrowed into an int push-constant field, so both are checked; the
+                // packed count is the flat count over the NC4HW4 block width, so the flat one binds.
+                if (!flat::dispatchExtentFits(flatLanes) || !flat::dispatchExtentFits(packedLanes))
                 {
-                    nc4Pc    = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
-                    nc4Count = (uint32_t) ((int64_t) x.n * cBlocks(C2) * OH * OW); // one lane per output block-pixel
-                    pipe = env.pipeline(shader("depth_to_space_nc4", env.useFp16), 2, sizeof(D2sNc4PC), std::vector<uint32_t> {env.convLocalSize});
+                    throw Error(Status::Unsupported, flat::dispatchExtentRefusal("DepthToSpace '" + node.name + "'", "output element count", flatLanes));
+                }
+                flatPc   = {(int) flatLanes, (int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
+                packedPc = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, C2, OH, OW, b, mode};
+                if (plan.path == DepthToSpacePath::kPackedNc4)
+                {
+                    pipe = env.pipeline(shader("depth_to_space_nc4", env.useFp16), 2, plan.pushConstantBytes(), std::vector<uint32_t> {env.convLocalSize});
                     return;
                 }
-                pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, sizeof(D2sPC), std::vector<uint32_t> {env.flatLocalSize});
+                pipe = env.pipeline(shader("flat_depth_to_space", env.useFp16), 2, plan.pushConstantBytes(), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), env.devBuf(node.outputs[0])->handle()};
-                if (nc4Count)
+                // The path, the pushed block and its size all come from the plan prepare() built, so a
+                // zero-lane dispatch still pushes the block the pipeline's range was created for.
+                if (plan.path == DepthToSpacePath::kPackedNc4)
                 {
-                    pipe->dispatch(cmd, bufs, &nc4Pc, sizeof(nc4Pc), groups(nc4Count, env.convLocalSize));
+                    pipe->dispatch(cmd, bufs, &packedPc, plan.pushConstantBytes(), groups(plan.laneCount, env.convLocalSize));
                     return;
                 }
-                // One thread per output element; flat_depth_to_space.comp is local_size_x=256 ==
-                // flat::kFlatLocalSize. groups() rounds pc.total up to whole workgroups.
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
+                // One thread per output element; flat_depth_to_space.comp takes the family width as its
+                // workgroup-size spec constant (env.flatLocalSize), and groups() rounds the lane count
+                // up to whole workgroups.
+                pipe->dispatch(cmd, bufs, &flatPc, plan.pushConstantBytes(), groups(plan.laneCount, env.flatLocalSize));
             }
         };
     } // namespace
