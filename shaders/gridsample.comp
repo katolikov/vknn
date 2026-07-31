@@ -17,11 +17,11 @@ layout(std430, binding = 2) writeonly buffer Dst { vec4 dst[]; };
 layout(push_constant) uniform PC { int N, C, Hin, Win, OH, OW, align; } pc;
 
 #include "gridsample_taps.glsl"
-// A resolved tap read from a column index and a row offset. Only the zeros padding mode can
-// produce an OOB axis, so the test compiles out of the border/reflection variants (PADMODE is a
-// specialization constant) and their per-tap cost is a single add + load.
+// A resolved tap read from a column index and a row offset. gridSampleTapsCanBeOob() is uniform
+// across the dispatch, so the test compiles out of a border/reflection variant sampling a
+// non-empty plane and its per-tap cost is a single add + load.
 vec4 tapAt(int sb, int xr, int yw) {
-  if (PADMODE == 0 && (xr < 0 || yw < 0)) return vec4(0.0);
+  if (gridSampleTapsCanBeOob() && (xr < 0 || yw < 0)) return vec4(0.0);
   return vec4(src[sb + yw + xr]);
 }
 

@@ -5,9 +5,20 @@
 // change applied to only one of them is the silent-wrong-answer class the shared lane-count
 // contract in gridsample.cpp guards against.
 
-// A zeros-OOB tap axis: the resolvers return it instead of a column index / row offset, and the
-// variant's tapAt() reads any tap with an OOB axis as vec4(0).
+// An out-of-range tap axis: the resolvers return it instead of a column index / row offset, and
+// the variant's tapAt() reads any tap with an OOB axis as vec4(0). Mirrors kGridSampleTapOob in
+// src/backend/vulkan/ops/gridsample_rule.h, which holds the host definition of everything below.
 #define GS_TAP_OOB (-1)
+
+// A source plane with a zero extent holds no pixel to sample. Mirrors gridSampleSourceEmpty().
+bool gridSampleSourceEmpty() { return pc.Hin <= 0 || pc.Win <= 0; }
+// Whether a resolved tap can carry GS_TAP_OOB, i.e. whether the variant's tapAt() has to test for
+// it: the zeros mode reports out-of-range taps by construction, and an empty source plane has no
+// in-range tap in ANY padding mode. Both terms are invariant across the dispatch (PADMODE is a
+// specialization constant, the extents are push constants), so the test folds away for a
+// border/reflection variant sampling a non-empty plane and the per-tap cost stays one add + load.
+// Mirrors gridSampleTapsCanBeOob().
+bool gridSampleTapsCanBeOob() { return PADMODE == 0 || gridSampleSourceEmpty(); }
 
 float reflectc(float x, float lo, float hi) {
   if (hi <= lo) return lo;
@@ -25,9 +36,13 @@ float handle(float c, int S) {
 // the channel-block loop pays a single add per tap — no padding or address math per block.
 // Reflection reflects each tap (cubic taps reach +-2 px past the mapped coordinate, where a
 // clamp diverges from the reflected pixel; for linear/nearest the two agree).
-// resolveTapX yields a column index, resolveTapRow a row offset (py * Win); zeros-OOB axes
-// yield GS_TAP_OOB.
+// resolveTapX yields a column index, resolveTapRow a row offset (py * Win); an axis with no
+// in-range pixel yields GS_TAP_OOB — the zeros mode's out-of-range taps, and an empty source
+// plane in every mode.
 int resolveTapX(int px) {
+  // No column exists, in any padding mode: the border/reflection clamp below would run over the
+  // empty range [0, -1] — undefined — and the tap would index past an empty source.
+  if (pc.Win <= 0) return GS_TAP_OOB;
   if (PADMODE == 0) {
     if (px < 0 || px >= pc.Win) return GS_TAP_OOB;
   } else if (PADMODE == 2) {
@@ -38,6 +53,7 @@ int resolveTapX(int px) {
   return px;
 }
 int resolveTapRow(int py) {
+  if (pc.Hin <= 0) return GS_TAP_OOB; // no row exists, in any padding mode (see resolveTapX)
   if (PADMODE == 0) {
     if (py < 0 || py >= pc.Hin) return GS_TAP_OOB;
   } else if (PADMODE == 2) {

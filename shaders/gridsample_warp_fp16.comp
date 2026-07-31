@@ -2,9 +2,9 @@
 // Warp-mode GridSample (NC4HW4 fp16 data, fused scaled-flow coordinate source). Instead of a
 // materialized grid this reads an NCHW flow [N,2,OH,OW] (binding 1, NC4HW4) and a base grid
 // [.,OH,OW,2] (binding 2, fp32) and computes the sample coordinate coord = base + scale*flow inline
-// (fuseGridSampleWarp). The product reproduces the standalone flat_binary Mul it replaces bit for bit:
-// flow (fp16) times the fp16-narrowed scale (baked in pc.scale), rounded to fp16 through the same
-// integer-exact vknnRte16, then widened and added to the fp32 base — the fp32 grid the split
+// (fuseGridSampleWarp). An fp16 flow's product reproduces the standalone flat_binary Mul it replaces bit
+// for bit: flow (fp16) times the fp16-narrowed scale (baked in pc.scale), rounded to fp16 through the
+// same integer-exact vknnRte16, then widened and added to the fp32 base — the fp32 grid the split
 // Mul+Transpose+Add stored. The sampler body (fetch/cubic/reflection) is identical to gridsample_fp16,
 // so the warp output is byte-identical to the materialized-grid path. MODE: 0=bilinear 1=nearest
 // 2=cubic. PADMODE: 0=zeros 1=border 2=reflection.
@@ -22,7 +22,9 @@ layout(constant_id = 1) const int PADMODE = 0;
 // FLOW_FP32 selects the flow buffer's storage decode, exactly like the plain kernel's GRID_FP32:
 // pinSampleCoordFp32 pins the flow cone to fp32 storage, and fp16-quantized flow drifts the
 // sample point ~0.5-1 px at 2k-wide inputs. The buffer binds as raw words; one NC4HW4 block per
-// pixel is 2 words at fp16 (lanes x/y in word 0) or 4 words at fp32 (x, y in words 0/1).
+// pixel is 2 words at fp16 (lanes x/y in word 0) or 4 words at fp32 (x, y in words 0/1). pc.scale
+// arrives baked at the SAME precision (gridSampleWarpScale in gridsample_rule.h), so a pinned flow
+// multiplies by the exact scalar and an fp16 flow by the narrowed one.
 layout(constant_id = 2) const int FLOW_FP32 = 0;
 layout(local_size_x = 64, local_size_x_id = 3) in; // trailing spec = device-resolved lane width (env.convLocalSize)
 layout(std430, binding = 0) readonly  buffer Src  { f16vec4 src[]; };
@@ -32,11 +34,11 @@ layout(std430, binding = 3) writeonly buffer Dst  { f16vec4 dst[]; };
 layout(push_constant) uniform PC { int N, C, Hin, Win, OH, OW, align; float scale; int baseNStride; } pc;
 
 #include "gridsample_taps.glsl"
-// A resolved tap read from a column index and a row offset. Only the zeros padding mode can
-// produce an OOB axis, so the test compiles out of the border/reflection variants (PADMODE is a
-// specialization constant) and their per-tap cost is a single add + load.
+// A resolved tap read from a column index and a row offset. gridSampleTapsCanBeOob() is uniform
+// across the dispatch, so the test compiles out of a border/reflection variant sampling a
+// non-empty plane and its per-tap cost is a single add + load.
 vec4 tapAt(int sb, int xr, int yw) {
-  if (PADMODE == 0 && (xr < 0 || yw < 0)) return vec4(0.0);
+  if (gridSampleTapsCanBeOob() && (xr < 0 || yw < 0)) return vec4(0.0);
   return vec4(src[sb + yw + xr]);
 }
 
