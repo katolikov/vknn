@@ -26,6 +26,11 @@
 // FOLDTOTAL == G*WGS size the shared arrays (the host computes the products; two spec constants
 // cannot multiply in an array size); WGS is the workgroup width (local_size_x_id shares its id);
 // KV4/VV4 select the vec4 load paths.
+// Floats of one partial-record header before the hd accumulator lanes: {chunk max m,
+// weight sum l}. Mirrors the host scratch allocation rows * chunks * (hd + FA_PART_HDR)
+// (kFaPartialHeaderFloats, src/backend/vulkan/ops/fused_attention.cpp); the two must
+// change together or every partial lands in the wrong chunk slot with plausible values.
+#define FA_PART_HDR 2
 layout(constant_id = 0) const int G = 1;
 layout(constant_id = 1) const int HD = 64;
 layout(constant_id = 2) const int CHUNK = 256;
@@ -224,7 +229,7 @@ void main() {
     barrier(); // the whole fold staging publishes at once
     if (tid == 0) {
       for (int gi = 0; gi < G; ++gi) {
-        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
         part[pBase] = rowMax[gi];
         part[pBase + 1] = rowSum[gi];
       }
@@ -234,7 +239,7 @@ void main() {
       int nw = i % HD4;
       vec4 outAcc = vec4(0.0);
       for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD4 + nw];
-      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
       part[pBase + 2 + 4 * nw] = outAcc.x;
       part[pBase + 2 + 4 * nw + 1] = outAcc.y;
       part[pBase + 2 + 4 * nw + 2] = outAcc.z;
@@ -264,7 +269,7 @@ void main() {
     barrier(); // the whole fold staging publishes at once
     if (tid == 0) {
       for (int gi = 0; gi < G; ++gi) {
-        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
         part[pBase] = rowMax[gi];
         part[pBase + 1] = rowSum[gi];
       }
@@ -274,7 +279,7 @@ void main() {
       int n = i % HD;
       float outAcc = 0.0;
       for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD + n].x;
-      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
       part[pBase + 2 + n] = outAcc;
     }
   }

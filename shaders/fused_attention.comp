@@ -18,6 +18,11 @@
 // SCORETOTAL == G*CHUNK size the shared arrays (the host computes the products; two spec constants
 // cannot multiply in an array size).
 #define WG 256
+// Floats of one partial-record header before the hd accumulator lanes: {chunk max m,
+// weight sum l}. Mirrors the host scratch allocation rows * chunks * (hd + FA_PART_HDR)
+// (kFaPartialHeaderFloats, src/backend/vulkan/ops/fused_attention.cpp); the two must
+// change together or every partial lands in the wrong chunk slot with plausible values.
+#define FA_PART_HDR 2
 layout(constant_id = 0) const int G = 1;
 layout(constant_id = 1) const int HD = 64;
 layout(constant_id = 2) const int CHUNK = 256;
@@ -164,7 +169,7 @@ void main() {
 
     // Partial slot for (attention row, chunk): {m, l, acc[hd]}.
     int row = rowBase + gi * pc.groupStrideRow;
-    int pBase = (row * pc.chunks + chunk) * (pc.hd + 2);
+    int pBase = (row * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
     if (tid == 0) {
       part[pBase] = m;
       part[pBase + 1] = l;

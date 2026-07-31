@@ -9,7 +9,15 @@
 // One workgroup per attention row; the per-chunk rescale factors stage through shared memory so
 // each is computed once. Only this pass stores to the output (fp16 via TO_STORE).
 #define WG 256
+// Ceiling of the chunk count one combine workgroup reduces; == kFaMaxChunks
+// (src/backend/vulkan/ops/fused_attention.cpp), which clamps the split so sFactor
+// never indexes past this.
 #define FA_MAX_CHUNKS 64
+// Floats of one partial-record header before the hd accumulator lanes: {chunk max m,
+// weight sum l}. Mirrors the host scratch allocation rows * chunks * (hd + FA_PART_HDR)
+// (kFaPartialHeaderFloats, src/backend/vulkan/ops/fused_attention.cpp); the two must
+// change together or every partial lands in the wrong chunk slot with plausible values.
+#define FA_PART_HDR 2
 layout(local_size_x = WG) in;
 layout(std430, binding = 0) readonly buffer P { float part[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
@@ -25,17 +33,17 @@ void main() {
 
   // Global max and rescaled weight sum over the chunks (small count; every lane computes both).
   float gM = -3.4e38; // finite ~-FLT_MAX seed: every chunk max is a finite score above it (chunks >= 1), so the seed never survives the fold
-  for (int c = 0; c < pc.chunks; ++c) gM = max(gM, part[(base + c) * (pc.hd + 2)]);
+  for (int c = 0; c < pc.chunks; ++c) gM = max(gM, part[(base + c) * (pc.hd + FA_PART_HDR)]);
   float gL = 0.0;
-  for (int c = 0; c < pc.chunks; ++c) gL += part[(base + c) * (pc.hd + 2) + 1] * exp(part[(base + c) * (pc.hd + 2)] - gM);
-  if (tid < pc.chunks) sFactor[tid] = exp(part[(base + tid) * (pc.hd + 2)] - gM);
+  for (int c = 0; c < pc.chunks; ++c) gL += part[(base + c) * (pc.hd + FA_PART_HDR) + 1] * exp(part[(base + c) * (pc.hd + FA_PART_HDR)] - gM);
+  if (tid < pc.chunks) sFactor[tid] = exp(part[(base + tid) * (pc.hd + FA_PART_HDR)] - gM);
   barrier();
 
   float rL = 1.0 / gL;
   for (int n = tid; n < pc.hd; n += WG) {
     float context = 0.0;
     for (int c = 0; c < pc.chunks; ++c)
-      context += part[(base + c) * (pc.hd + 2) + 2 + n] * sFactor[c];
+      context += part[(base + c) * (pc.hd + FA_PART_HDR) + 2 + n] * sFactor[c];
     d[int(row) * pc.hd + n] = TO_STORE(context * rL);
   }
 }
