@@ -6,17 +6,19 @@
 #extension GL_GOOGLE_include_directive : require
 
 // Activation fusion codes (kept in sync with vknn::ActType in include/vknn/act_type.h and include/vknn/unary_type.h).
-#define ACT_NONE  0
-#define ACT_RELU  1
-#define ACT_RELU6 2
-#define ACT_CLIP  3
+#define ACT_NONE      0
+#define ACT_RELU      1
+#define ACT_RELU6     2
+#define ACT_CLIP      3
+#define ACT_HARDSWISH 4
+#define ACT_SILU      5
 
 float vx_act(float x, int act, float lo, float hi) {
-  if (act == ACT_RELU)  return max(x, 0.0);
-  if (act == ACT_RELU6) return clamp(x, 0.0, 6.0);
-  if (act == ACT_CLIP)  return clamp(x, lo, hi);
-  if (act == ACT_HARDSWISH)         return x * clamp(x + 3.0, 0.0, 6.0) / 6.0;  // HardSwish
-  if (act == ACT_SILU)         return x / (1.0 + exp(-x));                 // SiLU / Swish
+  if (act == ACT_RELU)      return max(x, 0.0);
+  if (act == ACT_RELU6)     return clamp(x, 0.0, 6.0);
+  if (act == ACT_CLIP)      return clamp(x, lo, hi);
+  if (act == ACT_HARDSWISH) return x * clamp(x + 3.0, 0.0, 6.0) / 6.0;
+  if (act == ACT_SILU)      return x / (1.0 + exp(-x));
   return x;
 }
 
