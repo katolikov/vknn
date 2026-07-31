@@ -115,7 +115,7 @@ void main() {
   // tracks its own running score max, so the max reduction below never re-reads the score slab.
   bool chunkAllPast = s0 + sLen <= pc.pastLen;
   float laneMax[G];
-  for (int gi = 0; gi < G; ++gi) laneMax[gi] = -3.4e38;
+  for (int gi = 0; gi < G; ++gi) laneMax[gi] = -3.4e38; // finite ~-FLT_MAX seed: scores are finite and far above it, so a real score always replaces it (byte-equal to the exact -inf identity here)
   for (int t = tid; t < sLen; t += WGS) {
     int s = s0 + t;
     float dotAcc[G];
@@ -170,7 +170,7 @@ void main() {
   barrier(); // publishes the raw scores and the max slab
   float rowMax[G];
   for (int gi = 0; gi < G; ++gi) {
-    float m = -3.4e38;
+    float m = -3.4e38; // finite ~-FLT_MAX seed: the slab entries carry the same floor, so the fold result matches an exact -inf identity
     for (uint sg = 0u; sg < gl_NumSubgroups; ++sg) m = max(m, sRed[uint(gi) * gl_NumSubgroups + sg]);
     rowMax[gi] = m;
   }

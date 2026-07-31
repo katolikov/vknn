@@ -24,7 +24,7 @@ void main() {
   int base = int(row) * pc.chunks;
 
   // Global max and rescaled weight sum over the chunks (small count; every lane computes both).
-  float gM = -3.4e38;
+  float gM = -3.4e38; // finite ~-FLT_MAX seed: every chunk max is a finite score above it (chunks >= 1), so the seed never survives the fold
   for (int c = 0; c < pc.chunks; ++c) gM = max(gM, part[(base + c) * (pc.hd + 2)]);
   float gL = 0.0;
   for (int c = 0; c < pc.chunks; ++c) gL += part[(base + c) * (pc.hd + 2) + 1] * exp(part[(base + c) * (pc.hd + 2)] - gM);

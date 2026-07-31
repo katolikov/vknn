@@ -17,7 +17,17 @@ layout(push_constant) uniform PC {
   int rank, total, op, groups;
 } pc;
 
-shared float red[256];
+// Reduce wire codes carried in pc.op (kept in sync with vknn::ReduceType, include/vknn/reduce_type.h).
+#define REDUCE_MEAN 0
+#define REDUCE_SUM  1
+#define REDUCE_MAX  2
+#define REDUCE_MIN  3
+#define REDUCE_PROD 4
+#define REDUCE_L2   5
+
+#define WG_MAX 256 // shared-array ceiling: must be >= the spec-0 width; the host guarantees
+                   // flatLocalSize = min(256, caps), pow2-clamped for the tree fold (vk_op_env.h)
+shared float red[WG_MAX];
 
 void main() {
   // One workgroup per (output, chunk). The linear id folds a y-spill (ComputePipeline::dispatch).
@@ -45,15 +55,15 @@ void main() {
   int end   = min(start + chunk, rcount);
 
   uint t = gl_LocalInvocationID.x;
-  float acc = (pc.op == 2) ? VX_NEG_INF : (pc.op == 3) ? VX_POS_INF : (pc.op == 4) ? 1.0 : 0.0;
+  float acc = (pc.op == REDUCE_MAX) ? VX_NEG_INF : (pc.op == REDUCE_MIN) ? VX_POS_INF : (pc.op == REDUCE_PROD) ? 1.0 : 0.0;
   if (nRed == 1) {
     for (int r = start + int(t); r < end; r += int(gl_WorkGroupSize.x)) {
       float v = float(s[base + r * singleStride]);
-      if (pc.op == 2) acc = max(acc, v);
-      else if (pc.op == 3) acc = min(acc, v);
-      else if (pc.op == 4) acc *= v;
-      else if (pc.op == 5) acc += v * v;
-      else acc += v;
+      if (pc.op == REDUCE_MAX) acc = max(acc, v);
+      else if (pc.op == REDUCE_MIN) acc = min(acc, v);
+      else if (pc.op == REDUCE_PROD) acc *= v;
+      else if (pc.op == REDUCE_L2) acc += v * v;
+      else acc += v; // REDUCE_SUM / REDUCE_MEAN
     }
   } else {
     for (int r = start + int(t); r < end; r += int(gl_WorkGroupSize.x)) {
@@ -65,11 +75,11 @@ void main() {
         off += c * geom.g[pc.rank + k];
       }
       float v = float(s[off]);
-      if (pc.op == 2) acc = max(acc, v);
-      else if (pc.op == 3) acc = min(acc, v);
-      else if (pc.op == 4) acc *= v;
-      else if (pc.op == 5) acc += v * v;
-      else acc += v;
+      if (pc.op == REDUCE_MAX) acc = max(acc, v);
+      else if (pc.op == REDUCE_MIN) acc = min(acc, v);
+      else if (pc.op == REDUCE_PROD) acc *= v;
+      else if (pc.op == REDUCE_L2) acc += v * v;
+      else acc += v; // REDUCE_SUM / REDUCE_MEAN
     }
   }
 
@@ -78,7 +88,7 @@ void main() {
   for (uint stride = gl_WorkGroupSize.x / 2u; stride > 0u; stride >>= 1) {
     if (t < stride) {
       float a = red[t], b = red[t + stride];
-      red[t] = (pc.op == 2) ? max(a, b) : (pc.op == 3) ? min(a, b) : (pc.op == 4) ? a * b : a + b;
+      red[t] = (pc.op == REDUCE_MAX) ? max(a, b) : (pc.op == REDUCE_MIN) ? min(a, b) : (pc.op == REDUCE_PROD) ? a * b : a + b;
     }
     barrier();
   }

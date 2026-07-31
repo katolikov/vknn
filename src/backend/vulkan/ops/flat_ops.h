@@ -66,7 +66,8 @@ namespace vknn {
             return pow2;
         }
 
-        // flat_softmax's width ceiling (its shared array and the rows-per-workgroup host math).
+        // flat_softmax's width ceiling (its shared array and the rows-per-workgroup host math);
+        // mirrors WG_MAX in shaders/flat_softmax.comp.
         constexpr uint32_t kSoftmaxWgMax = 128;
 
         // Elements each lane walks, one slot apart, for the element-parallel family (the fused_pw

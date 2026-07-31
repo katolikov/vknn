@@ -15,7 +15,17 @@ layout(push_constant) uniform PC {
   int total, op, groups, rcount;
 } pc;
 
-shared float red[256];
+// Reduce wire codes carried in pc.op (kept in sync with vknn::ReduceType, include/vknn/reduce_type.h).
+#define REDUCE_MEAN 0
+#define REDUCE_SUM  1
+#define REDUCE_MAX  2
+#define REDUCE_MIN  3
+#define REDUCE_PROD 4
+#define REDUCE_L2   5
+
+#define WG_MAX 256 // shared-array ceiling: must be >= the spec-0 width; the host guarantees
+                   // flatLocalSize = min(256, caps), pow2-clamped for the tree fold (vk_op_env.h)
+shared float red[WG_MAX];
 
 void main() {
   uint outIdx = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
@@ -23,24 +33,24 @@ void main() {
   uint t = gl_LocalInvocationID.x;
 
   // Fold this output's `groups` partials; lanes past the group count seed the op identity.
-  float acc = (pc.op == 2) ? VX_NEG_INF : (pc.op == 3) ? VX_POS_INF : (pc.op == 4) ? 1.0 : 0.0;
+  float acc = (pc.op == REDUCE_MAX) ? VX_NEG_INF : (pc.op == REDUCE_MIN) ? VX_POS_INF : (pc.op == REDUCE_PROD) ? 1.0 : 0.0;
   for (int gi = int(t); gi < pc.groups; gi += int(gl_WorkGroupSize.x)) {
     float v = part[outIdx * uint(pc.groups) + uint(gi)];
-    acc = (pc.op == 2) ? max(acc, v) : (pc.op == 3) ? min(acc, v) : (pc.op == 4) ? acc * v : acc + v;
+    acc = (pc.op == REDUCE_MAX) ? max(acc, v) : (pc.op == REDUCE_MIN) ? min(acc, v) : (pc.op == REDUCE_PROD) ? acc * v : acc + v;
   }
   red[t] = acc;
   barrier();
   for (uint stride = gl_WorkGroupSize.x / 2u; stride > 0u; stride >>= 1) {
     if (t < stride) {
       float a = red[t], b = red[t + stride];
-      red[t] = (pc.op == 2) ? max(a, b) : (pc.op == 3) ? min(a, b) : (pc.op == 4) ? a * b : a + b;
+      red[t] = (pc.op == REDUCE_MAX) ? max(a, b) : (pc.op == REDUCE_MIN) ? min(a, b) : (pc.op == REDUCE_PROD) ? a * b : a + b;
     }
     barrier();
   }
   if (t == 0u) {
     float r = red[0];
-    if (pc.op == 0 && pc.rcount > 0) r /= float(pc.rcount);   // Mean
-    else if (pc.op == 5) r = sqrt(r);                          // L2
+    if (pc.op == REDUCE_MEAN && pc.rcount > 0) r /= float(pc.rcount);
+    else if (pc.op == REDUCE_L2) r = sqrt(r);
 #ifdef PW_EPI
     r = pw_apply(r, int(outIdx));
 #endif

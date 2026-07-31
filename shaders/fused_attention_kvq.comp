@@ -127,7 +127,7 @@ void main() {
 
   // Per group member: chunk softmax over the shared scores, then the p.V partial.
   for (int gi = 0; gi < G; ++gi) {
-    float localMax = -3.4e38;
+    float localMax = -3.4e38; // finite ~-FLT_MAX seed: scores are finite and far above it, so a real score always replaces it (byte-equal to the exact -inf identity here)
     for (int t = tid; t < sLen; t += WG) localMax = max(localMax, sScores[gi * CHUNK + t]);
     sRed[tid] = localMax;
     barrier();
