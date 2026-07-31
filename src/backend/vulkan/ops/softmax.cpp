@@ -2,6 +2,7 @@
 // (logits [N,C] / [N,C,1,1]); other axes fall back to the CPU softmax.
 #include "flat_ops.h"
 #include "pw_plan.h"
+#include "reduction_tree_width.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 
@@ -34,10 +35,13 @@ namespace vknn {
                 epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
                 // 2 fixed bindings (source, dest) plus any extra buffers the fused pointwise epilogue
                 // binds after them at PW_EPI_BASE=2; suffix() picks the matching PW_EPI shader variant.
-                // The workgroup width is the device-resolved family width; the shader's reduction tree and
-                // channel strides derive from the same spec constant, and the dispatch is one workgroup
-                // per image regardless of width.
-                pipe = env.pipeline(shader((std::string("softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(SmPC), std::vector<uint32_t> {env.flatLocalSize});
+                // The workgroup width is the device-resolved family width clamped to a power of two:
+                // softmax.comp folds its channel max and its exp-sum with a halving tree, which covers
+                // every lane only at a pow2 width (reduction_tree_width.h). The shader's reduction tree
+                // and channel strides derive from the same spec constant, and the dispatch is one
+                // workgroup per image regardless of width.
+                const uint32_t treeWidth = flat::reductionTreeWidth(env.flatLocalSize);
+                pipe = env.pipeline(shader((std::string("softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(SmPC), std::vector<uint32_t> {treeWidth});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 if (flat)
