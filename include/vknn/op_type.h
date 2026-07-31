@@ -175,6 +175,8 @@ namespace vknn {
     /// pw_steps record geometry: ints per step and the field offsets read outside the plan
     /// builder. Mirrored as PW_STEP_FIELDS in shaders/pw_epilogue.glsl.
     constexpr int kPwStepInts       = 8; ///< Ints per step: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc.
+    constexpr int kPwStepSrcA       = 2; ///< Offset of the step's first source field.
+    constexpr int kPwStepSrcC       = 4; ///< Offset of the step's last source field (srcA..srcC are contiguous).
     constexpr int kPwStepBcastField = 6; ///< Offset of the step's broadcast-class field.
 
     /// Stride-slot order of a kPwBcastPacked step's packed vec4-space strides

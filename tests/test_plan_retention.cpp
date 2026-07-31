@@ -300,3 +300,53 @@ TEST(PlanRetention, PrepareShapesStaysIdempotentWithoutPristineGraph) {
         EXPECT_FLOAT_EQ(y[i], 2.f * (float) i) << "element " << i;
     }
 }
+
+// A standalone FusedPointwise node names its operands in the plan's step words, not as a
+// contiguous tail past pw_opbase: buildPwPlan reads each step's srcA/srcB/srcC field, where
+// operand i is encoded as kPwRefOp0 - i indexing node.inputs. Reclaiming such an operand leaves
+// pwOperandBuf with no host payload AND no activation buffer on the first record, which is a null
+// dereference rather than a diagnosable error.
+TEST(PlanRetention, StandalonePointwiseOperandNamedByAStepStaysResident) {
+    Graph    g       = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
+    TensorId operand = addInitializer(g, "pw.mul.operand", 8, 0.5f);
+    Node    &n       = g.nodes[0];
+    n.inputs.push_back(operand);
+    const int64_t operandIndex = (int64_t) n.inputs.size() - 1;
+
+    // One step: kind, code, srcA = the accumulator, srcB = our operand, srcC unused, dst, bcast,
+    // bcastSrc. The operand is named ONLY here -- pw_opbase deliberately points past every input,
+    // which is what a standalone unit whose plan references an early input looks like.
+    Attr steps;
+    steps.kind             = Attr::Ints;
+    steps.ints             = {0, 0, kPwRefAcc, kPwRefOp0 - operandIndex, kPwRefNone, kPwRefNone, 0, 0};
+    n.attr.map["pw_steps"] = steps;
+    Attr opbase;
+    opbase.kind             = Attr::Int;
+    opbase.i                = (int64_t) n.inputs.size();
+    n.attr.map["pw_opbase"] = opbase;
+
+    applyReclaim(g, kSoleNodeOnGpu);
+
+    ASSERT_EQ(g.initializers.count(operand), 1u)
+        << "an operand the plan names by step reference must keep its host payload";
+}
+
+// A step field that names the accumulator, the entry value, a register or nothing must not be
+// mistaken for an operand index and drag an unrelated input into the kept set.
+TEST(PlanRetention, NonOperandStepReferencesKeepNothing) {
+    Graph g = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
+    Node &n = g.nodes[0];
+    Attr  steps;
+    steps.kind             = Attr::Ints;
+    steps.ints             = {0, 0, kPwRefAcc, kPwRefEntry, kPwRefReg0, kPwRefNone, 0, 0};
+    n.attr.map["pw_steps"] = steps;
+    Attr opbase;
+    opbase.kind             = Attr::Int;
+    opbase.i                = (int64_t) n.inputs.size();
+    n.attr.map["pw_opbase"] = opbase;
+
+    applyReclaim(g, kSoleNodeOnGpu);
+
+    EXPECT_TRUE(g.initializers.empty())
+        << "no step field named an operand, so both conv weights stay reclaimable";
+}

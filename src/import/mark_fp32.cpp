@@ -355,6 +355,82 @@ namespace vknn {
         }
     }
 
+    // ONNX TensorProto dtype codes a Cast `to` attribute carries. Only the codes whose CPU/GPU
+    // implementations TRUNCATE need the pin; the float codes are a same-precision copy.
+    constexpr int64_t kOnnxDtypeFloat  = 1;
+    constexpr int64_t kOnnxDtypeUint8  = 2;
+    constexpr int64_t kOnnxDtypeInt8   = 3;
+    constexpr int64_t kOnnxDtypeUint16 = 4;
+    constexpr int64_t kOnnxDtypeInt16  = 5;
+    constexpr int64_t kOnnxDtypeInt32  = 6;
+    constexpr int64_t kOnnxDtypeInt64  = 7;
+    constexpr int64_t kOnnxDtypeBool   = 9;
+    constexpr int64_t kOnnxDtypeUint32 = 12;
+    constexpr int64_t kOnnxDtypeUint64 = 13;
+    // Hop ceiling of a pin walk, shared with the index and coordinate pins: a movement chain longer
+    // than this is pathological and the walk stops rather than scanning an adversarial graph.
+    constexpr int kFp32PinMaxHops = 64;
+
+    /// True when a Cast to `onnxDtype` truncates its input toward zero rather than copying it at
+    /// the same precision. Truncation is discontinuous, so any storage rounding that crosses an
+    /// integer boundary becomes a full-unit output error — which is why the operand cone of such a
+    /// Cast is pinned to fp32 exactly like an index or a sampling coordinate.
+    bool castTargetTruncates(int64_t onnxDtype) {
+        switch (onnxDtype)
+        {
+            case kOnnxDtypeUint8:
+            case kOnnxDtypeInt8:
+            case kOnnxDtypeUint16:
+            case kOnnxDtypeInt16:
+            case kOnnxDtypeInt32:
+            case kOnnxDtypeInt64:
+            case kOnnxDtypeBool:
+            case kOnnxDtypeUint32:
+            case kOnnxDtypeUint64:
+                return true;
+            default:
+                return false; // FLOAT / FLOAT16 / DOUBLE: a same-precision copy
+        }
+    }
+
+    /// True when a Unary step is discontinuous in its input: it maps an interval to one value and
+    /// jumps at the boundary, so a storage rounding that crosses a boundary is a full-unit output
+    /// error. Trunc is what foldIntRoundtripCast leaves behind when it collapses a
+    /// float->wide-int->float Cast pair, so a graph can carry this hazard with no Cast node left.
+    bool unaryStepIsDiscontinuous(int32_t subOp) {
+        switch ((UnaryType) subOp)
+        {
+            case UnaryType::Floor:
+            case UnaryType::Ceil:
+            case UnaryType::Round:
+            case UnaryType::Trunc:
+            case UnaryType::Sign:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// True when an op reproduces its input values unchanged and only moves or re-labels them, so a
+    /// pin may follow it upstream without changing what any kernel computes.
+    bool movementOnlyOp(OpType op) {
+        switch (op)
+        {
+            case OpType::ConvertLayout:
+            case OpType::Reshape:
+            case OpType::Transpose:
+            case OpType::Squeeze:
+            case OpType::Unsqueeze:
+            case OpType::Slice:
+            case OpType::Concat:
+            case OpType::Expand:
+            case OpType::Tile:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     bool coordinateTransparentOp(OpType op) {
         switch (op)
         {
@@ -379,6 +455,70 @@ namespace vknn {
                 return true;
             default:
                 return false;
+        }
+    }
+
+    void pinDiscontinuousStepFp32(Graph &g) {
+        std::vector<int> producer(g.tensors.size(), -1);
+        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        {
+            for (TensorId o: g.nodes[ni].outputs)
+            {
+                if (o != kNoTensor)
+                {
+                    producer[(size_t) o] = ni;
+                }
+            }
+        }
+        int pinned = 0;
+        for (const auto &nd: g.nodes)
+        {
+            if (nd.inputs.empty() || nd.inputs[0] == kNoTensor)
+            {
+                continue;
+            }
+            const bool truncatingCast = nd.type == OpType::Cast && castTargetTruncates(nd.attr.geti("to", kOnnxDtypeFloat));
+            const bool steppingUnary  = nd.type == OpType::Unary && unaryStepIsDiscontinuous(nd.subOp);
+            if (!truncatingCast && !steppingUnary)
+            {
+                continue; // a float-target Cast and a smooth unary both carry rounding proportionally
+            }
+            // The result is a logical integer carried in a float slot, so an fp16 store on the
+            // OUTPUT would round it a second time (fp16 spaces integers past 2048).
+            if (nd.outputs[0] != kNoTensor && !g.desc(nd.outputs[0]).storeFp32)
+            {
+                g.desc(nd.outputs[0]).storeFp32 = true;
+                ++pinned;
+            }
+            // Walk the operand back through pure movement producers: a rounding one hop upstream
+            // reaches trunc() as the same full-unit error.
+            TensorId t = nd.inputs[0];
+            for (int hop = 0; t != kNoTensor && !g.isInitializer(t) && hop < kFp32PinMaxHops; ++hop)
+            {
+                if (g.desc(t).storeFp32)
+                {
+                    break; // already pinned (a shared operand, or a prior hop)
+                }
+                g.desc(t).storeFp32 = true;
+                ++pinned;
+                int p = producer[(size_t) t];
+                if (p < 0)
+                {
+                    break; // graph-input boundary: pinned, nothing upstream to follow
+                }
+                const Node &pn = g.nodes[(size_t) p];
+                if (movementOnlyOp(pn.type) && pn.inputs.size() >= 1)
+                {
+                    t = pn.inputs[0]; // same values, different placement -- keep pinning to the source
+                } else
+                {
+                    break; // a computing producer runs at its own precision; markFp32 bridges it
+                }
+            }
+        }
+        if (pinned != 0)
+        {
+            VKNN_INFO << "pinDiscontinuousStepFp32: pinned " << pinned << " tensor(s) around truncating Cast / stepping Unary nodes";
         }
     }
 

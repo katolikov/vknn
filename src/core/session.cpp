@@ -677,6 +677,11 @@ namespace vknn {
             // - the grid/flow algebra back through elementwise/movement/fused chains - to fp32; the
             // samplers decode their coordinate operands at storage precision.
             pinSampleCoordFp32(graph_);
+            // A truncating Cast and the stepping unaries (Floor/Ceil/Round/Trunc/Sign) are
+            // discontinuous, so any fp16 storage rounding that crosses a step becomes a full-unit
+            // error; their operand cones and results carry full precision.
+            pinDiscontinuousStepFp32(graph_);
+
             // Only a caller-supplied fp32Tensors list takes zero-match accounting; the built-in
             // Precision::Normal preset is engine-owned and exempt from the load-end warning.
             markFp32(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);

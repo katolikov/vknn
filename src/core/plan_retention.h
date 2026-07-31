@@ -54,13 +54,33 @@ namespace vknn {
                 }
                 continue;
             }
-            // A pointwise-chain epilogue uploads its operands (the inputs at or past pwCoreInputs())
-            // lazily while recording — e.g. a PRelu slope folded into a Conv.
-            if (nd.attr.has("pw_steps"))
+            // A pointwise unit resolves its constant operands lazily while RECORDING (pwOperandBuf
+            // materializes one on first use), so their payloads must outlive planning. Which inputs
+            // those are is stated by the plan itself: a step's srcA/srcB/srcC field encodes operand
+            // i as kPwRefOp0 - i, indexing node.inputs. Reading the step words rather than assuming
+            // a contiguous tail covers both carriers of a unit — an epilogue host, whose operands
+            // start at pwCoreInputs(), and a standalone FusedPointwise node, whose plan may name any
+            // input — and a future step layout that names one somewhere else again.
+            // The contiguous operand tail an epilogue host declares through pw_opbase.
+            for (size_t k = pwCoreInputs(nd); k < nd.inputs.size(); ++k)
             {
-                for (size_t k = pwCoreInputs(nd); k < nd.inputs.size(); ++k)
+                keep(nd.inputs[k]);
+            }
+            const std::vector<int64_t> &steps = nd.attr.getints("pw_steps");
+            for (size_t s = 0; s + kPwStepInts <= steps.size(); s += kPwStepInts)
+            {
+                for (int field = kPwStepSrcA; field <= kPwStepSrcC; ++field)
                 {
-                    keep(nd.inputs[k]);
+                    const int64_t ref = steps[s + (size_t) field];
+                    if (ref > kPwRefOp0)
+                    {
+                        continue; // accumulator, entry value, register, or unused slot
+                    }
+                    const size_t operandIndex = (size_t) (kPwRefOp0 - ref);
+                    if (operandIndex < nd.inputs.size())
+                    {
+                        keep(nd.inputs[operandIndex]);
+                    }
                 }
             }
         }

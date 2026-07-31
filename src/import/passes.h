@@ -331,6 +331,19 @@ namespace vknn {
     // precision. A hop whose producer is neither transparent nor flat stays unpinned (the NC4HW4
     // conv family has no fp32 kernels); markFp32's frontier converts bridge that boundary. This is
     // the coordinate pin the session runs; it subsumes pinGridSampleGridFp32 below.
+    // Pin the operand cone and the output of every DISCONTINUOUS step to fp32 storage: a Cast to
+    // an integer target, and the stepping unaries (Floor/Ceil/Round/Trunc/Sign). Such an op maps an
+    // interval to one value and jumps at the boundary, so a storage rounding that crosses a
+    // boundary is a full-unit output error, not a proportional one — an input one fp16 step below
+    // 1.0 stores as exactly 1.0 and truncates to 1 where the fp32 oracle gives 0. The output is
+    // pinned too, because the result is a logical integer in a float slot and fp16 spaces integers
+    // past 2048. Trunc matters as much as Cast here: foldIntRoundtripCast collapses a
+    // float->wide-int->float Cast pair into one Unary(Trunc), so a graph can carry the hazard with
+    // no Cast node left in it. Smooth unaries and float-target Casts carry rounding proportionally
+    // and are left at the running precision. Same shape as pinGatherIndexFp32 and
+    // pinSampleCoordFp32, for the same reason.
+    void pinDiscontinuousStepFp32(Graph &g);
+
     void pinSampleCoordFp32(Graph &g);
 
     // Pin only the plain (non-warp) GPU GridSample's runtime grid, and the flat passthrough chain
