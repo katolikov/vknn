@@ -9,6 +9,7 @@
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -180,6 +181,10 @@ namespace {
     bool contains(const std::vector<int64_t> &v, int64_t x) {
         return std::find(v.begin(), v.end(), x) != v.end();
     }
+
+    int64_t countOf(const std::vector<int64_t> &v, int64_t x) {
+        return (int64_t) std::count(v.begin(), v.end(), x);
+    }
 } // namespace
 
 TEST(PwRowColBcast, SingleBatchMasksClassifyClosedForm) {
@@ -192,10 +197,12 @@ TEST(PwRowColBcast, SingleBatchMasksClassifyClosedForm) {
     EXPECT_FALSE(contains(classes, kPwBcastGeneral)) << "no step may stay general: one general step forces the whole unit off NC4HW4";
 }
 
-TEST(PwRowColBcast, BatchedRowColClassifyClosedFormButSplatsStayGeneral) {
+TEST(PwRowColBcast, BatchedRowColClassifyClosedFormAndSplatMasksTakeThePackedClass) {
     // The Row/Col classes carry the batch in the channel-block index, so N=2 is legal for them;
-    // the *Splat classes derive the pixel from vecIdx % HW, which drops the batch, so they must
-    // NOT engage on a batched run.
+    // the *Splat classes derive the pixel from vecIdx % HW, which drops the batch, so they must NOT
+    // engage on a batched run. A [1,1,H,1] / [1,1,1,W] mask is still 1-or-full on every axis, so it
+    // takes the generic packed class -- the closed form that keeps the unit on NC4HW4. Falling back
+    // to the general class instead would flat-force the whole unit.
     Graph gRowCol = buildMaskChainGraph({2, 8, 4, 5}, {{2, 8, 4, 1}, {2, 8, 1, 5}});
     auto  rowCol  = fusedBcastClasses(gRowCol);
     EXPECT_TRUE(contains(rowCol, kPwBcastRow));
@@ -206,6 +213,8 @@ TEST(PwRowColBcast, BatchedRowColClassifyClosedFormButSplatsStayGeneral) {
     auto  splat  = fusedBcastClasses(gSplat);
     EXPECT_FALSE(contains(splat, kPwBcastRowSplat)) << "a batched run must not use the batch-dropping row-splat index";
     EXPECT_FALSE(contains(splat, kPwBcastColSplat)) << "a batched run must not use the batch-dropping column-splat index";
+    EXPECT_EQ(countOf(splat, kPwBcastPacked), 2) << "both batched splat masks must take the generic packed index";
+    EXPECT_FALSE(contains(splat, kPwBcastGeneral)) << "no step may stay general: one general step forces the whole unit off NC4HW4";
 }
 
 // The closed-form index must select the SAME element the general strided walk would have. The CPU

@@ -80,6 +80,7 @@
 // processing EVERY bucket of a multi-bucket container and preserving bucket order and names.
 // (No widened bucket is appended on this path: the stored graphs carry no re-importable source, and
 // each bucket's passes are baked at its own shape.)
+#include "compile_cli.h"
 #include "core/vk_gates.h"
 #include "import/dim_expr.h"
 #include "import/passes.h"
@@ -87,6 +88,7 @@
 #include "vknn/graph.h"
 #include "vknn/io_link.h"
 #include "vknn/spec_decode.h"
+#include "vknn/version.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -514,6 +516,12 @@ static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<
 }
 
 int main(int argc, char **argv) {
+    // Answered before anything else parses, so `--version` works with no model argument.
+    if (compileVersionRequested(argc, argv))
+    {
+        printf("vknn %s\n", vknnVersion());
+        return 0;
+    }
     // `--graph` selects the multi-graph form: no positional input model, one source graph per
     // occurrence, all compiled into one multi-bucket .vxm over a shared initializer pool.
     bool graphMode = false;
@@ -533,8 +541,9 @@ int main(int argc, char **argv) {
                "[--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
                "   or: %s <out.vxm> --graph \"FILE.onnx[;NAME=D0xD1x...;dim:NAME2=VALUE;...]\" [--graph ...] [shared flags as above]\n"
                "       each --graph occurrence compiles ONE bucket from its file (with its own shape/dim segments);\n"
-               "       all buckets share one initializer pool in a single multi-graph .vxm\n",
-               argv[0], argv[0]);
+               "       all buckets share one initializer pool in a single multi-graph .vxm\n"
+               "   or: %s --version | -V     print the engine version and exit\n",
+               argv[0], argv[0], argv[0]);
         return 1;
     }
     const int   flagStart = graphMode ? 2 : 3;

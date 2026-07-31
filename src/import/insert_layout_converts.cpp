@@ -29,6 +29,15 @@ namespace vknn {
         {
             return false;
         }
+        if (g.desc(n.inputs[0]).gpuFlat)
+        {
+            // The packed read pays off only on an input that is ALREADY packed. Behind a flat
+            // producer it would cost a full-tensor flat->NC4HW4 convert the flat gather never
+            // needed, so the gather wins by exactly that convert. Both routes store identical
+            // bytes. The layout assignment and the Vulkan op both ask this predicate over the final
+            // gpuFlat facts, so they agree on which buffer the kernel is handed.
+            return false;
+        }
         if (in[1] > kTransposeNhwcMaxChannels)
         {
             return false; // outside the kernel's proven-win region (see kTransposeNhwcMaxChannels)

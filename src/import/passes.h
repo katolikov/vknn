@@ -318,11 +318,6 @@ namespace vknn {
     // store would corrupt the lookup. Runs at load, after insertLayoutConverts, before markFp32.
     void pinGatherIndexFp32(Graph &g);
 
-    // Pin every GPU GridSample's runtime grid (and the flat passthrough chain feeding it) to fp32
-    // storage. The grid holds normalized sampling coordinates whose fp16 quantization drifts the
-    // sample point by up to ~0.5 px at 1920-wide inputs (a direct warp/UV-quality loss); the shader
-    // decodes the grid at its storage precision via the GRID_FP32 spec constant. Runs at load, after
-    // insertLayoutConverts, before markFp32.
     // True for ops a sampling coordinate flows through unchanged in kind: elementwise algebra,
     // value-preserving movement, fused pointwise chains, reductions, and layout converts. Shared
     // by the convert-time fp16 keep (convert_fp16.cpp) and the load-time coordinate-cone pin, so
@@ -334,8 +329,17 @@ namespace vknn {
     // coordinateTransparentOp producers pinning each non-initializer hop, so the whole
     // grid/flow algebra computes and stores at fp32 while image tensors stay at the session
     // precision. A hop whose producer is neither transparent nor flat stays unpinned (the NC4HW4
-    // conv family has no fp32 kernels); markFp32's frontier converts bridge that boundary.
+    // conv family has no fp32 kernels); markFp32's frontier converts bridge that boundary. This is
+    // the coordinate pin the session runs; it subsumes pinGridSampleGridFp32 below.
     void pinSampleCoordFp32(Graph &g);
+
+    // Pin only the plain (non-warp) GPU GridSample's runtime grid, and the flat passthrough chain
+    // feeding it, to fp32 storage. The grid holds normalized sampling coordinates whose fp16
+    // quantization drifts the sample point by up to ~0.5 px at a 1920-wide input (a direct warp/UV
+    // quality loss); the shader decodes the grid at its storage precision via the GRID_FP32 spec
+    // constant. The narrow form of pinSampleCoordFp32: it seeds the same grid operand but walks
+    // only ConvertLayout hops, and it skips the warp variant's flow entirely. Exercised by the unit
+    // tests; the session runs pinSampleCoordFp32 instead.
     void pinGridSampleGridFp32(Graph &g);
 
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into

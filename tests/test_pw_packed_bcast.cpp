@@ -367,6 +367,169 @@ TEST(PwPackedBcast, CpuComputesRowLikePackedChain) {
     expectCpuMatchesReference({kRunN, kRunC, kRunH, kRunW}, {{kBcast, kBcast, kRunH, kBcast}, {kRunN, kBcast, kRunH, kBcast}});
 }
 
+// The two channel-carrying single-batch plane masks: against a BATCHED run their n axis is a real
+// broadcast, so Row/Col cannot claim them and they fall to the packed class.
+TEST(PwPackedBcast, BatchedSingleBatchRowAndColumnMasksClassifyPacked) {
+    const Shape              run = {kRunN, kRunC, kRunH, kRunW};
+    const std::vector<Shape> masks {{kBcast, kRunC, kRunH, kBcast}, {kBcast, kRunC, kBcast, kRunW}};
+    Graph                    g       = buildConstMaskChainGraph(run, masks);
+    auto                     classes = fusedBcastClasses(g);
+    EXPECT_EQ(countOf(classes, kPwBcastPacked), (int64_t) masks.size()) << "a batch-broadcast row/column plane is a packed mask";
+    EXPECT_FALSE(contains(classes, kPwBcastRow)) << "the per-row class needs the run's full batch";
+    EXPECT_FALSE(contains(classes, kPwBcastCol)) << "the per-column class needs the run's full batch";
+    EXPECT_FALSE(contains(classes, kPwBcastGeneral));
+}
+
+TEST(PwPackedBcast, CpuComputesSingleBatchRowAndColumnPackedChain) {
+    expectCpuMatchesReference({kRunN, kRunC, kRunH, kRunW}, {{kBcast, kRunC, kRunH, kBcast}, {kBcast, kRunC, kBcast, kRunW}});
+}
+
+// A rank<4 CONSTANT is judged by its right-aligned rank-4 reading -- the shape pwOperandBuf packs
+// it at -- so it reaches the same named classes a written-out rank-4 constant would, with no
+// Reshape in the graph (only runtime operands need one).
+TEST(PwPackedBcast, ConstantMasksBelowRankFourClassifyByTheirRightAlignedShape) {
+    const Shape run = {kSingleBatch, kRunC, kRunH, kRunW};
+    // [C,1,1] -> [1,C,1,1] per-channel; [H,W] -> [1,1,H,W] per-pixel; [C,H,1] -> [1,C,H,1] per-row;
+    // [W] -> [1,1,1,W] column-splat.
+    const std::vector<Shape> masks {{kRunC, kBcast, kBcast}, {kRunH, kRunW}, {kRunC, kRunH, kBcast}, {kRunW}};
+    Graph                    g       = buildConstMaskChainGraph(run, masks);
+    auto                     classes = fusedBcastClasses(g);
+    EXPECT_TRUE(contains(classes, kPwBcastChannel)) << "a [C,1,1] constant right-aligns to the per-channel class";
+    EXPECT_TRUE(contains(classes, kPwBcastSpatial)) << "an [H,W] constant right-aligns to the per-pixel class";
+    EXPECT_TRUE(contains(classes, kPwBcastRow)) << "a [C,H,1] constant right-aligns to the per-row class";
+    EXPECT_TRUE(contains(classes, kPwBcastColSplat)) << "a [W] constant right-aligns to the column-splat class";
+    EXPECT_FALSE(contains(classes, kPwBcastGeneral)) << "a right-aligned constant must not flat-force its unit";
+    for (const TensorDesc &td: g.tensors)
+    {
+        EXPECT_EQ(td.name.find("#pwr4"), std::string::npos) << "a constant is packed at its right-aligned shape: no Reshape is inserted";
+    }
+}
+
+// The same rule reaching the generic packed class: a rank-3 [C,H,1] constant against a BATCHED run
+// right-aligns to [1,C,H,1], which no named class covers.
+TEST(PwPackedBcast, ConstantMaskBelowRankFourReachesThePackedClass) {
+    const Shape run     = {kRunN, kRunC, kRunH, kRunW};
+    Graph       g       = buildConstMaskChainGraph(run, {{kRunC, kRunH, kBcast}});
+    auto        classes = fusedBcastClasses(g);
+    EXPECT_TRUE(contains(classes, kPwBcastPacked)) << "the right-aligned [1,C,H,1] reading is a packed mask";
+    EXPECT_FALSE(contains(classes, kPwBcastGeneral));
+}
+
+TEST(PwPackedBcast, CpuComputesConstantSubRankMaskChain) {
+    expectCpuMatchesReference({kSingleBatch, kRunC, kRunH, kRunW}, {{kRunH, kRunW}, {kRunC, kBcast, kBcast}, {kRunW}});
+}
+
+// One rank<4 runtime operand read by two separate units takes ONE #pwr4 view between them, while a
+// non-pointwise consumer keeps reading the original tensor at its own rank.
+TEST(PwPackedBcast, OneRightAlignViewIsSharedAndTheOriginalSurvivesForOtherReaders) {
+    const Shape run {kSingleBatch, kRunC, kRunH, kRunW};
+    const Shape maskShape {kRunH, kRunW};
+
+    Graph      g;
+    TensorDesc mi;
+    mi.name    = "m";
+    mi.shape   = maskShape;
+    mi.isInput = true;
+    TensorId m = g.addTensor(mi);
+    g.inputs   = {m};
+
+    // Two independent chains, each x -> Abs -> Mul(m): separate regions, one shared operand.
+    for (int chain = 0; chain < 2; ++chain)
+    {
+        const std::string suffix = std::to_string(chain);
+        TensorDesc        xi;
+        xi.name    = "x" + suffix;
+        xi.shape   = run;
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs.push_back(x);
+
+        TensorId t = g.addTensor(namedDesc(("t" + suffix).c_str()));
+        Node     act;
+        act.type    = OpType::Unary;
+        act.name    = "producer" + suffix;
+        act.subOp   = (int) UnaryType::Abs;
+        act.inputs  = {x};
+        act.outputs = {t};
+        g.nodes.push_back(act);
+
+        TensorDesc yo;
+        yo.name     = "y" + suffix;
+        yo.isOutput = true;
+        TensorId y  = g.addTensor(yo);
+        Node     bin;
+        bin.type    = OpType::Binary;
+        bin.name    = "mask_step_" + suffix;
+        bin.subOp   = (int) BinaryType::Mul;
+        bin.inputs  = {t, m};
+        bin.outputs = {y};
+        g.nodes.push_back(bin);
+        g.outputs.push_back(y);
+    }
+
+    // A Reduce is not pointwise-fusable, so it stays outside every unit and reads the original.
+    TensorDesc ro;
+    ro.name     = "mask_reduced";
+    ro.isOutput = true;
+    TensorId r  = g.addTensor(ro);
+    Node     red;
+    red.type    = OpType::Reduce;
+    red.name    = "mask_consumer";
+    red.subOp   = (int) ReduceType::Sum;
+    red.inputs  = {m};
+    red.outputs = {r};
+    Attr axes;
+    axes.kind            = Attr::Ints;
+    axes.ints            = {(int64_t) maskShape.size() - 1};
+    red.attr.map["axes"] = axes;
+    Attr keep;
+    keep.kind                = Attr::Int;
+    keep.i                   = 0;
+    red.attr.map["keepdims"] = keep;
+    g.nodes.push_back(red);
+    g.outputs.push_back(r);
+
+    inferShapes(g, 1);
+    fusePointwiseChains(g, /*strictFuse*/ false);
+
+    TensorId view  = kNoTensor;
+    int      views = 0;
+    for (const Node &nd: g.nodes)
+    {
+        if (nd.type == OpType::Reshape && nd.name.find("#pwr4") != std::string::npos)
+        {
+            ++views;
+            view = nd.outputs[0];
+        }
+    }
+    EXPECT_EQ(views, 1) << "both units must share one right-align view of the same operand";
+    ASSERT_NE(view, kNoTensor);
+    EXPECT_EQ(g.desc(view).shape, (Shape {kSingleBatch, kBcast, kRunH, kRunW}));
+
+    int readers = 0;
+    for (const Node &nd: g.nodes)
+    {
+        if (nd.attr.has("pw_steps") && std::find(nd.inputs.begin(), nd.inputs.end(), view) != nd.inputs.end())
+        {
+            ++readers;
+        }
+    }
+    EXPECT_EQ(readers, 2) << "both fused units must read the shared view";
+
+    const Node *outside = nullptr;
+    for (const Node &nd: g.nodes)
+    {
+        if (nd.type == OpType::Reduce)
+        {
+            outside = &nd;
+        }
+    }
+    ASSERT_NE(outside, nullptr);
+    ASSERT_FALSE(outside->inputs.empty());
+    EXPECT_EQ(outside->inputs[0], m) << "a non-pointwise consumer keeps the original operand";
+    EXPECT_EQ(g.desc(m).shape, maskShape) << "the original tensor keeps its own rank";
+}
+
 // Negative control: an axis extent that is neither 1 nor the run's is no packed mask. The Binary
 // output still infers to the run shape (per-dim max), so the unit's run is the full one and only
 // the operand is off -- it must classify general, exactly as before the packed class existed.
