@@ -9,9 +9,11 @@
 //     reduction to a handful of lanes. Pass 1 fans the reduced extent across `groups` workgroups per
 //     output (fp32 partials -> scratch); pass 2 folds the partials and finalises. This is the same
 //     partial-buffer pattern conv.cpp uses, and turns the pathological ~1-lane case into a full-GPU one.
+#include "dispatch_extent.h"
 #include "flat_ops.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
+#include "vknn/error.h"
 #include "vknn/op.h"
 
 namespace vknn {
@@ -59,11 +61,6 @@ namespace vknn {
                 }
                 auto                 inStride = flat::rowStrides(in);
                 std::vector<int32_t> inDim(rank), inStr(rank), reduce(rank, 0);
-                for (int k = 0; k < rank; ++k)
-                {
-                    inDim[k] = (int) in[k];
-                    inStr[k] = (int) inStride[k];
-                }
                 // Build the reduce mask: normalize each ONNX axis (negative counts from the end) and set
                 // its lane. Out-of-range axes are ignored so a malformed attr can't index past rank.
                 for (int64_t a: axes)
@@ -74,17 +71,47 @@ namespace vknn {
                         reduce[ax] = 1;
                     }
                 }
-                int total = (int) numElements(g.desc(node.outputs[0]).shape);
-                geom      = flat::uploadFlatGeom(env, {inDim, inStr, reduce});
-
-                int64_t reducedExtent = 1;
+                // Every quantity the kernels carry is an int32 field they then do int32 arithmetic on:
+                // the geometry SSBO's dims and strides, the output total, and the reduced-element count
+                // that finalises a Mean. Each is checked against the family's element domain BEFORE it
+                // is narrowed, because a wrapped reduced count fails the combine pass's
+                // `pc.rcount > 0` test and makes ReduceMean silently return the raw sum
+                // (dispatch_extent.h).
+                const int64_t outputElements = numElements(g.desc(node.outputs[0]).shape);
+                int64_t       reducedExtent  = 1;
                 for (int k = 0; k < rank; ++k)
                 {
                     if (reduce[k])
                     {
-                        reducedExtent *= inDim[k];
+                        reducedExtent *= in[k];
                     }
                 }
+                auto refuseExtent = [&](const char *quantity, int64_t extent) {
+                    throw Error(Status::Unsupported, flat::dispatchExtentRefusal("Reduce '" + node.name + "'", quantity, extent));
+                };
+                if (!flat::dispatchExtentFits(outputElements))
+                {
+                    refuseExtent("output element count", outputElements);
+                }
+                if (!flat::dispatchExtentFits(reducedExtent))
+                {
+                    refuseExtent("reduced element count", reducedExtent);
+                }
+                for (int k = 0; k < rank; ++k)
+                {
+                    if (!flat::dispatchExtentFits(in[k]))
+                    {
+                        refuseExtent("input dimension", in[k]);
+                    }
+                    if (!flat::dispatchExtentFits(inStride[k]))
+                    {
+                        refuseExtent("input stride", inStride[k]);
+                    }
+                    inDim[k] = (int) in[k];
+                    inStr[k] = (int) inStride[k];
+                }
+                int total = (int) outputElements;
+                geom      = flat::uploadFlatGeom(env, {inDim, inStr, reduce});
                 // Cooperate only for the small-output case; large-output reductions already parallelise
                 // fully on the scalar path and would pay the two-pass barrier for nothing.
                 coop = (total <= 4096 && reducedExtent >= 256);

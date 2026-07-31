@@ -8,7 +8,9 @@
 // scalar/narrow targets on the GPU (the int64 lanes decode to compute-precision float at the pack
 // boundary); INT16/UINT16 are not distinct vknn dtypes (they map to fp32 storage) and take the copy path.
 #include "backend/vulkan/vk_tune_race.h"
+#include "dispatch_extent.h"
 #include "vk_op_common.h"
+#include "vknn/error.h"
 #include "vknn/logging.h"
 #include "vknn/op.h"
 #include <limits>
@@ -142,9 +144,16 @@ namespace vknn {
                 }
                 if (truncate)
                 {
+                    // The kernels address elements with int32 push constants and int32 index math, so
+                    // an output past that domain cannot be dispatched correctly (dispatch_extent.h).
+                    const int64_t outputElements = numElements(env.graph->desc(node.outputs[0]).shape);
+                    if (!flat::dispatchExtentFits(outputElements))
+                    {
+                        throw Error(Status::Unsupported, flat::dispatchExtentRefusal("Cast '" + node.name + "'", "output element count", outputElements));
+                    }
                     // 2 SSBO bindings (src, dst); the spec constant pins both kernels to the
                     // device-resolved width (spec 0 = env.flatLocalSize, matching groups() below).
-                    quadKernel = pickCastQuad(env, (int) numElements(env.graph->desc(node.outputs[0]).shape));
+                    quadKernel = pickCastQuad(env, (int) outputElements);
                     pipe       = env.pipeline(shader(quadKernel ? "cast_v4" : "cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
                 }
             }
@@ -160,10 +169,19 @@ namespace vknn {
                     vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
                     return;
                 }
-                // Truncate every storage slot of the output buffer (element-wise, layout-agnostic; NC4HW4
+                // Truncate every storage slot BOTH buffers hold (element-wise, layout-agnostic; NC4HW4
                 // channel padding is truncated harmlessly). elemSize matches the compute precision.
-                int elemSize = env.useFp16 ? 2 : 4;
-                pc.total     = (int) (dst->bytes() / elemSize);
+                // The lane count follows the smaller allocation: a pooled activation slot keeps the
+                // larger-or-equal capacity of the freed slot it reuses, so a count taken from the
+                // destination alone reads past the end of an exactly-sized source. Both allocations
+                // are at least the tensor's footprint, so every real and padded element is still cast.
+                const int     elemSize = env.useFp16 ? 2 : 4;
+                const int64_t elements = flat::sharedElementCapacity(src->bytes(), dst->bytes(), elemSize);
+                if (!flat::dispatchExtentFits(elements))
+                {
+                    throw Error(Status::Unsupported, flat::dispatchExtentRefusal("Cast '" + node.name + "'", "storage element count", elements));
+                }
+                pc.total = (int) elements;
                 // Lane count: elements for the scalar kernel, whole quads for the vectorized twin
                 // (which re-derives its quad count from pc.total).
                 const int laneSteps = quadKernel ? (pc.total + kCastQuad - 1) / kCastQuad : pc.total;

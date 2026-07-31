@@ -23,6 +23,13 @@
 // loads and discards; reads do not change bytes). dir==1 writes the same pairs, but only the
 // scalar kernel zero-fills the pad lanes of a partial final channel block, so the host offers this
 // kernel only when C is a multiple of CLAYOUT_NC4_BLOCK (no pad lanes exist).
+//
+// Element domain: flatTotal and quadTotal below are int, so this kernel covers exactly the element
+// counts the flat kernel family's int32 domain expresses — flat::kMaxDispatchElements, which the
+// host checks with flat::dispatchExtentFits before it narrows a count into a push constant
+// (src/backend/vulkan/ops/dispatch_extent.h). Past that domain flatTotal wraps negative, quadTotal
+// wraps with it, and `q >= uint(quadTotal)` compares against a value near 2^32, which admits every
+// lane in the dispatch instead of bounding it.
 #include "common.glsl"
 #ifdef USE_FP16
 #define STORE4 f16vec4

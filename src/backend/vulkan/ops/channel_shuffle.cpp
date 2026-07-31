@@ -6,8 +6,10 @@
 // output vec4 lane-quad, gathering each lane's source scalar from its NC4HW4 block. Both kernels
 // are pure index remaps with STORE-to-STORE copies, so the output is bit-identical to the chain in
 // either precision.
+#include "dispatch_extent.h"
 #include "flat_ops.h"
 #include "vk_op_common.h"
+#include "vknn/error.h"
 
 namespace vknn {
     namespace {
@@ -28,21 +30,24 @@ namespace vknn {
                 {
                     spatial *= in[k];
                 }
-                if (opIsFlat(node, env))
+                // Lane count: one per output element on the flat path, one per output NC4HW4 lane-quad
+                // on the packed one. It stays int64 until the extent gate has cleared it, because the
+                // kernels address elements with int32 push constants and int32 index math
+                // (dispatch_extent.h).
+                const bool    runsFlat = opIsFlat(node, env);
+                const int64_t lanes    = runsFlat ? batch * channels * spatial : batch * cBlocks(channels) * spatial;
+                if (!flat::dispatchExtentFits(lanes))
                 {
-                    // total is computed in int64 before narrowing into the int push-constant field.
-                    pc = {(int) (batch * channels * spatial), (int) channels, (int) spatial, groupCount};
-                    pipe = env.pipeline(shader("channel_shuffle_flat", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {env.flatLocalSize});
-                } else
-                {
-                    int64_t channelBlocks = (channels + 3) / 4;
-                    pc = {(int) (batch * channelBlocks * spatial), (int) channels, (int) spatial, groupCount};
-                    pipe = env.pipeline(shader("channel_shuffle_nc4", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {env.flatLocalSize});
+                    throw Error(Status::Unsupported, flat::dispatchExtentRefusal("ChannelShuffle '" + node.name + "'", "dispatch element count", lanes));
                 }
+                pc = {(int) lanes, (int) channels, (int) spatial, groupCount};
+                pipe = env.pipeline(shader(runsFlat ? "channel_shuffle_flat" : "channel_shuffle_nc4", env.useFp16), 2, sizeof(ChannelShufflePC), std::vector<uint32_t> {env.flatLocalSize});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
-                // Both kernels are local_size_x=256 == flat::kFlatLocalSize; groups() rounds pc.total
-                // up to whole workgroups and dispatch() 2D-splits past the device's x-limit.
+                // Both kernels take the device-resolved family width as their workgroup-size spec
+                // constant (env.flatLocalSize, the same value prepare() specialized them with);
+                // groups() rounds pc.total up to whole workgroups and dispatch() 2D-splits past the
+                // device's x-limit.
                 pipe->dispatch(cmd, {operandBuf(env, node.inputs[0], hold0)->handle(), env.devBuf(node.outputs[0])->handle()}, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
