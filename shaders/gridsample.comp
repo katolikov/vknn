@@ -16,37 +16,13 @@ layout(std430, binding = 1) readonly  buffer Grid { float grid[]; };
 layout(std430, binding = 2) writeonly buffer Dst { vec4 dst[]; };
 layout(push_constant) uniform PC { int N, C, Hin, Win, OH, OW, align; } pc;
 
-float reflectc(float x, float lo, float hi) {
-  if (hi <= lo) return lo;
-  float rng = hi - lo, t = mod(x - lo, 2.0 * rng);
-  if (t < 0.0) t += 2.0 * rng;
-  if (t > rng) t = 2.0 * rng - t;
-  return lo + t;
-}
-float handle(float c, int S) {
-  if (PADMODE == 2) return reflectc(c, pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(S - 1) : float(S) - 0.5);
-  return c;
-}
-// fetch a channel-block vec4 at (px,py) with padding behaviour; returns vec4(0) for zeros-OOB.
-// Reflection reflects each tap (cubic taps reach +-2 px past the mapped coordinate, where a clamp
-// diverges from the reflected pixel; for linear/nearest the two agree).
-vec4 fetchBlk(int sb, int px, int py, int Cb) {
-  if (PADMODE == 0) { if (px < 0 || px >= pc.Win || py < 0 || py >= pc.Hin) return vec4(0.0); }
-  else if (PADMODE == 2) {
-    px = clamp(int(round(reflectc(float(px), pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(pc.Win - 1) : float(pc.Win) - 0.5))), 0, pc.Win - 1);
-    py = clamp(int(round(reflectc(float(py), pc.align == 1 ? 0.0 : -0.5, pc.align == 1 ? float(pc.Hin - 1) : float(pc.Hin) - 0.5))), 0, pc.Hin - 1);
-  }
-  else { px = clamp(px, 0, pc.Win - 1); py = clamp(py, 0, pc.Hin - 1); }
-  return vec4(src[sb + py * pc.Win + px]);
-}
-// Cubic convolution weights (alpha = -0.75): taps at floor-1..floor+2 per axis.
-void cubicW(float t, out float w[4]) {
-  const float A = -0.75;
-  float t1 = 1.0 + t, t2 = 2.0 - t;
-  w[0] = A * t1 * t1 * t1 - 5.0 * A * t1 * t1 + 8.0 * A * t1 - 4.0 * A;
-  w[1] = (A + 2.0) * t * t * t - (A + 3.0) * t * t + 1.0;
-  w[2] = (A + 2.0) * (1.0 - t) * (1.0 - t) * (1.0 - t) - (A + 3.0) * (1.0 - t) * (1.0 - t) + 1.0;
-  w[3] = A * t2 * t2 * t2 - 5.0 * A * t2 * t2 + 8.0 * A * t2 - 4.0 * A;
+#include "gridsample_taps.glsl"
+// A resolved tap read from a column index and a row offset. Only the zeros padding mode can
+// produce an OOB axis, so the test compiles out of the border/reflection variants (PADMODE is a
+// specialization constant) and their per-tap cost is a single add + load.
+vec4 tapAt(int sb, int xr, int yw) {
+  if (PADMODE == 0 && (xr < 0 || yw < 0)) return vec4(0.0);
+  return vec4(src[sb + yw + xr]);
 }
 
 void main() {
@@ -63,33 +39,43 @@ void main() {
   int a = pc.align == 1 ? 1 : 0, b = 1 - a;
   float ix = handle(((1.0 + grid[gi + 0]) * float(pc.Win - a) - float(b)) * 0.5, pc.Win);
   float iy = handle(((1.0 + grid[gi + 1]) * float(pc.Hin - a) - float(b)) * 0.5, pc.Hin);
-  // Tap positions and weights: identical fp32 arithmetic to the per-block form, evaluated once.
-  int rx = 0, ry = 0, x0 = 0, y0 = 0;
-  float wxc[4], wyc[4];
+  // Tap axes and weights: identical fp32 arithmetic to the per-block form, resolved once per
+  // pixel per axis (the tap grid is separable). The channel-block loop below is then pure
+  // gather + accumulate — one add per tap, no padding or address math per block.
+  int xr0 = 0, xr1 = 0, yw0 = 0, yw1 = 0;
+  int cubicXr[GS_CUBIC_TAPS], cubicYw[GS_CUBIC_TAPS];
+  float wxc[GS_CUBIC_TAPS], wyc[GS_CUBIC_TAPS];
   float wxl = 0.0, wyl = 0.0;
   if (MODE == 1) {
-    rx = int(floor(ix + 0.5)); ry = int(floor(iy + 0.5));
+    xr0 = resolveTapX(int(floor(ix + 0.5)));
+    yw0 = resolveTapRow(int(floor(iy + 0.5)));
   } else if (MODE == 2) {
-    x0 = int(floor(ix)); y0 = int(floor(iy));
+    int x0 = int(floor(ix)), y0 = int(floor(iy));
     cubicW(ix - float(x0), wxc);
     cubicW(iy - float(y0), wyc);
+    for (int t = 0; t < GS_CUBIC_TAPS; ++t) {
+      cubicXr[t] = resolveTapX(x0 - 1 + t);
+      cubicYw[t] = resolveTapRow(y0 - 1 + t);
+    }
   } else {
-    x0 = int(floor(ix)); y0 = int(floor(iy));
+    int x0 = int(floor(ix)), y0 = int(floor(iy));
     wxl = ix - float(x0); wyl = iy - float(y0);
+    xr0 = resolveTapX(x0); xr1 = resolveTapX(x0 + 1);
+    yw0 = resolveTapRow(y0); yw1 = resolveTapRow(y0 + 1);
   }
   for (int cb = 0; cb < Cb; ++cb) {
     int sb = (n * Cb + cb) * pc.Hin * pc.Win;
     vec4 v;
     if (MODE == 1) {
-      v = fetchBlk(sb, rx, ry, Cb);
+      v = tapAt(sb, xr0, yw0);
     } else if (MODE == 2) {
       v = vec4(0.0);
-      for (int j = 0; j < 4; ++j)
-        for (int i2 = 0; i2 < 4; ++i2)
-          v += wyc[j] * wxc[i2] * fetchBlk(sb, x0 - 1 + i2, y0 - 1 + j, Cb);
+      for (int j = 0; j < GS_CUBIC_TAPS; ++j)
+        for (int i2 = 0; i2 < GS_CUBIC_TAPS; ++i2)
+          v += wyc[j] * wxc[i2] * tapAt(sb, cubicXr[i2], cubicYw[j]);
     } else {
-      vec4 v00 = fetchBlk(sb, x0, y0, Cb), v01 = fetchBlk(sb, x0 + 1, y0, Cb);
-      vec4 v10 = fetchBlk(sb, x0, y0 + 1, Cb), v11 = fetchBlk(sb, x0 + 1, y0 + 1, Cb);
+      vec4 v00 = tapAt(sb, xr0, yw0), v01 = tapAt(sb, xr1, yw0);
+      vec4 v10 = tapAt(sb, xr0, yw1), v11 = tapAt(sb, xr1, yw1);
       v = (1.0 - wyl) * ((1.0 - wxl) * v00 + wxl * v01) + wyl * ((1.0 - wxl) * v10 + wxl * v11);
     }
     int outIdx = (n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW + ox;
