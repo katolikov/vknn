@@ -7,10 +7,12 @@
 #include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
 #include "core/slice_bounds.h"
+#include "flat_kernel_rules.h"
 #include "import/passes.h" // readI64Param
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
+#include <initializer_list>
 
 namespace vknn {
 
@@ -26,26 +28,18 @@ namespace vknn {
         // AND expose it as their workgroup-size spec constant, so the value that actually runs is
         // env.flatLocalSize - resolved once at load by flatLocalSizeFor() below and passed to every
         // family pipeline. 256 remains the ceiling (and the shared-array size of the workgroup-
-        // reduction kernels); a device whose caps cannot host it gets the largest whole-subgroup
-        // width that fits instead of a pipeline-creation failure.
+        // reduction kernels); a device whose caps cannot host it gets the widest workgroup its caps
+        // do host instead of a pipeline-creation failure.
         constexpr uint32_t kFlatLocalSize = 256;
 
-        // A family workgroup width for this device, from EXACT caps (never a measured probe -
-        // see VkOpEnv::flatLocalSize): the family's ceiling clamped to maxWorkGroupInvocations and
-        // maxWorkGroupSize[0], rounded down to whole subgroups, at least one subgroup.
+        // Index of the workgroup-size cap along x in VulkanCaps::maxWorkGroupSize.
+        constexpr int kWorkGroupSizeAxisX = 0;
+
+        // A family workgroup width for this device, from EXACT caps (never a measured probe - see
+        // VkOpEnv::flatLocalSize): the caps this device reports, fed to the family's width rule
+        // (laneWidthFrom in flat_kernel_rules.h, where it is host-tested).
         inline uint32_t laneWidthFor(const vk::VulkanCaps &caps, uint32_t ceiling) {
-            uint32_t width = ceiling;
-            if (caps.maxWorkGroupInvocations != 0u && caps.maxWorkGroupInvocations < width)
-            {
-                width = caps.maxWorkGroupInvocations;
-            }
-            if (caps.maxWorkGroupSize[0] != 0u && caps.maxWorkGroupSize[0] < width)
-            {
-                width = caps.maxWorkGroupSize[0];
-            }
-            const uint32_t sub = caps.subgroupSize != 0u ? caps.subgroupSize : 64u;
-            width              = width / sub * sub;
-            return width != 0u ? width : sub;
+            return laneWidthFrom(ceiling, caps.maxWorkGroupInvocations, caps.maxWorkGroupSize[kWorkGroupSizeAxisX], caps.subgroupSize);
         }
         inline uint32_t flatLocalSizeFor(const vk::VulkanCaps &caps) {
             return laneWidthFor(caps, kFlatLocalSize);
@@ -87,11 +81,11 @@ namespace vknn {
         constexpr int kMovementItemsPerLane = 1;
         // Output elements per lane-quad of the vectorized flat gather (one whole-vec4 store);
         // mirrors FLAT_GATHER_QUAD in shaders/flat_gather_v4.comp.
-        constexpr int kFlatGatherQuad = 4;
+        constexpr int kFlatGatherQuad = kQuadBindingElems;
         // Output elements per lane-quad of the vectorized broadcast/binary/pad twins (one
         // whole-vec4 store); mirrors FLAT_MOVE_QUAD in shaders/flat_broadcast_v4.comp,
         // flat_binary_v4.comp, flat_pad_v4.comp and flat_pad_rt_v4.comp.
-        constexpr int kFlatMoveQuad = 4;
+        constexpr int kFlatMoveQuad = kQuadBindingElems;
         // Tune-table values of the movement-family scalar-vs-quad kernel picks (append-only).
         constexpr int kFlatKernelScalar      = 0; ///< the scalar kernel: one output element per lane step.
         constexpr int kFlatKernelQuad        = 1; ///< the _v4 twin: one whole-vec4 quad per lane step.
@@ -145,12 +139,58 @@ namespace vknn {
         // the node will (same shader suffix, same binding count) on the REAL geometry SSBO, so it
         // times the node's actual walk.
 
-        // Answers a pick without racing: a persisted tune-table verdict, or the scalar default
-        // when the race cannot run (Tuning::None, no runner). Returns false when the caller must
-        // race.
+        // ---- Gates every quad pick applies BEFORE it consults the tune table ----
+        // A cached verdict is keyed by a shape/geometry signature and is reused by every node that
+        // carries it, so a requirement that depends on a node's own BUFFERS cannot live behind the
+        // cache: it is a deterministic geometry gate applied first, exactly like ConvertLayout's
+        // partial-final-block refusal.
+
+        // True when every buffer a _v4 twin re-types as STORE_QUAD can legally be bound under that
+        // declaration, i.e. its device base is a whole vector (quadBindingBytes at the running
+        // precision). A tensor with no activation buffer - a constant operand uploaded into its own
+        // allocation - always qualifies, since an owning allocation starts at offset 0.
+        //
+        // Only the bindings the twin actually re-types are listed by a caller: a gather/broadcast/
+        // pad twin widens its STORE, not its scattered loads, so only the destination is gated,
+        // while flat_binary_v4 loads and stores whole vec4s and gates all three.
+        inline bool quadBindingsAligned(VkOpEnv &env, std::initializer_list<TensorId> quadBound) {
+            const size_t quadBytes = quadBindingBytes(env.useFp16);
+            for (TensorId t: quadBound)
+            {
+                if (t == kNoTensor || !env.devBuf)
+                {
+                    continue;
+                }
+                const vk::Buffer *buffer = env.devBuf(t);
+                if (buffer != nullptr && !buffer->baseAlignedTo(quadBytes))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // True when a race may allocate `scratchElems` elements of dedicated scratch at the running
+        // precision. The race buffers are shaped like the node's REAL tensors, so a large movement
+        // node would transiently hold a multiple of its own footprint on top of a resident model;
+        // the budget bounds that against what the device reports free.
+        inline bool quadRaceAffordable(VkOpEnv &env, int64_t scratchElems) {
+            const size_t elemBytes = (size_t) (env.useFp16 ? kFp16StorageBytes : kFp32StorageBytes);
+            const size_t bytes     = (size_t) std::max<int64_t>(scratchElems, 0) * elemBytes;
+            return quadRaceScratchAffordable(bytes, vk::Buffer::deviceLocalFreeBytes(*env.ctx));
+        }
+
+        // Answers a pick without racing: a persisted tune-table verdict, the process memo's verdict
+        // for a session with no weight cache, or the scalar default when the race cannot run
+        // (Tuning::None, no runner). Returns false when the caller must race.
         inline bool quadPickResolved(VkOpEnv &env, const std::string &sig, bool &picked) {
             int reuse;
             if (env.reuseTuned(sig, reuse) && (reuse == kFlatKernelScalar || reuse == kFlatKernelQuad))
+            {
+                picked = reuse == kFlatKernelQuad;
+                return true;
+            }
+            if (QuadVerdictMemo::lookup(sig, env.tuning, reuse) && (reuse == kFlatKernelScalar || reuse == kFlatKernelQuad))
             {
                 picked = reuse == kFlatKernelQuad;
                 return true;
@@ -167,22 +207,26 @@ namespace vknn {
         // kFlatKernelScalar/kFlatKernelQuad), persists the verdict under `sig`, and logs the
         // autotune line. Returns true when the quad twin displaced the scalar incumbent.
         inline bool quadRaceVerdict(VkOpEnv &env, const std::string &sig, const std::vector<double> &ms) {
-            const bool won = ms.size() == 2 && ms[kFlatKernelQuad] < ms[kFlatKernelScalar] * vk::kTuneRaceMargin;
+            const bool won    = ms.size() == 2 && ms[kFlatKernelQuad] < ms[kFlatKernelScalar] * vk::kTuneRaceMargin;
+            const int  kernel = won ? kFlatKernelQuad : kFlatKernelScalar;
             if (env.weights)
             {
-                env.weights->setTuned(sig, won ? kFlatKernelQuad : kFlatKernelScalar, (int) env.tuning);
+                env.weights->setTuned(sig, kernel, (int) env.tuning);
             }
+            // Also memoized, so a session with no weight cache answers the next node carrying this
+            // signature from the verdict instead of racing it again.
+            QuadVerdictMemo::store(sig, env.tuning, kernel);
             VKNN_DEBUG << "autotune " << sig << " -> " << (won ? "quad" : "scalar") << vk::raceTimes(ms);
             return won;
         }
 
         // Floor of a race-scratch allocation: one fp32 vec4, so a zero-element operand still
         // binds a valid SSBO.
-        constexpr size_t kQuadRaceScratchFloorBytes = 16;
+        constexpr size_t kQuadRaceScratchFloorBytes = kQuadBindingElems * kFp32StorageBytes;
         // Dedicated device-only race scratch sized like a real tensor of `elems` elements at the
         // running storage precision.
         inline std::shared_ptr<vk::Buffer> quadRaceScratch(VkOpEnv &env, int64_t elems) {
-            const size_t elemBytes = (size_t) (env.useFp16 ? 2 : 4);
+            const size_t elemBytes = (size_t) (env.useFp16 ? kFp16StorageBytes : kFp32StorageBytes);
             return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) elems * elemBytes, kQuadRaceScratchFloorBytes), vk::MemPref::kDeviceOnly);
         }
 
@@ -214,8 +258,10 @@ namespace vknn {
             // dispatches the SAME variant the node will (same epilogue suffix, same binding count)
             // on the REAL geometry SSBO, and the innermost output extent and input stride ride the
             // signature because they set the row-straddle rate and the load coalescing class.
-            bool pickQuad(VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inStr, int64_t inElems) {
-                if (pc.total <= 0)
+            // flat_gather_v4 re-types only its destination (its gathered reads stay scalar), so
+            // that is the one binding the vec4-alignment gate covers.
+            bool pickQuad(const Node &node, VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inStr, int64_t inElems) {
+                if (pc.total <= 0 || !quadBindingsAligned(env, {node.outputs[0]}))
                 {
                     return false;
                 }
@@ -234,6 +280,10 @@ namespace vknn {
                 // the input tensor, so an input-sized source covers all reads; the destination —
                 // and the epilogue's operand filler, indexed by output element (the
                 // appendForTiming rule) — cover pc.total, the output's physical element count.
+                if (!quadRaceAffordable(env, inElems + pc.total + (epi.active ? pc.total : 0)))
+                {
+                    return false;
+                }
                 auto                        sSrc = quadRaceScratch(env, inElems);
                 auto                        sDst = quadRaceScratch(env, pc.total);
                 std::shared_ptr<vk::Buffer> sFill;
@@ -262,7 +312,7 @@ namespace vknn {
             void finishPrepare(const Node &node, VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inStr, int64_t inElems) {
                 geom = uploadFlatGeom(env, {outDim, inStr});
                 epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
-                quad = pickQuad(env, outDim, inStr, inElems);
+                quad = pickQuad(node, env, outDim, inStr, inElems);
                 pipe = env.pipeline(shader((std::string(quad ? "flat_gather_v4" : "flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
                                     std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
             }
@@ -405,8 +455,10 @@ namespace vknn {
             // block above). The innermost output/input extents and begin pad ride the signature
             // because they set the row-straddle rate and how often a quad touches the innermost
             // pad border (the quad kernel's scalar fallback).
-            bool pickQuad(VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inDim, const std::vector<int32_t> &padBegin, int64_t inElems) {
-                if (pc.total <= 0)
+            // Both pad twins re-type only their destination (their reads stay scalar, and the
+            // runtime pad value is a single element), so that is the one gated binding.
+            bool pickQuad(const Node &node, VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inDim, const std::vector<int32_t> &padBegin, int64_t inElems) {
+                if (pc.total <= 0 || !quadBindingsAligned(env, {node.outputs[0]}))
                 {
                     return false;
                 }
@@ -424,6 +476,10 @@ namespace vknn {
                 // Dedicated scratch sized like the real tensors: every pad-resolved index lies
                 // inside the input tensor, so an input-sized source covers all reads; the runtime
                 // pad value is a single element.
+                if (!quadRaceAffordable(env, inElems + pc.total))
+                {
+                    return false;
+                }
                 auto                        sSrc = quadRaceScratch(env, inElems);
                 auto                        sDst = quadRaceScratch(env, pc.total);
                 std::shared_ptr<vk::Buffer> sVal;
@@ -491,7 +547,7 @@ namespace vknn {
                     padBegin[k] = pads.empty() ? 0 : (int) pads[k];
                 }
                 geom = uploadFlatGeom(env, {outDim, inDim, inStr, padBegin});
-                quad = pickQuad(env, outDim, inDim, padBegin, numElements(in));
+                quad = pickQuad(node, env, outDim, inDim, padBegin, numElements(in));
                 pipe = runtimeVal ? env.pipeline(shader(quad ? "flat_pad_rt_v4" : "flat_pad_rt", env.useFp16), 4, sizeof(PC),
                                                    std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}) :
                                       env.pipeline(shader(quad ? "flat_pad_v4" : "flat_pad", env.useFp16), 3, sizeof(PC),
@@ -600,8 +656,10 @@ namespace vknn {
             // they set the row-straddle rate and the linearity class the quad kernel hoists by (a
             // matching or size-1 innermost source axis hoists; a widening one runs the scalar
             // walk per element).
-            bool pickQuad(VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inDim, int64_t inElems) {
-                if (pc.total <= 0)
+            // flat_broadcast_v4 re-types only its destination (its source reads stay scalar), so
+            // that is the one gated binding.
+            bool pickQuad(const Node &node, VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &inDim, int64_t inElems) {
+                if (pc.total <= 0 || !quadBindingsAligned(env, {node.outputs[0]}))
                 {
                     return false;
                 }
@@ -617,6 +675,10 @@ namespace vknn {
                 }
                 // Dedicated scratch sized like the real tensors: every broadcast-resolved index
                 // lies inside the input tensor, so an input-sized source covers all reads.
+                if (!quadRaceAffordable(env, inElems + pc.total))
+                {
+                    return false;
+                }
                 auto          sSrc = quadRaceScratch(env, inElems);
                 auto          sDst = quadRaceScratch(env, pc.total);
                 vk::TuneTimer timer(env);
@@ -656,7 +718,7 @@ namespace vknn {
                 {
                     constBuf = uploadInit(env, node.inputs[0], in);
                 }
-                quad = pickQuad(env, outDim, inDim, numElements(in));
+                quad = pickQuad(node, env, outDim, inDim, numElements(in));
                 pipe = env.pipeline(shader(quad ? "flat_broadcast_v4" : "flat_broadcast", env.useFp16), 3, sizeof(PC),
                                     std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
             }
@@ -775,8 +837,10 @@ namespace vknn {
             // block above). bothFull and the innermost operand strides ride the signature because
             // they set the load coalescing class (whole-vec4, stepped, or splat per operand), and
             // the innermost output extent sets the row-straddle rate.
-            bool pickQuad(VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &aStride, const std::vector<int32_t> &bStride, int64_t aElems, int64_t bElems) {
-                if (pc.total <= 0)
+            // flat_binary_v4 re-types BOTH operand bindings and its destination (the bothFull path
+            // issues whole-vec4 operand loads), so all three are gated.
+            bool pickQuad(const Node &node, VkOpEnv &env, const std::vector<int32_t> &outDim, const std::vector<int32_t> &aStride, const std::vector<int32_t> &bStride, int64_t aElems, int64_t bElems) {
+                if (pc.total <= 0 || !quadBindingsAligned(env, {node.inputs[0], node.inputs[1], node.outputs[0]}))
                 {
                     return false;
                 }
@@ -793,6 +857,10 @@ namespace vknn {
                 }
                 // Dedicated scratch sized like the real tensors: every operand index lies inside
                 // its tensor, so operand-sized sources cover all reads.
+                if (!quadRaceAffordable(env, aElems + bElems + pc.total))
+                {
+                    return false;
+                }
                 auto          sA   = quadRaceScratch(env, aElems);
                 auto          sB   = quadRaceScratch(env, bElems);
                 auto          sDst = quadRaceScratch(env, pc.total);
@@ -847,11 +915,13 @@ namespace vknn {
                 };
                 setup(node.inputs[0], 0);
                 setup(node.inputs[1], 1);
-                pc.bothFull = (g.desc(node.inputs[0]).shape == out && g.desc(node.inputs[1]).shape == out) ? 1 : 0;
-                geom        = uploadFlatGeom(env, {outDim, aStride, bStride});
-                quad        = pickQuad(env, outDim, aStride, bStride, numElements(g.desc(node.inputs[0]).shape), numElements(g.desc(node.inputs[1]).shape));
-                pipe        = env.pipeline(shader(quad ? "flat_binary_v4" : "flat_binary", env.useFp16), 4, sizeof(PC),
-                                           std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                const int64_t aElems = numElements(g.desc(node.inputs[0]).shape);
+                const int64_t bElems = numElements(g.desc(node.inputs[1]).shape);
+                pc.bothFull          = (g.desc(node.inputs[0]).shape == out && g.desc(node.inputs[1]).shape == out) ? 1 : 0;
+                geom                 = uploadFlatGeom(env, {outDim, aStride, bStride});
+                quad                 = pickQuad(node, env, outDim, aStride, bStride, aElems, bElems);
+                pipe                 = env.pipeline(shader(quad ? "flat_binary_v4" : "flat_binary", env.useFp16), 4, sizeof(PC),
+                                                    std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 auto buf = [&](int e) {

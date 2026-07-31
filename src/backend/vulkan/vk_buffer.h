@@ -98,6 +98,22 @@ namespace vknn { namespace vk {
             return viewOffset_;
         }
 
+        /// True when this buffer's device base address is a whole multiple of `byteAlignment` — the
+        /// gate a caller must pass before binding it under a VECTOR-typed SSBO declaration
+        /// (`vec4 d4[]` / `f16vec4 d4[]`, whose std430 base alignment is the vector's byte width).
+        ///
+        /// A buffer that owns its memory binds at offset 0 of an allocation the driver returns
+        /// aligned for any resource, so it always qualifies. A sub-buffer view binds at
+        /// rootOffset(), which the segment planner derives from raw accumulated member byte counts
+        /// and this class validates only against the driver-reported
+        /// VkMemoryRequirements::alignment — 4 bytes on the target GPUs. That is enough for the
+        /// scalar kernels, which address their SSBO one element at a time, and not enough for their
+        /// vectorized _v4 twins. Mirrors quadBaseAligned in ops/flat_kernel_rules.h, where the rule
+        /// is host-tested.
+        bool baseAlignedTo(size_t byteAlignment) const noexcept {
+            return byteAlignment == 0 || viewOffset_ % byteAlignment == 0;
+        }
+
         /// memcpy `n` bytes from `src` into the mapping at `offset`. Precondition: the buffer is
         /// host-visible and `offset + n <= bytes()`; both are checked and throw on violation.
         void upload(const void *src, size_t n, size_t offset = 0);
@@ -110,6 +126,14 @@ namespace vknn { namespace vk {
         /// @returns An owning Buffer, or nullptr if the device lacks dma-buf import or the import fails
         ///          (the caller then falls back to a staged copy). Never throws.
         static std::unique_ptr<Buffer> importDmaBufFd(VulkanContext &ctx, int fd, size_t bytes, VkBufferUsageFlags extraUsage = 0) noexcept;
+
+        /// Bytes still free across the device-local heaps, as VK_EXT_memory_budget reports them
+        /// (heapBudget - heapUsage, summed over every DEVICE_LOCAL heap and floored at zero).
+        /// @returns 0 when the device does not advertise the extension, which callers read as
+        ///          "unknown" rather than "nothing free". Read at load by the sites that size a
+        ///          transient allocation against what is left (ops/flat_kernel_rules.h
+        ///          quadRaceScratchAffordable).
+        static size_t deviceLocalFreeBytes(VulkanContext &ctx) noexcept;
 
         /// Process-wide allocation accounting. Each Buffer owns one vkAllocateMemory, so liveCount()
         /// also tracks consumption of the driver's maxMemoryAllocationCount budget, not just bytes.

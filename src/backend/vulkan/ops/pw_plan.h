@@ -8,6 +8,7 @@
 // inputs[pw_opbase..]). pw_outs lists the step whose value each extra output stream stores
 // (kPwRefEntry exports the entry value itself).
 #pragma once
+#include "flat_kernel_rules.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -113,7 +114,9 @@ namespace vknn {
             {
                 plan.outDim[k] = (int) out[(int) out.size() - rank + k];
             }
-            total = (int) numElements(out);
+            // The kernels guard their grid with `PC { int total, items; }`, so the element count is
+            // an int32 by contract; a wider one is refused by name rather than wrapped negative.
+            total = flatElementCount(numElements(out), "FusedPointwise (" + node.name + ") output " + shapeStr(out));
             for (int s = 0; s < nSteps; ++s)
             {
                 TensorId opd = bcastOperand(s);
@@ -172,7 +175,9 @@ namespace vknn {
             plan.outDim[1] = (int) y.w;
             plan.outDim[2] = (int) y.h;
             plan.outDim[3] = (int) runCb;
-            total          = (int) ((int64_t) y.n * runCb * HW);
+            // Same int32 push-constant contract as the flat world above: one thread per
+            // (n, channel-block, hw) triple, refused by name when the triple count exceeds it.
+            total = flatElementCount((int64_t) y.n * runCb * HW, "FusedPointwise (" + node.name + ") NC4HW4 output " + shapeStr(out));
             // A kPwBcastPacked operand reads through per-step packed vec4-space strides: its own
             // NC4HW4 block index is n*sN + cb*sCb + h*sH + w*sW with a zero stride on each
             // broadcast axis. The kernel splats channel lane 0 when the operand's channel axis is

@@ -48,6 +48,33 @@ namespace vknn { namespace vk {
         return gPeakBytes.load();
     }
 
+    size_t Buffer::deviceLocalFreeBytes(VulkanContext &ctx) noexcept {
+        if (!ctx.caps().memoryBudget)
+        {
+            return 0;
+        }
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2         props {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+        props.pNext = &budget;
+        vkGetPhysicalDeviceMemoryProperties2(ctx.physicalDevice(), &props);
+        size_t      freeBytes = 0;
+        const auto &mp        = ctx.memProps();
+        for (uint32_t heap = 0; heap < mp.memoryHeapCount; ++heap)
+        {
+            if (!(mp.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+            {
+                continue;
+            }
+            // A driver may report usage above its own budget under memory pressure; that heap
+            // contributes nothing rather than wrapping the unsigned subtraction.
+            if (budget.heapBudget[heap] > budget.heapUsage[heap])
+            {
+                freeBytes += (size_t) (budget.heapBudget[heap] - budget.heapUsage[heap]);
+            }
+        }
+        return freeBytes;
+    }
+
     bool Buffer::isHostVisible(uint32_t typeIdx) const noexcept {
         return (ctx_.memProps().memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     }
@@ -260,6 +287,11 @@ namespace vknn { namespace vk {
 
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(ctx_.device(), buf_, &req);
+            // The driver's own binding requirement, and the only alignment a view offset must clear
+            // to exist: 4 bytes on the target GPUs. It says nothing about the width of the loads a
+            // kernel will issue through the view — a binding declared as a vec4/f16vec4 array needs
+            // the whole vector's byte alignment, which baseAlignedTo() answers and every vectorized
+            // kernel pick consults before it may run.
             if (req.alignment != 0 && off % req.alignment != 0)
             {
                 throw Error(Status::Unsupported, "sub-buffer view offset " + std::to_string(off) + " violates alignment " + std::to_string(req.alignment));

@@ -4,6 +4,7 @@
 // The format pass inserts ConvertLayout NODES only — no splice site builds this pipeline directly —
 // so pickClayoutQuad below is the single kernel pick for every dispatch of these shaders.
 #include "backend/vulkan/vk_tune_race.h"
+#include "flat_ops.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
 #include "vknn/op.h"
@@ -13,10 +14,11 @@ namespace vknn {
 
         // Flat elements per lane of the vectorized kernel (whole-vec4 access on the flat side);
         // mirrors CLAYOUT_QUAD in shaders/convert_layout_v4.comp.
-        constexpr int kClayoutQuad = 4;
-        // Tune-table values of the convert-layout kernel pick (append-only).
-        constexpr int kClayoutKernelScalar = 0; ///< convert_layout: one NC4 lane-quad per lane.
-        constexpr int kClayoutKernelQuad   = 1; ///< convert_layout_v4: one flat vec4 quad per lane.
+        constexpr int kClayoutQuad = kQuadBindingElems;
+        // Tune-table values of the convert-layout kernel pick (append-only), index-aligned with the
+        // family's shared race entrants (flat::kFlatKernelScalar / flat::kFlatKernelQuad).
+        constexpr int kClayoutKernelScalar = flat::kFlatKernelScalar; ///< convert_layout: one NC4 lane-quad per lane.
+        constexpr int kClayoutKernelQuad   = flat::kFlatKernelQuad;   ///< convert_layout_v4: one flat vec4 quad per lane.
         // Binding layout shared by both kernels: 0/1 are the scalar views and 2/3 the vec4 views of
         // the SAME src/dst buffers. Each kernel takes the vec4 view on its whole-vec4 side (the NC4
         // side for the scalar kernel, the flat side for the quad twin) and scalars on the other.
@@ -53,8 +55,12 @@ namespace vknn {
             // vk::kTuneRaceMargin to displace the incumbent. total, C and HW ride the signature
             // because they set the plane-run length (the quad's fast-path rate) and both sides'
             // coalescing classes; dir rides it because it flips which side is the scattered one.
-            bool pickClayoutQuad(VkOpEnv &env, int64_t flatTotal, int64_t nc4Total, int64_t scalarLanes) {
-                if (flatTotal <= 0)
+            // convert_layout_v4 addresses BOTH the source and the destination through their vec4
+            // views (bindings 2/3), so both are gated on vec4 alignment, ahead of the cache lookup:
+            // a cached verdict is keyed on shape and would otherwise reach a node whose own buffers
+            // cannot host the wider access.
+            bool pickClayoutQuad(const Node &node, VkOpEnv &env, int64_t flatTotal, int64_t nc4Total, int64_t scalarLanes) {
+                if (flatTotal <= 0 || !flat::quadBindingsAligned(env, {node.inputs[0], node.outputs[0]}))
                 {
                     return false;
                 }
@@ -70,20 +76,29 @@ namespace vknn {
                 {
                     return reuse == kClayoutKernelQuad;
                 }
+                if (QuadVerdictMemo::lookup(sig, env.tuning, reuse) && (reuse == kClayoutKernelScalar || reuse == kClayoutKernelQuad))
+                {
+                    return reuse == kClayoutKernelQuad;
+                }
                 if (env.tuning == Tuning::None || !env.runner)
                 {
                     return false;
                 }
                 // Dedicated scratch at the NC4 physical footprint, which is >= the flat footprint,
                 // so one size covers either side of either direction for both candidates.
-                const size_t es = (size_t) (env.useFp16 ? 2 : 4);
+                constexpr int kClayoutRaceScratchBuffers = 2; // source, destination
+                if (!flat::quadRaceAffordable(env, nc4Total * kClayoutRaceScratchBuffers))
+                {
+                    return false;
+                }
+                const size_t es = (size_t) (env.useFp16 ? kFp16StorageBytes : kFp32StorageBytes);
                 auto         mk = [&](size_t bytes) {
-                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, flat::kQuadRaceScratchFloorBytes), vk::MemPref::kDeviceOnly);
                 };
                 auto          sSrc = mk((size_t) nc4Total * es);
                 auto          sDst = mk((size_t) nc4Total * es);
                 vk::TuneTimer timer(env);
-                auto          ms  = vk::raceCandidates(2, [&](int index) {
+                auto          ms     = vk::raceCandidates(2, [&](int index) {
                     const bool q = index == kClayoutKernelQuad;
                     auto racePipe = env.pipeline(shader(q ? "convert_layout_v4" : "convert_layout", env.useFp16), kClayoutBindings, sizeof(ConvertPC), std::vector<uint32_t> {env.flatLocalSize});
                     const int64_t lanes = q ? (flatTotal + kClayoutQuad - 1) / kClayoutQuad : scalarLanes;
@@ -91,11 +106,15 @@ namespace vknn {
                         racePipe->dispatch(cmd, {sSrc->handle(), sDst->handle(), sSrc->handle(), sDst->handle()}, &pc, sizeof(pc), groups(lanes, env.flatLocalSize));
                     });
                 });
-                const bool    won = ms.size() == 2 && ms[kClayoutKernelQuad] < ms[kClayoutKernelScalar] * vk::kTuneRaceMargin;
+                const bool    won    = ms.size() == 2 && ms[kClayoutKernelQuad] < ms[kClayoutKernelScalar] * vk::kTuneRaceMargin;
+                const int     kernel = won ? kClayoutKernelQuad : kClayoutKernelScalar;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, won ? kClayoutKernelQuad : kClayoutKernelScalar, (int) env.tuning);
+                    env.weights->setTuned(sig, kernel, (int) env.tuning);
                 }
+                // Also memoized, so a session with no weight cache answers the next node carrying
+                // this signature from the verdict instead of racing it again.
+                QuadVerdictMemo::store(sig, env.tuning, kernel);
                 VKNN_DEBUG << "autotune " << sig << " -> " << (won ? "quad" : "scalar") << vk::raceTimes(ms);
                 return won;
             }
@@ -110,7 +129,7 @@ namespace vknn {
                 // the quad twin one lane per kClayoutQuad consecutive flat elements.
                 const int64_t scalarLanes = x.n * Cb * HW;
                 const int64_t flatTotal   = x.n * x.c * HW;
-                quadKernel                = pickClayoutQuad(env, flatTotal, packedElems(shape), scalarLanes);
+                quadKernel                = pickClayoutQuad(node, env, flatTotal, packedElems(shape), scalarLanes);
                 count                     = (uint32_t) (quadKernel ? (flatTotal + kClayoutQuad - 1) / kClayoutQuad : scalarLanes);
                 // Workgroup width rides spec constant 0, resolved at load (env.flatLocalSize); the
                 // dispatch below divides by the same value.

@@ -20,10 +20,11 @@ namespace vknn {
 
         // Elements per lane-quad of the vectorized flat kernel; mirrors PW_FLAT_QUAD in
         // shaders/fused_pw_flat_v4.comp.
-        constexpr int kPwFlatQuad = 4;
-        // Tune-table values of the flat-kernel pick (append-only).
-        constexpr int kPwFlatKernelScalar = 0; ///< fused_pw_flat: one element per lane step.
-        constexpr int kPwFlatKernelQuad   = 1; ///< fused_pw_flat_v4: one whole-vec4 quad per lane step.
+        constexpr int kPwFlatQuad = kQuadBindingElems;
+        // Tune-table values of the flat-kernel pick (append-only), index-aligned with the family's
+        // shared race entrants (flat::kFlatKernelScalar / flat::kFlatKernelQuad).
+        constexpr int kPwFlatKernelScalar = flat::kFlatKernelScalar; ///< fused_pw_flat: one element per lane step.
+        constexpr int kPwFlatKernelQuad   = flat::kFlatKernelQuad;   ///< fused_pw_flat_v4: one whole-vec4 quad per lane step.
 
         struct FusedPointwiseOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline>     pipe;
@@ -42,12 +43,24 @@ namespace vknn {
             // kernel (the deterministic default), Fast/Heavy race both once on dedicated scratch
             // through TuneTimer/raceCandidates and persist the winner; the quad challenger must
             // clear vk::kTuneRaceMargin to displace the incumbent.
-            bool pickFlatQuad(VkOpEnv &env, const std::vector<uint32_t> &spec, bool relax, int numSteps) {
-                char buf[96];
-                snprintf(buf, sizeof(buf), "pwflat_%d_%d_%d_%d_%d", total, numSteps, (int) operands.size(), relax ? 1 : 0, env.useFp16 ? 1 : 0);
-                std::string sig = env.gpuTag + "/" + buf;
-                int         reuse;
+            //
+            // fused_pw_flat_v4 re-types binding 0 (the primary input) and binding 1 (the output) as
+            // STORE_QUAD; the epilogue's operand and extra-output slots stay scalar. Those two are
+            // the bindings the vec4-alignment gate covers, and it runs BEFORE the cache lookup
+            // because a cached verdict is keyed on shape and would otherwise reach a node whose own
+            // buffers cannot host the wider access.
+            bool pickFlatQuad(const Node &node, VkOpEnv &env, const std::vector<uint32_t> &spec, bool relax, const PwPlanCPU &plan) {
+                if (total <= 0 || !flat::quadBindingsAligned(env, {node.inputs[0], node.outputs[0]}))
+                {
+                    return false;
+                }
+                const std::string sig = env.gpuTag + "/" + pwFlatKernelSignature(total, (int) operands.size(), relax, env.useFp16, pwFlatAccessClass(plan.step, plan.stride, plan.numSteps));
+                int reuse;
                 if (env.reuseTuned(sig, reuse) && (reuse == kPwFlatKernelScalar || reuse == kPwFlatKernelQuad))
+                {
+                    return reuse == kPwFlatKernelQuad;
+                }
+                if (QuadVerdictMemo::lookup(sig, env.tuning, reuse) && (reuse == kPwFlatKernelScalar || reuse == kPwFlatKernelQuad))
                 {
                     return reuse == kPwFlatKernelQuad;
                 }
@@ -59,9 +72,14 @@ namespace vknn {
                 // count (the epilogue indexes operands by output element, so the filler must be at
                 // least output-sized — the appendForTiming rule). The real plan SSBO makes the
                 // race walk the unit's actual classes and step chain.
-                const size_t es = (size_t) (env.useFp16 ? 2 : 4);
+                constexpr int kPwRaceScratchBuffers = 3; // entry stream, output stream, operand filler
+                if (!flat::quadRaceAffordable(env, (int64_t) total * kPwRaceScratchBuffers))
+                {
+                    return false;
+                }
+                const size_t es = (size_t) (env.useFp16 ? kFp16StorageBytes : kFp32StorageBytes);
                 auto         mk = [&](size_t bytes) {
-                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, flat::kQuadRaceScratchFloorBytes), vk::MemPref::kDeviceOnly);
                 };
                 auto          sPrim = mk((size_t) total * es);
                 auto          sDst  = mk((size_t) total * es);
@@ -93,10 +111,14 @@ namespace vknn {
                     });
                 });
                 const bool    quad        = ms.size() == 2 && ms[kPwFlatKernelQuad] < ms[kPwFlatKernelScalar] * vk::kTuneRaceMargin;
+                const int     kernel      = quad ? kPwFlatKernelQuad : kPwFlatKernelScalar;
                 if (env.weights)
                 {
-                    env.weights->setTuned(sig, quad ? kPwFlatKernelQuad : kPwFlatKernelScalar, (int) env.tuning);
+                    env.weights->setTuned(sig, kernel, (int) env.tuning);
                 }
+                // Also memoized, so a session with no weight cache answers the next unit carrying
+                // this signature from the verdict instead of racing it again.
+                QuadVerdictMemo::store(sig, env.tuning, kernel);
                 VKNN_DEBUG << "autotune " << sig << " -> " << (quad ? "quad" : "scalar") << vk::raceTimes(ms);
                 return quad;
             }
@@ -141,7 +163,7 @@ namespace vknn {
                 // The rounding discipline is compiled in: "_rx" = fp32-chained (pw_relax units),
                 // base name = strict per-step-rounded.
                 bool       relax = node.attr.geti("pw_relax", 0) != 0;
-                const bool quad  = flat && pickFlatQuad(env, spec, relax, plan.numSteps);
+                const bool quad  = flat && pickFlatQuad(node, env, spec, relax, plan);
                 units            = quad ? (total + kPwFlatQuad - 1) / kPwFlatQuad : total;
                 items            = flat::itemsPerLane(units, env); // device-probe consult happens at load, never at record
                 std::string base = flat ? (quad ? "fused_pw_flat_v4" : "fused_pw_flat") : "fused_pw_nc4";
