@@ -29,6 +29,9 @@
 // weight sum l}. Mirrors the host scratch allocation rows * chunks * (hd + FA_PART_HDR)
 // (kFaPartialHeaderFloats, src/backend/vulkan/ops/fused_attention.cpp); the two must
 // change together or every partial lands in the wrong chunk slot with plausible values.
+// Header slot of the chunk weight sum l; the chunk max m sits at the record base.
+// Mirrors FA_PART_L in shaders/fused_attention_combine.comp, which reads these records.
+#define FA_PART_L 1
 #define FA_PART_HDR 2
 layout(constant_id = 0) const int G = 1;
 layout(constant_id = 1) const int HD = 64;
@@ -246,7 +249,7 @@ void main() {
       for (int gi = 0; gi < G; ++gi) {
         int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
         part[pBase] = rowMax[gi];
-        part[pBase + 1] = rowSum[gi];
+        part[pBase + FA_PART_L] = rowSum[gi];
       }
     }
     for (int i = tid; i < G * HD4; i += WGS) {
@@ -255,10 +258,10 @@ void main() {
       vec4 outAcc = vec4(0.0);
       for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD4 + nw];
       int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
-      part[pBase + 2 + 4 * nw] = outAcc.x;
-      part[pBase + 2 + 4 * nw + 1] = outAcc.y;
-      part[pBase + 2 + 4 * nw + 2] = outAcc.z;
-      part[pBase + 2 + 4 * nw + 3] = outAcc.w;
+      part[pBase + FA_PART_HDR + 4 * nw] = outAcc.x;
+      part[pBase + FA_PART_HDR + 4 * nw + 1] = outAcc.y;
+      part[pBase + FA_PART_HDR + 4 * nw + 2] = outAcc.z;
+      part[pBase + FA_PART_HDR + 4 * nw + 3] = outAcc.w;
     }
   } else {
     int n = tid % HD;
@@ -293,7 +296,7 @@ void main() {
       for (int gi = 0; gi < G; ++gi) {
         int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
         part[pBase] = rowMax[gi];
-        part[pBase + 1] = rowSum[gi];
+        part[pBase + FA_PART_L] = rowSum[gi];
       }
     }
     for (int i = tid; i < G * HD; i += WGS) {
@@ -302,7 +305,7 @@ void main() {
       float outAcc = 0.0;
       for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD + n].x;
       int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
-      part[pBase + 2 + n] = outAcc;
+      part[pBase + FA_PART_HDR + n] = outAcc;
     }
   }
 }

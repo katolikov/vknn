@@ -330,7 +330,7 @@ namespace vknn {
     // grid/flow algebra computes and stores at fp32 while image tensors stay at the session
     // precision. A hop whose producer is neither transparent nor flat stays unpinned (the NC4HW4
     // conv family has no fp32 kernels); markFp32's frontier converts bridge that boundary. This is
-    // the coordinate pin the session runs; it subsumes pinGridSampleGridFp32 below.
+    // the coordinate pin the session runs.
     // Pin the operand cone and the output of every DISCONTINUOUS step to fp32 storage: a Cast to
     // an integer target, and the stepping unaries (Floor/Ceil/Round/Trunc/Sign). Such an op maps an
     // interval to one value and jumps at the boundary, so a storage rounding that crosses a
@@ -346,14 +346,6 @@ namespace vknn {
 
     void pinSampleCoordFp32(Graph &g);
 
-    // Pin only the plain (non-warp) GPU GridSample's runtime grid, and the flat passthrough chain
-    // feeding it, to fp32 storage. The grid holds normalized sampling coordinates whose fp16
-    // quantization drifts the sample point by up to ~0.5 px at a 1920-wide input (a direct warp/UV
-    // quality loss); the shader decodes the grid at its storage precision via the GRID_FP32 spec
-    // constant. The narrow form of pinSampleCoordFp32: it seeds the same grid operand but walks
-    // only ConvertLayout hops, and it skips the warp variant's flow entirely. Exercised by the unit
-    // tests; the session runs pinSampleCoordFp32 instead.
-    void pinGridSampleGridFp32(Graph &g);
 
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into
     // ONE strided gather: the consumer reads the chain's source through the composed per-axis map

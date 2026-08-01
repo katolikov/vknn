@@ -72,7 +72,7 @@ namespace vknn {
     }
 
     /// GRID_FP32 for the plain kernel: a CONSTANT grid is uploaded fp32 by the op itself, and a
-    /// runtime grid binds its own activation buffer — fp32 exactly when pinGridSampleGridFp32
+    /// runtime grid binds its own activation buffer — fp32 exactly when pinSampleCoordFp32
     /// pinned its storage.
     inline bool gridSampleGridWordsFp32(bool gridIsInitializer, bool gridStoreFp32) {
         return gridIsInitializer || gridStoreFp32;

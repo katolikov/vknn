@@ -2,7 +2,7 @@
 // carries normalized COORDINATES, where fp16 quantization costs up to ~0.5 px at 1920-wide inputs, so it
 // is kept at fp32 wherever the storage allows: a CONSTANT grid always uploads fp32, and a RUNTIME grid
 // (the optical-flow warps) binds its flat activation buffer via operandBuf — fp32 when
-// pinGridSampleGridFp32 pinned its storage, else the fp16 bytes it was stored in. The shader reads the
+// pinSampleCoordFp32 pinned its storage, else the fp16 bytes it was stored in. The shader reads the
 // grid as raw words and decodes per the GRID_FP32 spec constant, so the binding is correct either way.
 // The layout pass keeps the grid flat (it can't be NC4HW4-packed with its channels-last [.,.,.,2] shape).
 //

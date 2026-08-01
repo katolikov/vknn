@@ -127,8 +127,11 @@ namespace vknn {
                 int64_t Cb = cBlocks(x.c), HW = x.h * x.w;
                 // Lane counts: the scalar kernel runs one lane per NC4 lane-quad (both directions);
                 // the quad twin one lane per kClayoutQuad consecutive flat elements.
-                const int64_t scalarLanes = x.n * Cb * HW;
-                const int64_t flatTotal   = x.n * x.c * HW;
+                // Both kernels index their buffers with int32 lane and element arithmetic, so the
+                // extents enter the same element-count contract the rest of the flat family
+                // enforces: a named refusal at load rather than a silent wrap at dispatch.
+                const int64_t scalarLanes = flatElementCount(x.n * Cb * HW, "ConvertLayout NC4HW4 lane count");
+                const int64_t flatTotal   = flatElementCount(x.n * x.c * HW, "ConvertLayout flat element count");
                 quadKernel                = pickClayoutQuad(node, env, flatTotal, packedElems(shape), scalarLanes);
                 count                     = (uint32_t) (quadKernel ? (flatTotal + kClayoutQuad - 1) / kClayoutQuad : scalarLanes);
                 // Workgroup width rides spec constant 0, resolved at load (env.flatLocalSize); the
