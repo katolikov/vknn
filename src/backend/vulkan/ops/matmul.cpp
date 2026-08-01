@@ -147,9 +147,9 @@ namespace vknn {
                     quantShader = "lowp_quant_fp8";
                     gemmShader  = "coopmat_gemm_fp8";
                 }
-                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC));
-                coopQuantPipe  = env.pipeline(quantShader, 3, sizeof(int));
-                pipe           = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {}, /*requiredSubgroupSize=*/32);
+                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC), std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
+                coopQuantPipe = env.pipeline(quantShader, 3, sizeof(int));
+                pipe          = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {}, /*requiredSubgroupSize=*/32);
             }
 
             void recordCoopmat(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {

@@ -34,6 +34,10 @@ namespace {
         width = width / subgroupSize * subgroupSize;
         return width != 0u ? width : subgroupSize;
     }
+    // What laneWidthPow2For() resolves: the same family width, then clamped DOWN to a power of two.
+    uint32_t familyWidthPow2For(uint32_t ceiling, uint32_t maxWorkGroupInvocations, uint32_t subgroupSize) {
+        return flat::reductionTreeWidth(familyWidthFor(ceiling, maxWorkGroupInvocations, subgroupSize));
+    }
 } // namespace
 
 // The defect the clamp exists for: a conformant device reporting a 192-invocation limit with
@@ -96,6 +100,37 @@ TEST(ReductionTreeWidth, ClampIsTheLargestCoveringWidth) {
         for (uint32_t bigger = treeWidth + 1u; bigger <= width; ++bigger)
         {
             ASSERT_FALSE(flat::halvingFoldCoversEveryLane(bigger)) << "width " << width << " candidate " << bigger;
+        }
+    }
+}
+
+// A workgroup width is only usable if the device can actually launch it. Vulkan guarantees
+// maxComputeWorkGroupInvocations >= 128 and nothing more, so a kernel that declares a literal 256
+// cannot be created at all on a conformant device at that floor -- a hard pipeline-creation
+// failure, not a wrong answer. Every reduction kernel takes its width from laneWidthPow2For, which
+// has to satisfy both constraints at once: within the device's limit, and a power of two so the
+// halving fold reaches lane zero.
+TEST(ReductionTreeWidth, WidthIsLaunchableAndFoldsAtTheVulkanFloor) {
+    // The floor a conformant device may report.
+    constexpr uint32_t kVulkanMinWorkGroupInvocations = 128u;
+    for (uint32_t subgroup: {16u, 32u, 64u, 128u})
+    {
+        const uint32_t width = familyWidthPow2For(/*ceiling=*/256u, kVulkanMinWorkGroupInvocations, subgroup);
+        EXPECT_LE(width, kVulkanMinWorkGroupInvocations) << "subgroup " << subgroup << ": a width above the device limit fails pipeline creation";
+        EXPECT_GT(width, 0u) << "subgroup " << subgroup;
+        EXPECT_TRUE(flat::halvingFoldCoversEveryLane(width)) << "subgroup " << subgroup;
+    }
+}
+
+// The same across the whole range a device may report, not just the floor.
+TEST(ReductionTreeWidth, WidthNeverExceedsTheReportedInvocationLimit) {
+    for (uint32_t limit = 128u; limit <= 1024u; limit += 32u)
+    {
+        for (uint32_t subgroup: {16u, 32u, 64u, 128u})
+        {
+            const uint32_t width = familyWidthPow2For(256u, limit, subgroup);
+            EXPECT_LE(width, limit) << "limit " << limit << " subgroup " << subgroup;
+            EXPECT_TRUE(flat::halvingFoldCoversEveryLane(width)) << "limit " << limit << " subgroup " << subgroup;
         }
     }
 }

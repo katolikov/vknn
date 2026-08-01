@@ -8,7 +8,13 @@
 // workgroup per (n, channel-block) folds that block's `groups` vec4 partial sums, divides by H*W,
 // runs any fused pointwise epilogue, and stores the four packed channels.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+// Reduction-scratch ceiling; must be >= the spec-0 width. The host specializes this kernel with
+// flat::laneWidthPow2For (ops/flat_ops.h), which clamps the family ceiling to the device's
+// maxComputeWorkGroupInvocations and rounds DOWN to a power of two, so the width never exceeds this
+// bound and the halving fold below covers every lane. A literal width would exceed the Vulkan
+// guaranteed minimum of 128 invocations and fail pipeline creation on a conformant device.
+#define POOL_WG_MAX 256
+layout(local_size_x = POOL_WG_MAX, local_size_x_id = 0) in; // spec 0 = device-resolved pow2 width
 layout(std430, binding = 0) readonly  buffer P { vec4 part[]; };
 layout(std430, binding = 1) writeonly buffer Dst { STORE dst[]; };
 layout(push_constant) uniform PC { int N, C, H, W, groups; } pc;
@@ -25,12 +31,12 @@ void main() {
   uint t  = gl_LocalInvocationID.x;
 
   vec4 acc = vec4(0.0);
-  for (int gi = int(t); gi < pc.groups; gi += 256) {
+  for (int gi = int(t); gi < pc.groups; gi += int(gl_WorkGroupSize.x)) {
     acc += part[ncb * uint(pc.groups) + uint(gi)];
   }
   red[t] = acc;
   barrier();
-  for (uint s = 128u; s > 0u; s >>= 1) {
+  for (uint s = gl_WorkGroupSize.x / 2u; s > 0u; s >>= 1) {
     if (t < s) red[t] += red[t + s];
     barrier();
   }

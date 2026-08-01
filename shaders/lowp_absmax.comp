@@ -10,7 +10,13 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
-layout(local_size_x = 256) in;
+// Reduction-scratch ceiling; must be >= the spec-0 width. The host specializes this kernel with
+// flat::laneWidthPow2For (ops/flat_ops.h), which clamps the family ceiling to the device's
+// maxComputeWorkGroupInvocations and rounds DOWN to a power of two, so the width never exceeds this
+// bound and the halving fold below covers every lane. A literal width would exceed the Vulkan
+// guaranteed minimum of 128 invocations and fail pipeline creation on a conformant device.
+#define ABSMAX_WG_MAX 256
+layout(local_size_x = ABSMAX_WG_MAX, local_size_x_id = 0) in; // spec 0 = device-resolved pow2 width
 
 layout(std430, binding = 0) readonly buffer Src { float16_t src[]; };
 layout(std430, binding = 1) writeonly buffer Scales { float scales[]; };
@@ -20,16 +26,16 @@ layout(push_constant) uniform PC {
 }
 pc;
 
-shared float partials[256];
+shared float partials[ABSMAX_WG_MAX];
 
 void main() {
   float localMax = 0.0;
-  for (uint i = gl_LocalInvocationID.x; i < uint(pc.total); i += 256u) {
+  for (uint i = gl_LocalInvocationID.x; i < uint(pc.total); i += gl_WorkGroupSize.x) {
     localMax = max(localMax, abs(float(src[i])));
   }
   partials[gl_LocalInvocationID.x] = localMax;
   barrier();
-  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+  for (uint stride = gl_WorkGroupSize.x / 2u; stride > 0u; stride >>= 1u) {
     if (gl_LocalInvocationID.x < stride) {
       partials[gl_LocalInvocationID.x] = max(partials[gl_LocalInvocationID.x], partials[gl_LocalInvocationID.x + stride]);
     }

@@ -7,7 +7,13 @@
 // a large plane); fanning the plane across many workgroups fills it. Pass 2 (avgpool_combine) folds the
 // partials, divides by H*W, and runs the epilogue.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+// Reduction-scratch ceiling; must be >= the spec-0 width. The host specializes this kernel with
+// flat::laneWidthPow2For (ops/flat_ops.h), which clamps the family ceiling to the device's
+// maxComputeWorkGroupInvocations and rounds DOWN to a power of two, so the width never exceeds this
+// bound and the halving fold below covers every lane. A literal width would exceed the Vulkan
+// guaranteed minimum of 128 invocations and fail pipeline creation on a conformant device.
+#define POOL_WG_MAX 256
+layout(local_size_x = POOL_WG_MAX, local_size_x_id = 0) in; // spec 0 = device-resolved pow2 width
 layout(std430, binding = 0) readonly  buffer Src { STORE src[]; };
 layout(std430, binding = 1) writeonly buffer P { vec4 part[]; };
 layout(push_constant) uniform PC { int N, C, H, W, groups; } pc;
@@ -31,13 +37,13 @@ void main() {
 
   uint t = gl_LocalInvocationID.x;
   vec4 acc = vec4(0.0);
-  for (int i = start + int(t); i < end; i += 256) {
+  for (int i = start + int(t); i < end; i += int(gl_WorkGroupSize.x)) {
     int idx = base + i * 4;
     acc += vec4(float(src[idx]), float(src[idx + 1]), float(src[idx + 2]), float(src[idx + 3]));
   }
   red[t] = acc;
   barrier();
-  for (uint s = 128u; s > 0u; s >>= 1) {
+  for (uint s = gl_WorkGroupSize.x / 2u; s > 0u; s >>= 1) {
     if (t < s) red[t] += red[t + s];
     barrier();
   }
