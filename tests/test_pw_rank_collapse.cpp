@@ -822,3 +822,51 @@ TEST(PwRankCollapse, RankFourGraphGainsNoCollapseViews) {
         EXPECT_EQ(td.name.find("#pwrc"), std::string::npos) << "rank-4 runs must gain no collapse tensors";
     }
 }
+
+// A grouped constant whose SOURCE survives the collapse shares one payload with it.
+//
+// When the collapse consumes the source's last reference the pass moves the bytes, so nothing is
+// duplicated. The case that costs memory is the source outliving the view: a reader outside the
+// region, or a second grouping wanting the same constant at another shape. Those two tensors differ
+// only in shape, so they must point at one allocation rather than each holding a copy of every
+// weight byte for the life of the compile.
+TEST(PwRankCollapse, GroupedConstantSharesItsSourcePayloadWhenBothSurvive) {
+    // The mask shape this suite documents as producing a grouped copy: [N,V,1,1,W] against
+    // [N,V,C,H,W] regroups to [N*V, 1, W], so the collapse genuinely needs the constant at a second
+    // shape.
+    MaskChain chain = buildConstMaskChain(kRun5, {{kRunN, kRunV, kBcast, kBcast, kRunW}});
+    Graph    &g     = chain.g;
+    ASSERT_FALSE(chain.masks.empty());
+    const TensorId mask = chain.masks.front();
+
+    // The constant is also a graph output, which attachGroupedConstantPayloads counts as a live
+    // reference (it mirrors pruneDeadInitializers' reachability). The collapse therefore cannot
+    // move the payload away, and both shapes must coexist -- the case that used to cost a full
+    // duplicate of every byte. A pointwise consumer would not do: the fuser absorbs it into the
+    // region and the reference disappears with it.
+    g.outputs.push_back(mask);
+
+    inferShapes(g, 1);
+    fusePointwiseChains(g, /*strictFuse*/ false);
+
+    ASSERT_NE(findFusedPointwise(g), nullptr) << "the rank-5 region must collapse and fuse";
+    ASSERT_TRUE(g.isInitializer(mask)) << "the source must survive: a node outside the region reads it";
+
+    const ByteStorage &sourceBytes = g.initializers.at(mask).bytes;
+    const uint8_t     *sourceData  = sourceBytes.data();
+    int                shared = 0, copied = 0;
+    for (const auto &entry: g.initializers)
+    {
+        if (entry.first == mask || entry.second.bytes.size() != sourceBytes.size())
+        {
+            continue;
+        }
+        const ByteStorage &other = entry.second.bytes;
+        if (std::equal(other.begin(), other.end(), sourceBytes.begin()))
+        {
+            (other.data() == sourceData) ? ++shared : ++copied;
+        }
+    }
+    EXPECT_GT(shared, 0) << "the grouped constant must share the source allocation";
+    EXPECT_EQ(copied, 0) << "no tensor may hold a duplicate of the source payload";
+}

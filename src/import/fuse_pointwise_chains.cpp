@@ -1014,7 +1014,21 @@ namespace vknn {
                     g.initializers.erase(source);
                 } else
                 {
-                    g.initializers[view] = g.initializers.at(source);
+                    // The source outlives this view — another grouping wants it at a different
+                    // shape, or a reader outside the region still names it. The two tensors differ
+                    // only in shape, so they SHARE one payload: a copy would duplicate every weight
+                    // byte in host memory and again in the artifact. Both sides stay
+                    // copy-on-write, so a later mutation on either takes its own copy.
+                    auto shared = g.initializers.at(source).bytes.shareBytes();
+                    if (shared)
+                    {
+                        g.initializers[view].bytes.setSharedBytes(std::move(shared));
+                    } else
+                    {
+                        // File-backed or empty: copying the buffer already copies a handle, not
+                        // bytes.
+                        g.initializers[view] = g.initializers.at(source);
+                    }
                 }
             }
         }
