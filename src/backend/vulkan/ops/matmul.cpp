@@ -154,10 +154,9 @@ namespace vknn {
                 // fold needs a power of two, and a literal 256 exceeds the 128 invocations Vulkan
                 // guarantees. The GEMM keeps main's native-wave pinning, which is a different
                 // question -- the cooperative-matrix shapes are defined per subgroup width.
-                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC),
-                                              std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
-                coopQuantPipe  = env.pipeline(quantShader, 3, sizeof(int));
-                pipe           = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {coopWidth}, /*requiredSubgroupSize=*/coopWidth);
+                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC), std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
+                coopQuantPipe = env.pipeline(quantShader, 3, sizeof(int));
+                pipe          = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {coopWidth}, /*requiredSubgroupSize=*/coopWidth);
             }
 
             void recordCoopmat(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
