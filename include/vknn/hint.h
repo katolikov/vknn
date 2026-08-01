@@ -23,17 +23,25 @@ namespace vknn {
                           ///< structurally eligible KxK conv (fp16, batch 1, group 1, non-pointwise; an
                           ///< explicit DirectConv3x3 kernel force still wins); Off disables both the
                           ///< general and the 1x1 split-K paths.
-        CoopmatGemm = 11, ///< Cooperative-matrix MatMul routing (Auto / On / Off / Fp8 / Int8Coop,
-                          ///< default Auto). Requires VK_KHR_cooperative_matrix with an enumerated
-                          ///< subgroup-scope 16x16x16 row, pinnable 32-wide subgroups and the Vulkan
-                          ///< memory model; a device without them runs the SSBO kernels unchanged at
-                          ///< every value. Auto/On route eligible fp16 GEMMs (dense 2-D, batch 1,
-                          ///< M,N multiples of 32, K multiple of 16, no view/bias/epilogue) through
-                          ///< the fp16-operand fp32-accumulator coopmat kernel after a one-time
-                          ///< on-device exact self-check. Fp8 / Int8Coop additionally quantize the
-                          ///< A operand per-dispatch (per-tensor absmax scale) against a host-
-                          ///< quantized weight operand - opt-in low-precision fast paths, never a
-                          ///< default, numerics differ from the fp16 path by construction.
+        CoopmatGemm = 11, ///< Cooperative-matrix routing for GEMM-shaped work (Auto / On / Off /
+                          ///< Fp8 / Int8Coop, default Auto). Requires VK_KHR_cooperative_matrix
+                          ///< with an enumerated subgroup-scope 16x16x16 row, the Vulkan memory
+                          ///< model, and the device's native compute subgroup width (32 or 64)
+                          ///< pinnable via VK_EXT_subgroup_size_control - the kernels take that
+                          ///< width as a spec constant and pin it, so the fragment shapes never
+                          ///< shift under a driver heuristic. A device without the set runs the
+                          ///< SSBO kernels unchanged at every value. Auto/On route (a) eligible
+                          ///< fp16 GEMMs (dense 2-D, batch 1, M,N multiples of 32, K multiple of
+                          ///< 16, no view/bias/epilogue) through the direct-load coopmat kernel
+                          ///< and (b) eligible fp16 group-1 convs (M=OH*OW, N=Cout, K=Cin*KH*KW
+                          ///< at or above one 32x32x16 tile; no fused residual or pointwise
+                          ///< epilogue) through the staged implicit-GEMM kernel (conv_gemm_cm) -
+                          ///< each after its own one-time on-device exact self-check
+                          ///< (coopmat_check.cpp). Fp8 / Int8Coop additionally quantize the
+                          ///< MatMul A operand per-dispatch (per-tensor absmax scale) against a
+                          ///< host-quantized weight operand - opt-in low-precision fast paths,
+                          ///< never a default, numerics differ from the fp16 path by
+                          ///< construction; the conv route treats them as Auto.
         KvCacheQuant = 12, ///< Int8 KV-cache storage (Auto / On / Off, DEFAULT OFF). On stores
                            ///< the engine-resident decode KV cache as symmetric int8 with one
                            ///< fp16 scale per (token, head) row: the resident-link fold

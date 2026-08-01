@@ -76,7 +76,10 @@ namespace vknn {
             // Cooperative-matrix path (Hint::CoopmatGemm; routing rule in core/lowp_gemm.h).
             // Fp16 binds the operands directly; the opt-in low-precision kinds add a per-run
             // A-quantization prelude (absmax -> quant) and a host-quantized weight operand.
-            CoopmatGemmKind                      coopKind = CoopmatGemmKind::None;
+            // coopWidth is the device's pinned subgroup width (32/64), passed to every coopmat
+            // pipeline as spec constant 0 and as requiredSubgroupSize.
+            CoopmatGemmKind                      coopKind  = CoopmatGemmKind::None;
+            uint32_t                             coopWidth = 0;
             std::shared_ptr<vk::ComputePipeline> coopAbsmaxPipe, coopQuantPipe;
             std::shared_ptr<vk::Buffer>          coopWeights; // e4m3/int8 codes of the B initializer
             std::shared_ptr<vk::Buffer>          coopScales;  // [0] sA (device-written), [1] sB (host-written)
@@ -102,7 +105,7 @@ namespace vknn {
                 coopPc         = {pc.M, pc.N, pc.K};
                 if (coopKind == CoopmatGemmKind::Fp16)
                 {
-                    pipe = env.pipeline("coopmat_gemm", 3, sizeof(CoopGemmPC), {}, /*requiredSubgroupSize=*/32);
+                    pipe = env.pipeline("coopmat_gemm", 3, sizeof(CoopGemmPC), {coopWidth}, /*requiredSubgroupSize=*/coopWidth);
                     return;
                 }
                 const bool  fp8     = coopKind == CoopmatGemmKind::Fp8;
@@ -147,9 +150,14 @@ namespace vknn {
                     quantShader = "lowp_quant_fp8";
                     gemmShader  = "coopmat_gemm_fp8";
                 }
-                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC), std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
-                coopQuantPipe = env.pipeline(quantShader, 3, sizeof(int));
-                pipe          = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {}, /*requiredSubgroupSize=*/32);
+                // The absmax reduction takes the caps-derived power-of-two family width: its halving
+                // fold needs a power of two, and a literal 256 exceeds the 128 invocations Vulkan
+                // guarantees. The GEMM keeps main's native-wave pinning, which is a different
+                // question -- the cooperative-matrix shapes are defined per subgroup width.
+                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC),
+                                              std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
+                coopQuantPipe  = env.pipeline(quantShader, 3, sizeof(int));
+                pipe           = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {coopWidth}, /*requiredSubgroupSize=*/coopWidth);
             }
 
             void recordCoopmat(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -540,14 +548,9 @@ namespace vknn {
                 // Hint::CoopmatGemm value and the shape (core/lowp_gemm.h). A one-time on-device
                 // exact self-check guards the kernel's fragment mapping before the first use.
                 {
-                    const auto     &cap = env.ctx->caps();
-                    CoopmatGemmCaps cmCaps;
-                    cmCaps.coopmatFp16Fp32Row16 = cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_FLOAT16_KHR, (uint32_t) VK_COMPONENT_TYPE_FLOAT32_KHR);
-                    cmCaps.coopmatFp8Fp32Row16 = cap.shaderFloat8CoopMat && cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT, (uint32_t) VK_COMPONENT_TYPE_FLOAT32_KHR);
-                    cmCaps.coopmatI8I32Row16 = cap.hasCoopmatShape(16, 16, 16, (uint32_t) VK_COMPONENT_TYPE_SINT8_KHR, (uint32_t) VK_COMPONENT_TYPE_SINT32_KHR);
-                    cmCaps.wave32Pinnable = cap.subgroupSizeControl && cap.requiredSubgroupSizeCompute && cap.minSubgroupSize <= 32u && 32u <= cap.maxSubgroupSize;
-                    cmCaps.vulkanMemoryModel = cap.vulkanMemoryModel;
-                    cmCaps.selfCheckPassed   = true; // provisionally; the on-device check runs below only when the rule matches
+                    const auto     &cap    = env.ctx->caps();
+                    CoopmatGemmCaps cmCaps = fillCoopmatGemmCaps(cap);
+                    coopWidth              = coopmatSubgroupWidth(cmCaps);
                     // A virtualized operand keeps the SSBO kernels: the coopmat kernels load dense
                     // packed panels and have no physical-row-stride parameter.
                     const bool denseRank2Batch1 = !hasView && !aWas1D && !bWas1D && aRowPad == 0 && bRowPad == 0 && M > 0 && N > 0 && pc.total == (int) (M * N);

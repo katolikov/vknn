@@ -63,3 +63,58 @@ pool slot paid a full memory barrier.
   enumerated rows, fp8 features, integer-dot-product acceleration bits (the acceleration bits
   gate any future int8-dot kernel per the standing rule: the feature bit alone only proves the
   opcodes exist, not that they are fast).
+
+## Amendment (2026-07-30): global tile core, native-wave pinning, conv consumer
+
+### Native subgroup width instead of a fixed wave32
+The routing prerequisite "pinnable 32-wide subgroups" becomes "the device's native compute
+subgroup width (32 or 64), pinnable". `CoopmatGemmCaps` carries `subgroupWidth` (from
+`VkPhysicalDeviceSubgroupProperties`) and `widthPinnable`; `coopmatSubgroupWidth()` returns the
+width every coopmat pipeline and self-check must create with - as specialization constant 0
+(`local_size_x_id = 0`) and as `requiredSubgroupSize`. The device's own width is pinned directly;
+there is no preference ladder between 32 and 64. RDNA-class drivers run compute at either width,
+and the coopmat fragment ops are subgroup-scope, so the tile math is width-independent; staged
+kernels stride their panel-fill and scatter loops by `gl_WorkGroupSize.x`.
+
+### Shared staged-tile core: shaders/coopmat_tile.glsl
+A shared include provides the 32x32x16 staged tile machinery for kernels whose operands are not
+dense row-major fp16 in global memory: fp16 LDS panels `cmA[k][m]` (k-major, so NC4HW4/im2col/
+dequant gathers land without a transpose) and `cmB[k][n]`, an fp32 accumulator tile `cmD[m][n]`
+(bias/act apply before the single TO_STORE narrowing), and the fragment loop
+(`coopTileAccClear` / `coopTileStep` / `coopTileStoreAcc`) as a 2x2 grid of 16x16x16 fragments
+per pinned subgroup. Out-of-range panel entries stage as zero, so ragged edges mask only at the
+scatter - staged consumers need no %32 shape alignment. The direct-load `coopmat_gemm.comp`
+keeps its own body.
+
+### Conv consumer: conv_gemm_cm.comp
+The implicit-GEMM conv (`out[m, oc] = sum_k patch(m, k) * Wt[k, oc]`) on the staged core: the
+conv_gemm A-panel gather (aligned channel-block fast path, per-element edge decode) fills cmA,
+the B panel reads the same `[K][Cout]` "#gemmw" weight cache entry conv_gemm binds. One kernel
+serves every routed group-1 conv - 1x1 included, where the gather degenerates to a channel read.
+Routing (`coopmatConvRoute`, core/lowp_gemm.h) is deterministic - caps + Hint::CoopmatGemm +
+GEMM-view floors (M, N >= 32, K >= 16) - and preempts the Winograd decision and every SSBO race;
+fused-residual and pointwise-epilogue chains keep the SSBO kernels. Gated by its own on-device
+self-check (`coopmatConvGemmSelfCheckPassed`: ragged 36x22x54 integer conv with a C % 4 != 0
+channel count so both A-gather bodies run live, byte-compared to a
+host NC4HW4 oracle) memoized per (VkDevice, kernel) alongside the GEMM verdict; the capability
+mirror is filled once in `fillCoopmatGemmCaps` (coopmat_check.cpp), shared by MatMul and Conv.
+
+### Survey: remaining coopmat candidates (from the kernel census)
+- `matmul_tiled*` prefill GEMMs: DIRECT fit for the aligned subset (already served); ragged
+  edges/bias/epilogue need the staged core - candidate follow-up.
+- `matmul_tiled_i4/_i8/_lut4` (quantized prefill): dequant-to-LDS already produces a dense fp16
+  B panel; the post-barrier micro-kernel is a drop-in `coopTileStep` target - candidate.
+- `wino_gemm_fp16`: dense per-position GEMM, but K packs 4 input channels per vec4 lane;
+  requires k-scalar staging (or a k-scalar V/U emission) - candidate.
+- POOR fits (stay SSBO): every GEMV/decode kernel (M == 1), fused attention decode (M = G <= 8),
+  the bit-exact direct-race conv kernels (tap-skip accumulation order is contractual),
+  `wino_fused2`/`wino_full` (per-tile granularity), split-K reduces (not contractions).
+
+### Consequences
+- Still no cooperative-matrix device in the fleet (both Xclipse phones re-probed 2026-07-30:
+  extension absent); both new kernels compile and their routing unit-tests, and the per-kernel
+  self-checks are the first-use gate on real hardware. Byte-neutrality on non-coopmat devices
+  verified per model against main on both test devices.
+- New shader + include: `conv_gemm_cm.comp`, `coopmat_tile.glsl`. New routing surface:
+  `coopmatConvRoute`, `coopmatSubgroupWidth`, `CoopmatGemmCaps.subgroupWidth/widthPinnable`
+  (replacing `wave32Pinnable`).

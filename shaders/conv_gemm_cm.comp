@@ -1,0 +1,140 @@
+#version 450
+#define VKNN_NO_RTE 1 // gemm family avoids the float-controls execution mode (miscompiled by some drivers)
+// Cooperative-matrix implicit-GEMM convolution: the conv_gemm.comp contraction
+// (out[m, oc] = sum_k patch(m, k) * Wt[k, oc], m = oy*OW + ox, k = (ky*KW + kx)*C + ic,
+// channel-fastest k) on 16x16x16 subgroup matrix tiles. One kernel serves every routed group-1
+// conv — 1x1 included, where the im2col gather degenerates to a plain channel read — so the
+// cooperative-matrix conv route needs no per-kernel-family variants.
+//
+// The A panel gathers the NC4HW4 patch exactly like conv_gemm (aligned channel-block fast path,
+// per-element decode on edge quads) into the k-major cmA staging tile; the B panel reads the same
+// [K][coutP] repacked weights conv_gemm binds ("#gemmw" — the two kernels share one weight cache
+// entry). The fragment loop, panel layouts and LDS live in coopmat_tile.glsl. K accumulates in
+// fp32 on the matrix units in a fixed 16-deep chunk order: deterministic on a device, fp16-floor
+// equivalent to Conv (the order differs from the SSBO kernels, same equivalence class as
+// conv_gemm itself). Bias/act apply to the fp32 tile at the scatter, one TO_STORE rounding, pad
+// lanes past Cout store zero — mirroring conv_gemm's store contract. Out-of-range panel entries
+// stage as zero, so ragged M/N/K edges need no %32 alignment from the routing rule.
+//
+// Dispatch: (ceil(Cout/COOP_TN), ceil(OH*OW/COOP_TM), N); the host sets spec constant 0 to the
+// device's native subgroup width (32/64), pins that width, and gates the route on the one-time
+// conv self-check (coopmat_check.cpp). The staging loops and the scatter stride by the width, so
+// wave64 devices split the same tile across twice the lanes.
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#include "coopmat_tile.glsl"
+
+layout(local_size_x = 32, local_size_x_id = 0) in; // spec 0 = the pinned subgroup width (32/64)
+layout(std430, binding = 0) readonly buffer Src { f16vec4 s[]; };    // NC4HW4 activations, one channel block per element
+layout(std430, binding = 1) readonly buffer Wt { float16_t w[]; };   // [K][coutP] repacked weights
+layout(std430, binding = 2) readonly buffer Bs { float16_t bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { float16_t d[]; }; // NC4HW4
+layout(push_constant) uniform PC {
+  int C, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW_;
+  int act, hasBias;
+  float actLo, actHi;
+  int coutP;
+} pc;
+
+void main() {
+  int M = pc.OH * pc.OW;
+  int K = pc.C * pc.KH * pc.KW;
+  int Cinb = (pc.C + 3) / 4, Coutb = (pc.Cout + 3) / 4;
+  int n = int(gl_WorkGroupID.z);
+  int tileM = int(gl_WorkGroupID.y) * COOP_TM;
+  int tileN = int(gl_WorkGroupID.x) * COOP_TN;
+  int tid = int(gl_LocalInvocationID.x);
+  int wgs = int(gl_WorkGroupSize.x); // spec-constant width: the strides below fold at pipeline build
+
+  coopTileAccClear();
+  for (int k0 = 0; k0 < K; k0 += COOP_TK) {
+    // A panel: gather COOP_TM patch rows for this K chunk from the NC4HW4 input (implicit
+    // im2col, conv_gemm's quad decode: each iteration owns one 4-aligned k quad of one row m).
+    for (int q = tid; q < COOP_TM * (COOP_TK / 4); q += wgs) {
+      int m = q >> 2;
+      int k = (q & 3) << 2;
+      int gm = tileM + m, gk = k0 + k;
+      int ic = (gk < K) ? gk % pc.C : 0;
+      // Fast path: quad fully in range, all 4 k in one tap's aligned channel block.
+      if (gm < M && gk + 3 < K && (ic & 3) == 0 && ic + 3 < pc.C) {
+        int p = gk / pc.C;
+        int ky = p / pc.KW, kx = p - ky * pc.KW;
+        int oy = gm / pc.OW, ox = gm - oy * pc.OW;
+        int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+        int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+        f16vec4 v = f16vec4(0.0);
+        if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W)
+          v = s[((n * Cinb + (ic >> 2)) * pc.H + iy) * pc.W + ix];
+        cmA[(k + 0) * COOP_TM + m] = v.x;
+        cmA[(k + 1) * COOP_TM + m] = v.y;
+        cmA[(k + 2) * COOP_TM + m] = v.z;
+        cmA[(k + 3) * COOP_TM + m] = v.w;
+      } else {
+        // Edge quad (M/K tail, or a quad straddling a channel block when C % 4 != 0).
+        for (int j = 0; j < 4; ++j) {
+          int gkj = gk + j;
+          float16_t v = float16_t(0.0);
+          if (gm < M && gkj < K) {
+            int icj = gkj % pc.C, pj = gkj / pc.C;
+            int ky = pj / pc.KW, kx = pj - ky * pc.KW;
+            int oy = gm / pc.OW, ox = gm - oy * pc.OW;
+            int iy = oy * pc.SH - pc.PT + ky * pc.DH;
+            int ix = ox * pc.SW - pc.PL + kx * pc.DW_;
+            if (iy >= 0 && iy < pc.H && ix >= 0 && ix < pc.W) {
+              f16vec4 blk = s[((n * Cinb + (icj >> 2)) * pc.H + iy) * pc.W + ix];
+              v = blk[icj & 3];
+            }
+          }
+          cmA[(k + j) * COOP_TM + m] = v;
+        }
+      }
+    }
+    // B panel: contiguous [K][coutP] rows, zero past K/Cout.
+    for (int t = tid; t < COOP_TK * COOP_TN; t += wgs) {
+      int k = t / COOP_TN, c = t % COOP_TN;
+      int gk = k0 + k, gc = tileN + c;
+      cmB[k * COOP_TN + c] = (gk < K && gc < pc.Cout) ? w[gk * pc.coutP + gc] : float16_t(0.0);
+    }
+    barrier();
+    coopTileStep();
+    barrier();
+  }
+  coopTileStoreAcc();
+  barrier();
+
+  // Scatter: the tile's COOP_TN columns are 8 aligned NC4HW4 channel blocks per output row. At
+  // width 32 each thread owns one row's 8 blocks; at width 64 two threads split a row (4 blocks
+  // each), so every lane stays busy. Bias/act on the fp32 tile, pad lanes past Cout store zero
+  // (the buffer pool reuses memory; a pad lane must never carry a stale value).
+  int colGroups = wgs / COOP_TM;                    // 1 (wave32) or 2 (wave64)
+  int blocksPerThread = (COOP_TN / 4) / colGroups;  // 8 or 4
+  int m = tileM + tid % COOP_TM;
+  int j0 = (tid / COOP_TM) * blocksPerThread;
+  if (m >= M) return;
+  int oy = m / pc.OW, ox = m - oy * pc.OW;
+  for (int j = j0; j < j0 + blocksPerThread; ++j) {
+    int oc0 = tileN + j * 4;
+    int ocb = oc0 >> 2;
+    if (ocb >= Coutb) break;
+    int mLocal = tid % COOP_TM;
+    vec4 v = vec4(cmD[mLocal * COOP_TN + j * 4 + 0], cmD[mLocal * COOP_TN + j * 4 + 1],
+                  cmD[mLocal * COOP_TN + j * 4 + 2], cmD[mLocal * COOP_TN + j * 4 + 3]);
+    if (pc.hasBias != 0) {
+      v += vec4(oc0 + 0 < pc.Cout ? float(bias[oc0 + 0]) : 0.0, oc0 + 1 < pc.Cout ? float(bias[oc0 + 1]) : 0.0,
+                oc0 + 2 < pc.Cout ? float(bias[oc0 + 2]) : 0.0, oc0 + 3 < pc.Cout ? float(bias[oc0 + 3]) : 0.0);
+    }
+    v = vec4(vx_act(v.x, pc.act, pc.actLo, pc.actHi), vx_act(v.y, pc.act, pc.actLo, pc.actHi),
+             vx_act(v.z, pc.act, pc.actLo, pc.actHi), vx_act(v.w, pc.act, pc.actLo, pc.actHi));
+    v = vec4(oc0 + 0 < pc.Cout ? v.x : 0.0, oc0 + 1 < pc.Cout ? v.y : 0.0,
+             oc0 + 2 < pc.Cout ? v.z : 0.0, oc0 + 3 < pc.Cout ? v.w : 0.0);
+    int di = ((n * Coutb + ocb) * pc.OH + oy) * pc.OW + ox;
+    d[(di << 2) + 0] = TO_STORE(v.x);
+    d[(di << 2) + 1] = TO_STORE(v.y);
+    d[(di << 2) + 2] = TO_STORE(v.z);
+    d[(di << 2) + 3] = TO_STORE(v.w);
+  }
+}
