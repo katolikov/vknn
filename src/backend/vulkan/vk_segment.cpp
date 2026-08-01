@@ -13,6 +13,7 @@
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
 #include "vknn/profiler.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>

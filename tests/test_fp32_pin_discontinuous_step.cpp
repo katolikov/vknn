@@ -12,6 +12,7 @@
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/unary_type.h"
+#include <cmath>
 #include <cstdint>
 #include <gtest/gtest.h>
 

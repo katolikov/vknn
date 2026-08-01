@@ -9,6 +9,7 @@
 #include "backend/vulkan/vk_cache_image.h"
 #include "backend/vulkan/vk_weight_cache.h"
 #include "core/cache_codec.h"
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

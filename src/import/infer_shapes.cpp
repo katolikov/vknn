@@ -3,6 +3,7 @@
 #include "core/slice_bounds.h"
 #include "dim_expr.h"
 #include "passes_internal.h"
+#include <algorithm>
 
 namespace vknn {
 
