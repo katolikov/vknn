@@ -348,3 +348,38 @@ TEST(PlanRetention, NonOperandStepReferencesKeepNothing) {
 
     EXPECT_TRUE(g.initializers.empty()) << "no step field named an operand, so both conv weights stay reclaimable";
 }
+
+// An op may resolve a constant operand on its FIRST record rather than in prepare -- flat Concat
+// parts and pointwise operands both do -- and that record runs after the reclaim. So the rule is an
+// allow-list of what may be dropped: only a weighted op reading a constant in a weight position is
+// known to be finished with the host bytes. A constant read by anything else is kept, whatever the
+// op is, including op types that did not exist when this rule was written.
+TEST(PlanRetention, ConstantReadByANonWeightedOpIsKept) {
+    for (OpType consumer: {OpType::Concat, OpType::Binary, OpType::Pad, OpType::Gather, OpType::Where})
+    {
+        Graph      g        = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
+        TensorId   constant = addInitializer(g, "lazy.operand", 8, 0.25f);
+        TensorDesc od;
+        od.name      = "lazy.out";
+        TensorId out = g.addTensor(od);
+        Node     nd;
+        nd.type    = consumer;
+        nd.name    = "reads_a_constant_at_record";
+        nd.inputs  = {g.nodes[0].outputs[0], constant};
+        nd.outputs = {out};
+        g.nodes.push_back(nd);
+        g.outputs.push_back(out);
+
+        applyReclaim(g, std::vector<bool>(g.nodes.size(), false));
+
+        EXPECT_EQ(g.initializers.count(constant), 1u) << "op type " << (int) consumer << " may materialize its constant while recording";
+    }
+}
+
+// The weighted ops are still reclaimed -- that is the whole point, and on a large model it is
+// gigabytes.
+TEST(PlanRetention, WeightedOpConstantsAreStillReclaimed) {
+    Graph g = makeFusedDwPwGraph(/*depthwiseElems=*/8 * 3 * 3, /*pointwiseElems=*/8 * 16);
+    applyReclaim(g, kSoleNodeOnGpu);
+    EXPECT_TRUE(g.initializers.empty()) << "a fused depthwise/pointwise node's weights upload in prepare";
+}
