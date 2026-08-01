@@ -38,8 +38,8 @@ namespace {
     // something to follow back toward the boundary input.
     Graph buildCastGraph(int64_t to, bool withMovementHop) {
         Graph    g;
-        TensorId x = addNamed(g, "x", /*isInput=*/true);
-        g.inputs   = {x};
+        TensorId x      = addNamed(g, "x", /*isInput=*/true);
+        g.inputs        = {x};
         TensorId castIn = x;
         if (withMovementHop)
         {
@@ -91,10 +91,10 @@ namespace {
 TEST(Fp32PinDiscontinuousStep, Fp16StorageMovesTheTruncationBoundary) {
     const float justUnderOne = 0.9998311f;
     // Round-trip through fp16 the way the flat storage path does.
-    const auto  asHalfBits   = [](float v) {
+    const auto asHalfBits = [](float v) {
         // Values in [0.5, 1.0) carry an 11-bit significand in fp16; rounding to nearest even at
         // that width is what the store performs.
-        const float scale   = 2048.0f; // 2^11, the significand step across [0.5, 1.0)
+        const float scale = 2048.0f; // 2^11, the significand step across [0.5, 1.0)
         return std::nearbyint(v * scale) / scale;
     };
     EXPECT_LT(justUnderOne, 1.0f);
@@ -108,10 +108,8 @@ TEST(Fp32PinDiscontinuousStep, IntegerTargetPinsTheCastOperand) {
     {
         Graph g = buildCastGraph(to, /*withMovementHop=*/false);
         pinDiscontinuousStepFp32(g);
-        EXPECT_TRUE(g.desc(g.nodes[0].inputs[0]).storeFp32)
-            << "the operand of a Cast to ONNX dtype " << to << " must carry full precision";
-        EXPECT_TRUE(g.desc(g.nodes[0].outputs[0]).storeFp32)
-            << "the truncated integer must survive storage, not round again";
+        EXPECT_TRUE(g.desc(g.nodes[0].inputs[0]).storeFp32) << "the operand of a Cast to ONNX dtype " << to << " must carry full precision";
+        EXPECT_TRUE(g.desc(g.nodes[0].outputs[0]).storeFp32) << "the truncated integer must survive storage, not round again";
     }
 }
 
@@ -151,12 +149,10 @@ TEST(Fp32PinDiscontinuousStep, PassIsIdempotent) {
 TEST(Fp32PinDiscontinuousStep, SteppingUnariesArePinnedToo) {
     for (UnaryType step: {UnaryType::Trunc, UnaryType::Floor, UnaryType::Ceil, UnaryType::Round, UnaryType::Sign})
     {
-        Graph    g = buildUnaryGraph(step);
+        Graph g = buildUnaryGraph(step);
         pinDiscontinuousStepFp32(g);
-        EXPECT_TRUE(g.desc(g.nodes[0].inputs[0]).storeFp32)
-            << "operand of Unary subOp " << (int) step << " must carry full precision";
-        EXPECT_TRUE(g.desc(g.nodes[0].outputs[0]).storeFp32)
-            << "result of Unary subOp " << (int) step << " must not round again";
+        EXPECT_TRUE(g.desc(g.nodes[0].inputs[0]).storeFp32) << "operand of Unary subOp " << (int) step << " must carry full precision";
+        EXPECT_TRUE(g.desc(g.nodes[0].outputs[0]).storeFp32) << "result of Unary subOp " << (int) step << " must not round again";
     }
 }
 
@@ -166,8 +162,7 @@ TEST(Fp32PinDiscontinuousStep, SmoothUnariesAreLeftAtSessionPrecision) {
     {
         Graph g = buildUnaryGraph(smooth);
         pinDiscontinuousStepFp32(g);
-        EXPECT_FALSE(g.desc(g.nodes[0].inputs[0]).storeFp32)
-            << "Unary subOp " << (int) smooth << " does not need the pin";
+        EXPECT_FALSE(g.desc(g.nodes[0].inputs[0]).storeFp32) << "Unary subOp " << (int) smooth << " does not need the pin";
         EXPECT_FALSE(g.desc(g.nodes[0].outputs[0]).storeFp32);
     }
 }

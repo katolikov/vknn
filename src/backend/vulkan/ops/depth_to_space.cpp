@@ -37,7 +37,7 @@ namespace vknn {
                 // element for the flat kernel, one per output NC4HW4 block-pixel for the packed one.
                 const int64_t flatLanes   = (int64_t) x.n * C2 * OH * OW;
                 const int64_t packedLanes = (int64_t) x.n * cBlocks(C2) * OH * OW;
-                plan                      = planDepthToSpaceDispatch(depthToSpaceIsNc4(*env.graph, node), packedLanes, flatLanes);
+                plan = planDepthToSpaceDispatch(depthToSpaceIsNc4(*env.graph, node), packedLanes, flatLanes);
                 // Both counts are narrowed into an int push-constant field, so both are checked; the
                 // packed count is the flat count over the NC4HW4 block width, so the flat one binds.
                 if (!flat::dispatchExtentFits(flatLanes) || !flat::dispatchExtentFits(packedLanes))

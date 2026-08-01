@@ -2475,7 +2475,6 @@ namespace {
     // data[1,4,8,8] (NC4) + a RUNTIME grid chain: flow (graph input, NC4) -> ConvertLayout ->
 } // namespace
 
-
 // --- A per-tensor --shape declaration overrides a --dim binding for that tensor (declared wins). ---
 TEST(Passes, InferShapesShapeOverridesDim) {
     Graph                          g        = makeSymbolicInputGraph({-1, -1}, {"batch_size", "sequence_length"});

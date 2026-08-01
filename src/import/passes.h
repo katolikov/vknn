@@ -346,7 +346,6 @@ namespace vknn {
 
     void pinSampleCoordFp32(Graph &g);
 
-
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into
     // ONE strided gather: the consumer reads the chain's source through the composed per-axis map
     // (stamped as view_stride/view_base attrs the CPU kernels and flat_gather geometry consume) and

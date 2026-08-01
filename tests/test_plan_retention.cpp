@@ -327,8 +327,7 @@ TEST(PlanRetention, StandalonePointwiseOperandNamedByAStepStaysResident) {
 
     applyReclaim(g, kSoleNodeOnGpu);
 
-    ASSERT_EQ(g.initializers.count(operand), 1u)
-        << "an operand the plan names by step reference must keep its host payload";
+    ASSERT_EQ(g.initializers.count(operand), 1u) << "an operand the plan names by step reference must keep its host payload";
 }
 
 // A step field that names the accumulator, the entry value, a register or nothing must not be
@@ -347,6 +346,5 @@ TEST(PlanRetention, NonOperandStepReferencesKeepNothing) {
 
     applyReclaim(g, kSoleNodeOnGpu);
 
-    EXPECT_TRUE(g.initializers.empty())
-        << "no step field named an operand, so both conv weights stay reclaimable";
+    EXPECT_TRUE(g.initializers.empty()) << "no step field named an operand, so both conv weights stay reclaimable";
 }

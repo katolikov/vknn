@@ -84,9 +84,9 @@ namespace vknn {
                 PC            rpc = pc;
                 rpc.total         = raceTotal;
                 auto       ms     = vk::raceCandidates(2, [&](int index) {
-                    const bool q        = index == kCastKernelQuad;
+                    const bool q = index == kCastKernelQuad;
                     auto       racePipe = env.pipeline(shader(q ? "cast_v4" : "cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
-                    const int  lanes    = q ? (raceTotal + kCastQuad - 1) / kCastQuad : raceTotal;
+                    const int  lanes = q ? (raceTotal + kCastQuad - 1) / kCastQuad : raceTotal;
                     return timer.time([&](VkCommandBuffer cmd) {
                         racePipe->dispatch(cmd, {sSrc->handle(), sDst->handle()}, &rpc, sizeof(rpc), groups(lanes, env.flatLocalSize));
                     });
