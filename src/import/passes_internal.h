@@ -18,6 +18,8 @@ namespace vknn {
     bool gpuFlatNode(const Graph &g, const Node &n);
     /// Is this Slice a block-aligned channel slice, i.e. a contiguous NC4HW4 block-range copy?
     bool sliceIsNc4(const Graph &g, const Node &n);
+    /// Is this Reduce a spatial reduction, i.e. one reduction per channel over the blocked plane?
+    bool reduceIsNc4(const Graph &g, const Node &n);
 
     // The Config::fp32Tensors include/exclude substring matcher, shared by markFp32 (load) and the
     // fusion pass's compile-time fp32 prediction (defined in mark_fp32.cpp).

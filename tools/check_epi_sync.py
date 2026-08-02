@@ -193,12 +193,18 @@ def parse_vk_registry(ops_dir):
 
 
 def _file_requests_epi(path):
-    """True if this op file (or a flat_ops.h it includes) issues an epi.suffix() kernel-name site."""
+    """True if this op file issues an epi.suffix() kernel-name site.
+
+    The site may live in a header the file includes rather than in the file itself: flat_ops.h owns
+    the flat family's, and nc4_spatial_reduce.h owns the one GlobalAveragePool and the Reduce
+    family's spatial arm share. An op that delegates its whole dispatch to such a header still
+    requests the epilogue kernels.
+    """
     with open(path, encoding="utf-8") as f:
         text = f.read()
     if "epi.suffix()" in text:
         return True
-    return bool(re.search(r'#include\s+"flat_ops\.h"', text))
+    return bool(re.search(r'#include\s+"(?:flat_ops|nc4_spatial_reduce)\.h"', text))
 
 
 # --- the plan-encoding constant mirror (check 4) ----------------------------------------------

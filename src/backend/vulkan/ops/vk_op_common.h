@@ -30,8 +30,10 @@ namespace vknn {
         int   N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act, pad0;
         float actLo, actHi;
     };
+    /// Blocked spatial-reduction push constant: the plane geometry plus the ReduceType code the
+    /// kernels branch on (shaders/nc4_reduce_codes.glsl). GlobalAveragePool passes REDUCE_MEAN.
     struct PoolPC {
-        int N, C, H, W;
+        int N, C, H, W, op;
     };
     struct MaxPC {
         int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL;

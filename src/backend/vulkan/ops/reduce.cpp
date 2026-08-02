@@ -11,6 +11,7 @@
 //     partial-buffer pattern conv.cpp uses, and turns the pathological ~1-lane case into a full-GPU one.
 #include "dispatch_extent.h"
 #include "flat_ops.h"
+#include "nc4_spatial_reduce.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/error.h"
@@ -44,8 +45,19 @@ namespace vknn {
             ReducePCPartial                      partialPc {};
             ReducePCCombine                      combinePc {};
             bool                                 coop = false;
+            // Set when the layout pass placed this node on the blocked path: a spatial reduction is
+            // one reduction per channel, so the four lanes of a channel block reduce independently
+            // and the NC4HW4 buffer is read as stored (nc4_spatial_reduce.h).
+            bool             nc4 = false;
+            Nc4SpatialReduce blocked;
 
             void prepare(const Node &node, VkOpEnv &env) override {
+                nc4 = !opIsFlat(node, env);
+                if (nc4)
+                {
+                    blocked.prepare(node, env, node.subOp);
+                    return;
+                }
                 const Graph &g    = *env.graph;
                 Shape        in   = g.desc(node.inputs[0]).shape;
                 int          rank = (int) in.size();
@@ -150,6 +162,11 @@ namespace vknn {
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                if (nc4)
+                {
+                    blocked.record(cmd, node, env);
+                    return;
+                }
                 VkBuffer dst = env.devBuf(node.outputs[0])->handle();
                 if (coop)
                 {

@@ -124,6 +124,36 @@ namespace vknn {
         return out[0] == in[0] && out[1] == b.count && out[2] == in[2] && out[3] == in[3];
     }
 
+    bool reduceIsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::Reduce || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        if (n.attr.has("view_stride"))
+        {
+            return false; // a folded movement chain reindexes; the blocked kernel reads the plane as stored
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape, &out = g.desc(n.outputs[0]).shape;
+        if (in.size() != kNchwRank || out.size() != kNchwRank)
+        {
+            return false;
+        }
+        // Exactly the spatial axes, keeping them: that is one reduction per channel, which is what a
+        // channel block's four lanes each carry. Any other axis set would have to cross lanes.
+        const std::vector<int64_t> axes = readI64Param(g, n, "axes", 1);
+        if (axes.size() != 2)
+        {
+            return false;
+        }
+        const int64_t a0 = axes[0] < 0 ? axes[0] + (int64_t) kNchwRank : axes[0];
+        const int64_t a1 = axes[1] < 0 ? axes[1] + (int64_t) kNchwRank : axes[1];
+        if (std::min(a0, a1) != 2 || std::max(a0, a1) != 3)
+        {
+            return false;
+        }
+        return out[0] == in[0] && out[1] == in[1] && out[2] == 1 && out[3] == 1;
+    }
+
     bool gpuFlatNode(const Graph &g, const Node &n) {
         auto sh = [&](TensorId t) -> const Shape & {
             return g.desc(t).shape;
@@ -191,6 +221,11 @@ namespace vknn {
                 }
                 return true;
             }
+            case OpType::Reduce:
+                // A spatial reduction is one reduction per channel, which is exactly what a channel
+                // block's four lanes carry -- so it reads the blocked buffer as stored. Every other
+                // axis set has to cross lanes and keeps the flat kernel.
+                return !reduceIsNc4(g, n);
             case OpType::Slice:
                 // A block-aligned channel slice is a contiguous run of NC4HW4 blocks per batch, so it
                 // copies buffer ranges (and often aliases outright) instead of gathering through flat.
