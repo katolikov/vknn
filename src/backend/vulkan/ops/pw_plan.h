@@ -304,6 +304,10 @@ namespace vknn {
         bool                                     active    = false;
         bool                                     flatWorld = true;
         bool                                     relax     = false;
+        /// True when no step of this unit's plan carries a geometric broadcast class, which selects
+        /// the "_dc" kernel build: one compiled without the geometric arms. The arms sit inside the
+        /// per-element resolvers, so a chain that never reaches them still pays for them.
+        bool directClassesOnly = false;
 
         void prepare(const Node &node, VkOpEnv &env, bool flat, const Shape &out) {
             active = node.attr.has("pw_steps");
@@ -316,21 +320,18 @@ namespace vknn {
             PwPlanCPU p {};
             int       total = 0;
             buildPwPlan(*env.graph, node, flat, out, p, operands, total);
-            // The _epi variants compile the direct broadcast group only (PW_BCAST_MASK_DIRECT) for
-            // the NC4HW4 appliers, and fuse_pointwise_chains keeps blocked-world units off a
-            // producer for that reason. The flat appliers resolve every class through pwFlatIdx's
-            // strided walk and need no arm, so this only concerns the blocked world. A geometric
-            // class arriving here would fall through to a same-shape read -- refuse rather than
-            // compute a wrong answer quietly.
-            if (!flatWorld)
+            // The class group is read from the plan, never enforced on it: a unit is attached or not
+            // for its own reasons, and the kernel is then compiled for what it turns out to carry.
+            // Deciding the other way round -- refusing to attach a geometric-class unit so the narrow
+            // kernel always fits -- splits the unit, and a split rounds its intermediate through
+            // fp16 storage where the whole unit kept it in an fp32 register.
+            directClassesOnly = true;
+            for (int s = 0; s < p.numSteps; ++s)
             {
-                for (int s = 0; s < p.numSteps; ++s)
+                if (pwBcastClassIsGeometric(p.step[s * kPwStepInts + kPwStepBcastField]))
                 {
-                    const int bcastClass = p.step[s * kPwStepInts + kPwStepBcastField];
-                    if (pwBcastClassIsGeometric(bcastClass))
-                    {
-                        throw Error(Status::RuntimeError, "node '" + node.name + "' carries an attached pointwise unit whose step " + std::to_string(s) + " has geometric broadcast class " + std::to_string(bcastClass) + ", which the blocked-world epilogue appliers do not compile; such a unit must stay standalone");
-                    }
+                    directClassesOnly = false;
+                    break;
                 }
             }
             plan = uploadPwPlan(env, p);
@@ -339,7 +340,15 @@ namespace vknn {
         // The rounding discipline is compiled into the SPIR-V (see shaders/pw_epilogue.glsl):
         // "_epi" carries the strict per-step-rounded appliers, "_epi_rx" the fp32-chained ones.
         const char *suffix() const {
-            return !active ? "" : relax ? "_epi_rx" : "_epi";
+            if (!active)
+            {
+                return "";
+            }
+            if (directClassesOnly)
+            {
+                return relax ? "_epi_dc_rx" : "_epi_dc";
+            }
+            return relax ? "_epi_rx" : "_epi";
         }
         // The epilogue binds the same operand budget a standalone unit gets (PW_OPERAND_SLOTS in
         // pw_epilogue.glsl == kPwMaxOperands): a narrower epilogue would split units that must stay

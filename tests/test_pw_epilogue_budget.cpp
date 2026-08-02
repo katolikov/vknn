@@ -201,47 +201,34 @@ namespace {
     }
 } // namespace
 
-// --- the broadcast-class bound, blocked world ---------------------------------------------------
+// --- what the epilogue must keep carrying ------------------------------------------------------
 
-TEST(PwEpilogueBudget, DirectClassOperandRidesTheProducersStore) {
-    UnitPlacement p = placeUnit(channelMasks(1), /*blocked*/ true);
-    EXPECT_TRUE(p.attachedToProducer) << "a per-channel operand is a direct class: the unit belongs on the producer";
-    EXPECT_FALSE(p.standalone);
-    EXPECT_FALSE(anyGeometric(p.bcastClasses));
-}
-
-TEST(PwEpilogueBudget, GeometricClassOperandKeepsABlockedUnitStandalone) {
+// A geometric-class operand (per-pixel here) rides its producer's store like any other. Refusing it
+// would SPLIT the unit, and a split rounds the intermediate through fp16 storage -- the same defect
+// that narrowing the operand budget caused, measured at 70 dB -> 15 dB against the CPU oracle on a
+// production image-warp graph. Only the STANDALONE kernels specialize by class (their _dc twin),
+// because that choice is made per node at record time and leaves the graph alone.
+TEST(PwEpilogueBudget, GeometricClassOperandStillRidesABlockedProducersStore) {
     UnitPlacement p = placeUnit({Shape {kBcast, kBcast, kRunH, kRunW}}, /*blocked*/ true);
     ASSERT_FALSE(p.bcastClasses.empty()) << "the chain must have been fused into a unit at all";
     EXPECT_TRUE(anyGeometric(p.bcastClasses)) << "a [1,1,H,W] operand must classify as the per-pixel class";
-    EXPECT_FALSE(p.attachedToProducer) << "the blocked appliers compile PW_BCAST_MASK_DIRECT only: a geometric "
-                                          "operand would fall through to a same-shape read";
-    EXPECT_TRUE(p.standalone) << "the unit must still fuse -- standalone, where every class is compiled in";
+    EXPECT_TRUE(p.attachedToProducer) << "splitting a unit to avoid a class arm changes its answer";
+    EXPECT_FALSE(p.standalone);
 }
 
-TEST(PwEpilogueBudget, OneGeometricOperandUnhostsTheWholeBlockedUnit) {
-    // The gate is per unit, not per step: the direct-class steps around a geometric one cannot ride
-    // the store either, because a unit is emitted whole.
-    std::vector<Shape> masks = channelMasks(2);
-    masks.insert(masks.begin() + 1, Shape {kBcast, kBcast, kRunH, kRunW});
-    UnitPlacement p = placeUnit(masks, /*blocked*/ true);
-    EXPECT_TRUE(anyGeometric(p.bcastClasses));
-    EXPECT_FALSE(p.attachedToProducer);
-    EXPECT_TRUE(p.standalone);
-}
-
-// --- the flat world keeps hosting every class ---------------------------------------------------
-
-// The flat applier resolves an operand of ANY class through pwFlatIdx's single strided walk, so it
-// has no per-class arms to drop and no reason to refuse. This is not a nicety: an attention mask is
-// per-pixel against its QK run and the RoPE tables are per-row against theirs, and the attention
-// matcher only fires once that unit sits on the MatMul. A blanket gate silently unfuses attention.
 TEST(PwEpilogueBudget, GeometricClassOperandStillRidesAFlatProducersStore) {
     UnitPlacement p = placeUnit({Shape {kBcast, kBcast, kRunW, kRunH}}, /*blocked*/ false);
-    ASSERT_FALSE(p.bcastClasses.empty()) << "the chain must have been fused into a unit at all";
-    EXPECT_TRUE(anyGeometric(p.bcastClasses)) << "a [1,1,W,H] operand against the transposed run is the per-pixel class";
-    EXPECT_TRUE(p.attachedToProducer) << "a flat-world host pays nothing for a geometric class and must keep hosting";
+    ASSERT_FALSE(p.bcastClasses.empty());
+    EXPECT_TRUE(anyGeometric(p.bcastClasses));
+    EXPECT_TRUE(p.attachedToProducer) << "the flat applier resolves every class through one strided walk";
     EXPECT_FALSE(p.standalone);
+}
+
+TEST(PwEpilogueBudget, DirectClassOperandRidesTheProducersStore) {
+    UnitPlacement p = placeUnit(channelMasks(1), /*blocked*/ true);
+    EXPECT_TRUE(p.attachedToProducer);
+    EXPECT_FALSE(p.standalone);
+    EXPECT_FALSE(anyGeometric(p.bcastClasses));
 }
 
 // --- the operand budget is NOT bounded, on purpose --------------------------------------------
