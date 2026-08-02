@@ -307,23 +307,24 @@ for cand in (os.path.join(g, "_order.txt"), os.path.join(c, "_order.txt")):
         break
 gpuHave = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(g, "*.bin"))}
 cpuHave = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(c, "*.bin"))}
-# The GPU keeps a tensor in whichever layout its kernel wants and names the variants "X#nc4<n>" /
-# "X#flat<n>"; the CPU has no layout converts and knows only "X". Matching names literally therefore
-# drops every GPU-internal tensor -- including the pre-convert twin of a graph output, which is the
-# one that says whether the op that COMPUTED the output was already wrong. The dump is unpacked to
-# canonical NCHW on both sides, so a variant is comparable against the plain name it derives from.
-LAYOUT_VARIANT = re.compile(r"#(?:nc4|flat)\d*$")
+# The GPU keeps a tensor in whichever layout and precision its kernel wants, and names each variant
+# by suffixing the original: a layout bridge writes "X#nc4<n>" / "X#flat<n>", a precision bridge
+# writes "X#f32<n>" / "X#f16<n>". The CPU has neither kind of bridge and knows only "X". Matching
+# names literally therefore drops every GPU-internal tensor -- including the twin that feeds the op
+# a divergence is blamed on, which is the one that says whether its input was already wrong. Both
+# dumps are canonical NCHW fp32, so a variant is comparable against the name it derives from.
+INTERNAL_VARIANT = re.compile(r"#(?:nc4|flat|f32|f16)\d*$")
 def counterpart(n):
     if n in cpuHave:
         return n
-    base = LAYOUT_VARIANT.sub("", n)
+    base = INTERNAL_VARIANT.sub("", n)
     return base if base in cpuHave else None
 inOrder = [n for n in order if n in gpuHave and counterpart(n)]
 names = inOrder + sorted(x for x in gpuHave if x not in set(order) and counterpart(x))
 aliased = sum(1 for n in names if counterpart(n) != n)
 print("  %d tensor(s) comparable, %d of them against their pre-convert twin, bar %.2f%% of range%s"
       % (len(names), aliased, relBar * 100, "" if order else "  (no node-order index; name order)"))
-first, rows, verdict, skipped = None, [], {}, []
+first, rows, verdict, skipped, empty = None, [], {}, [], []
 for n in names:
     pg, pc = os.path.join(g, n + ".bin"), os.path.join(c, counterpart(n) + ".bin")
     # Equal byte counts or the two sides hold different element types, and reading both as fp32
@@ -345,9 +346,19 @@ for n in names:
     # whose values are 1e-9 a "100% divergence" -- true and useless, since both sides are zero to
     # every consumer. Absolute alone would miss a real disagreement in a small-valued tensor. A
     # divergence has to be big against the tensor's own range AND big enough to survive fp16.
+    # A tensor whose largest difference equals its own largest value is not "drifted", it is
+    # missing: one side computed essentially nothing. Worth calling out, because the causes are
+    # disjoint -- an unwritten buffer or a skipped dispatch, never accumulated rounding.
+    gmax, cmax = float(np.abs(a).max()), float(np.abs(b).max())
+    if rel > 0.99 and min(gmax, cmax) <= 0.01 * max(gmax, cmax):
+        empty.append((n, "gpu" if gmax < cmax else "cpu"))
     verdict[n] = rel > relBar and float(d.max()) > 1e-5
     if first is None and verdict[n]:
         first = (n, k, float(d.max()), rel)
+if empty:
+    print("  %d tensor(s) where ONE SIDE IS ESSENTIALLY ZERO and the other is not:" % len(empty))
+    for nm, side in empty[:8]:
+        print("    %-40.40s %s side is ~zero" % (nm, side))
 if skipped:
     print("  %d tensor(s) not comparable (the two backends stored different element widths):" % len(skipped))
     for nm, bg, bc in skipped[:8]:
