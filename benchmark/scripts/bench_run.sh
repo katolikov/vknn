@@ -32,8 +32,9 @@
 #   --compare-flags "..."  run arm B as the SAME binary with these flags instead — the cheapest way
 #                      to test an engine decision on a real model, e.g. --compare-flags "--no-flat"
 #                      to ask whether the packed path beats the flat one on this graph.
-#                      Either form runs the two arms in INTERLEAVED rounds so a drifting device
-#                      cannot favour one, and a paired sign test says whether the difference is real
+#                      Either form runs the two arms in interleaved rounds with the ORDER ALTERNATING,
+#                      so a device that warms up as it works cannot favour whichever arm ran second,
+#                      and a paired sign test says whether the difference is real
 #   --binary PATH      vknn_run_io to use (default build-android/vknn_run_io)
 #   --compiler PATH    vknn_compile (default build-host/vknn_compile)
 #   --keep             leave the device scratch directory in place
@@ -133,12 +134,19 @@ runArm() { # binaryName logfile extraFlags  -- one process, REPEAT+1 runs, the f
 tBefore=$(tempC "$(deviceTemp)")
 echo "running $((REPEAT + 1)) iteration(s) on $BACKEND, precision $PRECISION ..."
 if [[ -n "$COMPARE" || -n "$FLAGS_B" ]]; then
-  # Interleaved rounds: a device that drifts mid-benchmark drifts across BOTH arms equally, which a
-  # back-to-back A-then-B layout cannot claim.
+  # Interleaved rounds with the ORDER ALTERNATING. Interleaving alone is not enough: a device warms
+  # up as it works, so always running A before B measures B on a hotter device every single round --
+  # a systematic bias, not noise, and on a model that takes seconds per run it dominates the result.
+  # Swapping the order on odd rounds makes each arm lead half the time, so the ramp cancels.
   : >"$WORK/a.log"; : >"$WORK/b.log"
-  for ((r = 0; r < 5; ++r)); do
-    runArm run_bn_a "$WORK/a_$r.log" "$FLAGS_A"; cat "$WORK/a_$r.log" >>"$WORK/a.log"
-    runArm run_bn_b "$WORK/b_$r.log" "$FLAGS_B"; cat "$WORK/b_$r.log" >>"$WORK/b.log"
+  for ((r = 0; r < 6; ++r)); do
+    if (( r % 2 == 0 )); then
+      runArm run_bn_a "$WORK/a_$r.log" "$FLAGS_A"; runArm run_bn_b "$WORK/b_$r.log" "$FLAGS_B"
+    else
+      runArm run_bn_b "$WORK/b_$r.log" "$FLAGS_B"; runArm run_bn_a "$WORK/a_$r.log" "$FLAGS_A"
+    fi
+    cat "$WORK/a_$r.log" >>"$WORK/a.log"
+    cat "$WORK/b_$r.log" >>"$WORK/b.log"
   done
 else
   runArm run_bn_a "$WORK/a.log" "$FLAGS_A"
