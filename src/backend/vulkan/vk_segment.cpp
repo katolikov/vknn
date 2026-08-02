@@ -2197,6 +2197,14 @@ namespace vknn {
             }
             rt.device->buffer = bit->second;
             auto sit          = stagingIn_.find(tid);
+            // Session may have LENT this input's bytes rather than copying them, which is valid only
+            // for the staging-convert route below. Every other route reads owned host bytes, so take
+            // ownership before entering the chain.
+            const bool stagedInput = sit != stagingIn_.end() && convert_.count(tid);
+            if (!stagedInput)
+            {
+                rt.materializeHostBorrow();
+            }
             if (rt.dmaBufFd >= 0 && !kvqCaches_.count(tid))
             {
                 // zero-copy: the GPU reads the caller's dma-buf directly (device-native bytes); no pack.
@@ -2204,12 +2212,16 @@ namespace vknn {
                 // branch below quantizes instead.
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-            } else if (sit != stagingIn_.end() && convert_.count(tid))
+            } else if (stagedInput)
             {
                 // GPU image convert: raw memcpy the caller's declared bytes into the staging buffer; the
                 // recorded boundary_convert dispatch turns them into the device-native boundary. No host
                 // uint8->fp32->fp16 pack. The convert writes bit->second (the boundary), read by the ops.
-                std::memcpy(sit->second->host(), rt.host.bytes.data(), std::min(sit->second->bytes(), rt.host.bytes.size()));
+                // The bytes are the caller's own when Session lent them (no host mirror was filled);
+                // otherwise they are the mirror's. Either way this is the ONLY copy of an input.
+                const uint8_t *src      = rt.hostBorrow ? rt.hostBorrow : rt.host.bytes.data();
+                const size_t   srcBytes = rt.hostBorrow ? rt.hostBorrowBytes : rt.host.bytes.size();
+                std::memcpy(sit->second->host(), src, std::min(sit->second->bytes(), srcBytes));
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
             } else if (rt.hostValid && !alreadyHere && kvqCaches_.count(tid))

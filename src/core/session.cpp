@@ -27,6 +27,16 @@ namespace vknn {
     // Storage is always sized for `elems`; a short caller buffer is tolerated, not rejected — every
     // branch fills only min(elems, in.size()/bytesPer) elements and zeroes the tail past them, so a bound
     // tensor never carries an earlier run's values into the elements the caller left out.
+    // Lend the caller's input bytes to the runtime tensor for this run instead of copying them.
+    // Only for inputs whose sole consumer is the backend's GPU staging convert: it reads the bytes
+    // straight out of the caller's vector, so the host mirror this would otherwise fill is never
+    // read. Any path that does need owned bytes calls RtTensor::materializeHostBorrow() first.
+    static void bindInputBorrow(const IOTensor &io, RtTensor &rt) {
+        rt.host.bytes.clear();
+        rt.hostBorrow      = io.data.data();
+        rt.hostBorrowBytes = io.data.size();
+    }
+
     static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
         if (src == DType::Int64)
         {
@@ -2179,9 +2189,18 @@ namespace vknn {
                 // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16 + NC4HW4
                 // gather — skipping the host uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit
                 // rt.dtype, memcpys the raw NCHW bytes into a staging buffer, and dispatches boundary_convert.
-                rt.dtype      = io.dtype;
-                rt.host.bytes = io.data;
-                rt.hostValid  = true;
+                rt.dtype     = io.dtype;
+                rt.hostValid = true;
+                bindInputBorrow(io, rt);
+            } else if (ioGpuConvert_ && io.dtype == DType::Float32 && rt.shape.size() == kNchwRank && !linkedInput(bucketIndex, id))
+            {
+                // The same for a rank-4 fp32 image input, which the Vulkan backend also converts on
+                // the GPU (fp32 -> device fp16 + NC4HW4). bindInput below would memcpy the caller's
+                // bytes into the host mirror only for the backend to memcpy them again into its
+                // staging buffer; the mirror is never read on this path.
+                rt.dtype     = DType::Float32;
+                rt.hostValid = true;
+                bindInputBorrow(io, rt);
             } else
             {
                 // Convert the caller's bytes (in io.dtype) to the internal compute storage: fp32 for every
@@ -2282,6 +2301,19 @@ namespace vknn {
         }
 
         auto tB = now();
+        // The input bytes Session lent (rather than copied) point into the caller's vectors and are
+        // valid only until run() returns. Dropping them on the way out — including the exception
+        // path — keeps a stale pointer from outliving the call that made it valid.
+        struct BorrowGuard {
+            std::vector<RtTensor> &pool;
+            ~BorrowGuard() {
+                for (RtTensor &rt: pool)
+                {
+                    rt.hostBorrow      = nullptr;
+                    rt.hostBorrowBytes = 0;
+                }
+            }
+        } borrowGuard {pool_};
         // --- run segments in order ---
         try
         {
