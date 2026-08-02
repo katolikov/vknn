@@ -29,6 +29,21 @@ namespace vknn {
         return flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize);
     }
 
+    /// Occupancy gates of the two-pass reduction, shared by the flat family (reduce.cpp) and the
+    /// blocked one. A dispatch of fewer than kReduceSaturatingGroups workgroups cannot fill the GPU
+    /// on its own, so a reduction that wide is worth splitting; each split chunk still has to carry
+    /// at least kReduceMinChunk elements to be worth a workgroup; and kReduceMaxSplit caps the split
+    /// so the combine pass stays one trivial workgroup.
+    ///
+    /// These stay FIXED on purpose. The split count they choose sets the summation ORDER, which is
+    /// byte-affecting, and the only device signal that could size them is the MEASURED saturation
+    /// probe -- which may only ever steer placement-only choices (see VkOpEnv::flatLocalSize). Core
+    /// Vulkan exposes no compute-unit count, so a caps-exact derivation of "how many workgroups fill
+    /// this GPU" does not exist; a measured one would make the ANSWER device-dependent.
+    inline constexpr int64_t kReduceSaturatingGroups = 4096;
+    inline constexpr int64_t kReduceMinChunk         = 256;
+    inline constexpr int64_t kReduceMaxSplit         = 64;
+
     /// avgpool_partial/avgpool_combine push constant: PoolPC's geometry plus the per-block group count.
     struct PoolPCGroups {
         int N, C, H, W, groups, op;
@@ -47,12 +62,6 @@ namespace vknn {
         int64_t                              total = 0; // N*Cb dispatch group count
         bool                                 coop  = false;
 
-        // Cooperation thresholds. Below kFewBlocks the block count alone cannot fill the GPU, and a
-        // plane of at least kWidePlane elements is what makes splitting it worth a second pass.
-        static constexpr int64_t kFewBlocks = 4096;
-        static constexpr int64_t kWidePlane = 256;
-        static constexpr int64_t kMaxGroups = 64;
-
         void prepare(const Node &node, VkOpEnv &env, int reduceOp) {
             const NCHW x  = NCHW::from(env.graph->desc(node.inputs[0]).shape);
             const int  Cb = (int) cBlocks(x.c);
@@ -60,14 +69,18 @@ namespace vknn {
             epi.prepare(node, env, /*flat=*/false, env.graph->desc(node.outputs[0]).shape);
 
             const int64_t hw = (int64_t) x.h * x.w;
-            coop             = (total <= kFewBlocks && hw >= kWidePlane);
+            coop             = (total <= kReduceSaturatingGroups && hw >= kReduceMinChunk);
             if (coop)
             {
-                const int64_t byWork = hw / kWidePlane; // no more groups than chunks
-                const int64_t byGrid = kFewBlocks / std::max<int64_t>(total, 1);
-                const int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, kMaxGroups}));
+                const int64_t byWork = hw / kReduceMinChunk; // no more groups than whole chunks
+                const int64_t byGrid = kReduceSaturatingGroups / std::max<int64_t>(total, 1);
+                const int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, kReduceMaxSplit}));
                 pcg                  = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, groups, reduceOp};
-                scratch = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) total * groups * 4 * sizeof(float), 16), vk::MemPref::kDeviceOnly);
+                // One fp32 vec4 partial per (block, split): the four lanes of a channel block reduce
+                // together. The floor keeps a degenerate plan from asking for a zero-byte buffer.
+                constexpr size_t kMinScratchBytes = 16;
+                const size_t     partialBytes     = (size_t) total * groups * kNC4Block * sizeof(float);
+                scratch                           = std::make_shared<vk::Buffer>(*env.ctx, std::max(partialBytes, kMinScratchBytes), vk::MemPref::kDeviceOnly);
                 // pass 1 bindings: src(0), scratch(1). No epilogue on the partials.
                 partialPipe = env.pipeline(shader("avgpool_partial", env.useFp16), 2, sizeof(PoolPCGroups), std::vector<uint32_t> {poolTreeWidth(env)});
                 // pass 2 bindings: scratch(0), dst(1), then epilogue operands.

@@ -1532,7 +1532,7 @@ namespace vknn {
                 prod     = (u.entry >= 0 && u.entry < (TensorId) producer.size()) ? producer[u.entry] : -1;
                 entryExp = false;
                 bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") &&
-                           g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
+                          g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
                 // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >=
                 // kTiledMatMulMin — the same constant matmul.cpp gates on) has no register
                 // headroom for the VM at its per-thread register micro-tile store loop — an

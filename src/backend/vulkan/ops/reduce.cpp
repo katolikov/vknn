@@ -126,7 +126,7 @@ namespace vknn {
                 geom      = flat::uploadFlatGeom(env, {inDim, inStr, reduce});
                 // Cooperate only for the small-output case; large-output reductions already parallelise
                 // fully on the scalar path and would pay the two-pass barrier for nothing.
-                coop = (total <= 4096 && reducedExtent >= 256);
+                coop = (total <= kReduceSaturatingGroups && reducedExtent >= kReduceMinChunk);
                 // A pointwise chain can be folded into the reduce's store: epi.suffix() selects the _epi
                 // shader variant and epi.extraBufs() adds its operand bindings. The epilogue runs at the
                 // final store — the scalar kernel, or the combine pass for the cooperative path.
@@ -134,16 +134,11 @@ namespace vknn {
 
                 if (coop)
                 {
-                    // groups per output: enough workgroups to fill the GPU (~4096 total), each chunk still
-                    // >= 256 elements, capped at 64 so the combine pass stays a single trivial workgroup.
-                    // These occupancy gates stay FIXED constants on purpose: the split count they
-                    // choose sets the summation order (byte-affecting), and the only device signal
-                    // that could size them is the MEASURED saturation probe - which may only ever
-                    // steer placement-only choices (see VkOpEnv::flatLocalSize). A caps-exact
-                    // derivation does not exist for "how many groups fill this GPU".
-                    int64_t byWork = reducedExtent / 256;       // no more groups than 256-elem chunks
-                    int64_t byGrid = 4096 / std::max(total, 1); // ~4096 workgroups total
-                    int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, (int64_t) 64}));
+                    // groups per output, under the three shared occupancy gates (their rationale, and
+                    // why they cannot be device-derived, lives with them in nc4_spatial_reduce.h).
+                    int64_t byWork = reducedExtent / kReduceMinChunk;
+                    int64_t byGrid = kReduceSaturatingGroups / std::max<int64_t>(total, 1);
+                    int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, kReduceMaxSplit}));
                     partialPc      = {rank, total, node.subOp, groups};
                     combinePc      = {total, node.subOp, groups, (int) reducedExtent};
                     scratch = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) total * groups * sizeof(float), 16), vk::MemPref::kDeviceOnly);
