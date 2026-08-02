@@ -2,6 +2,12 @@
 """Embed compiled SPIR-V (.spv) blobs into a single C++ translation unit.
 
 Usage: embed_spirv.py <out.cpp> <a.spv> <b.spv> ...
+       embed_spirv.py <out.cpp> @<list.txt>      (one .spv path per line)
+
+The @list form exists because the kernel set outgrew what a command line can hold: Windows caps a
+command (and the batch file CMake wraps a long one in) at ~8 KB, and several hundred absolute .spv
+paths pass that. Naming the list in a file makes the step independent of how many kernels there
+are, so adding a shader variant can never break the build on one platform alone.
 Generates:
   vknn::embeddedShaders()      -> map<name, vector<uint32_t>>
   vknn::embeddedShadersHash()  -> md5 hex of all kernels (the cache's kernel-version guard). Any shader
@@ -12,6 +18,10 @@ import sys, os, struct, hashlib
 def main():
     out = sys.argv[1]
     spvs = sys.argv[2:]
+    # A single @file argument names a list of .spv paths, one per line; blank lines are ignored.
+    if len(spvs) == 1 and spvs[0].startswith("@"):
+        with open(spvs[0][1:], encoding="utf-8") as f:
+            spvs = [line.strip() for line in f if line.strip()]
     # Read every blob and sort by name so the hash is independent of the argument order.
     shaders = []
     for spv in spvs:

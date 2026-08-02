@@ -331,12 +331,19 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
   bc_variant(f32_u8  float      uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
   bc_variant(u8_u8   uint8_t    uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
 
+  # The .spv paths go to the embedder in a LIST FILE, not on the command line. Several hundred
+  # absolute paths overflow Windows' ~8 KB command (and the batch file CMake wraps a long command
+  # in), which fails as an opaque "Batch file failed at line 3" on that platform only — so adding a
+  # shader variant could break one platform's build and no other.
+  set(_spv_list ${VKNN_SHADER_GEN_DIR}/embedded_spirv_list.txt)
+  string(REPLACE ";" "\n" _spv_list_lines "${_spv_files}")
+  file(WRITE ${_spv_list} "${_spv_list_lines}\n")
   add_custom_command(
     OUTPUT ${EMBEDDED_SHADERS_CPP}
     COMMAND ${CMAKE_COMMAND} -E env python3
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
-            ${EMBEDDED_SHADERS_CPP} ${_spv_files}
-    DEPENDS ${_spv_files} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
+            ${EMBEDDED_SHADERS_CPP} @${_spv_list}
+    DEPENDS ${_spv_files} ${_spv_list} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
     COMMENT "Embedding SPIR-V blobs -> vknn_embedded_shaders.cpp"
     VERBATIM)
 else()
