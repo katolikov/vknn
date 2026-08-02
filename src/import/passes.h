@@ -279,6 +279,14 @@ namespace vknn {
     // without such ops. Run after backend-agnostic passes, before backend planning.
     void insertLayoutConverts(Graph &g);
 
+    /// Does this node's GPU kernel read its tensors flat row-major rather than NC4HW4?
+    ///
+    /// The layout pass consults this to decide which tensors to mark gpuFlat and where to splice a
+    /// ConvertLayout. It is exposed here because BACKEND ASSIGNMENT needs the same answer when that
+    /// pass is disabled: without it no tensor is marked flat and no convert exists, so a node that
+    /// answers true has no valid plan on the GPU and must not be assigned to it.
+    bool gpuFlatNode(const Graph &g, const Node &n);
+
     /// Does this Transpose read its input in NC4HW4 rather than flat row-major?
     ///
     /// True for the rank-4 NCHW -> NHWC permutation (0,2,3,1) with no fused epilogue: an NC4HW4

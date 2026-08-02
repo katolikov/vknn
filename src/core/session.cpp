@@ -719,11 +719,21 @@ namespace vknn {
         nodeBackendIdx_.assign(graph_.nodes.size(), -1);
         for (size_t n = 0; n < graph_.nodes.size(); ++n)
         {
-            const Node &nd     = graph_.nodes[n];
-            DType       dt     = DType::Float32; // compute dtype at IR level
-            int         chosen = -1;
+            const Node &nd = graph_.nodes[n];
+            DType       dt = DType::Float32; // compute dtype at IR level
+            // A node whose GPU kernel reads flat row-major has no valid plan when the flat pass did
+            // not run: nothing marked its tensors gpuFlat and no ConvertLayout exists, so the buffers
+            // are packed NC4HW4 while the kernel indexes them densely -- reads past the end of every
+            // partial channel block. It has to go to the CPU, which is what disabling the flat path
+            // means for the ops that need it.
+            const bool needsFlatKernel = !vulkanFlat && gpuFlatNode(graph_, nd);
+            int        chosen          = -1;
             for (size_t bi = 0; bi < backends_.size(); ++bi)
             {
+                if (needsFlatKernel && backends_[bi]->kind() == BackendKind::Vulkan)
+                {
+                    continue;
+                }
                 if (backends_[bi]->supportsNode(graph_, nd, dt))
                 {
                     chosen = (int) bi;
@@ -740,7 +750,13 @@ namespace vknn {
             if (backends_[chosen]->kind() != cfg_.backend && byKind_.count(cfg_.backend))
             {
                 std::string why;
-                if (!byKind_[cfg_.backend]->supportsNode(graph_, nd, dt, &why))
+                if (needsFlatKernel)
+                {
+                    // The gate would answer "supported" here -- the kernel exists, it is the layout
+                    // plan that does not. Say the real reason rather than a misleading one.
+                    why = std::string(opTypeName(nd.type)) + ": needs the flat layout, which this run disabled";
+                    bucket.fallbackReasons.push_back({nd.name, opTypeName(nd.type), why});
+                } else if (!byKind_[cfg_.backend]->supportsNode(graph_, nd, dt, &why))
                 {
                     bucket.fallbackReasons.push_back({nd.name, opTypeName(nd.type), why});
                     VKNN_WARN_THROTTLE(std::string("fallback_") + opTypeName(nd.type), 2) << "op " << opTypeName(nd.type) << " (" << nd.name << ") not supported by " << backendName(cfg_.backend) << " backend -> falling back to "

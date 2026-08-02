@@ -148,7 +148,8 @@ tAfter=$(tempC "$(deviceTemp)")
 # --- where the layout converts sit ---------------------------------------------------------------
 # The load log already names them, grouped by the op pair each convert bridges. Surfaced here so a
 # profile that puts ConvertLayout near the top comes with its own explanation.
-seams=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/a.log" | grep "insertLayoutConverts:" | head -12)
+# Every round re-loads the model and re-prints the same summary, so identical lines collapse.
+seams=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/a.log" | grep "insertLayoutConverts:" | awk '!seen[$0]++' | head -12)
 if [[ -n "$seams" ]]; then
   echo
   echo "layout converts, by the op pair each one bridges:"
