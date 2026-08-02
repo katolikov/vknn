@@ -374,40 +374,70 @@ def operandLine(nm):
 if first is None:
     print("  every dumped tensor agrees within the bar")
     sys.exit(0)
+
+diverging = [r for r in rows if verdict.get(r[0])]
+n, k, mx, rel = first
+print()
+print("  %d of %d comparable tensor(s) DIVERGE." % (len(diverging), len(rows)))
+print("  FIRST in node order: '%s'  (%d elements, max|diff| %.6g, %.2f%% of its range)%s"
+      % (n, k, mx, rel * 100, ", produced by %s" % producer[n] if producer.get(n) else ""))
+print(operandLine(n))
+
+# The whole point of a walk: an op whose output diverges while every comparable operand AGREES made
+# the difference itself. Nothing upstream handed it a bad value, so it is a root and not a symptom.
+# Node order is one topological order among many, so "first" is a lead; a root is a finding. A graph
+# can have SEVERAL independent roots -- report all of them, since fixing one leaves the rest.
+def rootCause(nm):
+    ins = operands.get(nm, [])
+    known = [o for o in ins if o in verdict]
+    return bool(known) and all(not verdict[o] for o in known)
+
+roots = [nm for nm, _, _, _ in diverging if rootCause(nm)]
+if roots:
+    print()
+    print("  ROOT DIVERGENCES (%d) — every comparable operand agrees, so the difference is made here:" % len(roots))
+    for nm in roots:
+        print("    %-40.40s %s" % (nm, producer.get(nm, "?")))
+        print("  " + operandLine(nm))
 else:
-    n, k, mx, rel = first
     print()
-    print("  FIRST DIVERGENCE: '%s'  (%d elements, max|diff| %.6g, %.2f%% of the tensor's range)" % (n, k, mx, rel * 100))
-    if producer.get(n):
-        print("  produced by %s" % producer[n])
-    print(operandLine(n))
-    print("  everything after this differs because its input did; this is the op to look at.")
+    print("  No tensor diverges on operands that all agree, so no root is isolated: either the")
+    print("  divergence enters through an operand nothing dumped, or it enters at a graph input.")
+
+# What the roots are, by op. One line per op type turns "147 tensors differ" into the handful of
+# kernels actually implicated.
+byOp = {}
+for nm, _, _, _ in diverging:
+    byOp.setdefault(producer.get(nm) or "(not in the index)", [0, 0])[0] += 1
+for nm in roots:
+    byOp.setdefault(producer.get(nm) or "(not in the index)", [0, 0])[1] += 1
+print()
+print("  %-24s %10s %8s" % ("producing op", "diverging", "roots"))
+for op, (dv, rt) in sorted(byOp.items(), key=lambda kv: -kv[1][0]):
+    print("  %-24.24s %10d %8d" % (op, dv, rt))
+
+# Then every diverging tensor, in node order. Capped, but the cap is stated: a silent truncation
+# reads as "that was all of them".
+kRowsShown = 60
+print()
+print("  all diverging tensors, node order:")
+print("  %-40s %10s %12s %9s  %s" % ("tensor", "elements", "max|diff|", "rel%", "op"))
+for nm, kk, mm, rr in diverging[:kRowsShown]:
+    mark = "  <== first" if nm == first[0] else ("  <== root" if nm in roots else "")
+    print("  %-40.40s %10d %12.6g %8.3f%%  %s%s" % (nm, kk, mm, rr * 100, producer.get(nm, "?"), mark))
+if len(diverging) > kRowsShown:
+    print("  ... and %d more (raise kRowsShown in this script to see them all)" % (len(diverging) - kRowsShown))
+
+# The last tensors that still agreed before the first divergence: what the first failing op read.
+kAgreeingRowsShown = 8
+cut = next(i for i, r in enumerate(rows) if r[0] == first[0])
+lo = max(0, cut - kAgreeingRowsShown)
+if cut > 0:
     print()
-    # A window ending at the divergence, not the head of the list: the rows that matter are the last
-    # few that still agreed, since they are what the failing op read.
-    kAgreeingRowsShown = 12
-    cut = next(i for i, r in enumerate(rows) if r[0] == n)
-    lo = max(0, cut - kAgreeingRowsShown)
-    print("  %-34s %10s %12s %9s" % ("tensor (node order)", "elements", "max|diff|", "rel%"))
-    if lo > 0:
-        print("  ... %d earlier tensor(s) agree" % lo)
-    for nm, kk, mm, rr in rows[lo: cut + 1]:
-        mark = "  <== first" if nm == n else ""
-        print("  %-34.34s %10d %12.6g %8.3f%%%s" % (nm, kk, mm, rr * 100, mark))
-    # Node order is one valid topological order among many, so "first" is a good lead but not a
-    # proof. An op whose output diverges while every operand it read AGREES is the proof: nothing
-    # upstream handed it a bad value, so the difference was made there. List them all.
-    culprits = [nm for nm, _, _, _ in rows
-                if verdict.get(nm)
-                and any(o in verdict for o in operands.get(nm, []))
-                and all(not verdict.get(o, False) for o in operands[nm])]
-    if culprits:
-        print()
-        print("  ops that diverge on operands that AGREE (the difference is made here):")
-        for nm in culprits[:12]:
-            print("    %-34.34s %s" % (nm, producer.get(nm, "?")))
-            print("  " + operandLine(nm))
-    sys.exit(4)
+    print("  last agreeing tensors before the first divergence:")
+    for nm, kk, mm, rr in rows[lo:cut]:
+        print("  %-40.40s %10d %12.6g %8.3f%%" % (nm, kk, mm, rr * 100))
+sys.exit(4)
 PYL
   echo
   echo "localizing: dumping every activation on both backends ..."
