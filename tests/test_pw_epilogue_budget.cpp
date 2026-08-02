@@ -9,7 +9,7 @@
 // The OPERAND budget is deliberately NOT bounded, and the last test here pins that. Narrowing it
 // changes answers rather than speed: a unit split for want of a slot rounds its intermediate
 // through fp16 storage where the whole unit kept it in an fp32 register, and a production
-// image-warp graph fell from matching the CPU oracle within one code to 15 dB when the epilogue
+// graph fell from matching the CPU oracle within one code to 15 dB when the epilogue
 // was narrowed to 6 slots. It also bought nothing measurable -- see the note on kPwMaxOperands.
 //
 //   * broadcast classes, in the blocked world only. A geometric class (per-pixel, row/column,
@@ -206,7 +206,7 @@ namespace {
 // A geometric-class operand (per-pixel here) rides its producer's store like any other. Refusing it
 // would SPLIT the unit, and a split rounds the intermediate through fp16 storage -- the same defect
 // that narrowing the operand budget caused, measured at 70 dB -> 15 dB against the CPU oracle on a
-// production image-warp graph. Only the STANDALONE kernels specialize by class (their _dc twin),
+// graph. Only the STANDALONE kernels specialize by class (their _dc twin),
 // because that choice is made per node at record time and leaves the graph alone.
 TEST(PwEpilogueBudget, GeometricClassOperandStillRidesABlockedProducersStore) {
     UnitPlacement p = placeUnit({Shape {kBcast, kBcast, kRunH, kRunW}}, /*blocked*/ true);
@@ -235,7 +235,7 @@ TEST(PwEpilogueBudget, DirectClassOperandRidesTheProducersStore) {
 
 // A unit using every operand slot a standalone unit gets must still ride its producer's store.
 // This is the test that fails if someone narrows the epilogue budget again for speed: it is the
-// cheap, local signal standing in for the image-warp graph that caught it the expensive way.
+// cheap, local signal standing in for the graph that caught it the expensive way.
 TEST(PwEpilogueBudget, AUnitUsingEveryOperandSlotStillRidesTheProducersStore) {
     for (bool blocked: {false, true})
     {

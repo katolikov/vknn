@@ -146,7 +146,7 @@ namespace vknn {
     /// The epilogue carries the SAME budget as a standalone unit, and must: narrowing it changes
     /// ANSWERS, not just speed. A unit that no longer fits is emitted as a separate node, and the
     /// split rounds its intermediate through fp16 storage where the single fused unit kept it in an
-    /// fp32 register. A production image-warp graph whose blend region needs the full budget went
+    /// fp32 register. A graph whose fused region needs the full budget went
     /// from matching the CPU oracle within one code (70 dB) to 15 dB when the epilogue was narrowed
     /// to 6 slots -- that widening was never a speed knob, it is what makes the region fuse at all.
     ///
