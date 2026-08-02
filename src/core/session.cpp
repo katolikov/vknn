@@ -684,7 +684,8 @@ namespace vknn {
             // markFp32 so the buffer planner sizes them 4-byte and their producers run in fp32.
             pinGatherIndexFp32(graph_);
             // Sampling coordinates (a GridSample grid or the warp variant's flow) quantized to fp16
-            // drift the sample point (~0.5-1 px at 1920-wide inputs). Pin the whole coordinate cone
+            // drift the sample point: an 11-bit significand resolves a coordinate past 1024 only to the
+            // nearest half pixel, and past 2048 only to the nearest pixel. Pin the whole coordinate cone
             // - the grid/flow algebra back through elementwise/movement/fused chains - to fp32; the
             // samplers decode their coordinate operands at storage precision.
             pinSampleCoordFp32(graph_);

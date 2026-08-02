@@ -3,7 +3,7 @@
 // (a vec4 per output pixel for every channel), so the channel axis is never permuted. The grid is a flat
 // buffer (2 coords per output pixel) read as raw words: GRID_FP32 selects fp32 (a constant grid uploads
 // fp32, and pinGridSampleGridFp32 pins a runtime grid's storage to fp32) or fp16 decode — normalized
-// coordinates quantized to fp16 drift up to ~0.5 px at 1920-wide inputs, so the grid rides fp32 whenever
+// coordinates quantized to fp16 stop resolving whole pixels past 2048, so the grid rides fp32 whenever
 // the storage allows. MODE: 0=bilinear 1=nearest 2=cubic. PADMODE: 0=zeros 1=border 2=reflection.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require

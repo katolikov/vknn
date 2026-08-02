@@ -1,5 +1,6 @@
 // GridSample on the GPU: NC4HW4 data (input 0) sampled by a flat [N,Hout,Wout,2] grid (input 1). The grid
-// carries normalized COORDINATES, where fp16 quantization costs up to ~0.5 px at 1920-wide inputs, so it
+// carries normalized COORDINATES, and fp16 resolves a pixel coordinate only to the nearest half pixel
+// once it passes 1024 and to the nearest whole pixel past 2048 (an 11-bit significand), so it
 // is kept at fp32 wherever the storage allows: a CONSTANT grid always uploads fp32, and a RUNTIME grid
 // (the optical-flow warps) binds its flat activation buffer via operandBuf — fp32 when
 // pinSampleCoordFp32 pinned its storage, else the fp16 bytes it was stored in. The shader reads the
@@ -117,8 +118,8 @@ namespace vknn {
                     if (g->isInitializer(node.inputs[1]))
                     {
                         // A constant grid uploads fp32 regardless of the segment precision: the grid holds
-                        // normalized coordinates whose fp16 quantization drifts the sample point by up to
-                        // ~0.5 px at 1920-wide inputs. The shader decodes per GRID_FP32.
+                        // normalized coordinates, and fp16 stops resolving whole pixels once a coordinate
+                        // passes 2048. The shader decodes per GRID_FP32.
                         if (!gridHold)
                         {
                             gridHold = uploadWeight(env, initFloats(*g, node.inputs[1]), /*fp16=*/false);
