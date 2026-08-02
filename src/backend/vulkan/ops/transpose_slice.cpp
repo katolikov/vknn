@@ -1,5 +1,6 @@
 // Transpose and Slice on the GPU. Flat row-major, except a channel-last (NCHW->NHWC) Transpose,
 // which reads its input in NC4HW4 (transposeReadsNc4) so no ConvertLayout precedes it.
+#include "core/slice_bounds.h"
 #include "flat_ops.h"
 
 namespace vknn {
@@ -64,10 +65,59 @@ namespace vknn {
         };
         struct SliceOp: VulkanOp {
             flat::Gather impl;
-            void         prepare(const Node &node, VkOpEnv &env) override {
-                impl.prepare(node, env);
+            // ---- NC4HW4 channel path ----
+            // A block-aligned channel slice (sliceIsNc4) takes a contiguous run of channel blocks out
+            // of each batch, so it moves buffer ranges instead of gathering element by element -- and
+            // when the planner already aliased the output onto that range, it moves nothing at all.
+            // Geometry mirrors split.cpp: NC4HW4 bytes are [n][channelBlock][h*w][kNC4Block] * elem.
+            bool    nc4_ = false;
+            NCHW    x_ {};
+            int64_t cbTotal_  = 0; // the input's channel-block count (its per-batch pitch)
+            int64_t cbOut_    = 0; // channel blocks this slice takes
+            int64_t blockOff_ = 0; // first input block the slice starts at
+            int64_t hw_       = 0;
+            int64_t elem_     = 0;
+
+            void prepare(const Node &node, VkOpEnv &env) override {
+                nc4_ = !opIsFlat(node, env);
+                if (!nc4_)
+                {
+                    impl.prepare(node, env);
+                    return;
+                }
+                const Graph &g               = *env.graph;
+                const Shape &in              = g.desc(node.inputs[0]).shape;
+                x_                           = NCHW::from(in);
+                elem_                        = env.useFp16 ? 2 : 4;
+                cbTotal_                     = cBlocks(x_.c);
+                hw_                          = x_.h * x_.w;
+                const auto            starts = readI64Param(g, node, "starts", 1), ends = readI64Param(g, node, "ends", 2);
+                const auto            steps = readI64Param(g, node, "steps", 4);
+                const SliceAxisBounds b     = resolveSliceAxis(in[1], starts[0], ends[0], steps.empty() ? 1 : steps[0]);
+                blockOff_                   = b.start / kNC4Block;
+                cbOut_                      = cBlocks(NCHW::from(g.desc(node.outputs[0]).shape).c);
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                if (nc4_)
+                {
+                    vk::Buffer *src = env.devBuf(node.inputs[0]);
+                    vk::Buffer *dst = env.devBuf(node.outputs[0]);
+                    // Zero-copy: the output already IS this block range of the input. Only for a single
+                    // batch -- batches interleave in the source, so a multi-batch slice is not one view.
+                    if (x_.n == 1 && dst->hazardRoot() == src->hazardRoot() && dst->rootOffset() == src->rootOffset() + (size_t) (blockOff_ * hw_ * kNC4Block * elem_))
+                    {
+                        return;
+                    }
+                    for (int64_t n = 0; n < x_.n; ++n)
+                    {
+                        VkBufferCopy c {};
+                        c.srcOffset = (VkDeviceSize) ((n * cbTotal_ + blockOff_) * hw_ * kNC4Block * elem_);
+                        c.dstOffset = (VkDeviceSize) ((n * cbOut_) * hw_ * kNC4Block * elem_);
+                        c.size      = (VkDeviceSize) (cbOut_ * hw_ * kNC4Block * elem_);
+                        vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
+                    }
+                    return;
+                }
                 // A full-range unit-step Slice is aliased onto its input buffer by the segment planner
                 // (geometry-as-metadata); input and output then resolve to the same buffer, so the gather
                 // is a no-op — skip it. Guards, in order: a folded pointwise epilogue ("pw_steps") still

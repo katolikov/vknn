@@ -56,7 +56,7 @@ namespace vknn {
                 set(OpType::Resize, L::Nc4, false, true);
                 set(OpType::GridSample, L::Nc4, false, true);
                 set(OpType::Transpose, L::Flat, false, true);
-                set(OpType::Slice, L::Flat, false, true);
+                set(OpType::Slice, L::ShapeDependent, false, true);
                 set(OpType::Reduce, L::Flat, false, true);
                 set(OpType::DepthToSpace, L::ShapeDependent, false, false);
                 set(OpType::Split, L::ShapeDependent, false, false);

@@ -1,3 +1,4 @@
+#include "core/slice_bounds.h"
 #include "passes_internal.h"
 #include <iterator>
 
@@ -83,6 +84,46 @@ namespace vknn {
         return in[1] % kNC4Block == 0 && out[1] % kNC4Block == 0;
     }
 
+    bool sliceIsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::Slice || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        // A folded epilogue or a folded movement chain has arithmetic/reindexing to do; only a plain
+        // slice degenerates to a copy.
+        if (n.attr.has("pw_steps") || n.attr.has("view_stride"))
+        {
+            return false;
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape, &out = g.desc(n.outputs[0]).shape;
+        if (in.size() != kNchwRank || out.size() != kNchwRank)
+        {
+            return false;
+        }
+        const auto starts = readI64Param(g, n, "starts", 1), ends = readI64Param(g, n, "ends", 2);
+        const auto axes = readI64Param(g, n, "axes", 3), steps = readI64Param(g, n, "steps", 4);
+        if (starts.size() != 1 || ends.size() != 1)
+        {
+            return false; // exactly one sliced axis
+        }
+        const int64_t axis = axes.empty() ? 0 : (axes[0] < 0 ? axes[0] + (int64_t) kNchwRank : axes[0]);
+        const int64_t step = steps.empty() ? 1 : steps[0];
+        if (axis != 1 || step != 1)
+        {
+            return false; // the channel axis, walked forward
+        }
+        // NC4HW4 groups four channels into one block, so a channel range is a run of WHOLE blocks
+        // exactly when it starts and ends on a block boundary. Anything else would split a block
+        // across the seam, which no byte copy can express.
+        const SliceAxisBounds b = resolveSliceAxis(in[1], starts[0], ends[0], step);
+        if (b.start % kNC4Block != 0 || b.count % kNC4Block != 0 || b.count <= 0)
+        {
+            return false;
+        }
+        // Every other axis must be taken whole: the copy moves contiguous block runs, not a box.
+        return out[0] == in[0] && out[1] == b.count && out[2] == in[2] && out[3] == in[3];
+    }
+
     bool gpuFlatNode(const Graph &g, const Node &n) {
         auto sh = [&](TensorId t) -> const Shape & {
             return g.desc(t).shape;
@@ -150,6 +191,11 @@ namespace vknn {
                 }
                 return true;
             }
+            case OpType::Slice:
+                // A block-aligned channel slice is a contiguous run of NC4HW4 blocks per batch, so it
+                // copies buffer ranges (and often aliases outright) instead of gathering through flat.
+                // Every other slice keeps the flat gather.
+                return !sliceIsNc4(g, n);
             case OpType::DepthToSpace:
                 // Both sides packed when every NC4HW4 block is fully occupied; otherwise the flat
                 // row-major remap, with the layout pass converting at the boundary.

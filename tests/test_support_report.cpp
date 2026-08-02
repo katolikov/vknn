@@ -581,6 +581,7 @@ TEST(OpDescriptor, LayoutClassAgreesWithGpuFlatNode) {
             case OpType::DepthToSpace:
             case OpType::Pad:
             case OpType::Gather:
+            case OpType::Slice:
             case OpType::Split:
             case OpType::ScatterND:
             case OpType::TopK:
