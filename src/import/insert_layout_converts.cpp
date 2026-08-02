@@ -600,8 +600,15 @@ namespace vknn {
                     }
                 }
             }
-            // seam -> count, keyed by "<producer op> -> <consumer op>".
-            std::map<std::string, int> seams;
+            // seam -> (count, elements converted), keyed by "<producer op> -> <consumer op>".
+            // The element total is what decides where effort goes: a dozen converts over reduced
+            // scalars cost nothing, while a handful over full-resolution maps is the whole bill, and
+            // a count alone ranks them identically.
+            struct Seam {
+                int     converts = 0;
+                int64_t elements = 0;
+            };
+            std::map<std::string, Seam> seams;
             for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
             {
                 const Node &nd = g.nodes[(size_t) ni];
@@ -611,6 +618,10 @@ namespace vknn {
                 }
                 const int   src  = producer[(size_t) nd.inputs[0]];
                 const char *from = src >= 0 ? opTypeName(g.nodes[(size_t) src].type) : "(graph input)";
+                // Which side asked for flat. subOp 0 converts NC4HW4 -> flat (the CONSUMER wants
+                // flat), 1 converts the other way (the PRODUCER was flat). Without this the pair
+                // names two ops and leaves it open which of them has no blocked kernel.
+                const char *direction = nd.subOp == 0 ? "   [consumer wants flat]" : "   [producer was flat]";
                 // A convert may feed several consumers; each is its own seam, and a convert with no
                 // consumer feeds a graph output.
                 bool consumed = false;
@@ -624,7 +635,9 @@ namespace vknn {
                     {
                         if (in != kNoTensor && in == nd.outputs[0])
                         {
-                            seams[std::string(from) + " -> " + opTypeName(other.type)]++;
+                            Seam &seam = seams[std::string(from) + " -> " + opTypeName(other.type) + direction];
+                            seam.converts++;
+                            seam.elements += numElements(g.desc(nd.outputs[0]).shape);
                             consumed = true;
                             break;
                         }
@@ -632,21 +645,33 @@ namespace vknn {
                 }
                 if (!consumed)
                 {
-                    seams[std::string(from) + " -> (graph output)"]++;
+                    Seam &seam = seams[std::string(from) + " -> (graph output)" + direction];
+                    seam.converts++;
+                    seam.elements += numElements(g.desc(nd.outputs[0]).shape);
                 }
             }
-            std::vector<std::pair<std::string, int>> ranked(seams.begin(), seams.end());
+            std::vector<std::pair<std::string, Seam>> ranked(seams.begin(), seams.end());
+            // Ranked by ELEMENTS moved, not by how many converts there are.
             std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
-                return a.second > b.second;
+                return a.second.elements > b.second.elements;
             });
+            int64_t total = 0;
+            for (const auto &r: ranked)
+            {
+                total += r.second.elements;
+            }
             constexpr size_t kSeamsReported = 8;
+            int64_t          shown          = 0;
             for (size_t i = 0; i < ranked.size() && i < kSeamsReported; ++i)
             {
-                VKNN_INFO << "insertLayoutConverts:   " << ranked[i].second << "x  " << ranked[i].first;
+                const Seam &s2 = ranked[i].second;
+                shown += s2.elements;
+                VKNN_INFO << "insertLayoutConverts:   " << s2.converts << "x  " << (total ? s2.elements * 100 / total : 0) << "% of converted elements  "
+                          << ranked[i].first;
             }
             if (ranked.size() > kSeamsReported)
             {
-                VKNN_INFO << "insertLayoutConverts:   ... " << (ranked.size() - kSeamsReported) << " further seam(s)";
+                VKNN_INFO << "insertLayoutConverts:   ... " << (ranked.size() - kSeamsReported) << " further seam(s), " << (total ? (total - shown) * 100 / total : 0) << "% of converted elements";
             }
         }
 
