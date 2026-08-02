@@ -439,12 +439,25 @@ namespace vknn {
     namespace {
         enum class LKind { FixedFlat, FixedNC4, Flexible, Agnostic };
 
-        bool layoutAgnostic(const Node &n) {
+        bool layoutAgnostic(const Graph &g, const Node &n) {
             // metadata reshape / no-op copy: input and output bytes are identical, so it keeps its
             // layout. ChannelShuffle is not a byte copy but has a kernel in BOTH layouts (a pure
             // index remap either way), so it equally adopts its input's layout — the channel count
             // is unchanged, which keeps the NC4HW4 arm of the agnostic rule valid.
-            return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle;
+            if (n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle)
+            {
+                return true;
+            }
+            // A per-element map reads element i and writes element i, so it computes the same answer
+            // in either layout and can adopt its input's -- as long as the element it reads is at the
+            // same index it writes. A CONSTANT data operand breaks that: operandBuf uploads a
+            // constant dense, which is a different arrangement from the blocked output it would be
+            // paired against, so such a node keeps the flat path.
+            if (n.type == OpType::Clip)
+            {
+                return !n.inputs.empty() && n.inputs[0] != kNoTensor && !g.isInitializer(n.inputs[0]);
+            }
+            return false;
         }
 
         /// The layout ONE reader operates a given input slot in — the exact rule the convert
@@ -470,7 +483,7 @@ namespace vknn {
         }
 
         LKind opLayoutKind(const Graph &g, const Node &n) {
-            if (layoutAgnostic(n))
+            if (layoutAgnostic(g, n))
             {
                 return LKind::Agnostic;
             }
@@ -597,7 +610,7 @@ namespace vknn {
                             for (size_t rj: readers[(size_t) o])
                             {
                                 const Node &R = g.nodes[rj];
-                                if (layoutAgnostic(R))
+                                if (layoutAgnostic(g, R))
                                 {
                                     continue; // adopts whatever this node chooses: no convert either way
                                 }

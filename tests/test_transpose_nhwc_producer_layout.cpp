@@ -57,9 +57,51 @@ namespace {
         g.outputs = {y};
     }
 
-    // x -> Clip -> Transpose(NHWC). Clip is an unconditionally FLAT op, so the Transpose's input is
-    // a flat row-major tensor: exactly the case a packed read would have to pay a convert for.
+    /// An int64 initializer, for the Slice bounds below.
+    TensorId int64Init(Graph &g, const char *name, const std::vector<int64_t> &v) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = {(int64_t) v.size()};
+        d.dtype         = DType::Int64;
+        d.isInitializer = true;
+        TensorId   t    = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems((int64_t) v.size(), DType::Int64);
+        for (size_t k = 0; k < v.size(); ++k)
+        {
+            hb.i64()[k] = v[k];
+        }
+        g.initializers[t] = std::move(hb);
+        return t;
+    }
+
+    // x -> Slice(channels 1..13) -> Transpose(NHWC). A channel range that does not start or end on a
+    // block boundary has no blocked form, so the Transpose's input is a flat row-major tensor:
+    // exactly the case a packed read would have to pay a convert for.
     Graph buildFlatProducerThenTranspose() {
+        Graph      g;
+        TensorDesc xi;
+        xi.name    = "x";
+        xi.shape   = {kBatch, kChannels, kHeight, kWidth};
+        xi.isInput = true;
+        TensorId x = g.addTensor(xi);
+        g.inputs   = {x};
+
+        TensorId t = g.addTensor(namedDesc("t"));
+        Node     slice;
+        slice.type    = OpType::Slice;
+        slice.name    = "unaligned";
+        slice.inputs  = {x, int64Init(g, "starts", {1}), int64Init(g, "ends", {13}), int64Init(g, "axes", {1})};
+        slice.outputs = {t};
+        g.nodes.push_back(slice);
+
+        appendChannelLastTranspose(g, t);
+        return g;
+    }
+
+    // x -> Clip -> Transpose(NHWC). A clamp is a per-element map, so it adopts whatever layout its
+    // neighbours carry rather than forcing one.
+    Graph buildElementwiseProducerThenTranspose() {
         Graph      g;
         TensorDesc xi;
         xi.name    = "x";
@@ -147,6 +189,16 @@ TEST(TransposeNhwcProducerLayout, FlatProducerKeepsTheFlatGatherAndAddsNoConvert
     insertLayoutConverts(g);
     EXPECT_EQ(countConvertLayout(g), 0u) << "a flat-produced input feeds the flat gather directly";
     EXPECT_FALSE(transposeReadsNc4(g, transposeNode(g))) << "the op must read the buffer the layout pass left in place";
+}
+
+// A per-element producer forces nothing: it adopts the packed layout, so the packed read engages and
+// still nothing converts. Both halves of the win at once.
+TEST(TransposeNhwcProducerLayout, ElementwiseProducerAdoptsThePackedLayout) {
+    Graph g = buildElementwiseProducerThenTranspose();
+    inferShapes(g, 1);
+    insertLayoutConverts(g);
+    EXPECT_EQ(countConvertLayout(g), 0u) << "an elementwise map needs no convert in either direction";
+    EXPECT_TRUE(transposeReadsNc4(g, transposeNode(g))) << "having adopted the packed layout, it feeds the packed read";
 }
 
 // The packed producer keeps the win the kernel exists for: no convert, and the packed read engages.
