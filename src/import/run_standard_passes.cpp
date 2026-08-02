@@ -185,6 +185,10 @@ namespace vknn {
         {
             fusePointwiseChains(g, opt.strictFuse);
             inferShapes(g, batch, declared, bindings); // set the FusedPointwise output shapes
+            // A unit that resolved an operand back through its Expand leaves that Expand with no
+            // reader. Nothing after this point would collect it, and a dead Expand is not free: it
+            // still dispatches, and having only a flat kernel it drags a layout convert in and out.
+            eliminateDeadNodes(g);
         }
         pruneDeadInitializers(g); // after all rewiring: orphaned fold intermediates + Cast-copied weights
         // Restore the declared output dtypes dropped by the output-rewiring passes above (see snapshot).

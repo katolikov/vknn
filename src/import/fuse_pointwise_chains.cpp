@@ -299,6 +299,36 @@ namespace vknn {
                 g(g_), run(run_), producer(prod), consumerCount(cc), isGraphOut(go), strict(strict_) {
             }
 
+            /// The tensor a unit should actually READ for an external operand `t`.
+            ///
+            /// An Expand exists only to materialise a broadcast, and a unit reads its operands
+            /// through the same broadcast machinery -- so reading the Expand's SOURCE computes the
+            /// identical values while touching a fraction of the memory, and once nothing reads the
+            /// expanded tensor the Expand (and the layout converts around it, since Expand has only
+            /// a flat kernel) is dead code.
+            ///
+            /// Only when the source still classifies: an operand with no blocked index would force
+            /// the whole unit onto the flat kernel, which costs far more than the Expand saved.
+            TensorId operandThroughExpand(TensorId t, const Shape &run) const {
+                for (int hop = 0; hop < kPwExpandFoldMaxHops; ++hop)
+                {
+                    const int p = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
+                    if (p < 0 || g.nodes[(size_t) p].type != OpType::Expand || g.nodes[(size_t) p].inputs.empty())
+                    {
+                        return t;
+                    }
+                    const TensorId srcT = g.nodes[(size_t) p].inputs[0];
+                    // The storage precision has to match: the unit decodes an operand at one width,
+                    // and an fp32-pinned source behind an fp16 expansion is a different tensor to it.
+                    if (srcT == kNoTensor || pwTensorIsFp32(g, srcT) != pwTensorIsFp32(g, t) || pwBcastClass(g, srcT, run) == kPwBcastGeneral)
+                    {
+                        return t;
+                    }
+                    t = srcT;
+                }
+                return t;
+            }
+
             // The member's data inputs (excluding Clip bound inputs, which encode as params).
             static std::vector<TensorId> dataInputs(const Node &n) {
                 if (n.type == OpType::Clip || n.type == OpType::Relu || n.type == OpType::Unary)
@@ -369,7 +399,9 @@ namespace vknn {
                     {
                         int  p        = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
                         bool internal = p >= 0 && memberSet.count(p);
-                        if (!internal && t != u.entry && t != kNoTensor && pwBcastClass(g, t, run) != 0)
+                        // Resolved the same way the emission below resolves it, so the register
+                        // plan counts the operands the unit will actually load.
+                        if (!internal && t != u.entry && t != kNoTensor && pwBcastClass(g, operandThroughExpand(t, run), run) != 0)
                         {
                             bcastOperands++;
                         }
@@ -493,6 +525,7 @@ namespace vknn {
                             src[k].ref = kPwRefEntry;
                         } else
                         {
+                            t              = operandThroughExpand(t, run);
                             src[k].operand = true;
                             src[k].bc      = pwBcastClass(g, t, run);
                             if (pwTensorIsFp32(g, t))
@@ -1499,7 +1532,7 @@ namespace vknn {
                 prod     = (u.entry >= 0 && u.entry < (TensorId) producer.size()) ? producer[u.entry] : -1;
                 entryExp = false;
                 bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") &&
-                          g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
+                           g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
                 // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >=
                 // kTiledMatMulMin — the same constant matmul.cpp gates on) has no register
                 // headroom for the VM at its per-thread register micro-tile store loop — an

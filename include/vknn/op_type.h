@@ -190,6 +190,10 @@ namespace vknn {
     /// shaders/pw_epilogue.glsl). The epilogue inlines into every producer kernel, so it compiles
     /// the direct group alone and a unit carrying a geometric operand runs standalone —
     /// fuse_pointwise_chains refuses the attach, PwEpi::prepare refuses a plan that slipped past.
+    /// Hop ceiling when a unit resolves an operand back through chained Expands. Two Expands in a
+    /// row is already a redundant graph; the bound stops the walk on an adversarial one.
+    constexpr int kPwExpandFoldMaxHops = 4;
+
     constexpr bool pwBcastClassIsGeometric(int cls) {
         return cls == kPwBcastSpatial || cls == kPwBcastRow || cls == kPwBcastCol || cls == kPwBcastRowSplat || cls == kPwBcastColSplat || cls == kPwBcastPacked;
     }
