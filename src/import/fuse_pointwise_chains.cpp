@@ -301,19 +301,23 @@ namespace vknn {
 
             /// The tensor a unit should actually READ for an external operand `t`.
             ///
-            /// An Expand exists only to materialise a broadcast, and a unit reads its operands
-            /// through the same broadcast machinery -- so reading the Expand's SOURCE computes the
-            /// identical values while touching a fraction of the memory, and once nothing reads the
-            /// expanded tensor the Expand (and the layout converts around it, since Expand has only
-            /// a flat kernel) is dead code.
+            /// An Expand exists only to materialise a broadcast, and a Tile does the same whenever
+            /// the axes it repeats are size 1 at the source. A unit reads its operands through that
+            /// same broadcast machinery -- so reading the SOURCE computes identical values while
+            /// touching a fraction of the memory, and once nothing reads the materialised tensor it
+            /// (and the layout converts around it, since both ops have only flat kernels) is dead.
             ///
-            /// Only when the source still classifies: an operand with no blocked index would force
-            /// the whole unit onto the flat kernel, which costs far more than the Expand saved.
+            /// The class check carries the whole correctness argument, for both producers: a source
+            /// that classifies is one the broadcast machinery reaches every element of the run from.
+            /// A Tile that genuinely REPEATS -- three source elements laid out six times -- has no
+            /// such class and is left alone, as is any operand with no blocked index, which would
+            /// force the whole unit onto the flat kernel and cost far more than the fold saved.
             TensorId operandThroughExpand(TensorId t, const Shape &run) const {
                 for (int hop = 0; hop < kPwExpandFoldMaxHops; ++hop)
                 {
-                    const int p = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
-                    if (p < 0 || g.nodes[(size_t) p].type != OpType::Expand || g.nodes[(size_t) p].inputs.empty())
+                    const int  p                 = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
+                    const bool broadcastProducer = p >= 0 && (g.nodes[(size_t) p].type == OpType::Expand || g.nodes[(size_t) p].type == OpType::Tile);
+                    if (!broadcastProducer || g.nodes[(size_t) p].inputs.empty())
                     {
                         return t;
                     }

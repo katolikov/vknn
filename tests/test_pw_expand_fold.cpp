@@ -1,4 +1,4 @@
-// A pointwise unit reads an Expand's SOURCE, not its materialised result.
+// A pointwise unit reads a broadcast producer's SOURCE, not its materialised result.
 //
 // Expand exists only to write a broadcast out in full, and a unit already broadcasts its operands --
 // so reading the source computes identical values over a fraction of the memory, and the Expand
@@ -20,8 +20,8 @@ namespace {
         return g.addTensor(d);
     }
 
-    /// Relu(x) * Expand(b -> full): two members, which is what makes a unit.
-    Graph expandIntoMul(const Shape &full, const Shape &broadcastSource) {
+    /// Relu(x) * Broadcast(b -> full): two members, which is what makes a unit.
+    Graph expandIntoMul(const Shape &full, const Shape &broadcastSource, OpType producer = OpType::Expand) {
         Graph    g;
         TensorId x = value(g, "x", full), b = value(g, "b", broadcastSource);
         TensorId r = value(g, "r", full), e = value(g, "e", full), m = value(g, "m", full);
@@ -33,7 +33,7 @@ namespace {
         relu.outputs = {r};
         g.nodes.push_back(relu);
         Node expand;
-        expand.type    = OpType::Expand;
+        expand.type    = producer;
         expand.name    = "expand";
         expand.inputs  = {b};
         expand.outputs = {e};
@@ -71,6 +71,27 @@ TEST(PwExpandFold, AClassifiableSourceIsReadDirectly) {
         EXPECT_EQ(countOf(g, OpType::Expand), 0) << "the Expand should be dead once the unit reads its source";
         EXPECT_EQ(countOf(g, OpType::FusedPointwise), 1);
     }
+}
+
+// A Tile whose repeated axes are size 1 at the source IS a broadcast, and folds the same way.
+TEST(PwExpandFold, ABroadcastingTileFoldsToo) {
+    for (const Shape &src: {Shape {1, 8, 1, 1}, Shape {1, 1, 16, 12}})
+    {
+        Graph g = expandIntoMul({1, 8, 16, 12}, src, OpType::Tile);
+        fusePointwiseChains(g, /*strictFuse=*/false);
+        eliminateDeadNodes(g);
+        EXPECT_EQ(countOf(g, OpType::Tile), 0) << "a broadcasting Tile is dead once the unit reads its source";
+        EXPECT_EQ(countOf(g, OpType::FusedPointwise), 1);
+    }
+}
+
+// A Tile that genuinely repeats -- four source rows laid out twice -- has no broadcast class, so it
+// stays and materialises its result.
+TEST(PwExpandFold, ARepeatingTileIsLeftAlone) {
+    Graph g = expandIntoMul({1, 8, 16, 12}, {1, 8, 8, 12}, OpType::Tile);
+    fusePointwiseChains(g, /*strictFuse=*/false);
+    eliminateDeadNodes(g);
+    EXPECT_EQ(countOf(g, OpType::Tile), 1) << "repeating is not broadcasting; the unit cannot express it";
 }
 
 TEST(PwExpandFold, TheUnitStillProducesTheGraphOutput) {
