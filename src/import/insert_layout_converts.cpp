@@ -59,7 +59,7 @@ namespace vknn {
     }
 
     // Does this op run as a FLAT (row-major) GPU op rather than the NC4HW4 path? Mirrors the cases the
-    // Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
+    // Vulkan supportsNode() cannot do in NC4HW4: Transpose always; Softmax on a non-channel axis;
     // Concat that isn't 4D channel-axis 4-aligned; Binary/Add with a constant operand or a broadcast/
     // rank that the packed kernel doesn't handle.
     //
@@ -278,10 +278,9 @@ namespace vknn {
                 {
                     return false;
                 }
-                if (g.isInitializer(n.inputs[0]) || g.isInitializer(n.inputs[1]))
-                {
-                    return true;
-                }
+                // A constant operand is no longer a reason to run flat: binary.cpp packs it into the
+                // blocked layout at prepare and uploads it, so the only question left is whether the
+                // SHAPES are ones the blocked kernel indexes.
                 const Shape &a = sh(n.inputs[0]);
                 const Shape &b = sh(n.inputs[1]);
                 if (a.size() == 4 && b.size() == 4 && a == b)
