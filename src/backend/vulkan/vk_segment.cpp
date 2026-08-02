@@ -2508,15 +2508,30 @@ namespace vknn {
             // says nothing about which came first -- and the only question worth asking of two
             // diverging dumps is which tensor diverged FIRST, since everything downstream of it
             // differs for free. The segment knows the order it recorded; nothing else does.
+            //
+            // Each row also names the op that produced the tensor and the operands it read, because
+            // "tensor T diverged" is only half an answer: the op is what gets fixed, and a diverging
+            // output whose operands all AGREE is a proven culprit rather than a suspect inherited
+            // from upstream. Tab-separated: name, op type, comma-separated operand names.
             {
                 std::ofstream order(ctx.config->layerDumpDir + "/_order.txt");
                 for (int ni: nodeIdx)
                 {
-                    for (TensorId out: g_.nodes[ni].outputs)
+                    const Node &nd = g_.nodes[ni];
+                    std::string operands;
+                    for (TensorId in: nd.inputs)
+                    {
+                        if (in == kNoTensor || g_.tensors[in].name.empty())
+                        {
+                            continue;
+                        }
+                        operands += (operands.empty() ? "" : ",") + g_.tensors[in].name;
+                    }
+                    for (TensorId out: nd.outputs)
                     {
                         if (out != kNoTensor && !g_.tensors[out].name.empty())
                         {
-                            order << g_.tensors[out].name << "\n";
+                            order << g_.tensors[out].name << "\t" << opTypeName(nd.type) << "\t" << operands << "\n";
                         }
                     }
                 }

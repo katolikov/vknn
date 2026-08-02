@@ -30,6 +30,12 @@
 #   --rel PCT           what counts as diverged, as a percentage of the tensor's own range
 #                       (default 1.0). fp16 carries ~0.05% per rounding and a few ops accumulate to
 #                       a few tenths, so a tighter bar names rounding rather than a defect.
+#   --no-fold-islands   keep tiny GPU op-islands on the GPU. A few-node probe is folded to the CPU
+#                       by default because the round trip costs more than the work, and then the
+#                       "GPU" arm IS the CPU arm and agreement means nothing. Pass this for probes.
+#
+# The GPU arm's node coverage is reported either way: a run whose nodes all fell back to the CPU is
+# called out rather than scored, because a gate that grades the oracle against itself always passes.
 #
 # Metrics per output: max absolute difference, PSNR, SNR, cosine similarity, and the share of
 # elements that differ at all. Element width is derived from the printed shape and the file size, so
@@ -43,6 +49,7 @@ WORKDIR="/data/local/tmp/cpugpu"
 KEEP=0
 LOCALIZE=0
 REL_PCT="1.0"
+FOLD_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --onnx)      ONNX="$2"; shift 2 ;;
@@ -56,7 +63,8 @@ while [[ $# -gt 0 ]]; do
     --keep)      KEEP=1; shift ;;
     --localize)  LOCALIZE=1; shift ;;
     --rel)       REL_PCT="$2"; shift 2 ;;
-    -h|--help)   sed -n '2,32p' "$0"; exit 0 ;;
+    --no-fold-islands) FOLD_FLAG=" --no-fold-islands"; shift ;;
+    -h|--help)   sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -106,7 +114,7 @@ done
 # --no-cache on both: a cached autotune pick is per-device state, and the point here is what THIS
 # build computes, not what an earlier one left behind.
 run_arm() { # backend outdir logfile
-  $ADB shell "cd $WORKDIR && rm -rf $2 && ./run_cg model.vxm $2 --backend $1 --precision $PRECISION --no-cache$inNames" \
+  $ADB shell "cd $WORKDIR && rm -rf $2 && ./run_cg model.vxm $2 --backend $1 --precision $PRECISION --no-cache$FOLD_FLAG$inNames" \
     </dev/null >"$3" 2>&1
 }
 echo "running GPU (vulkan, precision $PRECISION) ..."
@@ -122,9 +130,23 @@ for arm in gpu cpu; do
     exit 1
   fi
 done
-# A CPU fallback on the "GPU" arm means the comparison is GPU-vs-CPU for only part of the graph.
-falls=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/gpu.log" | grep -c "falling back")
-[[ "$falls" == "0" ]] || echo "note: the GPU arm fell back to another backend for $falls op(s); those parts are compared against themselves"
+# How much of the graph the GPU arm actually ran on the GPU. A node the planner sent to the CPU is
+# compared against itself, so a run that placed EVERY node on the CPU agrees perfectly while proving
+# nothing -- the failure mode a gate must never report as a pass. The Session announces both numbers
+# ("Planned N segment(s) over M nodes", "K node(s) fall back to CPU"), summed here over buckets.
+plain=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/gpu.log")
+nodes=$(echo "$plain" | grep -oE "Planned [0-9]+ segment\(s\) over [0-9]+ nodes" | grep -oE "over [0-9]+" | awk '{s+=$2} END{print s+0}')
+onCpu=$(echo "$plain" | grep -oE "[0-9]+ node\(s\) fall back to CPU" | awk '{s+=$1} END{print s+0}')
+if [[ "$nodes" -gt 0 && "$onCpu" -ge "$nodes" ]]; then
+  echo
+  echo "gate_cpu_gpu: the GPU arm ran ALL $nodes node(s) on the CPU -- this would compare the oracle"
+  echo "  against itself and agree no matter what the GPU does. Reason the planner gave:"
+  echo "$plain" | grep -oE "fall back to CPU.*" | head -1 | sed 's/^/    /'
+  echo "  A few-node graph is folded to the CPU on purpose (the round trip costs more than the work);"
+  echo "  pass --no-fold-islands to keep it on the GPU."
+  exit 3
+fi
+[[ "$onCpu" == "0" ]] || echo "note: $onCpu of $nodes node(s) ran on the CPU in the GPU arm; those are compared against themselves"
 
 $ADB pull "$WORKDIR/out_gpu" "$WORK/gpu" >/dev/null 2>&1
 $ADB pull "$WORKDIR/out_cpu" "$WORK/cpu" >/dev/null 2>&1
@@ -133,7 +155,7 @@ $ADB pull "$WORKDIR/out_cpu" "$WORK/cpu" >/dev/null 2>&1
 # The element width comes from the run log's declared shape and the file size, so a uint8 image, an
 # fp16 tensor and an fp32 tensor are each read as themselves without a dtype flag.
 sed 's/\x1b\[[0-9;]*m//g' "$WORK/gpu.log" | grep -oE "output +'[^']+' +\[[0-9,]+\]" > "$WORK/shapes.txt" || true
-python3 - "$WORK" <<'PY'
+cat >"$WORK/compare.py" <<'PY'
 import sys, os, re, glob
 import numpy as np
 
@@ -201,24 +223,57 @@ elif worst >= 25:
     print("VERDICT: marginal (worst PSNR %.2f dB) — larger than rounding; inspect the ops involved" % worst)
 else:
     print("VERDICT: DISAGREE (worst PSNR %.2f dB) — the GPU is computing something different" % worst)
+sys.exit(0 if worst >= 40 else 5)
 PY
+python3 "$WORK/compare.py" "$WORK"
+gateVerdict=$?
+
+# --- is it precision, or is it the kernel? ---------------------------------------------------------
+# A gap this size has two very different causes and one cheap way to tell them apart: run the same
+# GPU path with fp32 activations. If the gap closes, nothing computes the wrong thing -- some value
+# simply does not survive fp16 storage (a sampling coordinate at a two-thousand-pixel width rounds by
+# up to half a pixel, which moves an image without ever looking like an arithmetic error). If the gap
+# stays, precision is not the story and a kernel is.
+if [[ "$gateVerdict" != "0" && "$PRECISION" != "high" ]]; then
+  echo
+  echo "re-running the GPU arm with fp32 activations (--precision high) against the same oracle ..."
+  $ADB shell "cd $WORKDIR && rm -rf out_hi && ./run_cg model.vxm out_hi --backend vulkan --precision high --no-cache$FOLD_FLAG$inNames" \
+    </dev/null >"$WORK/hi.log" 2>&1
+  rm -rf "$WORK/gpu"
+  $ADB pull "$WORKDIR/out_hi" "$WORK/gpu" >/dev/null 2>&1
+  sed 's/\x1b\[[0-9;]*m//g' "$WORK/hi.log" | grep -oE "output +'[^']+' +\[[0-9,]+\]" > "$WORK/shapes.txt" || true
+  python3 "$WORK/compare.py" "$WORK"
+  hiVerdict=$?
+  echo
+  if [[ "$hiVerdict" == "0" ]]; then
+    echo "  => at fp32 the GPU agrees with the oracle. The difference is PRECISION, not a kernel:"
+    echo "     some value in this graph does not survive fp16 storage."
+  else
+    echo "  => the difference is there at fp32 too, so it is not fp16 storage. A kernel computes"
+    echo "     something different; the localize pass below names which."
+  fi
+  rm -rf "$WORK/gpu"
+  $ADB pull "$WORKDIR/out_gpu" "$WORK/gpu" >/dev/null 2>&1
+fi
 
 # --- localize -------------------------------------------------------------------------------------
 # Which tensor diverged FIRST. A disagreement at the output says only that something upstream is
 # wrong; every tensor after the first bad one differs because its input did. Dumping both backends
 # and walking the segment's own node order turns "the GPU is different" into one op's name.
-if [[ "$LOCALIZE" == "1" ]]; then
-  echo
-  echo "localizing: dumping every activation on both backends ..."
+walk_dumps() { # vxmOnDevice tag -- dump both arms of one .vxm and name where they part
   for arm in gpu cpu; do
     be=$([[ "$arm" == "gpu" ]] && echo vulkan || echo cpu)
-    $ADB shell "cd $WORKDIR && rm -rf ld_$arm && mkdir -p ld_$arm && ./run_cg model.vxm ld_out_$arm --backend $be --precision $PRECISION --no-cache --layer-dump --layer-dump-dir ld_$arm$inNames" \
-      </dev/null >"$WORK/ld_$arm.log" 2>&1
+    $ADB shell "cd $WORKDIR && rm -rf ld_$2_$arm && mkdir -p ld_$2_$arm && ./run_cg $1 ld_out_$2_$arm --backend $be --precision $PRECISION --no-cache$FOLD_FLAG --layer-dump --layer-dump-dir ld_$2_$arm$inNames" \
+      </dev/null >"$WORK/ld_$2_$arm.log" 2>&1
   done
   rm -rf "$WORK/ldg" "$WORK/ldc"
-  $ADB pull "$WORKDIR/ld_gpu" "$WORK/ldg" >/dev/null 2>&1
-  $ADB pull "$WORKDIR/ld_cpu" "$WORK/ldc" >/dev/null 2>&1
-  python3 - "$WORK" "$REL_PCT" <<'PYL'
+  $ADB pull "$WORKDIR/ld_$2_gpu" "$WORK/ldg" >/dev/null 2>&1
+  $ADB pull "$WORKDIR/ld_$2_cpu" "$WORK/ldc" >/dev/null 2>&1
+  python3 "$WORK/walk.py" "$WORK" "$REL_PCT"
+}
+
+if [[ "$LOCALIZE" == "1" ]]; then
+  cat >"$WORK/walk.py" <<'PYL'
 import sys, os, glob
 import numpy as np
 work = sys.argv[1]
@@ -232,25 +287,39 @@ def side(tag):
 g, c = side("ldg"), side("ldc")
 if not g or not c:
     print("  no dumps came back"); sys.exit(0)
-order = []
+# The index rows are "tensor <TAB> op <TAB> operand,operand,...", written in the order the segment
+# recorded. Older builds wrote the bare tensor name, so a missing column just means no op attribution.
+order, producer, operands = [], {}, {}
 for cand in (os.path.join(g, "_order.txt"), os.path.join(c, "_order.txt")):
     if os.path.exists(cand):
-        order = [l.strip() for l in open(cand) if l.strip()]
+        for line in open(cand):
+            f = line.rstrip("\n").split("\t")
+            if not f or not f[0].strip():
+                continue
+            nm = f[0].strip()
+            order.append(nm)
+            producer[nm] = f[1].strip() if len(f) > 1 else ""
+            operands[nm] = [o for o in (f[2].split(",") if len(f) > 2 else []) if o]
         break
 have = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(g, "*.bin"))}
 have &= {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(c, "*.bin"))}
 # node order first, then anything the index did not name (inputs, initializers)
 names = [n for n in order if n in have] + sorted(have - set(order))
 print("  %d tensor(s) dumped on both backends, bar %.2f%% of range%s" % (len(names), relBar * 100, "" if order else "  (no node-order index; name order)"))
-first = None
-rows = []
+first, rows, verdict, skipped = None, [], {}, []
 for n in names:
-    a = np.fromfile(os.path.join(g, n + ".bin"), dtype=np.float32).astype(np.float64)
-    b = np.fromfile(os.path.join(c, n + ".bin"), dtype=np.float32).astype(np.float64)
-    k = min(a.size, b.size)
+    pg, pc = os.path.join(g, n + ".bin"), os.path.join(c, n + ".bin")
+    # Equal byte counts or the two sides hold different element types, and reading both as fp32
+    # would compare one side's values against the other's bit patterns -- a fabricated divergence
+    # that looks exactly like a real one. Report the mismatch instead of ranking noise.
+    if os.path.getsize(pg) != os.path.getsize(pc):
+        skipped.append((n, os.path.getsize(pg), os.path.getsize(pc)))
+        continue
+    a = np.fromfile(pg, dtype=np.float32).astype(np.float64)
+    b = np.fromfile(pc, dtype=np.float32).astype(np.float64)
+    k = a.size
     if k == 0:
         continue
-    a, b = a[:k], b[:k]
     d = np.abs(a - b)
     scale = max(float(np.abs(b).max()), 1e-12)
     rel = float(d.max()) / scale
@@ -259,14 +328,31 @@ for n in names:
     # whose values are 1e-9 a "100% divergence" -- true and useless, since both sides are zero to
     # every consumer. Absolute alone would miss a real disagreement in a small-valued tensor. A
     # divergence has to be big against the tensor's own range AND big enough to survive fp16.
-    if first is None and rel > relBar and float(d.max()) > 1e-5:
+    verdict[n] = rel > relBar and float(d.max()) > 1e-5
+    if first is None and verdict[n]:
         first = (n, k, float(d.max()), rel)
+if skipped:
+    print("  %d tensor(s) not comparable (the two backends stored different element widths):" % len(skipped))
+    for nm, bg, bc in skipped[:8]:
+        print("    %-34.34s gpu %d B, cpu %d B" % (nm, bg, bc))
+def operandLine(nm):
+    ins = operands.get(nm, [])
+    if not ins:
+        return "    operands: none recorded"
+    parts = []
+    for o in ins:
+        parts.append("%s [%s]" % (o, "DIVERGES" if verdict.get(o) else ("agrees" if o in verdict else "not dumped")))
+    return "    operands: " + ", ".join(parts)
 if first is None:
-    print("  every dumped tensor agrees within fp16 rounding -- the divergence is not in a dumped activation")
+    print("  every dumped tensor agrees within the bar")
+    sys.exit(0)
 else:
     n, k, mx, rel = first
     print()
     print("  FIRST DIVERGENCE: '%s'  (%d elements, max|diff| %.6g, %.2f%% of the tensor's range)" % (n, k, mx, rel * 100))
+    if producer.get(n):
+        print("  produced by %s" % producer[n])
+    print(operandLine(n))
     print("  everything after this differs because its input did; this is the op to look at.")
     print()
     print("  %-34s %10s %12s %9s" % ("tensor (node order)", "elements", "max|diff|", "rel%"))
@@ -275,5 +361,49 @@ else:
         print("  %-34.34s %10d %12.6g %8.3f%%%s" % (nm, kk, mm, rr * 100, mark))
         if nm == n:
             break
+    # Node order is one valid topological order among many, so "first" is a good lead but not a
+    # proof. An op whose output diverges while every operand it read AGREES is the proof: nothing
+    # upstream handed it a bad value, so the difference was made there. List them all.
+    culprits = [nm for nm, _, _, _ in rows
+                if verdict.get(nm)
+                and any(o in verdict for o in operands.get(nm, []))
+                and all(not verdict.get(o, False) for o in operands[nm])]
+    if culprits:
+        print()
+        print("  ops that diverge on operands that AGREE (the difference is made here):")
+        for nm in culprits[:12]:
+            print("    %-34.34s %s" % (nm, producer.get(nm, "?")))
+            print("  " + operandLine(nm))
+    sys.exit(4)
 PYL
+  echo
+  echo "localizing: dumping every activation on both backends ..."
+  walk_dumps model.vxm fused
+  fusedWalk=$?
+
+  # Pointwise fusion is the one transform that changes WHICH kernel computes a tensor without
+  # changing the graph's meaning, and it also swallows the intermediates a walk needs to see -- a
+  # fused unit exports one tensor where the source had six. Recompiling without it answers both at
+  # once: if the disagreement vanishes, fusion introduced it; if it survives, the finer dump names a
+  # smaller op. Only possible when the model was given as ONNX, since a prebuilt .vxm is already fused.
+  if [[ -n "$ONNX" && "$fusedWalk" != "0" ]]; then
+    echo
+    echo "re-checking without pointwise fusion (the same graph, one kernel per op) ..."
+    NOFUSE="$WORK/nofuse.vxm"
+    if "$COMPILER" "$ONNX" "$NOFUSE" --no-fuse-pointwise >"$WORK/nofuse_compile.log" 2>&1; then
+      $ADB push "$NOFUSE" "$WORKDIR/nofuse.vxm" >/dev/null
+      walk_dumps nofuse.vxm nofuse
+      if [[ $? == 0 ]]; then
+        echo
+        echo "  => unfused, the GPU matches the oracle everywhere. POINTWISE FUSION introduces the"
+        echo "     difference: the fused unit computes something its unfused equivalent does not."
+      else
+        echo
+        echo "  => the difference survives without fusion, and the unfused dump above names a"
+        echo "     smaller op than the fused one could."
+      fi
+    else
+      echo "  unfused compilation failed:"; tail -5 "$WORK/nofuse_compile.log" | sed 's/^/    /'
+    fi
+  fi
 fi
