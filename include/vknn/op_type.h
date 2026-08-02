@@ -143,24 +143,18 @@ namespace vknn {
     /// vkNodeGate refusal.
     constexpr int kDetMaxGpuN    = 8;
     constexpr int kPwMaxOperands = 9; ///< Extra tensor operands per unit (the primary input is excluded).
-    /// Operand slots the EPILOGUE form carries, which is a different budget from the standalone
-    /// unit's above.
+    /// The epilogue carries the SAME budget as a standalone unit, and must: narrowing it changes
+    /// ANSWERS, not just speed. A unit that no longer fits is emitted as a separate node, and the
+    /// split rounds its intermediate through fp16 storage where the single fused unit kept it in an
+    /// fp32 register. A production image-warp graph whose blend region needs the full budget went
+    /// from matching the CPU oracle within one code (70 dB) to 15 dB when the epilogue was narrowed
+    /// to 6 slots -- that widening was never a speed knob, it is what makes the region fuse at all.
     ///
-    /// pw_epilogue.glsl is #included into 80-odd producer kernels -- conv, matmul, winograd, the
-    /// pooling family -- so every slot it declares costs a descriptor binding and a dispatch step in
-    /// each of them, whether that kernel's unit uses the slot or not. Measured on the direct
-    /// conv+epilogue kernel, widening the epilogue from 6 slots to 9 doubled its time (0.099 ms ->
-    /// 0.186 ms on a 3x224x224 -> 32x112x112 3x3 stride-2 conv), which flipped the conv tile race to
-    /// a slower winner. The standalone kernels pay for their own slots only, so they keep the wider
-    /// budget; an epilogue-shaped unit needing more than this stays a standalone FusedPointwise node
-    /// (pwEpilogueOperandBudgetFits below), which costs one dispatch instead of slowing every
-    /// producer in the graph.
-    constexpr int kPwEpilogueMaxOperands = 6;
-
-    /// Whether a unit with `operandCount` tensor operands may be carried as a producer's epilogue.
-    constexpr bool pwEpilogueOperandBudgetFits(int operandCount) {
-        return operandCount <= kPwEpilogueMaxOperands;
-    }
+    /// Narrowing was tried and reverted because it also bought nothing: on submit+gpu, the metric a
+    /// caller actually waits on, 9 slots measured 4.99 ms against 6 slots' 5.04 ms on one classifier
+    /// and 16.17 vs 16.15 ms on another. The earlier reading that appeared to justify it came from
+    /// summing the profiler's per-node intervals, which overlap and over-report (see
+    /// Profiler::totalGpuMs).
     constexpr int kPwMaxRank = 4; ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
     constexpr int kPwMaxRegs = 4; ///< Named registers for step values reused by later steps.
     constexpr int kPwMaxOuts = 4; ///< Extra output streams (fanout values exported from the unit).

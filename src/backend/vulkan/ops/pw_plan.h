@@ -341,12 +341,11 @@ namespace vknn {
         const char *suffix() const {
             return !active ? "" : relax ? "_epi_rx" : "_epi";
         }
-        // The epilogue form's binding count, which is NOT the standalone unit's: pw_epilogue.glsl
-        // declares kPwEpilogueMaxOperands slots by default, and every producer kernel that carries a
-        // chain pays for each one. The standalone kernels define PW_OPERAND_SLOTS to the wider
-        // kPwMaxOperands themselves and count their bindings with that.
+        // The epilogue binds the same operand budget a standalone unit gets (PW_OPERAND_SLOTS in
+        // pw_epilogue.glsl == kPwMaxOperands): a narrower epilogue would split units that must stay
+        // whole, which changes their answers, not just their speed.
         uint32_t extraBufs() const {
-            return active ? 1u + (uint32_t) kPwEpilogueMaxOperands + (uint32_t) kPwMaxOuts : 0u;
+            return active ? 1u + (uint32_t) kPwMaxOperands + (uint32_t) kPwMaxOuts : 0u;
         }
         // Binding set for a load-time timing race: the real plan SSBO plus `filler` in every
         // operand and extra-output slot. A race runs on dedicated scratch buffers, so there are no
@@ -362,7 +361,7 @@ namespace vknn {
                 return;
             }
             bufs.push_back(plan->handle());
-            for (int slot = 0; slot < kPwEpilogueMaxOperands + kPwMaxOuts; ++slot)
+            for (int slot = 0; slot < kPwMaxOperands + kPwMaxOuts; ++slot)
             {
                 bufs.push_back(filler);
             }
@@ -373,7 +372,7 @@ namespace vknn {
                 return;
             }
             bufs.push_back(plan->handle());
-            for (int k = 0; k < kPwEpilogueMaxOperands; ++k)
+            for (int k = 0; k < kPwMaxOperands; ++k)
             {
                 bufs.push_back(k < (int) operands.size() ? pwOperandBuf(env, operands[k], holds[k], flatWorld)->handle() : dummy);
             }

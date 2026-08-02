@@ -1664,11 +1664,11 @@ namespace vknn {
             // pointwise kernel binds the plan SSBO plus its operand slots and the kPwMaxOuts extra
             // output streams on top of its own inputs/outputs; a plain op binds just those. A
             // STANDALONE unit carries kPwMaxOperands slots, an epilogue the narrower
-            // kPwEpilogueMaxOperands, since that header is inlined into every producer kernel. Concat dispatches once per concatenated part, re-binding
+            // kPwMaxOperands, the budget both the standalone and the epilogue form carry. Concat dispatches once per concatenated part, re-binding
             // the full set each time. Accumulated per command buffer, this drives the
             // maxSubmitBindings split below.
             auto bindEstimate = [&](const Node &nd) -> int {
-                const int pwSlots = nd.type == OpType::FusedPointwise ? kPwMaxOperands : kPwEpilogueMaxOperands;
+                const int pwSlots = kPwMaxOperands;
                 int       pwExtra = (nd.type == OpType::FusedPointwise || nd.attr.has("pw_steps")) ? 1 + pwSlots + kPwMaxOuts : 0;
                 if (nd.type == OpType::Concat)
                 {

@@ -1516,15 +1516,6 @@ namespace vknn {
                 // An aliasable Concat must not host: pw_steps forces one copy dispatch per part,
                 // while an unhosted concat elides into arena views and the unit runs as a single
                 // standalone dispatch (see pwConcatPartsCanAlias).
-                // The epilogue form carries fewer operand slots than a standalone unit, because
-                // pw_epilogue.glsl is inlined into every producer kernel and each slot it declares
-                // costs that kernel a binding and a dispatch step. A unit past that budget stays
-                // standalone -- one extra dispatch, against slowing every conv and matmul that
-                // hosts a chain.
-                if (ok && !pwEpilogueOperandBudgetFits((int) u.operands.size()))
-                {
-                    ok = false;
-                }
                 // Same trade for the broadcast classes, but only in the blocked world. The
                 // geometric classes (per-pixel, row/column, packed) resolve an operand by first
                 // recovering the store's (n, cb, h, w) from the output index; the NC4HW4 appliers

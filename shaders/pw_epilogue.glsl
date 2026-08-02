@@ -92,15 +92,11 @@
 // fp32-chained appliers, kernels built without it only the strict per-step-rounded ones — a
 // runtime branch would carry both bodies in every kernel and cost occupancy.
 #define PW_FLAG_CHAIN32 1
-// Operand slots this translation unit compiles. The default is the EPILOGUE budget
-// (kPwEpilogueMaxOperands in include/vknn/op_type.h): this header is #included into every producer
-// kernel that can carry a fused chain, and each declared slot costs that kernel a binding and a
-// dispatch step whether its unit uses it or not. The standalone pointwise kernels define
-// PW_OPERAND_SLOTS to kPwMaxOperands before including, paying for the wider budget only in
-// themselves.
-#ifndef PW_OPERAND_SLOTS
-#define PW_OPERAND_SLOTS 6
-#endif
+// Operand slots every kernel carrying this epilogue declares: kPwMaxOperands, the same budget a
+// standalone unit gets. Declaring fewer would not merely cost a fusion -- it changes ANSWERS, since
+// a unit split for want of a slot rounds its intermediate through fp16 storage where the whole unit
+// kept it in an fp32 register.
+#define PW_OPERAND_SLOTS 9
 // First binding after the operand block; the extra output streams follow it.
 #define PW_EPI_OUT_BASE (PW_EPI_BASE + 1 + PW_OPERAND_SLOTS)
 layout(std430, binding = PW_EPI_BASE) readonly buffer PwPlan {

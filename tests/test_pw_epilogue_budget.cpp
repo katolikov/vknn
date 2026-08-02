@@ -3,12 +3,15 @@
 //
 // shaders/pw_epilogue.glsl is #included by every epilogue-capable kernel -- conv, matmul, pooling,
 // winograd, transpose and the rest -- so whatever the epilogue form declares is inlined into all of
-// them, used or not. Two things are bounded for that reason, and both bounds are the same trade:
-// one extra dispatch for the rare unit, against slowing every producer in the graph.
+// them, used or not. ONE thing is bounded for that reason: one extra dispatch for the rare unit,
+// against slowing every producer in the graph.
 //
-//   * operand slots. Each one costs every hosting kernel a descriptor binding and a dispatch step,
-//     so the epilogue declares kPwEpilogueMaxOperands of them where a standalone unit gets
-//     kPwMaxOperands.
+// The OPERAND budget is deliberately NOT bounded, and the last test here pins that. Narrowing it
+// changes answers rather than speed: a unit split for want of a slot rounds its intermediate
+// through fp16 storage where the whole unit kept it in an fp32 register, and a production
+// image-warp graph fell from matching the CPU oracle within one code to 15 dB when the epilogue
+// was narrowed to 6 slots. It also bought nothing measurable -- see the note on kPwMaxOperands.
+//
 //   * broadcast classes, in the blocked world only. A geometric class (per-pixel, row/column,
 //     packed) resolves its operand by first recovering the store's (n, channel-block, h, w) from
 //     the output index; the direct classes address it from that index alone. The NC4HW4 appliers
@@ -241,25 +244,19 @@ TEST(PwEpilogueBudget, GeometricClassOperandStillRidesAFlatProducersStore) {
     EXPECT_FALSE(p.standalone);
 }
 
-// --- the operand-slot bound ---------------------------------------------------------------------
+// --- the operand budget is NOT bounded, on purpose --------------------------------------------
 
-// This bound is about declared bindings, so it holds in both worlds.
-TEST(PwEpilogueBudget, UnitAtTheOperandBudgetRidesTheProducersStore) {
+// A unit using every operand slot a standalone unit gets must still ride its producer's store.
+// This is the test that fails if someone narrows the epilogue budget again for speed: it is the
+// cheap, local signal standing in for the image-warp graph that caught it the expensive way.
+TEST(PwEpilogueBudget, AUnitUsingEveryOperandSlotStillRidesTheProducersStore) {
     for (bool blocked: {false, true})
     {
-        UnitPlacement p = placeUnit(channelMasks(kPwEpilogueMaxOperands), blocked);
-        EXPECT_TRUE(p.attachedToProducer) << kPwEpilogueMaxOperands << " operands is exactly what the epilogue form declares (blocked=" << blocked << ")";
+        UnitPlacement p = placeUnit(channelMasks(kPwMaxOperands), blocked);
+        EXPECT_TRUE(p.attachedToProducer) << "the epilogue must carry the full operand budget: a unit split for want "
+                                             "of a slot rounds its intermediate through storage (blocked="
+                                          << blocked << ")";
         EXPECT_FALSE(p.standalone) << "blocked=" << blocked;
-    }
-}
-
-TEST(PwEpilogueBudget, UnitPastTheOperandBudgetKeepsTheUnitStandalone) {
-    static_assert(kPwEpilogueMaxOperands < kPwMaxOperands, "a standalone unit must hold more operands than an epilogue, or this bound is moot");
-    for (bool blocked: {false, true})
-    {
-        UnitPlacement p = placeUnit(channelMasks(kPwEpilogueMaxOperands + 1), blocked);
-        EXPECT_FALSE(p.attachedToProducer) << "one operand past the epilogue's slots must not bind a slot that is not declared (blocked=" << blocked << ")";
-        EXPECT_TRUE(p.standalone) << "the unit must still fuse standalone: the wider kernels carry kPwMaxOperands (blocked=" << blocked << ")";
     }
 }
 
@@ -271,7 +268,7 @@ TEST(PwEpilogueBudget, PlacementDoesNotChangeTheComputedValues) {
     const std::vector<std::vector<Shape>> cases = {
         channelMasks(1),
         {Shape {kBcast, kBcast, kRunW, kRunH}},
-        channelMasks(kPwEpilogueMaxOperands + 1),
+        channelMasks(kPwMaxOperands),
     };
     for (size_t c = 0; c < cases.size(); ++c)
     {
