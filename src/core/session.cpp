@@ -1,5 +1,6 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
+#include "core/layer_dump.h"
 #include "core/plan_retention.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
@@ -2348,15 +2349,8 @@ namespace vknn {
                 {
                     continue;
                 }
-                std::string nm = graph_.tensors[i].name;
-                for (char &c: nm)
-                {
-                    if (c == '/' || c == ':')
-                    {
-                        c = '_';
-                    }
-                }
-                std::ofstream f(cfg_.layerDumpDir + "/" + nm + ".bin", std::ios::binary);
+                const std::string nm = layerDumpFileName(graph_.tensors[i].name);
+                std::ofstream     f(cfg_.layerDumpDir + "/" + nm + ".bin", std::ios::binary);
                 if (f)
                 {
                     f.write((const char *) rt.host.bytes.data(), rt.host.bytes.size());

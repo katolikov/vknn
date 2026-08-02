@@ -2,6 +2,7 @@
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
 #include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
+#include "core/layer_dump.h"      // dump file naming, shared with the node-order index
 #include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
 #include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
 #include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
@@ -2485,15 +2486,8 @@ namespace vknn {
                 {
                     VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, g_.desc(tid).gpuFlat);
                 }
-                std::string nm = g_.tensors[tid].name;
-                for (char &c: nm)
-                {
-                    if (c == '/' || c == ':')
-                    {
-                        c = '_';
-                    }
-                }
-                FILE *f = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
+                const std::string nm = layerDumpFileName(g_.tensors[tid].name);
+                FILE              *f = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
                 if (f)
                 {
                     fwrite(rt.host.bytes.data(), 1, rt.host.bytes.size(), f);
@@ -2512,7 +2506,8 @@ namespace vknn {
             // Each row also names the op that produced the tensor and the operands it read, because
             // "tensor T diverged" is only half an answer: the op is what gets fixed, and a diverging
             // output whose operands all AGREE is a proven culprit rather than a suspect inherited
-            // from upstream. Tab-separated: name, op type, comma-separated operand names.
+            // from upstream. Tab-separated: name, op type, comma-separated operand names. Every
+            // name is the DUMP name, so each one names a file that exists.
             {
                 std::ofstream order(ctx.config->layerDumpDir + "/_order.txt");
                 for (int ni: nodeIdx)
@@ -2525,13 +2520,13 @@ namespace vknn {
                         {
                             continue;
                         }
-                        operands += (operands.empty() ? "" : ",") + g_.tensors[in].name;
+                        operands += (operands.empty() ? "" : ",") + layerDumpFileName(g_.tensors[in].name);
                     }
                     for (TensorId out: nd.outputs)
                     {
                         if (out != kNoTensor && !g_.tensors[out].name.empty())
                         {
-                            order << g_.tensors[out].name << "\t" << opTypeName(nd.type) << "\t" << operands << "\n";
+                            order << layerDumpFileName(g_.tensors[out].name) << "\t" << opTypeName(nd.type) << "\t" << operands << "\n";
                         }
                     }
                 }

@@ -296,10 +296,14 @@ for cand in (os.path.join(g, "_order.txt"), os.path.join(c, "_order.txt")):
             f = line.rstrip("\n").split("\t")
             if not f or not f[0].strip():
                 continue
-            nm = f[0].strip()
+            # An index written by an older runner spells raw tensor names; the dumps flatten path
+            # characters, so flatten here too and the two agree either way.
+            def dumpName(x):
+                return x.strip().replace("/", "_").replace(":", "_")
+            nm = dumpName(f[0])
             order.append(nm)
             producer[nm] = f[1].strip() if len(f) > 1 else ""
-            operands[nm] = [o for o in (f[2].split(",") if len(f) > 2 else []) if o]
+            operands[nm] = [dumpName(o) for o in (f[2].split(",") if len(f) > 2 else []) if o.strip()]
         break
 gpuHave = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(g, "*.bin"))}
 cpuHave = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(c, "*.bin"))}
