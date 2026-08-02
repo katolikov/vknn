@@ -125,44 +125,45 @@ namespace {
     }
 } // namespace
 
-// Both channel counts 4-aligned -> packed. Either side unaligned -> flat, because a partly-filled
-// block would draw its four lanes from different source blocks.
-TEST(DepthToSpaceNc4, PackedOnlyWhenBothChannelCountsAreBlockAligned) {
+// A partly-filled channel block on either side is NOT a reason to go flat. The kernel reads its four
+// source channels through the scalar view of the input, so they may sit in different blocks, and it
+// stops at the last real output channel, leaving that block's remaining lanes zero the way every
+// blocked buffer carries its padding. Device-checked over both modes at input counts 8, 9, 12, 16,
+// 18, 20, 36 and block sizes 2 and 3.
+TEST(DepthToSpaceNc4, PackedWhateverTheChannelCountsAre) {
     struct Case {
         int64_t cIn, block;
-        bool    packed;
     };
     const Case cases[] = {
-        {128, 2, true}, // in 128, out 32: both aligned
-        {16, 2, true},  // in 16, out 4
-        {36, 3, true},  // in 36, out 4: both aligned, block 3
-        {8, 2, false},  // in 8 aligned, out 2 NOT aligned
-        {12, 2, false}, // in 12 aligned, out 3 NOT aligned
-        {18, 3, false}, // in 18 NOT aligned
+        {128, 2}, // in 128, out 32: both block-aligned
+        {16, 2},  // in 16, out 4
+        {36, 3},  // in 36, out 4, block 3
+        {8, 2},   // in 8 aligned, out 2 -- a partial OUTPUT block
+        {12, 2},  // in 12 aligned, out 3 -- a partial output block
+        {18, 3},  // in 18 -- a partial INPUT block, out 2 partial as well
     };
     for (const Case &c: cases)
     {
         Graph g = buildSandwich(c.cIn, 4, 4, c.block, "DCR");
         inferShapes(g, 1);
-        const Node &d2s     = g.nodes[1];
-        const bool  aligned = c.cIn % 4 == 0 && (c.cIn / (c.block * c.block)) % 4 == 0;
-        EXPECT_EQ(depthToSpaceIsNc4(g, d2s), aligned) << "cIn=" << c.cIn << " block=" << c.block;
-        EXPECT_EQ(gpuFlatNode(g, d2s), !aligned) << "gpuFlatNode must mirror the packed decision";
+        const Node &d2s = g.nodes[1];
+        EXPECT_TRUE(depthToSpaceIsNc4(g, d2s)) << "cIn=" << c.cIn << " block=" << c.block;
+        EXPECT_FALSE(gpuFlatNode(g, d2s)) << "gpuFlatNode must mirror the packed decision";
     }
 }
 
-// The point of the change: a packed DepthToSpace between two packed neighbours needs no converts,
-// while an unaligned one still gets the pair that brackets the flat kernel.
+// The point of the change: a DepthToSpace between two packed neighbours needs no converts, and a
+// partial channel block does not change that.
 TEST(DepthToSpaceNc4, PackedSandwichNeedsNoLayoutConverts) {
     Graph packed = buildSandwich(128, 8, 8, 2, "DCR");
     inferShapes(packed, 1);
     insertLayoutConverts(packed);
     EXPECT_EQ(countConvertsAroundD2s(packed), 0u) << "both neighbours are packed and so is the remap";
 
-    Graph unaligned = buildSandwich(8, 8, 8, 2, "DCR"); // out channels = 2, not block-aligned
-    inferShapes(unaligned, 1);
-    insertLayoutConverts(unaligned);
-    EXPECT_EQ(countConvertsAroundD2s(unaligned), 2u) << "the flat kernel is still bracketed on both sides";
+    Graph partial = buildSandwich(8, 8, 8, 2, "DCR"); // out channels = 2: a partial output block
+    inferShapes(partial, 1);
+    insertLayoutConverts(partial);
+    EXPECT_EQ(countConvertsAroundD2s(partial), 0u) << "a partial block is still packed, so still no converts";
 }
 
 // The remap itself, against the ONNX definition, on the CPU oracle -- the packed kernel has to

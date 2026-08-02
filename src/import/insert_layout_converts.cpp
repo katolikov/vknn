@@ -78,10 +78,12 @@ namespace vknn {
         {
             return false;
         }
-        // A partly-filled NC4HW4 block on either side would put a block's four lanes in different
-        // source blocks (or leave output lanes with no source channel at all), which the packed
-        // kernel's quad-at-a-time store cannot express.
-        return in[1] % kNC4Block == 0 && out[1] % kNC4Block == 0;
+        // Partly-filled blocks on either side are fine: the kernel reads its four source channels
+        // through the SCALAR view of the input, so they may sit in different blocks, and it stops at
+        // the last real output channel, leaving that block's remaining lanes zero the way every
+        // blocked buffer carries its padding. What it does need is a whole number of output pixels
+        // per input pixel, which the block size gives by construction.
+        return in[1] > 0 && out[1] > 0;
     }
 
     bool sliceIsNc4(const Graph &g, const Node &n) {
