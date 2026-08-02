@@ -295,7 +295,7 @@ if [[ "$PROFILE" == "1" ]]; then
   echo
   echo "per-op attribution (a SEPARATE pass: --profile serializes the pipeline, so these are shares,"
   echo "not latency) ..."
-  $ADB shell "cd $WORKDIR && ./run_bn_a model.vxm outp --backend $BACKEND --precision $PRECISION --no-cache --profile --repeat 5$inNames" \
+  $ADB shell "cd $WORKDIR && ./run_bn_a model.vxm outp --backend $BACKEND --precision $PRECISION --no-cache --profile --repeat 5$FLAGS_A$inNames" \
     </dev/null >"$WORK/prof.log" 2>&1
   sed 's/\x1b\[[0-9;]*m//g' "$WORK/prof.log" >"$WORK/prof.txt"
   python3 - "$WORK/prof.txt" <<'PYP'
