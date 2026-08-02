@@ -310,6 +310,12 @@ namespace vknn {
             case OpType::FusedPointwise:
             case OpType::Reduce:
             case OpType::ConvertLayout:
+            // A Resize carries coordinates from one grid density to another; it is as much a step of
+            // the coordinate algebra as a multiply is, and it has fp32 kernels. Left out of this set
+            // it became a WALL: the pin stopped there, so the tensor on the far side kept the session
+            // precision and markFp32 spliced a ConvertDtype across the seam. Every Resize inside a
+            // flow chain cost one such bridge.
+            case OpType::Resize:
                 return true;
             default:
                 return false;
