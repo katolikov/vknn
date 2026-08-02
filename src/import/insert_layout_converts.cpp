@@ -579,6 +579,79 @@ namespace vknn {
     /// the compiled result is byte-identical to the pre-pass math; the assignment is a pure function of the
     /// graph, keeping the compiled .vxm bit-exact run to run. New nodes are appended and the graph is
     /// re-topo-sorted so each convert precedes its consumer.
+    namespace {
+
+        /// Name the SEAMS the layout converts sit on, grouped by the pair of ops they bridge.
+        ///
+        /// A convert count alone says a graph pays for layout changes; it does not say where, and a
+        /// profile that shows ConvertLayout among the top costs leaves nothing to act on. Every
+        /// convert lies between one producer and one consumer, and the same pair usually recurs --
+        /// so a handful of op pairs explains the whole bill, and each pair is a question with an
+        /// answer ("can this consumer read the producer's layout?").
+        void reportConvertSeams(const Graph &g) {
+            std::vector<int> producer(g.tensors.size(), -1);
+            for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+            {
+                for (TensorId o: g.nodes[ni].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producer[(size_t) o] = ni;
+                    }
+                }
+            }
+            // seam -> count, keyed by "<producer op> -> <consumer op>".
+            std::map<std::string, int> seams;
+            for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+            {
+                const Node &nd = g.nodes[(size_t) ni];
+                if (nd.type != OpType::ConvertLayout || nd.inputs.empty() || nd.inputs[0] == kNoTensor)
+                {
+                    continue;
+                }
+                const int   src  = producer[(size_t) nd.inputs[0]];
+                const char *from = src >= 0 ? opTypeName(g.nodes[(size_t) src].type) : "(graph input)";
+                // A convert may feed several consumers; each is its own seam, and a convert with no
+                // consumer feeds a graph output.
+                bool consumed = false;
+                for (const Node &other: g.nodes)
+                {
+                    if (&other == &nd)
+                    {
+                        continue;
+                    }
+                    for (TensorId in: other.inputs)
+                    {
+                        if (in != kNoTensor && in == nd.outputs[0])
+                        {
+                            seams[std::string(from) + " -> " + opTypeName(other.type)]++;
+                            consumed = true;
+                            break;
+                        }
+                    }
+                }
+                if (!consumed)
+                {
+                    seams[std::string(from) + " -> (graph output)"]++;
+                }
+            }
+            std::vector<std::pair<std::string, int>> ranked(seams.begin(), seams.end());
+            std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+                return a.second > b.second;
+            });
+            constexpr size_t kSeamsReported = 8;
+            for (size_t i = 0; i < ranked.size() && i < kSeamsReported; ++i)
+            {
+                VKNN_INFO << "insertLayoutConverts:   " << ranked[i].second << "x  " << ranked[i].first;
+            }
+            if (ranked.size() > kSeamsReported)
+            {
+                VKNN_INFO << "insertLayoutConverts:   ... " << (ranked.size() - kSeamsReported) << " further seam(s)";
+            }
+        }
+
+    } // namespace
+
     void insertLayoutConverts(Graph &g) {
         // Assign every tensor a layout (minimising converts), then for every node input whose layout differs
         // from what the consumer needs, splice in a ConvertLayout node.
@@ -677,6 +750,7 @@ namespace vknn {
             }
             g.topoSort();
             VKNN_INFO << "insertLayoutConverts: inserted " << converts.size() << " layout convert(s)";
+            reportConvertSeams(g);
         }
     }
 

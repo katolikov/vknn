@@ -227,16 +227,39 @@ def report(name, rows):
     return (tMin, tMed, total)
 
 perProcess = repeat + 1
-rowsA = dropColdRuns(parse(os.path.join(work, "a.log")), perProcess)
-if not rowsA:
-    print("bench_run: no timing lines came back; is --timing supported by this runner?")
+def loadArm(tag, label):
+    """An arm with no timed runs did not run. Say so and show why, rather than reporting a table of
+    zeros -- a benchmark that scores a failed arm as 0.000 ms reads as a result."""
+    path = os.path.join(work, tag + ".log")
+    rows = dropColdRuns(parse(path), perProcess)
+    if rows:
+        return rows
+    print()
+    text = [re.sub(r"\x1b\[[0-9;]*m", "", l.rstrip())
+            for l in open(path, encoding="utf-8", errors="ignore")]
+    ranAtAll = any("sess::run" in l for l in text)
+    if ranAtAll:
+        # The model executed but no segment reported pack/submit/unpack, which is what a GPU segment
+        # prints. Everything ran somewhere else -- almost always a CPU fallback.
+        print("bench_run: arm %s ran, but NO segment reported GPU timing: nothing executed on the" % label)
+        print("  GPU, so there is no runtime to compare. Why the planner said so:")
+        why = [l for l in text if "fall back to CPU" in l or "falling back" in l]
+        for l in (why[:6] or text[-10:]):
+            print("    " + l.strip())
+    else:
+        print("bench_run: arm %s produced NO runs -- it did not execute. Its output:" % label)
+        bad = [l for l in text if re.search(r"error|failed|refus|unsupported|abort", l, re.I)]
+        for l in (bad[:8] or text[-15:]):
+            print("    " + l)
     sys.exit(1)
+
+rowsA = loadArm("a", "A")
 if tB or tA:
     print("device thermal reading: %s C before, %s C after" % (tB or "?", tA or "?"))
 aStat = report("A%s" % (" (%s)" % flagsA.strip() if flagsA.strip() else ""), rowsA)
 
 if compare:
-    rowsB = dropColdRuns(parse(os.path.join(work, "b.log")), perProcess)
+    rowsB = loadArm("b", "B (%s)" % compare)
     bStat = report("B (%s)" % compare, rowsB)
     print()
     # Paired sign test over the interleaved rounds: the question is not "is A's mean lower" but
