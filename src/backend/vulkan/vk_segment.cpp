@@ -37,6 +37,7 @@ namespace vknn {
         elemSize_      = useFp16_ ? 2 : 4;
         chainStepsMax_ = std::max(1, cfg.decodeChainSteps); // sizes the per-iteration link range sets + argmax result slots
         graphInputs_.insert(g.inputs.begin(), g.inputs.end());
+        graphOutputs_.insert(g.outputs.begin(), g.outputs.end());
 
         // 1) allocate device buffers for all activation tensors (non-initializers).
         std::set<TensorId> acts;
@@ -2091,6 +2092,55 @@ namespace vknn {
                     cb.devDtype   = devDt;
                     convert_[tid] = cb;
                 }
+                // The same on the way out. A graph output the device holds as fp16 but the caller
+                // declared fp32 is downloaded today by reading the device mapping element by element
+                // and widening each one; on a 2.8 MB output that is the single largest host cost of a
+                // run. A boundary_convert into a HOST_CACHED staging buffer leaves the host a plain
+                // memcpy. fp16 -> fp32 is exact and NCHW -> NCHW is identity, so the bytes are the
+                // ones the host loop produced.
+                for (TensorId tid: boundaryOutputs)
+                {
+                    if (!graphOutputs_.count(tid) || buffers_.find(tid) == buffers_.end())
+                    {
+                        continue;
+                    }
+                    // Every case the download path handles some other way keeps that way: a
+                    // zero-copy fd, a resident link, an on-device argmax, a row-sliced readback (it
+                    // wants ONE row, not the converted whole), an int8 KV cache, and the NC4HW4
+                    // outputs, which do not take the flat download branch this replaces.
+                    RtTensor &rt = ctx.t(tid);
+                    if (rt.dmaBufFd >= 0 || convert_.count(tid) || linkedOutputs_.count(tid) || argMaxOutputs_.count(tid) || rowSelectOutputs_.count(tid) ||
+                        kvqCaches_.count(tid) || !g_.desc(tid).gpuFlat)
+                    {
+                        continue;
+                    }
+                    const bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
+                    if (!deviceFp16 || g_.tensors[tid].dtype != DType::Float32)
+                    {
+                        continue; // no widening to do: the download is already a straight copy
+                    }
+                    const std::vector<int64_t> &outShape = rt.shape.empty() ? g_.tensors[tid].shape : rt.shape;
+                    NCHW                        y        = NCHW::from(outShape);
+                    const size_t                need     = (size_t) (formatElems(TensorFormat::NCHW, y) * dtypeSize(DType::Float32));
+                    if (need == 0)
+                    {
+                        continue; // a zero-dim output has no bytes to stage; vkCreateBuffer(size=0) is invalid
+                    }
+                    auto &st = stagingOut_[tid];
+                    if (!st || st->bytes() != need)
+                    {
+                        st = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kReadback);
+                    }
+                    ConvertBinding cb;
+                    cb.imported   = st;
+                    cb.isInput    = false;
+                    cb.shape      = y;
+                    cb.declFmt    = TensorFormat::NCHW;
+                    cb.declDtype  = DType::Float32;
+                    cb.devFmt     = TensorFormat::NCHW;
+                    cb.devDtype   = DType::Float16;
+                    convert_[tid] = cb;
+                }
             }
             if (!sameConvert(convert_, recordedConvert_))
             {
@@ -2292,6 +2342,15 @@ namespace vknn {
                     { // out-of-range selection: fall back to the full readback rather than miscopy
                         VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
                     }
+                } else if (auto sout = stagingOut_.find(tid); sout != stagingOut_.end() && convert_.count(tid))
+                {
+                    // The recorded boundary_convert already widened this output into the staging
+                    // buffer in the declared dtype, so the download is a memcpy out of HOST_CACHED
+                    // memory rather than a per-element read of the device mapping.
+                    const int64_t n = numElements(rt.shape);
+                    rt.host.resizeElems(n, DType::Float32);
+                    std::memcpy(rt.host.bytes.data(), sout->second->host(), std::min(sout->second->bytes(), rt.host.bytes.size()));
+                    rt.dtype = DType::Float32;
                 } else if (flat && graphOut.count(tid))
                 { // terminal graph output: convert straight to the declared dtype (skip fp32 round trip)
                     VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
