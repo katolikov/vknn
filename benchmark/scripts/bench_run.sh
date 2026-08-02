@@ -145,6 +145,16 @@ else
 fi
 tAfter=$(tempC "$(deviceTemp)")
 
+# --- where the layout converts sit ---------------------------------------------------------------
+# The load log already names them, grouped by the op pair each convert bridges. Surfaced here so a
+# profile that puts ConvertLayout near the top comes with its own explanation.
+seams=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/a.log" | grep "insertLayoutConverts:" | head -12)
+if [[ -n "$seams" ]]; then
+  echo
+  echo "layout converts, by the op pair each one bridges:"
+  echo "$seams" | sed 's/.*insertLayoutConverts:/ /'
+fi
+
 armB=""
 [[ -n "$COMPARE" ]] && armB="$(basename "$COMPARE")"
 [[ -z "$armB" && -n "$FLAGS_B" ]] && armB="same build,$FLAGS_B"
@@ -275,6 +285,9 @@ if compare:
     else:
         print("  the sign test is NOT decisive — treat the two as equal.")
 PY
+benchStatus=$?
+
+[[ "$benchStatus" == "0" ]] || exit "$benchStatus"
 
 # --- attribution (separate, and explicitly not latency) ------------------------------------------
 if [[ "$PROFILE" == "1" ]]; then
