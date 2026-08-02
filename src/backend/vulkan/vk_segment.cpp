@@ -975,6 +975,43 @@ namespace vknn {
                 }
             }
         }
+        // Drop any planned view the driver could not bind. vkBindBufferMemory demands the memory
+        // offset be a multiple of caps().bufferBindAlignment (4 B on the target GPUs), so an fp16
+        // slice may begin at an even element index and no other -- a Concat whose first part holds
+        // an odd number of elements puts the second at offset 2, which is unbindable, not merely
+        // slow. Deciding it HERE keeps the arena honest: the member gets its own buffer, record()
+        // dispatches its copy, and the run is the same as if the alias had never been considered.
+        // Discovering it later, at buffer creation, half-aliased the concat and cost a warning per
+        // member for a decision that was never the member's to make.
+        const uint32_t bindAlign = be_->ctx().caps().bufferBindAlignment;
+        if (bindAlign > 1)
+        {
+            int unbindable = 0;
+            for (auto it = viewOf.begin(); it != viewOf.end();)
+            {
+                if (resolveView(it->first).second % bindAlign != 0)
+                {
+                    it = viewOf.erase(it);
+                    ++unbindable;
+                    --viewSlices;
+                } else
+                {
+                    ++it;
+                }
+            }
+            if (unbindable > 0)
+            {
+                // The node that owned the dropped view was marked fully elided while the alias still
+                // looked possible; it has to dispatch its copy after all, and carry the hazard
+                // bookkeeping that goes with dispatching. Clearing both sets is the same answer the
+                // buffer-creation fallback gives, arrived at before the arena is built rather than
+                // after -- and it is not optional: leaving the node elided writes nothing into the
+                // slice, which is a silently truncated output, not a lost optimization.
+                fullyElided_.clear();
+                transferFillNodes_.clear();
+                VKNN_INFO << "zero-copy: " << unbindable << " slice(s) start at an offset this driver cannot bind (alignment " << bindAlign << " B); they copy instead";
+            }
+        }
         std::set<TensorId> viewRoots; // arena tensors whose buffer must accept sub-buffer views
         for (auto &kv: viewOf)
         {

@@ -39,8 +39,14 @@ namespace vknn { namespace vk {
         // then arrives as an allocation error with no hint that COUNT, not bytes, ran out. The
         // Vulkan floor is 4096, which mobile drivers typically report verbatim.
         uint32_t maxMemoryAllocationCount = 0;
-        float    timestampPeriod          = 0.f;
-        bool     timestampSupported       = false;
+        /// Byte alignment vkBindBufferMemory demands of a buffer's memory offset, as the driver
+        /// reports it for a storage buffer. A zero-copy slice can only alias into an arena at a
+        /// multiple of this, so with 4 here an fp16 tensor may begin at an even element index and no
+        /// other -- an odd one is unbindable, not merely slower. The segment planner consults it
+        /// before deciding to alias, so a view that could not bind is never planned.
+        uint32_t bufferBindAlignment = 0;
+        float    timestampPeriod     = 0.f;
+        bool     timestampSupported  = false;
 
         // Feature flags we exploit
         bool shaderFloat16 = false;
@@ -174,6 +180,7 @@ namespace vknn { namespace vk {
         void createInstance();
         void selectPhysicalDevice();
         void queryCaps();
+        void queryBufferBindAlignment();
         void createDevice();
 
         VkInstance                       instance_    = VK_NULL_HANDLE;

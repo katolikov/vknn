@@ -33,6 +33,7 @@ namespace vknn { namespace vk {
             selectPhysicalDevice();
             queryCaps();
             createDevice();
+            queryBufferBindAlignment();
             VKNN_INFO << "Vulkan ready: " << caps_.summary();
         } catch (const std::exception &e)
         {
@@ -50,6 +51,31 @@ namespace vknn { namespace vk {
         {
             vkDestroyInstance(instance_, nullptr);
         }
+    }
+
+    // The memory-offset alignment vkBindBufferMemory demands, asked of the driver rather than
+    // assumed: it decides which zero-copy slice offsets can exist at all, and the segment planner
+    // needs the answer before it lays out an arena. Queried from a throwaway storage buffer because
+    // VkMemoryRequirements is a property of a buffer, not of the device.
+    void VulkanContext::queryBufferBindAlignment() {
+        caps_.bufferBindAlignment = 0;
+        if (!device_)
+        {
+            return;
+        }
+        VkBufferCreateInfo bi {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bi.size        = 4;
+        bi.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkBuffer probe = VK_NULL_HANDLE;
+        if (vkCreateBuffer(device_, &bi, nullptr, &probe) != VK_SUCCESS)
+        {
+            return;
+        }
+        VkMemoryRequirements req {};
+        vkGetBufferMemoryRequirements(device_, probe, &req);
+        caps_.bufferBindAlignment = (uint32_t) req.alignment;
+        vkDestroyBuffer(device_, probe, nullptr);
     }
 
     void VulkanContext::createInstance() {
