@@ -143,9 +143,27 @@ namespace vknn {
     /// vkNodeGate refusal.
     constexpr int kDetMaxGpuN    = 8;
     constexpr int kPwMaxOperands = 9; ///< Extra tensor operands per unit (the primary input is excluded).
-    constexpr int kPwMaxRank     = 4; ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
-    constexpr int kPwMaxRegs     = 4; ///< Named registers for step values reused by later steps.
-    constexpr int kPwMaxOuts     = 4; ///< Extra output streams (fanout values exported from the unit).
+    /// Operand slots the EPILOGUE form carries, which is a different budget from the standalone
+    /// unit's above.
+    ///
+    /// pw_epilogue.glsl is #included into 80-odd producer kernels -- conv, matmul, winograd, the
+    /// pooling family -- so every slot it declares costs a descriptor binding and a dispatch step in
+    /// each of them, whether that kernel's unit uses the slot or not. Measured on the direct
+    /// conv+epilogue kernel, widening the epilogue from 6 slots to 9 doubled its time (0.099 ms ->
+    /// 0.186 ms on a 3x224x224 -> 32x112x112 3x3 stride-2 conv), which flipped the conv tile race to
+    /// a slower winner. The standalone kernels pay for their own slots only, so they keep the wider
+    /// budget; an epilogue-shaped unit needing more than this stays a standalone FusedPointwise node
+    /// (pwEpilogueOperandBudgetFits below), which costs one dispatch instead of slowing every
+    /// producer in the graph.
+    constexpr int kPwEpilogueMaxOperands = 6;
+
+    /// Whether a unit with `operandCount` tensor operands may be carried as a producer's epilogue.
+    constexpr bool pwEpilogueOperandBudgetFits(int operandCount) {
+        return operandCount <= kPwEpilogueMaxOperands;
+    }
+    constexpr int kPwMaxRank = 4; ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
+    constexpr int kPwMaxRegs = 4; ///< Named registers for step values reused by later steps.
+    constexpr int kPwMaxOuts = 4; ///< Extra output streams (fanout values exported from the unit).
 
     /// Broadcast class of a pw operand against the unit's run shape, stored in a step's bcast field.
     /// Every class except kPwBcastGeneral has a closed-form index in BOTH the flat and the NC4HW4
@@ -171,6 +189,16 @@ namespace vknn {
     /// stride). Any batch. The named classes above stay the fast paths; the classifier only lands
     /// here for masks none of them cover, so existing encodings are byte-stable.
     constexpr int kPwBcastPacked = 9;
+
+    /// Does resolving this class start by recovering the store's (n, channel-block, h, w) from the
+    /// output index? Those classes carry a division chain the direct ones do not, and their arms
+    /// exist only in kernels compiled with the geometric group (PW_BCAST_MASK_GEOMETRIC in
+    /// shaders/pw_epilogue.glsl). The epilogue inlines into every producer kernel, so it compiles
+    /// the direct group alone and a unit carrying a geometric operand runs standalone —
+    /// fuse_pointwise_chains refuses the attach, PwEpi::prepare refuses a plan that slipped past.
+    constexpr bool pwBcastClassIsGeometric(int cls) {
+        return cls == kPwBcastSpatial || cls == kPwBcastRow || cls == kPwBcastCol || cls == kPwBcastRowSplat || cls == kPwBcastColSplat || cls == kPwBcastPacked;
+    }
 
     /// pw_steps record geometry: ints per step and the field offsets read outside the plan
     /// builder. Mirrored as PW_STEP_FIELDS in shaders/pw_epilogue.glsl.

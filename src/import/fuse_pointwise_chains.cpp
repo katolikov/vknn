@@ -276,8 +276,11 @@ namespace vknn {
             /// First operand classified kPwBcastGeneral, the one that set nc4Ok false (see
             /// warnFlatForcedUnit). kNoTensor when the unit has none.
             TensorId generalOperand = kNoTensor;
-            bool     nc4Ok = false, flatOk = false;
-            bool     ok = false;
+            /// Set by any operand whose class is geometric (pwBcastClassIsGeometric). The epilogue
+            /// form has no arm for those classes, so such a unit cannot attach to a producer.
+            bool geometricBcast = false;
+            bool nc4Ok = false, flatOk = false;
+            bool ok = false;
         };
 
         // Plan a unit over `members` (node indices, ascending = emission order) with run shape
@@ -500,6 +503,10 @@ namespace vknn {
                                 return PwUnit {};
                             }
                             src[k].ref = operandRef(t);
+                            if (pwBcastClassIsGeometric(src[k].bc))
+                            {
+                                u.geometricBcast = true;
+                            }
                             if (src[k].bc == kPwBcastGeneral)
                             {
                                 hasClass2 = true;
@@ -1509,6 +1516,33 @@ namespace vknn {
                 // An aliasable Concat must not host: pw_steps forces one copy dispatch per part,
                 // while an unhosted concat elides into arena views and the unit runs as a single
                 // standalone dispatch (see pwConcatPartsCanAlias).
+                // The epilogue form carries fewer operand slots than a standalone unit, because
+                // pw_epilogue.glsl is inlined into every producer kernel and each slot it declares
+                // costs that kernel a binding and a dispatch step. A unit past that budget stays
+                // standalone -- one extra dispatch, against slowing every conv and matmul that
+                // hosts a chain.
+                if (ok && !pwEpilogueOperandBudgetFits((int) u.operands.size()))
+                {
+                    ok = false;
+                }
+                // Same trade for the broadcast classes, but only in the blocked world. The
+                // geometric classes (per-pixel, row/column, packed) resolve an operand by first
+                // recovering the store's (n, cb, h, w) from the output index; the NC4HW4 appliers
+                // carry an arm per class for that, and every hosting kernel inlines all of them
+                // whether or not its own chains use one. The flat appliers have no such arms -- a
+                // flat operand of ANY class resolves through the one strided walk in pwFlatIdx --
+                // so a flat-world host pays nothing and keeps hosting (this is the attention mask
+                // and the RoPE tables, which are per-pixel and per-row against their runs).
+                //
+                // LayoutClass::Flat is the conservative reading of which world the host's epilogue
+                // runs in: those ops produce flat tensors and pass flat=true at every epi.prepare
+                // site, while an Nc4 or ShapeDependent host may take either. Judging a flat host as
+                // blocked would only cost a fusion; the reverse would hand the NC4 applier a class
+                // it has no arm for, which PwEpi::prepare refuses outright.
+                if (ok && u.geometricBcast && opDescriptor(g.nodes[prod].type).layout != LayoutClass::Flat)
+                {
+                    ok = false;
+                }
                 if (ok && g.nodes[prod].type == OpType::Concat && pwConcatPartsCanAlias(g, g.nodes[prod]))
                 {
                     ok = false;

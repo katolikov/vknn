@@ -201,6 +201,11 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     # Each PW_EPI build comes in two rounding disciplines selected at compile time (a runtime
     # branch would carry both bodies in every kernel): the strict per-step-rounded "_epi" and the
     # fp32-chained "_epi_rx" (-DPW_RELAX, for units carrying the pw_relax attr):
+    # The same reasoning bounds the broadcast classes an epilogue resolves. The geometric classes
+    # recover the store's (n, channel-block, h, w) before addressing their operand, and that chain
+    # inlines into every hosting kernel; the epilogue builds compile the direct group alone
+    # (PW_BCAST_MASK_DIRECT) and fuse_pointwise_chains keeps geometric-class units standalone, where
+    # the fused_pw_* kernels below serve them with every class compiled in.
     #   plain/templated <stem>.comp      -> <stem>_epi[_rx].spv (+ <stem>_epi[_rx]_fp16.spv when templated)
     #   hand-written    <stem>_fp16.comp -> <stem>_epi[_rx]_fp16.spv
     list(FIND _epi_stems ${_name} _epiPlain)
@@ -214,7 +219,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         set(_spvEpi ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_relax}.spv)
         add_custom_command(
           OUTPUT ${_spvEpi}
-          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -o ${_spvEpi} ${_comp}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT -o ${_spvEpi} ${_comp}
           DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
           COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -> ${_name}_epi${_relax}.spv"
           VERBATIM)
@@ -223,7 +228,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
           set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_relax}_fp16.spv)
           add_custom_command(
             OUTPUT ${_spvEpi16}
-            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
+            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
             DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
             COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -DUSE_FP16 -> ${_name}_epi${_relax}_fp16.spv"
             VERBATIM)
@@ -232,7 +237,10 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
       endforeach()
     elseif(_rxAlone GREATER -1)
       # fused_pw_* compile the strict discipline as the base name (rule above); add the _rx twin
-      # and its fp16 form.
+      # and its fp16 form, and a "_dc" build of each for units whose every step resolves a DIRECT
+      # broadcast class. The geometric arms live inside the per-element resolvers, so a unit that
+      # never reaches them still pays for them; fused_pointwise.cpp picks the narrow build by the
+      # plan's classes and falls back to the full one, which keeps every class compiled in.
       set(_spvRx ${VKNN_SHADER_GEN_DIR}/${_name}_rx.spv)
       add_custom_command(
         OUTPUT ${_spvRx}
@@ -241,6 +249,31 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         COMMENT "compile ${_name}.comp -DPW_RELAX -> ${_name}_rx.spv"
         VERBATIM)
       list(APPEND _spv_files ${_spvRx})
+      # The direct-class builds: one per rounding discipline, each with its fp16 twin.
+      foreach(_relax "" "_rx")
+        set(_relaxFlag "")
+        if(_relax STREQUAL "_rx")
+          set(_relaxFlag "-DPW_RELAX=1")
+        endif()
+        set(_spvDc ${VKNN_SHADER_GEN_DIR}/${_name}_dc${_relax}.spv)
+        add_custom_command(
+          OUTPUT ${_spvDc}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} ${_relaxFlag} -DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT -o ${_spvDc} ${_comp}
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+          COMMENT "compile ${_name}.comp ${_relaxFlag} -DPW_BCAST_MASK_DIRECT -> ${_name}_dc${_relax}.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvDc})
+        if(_src MATCHES "precision.glsl")
+          set(_spvDc16 ${VKNN_SHADER_GEN_DIR}/${_name}_dc${_relax}_fp16.spv)
+          add_custom_command(
+            OUTPUT ${_spvDc16}
+            COMMAND ${SHADERCC} ${SHADERCC_PRE} ${_relaxFlag} -DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT -DUSE_FP16=1 -o ${_spvDc16} ${_comp}
+            DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+            COMMENT "compile ${_name}.comp ${_relaxFlag} -DPW_BCAST_MASK_DIRECT -DUSE_FP16 -> ${_name}_dc${_relax}_fp16.spv"
+            VERBATIM)
+          list(APPEND _spv_files ${_spvDc16})
+        endif()
+      endforeach()
       if(_src MATCHES "precision.glsl")
         set(_spvRx16 ${VKNN_SHADER_GEN_DIR}/${_name}_rx_fp16.spv)
         add_custom_command(
@@ -262,7 +295,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
           set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${CMAKE_MATCH_1}_epi${_relax}_fp16.spv)
           add_custom_command(
             OUTPUT ${_spvEpi16}
-            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -o ${_spvEpi16} ${_comp}
+            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT -o ${_spvEpi16} ${_comp}
             DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
             COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -> ${CMAKE_MATCH_1}_epi${_relax}_fp16.spv"
             VERBATIM)

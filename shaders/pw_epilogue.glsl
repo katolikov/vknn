@@ -53,6 +53,31 @@
 #define PW_BCAST_ROW_SPLAT 7
 #define PW_BCAST_COL_SPLAT 8
 #define PW_BCAST_PACKED    9
+// One bit per broadcast class, governing the BLOCKED-world resolvers (pwLoadBc4 / pwNc4Idx) alone.
+// They carry an arm per class, run per element, and inline into every kernel that carries an
+// epilogue, so an arm no plan can reach is pure cost in all of them; a kernel therefore compiles
+// only the classes its plans may carry. The flat resolver (pwFlatIdx) needs no such mask: every
+// class it sees resolves through its one strided walk.
+//
+// The split is what the resolver has to compute, not which shapes are expressible. A DIRECT class
+// addresses its operand from the store index alone; a GEOMETRIC class first recovers the store's
+// (n, channel-block, h, w) from that index, which is the division chain that costs. PW_BCAST_MASK
+// defaults to both groups, the set a kernel serving arbitrary plans needs.
+#define PW_BCAST_BIT(cls) (1 << (cls))
+#define PW_BCAST_MASK_DIRECT (PW_BCAST_BIT(PW_BCAST_SAME) | PW_BCAST_BIT(PW_BCAST_CHANNEL) \
+                            | PW_BCAST_BIT(PW_BCAST_GENERAL) | PW_BCAST_BIT(PW_BCAST_SCALAR))
+#define PW_BCAST_MASK_GEOMETRIC (PW_BCAST_BIT(PW_BCAST_SPATIAL) | PW_BCAST_BIT(PW_BCAST_ROW) \
+                               | PW_BCAST_BIT(PW_BCAST_COL) | PW_BCAST_BIT(PW_BCAST_ROW_SPLAT) \
+                               | PW_BCAST_BIT(PW_BCAST_COL_SPLAT) | PW_BCAST_BIT(PW_BCAST_PACKED))
+#define PW_BCAST_MASK_ALL (PW_BCAST_MASK_DIRECT | PW_BCAST_MASK_GEOMETRIC)
+#ifndef PW_BCAST_MASK
+#define PW_BCAST_MASK PW_BCAST_MASK_ALL
+#endif
+#define PW_BCAST_HAS(cls) ((PW_BCAST_MASK & PW_BCAST_BIT(cls)) != 0)
+// The four row/column classes share one guarded block: they alone recover both W and H.
+#define PW_BCAST_MASK_ROWCOL (PW_BCAST_BIT(PW_BCAST_ROW) | PW_BCAST_BIT(PW_BCAST_COL) \
+                            | PW_BCAST_BIT(PW_BCAST_ROW_SPLAT) | PW_BCAST_BIT(PW_BCAST_COL_SPLAT))
+#define PW_BCAST_HAS_ROWCOL ((PW_BCAST_MASK & PW_BCAST_MASK_ROWCOL) != 0)
 // Stride-slot order of a PW_BCAST_PACKED step's packed vec4-space strides
 // (plan.stride[s*PW_EPI_MAXRANK + slot]), mirroring kPwPackedStride* in include/vknn/op_type.h.
 // A broadcast axis carries stride 0; a zero CB stride marks a channel-1 operand (splat lane 0).
@@ -67,6 +92,17 @@
 // fp32-chained appliers, kernels built without it only the strict per-step-rounded ones — a
 // runtime branch would carry both bodies in every kernel and cost occupancy.
 #define PW_FLAG_CHAIN32 1
+// Operand slots this translation unit compiles. The default is the EPILOGUE budget
+// (kPwEpilogueMaxOperands in include/vknn/op_type.h): this header is #included into every producer
+// kernel that can carry a fused chain, and each declared slot costs that kernel a binding and a
+// dispatch step whether its unit uses it or not. The standalone pointwise kernels define
+// PW_OPERAND_SLOTS to kPwMaxOperands before including, paying for the wider budget only in
+// themselves.
+#ifndef PW_OPERAND_SLOTS
+#define PW_OPERAND_SLOTS 6
+#endif
+// First binding after the operand block; the extra output streams follow it.
+#define PW_EPI_OUT_BASE (PW_EPI_BASE + 1 + PW_OPERAND_SLOTS)
 layout(std430, binding = PW_EPI_BASE) readonly buffer PwPlan {
   int numSteps, rank, worldFlat, numOuts, flags;
   int outDim[PW_EPI_MAXRANK];
@@ -81,13 +117,15 @@ layout(std430, binding = PW_EPI_BASE+3) readonly buffer PwOp3 { STORE d[]; } pwo
 layout(std430, binding = PW_EPI_BASE+4) readonly buffer PwOp4 { STORE d[]; } pwop4;
 layout(std430, binding = PW_EPI_BASE+5) readonly buffer PwOp5 { STORE d[]; } pwop5;
 layout(std430, binding = PW_EPI_BASE+6) readonly buffer PwOp6 { STORE d[]; } pwop6;
+#if PW_OPERAND_SLOTS > 6
 layout(std430, binding = PW_EPI_BASE+7) readonly buffer PwOp7 { STORE d[]; } pwop7;
 layout(std430, binding = PW_EPI_BASE+8) readonly buffer PwOp8 { STORE d[]; } pwop8;
 layout(std430, binding = PW_EPI_BASE+9) readonly buffer PwOp9 { STORE d[]; } pwop9;
-layout(std430, binding = PW_EPI_BASE+10) writeonly buffer PwOut1 { STORE d[]; } pwout1;
-layout(std430, binding = PW_EPI_BASE+11) writeonly buffer PwOut2 { STORE d[]; } pwout2;
-layout(std430, binding = PW_EPI_BASE+12) writeonly buffer PwOut3 { STORE d[]; } pwout3;
-layout(std430, binding = PW_EPI_BASE+13) writeonly buffer PwOut4 { STORE d[]; } pwout4;
+#endif
+layout(std430, binding = PW_EPI_OUT_BASE)   writeonly buffer PwOut1 { STORE d[]; } pwout1;
+layout(std430, binding = PW_EPI_OUT_BASE+1) writeonly buffer PwOut2 { STORE d[]; } pwout2;
+layout(std430, binding = PW_EPI_OUT_BASE+2) writeonly buffer PwOut3 { STORE d[]; } pwout3;
+layout(std430, binding = PW_EPI_OUT_BASE+3) writeonly buffer PwOut4 { STORE d[]; } pwout4;
 float pwLoad(int slot,int idx){
   if(slot==0)return float(pwop1.d[idx]);
   if(slot==1)return float(pwop2.d[idx]);
@@ -95,10 +133,14 @@ float pwLoad(int slot,int idx){
   if(slot==3)return float(pwop4.d[idx]);
   if(slot==4)return float(pwop5.d[idx]);
   if(slot==5)return float(pwop6.d[idx]);
+#if PW_OPERAND_SLOTS > 6
   if(slot==6)return float(pwop7.d[idx]);
   if(slot==7)return float(pwop8.d[idx]);
-  if(slot==8)return float(pwop9.d[idx]);
-  return float(pwop9.d[idx]); }
+  return float(pwop9.d[idx]);
+#else
+  return float(pwop6.d[idx]);
+#endif
+}
 vec4 pwLoad4(int slot,int idx){
   if(slot==0)return vec4(pwop1.d[idx*4],pwop1.d[idx*4+1],pwop1.d[idx*4+2],pwop1.d[idx*4+3]);
   if(slot==1)return vec4(pwop2.d[idx*4],pwop2.d[idx*4+1],pwop2.d[idx*4+2],pwop2.d[idx*4+3]);
@@ -106,10 +148,14 @@ vec4 pwLoad4(int slot,int idx){
   if(slot==3)return vec4(pwop4.d[idx*4],pwop4.d[idx*4+1],pwop4.d[idx*4+2],pwop4.d[idx*4+3]);
   if(slot==4)return vec4(pwop5.d[idx*4],pwop5.d[idx*4+1],pwop5.d[idx*4+2],pwop5.d[idx*4+3]);
   if(slot==5)return vec4(pwop6.d[idx*4],pwop6.d[idx*4+1],pwop6.d[idx*4+2],pwop6.d[idx*4+3]);
+#if PW_OPERAND_SLOTS > 6
   if(slot==6)return vec4(pwop7.d[idx*4],pwop7.d[idx*4+1],pwop7.d[idx*4+2],pwop7.d[idx*4+3]);
   if(slot==7)return vec4(pwop8.d[idx*4],pwop8.d[idx*4+1],pwop8.d[idx*4+2],pwop8.d[idx*4+3]);
-  if(slot==8)return vec4(pwop9.d[idx*4],pwop9.d[idx*4+1],pwop9.d[idx*4+2],pwop9.d[idx*4+3]);
-  return vec4(pwop9.d[idx*4],pwop9.d[idx*4+1],pwop9.d[idx*4+2],pwop9.d[idx*4+3]); }
+  return vec4(pwop9.d[idx*4],pwop9.d[idx*4+1],pwop9.d[idx*4+2],pwop9.d[idx*4+3]);
+#else
+  return vec4(pwop6.d[idx*4],pwop6.d[idx*4+1],pwop6.d[idx*4+2],pwop6.d[idx*4+3]);
+#endif
+}
 void pwStoreOut(int o,int idx,float v){ if(o==0)pwout1.d[idx]=STORE(v); else if(o==1)pwout2.d[idx]=STORE(v);
   else if(o==2)pwout3.d[idx]=STORE(v); else pwout4.d[idx]=STORE(v); }
 void pwStoreOut4(int o,int idx,vec4 v){
@@ -231,39 +277,69 @@ int pwPackedBlock(int s,int vecIdx,int HW){
   return n*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_N]+cb*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_CB]
         +h*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_H]+w*plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_W]; }
 vec4 pwLoadBc4(int slot,int s,int m,int vecIdx,int HW){
+#if PW_BCAST_HAS(PW_BCAST_SCALAR)
   if(m==PW_BCAST_SCALAR)  return vec4(pwLoad(slot,0));
+#endif
+#if PW_BCAST_HAS(PW_BCAST_SPATIAL)
   if(m==PW_BCAST_SPATIAL) return vec4(pwLoad(slot,(vecIdx%HW)*4));
+#endif
+#if PW_BCAST_HAS(PW_BCAST_PACKED)
   if(m==PW_BCAST_PACKED){
     int ob=pwPackedBlock(s,vecIdx,HW);
     if(plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_CB]==0) return vec4(pwLoad(slot,ob*NC4_LANES)); // channel axis 1: splat lane 0
     return pwLoad4(slot,ob);
   }
+#endif
+#if PW_BCAST_HAS_ROWCOL
   if(m>=PW_BCAST_ROW){
     int W=plan.outDim[1]; int H=plan.outDim[2];
     int blockIdx=vecIdx/HW; int hw=vecIdx%HW;
+#if PW_BCAST_HAS(PW_BCAST_ROW)
     if(m==PW_BCAST_ROW) return pwLoad4(slot,blockIdx*H+hw/W);
+#endif
+#if PW_BCAST_HAS(PW_BCAST_COL)
     if(m==PW_BCAST_COL) return pwLoad4(slot,blockIdx*W+hw%W);
+#endif
+#if PW_BCAST_HAS(PW_BCAST_ROW_SPLAT)
     if(m==PW_BCAST_ROW_SPLAT) return vec4(pwLoad(slot,(hw/W)*4));
+#endif
     return vec4(pwLoad(slot,(hw%W)*4)); // PW_BCAST_COL_SPLAT
   }
+#endif
   return pwLoad4(slot,(m==PW_BCAST_CHANNEL)?vecIdx/HW:vecIdx); }
 int pwNc4Idx(int s,int bc,int packedIdx,int lane,int vecIdx){
   int HW=plan.outDim[0];
+#if PW_BCAST_HAS(PW_BCAST_SCALAR)
   if(bc==PW_BCAST_SCALAR)  return 0;
+#endif
+#if PW_BCAST_HAS(PW_BCAST_CHANNEL)
   if(bc==PW_BCAST_CHANNEL) return (vecIdx/HW)*4+lane;
+#endif
+#if PW_BCAST_HAS(PW_BCAST_SPATIAL)
   if(bc==PW_BCAST_SPATIAL) return (vecIdx%HW)*4;
+#endif
+#if PW_BCAST_HAS(PW_BCAST_PACKED)
   if(bc==PW_BCAST_PACKED){
     int ob=pwPackedBlock(s,vecIdx,HW);
     return plan.stride[s*PW_EPI_MAXRANK+PW_PACKED_STRIDE_CB]==0 ? ob*NC4_LANES : ob*NC4_LANES+lane; // channel axis 1: lane 0 value
   }
+#endif
+#if PW_BCAST_HAS_ROWCOL
   if(bc>=PW_BCAST_ROW){
     int W=plan.outDim[1]; int H=plan.outDim[2];
     int blockIdx=vecIdx/HW; int hw=vecIdx%HW;
+#if PW_BCAST_HAS(PW_BCAST_ROW)
     if(bc==PW_BCAST_ROW) return (blockIdx*H+hw/W)*4+lane;
+#endif
+#if PW_BCAST_HAS(PW_BCAST_COL)
     if(bc==PW_BCAST_COL) return (blockIdx*W+hw%W)*4+lane;
+#endif
+#if PW_BCAST_HAS(PW_BCAST_ROW_SPLAT)
     if(bc==PW_BCAST_ROW_SPLAT) return (hw/W)*4;
+#endif
     return (hw%W)*4; // PW_BCAST_COL_SPLAT
   }
+#endif
   return packedIdx; }
 #ifndef PW_RELAX
 float pw_apply_nc4_st(float entryRaw, int packedIdx){ int lane=packedIdx&3, vecIdx=packedIdx>>2;

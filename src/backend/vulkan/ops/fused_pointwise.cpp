@@ -49,6 +49,30 @@ namespace vknn {
             // the bindings the vec4-alignment gate covers, and it runs BEFORE the cache lookup
             // because a cached verdict is keyed on shape and would otherwise reach a node whose own
             // buffers cannot host the wider access.
+            // Standalone kernel name for this plan. Two compile-time axes ride the name: the
+            // rounding discipline ("_rx" = fp32-chained, base = strict per-step-rounded) and the
+            // broadcast group. A unit whose every step resolves a DIRECT class runs the "_dc" build,
+            // which compiles the geometric arms out of pwNc4Idx / pwLoadBc4 -- those arms sit inside
+            // the per-element resolvers, so a unit that never reaches them still pays for them
+            // (measured on a Concat-dense classifier: 58 units, 1.6 -> 2.9 ms of pointwise time).
+            static std::string pwStandaloneKernel(const char *base, const PwPlanCPU &plan, bool relax) {
+                bool geometric = false;
+                for (int s = 0; s < plan.numSteps; ++s)
+                {
+                    geometric = geometric || pwBcastClassIsGeometric(plan.step[s * kPwStepInts + kPwStepBcastField]);
+                }
+                std::string name = base;
+                if (!geometric)
+                {
+                    name += "_dc";
+                }
+                if (relax)
+                {
+                    name += "_rx";
+                }
+                return name;
+            }
+
             bool pickFlatQuad(const Node &node, VkOpEnv &env, const std::vector<uint32_t> &spec, bool relax, const PwPlanCPU &plan) {
                 if (total <= 0 || !flat::quadBindingsAligned(env, {node.inputs[0], node.outputs[0]}))
                 {
@@ -90,12 +114,8 @@ namespace vknn {
                 const int     itemsQuad   = flat::itemsPerLane(quadTotal, env);
                 auto          ms          = vk::raceCandidates(2, [&](int index) {
                     const bool  quad = index == kPwFlatKernelQuad;
-                    std::string base = quad ? "fused_pw_flat_v4" : "fused_pw_flat";
-                    if (relax)
-                    {
-                        base += "_rx";
-                    }
-                    auto pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int) * 2, spec);
+                    std::string base = pwStandaloneKernel(quad ? "fused_pw_flat_v4" : "fused_pw_flat", plan, relax);
+                    auto        pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int) * 2, spec);
                     struct {
                         int total, items;
                     } rpc {total, quad ? itemsQuad : itemsScalar};
@@ -166,12 +186,8 @@ namespace vknn {
                 const bool quad  = flat && pickFlatQuad(node, env, spec, relax, plan);
                 units            = quad ? (total + kPwFlatQuad - 1) / kPwFlatQuad : total;
                 items            = flat::itemsPerLane(units, env); // device-probe consult happens at load, never at record
-                std::string base = flat ? (quad ? "fused_pw_flat_v4" : "fused_pw_flat") : "fused_pw_nc4";
-                if (relax)
-                {
-                    base += "_rx";
-                }
-                pipe = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int) * 2, spec);
+                std::string base = pwStandaloneKernel(flat ? (quad ? "fused_pw_flat_v4" : "fused_pw_flat") : "fused_pw_nc4", plan, relax);
+                pipe             = env.pipeline(shader(base.c_str(), env.useFp16), 2 + 1 + kPwMaxOperands + kPwMaxOuts, sizeof(int) * 2, spec);
                 // Which of the two appliers this unit lands on is the difference between an unrolled
                 // chain with its params folded at pipeline creation and a per-element walk of the
                 // plan SSBO, so it is the first thing to know about a unit that costs more than its

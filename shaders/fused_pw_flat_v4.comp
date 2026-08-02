@@ -13,6 +13,9 @@
 #define VKNN_NO_RTE 1
 #include "precision.glsl"
 #define PW_EPI_BASE 2
+// This kernel IS the pointwise unit, so it takes the full operand budget (kPwMaxOperands);
+// the epilogue form inlined into producer kernels keeps the narrower default.
+#define PW_OPERAND_SLOTS 9
 #include "pw_epilogue.glsl"
 // Storage vector of PW_FLAT_QUAD consecutive elements (the fp32 variant stores plain vec4).
 #ifdef USE_FP16

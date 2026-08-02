@@ -6,6 +6,9 @@
 #define VKNN_NO_RTE 1
 #include "precision.glsl"
 #define PW_EPI_BASE 2
+// This kernel IS the pointwise unit, so it takes the full operand budget (kPwMaxOperands);
+// the epilogue form inlined into producer kernels keeps the narrower default.
+#define PW_OPERAND_SLOTS 9
 #include "pw_epilogue.glsl"
 layout(local_size_x=256, local_size_x_id=25) in; // spec 25 = device-resolved family width (0..24 carry the plan)
 layout(std430,binding=0) readonly buffer Prim { STORE prim[]; };

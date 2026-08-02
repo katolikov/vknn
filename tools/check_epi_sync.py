@@ -30,7 +30,11 @@ Checks:
      kPwMaxRank, kNC4Block). The plan is encoded host-side and decoded shader-side by these codes, so
      a renumber or an addition on one side alone is a wrong-answer-on-device bug that no host build
      and no compile can see.
-  5. a standalone applier does not hand-roll the broadcast-class dispatch (see check_applier_twins).
+  5. the geometric broadcast group agrees across its two spellings: PW_BCAST_MASK_GEOMETRIC in
+     shaders/pw_epilogue.glsl (which class arms the _epi builds compile) and pwBcastClassIsGeometric
+     in include/vknn/op_type.h (which units the fuser keeps off a producer's store). A class named
+     geometric on the shader side alone loses its arm while units carrying it still attach.
+  6. a standalone applier does not hand-roll the broadcast-class dispatch (see check_applier_twins).
 
 Usage:
   tools/check_epi_sync.py [--repo REPO]
@@ -327,6 +331,88 @@ def verify_mirror_detector():
                      % label)
 
 
+# --- the geometric broadcast-group mirror (check 5) -------------------------------------------
+# Which classes count as geometric is a SECOND mirror over the same class list, and a costlier one
+# to get wrong than the values: the shader's PW_BCAST_MASK_GEOMETRIC decides which arms the _epi
+# builds leave out, while the host's pwBcastClassIsGeometric decides which units are kept off a
+# producer's store. A class named geometric on the shader side alone loses its arm while the fuser
+# still attaches it -- the kernel then falls through to a same-shape read and computes a wrong
+# answer with nothing to show for it.
+_SHADER_MASK_RE = re.compile(
+    r'^[ \t]*#define[ \t]+PW_BCAST_MASK_GEOMETRIC[ \t]+((?:.*\\\n)*.*)$', re.M)
+_HOST_PREDICATE_RE = re.compile(
+    r'constexpr\s+bool\s+pwBcastClassIsGeometric\s*\([^)]*\)\s*\{(.*?)\}', re.S)
+_SHADER_CLASS_TOKEN_RE = re.compile(r'\bPW_BCAST_(?!BIT\b|MASK_)([A-Z][A-Z0-9_]*)')
+_HOST_CLASS_TOKEN_RE = re.compile(r'\bkPwBcast([A-Z][A-Za-z0-9]*)')
+
+
+def parse_geometric_group(glsl_text, host_text):
+    """(shader class tails, host class tails) named by the geometric group on each side."""
+    mask = _SHADER_MASK_RE.search(glsl_text)
+    pred = _HOST_PREDICATE_RE.search(host_text)
+    shader_names = set()
+    host_names = set()
+    if mask:
+        shader_names = {_shader_word_to_camel(w) for w in _SHADER_CLASS_TOKEN_RE.findall(mask.group(1))}
+    if pred:
+        host_names = set(_HOST_CLASS_TOKEN_RE.findall(pred.group(1)))
+    return shader_names, host_names, mask is not None, pred is not None
+
+
+def compare_geometric_group(shader_names, host_names, found_mask, found_pred):
+    """Problems in the geometric-group mirror; empty when the two sides name the same classes."""
+    problems = []
+    if not found_mask:
+        problems.append("shaders/pw_epilogue.glsl defines no PW_BCAST_MASK_GEOMETRIC (the epilogue "
+                        "builds would compile every class arm, or none)")
+    if not found_pred:
+        problems.append("include/vknn/op_type.h defines no pwBcastClassIsGeometric (nothing keeps a "
+                        "geometric-class unit off a producer's store)")
+    if not (found_mask and found_pred):
+        return problems
+    for name in sorted(shader_names - host_names):
+        problems.append("PW_BCAST_MASK_GEOMETRIC names %s but pwBcastClassIsGeometric does not: the "
+                        "_epi kernels drop that arm while the fuser still attaches such units "
+                        "(silent wrong answer)" % name)
+    for name in sorted(host_names - shader_names):
+        problems.append("pwBcastClassIsGeometric names %s but PW_BCAST_MASK_GEOMETRIC does not: "
+                        "units are kept standalone for an arm the epilogue still compiles" % name)
+    return problems
+
+
+def verify_group_detector():
+    """Self-check: the group comparison must flag drift in either direction, and a lost regex."""
+    both = ({"Spatial", "Packed"}, {"Spatial", "Packed"}, True, True)
+    if compare_geometric_group(*both):
+        sys.exit("error: check_epi_sync self-check: the geometric-group mirror reports drift on "
+                 "agreeing inputs (comparison out of date)")
+    cases = [
+        ("shader-only geometric class", ({"Spatial", "Packed"}, {"Spatial"}, True, True)),
+        ("host-only geometric class", ({"Spatial"}, {"Spatial", "Packed"}, True, True)),
+        ("mask macro not found", ({"Spatial"}, {"Spatial"}, False, True)),
+        ("predicate not found", ({"Spatial"}, {"Spatial"}, True, False)),
+    ]
+    for label, args in cases:
+        if not compare_geometric_group(*args):
+            sys.exit("error: check_epi_sync self-check: %s goes undetected (comparison out of date)"
+                     % label)
+
+
+def check_geometric_group(repo):
+    """Compare the shader's geometric class mask against the host predicate that mirrors it."""
+    verify_group_detector()
+    glsl = os.path.join(repo, "shaders", "pw_epilogue.glsl")
+    op_type_h = os.path.join(repo, "include", "vknn", "op_type.h")
+    for path in (glsl, op_type_h):
+        if not os.path.isfile(path):
+            sys.exit("error: %s not found (pass --repo)" % path)
+    with open(glsl, encoding="utf-8") as f:
+        glsl_text = f.read()
+    with open(op_type_h, encoding="utf-8") as f:
+        host_text = f.read()
+    return compare_geometric_group(*parse_geometric_group(glsl_text, host_text))
+
+
 def check_constant_mirror(repo):
     """Compare shaders/pw_epilogue.glsl's plan codes against their include/ counterparts."""
     verify_mirror_detector()
@@ -479,6 +565,7 @@ def main():
             "pwEpilogueCapable OpTypes whose kernel cannot host an epilogue: %s" % ", ".join(no_kernel))
 
     problems += check_constant_mirror(args.repo)
+    problems += check_geometric_group(args.repo)
     problems += check_applier_twins(shader_dir)
 
     mirrored = len([m for m in parse_shader_defines(os.path.join(shader_dir, "pw_epilogue.glsl"))
@@ -492,8 +579,8 @@ def main():
         for p in problems:
             print("  - %s" % p)
         sys.exit(1)
-    print("PASS — pw_epilogue.glsl shaders, op-file stem sites, pwEpilogueCapable, and the plan "
-          "constant mirror agree")
+    print("PASS — pw_epilogue.glsl shaders, op-file stem sites, pwEpilogueCapable, the plan "
+          "constant mirror, and the geometric broadcast group agree")
 
 
 if __name__ == "__main__":

@@ -316,6 +316,23 @@ namespace vknn {
             PwPlanCPU p {};
             int       total = 0;
             buildPwPlan(*env.graph, node, flat, out, p, operands, total);
+            // The _epi variants compile the direct broadcast group only (PW_BCAST_MASK_DIRECT) for
+            // the NC4HW4 appliers, and fuse_pointwise_chains keeps blocked-world units off a
+            // producer for that reason. The flat appliers resolve every class through pwFlatIdx's
+            // strided walk and need no arm, so this only concerns the blocked world. A geometric
+            // class arriving here would fall through to a same-shape read -- refuse rather than
+            // compute a wrong answer quietly.
+            if (!flatWorld)
+            {
+                for (int s = 0; s < p.numSteps; ++s)
+                {
+                    const int bcastClass = p.step[s * kPwStepInts + kPwStepBcastField];
+                    if (pwBcastClassIsGeometric(bcastClass))
+                    {
+                        throw Error(Status::RuntimeError, "node '" + node.name + "' carries an attached pointwise unit whose step " + std::to_string(s) + " has geometric broadcast class " + std::to_string(bcastClass) + ", which the blocked-world epilogue appliers do not compile; such a unit must stay standalone");
+                    }
+                }
+            }
             plan = uploadPwPlan(env, p);
             holds.assign(operands.size(), nullptr);
         }
@@ -324,8 +341,12 @@ namespace vknn {
         const char *suffix() const {
             return !active ? "" : relax ? "_epi_rx" : "_epi";
         }
+        // The epilogue form's binding count, which is NOT the standalone unit's: pw_epilogue.glsl
+        // declares kPwEpilogueMaxOperands slots by default, and every producer kernel that carries a
+        // chain pays for each one. The standalone kernels define PW_OPERAND_SLOTS to the wider
+        // kPwMaxOperands themselves and count their bindings with that.
         uint32_t extraBufs() const {
-            return active ? 1u + (uint32_t) kPwMaxOperands + (uint32_t) kPwMaxOuts : 0u;
+            return active ? 1u + (uint32_t) kPwEpilogueMaxOperands + (uint32_t) kPwMaxOuts : 0u;
         }
         // Binding set for a load-time timing race: the real plan SSBO plus `filler` in every
         // operand and extra-output slot. A race runs on dedicated scratch buffers, so there are no
@@ -341,7 +362,7 @@ namespace vknn {
                 return;
             }
             bufs.push_back(plan->handle());
-            for (int slot = 0; slot < kPwMaxOperands + kPwMaxOuts; ++slot)
+            for (int slot = 0; slot < kPwEpilogueMaxOperands + kPwMaxOuts; ++slot)
             {
                 bufs.push_back(filler);
             }
@@ -352,7 +373,7 @@ namespace vknn {
                 return;
             }
             bufs.push_back(plan->handle());
-            for (int k = 0; k < kPwMaxOperands; ++k)
+            for (int k = 0; k < kPwEpilogueMaxOperands; ++k)
             {
                 bufs.push_back(k < (int) operands.size() ? pwOperandBuf(env, operands[k], holds[k], flatWorld)->handle() : dummy);
             }
