@@ -274,7 +274,7 @@ walk_dumps() { # vxmOnDevice tag -- dump both arms of one .vxm and name where th
 
 if [[ "$LOCALIZE" == "1" ]]; then
   cat >"$WORK/walk.py" <<'PYL'
-import sys, os, glob
+import sys, os, re, glob
 import numpy as np
 work = sys.argv[1]
 relBar = float(sys.argv[2]) / 100.0 if len(sys.argv) > 2 else 0.01
@@ -301,14 +301,27 @@ for cand in (os.path.join(g, "_order.txt"), os.path.join(c, "_order.txt")):
             producer[nm] = f[1].strip() if len(f) > 1 else ""
             operands[nm] = [o for o in (f[2].split(",") if len(f) > 2 else []) if o]
         break
-have = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(g, "*.bin"))}
-have &= {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(c, "*.bin"))}
-# node order first, then anything the index did not name (inputs, initializers)
-names = [n for n in order if n in have] + sorted(have - set(order))
-print("  %d tensor(s) dumped on both backends, bar %.2f%% of range%s" % (len(names), relBar * 100, "" if order else "  (no node-order index; name order)"))
+gpuHave = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(g, "*.bin"))}
+cpuHave = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(c, "*.bin"))}
+# The GPU keeps a tensor in whichever layout its kernel wants and names the variants "X#nc4<n>" /
+# "X#flat<n>"; the CPU has no layout converts and knows only "X". Matching names literally therefore
+# drops every GPU-internal tensor -- including the pre-convert twin of a graph output, which is the
+# one that says whether the op that COMPUTED the output was already wrong. The dump is unpacked to
+# canonical NCHW on both sides, so a variant is comparable against the plain name it derives from.
+LAYOUT_VARIANT = re.compile(r"#(?:nc4|flat)\d*$")
+def counterpart(n):
+    if n in cpuHave:
+        return n
+    base = LAYOUT_VARIANT.sub("", n)
+    return base if base in cpuHave else None
+inOrder = [n for n in order if n in gpuHave and counterpart(n)]
+names = inOrder + sorted(x for x in gpuHave if x not in set(order) and counterpart(x))
+aliased = sum(1 for n in names if counterpart(n) != n)
+print("  %d tensor(s) comparable, %d of them against their pre-convert twin, bar %.2f%% of range%s"
+      % (len(names), aliased, relBar * 100, "" if order else "  (no node-order index; name order)"))
 first, rows, verdict, skipped = None, [], {}, []
 for n in names:
-    pg, pc = os.path.join(g, n + ".bin"), os.path.join(c, n + ".bin")
+    pg, pc = os.path.join(g, n + ".bin"), os.path.join(c, counterpart(n) + ".bin")
     # Equal byte counts or the two sides hold different element types, and reading both as fp32
     # would compare one side's values against the other's bit patterns -- a fabricated divergence
     # that looks exactly like a real one. Report the mismatch instead of ranking noise.
@@ -355,12 +368,17 @@ else:
     print(operandLine(n))
     print("  everything after this differs because its input did; this is the op to look at.")
     print()
+    # A window ending at the divergence, not the head of the list: the rows that matter are the last
+    # few that still agreed, since they are what the failing op read.
+    kAgreeingRowsShown = 12
+    cut = next(i for i, r in enumerate(rows) if r[0] == n)
+    lo = max(0, cut - kAgreeingRowsShown)
     print("  %-34s %10s %12s %9s" % ("tensor (node order)", "elements", "max|diff|", "rel%"))
-    for nm, kk, mm, rr in rows[: min(len(rows), 40)]:
+    if lo > 0:
+        print("  ... %d earlier tensor(s) agree" % lo)
+    for nm, kk, mm, rr in rows[lo: cut + 1]:
         mark = "  <== first" if nm == n else ""
         print("  %-34.34s %10d %12.6g %8.3f%%%s" % (nm, kk, mm, rr * 100, mark))
-        if nm == n:
-            break
     # Node order is one valid topological order among many, so "first" is a good lead but not a
     # proof. An op whose output diverges while every operand it read AGREES is the proof: nothing
     # upstream handed it a bad value, so the difference was made there. List them all.
