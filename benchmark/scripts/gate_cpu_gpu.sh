@@ -24,6 +24,12 @@
 #   --vxm PATH          skip compilation and use this prebuilt .vxm instead of --onnx
 #   --workdir DIR       device scratch directory (default /data/local/tmp/cpugpu)
 #   --keep              leave the device scratch directory in place when finished
+#   --localize          on a disagreement, dump every activation on both backends and name the
+#                       FIRST tensor that diverges in node order -- everything downstream of it
+#                       differs for free, so that one name is the whole answer
+#   --rel PCT           what counts as diverged, as a percentage of the tensor's own range
+#                       (default 1.0). fp16 carries ~0.05% per rounding and a few ops accumulate to
+#                       a few tenths, so a tighter bar names rounding rather than a defect.
 #
 # Metrics per output: max absolute difference, PSNR, SNR, cosine similarity, and the share of
 # elements that differ at all. Element width is derived from the printed shape and the file size, so
@@ -35,6 +41,8 @@ BIN="build-android/vknn_run_io"
 COMPILER="build-host/vknn_compile"
 WORKDIR="/data/local/tmp/cpugpu"
 KEEP=0
+LOCALIZE=0
+REL_PCT="1.0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --onnx)      ONNX="$2"; shift 2 ;;
@@ -46,6 +54,8 @@ while [[ $# -gt 0 ]]; do
     --vxm)       VXM="$2"; shift 2 ;;
     --workdir)   WORKDIR="$2"; shift 2 ;;
     --keep)      KEEP=1; shift ;;
+    --localize)  LOCALIZE=1; shift ;;
+    --rel)       REL_PCT="$2"; shift 2 ;;
     -h|--help)   sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -192,3 +202,78 @@ elif worst >= 25:
 else:
     print("VERDICT: DISAGREE (worst PSNR %.2f dB) — the GPU is computing something different" % worst)
 PY
+
+# --- localize -------------------------------------------------------------------------------------
+# Which tensor diverged FIRST. A disagreement at the output says only that something upstream is
+# wrong; every tensor after the first bad one differs because its input did. Dumping both backends
+# and walking the segment's own node order turns "the GPU is different" into one op's name.
+if [[ "$LOCALIZE" == "1" ]]; then
+  echo
+  echo "localizing: dumping every activation on both backends ..."
+  for arm in gpu cpu; do
+    be=$([[ "$arm" == "gpu" ]] && echo vulkan || echo cpu)
+    $ADB shell "cd $WORKDIR && rm -rf ld_$arm && mkdir -p ld_$arm && ./run_cg model.vxm ld_out_$arm --backend $be --precision $PRECISION --no-cache --layer-dump --layer-dump-dir ld_$arm$inNames" \
+      </dev/null >"$WORK/ld_$arm.log" 2>&1
+  done
+  rm -rf "$WORK/ldg" "$WORK/ldc"
+  $ADB pull "$WORKDIR/ld_gpu" "$WORK/ldg" >/dev/null 2>&1
+  $ADB pull "$WORKDIR/ld_cpu" "$WORK/ldc" >/dev/null 2>&1
+  python3 - "$WORK" "$REL_PCT" <<'PYL'
+import sys, os, glob
+import numpy as np
+work = sys.argv[1]
+relBar = float(sys.argv[2]) / 100.0 if len(sys.argv) > 2 else 0.01
+def side(tag):
+    for d in (os.path.join(work, tag), ):
+        for root, _, files in os.walk(d):
+            if any(f.endswith(".bin") for f in files):
+                return root
+    return None
+g, c = side("ldg"), side("ldc")
+if not g or not c:
+    print("  no dumps came back"); sys.exit(0)
+order = []
+for cand in (os.path.join(g, "_order.txt"), os.path.join(c, "_order.txt")):
+    if os.path.exists(cand):
+        order = [l.strip() for l in open(cand) if l.strip()]
+        break
+have = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(g, "*.bin"))}
+have &= {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(c, "*.bin"))}
+# node order first, then anything the index did not name (inputs, initializers)
+names = [n for n in order if n in have] + sorted(have - set(order))
+print("  %d tensor(s) dumped on both backends, bar %.2f%% of range%s" % (len(names), relBar * 100, "" if order else "  (no node-order index; name order)"))
+first = None
+rows = []
+for n in names:
+    a = np.fromfile(os.path.join(g, n + ".bin"), dtype=np.float32).astype(np.float64)
+    b = np.fromfile(os.path.join(c, n + ".bin"), dtype=np.float32).astype(np.float64)
+    k = min(a.size, b.size)
+    if k == 0:
+        continue
+    a, b = a[:k], b[:k]
+    d = np.abs(a - b)
+    scale = max(float(np.abs(b).max()), 1e-12)
+    rel = float(d.max()) / scale
+    rows.append((n, k, float(d.max()), rel))
+    # Two thresholds, because either alone lies. Relative alone calls a 1e-9 difference on a tensor
+    # whose values are 1e-9 a "100% divergence" -- true and useless, since both sides are zero to
+    # every consumer. Absolute alone would miss a real disagreement in a small-valued tensor. A
+    # divergence has to be big against the tensor's own range AND big enough to survive fp16.
+    if first is None and rel > relBar and float(d.max()) > 1e-5:
+        first = (n, k, float(d.max()), rel)
+if first is None:
+    print("  every dumped tensor agrees within fp16 rounding -- the divergence is not in a dumped activation")
+else:
+    n, k, mx, rel = first
+    print()
+    print("  FIRST DIVERGENCE: '%s'  (%d elements, max|diff| %.6g, %.2f%% of the tensor's range)" % (n, k, mx, rel * 100))
+    print("  everything after this differs because its input did; this is the op to look at.")
+    print()
+    print("  %-34s %10s %12s %9s" % ("tensor (node order)", "elements", "max|diff|", "rel%"))
+    for nm, kk, mm, rr in rows[: min(len(rows), 40)]:
+        mark = "  <== first" if nm == n else ""
+        print("  %-34.34s %10d %12.6g %8.3f%%%s" % (nm, kk, mm, rr * 100, mark))
+        if nm == n:
+            break
+PYL
+fi

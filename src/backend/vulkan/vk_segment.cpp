@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <set>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -102,6 +103,20 @@ namespace vknn {
         // Debug: Config::dumpTensors="substr1,substr2" forces matching tensors to dedicated (un-aliased)
         // readback buffers and dumps them to cfg.layerDumpDir after the run — so intermediate
         // activations can be diffed despite the liveness planner reusing buffers. A few tensors only.
+        // Config::layerDump asks for EVERY activation, which is the same requirement: without a
+        // dedicated buffer each one, the dump reads whatever tensor last occupied a pooled slot and
+        // reports it under this tensor's name. That is worse than no dump -- it is a confident wrong
+        // answer, and it has cost an investigation. Debug-only, so the pool is simply switched off.
+        if (cfg_.layerDump)
+        {
+            for (TensorId tid: acts)
+            {
+                if (!g.tensors[tid].name.empty())
+                {
+                    readBack.insert(tid);
+                }
+            }
+        }
         if (!cfg_.dumpTensors.empty())
         {
             std::string list = cfg_.dumpTensors;
@@ -2489,6 +2504,23 @@ namespace vknn {
         // layer-dump: bring every activation back to host for per-layer diffing.
         if (ctx.config && ctx.config->layerDump)
         {
+            // A companion index in NODE ORDER. The dumps themselves are files named by tensor, which
+            // says nothing about which came first -- and the only question worth asking of two
+            // diverging dumps is which tensor diverged FIRST, since everything downstream of it
+            // differs for free. The segment knows the order it recorded; nothing else does.
+            {
+                std::ofstream order(ctx.config->layerDumpDir + "/_order.txt");
+                for (int ni: nodeIdx)
+                {
+                    for (TensorId out: g_.nodes[ni].outputs)
+                    {
+                        if (out != kNoTensor && !g_.tensors[out].name.empty())
+                        {
+                            order << g_.tensors[out].name << "\n";
+                        }
+                    }
+                }
+            }
             for (auto &kv: buffers_)
             {
                 RtTensor &rt = ctx.t(kv.first);
