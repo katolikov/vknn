@@ -2,8 +2,8 @@
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
 #include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
-#include "core/layer_dump.h"      // dump file naming, shared with the node-order index
 #include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
+#include "core/layer_dump.h"      // dump file naming, shared with the node-order index
 #include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
 #include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
 #include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
@@ -2487,7 +2487,7 @@ namespace vknn {
                     VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, g_.desc(tid).gpuFlat);
                 }
                 const std::string nm = layerDumpFileName(g_.tensors[tid].name);
-                FILE              *f = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
+                FILE             *f  = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
                 if (f)
                 {
                     fwrite(rt.host.bytes.data(), 1, rt.host.bytes.size(), f);
