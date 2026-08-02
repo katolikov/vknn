@@ -729,6 +729,12 @@ namespace vknn {
                 epi.prepare(node, env, /*flat=*/true, out);
                 name += epi.suffix();
                 nbuf += epi.extraBufs();
+                // Which kernel a MatMul lands on is the first thing to know about one that costs more
+                // than its operands do to read: the gemv, naive, spec-tiled and fast-tiled routes
+                // differ by an order of magnitude on the same shape, and the choice is made from half
+                // a dozen predicates above. FusedPointwise already announces its applier; this is the
+                // same courtesy for the op that dominates transformer graphs.
+                VKNN_DEBUG << "MatMul '" << node.name << "': " << name << " M=" << M << " N=" << N << " K=" << K;
 
                 // The spec-constant tiled kernel takes its TM/TN/TK tile as specialization constants
                 // 0/1/2; the fast kernel bakes {128,128,16} in as literal #defines (no spec words).
