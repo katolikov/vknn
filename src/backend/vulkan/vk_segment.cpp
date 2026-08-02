@@ -1388,7 +1388,11 @@ namespace vknn {
         // 4) pre-record the command buffer for the static graph.
         record();
 
-        VKNN_INFO << "vk memory after segment build: live " << (vk::Buffer::liveBytes() >> 20) << " MB / " << vk::Buffer::liveCount() << " buffers (peak " << (vk::Buffer::peakBytes() >> 20) << " MB / " << vk::Buffer::peakCount() << ", host rss " << hostRssMb() << " MB)";
+        // The buffer count is reported against the device's allocation limit, not on its own: each
+        // buffer costs one vkAllocateMemory, so a graph can run out of ALLOCATIONS while the heap
+        // is far from full, and the bare count gives no way to see that coming.
+        VKNN_INFO << "vk memory after segment build: live " << (vk::Buffer::liveBytes() >> 20) << " MB / " << vk::Buffer::liveCount() << " buffers (peak " << (vk::Buffer::peakBytes() >> 20) << " MB / " << vk::Buffer::peakCount() << " of "
+                  << env_.ctx->caps().maxMemoryAllocationCount << " allowed, host rss " << hostRssMb() << " MB)";
     }
 
     size_t VulkanSegment::hostRssMb() {

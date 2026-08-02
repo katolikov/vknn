@@ -18,7 +18,7 @@ namespace vknn { namespace vk {
 
     std::string VulkanCaps::summary() const {
         std::ostringstream os;
-        os << deviceName << " | " << driverName << " (" << driverInfo << ")" << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B" << " tsPeriod=" << timestampPeriod << "ns\n"
+        os << deviceName << " | " << driverName << " (" << driverInfo << ")" << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B" << " maxAllocs=" << maxMemoryAllocationCount << " tsPeriod=" << timestampPeriod << "ns\n"
            << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " int64=" << shaderInt64 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
            << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
            << "  globalPriority=" << globalPriority << " sync2=" << synchronization2 << " sgCtl=" << subgroupSizeControl << " sgRange=[" << minSubgroupSize << "," << maxSubgroupSize << "]" << " vkMemModel=" << vulkanMemoryModel
@@ -131,20 +131,21 @@ namespace vknn { namespace vk {
         caps_.driverName    = driver.driverName;
         caps_.driverInfo    = driver.driverInfo;
         std::memcpy(caps_.pipelineCacheUUID, p.pipelineCacheUUID, sizeof(caps_.pipelineCacheUUID));
-        caps_.subgroupSize            = subgroup.subgroupSize;
-        caps_.subgroupArithmetic      = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
-        caps_.subgroupShuffle         = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
-        caps_.maxWorkGroupInvocations = p.limits.maxComputeWorkGroupInvocations;
-        caps_.maxWorkGroupSize[0]     = p.limits.maxComputeWorkGroupSize[0];
-        caps_.maxWorkGroupSize[1]     = p.limits.maxComputeWorkGroupSize[1];
-        caps_.maxWorkGroupSize[2]     = p.limits.maxComputeWorkGroupSize[2];
-        caps_.maxWorkGroupCount[0]    = p.limits.maxComputeWorkGroupCount[0];
-        caps_.maxWorkGroupCount[1]    = p.limits.maxComputeWorkGroupCount[1];
-        caps_.maxWorkGroupCount[2]    = p.limits.maxComputeWorkGroupCount[2];
-        caps_.maxSharedMemory         = p.limits.maxComputeSharedMemorySize;
-        caps_.maxPushConstantsSize    = p.limits.maxPushConstantsSize;
-        caps_.timestampPeriod         = p.limits.timestampPeriod;
-        caps_.timestampSupported      = p.limits.timestampComputeAndGraphics;
+        caps_.subgroupSize             = subgroup.subgroupSize;
+        caps_.subgroupArithmetic       = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
+        caps_.subgroupShuffle          = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
+        caps_.maxWorkGroupInvocations  = p.limits.maxComputeWorkGroupInvocations;
+        caps_.maxWorkGroupSize[0]      = p.limits.maxComputeWorkGroupSize[0];
+        caps_.maxWorkGroupSize[1]      = p.limits.maxComputeWorkGroupSize[1];
+        caps_.maxWorkGroupSize[2]      = p.limits.maxComputeWorkGroupSize[2];
+        caps_.maxWorkGroupCount[0]     = p.limits.maxComputeWorkGroupCount[0];
+        caps_.maxWorkGroupCount[1]     = p.limits.maxComputeWorkGroupCount[1];
+        caps_.maxWorkGroupCount[2]     = p.limits.maxComputeWorkGroupCount[2];
+        caps_.maxSharedMemory          = p.limits.maxComputeSharedMemorySize;
+        caps_.maxPushConstantsSize     = p.limits.maxPushConstantsSize;
+        caps_.maxMemoryAllocationCount = p.limits.maxMemoryAllocationCount;
+        caps_.timestampPeriod          = p.limits.timestampPeriod;
+        caps_.timestampSupported       = p.limits.timestampComputeAndGraphics;
 
         // --- features via pNext chain ---
         VkPhysicalDeviceShaderFloat16Int8Features f16i8 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
