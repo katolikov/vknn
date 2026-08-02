@@ -296,6 +296,11 @@ namespace vknn {
             case OpType::Binary:
             case OpType::Unary:
             case OpType::Clip:
+            // The rest of the elementwise family. A flow clamped by a Relu or scaled by a PRelu is
+            // ordinary coordinate algebra, and both have fp32 kernels; leaving them out made each one
+            // a wall the pin stopped at, for no reason the arithmetic can name.
+            case OpType::Relu:
+            case OpType::PRelu:
             case OpType::Concat:
             case OpType::Slice:
             case OpType::Split:
@@ -310,6 +315,13 @@ namespace vknn {
             case OpType::FusedPointwise:
             case OpType::Reduce:
             case OpType::ConvertLayout:
+            // Movement that carries values verbatim: a pixel-shuffle upsample of a flow, a padded
+            // coordinate field, a channel remap, a rank change. Each has kernels at both precisions
+            // and none of them touches the VALUE, only where it sits.
+            case OpType::DepthToSpace:
+            case OpType::Pad:
+            case OpType::ChannelShuffle:
+            case OpType::Flatten:
             // A Resize carries coordinates from one grid density to another; it is as much a step of
             // the coordinate algebra as a multiply is, and it has fp32 kernels. Left out of this set
             // it became a WALL: the pin stopped there, so the tensor on the far side kept the session
