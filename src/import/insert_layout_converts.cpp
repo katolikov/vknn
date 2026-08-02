@@ -316,6 +316,84 @@ namespace vknn {
         }
     }
 
+    /// Why this node runs flat, in a few words, for the load-time inventory below.
+    ///
+    /// The two causes are different work. A whole OP CLASS with no blocked kernel is a kernel to
+    /// write; a SHAPE that the blocked kernel cannot express is a case to widen (or a graph to
+    /// change). Naming which one applies per node is what turns "62 layout converts" into a task
+    /// list, so the inventory reports the reason rather than only the count.
+    const char *flatReason(const Graph &g, const Node &n) {
+        if (opDescriptor(n.type).layout == LayoutClass::Flat)
+        {
+            return "op class has no blocked kernel";
+        }
+        switch (n.type)
+        {
+            case OpType::Binary:
+            case OpType::Add:
+                if (n.inputs.size() == 2 && (g.isInitializer(n.inputs[0]) || g.isInitializer(n.inputs[1])))
+                {
+                    return "constant operand (the blocked kernel binds activations only)";
+                }
+                return "operand shapes outside the blocked broadcast forms";
+            case OpType::Slice:
+                return "channel range not block-aligned, or carries an epilogue";
+            case OpType::Concat:
+                return "not a 4D channel concat with every part 4-aligned";
+            case OpType::Split:
+                return "not a 4D channel split with every part 4-aligned";
+            case OpType::DepthToSpace:
+                return "a partly filled channel block on one side";
+            case OpType::Softmax:
+                return "reduces an axis other than a full channel axis";
+            case OpType::FusedPointwise:
+                return "the unit was recorded flat (an operand had no blocked index)";
+            case OpType::Pad:
+            case OpType::Gather:
+            case OpType::ScatterND:
+            case OpType::TopK:
+            case OpType::Einsum:
+            case OpType::ConvTranspose:
+                return "this form has only a flat kernel";
+            default:
+                return "shape-dependent rule resolved flat";
+        }
+    }
+
+    /// Everything still running flat, by op type and reason. The inventory of what is left to move.
+    void reportFlatInventory(const Graph &g) {
+        std::map<std::string, int> byReason;
+        int                        flatNodes = 0;
+        for (const Node &n: g.nodes)
+        {
+            if (n.type == OpType::ConvertLayout || n.outputs.empty() || n.outputs[0] == kNoTensor || !g.desc(n.outputs[0]).gpuFlat)
+            {
+                continue;
+            }
+            ++flatNodes;
+            byReason[std::string(opTypeName(n.type)) + ": " + flatReason(g, n)]++;
+        }
+        if (flatNodes == 0)
+        {
+            VKNN_INFO << "flat path: no node runs flat -- the whole graph is blocked";
+            return;
+        }
+        std::vector<std::pair<std::string, int>> ranked(byReason.begin(), byReason.end());
+        std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+        VKNN_INFO << "flat path: " << flatNodes << " node(s) still run flat";
+        constexpr size_t kReasonsReported = 10;
+        for (size_t i = 0; i < ranked.size() && i < kReasonsReported; ++i)
+        {
+            VKNN_INFO << "flat path:   " << ranked[i].second << "x  " << ranked[i].first;
+        }
+        if (ranked.size() > kReasonsReported)
+        {
+            VKNN_INFO << "flat path:   ... " << (ranked.size() - kReasonsReported) << " further reason(s)";
+        }
+    }
+
     // --- Global layout assignment (NC4HW4 vs flat) ------------------------------------------------------
     // Every GPU tensor runs in one layout. A FIXED op has a kernel in only one layout; a FLEXIBLE op is
     // bit-exact in either (layout is an index remap over the same math + fp16 rounding), so the assignment
@@ -823,6 +901,7 @@ namespace vknn {
             VKNN_INFO << "insertLayoutConverts: inserted " << converts.size() << " layout convert(s)";
             reportConvertSeams(g);
         }
+        reportFlatInventory(g);
     }
 
 } // namespace vknn
