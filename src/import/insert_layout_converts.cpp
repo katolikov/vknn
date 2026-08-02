@@ -453,10 +453,17 @@ namespace vknn {
             // same index it writes. A CONSTANT data operand breaks that: operandBuf uploads a
             // constant dense, which is a different arrangement from the blocked output it would be
             // paired against, so such a node keeps the flat path.
-            if (n.type == OpType::Clip)
+            const bool runtimeData = !n.inputs.empty() && n.inputs[0] != kNoTensor && !g.isInitializer(n.inputs[0]);
+            if (n.type == OpType::Clip || n.type == OpType::IsNaN)
             {
-                return !n.inputs.empty() && n.inputs[0] != kNoTensor && !g.isInitializer(n.inputs[0]);
+                return runtimeData;
             }
+            // NOT here, and each for a reason rather than an oversight:
+            //   * the comparison and Where family carry per-axis geometry in an SSBO to broadcast
+            //     their operands, and that decomposition is a statement about row-major arrangement;
+            //   * QuantizeLinear/DequantizeLinear have a per-axis form that recovers the channel by
+            //     dividing the flat index, and their outputs live in the quantized path's own
+            //     buffer conventions.
             return false;
         }
 
