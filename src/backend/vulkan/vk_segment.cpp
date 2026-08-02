@@ -2417,8 +2417,11 @@ namespace vknn {
                 ctx.profiler->add(r);
             }
             // GPU span (first dispatch start -> last dispatch end) vs the CPU-side submit wall: the
-            // difference is barrier bubbles + submit/fence latency, not kernel work.
+            // difference is barrier bubbles + submit/fence latency, not kernel work. The span is
+            // also the run's ELAPSED GPU time, which the per-node records cannot give: the GPU
+            // overlaps consecutive nodes, so their intervals overlap and summing them over-reports.
             double span = (double) (ts.back() - ts.front()) * period / 1e6;
+            ctx.profiler->addGpuSpanMs(span);
             VKNN_INFO << "gpu span=" << span << "ms  submit-wall=" << wall << "ms  (gap = overhead)";
         }
     }

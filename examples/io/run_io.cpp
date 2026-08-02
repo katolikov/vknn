@@ -32,7 +32,7 @@
 //   --bucket N             run plan bucket N of a multi-bucket model (default 0); the positional
 //                          inputs bind bucket N's declared inputs, so run() dispatches to that
 //                          bucket and the written outputs (and --dump tensors) are bucket N's
-//   --profile              print the per-op GPU profile table and the GPU total
+//   --profile              print the per-op GPU profile table and the elapsed GPU span
 //   --dump NAMES           dump the named intermediate tensors (comma-separated) as fp32
 //   --fp32-tensors NAMES   force the named tensors to fp32 compute (comma-separated)
 //   --disable-vk-ops NAMES force the named ops onto the CPU backend (comma-separated)
@@ -248,9 +248,14 @@ int main(int argc, char **argv) {
     int                   repeatCount = atoi(optValue(argc, argv, "--repeat", "1"));
     std::vector<IOTensor> outputs;
     Status                status = Status::Ok;
+    // `outputs` is handed straight back to the next run instead of being cleared. Session::run
+    // reclaims the byte storage the previous run donated to it (matching entries positionally and
+    // rejecting a name mismatch), so a steady-state loop allocates nothing and zeroes nothing per
+    // run; clearing the vector throws that storage away and makes every run fault in a freshly
+    // zeroed output. On a 2.8 MB output that showed up as unpack time swinging between 0.5 and 16 ms
+    // run to run -- allocation noise, measured and reported as if it were inference cost.
     for (int runIndex = 0; runIndex < (repeatCount < 1 ? 1 : repeatCount); ++runIndex)
     {
-        outputs.clear();
         status = session->run(inputs, outputs);
         if (status != Status::Ok)
         {
@@ -288,7 +293,10 @@ int main(int argc, char **argv) {
     if (cfg.profile)
     {
         session->profiler().printTable();
-        printf("GPU total: %.1f ms\n", session->profiler().totalGpuMs());
+        // The elapsed span is the run's GPU time and the figure the published benchmarks quote;
+        // the per-node column sums to more than it because the GPU overlaps consecutive nodes.
+        const double span = session->profiler().gpuSpanMs();
+        printf("GPU span: %.1f ms\n", span > 0 ? span : session->profiler().totalGpuMs());
     }
     return 0;
 }
