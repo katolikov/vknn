@@ -27,9 +27,13 @@
 #   --precision P      low | normal | high (default low — the shipping default)
 #   --backend B        vulkan | cpu (default vulkan)
 #   --no-ops           skip the per-op-type attribution pass (it runs by default)
-#   --compare PATH     a second vknn_run_io (e.g. built from main) — the two are run in INTERLEAVED
-#                      rounds so a drifting device cannot favour either, and a paired sign test says
-#                      whether the difference is real
+#   --flags "..."      extra runner flags for arm A
+#   --compare PATH     a second vknn_run_io (e.g. built from main) to run as arm B
+#   --compare-flags "..."  run arm B as the SAME binary with these flags instead — the cheapest way
+#                      to test an engine decision on a real model, e.g. --compare-flags "--no-flat"
+#                      to ask whether the packed path beats the flat one on this graph.
+#                      Either form runs the two arms in INTERLEAVED rounds so a drifting device
+#                      cannot favour one, and a paired sign test says whether the difference is real
 #   --binary PATH      vknn_run_io to use (default build-android/vknn_run_io)
 #   --compiler PATH    vknn_compile (default build-host/vknn_compile)
 #   --keep             leave the device scratch directory in place
@@ -38,7 +42,7 @@ set -uo pipefail
 ONNX="" VXM="" INPUTS="" SER="" PRECISION="low" BACKEND="vulkan"
 REPEAT=30
 PROFILE=1
-COMPARE=""
+COMPARE="" FLAGS_A="" FLAGS_B=""
 BIN="build-android/vknn_run_io"
 COMPILER="build-host/vknn_compile"
 WORKDIR="/data/local/tmp/benchrun"
@@ -53,7 +57,9 @@ while [[ $# -gt 0 ]]; do
     --precision) PRECISION="$2"; shift 2 ;;
     --backend)   BACKEND="$2"; shift 2 ;;
     --no-ops)    PROFILE=0; shift ;;
-    --compare)   COMPARE="$2"; shift 2 ;;
+    --flags)         FLAGS_A=" $2"; shift 2 ;;
+    --compare)       COMPARE="$2"; shift 2 ;;
+    --compare-flags) FLAGS_B=" $2"; shift 2 ;;
     --binary)    BIN="$2"; shift 2 ;;
     --compiler)  COMPILER="$2"; shift 2 ;;
     --keep)      KEEP=1; shift ;;
@@ -92,7 +98,12 @@ fi
 
 $ADB shell "rm -rf $WORKDIR && mkdir -p $WORKDIR" >/dev/null
 $ADB push "$BIN" "$WORKDIR/run_bn_a" >/dev/null
-[[ -n "$COMPARE" ]] && $ADB push "$COMPARE" "$WORKDIR/run_bn_b" >/dev/null
+if [[ -n "$COMPARE" ]]; then
+  $ADB push "$COMPARE" "$WORKDIR/run_bn_b" >/dev/null
+elif [[ -n "$FLAGS_B" ]]; then
+  # Same build, different engine decision: arm B is a copy of arm A so the two differ only in flags.
+  $ADB shell "cp $WORKDIR/run_bn_a $WORKDIR/run_bn_b" >/dev/null
+fi
 $ADB shell "chmod +x $WORKDIR/run_bn_*" >/dev/null
 $ADB push "$VXM" "$WORKDIR/model.vxm" >/dev/null
 inNames=""
@@ -113,30 +124,34 @@ tempC() { # raw -> Celsius (kernels report milli-C or C)
   if [[ "$t" -gt 1000 ]]; then echo "$((t / 1000))"; else echo "$t"; fi
 }
 
-runArm() { # binaryName logfile  -- one process, REPEAT+1 runs, the first discarded by the parser
-  $ADB shell "cd $WORKDIR && ./$1 model.vxm out --backend $BACKEND --precision $PRECISION --no-cache --timing --repeat $((REPEAT + 1))$inNames" \
+runArm() { # binaryName logfile extraFlags  -- one process, REPEAT+1 runs, the first discarded
+  $ADB shell "cd $WORKDIR && ./$1 model.vxm out --backend $BACKEND --precision $PRECISION --no-cache --timing --repeat $((REPEAT + 1))${3:-}$inNames" \
     </dev/null >"$2" 2>&1
 }
 
 # --- collect ------------------------------------------------------------------------------------
 tBefore=$(tempC "$(deviceTemp)")
 echo "running $((REPEAT + 1)) iteration(s) on $BACKEND, precision $PRECISION ..."
-if [[ -n "$COMPARE" ]]; then
+if [[ -n "$COMPARE" || -n "$FLAGS_B" ]]; then
   # Interleaved rounds: a device that drifts mid-benchmark drifts across BOTH arms equally, which a
   # back-to-back A-then-B layout cannot claim.
   : >"$WORK/a.log"; : >"$WORK/b.log"
   for ((r = 0; r < 5; ++r)); do
-    runArm run_bn_a "$WORK/a_$r.log"; cat "$WORK/a_$r.log" >>"$WORK/a.log"
-    runArm run_bn_b "$WORK/b_$r.log"; cat "$WORK/b_$r.log" >>"$WORK/b.log"
+    runArm run_bn_a "$WORK/a_$r.log" "$FLAGS_A"; cat "$WORK/a_$r.log" >>"$WORK/a.log"
+    runArm run_bn_b "$WORK/b_$r.log" "$FLAGS_B"; cat "$WORK/b_$r.log" >>"$WORK/b.log"
   done
 else
-  runArm run_bn_a "$WORK/a.log"
+  runArm run_bn_a "$WORK/a.log" "$FLAGS_A"
 fi
 tAfter=$(tempC "$(deviceTemp)")
 
-python3 - "$WORK" "$REPEAT" "${COMPARE:-}" "${tBefore:-}" "${tAfter:-}" <<'PY'
+armB=""
+[[ -n "$COMPARE" ]] && armB="$(basename "$COMPARE")"
+[[ -z "$armB" && -n "$FLAGS_B" ]] && armB="same build,$FLAGS_B"
+python3 - "$WORK" "$REPEAT" "$armB" "${tBefore:-}" "${tAfter:-}" "${FLAGS_A:-}" <<'PY'
 import sys, os, re
 work, repeat, compare, tB, tA = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+flagsA = sys.argv[6] if len(sys.argv) > 6 else ""
 
 STAGE = re.compile(r"timing: pack=([0-9.eE+-]+)ms submit\+gpu=([0-9.eE+-]+)ms unpack=([0-9.eE+-]+)ms")
 TOTAL = re.compile(r"sess::run bind=([0-9.eE+-]+)ms segments=([0-9.eE+-]+)ms collect=([0-9.eE+-]+)ms")
@@ -218,11 +233,11 @@ if not rowsA:
     sys.exit(1)
 if tB or tA:
     print("device thermal reading: %s C before, %s C after" % (tB or "?", tA or "?"))
-aStat = report("A (--binary)", rowsA)
+aStat = report("A%s" % (" (%s)" % flagsA.strip() if flagsA.strip() else ""), rowsA)
 
 if compare:
     rowsB = dropColdRuns(parse(os.path.join(work, "b.log")), perProcess)
-    bStat = report("B (--compare)", rowsB)
+    bStat = report("B (%s)" % compare, rowsB)
     print()
     # Paired sign test over the interleaved rounds: the question is not "is A's mean lower" but
     # "does A win more rounds than chance", which a drifting device cannot fake.
