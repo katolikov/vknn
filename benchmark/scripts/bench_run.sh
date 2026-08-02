@@ -26,7 +26,7 @@
 #   --repeat N         timed runs after the discarded warm-up (default 30)
 #   --precision P      low | normal | high (default low — the shipping default)
 #   --backend B        vulkan | cpu (default vulkan)
-#   --profile          add a second, separate pass attributing GPU time per op type
+#   --no-ops           skip the per-op-type attribution pass (it runs by default)
 #   --compare PATH     a second vknn_run_io (e.g. built from main) — the two are run in INTERLEAVED
 #                      rounds so a drifting device cannot favour either, and a paired sign test says
 #                      whether the difference is real
@@ -37,7 +37,7 @@ set -uo pipefail
 
 ONNX="" VXM="" INPUTS="" SER="" PRECISION="low" BACKEND="vulkan"
 REPEAT=30
-PROFILE=0
+PROFILE=1
 COMPARE=""
 BIN="build-android/vknn_run_io"
 COMPILER="build-host/vknn_compile"
@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     --repeat)    REPEAT="$2"; shift 2 ;;
     --precision) PRECISION="$2"; shift 2 ;;
     --backend)   BACKEND="$2"; shift 2 ;;
-    --profile)   PROFILE=1; shift ;;
+    --no-ops)    PROFILE=0; shift ;;
     --compare)   COMPARE="$2"; shift 2 ;;
     --binary)    BIN="$2"; shift 2 ;;
     --compiler)  COMPILER="$2"; shift 2 ;;
@@ -241,11 +241,69 @@ PY
 # --- attribution (separate, and explicitly not latency) ------------------------------------------
 if [[ "$PROFILE" == "1" ]]; then
   echo
-  echo "attribution pass (--profile SERIALIZES the pipeline: these totals are NOT latency) ..."
+  echo "per-op attribution (a SEPARATE pass: --profile serializes the pipeline, so these are shares,"
+  echo "not latency) ..."
   $ADB shell "cd $WORKDIR && ./run_bn_a model.vxm outp --backend $BACKEND --precision $PRECISION --no-cache --profile --repeat 5$inNames" \
     </dev/null >"$WORK/prof.log" 2>&1
-  sed 's/\x1b\[[0-9;]*m//g' "$WORK/prof.log" | sed -n '/by op type/,/^$/p' | head -30
-  echo "  (per-node GPU intervals OVERLAP, so their sum over-reports; the elapsed 'gpu span' line"
-  echo "   is the only absolute figure here.)"
-  sed 's/\x1b\[[0-9;]*m//g' "$WORK/prof.log" | grep -i "gpu span" | tail -2
+  sed 's/\x1b\[[0-9;]*m//g' "$WORK/prof.log" >"$WORK/prof.txt"
+  python3 - "$WORK/prof.txt" <<'PYP'
+import sys, re
+lines = open(sys.argv[1], encoding="utf-8", errors="ignore").read().splitlines()
+
+# "  <OpType>   <cpu ms> /   <gpu ms> /   <dispatches>" under the "Per op-type" heading.
+ROW = re.compile(r"^\s+(\S+)\s+([0-9.]+)\s*/\s*([0-9.]+)\s*/\s*(\d+)\s*$")
+SPAN = re.compile(r"elapsed GPU span ([0-9.]+) ms")
+rows, span, inSection = [], None, False
+for line in lines:
+    m = SPAN.search(line)
+    if m:
+        span = float(m.group(1))
+    if line.startswith("Per op-type"):
+        inSection = True
+        continue
+    if inSection:
+        m = ROW.match(line)
+        if m:
+            rows.append((m.group(1), float(m.group(2)), float(m.group(3)), int(m.group(4))))
+        elif line.strip() == "":
+            inSection = False
+if not rows:
+    print("  (the profiler printed no per-op-type table)")
+    sys.exit(0)
+
+# The op-type gpu column is a SUM of per-node intervals, and those intervals overlap on a GPU that
+# runs work concurrently. Shares are taken against that sum -- they are proportions of attributed
+# work, which is the question "which op should I improve" actually asks. The elapsed span is the
+# only absolute number and is printed beside it so the two are never confused.
+attributed = sum(r[2] for r in rows)
+rows.sort(key=lambda r: -r[2])
+print()
+print("  %-24s %10s %8s %12s" % ("op type", "gpu ms", "share", "dispatches"))
+for name, cpu, gpu, disp in rows:
+    note = "   <- 0 dispatches: elided, this time is attribution only" if disp == 0 else ""
+    print("  %-24.24s %10.3f %7.1f%% %12d%s" % (name, gpu, gpu / attributed * 100 if attributed else 0, disp, note))
+print("  %-24s %10.3f" % ("attributed sum", attributed))
+if span:
+    print("  %-24s %10.3f   <- the only absolute figure; the column above overlaps and over-reports"
+          % ("elapsed GPU span", span))
+
+real = [r for r in rows if r[3] > 0]
+if real:
+    print()
+    cum, top = 0.0, []
+    realTotal = sum(r[2] for r in real)
+    for name, _, gpu, _ in real:
+        top.append(name)
+        cum += gpu
+        if realTotal and cum / realTotal >= 0.8:
+            break
+    print("  => %s %s for %.0f%% of the dispatched work; nothing else moves the total until it does."
+          % (", ".join(top), "accounts" if len(top) == 1 else "account",
+             cum / realTotal * 100 if realTotal else 0))
+phantom = [r[0] for r in rows if r[3] == 0 and r[2] > 0.05 * attributed]
+if phantom:
+    print("  => %s %s time with ZERO dispatches: the op was elided and the interval is charged"
+          % (", ".join(phantom), "carries" if len(phantom) == 1 else "carry"))
+    print("     to a neighbour. There is nothing there to optimize.")
+PYP
 fi
