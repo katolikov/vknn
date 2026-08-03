@@ -46,7 +46,7 @@ namespace vknn {
 
     /// avgpool_partial/avgpool_combine push constant: PoolPC's geometry plus the per-block group count.
     struct PoolPCGroups {
-        int N, C, H, W, groups, op;
+        int N, C, H, W, groups;
     };
 
     /// Blocked spatial reduction. `prepare` picks the strategy and builds the pipelines; `record`
@@ -75,21 +75,21 @@ namespace vknn {
                 const int64_t byWork = hw / kReduceMinChunk; // no more groups than whole chunks
                 const int64_t byGrid = kReduceSaturatingGroups / std::max<int64_t>(total, 1);
                 const int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, kReduceMaxSplit}));
-                pcg                  = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, groups, reduceOp};
+                pcg                  = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, groups};
                 // One fp32 vec4 partial per (block, split): the four lanes of a channel block reduce
                 // together. The floor keeps a degenerate plan from asking for a zero-byte buffer.
                 constexpr size_t kMinScratchBytes = 16;
                 const size_t     partialBytes     = (size_t) total * groups * kNC4Block * sizeof(float);
                 scratch                           = std::make_shared<vk::Buffer>(*env.ctx, std::max(partialBytes, kMinScratchBytes), vk::MemPref::kDeviceOnly);
                 // pass 1 bindings: src(0), scratch(1). No epilogue on the partials.
-                partialPipe = env.pipeline(shader("avgpool_partial", env.useFp16), 2, sizeof(PoolPCGroups), std::vector<uint32_t> {poolTreeWidth(env)});
+                partialPipe = env.pipeline(shader("avgpool_partial", env.useFp16), 2, sizeof(PoolPCGroups), std::vector<uint32_t> {poolTreeWidth(env), (uint32_t) reduceOp});
                 // pass 2 bindings: scratch(0), dst(1), then epilogue operands.
-                combinePipe = env.pipeline(shader((std::string("avgpool_combine") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PoolPCGroups), std::vector<uint32_t> {poolTreeWidth(env)});
+                combinePipe = env.pipeline(shader((std::string("avgpool_combine") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PoolPCGroups), std::vector<uint32_t> {poolTreeWidth(env), (uint32_t) reduceOp});
             } else
             {
-                // PoolPC is byte-matched to shaders/avgpool.comp's push constant {N, C, H, W, op}.
-                pc = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, reduceOp};
-                pipe = env.pipeline(shader((std::string("avgpool") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PoolPC), std::vector<uint32_t> {poolTreeWidth(env)});
+                // PoolPC is byte-matched to shaders/avgpool.comp's push constant {N, C, H, W}.
+                pc = {(int) x.n, (int) x.c, (int) x.h, (int) x.w};
+                pipe = env.pipeline(shader((std::string("avgpool") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PoolPC), std::vector<uint32_t> {poolTreeWidth(env), (uint32_t) reduceOp});
             }
         }
 

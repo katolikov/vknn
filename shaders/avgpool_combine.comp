@@ -18,7 +18,8 @@
 layout(local_size_x = POOL_WG_MAX, local_size_x_id = 0) in; // spec 0 = device-resolved pow2 width
 layout(std430, binding = 0) readonly  buffer P { vec4 part[]; };
 layout(std430, binding = 1) writeonly buffer Dst { STORE dst[]; };
-layout(push_constant) uniform PC { int N, C, H, W, groups, op; } pc;
+layout(constant_id = 1) const int REDUCE_OP = REDUCE_MEAN; // spec 1 = the reduction, folded at pipeline creation
+layout(push_constant) uniform PC { int N, C, H, W, groups; } pc;
 
 shared vec4 red[256];
 
@@ -31,18 +32,18 @@ void main() {
   int  hw = pc.H * pc.W;
   uint t  = gl_LocalInvocationID.x;
 
-  vec4 acc = vxReduceIdentity(pc.op);
+  vec4 acc = vxReduceIdentity(REDUCE_OP);
   for (int gi = int(t); gi < pc.groups; gi += int(gl_WorkGroupSize.x)) {
-    acc = vxReduceMerge(pc.op, acc, part[ncb * uint(pc.groups) + uint(gi)]);
+    acc = vxReduceMerge(REDUCE_OP, acc, part[ncb * uint(pc.groups) + uint(gi)]);
   }
   red[t] = acc;
   barrier();
   for (uint s = gl_WorkGroupSize.x / 2u; s > 0u; s >>= 1) {
-    if (t < s) red[t] = vxReduceMerge(pc.op, red[t], red[t + s]);
+    if (t < s) red[t] = vxReduceMerge(REDUCE_OP, red[t], red[t + s]);
     barrier();
   }
   if (t == 0u) {
-    vec4 r    = vxReduceFinish(pc.op, red[0], hw);
+    vec4 r    = vxReduceFinish(REDUCE_OP, red[0], hw);
     int  didx = (n * Cb + cb) * 4;
     for (int l = 0; l < 4; ++l) {
       float v = r[l];
