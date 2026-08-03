@@ -9,9 +9,12 @@
 //     reduction to a handful of lanes. Pass 1 fans the reduced extent across `groups` workgroups per
 //     output (fp32 partials -> scratch); pass 2 folds the partials and finalises. This is the same
 //     partial-buffer pattern conv.cpp uses, and turns the pathological ~1-lane case into a full-GPU one.
+#include "dispatch_extent.h"
 #include "flat_ops.h"
+#include "nc4_spatial_reduce.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
+#include "vknn/error.h"
 #include "vknn/op.h"
 
 namespace vknn {
@@ -42,8 +45,19 @@ namespace vknn {
             ReducePCPartial                      partialPc {};
             ReducePCCombine                      combinePc {};
             bool                                 coop = false;
+            // Set when the layout pass placed this node on the blocked path: a spatial reduction is
+            // one reduction per channel, so the four lanes of a channel block reduce independently
+            // and the NC4HW4 buffer is read as stored (nc4_spatial_reduce.h).
+            bool             nc4 = false;
+            Nc4SpatialReduce blocked;
 
             void prepare(const Node &node, VkOpEnv &env) override {
+                nc4 = !opIsFlat(node, env);
+                if (nc4)
+                {
+                    blocked.prepare(node, env, node.subOp);
+                    return;
+                }
                 const Graph &g    = *env.graph;
                 Shape        in   = g.desc(node.inputs[0]).shape;
                 int          rank = (int) in.size();
@@ -59,11 +73,6 @@ namespace vknn {
                 }
                 auto                 inStride = flat::rowStrides(in);
                 std::vector<int32_t> inDim(rank), inStr(rank), reduce(rank, 0);
-                for (int k = 0; k < rank; ++k)
-                {
-                    inDim[k] = (int) in[k];
-                    inStr[k] = (int) inStride[k];
-                }
                 // Build the reduce mask: normalize each ONNX axis (negative counts from the end) and set
                 // its lane. Out-of-range axes are ignored so a malformed attr can't index past rank.
                 for (int64_t a: axes)
@@ -74,20 +83,50 @@ namespace vknn {
                         reduce[ax] = 1;
                     }
                 }
-                int total = (int) numElements(g.desc(node.outputs[0]).shape);
-                geom      = flat::uploadFlatGeom(env, {inDim, inStr, reduce});
-
-                int64_t reducedExtent = 1;
+                // Every quantity the kernels carry is an int32 field they then do int32 arithmetic on:
+                // the geometry SSBO's dims and strides, the output total, and the reduced-element count
+                // that finalises a Mean. Each is checked against the family's element domain BEFORE it
+                // is narrowed, because a wrapped reduced count fails the combine pass's
+                // `pc.rcount > 0` test and makes ReduceMean silently return the raw sum
+                // (dispatch_extent.h).
+                const int64_t outputElements = numElements(g.desc(node.outputs[0]).shape);
+                int64_t       reducedExtent  = 1;
                 for (int k = 0; k < rank; ++k)
                 {
                     if (reduce[k])
                     {
-                        reducedExtent *= inDim[k];
+                        reducedExtent *= in[k];
                     }
                 }
+                auto refuseExtent = [&](const char *quantity, int64_t extent) {
+                    throw Error(Status::Unsupported, flat::dispatchExtentRefusal("Reduce '" + node.name + "'", quantity, extent));
+                };
+                if (!flat::dispatchExtentFits(outputElements))
+                {
+                    refuseExtent("output element count", outputElements);
+                }
+                if (!flat::dispatchExtentFits(reducedExtent))
+                {
+                    refuseExtent("reduced element count", reducedExtent);
+                }
+                for (int k = 0; k < rank; ++k)
+                {
+                    if (!flat::dispatchExtentFits(in[k]))
+                    {
+                        refuseExtent("input dimension", in[k]);
+                    }
+                    if (!flat::dispatchExtentFits(inStride[k]))
+                    {
+                        refuseExtent("input stride", inStride[k]);
+                    }
+                    inDim[k] = (int) in[k];
+                    inStr[k] = (int) inStride[k];
+                }
+                int total = (int) outputElements;
+                geom      = flat::uploadFlatGeom(env, {inDim, inStr, reduce});
                 // Cooperate only for the small-output case; large-output reductions already parallelise
                 // fully on the scalar path and would pay the two-pass barrier for nothing.
-                coop = (total <= 4096 && reducedExtent >= 256);
+                coop = (total <= kReduceSaturatingGroups && reducedExtent >= kReduceMinChunk);
                 // A pointwise chain can be folded into the reduce's store: epi.suffix() selects the _epi
                 // shader variant and epi.extraBufs() adds its operand bindings. The epilogue runs at the
                 // final store — the scalar kernel, or the combine pass for the cooperative path.
@@ -95,27 +134,34 @@ namespace vknn {
 
                 if (coop)
                 {
-                    // groups per output: enough workgroups to fill the GPU (~4096 total), each chunk still
-                    // >= 256 elements, capped at 64 so the combine pass stays a single trivial workgroup.
-                    int64_t byWork = reducedExtent / 256;       // no more groups than 256-elem chunks
-                    int64_t byGrid = 4096 / std::max(total, 1); // ~4096 workgroups total
-                    int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, (int64_t) 64}));
+                    // groups per output, under the three shared occupancy gates (their rationale, and
+                    // why they cannot be device-derived, lives with them in nc4_spatial_reduce.h).
+                    int64_t byWork = reducedExtent / kReduceMinChunk;
+                    int64_t byGrid = kReduceSaturatingGroups / std::max<int64_t>(total, 1);
+                    int     groups = (int) std::max<int64_t>(1, std::min({byWork, byGrid, kReduceMaxSplit}));
                     partialPc      = {rank, total, node.subOp, groups};
                     combinePc      = {total, node.subOp, groups, (int) reducedExtent};
                     scratch = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) total * groups * sizeof(float), 16), vk::MemPref::kDeviceOnly);
                     // pass 1 bindings: input(0), scratch(1), geom(2). No epilogue on the partials.
-                    partialPipe = env.pipeline(shader("flat_reduce_partial", env.useFp16), 3, sizeof(ReducePCPartial), std::vector<uint32_t> {});
+                    partialPipe = env.pipeline(shader("flat_reduce_partial", env.useFp16), 3, sizeof(ReducePCPartial),
+                                               std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
                     // pass 2 bindings: scratch(0), output(1), then epilogue operands.
-                    combinePipe = env.pipeline(shader((std::string("flat_reduce_combine") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ReducePCCombine), std::vector<uint32_t> {});
+                    combinePipe = env.pipeline(shader((std::string("flat_reduce_combine") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(ReducePCCombine),
+                                               std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
                 } else
                 {
                     pc = {rank, total, node.subOp};
                     // scalar bindings: input(0), output(1), geom(2), then epilogue operands.
-                    pipe = env.pipeline(shader((std::string("flat_reduce") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(ReducePCFlat), std::vector<uint32_t> {});
+                    pipe = env.pipeline(shader((std::string("flat_reduce") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(ReducePCFlat), std::vector<uint32_t> {env.flatLocalSize});
                 }
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
+                if (nc4)
+                {
+                    blocked.record(cmd, node, env);
+                    return;
+                }
                 VkBuffer dst = env.devBuf(node.outputs[0])->handle();
                 if (coop)
                 {
@@ -135,7 +181,7 @@ namespace vknn {
                     // Binding order matches flat_reduce.comp: input(0), output(1), geometry(2), epilogue.
                     std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst, geom->handle()};
                     epi.append(bufs, node, env, dst);
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
                 }
             }
         };

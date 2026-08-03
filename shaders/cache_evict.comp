@@ -9,7 +9,7 @@
 // The loads feed a store the shader compiler cannot prove dead, or it deletes them and the kernel
 // touches no memory at all. The store lands at element 0 of the same scratch buffer and never fires
 // in practice: the buffer is zero-filled at allocation, so the xor is 0, and the sentinel is not.
-layout(local_size_x = 256) in;
+layout(local_size_x = 256) in; // == kEvictLocalSize (src/backend/vulkan/vk_tune_race.cpp): the eviction stream sizes its grid from the same width
 layout(std430, binding = 0) buffer Stream { uvec4 s[]; };
 layout(push_constant) uniform PC {
   uint vec4Count, sentinel;

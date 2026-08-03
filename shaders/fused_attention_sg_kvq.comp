@@ -25,6 +25,14 @@
 //     ONCE (dot * kScale[s] * scale). V-apply: the row's codes dequantize in place
 //     (score * (vScale[s] * v)).
 // Softmax, the subgroup reductions, the fold staging and all accumulation remain fp32.
+// Floats of one partial-record header before the hd accumulator lanes: {chunk max m,
+// weight sum l}. Mirrors the host scratch allocation rows * chunks * (hd + FA_PART_HDR)
+// (kFaPartialHeaderFloats, src/backend/vulkan/ops/fused_attention.cpp); the two must
+// change together or every partial lands in the wrong chunk slot with plausible values.
+// Header slot of the chunk weight sum l; the chunk max m sits at the record base.
+// Mirrors FA_PART_L in shaders/fused_attention_combine.comp, which reads these records.
+#define FA_PART_L 1
+#define FA_PART_HDR 2
 layout(constant_id = 0) const int G = 1;
 layout(constant_id = 1) const int HD = 64;
 layout(constant_id = 2) const int CHUNK = 256;
@@ -118,7 +126,7 @@ void main() {
   // its own running score max, so the max reduction below never re-reads the score slab.
   bool chunkAllPast = s0 + sLen <= pc.pastLen;
   float laneMax[G];
-  for (int gi = 0; gi < G; ++gi) laneMax[gi] = -3.4e38;
+  for (int gi = 0; gi < G; ++gi) laneMax[gi] = -3.4e38; // finite ~-FLT_MAX seed: scores are finite and far above it, so a real score always replaces it (byte-equal to the exact -inf identity here)
   for (int t = tid; t < sLen; t += WGS) {
     int s = s0 + t;
     float dotAcc[G];
@@ -177,7 +185,7 @@ void main() {
   barrier(); // publishes the raw scores and the max slab
   float rowMax[G];
   for (int gi = 0; gi < G; ++gi) {
-    float m = -3.4e38;
+    float m = -3.4e38; // finite ~-FLT_MAX seed: the slab entries carry the same floor, so the fold result matches an exact -inf identity
     for (uint sg = 0u; sg < gl_NumSubgroups; ++sg) m = max(m, sRed[uint(gi) * gl_NumSubgroups + sg]);
     rowMax[gi] = m;
   }
@@ -239,9 +247,9 @@ void main() {
     barrier(); // the whole fold staging publishes at once
     if (tid == 0) {
       for (int gi = 0; gi < G; ++gi) {
-        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
         part[pBase] = rowMax[gi];
-        part[pBase + 1] = rowSum[gi];
+        part[pBase + FA_PART_L] = rowSum[gi];
       }
     }
     for (int i = tid; i < G * HD4; i += WGS) {
@@ -249,11 +257,11 @@ void main() {
       int nw = i % HD4;
       vec4 outAcc = vec4(0.0);
       for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD4 + nw];
-      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
-      part[pBase + 2 + 4 * nw] = outAcc.x;
-      part[pBase + 2 + 4 * nw + 1] = outAcc.y;
-      part[pBase + 2 + 4 * nw + 2] = outAcc.z;
-      part[pBase + 2 + 4 * nw + 3] = outAcc.w;
+      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
+      part[pBase + FA_PART_HDR + 4 * nw] = outAcc.x;
+      part[pBase + FA_PART_HDR + 4 * nw + 1] = outAcc.y;
+      part[pBase + FA_PART_HDR + 4 * nw + 2] = outAcc.z;
+      part[pBase + FA_PART_HDR + 4 * nw + 3] = outAcc.w;
     }
   } else {
     int n = tid % HD;
@@ -286,9 +294,9 @@ void main() {
     barrier(); // the whole fold staging publishes at once
     if (tid == 0) {
       for (int gi = 0; gi < G; ++gi) {
-        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
+        int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
         part[pBase] = rowMax[gi];
-        part[pBase + 1] = rowSum[gi];
+        part[pBase + FA_PART_L] = rowSum[gi];
       }
     }
     for (int i = tid; i < G * HD; i += WGS) {
@@ -296,8 +304,8 @@ void main() {
       int n = i % HD;
       float outAcc = 0.0;
       for (int p = 0; p < parts; ++p) outAcc += sFold[gi * WGS + p * HD + n].x;
-      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + 2);
-      part[pBase + 2 + n] = outAcc;
+      int pBase = ((rowBase + gi * pc.groupStrideRow) * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
+      part[pBase + FA_PART_HDR + n] = outAcc;
     }
   }
 }

@@ -16,7 +16,7 @@
 layout(constant_id = 0) const int HAS_RES = 0;  // fused residual add (out = act(conv + res))
 layout(constant_id = 1) const int WTILE = 4;    // output pixels per thread (autotuned per shape)
 layout(constant_id = 2) const int OCB = 1;      // output channel-blocks per thread (autotuned per shape)
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 3) in; // trailing spec = device-resolved lane width (env.convLocalSize), matching the fp32 twin
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };

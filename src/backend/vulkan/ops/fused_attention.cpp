@@ -39,6 +39,9 @@ namespace vknn {
 
         constexpr int kFaWorkgroupSize = 256;
         constexpr int kFaMaxChunks     = 64; // == FA_MAX_CHUNKS in fused_attention_combine.comp
+        // Floats of one partial-record header before the hd accumulator lanes; == FA_PART_HDR
+        // in the attention shaders. Sizes the partial scratch rows * chunks * (hd + this).
+        constexpr int kFaPartialHeaderFloats = 2;
         // Subgroup-kernel tile: token chunk and workgroup-width target (the width widens to the
         // head dim and rounds up to whole subgroups). A decode model exposes only kv-head-count KV
         // rows, so parallelism comes from the chunk count: the half-width chunk doubles the
@@ -233,7 +236,7 @@ namespace vknn {
                 geom = flat::uploadFlatGeom(env, {dimsKv, qs, ks, vs, ms, rs, kn2, vn2});
 
                 // fp32 chunk partials: {m, l, acc[hd]} per (row, chunk).
-                scratch = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) rows * (size_t) chunks * (size_t) (partialPc.hd + 2) * sizeof(float), 16), vk::MemPref::kDeviceOnly);
+                scratch = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) rows * (size_t) chunks * (size_t) (partialPc.hd + kFaPartialHeaderFloats) * sizeof(float), 16), vk::MemPref::kDeviceOnly);
 
                 if (!partialPc.hasMask || !split)
                 {

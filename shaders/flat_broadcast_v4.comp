@@ -1,0 +1,114 @@
+#version 450
+#include "precision.glsl"
+// Vectorized twin of flat_broadcast: a lane processes FLAT_MOVE_QUAD CONSECUTIVE output elements,
+// so the store is one whole-vec4 transaction (a 64-lane wave writes 512 contiguous bytes per
+// access instead of 128). The broadcast's input index is a per-axis form of the output coordinate
+// that is linear in the innermost coordinate whenever the innermost source axis MATCHES the
+// output axis (src = c under both modes) or BROADCASTS (size 1: src = 0 under both modes), so
+// within one innermost-output-axis row the rank walk runs ONCE per quad and the innermost input
+// stride steps it (the broadcast axis collapses the quad to a single load). A quad straddling a
+// row boundary — or one on a WIDENING innermost axis, where Tile wraps (c % inDim) and Expand
+// right-aligns (clamp), both nonlinear in c — runs the scalar kernel's four independent walks
+// instead. Indices and value expressions — and therefore bytes — are identical to flat_broadcast
+// for every element, so the two variants are byte-interchangeable and the host
+// (flat::Broadcast::pickQuad) may pick either on measured speed alone. The tail quad (total not a
+// multiple of FLAT_MOVE_QUAD) runs the scalar body per element behind a bounds guard; component
+// indexing of the vec4 SSBO element compiles to scalar stores, so the tail never writes past
+// total.
+#include "common.glsl"
+// Storage vector of FLAT_MOVE_QUAD consecutive output elements (the fp32 variant stores plain
+// vec4).
+#ifdef USE_FP16
+#define STORE_QUAD f16vec4
+#else
+#define STORE_QUAD vec4
+#endif
+// Elements per lane-quad; mirrored by kFlatMoveQuad in src/backend/vulkan/ops/flat_ops.h.
+#define FLAT_MOVE_QUAD 4
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };       // broadcast reads are arbitrary-stride: scalar-indexed
+layout(std430, binding = 1) writeonly buffer D { STORE_QUAD d4[]; }; // whole-vec4 stores over consecutive elements
+layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;    // outDim = g[0..rank), inDim = g[rank..2*rank), inStride = g[2*rank..3*rank)
+// Same push-constant contract as flat_broadcast.comp (mode 0 = Expand, 1 = Tile).
+layout(push_constant) uniform PC { int rank, total, mode; } pc;
+
+// ITEMS quads per lane, one slot apart — the scalar twin's walk, over quads. The movement family
+// pins ITEMS = 1 (flat_ops.h kMovementItemsPerLane); the spec constant stays so a future shape
+// rule can re-enable the walk per node without a kernel change.
+layout(constant_id = 1) const int ITEMS = 1;
+
+// The scalar kernel's per-axis index resolution (flat_broadcast.comp processOne): identical
+// statements, value-returning.
+int broadcastIndex(int gid) {
+  int rem = gid, inIdx = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    int inDim = geom.g[pc.rank + k];
+    int src = (pc.mode == 1) ? (c % inDim) : clamp(c - (geom.g[k] - inDim), 0, inDim - 1);
+    inIdx += src * geom.g[2 * pc.rank + k];
+  }
+  return inIdx;
+}
+
+// The scalar kernel's per-element body, value-returning: identical statements with the store
+// lifted to the caller.
+STORE broadcastOne(int gid) {
+  return STORE(float(s[broadcastIndex(gid)]));
+}
+
+void processQuad(int q) {
+  int e0 = q * FLAT_MOVE_QUAD;
+  if (e0 + FLAT_MOVE_QUAD > pc.total) {
+    // Tail quad: the scalar body per element behind the bounds guard; component stores compile to
+    // scalar accesses, so nothing writes past total.
+    for (int j = 0; j < FLAT_MOVE_QUAD; ++j) {
+      if (e0 + j >= pc.total) break;
+      d4[q][j] = broadcastOne(e0 + j);
+    }
+    return;
+  }
+  // Row-interior full quad on a LINEAR innermost axis: the four output coordinates share every
+  // axis but the innermost, and a matching (src = c) or size-1 (src = 0) innermost source axis
+  // makes the input index linear in the innermost coordinate — one walk resolves the quad and
+  // the innermost input stride steps it. (pc.rank == 0 never reaches here: its total is 1, which
+  // the tail path above handles.)
+  int lastDim = geom.g[pc.rank - 1];
+  int lastIn  = geom.g[2 * pc.rank - 1];
+  int lastPos = e0 - (e0 / lastDim) * lastDim;
+  if (lastPos + FLAT_MOVE_QUAD <= lastDim && (lastIn == lastDim || lastIn == 1)) {
+    int inIdx = broadcastIndex(e0);
+    // A size-1 source axis contributes src = 0 at every column regardless of its stored stride,
+    // so its step is 0; a matching axis steps by its input stride.
+    int   st = (lastIn == 1) ? 0 : geom.g[3 * pc.rank - 1];
+    float v0, v1, v2, v3;
+    if (st == 0) { // innermost axis broadcast: one value serves the quad
+      v0 = float(s[inIdx]); v1 = v0; v2 = v0; v3 = v0;
+    } else {
+      v0 = float(s[inIdx]); v1 = float(s[inIdx + st]); v2 = float(s[inIdx + 2 * st]); v3 = float(s[inIdx + 3 * st]);
+    }
+    d4[q] = STORE_QUAD(STORE(v0), STORE(v1), STORE(v2), STORE(v3));
+    return;
+  }
+  // Row-straddling quad, or a widening innermost axis (Tile repeat / Expand right-align): the
+  // scalar kernel's four independent per-element walks; the store stays one whole-vec4
+  // transaction.
+  d4[q] = STORE_QUAD(broadcastOne(e0), broadcastOne(e0 + 1), broadcastOne(e0 + 2), broadcastOne(e0 + 3));
+}
+
+void main() {
+  uint lane = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int quadTotal = (pc.total + FLAT_MOVE_QUAD - 1) / FLAT_MOVE_QUAD;
+  if (ITEMS == 1) {
+    if (lane >= uint(quadTotal)) return;
+    processQuad(int(lane));
+    return;
+  }
+  uint slot = (uint(quadTotal) + uint(ITEMS) - 1u) / uint(ITEMS);
+  if (lane >= slot) return;
+  for (int it = 0; it < ITEMS; ++it) {
+    uint q = lane + uint(it) * slot;
+    if (q >= uint(quadTotal)) break;
+    processQuad(int(q));
+  }
+}

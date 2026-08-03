@@ -10,6 +10,9 @@
 //   [ 0 -2 -1  2  1  0]
 //   [ 0  2 -1 -2  1  0]
 //   [ 0  4  0 -5  0  1]
+// Each Bt row is inlined in one expression below (zero terms dropped, unit terms bare) rather than
+// held in an F(6,3)-style kBt array (wino_input6_fp16.comp): the array-indexed form compiles to
+// different SPIR-V, and this kernel's emitted code is byte-locked by the determinism gates.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
@@ -41,24 +44,24 @@ void main() {
                     : vec4(0.0);
     }
   }
-  // tmp = Bt * d  (apply Bt rows to the row index)
+  // tmp = Bt * d  (apply Bt rows to the row index; one Bt row per line, header matrix)
   vec4 t[6][6];
   for (int c = 0; c < 6; ++c) {
-    t[0][c] = 4.0 * d[0][c] - 5.0 * d[2][c] + d[4][c];
-    t[1][c] = -4.0 * d[1][c] - 4.0 * d[2][c] + d[3][c] + d[4][c];
-    t[2][c] = 4.0 * d[1][c] - 4.0 * d[2][c] - d[3][c] + d[4][c];
-    t[3][c] = -2.0 * d[1][c] - d[2][c] + 2.0 * d[3][c] + d[4][c];
-    t[4][c] = 2.0 * d[1][c] - d[2][c] - 2.0 * d[3][c] + d[4][c];
-    t[5][c] = 4.0 * d[1][c] - 5.0 * d[3][c] + d[5][c];
+    t[0][c] = 4.0 * d[0][c] - 5.0 * d[2][c] + d[4][c];            // Bt[0]: [ 4  0 -5  0  1  0]
+    t[1][c] = -4.0 * d[1][c] - 4.0 * d[2][c] + d[3][c] + d[4][c]; // Bt[1]: [ 0 -4 -4  1  1  0]
+    t[2][c] = 4.0 * d[1][c] - 4.0 * d[2][c] - d[3][c] + d[4][c];  // Bt[2]: [ 0  4 -4 -1  1  0]
+    t[3][c] = -2.0 * d[1][c] - d[2][c] + 2.0 * d[3][c] + d[4][c]; // Bt[3]: [ 0 -2 -1  2  1  0]
+    t[4][c] = 2.0 * d[1][c] - d[2][c] - 2.0 * d[3][c] + d[4][c];  // Bt[4]: [ 0  2 -1 -2  1  0]
+    t[5][c] = 4.0 * d[1][c] - 5.0 * d[3][c] + d[5][c];            // Bt[5]: [ 0  4  0 -5  0  1]
   }
   // V = tmp * B  (same coefficients applied to the column index)
   for (int r = 0; r < 6; ++r) {
-    vec4 v0 = 4.0 * t[r][0] - 5.0 * t[r][2] + t[r][4];
-    vec4 v1 = -4.0 * t[r][1] - 4.0 * t[r][2] + t[r][3] + t[r][4];
-    vec4 v2 = 4.0 * t[r][1] - 4.0 * t[r][2] - t[r][3] + t[r][4];
-    vec4 v3 = -2.0 * t[r][1] - t[r][2] + 2.0 * t[r][3] + t[r][4];
-    vec4 v4 = 2.0 * t[r][1] - t[r][2] - 2.0 * t[r][3] + t[r][4];
-    vec4 v5 = 4.0 * t[r][1] - 5.0 * t[r][3] + t[r][5];
+    vec4 v0 = 4.0 * t[r][0] - 5.0 * t[r][2] + t[r][4];            // Bt[0]
+    vec4 v1 = -4.0 * t[r][1] - 4.0 * t[r][2] + t[r][3] + t[r][4]; // Bt[1]
+    vec4 v2 = 4.0 * t[r][1] - 4.0 * t[r][2] - t[r][3] + t[r][4];  // Bt[2]
+    vec4 v3 = -2.0 * t[r][1] - t[r][2] + 2.0 * t[r][3] + t[r][4]; // Bt[3]
+    vec4 v4 = 2.0 * t[r][1] - t[r][2] - 2.0 * t[r][3] + t[r][4];  // Bt[4]
+    vec4 v5 = 4.0 * t[r][1] - 5.0 * t[r][3] + t[r][5];            // Bt[5]
     int b = r * 6;
     vbuf[((b + 0) * Cinb + icb) * nT + tile] = f16vec4(v0);
     vbuf[((b + 1) * Cinb + icb) * nT + tile] = f16vec4(v1);

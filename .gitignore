@@ -2,6 +2,7 @@ build/
 build-android/
 build-host/
 build-host-leakcheck/
+build-host-asan/
 leakcheck.log
 *.o
 *.spv

@@ -4,7 +4,7 @@
 // broadcasting, so it needs no geometry SSBO: one invocation per element, bounds-checked on the
 // tail. The bool result is the canonical fp32 1.0/0.0 the flat comparison ops emit.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int total; } pc;

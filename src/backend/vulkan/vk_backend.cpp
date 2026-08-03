@@ -145,6 +145,34 @@ namespace vknn {
         return k;
     }
 
+    bool VulkanBackend::readCacheFile(CacheDoc &out, CacheImageFingerprint *image) const {
+        if (noCache_ || cacheFile_.empty())
+        {
+            return false;
+        }
+        std::ifstream f(cacheFile_, std::ios::binary);
+        if (!f)
+        {
+            return false;
+        }
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        CacheDoc             loaded;
+        // Whole-file guards: a file written by other kernels, another device or another model shares
+        // nothing with this session, so it contributes nothing and is rewritten from scratch.
+        if (!cacheDecode(bytes.data(), bytes.size(), loaded) || loaded.format != cacheDoc_.format || loaded.kernelHash != cacheDoc_.kernelHash ||
+            loaded.vendorId != cacheDoc_.vendorId || loaded.deviceId != cacheDoc_.deviceId || loaded.driverVersion != cacheDoc_.driverVersion ||
+            loaded.pipelineCacheUUID != cacheDoc_.pipelineCacheUUID || loaded.model != cacheDoc_.model)
+        {
+            return false;
+        }
+        out = std::move(loaded);
+        if (image)
+        {
+            *image = fingerprintCacheImage(bytes.data(), bytes.size());
+        }
+        return true;
+    }
+
     void VulkanBackend::loadCache(const Config &cfg, const std::string &modelHash) {
         if (cacheLoaded_)
         {
@@ -165,45 +193,33 @@ namespace vknn {
         cacheDoc_.pipelineCacheUUID.assign(caps.pipelineCacheUUID, caps.pipelineCacheUUID + sizeof(caps.pipelineCacheUUID));
         cacheDoc_.model = modelHash;
 
-        std::vector<char>   pipeInit;
-        const CacheVariant *matched = nullptr;
-        if (!noCache_ && !cacheFile_.empty())
+        wcache_ = std::make_unique<WeightCache>();
+        wcache_->reset(!noCache_ && !cacheFile_.empty());
+        // The decoded document is scoped to this load: only what this configuration consumes is kept —
+        // the pipeline blob (handed to the driver cache) and the matched variant's prepacked weights
+        // (moved into the weight cache). Every other variant's decoded weight map, and the file image
+        // itself, are released at the end of this function; saveCaches() reads the file again to
+        // rewrite it, so nothing belonging to another configuration stays resident for the session.
+        std::vector<char> pipeInit;
+        CacheDoc          loaded;
+        if (readCacheFile(loaded, &savedImage_))
         {
-            std::ifstream f(cacheFile_, std::ios::binary);
-            if (f)
+            for (CacheVariant &v: loaded.variants)
             {
-                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                CacheDoc             loaded;
-                if (cacheDecode(bytes.data(), bytes.size(), loaded) && loaded.format == cacheDoc_.format && loaded.kernelHash == cacheDoc_.kernelHash &&
-                    loaded.vendorId == cacheDoc_.vendorId && loaded.deviceId == cacheDoc_.deviceId && loaded.driverVersion == cacheDoc_.driverVersion &&
-                    loaded.pipelineCacheUUID == cacheDoc_.pipelineCacheUUID && loaded.model == cacheDoc_.model)
+                if (v.sameKey(curKey_))
                 {
-                    cacheDoc_    = std::move(loaded); // keep every cached variant
-                    loadedBytes_ = std::move(bytes);
-                    matched      = cacheDoc_.findVariant(curKey_);
-                    if (matched)
-                    {
-                        pipeInit.assign(matched->pipeline.begin(), matched->pipeline.end());
-                    }
-                } else
-                {
-                    VKNN_INFO << "cache " << cacheFile_ << " does not match this device/model/kernels -> recompiling";
+                    pipeInit.assign(v.pipeline.begin(), v.pipeline.end());
+                    wcache_->loadFrom(std::move(v));
+                    break;
                 }
             }
-        }
+        } else if (!noCache_ && !cacheFile_.empty())
+        { VKNN_INFO << "cache " << cacheFile_ << " is absent or does not match this device/model/kernels -> recompiling"; }
         cache_ = std::make_unique<vk::PipelineCache>(*ctx_, pipeInit);
         // Baseline from the driver's own serialization of what was just restored, not from pipeInit: the
         // two differ by however the driver re-encodes, and a warm session must compare equal so it skips
         // the flush entirely.
         savedPipelineBytes_ = cache_->currentBytes();
-        wcache_             = std::make_unique<WeightCache>();
-        if (matched)
-        {
-            wcache_->loadFrom(*matched);
-        } else
-        {
-            wcache_->reset(!noCache_ && !cacheFile_.empty());
-        }
     }
 
     void VulkanBackend::saveCaches() {
@@ -215,26 +231,23 @@ namespace vknn {
         std::vector<char> pipe = cache_->getData();
         v.pipeline.assign(pipe.begin(), pipe.end());
         wcache_->writeInto(v);
-        bool replaced = false;
-        for (auto &e: cacheDoc_.variants)
+        // Rebuild the document from the file rather than from a resident copy: the variants of other
+        // configurations, and the prepacked weights this session already saved and released, come back
+        // off disk exactly here. mergeVariantIntoDoc folds this session's variant into the stored one,
+        // so a weight table holding only what was put since the last save completes what disk holds.
+        // A file that has since been removed or replaced by one this session cannot use contributes
+        // nothing, and the rewrite carries only what this session still holds — the keys it dropped are
+        // recomputed by the next cold prepack, exactly as they are on a first run.
+        CacheDoc doc = cacheDoc_; // header from the running device/model; the variants come from the file
+        doc.variants.clear();
+        readCacheFile(doc);
+        mergeVariantIntoDoc(doc, std::move(v));
+        std::vector<uint8_t>        out   = cacheEncode(doc);
+        const CacheImageFingerprint fresh = fingerprintCacheImage(out.data(), out.size());
+        if (fresh == savedImage_)
         {
-            if (e.sameKey(v))
-            {
-                e        = std::move(v);
-                replaced = true;
-                break;
-            }
-        }
-        if (!replaced)
-        {
-            cacheDoc_.variants.push_back(std::move(v));
-        }
-        std::vector<uint8_t> out = cacheEncode(cacheDoc_);
-        if (out == loadedBytes_)
-        {
-            wcache_->markSaved();
-            savedPipelineBytes_ = pipe.size();
-            return; // unchanged
+            releaseSavedWeights(pipe.size()); // unchanged: the file already holds this session's work
+            return;
         }
         // A cache path may name a directory that does not exist yet (one directory holding every model's
         // cache); create the chain so the first write lands instead of warning on every session.
@@ -247,7 +260,9 @@ namespace vknn {
         }
         // Write a per-process temp file and atomically rename it over the target, so a crash or a
         // second concurrent writer mid-write leaves the existing cache intact instead of a truncated
-        // (corrupt) file. loadedBytes_ advances only after the write is confirmed and the rename lands.
+        // (corrupt) file. The remembered image and the weight release both advance only after the write
+        // is confirmed and the rename lands: a failed write leaves the retained blobs in place, so the
+        // next flush retries with everything this session produced.
         const std::string tmp = cacheFile_ + ".tmp." + std::to_string((long) getpid());
         {
             std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
@@ -272,10 +287,25 @@ namespace vknn {
             std::remove(tmp.c_str());
             return;
         }
-        loadedBytes_        = out;
-        savedPipelineBytes_ = pipe.size();
+        const size_t variantCount = doc.variants.size();
+        savedImage_               = fresh;
+        releaseSavedWeights(pipe.size());
+        VKNN_INFO << "Saved cache (" << out.size() << " bytes, " << variantCount << " variant(s)) -> " << cacheFile_;
+    }
+
+    void VulkanBackend::releaseSavedWeights(size_t savedPipelineBytes) {
+        savedPipelineBytes_ = savedPipelineBytes;
         wcache_->markSaved();
-        VKNN_INFO << "Saved cache (" << out.size() << " bytes, " << cacheDoc_.variants.size() << " variant(s)) -> " << cacheFile_;
+        // The prepacked blobs are now in the cache file, and the device holds the uploaded copies, so
+        // the fp32 host copies have no remaining reader. Weights put after this point accumulate as a
+        // delta the next save merges into the stored variant.
+        const size_t releasedBytes = wcache_->retainedBytes();
+        wcache_->releaseRetained();
+        if (releasedBytes > 0)
+        {
+            constexpr size_t kBytesPerMegabyte = 1024 * 1024;
+            VKNN_INFO << "WeightCache: released " << releasedBytes / kBytesPerMegabyte << " MB of prepacked weights held for the cache file";
+        }
     }
 
     bool VulkanBackend::useFp16(const Config &cfg) const {

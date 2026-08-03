@@ -9,11 +9,18 @@
 
 namespace vknn {
 
-    /// Raw bytes that are either OWNED (a heap vector) or a read-only VIEW into a mapped model file.
+    /// Raw bytes that are either OWNED (a heap vector this buffer alone controls) or VIEWED — read
+    /// only, backed by storage this buffer shares with someone else. A view has two backings:
     ///
-    /// A view costs no memory: the ".vxm" already holds the weight bytes, so a loaded model points at
-    /// them instead of copying. Views are read-only; the first mutation materializes an owned copy
-    /// (copy-on-write), which keeps every writer correct without knowing where the bytes came from.
+    ///   * a mapped model file: the ".vxm" already holds the weight bytes, so a loaded model points
+    ///     at them instead of copying, and the view costs no memory at all;
+    ///   * a shared heap block: two buffers that hold the SAME decoded payload — an ONNX initializer
+    ///     read at two different shapes, say — point at one allocation instead of two.
+    ///
+    /// Both are read-only, and the first mutation materializes a private owned copy (copy-on-write),
+    /// which keeps every writer correct without knowing where the bytes came from. `viewed()` asks
+    /// the question that matters to a caller: are these bytes shared, so that dropping them here
+    /// would take them from someone else too?
     ///
     /// Blob offsets inside a ".vxm" are not 4- or 8-byte aligned, so a viewed payload must never be
     /// reinterpreted as a typed array — only `data()`/`size()` (memcpy, hashing, byte copies) are valid
@@ -81,6 +88,56 @@ namespace vknn {
         bool viewed() const noexcept {
             return viewSize_ != 0;
         }
+
+        /// Hand back these bytes as a shared block another buffer can point at, converting this
+        /// buffer to a view of that block if it still owned them privately.
+        ///
+        /// Sharing is what a pass wants when it needs the SAME payload under a second tensor — a
+        /// constant regrouped to a different shape, for instance. Assigning the buffer instead
+        /// deep-copies every byte, twice over for a large weight: once in host memory and again in
+        /// the artifact. Both sides stay copy-on-write, so a later mutation on either one silently
+        /// takes its own copy and neither can corrupt the other.
+        ///
+        /// @returns The shared block, or nullptr when the bytes are file-backed (a mapped view is
+        ///          already free to copy — assign the buffer directly) or empty.
+        std::shared_ptr<const std::vector<uint8_t>> shareBytes() {
+            if (mapping_)
+            {
+                return nullptr; // file-backed: a mapped view already costs nothing to copy
+            }
+            if (shared_)
+            {
+                return shared_; // already shared with someone
+            }
+            if (owned_.empty())
+            {
+                return nullptr;
+            }
+            auto block = std::make_shared<const std::vector<uint8_t>>(std::move(owned_));
+            owned_.clear();
+            owned_.shrink_to_fit();
+            viewData_ = block->data();
+            viewSize_ = block->size();
+            shared_   = block;
+            return block;
+        }
+        /// Point at a block obtained from another buffer's shareBytes(). A null or empty block
+        /// leaves this buffer empty rather than pointing at nothing.
+        void setSharedBytes(std::shared_ptr<const std::vector<uint8_t>> block) {
+            owned_.clear();
+            owned_.shrink_to_fit();
+            mapping_.reset();
+            if (!block || block->empty())
+            {
+                shared_.reset();
+                viewData_ = nullptr;
+                viewSize_ = 0;
+                return;
+            }
+            viewData_ = block->data();
+            viewSize_ = block->size();
+            shared_   = std::move(block);
+        }
         /// Copy the bytes out (used by the writer, which serializes owned and viewed buffers alike).
         std::vector<uint8_t> toVector() const {
             return viewSize_ ? std::vector<uint8_t>(viewData_, viewData_ + viewSize_) : owned_;
@@ -96,6 +153,7 @@ namespace vknn {
       private:
         void dropView() noexcept {
             mapping_.reset();
+            shared_.reset();
             viewData_ = nullptr;
             viewSize_ = 0;
         }
@@ -109,10 +167,11 @@ namespace vknn {
             owned_ = std::move(copy);
         }
 
-        std::vector<uint8_t>              owned_;
-        std::shared_ptr<const MappedFile> mapping_; // keeps the view's pages alive
-        const uint8_t                    *viewData_ = nullptr;
-        size_t                            viewSize_ = 0;
+        std::vector<uint8_t>                        owned_;
+        std::shared_ptr<const MappedFile>           mapping_; // keeps a file view's pages alive
+        std::shared_ptr<const std::vector<uint8_t>> shared_;  // keeps a shared heap block alive
+        const uint8_t                              *viewData_ = nullptr;
+        size_t                                      viewSize_ = 0;
     };
 
     /// Host-side raw bytes (initializers, I/O, CPU compute results). Logical layout = NCHW.

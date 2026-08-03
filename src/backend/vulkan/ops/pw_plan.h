@@ -8,6 +8,7 @@
 // inputs[pw_opbase..]). pw_outs lists the step whose value each extra output stream stores
 // (kPwRefEntry exports the entry value itself).
 #pragma once
+#include "flat_kernel_rules.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -89,7 +90,17 @@ namespace vknn {
             plan.step[s * 8 + 3] = (int32_t) mapRef((int) st[s * 8 + 3]);
             plan.step[s * 8 + 4] = (int32_t) mapRef((int) st[s * 8 + 4]);
             plan.step[s * 8 + 5] = (int32_t) st[s * 8 + 5]; // dst register
-            plan.step[s * 8 + 6] = (int32_t) st[s * 8 + 6]; // bcast mode
+            // The broadcast class indexes a fixed set of arms in pw_epilogue.glsl. A .vxm written by
+            // a NEWER compiler can carry a class this build has no arm for; the kernel would then
+            // fall through to the same-shape read and address the operand as if it were full size --
+            // silently, since nothing about the file's container magic says the step encoding grew.
+            // Refuse by name instead: the pw step encoding has no version of its own.
+            const int64_t bcastClass = st[s * 8 + 6];
+            if (bcastClass < kPwBcastSame || bcastClass > kPwBcastPacked)
+            {
+                throw Error(Status::Unsupported, "FusedPointwise '" + node.name + "' step " + std::to_string(s) + " carries broadcast class " + std::to_string(bcastClass) + ", which this build has no kernel arm for -- the model was compiled by a newer vknn_compile; reconvert it");
+            }
+            plan.step[s * 8 + 6] = (int32_t) bcastClass;    // bcast mode
             plan.step[s * 8 + 7] = (int32_t) st[s * 8 + 7]; // bcast source field
             plan.p0[s]           = pr[s * 2];
             plan.p1[s]           = pr[s * 2 + 1];
@@ -103,7 +114,9 @@ namespace vknn {
             {
                 plan.outDim[k] = (int) out[(int) out.size() - rank + k];
             }
-            total = (int) numElements(out);
+            // The kernels guard their grid with `PC { int total, items; }`, so the element count is
+            // an int32 by contract; a wider one is refused by name rather than wrapped negative.
+            total = flatElementCount(numElements(out), "FusedPointwise (" + node.name + ") output " + shapeStr(out));
             for (int s = 0; s < nSteps; ++s)
             {
                 TensorId opd = bcastOperand(s);
@@ -147,15 +160,58 @@ namespace vknn {
             }
         } else
         {
-            // NC4HW4 world: the kernel indexes packed channel blocks, so the plan carries only the
-            // spatial extent (rank 1, outDim[0] = H*W). `total` is the thread count: one thread per
-            // (n, channel-block, hw) triple = n * ceil(c/4) * H*W, each thread handling the 4 packed
-            // channel lanes as a vec4. Blocks for c not a multiple of 4 (padded lanes) are included.
-            NCHW y         = NCHW::from(out);
-            int  HW        = (int) (y.h * y.w);
+            // NC4HW4 world: the kernel indexes packed channel blocks, so the plan carries the
+            // spatial extent (rank 1, outDim[0] = H*W) plus W, H and the run's channel-block count
+            // in the otherwise-unused next slots — the row/column arms split hw into (h, w) with
+            // W/H, and the generic packed arm additionally splits the block index into (n, cb) with
+            // outDim[3]. `total` is the thread count: one thread per (n, channel-block, hw) triple
+            // = n * ceil(c/4) * H*W, each thread handling the 4 packed channel lanes as a vec4.
+            // Blocks for c not a multiple of 4 (padded lanes) are included.
+            NCHW    y      = NCHW::from(out);
+            int     HW     = (int) (y.h * y.w);
+            int64_t runCb  = cBlocks(y.c);
             plan.rank      = 1;
             plan.outDim[0] = HW;
-            total          = (int) ((int64_t) y.n * ((y.c + 3) / 4) * HW);
+            plan.outDim[1] = (int) y.w;
+            plan.outDim[2] = (int) y.h;
+            plan.outDim[3] = (int) runCb;
+            // Same int32 push-constant contract as the flat world above: one thread per
+            // (n, channel-block, hw) triple, refused by name when the triple count exceeds it.
+            total = flatElementCount((int64_t) y.n * runCb * HW, "FusedPointwise (" + node.name + ") NC4HW4 output " + shapeStr(out));
+            // A kPwBcastPacked operand reads through per-step packed vec4-space strides: its own
+            // NC4HW4 block index is n*sN + cb*sCb + h*sH + w*sW with a zero stride on each
+            // broadcast axis. The kernel splats channel lane 0 when the operand's channel axis is
+            // 1, which it detects as a zero kPwPackedStrideCb (a non-broadcast channel axis always
+            // has sCb = opH*opW >= 1). Shapes right-align into NCHW exactly as pwOperandBuf packs
+            // constants and as the compile-time Reshape views present runtime operands.
+            for (int s = 0; s < nSteps; ++s)
+            {
+                if (plan.step[s * kPwStepInts + kPwStepBcastField] != kPwBcastPacked)
+                {
+                    continue;
+                }
+                TensorId opd = bcastOperand(s);
+                if (opd == kNoTensor)
+                {
+                    throw Error(Status::InvalidArgument, "FusedPointwise (" + node.name + ") step " + std::to_string(s) + " carries the packed broadcast class but names no operand");
+                }
+                Shape sh = g.desc(opd).shape;
+                while (sh.size() < kNchwRank)
+                {
+                    sh.insert(sh.begin(), 1);
+                }
+                NCHW o = NCHW::from(sh);
+                if ((o.n != 1 && o.n != y.n) || (o.c != 1 && o.c != y.c) || (o.h != 1 && o.h != y.h) || (o.w != 1 && o.w != y.w))
+                {
+                    throw Error(Status::InvalidArgument,
+                                "FusedPointwise (" + node.name + ") operand tensor " + std::to_string(opd) + " shape " + shapeStr(g.desc(opd).shape) + " is not broadcast-compatible with output " + shapeStr(out));
+                }
+                const int64_t opCb = cBlocks(o.c), opHW = o.h * o.w;
+                plan.stride[s * kPwMaxRank + kPwPackedStrideN]  = (int32_t) (o.n == 1 ? 0 : opCb * opHW);
+                plan.stride[s * kPwMaxRank + kPwPackedStrideCb] = (int32_t) (o.c == 1 ? 0 : opHW);
+                plan.stride[s * kPwMaxRank + kPwPackedStrideH]  = (int32_t) (o.h == 1 ? 0 : o.w);
+                plan.stride[s * kPwMaxRank + kPwPackedStrideW]  = o.w == 1 ? 0 : 1;
+            }
         }
 
         const auto &po = node.attr.getints("pw_outs");
@@ -248,6 +304,10 @@ namespace vknn {
         bool                                     active    = false;
         bool                                     flatWorld = true;
         bool                                     relax     = false;
+        /// True when no step of this unit's plan carries a geometric broadcast class, which selects
+        /// the "_dc" kernel build: one compiled without the geometric arms. The arms sit inside the
+        /// per-element resolvers, so a chain that never reaches them still pays for them.
+        bool directClassesOnly = false;
 
         void prepare(const Node &node, VkOpEnv &env, bool flat, const Shape &out) {
             active = node.attr.has("pw_steps");
@@ -260,14 +320,39 @@ namespace vknn {
             PwPlanCPU p {};
             int       total = 0;
             buildPwPlan(*env.graph, node, flat, out, p, operands, total);
+            // The class group is read from the plan, never enforced on it: a unit is attached or not
+            // for its own reasons, and the kernel is then compiled for what it turns out to carry.
+            // Deciding the other way round -- refusing to attach a geometric-class unit so the narrow
+            // kernel always fits -- splits the unit, and a split rounds its intermediate through
+            // fp16 storage where the whole unit kept it in an fp32 register.
+            directClassesOnly = true;
+            for (int s = 0; s < p.numSteps; ++s)
+            {
+                if (pwBcastClassIsGeometric(p.step[s * kPwStepInts + kPwStepBcastField]))
+                {
+                    directClassesOnly = false;
+                    break;
+                }
+            }
             plan = uploadPwPlan(env, p);
             holds.assign(operands.size(), nullptr);
         }
         // The rounding discipline is compiled into the SPIR-V (see shaders/pw_epilogue.glsl):
         // "_epi" carries the strict per-step-rounded appliers, "_epi_rx" the fp32-chained ones.
         const char *suffix() const {
-            return !active ? "" : relax ? "_epi_rx" : "_epi";
+            if (!active)
+            {
+                return "";
+            }
+            if (directClassesOnly)
+            {
+                return relax ? "_epi_dc_rx" : "_epi_dc";
+            }
+            return relax ? "_epi_rx" : "_epi";
         }
+        // The epilogue binds the same operand budget a standalone unit gets (PW_OPERAND_SLOTS in
+        // pw_epilogue.glsl == kPwMaxOperands): a narrower epilogue would split units that must stay
+        // whole, which changes their answers, not just their speed.
         uint32_t extraBufs() const {
             return active ? 1u + (uint32_t) kPwMaxOperands + (uint32_t) kPwMaxOuts : 0u;
         }

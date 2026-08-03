@@ -1,15 +1,161 @@
+#include "core/slice_bounds.h"
 #include "passes_internal.h"
+#include <iterator>
 
 namespace vknn {
 
+    // Channel-last permutation of a rank-4 NCHW tensor: [N,C,H,W] -> [N,H,W,C].
+    static constexpr int64_t kNhwcPerm[] = {0, 2, 3, 1};
+
+    // Channel bound for the NC4-reading channel-last kernel. The lane-per-(pixel, channel-block)
+    // map wins where the July image-path class lives (measured -50% at C = 32 over a large spatial
+    // map) and degrades sharply where the channel axis dominates the spatial one (measured 7x
+    // SLOWER at a deep-channel, small-spatial embedding transpose): every output pixel's channel
+    // run then reads C/4 blocks a full plane apart with no reuse. The bound keeps the kernel inside
+    // its proven-win region; wider channels take the ConvertLayout + flat gather route, exactly as
+    // before the kernel existed. Routing only - both routes store identical bytes.
+    constexpr int64_t kTransposeNhwcMaxChannels = 32;
+
+    bool transposeReadsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::Transpose || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        if (n.attr.has("pw_steps") || n.attr.has("view_stride"))
+        {
+            return false; // a fused epilogue / folded movement chain runs through the flat gather
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape;
+        if (in.size() != std::size(kNhwcPerm) || g.isInitializer(n.inputs[0]))
+        {
+            return false;
+        }
+        if (g.desc(n.inputs[0]).gpuFlat)
+        {
+            // The packed read pays off only on an input that is ALREADY packed. Behind a flat
+            // producer it would cost a full-tensor flat->NC4HW4 convert the flat gather never
+            // needed, so the gather wins by exactly that convert. Both routes store identical
+            // bytes. The layout assignment and the Vulkan op both ask this predicate over the final
+            // gpuFlat facts, so they agree on which buffer the kernel is handed.
+            return false;
+        }
+        if (in[1] > kTransposeNhwcMaxChannels)
+        {
+            return false; // outside the kernel's proven-win region (see kTransposeNhwcMaxChannels)
+        }
+        const auto &perm = n.attr.getints("perm");
+        if (perm.size() != std::size(kNhwcPerm))
+        {
+            return false; // an absent perm is the full reverse, not channel-last
+        }
+        for (size_t k = 0; k < perm.size(); ++k)
+        {
+            if (perm[k] != kNhwcPerm[k])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // Does this op run as a FLAT (row-major) GPU op rather than the NC4HW4 path? Mirrors the cases the
-    // Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
+    // Vulkan supportsNode() cannot do in NC4HW4: Transpose always; Softmax on a non-channel axis;
     // Concat that isn't 4D channel-axis 4-aligned; Binary/Add with a constant operand or a broadcast/
     // rank that the packed kernel doesn't handle.
     //
     // The per-OpType layout fact lives in opDescriptor(): LayoutClass::Flat is unconditionally flat,
     // LayoutClass::Nc4 unconditionally NC4HW4. Only LayoutClass::ShapeDependent ops keep a per-node
     // predicate below; the switch handles exactly those (the anti-drift test asserts the two agree).
+    //
+    // A Transpose's OUTPUT is always flat; transposeReadsNc4 governs its INPUT separately.
+    bool depthToSpaceIsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::DepthToSpace || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape, &out = g.desc(n.outputs[0]).shape;
+        if (in.size() != 4 || out.size() != 4)
+        {
+            return false;
+        }
+        // Partly-filled blocks on either side are fine: the kernel reads its four source channels
+        // through the SCALAR view of the input, so they may sit in different blocks, and it stops at
+        // the last real output channel, leaving that block's remaining lanes zero the way every
+        // blocked buffer carries its padding. What it does need is a whole number of output pixels
+        // per input pixel, which the block size gives by construction.
+        return in[1] > 0 && out[1] > 0;
+    }
+
+    bool sliceIsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::Slice || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        // A folded epilogue or a folded movement chain has arithmetic/reindexing to do; only a plain
+        // slice degenerates to a copy.
+        if (n.attr.has("pw_steps") || n.attr.has("view_stride"))
+        {
+            return false;
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape, &out = g.desc(n.outputs[0]).shape;
+        if (in.size() != kNchwRank || out.size() != kNchwRank)
+        {
+            return false;
+        }
+        const auto starts = readI64Param(g, n, "starts", 1), ends = readI64Param(g, n, "ends", 2);
+        const auto axes = readI64Param(g, n, "axes", 3), steps = readI64Param(g, n, "steps", 4);
+        if (starts.size() != 1 || ends.size() != 1)
+        {
+            return false; // exactly one sliced axis
+        }
+        const int64_t axis = axes.empty() ? 0 : (axes[0] < 0 ? axes[0] + (int64_t) kNchwRank : axes[0]);
+        const int64_t step = steps.empty() ? 1 : steps[0];
+        if (axis != 1 || step != 1)
+        {
+            return false; // the channel axis, walked forward
+        }
+        // NC4HW4 groups four channels into one block, so a channel range is a run of WHOLE blocks
+        // exactly when it starts and ends on a block boundary. Anything else would split a block
+        // across the seam, which no byte copy can express.
+        const SliceAxisBounds b = resolveSliceAxis(in[1], starts[0], ends[0], step);
+        if (b.start % kNC4Block != 0 || b.count % kNC4Block != 0 || b.count <= 0)
+        {
+            return false;
+        }
+        // Every other axis must be taken whole: the copy moves contiguous block runs, not a box.
+        return out[0] == in[0] && out[1] == b.count && out[2] == in[2] && out[3] == in[3];
+    }
+
+    bool reduceIsNc4(const Graph &g, const Node &n) {
+        if (n.type != OpType::Reduce || n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+        {
+            return false;
+        }
+        if (n.attr.has("view_stride"))
+        {
+            return false; // a folded movement chain reindexes; the blocked kernel reads the plane as stored
+        }
+        const Shape &in = g.desc(n.inputs[0]).shape, &out = g.desc(n.outputs[0]).shape;
+        if (in.size() != kNchwRank || out.size() != kNchwRank)
+        {
+            return false;
+        }
+        // Exactly the spatial axes, keeping them: that is one reduction per channel, which is what a
+        // channel block's four lanes each carry. Any other axis set would have to cross lanes.
+        const std::vector<int64_t> axes = readI64Param(g, n, "axes", 1);
+        if (axes.size() != 2)
+        {
+            return false;
+        }
+        const int64_t a0 = axes[0] < 0 ? axes[0] + (int64_t) kNchwRank : axes[0];
+        const int64_t a1 = axes[1] < 0 ? axes[1] + (int64_t) kNchwRank : axes[1];
+        if (std::min(a0, a1) != 2 || std::max(a0, a1) != 3)
+        {
+            return false;
+        }
+        return out[0] == in[0] && out[1] == in[1] && out[2] == 1 && out[3] == 1;
+    }
+
     bool gpuFlatNode(const Graph &g, const Node &n) {
         auto sh = [&](TensorId t) -> const Shape & {
             return g.desc(t).shape;
@@ -77,6 +223,20 @@ namespace vknn {
                 }
                 return true;
             }
+            case OpType::Reduce:
+                // A spatial reduction is one reduction per channel, which is exactly what a channel
+                // block's four lanes carry -- so it reads the blocked buffer as stored. Every other
+                // axis set has to cross lanes and keeps the flat kernel.
+                return !reduceIsNc4(g, n);
+            case OpType::Slice:
+                // A block-aligned channel slice is a contiguous run of NC4HW4 blocks per batch, so it
+                // copies buffer ranges (and often aliases outright) instead of gathering through flat.
+                // Every other slice keeps the flat gather.
+                return !sliceIsNc4(g, n);
+            case OpType::DepthToSpace:
+                // Both sides packed when every NC4HW4 block is fully occupied; otherwise the flat
+                // row-major remap, with the layout pass converting at the boundary.
+                return !depthToSpaceIsNc4(g, n);
             case OpType::ScatterND:
                 // GPU flat scatter; index may be a constant or a runtime float activation.
                 return n.inputs.size() >= 3;
@@ -155,10 +315,9 @@ namespace vknn {
                 {
                     return false;
                 }
-                if (g.isInitializer(n.inputs[0]) || g.isInitializer(n.inputs[1]))
-                {
-                    return true;
-                }
+                // A constant operand is no longer a reason to run flat: binary.cpp packs it into the
+                // blocked layout at prepare and uploads it, so the only question left is whether the
+                // SHAPES are ones the blocked kernel indexes.
                 const Shape &a = sh(n.inputs[0]);
                 const Shape &b = sh(n.inputs[1]);
                 if (a.size() == 4 && b.size() == 4 && a == b)
@@ -193,6 +352,84 @@ namespace vknn {
         }
     }
 
+    /// Why this node runs flat, in a few words, for the load-time inventory below.
+    ///
+    /// The two causes are different work. A whole OP CLASS with no blocked kernel is a kernel to
+    /// write; a SHAPE that the blocked kernel cannot express is a case to widen (or a graph to
+    /// change). Naming which one applies per node is what turns "62 layout converts" into a task
+    /// list, so the inventory reports the reason rather than only the count.
+    const char *flatReason(const Graph &g, const Node &n) {
+        if (opDescriptor(n.type).layout == LayoutClass::Flat)
+        {
+            return "op class has no blocked kernel";
+        }
+        switch (n.type)
+        {
+            case OpType::Binary:
+            case OpType::Add:
+                if (n.inputs.size() == 2 && (g.isInitializer(n.inputs[0]) || g.isInitializer(n.inputs[1])))
+                {
+                    return "constant operand (the blocked kernel binds activations only)";
+                }
+                return "operand shapes outside the blocked broadcast forms";
+            case OpType::Slice:
+                return "channel range not block-aligned, or carries an epilogue";
+            case OpType::Concat:
+                return "not a 4D channel concat with every part 4-aligned";
+            case OpType::Split:
+                return "not a 4D channel split with every part 4-aligned";
+            case OpType::DepthToSpace:
+                return "a partly filled channel block on one side";
+            case OpType::Softmax:
+                return "reduces an axis other than a full channel axis";
+            case OpType::FusedPointwise:
+                return "the unit was recorded flat (an operand had no blocked index)";
+            case OpType::Pad:
+            case OpType::Gather:
+            case OpType::ScatterND:
+            case OpType::TopK:
+            case OpType::Einsum:
+            case OpType::ConvTranspose:
+                return "this form has only a flat kernel";
+            default:
+                return "shape-dependent rule resolved flat";
+        }
+    }
+
+    /// Everything still running flat, by op type and reason. The inventory of what is left to move.
+    void reportFlatInventory(const Graph &g) {
+        std::map<std::string, int> byReason;
+        int                        flatNodes = 0;
+        for (const Node &n: g.nodes)
+        {
+            if (n.type == OpType::ConvertLayout || n.outputs.empty() || n.outputs[0] == kNoTensor || !g.desc(n.outputs[0]).gpuFlat)
+            {
+                continue;
+            }
+            ++flatNodes;
+            byReason[std::string(opTypeName(n.type)) + ": " + flatReason(g, n)]++;
+        }
+        if (flatNodes == 0)
+        {
+            VKNN_INFO << "flat path: no node runs flat -- the whole graph is blocked";
+            return;
+        }
+        std::vector<std::pair<std::string, int>> ranked(byReason.begin(), byReason.end());
+        std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+        VKNN_INFO << "flat path: " << flatNodes << " node(s) still run flat";
+        constexpr size_t kReasonsReported = 10;
+        for (size_t i = 0; i < ranked.size() && i < kReasonsReported; ++i)
+        {
+            VKNN_INFO << "flat path:   " << ranked[i].second << "x  " << ranked[i].first;
+        }
+        if (ranked.size() > kReasonsReported)
+        {
+            VKNN_INFO << "flat path:   ... " << (ranked.size() - kReasonsReported) << " further reason(s)";
+        }
+    }
+
     // --- Global layout assignment (NC4HW4 vs flat) ------------------------------------------------------
     // Every GPU tensor runs in one layout. A FIXED op has a kernel in only one layout; a FLEXIBLE op is
     // bit-exact in either (layout is an index remap over the same math + fp16 rounding), so the assignment
@@ -202,25 +439,58 @@ namespace vknn {
     namespace {
         enum class LKind { FixedFlat, FixedNC4, Flexible, Agnostic };
 
-        bool layoutAgnostic(const Node &n) {
+        bool layoutAgnostic(const Graph &g, const Node &n) {
             // metadata reshape / no-op copy: input and output bytes are identical, so it keeps its
             // layout. ChannelShuffle is not a byte copy but has a kernel in BOTH layouts (a pure
             // index remap either way), so it equally adopts its input's layout — the channel count
             // is unchanged, which keeps the NC4HW4 arm of the agnostic rule valid.
-            return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle;
+            if (n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle)
+            {
+                return true;
+            }
+            // A per-element map reads element i and writes element i, so it computes the same answer
+            // in either layout and can adopt its input's -- as long as the element it reads is at the
+            // same index it writes. A CONSTANT data operand breaks that: operandBuf uploads a
+            // constant dense, which is a different arrangement from the blocked output it would be
+            // paired against, so such a node keeps the flat path.
+            const bool runtimeData = !n.inputs.empty() && n.inputs[0] != kNoTensor && !g.isInitializer(n.inputs[0]);
+            if (n.type == OpType::Clip || n.type == OpType::IsNaN)
+            {
+                return runtimeData;
+            }
+            // NOT here, and each for a reason rather than an oversight:
+            //   * the comparison and Where family carry per-axis geometry in an SSBO to broadcast
+            //     their operands, and that decomposition is a statement about row-major arrangement;
+            //   * QuantizeLinear/DequantizeLinear have a per-axis form that recovers the channel by
+            //     dividing the flat index, and their outputs live in the quantized path's own
+            //     buffer conventions.
+            return false;
         }
 
         /// The layout ONE reader operates a given input slot in — the exact rule the convert
         /// splicer applies below, so an assignment derived from it provably removes the convert
         /// instead of moving it.
         bool readerWantsFlat(const Graph &g, const Node &n, size_t inputIndex) {
-            const bool needFlat = n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
-            // GridSample's non-warp grid is always a flat [N,Hout,Wout,2] buffer (see convertRead).
-            return (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp")) ? true : needFlat;
+            // GridSample's non-warp grid is always a flat [N,Hout,Wout,2] buffer, whatever layout the
+            // data path runs in: a runtime grid left NC4HW4 would be mis-packed. A warp-mode
+            // GridSample instead reads its NCHW flow (input 1) in the NC4HW4 activation layout (the
+            // op computes coordinates from it directly), so it follows the node's own format.
+            if (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp"))
+            {
+                return true;
+            }
+            // A channel-last Transpose reads NC4HW4 directly (transposeReadsNc4): the packed vec4 is
+            // four consecutive output channels, so the reindex is one coalesced pass and the
+            // full-size ConvertLayout that would otherwise precede it never gets spliced in.
+            if (inputIndex == 0 && transposeReadsNc4(g, n))
+            {
+                return false;
+            }
+            return n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
         }
 
         LKind opLayoutKind(const Graph &g, const Node &n) {
-            if (layoutAgnostic(n))
+            if (layoutAgnostic(g, n))
             {
                 return LKind::Agnostic;
             }
@@ -277,12 +547,9 @@ namespace vknn {
         //    with their classifier layout. Rounds alternate vote and re-seed until stable — the
         //    result stays a deterministic pure function of the graph.
         {
-            // A step record is 8 ints: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc; a bcast
-            // field of 2 marks the general-broadcast operand class that only the flat kernel
-            // addresses.
-            constexpr int       kPwStepInts        = 8;
-            constexpr int       kPwStepBcastField  = 6;
-            constexpr int64_t   kPwBcastGeneral    = 2;
+            // A step's bcast field of kPwBcastGeneral marks the general-broadcast operand class
+            // that only the flat kernel addresses (record geometry: kPwStepInts/kPwStepBcastField,
+            // include/vknn/op_type.h).
             constexpr int       kFlexVoteMaxRounds = 8; // cycles are byte-weight monotone; this only caps oscillation
             constexpr int64_t   kNc4Rank           = 4;
             std::vector<size_t> flexible;
@@ -350,7 +617,7 @@ namespace vknn {
                             for (size_t rj: readers[(size_t) o])
                             {
                                 const Node &R = g.nodes[rj];
-                                if (layoutAgnostic(R))
+                                if (layoutAgnostic(g, R))
                                 {
                                     continue; // adopts whatever this node chooses: no convert either way
                                 }
@@ -492,6 +759,104 @@ namespace vknn {
     /// the compiled result is byte-identical to the pre-pass math; the assignment is a pure function of the
     /// graph, keeping the compiled .vxm bit-exact run to run. New nodes are appended and the graph is
     /// re-topo-sorted so each convert precedes its consumer.
+    namespace {
+
+        /// Name the SEAMS the layout converts sit on, grouped by the pair of ops they bridge.
+        ///
+        /// A convert count alone says a graph pays for layout changes; it does not say where, and a
+        /// profile that shows ConvertLayout among the top costs leaves nothing to act on. Every
+        /// convert lies between one producer and one consumer, and the same pair usually recurs --
+        /// so a handful of op pairs explains the whole bill, and each pair is a question with an
+        /// answer ("can this consumer read the producer's layout?").
+        void reportConvertSeams(const Graph &g) {
+            std::vector<int> producer(g.tensors.size(), -1);
+            for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+            {
+                for (TensorId o: g.nodes[ni].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producer[(size_t) o] = ni;
+                    }
+                }
+            }
+            // seam -> (count, elements converted), keyed by "<producer op> -> <consumer op>".
+            // The element total is what decides where effort goes: a dozen converts over reduced
+            // scalars cost nothing, while a handful over full-resolution maps is the whole bill, and
+            // a count alone ranks them identically.
+            struct Seam {
+                int     converts = 0;
+                int64_t elements = 0;
+            };
+            std::map<std::string, Seam> seams;
+            for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+            {
+                const Node &nd = g.nodes[(size_t) ni];
+                if (nd.type != OpType::ConvertLayout || nd.inputs.empty() || nd.inputs[0] == kNoTensor)
+                {
+                    continue;
+                }
+                const int   src  = producer[(size_t) nd.inputs[0]];
+                const char *from = src >= 0 ? opTypeName(g.nodes[(size_t) src].type) : "(graph input)";
+                // Which side asked for flat. subOp 0 converts NC4HW4 -> flat (the CONSUMER wants
+                // flat), 1 converts the other way (the PRODUCER was flat). Without this the pair
+                // names two ops and leaves it open which of them has no blocked kernel.
+                const char *direction = nd.subOp == 0 ? "   [consumer wants flat]" : "   [producer was flat]";
+                // A convert may feed several consumers; each is its own seam, and a convert with no
+                // consumer feeds a graph output.
+                bool consumed = false;
+                for (const Node &other: g.nodes)
+                {
+                    if (&other == &nd)
+                    {
+                        continue;
+                    }
+                    for (TensorId in: other.inputs)
+                    {
+                        if (in != kNoTensor && in == nd.outputs[0])
+                        {
+                            Seam &seam = seams[std::string(from) + " -> " + opTypeName(other.type) + direction];
+                            seam.converts++;
+                            seam.elements += numElements(g.desc(nd.outputs[0]).shape);
+                            consumed = true;
+                            break;
+                        }
+                    }
+                }
+                if (!consumed)
+                {
+                    Seam &seam = seams[std::string(from) + " -> (graph output)" + direction];
+                    seam.converts++;
+                    seam.elements += numElements(g.desc(nd.outputs[0]).shape);
+                }
+            }
+            std::vector<std::pair<std::string, Seam>> ranked(seams.begin(), seams.end());
+            // Ranked by ELEMENTS moved, not by how many converts there are.
+            std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+                return a.second.elements > b.second.elements;
+            });
+            int64_t total = 0;
+            for (const auto &r: ranked)
+            {
+                total += r.second.elements;
+            }
+            constexpr size_t kSeamsReported = 8;
+            int64_t          shown          = 0;
+            for (size_t i = 0; i < ranked.size() && i < kSeamsReported; ++i)
+            {
+                const Seam &s2 = ranked[i].second;
+                shown += s2.elements;
+                VKNN_INFO << "insertLayoutConverts:   " << s2.converts << "x  " << (total ? s2.elements * 100 / total : 0) << "% of converted elements  "
+                          << ranked[i].first;
+            }
+            if (ranked.size() > kSeamsReported)
+            {
+                VKNN_INFO << "insertLayoutConverts:   ... " << (ranked.size() - kSeamsReported) << " further seam(s), " << (total ? (total - shown) * 100 / total : 0) << "% of converted elements";
+            }
+        }
+
+    } // namespace
+
     void insertLayoutConverts(Graph &g) {
         // Assign every tensor a layout (minimising converts), then for every node input whose layout differs
         // from what the consumer needs, splice in a ConvertLayout node.
@@ -540,12 +905,10 @@ namespace vknn {
             bool needFlat = g.desc(nd.outputs[0]).gpuFlat; // the format this node operates in
             for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
             {
-                // GridSample's grid (input 1) is a flat [N,Hout,Wout,2] buffer regardless of the NC4HW4
-                // data path — keep it flat so a runtime grid is not mis-packed as NC4HW4. A warp-mode
-                // GridSample instead reads its NCHW flow (input 1) in the NC4HW4 activation layout (the
-                // op computes coordinates from it directly), so it follows the node's own format.
-                bool wantFlat = (nd.type == OpType::GridSample && inIdx == 1 && !nd.attr.has("warp")) ? true : needFlat;
-                convertRead(nd.inputs[inIdx], wantFlat);
+                // readerWantsFlat is the ONE rule for which layout a reader operates an input slot
+                // in; globalLayoutAssign derived the assignment from it, so the splicer has to ask
+                // the same function or the two drift and a convert gets moved instead of removed.
+                convertRead(nd.inputs[inIdx], readerWantsFlat(g, nd, inIdx));
             }
             // Fused residual/bias edges are reads outside the inputs list (rewireTensor's contract)
             // and the kernel decodes them in ITS layout world, so they take the same converts as any
@@ -592,7 +955,9 @@ namespace vknn {
             }
             g.topoSort();
             VKNN_INFO << "insertLayoutConverts: inserted " << converts.size() << " layout convert(s)";
+            reportConvertSeams(g);
         }
+        reportFlatInventory(g);
     }
 
 } // namespace vknn

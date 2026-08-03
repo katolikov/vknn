@@ -32,8 +32,12 @@
 //   --bucket N             run plan bucket N of a multi-bucket model (default 0); the positional
 //                          inputs bind bucket N's declared inputs, so run() dispatches to that
 //                          bucket and the written outputs (and --dump tensors) are bucket N's
-//   --profile              print the per-op GPU profile table and the GPU total
+//   --profile              print the per-op GPU profile table and the elapsed GPU span
 //   --dump NAMES           dump the named intermediate tensors (comma-separated) as fp32
+//
+// Input files are raw little-endian payloads, or .npy: a numpy file is read as one (its header is
+// skipped and its dtype checked against the declared input), because handing a .npy to a raw-bytes
+// reader shifts the whole array by the header.
 //   --fp32-tensors NAMES   force the named tensors to fp32 compute (comma-separated)
 //   --disable-vk-ops NAMES force the named ops onto the CPU backend (comma-separated)
 //   --layer-dump           dump every layer's output    --layer-dump-dir DIR  where to write them
@@ -79,6 +83,132 @@ static const char *optValue(int argc, char **argv, const char *name, const char 
         }
     }
     return dflt;
+}
+
+// A .npy file's payload, located and type-checked. numpy writes a 6-byte magic, a 2-byte version, a
+// 2- or 4-byte header length and an ASCII dict ("descr", "fortran_order", "shape"), then the raw
+// array; a caller who hands one of these to a reader expecting raw bytes gets the whole array
+// shifted by the header, which is a silent wrong answer rather than a failure. Reading the format
+// costs a few lines and removes that trap, and it is what a caller working in numpy actually has on
+// disk.
+struct NpyPayload {
+    bool        isNpy      = false; ///< The file carries the numpy magic.
+    long long   dataOffset = 0;     ///< Byte offset of the first array element.
+    long long   dataBytes  = 0;     ///< Bytes of array payload after the header.
+    std::string descr;              ///< numpy dtype string, e.g. "|u1", "<f4".
+    bool        fortranOrder = false;
+    std::string error; ///< Non-empty when the file is a .npy this reader cannot use.
+};
+
+// Read `path`'s numpy header, if it has one. A file without the magic comes back with isNpy false
+// and no error, so the caller falls through to its raw-bytes path unchanged.
+static NpyPayload npyInspect(const std::string &path) {
+    NpyPayload    out;
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+    {
+        return out;
+    }
+    char magic[6] = {};
+    f.read(magic, 6);
+    if (f.gcount() != 6 || std::memcmp(magic, "\x93NUMPY", 6) != 0)
+    {
+        return out; // not a .npy; the caller reads it as raw bytes
+    }
+    out.isNpy            = true;
+    unsigned char ver[2] = {};
+    f.read(reinterpret_cast<char *>(ver), 2);
+    // v1 stores the header length as 2 little-endian bytes, v2+ as 4.
+    long long headerLen = 0;
+    if (ver[0] == 1)
+    {
+        unsigned char n[2] = {};
+        f.read(reinterpret_cast<char *>(n), 2);
+        headerLen      = (long long) n[0] | ((long long) n[1] << 8);
+        out.dataOffset = 10 + headerLen;
+    } else
+    {
+        unsigned char n[4] = {};
+        f.read(reinterpret_cast<char *>(n), 4);
+        headerLen      = (long long) n[0] | ((long long) n[1] << 8) | ((long long) n[2] << 16) | ((long long) n[3] << 24);
+        out.dataOffset = 12 + headerLen;
+    }
+    std::string header((size_t) headerLen, '\0');
+    f.read(&header[0], headerLen);
+    if (!f)
+    {
+        out.error = "truncated .npy header";
+        return out;
+    }
+    // The value is the next quoted run AFTER the key; searching from the key's own position would
+    // find the quote that opens the key itself.
+    auto field = [&](const char *key) -> std::string {
+        size_t k = header.find(key);
+        if (k == std::string::npos)
+        {
+            return "";
+        }
+        size_t q = header.find('\'', k + std::strlen(key));
+        if (q == std::string::npos)
+        {
+            return "";
+        }
+        size_t e = header.find('\'', q + 1);
+        return e == std::string::npos ? "" : header.substr(q + 1, e - q - 1);
+    };
+    out.descr        = field("'descr'");
+    out.fortranOrder = header.find("'fortran_order': True") != std::string::npos;
+    f.seekg(0, std::ios::end);
+    out.dataBytes = (long long) f.tellg() - out.dataOffset;
+    if (out.fortranOrder)
+    {
+        out.error = "column-major (fortran_order) .npy; save it C-contiguous";
+    }
+    return out;
+}
+
+// The engine dtype a numpy descr denotes. Returns false when this reader has no mapping for it,
+// which is a refusal rather than a guess: reading the bytes at the wrong width is exactly the silent
+// corruption the .npy path exists to prevent.
+static bool npyDtype(const std::string &descr, DType &out) {
+    // Byte order: '|' none, '<' little, '=' native. The engine reads little-endian host order, so a
+    // '>' (big-endian) array would need swapping and is refused by name rather than read wrongly.
+    if (descr.size() < 3 || (descr[0] != '|' && descr[0] != '<' && descr[0] != '='))
+    {
+        return false;
+    }
+    const std::string kind = descr.substr(1);
+    if (kind == "u1")
+    {
+        out = DType::UInt8;
+        return true;
+    }
+    if (kind == "i1")
+    {
+        out = DType::Int8;
+        return true;
+    }
+    if (kind == "f2")
+    {
+        out = DType::Float16;
+        return true;
+    }
+    if (kind == "f4")
+    {
+        out = DType::Float32;
+        return true;
+    }
+    if (kind == "i4")
+    {
+        out = DType::Int32;
+        return true;
+    }
+    if (kind == "i8")
+    {
+        out = DType::Int64;
+        return true;
+    }
+    return false;
 }
 
 int main(int argc, char **argv) {
@@ -221,19 +351,52 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "cannot open input file '%s' for '%s'\n", inputFiles[i].c_str(), input.name.c_str());
                 return 1; // silently feeding zeros would fake a successful run on wrong data
             }
-            // The file must hold exactly the declared payload: a short file (wrong shape or dtype on
-            // the producing side) would zero-fill the tail and an oversized one would be silently
-            // truncated - both run "successfully" on garbage and surface as an inexplicable
-            // near-zero-cosine output instead of an error here.
-            inputFile.seekg(0, std::ios::end);
-            int64_t fileBytes = (int64_t) inputFile.tellg();
-            inputFile.seekg(0, std::ios::beg);
+            // A .npy is read as one: its payload starts after the header, and handing the whole
+            // file to a raw-bytes reader shifts the array by that header -- the file is then the
+            // right size for nothing and, were the size to happen to match, would run on data
+            // offset by 128 bytes without a word.
+            const NpyPayload npy = npyInspect(inputFiles[i]);
+            if (!npy.error.empty())
+            {
+                fprintf(stderr, "input file '%s' for '%s': %s\n", inputFiles[i].c_str(), input.name.c_str(), npy.error.c_str());
+                return 1;
+            }
+            int64_t dataOffset = 0, fileBytes = 0;
+            if (npy.isNpy)
+            {
+                DType fileDtype = DType::Float32;
+                if (!npyDtype(npy.descr, fileDtype))
+                {
+                    fprintf(stderr, "input file '%s' for '%s': numpy dtype '%s' is not one this reader maps (u1/i1/f2/f4/i4/i8, little-endian)\n", inputFiles[i].c_str(),
+                            input.name.c_str(), npy.descr.c_str());
+                    return 1;
+                }
+                if (fileDtype != input.dtype)
+                {
+                    // Reinterpreting the bytes at a different width is the same silent corruption
+                    // this reader exists to prevent, so say which two dtypes disagree and stop.
+                    fprintf(stderr, "input file '%s' holds numpy dtype '%s' (%s) but '%s' is declared %s -- convert the array before saving it\n", inputFiles[i].c_str(),
+                            npy.descr.c_str(), dtypeStr(fileDtype), input.name.c_str(), dtypeStr(input.dtype));
+                    return 1;
+                }
+                dataOffset = npy.dataOffset;
+                fileBytes  = npy.dataBytes;
+            } else
+            {
+                inputFile.seekg(0, std::ios::end);
+                fileBytes = (int64_t) inputFile.tellg();
+            }
+            // The payload must hold exactly the declared elements: a short file (wrong shape or
+            // dtype on the producing side) would zero-fill the tail and an oversized one would be
+            // silently truncated - both run "successfully" on garbage and surface as an
+            // inexplicable near-zero-cosine output instead of an error here.
             if (fileBytes != neededBytes)
             {
-                fprintf(stderr, "input file '%s' for '%s' holds %lld bytes but the declared %s %s input needs %lld\n", inputFiles[i].c_str(), input.name.c_str(), (long long) fileBytes,
+                fprintf(stderr, "input file '%s' for '%s' holds %lld bytes%s but the declared %s %s input needs %lld\n", inputFiles[i].c_str(), input.name.c_str(), (long long) fileBytes, npy.isNpy ? " of numpy payload" : "",
                         shapeStr(input.shape).c_str(), dtypeStr(input.dtype), (long long) neededBytes);
                 return 1;
             }
+            inputFile.seekg(dataOffset, std::ios::beg);
             inputFile.read(reinterpret_cast<char *>(input.data.data()), neededBytes);
         }
         printf("input  '%s'  %s  %s\n", input.name.c_str(), shapeStr(input.shape).c_str(), dtypeStr(input.dtype));
@@ -248,9 +411,14 @@ int main(int argc, char **argv) {
     int                   repeatCount = atoi(optValue(argc, argv, "--repeat", "1"));
     std::vector<IOTensor> outputs;
     Status                status = Status::Ok;
+    // `outputs` is handed straight back to the next run instead of being cleared. Session::run
+    // reclaims the byte storage the previous run donated to it (matching entries positionally and
+    // rejecting a name mismatch), so a steady-state loop allocates nothing and zeroes nothing per
+    // run; clearing the vector throws that storage away and makes every run fault in a freshly
+    // zeroed output. On a 2.8 MB output that showed up as unpack time swinging between 0.5 and 16 ms
+    // run to run -- allocation noise, measured and reported as if it were inference cost.
     for (int runIndex = 0; runIndex < (repeatCount < 1 ? 1 : repeatCount); ++runIndex)
     {
-        outputs.clear();
         status = session->run(inputs, outputs);
         if (status != Status::Ok)
         {
@@ -288,7 +456,10 @@ int main(int argc, char **argv) {
     if (cfg.profile)
     {
         session->profiler().printTable();
-        printf("GPU total: %.1f ms\n", session->profiler().totalGpuMs());
+        // The elapsed span is the run's GPU time and the figure the published benchmarks quote;
+        // the per-node column sums to more than it because the GPU overlaps consecutive nodes.
+        const double span = session->profiler().gpuSpanMs();
+        printf("GPU span: %.1f ms\n", span > 0 ? span : session->profiler().totalGpuMs());
     }
     return 0;
 }

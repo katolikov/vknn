@@ -8,7 +8,7 @@
 #define PW_EPI_BASE 2
 #include "pw_epilogue.glsl"
 #endif
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 0) in; // spec 0 = device-resolved family width (env.flatLocalSize)
 layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
 layout(push_constant) uniform PC { int N, Cib, Cob, cbOff, HW; } pc;

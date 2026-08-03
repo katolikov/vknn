@@ -1,7 +1,10 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
+#include "core/layer_dump.h"
+#include "core/plan_retention.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
+#include "vknn/op_descriptor.h"
 #include "vknn/version.h"
 #include <algorithm>
 #include <cctype>
@@ -26,6 +29,16 @@ namespace vknn {
     // Storage is always sized for `elems`; a short caller buffer is tolerated, not rejected — every
     // branch fills only min(elems, in.size()/bytesPer) elements and zeroes the tail past them, so a bound
     // tensor never carries an earlier run's values into the elements the caller left out.
+    // Lend the caller's input bytes to the runtime tensor for this run instead of copying them.
+    // Only for inputs whose sole consumer is the backend's GPU staging convert: it reads the bytes
+    // straight out of the caller's vector, so the host mirror this would otherwise fill is never
+    // read. Any path that does need owned bytes calls RtTensor::materializeHostBorrow() first.
+    static void bindInputBorrow(const IOTensor &io, RtTensor &rt) {
+        rt.host.bytes.clear();
+        rt.hostBorrow      = io.data.data();
+        rt.hostBorrowBytes = io.data.size();
+    }
+
     static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
         if (src == DType::Int64)
         {
@@ -339,13 +352,20 @@ namespace vknn {
         s->cfg_ = cfg;
         cfg.applyLogLevel();
         s->profiler_.setEnabled(cfg.profile);
-        // ONNX-built session: retain the pristine imported graph so prepareShapes() can re-run the
-        // pass pipeline at a new declared shape. The default bucket is compiled from a copy so the
-        // pristine graph (with its weights) survives the passes and the freeWeightsAfterUpload reclaim.
-        s->importedGraph_    = g;
-        s->hasImportedGraph_ = true;
-        auto  t0             = std::chrono::high_resolution_clock::now();
-        Graph def            = std::move(g);
+        // ONNX-built session: retain the pristine imported graph so prepareShapes() can re-run the pass
+        // pipeline at a new declared shape. The default bucket is compiled from a copy so the pristine
+        // graph (with its weights) survives the passes and the freeWeightsAfterUpload reclaim. That copy
+        // is a second resident set of every initializer payload, so it is taken only when a declared
+        // shape can still change the plan: shape resolution fills dynamic axes only, so a model whose
+        // inputs are fully static plans exactly one bucket and needs no pristine copy
+        // (importedGraphCanPlanNewShapes, core/plan_retention.h).
+        s->hasImportedGraph_ = importedGraphCanPlanNewShapes(g);
+        if (s->hasImportedGraph_)
+        {
+            s->importedGraph_ = g;
+        }
+        auto  t0  = std::chrono::high_resolution_clock::now();
+        Graph def = std::move(g);
         s->ensureBackends();
         std::string key = Session::shapeKey(def); // key reflects the input names before shape resolution
         s->buckets_.push_back(s->buildBucket(std::move(def), key));
@@ -597,7 +617,21 @@ namespace vknn {
         // Selective fp32 storage set. Precision::Normal ("normal") uses the built-in geometry-tail
         // preset when fp32Tensors is empty; an explicit fp32Tensors always wins. Resolved before the
         // view fold: a chain tensor markFp32 would pin must keep its materialized form.
-        const bool  vulkanFlat = byKind_.count(BackendKind::Vulkan) && cfg_.flatLayout();
+        // The flat-layout pass is what makes a graph RUNNABLE on the GPU, not an optimization on top
+        // of it: an op whose only kernel reads flat row-major has no plan at all without the layout
+        // assignment and the converts that pass splices. Honouring a request to skip it on a graph
+        // that contains one leaves those nodes indexing NC4HW4 buffers densely -- and the only ways
+        // out of that are a crash or a CPU fallback, and the engine allows neither. So the request is
+        // honoured exactly where it is safe: on a graph whose every op has an NC4HW4 kernel.
+        const bool graphNeedsFlat = std::any_of(graph_.nodes.begin(), graph_.nodes.end(), [](const Node &nd) {
+            const LayoutClass k = opDescriptor(nd.type).layout;
+            return k == LayoutClass::Flat || k == LayoutClass::ShapeDependent;
+        });
+        if (!cfg_.flatLayout() && graphNeedsFlat)
+        {
+            VKNN_INFO << "flat layout: keeping the pass on -- this graph has op(s) whose only GPU kernel reads flat row-major";
+        }
+        const bool  vulkanFlat = byKind_.count(BackendKind::Vulkan) && (cfg_.flatLayout() || graphNeedsFlat);
         std::string fp32Marks  = cfg_.fp32Tensors;
         if (fp32Marks.empty() && cfg_.precision == Precision::Normal)
         {
@@ -664,10 +698,17 @@ namespace vknn {
             // that would overflow a value above 65504 to +inf. Pin the Gather index chains to fp32 before
             // markFp32 so the buffer planner sizes them 4-byte and their producers run in fp32.
             pinGatherIndexFp32(graph_);
-            // GridSample grids hold normalized sampling coordinates whose fp16 storage quantization
-            // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
-            // the same way; the GridSample shader decodes the grid at its storage precision.
-            pinGridSampleGridFp32(graph_);
+            // Sampling coordinates (a GridSample grid or the warp variant's flow) quantized to fp16
+            // drift the sample point: the grid is normalized, so an 11-bit significand costs a
+            // relative 2^-11, which over a plane of extent S is S/2048 pixels. Pin the coordinate cone
+            // - the grid/flow algebra back through elementwise/movement/fused chains - to fp32; the
+            // samplers decode their coordinate operands at storage precision.
+            pinSampleCoordFp32(graph_);
+            // A truncating Cast and the stepping unaries (Floor/Ceil/Round/Trunc/Sign) are
+            // discontinuous, so any fp16 storage rounding that crosses a step becomes a full-unit
+            // error; their operand cones and results carry full precision.
+            pinDiscontinuousStepFp32(graph_);
+
             // Only a caller-supplied fp32Tensors list takes zero-match accounting; the built-in
             // Precision::Normal preset is engine-owned and exempt from the load-end warning.
             markFp32(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);
@@ -940,45 +981,18 @@ namespace vknn {
         //     need weights resident (re-plan, weight introspection) can opt out.
         if (cfg_.freeWeightsAfterUpload)
         {
-            // Free the bulk weights — Conv/MatMul/Gemm operands, which their ops upload + cache at compile.
-            // KEEP the remaining (small) constants: some ops read their initializers while recording the
-            // command buffer, which the zero-copy path re-records, so those initializers must stay
-            // resolvable. Keeping them costs little (KB-scale shapes/biases/tables).
-            // A fused pointwise-chain epilogue uploads its operands (inputs[pw_opbase..]) lazily while
-            // RECORDING, not at prepare — e.g. a PRelu slope folded into a Conv. Those initializers must
-            // stay resolvable, so keep any tensor used as an epilogue operand anywhere.
-            std::set<TensorId> keepAtRecord;
-            for (const auto &nd: graph_.nodes)
+            // Which payloads are still needed is decided by reclaimableInitializers (core/plan_retention.h)
+            // from what the plan still resolves — a CPU-assigned node's operand, a fused residual/bias
+            // edge, a constant graph output, a pointwise-chain epilogue operand — never from a list of
+            // weighted op types, so the weights of a fused or newly added weighted op are reclaimed
+            // without naming it here.
+            std::vector<bool> nodeRunsOnCpu(graph_.nodes.size(), true);
+            for (size_t n = 0; n < graph_.nodes.size(); ++n)
             {
-                if (!nd.attr.has("pw_steps"))
-                {
-                    continue;
-                }
-                int opbase = (int) pwCoreInputs(nd); // clamped to [0, inputs.size()]; a raw pw_opbase could be negative -> OOB
-                for (int k = opbase; k < (int) nd.inputs.size(); ++k)
-                {
-                    if (nd.inputs[k] != kNoTensor)
-                    {
-                        keepAtRecord.insert(nd.inputs[k]);
-                    }
-                }
-            }
-            std::set<TensorId> freeable;
-            for (const auto &nd: graph_.nodes)
-            {
-                if (nd.type == OpType::Conv || nd.type == OpType::MatMul || nd.type == OpType::Gemm || nd.type == OpType::ConvGemm)
-                {
-                    for (TensorId in: nd.inputs)
-                    {
-                        if (in != kNoTensor && graph_.isInitializer(in) && !keepAtRecord.count(in))
-                        {
-                            freeable.insert(in);
-                        }
-                    }
-                }
+                nodeRunsOnCpu[n] = nodeBackendIdx_[n] < 0 || backends_[nodeBackendIdx_[n]]->kind() == BackendKind::Cpu;
             }
             size_t freed = 0;
-            for (TensorId id: freeable)
+            for (TensorId id: reclaimableInitializers(graph_, nodeRunsOnCpu))
             {
                 auto it = graph_.initializers.find(id);
                 if (it != graph_.initializers.end())
@@ -987,7 +1001,8 @@ namespace vknn {
                     graph_.initializers.erase(it);
                 }
             }
-            VKNN_INFO << "freed " << freed / (1024 * 1024) << " MB of host weights after upload";
+            constexpr size_t kBytesPerMegabyte = 1024 * 1024;
+            VKNN_INFO << "freed " << freed / kBytesPerMegabyte << " MB of host weights after upload";
         }
 
         // Bind-time index bounds: which graph inputs index a Gather, and how many rows it holds.
@@ -1294,11 +1309,35 @@ namespace vknn {
     }
 
     Status Session::prepareShapes(const std::map<std::string, Shape> &shapes) {
-        if (!hasImportedGraph_)
+        if (graphOptimized_)
         {
             VKNN_ERROR << "prepareShapes: this session was loaded from a .vxm; its buckets are fixed at "
                           "compile time. Recompile with vknn_compile --bucket to add shapes.";
             return Status::Unsupported;
+        }
+        if (!hasImportedGraph_)
+        {
+            // Every input of this model is statically shaped, so the pass pipeline resolves nothing from
+            // a declared shape and the default bucket is the only plan this graph has (see
+            // importedGraphCanPlanNewShapes). The request is answered against that bucket: a declared
+            // rank the model does not have is the same InvalidArgument the pipeline raises, and anything
+            // else is the idempotent no-op re-declaring a planned shape always is.
+            const Graph &planned = *buckets_.front().graph;
+            for (const auto &kv: shapes)
+            {
+                TensorId id = planned.find(kv.first);
+                if (id == kNoTensor || !planned.desc(id).isInput)
+                {
+                    continue; // an input name the model does not declare is ignored, as the passes ignore it
+                }
+                if (kv.second.size() != planned.desc(id).shape.size())
+                {
+                    VKNN_ERROR << "prepareShapes: declared shape for input '" << kv.first << "' has rank " << kv.second.size() << " but the model declares rank "
+                               << planned.desc(id).shape.size();
+                    return Status::InvalidArgument;
+                }
+            }
+            return Status::Ok;
         }
         // Re-run the whole pipeline from the pristine imported graph at the declared shapes, then key
         // the bucket by the shapes the passes actually resolved. If that key already exists this is a
@@ -2167,9 +2206,18 @@ namespace vknn {
                 // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16 + NC4HW4
                 // gather — skipping the host uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit
                 // rt.dtype, memcpys the raw NCHW bytes into a staging buffer, and dispatches boundary_convert.
-                rt.dtype      = io.dtype;
-                rt.host.bytes = io.data;
-                rt.hostValid  = true;
+                rt.dtype     = io.dtype;
+                rt.hostValid = true;
+                bindInputBorrow(io, rt);
+            } else if (ioGpuConvert_ && io.dtype == DType::Float32 && rt.shape.size() == kNchwRank && !linkedInput(bucketIndex, id))
+            {
+                // The same for a rank-4 fp32 image input, which the Vulkan backend also converts on
+                // the GPU (fp32 -> device fp16 + NC4HW4). bindInput below would memcpy the caller's
+                // bytes into the host mirror only for the backend to memcpy them again into its
+                // staging buffer; the mirror is never read on this path.
+                rt.dtype     = DType::Float32;
+                rt.hostValid = true;
+                bindInputBorrow(io, rt);
             } else
             {
                 // Convert the caller's bytes (in io.dtype) to the internal compute storage: fp32 for every
@@ -2270,6 +2318,19 @@ namespace vknn {
         }
 
         auto tB = now();
+        // The input bytes Session lent (rather than copied) point into the caller's vectors and are
+        // valid only until run() returns. Dropping them on the way out — including the exception
+        // path — keeps a stale pointer from outliving the call that made it valid.
+        struct BorrowGuard {
+            std::vector<RtTensor> &pool;
+            ~BorrowGuard() {
+                for (RtTensor &rt: pool)
+                {
+                    rt.hostBorrow      = nullptr;
+                    rt.hostBorrowBytes = 0;
+                }
+            }
+        } borrowGuard {pool_};
         // --- run segments in order ---
         try
         {
@@ -2304,15 +2365,8 @@ namespace vknn {
                 {
                     continue;
                 }
-                std::string nm = graph_.tensors[i].name;
-                for (char &c: nm)
-                {
-                    if (c == '/' || c == ':')
-                    {
-                        c = '_';
-                    }
-                }
-                std::ofstream f(cfg_.layerDumpDir + "/" + nm + ".bin", std::ios::binary);
+                const std::string nm = layerDumpFileName(graph_.tensors[i].name);
+                std::ofstream     f(cfg_.layerDumpDir + "/" + nm + ".bin", std::ios::binary);
                 if (f)
                 {
                     f.write((const char *) rt.host.bytes.data(), rt.host.bytes.size());

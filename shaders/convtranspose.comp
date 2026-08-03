@@ -8,7 +8,7 @@
 // pixel we loop the kernel taps and accumulate the input pixels that map to it under the stride.
 // Weight layout is ONNX ConvTranspose: W[Cin, Cout/group, kH, kW]. Mirrors the CPU oracle exactly.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width (env.flatLocalSize)
 layout(std430, binding = 0) readonly  buffer Xb { STORE xs[]; };
 layout(std430, binding = 1) readonly  buffer Wb { STORE ws[]; };
 layout(std430, binding = 2) readonly  buffer Bb { STORE bs[]; };

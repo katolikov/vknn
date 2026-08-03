@@ -6,6 +6,7 @@
 #include "vknn/host_buffer.h"
 #include "vknn/op.h"
 #include "vknn/tensor_format.h"
+#include <cstring>
 #include <memory>
 
 namespace vknn {
@@ -35,6 +36,28 @@ namespace vknn {
         TensorFormat dmaBufFormat = TensorFormat::NCHW;
         /// Element type the caller declares the dma-buf holds (paired with `dmaBufFormat`).
         DType dmaBufDtype = DType::Float32;
+
+        /// Caller-owned input bytes for the CURRENT run, lent instead of copied. A graph input whose
+        /// only consumer is a GPU staging convert does not need a host mirror: Session points these
+        /// at the caller's IOTensor::data and the backend copies straight to the staging buffer, one
+        /// copy from the caller instead of two. Valid only for the duration of run(), which is why
+        /// Session clears them when it returns; any path that needs owned bytes calls
+        /// materializeHostBorrow() first.
+        const uint8_t *hostBorrow      = nullptr;
+        size_t         hostBorrowBytes = 0;
+
+        /// Copy borrowed caller bytes into owned `host` storage and drop the borrow. A no-op when
+        /// nothing is borrowed, so a caller can invoke it unconditionally before reading `host`.
+        void materializeHostBorrow() {
+            if (hostBorrow == nullptr)
+            {
+                return;
+            }
+            host.bytes.resize(hostBorrowBytes);
+            std::memcpy(host.bytes.data(), hostBorrow, hostBorrowBytes);
+            hostBorrow      = nullptr;
+            hostBorrowBytes = 0;
+        }
 
         /// @returns The number of logical elements implied by `shape` (0 for an empty shape).
         int64_t elems() const {

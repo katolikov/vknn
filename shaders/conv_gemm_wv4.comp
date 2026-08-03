@@ -29,12 +29,7 @@
 // pixels per thread). A small-M shape picks a narrow tile so the M axis still spreads across
 // workgroups. TM is bit-neutral: it only remaps threads to outputs, never the per-output K order.
 layout(constant_id = 0) const int TM = 64;
-#define TM_MAX 64      // shared storage is sized for the widest variant (4 KB total; no occupancy cost)
-#define TN 64
-#define TK 16
-#define TILE 16        // threads per dim (16x16 = 256)
-#define RM (TM / TILE) // output pixels per thread: 1, 2, or 4
-#define RN (TN / TILE) // 4 output channels per thread = one NC4 block
+#include "conv_gemm_tiles.glsl"
 
 // Whole-channel-block element type of the NC4HW4 source and of the vec4 weight-panel load.
 #ifdef USE_FP16

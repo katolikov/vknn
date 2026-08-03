@@ -3,18 +3,22 @@
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
 #include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
 #include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
+#include "core/layer_dump.h"      // dump file naming, shared with the node-order index
 #include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
 #include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
 #include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
 #include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
+#include "ops/flat_ops.h" // flat::flatLocalSizeFor / laneWidthFor (family widths, resolved at load)
 #include "vk_backend.h"
 #include "vknn/dtype.h"
 #include "vknn/logging.h"
 #include "vknn/profiler.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <set>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -35,6 +39,7 @@ namespace vknn {
         elemSize_      = useFp16_ ? 2 : 4;
         chainStepsMax_ = std::max(1, cfg.decodeChainSteps); // sizes the per-iteration link range sets + argmax result slots
         graphInputs_.insert(g.inputs.begin(), g.inputs.end());
+        graphOutputs_.insert(g.outputs.begin(), g.outputs.end());
 
         // 1) allocate device buffers for all activation tensors (non-initializers).
         std::set<TensorId> acts;
@@ -99,6 +104,20 @@ namespace vknn {
         // Debug: Config::dumpTensors="substr1,substr2" forces matching tensors to dedicated (un-aliased)
         // readback buffers and dumps them to cfg.layerDumpDir after the run — so intermediate
         // activations can be diffed despite the liveness planner reusing buffers. A few tensors only.
+        // Config::layerDump asks for EVERY activation, which is the same requirement: without a
+        // dedicated buffer each one, the dump reads whatever tensor last occupied a pooled slot and
+        // reports it under this tensor's name. That is worse than no dump -- it is a confident wrong
+        // answer, and it has cost an investigation. Debug-only, so the pool is simply switched off.
+        if (cfg_.layerDump)
+        {
+            for (TensorId tid: acts)
+            {
+                if (!g.tensors[tid].name.empty())
+                {
+                    readBack.insert(tid);
+                }
+            }
+        }
         if (!cfg_.dumpTensors.empty())
         {
             std::string list = cfg_.dumpTensors;
@@ -972,6 +991,43 @@ namespace vknn {
                 }
             }
         }
+        // Drop any planned view the driver could not bind. vkBindBufferMemory demands the memory
+        // offset be a multiple of caps().bufferBindAlignment (4 B on the target GPUs), so an fp16
+        // slice may begin at an even element index and no other -- a Concat whose first part holds
+        // an odd number of elements puts the second at offset 2, which is unbindable, not merely
+        // slow. Deciding it HERE keeps the arena honest: the member gets its own buffer, record()
+        // dispatches its copy, and the run is the same as if the alias had never been considered.
+        // Discovering it later, at buffer creation, half-aliased the concat and cost a warning per
+        // member for a decision that was never the member's to make.
+        const uint32_t bindAlign = be_->ctx().caps().bufferBindAlignment;
+        if (bindAlign > 1)
+        {
+            int unbindable = 0;
+            for (auto it = viewOf.begin(); it != viewOf.end();)
+            {
+                if (resolveView(it->first).second % bindAlign != 0)
+                {
+                    it = viewOf.erase(it);
+                    ++unbindable;
+                    --viewSlices;
+                } else
+                {
+                    ++it;
+                }
+            }
+            if (unbindable > 0)
+            {
+                // The node that owned the dropped view was marked fully elided while the alias still
+                // looked possible; it has to dispatch its copy after all, and carry the hazard
+                // bookkeeping that goes with dispatching. Clearing both sets is the same answer the
+                // buffer-creation fallback gives, arrived at before the arena is built rather than
+                // after -- and it is not optional: leaving the node elided writes nothing into the
+                // slice, which is a silently truncated output, not a lost optimization.
+                fullyElided_.clear();
+                transferFillNodes_.clear();
+                VKNN_INFO << "zero-copy: " << unbindable << " slice(s) start at an offset this driver cannot bind (alignment " << bindAlign << " B); they copy instead";
+            }
+        }
         std::set<TensorId> viewRoots; // arena tensors whose buffer must accept sub-buffer views
         for (auto &kv: viewOf)
         {
@@ -1218,10 +1274,14 @@ namespace vknn {
         env_.runner   = &be_->runner();
         env_.tuning   = cfg.tuning;
         env_.winograd = (Mode) cfg.hint(Hint::Winograd, (int) Mode::Auto);
-        env_.graph    = &g;
-        env_.config   = &cfg;
-        env_.useFp16  = useFp16_;
-        env_.baseFp16 = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
+        // Load-time device resolution: the flat family's workgroup width comes from exact caps
+        // here, once, and rides VkOpEnv so pipelines and dispatch math share one value.
+        env_.flatLocalSize = flat::flatLocalSizeFor(env_.ctx->caps());
+        env_.convLocalSize = flat::laneWidthFor(env_.ctx->caps(), flat::kConvFamilyLaneWidth);
+        env_.graph         = &g;
+        env_.config        = &cfg;
+        env_.useFp16       = useFp16_;
+        env_.baseFp16      = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
         // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
         // model, distinct across models) so a shared cache directory can't return another model's weights.
         {
@@ -1382,7 +1442,11 @@ namespace vknn {
         // 4) pre-record the command buffer for the static graph.
         record();
 
-        VKNN_INFO << "vk memory after segment build: live " << (vk::Buffer::liveBytes() >> 20) << " MB / " << vk::Buffer::liveCount() << " buffers (peak " << (vk::Buffer::peakBytes() >> 20) << " MB / " << vk::Buffer::peakCount() << ", host rss " << hostRssMb() << " MB)";
+        // The buffer count is reported against the device's allocation limit, not on its own: each
+        // buffer costs one vkAllocateMemory, so a graph can run out of ALLOCATIONS while the heap
+        // is far from full, and the bare count gives no way to see that coming.
+        VKNN_INFO << "vk memory after segment build: live " << (vk::Buffer::liveBytes() >> 20) << " MB / " << vk::Buffer::liveCount() << " buffers (peak " << (vk::Buffer::peakBytes() >> 20) << " MB / " << vk::Buffer::peakCount() << " of "
+                  << env_.ctx->caps().maxMemoryAllocationCount << " allowed, host rss " << hostRssMb() << " MB)";
     }
 
     size_t VulkanSegment::hostRssMb() {
@@ -1650,13 +1714,15 @@ namespace vknn {
             };
             bool copySinceBarrier = false;
             // Push-descriptor writes a node records = one per bound storage buffer. A fused
-            // pointwise/epilogue kernel always binds the plan SSBO plus the fixed kPwMaxOperands
-            // operand slots and kPwMaxOuts extra output streams on top of its own inputs/outputs; a
-            // plain op binds just those. Concat dispatches once per concatenated part, re-binding
+            // pointwise kernel binds the plan SSBO plus its operand slots and the kPwMaxOuts extra
+            // output streams on top of its own inputs/outputs; a plain op binds just those. A
+            // STANDALONE unit carries kPwMaxOperands slots, an epilogue the narrower
+            // kPwMaxOperands, the budget both the standalone and the epilogue form carry. Concat dispatches once per concatenated part, re-binding
             // the full set each time. Accumulated per command buffer, this drives the
             // maxSubmitBindings split below.
             auto bindEstimate = [&](const Node &nd) -> int {
-                int pwExtra = (nd.type == OpType::FusedPointwise || nd.attr.has("pw_steps")) ? 1 + kPwMaxOperands + kPwMaxOuts : 0;
+                const int pwSlots = kPwMaxOperands;
+                int       pwExtra = (nd.type == OpType::FusedPointwise || nd.attr.has("pw_steps")) ? 1 + pwSlots + kPwMaxOuts : 0;
                 if (nd.type == OpType::Concat)
                 {
                     return (int) pwCoreInputs(nd) * (2 + pwExtra);
@@ -1839,7 +1905,8 @@ namespace vknn {
                 auto      &pipe = fp16 ? argMaxPipeFp16_ : argMaxPipeFp32_;
                 if (!pipe)
                 {
-                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC), std::vector<uint32_t> {},
+                    pipe = std::make_unique<vk::ComputePipeline>(be_->ctx(), fp16 ? "argmax_flat_fp16" : "argmax_flat", 2, sizeof(ArgMaxPC),
+                                                                 std::vector<uint32_t> {flat::laneWidthPow2For(be_->ctx().caps(), flat::kFlatLocalSize)},
                                                                  env_.cache ? env_.cache->handle() : VK_NULL_HANDLE);
                 }
                 ArgMaxPC pc {(uint32_t) numElements(g_.tensors[argMaxTid].shape), (uint32_t) step};
@@ -2078,6 +2145,55 @@ namespace vknn {
                     cb.devDtype   = devDt;
                     convert_[tid] = cb;
                 }
+                // The same on the way out. A graph output the device holds as fp16 but the caller
+                // declared fp32 is downloaded today by reading the device mapping element by element
+                // and widening each one; on a 2.8 MB output that is the single largest host cost of a
+                // run. A boundary_convert into a HOST_CACHED staging buffer leaves the host a plain
+                // memcpy. fp16 -> fp32 is exact and NCHW -> NCHW is identity, so the bytes are the
+                // ones the host loop produced.
+                for (TensorId tid: boundaryOutputs)
+                {
+                    if (!graphOutputs_.count(tid) || buffers_.find(tid) == buffers_.end())
+                    {
+                        continue;
+                    }
+                    // Every case the download path handles some other way keeps that way: a
+                    // zero-copy fd, a resident link, an on-device argmax, a row-sliced readback (it
+                    // wants ONE row, not the converted whole), an int8 KV cache, and the NC4HW4
+                    // outputs, which do not take the flat download branch this replaces.
+                    RtTensor &rt = ctx.t(tid);
+                    if (rt.dmaBufFd >= 0 || convert_.count(tid) || linkedOutputs_.count(tid) || argMaxOutputs_.count(tid) || rowSelectOutputs_.count(tid) ||
+                        kvqCaches_.count(tid) || !g_.desc(tid).gpuFlat)
+                    {
+                        continue;
+                    }
+                    const bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
+                    if (!deviceFp16 || g_.tensors[tid].dtype != DType::Float32)
+                    {
+                        continue; // no widening to do: the download is already a straight copy
+                    }
+                    const std::vector<int64_t> &outShape = rt.shape.empty() ? g_.tensors[tid].shape : rt.shape;
+                    NCHW                        y        = NCHW::from(outShape);
+                    const size_t                need     = (size_t) (formatElems(TensorFormat::NCHW, y) * dtypeSize(DType::Float32));
+                    if (need == 0)
+                    {
+                        continue; // a zero-dim output has no bytes to stage; vkCreateBuffer(size=0) is invalid
+                    }
+                    auto &st = stagingOut_[tid];
+                    if (!st || st->bytes() != need)
+                    {
+                        st = std::make_shared<vk::Buffer>(be_->ctx(), need, vk::MemPref::kReadback);
+                    }
+                    ConvertBinding cb;
+                    cb.imported   = st;
+                    cb.isInput    = false;
+                    cb.shape      = y;
+                    cb.declFmt    = TensorFormat::NCHW;
+                    cb.declDtype  = DType::Float32;
+                    cb.devFmt     = TensorFormat::NCHW;
+                    cb.devDtype   = DType::Float16;
+                    convert_[tid] = cb;
+                }
             }
             if (!sameConvert(convert_, recordedConvert_))
             {
@@ -2134,6 +2250,14 @@ namespace vknn {
             }
             rt.device->buffer = bit->second;
             auto sit          = stagingIn_.find(tid);
+            // Session may have LENT this input's bytes rather than copying them, which is valid only
+            // for the staging-convert route below. Every other route reads owned host bytes, so take
+            // ownership before entering the chain.
+            const bool stagedInput = sit != stagingIn_.end() && convert_.count(tid);
+            if (!stagedInput)
+            {
+                rt.materializeHostBorrow();
+            }
             if (rt.dmaBufFd >= 0 && !kvqCaches_.count(tid))
             {
                 // zero-copy: the GPU reads the caller's dma-buf directly (device-native bytes); no pack.
@@ -2141,12 +2265,16 @@ namespace vknn {
                 // branch below quantizes instead.
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-            } else if (sit != stagingIn_.end() && convert_.count(tid))
+            } else if (stagedInput)
             {
                 // GPU image convert: raw memcpy the caller's declared bytes into the staging buffer; the
                 // recorded boundary_convert dispatch turns them into the device-native boundary. No host
                 // uint8->fp32->fp16 pack. The convert writes bit->second (the boundary), read by the ops.
-                std::memcpy(sit->second->host(), rt.host.bytes.data(), std::min(sit->second->bytes(), rt.host.bytes.size()));
+                // The bytes are the caller's own when Session lent them (no host mirror was filled);
+                // otherwise they are the mirror's. Either way this is the ONLY copy of an input.
+                const uint8_t *src      = rt.hostBorrow ? rt.hostBorrow : rt.host.bytes.data();
+                const size_t   srcBytes = rt.hostBorrow ? rt.hostBorrowBytes : rt.host.bytes.size();
+                std::memcpy(sit->second->host(), src, std::min(sit->second->bytes(), srcBytes));
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
             } else if (rt.hostValid && !alreadyHere && kvqCaches_.count(tid))
@@ -2279,6 +2407,15 @@ namespace vknn {
                     { // out-of-range selection: fall back to the full readback rather than miscopy
                         VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
                     }
+                } else if (auto sout = stagingOut_.find(tid); sout != stagingOut_.end() && convert_.count(tid))
+                {
+                    // The recorded boundary_convert already widened this output into the staging
+                    // buffer in the declared dtype, so the download is a memcpy out of HOST_CACHED
+                    // memory rather than a per-element read of the device mapping.
+                    const int64_t n = numElements(rt.shape);
+                    rt.host.resizeElems(n, DType::Float32);
+                    std::memcpy(rt.host.bytes.data(), sout->second->host(), std::min(sout->second->bytes(), rt.host.bytes.size()));
+                    rt.dtype = DType::Float32;
                 } else if (flat && graphOut.count(tid))
                 { // terminal graph output: convert straight to the declared dtype (skip fp32 round trip)
                     VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
@@ -2349,15 +2486,8 @@ namespace vknn {
                 {
                     VulkanBackend::unpackFromBuffer(bit->second.get(), rt, useFp16_ && !g_.tensors[tid].storeFp32, g_.desc(tid).gpuFlat);
                 }
-                std::string nm = g_.tensors[tid].name;
-                for (char &c: nm)
-                {
-                    if (c == '/' || c == ':')
-                    {
-                        c = '_';
-                    }
-                }
-                FILE *f = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
+                const std::string nm = layerDumpFileName(g_.tensors[tid].name);
+                FILE             *f  = fopen((cfg_.layerDumpDir + "/" + nm + ".bin").c_str(), "wb");
                 if (f)
                 {
                     fwrite(rt.host.bytes.data(), 1, rt.host.bytes.size(), f);
@@ -2368,6 +2498,39 @@ namespace vknn {
         // layer-dump: bring every activation back to host for per-layer diffing.
         if (ctx.config && ctx.config->layerDump)
         {
+            // A companion index in NODE ORDER. The dumps themselves are files named by tensor, which
+            // says nothing about which came first -- and the only question worth asking of two
+            // diverging dumps is which tensor diverged FIRST, since everything downstream of it
+            // differs for free. The segment knows the order it recorded; nothing else does.
+            //
+            // Each row also names the op that produced the tensor and the operands it read, because
+            // "tensor T diverged" is only half an answer: the op is what gets fixed, and a diverging
+            // output whose operands all AGREE is a proven culprit rather than a suspect inherited
+            // from upstream. Tab-separated: name, op type, comma-separated operand names. Every
+            // name is the DUMP name, so each one names a file that exists.
+            {
+                std::ofstream order(ctx.config->layerDumpDir + "/_order.txt");
+                for (int ni: nodeIdx)
+                {
+                    const Node &nd = g_.nodes[ni];
+                    std::string operands;
+                    for (TensorId in: nd.inputs)
+                    {
+                        if (in == kNoTensor || g_.tensors[in].name.empty())
+                        {
+                            continue;
+                        }
+                        operands += (operands.empty() ? "" : ",") + layerDumpFileName(g_.tensors[in].name);
+                    }
+                    for (TensorId out: nd.outputs)
+                    {
+                        if (out != kNoTensor && !g_.tensors[out].name.empty())
+                        {
+                            order << layerDumpFileName(g_.tensors[out].name) << "\t" << opTypeName(nd.type) << "\t" << operands << "\n";
+                        }
+                    }
+                }
+            }
             for (auto &kv: buffers_)
             {
                 RtTensor &rt = ctx.t(kv.first);
@@ -2408,8 +2571,11 @@ namespace vknn {
                 ctx.profiler->add(r);
             }
             // GPU span (first dispatch start -> last dispatch end) vs the CPU-side submit wall: the
-            // difference is barrier bubbles + submit/fence latency, not kernel work.
+            // difference is barrier bubbles + submit/fence latency, not kernel work. The span is
+            // also the run's ELAPSED GPU time, which the per-node records cannot give: the GPU
+            // overlaps consecutive nodes, so their intervals overlap and summing them over-reports.
             double span = (double) (ts.back() - ts.front()) * period / 1e6;
+            ctx.profiler->addGpuSpanMs(span);
             VKNN_INFO << "gpu span=" << span << "ms  submit-wall=" << wall << "ms  (gap = overhead)";
         }
     }

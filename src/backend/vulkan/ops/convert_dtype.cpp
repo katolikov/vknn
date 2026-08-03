@@ -1,8 +1,9 @@
 // ConvertDtype: fp16 <-> fp32 storage conversion at a selective-fp32 region frontier (inserted by the
-// markFp32 pass). Logical shape + flat layout are identical on both sides; only the buffer element type
+// markFp32 pass). Logical shape AND layout are identical on both sides; only the buffer element type
 // differs. Reuses BoundaryConvert (one thread per element, four cross-dtype SPIR-V) as a flat identity
-// map: the tensor is presented as NCHW {1, numElements, 1, 1} so the index math is a straight copy with
+// map: the tensor is presented as NCHW {1, storedElems, 1, 1} so the index math is a straight copy with
 // a dtype cast. A non-storeFp32 tensor is stored at the segment's base precision (env.baseFp16).
+#include "backend/vulkan/ops/blocked_extent.h"
 #include "backend/vulkan/ops/boundary_convert.h"
 #include "vk_op_common.h"
 
@@ -15,9 +16,14 @@ namespace vknn {
             DType           srcDt = DType::Float32, dstDt = DType::Float32;
 
             void prepare(const Node &node, VkOpEnv &env) override {
-                const Graph &g = *env.graph;
-                int64_t      n = numElements(g.desc(node.outputs[0]).shape);
-                // Flatten every logical element onto the C axis ({1, n, 1, 1}) so BoundaryConvert walks a
+                const Graph      &g   = *env.graph;
+                const TensorDesc &out = g.desc(node.outputs[0]);
+                // The STORED element count, not the logical one: a blocked tensor pads its channel axis
+                // to a multiple of kNC4Block, and converting only the logical count would leave the rest
+                // of the buffer at the source width for every consumer to read at the destination width
+                // (see storedElemCount).
+                const int64_t n = storedElemCount(out.shape, out.gpuFlat);
+                // Flatten every stored element onto the C axis ({1, n, 1, 1}) so BoundaryConvert walks a
                 // 1-D index range and its layout math degenerates to a straight element-for-element copy.
                 sh.n = 1;
                 sh.c = n;

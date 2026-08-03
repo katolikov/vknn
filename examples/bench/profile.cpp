@@ -124,7 +124,8 @@ int main(int argc, char **argv) {
 
     std::ofstream(jsonp) << sess->profiler().toJson();
     sess->profiler().writeChromeTrace(trace);
-    printf("\nGPU total: %.3f ms   CPU total: %.3f ms\n", sess->profiler().totalGpuMs(), sess->profiler().totalCpuMs());
+    // Span = elapsed GPU time (what the benchmarks quote); the per-node sum overlaps and is larger.
+    printf("\nGPU span: %.3f ms   (per-node sum %.3f ms)   CPU total: %.3f ms\n", sess->profiler().gpuSpanMs(), sess->profiler().totalGpuMs(), sess->profiler().totalCpuMs());
     printf("wrote profile JSON -> %s\nwrote Chrome trace -> %s (load in chrome://tracing)\n", jsonp.c_str(), trace.c_str());
     return 0;
 }

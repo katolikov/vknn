@@ -4,15 +4,25 @@
 #define PW_EPI_BASE 2
 #include "pw_epilogue.glsl"
 #endif
-// GlobalAveragePool, NC4HW4, fp16/fp32 storage + fp32 accumulation. One workgroup per (n, channel-block);
-// its 256 threads cooperatively reduce over H*W, then tree-reduce the partial sums in shared memory.
+// Blocked spatial reduction over H*W, NC4HW4, fp16/fp32 storage + fp32 accumulation. One workgroup
+// per (n, channel-block); its threads cooperatively reduce the plane, then tree-fold in shared
+// memory. REDUCE_OP selects the reduction (GlobalAveragePool passes REDUCE_MEAN); the four lanes of a
+// channel block are four independent reductions travelling together.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+#include "nc4_reduce_codes.glsl"
+// Reduction-scratch ceiling; must be >= the spec-0 width. The host specializes this kernel with
+// flat::laneWidthPow2For (ops/flat_ops.h), which clamps the family ceiling to the device's
+// maxComputeWorkGroupInvocations and rounds DOWN to a power of two, so the width never exceeds this
+// bound and the halving fold below covers every lane. A literal width would exceed the Vulkan
+// guaranteed minimum of 128 invocations and fail pipeline creation on a conformant device.
+#define POOL_WG_MAX 256
+layout(local_size_x = POOL_WG_MAX, local_size_x_id = 0) in; // spec 0 = device-resolved pow2 width
 layout(std430, binding = 0) readonly  buffer Src { STORE src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { STORE dst[]; };
+layout(constant_id = 1) const int REDUCE_OP = REDUCE_MEAN; // spec 1 = the reduction, folded at pipeline creation
 layout(push_constant) uniform PC { int N, C, H, W; } pc;
 
-shared vec4 partial[256];
+shared vec4 partial[POOL_WG_MAX];
 
 void main() {
   int Cb = (pc.C + 3) / 4;
@@ -23,19 +33,19 @@ void main() {
   int hw = pc.H * pc.W;
   int base = (((n * Cb + cb) * pc.H) * pc.W) * 4;
   uint t = gl_LocalInvocationID.x;
-  vec4 acc = vec4(0.0);
-  for (int i = int(t); i < hw; i += 256) {
+  vec4 acc = vxReduceIdentity(REDUCE_OP);
+  for (int i = int(t); i < hw; i += int(gl_WorkGroupSize.x)) {
     int idx = base + i * 4;
-    acc += vec4(float(src[idx]), float(src[idx + 1]), float(src[idx + 2]), float(src[idx + 3]));
+    acc = vxReduceStep(REDUCE_OP, acc, vec4(float(src[idx]), float(src[idx + 1]), float(src[idx + 2]), float(src[idx + 3])));
   }
   partial[t] = acc;
   barrier();
-  for (uint s = 128u; s > 0u; s >>= 1) {
-    if (t < s) partial[t] += partial[t + s];
+  for (uint s = gl_WorkGroupSize.x / 2u; s > 0u; s >>= 1) {
+    if (t < s) partial[t] = vxReduceMerge(REDUCE_OP, partial[t], partial[t + s]);
     barrier();
   }
   if (t == 0u) {
-    vec4 r = partial[0] / float(hw);
+    vec4 r = vxReduceFinish(REDUCE_OP, partial[0], hw);
     int didx = (n * Cb + cb) * 4;
     for (int l = 0; l < 4; ++l) {
       float v = r[l];

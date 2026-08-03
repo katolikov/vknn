@@ -1,0 +1,192 @@
+#version 450
+// Row-tiled Resize (spatial) over NC4HW4 (fp16), nearest + bilinear — the raced twin of
+// resize_fp16.comp (resize.cpp pickResizeRow; the cubic arm stays on the scalar kernel, see
+// resizeRowKernelOk).
+//
+// One lane computes RESIZE_ROW_TILE consecutive output pixels of ONE row of ONE channel block.
+// Resize source coordinates are uniform arithmetic in the output position: consecutive outputs
+// along a row advance the source column monotonically by 1/scale, so an upscale re-needs one or
+// both of the previous output's tap columns. The lane holds the previous output's resolved columns
+// in registers and loads each needed input column once per tile instead of once per output.
+//
+// BYTE-IDENTITY CONTRACT with resize_fp16.comp: sharing moves only WHEN a tap is loaded, never
+// what is accumulated. Each output pixel's taps, weights and accumulation expression are
+// line-for-line the scalar kernel's (the vertical terms carry no x and hoist unchanged); a held
+// column is the same widened vec4 the scalar kernel re-loads. The mode/coord codes and the integer
+// nearest index are the rules in src/core/resize_rule.h, copied here because GLSL cannot include
+// the C++ header.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
+// Output pixels one lane computes along its row; mirrors kResizeRowTile in
+// src/backend/vulkan/ops/resize.cpp (the host derives this kernel's lane count from it).
+#define RESIZE_ROW_TILE 4
+// Held-column tag for "nothing held yet"; valid columns are 0..IW-1.
+#define RESIZE_ROW_COL_NONE -1
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { f16vec4 dst[]; };
+// Full ResizePC block for byte layout; cubicA/excludeOutside/perPixel are unread here (this kernel
+// has one lane map and no cubic arm).
+layout(push_constant) uniform PC { int N, C, IH, IW, OH, OW, mode, cm; float cubicA; int excludeOutside, perPixel, nm; } pc;
+
+float coord(int d, int outS, int inS, int cm) {
+  float scale = float(outS) / float(inS);
+  if (cm == 1) return outS > 1 ? float(d) * float(inS - 1) / float(outS - 1) : 0.0;
+  if (cm == 2) return float(d) / scale;
+  if (cm == 3) return outS > 1 ? (float(d) + 0.5) / scale - 0.5 : 0.0;
+  return (float(d) + 0.5) / scale - 0.5;
+}
+int clampi(int v, int lo, int hi) { return clamp(v, lo, hi); }
+// Largest factor narrowMulDiv multiplies directly -- kResizeNarrowFactorMax in
+// src/core/resize_rule.h, the greatest k whose square fits a 32-bit signed int.
+#define RESIZE_NARROW_FACTOR_MAX 46340
+// Bits of the left factor the bit-scanned path walks -- kResizeNarrowProductBits in
+// src/core/resize_rule.h.
+#define RESIZE_NARROW_PRODUCT_BITS 31
+// floor(a * b / den) into q and the remainder in [0, den) into r, in 32-bit ints only, which is
+// the arithmetic a Vulkan kernel is guaranteed -- resizeNarrowMulDiv in
+// src/backend/cpu/ops/resize.cpp, kept identical here. Preconditions: a >= 0, b >= 0, den > 0,
+// a <= den. Splitting b into whole multiples of den plus a residue below den leaves two factors
+// each at most den: the direct path takes their product when both fit RESIZE_NARROW_FACTOR_MAX,
+// and the bit-scanned path accumulates it from the top bit of a down otherwise, holding the
+// running remainder inside [0, den) so no intermediate ever leaves the range one int holds.
+void narrowMulDiv(int a, int b, int den, out int q, out int r) {
+  int wholeSteps = b / den;
+  int residue = b - wholeSteps * den;
+  if (a <= RESIZE_NARROW_FACTOR_MAX && residue <= RESIZE_NARROW_FACTOR_MAX) {
+    int product = a * residue;
+    int direct = product / den;
+    q = a * wholeSteps + direct;
+    r = product - direct * den;
+    return;
+  }
+  int tileQuotient = 0, rem = 0;
+  for (int bit = RESIZE_NARROW_PRODUCT_BITS - 1; bit >= 0; --bit) {
+    int headroom = den - rem;   // doubles rem by comparison, never by forming 2 * rem
+    tileQuotient += tileQuotient;
+    if (rem >= headroom) { rem -= headroom; ++tileQuotient; } else { rem += rem; }
+    if (((a >> bit) & 1) != 0) {   // fold in one more copy of the residue, carrying the same way
+      int slack = den - residue;
+      if (rem >= slack) { rem -= slack; ++tileQuotient; } else { rem += residue; }
+    }
+  }
+  q = a * wholeSteps + tileQuotient;
+  r = rem;
+}
+// Nearest source index in exact integer arithmetic -- vxResizeNearestSrcNarrow in
+// src/backend/cpu/ops/resize.cpp, kept identical here. coord() cannot decide it: an integer
+// downsample factor under half_pixel puts every output pixel exactly on the round_prefer_floor
+// tie, this driver evaluates the divide through a reciprocal, and one ulp there moves the sample
+// a whole pixel. Integers make the index a pure function of the shape on any driver.
+int nearestSrc(int d, int outS, int inS, int cm, int nm) {
+  if (inS <= 0) return 0;   // an input axis of zero extent holds no pixel any rounding lands on
+  // Each coordinate transform is one fraction (leftFactor * rightFactor - shift) / den. The shift
+  // stays outside the product so narrowMulDiv sees two non-negative factors.
+  int leftFactor, rightFactor, den, shift;
+  if (cm == 1)      { leftFactor = d;         rightFactor = inS - 1; den = outS - 1; shift = 0; }
+  else if (cm == 2) { leftFactor = d;         rightFactor = inS;     den = outS;     shift = 0; }
+  else              { leftFactor = 2 * d + 1; rightFactor = inS;     den = 2 * outS; shift = outS; }
+  if (den <= 0 || (cm == 3 && outS <= 1)) return 0;
+  int q, r;
+  narrowMulDiv(leftFactor, rightFactor, den, q, r);
+  // The numerator's shift applies after the division: it is smaller than den, so it borrows at
+  // most one whole step, which is the floor the rule needs.
+  r -= shift;
+  if (r < 0) { r += den; --q; }
+  // The four ONNX nearest_mode roundings over the exact fraction q + r/den (codes in
+  // src/core/resize_rule.h): 0 round_prefer_floor, 1 round_prefer_ceil, 2 floor, 3 ceil. The
+  // midpoint tests read against den - r rather than 2 * r, which a denominator near the top of
+  // the int range would not hold.
+  if (nm == 1) return r >= den - r ? q + 1 : q;
+  if (nm == 2) return q;
+  if (nm == 3) return r > 0 ? q + 1 : q;
+  return r > den - r ? q + 1 : q;
+}
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  int tiles = (pc.OW + RESIZE_ROW_TILE - 1) / RESIZE_ROW_TILE;
+  // One lane per (n, channel block, output row, RESIZE_ROW_TILE-wide row tile). The bound below
+  // must stay one expression: it is the lane count resize.cpp dispatches for this kernel
+  // (resizeRowLanes).
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (i >= uint(pc.N * Cb * pc.OH * ((pc.OW + RESIZE_ROW_TILE - 1) / RESIZE_ROW_TILE))) return;
+  // A source plane with no elements has no pixel any arm can sample, and the tap clamps below
+  // would fold to an empty range. src/backend/vulkan/ops/resize.cpp refuses that geometry; the
+  // lane exits rather than resolving an index into a plane that holds nothing.
+  if (pc.IH <= 0 || pc.IW <= 0) return;
+  int tx = int(i) % tiles;
+  int oy = (int(i) / tiles) % pc.OH;
+  int cb = (int(i) / (tiles * pc.OH)) % Cb;
+  int n  = int(i) / (tiles * pc.OH * Cb);
+  int sb = (n * Cb + cb) * pc.IH * pc.IW;
+  int outRow = (n * Cb + cb) * pc.OH * pc.OW + oy * pc.OW;
+  int ox0 = tx * RESIZE_ROW_TILE;
+  if (pc.mode == 0) {
+    // Nearest. The vertical index carries no x term: one integer row for the whole tile,
+    // identical to the scalar kernel's per-pixel evaluation at this oy.
+    int nearY = clampi(nearestSrc(oy, pc.OH, pc.IH, pc.cm, pc.nm), 0, pc.IH - 1);
+    int rowBase = sb + nearY * pc.IW;
+    // nearX is monotone non-decreasing in ox, so one held column captures every repeat.
+    int heldX = RESIZE_ROW_COL_NONE;
+    vec4 held = vec4(0.0);
+    for (int t = 0; t < RESIZE_ROW_TILE; ++t) {
+      int ox = ox0 + t;
+      if (ox >= pc.OW) break;   // tail tile of a width not divisible by the tile
+      int nearX = clampi(nearestSrc(ox, pc.OW, pc.IW, pc.cm, pc.nm), 0, pc.IW - 1);
+      if (nearX != heldX) { held = vec4(src[rowBase + nearX]); heldX = nearX; }
+      vec4 v = held;
+      int outIdx = outRow + ox;
+#ifdef PW_EPI
+      v = pw_apply4(v, outIdx);
+#endif
+      dst[outIdx] = f16vec4(v);
+    }
+  } else {
+    // Bilinear (the host predicate keeps cubic on resize_fp16.comp). Vertical geometry (fy, iy0,
+    // wyl) carries no x term: computed once, the identical fp32 expressions the scalar kernel
+    // evaluates per pixel.
+    float fy = coord(oy, pc.OH, pc.IH, pc.cm);
+    int iy0 = int(floor(fy));
+    float wyl = fy - float(iy0);
+    int cy0 = clampi(iy0, 0, pc.IH - 1), iy1 = clampi(iy0 + 1, 0, pc.IH - 1);
+    int r0 = sb + cy0 * pc.IW, r1 = sb + iy1 * pc.IW;
+    // Held columns of the previous output: left = its cx0, right = its ix1, each as the (row y0,
+    // row y1) vec4 pair. The tags are exact column indices, so a hit returns precisely the value
+    // a fresh load would; a miss just loads. Reuse never depends on the scale factor.
+    int heldLX = RESIZE_ROW_COL_NONE, heldRX = RESIZE_ROW_COL_NONE;
+    vec4 heldL0 = vec4(0.0), heldL1 = vec4(0.0), heldR0 = vec4(0.0), heldR1 = vec4(0.0);
+    for (int t = 0; t < RESIZE_ROW_TILE; ++t) {
+      int ox = ox0 + t;
+      if (ox >= pc.OW) break;   // tail tile of a width not divisible by the tile
+      float fx = coord(ox, pc.OW, pc.IW, pc.cm);
+      int ix0 = int(floor(fx));
+      float wxl = fx - float(ix0);
+      int cx0 = clampi(ix0, 0, pc.IW - 1), ix1 = clampi(ix0 + 1, 0, pc.IW - 1);
+      // The scalar kernel's four taps: a/b = row y0 at columns cx0/ix1, c/d = row y1. ix1 equal
+      // to a held LEFT tag implies ix1 == cx0 (columns are monotone), which the first arm covers.
+      vec4 a, b, c, d;
+      if (cx0 == heldLX)      { a = heldL0; c = heldL1; }
+      else if (cx0 == heldRX) { a = heldR0; c = heldR1; }
+      else                    { a = vec4(src[r0 + cx0]); c = vec4(src[r1 + cx0]); }
+      if (ix1 == cx0)         { b = a; d = c; }
+      else if (ix1 == heldRX) { b = heldR0; d = heldR1; }
+      else                    { b = vec4(src[r0 + ix1]); d = vec4(src[r1 + ix1]); }
+      heldLX = cx0; heldL0 = a; heldL1 = c;
+      heldRX = ix1; heldR0 = b; heldR1 = d;
+      vec4 v = a * (1.0 - wyl) * (1.0 - wxl) + b * (1.0 - wyl) * wxl + c * wyl * (1.0 - wxl) + d * wyl * wxl;
+      int outIdx = outRow + ox;
+#ifdef PW_EPI
+      v = pw_apply4(v, outIdx);
+#endif
+      dst[outIdx] = f16vec4(v);
+    }
+  }
+}

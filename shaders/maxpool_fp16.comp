@@ -22,6 +22,8 @@ void main() {
   int oy = (int(gid) / pc.OW) % pc.OH;
   int cb = (int(gid) / (pc.OW * pc.OH)) % Cb;
   int n = int(gid) / (pc.OW * pc.OH * Cb);
+  // -65504 is the exact fp16 lowest: the conversion path clamps every stored fp16 value into
+  // [-65504, 65504], so within this kernel's domain the finite seed IS the Max identity.
   vec4 m = vec4(-65504.0);
   for (int ky = 0; ky < pc.KH; ++ky) {
     int iy = oy * pc.SH - pc.PT + ky;

@@ -1,5 +1,7 @@
 #include "core/matmul_tile.h"
+#include "core/quant_weights.h"
 #include "passes_internal.h"
+#include <algorithm>
 #include <map>
 
 namespace vknn {
@@ -188,39 +190,74 @@ namespace vknn {
         return axisSum == ws[axis];
     }
 
-    // Broadcast class of tensor `t` against the unit's run shape: 0 same-shape, 3 scalar splat,
-    // 1 per-channel (rank-4 [N,C,1,1]; a rank<4 CONSTANT that right-aligns to [1,C,1,1] with N==1
-    // also qualifies — pwOperandBuf packs it by that interpretation), 2 general (flat-only).
+    // Broadcast class of tensor `t` against the unit's run shape (see the kPwBcast* constants).
+    // A rank<4 CONSTANT is judged by its right-aligned rank-4 interpretation, which is exactly how
+    // pwOperandBuf packs it; rank<4 RUNTIME tensors reach here already right-aligned behind the
+    // explicit Reshape rightAlignPwOperands inserts (their device packing must match the reading).
+    // The spatial and *Splat classes are limited to a single batch: the
+    // NC4HW4 kernel recovers the pixel as vecIdx % HW, which drops the batch index, so N>1 would
+    // alias batch 0's values across the whole run and stays general. The Row/Col classes carry the
+    // batch in their channel-block index, so they have no such restriction. The older classes are
+    // tested first, so every shape that classified before keeps its class and its encoded bytes.
     static int pwBcastClass(const Graph &g, TensorId t, const Shape &run) {
         const Shape &s = g.desc(t).shape;
         if (s == run)
         {
-            return 0;
+            return kPwBcastSame;
         }
         if (numElements(s) <= 1)
         {
-            return 3;
+            return kPwBcastScalar;
         }
         if (run.size() == 4)
         {
-            if (s.size() == 4 && s[0] == run[0] && s[1] == run[1] && s[2] == 1 && s[3] == 1)
+            Shape rs = s;
+            if (g.isInitializer(t) && rs.size() < 4)
             {
-                return 1;
+                rs.insert(rs.begin(), 4 - rs.size(), 1); // right-align the constant into NCHW
             }
-            if (g.isInitializer(t) && run[0] == 1 && s.size() < 4)
+            if (rs.size() == 4)
             {
-                Shape rs(4, 1);
-                for (size_t k = 0; k < s.size(); ++k)
+                if (rs[0] == run[0] && rs[1] == run[1] && rs[2] == 1 && rs[3] == 1)
                 {
-                    rs[4 - s.size() + k] = s[k];
+                    return kPwBcastChannel;
                 }
-                if (rs[0] == 1 && rs[1] == run[1] && rs[2] == 1 && rs[3] == 1)
+                if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == run[2] && rs[3] == run[3])
                 {
-                    return 1;
+                    return kPwBcastSpatial;
+                }
+                if (rs[0] == run[0] && rs[1] == run[1] && rs[2] == run[2] && rs[3] == 1)
+                {
+                    return kPwBcastRow;
+                }
+                if (rs[0] == run[0] && rs[1] == run[1] && rs[2] == 1 && rs[3] == run[3])
+                {
+                    return kPwBcastCol;
+                }
+                if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == run[2] && rs[3] == 1)
+                {
+                    return kPwBcastRowSplat;
+                }
+                if (run[0] == 1 && rs[0] == 1 && rs[1] == 1 && rs[2] == 1 && rs[3] == run[3])
+                {
+                    return kPwBcastColSplat;
+                }
+                // Any remaining 1-or-full axis mask has a closed-form packed index: buildPwPlan
+                // derives per-axis vec4-space strides from the operand shape (zero on broadcast
+                // axes), so the NC4HW4 kernel addresses it without the flat div/mod walk. Tested
+                // after every named class, so shapes that classified before keep their encodings.
+                bool oneOrFull = rs.size() == kNchwRank;
+                for (size_t k = 0; oneOrFull && k < kNchwRank; ++k)
+                {
+                    oneOrFull = rs[k] == 1 || rs[k] == run[k];
+                }
+                if (oneOrFull)
+                {
+                    return kPwBcastPacked;
                 }
             }
         }
-        return 2;
+        return kPwBcastGeneral;
     }
 
     namespace {
@@ -236,8 +273,11 @@ namespace vknn {
             std::vector<int64_t>  outSteps; // pw_outs: emitted step index (or kPwRefEntry) per export
             TensorId              entry   = kNoTensor;
             TensorId              mainOut = kNoTensor;
-            bool                  nc4Ok = false, flatOk = false;
-            bool                  ok = false;
+            /// First operand classified kPwBcastGeneral, the one that set nc4Ok false (see
+            /// warnFlatForcedUnit). kNoTensor when the unit has none.
+            TensorId generalOperand = kNoTensor;
+            bool     nc4Ok = false, flatOk = false;
+            bool     ok = false;
         };
 
         // Plan a unit over `members` (node indices, ascending = emission order) with run shape
@@ -257,6 +297,40 @@ namespace vknn {
 
             PwPlanner(const Graph &g_, const Shape &run_, const std::vector<int> &prod, const std::vector<int> &cc, const std::vector<char> &go, bool strict_):
                 g(g_), run(run_), producer(prod), consumerCount(cc), isGraphOut(go), strict(strict_) {
+            }
+
+            /// The tensor a unit should actually READ for an external operand `t`.
+            ///
+            /// An Expand exists only to materialise a broadcast, and a Tile does the same whenever
+            /// the axes it repeats are size 1 at the source. A unit reads its operands through that
+            /// same broadcast machinery -- so reading the SOURCE computes identical values while
+            /// touching a fraction of the memory, and once nothing reads the materialised tensor it
+            /// (and the layout converts around it, since both ops have only flat kernels) is dead.
+            ///
+            /// The class check carries the whole correctness argument, for both producers: a source
+            /// that classifies is one the broadcast machinery reaches every element of the run from.
+            /// A Tile that genuinely REPEATS -- three source elements laid out six times -- has no
+            /// such class and is left alone, as is any operand with no blocked index, which would
+            /// force the whole unit onto the flat kernel and cost far more than the fold saved.
+            TensorId operandThroughExpand(TensorId t, const Shape &run) const {
+                for (int hop = 0; hop < kPwExpandFoldMaxHops; ++hop)
+                {
+                    const int  p                 = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
+                    const bool broadcastProducer = p >= 0 && (g.nodes[(size_t) p].type == OpType::Expand || g.nodes[(size_t) p].type == OpType::Tile);
+                    if (!broadcastProducer || g.nodes[(size_t) p].inputs.empty())
+                    {
+                        return t;
+                    }
+                    const TensorId srcT = g.nodes[(size_t) p].inputs[0];
+                    // The storage precision has to match: the unit decodes an operand at one width,
+                    // and an fp32-pinned source behind an fp16 expansion is a different tensor to it.
+                    if (srcT == kNoTensor || pwTensorIsFp32(g, srcT) != pwTensorIsFp32(g, t) || pwBcastClass(g, srcT, run) == kPwBcastGeneral)
+                    {
+                        return t;
+                    }
+                    t = srcT;
+                }
+                return t;
             }
 
             // The member's data inputs (excluding Clip bound inputs, which encode as params).
@@ -329,7 +403,9 @@ namespace vknn {
                     {
                         int  p        = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
                         bool internal = p >= 0 && memberSet.count(p);
-                        if (!internal && t != u.entry && t != kNoTensor && pwBcastClass(g, t, run) != 0)
+                        // Resolved the same way the emission below resolves it, so the register
+                        // plan counts the operands the unit will actually load.
+                        if (!internal && t != u.entry && t != kNoTensor && pwBcastClass(g, operandThroughExpand(t, run), run) != 0)
                         {
                             bcastOperands++;
                         }
@@ -453,6 +529,7 @@ namespace vknn {
                             src[k].ref = kPwRefEntry;
                         } else
                         {
+                            t              = operandThroughExpand(t, run);
                             src[k].operand = true;
                             src[k].bc      = pwBcastClass(g, t, run);
                             if (pwTensorIsFp32(g, t))
@@ -460,9 +537,13 @@ namespace vknn {
                                 return PwUnit {};
                             }
                             src[k].ref = operandRef(t);
-                            if (src[k].bc == 2)
+                            if (src[k].bc == kPwBcastGeneral)
                             {
                                 hasClass2 = true;
+                                if (u.generalOperand == kNoTensor)
+                                {
+                                    u.generalOperand = t;
+                                }
                             }
                         }
                     }
@@ -689,6 +770,566 @@ namespace vknn {
             }
         };
 
+        /// Report a rank-4 unit that a general-broadcast operand pushed onto the flat kernel. Such a
+        /// unit gives up vec4 addressing for the WHOLE region (one element per thread instead of
+        /// four), pays a per-axis integer div/mod walk per element per step that reads the operand,
+        /// and is excluded from the flexible layout re-vote, so a ConvertLayout appears on each of
+        /// its full-size edges. The message names the anchor node and the operand shape that caused
+        /// it, which is the whole diagnosis for a model whose bytes are not available to inspect.
+        void warnFlatForcedUnit(const Graph &g, const Node &anchor, TensorId general, const Shape &run, bool nc4Ok) {
+            if (nc4Ok || general == kNoTensor || run.size() != 4)
+            {
+                return; // NC4HW4-expressible, or a rank the blocked path has no form for anyway
+            }
+            VKNN_INFO << "fusePointwiseChains: unit at '" << anchor.name << "' runs " << shapeStr(run) << " on the flat kernel -- operand '" << g.desc(general).name << "' "
+                      << shapeStr(g.desc(general).shape) << " has no blocked-layout index, so the whole unit loses vec4 and picks up a layout convert on each side";
+        }
+
+        /// Rewire every rank<4 RUNTIME operand of a rank-4 pointwise run through an explicit Reshape
+        /// to its right-aligned rank-4 NumPy interpretation ([H,W] -> [1,1,H,W], [C,1,1] ->
+        /// [1,C,1,1]). pwBcastClass may only judge a tensor by right-alignment when its device bytes
+        /// follow that reading: initializers do (pwOperandBuf packs them right-aligned at upload),
+        /// but a runtime tensor's NC4HW4 packing follows NCHW::from's LEFT-aligned rank<4 mapping,
+        /// so without the Reshape such operands classify kPwBcastGeneral and flat-force their unit.
+        /// The Reshape puts the right-aligned reading into the graph itself: the layout passes then
+        /// convert the small operand into the unit's world instead of dropping the whole unit to the
+        /// flat kernel. Reshape is layout-agnostic and elides to a buffer alias at record time, so
+        /// the node adds nothing to the data path. Only readers in the pw-eligible set are rewired;
+        /// every other consumer keeps the original tensor.
+        void rightAlignPwOperands(Graph &g) {
+            struct PendingReshape {
+                Node     node;
+                TensorId source;
+            };
+            std::map<TensorId, TensorId> aligned; // original tensor -> its rank-4 view
+            std::vector<PendingReshape>  pending;
+            for (auto &nd: g.nodes)
+            {
+                if (!pwEligibleNode(g, nd) || PwPlanner::dataInputs(nd).size() < 2)
+                {
+                    continue;
+                }
+                const Shape run = g.desc(nd.outputs[0]).shape;
+                if (run.size() != kNchwRank)
+                {
+                    continue;
+                }
+                for (TensorId &in: nd.inputs)
+                {
+                    if (in == kNoTensor || g.isInitializer(in) || pwTensorIsFp32(g, in))
+                    {
+                        continue;
+                    }
+                    const Shape &s = g.desc(in).shape;
+                    if (s.empty() || s.size() >= kNchwRank || numElements(s) <= 1)
+                    {
+                        continue;
+                    }
+                    Shape rs = s;
+                    rs.insert(rs.begin(), kNchwRank - rs.size(), 1);
+                    bool broadcastLegal = true;
+                    for (size_t k = 0; k < kNchwRank; ++k)
+                    {
+                        broadcastLegal = broadcastLegal && (rs[k] == 1 || rs[k] == run[k]);
+                    }
+                    if (!broadcastLegal)
+                    {
+                        continue; // malformed broadcast: leave it for the plan builder's diagnostics
+                    }
+                    auto it = aligned.find(in);
+                    if (it == aligned.end())
+                    {
+                        TensorDesc d;
+                        d.name        = g.desc(in).name + "#pwr4";
+                        d.shape       = rs;
+                        d.dtype       = g.desc(in).dtype;
+                        TensorId view = g.addTensor(d);
+
+                        TensorDesc sd;
+                        sd.name            = d.name + "#shape";
+                        sd.shape           = {(int64_t) kNchwRank};
+                        sd.dtype           = DType::Int64;
+                        sd.isInitializer   = true;
+                        TensorId   shapeId = g.addTensor(sd);
+                        HostBuffer hb;
+                        hb.resizeElems((int64_t) kNchwRank, DType::Int64);
+                        for (size_t k = 0; k < kNchwRank; ++k)
+                        {
+                            hb.i64()[k] = rs[k];
+                        }
+                        g.initializers[shapeId] = std::move(hb);
+
+                        PendingReshape pr;
+                        pr.node.type    = OpType::Reshape;
+                        pr.node.name    = d.name;
+                        pr.node.inputs  = {in, shapeId};
+                        pr.node.outputs = {view};
+                        pr.source       = in;
+                        pending.push_back(std::move(pr));
+                        it = aligned.emplace(in, view).first;
+                    }
+                    in = it->second;
+                }
+            }
+            if (pending.empty())
+            {
+                return;
+            }
+            // Splice each Reshape right after its source's producer (graph inputs at the front), so
+            // node order stays topological for the index-interval convexity walk below. Insertions
+            // run back-to-front so earlier positions stay valid.
+            std::map<TensorId, size_t> producerAt;
+            for (size_t i = 0; i < g.nodes.size(); ++i)
+            {
+                for (TensorId o: g.nodes[i].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producerAt[o] = i;
+                    }
+                }
+            }
+            std::stable_sort(pending.begin(), pending.end(), [&](const PendingReshape &a, const PendingReshape &b) {
+                auto   pa = producerAt.find(a.source), pb = producerAt.find(b.source);
+                size_t ia = pa == producerAt.end() ? 0 : pa->second + 1;
+                size_t ib = pb == producerAt.end() ? 0 : pb->second + 1;
+                return ia < ib;
+            });
+            for (size_t i = pending.size(); i-- > 0;)
+            {
+                auto   pa  = producerAt.find(pending[i].source);
+                size_t pos = pa == producerAt.end() ? 0 : pa->second + 1;
+                g.nodes.insert(g.nodes.begin() + (long) pos, std::move(pending[i].node));
+            }
+            VKNN_INFO << "fusePointwiseChains: right-aligned " << pending.size() << " rank<4 runtime operand(s) behind Reshape views";
+        }
+
+        // ---- Rank collapse for pointwise runs beyond the plan's rank budget --------------------
+
+        /// Right-aligned rank-`rank` reading of `s` (leading axes filled with 1) -- the NumPy
+        /// broadcast interpretation the axis-grouping rule and the grouped-view shapes use.
+        Shape pwAlignShape(const Shape &s, size_t rank) {
+            Shape aligned = s;
+            aligned.insert(aligned.begin(), rank - aligned.size(), 1);
+            return aligned;
+        }
+
+        /// A node the rank-collapse pre-pass may rewire: pointwise-fusable, output rank above
+        /// kPwMaxRank with a positive element count, and every data edge present, un-pinned, and
+        /// (when non-scalar) a 1-or-full broadcast of the run. A malformed broadcast (an axis
+        /// neither 1 nor the run's extent) has no per-group closed form, so its node stays at full
+        /// rank and keeps the pre-collapse diagnostics.
+        bool pwRankCollapsible(const Graph &g, const Node &n) {
+            if (!pwEligibleNode(g, n))
+            {
+                return false;
+            }
+            const Shape &run = g.desc(n.outputs[0]).shape;
+            if ((int) run.size() <= kPwMaxRank || numElements(run) <= 0)
+            {
+                return false;
+            }
+            for (TensorId t: PwPlanner::dataInputs(n))
+            {
+                if (t == kNoTensor || pwTensorIsFp32(g, t))
+                {
+                    return false;
+                }
+                const Shape &s = g.desc(t).shape;
+                if (numElements(s) <= 1)
+                {
+                    continue; // scalars are shape-independent and ride along untouched
+                }
+                if (s.size() > run.size())
+                {
+                    return false;
+                }
+                const Shape aligned = pwAlignShape(s, run.size());
+                for (size_t k = 0; k < run.size(); ++k)
+                {
+                    if (aligned[k] != 1 && aligned[k] != run[k])
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        /// Record the axis-grouping cuts one operand forces on the run: walking the run's axes left
+        /// to right, a cut lands immediately left of every non-trivial axis whose state (broadcast
+        /// 1 vs the run's full extent) differs from the previous non-trivial axis. Run axes of
+        /// extent 1 are trivial -- 1 and full coincide there, so they constrain nothing and attach
+        /// to the group on their left. This canonical cut placement makes the grouping a pure
+        /// function of the shapes. cutAfter[k] set means axes k and k+1 may not share a group.
+        void pwMarkGroupCuts(const Shape &aligned, const Shape &run, std::vector<char> &cutAfter) {
+            bool havePrev = false, prevFull = false;
+            for (size_t k = 0; k < run.size(); ++k)
+            {
+                if (run[k] == 1)
+                {
+                    continue;
+                }
+                const bool full = aligned[k] == run[k];
+                if (havePrev && full != prevFull)
+                {
+                    cutAfter[k - 1] = 1;
+                }
+                havePrev = true;
+                prevFull = full;
+            }
+        }
+
+        /// Per-group extent products of `aligned` under the cut set (group boundaries fall after
+        /// every set cutAfter[k]). Within one group an operand is uniformly broadcast or uniformly
+        /// full (pwMarkGroupCuts places a cut between any two different-state axes), so each
+        /// product is 1 or the run group's extent -- a NumPy-legal broadcast of the grouped run.
+        Shape pwGroupShape(const Shape &aligned, const std::vector<char> &cutAfter) {
+            Shape   grouped;
+            int64_t extent = aligned[0];
+            for (size_t k = 1; k < aligned.size(); ++k)
+            {
+                if (cutAfter[k - 1])
+                {
+                    grouped.push_back(extent);
+                    extent = aligned[k];
+                } else
+                {
+                    extent *= aligned[k];
+                }
+            }
+            grouped.push_back(extent);
+            return grouped;
+        }
+
+        /// Give each grouped constant view its bytes, once the region rewiring is complete.
+        ///
+        /// A grouped view is a reshaped reading of the SAME payload, so the view TAKES the source's
+        /// bytes whenever the collapse consumed the source's last reference -- the common case,
+        /// where duplicating them would double a weight's host footprint and its serialized size
+        /// for nothing. A source some other consumer still reads at the full rank keeps its own
+        /// payload and its view gets a duplicate: two shapes, two tensors, both live. Reachability
+        /// is pruneDeadInitializers' rule (node inputs, the fused residual/bias edges, the
+        /// quantized-weight side tensors named by attributes, and the graph's input/output lists),
+        /// so a source this drops is exactly one that pass would drop.
+        ///
+        /// @param groupedConstants (source constant, grouped view) in creation order; a source with
+        ///                         several views keeps its bytes for all but the last.
+        void attachGroupedConstantPayloads(Graph &g, const std::vector<std::pair<TensorId, TensorId>> &groupedConstants) {
+            if (groupedConstants.empty())
+            {
+                return;
+            }
+            std::set<TensorId> referenced(g.outputs.begin(), g.outputs.end());
+            referenced.insert(g.inputs.begin(), g.inputs.end());
+            for (const Node &nd: g.nodes)
+            {
+                referenced.insert(nd.inputs.begin(), nd.inputs.end());
+                referenced.insert(nd.fusedResidual);
+                referenced.insert(nd.fusedBias);
+                if (nd.attr.has(kWq))
+                {
+                    for (const char *key: {kWqScales, kWqOidx, kWqOval, kWqLut})
+                    {
+                        referenced.insert((TensorId) nd.attr.geti(key, kNoTensor));
+                    }
+                }
+            }
+            std::map<TensorId, int> viewsLeft;
+            for (const auto &pair: groupedConstants)
+            {
+                viewsLeft[pair.first]++;
+            }
+            for (const auto &pair: groupedConstants)
+            {
+                const TensorId source = pair.first, view = pair.second;
+                const bool     lastView = --viewsLeft[source] == 0;
+                if (lastView && !referenced.count(source))
+                {
+                    g.initializers[view]         = std::move(g.initializers.at(source));
+                    g.desc(source).isInitializer = false;
+                    g.initializers.erase(source);
+                } else
+                {
+                    // The source outlives this view — another grouping wants it at a different
+                    // shape, or a reader outside the region still names it. The two tensors differ
+                    // only in shape, so they SHARE one payload: a copy would duplicate every weight
+                    // byte in host memory and again in the artifact. Both sides stay
+                    // copy-on-write, so a later mutation on either takes its own copy.
+                    auto shared = g.initializers.at(source).bytes.shareBytes();
+                    if (shared)
+                    {
+                        g.initializers[view].bytes.setSharedBytes(std::move(shared));
+                    } else
+                    {
+                        // File-backed or empty: copying the buffer already copies a handle, not
+                        // bytes.
+                        g.initializers[view] = g.initializers.at(source);
+                    }
+                }
+            }
+        }
+
+        /// Collapse every maximal same-run-shape pointwise region whose rank exceeds kPwMaxRank
+        /// onto the coarsest axis grouping ALL of its members' data inputs admit, so the region
+        /// becomes fusable: PwPlanner refuses any rank>kPwMaxRank run outright (no flat form, no
+        /// NC4 form), which otherwise decays a rank-5/6 elementwise block into per-op dispatches.
+        ///
+        /// Rewiring keeps the grouped shape interior to the region: each member's output moves to
+        /// a fresh "#pwrc" tensor at the grouped rank and intra-region edges connect DIRECTLY at
+        /// that shape; boundary inputs enter through collapse Reshape views (an initializer
+        /// instead becomes a grouped-shape constant carrying the source's bytes -- no runtime node,
+        /// and no second payload unless another consumer still reads the source at full rank); and the
+        /// original full-rank output tensor -- its id, name, and desc untouched, so graph outputs
+        /// keep their contract -- is regenerated by an expand Reshape only where a reader outside
+        /// the region (or a graph-output use) still needs it. Reshape is layout-agnostic and
+        /// aliases at record, so every view is free on the data path. Regions with no legal
+        /// grouping within the budget are left at full rank, unchanged.
+        void collapsePwRunRanks(Graph &g) {
+            const size_t                  nodeCount = g.nodes.size();
+            std::vector<int>              producer(g.tensors.size(), -1);
+            std::vector<std::vector<int>> readerNodes(g.tensors.size());
+            for (size_t i = 0; i < nodeCount; ++i)
+            {
+                for (TensorId o: g.nodes[i].outputs)
+                {
+                    if (o != kNoTensor)
+                    {
+                        producer[o] = (int) i;
+                    }
+                }
+                // Reads include the fused residual/bias edges: they are tensor references OUTSIDE
+                // the inputs list (rewireTensor's contract), and the dead-code passes count them as
+                // live uses. A member value read only through one of them is still an external use,
+                // and without the expand Reshape it would be left with no producer at all.
+                auto addRead = [&](TensorId t) {
+                    if (t != kNoTensor && t < (TensorId) readerNodes.size())
+                    {
+                        readerNodes[t].push_back((int) i);
+                    }
+                };
+                for (TensorId t: g.nodes[i].inputs)
+                {
+                    addRead(t);
+                }
+                addRead(g.nodes[i].fusedResidual);
+                addRead(g.nodes[i].fusedBias);
+            }
+            std::vector<char> isGraphOut(g.tensors.size(), 0);
+            for (TensorId go: g.outputs)
+            {
+                if (go != kNoTensor)
+                {
+                    isGraphOut[go] = 1;
+                }
+            }
+
+            struct PendingReshape {
+                Node   node;
+                size_t pos;  // node-list index the Reshape lands at (pre-insertion index space)
+                int    tier; // expands (0) precede collapses (1) at one pos: a collapse may read an expand's output
+            };
+            std::vector<PendingReshape>                    pending;
+            std::map<std::pair<TensorId, Shape>, TensorId> collapsedView; // (source, grouped shape) -> view
+            // (source constant, its grouped copy), in creation order. The payload is attached after
+            // the rewiring, when the source's surviving references are known.
+            std::vector<std::pair<TensorId, TensorId>> groupedConstants;
+            std::vector<char>                          visited(nodeCount, 0);
+            int                                        regions = 0, collapsedNodes = 0;
+
+            auto shapeInitializer = [&g](const std::string &name, const Shape &s) {
+                TensorDesc sd;
+                sd.name          = name;
+                sd.shape         = {(int64_t) s.size()};
+                sd.dtype         = DType::Int64;
+                sd.isInitializer = true;
+                TensorId   id    = g.addTensor(sd);
+                HostBuffer hb;
+                hb.resizeElems((int64_t) s.size(), DType::Int64);
+                for (size_t k = 0; k < s.size(); ++k)
+                {
+                    hb.i64()[k] = s[k];
+                }
+                g.initializers[id] = std::move(hb);
+                return id;
+            };
+
+            for (size_t seed = 0; seed < nodeCount; ++seed)
+            {
+                if (visited[seed] || !pwRankCollapsible(g, g.nodes[seed]))
+                {
+                    continue;
+                }
+                const Shape run = g.desc(g.nodes[seed].outputs[0]).shape;
+
+                // ---- maximal same-run-shape collapsible region over def-use edges, fanout included
+                // (the same connectivity the fusion's component walk uses, so a region collapses to
+                // ONE grouping and its interior edges never need a reshape) ----
+                std::set<int>    region {(int) seed};
+                std::vector<int> work {(int) seed};
+                while (!work.empty())
+                {
+                    int cur = work.back();
+                    work.pop_back();
+                    auto grow = [&](int j) {
+                        if (j >= 0 && !visited[j] && !region.count(j) && pwRankCollapsible(g, g.nodes[j]) && g.desc(g.nodes[j].outputs[0]).shape == run)
+                        {
+                            region.insert(j);
+                            work.push_back(j);
+                        }
+                    };
+                    for (TensorId t: PwPlanner::dataInputs(g.nodes[cur]))
+                    {
+                        grow(t >= 0 && t < (TensorId) producer.size() ? producer[t] : -1);
+                    }
+                    for (int j: readerNodes[g.nodes[cur].outputs[0]])
+                    {
+                        grow(j);
+                    }
+                }
+                for (int m: region)
+                {
+                    visited[m] = 1;
+                }
+
+                // ---- the coarsest grouping every member's every data input admits ----
+                std::vector<char> cutAfter(run.size() - 1, 0);
+                for (int m: region)
+                {
+                    for (TensorId t: PwPlanner::dataInputs(g.nodes[m]))
+                    {
+                        const Shape &s = g.desc(t).shape;
+                        if (numElements(s) > 1)
+                        {
+                            pwMarkGroupCuts(pwAlignShape(s, run.size()), run, cutAfter);
+                        }
+                    }
+                }
+                const int groups = 1 + (int) std::count(cutAfter.begin(), cutAfter.end(), (char) 1);
+                if (groups > kPwMaxRank)
+                {
+                    VKNN_INFO << "fusePointwiseChains: run " << shapeStr(run) << " at '" << g.nodes[*region.begin()].name << "' admits no axis grouping within rank " << kPwMaxRank << " -- the region stays at full rank, unfused";
+                    continue;
+                }
+                const Shape groupedRun = pwGroupShape(run, cutAfter);
+
+                // ---- rewire: fresh grouped output per member first, so interior edges resolve ----
+                std::map<TensorId, TensorId> groupedOut; // member's full-rank output -> grouped output
+                for (int m: region)
+                {
+                    TensorId   out = g.nodes[m].outputs[0];
+                    TensorDesc d;
+                    d.name  = g.desc(out).name + "#pwrc";
+                    d.shape = groupedRun;
+                    d.dtype = g.desc(out).dtype;
+                    groupedOut.emplace(out, g.addTensor(d));
+                }
+                TensorId runShapeInit = kNoTensor; // shared by the region's expand Reshapes
+                for (int m: region)                // std::set iterates ascending = topological
+                {
+                    Node &nd = g.nodes[m];
+                    // Data inputs only: Clip carries its bounds at inputs[1..2] and Relu/Unary are
+                    // single-input, mirroring PwPlanner::dataInputs by index.
+                    const bool   firstInputOnly = nd.type == OpType::Clip || nd.type == OpType::Relu || nd.type == OpType::Unary;
+                    const size_t dataCount      = firstInputOnly ? 1 : nd.inputs.size();
+                    for (size_t k = 0; k < dataCount; ++k)
+                    {
+                        TensorId &in       = nd.inputs[k];
+                        auto      interior = groupedOut.find(in);
+                        if (interior != groupedOut.end())
+                        {
+                            in = interior->second; // intra-region edge: connect at the grouped shape
+                            continue;
+                        }
+                        const Shape inShape = g.desc(in).shape;
+                        if (numElements(inShape) <= 1)
+                        {
+                            continue; // scalar: shape-independent
+                        }
+                        const Shape grouped = pwGroupShape(pwAlignShape(inShape, run.size()), cutAfter);
+                        const auto  key     = std::make_pair(in, grouped);
+                        auto        it      = collapsedView.find(key);
+                        if (it == collapsedView.end())
+                        {
+                            TensorDesc d;
+                            d.name  = g.desc(in).name + "#pwrc" + shapeStr(grouped);
+                            d.shape = grouped;
+                            d.dtype = g.desc(in).dtype;
+                            if (g.isInitializer(in))
+                            {
+                                // A constant view needs no runtime node: same bytes, grouped shape.
+                                // The entry exists from here on (so isInitializer holds through the
+                                // rest of the rewiring, which reads shapes only); the payload is
+                                // attached at the end of the pass, moved rather than copied
+                                // whenever the collapse consumed the source's last reference.
+                                d.isInitializer = true;
+                                TensorId copy   = g.addTensor(d);
+                                g.initializers.emplace(copy, HostBuffer {});
+                                groupedConstants.emplace_back(in, copy);
+                                it = collapsedView.emplace(key, copy).first;
+                            } else
+                            {
+                                TensorId       view = g.addTensor(d);
+                                PendingReshape pr;
+                                pr.node.type    = OpType::Reshape;
+                                pr.node.name    = d.name;
+                                pr.node.inputs  = {in, shapeInitializer(d.name + "#shape", grouped)};
+                                pr.node.outputs = {view};
+                                int p           = (in >= 0 && in < (TensorId) producer.size()) ? producer[in] : -1;
+                                pr.pos          = p < 0 ? 0 : (size_t) p + 1;
+                                pr.tier         = 1;
+                                pending.push_back(std::move(pr));
+                                it = collapsedView.emplace(key, view).first;
+                            }
+                        }
+                        in = it->second;
+                    }
+                    // The output moves to the grouped tensor; the full-rank value is regenerated
+                    // only where a reader outside the region (or a graph-output use) needs it.
+                    TensorId orig = nd.outputs[0];
+                    nd.outputs[0] = groupedOut.at(orig);
+                    bool external = orig < (TensorId) isGraphOut.size() && isGraphOut[orig];
+                    for (int j: readerNodes[orig])
+                    {
+                        external = external || !region.count(j);
+                    }
+                    if (external)
+                    {
+                        if (runShapeInit == kNoTensor)
+                        {
+                            runShapeInit = shapeInitializer(g.desc(orig).name + "#pwrc.run#shape", run);
+                        }
+                        PendingReshape pr;
+                        pr.node.type    = OpType::Reshape;
+                        pr.node.name    = g.desc(orig).name + "#pwrc.expand";
+                        pr.node.inputs  = {groupedOut.at(orig), runShapeInit};
+                        pr.node.outputs = {orig};
+                        pr.pos          = (size_t) m + 1;
+                        pr.tier         = 0;
+                        pending.push_back(std::move(pr));
+                    }
+                    collapsedNodes++;
+                }
+                regions++;
+            }
+            if (regions == 0)
+            {
+                return;
+            }
+            // Splice each Reshape right after its input's producer (graph inputs at the front) so
+            // node order stays topological; expands land before collapses at the same slot because
+            // a later region's collapse view can read the full-rank tensor an expand regenerates.
+            // Insertions run back-to-front so earlier positions stay valid.
+            std::stable_sort(pending.begin(), pending.end(), [](const PendingReshape &a, const PendingReshape &b) {
+                return a.pos != b.pos ? a.pos < b.pos : a.tier < b.tier;
+            });
+            for (size_t i = pending.size(); i-- > 0;)
+            {
+                g.nodes.insert(g.nodes.begin() + (long) pending[i].pos, std::move(pending[i].node));
+            }
+            attachGroupedConstantPayloads(g, groupedConstants);
+            VKNN_INFO << "fusePointwiseChains: collapsed " << collapsedNodes << " rank>" << kPwMaxRank << " pointwise node(s) across " << regions << " region(s)";
+        }
     } // namespace
 
     /// One general pointwise fusion: grow each maximal same-shape per-element region — Binary/Add/
@@ -723,6 +1364,12 @@ namespace vknn {
     /// FusedPointwise node) yields the unit's main output and carries pw_steps/pw_params/pw_outs —
     /// plus pw_flat on standalone nodes for the load-time layout classifier.
     void fusePointwiseChains(Graph &g, bool strictFuse) {
+        // Rank collapse runs BEFORE right-alignment: alignment engages only on kNchwRank runs, so
+        // it must observe each run's FINAL rank -- a region collapsed to rank 4 joins the alignment
+        // (and NC4 classification) population, while the reverse order would skip the original
+        // rank-5 form and never revisit the rank-4 run the collapse produces.
+        collapsePwRunRanks(g);   // rank>kPwMaxRank pointwise regions -> coarsest grouped rank<=kPwMaxRank views
+        rightAlignPwOperands(g); // rank<4 runtime operands -> explicit right-aligned rank-4 views
         std::vector<int>  producer, consumerCount;
         std::vector<char> isGraphOut;
         auto              rebuild = [&]() {
@@ -1018,6 +1665,7 @@ namespace vknn {
                 visited[seed] = 1; // not encodable at all: leave the seed unfused
                 continue;
             }
+            warnFlatForcedUnit(g, g.nodes[members.back()], unit.generalOperand, run, unit.nc4Ok);
 
             // Fast mode: a lone initializer-bias Add on a MatMul folds onto the kernel's native
             // bias input — matmul[_tiled]_bias adds it in the fp32 accumulator with one store
@@ -1163,11 +1811,22 @@ namespace vknn {
                 continue;
             }
 
-            // ---- standalone unit (worth a node only for >= 2 members) ----
+            // ---- standalone unit. A multi-member region is always worth a node. A SINGLE member
+            // is worth one exactly when it would otherwise run on the flat kernel with a broadcast
+            // or constant operand (gpuFlatNode: initializer-operand Binary/Add, non-channel
+            // broadcasts, Where and the comparisons have no NC4 kernel of their own): as a
+            // one-step NC4-expressible unit it joins the flexible layout re-vote, runs packed, and
+            // sheds the full-size ConvertLayout pair the flat node would carry. Everything the
+            // flat classifier already serves in NC4 (same-shape runtime Binary, lone activations)
+            // keeps its original node, so existing encodings are untouched. ----
             if (members.size() < 2)
             {
-                visited[members[0]] = 1;
-                continue;
+                const bool broadcastSingle = unit.nc4Ok && !unit.operands.empty() && PwPlanner::dataInputs(g.nodes[members[0]]).size() > 1 && gpuFlatNode(g, g.nodes[members[0]]);
+                if (!broadcastSingle)
+                {
+                    visited[members[0]] = 1;
+                    continue;
+                }
             }
             Node fn;
             fn.type   = OpType::FusedPointwise;

@@ -9,13 +9,21 @@
 // back-to-back: inDim = g[0..rank), inStride = g[rank..2*rank), reduce = g[2*rank..3*rank). The fused
 // epilogue's bindings start after it.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;
 layout(push_constant) uniform PC {
   int rank, total, op;
 } pc;
+
+// Reduce wire codes carried in pc.op (kept in sync with vknn::ReduceType, include/vknn/reduce_type.h).
+#define REDUCE_MEAN 0
+#define REDUCE_SUM  1
+#define REDUCE_MAX  2
+#define REDUCE_MIN  3
+#define REDUCE_PROD 4
+#define REDUCE_L2   5
 
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -33,18 +41,18 @@ void main() {
   int rcount = 1, nRed = 0, singleStride = 0;
   for (int k = 0; k < pc.rank; ++k) if (geom.g[2 * pc.rank + k] != 0) { rcount *= geom.g[k]; nRed++; singleStride = geom.g[pc.rank + k]; }
 
-  float acc = (pc.op == 2) ? -3.4e38 : (pc.op == 3) ? 3.4e38 : (pc.op == 4) ? 1.0 : 0.0;
+  float acc = (pc.op == REDUCE_MAX) ? VX_NEG_INF : (pc.op == REDUCE_MIN) ? VX_POS_INF : (pc.op == REDUCE_PROD) ? 1.0 : 0.0;
   // Fast path for a single reduced axis (the common global-min/max/sum-over-one-axis case): the reduced
   // element offset is base + r*stride, so the per-element multi-dim index recompute below is unneeded.
   // Same iteration order as the general path, so byte-identical for every op.
   if (nRed == 1) {
     for (int r = 0; r < rcount; ++r) {
       float v = float(s[base + r * singleStride]);
-      if (pc.op == 2) acc = max(acc, v);
-      else if (pc.op == 3) acc = min(acc, v);
-      else if (pc.op == 4) acc *= v;
-      else if (pc.op == 5) acc += v * v;
-      else acc += v;
+      if (pc.op == REDUCE_MAX) acc = max(acc, v);
+      else if (pc.op == REDUCE_MIN) acc = min(acc, v);
+      else if (pc.op == REDUCE_PROD) acc *= v;
+      else if (pc.op == REDUCE_L2) acc += v * v;
+      else acc += v; // REDUCE_SUM / REDUCE_MEAN
     }
   } else
   for (int r = 0; r < rcount; ++r) {
@@ -56,14 +64,14 @@ void main() {
       off += c * geom.g[pc.rank + k];
     }
     float v = float(s[off]);
-    if (pc.op == 2) acc = max(acc, v);
-    else if (pc.op == 3) acc = min(acc, v);
-    else if (pc.op == 4) acc *= v;
-    else if (pc.op == 5) acc += v * v;
-    else acc += v;
+    if (pc.op == REDUCE_MAX) acc = max(acc, v);
+    else if (pc.op == REDUCE_MIN) acc = min(acc, v);
+    else if (pc.op == REDUCE_PROD) acc *= v;
+    else if (pc.op == REDUCE_L2) acc += v * v;
+    else acc += v; // REDUCE_SUM / REDUCE_MEAN
   }
-  if (pc.op == 0 && rcount > 0) acc /= float(rcount);
-  else if (pc.op == 5) acc = sqrt(acc);
+  if (pc.op == REDUCE_MEAN && rcount > 0) acc /= float(rcount);
+  else if (pc.op == REDUCE_L2) acc = sqrt(acc);
 #ifdef PW_EPI
   acc = pw_apply(acc, int(gid));
 #endif

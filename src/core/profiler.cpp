@@ -81,6 +81,15 @@ namespace vknn {
         // copies, decode-chain feedback, and argmax epilogues dispatch outside any node, so the
         // segment's own "segment dispatches" log line is at or above this total.
         printf("%-28s %zu record(s), %llu dispatch(es) over the nodes\n", "", records_.size(), (unsigned long long) tdisp);
+        // The gpu(ms) column brackets each node with two timestamps, and the GPU overlaps
+        // consecutive nodes, so the intervals OVERLAP: their sum exceeds the elapsed span, and a
+        // node that issues no commands of its own still measures whatever was draining between its
+        // timestamps. Say so where the sum is printed, rather than leaving the reader to discover it
+        // by finding an elided op holding a quarter of the run.
+        if (gpuSpanMs_ > 0)
+        {
+            printf("%-28s elapsed GPU span %.3f ms; the gpu(ms) column overlaps and sums to %.3f ms\n", "", gpuSpanMs_, tgpu);
+        }
         printf("\nPer op-type (cpu ms / gpu ms / dispatches):\n");
         // byType is keyed on op-type name; copy to a vector so the summary can be reordered by cost.
         std::vector<std::pair<std::string, TypeTotals>> v(byType.begin(), byType.end());

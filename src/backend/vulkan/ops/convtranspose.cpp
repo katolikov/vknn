@@ -11,9 +11,6 @@
 namespace vknn {
     namespace {
 
-        // Local workgroup size along x; matches local_size_x in shaders/convtranspose.comp.
-        constexpr uint32_t kConvTransposeLocalSize = 256;
-
         struct ConvTransposeVk: VulkanOp {
             struct PC {
                 int N, Cin, Cout, H, W, outH, outW, kH, kW;
@@ -83,7 +80,7 @@ namespace vknn {
                 }
 
                 epi.prepare(node, env, /*flat=*/true, out);
-                pipe = env.pipeline(shader((std::string("convtranspose") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader((std::string("convtranspose") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -92,7 +89,7 @@ namespace vknn {
                 VkBuffer              b    = rtBias ? env.devBuf(node.inputs[2])->handle() : bbuf->handle();
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), w, b, dst};
                 epi.append(bufs, node, env, dst);
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, kConvTransposeLocalSize));
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
 

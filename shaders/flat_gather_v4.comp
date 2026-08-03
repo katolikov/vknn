@@ -1,0 +1,138 @@
+#version 450
+#include "precision.glsl"
+// Vectorized twin of flat_gather: a lane processes FLAT_GATHER_QUAD CONSECUTIVE output elements,
+// so the store is one whole-vec4 transaction (a 64-lane wave writes 512 contiguous bytes per
+// access instead of 128). The gather's input index is a per-axis linear form of the output
+// coordinate, so within one innermost-output-axis row the four input indices differ by exactly the
+// innermost input stride: the rank walk runs ONCE per quad and steps by that stride (a 0 stride —
+// a folded broadcast view — collapses the quad to a single load). A quad straddling a row
+// boundary, or covering pad columns of a virtualized output, runs the scalar kernel's four
+// independent walks instead. Indices — and therefore bytes — are identical to flat_gather for
+// every element, including the outPad zero-fill lanes and the per-element PW_EPI epilogue
+// application, so the two variants are byte-interchangeable and the host (flat::Gather::pickQuad)
+// may pick either on measured speed alone. The tail quad (total not a multiple of
+// FLAT_GATHER_QUAD) runs the scalar body per element behind a bounds guard; component indexing of
+// the vec4 SSBO element compiles to scalar stores, so the tail never writes past total.
+#include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 3
+#include "pw_epilogue.glsl"
+#endif
+// Storage vector of FLAT_GATHER_QUAD consecutive output elements (the fp32 variant stores plain
+// vec4).
+#ifdef USE_FP16
+#define STORE_QUAD f16vec4
+#else
+#define STORE_QUAD vec4
+#endif
+// Elements per lane-quad; mirrored by kFlatGatherQuad in src/backend/vulkan/ops/flat_ops.h.
+#define FLAT_GATHER_QUAD 4
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };       // gather reads are arbitrary-stride: scalar-indexed
+layout(std430, binding = 1) writeonly buffer D { STORE_QUAD d4[]; }; // whole-vec4 stores over consecutive elements
+layout(std430, binding = 2) readonly  buffer G { int g[]; } geom;    // outDim = g[0..rank), inStride = g[rank..2*rank)
+// Same push-constant contract as flat_gather.comp (see there for the outPad/outLast
+// virtualized-output rule: the grid covers the PHYSICAL element count, pad columns store zero,
+// data lanes keep the logical flat index for the epilogue).
+layout(push_constant) uniform PC { int rank, total, base, outPad, outLast; } pc;
+
+// ITEMS quads per lane, one slot apart — the scalar twin's walk, over quads. The movement family
+// pins ITEMS = 1 (flat_ops.h kMovementItemsPerLane); the spec constant stays so a future shape
+// rule can re-enable the walk per node without a kernel change.
+layout(constant_id = 1) const int ITEMS = 1;
+
+// The scalar kernel's per-element body (flat_gather.comp processOne), value-returning: identical
+// statements with the store lifted to the caller. A pad column of a virtualized output yields the
+// same zero the scalar kernel stores.
+STORE gatherOne(int dstIdx) {
+  int outIdx = dstIdx;
+  if (pc.outPad > 0) {
+    int row = dstIdx / pc.outPad, col = dstIdx % pc.outPad;
+    if (col >= pc.outLast) return STORE(0.0);
+    outIdx = row * pc.outLast + col;
+  }
+  int rem = outIdx, inIdx = pc.base;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    inIdx += c * geom.g[pc.rank + k];
+  }
+#ifdef PW_EPI
+  return STORE(pw_apply(float(s[inIdx]), outIdx));
+#else
+  return s[inIdx];
+#endif
+}
+
+void processQuad(int q) {
+  int e0 = q * FLAT_GATHER_QUAD;
+  if (e0 + FLAT_GATHER_QUAD > pc.total) {
+    // Tail quad: the scalar body per element behind the bounds guard; component stores compile to
+    // scalar accesses, so nothing writes past total.
+    for (int j = 0; j < FLAT_GATHER_QUAD; ++j) {
+      if (e0 + j >= pc.total) break;
+      d4[q][j] = gatherOne(e0 + j);
+    }
+    return;
+  }
+  // Row-interior full quad of a non-virtualized output: outIdx == dstIdx == e0 + j, the four
+  // output coordinates share every axis but the innermost, so one walk resolves the quad and the
+  // innermost input stride steps it. (pc.rank == 0 never reaches here: its total is 1, which the
+  // tail path above handles.)
+  if (pc.outPad == 0) {
+    int lastDim = geom.g[pc.rank - 1];
+    int lastPos = e0 - (e0 / lastDim) * lastDim;
+    if (lastPos + FLAT_GATHER_QUAD <= lastDim) {
+      int rem = e0, inIdx = pc.base;
+      for (int k = pc.rank - 1; k >= 0; --k) {
+        int c = rem % geom.g[k];
+        rem /= geom.g[k];
+        inIdx += c * geom.g[pc.rank + k];
+      }
+      int   st = geom.g[2 * pc.rank - 1];
+      STORE v0, v1, v2, v3;
+      if (st == 0) { // innermost axis broadcast (a folded view): one value serves the quad
+        v0 = s[inIdx]; v1 = v0; v2 = v0; v3 = v0;
+      } else {
+        v0 = s[inIdx]; v1 = s[inIdx + st]; v2 = s[inIdx + 2 * st]; v3 = s[inIdx + 3 * st];
+      }
+    #ifdef PW_EPI
+      // The epilogue is scalar per element: applied per component at the element's own flat
+      // output index, in ascending element order, exactly like the scalar kernel.
+      vec4 o;
+      o.x = pw_apply(float(v0), e0);
+      o.y = pw_apply(float(v1), e0 + 1);
+      o.z = pw_apply(float(v2), e0 + 2);
+      o.w = pw_apply(float(v3), e0 + 3);
+      d4[q] = STORE_QUAD(o);
+    #else
+      d4[q] = STORE_QUAD(v0, v1, v2, v3);
+    #endif
+      return;
+    }
+  }
+  // Row-straddling or virtualized-output quad: the scalar kernel's four independent per-element
+  // walks; the store stays one whole-vec4 transaction.
+  STORE w0 = gatherOne(e0);
+  STORE w1 = gatherOne(e0 + 1);
+  STORE w2 = gatherOne(e0 + 2);
+  STORE w3 = gatherOne(e0 + 3);
+  d4[q] = STORE_QUAD(w0, w1, w2, w3);
+}
+
+void main() {
+  uint lane = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int quadTotal = (pc.total + FLAT_GATHER_QUAD - 1) / FLAT_GATHER_QUAD;
+  if (ITEMS == 1) {
+    if (lane >= uint(quadTotal)) return;
+    processQuad(int(lane));
+    return;
+  }
+  uint slot = (uint(quadTotal) + uint(ITEMS) - 1u) / uint(ITEMS);
+  if (lane >= slot) return;
+  for (int it = 0; it < ITEMS; ++it) {
+    uint q = lane + uint(it) * slot;
+    if (q >= uint(quadTotal)) break;
+    processQuad(int(q));
+  }
+}

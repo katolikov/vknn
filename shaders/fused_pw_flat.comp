@@ -6,11 +6,13 @@
 #define VKNN_NO_RTE 1
 #include "precision.glsl"
 #define PW_EPI_BASE 2
+// This kernel IS the pointwise unit, so it takes the full operand budget (kPwMaxOperands);
+// the epilogue form inlined into producer kernels keeps the narrower default.
 #include "pw_epilogue.glsl"
-layout(local_size_x=256) in;
+layout(local_size_x=256, local_size_x_id=25) in; // spec 25 = device-resolved family width (0..24 carry the plan)
 layout(std430,binding=0) readonly buffer Prim { STORE prim[]; };
 layout(std430,binding=1) writeonly buffer Dst { STORE dst[]; };
-layout(push_constant) uniform PC { int total; } pc;
+layout(push_constant) uniform PC { int total, items; } pc;
 // Monomorphization spec constants (host: fused_pointwise.cpp). PW_NS = 0 — the default, and the
 // value an empty spec vector leaves in place — keeps the runtime interpreter (pw_apply). PW_NS in
 // [1,8] compiles a specialized unit: the driver unrolls the step loop at pipeline creation and
@@ -57,8 +59,8 @@ float pw_apply_mono(float entryRaw, int outIdx){
   for(int s=0;s<PW_NS;++s){
     int kind=int(pwSpecK(s)>>16), code=int(pwSpecK(s)&0xffffu);
     float p0=pwSpecP0(s), p1=pwSpecP1(s);
-    int a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
-    int dr=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
+    int a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
+    int dr=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     float va,vb=0.,vc=0.;
     if(a<=PW_REF_OP0)      va=pwLoad(PW_REF_OP0-a,pwFlatIdx(s,bsrc==1?bc:0,outIdx));
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
@@ -70,16 +72,25 @@ float pw_apply_mono(float entryRaw, int outIdx){
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     float v;
-    if(kind==0)      v=vx_binary(va,vb,code);
-    else if(kind==1) v=vx_unary(va,code,p0,p1);
-    else if(kind==2) v=vx_act(va,code,p0,p1);
-    else if(kind==3) v=va!=0.?vb:vc;
+    if(kind==PW_KIND_BINARY)      v=vx_binary(va,vb,code);
+    else if(kind==PW_KIND_UNARY) v=vx_unary(va,code,p0,p1);
+    else if(kind==PW_KIND_ACT) v=vx_act(va,code,p0,p1);
+    else if(kind==PW_KIND_SELECT) v=va!=0.?vb:vc;
     else             v=va;
-    acc=(kind==4||PW_CHAINED!=0)?v:PW_ROUND(v);
+    acc=(kind==PW_KIND_LOAD||PW_CHAINED!=0)?v:PW_ROUND(v);
     if(dr==0)r0=acc; else if(dr==1)r1=acc; else if(dr==2)r2=acc; else if(dr==3)r3=acc;
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut(o,outIdx,PW_CHAINED!=0?PW_ROUND(acc):acc); }
   }
   return PW_CHAINED!=0?PW_ROUND(acc):acc; }
+// pc.items elements per lane, one slot apart -- the same reason as the NC4HW4 twin: the applier's
+// runtime tracks its step count rather than its byte count, which is a chain waiting on memory
+// latency, and independent items per lane are what covers it. Slots are strided by the lane count,
+// so every item stays a coalesced wave-wide access.
 void main(){ uint gid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;
-  if(gid>=uint(pc.total)) return; float v=float(prim[gid]);
-  dst[gid]=STORE(PW_NS>0?pw_apply_mono(v,int(gid)):pw_apply(v,int(gid))); }
+  int slot=(pc.total+pc.items-1)/pc.items;
+  if(gid>=uint(slot)) return;
+  for(int k=0;k<pc.items;++k){
+    int i=int(gid)+k*slot;
+    if(i>=pc.total) break;
+    float v=float(prim[i]);
+    dst[i]=STORE(PW_NS>0?pw_apply_mono(v,i):pw_apply(v,i)); }}

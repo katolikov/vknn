@@ -142,10 +142,76 @@ namespace vknn {
     /// n > kDetMaxGpuN — no known real model — takes the CPU's double-precision LU via the named
     /// vkNodeGate refusal.
     constexpr int kDetMaxGpuN    = 8;
-    constexpr int kPwMaxOperands = 6; ///< Extra tensor operands per unit (the primary input is excluded).
-    constexpr int kPwMaxRank     = 4; ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
-    constexpr int kPwMaxRegs     = 4; ///< Named registers for step values reused by later steps.
-    constexpr int kPwMaxOuts     = 4; ///< Extra output streams (fanout values exported from the unit).
+    constexpr int kPwMaxOperands = 9; ///< Extra tensor operands per unit (the primary input is excluded).
+    /// The epilogue carries the SAME budget as a standalone unit, and must: narrowing it changes
+    /// ANSWERS, not just speed. A unit that no longer fits is emitted as a separate node, and the
+    /// split rounds its intermediate through fp16 storage where the single fused unit kept it in an
+    /// fp32 register. A graph whose fused region needs the full budget went
+    /// from matching the CPU oracle within one code (70 dB) to 15 dB when the epilogue was narrowed
+    /// to 6 slots -- that widening was never a speed knob, it is what makes the region fuse at all.
+    ///
+    /// Narrowing was tried and reverted because it also bought nothing: on submit+gpu, the metric a
+    /// caller actually waits on, 9 slots measured 4.99 ms against 6 slots' 5.04 ms on one classifier
+    /// and 16.17 vs 16.15 ms on another. The earlier reading that appeared to justify it came from
+    /// summing the profiler's per-node intervals, which overlap and over-report (see
+    /// Profiler::totalGpuMs).
+    constexpr int kPwMaxRank = 4; ///< Flat broadcast rank stored in the plan; rank>4 is not flat-fused.
+    constexpr int kPwMaxRegs = 4; ///< Named registers for step values reused by later steps.
+    constexpr int kPwMaxOuts = 4; ///< Extra output streams (fanout values exported from the unit).
+
+    /// Broadcast class of a pw operand against the unit's run shape, stored in a step's bcast field.
+    /// Every class except kPwBcastGeneral has a closed-form index in BOTH the flat and the NC4HW4
+    /// kernel; a general operand is addressable only by the flat kernel's per-axis div/mod walk, so
+    /// one of them forces its whole unit onto the flat path (and the layout converts that bracket it).
+    constexpr int kPwBcastSame    = 0; ///< Same shape as the run: reads at the output index.
+    constexpr int kPwBcastChannel = 1; ///< Per-channel [N,C,1,1]: one value per channel.
+    constexpr int kPwBcastGeneral = 2; ///< Anything else: per-axis strided decomposition, flat only.
+    constexpr int kPwBcastScalar  = 3; ///< Single element splat.
+    constexpr int kPwBcastSpatial = 4; ///< Per-pixel [1,1,H,W]: one value per spatial position.
+    /// Row/column masks. The Row/Col forms carry the channel axis (four distinct lane values, a
+    /// vec4 load in the NC4HW4 kernel at the operand's own packed index); the *Splat forms hold one
+    /// value per row/column at channel lane 0 and splat it across the four lanes, like kPwBcastSpatial.
+    /// The class list is append-only: pw_plan.h refuses an unknown class by name at load.
+    constexpr int kPwBcastRow      = 5; ///< Per-row [N,C,H,1]: one value per (n, channel, row).
+    constexpr int kPwBcastCol      = 6; ///< Per-column [N,C,1,W]: one value per (n, channel, column).
+    constexpr int kPwBcastRowSplat = 7; ///< Per-row [1,1,H,1], single batch: one value per row.
+    constexpr int kPwBcastColSplat = 8; ///< Per-column [1,1,1,W], single batch: one value per column.
+    /// Generic 1-or-full mask: every right-aligned NCHW axis of the operand is 1 or the run's
+    /// extent. The NC4HW4 kernel indexes it with per-step packed vec4-space strides (n / cb / h / w,
+    /// zero on the broadcast axes) carried in the plan's stride slots — unused by the NC4 world's
+    /// other classes — and splats channel lane 0 when the operand's channel axis is 1 (a zero cb
+    /// stride). Any batch. The named classes above stay the fast paths; the classifier only lands
+    /// here for masks none of them cover, so existing encodings are byte-stable.
+    constexpr int kPwBcastPacked = 9;
+
+    /// Does resolving this class start by recovering the store's (n, channel-block, h, w) from the
+    /// output index? Those classes carry a division chain the direct ones do not, and their arms
+    /// exist only in kernels compiled with the geometric group (PW_BCAST_MASK_GEOMETRIC in
+    /// shaders/pw_epilogue.glsl). The epilogue inlines into every producer kernel, so it compiles
+    /// the direct group alone and a unit carrying a geometric operand runs standalone —
+    /// fuse_pointwise_chains refuses the attach, PwEpi::prepare refuses a plan that slipped past.
+    /// Hop ceiling when a unit resolves an operand back through chained Expands. Two Expands in a
+    /// row is already a redundant graph; the bound stops the walk on an adversarial one.
+    constexpr int kPwExpandFoldMaxHops = 4;
+
+    constexpr bool pwBcastClassIsGeometric(int cls) {
+        return cls == kPwBcastSpatial || cls == kPwBcastRow || cls == kPwBcastCol || cls == kPwBcastRowSplat || cls == kPwBcastColSplat || cls == kPwBcastPacked;
+    }
+
+    /// pw_steps record geometry: ints per step and the field offsets read outside the plan
+    /// builder. Mirrored as PW_STEP_FIELDS in shaders/pw_epilogue.glsl.
+    constexpr int kPwStepInts       = 8; ///< Ints per step: kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc.
+    constexpr int kPwStepSrcA       = 2; ///< Offset of the step's first source field.
+    constexpr int kPwStepSrcC       = 4; ///< Offset of the step's last source field (srcA..srcC are contiguous).
+    constexpr int kPwStepBcastField = 6; ///< Offset of the step's broadcast-class field.
+
+    /// Stride-slot order of a kPwBcastPacked step's packed vec4-space strides
+    /// (plan.stride[s * kPwMaxRank + slot], mirrored as PW_PACKED_STRIDE_* in
+    /// shaders/pw_epilogue.glsl). A broadcast axis carries stride 0.
+    constexpr int kPwPackedStrideN  = 0; ///< Batch stride: opCb * opH * opW.
+    constexpr int kPwPackedStrideCb = 1; ///< Channel-block stride: opH * opW (0 marks a channel-1 operand: splat lane 0).
+    constexpr int kPwPackedStrideH  = 2; ///< Row stride: opW.
+    constexpr int kPwPackedStrideW  = 3; ///< Column stride: 1.
 
     /// pw_steps value references (the srcA/srcB/srcC/dst fields of a step). A source names the
     /// accumulator, the entry value, a register, or a tensor operand; a dst is kPwRefNone or a

@@ -1,0 +1,45 @@
+#version 450
+#include "precision.glsl"
+// NC4HW4 [N,C,H,W] -> flat NHWC [N,H,W,C], the trailing "hand the image back in pixel order"
+// Transpose (perm 0,2,3,1) of an image pipeline.
+//
+// The generic flat gather cannot do this well. It runs one lane per output ELEMENT and walks the
+// rank per element to recover the input index, and it can only read a FLAT input -- so the layout
+// pass has to put a full-size ConvertLayout in front of it, and the pair costs two passes over the
+// tensor plus the intermediate buffer.
+//
+// Read from NC4HW4 instead and the transpose is a vec4 read per four output elements: the packed
+// vec4 at (n, cb, h, w) holds channels 4cb..4cb+3 of ONE pixel, which are exactly four CONSECUTIVE
+// elements of the NHWC output.
+//
+// One lane per (pixel, channel block) with the BLOCK varying fastest, so adjacent lanes write
+// adjacent 4-element runs and a wave writes one contiguous span. The reads are then strided by H*W
+// between adjacent lanes, which is the cheaper half to give up: measured against the opposite map
+// (lane per pixel, coalesced reads, each lane writing its own pixel's run) this one is far faster,
+// because the scattered map has every lane touching a different cache line on every store.
+#include "common.glsl"
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#endif
+layout(local_size_x = 64, local_size_x_id = 0) in; // spec 0 = device-resolved family width (env.flatLocalSize)
+layout(std430, binding = 0) readonly  buffer S { STORE4 src[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE  dst[]; };
+layout(push_constant) uniform PC { int N, C, H, W; } pc;
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  int HW = pc.H * pc.W;
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (i >= uint(pc.N * HW * Cb)) return;
+  int cb = int(i) % Cb;
+  int hw = (int(i) / Cb) % HW;
+  int n  = int(i) / (Cb * HW);
+  STORE4 v = src[(n * Cb + cb) * HW + hw];
+  int dstBase = (n * HW + hw) * pc.C + cb * 4;
+  // The last block carries padding lanes when C is not a multiple of 4; they have no NHWC slot.
+  for (int l = 0; l < 4 && cb * 4 + l < pc.C; ++l) {
+    dst[dstBase + l] = v[l];
+  }
+}

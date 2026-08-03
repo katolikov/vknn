@@ -6,11 +6,13 @@
 #define VKNN_NO_RTE 1
 #include "precision.glsl"
 #define PW_EPI_BASE 2
+// This kernel IS the pointwise unit, so it takes the full operand budget (kPwMaxOperands);
+// the epilogue form inlined into producer kernels keeps the narrower default.
 #include "pw_epilogue.glsl"
-layout(local_size_x=256) in;
+layout(local_size_x=256, local_size_x_id=25) in; // spec 25 = device-resolved family width (0..24 carry the plan)
 layout(std430,binding=0) readonly buffer Prim { STORE prim[]; };
 layout(std430,binding=1) writeonly buffer Dst { STORE dst[]; };
-layout(push_constant) uniform PC { int total; } pc;
+layout(push_constant) uniform PC { int total, items; } pc;
 // Monomorphization spec constants (host: fused_pointwise.cpp). PW_NS = 0 — the default, and the
 // value an empty spec vector leaves in place — keeps the runtime interpreter (pw_apply4). PW_NS in
 // [1,8] compiles a specialized unit: the driver unrolls the step loop at pipeline creation and
@@ -50,6 +52,9 @@ float pwSpecP1(int s){ if(s==0)return PW_P1_0; if(s==1)return PW_P1_1; if(s==2)r
 // the per-step kind dispatch and params folded to constants. Strict rounds every compute step
 // through pwRound4 (a kind-4 load passes through unrounded in both disciplines); fp32-chained
 // leaves steps unrounded and rounds once per stored stream (each export + the returned value).
+// Operand fetches go through the SHARED pwLoadBc4: this twin exists to specialize the step
+// count, not to re-implement addressing, and a second copy of the broadcast-class ternary
+// silently diverges from the interpreter the moment a class is added.
 vec4 pw_apply4_mono(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
   vec4 entry=pwToStore4(entryRaw);
   vec4 acc=entry; vec4 r0=vec4(0.),r1=vec4(0.),r2=vec4(0.),r3=vec4(0.);
@@ -57,30 +62,40 @@ vec4 pw_apply4_mono(vec4 entryRaw, int vecIdx){ int HW=plan.outDim[0];
   for(int s=0;s<PW_NS;++s){
     int kind=int(pwSpecK(s)>>16), code=int(pwSpecK(s)&0xffffu);
     float p0=pwSpecP0(s), p1=pwSpecP1(s);
-    int a=plan.step[s*8+2],b=plan.step[s*8+3],c=plan.step[s*8+4];
-    int dr=plan.step[s*8+5],bc=plan.step[s*8+6],bsrc=plan.step[s*8+7];
+    int a=plan.step[s*PW_STEP_FIELDS+2],b=plan.step[s*PW_STEP_FIELDS+3],c=plan.step[s*PW_STEP_FIELDS+4];
+    int dr=plan.step[s*PW_STEP_FIELDS+5],bc=plan.step[s*PW_STEP_FIELDS+6],bsrc=plan.step[s*PW_STEP_FIELDS+7];
     vec4 va,vb=vec4(0.),vc=vec4(0.);
-    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=(m==3)?vec4(pwLoad(PW_REF_OP0-a,0)):pwLoad4(PW_REF_OP0-a,(m==1)?vecIdx/HW:vecIdx); }
+    if(a<=PW_REF_OP0){ int m=bsrc==1?bc:0; va=pwLoadBc4(PW_REF_OP0-a,s,m,vecIdx,HW); }
     else if(a==PW_REF_ACC) va=acc; else if(a==PW_REF_ENTRY) va=entry;
     else if(a==PW_REF_REG0) va=r0; else if(a==PW_REF_REG0-1) va=r1; else if(a==PW_REF_REG0-2) va=r2; else va=r3;
-    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=(m==3)?vec4(pwLoad(PW_REF_OP0-b,0)):pwLoad4(PW_REF_OP0-b,(m==1)?vecIdx/HW:vecIdx); }
+    if(b<=PW_REF_OP0){ int m=bsrc==2?bc:0; vb=pwLoadBc4(PW_REF_OP0-b,s,m,vecIdx,HW); }
     else if(b==PW_REF_ACC) vb=acc; else if(b==PW_REF_ENTRY) vb=entry;
     else if(b==PW_REF_REG0) vb=r0; else if(b==PW_REF_REG0-1) vb=r1; else if(b==PW_REF_REG0-2) vb=r2; else if(b==PW_REF_REG0-3) vb=r3;
-    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=(m==3)?vec4(pwLoad(PW_REF_OP0-c,0)):pwLoad4(PW_REF_OP0-c,(m==1)?vecIdx/HW:vecIdx); }
+    if(c<=PW_REF_OP0){ int m=bsrc==3?bc:0; vc=pwLoadBc4(PW_REF_OP0-c,s,m,vecIdx,HW); }
     else if(c==PW_REF_ACC) vc=acc; else if(c==PW_REF_ENTRY) vc=entry;
     else if(c==PW_REF_REG0) vc=r0; else if(c==PW_REF_REG0-1) vc=r1; else if(c==PW_REF_REG0-2) vc=r2; else if(c==PW_REF_REG0-3) vc=r3;
     vec4 v;
-    if(kind==0)      v=pwBin4(va,vb,code);
-    else if(kind==1) v=vec4(vx_unary(va.x,code,p0,p1),vx_unary(va.y,code,p0,p1),vx_unary(va.z,code,p0,p1),vx_unary(va.w,code,p0,p1));
-    else if(kind==2) v=vec4(vx_act(va.x,code,p0,p1),vx_act(va.y,code,p0,p1),vx_act(va.z,code,p0,p1),vx_act(va.w,code,p0,p1));
-    else if(kind==3) v=vec4(va.x!=0.?vb.x:vc.x,va.y!=0.?vb.y:vc.y,va.z!=0.?vb.z:vc.z,va.w!=0.?vb.w:vc.w);
+    if(kind==PW_KIND_BINARY)      v=pwBin4(va,vb,code);
+    else if(kind==PW_KIND_UNARY) v=vec4(vx_unary(va.x,code,p0,p1),vx_unary(va.y,code,p0,p1),vx_unary(va.z,code,p0,p1),vx_unary(va.w,code,p0,p1));
+    else if(kind==PW_KIND_ACT) v=vec4(vx_act(va.x,code,p0,p1),vx_act(va.y,code,p0,p1),vx_act(va.z,code,p0,p1),vx_act(va.w,code,p0,p1));
+    else if(kind==PW_KIND_SELECT) v=vec4(va.x!=0.?vb.x:vc.x,va.y!=0.?vb.y:vc.y,va.z!=0.?vb.z:vc.z,va.w!=0.?vb.w:vc.w);
     else             v=va;
-    acc=(kind==4||PW_CHAINED!=0)?v:pwRound4(v);
+    acc=(kind==PW_KIND_LOAD||PW_CHAINED!=0)?v:pwRound4(v);
     if(dr==0)r0=acc; else if(dr==1)r1=acc; else if(dr==2)r2=acc; else if(dr==3)r3=acc;
     for(int o=0;o<plan.numOuts;++o){ if(plan.outStep[o]==s) pwStoreOut4(o,vecIdx,PW_CHAINED!=0?pwRound4(acc):acc); }
   }
   return PW_CHAINED!=0?pwRound4(acc):acc; }
+// pc.items block-pixels per lane, one slot apart, so each lane has that many INDEPENDENT operand
+// fetches in flight at once. The kernel's runtime tracks its step count rather than its byte count
+// (a unit moving a third fewer bytes costs the same), which is the signature of a chain waiting on
+// memory latency rather than one saturating bandwidth; extra operands are already free because they
+// overlap. Slots are strided by the lane count, so every item is still a coalesced wave-wide access.
 void main(){ uint gid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;
-  if(gid>=uint(pc.total)) return; vec4 v=vec4(prim[gid*4],prim[gid*4+1],prim[gid*4+2],prim[gid*4+3]);
-  vec4 o=PW_NS>0?pw_apply4_mono(v,int(gid)):pw_apply4(v,int(gid));
-  dst[gid*4]=STORE(o.x); dst[gid*4+1]=STORE(o.y); dst[gid*4+2]=STORE(o.z); dst[gid*4+3]=STORE(o.w); }
+  int slot=(pc.total+pc.items-1)/pc.items;
+  if(gid>=uint(slot)) return;
+  for(int k=0;k<pc.items;++k){
+    int i=int(gid)+k*slot;
+    if(i>=pc.total) break;
+    vec4 v=vec4(prim[i*4],prim[i*4+1],prim[i*4+2],prim[i*4+3]);
+    vec4 o=PW_NS>0?pw_apply4_mono(v,i):pw_apply4(v,i);
+    dst[i*4]=STORE(o.x); dst[i*4+1]=STORE(o.y); dst[i*4+2]=STORE(o.z); dst[i*4+3]=STORE(o.w); }}

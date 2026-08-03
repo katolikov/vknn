@@ -6,36 +6,40 @@
 #define PW_EPI_BASE 2
 #include "pw_epilogue.glsl"
 #endif
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width (env.flatLocalSize)
 layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
 layout(push_constant) uniform PC { int N, C; } pc;
-shared float red[256];
+// Reduction-scratch ceiling; must be >= the spec-0 width. The host guarantees flatLocalSize =
+// min(256, caps) in whole pow2-clamped subgroups (vk_op_env.h), so the spec width never exceeds it.
+#define WG_MAX 256
+shared float red[WG_MAX];
 
 void main() {
   int Cb = (pc.C + 3) / 4;
   int n = int(gl_WorkGroupID.x);
   int tid = int(gl_LocalInvocationID.x);
   // max over channels
-  float m = -1e30;
-  for (int cb = tid; cb < Cb; cb += 256) {
+  float m = VX_NEG_INF; // exact -inf max identity: correct even for rows entirely below any finite sentinel
+  for (int cb = tid; cb < Cb; cb += int(gl_WorkGroupSize.x)) {
     vec4 v = vec4(src[n * Cb + cb]);
     for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) m = max(m, v[l]);
   }
   red[tid] = m; barrier();
-  for (int s = 128; s > 0; s >>= 1) { if (tid < s) red[tid] = max(red[tid], red[tid + s]); barrier(); }
+  // pow2 width (host contract above), so the halving tree covers every lane exactly.
+  for (int s = int(gl_WorkGroupSize.x) / 2; s > 0; s >>= 1) { if (tid < s) red[tid] = max(red[tid], red[tid + s]); barrier(); }
   float mx = red[0]; barrier();
   // sum of exp
   float su = 0.0;
-  for (int cb = tid; cb < Cb; cb += 256) {
+  for (int cb = tid; cb < Cb; cb += int(gl_WorkGroupSize.x)) {
     vec4 v = vec4(src[n * Cb + cb]);
     for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) su += exp(v[l] - mx);
   }
   red[tid] = su; barrier();
-  for (int s = 128; s > 0; s >>= 1) { if (tid < s) red[tid] += red[tid + s]; barrier(); }
+  for (int s = int(gl_WorkGroupSize.x) / 2; s > 0; s >>= 1) { if (tid < s) red[tid] += red[tid + s]; barrier(); }
   float sum = red[0]; barrier();
   // normalize
-  for (int cb = tid; cb < Cb; cb += 256) {
+  for (int cb = tid; cb < Cb; cb += int(gl_WorkGroupSize.x)) {
     vec4 v = vec4(src[n * Cb + cb]);
     vec4 o = vec4(0.0);
     for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) o[l] = exp(v[l] - mx) / sum;

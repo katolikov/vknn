@@ -1,4 +1,5 @@
 #include "vk_buffer.h"
+#include "core/allocation_budget.h"
 #include <atomic>
 #include <string>
 #include <unistd.h>
@@ -25,6 +26,13 @@ namespace vknn { namespace vk {
         std::atomic<size_t> gPeakCount {0};
         std::atomic<size_t> gPeakBytes {0};
 
+        // Said once per process: a device either has a cached readback type or it does not.
+        std::atomic<bool> gReadbackUncachedWarned {false};
+        // The warning names a process-wide condition, so it is worth saying once, not per buffer.
+        // The threshold itself is allocationCountNearLimit (core/allocation_budget.h), which the
+        // host build can test -- no Vulkan source is compiled there.
+        std::atomic<bool> gAllocCountWarned {false};
+
         // Raise an atomic high-water mark to `v` if it currently sits lower.
         void raisePeak(std::atomic<size_t> &peak, size_t v) noexcept {
             size_t p = peak.load();
@@ -46,6 +54,33 @@ namespace vknn { namespace vk {
     }
     size_t Buffer::peakBytes() noexcept {
         return gPeakBytes.load();
+    }
+
+    size_t Buffer::deviceLocalFreeBytes(VulkanContext &ctx) noexcept {
+        if (!ctx.caps().memoryBudget)
+        {
+            return 0;
+        }
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2         props {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+        props.pNext = &budget;
+        vkGetPhysicalDeviceMemoryProperties2(ctx.physicalDevice(), &props);
+        size_t      freeBytes = 0;
+        const auto &mp        = ctx.memProps();
+        for (uint32_t heap = 0; heap < mp.memoryHeapCount; ++heap)
+        {
+            if (!(mp.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+            {
+                continue;
+            }
+            // A driver may report usage above its own budget under memory pressure; that heap
+            // contributes nothing rather than wrapping the unsigned subtraction.
+            if (budget.heapBudget[heap] > budget.heapUsage[heap])
+            {
+                freeBytes += (size_t) (budget.heapBudget[heap] - budget.heapUsage[heap]);
+            }
+        }
+        return freeBytes;
     }
 
     bool Buffer::isHostVisible(uint32_t typeIdx) const noexcept {
@@ -98,6 +133,16 @@ namespace vknn { namespace vk {
                       std::to_string(budget.heapUsage[heap] >> kBytesToMiBShift) + " MiB";
         }
         detail += ", vknn live " + std::to_string(gLiveBytes.load() >> kBytesToMiBShift) + " MiB across " + std::to_string(gLiveCount.load()) + " buffers";
+        // An allocation can fail because the driver is out of ALLOCATIONS rather than out of memory:
+        // every Buffer owns one vkAllocateMemory, and a graph spends them on weights, activation
+        // buffers and each distinct fused-pointwise plan. Naming the count against the device's
+        // limit separates that case from a genuine byte shortage, which the heap budget above
+        // reports and which would otherwise be the only reading available.
+        const uint32_t allocLimit = ctx_.caps().maxMemoryAllocationCount;
+        if (allocLimit != 0)
+        {
+            detail += " (peak " + std::to_string(gPeakCount.load()) + " of the device's " + std::to_string(allocLimit) + " allowed allocations)";
+        }
         return detail;
     }
 
@@ -107,6 +152,14 @@ namespace vknn { namespace vk {
         const size_t byt = gLiveBytes += bytes_;
         raisePeak(gPeakCount, cnt);
         raisePeak(gPeakBytes, byt);
+        // Say it while the run is still healthy: past this fraction of the device's allocation
+        // count, the next failure is likelier to be the count than the heap, and the two need
+        // different fixes. Reported once per process.
+        const uint32_t allocLimit = ctx_.caps().maxMemoryAllocationCount;
+        if (allocationCountNearLimit(cnt, allocLimit) && !gAllocCountWarned.exchange(true))
+        {
+            VKNN_WARN << "vk allocations: " << cnt << " live of the device's " << allocLimit << " allowed (>= " << kAllocCountHighWaterPercent << "%). Every buffer costs one vkAllocateMemory; further allocations may fail on COUNT while the heap still has room.";
+        }
     }
 
     void Buffer::destroy() noexcept {
@@ -179,6 +232,16 @@ namespace vknn { namespace vk {
                 // No device-local host-visible type (a discrete GPU rather than UMA): settle for any
                 // host-coherent mapping so the buffer is still CPU-reachable, just across the bus.
                 typeIdx = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            }
+            // A readback buffer that did not get HOST_CACHED is mapped write-combined: the host can
+            // write it at full speed but READS from it are uncached and run several times slower,
+            // which is the whole cost of unpacking an output. The fallback above can land there
+            // silently, so the one place that knows says it -- once, naming the shortfall rather
+            // than leaving a slow unpack to be blamed on the kernels.
+            if (pref == MemPref::kReadback && (ctx_.memProps().memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == 0 &&
+                !gReadbackUncachedWarned.exchange(true))
+            {
+                VKNN_WARN << "readback buffers are not HOST_CACHED on this device (memory type " << typeIdx << "): host reads of outputs are uncached, so unpack costs several times what the copy should.";
             }
 
             VkMemoryAllocateInfo ai {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -260,6 +323,11 @@ namespace vknn { namespace vk {
 
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(ctx_.device(), buf_, &req);
+            // The driver's own binding requirement, and the only alignment a view offset must clear
+            // to exist: 4 bytes on the target GPUs. It says nothing about the width of the loads a
+            // kernel will issue through the view — a binding declared as a vec4/f16vec4 array needs
+            // the whole vector's byte alignment, which baseAlignedTo() answers and every vectorized
+            // kernel pick consults before it may run.
             if (req.alignment != 0 && off % req.alignment != 0)
             {
                 throw Error(Status::Unsupported, "sub-buffer view offset " + std::to_string(off) + " violates alignment " + std::to_string(req.alignment));

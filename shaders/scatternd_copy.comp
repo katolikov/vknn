@@ -2,7 +2,7 @@
 #include "precision.glsl"
 // ScatterND copy pass: element-wise copy of the data tensor (STORE, fp16/fp32) before the scatter.
 #include "common.glsl"
-layout(local_size_x = 256) in;
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec = device-resolved family width
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
 layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { uint count; } pc;

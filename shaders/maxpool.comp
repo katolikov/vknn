@@ -18,7 +18,7 @@ void main() {
   int oy = (int(gid) / pc.OW) % pc.OH;
   int cb = (int(gid) / (pc.OW * pc.OH)) % Cb;
   int n = int(gid) / (pc.OW * pc.OH * Cb);
-  vec4 m = vec4(-3.4e38);
+  vec4 m = vec4(VX_NEG_INF);
   for (int ky = 0; ky < pc.KH; ++ky) {
     int iy = oy * pc.SH - pc.PT + ky;
     if (iy < 0 || iy >= pc.H) continue;

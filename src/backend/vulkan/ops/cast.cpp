@@ -7,15 +7,24 @@
 // [0,255], the wide targets (INT32/INT64/UINT32/UINT64) truncate only. supportsNode runs int64 -> the
 // scalar/narrow targets on the GPU (the int64 lanes decode to compute-precision float at the pack
 // boundary); INT16/UINT16 are not distinct vknn dtypes (they map to fp32 storage) and take the copy path.
+#include "backend/vulkan/vk_tune_race.h"
+#include "dispatch_extent.h"
+#include "flat_ops.h" // flat::quadBindingsAligned (the vec4 base gate every quad pick applies)
 #include "vk_op_common.h"
+#include "vknn/error.h"
+#include "vknn/logging.h"
 #include "vknn/op.h"
 #include <limits>
 
 namespace vknn {
     namespace {
 
-        // Local workgroup size along x; matches local_size_x in shaders/cast.comp.
-        constexpr uint32_t kCastLocalSize = 256;
+        // Elements per lane-quad of the vectorized cast kernel (whole-vec4 load/store); mirrors
+        // CAST_QUAD in shaders/cast_v4.comp.
+        constexpr int kCastQuad = 4;
+        // Tune-table values of the cast kernel pick (append-only).
+        constexpr int kCastKernelScalar = 0; ///< cast: one element per lane.
+        constexpr int kCastKernelQuad   = 1; ///< cast_v4: one whole-vec4 quad per lane.
 
         struct CastOp: VulkanOp {
             struct PC {
@@ -23,9 +32,73 @@ namespace vknn {
                 float lo, hi;
                 int   mode; // 0 = wide (clamp to fence inf/NaN), 1 = INT8 wrap, 2 = UINT8 saturate
             } pc {};
-            bool                                 truncate = false;
+            bool truncate = false;
+            // cast_v4 (one whole-vec4 quad per lane) when the cached race picked it; the scalar
+            // kernel otherwise. Byte-identical either way (see pickCastQuad).
+            bool                                 quadKernel = false;
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input is a constant initializer
+
+            // The scalar and quad cast kernels are byte-interchangeable: castOne is the scalar
+            // kernel's body per component, at the same element index, with the same rounding. The
+            // pick is therefore placement-only and follows the standard cached race
+            // (fused_pointwise.cpp pickFlatQuad): Tuning::None keeps the scalar kernel (the
+            // deterministic default), Fast/Heavy race both once on dedicated scratch through
+            // TuneTimer/raceCandidates and persist the winner; the quad challenger must clear
+            // vk::kTuneRaceMargin to displace the incumbent. raceTotal is the output's logical
+            // element count — record()'s physical count can add NC4HW4 channel padding, which
+            // moves the raced workload by at most the pad fraction and the bytes not at all (the
+            // pick is placement-only).
+            bool pickCastQuad(VkOpEnv &env, const Node &node, int raceTotal) {
+                if (raceTotal <= 0)
+                {
+                    return false;
+                }
+                // cast_v4 re-types BOTH bindings as STORE_QUAD, so both bases must be whole
+                // vectors. The gate precedes the tune cache: a cached verdict keys on the
+                // signature, which carries no buffer identity, so a quad verdict recorded for an
+                // aligned node must not be replayed onto a zero-copy view that is not.
+                if (!flat::quadBindingsAligned(env, {node.inputs[0], node.outputs[0]}))
+                {
+                    return false;
+                }
+                char buf[64];
+                snprintf(buf, sizeof(buf), "cast_%d_%d_%d", raceTotal, pc.mode, env.useFp16 ? 1 : 0);
+                std::string sig = env.gpuTag + "/" + buf;
+                int         reuse;
+                if (env.reuseTuned(sig, reuse) && (reuse == kCastKernelScalar || reuse == kCastKernelQuad))
+                {
+                    return reuse == kCastKernelQuad;
+                }
+                if (env.tuning == Tuning::None || !env.runner)
+                {
+                    return false;
+                }
+                const size_t es = (size_t) (env.useFp16 ? 2 : 4);
+                auto         mk = [&](size_t bytes) {
+                    return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
+                };
+                auto          sSrc = mk((size_t) raceTotal * es);
+                auto          sDst = mk((size_t) raceTotal * es);
+                vk::TuneTimer timer(env);
+                PC            rpc = pc;
+                rpc.total         = raceTotal;
+                auto       ms     = vk::raceCandidates(2, [&](int index) {
+                    const bool q = index == kCastKernelQuad;
+                    auto       racePipe = env.pipeline(shader(q ? "cast_v4" : "cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
+                    const int  lanes = q ? (raceTotal + kCastQuad - 1) / kCastQuad : raceTotal;
+                    return timer.time([&](VkCommandBuffer cmd) {
+                        racePipe->dispatch(cmd, {sSrc->handle(), sDst->handle()}, &rpc, sizeof(rpc), groups(lanes, env.flatLocalSize));
+                    });
+                });
+                const bool won    = ms.size() == 2 && ms[kCastKernelQuad] < ms[kCastKernelScalar] * vk::kTuneRaceMargin;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, won ? kCastKernelQuad : kCastKernelScalar, (int) env.tuning);
+                }
+                VKNN_DEBUG << "autotune " << sig << " -> " << (won ? "quad" : "scalar") << vk::raceTimes(ms);
+                return won;
+            }
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 int64_t to = node.attr.geti("to", 1); // ONNX TensorProto dtype
@@ -80,9 +153,17 @@ namespace vknn {
                 }
                 if (truncate)
                 {
-                    // 2 SSBO bindings (src, dst); the empty spec-constant vector leaves cast.comp
-                    // unspecialized (local_size_x is fixed at kCastLocalSize in the shader, matching groups() below).
-                    pipe = env.pipeline(shader("cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {});
+                    // The kernels address elements with int32 push constants and int32 index math, so
+                    // an output past that domain cannot be dispatched correctly (dispatch_extent.h).
+                    const int64_t outputElements = numElements(env.graph->desc(node.outputs[0]).shape);
+                    if (!flat::dispatchExtentFits(outputElements))
+                    {
+                        throw Error(Status::Unsupported, flat::dispatchExtentRefusal("Cast '" + node.name + "'", "output element count", outputElements));
+                    }
+                    // 2 SSBO bindings (src, dst); the spec constant pins both kernels to the
+                    // device-resolved width (spec 0 = env.flatLocalSize, matching groups() below).
+                    quadKernel = pickCastQuad(env, node, (int) outputElements);
+                    pipe       = env.pipeline(shader(quadKernel ? "cast_v4" : "cast", env.useFp16), 2, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -97,11 +178,23 @@ namespace vknn {
                     vkCmdCopyBuffer(cmd, src->handle(), dst->handle(), 1, &c);
                     return;
                 }
-                // Truncate every storage slot of the output buffer (element-wise, layout-agnostic; NC4HW4
+                // Truncate every storage slot BOTH buffers hold (element-wise, layout-agnostic; NC4HW4
                 // channel padding is truncated harmlessly). elemSize matches the compute precision.
-                int elemSize = env.useFp16 ? 2 : 4;
-                pc.total     = (int) (dst->bytes() / elemSize);
-                pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), groups(pc.total, kCastLocalSize));
+                // The lane count follows the smaller allocation: a pooled activation slot keeps the
+                // larger-or-equal capacity of the freed slot it reuses, so a count taken from the
+                // destination alone reads past the end of an exactly-sized source. Both allocations
+                // are at least the tensor's footprint, so every real and padded element is still cast.
+                const int     elemSize = env.useFp16 ? 2 : 4;
+                const int64_t elements = flat::sharedElementCapacity(src->bytes(), dst->bytes(), elemSize);
+                if (!flat::dispatchExtentFits(elements))
+                {
+                    throw Error(Status::Unsupported, flat::dispatchExtentRefusal("Cast '" + node.name + "'", "storage element count", elements));
+                }
+                pc.total = (int) elements;
+                // Lane count: elements for the scalar kernel, whole quads for the vectorized twin
+                // (which re-derives its quad count from pc.total).
+                const int laneSteps = quadKernel ? (pc.total + kCastQuad - 1) / kCastQuad : pc.total;
+                pipe->dispatch(cmd, {src->handle(), dst->handle()}, &pc, sizeof(pc), groups(laneSteps, env.flatLocalSize));
             }
         };
 

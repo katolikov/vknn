@@ -55,6 +55,10 @@ namespace vknn {
     /// Channel-block width of the NC4HW4 boundary layout: channels are packed in groups of four.
     inline constexpr int64_t kNC4Block = 4;
 
+    /// Rank of the canonical NCHW view: the rank a shape right-aligns into for broadcast
+    /// classification and NC4HW4 packing (leading missing axes read as 1).
+    inline constexpr size_t kNchwRank = 4;
+
     /// Number of channel blocks (of kNC4Block channels each) needed to hold `c` channels in NC4HW4,
     /// rounding up so a partial final block is counted.
     /// @param c Logical channel count.

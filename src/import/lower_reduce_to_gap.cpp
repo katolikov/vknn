@@ -7,14 +7,15 @@ namespace vknn {
     // generic Reduce (the flat kernel). The importer maps ONNX ReduceMean to Reduce unconditionally,
     // so this runs once input ranks are known.
     void lowerReduceToGap(Graph &g) {
-        int lowered = 0;
+        int               lowered = 0;
+        std::vector<Node> reshapes; // appended after the walk so the node vector is not resized under it
         for (auto &n: g.nodes)
         {
             if (n.type != OpType::Reduce || (ReduceType) n.subOp != ReduceType::Mean)
             {
                 continue;
             }
-            if (n.inputs.empty() || n.inputs[0] == kNoTensor || n.attr.geti("keepdims", 1) == 0)
+            if (n.inputs.empty() || n.inputs[0] == kNoTensor)
             {
                 continue;
             }
@@ -37,9 +38,55 @@ namespace vknn {
             {
                 continue;
             }
+            // keepdims=0 drops the reduced axes, which GlobalAvgPool keeps as [N,C,1,1]. The values
+            // are the same means either way, so the difference is metadata: pool, then Reshape to the
+            // shape the graph declared. A Reshape is layout-agnostic and stores no bytes, so the
+            // reduction still runs blocked instead of dragging the whole chain onto the flat path.
+            const bool     keepDims = n.attr.geti("keepdims", 1) != 0;
+            const TensorId out      = n.outputs[0];
+            if (!keepDims)
+            {
+                TensorDesc pooled    = g.desc(out);
+                pooled.name          = g.desc(out).name + "#pooled";
+                pooled.shape         = {in[0], in[1], 1, 1};
+                pooled.isOutput      = false;
+                pooled.isInitializer = false;
+                const TensorId mid   = g.addTensor(pooled);
+                // Reshape reads its target from input 1, as an int64 initializer; a Reshape without
+                // one has no shape to infer and every consumer downstream then works on an empty one.
+                const Shape &decl = g.desc(out).shape;
+                TensorDesc   sd;
+                sd.name                = g.desc(out).name + "#shape";
+                sd.shape               = {(int64_t) decl.size()};
+                sd.dtype               = DType::Int64;
+                sd.isInitializer       = true;
+                const TensorId shapeId = g.addTensor(sd);
+                HostBuffer     hb;
+                hb.resizeElems((int64_t) decl.size(), DType::Int64);
+                for (size_t k = 0; k < decl.size(); ++k)
+                {
+                    hb.i64()[k] = decl[k];
+                }
+                g.initializers[shapeId] = std::move(hb);
+                Node shape;
+                shape.type    = OpType::Reshape;
+                shape.name    = n.name + "_keepdims";
+                shape.inputs  = {mid, shapeId};
+                shape.outputs = {out};
+                n.outputs[0]  = mid;
+                reshapes.push_back(std::move(shape));
+            }
             n.type = OpType::GlobalAvgPool;
             n.inputs.resize(1); // drop an axes initializer input; GAP reads the data tensor only
             lowered++;
+        }
+        if (!reshapes.empty())
+        {
+            for (Node &r: reshapes)
+            {
+                g.nodes.push_back(std::move(r));
+            }
+            g.topoSort();
         }
         if (lowered)
         {

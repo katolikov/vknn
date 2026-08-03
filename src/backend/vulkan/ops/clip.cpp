@@ -1,12 +1,17 @@
-// Flat elementwise Clip on the GPU. Bounds (min=input[1], max=input[2]) are constant scalars read
-// in prepare() and baked into the push constant; an absent bound is -/+inf. Runs on the flat
-// row-major path (the geometry-tail Clip is a rank-6 tensor that can't be NC4HW4-packed).
+// Elementwise Clip on the GPU. Bounds (min=input[1], max=input[2]) are constant scalars read in
+// prepare() and baked into the push constant; an absent bound is -/+inf.
+//
+// A clamp reads element i and writes element i, so it computes the same answer whatever layout its
+// tensor carries -- the layout pass therefore lets it ADOPT its input's, and a Clip between blocked
+// neighbours needs no converts. What it must respect is the STORED element count: a blocked buffer
+// pads its channel axis, and walking the logical count would leave those lanes undefined.
 //
 // When a bound is a RUNTIME tensor (computed min/max, not an initializer) the value isn't known in
 // prepare(), so the op switches to clip_rt.comp: the bounds bind as single-element SSBOs read at
 // dispatch. An absent or constant bound in that path is materialised as a one-element buffer holding
 // the -/+inf or the fixed value, so the shader always reads binding 1/2. The all-constant/absent case
 // keeps the baked push-constant kernel (clip.comp) byte-for-byte unchanged.
+#include "blocked_extent.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <limits>
@@ -62,7 +67,7 @@ namespace vknn {
                 {
                     pc.hi = node.attr.getf("max", pc.hi);
                 }
-                pc.total   = (int) numElements(g.desc(node.outputs[0]).shape);
+                pc.total   = (int) storedElemCount(g.desc(node.outputs[0]).shape, g.desc(node.outputs[0]).gpuFlat);
                 rtpc.total = pc.total;
 
                 runtime = runtimeBound(g, node, 1) || runtimeBound(g, node, 2);

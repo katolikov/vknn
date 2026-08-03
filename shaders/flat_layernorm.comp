@@ -9,16 +9,17 @@
 // of the row's `norm` elements through LDS (fp32), so a wide row (norm = 1024 in the encoder) is
 // parallelised across the workgroup instead of walked by one thread. Row index spans a 2D workgroup
 // grid (ComputePipeline::dispatch spills the count into y past the per-dim limit).
-#define WG 256
-layout(local_size_x = WG) in;
+#define WG_MAX 256                        // shared-array size = the width ceiling
+#define WG int(gl_WorkGroupSize.x)         // running width: spec 0, resolved at load (pow2)
+layout(local_size_x = 256, local_size_x_id = 0) in;
 layout(std430, binding = 0) readonly buffer S { STORE s[]; };
 layout(std430, binding = 1) readonly buffer G { STORE gamma[]; };
 layout(std430, binding = 2) readonly buffer B { STORE beta[]; };
 layout(std430, binding = 3) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int outer, norm, hasBeta; float eps; } pc;
 
-shared float rsum[WG];
-shared float rsq[WG];
+shared float rsum[WG_MAX];
+shared float rsq[WG_MAX];
 
 void main() {
   uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;

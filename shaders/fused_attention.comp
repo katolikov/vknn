@@ -18,6 +18,14 @@
 // SCORETOTAL == G*CHUNK size the shared arrays (the host computes the products; two spec constants
 // cannot multiply in an array size).
 #define WG 256
+// Floats of one partial-record header before the hd accumulator lanes: {chunk max m,
+// weight sum l}. Mirrors the host scratch allocation rows * chunks * (hd + FA_PART_HDR)
+// (kFaPartialHeaderFloats, src/backend/vulkan/ops/fused_attention.cpp); the two must
+// change together or every partial lands in the wrong chunk slot with plausible values.
+// Header slot of the chunk weight sum l; the chunk max m sits at the record base.
+// Mirrors FA_PART_L in shaders/fused_attention_combine.comp, which reads these records.
+#define FA_PART_L 1
+#define FA_PART_HDR 2
 layout(constant_id = 0) const int G = 1;
 layout(constant_id = 1) const int HD = 64;
 layout(constant_id = 2) const int CHUNK = 256;
@@ -113,7 +121,7 @@ void main() {
 
   // Per group member: chunk softmax over the shared scores, then the p.V partial.
   for (int gi = 0; gi < G; ++gi) {
-    float localMax = -3.4e38;
+    float localMax = -3.4e38; // finite ~-FLT_MAX seed: scores are finite and far above it, so a real score always replaces it (byte-equal to the exact -inf identity here)
     for (int t = tid; t < sLen; t += WG) localMax = max(localMax, sScores[gi * CHUNK + t]);
     sRed[tid] = localMax;
     barrier();
@@ -164,12 +172,12 @@ void main() {
 
     // Partial slot for (attention row, chunk): {m, l, acc[hd]}.
     int row = rowBase + gi * pc.groupStrideRow;
-    int pBase = (row * pc.chunks + chunk) * (pc.hd + 2);
+    int pBase = (row * pc.chunks + chunk) * (pc.hd + FA_PART_HDR);
     if (tid == 0) {
       part[pBase] = m;
-      part[pBase + 1] = l;
+      part[pBase + FA_PART_L] = l;
     }
-    for (int i = tid; i < pc.hd; i += WG) part[pBase + 2 + i] = sAcc[i];
+    for (int i = tid; i < pc.hd; i += WG) part[pBase + FA_PART_HDR + i] = sAcc[i];
     barrier(); // sScores/sRed/sAcc are reused by the next group member
   }
 }

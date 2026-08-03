@@ -578,8 +578,11 @@ TEST(OpDescriptor, LayoutClassAgreesWithGpuFlatNode) {
         switch (t)
         {
             case OpType::ConvTranspose:
+            case OpType::DepthToSpace:
             case OpType::Pad:
             case OpType::Gather:
+            case OpType::Reduce:
+            case OpType::Slice:
             case OpType::Split:
             case OpType::ScatterND:
             case OpType::TopK:

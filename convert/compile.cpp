@@ -80,6 +80,7 @@
 // processing EVERY bucket of a multi-bucket container and preserving bucket order and names.
 // (No widened bucket is appended on this path: the stored graphs carry no re-importable source, and
 // each bucket's passes are baked at its own shape.)
+#include "compile_cli.h"
 #include "core/vk_gates.h"
 #include "import/dim_expr.h"
 #include "import/passes.h"
@@ -466,8 +467,8 @@ static void runFp16Pass(std::vector<Graph> &buckets, const std::vector<std::stri
     for (size_t b = 0; b < buckets.size(); ++b)
     {
         const Fp16ConvertStats st = convertInitializersFp16(buckets[b]);
-        printf("[compile] fp16: bucket %zu '%s': converted %lld weights (%lld kept non-fp32), %.0f MB -> %.0f MB\n", b, b < labels.size() ? labels[b].c_str() : "",
-               (long long) st.converted, (long long) st.kept, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
+        printf("[compile] fp16: bucket %zu '%s': converted %lld weights (%lld kept non-fp32, %lld coordinate-class), %.0f MB -> %.0f MB\n", b,
+               b < labels.size() ? labels[b].c_str() : "", (long long) st.converted, (long long) st.kept, (long long) st.keptCoord, st.bytesBefore / 1e6, st.bytesAfter / 1e6);
     }
 }
 
@@ -515,14 +516,11 @@ static void appendWidenedDecodeBuckets(std::vector<Graph> &buckets, std::vector<
 }
 
 int main(int argc, char **argv) {
-    // Before any other parsing, so --version needs no model argument.
-    for (int i = 1; i < argc; ++i)
+    // Answered before anything else parses, so `--version` works with no model argument.
+    if (compileVersionRequested(argc, argv))
     {
-        if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V"))
-        {
-            printf("vknn %s\n", vknnVersion());
-            return 0;
-        }
+        printf("vknn %s\n", vknnVersion());
+        return 0;
     }
     // `--graph` selects the multi-graph form: no positional input model, one source graph per
     // occurrence, all compiled into one multi-bucket .vxm over a shared initializer pool.
@@ -543,8 +541,9 @@ int main(int argc, char **argv) {
                "[--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
                "   or: %s <out.vxm> --graph \"FILE.onnx[;NAME=D0xD1x...;dim:NAME2=VALUE;...]\" [--graph ...] [shared flags as above]\n"
                "       each --graph occurrence compiles ONE bucket from its file (with its own shape/dim segments);\n"
-               "       all buckets share one initializer pool in a single multi-graph .vxm\n",
-               argv[0], argv[0]);
+               "       all buckets share one initializer pool in a single multi-graph .vxm\n"
+               "   or: %s --version | -V     print the engine version and exit\n",
+               argv[0], argv[0], argv[0]);
         return 1;
     }
     const int   flagStart = graphMode ? 2 : 3;

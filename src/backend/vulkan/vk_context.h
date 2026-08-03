@@ -33,8 +33,20 @@ namespace vknn { namespace vk {
         // Largest push-constant block the device accepts; the Vulkan-guaranteed floor is 128 B
         // and some kernel PC blocks exceed it, so ComputePipeline validates against this cap.
         uint32_t maxPushConstantsSize = 0;
-        float    timestampPeriod      = 0.f;
-        bool     timestampSupported   = false;
+        // Live vkAllocateMemory allocations the driver permits at once. Every vk::Buffer owns one,
+        // and a model spends them on weights, activation buffers and each DISTINCT fused-pointwise
+        // plan, so a large graph can exhaust the count while the heap still has room; the failure
+        // then arrives as an allocation error with no hint that COUNT, not bytes, ran out. The
+        // Vulkan floor is 4096, which mobile drivers typically report verbatim.
+        uint32_t maxMemoryAllocationCount = 0;
+        /// Byte alignment vkBindBufferMemory demands of a buffer's memory offset, as the driver
+        /// reports it for a storage buffer. A zero-copy slice can only alias into an arena at a
+        /// multiple of this, so with 4 here an fp16 tensor may begin at an even element index and no
+        /// other -- an odd one is unbindable, not merely slower. The segment planner consults it
+        /// before deciding to alias, so a view that could not bind is never planned.
+        uint32_t bufferBindAlignment = 0;
+        float    timestampPeriod     = 0.f;
+        bool     timestampSupported  = false;
 
         // Feature flags we exploit
         bool shaderFloat16 = false;
@@ -168,6 +180,7 @@ namespace vknn { namespace vk {
         void createInstance();
         void selectPhysicalDevice();
         void queryCaps();
+        void queryBufferBindAlignment();
         void createDevice();
 
         VkInstance                       instance_    = VK_NULL_HANDLE;

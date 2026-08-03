@@ -1,0 +1,139 @@
+#version 450
+#define VKNN_NO_RTE 1 // stores round via vknnRte16: must match the scalar twin's per-element rounding exactly
+#include "precision.glsl"
+// Vectorized twin of flat_binary: a lane processes FLAT_MOVE_QUAD CONSECUTIVE output elements, so
+// the store is one whole-vec4 transaction — and on the bothFull path (both operands same shape as
+// the output, index == gid) BOTH operand fetches are whole-vec4 loads too, making that path pure
+// bandwidth. A broadcast operand's index is a per-axis linear form of the output coordinate, so
+// within one innermost-output-axis row the shared rank walk runs ONCE per quad and each operand
+// steps by ITS OWN innermost stride (0 on a broadcast axis, which collapses that operand to a
+// single load). A quad straddling a row boundary runs the scalar kernel's four independent walks
+// instead. Indices, per-element op order and rounding are identical to flat_binary for every
+// element, so the two variants are byte-interchangeable and the host (flat::Binary::pickQuad) may
+// pick either on measured speed alone. The tail quad (total not a multiple of FLAT_MOVE_QUAD)
+// runs the scalar body per element behind a bounds guard; component indexing of the vec4 SSBO
+// element compiles to scalar accesses, so the tail never reads or writes past total.
+#include "common.glsl"
+// Storage vector of FLAT_MOVE_QUAD consecutive elements (the fp32 variant stores plain vec4).
+#ifdef USE_FP16
+#define STORE_QUAD f16vec4
+#else
+#define STORE_QUAD vec4
+#endif
+// Elements per lane-quad; mirrored by kFlatMoveQuad in src/backend/vulkan/ops/flat_ops.h.
+#define FLAT_MOVE_QUAD 4
+layout(local_size_x = 256, local_size_x_id = 0) in; // spec 0 = device-resolved family width
+// The operands are vec4-typed for the bothFull whole-vec4 loads; a broadcast operand's
+// arbitrary-index element reads through component indexing, which compiles to a scalar access of
+// the same bytes the scalar kernel's a[i]/b[i] read.
+layout(std430, binding = 0) readonly  buffer A { STORE_QUAD a4[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE_QUAD b4[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE_QUAD d4[]; }; // whole-vec4 stores over consecutive elements
+layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;    // outDim = g[0..rank), aStride = g[rank..2*rank), bStride = g[2*rank..3*rank)
+// Same push-constant contract as flat_binary.comp.
+layout(push_constant) uniform PC {
+  int rank, total, op;
+  int act; float actLo, actHi;
+  int bothFull; // both operands same shape as output => index == gid (skip the stride loop)
+} pc;
+
+// ITEMS quads per lane, one slot apart — the scalar twin's walk, over quads. The movement family
+// pins ITEMS = 1 (flat_ops.h kMovementItemsPerLane); the spec constant stays so a future shape
+// rule can re-enable the walk per node without a kernel change.
+layout(constant_id = 1) const int ITEMS = 1;
+
+// Element i of a vec4-typed operand buffer; compiles to one scalar access.
+float loadA(int i) { return float(a4[i / FLAT_MOVE_QUAD][i % FLAT_MOVE_QUAD]); }
+float loadB(int i) { return float(b4[i / FLAT_MOVE_QUAD][i % FLAT_MOVE_QUAD]); }
+
+// The scalar kernel's per-element combine (flat_binary.comp processOne's store expression).
+STORE combine(float a, float b) {
+  return TO_STORE(vx_act(vx_binary(a, b, pc.op), pc.act, pc.actLo, pc.actHi));
+}
+
+// The scalar kernel's per-axis operand-index resolution (flat_binary.comp processOne's stride
+// loop): identical statements.
+void binaryIndices(int gid, out int ai, out int bi) {
+  int rem = gid;
+  ai = 0; bi = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    ai += c * geom.g[pc.rank + k];
+    bi += c * geom.g[2 * pc.rank + k];
+  }
+}
+
+// The scalar kernel's per-element body, value-returning: identical statements with the store
+// lifted to the caller.
+STORE binaryOne(int gid) {
+  int ai = gid, bi = gid;
+  if (pc.bothFull == 0) binaryIndices(gid, ai, bi);
+  return combine(loadA(ai), loadB(bi));
+}
+
+void processQuad(int q) {
+  int e0 = q * FLAT_MOVE_QUAD;
+  if (e0 + FLAT_MOVE_QUAD > pc.total) {
+    // Tail quad: the scalar body per element behind the bounds guard; component stores compile to
+    // scalar accesses, so nothing writes past total.
+    for (int j = 0; j < FLAT_MOVE_QUAD; ++j) {
+      if (e0 + j >= pc.total) break;
+      d4[q][j] = binaryOne(e0 + j);
+    }
+    return;
+  }
+  if (pc.bothFull != 0) {
+    // Both operands contiguous at the output index: two whole-vec4 loads and one whole-vec4
+    // store — the pure-bandwidth case.
+    STORE_QUAD aq = a4[q], bq = b4[q];
+    d4[q] = STORE_QUAD(combine(float(aq.x), float(bq.x)), combine(float(aq.y), float(bq.y)),
+                       combine(float(aq.z), float(bq.z)), combine(float(aq.w), float(bq.w)));
+    return;
+  }
+  // Row-interior full quad: the four output coordinates share every axis but the innermost, and
+  // each operand's index is linear in the innermost coordinate — one shared walk resolves the
+  // quad and each operand steps by its own innermost stride (0 on a broadcast axis collapses
+  // that operand to a single load). (pc.rank == 0 never reaches here: its total is 1, which the
+  // tail path above handles.)
+  int lastDim = geom.g[pc.rank - 1];
+  int lastPos = e0 - (e0 / lastDim) * lastDim;
+  if (lastPos + FLAT_MOVE_QUAD <= lastDim) {
+    int ai, bi;
+    binaryIndices(e0, ai, bi);
+    int   aSt = geom.g[2 * pc.rank - 1], bSt = geom.g[3 * pc.rank - 1];
+    float a0, a1, a2, a3, b0, b1, b2, b3;
+    if (aSt == 0) { // innermost axis broadcast: one value serves the quad
+      a0 = loadA(ai); a1 = a0; a2 = a0; a3 = a0;
+    } else {
+      a0 = loadA(ai); a1 = loadA(ai + aSt); a2 = loadA(ai + 2 * aSt); a3 = loadA(ai + 3 * aSt);
+    }
+    if (bSt == 0) {
+      b0 = loadB(bi); b1 = b0; b2 = b0; b3 = b0;
+    } else {
+      b0 = loadB(bi); b1 = loadB(bi + bSt); b2 = loadB(bi + 2 * bSt); b3 = loadB(bi + 3 * bSt);
+    }
+    d4[q] = STORE_QUAD(combine(a0, b0), combine(a1, b1), combine(a2, b2), combine(a3, b3));
+    return;
+  }
+  // Row-straddling quad: the scalar kernel's four independent per-element walks; the store stays
+  // one whole-vec4 transaction.
+  d4[q] = STORE_QUAD(binaryOne(e0), binaryOne(e0 + 1), binaryOne(e0 + 2), binaryOne(e0 + 3));
+}
+
+void main() {
+  uint lane = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int quadTotal = (pc.total + FLAT_MOVE_QUAD - 1) / FLAT_MOVE_QUAD;
+  if (ITEMS == 1) {
+    if (lane >= uint(quadTotal)) return;
+    processQuad(int(lane));
+    return;
+  }
+  uint slot = (uint(quadTotal) + uint(ITEMS) - 1u) / uint(ITEMS);
+  if (lane >= slot) return;
+  for (int it = 0; it < ITEMS; ++it) {
+    uint q = lane + uint(it) * slot;
+    if (q >= uint(quadTotal)) break;
+    processQuad(int(q));
+  }
+}

@@ -53,7 +53,7 @@ namespace vknn {
                 setup(node.inputs[0], 0);
                 setup(node.inputs[1], 1);
                 geom = flat::uploadFlatGeom(env, {outDim, aStride, bStride});
-                pipe = env.pipeline(shader("greater", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {});
+                pipe = env.pipeline(shader("greater", env.useFp16), 4, sizeof(PC), std::vector<uint32_t> {env.flatLocalSize});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -61,7 +61,7 @@ namespace vknn {
                     return constBuf[e] ? constBuf[e].get() : env.devBuf(node.inputs[e]);
                 };
                 // One flat invocation per output element; greater.comp is local_size_x=256 == flat::kFlatLocalSize.
-                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                pipe->dispatch(cmd, {buf(0)->handle(), buf(1)->handle(), env.devBuf(node.outputs[0])->handle(), geom->handle()}, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
             }
         };
 

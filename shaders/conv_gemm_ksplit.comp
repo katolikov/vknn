@@ -16,12 +16,7 @@
 // Dispatch: (ceil(Cout/TN), ceil(OH*OW/TM), N*S).
 
 layout(constant_id = 0) const int TM = 64;
-#define TM_MAX 64
-#define TN 64
-#define TK 16
-#define TILE 16        // threads per dim (16x16 = 256)
-#define RM (TM / TILE) // output pixels per thread: 1, 2, or 4
-#define RN (TN / TILE) // 4 output channels per thread = one NC4 block
+#include "conv_gemm_tiles.glsl"
 
 #ifdef USE_FP16
 #define STORE4 f16vec4

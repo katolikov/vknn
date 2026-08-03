@@ -21,7 +21,7 @@ layout(constant_id = 0) const int OCB = 1;   // output channel-blocks (of 4 oc) 
 layout(constant_id = 1) const int WTILE = 4; // outputs per thread along the kernel axis
 layout(constant_id = 2) const int KAXIS = 0; // 0 = kernel runs along x (1xK), 1 = along y (Kx1)
 layout(constant_id = 3) const int KLEN = 3;  // kernel taps along that axis
-layout(local_size_x = 64) in;
+layout(local_size_x = 64, local_size_x_id = 4) in; // trailing spec = device-resolved lane width (env.convLocalSize)
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };

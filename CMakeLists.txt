@@ -201,8 +201,14 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     # Each PW_EPI build comes in two rounding disciplines selected at compile time (a runtime
     # branch would carry both bodies in every kernel): the strict per-step-rounded "_epi" and the
     # fp32-chained "_epi_rx" (-DPW_RELAX, for units carrying the pw_relax attr):
-    #   plain/templated <stem>.comp      -> <stem>_epi[_rx].spv (+ <stem>_epi[_rx]_fp16.spv when templated)
-    #   hand-written    <stem>_fp16.comp -> <stem>_epi[_rx]_fp16.spv
+    # A third compile-time axis is the broadcast-class group. The geometric classes resolve an
+    # operand by first recovering the store's (n, channel-block, h, w), a division chain that inlines
+    # into every hosting kernel, and most chains never use one -- so each discipline also builds a
+    # "_dc" twin carrying the direct group alone. The choice is made per node at RECORD time from the
+    # plan's own classes (PwEpi::suffix), never by refusing to attach: refusing splits the unit, and
+    # a split rounds its intermediate through fp16 storage and changes the answer.
+    #   plain/templated <stem>.comp      -> <stem>_epi[_dc][_rx].spv (+ _fp16 when templated)
+    #   hand-written    <stem>_fp16.comp -> <stem>_epi[_dc][_rx]_fp16.spv
     list(FIND _epi_stems ${_name} _epiPlain)
     list(FIND _rx_standalone ${_name} _rxAlone)
     if(_epiPlain GREATER -1)
@@ -211,28 +217,37 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         if(_relax STREQUAL "_rx")
           set(_relaxFlag "-DPW_RELAX=1")
         endif()
-        set(_spvEpi ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_relax}.spv)
+        foreach(_cls "" "_dc")
+          set(_clsFlag "")
+          if(_cls STREQUAL "_dc")
+            set(_clsFlag "-DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT")
+          endif()
+        set(_spvEpi ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_cls}${_relax}.spv)
         add_custom_command(
           OUTPUT ${_spvEpi}
-          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -o ${_spvEpi} ${_comp}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} ${_clsFlag} -o ${_spvEpi} ${_comp}
           DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
-          COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -> ${_name}_epi${_relax}.spv"
+          COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} ${_clsFlag} -> ${_name}_epi${_cls}${_relax}.spv"
           VERBATIM)
         list(APPEND _spv_files ${_spvEpi})
         if(_src MATCHES "precision.glsl")
-          set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_relax}_fp16.spv)
+          set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_name}_epi${_cls}${_relax}_fp16.spv)
           add_custom_command(
             OUTPUT ${_spvEpi16}
-            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
+            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} ${_clsFlag} -DUSE_FP16=1 -o ${_spvEpi16} ${_comp}
             DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
-            COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -DUSE_FP16 -> ${_name}_epi${_relax}_fp16.spv"
+            COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} ${_clsFlag} -DUSE_FP16 -> ${_name}_epi${_cls}${_relax}_fp16.spv"
             VERBATIM)
           list(APPEND _spv_files ${_spvEpi16})
         endif()
+        endforeach()
       endforeach()
     elseif(_rxAlone GREATER -1)
       # fused_pw_* compile the strict discipline as the base name (rule above); add the _rx twin
-      # and its fp16 form.
+      # and its fp16 form, and a "_dc" build of each for units whose every step resolves a DIRECT
+      # broadcast class. The geometric arms live inside the per-element resolvers, so a unit that
+      # never reaches them still pays for them; fused_pointwise.cpp picks the narrow build by the
+      # plan's classes and falls back to the full one, which keeps every class compiled in.
       set(_spvRx ${VKNN_SHADER_GEN_DIR}/${_name}_rx.spv)
       add_custom_command(
         OUTPUT ${_spvRx}
@@ -241,6 +256,31 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
         COMMENT "compile ${_name}.comp -DPW_RELAX -> ${_name}_rx.spv"
         VERBATIM)
       list(APPEND _spv_files ${_spvRx})
+      # The direct-class builds: one per rounding discipline, each with its fp16 twin.
+      foreach(_relax "" "_rx")
+        set(_relaxFlag "")
+        if(_relax STREQUAL "_rx")
+          set(_relaxFlag "-DPW_RELAX=1")
+        endif()
+        set(_spvDc ${VKNN_SHADER_GEN_DIR}/${_name}_dc${_relax}.spv)
+        add_custom_command(
+          OUTPUT ${_spvDc}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} ${_relaxFlag} -DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT -o ${_spvDc} ${_comp}
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+          COMMENT "compile ${_name}.comp ${_relaxFlag} -DPW_BCAST_MASK_DIRECT -> ${_name}_dc${_relax}.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvDc})
+        if(_src MATCHES "precision.glsl")
+          set(_spvDc16 ${VKNN_SHADER_GEN_DIR}/${_name}_dc${_relax}_fp16.spv)
+          add_custom_command(
+            OUTPUT ${_spvDc16}
+            COMMAND ${SHADERCC} ${SHADERCC_PRE} ${_relaxFlag} -DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT -DUSE_FP16=1 -o ${_spvDc16} ${_comp}
+            DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+            COMMENT "compile ${_name}.comp ${_relaxFlag} -DPW_BCAST_MASK_DIRECT -DUSE_FP16 -> ${_name}_dc${_relax}_fp16.spv"
+            VERBATIM)
+          list(APPEND _spv_files ${_spvDc16})
+        endif()
+      endforeach()
       if(_src MATCHES "precision.glsl")
         set(_spvRx16 ${VKNN_SHADER_GEN_DIR}/${_name}_rx_fp16.spv)
         add_custom_command(
@@ -254,19 +294,26 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     elseif(_name MATCHES "^(.+)_fp16$")
       list(FIND _epi_stems ${CMAKE_MATCH_1} _epiHand)
       if(_epiHand GREATER -1)
+        set(_handStem ${CMAKE_MATCH_1})
         foreach(_relax "" "_rx")
           set(_relaxFlag "")
           if(_relax STREQUAL "_rx")
             set(_relaxFlag "-DPW_RELAX=1")
           endif()
-          set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${CMAKE_MATCH_1}_epi${_relax}_fp16.spv)
-          add_custom_command(
-            OUTPUT ${_spvEpi16}
-            COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} -o ${_spvEpi16} ${_comp}
-            DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
-            COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} -> ${CMAKE_MATCH_1}_epi${_relax}_fp16.spv"
-            VERBATIM)
-          list(APPEND _spv_files ${_spvEpi16})
+          foreach(_cls "" "_dc")
+            set(_clsFlag "")
+            if(_cls STREQUAL "_dc")
+              set(_clsFlag "-DPW_BCAST_MASK=PW_BCAST_MASK_DIRECT")
+            endif()
+            set(_spvEpi16 ${VKNN_SHADER_GEN_DIR}/${_handStem}_epi${_cls}${_relax}_fp16.spv)
+            add_custom_command(
+              OUTPUT ${_spvEpi16}
+              COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_EPI=1 ${_relaxFlag} ${_clsFlag} -o ${_spvEpi16} ${_comp}
+              DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+              COMMENT "compile ${_name}.comp -DPW_EPI ${_relaxFlag} ${_clsFlag} -> ${_handStem}_epi${_cls}${_relax}_fp16.spv"
+              VERBATIM)
+            list(APPEND _spv_files ${_spvEpi16})
+          endforeach()
         endforeach()
       endif()
     endif()
@@ -298,12 +345,19 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
   bc_variant(f32_u8  float      uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
   bc_variant(u8_u8   uint8_t    uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
 
+  # The .spv paths go to the embedder in a LIST FILE, not on the command line. Several hundred
+  # absolute paths overflow Windows' ~8 KB command (and the batch file CMake wraps a long command
+  # in), which fails as an opaque "Batch file failed at line 3" on that platform only — so adding a
+  # shader variant could break one platform's build and no other.
+  set(_spv_list ${VKNN_SHADER_GEN_DIR}/embedded_spirv_list.txt)
+  string(REPLACE ";" "\n" _spv_list_lines "${_spv_files}")
+  file(WRITE ${_spv_list} "${_spv_list_lines}\n")
   add_custom_command(
     OUTPUT ${EMBEDDED_SHADERS_CPP}
     COMMAND ${CMAKE_COMMAND} -E env python3
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
-            ${EMBEDDED_SHADERS_CPP} ${_spv_files}
-    DEPENDS ${_spv_files} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
+            ${EMBEDDED_SHADERS_CPP} @${_spv_list}
+    DEPENDS ${_spv_files} ${_spv_list} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
     COMMENT "Embedding SPIR-V blobs -> vknn_embedded_shaders.cpp"
     VERBATIM)
 else()

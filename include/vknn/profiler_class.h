@@ -23,6 +23,7 @@ namespace vknn {
         /// Drop all accumulated records, leaving the enabled state unchanged.
         void clear() noexcept {
             records_.clear();
+            gpuSpanMs_ = 0;
         }
         /// Append a copy of `r` when recording is enabled; a no-op otherwise.
         void add(const OpRecord &r) {
@@ -47,7 +48,29 @@ namespace vknn {
         double totalCpuMs() const;
         /// Sum of the measured GPU timestamp times, in milliseconds; records with no GPU measurement
         /// (negative gpuMs) are skipped.
+        ///
+        /// This is NOT the wall-clock GPU time of the run: a node's record brackets its commands
+        /// with two timestamps, and the GPU overlaps consecutive nodes, so the intervals overlap and
+        /// their sum exceeds the elapsed span. A node that issues no commands of its own (an op the
+        /// planner elided to a zero-copy view) still measures whatever the GPU was draining between
+        /// its two timestamps, which is how an elided Concat came to carry 28% of a classifier's
+        /// reported time while dispatching nothing. Use it to RANK ops, and gpuSpanMs() for elapsed
+        /// time.
         double totalGpuMs() const;
+        /// Elapsed GPU time of the run: first command started to last command finished, as the
+        /// backend measured it. This is the figure the published benchmarks quote. Zero when the
+        /// backend recorded no span (no GPU segment ran, or profiling produced no timestamps).
+        double gpuSpanMs() const noexcept {
+            return gpuSpanMs_;
+        }
+        /// Record the elapsed GPU span for the run; the backend calls this once per segment, and the
+        /// spans of several segments add up to the run's.
+        void addGpuSpanMs(double ms) noexcept {
+            if (enabled_ && ms > 0)
+            {
+                gpuSpanMs_ += ms;
+            }
+        }
         /// Sum of every record's recorded dispatch count. Covers the ops only — a segment's
         /// boundary/epilogue dispatches belong to no record, so this is at or below the segment's
         /// own dispatch total (which the segment logs).
@@ -56,6 +79,7 @@ namespace vknn {
       private:
         bool                  enabled_ = false; ///< When false, add() records nothing.
         std::vector<OpRecord> records_;         ///< Collected records, in execution order.
+        double                gpuSpanMs_ = 0;   ///< Elapsed GPU time, summed over the segments that ran.
     };
 
 } // namespace vknn

@@ -124,7 +124,13 @@ namespace vknn {
         // input. The caller's raw bytes are memcpy'd in each run and a recorded boundary_convert turns them
         // into the device-native boundary — no host uint8->fp32->fp16 pack. Allocated once, stable identity.
         std::map<TensorId, std::shared_ptr<vk::Buffer>> stagingIn_;
-        std::set<TensorId>                              graphInputs_; // g_.inputs, for the staging-input gate
+        // The same idea on the way out: a persistent HOST_CACHED staging buffer per graph output whose
+        // declared dtype differs from the device's. A recorded boundary_convert writes the declared
+        // bytes into it, so the host download is a plain memcpy from cached memory instead of a
+        // strided read of device-mapped fp16 with a conversion on every element.
+        std::map<TensorId, std::shared_ptr<vk::Buffer>> stagingOut_;
+        std::set<TensorId>                              graphInputs_;  // g_.inputs, for the staging-input gate
+        std::set<TensorId>                              graphOutputs_; // g_.outputs, for the staging-output gate
         // Device-resident output->input links (Session::linkOutputToInput). Each link's ranges live in a
         // small host-visible SSBO the recorded link_copy dispatch reads, so per-run range updates (the
         // moving destination slot of a KV fold) need no re-record — the copy runs at the head of the

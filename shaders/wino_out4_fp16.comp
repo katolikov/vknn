@@ -5,6 +5,9 @@
 //   [0  1 -1  2 -2  0]
 //   [0  1  1  4  4  0]
 //   [0  1 -1  8 -8  1]
+// Each At row is inlined in one expression below (zero terms dropped, unit terms bare) rather than
+// held in an F(6,3)-style kAt array (wino_out6_fp16.comp): the array-indexed form compiles to
+// different SPIR-V, and this kernel's emitted code is byte-locked by the determinism gates.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
@@ -40,13 +43,13 @@ void main() {
     for (int j = 0; j < 6; ++j)
       M[i][j] = vec4(mbuf[((i * 6 + j) * Coutb + ocb) * nT + tile]);
 
-  // tmp = At * M  (4x6)
+  // tmp = At * M  (4x6; one At row per line, header matrix)
   vec4 t[4][6];
   for (int j = 0; j < 6; ++j) {
-    t[0][j] = M[0][j] + M[1][j] + M[2][j] + M[3][j] + M[4][j];
-    t[1][j] = M[1][j] - M[2][j] + 2.0 * M[3][j] - 2.0 * M[4][j];
-    t[2][j] = M[1][j] + M[2][j] + 4.0 * M[3][j] + 4.0 * M[4][j];
-    t[3][j] = M[1][j] - M[2][j] + 8.0 * M[3][j] - 8.0 * M[4][j] + M[5][j];
+    t[0][j] = M[0][j] + M[1][j] + M[2][j] + M[3][j] + M[4][j];              // At[0]: [1  1  1  1  1  0]
+    t[1][j] = M[1][j] - M[2][j] + 2.0 * M[3][j] - 2.0 * M[4][j];            // At[1]: [0  1 -1  2 -2  0]
+    t[2][j] = M[1][j] + M[2][j] + 4.0 * M[3][j] + 4.0 * M[4][j];            // At[2]: [0  1  1  4  4  0]
+    t[3][j] = M[1][j] - M[2][j] + 8.0 * M[3][j] - 8.0 * M[4][j] + M[5][j];  // At[3]: [0  1 -1  8 -8  1]
   }
   vec4 b = vec4(bias[ocb]);
   int oy = ty * 4, ox = tx * 4;
@@ -63,10 +66,10 @@ void main() {
   for (int i = 0; i < 4; ++i) {
     if (oy + i >= pc.OH) continue;
     int row = obase + (oy + i) * pc.OW;
-    vec4 y0 = t[i][0] + t[i][1] + t[i][2] + t[i][3] + t[i][4] + b;
-    vec4 y1 = t[i][1] - t[i][2] + 2.0 * t[i][3] - 2.0 * t[i][4] + b;
-    vec4 y2 = t[i][1] + t[i][2] + 4.0 * t[i][3] + 4.0 * t[i][4] + b;
-    vec4 y3 = t[i][1] - t[i][2] + 8.0 * t[i][3] - 8.0 * t[i][4] + t[i][5] + b;
+    vec4 y0 = t[i][0] + t[i][1] + t[i][2] + t[i][3] + t[i][4] + b;             // At[0] on the column index
+    vec4 y1 = t[i][1] - t[i][2] + 2.0 * t[i][3] - 2.0 * t[i][4] + b;           // At[1]
+    vec4 y2 = t[i][1] + t[i][2] + 4.0 * t[i][3] + 4.0 * t[i][4] + b;           // At[2]
+    vec4 y3 = t[i][1] - t[i][2] + 8.0 * t[i][3] - 8.0 * t[i][4] + t[i][5] + b; // At[3]
     if (ox + 0 < pc.OW) PW_ST(y0, row + ox + 0);
     if (ox + 1 < pc.OW) PW_ST(y1, row + ox + 1);
     if (ox + 2 < pc.OW) PW_ST(y2, row + ox + 2);

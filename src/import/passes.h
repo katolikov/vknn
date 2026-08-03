@@ -261,12 +261,15 @@ namespace vknn {
     std::vector<QuantStats> quantizeWeightsShared(const std::vector<Graph *> &buckets, const QuantOptions &opt);
 
     // Byte totals from convertInitializersFp16, for the compiler's conversion summary line.
+    // keptCoord counts the coordinate-class keeps (a subset of kept): fp32 initializers whose bits
+    // reach a GridSample coordinate operand through elementwise/movement ops only, left at fp32
+    // because their stored precision is the sample position itself.
     struct Fp16ConvertStats {
-        int64_t converted = 0, kept = 0, bytesBefore = 0, bytesAfter = 0;
+        int64_t converted = 0, kept = 0, keptCoord = 0, bytesBefore = 0, bytesAfter = 0;
     };
     // Convert every Float32 initializer payload to Float16 in place (vknn_compile --fp16), stamping
-    // the tensor descs. Non-fp32 payloads (int64 shape tensors, ...) stay untouched. Runs after the
-    // standard passes, immediately before saveGraphBin.
+    // the tensor descs. Non-fp32 payloads (int64 shape tensors, ...) and coordinate-class
+    // initializers stay untouched. Runs after the standard passes, immediately before saveGraphBin.
     Fp16ConvertStats convertInitializersFp16(Graph &g);
 
     // Read an int64 list param from a node attribute or an initializer input (Slice/Pad/Reduce style).
@@ -275,6 +278,28 @@ namespace vknn {
     // backend in a flat row-major layout (Transpose/Slice/Concat/Binary/Softmax). No-op for graphs
     // without such ops. Run after backend-agnostic passes, before backend planning.
     void insertLayoutConverts(Graph &g);
+
+    /// Does this Transpose read its input in NC4HW4 rather than flat row-major?
+    ///
+    /// True for the rank-4 NCHW -> NHWC permutation (0,2,3,1) with no fused epilogue: an NC4HW4
+    /// vec4 holds four consecutive channels of one pixel, which are four CONSECUTIVE elements of
+    /// the NHWC output, so shaders/transpose_nhwc.comp does the whole reindex in one coalesced
+    /// pass. Every other Transpose is a flat gather and takes the ConvertLayout in front of it.
+    ///
+    /// The layout pass and the Vulkan op must agree exactly -- the pass decides whether to leave
+    /// the input NC4HW4, the op decides which kernel to dispatch, and a disagreement means one of
+    /// them reads the wrong layout -- so both call this.
+    bool transposeReadsNc4(const Graph &g, const Node &n);
+
+    /// Does this DepthToSpace run entirely in NC4HW4 rather than flat row-major?
+    ///
+    /// True when both the input and the output channel counts are multiples of 4, so every NC4HW4
+    /// block is fully occupied on both sides and the remap is block-to-block
+    /// (shaders/depth_to_space_nc4.comp). The flat kernel otherwise forces an NC4HW4 producer and an
+    /// NC4HW4 consumer to pay a full-size ConvertLayout each, which costs more than the remap.
+    ///
+    /// The layout pass and the Vulkan op must agree exactly, so both call this.
+    bool depthToSpaceIsNc4(const Graph &g, const Node &n);
 
     // Split a comma-separated pattern list into its non-empty entries, as typed (an exclude entry
     // keeps its leading '-'). Shared by markFp32's per-entry match accounting and the session's
@@ -293,12 +318,33 @@ namespace vknn {
     // store would corrupt the lookup. Runs at load, after insertLayoutConverts, before markFp32.
     void pinGatherIndexFp32(Graph &g);
 
-    // Pin every GPU GridSample's runtime grid (and the flat passthrough chain feeding it) to fp32
-    // storage. The grid holds normalized sampling coordinates whose fp16 quantization drifts the
-    // sample point by up to ~0.5 px at 1920-wide inputs (a direct warp/UV-quality loss); the shader
-    // decodes the grid at its storage precision via the GRID_FP32 spec constant. Runs at load, after
-    // insertLayoutConverts, before markFp32.
-    void pinGridSampleGridFp32(Graph &g);
+    // True for ops a sampling coordinate flows through unchanged in kind: elementwise algebra,
+    // value-preserving movement, fused pointwise chains, reductions, and layout converts. Shared
+    // by the convert-time fp16 keep (convert_fp16.cpp) and the load-time coordinate-cone pin, so
+    // the two sides of the coordinate-precision contract can never drift apart.
+    bool coordinateTransparentOp(OpType op);
+
+    // Pin every sampling-coordinate cone to fp32 storage: for each GridSample coordinate operand
+    // (the plain grid, or the warp variant's flow), walk backward through
+    // coordinateTransparentOp producers pinning each non-initializer hop, so the whole
+    // grid/flow algebra computes and stores at fp32 while image tensors stay at the session
+    // precision. A hop whose producer is neither transparent nor flat stays unpinned (the NC4HW4
+    // conv family has no fp32 kernels); markFp32's frontier converts bridge that boundary. This is
+    // the coordinate pin the session runs.
+    // Pin the operand cone and the output of every DISCONTINUOUS step to fp32 storage: a Cast to
+    // an integer target, and the stepping unaries (Floor/Ceil/Round/Trunc/Sign). Such an op maps an
+    // interval to one value and jumps at the boundary, so a storage rounding that crosses a
+    // boundary is a full-unit output error, not a proportional one — an input one fp16 step below
+    // 1.0 stores as exactly 1.0 and truncates to 1 where the fp32 oracle gives 0. The output is
+    // pinned too, because the result is a logical integer in a float slot and fp16 spaces integers
+    // past 2048. Trunc matters as much as Cast here: foldIntRoundtripCast collapses a
+    // float->wide-int->float Cast pair into one Unary(Trunc), so a graph can carry the hazard with
+    // no Cast node left in it. Smooth unaries and float-target Casts carry rounding proportionally
+    // and are left at the running precision. Same shape as pinGatherIndexFp32 and
+    // pinSampleCoordFp32, for the same reason.
+    void pinDiscontinuousStepFp32(Graph &g);
+
+    void pinSampleCoordFp32(Graph &g);
 
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into
     // ONE strided gather: the consumer reads the chain's source through the composed per-axis map

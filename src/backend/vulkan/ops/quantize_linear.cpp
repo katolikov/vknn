@@ -9,6 +9,7 @@
 // Runs on the flat row-major path; the CPU op in backend/cpu/ops/quantize_linear.cpp is the oracle.
 #include "vk_op_common.h"
 #include "vknn/op.h"
+#include <cmath>
 
 namespace vknn {
     namespace {

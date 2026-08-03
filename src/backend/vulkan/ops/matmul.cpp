@@ -150,9 +150,13 @@ namespace vknn {
                     quantShader = "lowp_quant_fp8";
                     gemmShader  = "coopmat_gemm_fp8";
                 }
-                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC));
-                coopQuantPipe  = env.pipeline(quantShader, 3, sizeof(int));
-                pipe           = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {coopWidth}, /*requiredSubgroupSize=*/coopWidth);
+                // The absmax reduction takes the caps-derived power-of-two family width: its halving
+                // fold needs a power of two, and a literal 256 exceeds the 128 invocations Vulkan
+                // guarantees. The GEMM keeps main's native-wave pinning, which is a different
+                // question -- the cooperative-matrix shapes are defined per subgroup width.
+                coopAbsmaxPipe = env.pipeline("lowp_absmax", 2, sizeof(CoopAbsmaxPC), std::vector<uint32_t> {flat::laneWidthPow2For(env.ctx->caps(), flat::kFlatLocalSize)});
+                coopQuantPipe = env.pipeline(quantShader, 3, sizeof(int));
+                pipe          = env.pipeline(gemmShader, 4, sizeof(CoopGemmPC), {coopWidth}, /*requiredSubgroupSize=*/coopWidth);
             }
 
             void recordCoopmat(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -725,10 +729,20 @@ namespace vknn {
                 epi.prepare(node, env, /*flat=*/true, out);
                 name += epi.suffix();
                 nbuf += epi.extraBufs();
+                // Which kernel a MatMul lands on is the first thing to know about one that costs more
+                // than its operands do to read: the gemv, naive, spec-tiled and fast-tiled routes
+                // differ by an order of magnitude on the same shape, and the choice is made from half
+                // a dozen predicates above. FusedPointwise already announces its applier; this is the
+                // same courtesy for the op that dominates transformer graphs.
+                VKNN_DEBUG << "MatMul '" << node.name << "': " << name << " M=" << M << " N=" << N << " K=" << K;
 
                 // The spec-constant tiled kernel takes its TM/TN/TK tile as specialization constants
                 // 0/1/2; the fast kernel bakes {128,128,16} in as literal #defines (no spec words).
                 std::vector<uint32_t> spec;
+                if (!useFastTiled && !useTiled && !useGemv)
+                {
+                    spec = {env.flatLocalSize}; // the naive kernel's workgroup width (spec 0), resolved at load
+                }
                 if (useTiled && !useFastTiled)
                 {
                     spec = {(uint32_t) tile.tm, (uint32_t) tile.tn, (uint32_t) tile.tk};
@@ -778,7 +792,7 @@ namespace vknn {
                 {
                     // Naive kernel: one thread per output element over a flat 1-D grid of pc.total lanes.
                     // matmul.comp is local_size_x=256 == flat::kFlatLocalSize.
-                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, flat::kFlatLocalSize));
+                    pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(pc.total, env.flatLocalSize));
                 }
             }
         };

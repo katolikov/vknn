@@ -77,10 +77,12 @@ namespace vknn {
                             inStr[d]  = (int) inStride[d];
                         }
                         fgeom_.push_back(flat::uploadFlatGeom(env, {outDim, inStr}));
+                        pc.items = flat::kMovementItemsPerLane; // one element per lane (see flat_ops.h)
                         fpcs_.push_back(pc);
                         foutIdx_.push_back((int) k);
                         offset += out[axis]; // next output starts where this one ends
-                        fpipes_.push_back(env.pipeline(shader("flat_gather", env.useFp16), 3, sizeof(FPC), std::vector<uint32_t> {}));
+                        fpipes_.push_back(
+                            env.pipeline(shader("flat_gather", env.useFp16), 3, sizeof(FPC), std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}));
                     }
                     return;
                 }
@@ -122,7 +124,8 @@ namespace vknn {
                         }
                         // One flat_gather invocation per output element (local_size_x = kFlatLocalSize),
                         // gathering the slice for this output straight out of the shared input buffer.
-                        fpipes_[i]->dispatch(cmd, {src->handle(), dst->handle(), fgeom_[i]->handle()}, &fpcs_[i], sizeof(FPC), groups(fpcs_[i].total, flat::kFlatLocalSize));
+                        fpipes_[i]->dispatch(cmd, {src->handle(), dst->handle(), fgeom_[i]->handle()}, &fpcs_[i], sizeof(FPC),
+                                             groups((fpcs_[i].total + fpcs_[i].items - 1) / fpcs_[i].items, env.flatLocalSize));
                     }
                     return;
                 }
