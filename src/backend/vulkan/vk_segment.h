@@ -53,8 +53,9 @@ namespace vknn {
         VulkanBackend                                  *be_;
         Graph                                          &g_;
         const Config                                   &cfg_;
-        bool                                            useFp16_  = false;
-        int                                             elemSize_ = 4;
+        bool                                            useFp16_   = false;
+        bool                                            fp16Arith_ = false; // Precision::Low: reduction in fp16 as well as storage
+        int                                             elemSize_  = 4;
         std::map<TensorId, std::shared_ptr<vk::Buffer>> buffers_;
         std::vector<std::unique_ptr<VulkanOp>>          ops_;
         VkOpEnv                                         env_;

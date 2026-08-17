@@ -52,12 +52,13 @@ namespace vknn {
         // recomputed, so every consumer after the first resolves through this memo instead.
         std::function<std::shared_ptr<vk::Buffer>(TensorId)>       lookupFlatWeight;
         std::function<void(TensorId, std::shared_ptr<vk::Buffer>)> rememberFlatWeight;
-        bool                                                       useFp16  = false;   // per-node: false for a storeFp32 node so it runs its fp32 kernel
-        bool                                                       baseFp16 = false;   // segment-wide precision (what a non-storeFp32 tensor is stored as)
-        WeightCache                                               *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
-        vk::CommandRunner                                         *runner   = nullptr; // for on-device autotuning benchmarks
-        Tuning                                                     tuning   = Tuning::Fast;
-        Mode                                                       winograd = Mode::Auto;
+        bool                                                       useFp16   = false;   // per-node: false for a storeFp32 node so it runs its fp32 kernel
+        bool                                                       fp16Arith = false;   // reduction carried in fp16 too (Precision::Low); implies useFp16
+        bool                                                       baseFp16  = false;   // segment-wide precision (what a non-storeFp32 tensor is stored as)
+        WeightCache                                               *weights   = nullptr; // prepacked-weight + tuning cache (may be null)
+        vk::CommandRunner                                         *runner    = nullptr; // for on-device autotuning benchmarks
+        Tuning                                                     tuning    = Tuning::Fast;
+        Mode                                                       winograd  = Mode::Auto;
         // Per-model namespace for the weight cache, so reusing one cache directory across different models can't
         // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
         std::string modelTag;

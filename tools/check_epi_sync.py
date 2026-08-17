@@ -111,7 +111,7 @@ def _matmul_composed_stems(text):
     return stems
 
 
-def requested_stems(ops_dir):
+def requested_stems(ops_dir, available=frozenset()):
     """Union of every epi stem the op-file kernel-name sites request, over src/backend/vulkan/ops."""
     stems = set()
     files = sorted(glob.glob(os.path.join(ops_dir, "*.cpp"))
@@ -123,6 +123,11 @@ def requested_stems(ops_dir):
             continue
         stems |= _requested_stems_in_text(text)
         stems |= _matmul_composed_stems(text)
+    # An fp16-accumulator twin (shaders/gen_acc16.py) is selected by precision, not by a name literal:
+    # the op file requests the base stem and the kernel picker appends _acc16 at Precision::Low. A
+    # requested stem therefore also requests its twin -- but only for the stems that actually have one,
+    # so a missing twin still reports as drift rather than being excused.
+    stems |= {stem + "_acc16" for stem in stems if stem + "_acc16" in available}
     return stems
 
 
@@ -203,7 +208,7 @@ def main():
             sys.exit("error: %s not found (pass --repo)" % p)
 
     epi_stems, rx_standalone = derive_shader_stems(shader_dir)
-    req_stems = requested_stems(ops_dir)
+    req_stems = requested_stems(ops_dir, epi_stems)
     capable = parse_pw_capable(pass_cpp, descriptor_cpp)
     vk_reg = parse_vk_registry(ops_dir)
 

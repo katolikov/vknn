@@ -283,6 +283,13 @@ namespace vknn {
         return vxVulkanFp16Available() && ctx_->caps().shaderFloat16 && (cfg.precision == Precision::Low || cfg.precision == Precision::Normal);
     }
 
+    bool VulkanBackend::useFp16Arith(const Config &cfg) const {
+        // Low additionally carries the REDUCTION in fp16, not just storage: half the accumulator
+        // registers and packed-fp16 math, at roughly 8 dB of SNR on a 288-term conv reduction. Normal
+        // keeps fp32 accumulation, so the bit-exact-with-the-CPU-oracle guarantee lives there.
+        return useFp16(cfg) && cfg.precision == Precision::Low;
+    }
+
     std::shared_ptr<vk::ComputePipeline> VulkanBackend::sharedPipeline(const std::string &name, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &spec, VkPipelineCache cache, uint32_t requiredSubgroupSize) {
         std::string key = name;
         key += '|';

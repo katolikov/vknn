@@ -32,6 +32,7 @@ namespace vknn {
     VulkanSegment::VulkanSegment(const std::vector<int> &idx, Graph &g, const Config &cfg, VulkanBackend *be): be_(be), g_(g), cfg_(cfg) {
         nodeIdx        = idx;
         useFp16_       = be_->useFp16(cfg);
+        fp16Arith_     = be_->useFp16Arith(cfg);
         elemSize_      = useFp16_ ? 2 : 4;
         chainStepsMax_ = std::max(1, cfg.decodeChainSteps); // sizes the per-iteration link range sets + argmax result slots
         graphInputs_.insert(g.inputs.begin(), g.inputs.end());
@@ -1213,15 +1214,16 @@ namespace vknn {
         }
 
         // 2) build env + ops; prepare uploads weights.
-        env_.backend  = be_;
-        env_.ctx      = &be_->ctx();
-        env_.runner   = &be_->runner();
-        env_.tuning   = cfg.tuning;
-        env_.winograd = (Mode) cfg.hint(Hint::Winograd, (int) Mode::Auto);
-        env_.graph    = &g;
-        env_.config   = &cfg;
-        env_.useFp16  = useFp16_;
-        env_.baseFp16 = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
+        env_.backend   = be_;
+        env_.ctx       = &be_->ctx();
+        env_.runner    = &be_->runner();
+        env_.tuning    = cfg.tuning;
+        env_.winograd  = (Mode) cfg.hint(Hint::Winograd, (int) Mode::Auto);
+        env_.graph     = &g;
+        env_.config    = &cfg;
+        env_.useFp16   = useFp16_;
+        env_.fp16Arith = fp16Arith_;
+        env_.baseFp16  = useFp16_; // segment-wide precision; useFp16_ is overridden per-node below for storeFp32 nodes
         // per-model weight-cache namespace: FNV-1a over the whole graph (same for every segment of this
         // model, distinct across models) so a shared cache directory can't return another model's weights.
         {
@@ -1352,11 +1354,13 @@ namespace vknn {
             }
             // A storeFp32 node (its output kept in fp32) selects its fp32 kernel variant + uploads its
             // weights fp32; ConvertDtype reads the precision per tensor and ignores this.
-            env_.useFp16 = nodeFp32(g.nodes[ni]) ? false : useFp16_;
+            env_.useFp16   = nodeFp32(g.nodes[ni]) ? false : useFp16_;
+            env_.fp16Arith = env_.useFp16 && fp16Arith_;
             op->prepare(g.nodes[ni], env_);
             ops_.push_back(std::move(op));
         }
-        env_.useFp16 = useFp16_;
+        env_.useFp16   = useFp16_;
+        env_.fp16Arith = fp16Arith_;
 
         // 3) timestamp query pool (2 per node). Only when profiling - the extra writes + the implicit
         //    barriers around them aren't free, and we don't want them on the hot path.
@@ -1748,7 +1752,8 @@ namespace vknn {
                 {
                     vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool_, (uint32_t) (k * 2));
                 }
-                env_.useFp16 = nodeFp32(node) ? false : useFp16_; // match the variant chosen in prepare()
+                env_.useFp16   = nodeFp32(node) ? false : useFp16_; // match the variant chosen in prepare()
+                env_.fp16Arith = env_.useFp16 && fp16Arith_;
                 tally.openNode(k);
                 ops_[k]->record(cmd_, node, env_);
                 tally.closeNode(); // a decode chain re-enters this loop per iteration; counts accumulate
