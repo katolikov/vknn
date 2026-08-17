@@ -1,3 +1,4 @@
+#include "core/conv_compact_input.h"
 #include "passes_internal.h"
 
 namespace vknn {
@@ -216,7 +217,17 @@ namespace vknn {
         bool readerWantsFlat(const Graph &g, const Node &n, size_t inputIndex) {
             const bool needFlat = n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
             // GridSample's non-warp grid is always a flat [N,Hout,Wout,2] buffer (see convertRead).
-            return (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp")) ? true : needFlat;
+            if (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp"))
+            {
+                return true;
+            }
+            // A shallow-channel conv reads its activation from the compact flat plane the layout
+            // assignment left it in (core/conv_compact_input.h), so that read needs no convert.
+            if (inputIndex == 0 && g.desc(n.inputs[0]).gpuFlat && convCompactInputEligible(g, n))
+            {
+                return true;
+            }
+            return needFlat;
         }
 
         LKind opLayoutKind(const Graph &g, const Node &n) {
@@ -477,6 +488,16 @@ namespace vknn {
                 t.gpuFlat = true;
             }
         }
+        // 4) A shallow-channel conv input stays in its compact flat plane rather than being padded out
+        //    to a 4-channel NC4HW4 buffer (a 1-channel input would carry 4x its bytes). Only graph
+        //    inputs whose every reader takes the compact form qualify, so this never spawns a convert.
+        for (TensorId tid = 0; tid < (TensorId) g.tensors.size(); ++tid)
+        {
+            if (tensorWantsCompactConvInput(g, tid))
+            {
+                g.tensors[tid].gpuFlat = true;
+            }
+        }
     }
 
     /// Splice ConvertLayout nodes onto the graph wherever a tensor is read in a layout (NC4HW4 vs flat
@@ -540,12 +561,10 @@ namespace vknn {
             bool needFlat = g.desc(nd.outputs[0]).gpuFlat; // the format this node operates in
             for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
             {
-                // GridSample's grid (input 1) is a flat [N,Hout,Wout,2] buffer regardless of the NC4HW4
-                // data path — keep it flat so a runtime grid is not mis-packed as NC4HW4. A warp-mode
-                // GridSample instead reads its NCHW flow (input 1) in the NC4HW4 activation layout (the
-                // op computes coordinates from it directly), so it follows the node's own format.
-                bool wantFlat = (nd.type == OpType::GridSample && inIdx == 1 && !nd.attr.has("warp")) ? true : needFlat;
-                convertRead(nd.inputs[inIdx], wantFlat);
+                // readerWantsFlat is the single definition of the per-slot rule (GridSample's flat grid,
+                // a shallow-channel conv's compact activation); the layout assignment above consults the
+                // same function, so an assignment that removed a convert is not undone here.
+                convertRead(nd.inputs[inIdx], readerWantsFlat(g, nd, inIdx));
             }
             // Fused residual/bias edges are reads outside the inputs list (rewireTensor's contract)
             // and the kernel decodes them in ITS layout world, so they take the same converts as any

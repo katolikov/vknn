@@ -4,6 +4,7 @@
 // size the first time we see a given shape and cache the winner.
 #include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
+#include "core/conv_compact_input.h"
 #include "core/conv_gemm_route.h"
 #include "core/conv_geom.h"
 #include "core/wino_f63.h"
@@ -97,6 +98,7 @@ namespace vknn {
             bool                                 winograd       = false;
             bool                                 splitk         = false;
             bool                                 reg            = false; // register-tiled implicit-im2col general conv (WTILE pixels/thread)
+            bool                                 compactIn      = false; // input read from its unpadded flat plane (Cin < 4)
             bool                                 lds            = false; // LDS input-halo 3x3 (8x8 tile/workgroup)
             bool                                 gemm           = false; // implicit-GEMM kernel (conv_gemm.comp) won the plan-time race
             int64_t                              ldsGroups      = 0;
@@ -1096,6 +1098,9 @@ namespace vknn {
                 int64_t group = node.attr.geti("group", 1);
                 hasRes        = (node.fusedResidual != kNoTensor); // set by the residual-Add fusion pass (1x1 only)
                 depthwise     = (group == x.c && group == Cout && inCg == 1);
+                // The layout pass leaves a shallow-channel activation unpadded (core/conv_compact_input.h);
+                // the descriptor's layout is what decides here, so the kernel matches the bytes on hand.
+                compactIn = env.graph != nullptr && g.desc(node.inputs[0]).gpuFlat && convCompactInputEligible(*env.graph, node);
                 pointwise = (!depthwise && group == 1 && KH == 1 && KW == 1 && st[0] == 1 && st[1] == 1 && pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
                 pwS2 = (!depthwise && group == 1 && KH == 1 && KW == 1 && (st[0] > 1 || st[1] > 1) && pad[0] == 0 && pad[1] == 0 && pad[2] == 0 && pad[3] == 0);
                 // Winograd F(2,3) via a tiled GEMM is eligible only for deep, square 3x3/s1/p1 group-1
@@ -1218,7 +1223,19 @@ namespace vknn {
                     bool starvedDeep = skHint == (int) Mode::Off ? false :
                                        skHint == (int) Mode::On ? skStructural :
                                                                   skStructural && skTaps >= skTapsFloor && skOHW <= kSplitKGenMaxOHW && skStdThreads < kSplitKGenMaxThreads;
-                    if (pointwise)
+                    // A shallow-channel activation stays in its compact flat plane (the layout pass left
+                    // it unpadded), so the compact kernel is the ONLY one that reads it correctly --
+                    // this routes on layout, not on speed.
+                    if (compactIn)
+                    {
+                        reg                      = true;
+                        const uint32_t regOcb    = (uint32_t) std::min<int64_t>(Coutb, 2);
+                        const uint32_t regWt     = (uint32_t) kConv1x1DefaultWTile;
+                        int64_t        ocbGroups = (Coutb + regOcb - 1) / regOcb;
+                        total                    = x.n * ocbGroups * y.h * ((y.w + regWt - 1) / regWt);
+                        pipe = env.pipeline(shader((std::string("conv3x3_cin_lt4") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC),
+                                            std::vector<uint32_t> {regOcb, regWt, (uint32_t) st[1], (uint32_t) x.c});
+                    } else if (pointwise)
                     {
                         // Deep, small-spatial 1x1 convs have too few threads for the register-tiled kernel; use
                         // split-K there (parallelize the channel reduction). The rule lives in
