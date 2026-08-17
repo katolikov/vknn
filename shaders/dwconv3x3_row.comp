@@ -1,0 +1,83 @@
+#version 450
+// Depthwise 3x3 dilation-1 conv with horizontal halo reuse (NC4HW4, fp32).
+//
+// The tile is WTILE output pixels along one output row, spanning COLS = (WTILE-1)*SW + 3 input
+// columns, so each ky loads that row segment once and all three kx taps read it from registers.
+// Input loads per output pixel fall from dwconv's 9 to COLS*3/WTILE.
+//
+// Bit-exact with dwconv: same (ky, kx) order, same skip of an out-of-range row or column.
+//
+// SW is a spec constant because COLS sizes a register array.
+
+#include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+layout(constant_id = 0) const int WTILE = 4;   // output pixels per thread, consecutive along W
+layout(constant_id = 1) const int SW_SPEC = 1; // horizontal stride (sizes the row segment)
+layout(local_size_x = 64) in;
+#define KEXT 3                              // kernel extent this kernel is specialized to
+#define COLS ((WTILE - 1) * SW_SPEC + KEXT) // input columns one row segment covers
+layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, C, H, W, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act, pad0;
+  float actLo, actHi;
+}
+pc;
+
+void main() {
+  int Cb = (pc.C + 3) / 4;
+  int nTX = (pc.OW + WTILE - 1) / WTILE;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * Cb * pc.OH * nTX)) return;
+  int tx = int(gid) % nTX;
+  int oy = (int(gid) / nTX) % pc.OH;
+  int cb = (int(gid) / (nTX * pc.OH)) % Cb;
+  int n = int(gid) / (nTX * pc.OH * Cb);
+  int ox0 = tx * WTILE;
+
+  // Column validity depends only on the tile's x origin, so it is resolved once for every ky below.
+  int ixv[COLS];
+  bool colOk[COLS];
+  for (int c = 0; c < COLS; ++c) {
+    ixv[c] = ox0 * SW_SPEC - pc.PL + c;
+    colOk[c] = uint(ixv[c]) < uint(pc.W);
+  }
+
+  vec4 acc[WTILE];
+  vec4 b = bias[cb];
+  for (int p = 0; p < WTILE; ++p) acc[p] = b;
+
+  for (int ky = 0; ky < KEXT; ++ky) {
+    int iy = oy * pc.SH - pc.PT + ky;
+    if (uint(iy) >= uint(pc.H)) continue; // whole row out of range: every tap it feeds is skipped
+    int rowOff = ((n * Cb + cb) * pc.H + iy) * pc.W;
+    vec4 row[COLS];
+    for (int c = 0; c < COLS; ++c) row[c] = colOk[c] ? src[rowOff + ixv[c]] : vec4(0.0);
+    for (int kx = 0; kx < KEXT; ++kx) {
+      vec4 wv = wt[(cb * KEXT + ky) * KEXT + kx];
+      for (int p = 0; p < WTILE; ++p) {
+        int c = p * SW_SPEC + kx;
+        if (colOk[c]) acc[p] += row[c] * wv;
+      }
+    }
+  }
+  int dbase = ((n * Cb + cb) * pc.OH + oy) * pc.OW;
+  for (int p = 0; p < WTILE; ++p) {
+    int ox = ox0 + p;
+    if (ox < pc.OW) {
+      vec4 v = vec4(vx_act(acc[p].x, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].y, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].z, pc.act, pc.actLo, pc.actHi),
+                    vx_act(acc[p].w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+      v = pw_apply4(v, dbase + ox);
+#endif
+      dst[dbase + ox] = v;
+    }
+  }
+}

@@ -398,7 +398,12 @@ namespace vknn {
             // candidate also cost the most cold-tuning time of any entrant, since its losing
             // pipeline variants still compile. The kernel stays selectable through the tune table
             // for a deliberate experiment; nothing selects it automatically.
-            int pickDwTile(VkOpEnv &env, NCHW x, NCHW y, int64_t Cb) {
+            // pickDwTile results. The 2x2 tile stays reachable only through the tune table (above); the
+            // row-halo kernel is a normal raced candidate.
+            static constexpr int kDwChoiceOnePixel = 0;
+            static constexpr int kDwChoiceTile2    = 1;
+            static constexpr int kDwChoiceRow      = 2;
+            int                  pickDwTile(VkOpEnv &env, NCHW x, NCHW y, int64_t Cb) {
                 // Eligibility precedes the cache consult: a cached tile pick is only honored while
                 // the shape still tiles (the sig carries OH/OW, so this re-gate is belt-and-braces).
                 const int64_t tileThreads  = (int64_t) x.n * Cb * ((y.h + 1) / 2) * ((y.w + 1) / 2);
@@ -407,13 +412,46 @@ namespace vknn {
                 snprintf(buf, sizeof(buf), "dwt%s_%d_%d_%d_%d_%d_%d", epi.suffix(), dpc.C, dpc.OH, dpc.OW, dpc.KH, dpc.KW, dpc.SH);
                 std::string sig = env.gpuTag + "/" + buf;
                 int         reuse;
-                if (env.reuseTuned(sig, reuse) && (reuse == 0 || (reuse == 1 && tileEligible)))
+                // The row-halo kernel is 3x3/dilation-1 stride-1 only: it trades thread count for reuse
+                // (the trade dwconv_t2 lost outright), and at stride 2 the diluted tap overlap does not
+                // pay for it -- measured 1.4-2.0x slower on every strided depthwise shape. Even at
+                // stride 1 the win is shape-dependent, so it is raced rather than assumed.
+                const bool rowEligible = env.useFp16 && dpc.KH == kRowKernelExtent && dpc.KW == kRowKernelExtent && dpc.DH == 1 && dpc.DW == 1 && dpc.SW == 1;
+                if (env.reuseTuned(sig, reuse) && (reuse == kDwChoiceOnePixel || (reuse == kDwChoiceTile2 && tileEligible) || (reuse == kDwChoiceRow && rowEligible)))
                 {
                     return reuse;
                 }
-                // The tile is never selected automatically (see above); only an explicit tune-table
-                // entry, consulted before this point, can still reach it.
-                return 0;
+                if (!rowEligible || env.tuning == Tuning::None || !env.runner)
+                {
+                    // The 2x2 tile is never selected automatically (see above); only an explicit
+                    // tune-table entry, consulted above, can still reach it.
+                    return kDwChoiceOnePixel;
+                }
+                const int64_t         rowThreads = (int64_t) x.n * Cb * y.h * ((y.w + kConv1x1DefaultWTile - 1) / kConv1x1DefaultWTile);
+                const int64_t         oneThreads = (int64_t) x.n * Cb * y.h * y.w;
+                size_t                srcBytes   = (size_t) x.n * Cb * x.h * x.w * 4 * (env.useFp16 ? 2 : 4);
+                size_t                dstBytes   = (size_t) x.n * Cb * y.h * y.w * 4 * (env.useFp16 ? 2 : 4);
+                auto                  sSrc       = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(srcBytes, 16), vk::MemPref::kDeviceOnly);
+                auto                  sDst       = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(dstBytes, 16), vk::MemPref::kDeviceOnly);
+                std::vector<VkBuffer> bufs       = {sSrc->handle(), wbuf->handle(), bbuf->handle(), sDst->handle()};
+                epi.appendForTiming(bufs, sDst->handle());
+                vk::TuneTimer timer(env);
+                auto          timeIt = [&](std::shared_ptr<vk::ComputePipeline> p, int64_t tot) {
+                    return timer.time([&](VkCommandBuffer cmd) {
+                        p->dispatch(cmd, bufs, &dpc, sizeof(dpc), groups(tot, 64));
+                    });
+                };
+                const double oneMs = timeIt(env.pipeline(shader((std::string("dwconv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), {}), oneThreads);
+                const double rowMs = timeIt(env.pipeline(shader((std::string("dwconv3x3_row") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC),
+                                                         {(uint32_t) kConv1x1DefaultWTile, (uint32_t) dpc.SW}),
+                                            rowThreads);
+                const int best = (rowMs < oneMs * vk::kTuneRaceMargin) ? kDwChoiceRow : kDwChoiceOnePixel;
+                VKNN_DEBUG << "autotune " << sig << " -> dw=" << best << " one=" << oneMs << " row=" << rowMs;
+                if (env.weights)
+                {
+                    env.weights->setTuned(sig, best, (int) env.tuning);
+                }
+                return best;
             }
 
             // Autotune the register tile of the 1x1 kernels: WTILE (output pixels per thread) and OCB
@@ -535,7 +573,14 @@ namespace vknn {
             static constexpr int kChoice1D       = 1 << 16; // pickOcb result flag: the sliding-window 1-D kernel won
             static constexpr int kChoiceOcSplit2 = 1 << 17; // pickOcb result flag: conv_reg dispatched as 2 flat-gid slices
             static constexpr int kChoiceOcSplit4 = 1 << 18; // pickOcb result flag: conv_reg dispatched as 4 flat-gid slices
-            static constexpr int kChoiceRow3x3   = 1 << 19; // pickOcb result flag: the 3x3 row-halo-reuse kernel won
+            static constexpr int kChoiceRow3x3   = 1 << 19; // pickOcb result flag: the 3x3 halo-reuse kernel won
+            // Field layout of a conv_reg-style choice: OCB in the low byte, WTILE in the next, flags above.
+            static constexpr int kChoiceTileMask   = 0xff;
+            static constexpr int kChoiceWtileShift = 8;
+            // Kernel extent the row-halo shader is specialized to (its KEXT).
+            static constexpr int kRowKernelExtent = 3;
+            // The wide pixel tile raced alongside the default 4; encoded in the WTILE field.
+            static constexpr uint32_t kWtileWide = 8;
             // pickOcb results encode conv_reg's tile as OCB | WTILE<<8 (WTILE 0 = the classic 4),
             // with kChoice1D marking the conv_1d kernel at the same OCB/WTILE encoding and
             // kChoiceOcSplit2/4 marking a conv_reg tile whose flat gid range record() splits into
@@ -561,7 +606,7 @@ namespace vknn {
                 {
                     return false; // the row-halo flag rides alone on an OCB|WTILE encoding
                 }
-                int ocb = v & 0xff, wt = (v >> 8) & 0xff;
+                int ocb = v & kChoiceTileMask, wt = (v >> kChoiceWtileShift) & kChoiceTileMask;
                 return ocb >= 0 && ocb <= 3 && (wt == 0 || wt == 4 || wt == 8);
             }
             // Threads per OC-split slice: the flat gid range divided by the slice count, rounded up
@@ -794,13 +839,16 @@ namespace vknn {
                 // 3 kx taps rather than WTILE loads per tap.
                 if (row3x3Ok)
                 {
-                    for (uint32_t cand: (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {1, 2, 1 | (8u << 8), 2 | (8u << 8)} : std::vector<uint32_t> {2, 2 | (8u << 8)})
+                    for (uint32_t cand: (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {1, 2, 1 | (kWtileWide << kChoiceWtileShift), 2 | (kWtileWide << kChoiceWtileShift)} : std::vector<uint32_t> {2, 2 | (kWtileWide << kChoiceWtileShift)})
                     {
-                        uint32_t       ocb = cand & 0xffu, wt = std::max(4u, (cand >> 8) & 0xffu);
-                        int64_t        ocbGroups = (Coutb + ocb - 1) / ocb;
-                        int64_t        tot       = x.n * ocbGroups * y.h * ((y.w + wt - 1) / wt);
-                        const double   rowCols   = (double) ((wt - 1) * (uint32_t) pc.SW + 3);
-                        vk::KernelCost cost      = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, rowCols / 3.0, groups(tot, 64), 1);
+                        uint32_t ocb       = cand & (uint32_t) kChoiceTileMask;
+                        uint32_t wt        = std::max((uint32_t) kConv1x1DefaultWTile, (cand >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
+                        int64_t  ocbGroups = (Coutb + ocb - 1) / ocb;
+                        int64_t  tot       = x.n * ocbGroups * y.h * ((y.w + wt - 1) / wt);
+                        // The tile reads COLS columns per (channel-block, ky); tileCost wants that as a
+                        // per-tap figure, so amortize the segment over the kernel's kx taps.
+                        const double   rowCols = (double) ((wt - 1) * (uint32_t) pc.SW + kRowKernelExtent);
+                        vk::KernelCost cost = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, rowCols / (double) kRowKernelExtent, groups(tot, 64), 1);
                         entrants.push_back({(int) cand | kChoiceRow3x3, vk::kTuneRaceMargin, cost, [&, tot, ocb, wt] {
                                                 return timeIt(env.pipeline(shader((std::string("conv3x3_row") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC),
                                                                            {ocb, wt, (uint32_t) pc.SW}),
@@ -1116,10 +1164,19 @@ namespace vknn {
                     });
                     dpc        = {(int) x.n,   (int) x.c,    (int) x.h,    (int) x.w,    (int) y.h,    (int) y.w,           (int) KH, (int) KW,   (int) st[0],
                                   (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) node.fusedAct, 0,        node.actLo, node.actHi};
-                    // Bit-exact tile race: 1 pixel/thread vs the 2x2 output tile (dwconv_t2).
-                    bool dwTile2 = pickDwTile(env, x, y, Cb) == 1;
-                    total        = dwTile2 ? x.n * Cb * ((y.h + 1) / 2) * ((y.w + 1) / 2) : x.n * Cb * y.h * y.w;
-                    pipe = env.pipeline(shader((std::string(dwTile2 ? "dwconv_t2" : "dwconv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), std::vector<uint32_t> {});
+                    // Bit-exact tile race: 1 pixel/thread vs the 3x3 row-halo kernel (the 2x2 twin
+                    // dwconv_t2 remains reachable only through the tune table).
+                    const int dwChoice = pickDwTile(env, x, y, Cb);
+                    if (dwChoice == kDwChoiceRow)
+                    {
+                        total = x.n * Cb * y.h * ((y.w + kConv1x1DefaultWTile - 1) / kConv1x1DefaultWTile);
+                        pipe = env.pipeline(shader((std::string("dwconv3x3_row") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), std::vector<uint32_t> {(uint32_t) kConv1x1DefaultWTile, (uint32_t) st[1]});
+                    } else
+                    {
+                        const bool dwTile2 = dwChoice == kDwChoiceTile2;
+                        total              = dwTile2 ? x.n * Cb * ((y.h + 1) / 2) * ((y.w + 1) / 2) : x.n * Cb * y.h * y.w;
+                        pipe = env.pipeline(shader((std::string(dwTile2 ? "dwconv_t2" : "dwconv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(DwPC), std::vector<uint32_t> {});
+                    }
                 } else
                 {
                     int64_t Cinb = cBlocks(x.c);
@@ -1278,11 +1335,10 @@ namespace vknn {
                         } else if ((ocb & kChoiceRow3x3) != 0)
                         {
                             // 3x3 row-halo kernel (autotuned): WTILE pixels along one output row per
-                            // thread. The tile walks rows, so the gid range is OH * ceil(OW/WTILE) per
-                            // channel group rather than the flattened pixel count.
+                            // thread, so the gid range counts row-tiles rather than flattened pixels.
                             reg                = true;
-                            uint32_t regOcb    = (uint32_t) (ocb & 0xff);
-                            uint32_t regWt     = std::max(4u, (uint32_t) (ocb >> 8) & 0xffu);
+                            uint32_t regOcb    = (uint32_t) (ocb & kChoiceTileMask);
+                            uint32_t regWt     = std::max((uint32_t) kConv1x1DefaultWTile, (uint32_t) (ocb >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
                             int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
                             total              = x.n * ocbGroups * y.h * ((y.w + regWt - 1) / regWt);
                             pipe = env.pipeline(shader((std::string("conv3x3_row") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, (uint32_t) st[1]});
