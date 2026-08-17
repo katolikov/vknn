@@ -18,7 +18,7 @@ namespace vknn { namespace vk {
     /// buffer never fails to allocate merely because the ideal type is unavailable.
     enum class MemPref {
         kAuto,       ///< DEVICE_LOCAL + HOST_VISIBLE, avoiding HOST_CACHED (write-combined is the fast upload path on UMA).
-        kReadback,   ///< DEVICE_LOCAL + HOST_VISIBLE + HOST_CACHED — efficient CPU reads of GPU-written outputs.
+        kReadback,   ///< HOST_CACHED + HOST_VISIBLE, preferring DEVICE_LOCAL too — efficient CPU reads of GPU-written outputs.
         kDeviceOnly, ///< DEVICE_LOCAL, preferring a non-host-visible type; mapped (and host-accessible) only when every device-local type is host-visible.
     };
 
@@ -104,6 +104,20 @@ namespace vknn { namespace vk {
         /// memcpy `n` bytes from the mapping at `offset` into `dst`. Same preconditions as upload().
         void download(void *dst, size_t n, size_t offset = 0);
 
+        /// Make GPU writes visible to host reads through host(). No-op on HOST_COHERENT memory; callers
+        /// that read host() directly rather than through download() must call this first.
+        void invalidateForRead() noexcept;
+        /// Publish host writes made through host(). Mirror of invalidateForRead().
+        void flushAfterWrite() noexcept;
+        /// True when the backing memory type carries HOST_COHERENT (no explicit invalidate/flush).
+        bool coherent() const noexcept {
+            return coherent_;
+        }
+        /// Index of the memory type backing this buffer (a view reports its root's).
+        uint32_t memoryTypeIndex() const noexcept {
+            return memTypeIndex_;
+        }
+
         /// Import an external dma-buf fd as the backing memory (ION zero-copy), building a Buffer that
         /// aliases the caller's allocation instead of allocating its own. The fd is duplicated for the
         /// driver, so the caller retains ownership of `fd`.
@@ -141,6 +155,7 @@ namespace vknn { namespace vk {
         VkDeviceMemory          mem_          = VK_NULL_HANDLE;
         size_t                  bytes_        = 0;
         void                   *mapped_       = nullptr;
+        bool                    coherent_     = true;  ///< Memory type carries HOST_COHERENT; invalidate/flush are no-ops.
         bool                    imported_     = false; ///< Backing memory came from an imported fd (not owned here).
         bool                    accounted_    = false; ///< This allocation has been added to the live/peak totals.
         bool                    allowsViews_  = false; ///< Allocated without the dedicated hint; views may bind in.

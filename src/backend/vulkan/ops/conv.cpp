@@ -535,6 +535,7 @@ namespace vknn {
             static constexpr int kChoice1D       = 1 << 16; // pickOcb result flag: the sliding-window 1-D kernel won
             static constexpr int kChoiceOcSplit2 = 1 << 17; // pickOcb result flag: conv_reg dispatched as 2 flat-gid slices
             static constexpr int kChoiceOcSplit4 = 1 << 18; // pickOcb result flag: conv_reg dispatched as 4 flat-gid slices
+            static constexpr int kChoiceRow3x3   = 1 << 19; // pickOcb result flag: the 3x3 row-halo-reuse kernel won
             // pickOcb results encode conv_reg's tile as OCB | WTILE<<8 (WTILE 0 = the classic 4),
             // with kChoice1D marking the conv_1d kernel at the same OCB/WTILE encoding and
             // kChoiceOcSplit2/4 marking a conv_reg tile whose flat gid range record() splits into
@@ -555,6 +556,10 @@ namespace vknn {
                 if (split != 0 && ((v & kChoice1D) != 0 || (v & 0xff) == 0))
                 {
                     return false; // a split flag rides only on a conv_reg OCB|WTILE encoding
+                }
+                if ((v & kChoiceRow3x3) != 0 && (split != 0 || (v & kChoice1D) != 0 || (v & 0xff) == 0))
+                {
+                    return false; // the row-halo flag rides alone on an OCB|WTILE encoding
                 }
                 int ocb = v & 0xff, wt = (v >> 8) & 0xff;
                 return ocb >= 0 && ocb <= 3 && (wt == 0 || wt == 4 || wt == 8);
@@ -584,6 +589,11 @@ namespace vknn {
                 // A 1-D kernel (1xK / Kx1, stride 1, dilation 1) is eligible for the sliding-window
                 // candidates; computed before the cache consult because the reuse gate needs it.
                 bool asym1dOk = env.useFp16 && ((pc.KH == 1) != (pc.KW == 1)) && pc.SH == 1 && pc.SW == 1 && pc.DH == 1 && pc.DW == 1;
+                // Raced on stride-1 shapes only: the kernel's advantage is the overlap between the kx
+                // taps of adjacent output pixels, which the stride dilutes (WTILE=4 reads 6 columns for
+                // 12 tap-loads at stride 1, but 9 at stride 2, for a wider row array). It stays correct
+                // at stride 2 via SW_SPEC, just not worth racing. SH only picks the input row.
+                bool row3x3Ok = env.useFp16 && pc.KH == 3 && pc.KW == 3 && pc.DH == 1 && pc.DW == 1 && pc.SW == 1 && pc.SH >= 1;
                 // An OC-split choice is eligible only while its conv_reg tile still yields enough
                 // output-channel-block groups (>= 8 for 2 slices, >= 16 for 4) and every slice's
                 // group count fits the device X limit on its own: the flat-gid slices rely on the
@@ -611,7 +621,7 @@ namespace vknn {
                 // kChoice1D value only for the 1-D-eligible shape, and an OC-split value only while
                 // its slice geometry stays eligible — an ineligible node with the same sig fields
                 // must re-race without it.
-                if (env.reuseTuned(sig, reuse) && validOcbChoice(reuse) && (reuse != kChoiceLds3x3 || lds3x3) && (reuse != kChoiceLds16 || lds16Ok) && (!(reuse & kChoice1D) || asym1dOk) && ocSplitEligible(reuse))
+                if (env.reuseTuned(sig, reuse) && validOcbChoice(reuse) && (reuse != kChoiceLds3x3 || lds3x3) && (reuse != kChoiceLds16 || lds16Ok) && (!(reuse & kChoice1D) || asym1dOk) && (!(reuse & kChoiceRow3x3) || row3x3Ok) && ocSplitEligible(reuse))
                 {
                     return reuse;
                 }
@@ -777,6 +787,26 @@ namespace vknn {
                     entrants.push_back({kChoiceLds16, 0.97, ldsCost(ldsG16, 16), [&] {
                                             return timeIt(env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), {16u, 256u}), ldsG16 * 256, 256);
                                         }});
+                }
+                // The row-halo 3x3 joins the same bit-exact race: same loop nest, tap order and
+                // out-of-bounds skip as conv_reg, with each input read moved from a fresh load to a row
+                // segment held in registers. Its per-tap input term is that segment amortized over the
+                // 3 kx taps rather than WTILE loads per tap.
+                if (row3x3Ok)
+                {
+                    for (uint32_t cand: (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {1, 2, 1 | (8u << 8), 2 | (8u << 8)} : std::vector<uint32_t> {2, 2 | (8u << 8)})
+                    {
+                        uint32_t       ocb = cand & 0xffu, wt = std::max(4u, (cand >> 8) & 0xffu);
+                        int64_t        ocbGroups = (Coutb + ocb - 1) / ocb;
+                        int64_t        tot       = x.n * ocbGroups * y.h * ((y.w + wt - 1) / wt);
+                        const double   rowCols   = (double) ((wt - 1) * (uint32_t) pc.SW + 3);
+                        vk::KernelCost cost      = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, rowCols / 3.0, groups(tot, 64), 1);
+                        entrants.push_back({(int) cand | kChoiceRow3x3, vk::kTuneRaceMargin, cost, [&, tot, ocb, wt] {
+                                                return timeIt(env.pipeline(shader((std::string("conv3x3_row") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC),
+                                                                           {ocb, wt, (uint32_t) pc.SW}),
+                                                              tot, 64);
+                                            }});
+                    }
                 }
                 std::vector<vk::KernelCost> costs;
                 costs.reserve(entrants.size());
@@ -1093,10 +1123,10 @@ namespace vknn {
                 } else
                 {
                     int64_t Cinb = cBlocks(x.c);
-                    pc           = {(int) x.n,   (int) x.c,   (int) x.h,    (int) x.w,    (int) Cout,   (int) y.h,    (int) y.w,           (int) KH,   (int) KW,
-                                    (int) st[0], (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) node.fusedAct, node.actLo, node.actHi};
-                    total        = x.n * Coutb * y.h * y.w;
-                    wbuf         = uploadCached(env, node.name + "#w", [&] {
+                    pc    = {(int) x.n,   (int) x.c,   (int) x.h,    (int) x.w,    (int) Cout,   (int) y.h,    (int) y.w,           (int) KH,   (int) KW,
+                             (int) st[0], (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) node.fusedAct, node.actLo, node.actHi};
+                    total = x.n * Coutb * y.h * y.w;
+                    wbuf  = uploadCached(env, node.name + "#w", [&] {
                         // [Cout,Cin,KH,KW] -> [Cout][Cinb][KH][KW][4], with the output-channel rows
                         // padded out to whole blocks (Coutb*4): the kernels read all 4 rows of a block,
                         // so a partial last block must resolve to zero rows, not out-of-bounds loads.
@@ -1117,7 +1147,7 @@ namespace vknn {
                         }
                         return wp;
                     });
-                            // General split-K shape rule (non-pointwise): deep reduction + starved standard
+                    // General split-K shape rule (non-pointwise): deep reduction + starved standard
                     // dispatch. Skipped when a DirectConv3x3 hint forces a specific kernel.
                     int64_t skOHW        = y.h * y.w;
                     int64_t skTaps       = Cinb * KH * KW;
@@ -1128,9 +1158,9 @@ namespace vknn {
                     // every mode.
                     int  skHint       = cfgHint(env, Hint::SplitKConv);
                     bool skStructural = env.useFp16 && x.n == 1 && group == 1 && !pointwise && cfgHint(env, Hint::DirectConv3x3) == 0;
-                    bool starvedDeep  = skHint == (int) Mode::Off ? false :
-                                        skHint == (int) Mode::On  ? skStructural :
-                                                                   skStructural && skTaps >= skTapsFloor && skOHW <= kSplitKGenMaxOHW && skStdThreads < kSplitKGenMaxThreads;
+                    bool starvedDeep = skHint == (int) Mode::Off ? false :
+                                       skHint == (int) Mode::On ? skStructural :
+                                                                  skStructural && skTaps >= skTapsFloor && skOHW <= kSplitKGenMaxOHW && skStdThreads < kSplitKGenMaxThreads;
                     if (pointwise)
                     {
                         // Deep, small-spatial 1x1 convs have too few threads for the register-tiled kernel; use
@@ -1245,6 +1275,17 @@ namespace vknn {
                             int64_t  nTX = (y.w + ts - 1) / ts, nTY = (y.h + ts - 1) / ts;
                             ldsGroups = x.n * Coutb * nTY * nTX;
                             pipe = env.pipeline((std::string("conv3x3_lds") + epi.suffix() + "_fp16").c_str(), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {ts, ts * ts});
+                        } else if ((ocb & kChoiceRow3x3) != 0)
+                        {
+                            // 3x3 row-halo kernel (autotuned): WTILE pixels along one output row per
+                            // thread. The tile walks rows, so the gid range is OH * ceil(OW/WTILE) per
+                            // channel group rather than the flattened pixel count.
+                            reg                = true;
+                            uint32_t regOcb    = (uint32_t) (ocb & 0xff);
+                            uint32_t regWt     = std::max(4u, (uint32_t) (ocb >> 8) & 0xffu);
+                            int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
+                            total              = x.n * ocbGroups * y.h * ((y.w + regWt - 1) / regWt);
+                            pipe = env.pipeline(shader((std::string("conv3x3_row") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, (uint32_t) st[1]});
                         } else if ((ocb & kChoice1D) != 0)
                         {
                             // sliding-window 1-D kernel (1xK / Kx1; autotuned, won the bit-exact race).

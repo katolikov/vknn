@@ -2,6 +2,7 @@
 #include <atomic>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 namespace vknn { namespace vk {
 
@@ -152,33 +153,55 @@ namespace vknn { namespace vk {
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(ctx_.device(), buf_, &req);
 
-            VkMemoryPropertyFlags want  = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-            VkMemoryPropertyFlags avoid = 0;
+            // Ordered wish list: each rung is a (want, avoid) pair tried in turn, so the rung order
+            // encodes which property is worth giving up first.
+            constexpr VkMemoryPropertyFlags kDeviceLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            constexpr VkMemoryPropertyFlags kVisible     = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+            constexpr VkMemoryPropertyFlags kCoherent    = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            constexpr VkMemoryPropertyFlags kCached      = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+
+            struct MemRung {
+                VkMemoryPropertyFlags want;
+                VkMemoryPropertyFlags avoid;
+            };
+            std::vector<MemRung> ladder;
             switch (pref)
             {
                 case MemPref::kAuto:
-                    want |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-                    avoid = VK_MEMORY_PROPERTY_HOST_CACHED_BIT; // write-combined is the faster upload path on UMA
+                    ladder = {{kDeviceLocal | kVisible | kCoherent, kCached}, // write-combined: the fast upload path on UMA
+                              {kDeviceLocal | kVisible | kCoherent, 0},
+                              {kVisible | kCoherent, 0}};
                     break;
                 case MemPref::kReadback:
-                    want |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+                    // HOST_CACHED outranks DEVICE_LOCAL: these buffers exist to be read by the CPU, and
+                    // a write-combined mapping reads an order of magnitude slower. On a UMA part giving
+                    // up the device-local bit costs the GPU nothing.
+                    ladder = {{kDeviceLocal | kVisible | kCached, 0}, {kVisible | kCached, 0}, {kVisible | kCoherent, 0}};
                     break;
                 case MemPref::kDeviceOnly:
                     // Prefer a type WITHOUT host visibility: host-mappable allocations count against a
                     // per-process driver budget that GPU-only weights and scratch must not consume
-                    // (see VulkanBackend::stageWeightToDevice). The second findMemoryType pass drops
-                    // the avoid bit, so a device whose every type is host-visible still allocates.
-                    avoid = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+                    // (see VulkanBackend::stageWeightToDevice). Later rungs drop the avoid bit, so a
+                    // device whose every type is host-visible still allocates.
+                    ladder = {{kDeviceLocal, kVisible}, {kDeviceLocal, 0}, {kVisible | kCoherent, 0}};
                     break;
             }
 
-            uint32_t typeIdx;
-            try
-            { typeIdx = findMemoryType(req.memoryTypeBits, want, avoid); } catch (const Error &)
+            uint32_t typeIdx  = 0;
+            bool     resolved = false;
+            for (const MemRung &rung: ladder)
             {
-                // No device-local host-visible type (a discrete GPU rather than UMA): settle for any
-                // host-coherent mapping so the buffer is still CPU-reachable, just across the bus.
-                typeIdx = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                try
+                {
+                    typeIdx  = findMemoryType(req.memoryTypeBits, rung.want, rung.avoid);
+                    resolved = true;
+                    break;
+                } catch (const Error &)
+                {}
+            }
+            if (!resolved)
+            { // let the exact failure surface to the caller
+                typeIdx = findMemoryType(req.memoryTypeBits, kVisible | kCoherent);
             }
 
             VkMemoryAllocateInfo ai {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -202,6 +225,7 @@ namespace vknn { namespace vk {
             }
             memTypeIndex_ = typeIdx;
             memSize_      = req.size;
+            coherent_     = (ctx_.memProps().memoryTypes[typeIdx].propertyFlags & kCoherent) != 0;
             VK_CHECK(vkBindBufferMemory(ctx_.device(), buf_, mem_, 0));
 
             // A kDeviceOnly buffer is never mapped, even when the chosen type IS host-visible: on a UMA
@@ -273,6 +297,10 @@ namespace vknn { namespace vk {
                 throw Error(Status::Unsupported, "sub-buffer view memory-type requirements exclude the root's memory type");
             }
             VK_CHECK(vkBindBufferMemory(ctx_.device(), buf_, root->mem_, off));
+            memTypeIndex_ = root->memTypeIndex_;
+            // A view shares the root's memory, so it shares the root's coherency: inherit it rather
+            // than keeping the default, or a view of non-coherent memory would skip invalidate/flush.
+            coherent_ = root->coherent_;
             if (root->mapped_)
             {
                 mapped_ = static_cast<char *>(root->mapped_) + off;
@@ -300,6 +328,7 @@ namespace vknn { namespace vk {
             throw Error(Status::InvalidArgument, "upload of " + std::to_string(n) + " B at offset " + std::to_string(offset) + " exceeds buffer size " + std::to_string(bytes_));
         }
         std::memcpy(static_cast<char *>(mapped_) + offset, src, n);
+        flushAfterWrite();
     }
 
     void Buffer::download(void *dst, size_t n, size_t offset) {
@@ -311,7 +340,34 @@ namespace vknn { namespace vk {
         {
             throw Error(Status::InvalidArgument, "download of " + std::to_string(n) + " B at offset " + std::to_string(offset) + " exceeds buffer size " + std::to_string(bytes_));
         }
+        invalidateForRead();
         std::memcpy(dst, static_cast<const char *>(mapped_) + offset, n);
+    }
+
+    // Whole mapping rather than a sub-range: VK_WHOLE_SIZE needs no nonCoherentAtomSize rounding, and a
+    // view's offset carries no such alignment guarantee.
+    void Buffer::invalidateForRead() noexcept {
+        if (coherent_ || !mapped_)
+        {
+            return;
+        }
+        VkMappedMemoryRange range {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = viewParent_ ? viewParent_->mem_ : mem_;
+        range.offset = 0;
+        range.size   = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(ctx_.device(), 1, &range);
+    }
+
+    void Buffer::flushAfterWrite() noexcept {
+        if (coherent_ || !mapped_)
+        {
+            return;
+        }
+        VkMappedMemoryRange range {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = viewParent_ ? viewParent_->mem_ : mem_;
+        range.offset = 0;
+        range.size   = VK_WHOLE_SIZE;
+        vkFlushMappedMemoryRanges(ctx_.device(), 1, &range);
     }
 
     std::unique_ptr<Buffer> Buffer::importDmaBufFd(VulkanContext &ctx, int fd, size_t bytes, VkBufferUsageFlags extraUsage) noexcept {

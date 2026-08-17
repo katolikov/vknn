@@ -1,0 +1,118 @@
+#version 450
+// 3x3 dilation-1 group-1 conv with horizontal halo reuse (NC4HW4, fp32).
+//
+// The tile is WTILE output pixels along ONE output row, so it spans COLS = (WTILE-1)*SW + 3 input
+// columns: each (icb, ky) loads that row segment into registers once and every (kx, pixel) pair reads
+// it there. Input loads per output pixel per channel-block drop from conv_reg's 9 to COLS/WTILE (1.5
+// at WTILE=4, stride 1), which is the wall on tiny-channel maps -- the reduction over Cin is too short
+// to hide the L2 round trips. Weights load once per (icb, ky, kx) and are reused across WTILE pixels.
+//
+// Bit-exact with conv_reg: same loop nest, same tap order, same out-of-bounds skip (accumulating a
+// zero instead would flip an accumulator's -0.0 to +0.0). Only the source of `inv` changes.
+//
+// SW is a spec constant because COLS sizes a register array; SH stays in the push constants.
+
+#include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+layout(constant_id = 0) const int OCB_BLK = 1; // output channel-blocks (of 4 oc) computed per thread
+layout(constant_id = 1) const int WTILE = 4;   // output pixels per thread, consecutive along W
+layout(constant_id = 2) const int SW_SPEC = 1; // horizontal stride (sizes the row segment)
+layout(local_size_x = 64) in;
+#define COLS ((WTILE - 1) * SW_SPEC + 3)
+layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+  int gidBase; // first flat gid of this dispatch's OC-split slice (0 = whole range)
+} pc;
+
+void main() {
+  int Cinb = (pc.Cin + 3) / 4;
+  int Coutb = (pc.Cout + 3) / 4;
+  int HW = pc.OH * pc.OW;
+  int nTX = (pc.OW + WTILE - 1) / WTILE;
+  int ocbGroups = (Coutb + OCB_BLK - 1) / OCB_BLK;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x + uint(pc.gidBase);
+  if (gid >= uint(pc.N * ocbGroups * pc.OH * nTX)) return;
+  int tx = int(gid) % nTX;
+  int oy = (int(gid) / nTX) % pc.OH;
+  int ocbg = (int(gid) / (nTX * pc.OH)) % ocbGroups;
+  int n = int(gid) / (nTX * pc.OH * ocbGroups);
+  int ocb0 = ocbg * OCB_BLK;
+  int ox0 = tx * WTILE;
+  int ixBase = ox0 * SW_SPEC - pc.PL; // input column of tap kx=0 for the tile's first pixel
+
+  vec4 acc[WTILE][OCB_BLK];
+  int ocStride = Cinb * 9;
+  // Clamp: the last block group can overhang Coutb; its accumulator is never stored.
+  int wbj[OCB_BLK];
+  for (int j = 0; j < OCB_BLK; ++j) {
+    wbj[j] = min(ocb0 + j, Coutb - 1) * 4 * ocStride;
+    vec4 b = (ocb0 + j < Coutb) ? bias[ocb0 + j] : vec4(0.0);
+    for (int p = 0; p < WTILE; ++p) acc[p][j] = b;
+  }
+
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int sb = (n * Cinb + icb) * pc.H * pc.W;
+    for (int ky = 0; ky < 3; ++ky) {
+      int iy = oy * pc.SH - pc.PT + ky;
+      // Row segment for the whole tile; colOk carries conv_reg's per-tap bounds test forward.
+      bool rowOk = uint(iy) < uint(pc.H);
+      int rowOff = sb + iy * pc.W;
+      vec4 row[COLS];
+      bool colOk[COLS];
+      for (int c = 0; c < COLS; ++c) {
+        int ix = ixBase + c;
+        bool ok = rowOk && uint(ix) < uint(pc.W);
+        colOk[c] = ok;
+        row[c] = ok ? src[rowOff + ix] : vec4(0.0);
+      }
+      for (int kx = 0; kx < 3; ++kx) {
+        int wtap = (icb * 3 + ky) * 3 + kx;
+        vec4 w[OCB_BLK][4];
+        for (int j = 0; j < OCB_BLK; ++j) {
+          w[j][0] = (wt[wbj[j] + 0 * ocStride + wtap]);
+          w[j][1] = (wt[wbj[j] + 1 * ocStride + wtap]);
+          w[j][2] = (wt[wbj[j] + 2 * ocStride + wtap]);
+          w[j][3] = (wt[wbj[j] + 3 * ocStride + wtap]);
+        }
+        for (int p = 0; p < WTILE; ++p) {
+          int c = p * SW_SPEC + kx;
+          if (colOk[c]) {
+            vec4 inv = row[c];
+            for (int j = 0; j < OCB_BLK; ++j) {
+              acc[p][j].x += dot(inv, w[j][0]);
+              acc[p][j].y += dot(inv, w[j][1]);
+              acc[p][j].z += dot(inv, w[j][2]);
+              acc[p][j].w += dot(inv, w[j][3]);
+            }
+          }
+        }
+      }
+    }
+  }
+  for (int j = 0; j < OCB_BLK; ++j) {
+    if (ocb0 + j >= Coutb) continue;
+    int dbase = (n * Coutb + (ocb0 + j)) * HW;
+    for (int p = 0; p < WTILE; ++p) {
+      int ox = ox0 + p;
+      if (ox < pc.OW) {
+        int pix = oy * pc.OW + ox;
+        vec4 v = vec4(vx_act(acc[p][j].x, pc.act, pc.actLo, pc.actHi),
+                      vx_act(acc[p][j].y, pc.act, pc.actLo, pc.actHi),
+                      vx_act(acc[p][j].z, pc.act, pc.actLo, pc.actHi),
+                      vx_act(acc[p][j].w, pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+        v = pw_apply4(v, dbase + pix);
+#endif
+        dst[dbase + pix] = v;
+      }
+    }
+  }
+}

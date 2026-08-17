@@ -24,6 +24,7 @@
 //   --no-fold-islands      keep tiny GPU op-islands on the GPU instead of folding to CPU (advanced)
 //   --no-cache             skip cache read/write (cold compile every load)
 //   --timing               print pack/submit/unpack timing
+//   --timing-summary       print per-segment averages: submit call, fence wait, GPU busy, GPU gap
 //   --cache DIR            directory to hold the model's cache file (default: beside the model)
 //   --winograd auto|on|off force the 3x3-conv kernel (on/off skip autotuning -> deterministic choice)
 //   --max-submit-nodes N   split the GPU command buffer every N nodes (watchdog/TDR mitigation)
@@ -142,6 +143,7 @@ int main(int argc, char **argv) {
     cfg.debugSegments = hasFlag(argc, argv, "--debug-segments");
     cfg.layerDumpDir  = optValue(argc, argv, "--layer-dump-dir", cfg.layerDumpDir.c_str());
     cfg.timing        = hasFlag(argc, argv, "--timing");
+    cfg.timingSummary = hasFlag(argc, argv, "--timing-summary");
     // --cache names a directory to hold every model's cache file; without it the cache lands beside the
     // model (Runtime::load's default). The directory is created on the first write.
     if (const char *cacheDir = optValue(argc, argv, "--cache", ""); cacheDir[0])
@@ -248,9 +250,11 @@ int main(int argc, char **argv) {
     int                   repeatCount = atoi(optValue(argc, argv, "--repeat", "1"));
     std::vector<IOTensor> outputs;
     Status                status = Status::Ok;
+    // `outputs` keeps the previous run's buffers on purpose: run() reclaims that storage for the
+    // tensors it is about to write, then clears the vector itself. Clearing it here would free the
+    // buffers first, so every run would re-allocate and zero-fill the output before overwriting it.
     for (int runIndex = 0; runIndex < (repeatCount < 1 ? 1 : repeatCount); ++runIndex)
     {
-        outputs.clear();
         status = session->run(inputs, outputs);
         if (status != Status::Ok)
         {

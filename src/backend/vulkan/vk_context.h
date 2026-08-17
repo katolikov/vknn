@@ -169,6 +169,8 @@ namespace vknn { namespace vk {
         void selectPhysicalDevice();
         void queryCaps();
         void createDevice();
+        /// Debug-log the device's memory-type roster (properties per type).
+        void logMemoryTypes() const;
 
         VkInstance                       instance_    = VK_NULL_HANDLE;
         VkPhysicalDevice                 phys_        = VK_NULL_HANDLE;

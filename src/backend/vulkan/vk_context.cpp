@@ -34,6 +34,7 @@ namespace vknn { namespace vk {
             queryCaps();
             createDevice();
             VKNN_INFO << "Vulkan ready: " << caps_.summary();
+            logMemoryTypes();
         } catch (const std::exception &e)
         {
             VKNN_ERROR << "VulkanContext init failed: " << e.what();
@@ -237,6 +238,16 @@ namespace vknn { namespace vk {
         }
 
         vkGetPhysicalDeviceMemoryProperties(phys_, &memProps_);
+    }
+
+    void VulkanContext::logMemoryTypes() const {
+        // The roster decides which rung of the vk_buffer.cpp ladder a readback buffer lands on, and so
+        // whether CPU downloads run at cached or write-combined speed.
+        for (uint32_t i = 0; i < memProps_.memoryTypeCount; ++i)
+        {
+            const VkMemoryPropertyFlags f = memProps_.memoryTypes[i].propertyFlags;
+            VKNN_DEBUG << "vk memory type " << i << ": heap " << memProps_.memoryTypes[i].heapIndex << (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? " DEVICE_LOCAL" : "") << (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ? " HOST_VISIBLE" : "") << (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT ? " HOST_COHERENT" : "") << (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? " HOST_CACHED" : "");
+        }
     }
 
     void VulkanContext::createDevice() {
