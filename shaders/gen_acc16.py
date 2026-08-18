@@ -18,6 +18,7 @@ RULES = [
     (r"\bvec4 row\[", "f16vec4 row["),
     (r"\bvec4 w\[", "f16vec4 w["),
     (r"vec4 inv = vec4\(src\[([^\]]+)\]\);", r"f16vec4 inv = src[\1];"),
+    (r"vec4 inv = vec4\(span\[c\]\);", "f16vec4 inv = span[c];"),
     (r"\bvec4 inv = ", "f16vec4 inv = "),
     (r"vec4 b = \(ocb0 \+ j < Coutb\) \? vec4\(bias\[ocb0 \+ j\]\) : vec4\(0\.0\);",
      "f16vec4 b = (ocb0 + j < Coutb) ? bias[ocb0 + j] : f16vec4(0.0);"),

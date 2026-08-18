@@ -148,7 +148,7 @@ namespace vknn {
         /// Race only `analyticShortlist(costs, ...)` and return one estimate per CANDIDATE, with a
         /// pruned candidate's slot left at infinity. Callers keep their existing "must beat the
         /// incumbent's time" selection loop unchanged: an infinite estimate never wins.
-        std::vector<double> racePruned(const std::vector<KernelCost> &costs, const TuneModelCaps &caps, const std::function<double(int)> &submitOnce);
+        std::vector<double> racePruned(const std::vector<KernelCost> &costs, const TuneModelCaps &caps, const std::function<double(int)> &submitOnce, const std::vector<int> &alwaysKeep = {});
 
     } // namespace vk
 } // namespace vknn

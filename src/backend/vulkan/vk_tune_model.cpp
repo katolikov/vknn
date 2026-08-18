@@ -248,8 +248,14 @@ namespace vknn { namespace vk {
         auto total = [](const KernelCost &c) {
             return c.streamVec4 + c.residentVec4;
         };
-        int cheapest = 0, leanest = 0, leanestStream = 0, widest = 0;
-        for (int i = 1; i < (int) costs.size(); ++i)
+        // The ends name ALTERNATIVES to the incumbent, so they are seeded at candidate 1 rather than 0.
+        // Seeding at 0 silently wastes a slot whenever the incumbent already holds an extreme -- and it
+        // always holds the wave extreme, since the deterministic default is the one-output-per-thread
+        // kernel. The next-widest candidate, which is the one the model's traffic ranking is most
+        // likely to misjudge, then never reached the race at all.
+        const int first    = (costs.size() > 1) ? 1 : 0;
+        int       cheapest = first, leanest = first, leanestStream = first, widest = first;
+        for (int i = first + 1; i < (int) costs.size(); ++i)
         {
             if (modelMs(costs[(size_t) i], caps) < modelMs(costs[(size_t) cheapest], caps))
             {
@@ -307,8 +313,21 @@ namespace vknn { namespace vk {
         return caps;
     }
 
-    std::vector<double> racePruned(const std::vector<KernelCost> &costs, const TuneModelCaps &caps, const std::function<double(int)> &submitOnce) {
-        const std::vector<int> keep = analyticShortlist(costs, caps);
+    std::vector<double> racePruned(const std::vector<KernelCost> &costs, const TuneModelCaps &caps, const std::function<double(int)> &submitOnce, const std::vector<int> &alwaysKeep) {
+        // alwaysKeep names candidates whose difference the model provably cannot rank -- two tiles of
+        // ONE kernel, where the cheaper tile is an interior point on every axis the shortlist scores
+        // (fewer waves than a finer-grained kernel, more traffic than a coarser tile) and so is pruned
+        // however the ends are chosen. Deciding between them is precisely what the race is for.
+        std::vector<int> keep = analyticShortlist(costs, caps);
+        for (int i: alwaysKeep)
+        {
+            if (i >= 0 && i < (int) costs.size())
+            {
+                keep.push_back(i);
+            }
+        }
+        std::sort(keep.begin(), keep.end());
+        keep.erase(std::unique(keep.begin(), keep.end()), keep.end());
         // The race sees a dense list of survivors; the caller sees one slot per original candidate,
         // with a pruned slot at infinity so its existing selection loop skips it untouched.
         const std::vector<double> raced = raceCandidates((int) keep.size(), [&](int slot) {

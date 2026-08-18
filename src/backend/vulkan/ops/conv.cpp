@@ -803,7 +803,13 @@ namespace vknn {
                 entrants.push_back({0, 1.0, tileCost(x.n * Coutb * HW, pc.KH * pc.KW, 1.0, 1.0, 1.0, groups(x.n * Coutb * HW, 64), 1), [&] {
                                         return timeIt(env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), {64u}), x.n * Coutb * HW, 64);
                                     }});
-                for (uint32_t cand: cands)
+                // Where the row-halo kernel is eligible it is conv_reg's own math with strictly fewer
+                // input loads per tap at the same tile and wave count, and it beat every conv_reg
+                // candidate by 1.5-2x on the shapes measured here. Racing conv_reg's tile ladder as well
+                // only spends the analytic shortlist's five slots, and the row tiles then lose them to
+                // conv_reg entrants that cannot win -- so the ladder is dropped rather than raced.
+                // Entrant 0 (the deterministic direct kernel) stays as the incumbent either way.
+                for (uint32_t cand: row3x3Ok ? std::vector<uint32_t> {} : cands)
                 {
                     uint32_t ocb = cand & 0xffu, wt = std::max(4u, (cand >> 8) & 0xffu);
                     int64_t  ocbGroups = (Coutb + ocb - 1) / ocb;
@@ -867,6 +873,7 @@ namespace vknn {
                 // out-of-bounds skip as conv_reg, with each input read moved from a fresh load to a row
                 // segment held in registers. Its per-tap input term is that segment amortized over the
                 // 3 kx taps rather than WTILE loads per tap.
+                std::vector<int> pinnedEntrants; // row-halo tiles: see racePruned's alwaysKeep contract
                 if (row3x3Ok)
                 {
                     std::vector<uint32_t> rowCands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {1, 2, 1 | (kWtileWide << kChoiceWtileShift), 2 | (kWtileWide << kChoiceWtileShift)} : std::vector<uint32_t> {2, 2 | (kWtileWide << kChoiceWtileShift)};
@@ -880,6 +887,7 @@ namespace vknn {
                         // per-tap figure, so amortize the segment over the kernel's kx taps.
                         const double   rowCols = (double) ((wt - 1) * (uint32_t) pc.SW + kRowKernelExtent);
                         vk::KernelCost cost = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, rowCols / (double) kRowKernelExtent, groups(tot, 64), 1);
+                        pinnedEntrants.push_back((int) entrants.size());
                         entrants.push_back({(int) cand | kChoiceRow3x3, vk::kTuneRaceMargin, cost, [&, tot, ocb, wt] {
                                                 return timeIt(
                                                     env.pipeline(accKernel(env, "conv3x3_row"), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, (uint32_t) pc.SW}), tot, 64);
@@ -892,9 +900,12 @@ namespace vknn {
                 {
                     costs.push_back(entrant.cost);
                 }
-                std::vector<double> ms = vk::racePruned(costs, vk::deviceTuneModel(env), [&](int index) {
-                    return entrants[(size_t) index].time();
-                });
+                std::vector<double> ms = vk::racePruned(
+                    costs, vk::deviceTuneModel(env),
+                    [&](int index) {
+                        return entrants[(size_t) index].time();
+                    },
+                    pinnedEntrants);
                 // entrants[0] is the deterministic default and stays the incumbent: each challenger
                 // is measured against ITS time, not against a running best that would compound the
                 // margin and make the outcome depend on list order.
