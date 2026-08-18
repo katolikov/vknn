@@ -22,9 +22,13 @@ RULES = [
     (r"vec4 b = \(ocb0 \+ j < Coutb\) \? vec4\(bias\[ocb0 \+ j\]\) : vec4\(0\.0\);",
      "f16vec4 b = (ocb0 + j < Coutb) ? bias[ocb0 + j] : f16vec4(0.0);"),
     (r"vec4 b = vec4\(bias\[cb\]\);", "f16vec4 b = bias[cb];"),
-    (r"= ok \? vec4\(src\[([^\]]+)\]\) : vec4\(0\.0\);", r"= ok ? src[\1] : f16vec4(0.0);"),
+    (r"= (ok|colOk\[c\]) \? vec4\(src\[([^;]+?)\]\) : vec4\(0\.0\);", r"= \1 ? src[\2] : f16vec4(0.0);"),
     (r"w\[j\]\[(\d)\] = vec4\((wt\[.*\])\);", r"w[j][\1] = \2;"),
     (r"vec4 wv = vec4\(wt\[([^\]]+)\]\);", r"f16vec4 wv = wt[\1];"),
+    # conv3x3_cin_lt4's scalar gather: the assembled operand vector stays fp16. The store-side
+    # "vec4 v = vec4(vx_act(...)" differs textually, so these cannot touch it.
+    (r"vec4 v = vec4\(0\.0\);", "f16vec4 v = f16vec4(0.0);"),
+    (r"v\[ci\] = float\(src\[([^;]+)\]\);", r"v[ci] = src[\1];"),
     # The activation epilogue stays fp32: vx_act takes floats and the store converts back.
     (r"vx_act\(acc\[([^\]]+)\]\[([^\]]+)\]\.([xyzw])", r"vx_act(float(acc[\1][\2].\3)"),
     (r"vx_act\(acc\[([^\]]+)\]\.([xyzw])", r"vx_act(float(acc[\1].\2)"),

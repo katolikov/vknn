@@ -1,0 +1,131 @@
+#version 450
+// GENERATED from conv3x3_cin_lt4_fp16.comp by shaders/gen_acc16.py -- edit that file, not this one.
+// fp16-accumulator twin: the reduction rounds to fp16 at every tap instead of carrying
+// fp32, so it is NOT bit-exact with its source. Selected only at Precision::Low.
+// 3x3 dilation-1 group-1 conv whose input has fewer than 4 channels, read from a COMPACT flat plane
+// (NCHW row-major) instead of a channel-padded NC4HW4 buffer. Output is NC4HW4 as usual.
+//
+// With CIN=1 the padded form carries 4x the bytes for the same data and every load fetches 8 bytes to
+// use 2, which is the whole cost of a first conv over a large plane. Reading the dense plane cuts the
+// input traffic by 4/CIN.
+//
+// Tiling matches conv3x3_row: WTILE output pixels along one output row, the row segment held in
+// registers so all three kx taps read it there.
+//
+// Bit-exact with conv_reg: the operand is assembled into the SAME vec4 the padded path would load
+// (channels beyond CIN are zero, exactly as the NC4HW4 pack leaves them) and fed to the same dot() in
+// the same (ky, kx, pixel) order, so the sum is term-for-term identical. Computing cin*w.x instead
+// would drop dot()'s zero terms and could flip an accumulator's -0.0.
+//
+// CIN and SW are spec constants: CIN picks how many planes to gather, SW sizes the row segment.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+layout(constant_id = 0) const int OCB_BLK = 1; // output channel-blocks (of 4 oc) computed per thread
+layout(constant_id = 1) const int WTILE = 4;   // output pixels per thread, consecutive along W
+layout(constant_id = 2) const int SW_SPEC = 1; // horizontal stride (sizes the row segment)
+layout(constant_id = 3) const int CIN = 1;     // input channels, 1..3
+layout(local_size_x = 64) in;
+#define KEXT 3
+#define KTAPS (KEXT * KEXT)
+#define COLS ((WTILE - 1) * SW_SPEC + KEXT)
+layout(std430, binding = 0) readonly buffer Src { float16_t src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { f16vec4 bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { f16vec4 dst[]; };
+layout(push_constant) uniform PC {
+  int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
+  float actLo, actHi;
+  int gidBase;
+} pc;
+
+void main() {
+  int Coutb = (pc.Cout + 3) / 4;
+  int HW = pc.OH * pc.OW;
+  int nTX = (pc.OW + WTILE - 1) / WTILE;
+  int ocbGroups = (Coutb + OCB_BLK - 1) / OCB_BLK;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x + uint(pc.gidBase);
+  if (gid >= uint(pc.N * ocbGroups * pc.OH * nTX)) return;
+  int tx = int(gid) % nTX;
+  int oy = (int(gid) / nTX) % pc.OH;
+  int ocbg = (int(gid) / (nTX * pc.OH)) % ocbGroups;
+  int n = int(gid) / (nTX * pc.OH * ocbGroups);
+  int ocb0 = ocbg * OCB_BLK;
+  int ox0 = tx * WTILE;
+  int ixBase = ox0 * SW_SPEC - pc.PL;
+
+  f16vec4 acc[WTILE][OCB_BLK];
+  // One input channel-block, so the weight pack's per-output-channel stride is just the tap count.
+  int ocStride = KTAPS;
+  int wbj[OCB_BLK];
+  for (int j = 0; j < OCB_BLK; ++j) {
+    wbj[j] = min(ocb0 + j, Coutb - 1) * 4 * ocStride;
+    f16vec4 b = (ocb0 + j < Coutb) ? bias[ocb0 + j] : f16vec4(0.0);
+    for (int p = 0; p < WTILE; ++p) acc[p][j] = b;
+  }
+
+  int planeStride = pc.H * pc.W; // dense NCHW: consecutive channels are whole planes apart
+  for (int ky = 0; ky < KEXT; ++ky) {
+    int iy = oy * pc.SH - pc.PT + ky;
+    bool rowOk = uint(iy) < uint(pc.H);
+    f16vec4 row[COLS];
+    bool colOk[COLS];
+    for (int c = 0; c < COLS; ++c) {
+      int ix = ixBase + c;
+      bool ok = rowOk && uint(ix) < uint(pc.W);
+      colOk[c] = ok;
+      f16vec4 v = f16vec4(0.0);
+      if (ok) {
+        int base = (n * CIN * planeStride) + iy * pc.W + ix;
+        for (int ci = 0; ci < CIN; ++ci) v[ci] = src[base + ci * planeStride];
+      }
+      row[c] = v;
+    }
+    for (int kx = 0; kx < KEXT; ++kx) {
+      int wtap = ky * KEXT + kx;
+      f16vec4 w[OCB_BLK][4];
+      for (int j = 0; j < OCB_BLK; ++j) {
+        w[j][0] = wt[wbj[j] + 0 * ocStride + wtap];
+        w[j][1] = wt[wbj[j] + 1 * ocStride + wtap];
+        w[j][2] = wt[wbj[j] + 2 * ocStride + wtap];
+        w[j][3] = wt[wbj[j] + 3 * ocStride + wtap];
+      }
+      for (int p = 0; p < WTILE; ++p) {
+        int c = p * SW_SPEC + kx;
+        if (colOk[c]) {
+          f16vec4 inv = row[c];
+          for (int j = 0; j < OCB_BLK; ++j) {
+            acc[p][j].x += dot(inv, w[j][0]);
+            acc[p][j].y += dot(inv, w[j][1]);
+            acc[p][j].z += dot(inv, w[j][2]);
+            acc[p][j].w += dot(inv, w[j][3]);
+          }
+        }
+      }
+    }
+  }
+  for (int j = 0; j < OCB_BLK; ++j) {
+    if (ocb0 + j >= Coutb) continue;
+    int dbase = (n * Coutb + (ocb0 + j)) * HW;
+    for (int p = 0; p < WTILE; ++p) {
+      int ox = ox0 + p;
+      if (ox < pc.OW) {
+        int pix = oy * pc.OW + ox;
+        vec4 v = vec4(vx_act(float(acc[p][j].x), pc.act, pc.actLo, pc.actHi),
+                      vx_act(float(acc[p][j].y), pc.act, pc.actLo, pc.actHi),
+                      vx_act(float(acc[p][j].z), pc.act, pc.actLo, pc.actHi),
+                      vx_act(float(acc[p][j].w), pc.act, pc.actLo, pc.actHi));
+#ifdef PW_EPI
+        v = pw_apply4(v, dbase + pix);
+#endif
+        dst[dbase + pix] = TO_STORE4(v);
+      }
+    }
+  }
+}

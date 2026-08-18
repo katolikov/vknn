@@ -581,6 +581,11 @@ namespace vknn {
             static constexpr int kChoiceWtileShift = 8;
             // Kernel extent the row-halo shader is specialized to (its KEXT).
             static constexpr int kRowKernelExtent = 3;
+            static constexpr int kRowKernelTaps   = kRowKernelExtent * kRowKernelExtent;
+            static constexpr int kRowKernelHalo   = kRowKernelExtent - 1;
+            // The row-halo kernel's HTILE (output rows per thread) rides in its own field above the flags.
+            static constexpr int kChoiceHtileShift = 24;
+            static constexpr int kChoiceHtileMask  = 0xf;
             // The wide pixel tile raced alongside the default 4; encoded in the WTILE field.
             static constexpr uint32_t kWtileWide = 8;
             // pickOcb results encode conv_reg's tile as OCB | WTILE<<8 (WTILE 0 = the classic 4),
@@ -609,6 +614,10 @@ namespace vknn {
                     return false; // the row-halo flag rides alone on an OCB|WTILE encoding
                 }
                 int ocb = v & kChoiceTileMask, wt = (v >> kChoiceWtileShift) & kChoiceTileMask;
+                if (((v >> kChoiceHtileShift) & kChoiceHtileMask) != 0)
+                {
+                    return false; // a stale cached HTILE choice (the raced-and-rejected vertical tile) re-races
+                }
                 return ocb >= 0 && ocb <= 3 && (wt == 0 || wt == 4 || wt == 8);
             }
             // Threads per OC-split slice: the flat gid range divided by the slice count, rounded up
@@ -627,9 +636,12 @@ namespace vknn {
             // footprint buys occupancy: measured -22/-31/-31% on the stride-1 convs. conv_reg re-loads
             // its operand per tap and holds far less, so the same twin only pays the fp16 conversion --
             // measured 0.64 -> 1.01 and 0.64 -> 1.09 ms on the strided shapes. It keeps fp32.
-            std::string accKernel(const VkOpEnv &env, const std::string &stem) const {
-                const std::string name = env.fp16Arith ? stem + "_acc16" : stem;
-                return env.fp16Arith ? name + epi.suffix() + "_fp16" : shader((name + epi.suffix()).c_str(), env.useFp16);
+            std::string accKernel(const VkOpEnv &env, const char *stem) const {
+                if (env.fp16Arith)
+                {
+                    return std::string(stem) + "_acc16" + epi.suffix() + "_fp16";
+                }
+                return shader((std::string(stem) + epi.suffix()).c_str(), env.useFp16);
             }
             int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, bool lds3x3) {
                 // The LDS-halo kernel decodes a flat gl_WorkGroupID.x with no split spill, so its
@@ -653,7 +665,10 @@ namespace vknn {
                 // taps of adjacent output pixels, which the stride dilutes (WTILE=4 reads 6 columns for
                 // 12 tap-loads at stride 1, but 9 at stride 2, for a wider row array). It stays correct
                 // at stride 2 via SW_SPEC, just not worth racing. SH only picks the input row.
-                bool row3x3Ok = env.useFp16 && pc.KH == 3 && pc.KW == 3 && pc.DH == 1 && pc.DW == 1 && pc.SW == 1 && pc.SH >= 1;
+                // Stride 2 joins the race only when the reduction runs in fp16: the wider row segment
+                // ((WTILE-1)*2+3 columns) was measured a loss at fp32 register cost, and half-width
+                // accumulators are what make it affordable. Normal's race set is unchanged.
+                bool row3x3Ok = env.useFp16 && pc.KH == 3 && pc.KW == 3 && pc.DH == 1 && pc.DW == 1 && (pc.SW == 1 || (pc.SW == 2 && env.fp16Arith)) && pc.SH >= 1;
                 // An OC-split choice is eligible only while its conv_reg tile still yields enough
                 // output-channel-block groups (>= 8 for 2 slices, >= 16 for 4) and every slice's
                 // group count fits the device X limit on its own: the flat-gid slices rely on the
@@ -854,7 +869,8 @@ namespace vknn {
                 // 3 kx taps rather than WTILE loads per tap.
                 if (row3x3Ok)
                 {
-                    for (uint32_t cand: (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {1, 2, 1 | (kWtileWide << kChoiceWtileShift), 2 | (kWtileWide << kChoiceWtileShift)} : std::vector<uint32_t> {2, 2 | (kWtileWide << kChoiceWtileShift)})
+                    std::vector<uint32_t> rowCands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {1, 2, 1 | (kWtileWide << kChoiceWtileShift), 2 | (kWtileWide << kChoiceWtileShift)} : std::vector<uint32_t> {2, 2 | (kWtileWide << kChoiceWtileShift)};
+                    for (uint32_t cand: rowCands)
                     {
                         uint32_t ocb       = cand & (uint32_t) kChoiceTileMask;
                         uint32_t wt        = std::max((uint32_t) kConv1x1DefaultWTile, (cand >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
@@ -865,9 +881,8 @@ namespace vknn {
                         const double   rowCols = (double) ((wt - 1) * (uint32_t) pc.SW + kRowKernelExtent);
                         vk::KernelCost cost = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, rowCols / (double) kRowKernelExtent, groups(tot, 64), 1);
                         entrants.push_back({(int) cand | kChoiceRow3x3, vk::kTuneRaceMargin, cost, [&, tot, ocb, wt] {
-                                                return timeIt(env.pipeline(accKernel(env, std::string("conv3x3_row") + epi.suffix()), 4 + epi.extraBufs(), sizeof(ConvPC),
-                                                                           {ocb, wt, (uint32_t) pc.SW}),
-                                                              tot, 64);
+                                                return timeIt(
+                                                    env.pipeline(accKernel(env, "conv3x3_row"), 4 + epi.extraBufs(), sizeof(ConvPC), {ocb, wt, (uint32_t) pc.SW}), tot, 64);
                                             }});
                     }
                 }
@@ -1246,8 +1261,8 @@ namespace vknn {
                         const uint32_t regWt     = (uint32_t) kConv1x1DefaultWTile;
                         int64_t        ocbGroups = (Coutb + regOcb - 1) / regOcb;
                         total                    = x.n * ocbGroups * y.h * ((y.w + regWt - 1) / regWt);
-                        pipe = env.pipeline(shader((std::string("conv3x3_cin_lt4") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC),
-                                            std::vector<uint32_t> {regOcb, regWt, (uint32_t) st[1], (uint32_t) x.c});
+                        pipe                     = env.pipeline(accKernel(env, "conv3x3_cin_lt4"), 4 + epi.extraBufs(), sizeof(ConvPC),
+                                                                std::vector<uint32_t> {regOcb, regWt, (uint32_t) st[1], (uint32_t) x.c});
                     } else if (pointwise)
                     {
                         // Deep, small-spatial 1x1 convs have too few threads for the register-tiled kernel; use
@@ -1371,7 +1386,7 @@ namespace vknn {
                             uint32_t regWt     = std::max((uint32_t) kConv1x1DefaultWTile, (uint32_t) (ocb >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
                             int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
                             total              = x.n * ocbGroups * y.h * ((y.w + regWt - 1) / regWt);
-                            pipe = env.pipeline(accKernel(env, std::string("conv3x3_row") + epi.suffix()), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, (uint32_t) st[1]});
+                            pipe = env.pipeline(accKernel(env, "conv3x3_row"), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {regOcb, regWt, (uint32_t) st[1]});
                         } else if ((ocb & kChoice1D) != 0)
                         {
                             // sliding-window 1-D kernel (1xK / Kx1; autotuned, won the bit-exact race).

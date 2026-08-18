@@ -40,6 +40,9 @@ REPO_DEFAULT = os.path.dirname(HERE)
 _EPI_INCLUDE_RE = re.compile(r'#include[ \t]+"pw_epilogue\.glsl"')
 # A string literal immediately followed by  + epi.suffix()  (the common site and each ternary arm).
 _STEM_SITE_RE = re.compile(r'"([A-Za-z0-9_]+)"\s*\)?\s*\+\s*epi\.suffix\(\)')
+# accKernel(env, "<stem>") composes <stem>[_acc16]<epi.suffix()>_fp16 internally, so the bare literal
+# is a stem request even though "+ epi.suffix()" is not adjacent to it in the source.
+_ACC_SITE_RE = re.compile(r'accKernel\(\s*env\s*,\s*"([A-Za-z0-9_]+)"')
 # matmul.cpp composes the stem in a variable then does  name += epi.suffix();  — trace the literals.
 _NAME_SUFFIX_RE = re.compile(r'\b(\w+)\s*\+=\s*epi\.suffix\(\)')
 _REGISTER_VK_RE = re.compile(r'VKNN_REGISTER_VK_OP\(\s*OpType::(\w+)')
@@ -81,6 +84,10 @@ def _requested_stems_in_text(text):
     name += epi.suffix()) is resolved separately by _matmul_composed_stems.
     """
     stems = set(_STEM_SITE_RE.findall(text))
+    stems |= set(_ACC_SITE_RE.findall(text))
+    # accKernel's own body concatenates the "_acc16" literal ahead of epi.suffix(); a leading
+    # underscore marks a suffix fragment, never a stem.
+    stems = {stem for stem in stems if not stem.startswith("_")}
     # Ternary arms: "b" + epi.suffix() catches the false arm; the true arm "a" precedes the '?'.
     ternary = re.compile(
         r'\?\s*"([A-Za-z0-9_]+)"\s*:\s*"([A-Za-z0-9_]+)"\s*\)\s*\+\s*epi\.suffix\(\)')
