@@ -313,6 +313,13 @@ namespace vknn {
         return vxVulkanFp16Available() && ctx_->caps().shaderFloat16 && (cfg.precision == Precision::Low || cfg.precision == Precision::Normal);
     }
 
+    bool VulkanBackend::useFp16Arith(const Config &cfg) const {
+        // Low additionally carries the REDUCTION in fp16, not just storage: half the accumulator
+        // registers and packed-fp16 math, at roughly 8 dB of SNR on a 288-term conv reduction. Normal
+        // keeps fp32 accumulation, so the bit-exact-with-the-CPU-oracle guarantee lives there.
+        return useFp16(cfg) && cfg.precision == Precision::Low;
+    }
+
     std::shared_ptr<vk::ComputePipeline> VulkanBackend::sharedPipeline(const std::string &name, uint32_t numBuffers, uint32_t pushConstBytes, const std::vector<uint32_t> &spec, VkPipelineCache cache, uint32_t requiredSubgroupSize) {
         std::string key = name;
         key += '|';
@@ -408,12 +415,15 @@ namespace vknn {
             {
                 std::memcpy(buf->host(), hostSrc, (size_t) n * 4);
             }
+            buf->flushAfterWrite(); // writes go through host() above, not upload()
             return;
         }
         boundary::packNc4(hostSrc, buf->host(), NCHW::from(rt.shape), fp16, threads);
+        buf->flushAfterWrite(); // writes go through host() above, not upload()
     }
 
     void VulkanBackend::unpackFromBuffer(vk::Buffer *buf, RtTensor &rt, bool fp16, bool flat, int threads) {
+        buf->invalidateForRead(); // reads go through host() below, not download()
         if (flat)
         { // flat device buffer == host NCHW row-major; straight copy (+ fp16 convert)
             int64_t n = numElements(rt.shape);
@@ -441,6 +451,7 @@ namespace vknn {
         // Full output when elemCount < 0; a single flat row (elemCount elements from srcElemOffset)
         // when the caller sliced it (setOutputRow — prefill logits). rt.shape is left unchanged; the
         // Session emits the sliced io.shape and reads exactly `n` elements from rt.host.
+        buf->invalidateForRead(); // reads go through host() below, not download()
         int64_t        n   = elemCount >= 0 ? elemCount : numElements(rt.shape);
         const uint8_t *src = reinterpret_cast<const uint8_t *>(buf->host()) + (size_t) srcElemOffset * (deviceFp16 ? 2 : 4);
         if (deviceFp16 && declared == DType::Float16)

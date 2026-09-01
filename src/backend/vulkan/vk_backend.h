@@ -74,6 +74,8 @@ namespace vknn {
         void saveCaches();
 
         bool useFp16(const Config &cfg) const;
+        /// True when the reduction itself runs in fp16 (Precision::Low), not just the storage.
+        bool useFp16Arith(const Config &cfg) const;
 
         std::unique_ptr<Segment> compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) override;
         // Teardown flush. Routed through the same new-work check as a load-end flush: the cache document

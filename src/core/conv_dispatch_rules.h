@@ -63,6 +63,60 @@ namespace vknn {
         return spec;
     }
 
+    /// Specialization-constant slots of the 3x3 row-halo conv kernel (shaders/conv3x3_row*.comp):
+    /// 0 = OCB_BLK, 1 = WTILE, 2 = SW_SPEC (the horizontal stride, which sizes the register row
+    /// segment), 3 = local_size_x_id, the workgroup width. Same contract as conv_reg: the host states
+    /// every slot, so the kernel's declared width never stands in for the device-resolved one.
+    constexpr size_t kConvRowOcbSpecIndex       = 0;
+    constexpr size_t kConvRowPixelTileSpecIndex = 1;
+    constexpr size_t kConvRowStrideSpecIndex    = 2;
+    constexpr size_t kConvRowLaneWidthSpecIndex = 3;
+    constexpr size_t kConvRowSpecSlots          = 4;
+
+    inline std::vector<uint32_t> convRowSpecConstants(uint32_t ocbBlocks, uint32_t pixelTile, uint32_t strideW, uint32_t laneWidth) {
+        std::vector<uint32_t> spec(kConvRowSpecSlots);
+        spec[kConvRowOcbSpecIndex]       = ocbBlocks;
+        spec[kConvRowPixelTileSpecIndex] = pixelTile;
+        spec[kConvRowStrideSpecIndex]    = strideW;
+        spec[kConvRowLaneWidthSpecIndex] = laneWidth;
+        return spec;
+    }
+
+    /// Specialization-constant slots of the compact-input 3x3 conv kernel
+    /// (shaders/conv3x3_cin_lt4*.comp): the row-halo slots 0..2, then 3 = CIN (the 1..3 input
+    /// channels it gathers from the dense plane) and 4 = local_size_x_id, the workgroup width.
+    constexpr size_t kConvCompactOcbSpecIndex       = kConvRowOcbSpecIndex;
+    constexpr size_t kConvCompactPixelTileSpecIndex = kConvRowPixelTileSpecIndex;
+    constexpr size_t kConvCompactStrideSpecIndex    = kConvRowStrideSpecIndex;
+    constexpr size_t kConvCompactCinSpecIndex       = 3;
+    constexpr size_t kConvCompactLaneWidthSpecIndex = 4;
+    constexpr size_t kConvCompactSpecSlots          = 5;
+
+    inline std::vector<uint32_t> convCompactSpecConstants(uint32_t ocbBlocks, uint32_t pixelTile, uint32_t strideW, uint32_t inputChannels, uint32_t laneWidth) {
+        std::vector<uint32_t> spec(kConvCompactSpecSlots);
+        spec[kConvCompactOcbSpecIndex]       = ocbBlocks;
+        spec[kConvCompactPixelTileSpecIndex] = pixelTile;
+        spec[kConvCompactStrideSpecIndex]    = strideW;
+        spec[kConvCompactCinSpecIndex]       = inputChannels;
+        spec[kConvCompactLaneWidthSpecIndex] = laneWidth;
+        return spec;
+    }
+
+    /// Specialization-constant slots of the depthwise 3x3 row-halo kernel
+    /// (shaders/dwconv3x3_row*.comp): 0 = WTILE, 1 = SW_SPEC, 2 = local_size_x_id.
+    constexpr size_t kDwRowPixelTileSpecIndex = 0;
+    constexpr size_t kDwRowStrideSpecIndex    = 1;
+    constexpr size_t kDwRowLaneWidthSpecIndex = 2;
+    constexpr size_t kDwRowSpecSlots          = 3;
+
+    inline std::vector<uint32_t> dwRowSpecConstants(uint32_t pixelTile, uint32_t strideW, uint32_t laneWidth) {
+        std::vector<uint32_t> spec(kDwRowSpecSlots);
+        spec[kDwRowPixelTileSpecIndex] = pixelTile;
+        spec[kDwRowStrideSpecIndex]    = strideW;
+        spec[kDwRowLaneWidthSpecIndex] = laneWidth;
+        return spec;
+    }
+
     /// Threads per OC-split slice: the flat gid range divided over `parts`, rounded up to whole
     /// workgroups of the DISPATCH width. Whole-workgroup slices are what makes the slices disjoint -
     /// a non-final slice then dispatches exactly its own range, so none of its padding lanes reach

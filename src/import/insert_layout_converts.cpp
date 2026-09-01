@@ -1,3 +1,4 @@
+#include "core/conv_compact_input.h"
 #include "core/slice_bounds.h"
 #include "passes_internal.h"
 #include <iterator>
@@ -486,6 +487,12 @@ namespace vknn {
             {
                 return false;
             }
+            // A shallow-channel conv reads its activation from the compact flat plane the layout
+            // assignment left it in (core/conv_compact_input.h), so that read needs no convert.
+            if (inputIndex == 0 && g.desc(n.inputs[0]).gpuFlat && convCompactInputEligible(g, n))
+            {
+                return true;
+            }
             return n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
         }
 
@@ -742,6 +749,16 @@ namespace vknn {
             if (t.shape.size() > 4)
             {
                 t.gpuFlat = true;
+            }
+        }
+        // 4) A shallow-channel conv input stays in its compact flat plane rather than being padded out
+        //    to a 4-channel NC4HW4 buffer (a 1-channel input would carry 4x its bytes). Only graph
+        //    inputs whose every reader takes the compact form qualify, so this never spawns a convert.
+        for (TensorId tid = 0; tid < (TensorId) g.tensors.size(); ++tid)
+        {
+            if (tensorWantsCompactConvInput(g, tid))
+            {
+                g.tensors[tid].gpuFlat = true;
             }
         }
     }

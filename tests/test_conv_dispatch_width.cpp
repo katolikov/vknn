@@ -184,6 +184,79 @@ TEST(ConvDispatchWidth, ForcedConvRegPipelineWidthMatchesItsDispatchWidth) {
     }
 }
 
+// --- row-halo / compact-input / depthwise-row specialization constants ---------------------------
+
+// The 3x3 row-halo kernel, its compact-input variant and the depthwise row kernel each declare their
+// workgroup width as a trailing specialization constant with a 64 default, like conv_reg. Their
+// builders always fill every slot, so an omitted width cannot compile a 64-wide pipeline on a device
+// whose dispatch divides by another width.
+TEST(ConvDispatchWidth, ConvRowSpecAlwaysCarriesTheLaneWidth) {
+    for (int64_t laneWidth: kLaneWidths)
+    {
+        for (uint32_t ocbBlocks: {1u, 2u})
+        {
+            for (uint32_t pixelTile: {4u, 8u})
+            {
+                for (uint32_t strideW: {1u, 2u})
+                {
+                    const std::vector<uint32_t> spec = convRowSpecConstants(ocbBlocks, pixelTile, strideW, (uint32_t) laneWidth);
+                    ASSERT_EQ(spec.size(), kConvRowSpecSlots);
+                    EXPECT_EQ(spec[kConvRowOcbSpecIndex], ocbBlocks);
+                    EXPECT_EQ(spec[kConvRowPixelTileSpecIndex], pixelTile);
+                    EXPECT_EQ(spec[kConvRowStrideSpecIndex], strideW);
+                    EXPECT_EQ(spec[kConvRowLaneWidthSpecIndex], (uint32_t) laneWidth);
+                }
+            }
+        }
+    }
+}
+
+TEST(ConvDispatchWidth, ConvCompactSpecAlwaysCarriesTheLaneWidth) {
+    for (int64_t laneWidth: kLaneWidths)
+    {
+        for (uint32_t inputChannels: {1u, 2u, 3u})
+        {
+            for (uint32_t strideW: {1u, 2u})
+            {
+                const std::vector<uint32_t> spec = convCompactSpecConstants(2u, 4u, strideW, inputChannels, (uint32_t) laneWidth);
+                ASSERT_EQ(spec.size(), kConvCompactSpecSlots);
+                EXPECT_EQ(spec[kConvCompactOcbSpecIndex], 2u);
+                EXPECT_EQ(spec[kConvCompactPixelTileSpecIndex], 4u);
+                EXPECT_EQ(spec[kConvCompactStrideSpecIndex], strideW);
+                EXPECT_EQ(spec[kConvCompactCinSpecIndex], inputChannels);
+                EXPECT_EQ(spec[kConvCompactLaneWidthSpecIndex], (uint32_t) laneWidth);
+            }
+        }
+    }
+}
+
+TEST(ConvDispatchWidth, DwRowSpecAlwaysCarriesTheLaneWidth) {
+    for (int64_t laneWidth: kLaneWidths)
+    {
+        for (uint32_t strideW: {1u, 2u})
+        {
+            const std::vector<uint32_t> spec = dwRowSpecConstants(4u, strideW, (uint32_t) laneWidth);
+            ASSERT_EQ(spec.size(), kDwRowSpecSlots);
+            EXPECT_EQ(spec[kDwRowPixelTileSpecIndex], 4u);
+            EXPECT_EQ(spec[kDwRowStrideSpecIndex], strideW);
+            EXPECT_EQ(spec[kDwRowLaneWidthSpecIndex], (uint32_t) laneWidth);
+        }
+    }
+}
+
+// The compact kernel shares the row kernel's leading slots by construction, so a host that composes
+// one from the other (the OCB / tile / stride the router already chose) never lands a value in the
+// wrong slot.
+TEST(ConvDispatchWidth, CompactSpecLeadingSlotsMatchTheRowKernel) {
+    EXPECT_EQ(kConvCompactOcbSpecIndex, kConvRowOcbSpecIndex);
+    EXPECT_EQ(kConvCompactPixelTileSpecIndex, kConvRowPixelTileSpecIndex);
+    EXPECT_EQ(kConvCompactStrideSpecIndex, kConvRowStrideSpecIndex);
+    EXPECT_LT(kConvRowLaneWidthSpecIndex, kConvCompactCinSpecIndex + 1);
+    EXPECT_EQ(kConvCompactSpecSlots, kConvCompactLaneWidthSpecIndex + 1);
+    EXPECT_EQ(kConvRowSpecSlots, kConvRowLaneWidthSpecIndex + 1);
+    EXPECT_EQ(kDwRowSpecSlots, kDwRowLaneWidthSpecIndex + 1);
+}
+
 // --- race wave counts ----------------------------------------------------------------------------
 
 // KernelCost::waves is "workgroups * localSize / 64". Entrants of one race dispatch at one width,

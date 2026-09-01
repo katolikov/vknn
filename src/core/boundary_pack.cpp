@@ -13,18 +13,19 @@
 
 namespace vknn { namespace boundary {
 
+    // The flat converts are contiguous NEON sweeps: one core already saturates the memory bus, and
+    // splitting the range costs more in pool wake-up and little-core stragglers than the work itself
+    // (2-5x slower at 1.4M elements). They run on the calling thread; `threads` stays in the signature
+    // for symmetry with the NC4 siblings, which gather strided channel planes and are not bus-bound.
     void packFlatFp16(const float *src, fp16_t *dst, int64_t elems, int threads) {
-        cpu::parallelFor(threads, 0, elems, cpu::kMinChunkOps, [&](int64_t begin, int64_t end) {
-            // Saturating convert: a caller value beyond +/-65504 packs as the max finite fp16 (like
-            // every GPU activation store and imported constant), never as +/-inf.
-            floatToHalfSatBulk(src + begin, dst + begin, end - begin);
-        });
+        (void) threads;
+        // Saturating: a value beyond +/-65504 packs as the max finite fp16, never as +/-inf.
+        floatToHalfSatBulk(src, dst, elems);
     }
 
     void unpackFlatFp16(const fp16_t *src, float *dst, int64_t elems, int threads) {
-        cpu::parallelFor(threads, 0, elems, cpu::kMinChunkOps, [&](int64_t begin, int64_t end) {
-            halfToFloatBulk(src + begin, dst + begin, end - begin);
-        });
+        (void) threads;
+        halfToFloatBulk(src, dst, elems);
     }
 
     void packNc4(const float *src, void *dst, const NCHW &shape, bool fp16, int threads) {

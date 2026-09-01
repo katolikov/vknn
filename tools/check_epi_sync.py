@@ -52,6 +52,9 @@ REPO_DEFAULT = os.path.dirname(HERE)
 _EPI_INCLUDE_RE = re.compile(r'#include[ \t]+"pw_epilogue\.glsl"')
 # A string literal immediately followed by  + epi.suffix()  (the common site and each ternary arm).
 _STEM_SITE_RE = re.compile(r'"([A-Za-z0-9_]+)"\s*\)?\s*\+\s*epi\.suffix\(\)')
+# accKernel(env, "<stem>") composes <stem>[_acc16]<epi.suffix()>_fp16 internally, so the bare literal
+# is a stem request even though "+ epi.suffix()" is not adjacent to it in the source.
+_ACC_SITE_RE = re.compile(r'accKernel\(\s*env\s*,\s*"([A-Za-z0-9_]+)"')
 # matmul.cpp composes the stem in a variable then does  name += epi.suffix();  — trace the literals.
 _NAME_SUFFIX_RE = re.compile(r'\b(\w+)\s*\+=\s*epi\.suffix\(\)')
 _REGISTER_VK_RE = re.compile(r'VKNN_REGISTER_VK_OP\(\s*OpType::(\w+)')
@@ -93,6 +96,10 @@ def _requested_stems_in_text(text):
     name += epi.suffix()) is resolved separately by _matmul_composed_stems.
     """
     stems = set(_STEM_SITE_RE.findall(text))
+    stems |= set(_ACC_SITE_RE.findall(text))
+    # accKernel's own body concatenates the "_acc16" literal ahead of epi.suffix(); a leading
+    # underscore marks a suffix fragment, never a stem.
+    stems = {stem for stem in stems if not stem.startswith("_")}
     # Ternary arms: "b" + epi.suffix() catches the false arm; the true arm "a" precedes the '?'.
     ternary = re.compile(
         r'\?\s*"([A-Za-z0-9_]+)"\s*:\s*"([A-Za-z0-9_]+)"\s*\)\s*\+\s*epi\.suffix\(\)')
@@ -123,7 +130,7 @@ def _matmul_composed_stems(text):
     return stems
 
 
-def requested_stems(ops_dir):
+def requested_stems(ops_dir, available=frozenset()):
     """Union of every epi stem the op-file kernel-name sites request, over src/backend/vulkan/ops."""
     stems = set()
     files = sorted(glob.glob(os.path.join(ops_dir, "*.cpp"))
@@ -135,6 +142,11 @@ def requested_stems(ops_dir):
             continue
         stems |= _requested_stems_in_text(text)
         stems |= _matmul_composed_stems(text)
+    # An fp16-accumulator twin (shaders/gen_acc16.py) is selected by precision, not by a name literal:
+    # the op file requests the base stem and the kernel picker appends _acc16 at Precision::Low. A
+    # requested stem therefore also requests its twin -- but only for the stems that actually have one,
+    # so a missing twin still reports as drift rather than being excused.
+    stems |= {stem + "_acc16" for stem in stems if stem + "_acc16" in available}
     return stems
 
 
@@ -537,7 +549,7 @@ def main():
             sys.exit("error: %s not found (pass --repo)" % p)
 
     epi_stems, rx_standalone = derive_shader_stems(shader_dir)
-    req_stems = requested_stems(ops_dir)
+    req_stems = requested_stems(ops_dir, epi_stems)
     capable = parse_pw_capable(pass_cpp, descriptor_cpp)
     vk_reg = parse_vk_registry(ops_dir)
 
