@@ -203,12 +203,16 @@ outputs are unchanged.
 **F(4×4,3×3)** is also implemented (`setHint(Hint::WinogradUnit, 4)`): it cuts the transform-domain V/M
 traffic to 0.56× and the multiplies to 4× (vs F(2,3)'s 2.25×), and it is numerically fine at fp16
 (ResNet cosine 0.999999 — the larger transform coefficients do *not* break half precision here). It is
-**slower** on this GPU (~11.5 vs F(2,3)'s 10.5 ms): the 6×6 transforms hold `d[6][6]`+`t[6][6]` = 72
-`vec4` per thread (register pressure) and the GEMM has 4× fewer tiles (less parallelism). The traffic
-saving is real but the register-heavy transforms can eat it. The output tile is picked per shape by
-a deterministic cost model (F(4,3) wins on deep channels, F(2,3)'s smaller transform wins on
-shallow); `setHint(Hint::WinogradUnit, 4)` forces F(4,3) on every 3×3, bypassing even the
-Winograd-vs-direct shape rule.
+The output tile is picked per shape by a deterministic cost model (F(4,3) wins on deep channels,
+F(2,3)'s smaller transform wins on shallow); `setHint(Hint::WinogradUnit, 4)` forces F(4,3) on every
+3×3, bypassing even the Winograd-vs-direct shape rule. Its transforms are separable two-stage
+kernels like F(6,3)'s: six cooperating lanes per (channel-block, tile) unit, one per transform
+column in the first stage (staged in shared memory) and one per row in the second, ten units per
+64-lane workgroup (`winoTransformGroups` in `core/wino_f63.h` sizes the dispatch). One thread per
+unit held `d[6][6]`+`t[6][6]` = 72 `vec4` and ran a deep small map's 1024 units as 16 waves of a
+36-load/36-store job, latency-bound at twice the reference engine's transform time; the six-lane
+form runs the 256x256 @14x14 transforms in 12 us each (from 27) and the 128x128 @28x28 pair in
+15 + 18 us (from 27 + 29), and ResNet-50's GPU span went 8.45 -> 8.2 ms.
 
 ### F(6,3) stays hint-only (negative result)
 

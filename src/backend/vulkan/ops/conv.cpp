@@ -351,9 +351,9 @@ namespace vknn {
                 // vec4s * el bytes/element.
                 vbuf  = std::make_shared<vk::Buffer>(*env.ctx, (size_t) nPos * Cinb * nT * 4 * el, vk::MemPref::kDeviceOnly);
                 wInPC = {(int) x.n, (int) x.c, (int) x.h, (int) x.w, (int) y.h, (int) y.w, (int) nTH, (int) nTW};
-                // wino_input / wino_input4 run one thread per (icb, tile); wino_input6's separable
-                // two-stage transform runs kWinoF63TransformLanes cooperating threads per unit.
-                wInGroups = groups(Cinb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), kConvFixedKernelWidth);
+                // wino_input runs one thread per (icb, tile); wino_input4 / wino_input6's separable
+                // two-stage transforms run cooperating lanes per unit (winoTransformGroups).
+                wInGroups = (uint32_t) winoTransformGroups(U_, Cinb * nT);
 
                 // The fused / fused-split variants below the tiled GEMM are Hint-gated regressions
                 // (see above).
@@ -372,14 +372,14 @@ namespace vknn {
                     // when tuneWino's bit-neutral race picked it (bit 4), or the Hint-gated
                     // subgroup variant. The register kernel takes RM alone (no ACC16 body).
                     wGemmPipe = gemmSubgroup ? env.pipeline("wino_gemm_sg_fp16", 3, sizeof(WinoGemmPC), std::vector<uint32_t> {}, kWinoSgSubgroupWidth) : env.pipeline(winoRegGemm ? "wino_gemm_reg_fp16" : "wino_gemm_fp16", 3, sizeof(WinoGemmPC), winoRegGemm ? std::vector<uint32_t> {(uint32_t) winoRm} : std::vector<uint32_t> {(uint32_t) winoRm, (uint32_t) winoAcc16});
-                    // wino_out / wino_out4 run one thread per (ocb, tile); wino_out6 runs
-                    // kWinoF63TransformLanes cooperating threads per unit (record() dispatches
-                    // wOutGroups). Each arm spells "<stem>" + epi.suffix() so the
+                    // wino_out runs one thread per (ocb, tile); wino_out4 / wino_out6 run cooperating
+                    // lanes per unit (winoTransformGroups sizes wOutGroups). Each arm spells
+                    // "<stem>" + epi.suffix() so the
                     // tools/check_epi_sync.py stem derivation sees every hosting kernel.
                     std::string outName = (U_ == 2) ? std::string("wino_out") + epi.suffix() :
                                           (U_ == 4) ? std::string("wino_out4") + epi.suffix() :
                                                       std::string("wino_out6") + epi.suffix();
-                    wOutGroups          = groups(Coutb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), kConvFixedKernelWidth);
+                    wOutGroups          = (uint32_t) winoTransformGroups(U_, Coutb * nT);
                     wOutPipe            = env.pipeline((outName + "_fp16").c_str(), 3 + epi.extraBufs(), sizeof(WinoFusedPC), std::vector<uint32_t> {});
                     return;
                 }
@@ -1262,20 +1262,21 @@ namespace vknn {
                     std::vector<VkBuffer> oBufs = {sM->handle(), sBias->handle(), sDst->handle()};
                     epi.appendForTiming(oBufs, sDst->handle());
                     uint32_t gy = groups(Coutb, kWinoGemmTileNB);
-                    // F(6,3)'s separable transforms run kWinoF63TransformLanes cooperating threads per
-                    // (channel-block, tile) unit, so the timed transform dispatches match record()'s.
-                    int64_t       lanes = (U_ == 6) ? kWinoF63TransformLanes : 1;
+                    // The separable transforms run cooperating lanes per (channel-block, tile) unit,
+                    // so the timed transform dispatches are sized exactly as record()'s.
+                    const uint32_t inGroups  = (uint32_t) winoTransformGroups(U_, Cinb * nT);
+                    const uint32_t outGroups = (uint32_t) winoTransformGroups(U_, Coutb * nT);
                     vk::TuneTimer timer(env);
                     // Race only the bit-neutral choices — the RM tile and the GEMM body; ACC16 is
                     // fixed to 0 (fp32 accumulate). One full 3-pass per candidate so the GEMM's
                     // share of the pipeline is what is measured.
                     auto time3Pass = [&](std::shared_ptr<vk::ComputePipeline> gemmPipe, uint32_t gx) {
                         return timer.time([&](VkCommandBuffer cmd) {
-                            inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), groups(Cinb * nT * lanes, kConvFixedKernelWidth));
+                            inPipe->dispatch(cmd, {sSrc->handle(), sV->handle()}, &ipc, sizeof(ipc), inGroups);
                             vk::computeBarrier(*env.ctx, cmd);
                             gemmPipe->dispatch(cmd, {sV->handle(), sU->handle(), sM->handle()}, &gpc, sizeof(gpc), gx, gy, (uint32_t) nPos);
                             vk::computeBarrier(*env.ctx, cmd);
-                            oPipe->dispatch(cmd, oBufs, &opc, sizeof(opc), groups(Coutb * nT * lanes, kConvFixedKernelWidth));
+                            oPipe->dispatch(cmd, oBufs, &opc, sizeof(opc), outGroups);
                         });
                     };
                     // Entrants in one interleaved race: the LDS body at RM 4 (the incumbent

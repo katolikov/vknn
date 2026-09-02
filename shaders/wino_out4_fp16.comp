@@ -8,6 +8,13 @@
 // Each At row is inlined in one expression below (zero terms dropped, unit terms bare) rather than
 // held in an F(6,3)-style kAt array (wino_out6_fp16.comp): the array-indexed form compiles to
 // different SPIR-V, and this kernel's emitted code is byte-locked by the determinism gates.
+//
+// Separable two-stage form: one (ocb, tile) unit is LANES cooperating threads, one per transform
+// column in the first stage (At * M, staged in shared memory) and one per output row in the
+// second (* A). One thread per unit ran a deep small map's 1024 units as 16 waves of a
+// 36-load job - latency-bound. The host sizes the dispatch with winoTransformGroups
+// (src/core/wino_f63.h): LANES and UNITS_PER_GROUP mirror kWinoF43TransformLanes and
+// kWinoF43TransformUnitsPerGroup there.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
@@ -17,6 +24,10 @@
 #define PW_EPI_BASE 3
 #include "pw_epilogue.glsl"
 #endif
+#define ALPHA 6            // transform edge: 6x6 points per tile
+#define OUT_TILE 4         // output tile edge
+#define LANES 6            // threads per unit (kWinoF43TransformLanes)
+#define UNITS_PER_GROUP 10 // units per 64-lane workgroup (kWinoF43TransformUnitsPerGroup)
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer M { f16vec4 mbuf[]; };
 layout(std430, binding = 1) readonly buffer Bs { f16vec4 bias[]; };
@@ -26,34 +37,40 @@ layout(push_constant) uniform PC {
   float actLo, actHi;
 }
 pc;
+shared vec4 sT[UNITS_PER_GROUP][OUT_TILE][ALPHA]; // [unit][output row k][transform column j], fp32 staging
 
 void main() {
   int Coutb = (pc.Cout + 3) / 4;
   int nT = pc.N * pc.nTH * pc.nTW;
-  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(Coutb * nT)) return;
-  int tile = int(gid) % nT;
-  int ocb = int(gid) / nT;
+  int lid = int(gl_LocalInvocationID.x);
+  int unit = lid / LANES;   // 0..UNITS_PER_GROUP-1; the last 64 % LANES lanes belong to no unit
+  int lane = lid % LANES;
+  int unitId = int(gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * UNITS_PER_GROUP + unit;
+  bool unitLive = unit < UNITS_PER_GROUP && unitId < Coutb * nT;
+  int tile = unitLive ? unitId % nT : 0;
+  int ocb = unitLive ? unitId / nT : 0;
+  if (unitLive) {
+    // Column pass: this lane's transform column j = lane over the 6 transform rows (At * M).
+    vec4 m[ALPHA];
+    for (int i = 0; i < ALPHA; ++i)
+      m[i] = vec4(mbuf[((i * ALPHA + lane) * Coutb + ocb) * nT + tile]);
+    sT[unit][0][lane] = m[0] + m[1] + m[2] + m[3] + m[4];              // At[0]: [1  1  1  1  1  0]
+    sT[unit][1][lane] = m[1] - m[2] + 2.0 * m[3] - 2.0 * m[4];         // At[1]: [0  1 -1  2 -2  0]
+    sT[unit][2][lane] = m[1] + m[2] + 4.0 * m[3] + 4.0 * m[4];         // At[2]: [0  1  1  4  4  0]
+    sT[unit][3][lane] = m[1] - m[2] + 8.0 * m[3] - 8.0 * m[4] + m[5];  // At[3]: [0  1 -1  8 -8  1]
+  }
+  barrier();
+  if (!unitLive || lane >= OUT_TILE) return;
+  // Row pass: this lane's output row i = lane across the staged columns (* A), then bias, act, epilogue.
   int tx = tile % pc.nTW;
   int ty = (tile / pc.nTW) % pc.nTH;
   int n = tile / (pc.nTH * pc.nTW);
-
-  vec4 M[6][6];
-  for (int i = 0; i < 6; ++i)
-    for (int j = 0; j < 6; ++j)
-      M[i][j] = vec4(mbuf[((i * 6 + j) * Coutb + ocb) * nT + tile]);
-
-  // tmp = At * M  (4x6; one At row per line, header matrix)
-  vec4 t[4][6];
-  for (int j = 0; j < 6; ++j) {
-    t[0][j] = M[0][j] + M[1][j] + M[2][j] + M[3][j] + M[4][j];              // At[0]: [1  1  1  1  1  0]
-    t[1][j] = M[1][j] - M[2][j] + 2.0 * M[3][j] - 2.0 * M[4][j];            // At[1]: [0  1 -1  2 -2  0]
-    t[2][j] = M[1][j] + M[2][j] + 4.0 * M[3][j] + 4.0 * M[4][j];            // At[2]: [0  1  1  4  4  0]
-    t[3][j] = M[1][j] - M[2][j] + 8.0 * M[3][j] - 8.0 * M[4][j] + M[5][j];  // At[3]: [0  1 -1  8 -8  1]
-  }
+  int oy = ty * OUT_TILE + lane, ox = tx * OUT_TILE;
+  if (oy >= pc.OH) return;
+  vec4 t[ALPHA];
+  for (int j = 0; j < ALPHA; ++j) t[j] = sT[unit][lane][j];
   vec4 b = vec4(bias[ocb]);
-  int oy = ty * 4, ox = tx * 4;
-  int obase = (n * Coutb + ocb) * pc.OH * pc.OW;
+  int row = (n * Coutb + ocb) * pc.OH * pc.OW + oy * pc.OW;
 #define ACTF(v)                                                                                   \
   vec4(vx_act((v).x, pc.act, pc.actLo, pc.actHi), vx_act((v).y, pc.act, pc.actLo, pc.actHi),      \
        vx_act((v).z, pc.act, pc.actLo, pc.actHi), vx_act((v).w, pc.act, pc.actLo, pc.actHi))
@@ -63,18 +80,15 @@ void main() {
 #else
 #define PW_ST(v, idx) dst[idx] = ACT(v)
 #endif
-  for (int i = 0; i < 4; ++i) {
-    if (oy + i >= pc.OH) continue;
-    int row = obase + (oy + i) * pc.OW;
-    vec4 y0 = t[i][0] + t[i][1] + t[i][2] + t[i][3] + t[i][4] + b;             // At[0] on the column index
-    vec4 y1 = t[i][1] - t[i][2] + 2.0 * t[i][3] - 2.0 * t[i][4] + b;           // At[1]
-    vec4 y2 = t[i][1] + t[i][2] + 4.0 * t[i][3] + 4.0 * t[i][4] + b;           // At[2]
-    vec4 y3 = t[i][1] - t[i][2] + 8.0 * t[i][3] - 8.0 * t[i][4] + t[i][5] + b; // At[3]
-    if (ox + 0 < pc.OW) PW_ST(y0, row + ox + 0);
-    if (ox + 1 < pc.OW) PW_ST(y1, row + ox + 1);
-    if (ox + 2 < pc.OW) PW_ST(y2, row + ox + 2);
-    if (ox + 3 < pc.OW) PW_ST(y3, row + ox + 3);
-  }
+  vec4 y0 = t[0] + t[1] + t[2] + t[3] + t[4] + b;             // At[0] on the column index
+  vec4 y1 = t[1] - t[2] + 2.0 * t[3] - 2.0 * t[4] + b;        // At[1]
+  vec4 y2 = t[1] + t[2] + 4.0 * t[3] + 4.0 * t[4] + b;        // At[2]
+  vec4 y3 = t[1] - t[2] + 8.0 * t[3] - 8.0 * t[4] + t[5] + b; // At[3]
+  if (ox + 0 < pc.OW) PW_ST(y0, row + ox + 0);
+  if (ox + 1 < pc.OW) PW_ST(y1, row + ox + 1);
+  if (ox + 2 < pc.OW) PW_ST(y2, row + ox + 2);
+  if (ox + 3 < pc.OW) PW_ST(y3, row + ox + 3);
 #undef ACT
+#undef ACTF
 #undef PW_ST
 }

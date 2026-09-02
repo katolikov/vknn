@@ -32,6 +32,21 @@ namespace vknn {
     // Threads cooperating on one (channel-block, tile) unit in the separable two-stage
     // wino_input6/wino_out6 kernels: one thread per transform-tile column/row.
     constexpr int kWinoF63TransformLanes = 8;
+    // The F(4,3) pair (wino_input4/wino_out4) cooperates the same way at its 6-point transform
+    // edge: 6 lanes per unit, kWinoF43TransformUnitsPerGroup units per 64-lane workgroup (the
+    // 4 lanes left over belong to no unit). F(2,3) stays one thread per unit.
+    constexpr int kWinoF43TransformLanes          = 6;
+    constexpr int kWinoF43TransformUnitsPerGroup  = 10;
+    constexpr int kWinoF63TransformUnitsPerGroup  = 8;
+    constexpr int kWinoTransformWorkgroupLanes    = 64; // local_size_x of every transform kernel
+
+    /// Workgroups the input/output transform of Winograd unit `unit` dispatches for `units`
+    /// (channel-block, tile) pairs: whole workgroups of the unit's cooperating-lane grouping.
+    constexpr int64_t winoTransformGroups(int unit, int64_t units) {
+        return unit == 6 ? (units + kWinoF63TransformUnitsPerGroup - 1) / kWinoF63TransformUnitsPerGroup :
+               unit == 4 ? (units + kWinoF43TransformUnitsPerGroup - 1) / kWinoF43TransformUnitsPerGroup :
+                           (units + kWinoTransformWorkgroupLanes - 1) / kWinoTransformWorkgroupLanes;
+    }
 
     // The finite interpolation points (the 8th point is at infinity).
     constexpr double kWinoF63Points[kWinoF63Alpha - 1] = {0.0, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0};

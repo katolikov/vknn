@@ -410,3 +410,19 @@ TEST(WinoF63, MapAwareUnitYieldsToF23OnlyOnTinyMaps) {
         EXPECT_EQ(winoAutoUnitForMap(512, 512, 1, 7, 7), 2);
     }
 }
+
+// The transform dispatch is sized by the unit's cooperating-lane grouping: F(6,3) packs 8 units of
+// 8 lanes into a workgroup, F(4,3) 10 units of 6 lanes, F(2,3) one thread per unit.
+TEST(WinoF63, TransformGroupsFollowTheLaneGrouping) {
+    EXPECT_EQ(winoTransformGroups(6, 1), 1);
+    EXPECT_EQ(winoTransformGroups(6, 8), 1);
+    EXPECT_EQ(winoTransformGroups(6, 9), 2);
+    EXPECT_EQ(winoTransformGroups(4, 10), 1);
+    EXPECT_EQ(winoTransformGroups(4, 11), 2);
+    EXPECT_EQ(winoTransformGroups(4, 1024), 103); // 256 channels at 14x14: 64 blocks x 16 tiles
+    EXPECT_EQ(winoTransformGroups(2, 64), 1);
+    EXPECT_EQ(winoTransformGroups(2, 65), 2);
+    EXPECT_EQ(kWinoF43TransformLanes * kWinoF43TransformUnitsPerGroup, 60);
+    EXPECT_LE(kWinoF43TransformLanes * kWinoF43TransformUnitsPerGroup, kWinoTransformWorkgroupLanes);
+    EXPECT_EQ(kWinoF63TransformLanes * kWinoF63TransformUnitsPerGroup, kWinoTransformWorkgroupLanes);
+}
