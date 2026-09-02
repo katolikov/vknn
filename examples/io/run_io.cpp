@@ -17,6 +17,10 @@
 // Flags:
 //   --backend cpu|vulkan   (default vulkan)   --precision low|normal|high (default low; normal = fp16 + selective fp32)
 //   --priority low|normal|high  GPU queue scheduling priority (default normal; Vulkan queue global priority)
+//   --power normal|high    GPU power policy (default normal; high = an idle-time keep-alive dispatch every 30 ms holds
+//                          the GPU clock up between intermittent runs instead of letting it park and ramp)
+//   --gap-ms N             sleep N ms between --repeat iterations: the intermittent-inference benchmark mode, each
+//                          iteration still printing its own --timing line (default 0 = back to back)
 //   --tuning none|fast|heavy    load-time conv autotune effort (none = no per-shape measurement) (default fast)
 //   --cpu-threads N        CPU-backend worker threads (default 4; 1 = serial). Effort only: output is bit-identical.
 //   --keep-weights         keep host weights after upload (default: free them)
@@ -44,11 +48,13 @@
 //   --layer-dump           dump every layer's output    --layer-dump-dir DIR  where to write them
 //   --debug-segments       print the segment (CPU/GPU island) partition
 #include "vknn/session.h"
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <vector>
 #ifdef _WIN32
 #include <direct.h> // _mkdir (one-argument; no mode bits on Windows)
@@ -215,10 +221,10 @@ static bool npyDtype(const std::string &descr, DType &out) {
 int main(int argc, char **argv) {
     if (argc < 3)
     {
-        printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high]"
+        printf("usage: %s model outdir [--backend cpu|vulkan] [--precision low|normal|high] [--priority low|normal|high] [--power normal|high]"
                " [--tuning none|fast|heavy] [--no-cache] [--no-flat] [--no-fold-islands] [--no-matmul-view-fold] [--no-rope-fusion] [--no-fused-attention] "
                "[--timing] [--cache DIR]"
-               " [--winograd auto|on|off] [--max-submit-nodes N] [--bucket N] in0.bin in1.bin ...\n",
+               " [--winograd auto|on|off] [--max-submit-nodes N] [--bucket N] [--repeat N] [--gap-ms N] in0.bin in1.bin ...\n",
                argv[0]);
         return 1;
     }
@@ -240,6 +246,7 @@ int main(int argc, char **argv) {
     cfg.backend                = backendFromStr(optValue(argc, argv, "--backend", "vulkan"));
     cfg.precision              = precisionFromStr(optValue(argc, argv, "--precision", "low"));
     cfg.priority               = priorityFromStr(optValue(argc, argv, "--priority", "normal"));
+    cfg.power                  = powerFromStr(optValue(argc, argv, "--power", "normal"));
     cfg.tuning                 = tuningFromStr(optValue(argc, argv, "--tuning", "fast"));
     cfg.noCache                = hasFlag(argc, argv, "--no-cache");
     cfg.verbosity              = atoi(optValue(argc, argv, "--verbosity", "1"));
@@ -321,7 +328,7 @@ int main(int argc, char **argv) {
     {
         if (argv[i][0] == '-')
         {
-            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") || !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--cpu-threads") || !strcmp(argv[i], "--bucket") || !strcmp(argv[i], "--verbosity"))
+            if (!strcmp(argv[i], "--backend") || !strcmp(argv[i], "--precision") || !strcmp(argv[i], "--priority") || !strcmp(argv[i], "--power") || !strcmp(argv[i], "--cache") || !strcmp(argv[i], "--dump") || !strcmp(argv[i], "--winograd") || !strcmp(argv[i], "--tuning") || !strcmp(argv[i], "--fp32-tensors") || !strcmp(argv[i], "--layer-dump-dir") || !strcmp(argv[i], "--max-submit-nodes") || !strcmp(argv[i], "--max-submit-bindings") || !strcmp(argv[i], "--disable-vk-ops") || !strcmp(argv[i], "--repeat") || !strcmp(argv[i], "--gap-ms") || !strcmp(argv[i], "--cpu-threads") || !strcmp(argv[i], "--bucket") || !strcmp(argv[i], "--verbosity"))
             {
                 ++i; // skip the flag's value
             }
@@ -410,7 +417,14 @@ int main(int argc, char **argv) {
     // with every result. --repeat re-runs the same inputs (default 1); the first run pays one-time
     // costs (command-buffer record, pipeline build, first-run autotune) and later runs show
     // steady-state timing, so only the last run's outputs are kept.
-    int                   repeatCount = atoi(optValue(argc, argv, "--repeat", "1"));
+    const int repeatCount = atoi(optValue(argc, argv, "--repeat", "1"));
+    const int runCount    = repeatCount < 1 ? 1 : repeatCount;
+    // --gap-ms N sleeps N ms between iterations: the intermittent-inference benchmark mode. A
+    // back-to-back loop never lets the GPU idle, so it measures the steady clock; a gap longer than the
+    // GPU's idle-parking threshold makes every run start at the parked clock and pay the ramp, which
+    // is what a camera-rate caller sees, and what --power high is meant to remove. Each iteration
+    // still prints its own --timing line, so min/median compare across the two modes.
+    const int             gapMs = atoi(optValue(argc, argv, "--gap-ms", "0"));
     std::vector<IOTensor> outputs;
     Status                status = Status::Ok;
     // `outputs` is handed straight back to the next run instead of being cleared. Session::run
@@ -419,8 +433,12 @@ int main(int argc, char **argv) {
     // run; clearing the vector throws that storage away and makes every run fault in a freshly
     // zeroed output. On a 2.8 MB output that showed up as unpack time swinging between 0.5 and 16 ms
     // run to run -- allocation noise, measured and reported as if it were inference cost.
-    for (int runIndex = 0; runIndex < (repeatCount < 1 ? 1 : repeatCount); ++runIndex)
+    for (int runIndex = 0; runIndex < runCount; ++runIndex)
     {
+        if (gapMs > 0 && runIndex > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(gapMs));
+        }
         status = session->run(inputs, outputs);
         if (status != Status::Ok)
         {

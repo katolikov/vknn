@@ -5,6 +5,7 @@
 #include "vk_cache_image.h"
 #include "vk_command.h"
 #include "vk_context.h"
+#include "vk_keep_alive.h"
 #include "vk_pipeline.h"
 #include "vk_weight_cache.h"
 #include "vk_weight_pool.h"
@@ -27,6 +28,9 @@ namespace vknn {
         // The queue priority is applied at device/queue creation, so it must be known here (before
         // configure() runs) - the backend factory passes the session Config for exactly this.
         explicit VulkanBackend(const Config &cfg = {});
+        // Joins the keep-alive heartbeat thread and releases its Vulkan objects before any other member
+        // (the runner, the pools, and last the context) is destroyed.
+        ~VulkanBackend() override;
         BackendKind kind() const override {
             return BackendKind::Vulkan;
         }
@@ -80,7 +84,7 @@ namespace vknn {
         // is built from the file and this session's artifacts at every save, and neither changes outside
         // saveCaches(), so a session with nothing new to add owes the file nothing and skips the encode.
         void finalize() override {
-            flushNewCacheWork();
+            flushCacheAndScratch();
         }
         // New cache content is either a prepacked weight / autotune pick (the weight cache's dirty mark)
         // or a driver-compiled pipeline (the blob grew since the last save). Both are checked, because a
@@ -90,12 +94,13 @@ namespace vknn {
         //
         // Also the point where load-time scratch is handed back: every creation path calls this once the
         // plan is built, and prepareShapes calls it again for a bucket added later.
+        //
+        // Also where the Power::High keep-alive heartbeat starts (startKeepAlive): the plan is built
+        // and every load-time autotune probe has run, so the heartbeat never overlaps a timed probe,
+        // and it is running before the first run() so the very first intermittent gap is covered.
         void flushNewCacheWork() override {
-            if ((wcache_ && wcache_->dirty()) || (cache_ && cache_->currentBytes() != savedPipelineBytes_))
-            {
-                saveCaches();
-            }
-            weightStaging_.reset();
+            flushCacheAndScratch();
+            startKeepAlive();
         }
 
         // One VkPipeline (+ shader module + layout) per distinct kernel configuration, shared by every
@@ -159,6 +164,16 @@ namespace vknn {
         // Post-save bookkeeping: remember the pipeline-blob size the file now holds, clear the weight
         // cache's dirty mark, and drop the retained prepacked blobs now that the file holds them.
         void releaseSavedWeights(size_t savedPipelineBytes);
+        // The flushNewCacheWork body shared with finalize(): save when the cache holds new work, and
+        // hand the load-time staging buffer back.
+        void flushCacheAndScratch();
+        // Start the idle-time heartbeat: a no-op unless power_ is High, and while it already runs. The
+        // GpuKeepAlive is built on first use; a device that cannot host it (no push descriptors, a
+        // build without the kernel) logs once and the session runs without it.
+        void startKeepAlive();
+        // Join the heartbeat thread while a segment compiles (its autotune probes time the queue); the
+        // object and its Vulkan handles persist, and flushNewCacheWork restarts it.
+        void pauseKeepAlive();
 
         std::unique_ptr<vk::VulkanContext> ctx_;
         std::unique_ptr<vk::CommandRunner> runner_;
@@ -200,6 +215,12 @@ namespace vknn {
         // demand, so a later upload — a constant operand uploaded at RECORD time, or a bucket added by
         // prepareShapes — simply re-creates it at the size that upload needs.
         std::unique_ptr<vk::Buffer> weightStaging_;
+        // Config::power, fixed at construction like the queue priority. Falls back to Normal when the
+        // heartbeat cannot be built on this device.
+        Power power_ = Power::Normal;
+        // The Power::High heartbeat (vk_keep_alive.h); null under Power::Normal. Declared last so the
+        // implicit member order also destroys it first; ~VulkanBackend releases it explicitly anyway.
+        std::unique_ptr<vk::GpuKeepAlive> keepAlive_;
     };
 
 } // namespace vknn

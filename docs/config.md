@@ -37,6 +37,7 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `decodeChainSteps` | int | ≥ 1 | `1` | Decode iterations the decode bucket's GPU segment records as one command-buffer chain (`Session::configureDecodeChain`): this many greedy tokens per `run()` with on-device feedback (argmax id → `input_ids`, position + 1, mask slot) between iterations — no host readback or re-bind between tokens; each iteration's command buffer still submits with its own fence, so every submit stays watchdog-short. `1` records the single-step stream unchanged; only an explicitly configured bucket chains. The token stream is bit-identical to the single-step loop; chained decode is argmax-only. |
 | `freeWeightsAfterUpload` | bool | `true` / `false` | `true` | Free host weight buffers after they are uploaded to the device, reclaiming the full weight blob. `run()` never reads graph initializers, so this is safe; needed to fit large (e.g. 965M-param) models on-device. |
 | `priority` | string | `"low"`, `"normal"`, `"high"` | `"normal"` | GPU queue scheduling priority (Vulkan `VK_KHR/EXT_global_priority`). `normal` reproduces the default device-creation path; `low`/`high` request the matching queue tier. Scheduling only — never changes numerical output; an inert no-op on a device without a global-priority extension. |
+| `power` | string | `"normal"`, `"high"` | `"normal"` | GPU power policy (Vulkan backend). `normal` reproduces the default path exactly: the GPU idles between runs and parks its clock after a few tens of ms. `high` starts an idle-time keep-alive once the session is built: one trivial dispatch on the compute queue every 30 ms (`GpuKeepAlive::kGpuKeepAliveIntervalMs`) while no real work is in flight or was submitted within the last interval, so the clock never parks between intermittent runs. Policy only — never changes numerical output; inert on the CPU backend; costs a sustained milliwatt-class idle draw and thermal headroom for as long as the session lives. See [GPU power policy](#gpu-power-policy-power). |
 | `cacheFile` | string | filesystem path | `""` → `<model>.cache` | Per-model MessagePack cache holding the compiled pipelines, prepacked/Winograd weights, and conv autotune table. Empty resolves to `<model>.cache` next to the model. Setting it explicitly is also the only way a session built from an in-memory graph (`Session::create`, no model path) gets a cache; `Runtime::cacheFileIn(dir, model)` resolves one inside a shared directory, and missing parent directories are created on the first write. Caching is always on: a warm start reloads it (skipping shader compilation, weight prepacking, and autotuning), and it auto-heals when stale. See [Caching](#caching). |
 | `noCache` | bool | `true` / `false` | `false` | Debug: skip all cache read/write, recompiling + re-tuning on every load (for cold-compile measurement). |
 | `profile` | bool | `true` / `false` | `false` | Enable the per-op profiler (GPU timestamp queries + CPU timing); the table is available via `session.profiler()`. |
@@ -55,6 +56,31 @@ All defaults below are the C++ member initializers in `struct Config`.
 | `fp32Tensors` | string (C++ only, not serialized to JSON) | e.g. `"/enc/MatMul_,-camera_head"` | `""` | Advanced override of the selective-fp32 set: tensor-name substrings (leading `-` excludes) kept in fp32 storage under fp16 compute. Empty + `precision:"normal"` uses the built-in geometry-tail preset; a non-empty value replaces it (and also applies under `precision:"low"`). |
 | `inputShapes` | `map<string, Shape>` (C++ only, not serialized to JSON) | input tensor name → full concrete shape, e.g. `{{"pixel_values",{1,3,224,224}}}` | `{}` (empty) | Declared concrete shapes for graph inputs on the **ONNX-load path** (`createFromOnnx` / `Model::load` from `.onnx`), keyed by input name. Each listed input has its dynamic (negative) dims resolved from the declared shape; an input absent here falls back to `batch = 1` on an unnamed or batch-named leading axis, and any other dynamic axis with no declaration is a hard error (never a silent freeze to 1). Empty = the fixed-shape / batch-only path (byte-identical to before). **Ignored for a `.vxm` session** — a `.vxm` already has its shapes baked at compile time; set them there with `vknn_compile --dim` / `--shape` / `--bucket` (see below). |
 | `dimBindings` | `map<string, int64_t>` (C++ only, not serialized to JSON) | ONNX `dim_param` name → value, e.g. `{{"past_sequence_length",256},{"sequence_length",1}}` | `{}` (empty) | Symbolic-dimension bindings for the **ONNX-load path**, keyed by the ONNX `dim_param` name. Every dynamic input axis whose `dim_param` — a bare symbol, an integer literal, or a compound expression like `past_sequence_length + sequence_length` — resolves entirely from these bindings is filled automatically, so a many-input dynamic model (a with-past decoder's 51 inputs) needs a couple of bindings instead of one `inputShapes` entry per tensor. `inputShapes` (a per-tensor concrete shape) overrides a binding for that tensor; an unnamed or batch-named (`N`/`B`/`*batch*`) leading axis still falls back to `batch`, while a leading axis with any other `dim_param` name must be bound (an unbound one is a hard error, never a silent freeze to 1). Empty = the batch-only path. **Ignored for a `.vxm` session**; set the equivalent with `vknn_compile --dim`. |
+
+### GPU power policy (`power`)
+
+A mobile GPU that sees no submission for roughly 50–70 ms power-collapses, and the next
+submission starts at the bottom DVFS step and ramps up over tens of milliseconds. A caller
+that infers intermittently — camera frames every 33–600 ms, a UI that runs a model per
+gesture — therefore runs *every* inference on the ramp, and a run measures several times
+slower than the same model in a back-to-back loop (the cooled-protocol numbers in
+[benchmark.md](benchmark.md) measure exactly this parked regime). `power: "high"` closes the
+gap from the engine side: after the session is built the Vulkan backend submits a trivial
+keep-alive kernel (one workgroup of the device lane width writing lane indices into its own
+scratch buffer) whenever the compute queue has been idle for 30 ms, so no idle stretch reaches
+the parking threshold. The heartbeat is skipped whenever real work is in flight or was
+submitted within the last interval, it shares the queue through one mutex held only for the
+submit call, and it is paused while a segment compiles (autotune probes time the queue), so it
+never contends with inference or with tuning.
+
+Use it for intermittent inference at a fixed cadence. Do **not** use it for benchmarks: a
+back-to-back loop never idles long enough to park, so it changes nothing there, and any
+cooled-protocol comparison against another engine must run with it off. The cost is real —
+the GPU holds its active clock for the session's whole lifetime, a sustained milliwatt-class
+idle draw charged against the thermal budget the CPU shares — so an app should enable it while
+a camera pipeline is live and destroy the session (or use a `normal` session) when it is not.
+`vknn_run_io --repeat N --gap-ms G` reproduces the intermittent regime for measurement, with
+and without `--power high`.
 
 ### The `vknn_compile` flags
 
@@ -113,6 +139,7 @@ The string tokens map onto these enums (from `config.h` / `tensor_format.h`):
 enum class BackendKind { Vulkan, Cpu };
 enum class Precision   { Low, Normal, High };  // "low" fp16 | "normal" fp16 + selective fp32 | "high" fp32
 enum class Priority    { Low, Normal, High };  // GPU queue global-priority tier (scheduling only)
+enum class Power       { Normal, High };       // GPU power policy: High = idle-time keep-alive heartbeat (policy only)
 enum class Tuning      { None, Fast, Heavy };  // load-time conv autotune effort
 enum class TensorFormat : uint8_t { NCHW, NHWC, NC4HW4, Auto, Unknown };  // Auto: declared-boundary zero-copy sentinel (bytes already device-native)
 ```
@@ -237,6 +264,7 @@ lists all of them, with non-default values where useful:
   "allowCpuFallback": true,
   "precision": "low",
   "priority": "normal",
+  "power": "normal",
   "maxSubmitNodes": 500,
   "maxSubmitBindings": 1024,
   "decodeChainSteps": 1,

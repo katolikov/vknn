@@ -74,6 +74,23 @@ namespace vknn {
         }
         return "normal";
     }
+    Power powerFromStr(const std::string &s) {
+        if (s == "high")
+        {
+            return Power::High;
+        }
+        return Power::Normal;
+    }
+    static const char *powerStr(Power p) {
+        switch (p)
+        {
+            case Power::High:
+                return "high";
+            case Power::Normal:
+                break;
+        }
+        return "normal";
+    }
     const char *mixedPrecisionFp32Tensors() {
         // The geometry tail of a feed-forward-3DGS encoder (build_covariance matmuls, the world/means
         // einsum transforms, the scale/quaternion adapter chain, the camera feature MLP) lifted to fp32
@@ -177,6 +194,10 @@ namespace vknn {
         {
             c.priority = priorityFromStr(j->asStr("normal"));
         }
+        if (auto *j = v.get("power"))
+        {
+            c.power = powerFromStr(j->asStr("normal"));
+        }
         I("maxSubmitNodes", c.maxSubmitNodes);
         I("maxSubmitBindings", c.maxSubmitBindings);
         I("decodeChainSteps", c.decodeChainSteps);
@@ -268,6 +289,7 @@ namespace vknn {
         os << "  \"allowCpuFallback\": " << (allowCpuFallback ? "true" : "false") << ",\n";
         os << "  \"precision\": \"" << precStr(precision) << "\",\n";
         os << "  \"priority\": \"" << priorityStr(priority) << "\",\n";
+        os << "  \"power\": \"" << powerStr(power) << "\",\n";
         os << "  \"maxSubmitNodes\": " << maxSubmitNodes << ",\n";
         os << "  \"maxSubmitBindings\": " << maxSubmitBindings << ",\n";
         os << "  \"decodeChainSteps\": " << decodeChainSteps << ",\n";

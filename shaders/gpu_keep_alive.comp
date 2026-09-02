@@ -1,0 +1,14 @@
+#version 450
+// GPU keep-alive heartbeat (Config::power = high). One workgroup of the device lane width, each lane
+// storing its own index into a lane-width uint scratch buffer owned by the keep-alive: the smallest
+// dispatch that keeps the compute queue busy, so the GPU clock does not park between intermittent
+// runs. Never touches an activation, weight, or output buffer. The local_size_x literal is the
+// placeholder the spec constant overrides: id 0 = the workgroup width the backend resolved from device
+// caps (flat::laneWidthFor).
+layout(local_size_x = 64, local_size_x_id = 0) in;
+layout(std430, binding = 0) writeonly buffer Scratch { uint lanes[]; };
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= gl_WorkGroupSize.x) return; // one workgroup: the scratch holds exactly one lane width
+  lanes[gid] = gid;
+}
