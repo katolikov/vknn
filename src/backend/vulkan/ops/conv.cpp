@@ -175,9 +175,10 @@ namespace vknn {
             bool                                 splitkGen = false; // general KxK/strided split-K (conv_splitk.comp)
 
             // Shared split-K geometry: KPARTS targets kPwSplitKTargetThreads partial-pass threads,
-            // capped by Cinb (pw_splitk_rule.h, shared with the fused depthwise+project op).
-            static int64_t splitKParts(int64_t Cinb, int64_t Coutb, int64_t OHW) {
-                return pwSplitKParts(Cinb, Coutb, OHW);
+            // bounded by the reduction depth in (channel-block, tap) steps and by Cinb
+            // (pw_splitk_rule.h, shared with the fused depthwise+project op).
+            static int64_t splitKParts(int64_t Cinb, int64_t Coutb, int64_t OHW, int64_t tapsPerBlock) {
+                return pwSplitKParts(Cinb, Coutb, OHW, tapsPerBlock);
             }
 
             void prepareSplitKShared(const Node &node, VkOpEnv &env, int64_t Cout, int64_t Coutb, int64_t OHW, int64_t kparts) {
@@ -190,7 +191,7 @@ namespace vknn {
 
             void prepareSplitK(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb) {
                 int64_t Cinb = cBlocks(x.c), HW = y.h * y.w;
-                int64_t kparts = splitKParts(Cinb, Coutb, HW);
+                int64_t kparts = splitKParts(Cinb, Coutb, HW, 1);
                 int64_t chunk  = (Cinb + kparts - 1) / kparts;
                 skPC           = {(int) x.c, (int) Cout, (int) HW, (int) kparts, (int) chunk};
                 prepareSplitKShared(node, env, Cout, Coutb, HW, kparts);
@@ -199,7 +200,7 @@ namespace vknn {
 
             void prepareSplitKGeneral(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, int64_t KH, int64_t KW, const std::vector<int64_t> &st, const std::vector<int64_t> &pad, const std::vector<int64_t> &dil) {
                 int64_t Cinb = cBlocks(x.c), OHW = y.h * y.w;
-                int64_t kparts = splitKParts(Cinb, Coutb, OHW);
+                int64_t kparts = splitKParts(Cinb, Coutb, OHW, KH * KW);
                 int64_t chunk  = (Cinb + kparts - 1) / kparts;
                 skGenPC        = {(int) x.c,   (int) x.h,   (int) x.w,    (int) Cout,   (int) y.h,    (int) y.w,    (int) KH,     (int) KW,
                                   (int) st[0], (int) st[1], (int) pad[0], (int) pad[1], (int) dil[0], (int) dil[1], (int) kparts, (int) chunk};

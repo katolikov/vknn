@@ -32,19 +32,22 @@ namespace vknn {
     // Thread target of the partial pass (384 waves of 64 lanes), which sets how many ways the
     // reduction splits: measured best at 4 parts for 6272-8192 outputs and 2 at 12544-12800.
     inline constexpr int64_t kPwSplitKTargetThreads = 24576;
-    // Each part keeps at least this many input channel-blocks, so a shallow reduction on a tiny
-    // plane is not cut into slivers whose reduce pass outweighs the parallelism (240->80 @14x14
-    // is best at 3-4 parts, 256->256 @7x7 at 4, not the 7-8 the thread target alone would give).
-    inline constexpr int64_t kPwSplitKMinBlocksPerPart = 16;
+    // Each part keeps at least this many (input channel-block, tap) steps, so a shallow reduction
+    // on a tiny plane is not cut into slivers whose reduce pass outweighs the parallelism (240->80
+    // @14x14 is best at 3-4 parts, 256->256 @7x7 at 4, not the 7-8 the thread target alone would
+    // give). A KxK reduction counts its taps: a 128->32 3x3 at 7x7 has 32 blocks of 9 taps and is
+    // best at 16 parts (0.029 vs 0.081 ms at 2).
+    inline constexpr int64_t kPwSplitKMinStepsPerPart = 16;
     inline constexpr int64_t kPwSplitKMaxParts         = 16;
     inline constexpr int64_t kPwSplitKMinParts         = 2;
 
     // Chunks the channel-block reduction is split into: the thread target, bounded by the depth
-    // floor per part, the block count itself and kPwSplitKMaxParts.
-    inline int64_t pwSplitKParts(int64_t Cinb, int64_t Coutb, int64_t OHW) {
+    // floor per part (`tapsPerBlock` steps per channel-block: 1 for a pointwise conv, KH*KW for
+    // the general split-K kernel), the block count itself and kPwSplitKMaxParts.
+    inline int64_t pwSplitKParts(int64_t Cinb, int64_t Coutb, int64_t OHW, int64_t tapsPerBlock = 1) {
         const int64_t outputs   = Coutb * OHW;
         const int64_t byThreads = (kPwSplitKTargetThreads + outputs - 1) / outputs;
-        const int64_t byDepth   = std::max<int64_t>(kPwSplitKMinParts, Cinb / kPwSplitKMinBlocksPerPart);
+        const int64_t byDepth   = std::max<int64_t>(kPwSplitKMinParts, Cinb * tapsPerBlock / kPwSplitKMinStepsPerPart);
         return std::max<int64_t>(kPwSplitKMinParts, std::min<int64_t>({byThreads, byDepth, Cinb, kPwSplitKMaxParts}));
     }
 

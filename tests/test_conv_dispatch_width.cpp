@@ -466,7 +466,7 @@ TEST(ConvDispatchWidth, TileChunkIsSizedToTheMap) {
 // The pointwise split-K rule follows the measured boundary: the pair wins only when the output
 // plane has at most kPwSplitKMaxOutputs channel-block pixels and at most
 // kPwSplitKOutputsPerInputBlock of them per input channel-block, and the part count follows the
-// partial-pass thread target bounded by kPwSplitKMinBlocksPerPart blocks per part.
+// partial-pass thread target bounded by kPwSplitKMinStepsPerPart steps per part.
 TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
     constexpr int kAuto = 0;
     // 2048->512 @7x7 and 1024->512 @7x7: 6272 outputs, four parts.
@@ -502,6 +502,10 @@ TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
     EXPECT_FALSE(pwSplitKActive(true, 1, 2048, 128, 49, (int) Mode::Off));
     EXPECT_FALSE(pwSplitKActive(false, 1, 2048, 128, 49, kAuto));
     EXPECT_FALSE(pwSplitKActive(true, 2, 2048, 128, 49, kAuto));
+    // A KxK reduction counts its taps toward the depth floor: 128->32 3x3 at 7x7 (32 blocks of 9
+    // taps, 392 outputs) splits sixteen ways, where the same blocks as a pointwise conv split two.
+    EXPECT_EQ(pwSplitKParts(32, 8, 49, 9), 16);
+    EXPECT_EQ(pwSplitKParts(32, 8, 49, 1), 2);
     // Parts never exceed the block count or the cap, and never drop under two.
     EXPECT_EQ(pwSplitKParts(3, 4, 4), 2);
     EXPECT_EQ(pwSplitKParts(512, 4, 4), kPwSplitKMaxParts);
