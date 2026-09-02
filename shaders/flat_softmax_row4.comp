@@ -1,0 +1,63 @@
+#version 450
+#include "precision.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 2
+#include "pw_epilogue.glsl"
+#endif
+#include "common.glsl"
+// Softmax over a LAST axis that is a multiple of 4 and at most SOFTMAX_ROW_MAX wide (a detection
+// head's 16-bin distribution): one thread per row, the row loaded as vec4s into registers once, the
+// max, the exp-sum and the normalized values computed from those registers, and the row stored as
+// vec4s. flat_softmax's scalar thread-per-row mode issues 3 x axis two-byte loads per row at a
+// row-pitch lane stride, which is what a short row is bound by; this kernel issues axis / 4 vec4
+// loads and as many stores. The per-row arithmetic is the scalar mode's exactly (same max, the same
+// sequential exp-sum order, exp computed once per element), so the two modes produce identical bits
+// and the host may pick either by shape.
+// pc.outPad has flat_softmax's meaning (a virtualized output's physical last-axis extent, zero-filled
+// past the axis); the host takes this kernel only when outPad is 0 or a multiple of 4.
+#ifdef USE_FP16
+#define STORE4 f16vec4
+#else
+#define STORE4 vec4
+#define TO_STORE4(x) (x)
+#endif
+#define SOFTMAX_ROW_MAX 32                   // mirrors kThreadRowMaxAxis (src/backend/vulkan/ops/flat_ops.h)
+#define SOFTMAX_ROW_VEC4_MAX (SOFTMAX_ROW_MAX / 4)
+layout(local_size_x = 128, local_size_x_id = 0) in; // spec 0 = the flat family's device-resolved width
+layout(std430, binding = 0) readonly buffer S { STORE4 s[]; };
+layout(std430, binding = 1) writeonly buffer D { STORE4 d[]; };
+layout(push_constant) uniform PC { int outer, axis, inner, outPad; } pc; // inner == 1 by the host's gate
+
+void main() {
+  uint row = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (row >= uint(pc.outer)) return;
+  int n4 = pc.axis / 4;
+  int base = int(row) * n4;                                    // vec4 index of the row's first element
+  int obase = pc.outPad > 0 ? int(row) * (pc.outPad / 4) : base;
+
+  vec4 v[SOFTMAX_ROW_VEC4_MAX];
+  float m = VX_NEG_INF; // exact -inf max identity: correct even for rows entirely below any finite sentinel
+  for (int k = 0; k < n4; ++k) {
+    v[k] = vec4(s[base + k]);
+    m = max(m, max(max(v[k].x, v[k].y), max(v[k].z, v[k].w)));
+  }
+  float sum = 0.0;
+  for (int k = 0; k < n4; ++k) {
+    v[k] = exp(v[k] - m);
+    sum += v[k].x;
+    sum += v[k].y;
+    sum += v[k].z;
+    sum += v[k].w;
+  }
+  float rsum = 1.0 / sum;
+  for (int k = 0; k < n4; ++k) {
+    vec4 o = v[k] * rsum;
+#ifdef PW_EPI
+    int e = (base + k) * 4; // flat element index of o.x: the epilogue's index space
+    o = vec4(pw_apply(o.x, e), pw_apply(o.y, e + 1), pw_apply(o.z, e + 2), pw_apply(o.w, e + 3));
+#endif
+    d[obase + k] = TO_STORE4(o);
+  }
+  for (int k = n4; k < pc.outPad / 4; ++k)
+    d[obase + k] = TO_STORE4(vec4(0.0));
+}

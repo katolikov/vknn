@@ -66,6 +66,10 @@ namespace vknn {
         // mirrors WG_MAX in shaders/flat_softmax.comp.
         constexpr uint32_t kSoftmaxWgMax = 128;
 
+        // Elements one vec4 lane of the flat family carries (the _v4 kernels and flat_softmax_row4):
+        // a shape takes a vec4 kernel only when the extent it vectorizes is whole vec4s.
+        constexpr int64_t kFlatVec4Width = 4;
+
         // Elements each lane walks, one slot apart, for the element-parallel family (the fused_pw
         // pattern extended to the movement kernels). A pure placement choice - identical values at
         // any count - so it may consume the MEASURED device probe: the floor is the saturation
@@ -295,7 +299,7 @@ namespace vknn {
                 auto          ms = vk::raceCandidates(2, [&](int index) {
                     const bool q = index == kFlatKernelQuad;
                     auto racePipe = env.pipeline(shader((std::string(q ? "flat_gather_v4" : "flat_gather") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
-                                                          std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                                                 std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
                     const int laneSteps = q ? (pc.total + kFlatGatherQuad - 1) / kFlatGatherQuad : pc.total;
                     const int lanes     = (laneSteps + pc.items - 1) / pc.items;
                     return timer.time([&](VkCommandBuffer cmd) {
@@ -491,9 +495,9 @@ namespace vknn {
                 auto          ms = vk::raceCandidates(2, [&](int index) {
                     const bool q         = index == kFlatKernelQuad;
                     auto       racePipe  = runtimeVal ? env.pipeline(shader(q ? "flat_pad_rt_v4" : "flat_pad_rt", env.useFp16), 4, sizeof(PC),
-                                                                              std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}) :
-                                                                 env.pipeline(shader(q ? "flat_pad_v4" : "flat_pad", env.useFp16), 3, sizeof(PC),
-                                                                              std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                                                                     std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}) :
+                                                        env.pipeline(shader(q ? "flat_pad_v4" : "flat_pad", env.useFp16), 3, sizeof(PC),
+                                                                     std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
                     const int  laneSteps = q ? (pc.total + kFlatMoveQuad - 1) / kFlatMoveQuad : pc.total;
                     const int  lanes     = (laneSteps + pc.items - 1) / pc.items;
                     return timer.time([&](VkCommandBuffer cmd) {
@@ -549,9 +553,9 @@ namespace vknn {
                 geom = uploadFlatGeom(env, {outDim, inDim, inStr, padBegin});
                 quad = pickQuad(node, env, outDim, inDim, padBegin, numElements(in));
                 pipe = runtimeVal ? env.pipeline(shader(quad ? "flat_pad_rt_v4" : "flat_pad_rt", env.useFp16), 4, sizeof(PC),
-                                                   std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}) :
-                                      env.pipeline(shader(quad ? "flat_pad_v4" : "flat_pad", env.useFp16), 3, sizeof(PC),
-                                                   std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                                                 std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}) :
+                                    env.pipeline(shader(quad ? "flat_pad_v4" : "flat_pad", env.useFp16), 3, sizeof(PC),
+                                                 std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
                 {
                     const size_t es      = env.useFp16 ? 2 : 4;
                     int          padAxis = -1;
@@ -685,7 +689,7 @@ namespace vknn {
                 auto          ms = vk::raceCandidates(2, [&](int index) {
                     const bool q         = index == kFlatKernelQuad;
                     auto       racePipe  = env.pipeline(shader(q ? "flat_broadcast_v4" : "flat_broadcast", env.useFp16), 3, sizeof(PC),
-                                                                 std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                                                        std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
                     const int  laneSteps = q ? (pc.total + kFlatMoveQuad - 1) / kFlatMoveQuad : pc.total;
                     const int  lanes     = (laneSteps + pc.items - 1) / pc.items;
                     return timer.time([&](VkCommandBuffer cmd) {
@@ -788,7 +792,7 @@ namespace vknn {
                     inIdx.push_back((int) e);
                     offset += in[axis];
                     pipes.push_back(env.pipeline(shader((std::string("flat_scatter") + epi.suffix()).c_str(), env.useFp16), 3 + epi.extraBufs(), sizeof(PC),
-                                                                                              std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}));
+                                                 std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items}));
                 }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
@@ -868,7 +872,7 @@ namespace vknn {
                 auto          ms = vk::raceCandidates(2, [&](int index) {
                     const bool q         = index == kFlatKernelQuad;
                     auto       racePipe  = env.pipeline(shader(q ? "flat_binary_v4" : "flat_binary", env.useFp16), 4, sizeof(PC),
-                                                                 std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
+                                                        std::vector<uint32_t> {env.flatLocalSize, (uint32_t) pc.items});
                     const int  laneSteps = q ? (pc.total + kFlatMoveQuad - 1) / kFlatMoveQuad : pc.total;
                     const int  lanes     = (laneSteps + pc.items - 1) / pc.items;
                     return timer.time([&](VkCommandBuffer cmd) {
@@ -950,6 +954,7 @@ namespace vknn {
             } pc {};
             uint32_t                             softmaxWg = kSoftmaxWgMax; // resolved at load in prepare()
             bool                                 threadRow = false;
+            bool                                 vecRow    = false; // flat_softmax_row4: the thread-per-row mode with the row held as vec4s
             std::shared_ptr<vk::ComputePipeline> pipe;
             PwEpi                                epi;
             void                                 prepare(const Node &node, VkOpEnv &env) {
@@ -976,13 +981,22 @@ namespace vknn {
                     pc.outPad = (int) outPad; // rows start at o * outPad; the kernel zeroes the pad
                 }
                 threadRow = s[axis] <= kThreadRowMaxAxis;
+                // A short LAST axis that is whole vec4s takes the vec4-row twin (flat_softmax_row4): same
+                // bits as the scalar thread-per-row mode, a quarter of its load and store instructions.
+                vecRow = threadRow && inner == 1 && s[axis] % kFlatVec4Width == 0 && pc.outPad % kFlatVec4Width == 0;
                 epi.prepare(node, env, /*flat=*/true, env.graph->desc(node.outputs[0]).shape);
                 softmaxWg = laneWidthPow2For(env.ctx->caps(), kSoftmaxWgMax);
-                pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0), softmaxWg});
+                if (vecRow)
+                {
+                    pipe = env.pipeline(shader((std::string("flat_softmax_row4") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {softmaxWg});
+                } else
+                {
+                    pipe = env.pipeline(shader((std::string("flat_softmax") + epi.suffix()).c_str(), env.useFp16), 2 + epi.extraBufs(), sizeof(PC), std::vector<uint32_t> {(uint32_t) (threadRow ? 1 : 0), softmaxWg});
+                }
             }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) {
                 // ROW_MODE 0: one workgroup per row (LDS reduction across the workgroup).
-                // ROW_MODE 1: one thread per row (rows packed 128 to a workgroup).
+                // ROW_MODE 1 and the vec4-row twin: one thread per row (rows packed softmaxWg to a workgroup).
                 VkBuffer              dst  = env.devBuf(node.outputs[0])->handle();
                 std::vector<VkBuffer> bufs = {env.devBuf(node.inputs[0])->handle(), dst};
                 epi.append(bufs, node, env, dst);

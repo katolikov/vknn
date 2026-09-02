@@ -29,13 +29,13 @@ namespace vknn {
         // make it memory-bound above this point. Calibrated against the measured conv-suite winners.
         constexpr int64_t kWinoMaxCinCout = 32768;
         // Large-Cin*Cout shapes still take Winograd when the output map supplies enough tiles to keep
-        // the GEMM's M dimension fed. Measured on the primary device with the register-tile GEMM in
-        // the race (single-conv probes, Conv GPU-total, min of 3 cooled rounds): 256x256 @ 14x14
-        // (196 px) is +9% SLOWER on Winograd (tile-starved: 49 F(2,3) tiles), while 256x256 @ 20x20
-        // (400 px) is -38%, 192x192 @ 35x35 is -42% and 512x512 @ 28x28 is -69% FASTER. The floor
-        // sits at the smallest measured winner; between 196 and 400 output pixels is unmeasured and
-        // stays direct.
-        constexpr int64_t kWinoLargeCMinPixels = 400;
+        // the GEMM's M dimension fed. Measured cooled with the outer-product GEMM: 256x256 @ 14x14
+        // (196 px, 49 F(2,3) tiles) is -28% FASTER on Winograd (0.327 -> 0.237 ms per layer on the
+        // primary device), 256x256 @ 20x20 (400 px) -38%, 192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%,
+        // while 512x512 @ 7x7 (49 px, 16 tiles) is +18% SLOWER: the GEMM's M tile starves below one
+        // workgroup of tiles. The floor sits at the smallest measured winner; between 49 and 196
+        // output pixels is unmeasured and stays direct.
+        constexpr int64_t kWinoLargeCMinPixels = 196;
 
         // Workgroup size of the group==1 direct conv shader when no measurement applies: the value
         // Tuning::None dispatches and the incumbent every local-size race is seeded with.

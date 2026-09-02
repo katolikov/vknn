@@ -264,10 +264,24 @@ Four further changes, all output-byte-identical to v1.4.0 per model at every tun
   global reads through the cache hierarchy, same per-output fp32 chain — bit-exact) joins the
   bit-neutral body race, and wins the ResNet-50 Winograd shapes on the primary device. With the
   stronger GEMM the Winograd-vs-direct rule gains a second branch: a large-`Cin*Cout` 3x3 also
-  takes Winograd when the output map keeps the GEMM fed (`OHW >= 400`; probe-calibrated:
-  256x256 @ 20x20 -38%, 192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%, while the tile-starved
-  256x256 @ 14x14 stays direct). The rule is inert on this suite (no model sits in the admitted
-  region) and unlocks the class for larger models.
+  takes Winograd when the output map keeps the GEMM fed (`OHW >= 196`; probe-calibrated with the
+  outer-product GEMM: 256x256 @ 14x14 -28% (ResNet-50's layer3 blocks), 256x256 @ 20x20 -38%,
+  192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%, while the tile-starved 512x512 @ 7x7 stays direct).
+- **Outer-product tap contraction.** Every group-1 conv kernel (direct, register-tiled, row-halo,
+  compact stem, LDS-halo, 1-D, split-K, the pointwise family and the Winograd GEMM) folds a tap
+  as `acc = fma(vec4(in.c), w[c], acc)` over the four input lanes, with the weight pack holding a
+  4x4 block per tap as four contiguous vec4 indexed by input channel (`[Coutb][Cinb][KH][KW][4 ic]
+  [4 oc]`), instead of four per-output-channel `dot()` reductions. On the primary device's shader
+  compiler the horizontal reduction was the GEMM-class bottleneck: pointwise 64->256 @56x56
+  0.144 -> 0.077 ms at unchanged fp32 accumulation (packed fp16 accumulation is slower still in
+  this form, so `low` keeps fp32 accumulation). ResNet-50's 33 pointwise convs went 6.3 -> 4.3 ms.
+- **Block group inside the row.** The tile-per-thread kernels decode the output-channel block
+  group inside the row block (row-halo, compact stem) or inside a workgroup-sized chunk of pixel
+  tiles (pointwise, register-tiled), so a map's block groups run back to back and the input a
+  later group re-reads is still in cache instead of streaming from DRAM once per group. The
+  row-halo kernel additionally races a 2-D workgroup footprint (4, 2 or 1 output rows per
+  workgroup). Stride-2 3x3 convs on a shallow, huge-spatial net went 0.62 / 0.57 -> 0.42 / 0.38 ms,
+  and a pointwise 64->64 @160x160 0.39 -> 0.14 ms.
 - **Depthwise 2x2 output tile** (`dwconv_t2`) and **output-channel-sliced dispatch** for the
   register-tiled conv join the bit-neutral races (the tile carries a 4096-thread occupancy floor).
 
