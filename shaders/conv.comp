@@ -1,7 +1,7 @@
 #version 450
 // General Conv2D (group=1), NC4HW4. Handles 1x1 pointwise and KxK strided.
 // One thread computes one output channel-block (4 output channels) at one (oy,ox).
-// weight layout: [Cout][Cinb][KH][KW][4]  (lane = input channel within block)
+// weight layout: [Coutb][Cinb][KH][KW][4 ic][4 oc]  (a 4x4 block per tap: per input channel, the block's 4 output channels)
 // bias layout:   [Coutb*4]
 #include "common.glsl"
 #ifdef PW_EPI
@@ -41,11 +41,12 @@ void main() {
         if (ix < 0 || ix >= pc.W) continue;
         int sidx = ((((n * Cinb + icb) * pc.H + iy) * pc.W + ix) * 4);
         vec4 inv = vec4(src[sidx], src[sidx + 1], src[sidx + 2], src[sidx + 3]);
+        // The tap's 4x4 block: per input channel l, the 4 output channels of the block.
+        int wb = (((((ocb * Cinb + icb) * pc.KH + ky) * pc.KW + kx) * 4) * 4);
         for (int l = 0; l < 4; ++l) {
-          int oc = ocb * 4 + l;
-          int widx = ((((oc * Cinb + icb) * pc.KH + ky) * pc.KW + kx) * 4);
+          int widx = wb + l * 4;
           vec4 wv = vec4(wt[widx], wt[widx + 1], wt[widx + 2], wt[widx + 3]);
-          acc[l] += dot(inv, wv);
+          acc = fma(vec4(inv[l]), wv, acc);
         }
       }
     }

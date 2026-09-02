@@ -43,12 +43,11 @@ void main() {
         if (ix < 0 || ix >= pc.W) continue;
         int s = (((n * Cinb + icb) * pc.H + iy) * pc.W + ix);
         vec4 inv = vec4(src[s]);
-        int wbase = (((ocb * 4 + 0) * Cinb + icb) * pc.KH + ky) * pc.KW + kx;
-        int wstride = Cinb * pc.KH * pc.KW;  // step between output channels
-        acc.x += dot(inv, vec4(wt[wbase]));
-        acc.y += dot(inv, vec4(wt[wbase + wstride]));
-        acc.z += dot(inv, vec4(wt[wbase + 2 * wstride]));
-        acc.w += dot(inv, vec4(wt[wbase + 3 * wstride]));
+        int wb = ((((ocb * Cinb + icb) * pc.KH + ky) * pc.KW + kx) * 4); // the tap's 4x4 block: one vec4 (4 oc) per input channel
+        acc = fma(vec4(inv.x), vec4(wt[wb]), acc);
+        acc = fma(vec4(inv.y), vec4(wt[wb + 1]), acc);
+        acc = fma(vec4(inv.z), vec4(wt[wb + 2]), acc);
+        acc = fma(vec4(inv.w), vec4(wt[wb + 3]), acc);
       }
     }
   }

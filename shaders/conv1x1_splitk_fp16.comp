@@ -3,7 +3,7 @@
 // The deep convs (e.g. 960->160 @7x7) have tiny spatial -> too few threads to fill the GPU. We
 // split the Cin reduction across KPARTS thread-groups so total threads = KPARTS x Coutb x HW.
 // Each thread sums its Cin slice into a partial; the reduce pass adds the partials (+bias+act).
-// partial layout: [KPARTS][Coutb][HW] vec4(4 oc).  weight: [Cout][Cinb][4ic] (same as conv1x1).
+// partial layout: [KPARTS][Coutb][HW] vec4(4 oc).  weight: [Coutb][Cinb][4 ic][4 oc] (same as conv1x1).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
@@ -29,10 +29,10 @@ void main() {
   vec4 acc = vec4(0.0);
   for (int icb = istart; icb < iend; ++icb) {
     vec4 inv = vec4(src[icb * pc.HW + pix]);
-    acc.x += dot(inv, vec4(wt[wrow + 0 * Cinb + icb]));
-    acc.y += dot(inv, vec4(wt[wrow + 1 * Cinb + icb]));
-    acc.z += dot(inv, vec4(wt[wrow + 2 * Cinb + icb]));
-    acc.w += dot(inv, vec4(wt[wrow + 3 * Cinb + icb]));
+    acc = fma(vec4(inv.x), vec4(wt[wrow + icb * 4 + 0]), acc);
+    acc = fma(vec4(inv.y), vec4(wt[wrow + icb * 4 + 1]), acc);
+    acc = fma(vec4(inv.z), vec4(wt[wrow + icb * 4 + 2]), acc);
+    acc = fma(vec4(inv.w), vec4(wt[wrow + icb * 4 + 3]), acc);
   }
   part[(kpart * Coutb + ocb) * pc.HW + pix] = acc;
 }

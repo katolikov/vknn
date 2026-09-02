@@ -9,10 +9,10 @@
 // f16vec4s. Padded block rows are computed like real ones (their weights and bias are the zero
 // fill), so the full NC4 output buffer is written byte-identically to the direct kernel's.
 // The block's whole weight set (TINYOC_BLOCK_ROWS * CINB * TINYOC_KTAPS f16vec4, the exact
-// prefix of the [Cout][Cinb][3][3][4] pack) is staged into shared memory once per workgroup;
+// first block of the [Coutb][Cinb][3][3][4 ic][4 oc] pack, re-gathered per channel row) is staged into shared memory once per workgroup;
 // staging changes no values and no accumulation order.
 // Member of the bit-exact direct race: per (pixel, channel) the fp32 accumulator starts at the
-// same bias value and adds the same dot(input vec4, weight vec4) terms in conv.comp's exact
+// same bias value and applies the same per-input-channel fma terms in conv.comp's exact
 // icb -> ky -> kx order, out-of-range taps skipped by the same bounds guard (never folded in as
 // zero loads), and the result rounds through the same TO_STORE discipline.
 #extension GL_EXT_shader_16bit_storage : require
@@ -48,15 +48,18 @@ layout(push_constant) uniform PC {
   float actLo, actHi;
 } pc;
 // The single output block's weight set. Rows 0..3 are contiguous at the head of the
-// [Cout][Cinb][KH][KW][4] pack, so the stage is a straight prefix copy of wt.
+// [Coutb][Cinb][KH][KW][4 ic][4 oc] pack, transposed per channel row as it is staged.
 shared f16vec4 wlds[TINYOC_BLOCK_ROWS * CINB * TINYOC_KTAPS];
 
 void main() {
   // Cooperative weight stage; every lane participates (out-of-range lanes return only after the
   // barrier, keeping the barrier in uniform control flow).
   int tid = int(gl_LocalInvocationID.x);
+  // The pack holds the block as [icb][tap][4 ic][4 oc]; the lane math wants one vec4 over the
+  // 4 input channels per (channel row, tap), so the stage gathers that transpose once.
   for (int i = tid; i < TINYOC_BLOCK_ROWS * CINB * TINYOC_KTAPS; i += int(gl_WorkGroupSize.x)) {
-    wlds[i] = wt[i];
+    int r = i / (CINB * TINYOC_KTAPS), t = i % (CINB * TINYOC_KTAPS);
+    wlds[i] = f16vec4(wt[t * 4 + 0][r], wt[t * 4 + 1][r], wt[t * 4 + 2][r], wt[t * 4 + 3][r]);
   }
   barrier();
 
@@ -95,7 +98,11 @@ void main() {
           int iy = oyv[p] * pc.SH - pc.PT + ky * pc.DH;
           int ix = oxv[p] * pc.SW - pc.PL + kx * pc.DW;
           if (uint(iy) < uint(pc.H) && uint(ix) < uint(pc.W)) {
-            acc[p] += dot(vec4(src[sb + iy * pc.W + ix]), w);
+            vec4 inv = vec4(src[sb + iy * pc.W + ix]);
+            acc[p] = fma(inv.x, w.x, acc[p]);
+            acc[p] = fma(inv.y, w.y, acc[p]);
+            acc[p] = fma(inv.z, w.z, acc[p]);
+            acc[p] = fma(inv.w, w.w, acc[p]);
           }
         }
       }

@@ -10,9 +10,9 @@
 // registers so all three kx taps read it there.
 //
 // Bit-exact with conv_reg: the operand is assembled into the SAME vec4 the padded path would load
-// (channels beyond CIN are zero, exactly as the NC4HW4 pack leaves them) and fed to the same dot() in
+// (channels beyond CIN are zero, exactly as the NC4HW4 pack leaves them) and fed to the same fma chain in
 // the same (ky, kx, pixel) order, so the sum is term-for-term identical. Computing cin*w.x instead
-// would drop dot()'s zero terms and could flip an accumulator's -0.0.
+// would drop the zero terms and could flip an accumulator's -0.0.
 //
 // CIN and SW are spec constants: CIN picks how many planes to gather, SW sizes the row segment.
 #extension GL_EXT_shader_16bit_storage : require
@@ -110,20 +110,20 @@ void main() {
       int wtap = ky * KEXT + kx;
       vec4 w[OCB_BLK][4];
       for (int j = 0; j < OCB_BLK; ++j) {
-        w[j][0] = vec4(wt[wbj[j] + 0 * ocStride + wtap]);
-        w[j][1] = vec4(wt[wbj[j] + 1 * ocStride + wtap]);
-        w[j][2] = vec4(wt[wbj[j] + 2 * ocStride + wtap]);
-        w[j][3] = vec4(wt[wbj[j] + 3 * ocStride + wtap]);
+        w[j][0] = vec4(wt[wbj[j] + wtap * 4 + 0]);
+        w[j][1] = vec4(wt[wbj[j] + wtap * 4 + 1]);
+        w[j][2] = vec4(wt[wbj[j] + wtap * 4 + 2]);
+        w[j][3] = vec4(wt[wbj[j] + wtap * 4 + 3]);
       }
       for (int p = 0; p < WTILE; ++p) {
         int c = p * SW_SPEC + kx;
         if (colOk[c]) {
           vec4 inv = row[c];
           for (int j = 0; j < OCB_BLK; ++j) {
-            acc[p][j].x += dot(inv, w[j][0]);
-            acc[p][j].y += dot(inv, w[j][1]);
-            acc[p][j].z += dot(inv, w[j][2]);
-            acc[p][j].w += dot(inv, w[j][3]);
+            acc[p][j] = fma(vec4(inv.x), w[j][0], acc[p][j]);
+            acc[p][j] = fma(vec4(inv.y), w[j][1], acc[p][j]);
+            acc[p][j] = fma(vec4(inv.z), w[j][2], acc[p][j]);
+            acc[p][j] = fma(vec4(inv.w), w[j][3], acc[p][j]);
           }
         }
       }

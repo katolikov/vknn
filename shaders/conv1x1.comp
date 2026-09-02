@@ -39,10 +39,17 @@ void main() {
 
   if (OCB == 1) {
     // classic body: one output channel-block per thread.
-    if (gid >= uint(pc.N * Coutb * nTiles)) return;
-    int tile = int(gid) % nTiles;
-    int ocb = (int(gid) / nTiles) % Coutb;
-    int n = int(gid) / (nTiles * Coutb);
+    // Block group inside a workgroup-sized chunk of pixel tiles: every output block of one chunk
+    // runs back to back, so the input a later block re-reads is still in cache instead of
+    // being streamed once per block (the last chunk's padding lanes retire on the tile bound).
+    int wg = int(gl_WorkGroupSize.x);
+    int nChunks = (nTiles + wg - 1) / wg;
+    if (gid >= uint(pc.N * Coutb * nChunks * wg)) return;
+    int grp = int(gid / uint(wg));
+    int tile = (grp / Coutb) % nChunks * wg + int(gid % uint(wg));
+    int ocb = grp % Coutb;
+    int n = grp / (Coutb * nChunks);
+    if (tile >= nTiles) return;
     int p0 = tile * WTILE;
 
     vec4 acc[WTILE];
@@ -50,18 +57,18 @@ void main() {
 
     int wrow = ocb * 4 * Cinb;
     for (int icb = 0; icb < Cinb; ++icb) {
-      vec4 w0 = wt[wrow + 0 * Cinb + icb];
-      vec4 w1 = wt[wrow + 1 * Cinb + icb];
-      vec4 w2 = wt[wrow + 2 * Cinb + icb];
-      vec4 w3 = wt[wrow + 3 * Cinb + icb];
+      vec4 w0 = wt[wrow + icb * 4 + 0];
+      vec4 w1 = wt[wrow + icb * 4 + 1];
+      vec4 w2 = wt[wrow + icb * 4 + 2];
+      vec4 w3 = wt[wrow + icb * 4 + 3];
       int sbase = (n * Cinb + icb) * HW;
       for (int p = 0; p < WTILE; ++p) {
         int pix = min(p0 + p, HW - 1);
         vec4 inv = src[sbase + pix];
-        acc[p].x += dot(inv, w0);
-        acc[p].y += dot(inv, w1);
-        acc[p].z += dot(inv, w2);
-        acc[p].w += dot(inv, w3);
+        acc[p] = fma(vec4(inv.x), w0, acc[p]);
+        acc[p] = fma(vec4(inv.y), w1, acc[p]);
+        acc[p] = fma(vec4(inv.z), w2, acc[p]);
+        acc[p] = fma(vec4(inv.w), w3, acc[p]);
       }
     }
     int dbase = (n * Coutb + ocb) * HW;
@@ -82,10 +89,14 @@ void main() {
 
   // OCB > 1: tiled body. Weight-row offsets are hoisted out of the K loop.
   int ocbGroups = (Coutb + OCB - 1) / OCB;
-  if (gid >= uint(pc.N * ocbGroups * nTiles)) return;
-  int tile = int(gid) % nTiles;
-  int og = (int(gid) / nTiles) % ocbGroups;
-  int n = int(gid) / (nTiles * ocbGroups);
+  int wg = int(gl_WorkGroupSize.x);
+  int nChunks = (nTiles + wg - 1) / wg;
+  if (gid >= uint(pc.N * ocbGroups * nChunks * wg)) return;
+  int grp = int(gid / uint(wg));
+  int tile = (grp / ocbGroups) % nChunks * wg + int(gid % uint(wg));
+  int og = grp % ocbGroups;
+  int n = grp / (ocbGroups * nChunks);
+  if (tile >= nTiles) return;
   int p0 = tile * WTILE;
   int ocb0 = og * OCB;
 
@@ -102,17 +113,17 @@ void main() {
   for (int icb = 0; icb < Cinb; ++icb) {
     int sbase = (n * Cinb + icb) * HW;
     for (int j = 0; j < OCB; ++j) {
-      vec4 w0 = wt[wrowj[j] + 0 * Cinb + icb];
-      vec4 w1 = wt[wrowj[j] + 1 * Cinb + icb];
-      vec4 w2 = wt[wrowj[j] + 2 * Cinb + icb];
-      vec4 w3 = wt[wrowj[j] + 3 * Cinb + icb];
+      vec4 w0 = wt[wrowj[j] + icb * 4 + 0];
+      vec4 w1 = wt[wrowj[j] + icb * 4 + 1];
+      vec4 w2 = wt[wrowj[j] + icb * 4 + 2];
+      vec4 w3 = wt[wrowj[j] + icb * 4 + 3];
       for (int p = 0; p < WTILE; ++p) {
         int pix = min(p0 + p, HW - 1);
         vec4 inv = src[sbase + pix];
-        acc[j][p].x += dot(inv, w0);
-        acc[j][p].y += dot(inv, w1);
-        acc[j][p].z += dot(inv, w2);
-        acc[j][p].w += dot(inv, w3);
+        acc[j][p] = fma(vec4(inv.x), w0, acc[j][p]);
+        acc[j][p] = fma(vec4(inv.y), w1, acc[j][p]);
+        acc[j][p] = fma(vec4(inv.z), w2, acc[j][p]);
+        acc[j][p] = fma(vec4(inv.w), w3, acc[j][p]);
       }
     }
   }

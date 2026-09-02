@@ -79,18 +79,18 @@ void main() {
     for (int k = 0; k < KLEN; ++k) {
       for (int j = 0; j < OCB; ++j) {
         int wtap = icb * pc.KH * pc.KW + k;
-        vec4 w0 = vec4(wt[wrowj[j] + 0 * ocStride + wtap]);
-        vec4 w1 = vec4(wt[wrowj[j] + 1 * ocStride + wtap]);
-        vec4 w2 = vec4(wt[wrowj[j] + 2 * ocStride + wtap]);
-        vec4 w3 = vec4(wt[wrowj[j] + 3 * ocStride + wtap]);
+        vec4 w0 = vec4(wt[wrowj[j] + wtap * 4 + 0]);
+        vec4 w1 = vec4(wt[wrowj[j] + wtap * 4 + 1]);
+        vec4 w2 = vec4(wt[wrowj[j] + wtap * 4 + 2]);
+        vec4 w3 = vec4(wt[wrowj[j] + wtap * 4 + 3]);
         for (int p = 0; p < WTILE; ++p) {
           int ax = wbase0 + p + k;
           if (uint(ax) < uint(ilen)) {
             vec4 inv = vec4(win[p + k]);
-            acc[j][p].x += dot(inv, w0);
-            acc[j][p].y += dot(inv, w1);
-            acc[j][p].z += dot(inv, w2);
-            acc[j][p].w += dot(inv, w3);
+            acc[j][p] = fma(vec4(inv.x), w0, acc[j][p]);
+            acc[j][p] = fma(vec4(inv.y), w1, acc[j][p]);
+            acc[j][p] = fma(vec4(inv.z), w2, acc[j][p]);
+            acc[j][p] = fma(vec4(inv.w), w3, acc[j][p]);
           }
         }
       }

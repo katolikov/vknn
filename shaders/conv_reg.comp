@@ -43,10 +43,17 @@ void main() {
   int nTiles = (HW + WTILE - 1) / WTILE;
   int ocbGroups = (Coutb + OCB_BLK - 1) / OCB_BLK;
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x + uint(pc.gidBase);
-  if (gid >= uint(pc.N * ocbGroups * nTiles)) return;
-  int tile = int(gid) % nTiles;
-  int ocbg = (int(gid) / nTiles) % ocbGroups;
-  int n = int(gid) / (nTiles * ocbGroups);
+  // Block group inside a workgroup-sized chunk of pixel tiles (see conv1x1): a chunk's block
+  // groups run back to back so their shared input re-reads hit cache. A flat gid range
+  // still maps to distinct outputs, so the OC-split slice dispatches stay disjoint.
+  int wg = int(gl_WorkGroupSize.x);
+  int nChunks = (nTiles + wg - 1) / wg;
+  if (gid >= uint(pc.N * ocbGroups * nChunks * wg)) return;
+  int grp = int(gid / uint(wg));
+  int tile = (grp / ocbGroups) % nChunks * wg + int(gid % uint(wg));
+  int ocbg = grp % ocbGroups;
+  int n = grp / (ocbGroups * nChunks);
+  if (tile >= nTiles) return;
   int ocb0 = ocbg * OCB_BLK;
   int p0 = tile * WTILE;
 
@@ -78,10 +85,10 @@ void main() {
         // weights for the OCB_BLK blocks (4 oc each), loaded once, reused across WTILE pixels.
         vec4 w[OCB_BLK][4];
         for (int j = 0; j < OCB_BLK; ++j) {
-          w[j][0] = wt[wbj[j] + 0 * ocStride + wtap];
-          w[j][1] = wt[wbj[j] + 1 * ocStride + wtap];
-          w[j][2] = wt[wbj[j] + 2 * ocStride + wtap];
-          w[j][3] = wt[wbj[j] + 3 * ocStride + wtap];
+          w[j][0] = wt[wbj[j] + wtap * 4 + 0];
+          w[j][1] = wt[wbj[j] + wtap * 4 + 1];
+          w[j][2] = wt[wbj[j] + wtap * 4 + 2];
+          w[j][3] = wt[wbj[j] + wtap * 4 + 3];
         }
         for (int p = 0; p < WTILE; ++p) {
           int iy = oyv[p] * pc.SH - pc.PT + ky * pc.DH;
@@ -89,10 +96,10 @@ void main() {
           if (uint(iy) < uint(pc.H) && uint(ix) < uint(pc.W)) {
             vec4 inv = src[sb + iy * pc.W + ix];
             for (int j = 0; j < OCB_BLK; ++j) {
-              acc[p][j].x += dot(inv, w[j][0]);
-              acc[p][j].y += dot(inv, w[j][1]);
-              acc[p][j].z += dot(inv, w[j][2]);
-              acc[p][j].w += dot(inv, w[j][3]);
+              acc[p][j] = fma(vec4(inv.x), w[j][0], acc[p][j]);
+              acc[p][j] = fma(vec4(inv.y), w[j][1], acc[p][j]);
+              acc[p][j] = fma(vec4(inv.z), w[j][2], acc[p][j]);
+              acc[p][j] = fma(vec4(inv.w), w[j][3], acc[p][j]);
             }
           }
         }

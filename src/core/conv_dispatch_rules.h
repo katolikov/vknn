@@ -145,6 +145,21 @@ namespace vknn {
         return spec;
     }
 
+    /// Cache key and block size of the group-1 conv weight pack (see the pack in ops/conv.cpp): a
+    /// [Coutb][Cinb][KH][KW] array of 4x4 blocks, each block four vec4 indexed by input channel over
+    /// the block's four output channels - kConvWeightBlockFloats floats per (block pair, tap). The key
+    /// names the layout, so a cache written for the earlier output-channel-major pack never aliases.
+    constexpr const char *kConvWeightPackKey     = "#wT";
+    constexpr int64_t     kConvWeightBlockFloats = 16;
+
+    /// Lanes a tile-per-thread kernel (conv1x1, conv_reg) dispatches when it orders the
+    /// output-channel block group INSIDE a workgroup-sized chunk of pixel tiles: whole workgroups
+    /// per (chunk, block group, batch), so the last chunk's padding lanes are part of the count and
+    /// retire on the kernel's own tile bound.
+    constexpr int64_t convChunkedTileLanes(int64_t batch, int64_t ocbGroups, int64_t tiles, int64_t laneWidth) {
+        return laneWidth > 0 ? batch * ocbGroups * convDispatchLanes(tiles, laneWidth) : 0;
+    }
+
     /// Threads per OC-split slice: the flat gid range divided over `parts`, rounded up to whole
     /// workgroups of the DISPATCH width. Whole-workgroup slices are what makes the slices disjoint -
     /// a non-final slice then dispatches exactly its own range, so none of its padding lanes reach

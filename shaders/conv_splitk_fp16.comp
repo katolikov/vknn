@@ -5,7 +5,7 @@
 // K-loop's memory latency. This pass splits the input-channel reduction across KPARTS thread
 // groups so total threads = KPARTS x Coutb x OH*OW; each thread sums its icb slice over every
 // kernel tap into an fp32 partial, and conv1x1_reduce adds the partials (+bias [+residual] +act).
-// partial layout: [KPARTS][Coutb][OH*OW] vec4(4 oc).  weight: [Cout][Cinb][KH][KW][4ic] (the
+// partial layout: [KPARTS][Coutb][OH*OW] vec4(4 oc).  weight: [Coutb][Cinb][KH][KW][4 ic][4 oc] (the
 // direct-conv pack). Per-slice tap order matches the direct kernel (icb -> ky -> kx).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -34,7 +34,6 @@ void main() {
 
   int istart = kpart * pc.chunk;
   int iend = min(istart + pc.chunk, Cinb);
-  int wstride = Cinb * pc.KH * pc.KW; // step between output channels
   // Kahan-compensated fp32 accumulation: the per-slice sum is near-exact, so the two-pass
   // result tracks the true fp32 sum closer than the single-pass sequential chain does - the
   // final fp16 rounding then lands on the nearest representable of the TRUE value, keeping
@@ -50,11 +49,8 @@ void main() {
         int ix = ox * pc.SW - pc.PL + kx * pc.DW;
         if (ix < 0 || ix >= pc.W) continue;
         vec4 inv = vec4(src[(icb * pc.H + iy) * pc.W + ix]);
-        int wbase = (((ocb * 4 + 0) * Cinb + icb) * pc.KH + ky) * pc.KW + kx;
-        vec4 term = vec4(dot(inv, vec4(wt[wbase])),
-                         dot(inv, vec4(wt[wbase + wstride])),
-                         dot(inv, vec4(wt[wbase + 2 * wstride])),
-                         dot(inv, vec4(wt[wbase + 3 * wstride])));
+        int wb = ((((ocb * Cinb + icb) * pc.KH + ky) * pc.KW + kx) * 4); // the tap's 4x4 block: one vec4 (4 oc) per input channel
+        vec4 term = fma(vec4(inv.w), vec4(wt[wb + 3]), fma(vec4(inv.z), vec4(wt[wb + 2]), fma(vec4(inv.y), vec4(wt[wb + 1]), vec4(inv.x) * vec4(wt[wb]))));
         vec4 y = term - comp;
         vec4 t = acc + y;
         comp = (t - acc) - y;

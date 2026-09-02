@@ -165,9 +165,11 @@ int main(int argc, char **argv) {
                 {
                     for (int l = 0; l < 4; ++l)
                     {
-                        int    ic        = icb * 4 + l;
-                        size_t vec       = (((size_t) oc * Cinb + icb) * r.KH * r.KW + t);
-                        hwt[vec * 4 + l] = f2h((oc < r.Cout && ic < r.Cin) ? synth((uint32_t) (vec * 5 + l * 131 + 1)) : 0.0f);
+                        int    ic  = icb * 4 + l;
+                        size_t vec = (((size_t) oc * Cinb + icb) * r.KH * r.KW + t);
+                        // [Coutb][Cinb][taps][4 ic][4 oc]: the engine's transposed 4x4-block pack.
+                        size_t slot = ((((size_t) (oc / 4) * Cinb + icb) * r.KH * r.KW + t) * 4 + l) * 4 + (oc % 4);
+                        hwt[slot]   = f2h((oc < r.Cout && ic < r.Cin) ? synth((uint32_t) (vec * 5 + l * 131 + 1)) : 0.0f);
                     }
                 }
             }
@@ -365,9 +367,10 @@ int main(int argc, char **argv) {
                                             continue;
                                         }
                                         int    icb = ic / 4, il = ic % 4;
-                                        size_t sidx = (((size_t) (n * Cinb + icb)) * r.H * r.W + iy * r.W + ix) * 4 + il;
-                                        size_t vec  = (((size_t) oc * Cinb + icb) * r.KH * r.KW + (ky * r.KW + kx));
-                                        acc += h2f(hsrc[sidx]) * h2f(hwt[vec * 4 + il]);
+                                        size_t sidx  = (((size_t) (n * Cinb + icb)) * r.H * r.W + iy * r.W + ix) * 4 + il;
+                                        size_t vec   = (((size_t) oc * Cinb + icb) * r.KH * r.KW + (ky * r.KW + kx));
+                                        size_t wslot = ((((size_t) (oc / 4) * Cinb + icb) * r.KH * r.KW + (ky * r.KW + kx)) * 4 + il) * 4 + (oc % 4);
+                                        acc += h2f(hsrc[sidx]) * h2f(hwt[wslot]);
                                     }
                                 }
                             }

@@ -6,7 +6,7 @@
 // is fetched 1x from L2 instead of ~9x; the 16 tile cuts the halo overhead from (10^2/8^2) = 1.56x
 // to (18^2/16^2) = 1.27x of the tile's input at ~2.6 KB LDS. TS is autotuned per shape (bit-exact:
 // the tile size only remaps threads to outputs). fp32 accumulation. Uses the existing
-// [Cout][Cinb][3][3][4] weight pack.
+// [Coutb][Cinb][3][3][4 ic][4 oc] weight pack.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
@@ -56,15 +56,15 @@ void main() {
                                                                  : f16vec4(0.0);
     }
     barrier();
-    int wtap0 = wbase + icb * 9;
+    int wtap0 = wbase + icb * 9 * 4;
     for (int ky = 0; ky < 3; ++ky) {
       for (int kx = 0; kx < 3; ++kx) {
         vec4 inv = vec4(halo[(ly + ky) * HS + (lx + kx)]); // widen LDS f16 halo before the fp32 dot
-        int w0 = wtap0 + ky * 3 + kx;
-        acc.x += dot(inv, vec4(wt[w0]));
-        acc.y += dot(inv, vec4(wt[w0 + ocStride]));
-        acc.z += dot(inv, vec4(wt[w0 + 2 * ocStride]));
-        acc.w += dot(inv, vec4(wt[w0 + 3 * ocStride]));
+        int w0 = wtap0 + (ky * 3 + kx) * 4; // the tap's 4x4 block: one vec4 (4 oc) per input channel
+        acc = fma(vec4(inv.x), vec4(wt[w0]), acc);
+        acc = fma(vec4(inv.y), vec4(wt[w0 + 1]), acc);
+        acc = fma(vec4(inv.z), vec4(wt[w0 + 2]), acc);
+        acc = fma(vec4(inv.w), vec4(wt[w0 + 3]), acc);
       }
     }
     barrier();
