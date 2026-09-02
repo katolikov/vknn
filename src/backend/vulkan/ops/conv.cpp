@@ -1219,10 +1219,12 @@ namespace vknn {
                 // and winorm2_ entries omit the unit; neither may decode against this key).
                 char buf[128];
                 snprintf(buf, sizeof(buf), "winorm3_%d_%d_%d_%d_%d", (int) Cin, (int) Cout, (int) y.h, (int) y.w, U_);
-                std::string sig         = env.gpuTag + "/" + buf;
-                int         bestRm      = 4;
-                bool        bestRegGemm = false;
-                int         reuse;
+                std::string         sig         = env.gpuTag + "/" + buf;
+                int                 bestRm      = 4;
+                bool                bestRegGemm = false;
+                std::vector<double> raceMs; // the race's per-entrant 3-pass estimates, for the tune log
+                bool                raced = false;
+                int                 reuse;
                 if (env.reuseTuned(sig, reuse) && ((reuse & ~16) == 4 || (reuse & ~16) == 8))
                 {
                     bestRm      = reuse & ~16;
@@ -1281,11 +1283,13 @@ namespace vknn {
                         env.pipeline("wino_gemm_reg_fp16", 3, sizeof(WinoGemmPC), {4u}),
                         env.pipeline("wino_gemm_reg_fp16", 3, sizeof(WinoGemmPC), {8u}),
                     };
-                    std::vector<double> ms    = vk::raceCandidates(4, [&](int index) {
+                    std::vector<double> ms = vk::raceCandidates(4, [&](int index) {
                         return time3Pass(gemmPipes[index], groups(nT, winoGemmTileM(kWinoRmCands[index])));
                     });
-                    double              ldsMs = ms[0], regMs = ms[2];
-                    int                 ldsRm = 4, regRm = 4;
+                    raceMs                 = ms;
+                    raced                  = true;
+                    double ldsMs = ms[0], regMs = ms[2];
+                    int    ldsRm = 4, regRm = 4;
                     if (ms[1] < ldsMs)
                     {
                         ldsMs = ms[1];
@@ -1313,7 +1317,7 @@ namespace vknn {
                     }
                 }
                 int winoChoice = ((U_ == 2) ? 1 : (U_ == 4) ? 2 : 3) | (bestRm == 8 ? 4 : 0) | (bestRegGemm ? 16 : 0); // ACC16 bit (8) never set
-                VKNN_DEBUG << "tuneWino Cin=" << Cin << " Cout=" << Cout << " U=" << U_ << " rm=" << bestRm << " body=" << (bestRegGemm ? "reg" : "lds") << " -> " << winoChoice;
+                VKNN_DEBUG << "tuneWino Cin=" << Cin << " Cout=" << Cout << " U=" << U_ << " nT=" << (x.n * ((y.h + U_ - 1) / U_) * ((y.w + U_ - 1) / U_)) << " rm=" << bestRm << " body=" << (bestRegGemm ? "reg" : "lds") << " -> " << winoChoice << (raced ? vk::raceTimes(raceMs) : std::string());
                 return winoChoice;
             }
 

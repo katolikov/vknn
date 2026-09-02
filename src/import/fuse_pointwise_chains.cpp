@@ -1363,6 +1363,28 @@ namespace vknn {
     /// passes). Postcondition: fully-merged members are erased; the producer (or the anchor slot's
     /// FusedPointwise node) yields the unit's main output and carries pw_steps/pw_params/pw_outs —
     /// plus pw_flat on standalone nodes for the load-time layout classifier.
+    namespace {
+        /// True for a group-1 1x1 conv without padding at any stride: the shapes whose Vulkan kernels
+        /// (conv1x1, conv1x1_s2 and the pointwise split-K reduce) carry a native residual input.
+        bool pwConvIsPointwise(const Graph &g, const Node &n) {
+            (void) g;
+            const auto &k = n.attr.getints("kernel_shape");
+            const auto &p = n.attr.getints("pads");
+            if (n.attr.geti("group", 1) != 1 || k.size() != 2 || k[0] != 1 || k[1] != 1)
+            {
+                return false;
+            }
+            for (int64_t pad: p)
+            {
+                if (pad != 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    } // namespace
+
     void fusePointwiseChains(Graph &g, bool strictFuse) {
         // Rank collapse runs BEFORE right-alignment: alignment engages only on kNchwRank runs, so
         // it must observe each run's FINAL rank -- a region collapsed to rank 4 joins the alignment
@@ -1758,6 +1780,67 @@ namespace vknn {
                         attached++;
                         rebuild();
                         continue;
+                    }
+                }
+                // Residual fast path: a pointwise Conv whose unit is exactly [Add(entry, activation
+                // operand)] or that Add followed by one Relu / Clip hosts the operand on the kernel's
+                // own fusedResidual input and the activation on fusedAct. The pointwise kernels add
+                // the residual to the fp32 accumulator and apply the activation before the store, the
+                // VM unit's exact order, so the bytes match while the per-element VM interpretation -
+                // measured at as much as the conv itself on a large map - is gone.
+                if (unit.operands.size() == 1 && unit.exports.empty() && !entryExported && !strictFuse)
+                {
+                    Node          &P       = g.nodes[prod];
+                    const TensorId operand = unit.operands[0];
+                    const bool pointwise = P.type == OpType::Conv && P.inputs.size() >= 2 && P.inputs[1] != kNoTensor && P.fusedAct == ActType::None && P.fusedResidual == kNoTensor &&
+                                           !P.attr.has("pw_steps") && pwConvIsPointwise(g, P);
+                    const size_t stepCount = unit.steps.size() / (size_t) kPwStepInts;
+                    const bool   sameShape = operand != kNoTensor && !g.isInitializer(operand) && g.desc(operand).shape == g.desc(unit.mainOut).shape;
+                    if (pointwise && sameShape && (stepCount == 1 || stepCount == 2))
+                    {
+                        const int64_t *add = unit.steps.data();
+                        const bool onEntry = (add[kPwStepSrcAField] == kPwRefAcc || add[kPwStepSrcAField] == kPwRefEntry) && add[kPwStepSrcAField + 1] <= kPwRefOp0; // the unit's single operand (operand refs count down from kPwRefOp0)
+                        const bool onOp = (add[kPwStepSrcAField + 1] == kPwRefAcc || add[kPwStepSrcAField + 1] == kPwRefEntry) && add[kPwStepSrcAField] <= kPwRefOp0;
+                        bool    ok  = add[kPwStepKindField] == kPwKindBinary && add[kPwStepCodeField] == (int64_t) BinaryType::Add && (onEntry || onOp);
+                        ActType act = ActType::None;
+                        float   lo = 0, hi = 0;
+                        if (ok && stepCount == 2)
+                        {
+                            const int64_t *tail = unit.steps.data() + kPwStepInts;
+                            ok                  = tail[kPwStepKindField] == kPwKindAct && tail[kPwStepSrcAField] == kPwRefAcc && members.size() == 2;
+                            if (ok)
+                            {
+                                const Node &an = g.nodes[members[1]];
+                                if (tail[kPwStepCodeField] == (int64_t) ActType::Relu)
+                                {
+                                    act = ActType::Relu;
+                                } else if (an.type == OpType::Clip)
+                                {
+                                    pwClipBounds(g, an, lo, hi);
+                                    ok  = lo == halfToFloat(floatToHalf(lo)) && hi == halfToFloat(floatToHalf(hi));
+                                    act = (lo == 0.f && hi == 6.f) ? ActType::Relu6 : ActType::Clip;
+                                } else
+                                {
+                                    ok = false;
+                                }
+                            }
+                        }
+                        if (ok)
+                        {
+                            P.fusedResidual = operand;
+                            P.fusedAct      = act;
+                            P.actLo         = lo;
+                            P.actHi         = hi;
+                            P.outputs[0]    = unit.mainOut;
+                            for (int member: members)
+                            {
+                                removed.insert(member);
+                            }
+                            fused++;
+                            attached++;
+                            rebuild();
+                            continue;
+                        }
                     }
                 }
                 Node                &P      = g.nodes[prod];
