@@ -382,3 +382,31 @@ TEST(WinoF63, AutoUnitRuleIsDeterministicAndF63Free) {
     EXPECT_EQ(winoAutoUnit(32, 64), 4);   // probed ahead on F(6,3) at 147x147
     EXPECT_EQ(winoAutoUnit(128, 128), 4); // probed ahead on F(6,3) at 40x40 / 80x80
 }
+
+// The map-aware unit: the channel rule's F(4,3) yields to F(2,3) only where the map's F(4,3) tile
+// count no longer fills the GEMM's smallest M tile (a 7x7 map: 4 tiles against 16), and holds
+// wherever it does (14x14: 16 tiles exactly; 28x28 and up). Shallow channels stay on F(2,3) as
+// before. Pure shape rule: repeated evaluation is identical.
+TEST(WinoF63, MapAwareUnitYieldsToF23OnlyOnTinyMaps) {
+    ASSERT_EQ(winoAutoUnit(512, 512), 4);
+    EXPECT_EQ(winoAutoUnitForMap(512, 512, 1, 7, 7), 2);
+    EXPECT_EQ(winoAutoUnitForMap(256, 256, 1, 14, 14), 4);
+    EXPECT_EQ(winoAutoUnitForMap(128, 128, 1, 28, 28), 4);
+    EXPECT_EQ(winoAutoUnitForMap(64, 64, 1, 56, 56), 4);
+    EXPECT_EQ(winoAutoUnitForMap(512, 512, 4, 7, 7), 4) << "a batch of four 7x7 maps supplies 16 F(4,3) tiles";
+    // The channel rule prefers F(4,3) even for shallow channels; the map rule still yields on a 7x7
+    // map and holds on a 56x56 one, so the two agree everywhere the map fills the GEMM tile.
+    for (int64_t cin: {8, 16, 24})
+    {
+        EXPECT_EQ(winoAutoUnitForMap(cin, cin, 1, 56, 56), winoAutoUnit(cin, cin));
+        EXPECT_EQ(winoAutoUnitForMap(cin, cin, 1, 7, 7), winoAutoUnit(cin, cin) == 4 ? 2 : winoAutoUnit(cin, cin));
+    }
+    EXPECT_EQ(winoTileCount(4, 1, 7, 7), 4);
+    EXPECT_EQ(winoTileCount(2, 1, 7, 7), 16);
+    EXPECT_EQ(winoEffectiveGemmTiles(4, 4), 36 * kWinoGemmMinTileM);
+    EXPECT_EQ(winoEffectiveGemmTiles(2, 16), 16 * kWinoGemmMinTileM);
+    for (int repeat = 0; repeat < 4; ++repeat)
+    {
+        EXPECT_EQ(winoAutoUnitForMap(512, 512, 1, 7, 7), 2);
+    }
+}

@@ -29,13 +29,13 @@ namespace vknn {
         // make it memory-bound above this point. Calibrated against the measured conv-suite winners.
         constexpr int64_t kWinoMaxCinCout = 32768;
         // Large-Cin*Cout shapes still take Winograd when the output map supplies enough tiles to keep
-        // the GEMM's M dimension fed. Measured cooled with the outer-product GEMM: 256x256 @ 14x14
-        // (196 px, 49 F(2,3) tiles) is -28% FASTER on Winograd (0.327 -> 0.237 ms per layer on the
-        // primary device), 256x256 @ 20x20 (400 px) -38%, 192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%,
-        // while 512x512 @ 7x7 (49 px, 16 tiles) is +18% SLOWER: the GEMM's M tile starves below one
-        // workgroup of tiles. The floor sits at the smallest measured winner; between 49 and 196
-        // output pixels is unmeasured and stays direct.
-        constexpr int64_t kWinoLargeCMinPixels = 196;
+        // the GEMM's M dimension fed. Measured cooled with the outer-product GEMM and the map-aware
+        // unit rule (core/wino_f63.h winoAutoUnitForMap: a tiny map takes F(2,3) so its tiles fill
+        // the GEMM's smallest M tile): 512x512 @ 7x7 (49 px, 16 F(2,3) tiles) 0.629 -> 0.279 ms per
+        // layer on the primary device, 256x256 @ 14x14 (196 px) 0.327 -> 0.230, 256x256 @ 20x20
+        // -38%, 192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%. The floor sits at the smallest measured
+        // winner; a map below 49 output pixels is unmeasured and stays direct.
+        constexpr int64_t kWinoLargeCMinPixels = 49;
 
         // Workgroup size of the group==1 direct conv shader when no measurement applies: the value
         // Tuning::None dispatches and the incumbent every local-size race is seeded with.
@@ -103,8 +103,12 @@ namespace vknn {
             // tuneWino), so the real dispatch and the timing dispatch derive the tile from one
             // helper and cannot diverge. The subgroup variant (wino_gemm_sg) keeps its fixed
             // 32-tile geometry.
-            static constexpr int kWinoGemmTileNB = 8;  // output channel-blocks (N) per workgroup
-            static constexpr int kWinoSgTileM    = 32; // wino_gemm_sg's fixed M tile
+            static constexpr int kWinoGemmTileNB = 8; // output channel-blocks (N) per workgroup
+            // tuneWino's choice word: bits 0-1 the F-unit, then the RM tile (4 when neither bit is set), the
+            // ACC16 bit (8, never set by the race) and the register-body bit (16).
+            static constexpr int kWinoChoiceRm8Bit = 4;
+            static constexpr int kWinoChoiceRm2Bit = 32;
+            static constexpr int kWinoSgTileM      = 32; // wino_gemm_sg's fixed M tile
             /// Subgroup width wino_gemm_sg's shuffles span (its lane split, shuffle sources and
             /// tile math all assume it). The pipeline pins this exact compute subgroup width; a
             /// device that cannot pin it falls back to the default tiled GEMM.
@@ -1205,7 +1209,7 @@ namespace vknn {
                 // F(4,3)'s 4x FLOP / 0.56x V-M-traffic saving wins on deep channels, F(2,3)'s smaller
                 // transform wins on shallow, and F(6,3) stays out of the automatic rule — device
                 // measurement refuted it (accuracy gate + no shape-only win; evidence at winoAutoUnit).
-                int U_ = forceUnit ? forcedUnit : winoAutoUnit(Cin, Cout);
+                int U_ = forceUnit ? forcedUnit : winoAutoUnitForMap(Cin, Cout, x.n, y.h, y.w);
                 // RM (wino_gemm tiles/thread) and the GEMM body (LDS-staged vs the no-LDS register
                 // twin wino_gemm_reg) are bit-neutral - they only remap threads to outputs / change
                 // the operand staging while the per-output K order is unchanged, so any choice yields
@@ -1225,7 +1229,7 @@ namespace vknn {
                 std::vector<double> raceMs; // the race's per-entrant 3-pass estimates, for the tune log
                 bool                raced = false;
                 int                 reuse;
-                if (env.reuseTuned(sig, reuse) && ((reuse & ~16) == 4 || (reuse & ~16) == 8))
+                if (env.reuseTuned(sig, reuse) && ((reuse & ~16) == 2 || (reuse & ~16) == 4 || (reuse & ~16) == 8))
                 {
                     bestRm      = reuse & ~16;
                     bestRegGemm = (reuse & 16) != 0;
@@ -1274,34 +1278,45 @@ namespace vknn {
                             oPipe->dispatch(cmd, oBufs, &opc, sizeof(opc), groups(Coutb * nT * lanes, kConvFixedKernelWidth));
                         });
                     };
-                    // Entrants in one interleaved race: LDS RM4 (the incumbent Tuning::None
-                    // dispatches), LDS RM8, then the register body at RM4/RM8.
-                    constexpr int                        kWinoRmCands[] = {4, 8, 4, 8};
-                    std::shared_ptr<vk::ComputePipeline> gemmPipes[]    = {
-                        env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {4u, 0u}),
-                        env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {8u, 0u}),
-                        env.pipeline("wino_gemm_reg_fp16", 3, sizeof(WinoGemmPC), {4u}),
-                        env.pipeline("wino_gemm_reg_fp16", 3, sizeof(WinoGemmPC), {8u}),
+                    // Entrants in one interleaved race: the LDS body at RM 4 (the incumbent
+                    // Tuning::None dispatches), 8 and 2, then the register body at the same three
+                    // tiles. RM 2 is the tile a 16-tile map fills exactly (kWinoGemmMinTileM); the
+                    // wider tiles trade padding lanes for A reuse, which is what the race measures.
+                    constexpr int                        kWinoRmCands[]   = {4, 8, 2, 4, 8, 2};
+                    constexpr int                        kWinoLdsEntrants = 3; // the first kWinoLdsEntrants entrants run the LDS body
+                    std::shared_ptr<vk::ComputePipeline> gemmPipes[]      = {
+                        env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {4u, 0u}), env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {8u, 0u}),
+                        env.pipeline("wino_gemm_fp16", 3, sizeof(WinoGemmPC), {2u, 0u}), env.pipeline("wino_gemm_reg_fp16", 3, sizeof(WinoGemmPC), {4u}),
+                        env.pipeline("wino_gemm_reg_fp16", 3, sizeof(WinoGemmPC), {8u}), env.pipeline("wino_gemm_reg_fp16", 3, sizeof(WinoGemmPC), {2u}),
                     };
-                    std::vector<double> ms = vk::raceCandidates(4, [&](int index) {
+                    constexpr int       kWinoEntrants = sizeof(kWinoRmCands) / sizeof(kWinoRmCands[0]);
+                    std::vector<double> ms            = vk::raceCandidates(kWinoEntrants, [&](int index) {
                         return time3Pass(gemmPipes[index], groups(nT, winoGemmTileM(kWinoRmCands[index])));
                     });
-                    raceMs                 = ms;
-                    raced                  = true;
-                    double ldsMs = ms[0], regMs = ms[2];
-                    int    ldsRm = 4, regRm = 4;
-                    if (ms[1] < ldsMs)
+                    raceMs                            = ms;
+                    raced                             = true;
+                    // Within each body the fastest tile wins outright (a tile only remaps lanes to
+                    // outputs); the LDS RM4 incumbent's time is the reference.
+                    double ldsMs = ms[0], regMs = ms[kWinoLdsEntrants];
+                    int    ldsRm = kWinoRmCands[0], regRm = kWinoRmCands[kWinoLdsEntrants];
+                    for (int i = 1; i < kWinoLdsEntrants; ++i)
                     {
-                        ldsMs = ms[1];
-                        ldsRm = 8;
+                        if (ms[i] < ldsMs)
+                        {
+                            ldsMs = ms[i];
+                            ldsRm = kWinoRmCands[i];
+                        }
                     }
                     // The no-LDS register-tile body joins the same bit-exact race (identical
                     // per-output accumulation; only the operand staging differs). A NEW candidate
                     // class carries the 3% anti-noise margin against the LDS incumbent.
-                    if (ms[3] < regMs)
+                    for (int i = kWinoLdsEntrants + 1; i < kWinoEntrants; ++i)
                     {
-                        regMs = ms[3];
-                        regRm = 8;
+                        if (ms[i] < regMs)
+                        {
+                            regMs = ms[i];
+                            regRm = kWinoRmCands[i];
+                        }
                     }
                     if (regMs < ldsMs * 0.97)
                     {
@@ -1316,7 +1331,10 @@ namespace vknn {
                         env.weights->setTuned(sig, bestRm | (bestRegGemm ? 16 : 0), (int) env.tuning);
                     }
                 }
-                int winoChoice = ((U_ == 2) ? 1 : (U_ == 4) ? 2 : 3) | (bestRm == 8 ? 4 : 0) | (bestRegGemm ? 16 : 0); // ACC16 bit (8) never set
+                int winoChoice = ((U_ == 2) ? 1 :
+                                  (U_ == 4) ? 2 :
+                                              3) |
+                                 (bestRm == 8 ? kWinoChoiceRm8Bit : 0) | (bestRm == 2 ? kWinoChoiceRm2Bit : 0) | (bestRegGemm ? 16 : 0); // ACC16 bit (8) never set
                 VKNN_DEBUG << "tuneWino Cin=" << Cin << " Cout=" << Cout << " U=" << U_ << " nT=" << (x.n * ((y.h + U_ - 1) / U_) * ((y.w + U_ - 1) / U_)) << " rm=" << bestRm << " body=" << (bestRegGemm ? "reg" : "lds") << " -> " << winoChoice << (raced ? vk::raceTimes(raceMs) : std::string());
                 return winoChoice;
             }
@@ -1393,7 +1411,7 @@ namespace vknn {
                 int wchoice = (winoShape && !coopGemm) ? tuneWino(env, x, y, x.c, Cout, (int) node.fusedAct) : 0;
                 winograd    = (wchoice > 0);
                 winoUnit    = ((wchoice & 3) == 2) ? 4 : ((wchoice & 3) == 3) ? 6 : 2;
-                winoRm      = (wchoice & 4) != 0 ? 8 : 4;
+                winoRm      = (wchoice & kWinoChoiceRm8Bit) != 0 ? 8 : (wchoice & kWinoChoiceRm2Bit) != 0 ? 2 : 4;
                 winoAcc16   = (wchoice & 8) != 0 ? 1 : 0;
                 winoRegGemm = (wchoice & 16) != 0;
 

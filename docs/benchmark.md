@@ -272,9 +272,13 @@ Four further changes, all output-byte-identical to v1.4.0 per model at every tun
   global reads through the cache hierarchy, same per-output fp32 chain — bit-exact) joins the
   bit-neutral body race, and wins the ResNet-50 Winograd shapes on the primary device. With the
   stronger GEMM the Winograd-vs-direct rule gains a second branch: a large-`Cin*Cout` 3x3 also
-  takes Winograd when the output map keeps the GEMM fed (`OHW >= 196`; probe-calibrated with the
-  outer-product GEMM: 256x256 @ 14x14 -28% (ResNet-50's layer3 blocks), 256x256 @ 20x20 -38%,
-  192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%, while the tile-starved 512x512 @ 7x7 stays direct).
+  takes Winograd when the output map keeps the GEMM fed (`OHW >= 49`; probe-calibrated with the
+  outer-product GEMM: 512x512 @ 7x7 0.63 -> 0.28 ms (ResNet-50's layer4 blocks), 256x256 @ 14x14
+  0.33 -> 0.23, 256x256 @ 20x20 -38%, 192x192 @ 35x35 -42%, 512x512 @ 28x28 -69%). Two things
+  make the small maps win: the unit rule is map-aware (`winoAutoUnitForMap`: F(4,3) yields to
+  F(2,3) where its four times fewer tiles would no longer fill the GEMM's smallest M tile, so a
+  7x7 map runs 16 F(2,3) tiles instead of 4 F(4,3) tiles at 75% padding), and the bit-neutral tile
+  race carries RM = 2 beside 4 and 8, the tile a 16-tile map fills exactly.
 - **Outer-product tap contraction.** Every group-1 conv kernel (direct, register-tiled, row-halo,
   compact stem, LDS-halo, 1-D, split-K, the pointwise family and the Winograd GEMM) folds a tap
   as `acc = fma(vec4(in.c), w[c], acc)` over the four input lanes, with the weight pack holding a

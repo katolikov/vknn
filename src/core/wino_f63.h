@@ -104,4 +104,35 @@ namespace vknn {
         return (winoCostPerOutput(4, cin, cout) < winoCostPerOutput(2, cin, cout)) ? 4 : 2;
     }
 
+    // The transform-domain GEMM's smallest M tile: wino_gemm's MDIM (8 lanes along the tile axis)
+    // times the smallest RM the bit-neutral tile race offers (2). A map whose tile count is below
+    // this still pays a whole tile of GEMM work per position; the unit rule below charges for it.
+    constexpr int64_t kWinoGemmMinTileM = 16;
+
+    /// Output tiles an n x n Winograd unit needs for a batch x outH x outW map.
+    constexpr int64_t winoTileCount(int n, int64_t batch, int64_t outH, int64_t outW) {
+        return batch * ((outH + n - 1) / n) * ((outW + n - 1) / n);
+    }
+
+    /// GEMM work an n x n unit issues for `tiles` tiles, in tile-position units: (n + 2)^2 transform
+    /// positions times the tile count rounded up to the GEMM's smallest M tile.
+    constexpr int64_t winoEffectiveGemmTiles(int n, int64_t tiles) {
+        return (int64_t) (n + 2) * (n + 2) * ((tiles + kWinoGemmMinTileM - 1) / kWinoGemmMinTileM * kWinoGemmMinTileM);
+    }
+
+    /// The automatic unit for one output map: the channel rule's pick, except that F(4,3) yields to
+    /// F(2,3) where the map is so small that F(4,3)'s four times fewer tiles no longer fill the
+    /// GEMM's M tile - a 7x7 map is 4 F(4,3) tiles against a 16-tile workgroup, so its 36 positions
+    /// each compute 75% padding, while F(2,3)'s 16 tiles fit exactly. Still a pure shape rule.
+    inline int winoAutoUnitForMap(int64_t cin, int64_t cout, int64_t batch, int64_t outH, int64_t outW) {
+        const int channelPick = winoAutoUnit(cin, cout);
+        if (channelPick != 4)
+        {
+            return channelPick;
+        }
+        const int64_t work4 = winoEffectiveGemmTiles(4, winoTileCount(4, batch, outH, outW));
+        const int64_t work2 = winoEffectiveGemmTiles(2, winoTileCount(2, batch, outH, outW));
+        return work4 <= work2 ? 4 : 2;
+    }
+
 } // namespace vknn
