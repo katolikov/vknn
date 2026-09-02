@@ -125,11 +125,8 @@ namespace vknn {
 
     // ---- flat pointwise access class ----
 
-    // Step-record field offsets read here, mirroring the record layout kPwStepInts names in
-    // vknn/op_type.h (kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc).
-    constexpr int kPwStepKindField        = 0;
-    constexpr int kPwStepCodeField        = 1;
-    constexpr int kPwStepBcastSourceField = 7;
+    // Step-record field offsets (kind, code, srcA, srcB, srcC, dst, bcast, bcastSrc) are the
+    // kPwStep*Field constants of vknn/op_type.h, beside the record layout they index.
 
     /// The plan fields that set a flat pointwise unit's memory access pattern: per step the op kind,
     /// the op code, the broadcast class, the broadcast source field, and that step's per-axis

@@ -1536,7 +1536,7 @@ namespace vknn {
                 prod     = (u.entry >= 0 && u.entry < (TensorId) producer.size()) ? producer[u.entry] : -1;
                 entryExp = false;
                 bool ok  = prod >= 0 && !removed.count(prod) && pwEpilogueCapable(g.nodes[prod].type) && !g.nodes[prod].attr.has("pw_steps") &&
-                          g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
+                           g.nodes[prod].outputs.size() == 1 && g.nodes[prod].outputs[0] == u.entry;
                 // The register-tiled MatMul kernel (matmul_tiled, chosen for M,N,K >=
                 // kTiledMatMulMin — the same constant matmul.cpp gates on) has no register
                 // headroom for the VM at its per-thread register micro-tile store loop — an
@@ -1705,26 +1705,44 @@ namespace vknn {
                 // of a pw unit (no plan SSBO, no extra bindings). Byte-safe: a monotone clamp with
                 // exactly-representable bounds commutes with RTE rounding, so act applied in the
                 // fp32 accumulator stores the same bytes the unfused act-of-rounded-value would.
-                if (members.size() == 1 && unit.operands.empty() && unit.exports.empty() && !entryExported)
+                if (unit.operands.empty() && unit.exports.empty() && !entryExported)
                 {
-                    Node       &P        = g.nodes[prod];
-                    const Node &mn       = g.nodes[members[0]];
-                    bool        hostable = (P.type == OpType::Conv || P.type == OpType::Gemm) && P.fusedAct == ActType::None && P.fusedResidual == kNoTensor;
-                    auto        rep      = [](float v) {
+                    Node &P        = g.nodes[prod];
+                    bool  hostable = (P.type == OpType::Conv || P.type == OpType::Gemm) && P.fusedAct == ActType::None && P.fusedResidual == kNoTensor;
+                    auto  rep      = [](float v) {
                         return v == halfToFloat(floatToHalf(v));
                     };
                     ActType act = ActType::None;
                     float   lo = 0, hi = 0;
-                    if (hostable && mn.type == OpType::Relu)
+                    if (hostable && members.size() == 1)
                     {
-                        act = ActType::Relu;
-                    } else if (hostable && mn.type == OpType::Clip)
-                    {
-                        pwClipBounds(g, mn, lo, hi);
-                        if (rep(lo) && rep(hi))
+                        const Node &mn = g.nodes[members[0]];
+                        if (mn.type == OpType::Relu)
                         {
-                            act = (lo == 0.f && hi == 6.f) ? ActType::Relu6 : ActType::Clip;
+                            act = ActType::Relu;
+                        } else if (mn.type == OpType::Clip)
+                        {
+                            pwClipBounds(g, mn, lo, hi);
+                            if (rep(lo) && rep(hi))
+                            {
+                                act = (lo == 0.f && hi == 6.f) ? ActType::Relu6 : ActType::Clip;
+                            }
                         }
+                    } else if (hostable && !strictFuse && unit.steps.size() == (size_t) kPwStepInts && unit.steps[kPwStepKindField] == kPwKindUnary && (unit.steps[kPwStepSrcAField] == kPwRefAcc || unit.steps[kPwStepSrcAField] == kPwRefEntry))
+                    {
+                        // A swish diamond the fast mode collapsed to ONE unary step on the entry value
+                        // (Sigmoid + Mul -> SiLU, HardSigmoid + Mul -> HardSwish) hosts the same way: the
+                        // kernels carry both as plain activation codes with the VM step's exact formula,
+                        // applied in the fp32 accumulator before the store like the VM would, so the
+                        // bytes match while the per-element VM interpretation - measured at more than the
+                        // conv it decorates on a large map, and more than the two separate elementwise
+                        // passes it replaces - is gone.
+                        const int64_t code = unit.steps[kPwStepCodeField];
+                        if (code == (int64_t) UnaryType::SiLU)
+                        {
+                            act = ActType::SiLU;
+                        } else if (code == (int64_t) UnaryType::HardSwish)
+                        { act = ActType::HardSwish; }
                     }
                     if (act != ActType::None)
                     {
@@ -1732,7 +1750,10 @@ namespace vknn {
                         P.actLo      = lo;
                         P.actHi      = hi;
                         P.outputs[0] = unit.mainOut; // consumers already read the act's tensor id
-                        removed.insert(members[0]);
+                        for (int member: members)
+                        {
+                            removed.insert(member);
+                        }
                         fused++;
                         attached++;
                         rebuild();
