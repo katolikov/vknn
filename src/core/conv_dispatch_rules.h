@@ -153,12 +153,25 @@ namespace vknn {
     constexpr const char *kConvWeightPackKey     = "#wT";
     constexpr int64_t     kConvWeightBlockFloats = 16;
 
-    /// Lanes a tile-per-thread kernel (conv1x1, conv_reg) dispatches when it orders the
-    /// output-channel block group INSIDE a workgroup-sized chunk of pixel tiles: whole workgroups
-    /// per (chunk, block group, batch), so the last chunk's padding lanes are part of the count and
-    /// retire on the kernel's own tile bound.
+    /// Chunks a map's pixel tiles are split into: at most a workgroup of tiles each.
+    constexpr int64_t convTileChunkCount(int64_t tiles, int64_t laneWidth) {
+        return laneWidth > 0 ? (tiles + laneWidth - 1) / laneWidth : 0;
+    }
+
+    /// Tiles per chunk: the tile count split evenly over its chunks, so a map with fewer tiles than
+    /// a workgroup (a 7x7 output at two pixels per thread has 25) runs every block group over
+    /// exactly its tiles instead of padding each group to laneWidth lanes that retire idle. The
+    /// kernels (conv1x1, conv1x1_s2, conv_reg) derive the same width from the same two inputs.
+    constexpr int64_t convTileChunk(int64_t tiles, int64_t laneWidth) {
+        return convTileChunkCount(tiles, laneWidth) > 0 ? (tiles + convTileChunkCount(tiles, laneWidth) - 1) / convTileChunkCount(tiles, laneWidth) : 0;
+    }
+
+    /// Lanes a tile-per-thread kernel (conv1x1, conv_reg) covers when it orders the output-channel
+    /// block group INSIDE a chunk of pixel tiles: one chunk width per (chunk, block group, batch).
+    /// The dispatch rounds this up to whole workgroups; those padding lanes and the tiles past the
+    /// map that an uneven split leaves retire on the kernel's own bounds.
     constexpr int64_t convChunkedTileLanes(int64_t batch, int64_t ocbGroups, int64_t tiles, int64_t laneWidth) {
-        return laneWidth > 0 ? batch * ocbGroups * convDispatchLanes(tiles, laneWidth) : 0;
+        return batch * ocbGroups * convTileChunkCount(tiles, laneWidth) * convTileChunk(tiles, laneWidth);
     }
 
     /// Threads per OC-split slice: the flat gid range divided over `parts`, rounded up to whole

@@ -159,6 +159,13 @@ cosine unchanged, and BETTER on DenseNet-121 (+2.4 dB) and YOLOv8n (+0.9 dB)):
   Kahan-compensated fp32 partials so the two-pass sum tracks the true value tighter than the
   single-pass chain. `setHint(Hint::SplitKConv, Mode::Auto|On|Off)` overrides the rule (Auto is the
   default and the rule is active out of the box); the hint is a cache-variant key field.
+- **Pointwise split-K rule recalibrated** (`ops/pw_splitk_rule.h`): with the chunk decode sized to
+  the map, the 1x1 split pair wins only where the output plane has at most 16384 channel-block
+  pixels (`Coutb * OH*OW`) and the reduction is at least 512 channels deep; it is 16-44% faster
+  there (1024->256 @14x14, 2048->1024 @7x7, 1024->512 @7x7..10x10) and the register-tiled kernel
+  wins everywhere above (every 14x14 plane of 128+ output blocks, every 7x7 plane of 512). The
+  part count targets 384 waves of partial-pass threads (four parts at 6272 outputs, two at
+  12544). ResNet-50's 2048->512 @7x7 went 0.165 -> 0.117 ms.
 - **Sliding-window 1-D conv** (`conv_1d`): 1xK/Kx1 kernels (Inception's 7x1/1x7, 3x1/1x3) load the
   input window into registers once per channel-block and reuse it across every overlapping tap;
   joins the bit-exact direct race.
@@ -288,9 +295,12 @@ Four further changes, all output-byte-identical to v1.4.0 per model at every tun
   0.144 -> 0.077 ms at unchanged fp32 accumulation (packed fp16 accumulation is slower still in
   this form, so `low` keeps fp32 accumulation). ResNet-50's 33 pointwise convs went 6.3 -> 4.3 ms.
 - **Block group inside the row.** The tile-per-thread kernels decode the output-channel block
-  group inside the row block (row-halo, compact stem) or inside a workgroup-sized chunk of pixel
-  tiles (pointwise, register-tiled), so a map's block groups run back to back and the input a
-  later group re-reads is still in cache instead of streaming from DRAM once per group. The
+  group inside the row block (row-halo, compact stem) or inside a chunk of pixel tiles (pointwise,
+  register-tiled), so a map's block groups run back to back and the input a later group re-reads
+  is still in cache instead of streaming from DRAM once per group. The chunk is sized to the map
+  (at most a workgroup of tiles, the map's tiles split evenly over its chunks): a 7x7 output at
+  two pixels per thread has 25 tiles, and padding every block group to a 64-lane chunk would
+  retire 39 of every 64 lanes idle - the 7x7 layers of ResNet-50 ran at that utilisation. The
   row-halo kernel additionally races a 2-D workgroup footprint (4, 2 or 1 output rows per
   workgroup). Stride-2 3x3 convs on a shallow, huge-spatial net went 0.62 / 0.57 -> 0.42 / 0.38 ms,
   and a pointwise 64->64 @160x160 0.39 -> 0.14 ms.

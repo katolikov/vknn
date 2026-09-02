@@ -48,9 +48,13 @@ void main() {
   // still maps to distinct outputs, so the OC-split slice dispatches stay disjoint.
   int wg = int(gl_WorkGroupSize.x);
   int nChunks = (nTiles + wg - 1) / wg;
-  if (gid >= uint(pc.N * ocbGroups * nChunks * wg)) return;
-  int grp = int(gid / uint(wg));
-  int tile = (grp / ocbGroups) % nChunks * wg + int(gid % uint(wg));
+  // Chunk width sized to the map: the tiles split evenly over nChunks, so a map with
+  // fewer tiles than a workgroup (a 7x7 output has 25 two-pixel tiles) does not pad every
+  // block group to wg lanes that retire idle.
+  int chunk = (nTiles + nChunks - 1) / nChunks;
+  if (gid >= uint(pc.N * ocbGroups * nChunks * chunk)) return;
+  int grp = int(gid / uint(chunk));
+  int tile = (grp / ocbGroups) % nChunks * chunk + int(gid % uint(chunk));
   int ocbg = grp % ocbGroups;
   int n = grp / (ocbGroups * nChunks);
   if (tile >= nTiles) return;

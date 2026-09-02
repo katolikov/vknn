@@ -7,6 +7,7 @@
 // What these tests can and cannot prove: they are host tests, so they prove the HOST rules. That a
 // pipeline compiled at width W and dispatched at width W writes every output is a GPU statement and
 // needs a device gate on a device whose subgroupSize is not 64.
+#include "backend/vulkan/ops/pw_splitk_rule.h"
 #include "core/conv_dispatch_rules.h"
 #include "vknn/hint.h"
 #include <algorithm>
@@ -430,4 +431,66 @@ TEST(WinoGemmUPack, IndexMatchesShaderAddressingAndCoversTheCount) {
             }
         }
     }
+}
+
+// The chunk a tile-per-thread kernel orders its block groups inside is sized to the map: a map
+// with fewer tiles than a workgroup gets one chunk of exactly its tiles, a larger map splits into
+// near-equal chunks, so no block group pads to laneWidth lanes that retire idle.
+TEST(ConvDispatchWidth, TileChunkIsSizedToTheMap) {
+    constexpr int64_t kLanes = 64;
+    // 7x7 output at two pixels per thread: 25 tiles, one chunk of 25.
+    EXPECT_EQ(convTileChunkCount(25, kLanes), 1);
+    EXPECT_EQ(convTileChunk(25, kLanes), 25);
+    EXPECT_EQ(convChunkedTileLanes(1, 512, 25, kLanes), 512 * 25);
+    // 14x14 at two pixels per thread: 98 tiles split 49 + 49 rather than 64 + 34.
+    EXPECT_EQ(convTileChunkCount(98, kLanes), 2);
+    EXPECT_EQ(convTileChunk(98, kLanes), 49);
+    EXPECT_EQ(convChunkedTileLanes(1, 128, 98, kLanes), 128 * 2 * 49);
+    // A whole number of workgroups keeps the workgroup-wide chunk.
+    EXPECT_EQ(convTileChunk(64, kLanes), 64);
+    EXPECT_EQ(convTileChunk(128, kLanes), 64);
+    // One tile past a workgroup splits evenly instead of leaving a chunk of one.
+    EXPECT_EQ(convTileChunk(65, kLanes), 33);
+    EXPECT_EQ(convTileChunkCount(65, kLanes) * convTileChunk(65, kLanes), 66);
+    // The chunks always cover the map and never overshoot it by a whole chunk.
+    for (int64_t tiles = 1; tiles <= 1000; ++tiles)
+    {
+        const int64_t covered = convTileChunkCount(tiles, kLanes) * convTileChunk(tiles, kLanes);
+        EXPECT_GE(covered, tiles);
+        EXPECT_LT(covered - tiles, convTileChunkCount(tiles, kLanes));
+        EXPECT_LE(convTileChunk(tiles, kLanes), kLanes);
+    }
+    EXPECT_EQ(convChunkedTileLanes(1, 4, 25, 0), 0);
+}
+
+// The pointwise split-K rule follows the measured boundary: the pair wins only when the output
+// plane has at most kPwSplitKMaxOutputs channel-block pixels and the reduction is at least
+// kPwSplitKMinCin deep, and the part count targets kPwSplitKTargetThreads partial-pass threads.
+TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
+    constexpr int kAuto = 0;
+    // 2048->512 @7x7 and 1024->512 @7x7: 6272 outputs, four parts.
+    EXPECT_TRUE(pwSplitKActive(true, 1, 2048, 128, 49, kAuto));
+    EXPECT_EQ(pwSplitKParts(512, 128, 49), 4);
+    EXPECT_TRUE(pwSplitKActive(true, 1, 1024, 128, 49, kAuto));
+    EXPECT_EQ(pwSplitKParts(256, 128, 49), 4);
+    // 1024->256 @14x14 and 2048->1024 @7x7: 12544 outputs, two parts.
+    EXPECT_TRUE(pwSplitKActive(true, 1, 1024, 64, 196, kAuto));
+    EXPECT_EQ(pwSplitKParts(256, 64, 196), 2);
+    EXPECT_TRUE(pwSplitKActive(true, 1, 2048, 256, 49, kAuto));
+    EXPECT_EQ(pwSplitKParts(512, 256, 49), 2);
+    // 512->2048 @7x7 and 1024->512 @14x14: 25088 outputs, the register-tiled kernel wins.
+    EXPECT_FALSE(pwSplitKActive(true, 1, 512, 512, 49, kAuto));
+    EXPECT_FALSE(pwSplitKActive(true, 1, 1024, 128, 196, kAuto));
+    // 1024->512 @12x12: 18432 outputs, still the register-tiled kernel.
+    EXPECT_FALSE(pwSplitKActive(true, 1, 1024, 128, 144, kAuto));
+    // 256->256 @14x14: a shallow reduction only ties, so it stays single-pass.
+    EXPECT_FALSE(pwSplitKActive(true, 1, 256, 64, 196, kAuto));
+    // Off disables the path; fp32 storage and batches never split.
+    EXPECT_FALSE(pwSplitKActive(true, 1, 2048, 128, 49, (int) Mode::Off));
+    EXPECT_FALSE(pwSplitKActive(false, 1, 2048, 128, 49, kAuto));
+    EXPECT_FALSE(pwSplitKActive(true, 2, 2048, 128, 49, kAuto));
+    // Parts never exceed the block count or the cap, and never drop under two.
+    EXPECT_EQ(pwSplitKParts(3, 4, 4), 3);
+    EXPECT_EQ(pwSplitKParts(512, 4, 4), kPwSplitKMaxParts);
+    EXPECT_EQ(pwSplitKParts(512, 512, 196), kPwSplitKMinParts);
 }

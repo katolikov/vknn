@@ -16,16 +16,18 @@
 
 namespace vknn {
 
-    // Output pixels a standard 1x1 thread covers (the conv1x1 kernels' WTILE default), used only to
-    // size the "is the standard dispatch starved" test below.
-    inline constexpr int64_t kPwSplitKTileWidth = 4;
-    // Standard-dispatch thread count under which the reduction is split. Above it the register-tiled
-    // conv1x1 kernel already has the parallelism and split-K's partial-buffer round-trip only costs.
-    inline constexpr int64_t kPwSplitKMaxThreads = 2048;
-    // Channel floor: a shallow reduction has nothing to split.
-    inline constexpr int64_t kPwSplitKMinCin = 32;
-    // Thread target the partial pass aims for, and the cap on how many ways the reduction splits.
-    inline constexpr int64_t kPwSplitKTargetThreads = 8192;
+    // Output channel-block pixels (Coutb * OH*OW - the partial pass's threads at one part) at or
+    // under which the reduction is split. Measured on the primary device with the map-sized chunk
+    // decode: the register-tiled conv1x1 kernel wins from 18432 up (1024->512 @12x12, every 14x14
+    // plane of 128+ output blocks, every 7x7 plane of 512 blocks), the split pair wins by 16-44% at
+    // 12800 and under (1024->256 @14x14, 2048->1024 @7x7, 1024->512 @7x7..10x10).
+    inline constexpr int64_t kPwSplitKMaxOutputs = 16384;
+    // Channel floor: at 256 input channels the pair only ties the register-tiled kernel (256->256
+    // @14x14), at 512 it wins (512->256 @14x14, -16%).
+    inline constexpr int64_t kPwSplitKMinCin = 512;
+    // Thread target of the partial pass (384 waves of 64 lanes), which sets how many ways the
+    // reduction splits: measured best at 4 parts for 6272-8192 outputs and 2 parts at 12544-12800.
+    inline constexpr int64_t kPwSplitKTargetThreads = 24576;
     inline constexpr int64_t kPwSplitKMaxParts      = 16;
     inline constexpr int64_t kPwSplitKMinParts      = 2;
 
@@ -44,8 +46,7 @@ namespace vknn {
         {
             return false;
         }
-        const int64_t stdThreads = Coutb * ((OHW + kPwSplitKTileWidth - 1) / kPwSplitKTileWidth);
-        return stdThreads < kPwSplitKMaxThreads;
+        return Coutb * OHW <= kPwSplitKMaxOutputs;
     }
 
 } // namespace vknn
