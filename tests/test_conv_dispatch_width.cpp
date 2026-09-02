@@ -332,3 +332,50 @@ TEST(ConvDispatchWidth, WinogradVariantResolutionLeavesEveryOtherVariantAlone) {
         }
     }
 }
+
+// --- Winograd tiled-GEMM U pack ------------------------------------------------------------------
+
+// The pack the host writes (winoGemmUVec4Index) and the addressing shaders/wino_gemm_fp16.comp and
+// wino_gemm_reg_fp16.comp hard-code are one layout: the four input-lane vec4s of a (position,
+// output block, input block) are consecutive, input blocks step by kNC4Block, output blocks by a
+// whole K row, positions by a whole [N][K] panel - and winoGemmUVec4Count is exactly that span.
+TEST(WinoGemmUPack, IndexMatchesShaderAddressingAndCoversTheCount) {
+    for (int64_t positions: {16, 36, 64})
+    {
+        for (int64_t coutBlocks: {1, 3, 16})
+        {
+            for (int64_t cinBlocks: {1, 5, 8})
+            {
+                const int64_t     count = winoGemmUVec4Count(positions, coutBlocks, cinBlocks);
+                std::vector<bool> seen((size_t) count, false);
+                for (int64_t pos = 0; pos < positions; ++pos)
+                {
+                    for (int64_t ocb = 0; ocb < coutBlocks; ++ocb)
+                    {
+                        for (int64_t icb = 0; icb < cinBlocks; ++icb)
+                        {
+                            for (int64_t lane = 0; lane < kNC4Block; ++lane)
+                            {
+                                const int64_t index = winoGemmUVec4Index(pos, ocb, icb, lane, coutBlocks, cinBlocks);
+                                // The LDS kernel's form: uBaseP + (ocb*Cinb + k)*NC4 + c with
+                                // uBaseP = p*Coutb*Cinb*NC4.
+                                EXPECT_EQ(index, pos * coutBlocks * cinBlocks * kNC4Block + (ocb * cinBlocks + icb) * kNC4Block + lane);
+                                // The register kernel's form: (p*Coutb + ocb)*Cinb*NC4 + k*NC4 + c.
+                                EXPECT_EQ(index, (pos * coutBlocks + ocb) * cinBlocks * kNC4Block + icb * kNC4Block + lane);
+                                ASSERT_GE(index, 0);
+                                ASSERT_LT(index, count);
+                                EXPECT_FALSE(seen[(size_t) index]) << "vec4 slot " << index << " packed twice";
+                                seen[(size_t) index] = true;
+                            }
+                        }
+                    }
+                }
+                EXPECT_TRUE(std::all_of(seen.begin(), seen.end(),
+                                        [](bool packed) {
+                                            return packed;
+                                        }))
+                    << "positions=" << positions << " coutBlocks=" << coutBlocks << " cinBlocks=" << cinBlocks;
+            }
+        }
+    }
+}

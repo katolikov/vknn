@@ -258,10 +258,46 @@ namespace vknn {
                 static const float G4[6][3] = {
                     {0.25f, 0, 0}, {-1.f / 6, -1.f / 6, -1.f / 6}, {-1.f / 6, 1.f / 6, -1.f / 6}, {1.f / 24, 1.f / 12, 1.f / 6}, {1.f / 24, -1.f / 12, 1.f / 6},
                     {0, 0, 1}};
-                // Host weight transform U = G g G^T, vec4(4 ic). Default packed [pos][oc][icb]; the
-                // subgroup GEMM needs [pos][icb][oc] (coalesced per-K output-channel loads). Cached on disk.
-                ubuf = uploadCached(env, node.name + (gemmSubgroup ? "#winosg" : "#wino") + std::to_string(U_), [&] {
-                    std::vector<float> U((size_t) nPos * Cout * Cinb * 4, 0.f);
+                // The tiled-GEMM 3-pass is the default Winograd kernel (Mode::TiledGemm), and the
+                // variant every refusal above resolves to; Mode::SubgroupGemm is the same 3-pass with
+                // the subgroup-shuffle GEMM when the device can pin its width, the tiled GEMM otherwise.
+                winogemm                 = wvar == (int) Mode::TiledGemm || wvar == (int) Mode::SubgroupGemm;
+                const bool tiledGemmPack = winogemm && !gemmSubgroup;
+                // Host weight transform U = G g G^T, one vec4 per 4 packed channels. Each GEMM body
+                // reads its own pack, and the cache key names the layout, so a node that switches
+                // variant by hint re-packs instead of reading a stale layout:
+                //   "#winoT"  tiled GEMM (wino_gemm / wino_gemm_reg): [pos][ocb][icb][ic lane], vec4
+                //             over 4 OUTPUT channels (winoGemmUVec4Index, core/conv_dispatch_rules.h) -
+                //             the operand its per-input-channel fma contraction consumes whole;
+                //   "#winosg" subgroup GEMM: [pos][icb][oc], vec4 over 4 input channels (coalesced
+                //             per-K output-channel loads);
+                //   "#wino"   fused / fused-split / fully-fused kernels: [pos][oc][icb], vec4 over 4
+                //             input channels, one dot per output channel.
+                const char *packKey = "#wino";
+                if (gemmSubgroup)
+                {
+                    packKey = "#winosg";
+                }
+                if (tiledGemmPack)
+                {
+                    packKey = "#winoT";
+                }
+                // Element index of one transformed weight (position, output channel, input channel)
+                // in the pack this node uploads.
+                auto uElementIndex = [&](int64_t pos, int64_t oc, int64_t icb, int64_t icLane) -> int64_t {
+                    if (tiledGemmPack)
+                    {
+                        return winoGemmUVec4Index(pos, oc / kNC4Block, icb, icLane, Coutb, Cinb) * kNC4Block + oc % kNC4Block;
+                    }
+                    if (gemmSubgroup)
+                    {
+                        return ((pos * Cinb + icb) * Cout + oc) * kNC4Block + icLane;
+                    }
+                    return ((pos * Cout + oc) * Cinb + icb) * kNC4Block + icLane;
+                };
+                const size_t uFloats = (size_t) (tiledGemmPack ? winoGemmUVec4Count(nPos, Coutb, Cinb) : nPos * Cout * Cinb) * kNC4Block;
+                ubuf                 = uploadCached(env, node.name + packKey + std::to_string(U_), [&] {
+                    std::vector<float> U(uFloats, 0.f);
                     for (int64_t oc = 0; oc < Cout; ++oc)
                     {
                         for (int64_t ic = 0; ic < Cin; ++ic)
@@ -276,16 +312,15 @@ namespace vknn {
                                     Gg[i][j]        = Gi[0] * gk[j] + Gi[1] * gk[3 + j] + Gi[2] * gk[6 + j];
                                 }
                             }
-                            int64_t icb = ic / 4, lane = ic % 4;
+                            int64_t icb = ic / kNC4Block, lane = ic % kNC4Block;
                             for (int i = 0; i < A_; ++i)
                             {
                                 for (int j = 0; j < A_; ++j)
                                 {
-                                    const float *Gj    = (U_ == 2) ? G2[j] : (U_ == 4) ? G4[j] : kWinoF63G[j];
-                                    float        u     = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
-                                    int          pos   = i * A_ + j;
-                                    int64_t      uidx  = gemmSubgroup ? ((pos * Cinb + icb) * Cout + oc) : ((pos * Cout + oc) * Cinb + icb);
-                                    U[uidx * 4 + lane] = u;
+                                    const float *Gj                               = (U_ == 2) ? G2[j] : (U_ == 4) ? G4[j] : kWinoF63G[j];
+                                    float        u                                = Gg[i][0] * Gj[0] + Gg[i][1] * Gj[1] + Gg[i][2] * Gj[2];
+                                    int          pos                              = i * A_ + j;
+                                    U[(size_t) uElementIndex(pos, oc, icb, lane)] = u;
                                 }
                             }
                         }
@@ -316,11 +351,8 @@ namespace vknn {
                 // two-stage transform runs kWinoF63TransformLanes cooperating threads per unit.
                 wInGroups = groups(Cinb * nT * (U_ == 6 ? kWinoF63TransformLanes : 1), kConvFixedKernelWidth);
 
-                // The tiled-GEMM 3-pass is the default Winograd kernel (Mode::TiledGemm), and the
-                // variant every refusal above resolves to. Mode::SubgroupGemm is the same 3-pass with
-                // the subgroup-shuffle GEMM (no LDS). The fused / fused-split variants are Hint-gated
-                // regressions (see above).
-                winogemm = wvar == (int) Mode::TiledGemm || wvar == (int) Mode::SubgroupGemm;
+                // The fused / fused-split variants below the tiled GEMM are Hint-gated regressions
+                // (see above).
                 if (winogemm)
                 {
                     // 3-pass: input transform -> V, TILED batched GEMM -> M, output transform -> dst.
@@ -1187,8 +1219,10 @@ namespace vknn {
                     auto    mk = [&](size_t bytes) {
                         return std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>(bytes, 16), vk::MemPref::kDeviceOnly);
                     };
+                    // Scratch operands of the timed 3-pass; U is in the tiled-GEMM pack the raced
+                    // bodies read (output channels block-padded, so it is sized by Coutb, not Cout).
                     auto        sSrc   = mk((size_t) x.n * Cinb * x.h * x.w * 8);
-                    auto        sU     = mk((size_t) nPos * Cout * Cinb * 8);
+                    auto        sU     = mk((size_t) winoGemmUVec4Count(nPos, Coutb, Cinb) * 8);
                     auto        sV     = mk((size_t) nPos * Cinb * nT * 8);
                     auto        sM     = mk((size_t) nPos * nT * Coutb * 8);
                     auto        sBias  = mk((size_t) Coutb * 8);
